@@ -1,0 +1,255 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-poppins);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-poppins), Arial, Helvetica, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.leaflet-container {
+  z-index: 0;
+  min-height: 360px;
+  background: #e4e4e7;
+  font-family: var(--font-poppins), Arial, Helvetica, sans-serif;
+}
+
+@media (min-width: 640px) {
+  .leaflet-container {
+    min-height: 420px;
+  }
+}
+
+.dispatch-map-expanded .leaflet-container,
+.dispatch-map-expanded .dispatch-google-map-canvas {
+  min-height: 0;
+}
+
+.dispatch-workspace-panel[data-workspace-mode="split"] {
+  height: var(--dispatch-mobile-panel-height, 50dvh);
+}
+
+.dispatch-workspace-shell[data-resizing="true"],
+.dispatch-workspace-shell[data-resizing="true"] * {
+  cursor: ns-resize !important;
+  user-select: none;
+}
+
+@media (min-width: 1024px) {
+  .dispatch-workspace-shell[data-workspace-mode="split"] {
+    grid-template-rows: var(--dispatch-desktop-grid-rows, minmax(260px, 66fr) minmax(96px, 34fr));
+  }
+
+  .dispatch-workspace-panel[data-workspace-mode="split"] {
+    height: 100%;
+  }
+}
+
+@media (max-width: 639px) {
+  .dispatch-google-map-canvas .gm-bundled-control,
+  .dispatch-google-map-canvas .gm-control-active,
+  .dispatch-google-map-canvas .gmnoprint {
+    display: none !important;
+  }
+}
+
+.pac-container {
+  z-index: 10000;
+  margin-top: 6px;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #18181b;
+  box-shadow: 0 18px 40px rgb(24 24 27 / 0.18);
+  font-family: var(--font-poppins), Arial, Helvetica, sans-serif;
+}
+
+.pac-item {
+  border-top: 1px solid #e4e4e7;
+  color: #52525b;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.pac-item:hover,
+.pac-item-selected {
+  background: #eff6ff;
+}
+
+.pac-item-query {
+  color: #18181b;
+  font-weight: 600;
+}
+
+.pac-matched {
+  color: #09090b;
+  font-weight: 700;
+}
+
+.google-place-autocomplete {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #e4e4e7;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #09090b;
+  color-scheme: light;
+  font-family: var(--font-poppins), Arial, Helvetica, sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
+  box-shadow: 0 1px 2px rgb(24 24 27 / 0.04);
+}
+
+.google-place-autocomplete::part(input) {
+  background: #ffffff;
+  color: #09090b;
+  caret-color: #2563eb;
+}
+
+.google-place-autocomplete::part(prediction-list) {
+  margin-top: 6px;
+  overflow: hidden;
+  border: 1px solid #d4d4d8;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #3f3f46;
+  box-shadow: 0 18px 40px rgb(24 24 27 / 0.18);
+}
+
+.google-place-autocomplete::part(prediction-item) {
+  min-height: 52px;
+  border-bottom: 1px solid #e4e4e7;
+  background: #ffffff;
+  color: #52525b;
+}
+
+.google-place-autocomplete::part(prediction-item):hover,
+.google-place-autocomplete::part(prediction-item-selected) {
+  background: #eff6ff;
+  color: #1f2937;
+}
+
+.google-place-autocomplete::part(prediction-item-main-text) {
+  color: #18181b;
+  font-weight: 650;
+}
+
+.google-place-autocomplete::part(prediction-item-match) {
+  color: #09090b;
+  font-weight: 800;
+}
+
+.google-place-autocomplete::part(prediction-item-icon) {
+  color: #52525b;
+}
+
+.google-place-autocomplete::part(focus-ring) {
+  border-color: #2563eb;
+}
+
+.dispatch-map-pin-shell {
+  background: transparent;
+  border: 0;
+}
+
+.dispatch-map-pin {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border: 3px solid #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 8px 18px rgb(24 24 27 / 0.24);
+}
+
+.dispatch-map-pin-active {
+  position: relative;
+  animation: dispatch-pin-pulse 1.45s ease-out infinite;
+  box-shadow:
+    0 0 0 7px rgb(252 211 3 / 0.24),
+    0 8px 18px rgb(24 24 27 / 0.24);
+}
+
+.dispatch-map-pin-pickup {
+  background: #2563eb;
+}
+
+.dispatch-map-pin-destination {
+  background: #ef4444;
+}
+
+.dispatch-map-pin-branch {
+  background: #fcd703;
+}
+
+.dispatch-map-pin-tow {
+  background: #111827;
+}
+
+.dispatch-map-pin-replacement_car {
+  background: #059669;
+}
+
+.dispatch-map-pin-search {
+  background: #7c3aed;
+}
+
+/* Bublina s detailom vozidla ukotvená na markeri (google.maps.InfoWindow). */
+.dispatch-google-map-canvas .gm-style-iw-c {
+  border-radius: 12px;
+  box-shadow: 0 10px 24px rgb(24 24 27 / 0.2);
+}
+
+.dispatch-google-map-canvas .gm-style-iw {
+  font-family: var(--font-poppins), Arial, Helvetica, sans-serif;
+}
+
+.bg-map-fallback {
+  background-color: #f4f4f5;
+  background-image:
+    linear-gradient(rgba(63, 63, 70, 0.16) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(63, 63, 70, 0.16) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+@media (max-width: 639px) {
+  .dispatch-map-mobile-nav-safe .leaflet-bottom {
+    bottom: calc(76px + env(safe-area-inset-bottom));
+  }
+}
+
+@keyframes dispatch-pin-pulse {
+  0% {
+    box-shadow:
+      0 0 0 0 rgb(252 211 3 / 0.38),
+      0 8px 18px rgb(24 24 27 / 0.24);
+  }
+  70% {
+    box-shadow:
+      0 0 0 12px rgb(252 211 3 / 0),
+      0 8px 18px rgb(24 24 27 / 0.24);
+  }
+  100% {
+    box-shadow:
+      0 0 0 0 rgb(252 211 3 / 0),
+      0 8px 18px rgb(24 24 27 / 0.24);
+  }
+}

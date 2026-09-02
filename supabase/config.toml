@@ -1,0 +1,49 @@
+project_id = "motorist-dispatch-foundation"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.seed]
+enabled = false
+
+[realtime]
+enabled = true
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+[auth]
+enabled = true
+site_url = "https://dispecing.linkapomoci.sk"
+additional_redirect_urls = [
+  "https://dispecing.linkapomoci.sk",
+  "https://dispecing.linkapomoci.sk/auth/callback",
+  "https://dev.dispecing.linkapomoci.sk",
+  "https://dev.dispecing.linkapomoci.sk/auth/callback",
+  "https://pomoc-motoristom-dispecing.vercel.app",
+  "https://pomoc-motoristom-dispecing.vercel.app/auth/callback",
+  "http://localhost:3000",
+  "http://localhost:3000/auth/callback",
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:3000/auth/callback",
+]
+jwt_expiry = 3600
+enable_signup = false

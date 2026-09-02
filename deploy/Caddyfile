@@ -1,0 +1,30 @@
+{
+	email {$ACME_EMAIL}
+	admin localhost:2019
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	@middleware_bypass header x-middleware-subrequest *
+	respond @middleware_bypass 400
+
+	request_body {
+		max_size 32MB
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), geolocation=(self), microphone=(self)"
+	}
+
+	import /etc/caddy/upstream.caddy
+
+	log {
+		output stdout
+		format json
+	}
+}

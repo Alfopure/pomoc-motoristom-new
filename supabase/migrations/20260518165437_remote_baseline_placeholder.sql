@@ -1,0 +1,3 @@
+-- Remote baseline placeholder.
+-- This migration version already exists in the hosted Supabase project before this repo foundation.
+-- Keep this file so Supabase CLI migration history can line up without repairing remote history.

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "action": "delete_unreferenced_target_rental_photo_after_encrypted_quarantine",
+  "capturedAtUtc": "2026-07-16T11:56:10Z",
+  "sourceProjectRef": "jcwbiulwuwyrnmzjjbgr",
+  "targetProjectRef": "sjcsrygkkmersoczpunh",
+  "sourceFrozen": true,
+  "sourceMatchCount": 0,
+  "reconciledObjectCount": 1,
+  "targetOrphanCountAfter": 0,
+  "targetMissingMetadataCountAfter": 0,
+  "targetEnabledJobsAfter": 0,
+  "quarantineFile": ".context/migration/quarantine/rental-photo-orphan-20260716T115610Z.json.enc",
+  "quarantineSha256": "66db37f271b9fc3063bab3309ad939b8b34e92d289d876b325a3a69ddde41d76",
+  "sourceDeleted": false,
+  "privacy": "Aggregate reconciliation evidence only; no object path, row identifier, PII, credentials, or payload hash."
+}

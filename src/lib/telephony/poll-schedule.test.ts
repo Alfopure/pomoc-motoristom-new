@@ -1,0 +1,107 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  ACTIVE_CALL_POLL_MS,
+  activeCallPollDelayMs,
+  POLL_BACKOFF_MAX_MS,
+  supportPollDelayMs,
+  takeoverPollDelayMs,
+  telephonyPollActivity,
+} from "./poll-schedule";
+
+describe("active call poll cadence", () => {
+  it("keeps a live call in a visible tab at the original 750 ms", () => {
+    // Responsiveness where a human is watching a call must not regress.
+    for (const activity of ["in_call", "ringing"] as const) {
+      expect(activeCallPollDelayMs({ activity, documentHidden: false })).toBe(750);
+    }
+  });
+
+  it("slows a hidden tab hard, in every activity", () => {
+    expect(activeCallPollDelayMs({ activity: "in_call", documentHidden: true }))
+      .toBeGreaterThan(activeCallPollDelayMs({ activity: "in_call", documentHidden: false }));
+    expect(activeCallPollDelayMs({ activity: "idle", documentHidden: true })).toBe(15_000);
+  });
+
+  it("does not poll idle faster than the server-side snapshot cache", () => {
+    // /api/telephony/calls/active reuses one org-wide provider snapshot for
+    // 3 s, so sub-second idle polling cannot return fresher data.
+    expect(activeCallPollDelayMs({ activity: "idle", documentHidden: false })).toBe(2_000);
+    expect(ACTIVE_CALL_POLL_MS.idleVisible).toBeGreaterThan(1_000);
+  });
+
+  it("treats a ringing call as engaged even before it is answered", () => {
+    // That is exactly when the operator needs the fastest updates.
+    expect(telephonyPollActivity({ hasBrowserCall: false, liveCallCount: 1 })).toBe("ringing");
+    expect(telephonyPollActivity({ hasBrowserCall: true, liveCallCount: 0 })).toBe("in_call");
+    expect(telephonyPollActivity({ hasBrowserCall: false, liveCallCount: 0 })).toBe("idle");
+  });
+});
+
+describe("poll backoff", () => {
+  it("backs off a failing endpoint instead of hammering it", () => {
+    const healthy = activeCallPollDelayMs({ activity: "idle", documentHidden: false });
+    const failing = activeCallPollDelayMs({
+      activity: "idle",
+      documentHidden: false,
+      consecutiveFailures: 4,
+      random: () => 0.5,
+    });
+    expect(failing).toBeGreaterThan(healthy);
+  });
+
+  it("never backs off past the ceiling, nor below the healthy cadence", () => {
+    for (const random of [() => 0, () => 0.5, () => 1]) {
+      const delay = activeCallPollDelayMs({
+        activity: "in_call",
+        documentHidden: false,
+        consecutiveFailures: 50,
+        random,
+      });
+      expect(delay).toBeGreaterThanOrEqual(ACTIVE_CALL_POLL_MS.engagedVisible);
+      expect(delay).toBeLessThanOrEqual(POLL_BACKOFF_MAX_MS);
+    }
+  });
+
+  it("returns the plain cadence once a request succeeds again", () => {
+    expect(activeCallPollDelayMs({ activity: "idle", documentHidden: false, consecutiveFailures: 0 }))
+      .toBe(ACTIVE_CALL_POLL_MS.idleVisible);
+  });
+});
+
+describe("support and takeover cadence", () => {
+  it("keeps support reads at their original visible rate", () => {
+    expect(supportPollDelayMs({ documentHidden: false })).toBe(10_000);
+    expect(supportPollDelayMs({ documentHidden: true })).toBe(30_000);
+  });
+
+  it("stays fast only while a handover decision is actually open", () => {
+    // The decision window is 30 s, so an open request must stay responsive.
+    expect(takeoverPollDelayMs({ hasOpenRequest: true, documentHidden: false })).toBe(4_000);
+    // With nothing in flight this is just a "has anything appeared?" check; it
+    // used to run at a flat 4 s and was the second-noisiest poll in the console.
+    expect(takeoverPollDelayMs({ hasOpenRequest: false, documentHidden: false })).toBe(20_000);
+    expect(takeoverPollDelayMs({ hasOpenRequest: false, documentHidden: true })).toBe(60_000);
+  });
+});
+
+describe("steady-state request rate", () => {
+  it("cuts an idle visible console's telephony reads by more than half", () => {
+    const before = 1 / 1.0 + 1 / 10 + 1 / 10 + 1 / 10 + 1 / 4; // the previous flat cadences
+    const after =
+      1_000 / activeCallPollDelayMs({ activity: "idle", documentHidden: false }) / 1_000 +
+      1 / (supportPollDelayMs({ documentHidden: false }) / 1_000) * 3 +
+      1 / (takeoverPollDelayMs({ hasOpenRequest: false, documentHidden: false }) / 1_000);
+
+    expect(after).toBeLessThan(before / 2);
+  });
+
+  it("makes a hidden console nearly silent", () => {
+    const hidden =
+      1 / (activeCallPollDelayMs({ activity: "idle", documentHidden: true }) / 1_000) +
+      1 / (supportPollDelayMs({ documentHidden: true }) / 1_000) * 3 +
+      1 / (takeoverPollDelayMs({ hasOpenRequest: false, documentHidden: true }) / 1_000);
+
+    expect(hidden).toBeLessThan(0.3);
+  });
+});

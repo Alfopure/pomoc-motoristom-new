@@ -1,0 +1,62 @@
+[DEV] 24.7.2026 - 13.26 - Deploy new env variables to fix login page
+[DEV] 24.7.2026 - 11:04 - Deploy adjusted forms and auth fix
+[PRE-PROD] 25.7.2026 - 19.18 - Deploy phase 2/5 of calling architecture adjustments
+[PRE-PROD] 25.7.2026 - 20.34 - Deploy phase 3/5 of calling architecture adjustments
+[PRE-PROD] 27.7.2026 - 00.50 - Deploy phase 4/5 of calling architecture adjustments
+[PROD] 27.7.2026 - 10.27 - Stable version with most functionality and UI deployment
+[PRE-PROD] 8.8.2026 - 14.59 - Pre deploy of changes to workstations and phone forwarding
+[PRE-PROD] 8.8.2026 - 17.22 - UI fixes to previous deploy
+[PRE-PROD] 8.8.2026 - 18.26 - UI fixes to previous deploy
+[PRE-PROD] 9.8.2026 - 12.54 - UI fixes to previous deploy
+[PRE-PROD] 9.8.2026 - 15.57 - UI fixes to previous deploy + workstations
+[PRE-PROD] 9.8.2026 - 16.25 - Optimizations and bug fixes to previous deploys
+[PRE-PROD] 9.8.2026 - 17.56 - Optimizations and bug fixes to previous deploys v.2
+[PRE-PROD] 9.8.2026 - 19.56 - Fixes to ID detection during calls and workstations
+[PRE-PROD] 9.8.2026 - 20.50 - Fixes to ID detection during calls and workstations v.2
+[PRE-PROD] 9.8.2026 - 21.28 - Fixes to transfers and declines
+[PRE-PROD] 9.8.2026 - 22.35 - Fixes to transfers and declines v.2
+[PRE-PROD] 10.8.2026 - 10.30 - Fixes to stale browser sessions problem 
+[PRE-PROD] 10.8.2026 - 11.14 - Fixes to ringing transfer problems
+[PRE-PROD] 10.8.2026 - 14.04 - UI/UX fixes and adjustments
+[PRE-PROD] 10.8.2026 - 14.55 - Fix long workstation actions processing
+[PRE-PROD] 10.8.2026 - 15.45 - Supabase taking long problem fix
+[PRE-PROD] 11.8.2026 - 13.30 - Optimizations and new workstations
+[PRE-PROD] 11.8.2026 - 13.44 - Removing new workstations because waiting for VIPTel settings
+[PRE-PROD] 11.8.2026 - 15.06 - Multiple calls adjustments and waiting room
+[PRE-PROD] 11.8.2026 - 15.58 - Fixes to phone call declines
+[PRE-PROD] 11.8.2026 - 16.38 - More fixes :)
+[PRE-PROD] 11.8.2026 - 22.01 - Fixes to call recognition
+[PROD] 11.8.2026 - 22.47 - Decent point to call it production, most things are stable but changes will be made in future
+[PROD] 12.8.2026 - 22.04 - UI adjustments to main page and cases
+[PROD] 13.8.2026 - 09.54 - Hand off file added
+[PROD] 13.8.2026 - 15.59 - Hot fix
+[PROD] 17.8.2026 - 15.59 - Updates
+[PROD] 17.8.2026 - 14.07 - Notification filters
+[PROD] 17.8.2026 - 18.25 - SWHouse sync
+[PRE-PROD] 19.8.2026 - 9.12 - Some SMS code changes
+[PRE-PROD] 19.8.2026 - 9.42 - Better UI
+[PROD] 19.8.2026 - 10.07 - UI updates to new locations
+[PRE-PROD] 31.8.2026 - 10.49 - UI fixes and phone fixes
+[PRE-PROD] 31.8.2026 - 11.26 - Finish up phone fixes
+[PRE-PROD] 31.8.2026 - 12.40 - Db cleanup and pwa
+[PRE-PROD] 31.8.2026 - 13.11 - Fix map display with no data
+[PROD] 31.8.2026 - 13.54 - UI adjustments
+[PROD] 31.8.2026 - 14.16 - UI adjustments
+[PRE-PROD] 31.8.2026 - 18.30 - Phone fixes and adjustments to ringing
+[PROD] 1.9.2026 - 09.07 - More fixes after client testing
+[PROD] 1.9.2026 - 10.56 - fix: fallback number and queue
+[PROD] 1.9.2026 - 12.43 - fix: fallback number and queue
+[PROD] 1.9.2026 - 14.09 - fix: fallback number and queue
+[PROD] 1.9.2026 - 14.25 - fix: fallback number and queue
+[PROD] 1.9.2026 - 14.25 - fix: fallback number and queue
+[PROD] 1.9.2026 - 16.40 - hotfix
+[PROD] 1.9.2026 - 19.47 - claude fixes
+[PROD] 1.9.2026 - 22.53 - claude fixes
+[PROD] 1.9.2026 - 21.46 - claude fixes
+[PROD] 2.9.2026 - 00.51 - claude fixes
+[PROD] 2.9.2026 - 01.22 - claude fixes
+[PROD] 2.9.2026 - 01.22 - claude fixes
+[PROD] 2.9.2026 - 01.22 - claude fixes
+[PROD] 2.9.2026 - 01.22 - claude fixes
+[PROD] 2.9.2026 - 01.22 - claude fixes
+[PROD] 2.9.2026 - 01.22 - claude fixes

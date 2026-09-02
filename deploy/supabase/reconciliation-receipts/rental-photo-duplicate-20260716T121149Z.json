@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "action": "delete_redundant_target_rental_photo_row_after_encrypted_quarantine",
+  "capturedAtUtc": "2026-07-16T12:11:49Z",
+  "sourceProjectRef": "jcwbiulwuwyrnmzjjbgr",
+  "targetProjectRef": "sjcsrygkkmersoczpunh",
+  "sourceFrozen": true,
+  "reconciledRowCount": 1,
+  "storageObjectsChanged": 0,
+  "targetDuplicateGroupsAfter": 1,
+  "targetStorageOrphansAfter": 32,
+  "targetMissingObjectsAfter": 0,
+  "targetEnabledJobsAfter": 0,
+  "quarantineFile": ".context/migration/quarantine/rental-photo-duplicate-20260716T121149Z.json.enc",
+  "quarantineSha256": "7501479c6168dfa5156cc361e0e3cf7dc8e7308c71f08de6dfcf7fbac4d78395",
+  "sourceDeleted": false,
+  "privacy": "Aggregate reconciliation evidence only; no path, row identifier, PII, credentials, or row hash."
+}

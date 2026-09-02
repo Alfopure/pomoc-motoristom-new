@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+.context
+.omx
+.next
+node_modules
+supabase/.temp
+tsconfig.tsbuildinfo

@@ -1,0 +1,16 @@
+.git
+.github
+.next
+.context
+.omx
+.vercel
+node_modules
+dist
+coverage
+deploy/env
+deploy/releases
+supabase/.temp
+.env
+.env.*
+*.log
+*.tsbuildinfo
