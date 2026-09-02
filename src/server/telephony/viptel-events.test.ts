@@ -276,12 +276,25 @@ describe("VIPTel stable inbound caller identity", () => {
 
   it("does not let a delayed old-leg end close the current queue leg", () => {
     expect(terminalSnapshotIsForSupersededLeg(
-      { viptel_unique_id: "agent-leg-21" },
+      { from_queue_unique_id: "queue-parent", viptel_unique_id: "agent-leg-21" },
       { authoritativeTerminal: true, uniqueId: "agent-leg-20" },
     )).toBe(true);
     expect(terminalSnapshotIsForSupersededLeg(
-      { viptel_unique_id: "agent-leg-21" },
+      { from_queue_unique_id: "queue-parent", viptel_unique_id: "agent-leg-21" },
       { authoritativeTerminal: true, uniqueId: "agent-leg-21" },
+    )).toBe(false);
+  });
+
+  it("always lets the caller's own channel end close the journey", () => {
+    // Live trail 2026-09-02 08:42: a waiting call was picked up, so the queue
+    // channel itself dialled the workstation and the conversation ran on the
+    // channel while the row's identity stayed on the last dead agent leg. The
+    // channel's call.end (end_reason "answer", after 28s of talk) was then
+    // discarded as a superseded-leg event and the row stayed open forever --
+    // which is what later blocked outbound calls from that workstation.
+    expect(terminalSnapshotIsForSupersededLeg(
+      { from_queue_unique_id: "1788338494.1379", viptel_unique_id: "1788338529.1384" },
+      { authoritativeTerminal: true, uniqueId: "1788338494.1379" },
     )).toBe(false);
   });
 

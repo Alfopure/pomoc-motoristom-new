@@ -194,7 +194,25 @@ export function getViptelConfig(): ViptelConfig {
 
 export type ViptelQueue = { id: string; name: string };
 export type ViptelQueueMember = { extension: string; paused: boolean; inUse: boolean; dynamic: boolean; callsTaken: number };
-export type ViptelQueueStatus = { queue: string; members: ViptelQueueMember[]; waitingCalls: number };
+/**
+ * One caller currently waiting in a queue, from GET /api/queue/status
+ * `waiting_calls[]`. The uniqueId is the caller's own channel and stays the
+ * same for their whole journey through the rotation, which is what lets the
+ * waiting room keep showing them steadily while agent legs come and go.
+ */
+export type ViptelQueueWaitingCall = {
+  uniqueId: string;
+  caller?: string;
+  callerName?: string;
+  waitSeconds?: number;
+};
+export type ViptelQueueStatus = {
+  queue: string;
+  members: ViptelQueueMember[];
+  waitingCalls: number;
+  /** Present only when the provider returned the per-caller list. */
+  waitingCallEntries?: ViptelQueueWaitingCall[];
+};
 export type ViptelQueueAgentAction = "add" | "remove" | "pause" | "unpause";
 
 export function createViptelClient(config = getViptelConfig()) {
@@ -299,6 +317,21 @@ export class ViptelClient {
     if (waitingCalls === undefined) {
       throw new ViptelHttpError("VIPTel queue-status waiting count is missing.", response.status, response.data);
     }
+    const waitingCallEntries = Array.isArray(data.waiting_calls)
+      ? data.waiting_calls.flatMap((raw): ViptelQueueWaitingCall[] => {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+          const entry = raw as Record<string, unknown>;
+          const uniqueId = readStringCandidate(entry, ["unique_id", "uniqueid"]);
+          if (!uniqueId) return [];
+          const waitSeconds = readStrictNonNegativeInteger(entry, ["wait_time", "wait_seconds"]);
+          return [{
+            uniqueId,
+            caller: readStringCandidate(entry, ["caller"]),
+            callerName: readStringCandidate(entry, ["caller_name"]),
+            ...(waitSeconds === undefined ? {} : { waitSeconds }),
+          }];
+        })
+      : undefined;
     const membersRaw = data.members;
     const members: ViptelQueueMember[] = membersRaw
       .map((raw) => {
@@ -326,7 +359,12 @@ export class ViptelClient {
       })
       .filter((member) => member.extension);
 
-    return { queue: returnedQueue, members, waitingCalls };
+    return {
+      queue: returnedQueue,
+      members,
+      waitingCalls,
+      ...(waitingCallEntries ? { waitingCallEntries } : {}),
+    };
   }
 
   async setQueueAgent(queue: string, extension: string, action: ViptelQueueAgentAction): Promise<unknown> {

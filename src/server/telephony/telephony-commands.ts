@@ -829,7 +829,14 @@ export async function beginSerializedOutboundCall(
     .select("id, status")
     .eq("organization_id", input.organizationId)
     .eq("provider", "viptel")
-    .in("status", ["incoming", "ringing_agent", "answered", "outbound"]);
+    .in("status", ["incoming", "ringing_agent", "answered", "outbound"])
+    .is("ended_at", null)
+    // The provider snapshot above is the authority on whether the extension is
+    // genuinely busy; this stored-row check exists only to catch a call the
+    // listener knows about that the snapshot has not caught up with yet. An
+    // unbounded check let a single row that missed its terminal event block
+    // outbound calls from that workstation forever.
+    .gte("updated_at", new Date(Date.now() - 120_000).toISOString());
   activeCallQuery = callerExtension
     ? activeCallQuery.or([
         `extension_id.eq.${input.extensionId}`,
