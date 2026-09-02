@@ -14,7 +14,7 @@ V1 je klikateľné klientské demo pracovného dispečingu pre Pomoc Motoristom.
 
 V1 už nie je iba klikateľný mock. Supabase je hlavný zdroj dát pre prípady, kontakty, vozidlá, pobočky, techniku, úlohy a timeline. Operátor vie ručne založiť nový prípad cez Google Places adresy a zápisy idú cez serverové route handlery.
 
-Samostatný modul `Flotila` rieši dennú dostupnosť náhradných vozidiel a odťahoviek. Operátor v ňom vidí, čo je voľné, rezervované, prenajaté, v servise alebo offline, na ktorej pobočke sa vozidlo nachádza, dokedy je obsadené a či končia doklady. `Integrácie` ostávajú technická obrazovka pre VIPTel, Google, Supabase a ďalšie napojenia, nie každodenná správa vozidiel.
+Samostatný modul `Flotila` rieši dennú dostupnosť náhradných vozidiel a odťahoviek. Operátor v ňom vidí, čo je voľné, rezervované, prenajaté, v servise alebo offline, na ktorej pobočke sa vozidlo nachádza, dokedy je obsadené a či končia doklady. `Integrácie` ostávajú technická obrazovka pre telefóniu (Telnyx), Google, Supabase a ďalšie napojenia, nie každodenná správa vozidiel.
 
 Mapový foundation používa platené Google API ako primárny provider:
 
@@ -23,7 +23,7 @@ Mapový foundation používa platené Google API ako primárny provider:
 - viditeľný stav mapy `Google live`, `Fallback` alebo `Routes unavailable`,
 - deterministický fallback výpočet km/ETA/ceny a Leaflet/OSM fallback, ak Google mapa alebo Routes API zlyhá.
 
-V1 stále neobsahuje plnú autentifikáciu, reálne SMS odosielanie, živý VIPTel WebSocket ani produkčné fleet GPS napojenie. Tieto integrácie sú pripravené ako provider adaptéry mimo UI.
+V1 stále neobsahuje reálne SMS odosielanie ani živú telefóniu (obe pribudnú s Telnyxom); telefónne UI beží v režime „Telefónia nie je nakonfigurovaná". Tieto integrácie sú pripravené ako provider adaptéry mimo UI.
 
 ## Traceability
 

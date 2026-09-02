@@ -14,46 +14,44 @@ It is a map, not a substitute for reading the relevant source. The repository ch
    git log -10 --oneline --decorate
    ```
 
-3. Never copy `.env.local`, SIP passwords, API keys, database URLs, tokens, or live payloads into prompts, commits, logs, screenshots, or documentation.
-4. Vercel Preview/dev environments may use the live Supabase dataset. A preview deployment is therefore **not necessarily a data sandbox**.
-5. VIPTel is a distributed system. The web deployment and the Hetzner listener must be compatible, ideally built from the exact same commit.
-6. Do not deploy, run a migration, activate a listener, change PBX configuration, or mutate Hetzner merely because code was edited. Those are separate, explicit operational actions.
+3. Never copy `.env.local`, API keys, database URLs, tokens, WebRTC credentials, or live payloads into prompts, commits, logs, screenshots, or documentation.
+4. This repository is the **separate Telnyx copy** of the dispatch app. It has its own Supabase project and its own Vercel project. The original production project, its database, and the previous telephony provider are never referenced from here.
+5. Vercel Preview/dev environments use this copy's Supabase project. Writes are real for everyone testing on it, so a preview deployment is **not** a personal sandbox.
+6. Do not run a migration, change provider configuration, or add a cron merely because code was edited. Those are separate, explicit operational actions requested by the owner.
 7. Some older documents describe intended or historical behavior. Treat the source, current migrations, deployed environment, and live provider evidence as authoritative; verify before relying on an old plan.
 
 ## One-minute system picture
 
 ```mermaid
 flowchart LR
-    U[Dispatcher browser] -->|Next.js UI and API| V[Vercel web runtime]
-    U -->|SIP over WSS / media| P[VIPTel PBX]
-    V -->|Auth, reads, normalized writes| S[(Supabase)]
-    V -->|Insert durable command| C[(motorist_telephony_commands)]
-    C --> H[Hetzner VIPTel listener]
-    H -->|WebSocket actions and events| P
-    H -->|Allowlisted REST calls / snapshots / reconciliation| P
-    H -->|Calls, events, presence, command result| S
-    S -->|Poll/reload/projections| V
+    U[Dispatcher browser] -->|Next.js UI and API| V[Vercel web runtime, fra1]
+    U -->|WebRTC with short-lived token| T[Telnyx]
+    T -->|Signed webhooks| V
+    V -->|Call Control REST commands| T
+    V -->|Auth, reads, normalized writes| S[(Supabase, Frankfurt)]
+    S -->|Poll / Realtime broadcast| V
     U -->|Maps JS and Places with restricted browser key| G1[Google Maps browser APIs]
     V -->|Routes API with server key| G2[Google Routes API]
     V --> F[Commander / WebDispecink / SWHouse]
-    V --> M[VIPTel SMS / Resend]
-    H --> A[Recordings / transcription / AI analysis]
+    V --> M[Telnyx SMS / Resend]
+    C[Vercel cron every 5 min] --> V
 ```
 
-The central rule is: **Supabase stores the application truth, VIPTel owns live telephone truth, and the listener reconciles the two.** UI state is not provider confirmation.
+The central rule is: **Supabase stores the application truth, the telephony provider owns live telephone truth, and the webhook pipeline reconciles the two.** UI state is not provider confirmation.
+
+Current state (Phase 0 of the Telnyx rollout done): the previous provider is removed, the telephony UI runs in the "Telefónia nie je nakonfigurovaná" mode, SMS sending reports "SMS nie je nakonfigurované", and the Telnyx pipeline is not implemented yet. See [`docs/telnyx-data-contract.md`](./docs/telnyx-data-contract.md).
 
 ## Technology and runtime shape
 
 - Next.js 16 App Router, React 19, TypeScript, Tailwind CSS 4.
 - Supabase Auth, Postgres, Storage, and normalized application records.
-- VIPTel PBX, event WebSocket, REST API, SMS API, and SIP-over-WebSocket for the browser phone.
-- A long-running listener/worker on Hetzner for VIPTel events and durable commands.
+- Telnyx Call Control (REST + signed webhooks), Telnyx WebRTC for the browser phone, Telnyx Messaging for outbound SMS (planned phases).
 - Google Maps JavaScript/Places in the browser and Google Routes on the server.
 - Fleet integrations: Commander, WebDispecink, and SWHouse.
-- Optional downstream call processing through recordings, ElevenLabs transcription, and Anthropic analysis.
-- Vercel hosts the Next.js application. The production branch is normally `main`; development and previews follow the release policy in `AGENTS.md` and [`docs/deployment-vercel.md`](./docs/deployment-vercel.md).
+- Optional downstream call processing through ElevenLabs transcription and Anthropic analysis (disabled; recording is out of scope).
+- Vercel hosts the Next.js application in region `fra1`. The production branch is `main`; development and previews follow the release policy in `AGENTS.md` and [`docs/deployment-vercel.md`](./docs/deployment-vercel.md).
 
-The project is a modular monolith: UI, API handlers, and most business services live in one Next.js repository, while the always-on telephony process is built from the same repository and runs separately.
+The project is a modular monolith: UI, API handlers, business services, provider clients and webhook receivers live in one Next.js repository. There is no separate always-on process; manual jobs run through the one-shot worker entry point and periodic work through a single Vercel cron.
 
 ## Repository map
 
@@ -61,8 +59,9 @@ The project is a modular monolith: UI, API handlers, and most business services 
 | --- | --- |
 | `src/app/page.tsx` | Server entry point. Resolves auth, loads dispatch data, and renders the main console. |
 | `src/app/api/**/route.ts` | Authenticated server API boundary. Browser mutations should go through these routes. |
+| `src/server/route-auth-registry.ts` | Single source of truth for the auth class of every route (`public`, `bearer`, `dual`, `session`). `route-auth.test.ts` and `route-csrf.test.ts` enforce it. |
 | `src/components/dispatch/DispatchConsole.tsx` | Main application orchestrator and navigation. Large, stateful, and high-risk to edit casually. |
-| `src/components/dispatch/` | Dispatch, cases, tasks, phone center, workplace, fleet, attendance, reports, maps, and settings UI. |
+| `src/components/dispatch/` | Dispatch, cases, tasks, call center, fleet, attendance, reports, maps, and settings UI. |
 | `src/components/dispatch/map/` | Map-specific helpers and components. |
 | `src/data/dispatch-repository.ts` | Loads and maps the Supabase records used by the dashboard. Also controls mock fallback behavior. |
 | `src/data/dispatch-types.ts` | Aggregate data contract passed into the main UI. |
@@ -73,15 +72,19 @@ The project is a modular monolith: UI, API handlers, and most business services 
 | `src/server/motorist-mutations.ts` | Core server-side business mutations for cases and related entities. |
 | `src/server/api-auth.ts` | Maps Supabase sessions to an active organization profile and enforces roles. |
 | `src/server/access-policy.ts` | Role and access-management rules. |
-| `src/server/telephony/` | Call history loading, transcript processing, and the bearer guard for the transcript job route. |
-| `src/lib/telephony/` | Browser telephony state, SIP.js lifecycle, call control, phone normalization, transfer helpers, and workplace client logic. |
+| `src/server/telephony-workflow.ts` | Caller matching, call-to-case linking and call outcomes (provider-neutral). |
+| `src/server/telephony-directory.ts` | Contact directory and favourites for the phone panel. |
+| `src/server/telephony/` | Call history loading, transcript processing, and the bearer guard for the transcript job route. Telnyx modules land here in Phase 2. |
+| `src/server/sms-workflow.ts` | Case and custom SMS workflow behind the `SmsTransport` seam (`notConfiguredTransport` until Telnyx). |
+| `src/lib/telephony/` | Browser-side telephony helpers: phone normalization, presence derivation, polling schedule, request helper, directory types, ringtone, and the not-configured seam. |
 | `src/lib/integrations/webdispecink/` | WebDispecink provider adapter. |
 | `src/server/integrations/` | Server-side Commander, SWHouse, and other provider services. |
-| `src/worker/` | Scheduler, one-shot jobs, alerts, and runtime ledger. |
-| `supabase/migrations/` | Ordered database schema and RLS changes. Never edit an already-applied migration. |
-| `scripts/` | Local probes, smoke tests, sync/discovery helpers, and demo seed scripts. |
-| `tests/`, `e2e/`, colocated `*.test.ts` | Infrastructure, integration-contract, UI, and Playwright tests. |
-| `docs/` | Architecture, data model, integration strategy, and operational runbooks. Some plans may be historical. |
+| `src/server/jobs/` | Job registry and schedule for fleet syncs, notifications and transcript processing. |
+| `src/worker/` | Scheduler, one-shot job entry point, alerts, and runtime ledger. |
+| `supabase/migrations/` | Ordered database schema and RLS changes. |
+| `scripts/` | Demo seed and WebDispecink discovery helpers. |
+| `tests/`, `e2e/`, colocated `*.test.ts` | Node contract tests, Playwright responsive test, and Vitest unit/route tests. |
+| `docs/` | Architecture, data model, integration strategy, deployment runbook and Telnyx contract. Some plans may be historical. |
 
 ## Application entry and data flow
 
@@ -92,7 +95,7 @@ The project is a modular monolith: UI, API handlers, and most business services 
 3. Call `loadDispatchData()` from `src/data/dispatch-repository.ts`.
 4. Pass the aggregate result to `DispatchConsole`.
 
-`DispatchData` contains the dashboard projection: cases, calls, operators, attendance, users, branches, contacts, fleet assets, provider vehicles, notifications, integration health, metrics, and telephony statistics.
+`DispatchData` contains the dashboard projection: cases, calls, operators, attendance, users, branches, contacts, fleet assets, provider vehicles, notifications, integration health, and metrics.
 
 The repository reports whether data came from `supabase` or `mock`. Missing configuration or a failed Supabase read can produce a mock warning in permitted development contexts. Never treat a nice-looking UI as evidence that live data loaded. Production behavior must fail safely instead of silently presenting demo state.
 
@@ -106,7 +109,7 @@ The important identity distinction is:
 
 - Supabase Auth user: login identity.
 - `motorist_profiles`: application identity, role, active state, and organization membership.
-- Telephony extension/workplace assignment: a separate operational resource owned or leased by a profile.
+- Operator device (planned `motorist_operator_devices`): the browser phone registration owned by a profile; one active device per operator.
 
 Supported application roles are:
 
@@ -115,7 +118,7 @@ Supported application roles are:
 - `manager`
 - `admin`
 
-Do not assume an authenticated user is automatically an active operator, owns a telephone extension, or may perform manager actions. Use `src/server/api-auth.ts`, `src/server/access-policy.ts`, and telephony-specific access services.
+Do not assume an authenticated user is automatically an active operator, has a registered phone device, or may perform manager actions. Use `src/server/api-auth.ts` and `src/server/access-policy.ts`.
 
 `MOTORIST_DEV_AUTH_BYPASS` is an explicit local-development escape hatch. It must remain disabled in production and preview-like environments.
 
@@ -126,11 +129,8 @@ erDiagram
     ORGANIZATION ||--o{ PROFILE : has
     ORGANIZATION ||--o{ CASE : owns
     ORGANIZATION ||--o{ CALL : owns
-    ORGANIZATION ||--o{ TELEPHONY_EXTENSION : configures
-    ORGANIZATION ||--o{ TELEPHONY_QUEUE : configures
-    PROFILE o|--o{ TELEPHONY_EXTENSION : owns_or_leases
-    TELEPHONY_EXTENSION ||--o{ QUEUE_MEMBERSHIP : joins
-    TELEPHONY_QUEUE ||--o{ QUEUE_MEMBERSHIP : contains
+    ORGANIZATION ||--o{ TELEPHONY_LINE : configures
+    TELEPHONY_LINE ||--o{ CALL : received_on
     CALL ||--o{ CALL_EVENT : emits
     CALL o|--o| CASE : may_link_to
     CASE ||--o{ CASE_CONTACT : has
@@ -139,21 +139,20 @@ erDiagram
     CASE ||--o{ CASE_EVENT : timeline
     CASE }o--o| FLEET_ASSET : assigned_asset
     FLEET_ASSET o|--o{ EXTERNAL_VEHICLE_RECORD : linked_provider_record
-    TELEPHONY_COMMAND }o--|| PROFILE : requested_by
-    TELEPHONY_COMMAND }o--o| CALL : controls
-    TELEPHONY_COMMAND }o--o| TELEPHONY_EXTENSION : source
+    PROFILE ||--o{ OPERATOR_STATUS : history
+    CASE ||--o{ SMS_MESSAGE : sends
 ```
 
 Principal table groups include:
 
-- Organization and people: `motorist_organizations`, `motorist_profiles`, organization-profile/access tables, operator status tables.
-- Cases: `motorist_cases`, `motorist_case_contacts`, `motorist_case_vehicles`, `motorist_case_tasks`, `motorist_case_events`.
-- Telephony: `motorist_telephony_lines`, `motorist_telephony_queues`, `motorist_telephony_extensions`, memberships/snapshots, `motorist_calls`, `motorist_call_events`, recordings, and `motorist_telephony_commands`.
+- Organization and people: `motorist_organizations`, `motorist_profiles`, organization-profile/access tables, `motorist_operator_statuses`.
+- Cases: `motorist_cases`, case contacts/vehicles, `motorist_case_tasks`, `motorist_case_events`.
+- Telephony: `motorist_telephony_lines`, `motorist_calls`, `motorist_call_events`, `motorist_call_recordings`, `motorist_call_transcripts` (Telnyx sessions, legs, ring plans, presence and devices arrive with Phase 2).
 - Operations and maps: locations, branches, fleet assets, route estimates, external vehicle records and links.
-- Messaging/integrations: SMS messages/attempts, raw integration events, notifications, transcripts.
-- Audit and runtime: `motorist_audit_log`, worker/job runtime records, workplace leases/operations/bootstrap receipts.
+- Messaging/integrations: `motorist_sms_messages`, `motorist_sms_attempts`, `motorist_integration_raw_events`, `motorist_organization_integrations`, notifications.
+- Audit and runtime: `motorist_audit_log`, `motorist_job_*`, `motorist_worker_status`.
 
-Use [`docs/data-model.md`](./docs/data-model.md), the migrations, and generated Supabase database types together. A document can lag behind a migration.
+Use [`docs/data-model.md`](./docs/data-model.md), the migrations, and `src/lib/supabase/database.types.ts` together. A document can lag behind a migration.
 
 ## Cases, tasks, and the dispatcher UI
 
@@ -174,7 +173,7 @@ Important UI files:
 - `TaskPanel.tsx`: task creation, filters, and task list.
 - `case-form-fields.tsx` and `case-form-shared.ts`: shared field rendering and validation.
 
-The create and edit forms intentionally expose validation while allowing incomplete case drafts. “Invalid/incomplete” is a workflow state, not permission to corrupt typed data. Keep field-level validation and correct input types even when a whole form can be saved unfinished.
+The create and edit forms intentionally expose validation while allowing incomplete case drafts. "Invalid/incomplete" is a workflow state, not permission to corrupt typed data. Keep field-level validation and correct input types even when a whole form can be saved unfinished.
 
 Case editing uses autosave patterns. Preserve debouncing, in-flight request handling, retry behavior, and navigation protection. Do not add a second competing save mechanism.
 
@@ -186,72 +185,49 @@ When adding a task, preserve its relationship to the case and the responsible pr
 
 | Term | Meaning in this project |
 | --- | --- |
-| Public line / DID | The public number the customer dialled. It may identify an assistance company. Preserve the original DID exactly. |
-| Queue | VIPTel routing group. In the current dispatch plan, `601`, `602`, and `603` mean priority levels, not employees or browser phones. |
-| Extension / klapka | A SIP/PBX identity such as `20`, `21`, `22`, or `23`. Calls are placed to/from an extension. |
-| Workplace / pracovisko | A shared operational seat represented by one configured extension. A profile claims or leases it for a browser session. |
-| Profile/operator | The authenticated human. A profile is not the same as an extension. |
-| Browser phone | SIP.js registration using the workplace extension. Media flows between the browser and VIPTel. |
-| Physical phone | Another endpoint controlled by VIPTel. It can share provider-side call state but is not controlled by React state. |
-| Call | Logical application call, potentially represented by multiple provider legs and events. |
-| Command | Durable authenticated request to create, redirect, hang up, snapshot, or change queue state. |
+| Line / public number | A telephone number the customer dialled, stored in `motorist_telephony_lines` with a label and partner (e.g. `Allianz Assistance`). Preserve the dialled number exactly; resolve it to a line by exact match after E.164 normalization. |
+| Call | Logical application call in `motorist_calls`, correlated by `provider_session_id`. One conversation can span several provider legs. |
+| Session / leg (Phase 2) | Provider-side call session and its individual legs (customer, operator, consult, external). State transitions are defined on leg rows, never on "the newest call". |
+| Ring group / ring plan (Phase 2) | Application-owned routing: which operators ring, in which order, for how long, and what happens when nobody answers. The provider has no queue of its own. |
+| Presence | Operator availability derived from device registration, presence status and current session (`src/lib/telephony/presence.ts`). |
+| Browser phone | WebRTC registration with a per-operator credential and a short-lived server-minted token. Not implemented yet. |
+| Profile/operator | The authenticated human. A profile is not the same as a device or a line. |
 
-Current fixed workplace assumptions are extensions `20`–`23`. Current routing priorities are queues `601`–`603`. Adding more workplace cards in React does **not** provision more SIP extensions, credentials, queues, channel capacity, or PBX routes.
+### What works today
 
-VIPTel owns the 30-second queue overflow timers and final looping behavior. Application code should display and operate the known topology, not simulate PBX routing in the browser.
+- Call history (`/api/telephony/calls/history`), caller matching (`/api/telephony/calls/match`), call-to-case linking and outcomes (`/api/telephony/calls/[id]/{link-case,outcome}`), transcripts (`/api/telephony/calls/[id]/transcript`, `/api/telephony/transcripts/process`), directory and favourites (`/api/telephony/directory/**`), QA dashboard shell (`/api/telephony/qa/dashboard`).
+- Dialing, presence changes, click-to-call from a case and SMS sending report the not-configured state through `src/lib/telephony/not-configured.ts` and `notConfiguredTransport` in `src/server/sms-workflow.ts`.
 
-### Command path
+### Planned command path (Telnyx)
 
-Provider-affecting actions follow a durable outbox pattern:
+Provider-affecting actions are synchronous but guarded:
 
-1. The browser calls an authenticated Next.js telephony route.
-2. The server validates the actor, organization, source workplace/extension, call, and destination.
-3. The server inserts a row in `motorist_telephony_commands` and normally returns an accepted command ID.
-4. The Hetzner listener claims the queued command.
-5. The listener sends the VIPTel WebSocket or allowlisted REST action.
-6. A matching provider event/snapshot confirms or rejects the command.
-7. The UI polls/refreshes the command and provider projection. It must not announce success merely because a button was clicked.
-
-### Browser SIP and control API are different connections
-
-- `VIPTEL_SIP_WS_URL` is the SIP-over-WebSocket endpoint used by SIP.js for registration, signalling, and media setup.
-- `VIPTEL_WEBSOCKET_URL` is the provider event/control WebSocket used by the server listener.
-- VIPTel REST is server-only and restricted to the allowlisted Hetzner host. Vercel must not call it directly.
-
-An outbound browser call can use SIP.js for the actual INVITE while still creating a server-authenticated command/intention so the call can be audited and correlated.
+1. The browser calls an authenticated, same-origin Next.js telephony route.
+2. The server validates the actor, organization, call ownership (or senior role), destination allowlist, rate limit and kill switches (`TELNYX_LIVE_CALLS_ENABLED` plus the database settings row).
+3. The server issues the Telnyx command with a deterministic `command_id` and persists the intent.
+4. The provider confirms through a signed webhook; the webhook pipeline (claim ledger, per-session lease, reducer) updates the projection.
+5. The UI refreshes through polling (later Realtime Broadcast). It must not announce success merely because a button was clicked.
 
 ### Call correlation is high risk
 
-A visible telephone conversation can contain several VIPTel legs. Provider IDs can change across an API-created call lifecycle. Queue overflow, transfer, browser SIP, and physical endpoints can expose different identifiers for the same logical conversation.
+A visible telephone conversation can contain several provider legs. Never match a live call using only:
 
-Never match a live call using only:
-
-- “the newest call”;
+- "the newest call";
 - a timestamp rounded to a second;
 - caller number alone;
 - callee number alone;
-- a queue number;
-- a suffix/partial DID match.
+- a suffix/partial number match.
 
-Multi-call behavior must be keyed by exact call/leg identity. A single global `incomingCall` boolean or “current call” chosen from an unordered list will leak one operator’s call into another operator’s UI.
-
-### Workplace ownership and stale sessions
-
-Workplaces use server-side ownership, leases, generations, compare-and-set guards, operation records, and browser session fencing. This prevents two people or an old browser tab from controlling the same extension.
-
-Closing a window is not reliable proof that SIP disconnected or that a lease was released. Recovery must use current database state plus fresh provider evidence. Do not “fix” a stuck workplace with an unconditional database update.
+Multi-call behavior must be keyed by exact session/leg identity. A single global `incomingCall` boolean or "current call" chosen from an unordered list will leak one operator's call into another operator's UI.
 
 ### Telephony safety rules
 
 - Every command records the authenticated actor.
-- A source extension must belong to or be validly leased by that actor.
-- A transfer target must be a valid owned/configured destination and, when required, registered, unpaused, and idle.
-- External phone numbers must be normalized; short extension-like inputs must not be mistaken for public numbers.
+- External phone numbers must be normalized to E.164; short inputs must not be mistaken for public numbers.
 - Provider state wins over optimistic UI state.
-- Stale queued commands may fail safely; sent-but-unconfirmed commands must not be blindly retried.
-- Some VIPTel hangup actions can only control calls created during the listener’s current provider session. A safe failure is better than hanging up the wrong leg.
-- Queue membership (`Dostupný`, `Pauza`, `Mimo radu`) and SIP registration are related but separate states.
-- The “Voľní X/Y” count is derived from eligible queue members/provider state, not simply the number of profiles or visible workplace cards.
+- Commands that fail are compensated (e.g. failed bridge -> hang up the operator leg and keep the customer waiting), not blindly retried.
+- Device registration, presence status and active session are related but separate inputs; "browser connected" does not mean "available".
+- Kill switches fail closed: with `TELNYX_LIVE_CALLS_ENABLED=false` or `TELNYX_SMS_LIVE_SENDS=false` no provider-affecting command or SMS is sent.
 
 ## Supabase
 
@@ -260,52 +236,41 @@ Supabase provides:
 - authentication;
 - the operational Postgres database;
 - row-level security and organization scoping;
-- storage for attachments/recordings;
+- storage for attachments;
 - optional realtime delivery, while parts of the UI still use controlled polling/reloads.
 
 Server clients live under `src/lib/supabase/`. Browser-safe public keys and server-only service credentials are not interchangeable.
 
 Schema changes:
 
-1. Add a new timestamped migration; never rewrite an applied migration.
+1. This copy's database was created empty for the Telnyx rollout; the kept migrations were edited in place during the provider swap. From Phase 1 onward, add a new timestamped migration and do not rewrite an applied one.
 2. Keep changes additive when possible.
-3. Update generated database types if the workflow requires it.
+3. Regenerate `src/lib/supabase/database.types.ts` (or hand-edit it consistently) after every schema change.
 4. Update repository mapping, domain types, validation, mutations, and tests together.
 5. Test RLS and role behavior, not only service-role behavior.
-6. Applying a migration to a live project is a separate approved action.
+6. Applying a migration is a separate action that the owner requests explicitly, and it targets only this copy's Supabase project.
 
 Important: demo/mock data lives in `src/mock/` and repository fallback logic. Mock output must never be confused with a successful production read.
 
-## VIPTel and Hetzner
+## Telnyx
 
-The Hetzner host exists because the VIPTel integration needs an allowlisted network origin and an always-on WebSocket process. Vercel request handlers are short-lived and are not the correct owner of a permanent event connection.
+Telnyx replaces the previous provider and its always-on listener. Everything runs inside Vercel route handlers:
 
-The listener is responsible for:
+- signed webhooks at `/api/telephony/telnyx/webhook` and `/api/sms/telnyx/webhook` (public routes with Ed25519 verification and an idempotent claim ledger);
+- a thin REST client in `src/server/telephony/telnyx/` with timeouts and deterministic command ids;
+- a per-operator WebRTC credential and token route for the browser phone;
+- one Vercel cron (`*/5 * * * *` -> `/api/telephony/cron`, bearer `CRON_SECRET`) for reconciliation, stuck-session sweeps and ledger retention.
 
-- maintaining the VIPTel event WebSocket;
-- consuming durable telephony commands;
-- emitting provider actions;
-- normalizing/deduplicating call events;
-- updating active call, extension, queue, and history projections;
-- producing provider snapshots for web requests;
-- supporting CDR/history reconciliation and downstream recording work where enabled.
-
-Operational code and runbooks are under `deploy/` and `docs/operations/`. Before a listener update, verify the deployed web commit, listener commit, environment gates, database schema, and current health. Do not infer that the whole Next.js web application runs on Hetzner merely because the listener does; check the current deployment topology.
+Environments are isolated: dev/preview and production each have their own Call Control application, credential connection, outbound voice profile and messaging profile. Identifiers (never secrets) are listed in [`docs/operations/telnyx-setup.md`](./docs/operations/telnyx-setup.md).
 
 Feature gates are intentionally fail-closed. Important names include:
 
-- `VIPTEL_LISTENER_ENABLED`
-- `VIPTEL_LIVE_MUTATIONS_ENABLED`
-- `VIPTEL_LIVE_MUTATION_TOKEN`
-- `VIPTEL_PROVIDER_SNAPSHOT_BRIDGE_ENABLED`
-- `VIPTEL_PROVIDER_SNAPSHOT_BRIDGE_TOKEN`
-- `VIPTEL_WORKPLACE_ADMIN_TAKEOVER_ENABLED`
-- `VIPTEL_WORKPLACE_HOTDESK_*`
-- `VIPTEL_SIP_WEBPHONE_ENABLED`
+- `TELNYX_LIVE_CALLS_ENABLED`
+- `TELNYX_SMS_LIVE_SENDS`
+- `TRANSCRIPTS_ENABLED`
+- `SCHEDULER_ENABLED`
 
-The web and listener need matching independent tokens for guarded bridges, but the values must never enter source control.
-
-PBX behavior that cannot be created by application code includes purchased channel capacity, SIP accounts/passwords, public DID routing, queue overflow timers, queue loop strategy, and some transfer sequences. Obtain provider evidence rather than guessing.
+Provider-side behavior that application code cannot create includes purchased numbers and their regulatory approval, outbound voice profile limits, and messaging profile sender approval. Obtain provider evidence rather than guessing.
 
 ## Maps and locations
 
@@ -343,18 +308,11 @@ SWHouse provides replacement-vehicle/occupancy information. It has its own authe
 
 ### SMS and public location links
 
-VIPTel SMS is server-side. Location sharing uses signed/tokenized public links under `src/app/l/` and `/api/public/location-links/**`. Treat location tokens like credentials: do not log them, expose their hashes, or make public routes return unrelated case data.
+SMS is server-side through `src/server/sms-workflow.ts` and the `SmsTransport` seam; the Telnyx transport (`src/lib/integrations/telnyx/sms-client.ts`) lands in Phase 2. Location sharing uses signed/tokenized public links under `src/app/l/` and `/api/public/location-links/**`. Treat location tokens like credentials: do not log them, expose their hashes, or make public routes return unrelated case data.
 
 ### Recordings, transcript, and AI
 
-Recordings and post-call processing are downstream of the durable call record:
-
-1. reconcile/fetch recording metadata;
-2. store private recording information;
-3. optionally transcribe with ElevenLabs;
-4. optionally summarize/score with Anthropic.
-
-These steps must not block answering, ending, transferring, or saving a call/case. Feature gates and credentials may intentionally disable them.
+Recording is out of scope for the Telnyx rollout. The transcript and AI steps remain in the code (`src/server/telephony/transcripts-process.ts`) behind `TRANSCRIPTS_ENABLED` and provider keys, and must never block answering, ending, transferring, or saving a call/case.
 
 ### Email
 
@@ -369,16 +327,15 @@ Use `.env.example` as the inventory and comments. It contains placeholders only;
 | Supabase browser | `NEXT_PUBLIC_SUPABASE_URL`, publishable/anon key | Browser + web |
 | Supabase server | service/secret key, project ref, DB URL | Web/worker only |
 | App/organization | `APP_BASE_URL`, `DEPLOYMENT_VERSION`, `MOTORIST_ORGANIZATION_ID/SLUG` | Web/worker |
-| VIPTel control | REST URL, event WS URL, username/password, caller ID | Listener/server only |
-| VIPTel browser SIP | SIP WSS URL/domain/realm and per-extension config | Session route; only the minimum session config reaches an authorized browser |
-| VIPTel safety gates | live-mutation, snapshot bridge, hotdesk, takeover gates/tokens | Matching web/listener config |
-| VIPTel SMS | SMS URL, credentials, sender, webhook token | Server only |
+| Telnyx | `TELNYX_API_KEY`, `TELNYX_PUBLIC_KEY`, app/connection/profile IDs, `TELNYX_DEFAULT_FROM_NUMBER`, `TELNYX_SMS_ALPHA_SENDER`, `TELNYX_MEDIA_BASE_URL` | Server only; the browser receives only a short-lived WebRTC token |
+| Telnyx safety gates | `TELNYX_LIVE_CALLS_ENABLED`, `TELNYX_SMS_LIVE_SENDS` | Server only, `false` outside production |
+| Cron | `CRON_SECRET` | Vercel cron -> server |
 | Google | browser Maps key/map ID and server Routes key | Split browser/server |
 | Fleet | Commander, WebDispecink, SWHouse credentials and sync secrets | Server/worker only |
-| Call processing | recordings sync, ElevenLabs, Anthropic, retention | Server/worker only |
+| Call processing | `RECORDINGS_SYNC_SECRET` (transcript route guard), ElevenLabs, Anthropic, `TRANSCRIPTS_ENABLED` | Server/worker only |
 | Email/monitoring | Resend, alert targets, healthcheck URLs/tokens | Server/worker only |
 
-When an integration appears “configured,” distinguish four states:
+When an integration appears "configured," distinguish four states:
 
 1. variables exist;
 2. the feature gate is enabled;
@@ -391,14 +348,14 @@ Only the last state proves it works.
 
 - Authenticate with the shared helpers in `src/server/api-auth.ts`.
 - Require appropriate roles, not merely any session.
-- Enforce same-origin/CSRF rules for browser mutations.
+- Enforce same-origin/CSRF rules for browser mutations (`assertSameOriginRequest` before auth).
 - Scope every query by organization.
 - Validate request bodies at the route/service boundary.
 - Rate-limit sensitive public or authentication endpoints.
-- Never return provider credentials, raw secret-bearing payloads, service keys, or SIP passwords from general endpoints.
+- Never return provider credentials, raw secret-bearing payloads, service keys, or WebRTC credentials from general endpoints.
 - Record the authenticated actor for audited actions and telephony commands.
 - Prefer an existing service/mutation module over putting business logic directly in a route handler.
-- Add a route to the auth/security tests or registry when the project’s conventions require it.
+- Register every new route in `src/server/route-auth-registry.ts`; the route-auth and route-csrf tests fail otherwise.
 
 ## Common change paths
 
@@ -408,15 +365,15 @@ Read `CaseDetail.tsx`, `case-form-fields.tsx`, `case-form-shared.ts`, `case-inpu
 
 ### Editing the main dispatch layout
 
-Read `DispatchConsole.tsx`, `MapWorkspace.tsx`, `CaseCockpitPanel.tsx`, both sidebars, and responsive Playwright tests. Test common laptop sizes, not only a large monitor.
+Read `DispatchConsole.tsx`, `MapWorkspace.tsx`, `CaseCockpitPanel.tsx`, both sidebars, and the responsive Playwright test. Test common laptop sizes, not only a large monitor.
 
 ### Editing tasks or reports
 
 Verify the actual current task columns in migrations/generated types. Reports should degrade per section rather than failing the whole dashboard because one optional column/table is missing.
 
-### Editing phone or workplace behavior
+### Editing phone behavior
 
-Trace the complete flow: UI -> browser hook -> API route -> access/service validation -> command row -> listener -> provider event -> Supabase projection -> UI refresh. Add tests for inbound and outbound, ringing and answered, one and multiple simultaneous calls, two browser profiles, stale sessions, decline, hangup, and transfer.
+Trace the complete flow: UI -> browser hook -> API route -> access/service validation -> provider command -> provider webhook -> Supabase projection -> UI refresh. Add tests for inbound and outbound, ringing and answered, one and multiple simultaneous calls, two browser profiles, stale devices, decline, hangup, and transfer. Until Telnyx lands, keep the not-configured mode truthful: no optimistic success anywhere.
 
 ### Editing a provider integration
 
@@ -438,32 +395,28 @@ pnpm build
 pnpm test:e2e
 ```
 
-Run the smallest relevant tests while iterating, then the broad gates proportional to risk. Telephony and migration changes deserve the full suite and listener build.
+Run the smallest relevant tests while iterating, then the broad gates proportional to risk. Telephony and migration changes deserve the full suite and a build.
 
 Notes:
 
-- Some `node --test` infrastructure contracts are designed around Linux/POSIX deployment scripts and may behave differently on Windows. Do not ignore a failure; identify whether it is a platform assumption or product regression.
+- `pnpm test` runs Vitest and then `node --test tests/*.test.mjs`. Vitest must run with `NODE_ENV=test` so the auth guards stay active.
 - End-to-end tests may need explicit local test authentication and seeded fixtures. Never enable the development auth bypass on a deployed environment to make E2E convenient.
-- A successful TypeScript build does not verify VIPTel PBX behavior. Live telephony requires a controlled acceptance matrix and provider evidence.
+- A successful TypeScript build does not verify provider behavior. Live telephony requires a controlled acceptance matrix and provider evidence.
 
 ## Frequent failure modes and false assumptions
 
 - **Mock data looks real:** always inspect the data source/warning.
-- **“Credentials present” means healthy:** it does not. Check recent provider confirmation.
-- **Extension equals operator:** false; ownership/lease can change.
-- **Queue equals workstation:** false; queues route to member extensions.
-- **Browser connected equals available:** false; SIP registration, queue membership, pause, active call, and workplace lease are separate inputs.
-- **A React state update ended a call:** false until VIPTel confirms it.
-- **One call equals one provider ID:** often false during queueing and transfer.
-- **Closing a tab releases the workplace:** not guaranteed.
+- **"Credentials present" means healthy:** it does not. Check recent provider confirmation.
+- **Browser connected equals available:** false; device registration, presence status and active session are separate inputs.
+- **A React state update ended a call:** false until the provider confirms it.
+- **One call equals one provider ID:** often false during ringing and transfer; use the session id.
+- **Closing a tab ends the call:** not guaranteed; the server owns session state.
 - **The newest call belongs to this operator:** unsafe when calls arrive simultaneously.
-- **Vercel can call VIPTel REST:** normally false due to IP allowlisting; use the listener bridge.
-- **Preview is harmless:** false when it reads/writes production Supabase data.
-- **Adding UI workplace 5 provisions extension 24:** false; PBX and credential provisioning are external.
+- **Preview is harmless:** false when it writes to the shared Supabase project of this copy.
 - **A map key missing should block case creation:** false; manual location fallback is required.
 - **All docs are current:** false; verify code, migrations, environment, and deployment state.
-- **A migration is part of a normal frontend deploy:** false; it is a separate reviewed database operation.
-- **Web deployed means listener updated:** false; Vercel and Hetzner are separate deployments.
+- **A migration is part of a normal frontend deploy:** false; it is a separate, explicitly requested database operation.
+- **This copy may reuse the original production project:** never; see `AGENTS.md`.
 - **Provider status timestamps are local time:** usually provider/storage timestamps are UTC. Format through shared time utilities for Europe/Bratislava and do not add manual offsets.
 
 ## Definition of done by risk level
@@ -481,29 +434,31 @@ For a case/data change:
 - repository and database contract agree;
 - permissions and organization scope are verified.
 
-For telephony/workplace changes:
+For telephony changes:
 
 - no optimistic success or cross-operator call leakage;
-- command actor/source/destination validation remains intact;
-- simultaneous calls and stale browser sessions are covered;
-- web and listener builds/tests pass from the same commit;
-- a controlled production-like test covers browser and physical endpoints;
-- required Hetzner, Supabase, Vercel, and VIPTel-manager actions are stated separately.
+- command actor/ownership/destination validation and kill switches remain intact;
+- simultaneous calls and stale devices are covered;
+- webhook handling stays idempotent (claim ledger, natural-key upserts);
+- a controlled production-like test covers the browser phone and a real mobile endpoint;
+- required Supabase, Vercel, and Telnyx portal actions are stated separately.
 
 ## Best source documents
 
 - [`AGENTS.md`](./AGENTS.md) — mandatory work/release rules.
-- [`README.md`](./README.md) — setup overview; verify any old integration-status claims.
+- [`README.md`](./README.md) — setup overview and current state.
 - [`docs/architecture.md`](./docs/architecture.md) — architectural direction.
 - [`docs/data-model.md`](./docs/data-model.md) — table-level model.
 - [`docs/domain-model.md`](./docs/domain-model.md) — business entities and statuses.
 - [`docs/integration-strategy.md`](./docs/integration-strategy.md) — provider boundaries.
+- [`docs/telnyx-data-contract.md`](./docs/telnyx-data-contract.md) — telephony contract and phase status.
+- [`docs/operations/telnyx-setup.md`](./docs/operations/telnyx-setup.md) — Telnyx resource identifiers.
 - [`docs/deployment-vercel.md`](./docs/deployment-vercel.md) — Vercel environments and release behavior.
 
 ## Suggested first prompt for a new AI assistant
 
-> Read `AGENTS.md` and `AI_PROJECT_HANDOFF.md` completely. Check `git status`, the current branch, and the last 10 commits. Do not edit or deploy anything yet. For my requested feature, identify the UI, API, service, database, worker/listener, external-provider, and test files involved. Distinguish verified current behavior from assumptions or old documentation. Never expose secrets, never treat mock data as live, and never make a Supabase/Hetzner/VIPTel/Vercel change unless I explicitly authorize that operational action.
+> Read `AGENTS.md` and `AI_PROJECT_HANDOFF.md` completely. Check `git status`, the current branch, and the last 10 commits. Do not edit or deploy anything yet. For my requested feature, identify the UI, API, service, database, cron/job, external-provider, and test files involved. Distinguish verified current behavior from assumptions or old documentation. Never expose secrets, never treat mock data as live, and never make a Supabase/Telnyx/Vercel change unless I explicitly authorize that operational action.
 
 ---
 
-Last reviewed against the repository on 2026-08-13. Revalidate rapidly changing telephony and deployment details before acting.
+Last reviewed against the repository on 2026-09-02 (Phase 0 of the Telnyx rollout). Revalidate rapidly changing telephony and deployment details before acting.
