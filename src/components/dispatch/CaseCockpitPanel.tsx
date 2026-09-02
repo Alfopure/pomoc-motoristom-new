@@ -55,7 +55,6 @@ import type { DispatchMapModel } from "@/lib/map-adapter";
 import { attachmentCategoryLabels } from "./case-form-shared";
 import { CaseDetail } from "./CaseDetail";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
-import type { WorkplaceWebphoneSessionFence } from "@/lib/telephony/webphone-client";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 
 type WorkspaceMode = "collapsed" | "split" | "expanded";
@@ -79,7 +78,6 @@ type CaseCockpitPanelProps = {
   onSaveDraftChange: (saveDraft: SaveCaseDraft | null) => void;
   onSavingChange: (saving: boolean) => void;
   viewerProfileId?: string;
-  workplaceFence?: WorkplaceWebphoneSessionFence;
 };
 
 const sourceLabels: Record<NonNullable<DispatchCase["sourceType"]>, string> = {
@@ -109,7 +107,6 @@ export function CaseCockpitPanel({
   partnerDirectory,
   priceRule,
   viewerProfileId,
-  workplaceFence,
 }: CaseCockpitPanelProps) {
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
   const owner = operators.find((operator) => operator.id === caseItem.ownerId)?.name ?? caseItem.ownerName ?? "Nepriradené";
@@ -288,7 +285,6 @@ export function CaseCockpitPanel({
           priceRule={priceRule}
           showInlineEditButton={false}
           viewerProfileId={viewerProfileId}
-          workplaceFence={workplaceFence}
         />
 
         <details className="group overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm">

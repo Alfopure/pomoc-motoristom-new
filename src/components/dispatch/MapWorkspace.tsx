@@ -5,7 +5,6 @@ import { GripHorizontal } from "lucide-react";
 import type { CallCenterCall, CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
 import type { DispatchMapModel } from "@/lib/map-adapter";
-import type { WorkplaceWebphoneSessionFence } from "@/lib/telephony/webphone-client";
 import { CaseCockpitPanel } from "./CaseCockpitPanel";
 import { CaseTable, type CaseSortState } from "./CaseTable";
 import { DispatchMap } from "./DispatchMap";
@@ -36,7 +35,6 @@ type MapWorkspaceProps = {
   viewerProfileId?: string;
   workspaceKind: WorkspaceKind;
   workspaceMode: WorkspaceMode;
-  workplaceFence?: WorkplaceWebphoneSessionFence;
   onAssignAsset: (assetId: string) => void;
   onBackToCockpit: () => void;
   onCaseCreated: (dispatchData: DispatchData, caseId: string, notice?: string) => void;
@@ -117,7 +115,6 @@ export function MapWorkspace({
   viewerProfileId,
   workspaceKind,
   workspaceMode,
-  workplaceFence,
 }: MapWorkspaceProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const layoutStorageKey = useMemo(() => `motorist:dispatch-workspace-layout:v2:${viewerProfileId ?? "local-browser"}`, [viewerProfileId]);
@@ -494,7 +491,6 @@ export function MapWorkspace({
               partnerDirectory={partnerDirectory}
               priceRule={priceRule}
               viewerProfileId={viewerProfileId}
-              workplaceFence={workplaceFence}
             />
           ) : caseItem && mapModel ? (
             <CaseCockpitPanel
@@ -516,7 +512,6 @@ export function MapWorkspace({
               partnerDirectory={partnerDirectory}
               priceRule={priceRule}
               viewerProfileId={viewerProfileId}
-              workplaceFence={workplaceFence}
             />
           ) : (
             <EmptyActiveCase compact />

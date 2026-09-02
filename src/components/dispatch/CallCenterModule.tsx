@@ -1,21 +1,18 @@
 "use client";
 
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   AlertTriangle,
   BookUser,
-  Building2,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock3,
-  Headphones,
   History,
   Link2,
-  List,
   Loader2,
   LogOut,
   Pause,
@@ -23,10 +20,9 @@ import {
   PhoneForwarded,
   PhoneIncoming,
   PhoneMissed,
+  PhoneOff,
   PhoneOutgoing,
   Plus,
-  RadioTower,
-  RefreshCw,
   Search,
   Star,
   UserRound,
@@ -37,16 +33,6 @@ import type { DispatchCase, DispatchMetrics, Operator } from "@/domain/types";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
 import { callStatusLabels } from "@/domain/statuses";
 import { CallDetailDrawer } from "./CallDetailDrawer";
-import { describePhoneState } from "./webphone-ui";
-import { getQueueCoverage } from "./queue-coverage";
-import type {
-  ViptelBrowserWebphone,
-  WorkplaceWebphoneSessionFence,
-} from "@/lib/telephony/webphone-client";
-import { isViptelWebphoneReadyForBrowser, type ViptelWebphoneConfig } from "@/lib/telephony/webphone";
-import type { TelephonyHealthSignal } from "@/lib/telephony/health";
-import type { ViptelQueueStatus } from "@/lib/integrations/viptel/client";
-import type { WorkplaceTakeoverSnapshot } from "@/lib/telephony/workplace-takeover";
 import type {
   TelephonyDirectoryContact,
   TelephonyDirectoryResponse,
@@ -54,104 +40,83 @@ import type {
   TelephonyFavoriteMutationResponse,
   TelephonyFavoritesResponse,
 } from "@/lib/telephony/directory";
-import {
-  confirmAuditedBrowserSipCall,
-  requireConfirmedTelephonyCommand,
-  runAuditedBrowserSipInvite,
-  waitForTelephonyCommand,
-} from "@/lib/telephony/commands";
+import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import type {
   TelephonyAvailabilityAction,
   TelephonyOperatorPresence,
   TelephonyOperatorPresenceState,
-  TelephonyPresenceSnapshot,
 } from "@/lib/telephony/presence";
-import {
-  WorkplaceView,
-  type WorkplaceSelectionActionResult,
-  type WorkplaceSelectionInput,
-  type WorkplaceSelectionSnapshot,
-} from "./WorkplaceView";
-import {
-  callIsCurrentAtTelephonyStation,
-  partitionLiveTelephonyCalls,
-  resolveIncomingBrowserProviderCall,
-  resolveOutboundBrowserProviderCall,
-  resolveUniqueCurrentTelephonyCall,
-  sameTelephonyCallIdentity,
-  telephonyCallReactKey,
-  type TelephonyExtensionIdentity,
-} from "@/lib/telephony/call-endpoints";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
-import type { WaitingCallPickupController } from "./use-waiting-call-pickup";
-import {
-  busyActionBlocks,
-  busyActionDeadlineMs,
-  busyActionScope,
-  phoneScopeBusy,
-} from "./busy-actions";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 
 type CallCenterModuleProps = {
-  activeCallsHealth: TelephonyHealthSignal;
-  availabilityPending: boolean;
-  availabilityTarget: TelephonyAvailabilityAction | null;
-  browserWebphone: ViptelBrowserWebphone;
   calls: CallCenterCall[];
   cases: DispatchCase[];
   dataSource: DispatchData["source"];
-  defaultExtension: string;
   currentOperatorId?: string;
   metrics: DispatchMetrics;
   operatorPresences: TelephonyOperatorPresence[];
   operators: Operator[];
-  queueStatus: ViptelQueueStatus | null;
-  queueHealth: TelephonyHealthSignal;
-  selectedWebphoneExtension: string;
-  telephonyPresence: TelephonyPresenceSnapshot | null;
-  telephonyPresenceHealth: TelephonyHealthSignal;
-  workplaceSelection: WorkplaceSelectionSnapshot | null;
-  workplaceSelectionError: string | null;
-  workplaceSessionNotice: string | null;
-  workplaceRecoveryRequired: boolean;
-  workplaceTakeover: WorkplaceTakeoverSnapshot | null;
-  workplaceTakeoverError: string | null;
-  workplacePhoneMutationPending: boolean;
-  workplaceFence?: WorkplaceWebphoneSessionFence;
-  /**
-   * Owned by DispatchConsole so the waiting room works on every view and so
-   * only one pickup can be in flight per browser.
-   */
-  waitingPickup: WaitingCallPickupController;
-  webphoneConfig: ViptelWebphoneConfig | null;
   onDataChange: (data: DispatchData) => void;
   onDial: (phone: string, caseId?: string) => Promise<void>;
   onNewCase: (call?: CallCenterCall) => void;
   onOpenCase: (caseId: string) => void;
   onAvailabilityAction: (action: TelephonyAvailabilityAction) => void;
-  onRefreshWorkplace: () => Promise<void>;
-  onRecoverWorkplacePriority: (operationId: string) => Promise<WorkplaceSelectionActionResult | void>;
-  onCancelWorkplaceTakeover: (requestId: string) => Promise<WorkplaceSelectionActionResult | void>;
-  onRequestWorkplaceTakeover: (extension: string) => Promise<WorkplaceSelectionActionResult | void>;
-  onReleaseOccupiedWorkplace: (extension: string) => Promise<WorkplaceSelectionActionResult | void>;
-  onReleaseWorkplace: () => Promise<WorkplaceSelectionActionResult | void>;
-  onSelectWorkplace: (selection: WorkplaceSelectionInput) => Promise<WorkplaceSelectionActionResult | void>;
-  onTakeoverWorkplace: (extension: string) => Promise<WorkplaceSelectionActionResult | void>;
   onTelephonyChanged: () => void;
 };
 
 type HistoryFilter = "all" | "inbound" | "outbound" | "answered" | "missed" | "callback";
-type CallDialMode = "extension_callback" | "webphone";
 const CALLBACK_PAGE_SIZE = 3;
 const HISTORY_PAGE_SIZE = 8;
 
-type EnqueuedCommandResponse = {
-  command?: { id: string; status: string };
-  error?: string;
-  ok?: boolean;
-  requestId?: string;
+/**
+ * Scopes for the module's "an action is running" lock. Only actions that
+ * contend for the same resource block each other: `phone` for dialling and
+ * `call:<id>` for per-call bookkeeping (outcome, case link).
+ */
+type BusyActionScope = "phone" | `call:${string}`;
+
+const BUSY_ACTION_DEADLINE_MS: Record<"phone" | "call", number> = {
+  phone: 20_000,
+  call: 25_000,
 };
 
+function busyActionScope(key: string | null): BusyActionScope | null {
+  if (!key) return null;
+  if (key.startsWith("quick:")) return "phone";
+  const separator = key.lastIndexOf(":");
+  if (separator <= 0) return null;
+  const callId = key.slice(0, separator);
+  const action = key.slice(separator + 1);
+  if (action === "call_back") return "phone";
+  return `call:${callId}`;
+}
+
+function busyActionDeadlineMs(scope: BusyActionScope | null) {
+  if (!scope) return 0;
+  return scope === "phone" ? BUSY_ACTION_DEADLINE_MS.phone : BUSY_ACTION_DEADLINE_MS.call;
+}
+
+/** True when a dial is already in flight. */
+function phoneScopeBusy(key: string | null) {
+  return busyActionScope(key) === "phone";
+}
+
+/** Whether starting `next` must wait for `current`: same scope blocks, others never do. */
+function busyActionBlocks(current: string | null, next: string) {
+  const currentScope = busyActionScope(current);
+  if (!currentScope) return false;
+  return currentScope === busyActionScope(next);
+}
+
+const LIVE_CALL_STATUSES = new Set<CallCenterCall["status"]>(["incoming", "ringing_agent", "answered", "outbound"]);
+
+function partitionLiveCalls(calls: CallCenterCall[]) {
+  return {
+    active: calls.filter((call) => LIVE_CALL_STATUSES.has(call.status)),
+    completed: calls.filter((call) => !LIVE_CALL_STATUSES.has(call.status)),
+  };
+}
 
 type PhonebookEntry = {
   id: string;
@@ -165,36 +130,10 @@ export function customerNumberForCall(call: Pick<CallCenterCall, "calledNumber" 
   return call.direction === "outbound" ? call.calledNumber : call.callerNumber;
 }
 
-export function presentCallForBrowser(
-  call: CallCenterCall | undefined,
-  browser: Pick<ViptelBrowserWebphone, "activeCallTarget" | "callDirection" | "hasActiveCall">,
-) {
-  if (!call || !browser.hasActiveCall || browser.callDirection !== "outbound") return call;
-  const target = browser.activeCallTarget?.trim() || call.destinationNumber || call.calledNumber;
-  return {
-    ...call,
-    calledNumber: target,
-    callerName: undefined,
-    destinationNumber: target,
-    direction: "outbound" as const,
-    status: call.status === "incoming" || call.status === "ringing_agent" ? "outbound" as const : call.status,
-  };
-}
-
-async function confirmEnqueuedCommand(result: EnqueuedCommandResponse) {
-  if (!result.command?.id) throw new Error(result.error ?? "Telefónny príkaz sa nevytvoril.");
-  return requireConfirmedTelephonyCommand(await waitForTelephonyCommand(result.command.id));
-}
-
 export function CallCenterModule({
-  activeCallsHealth,
-  availabilityPending,
-  availabilityTarget,
-  browserWebphone,
   calls,
   cases,
   dataSource,
-  defaultExtension,
   currentOperatorId,
   metrics,
   operatorPresences,
@@ -203,93 +142,30 @@ export function CallCenterModule({
   onNewCase,
   onOpenCase,
   onAvailabilityAction,
-  onRefreshWorkplace,
-  onRecoverWorkplacePriority,
-  onCancelWorkplaceTakeover,
-  onRequestWorkplaceTakeover,
-  onReleaseOccupiedWorkplace,
-  onReleaseWorkplace,
-  onSelectWorkplace,
-  onTakeoverWorkplace,
   onTelephonyChanged,
   operators,
-  queueStatus,
-  queueHealth,
-  selectedWebphoneExtension,
-  telephonyPresence,
-  telephonyPresenceHealth,
-  workplaceSelection,
-  workplaceSelectionError,
-  workplaceSessionNotice,
-  workplaceRecoveryRequired,
-  workplaceTakeover,
-  workplaceTakeoverError,
-  workplacePhoneMutationPending,
-  workplaceFence,
-  waitingPickup,
-  webphoneConfig,
 }: CallCenterModuleProps) {
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [detailCall, setDetailCall] = useState<CallCenterCall | null>(null);
-  const [moduleView, setModuleView] = useState<"overview" | "workplace">("workplace");
-  const overviewTabRef = useRef<HTMLButtonElement>(null);
-  const workplaceTabRef = useRef<HTMLButtonElement>(null);
-  // The active endpoint already merges the provider snapshot with provisional
-  // listener rows. Status is the authoritative lifecycle marker; filtering by
-  // a presentation label used to hide calls exactly while VIPTel handed them
-  // from one queue member to another, leaving the waiting room empty.
-  // Memoised because the auto-answer effect below depends on them. Rebuilt in
-  // the render body, they were new arrays on every render, so that effect
-  // re-evaluated at the active-call poll cadence rather than when its inputs
-  // actually changed.
-  const partitionedCalls = useMemo(() => partitionLiveTelephonyCalls(calls), [calls]);
+  // Status is the authoritative lifecycle marker. Without a provider nothing
+  // is live, but a stale row must still not be mistaken for history.
+  const partitionedCalls = useMemo(() => partitionLiveCalls(calls), [calls]);
   const activeCalls = partitionedCalls.active;
   const storedCalls = useMemo(
     () => (dataSource === "supabase" ? partitionedCalls.completed : []),
     [dataSource, partitionedCalls],
   );
-  const controlStations = useMemo<TelephonyExtensionIdentity[]>(() => {
-    const stations = (telephonyPresence?.extensions ?? [])
-      .filter((extension) => extension.active)
-      .map((extension) => ({ extension: extension.extension, profileId: extension.profileId }));
-    if (defaultExtension && !stations.some((station) => station.extension === defaultExtension)) {
-      stations.push({ extension: defaultExtension, profileId: currentOperatorId });
-    }
-    return stations;
-  }, [currentOperatorId, defaultExtension, telephonyPresence?.extensions]);
-  const currentControlStation = controlStations.find((station) => station.extension === defaultExtension);
-  const canControlCall = (call: CallCenterCall) => Boolean(
-    currentControlStation && callIsCurrentAtTelephonyStation(call, currentControlStation, controlStations),
-  );
-  const providerActiveCall = browserWebphone.hasActiveCall
-    ? browserWebphone.callDirection === "inbound"
-      ? resolveIncomingBrowserProviderCall(activeCalls, currentControlStation, controlStations)
-      : browserWebphone.callDirection === "outbound"
-        ? resolveOutboundBrowserProviderCall(
-            activeCalls,
-            currentControlStation,
-            controlStations,
-            browserWebphone.activeCallTarget,
-          )
-        : resolveUniqueCurrentTelephonyCall(activeCalls, currentControlStation, controlStations)
-    : resolveUniqueCurrentTelephonyCall(activeCalls, currentControlStation, controlStations);
-  const activeCall = presentCallForBrowser(providerActiveCall, browserWebphone);
-  const presentedActiveCalls = activeCall && providerActiveCall
-    ? activeCalls.map((call) => sameTelephonyCallIdentity(call, providerActiveCall) ? activeCall : call)
-    : activeCalls;
   const missedCalls = storedCalls.filter((call) => ["missed", "abandoned_queue", "failed"].includes(call.status) || call.outcome === "callback");
   const filteredHistoryCalls = filterHistoryCalls(storedCalls, historyFilter);
   const primaryQueueWait = activeCalls.filter((call) => call.status === "incoming" || call.status === "ringing_agent").length;
-  const presenceByProfile = new Map(operatorPresences.map((presence) => [presence.profileId, presence]));
   const currentPresence = currentOperatorId
-    ? presenceByProfile.get(currentOperatorId)
-    : operatorPresences.find((presence) => presence.extensions.includes(defaultExtension));
+    ? operatorPresences.find((presence) => presence.profileId === currentOperatorId)
+    : undefined;
   const currentOperator = currentOperatorId
     ? operators.find((operator) => operator.id === currentOperatorId)
-    : operators.find((operator) => operator.extension === defaultExtension);
-  const workplaceRecoveryPending = busyAction === "workplace:recover";
+    : undefined;
   useEffect(() => {
     if (!busyAction) return;
     // Every lock surrenders eventually. Without this, one action whose promise
@@ -302,26 +178,6 @@ export function CallCenterModule({
     }, busyActionDeadlineMs(busyActionScope(busyAction)));
     return () => window.clearTimeout(timer);
   }, [busyAction]);
-
-  async function recoverCurrentWorkplace() {
-    const extension = workplaceSelection?.selection.extension;
-    if (!extension || busyActionBlocks(busyAction, "workplace:recover")) return;
-    const queue = workplaceSelection.selection.queue ??
-      workplaceSelection.priorities.find((priority) =>
-        (priority.selectedExtension ?? priority.activeExtension) === extension)?.queue ??
-      workplaceSelection.priorities[0]?.queue ??
-      "601";
-    setBusyAction("workplace:recover");
-    setActionNotice(null);
-    try {
-      const result = await onSelectWorkplace({ extension, queue });
-      setActionNotice(result?.message ?? `Pracovné miesto ${extension} je znova pripojené.`);
-    } catch (error) {
-      setActionNotice(messageFromError(error, "Pracovné miesto sa nepodarilo obnoviť. Skús to znova."));
-    } finally {
-      setBusyAction(null);
-    }
-  }
 
   async function postCallOutcome(call: CallCenterCall, outcome: CallOutcome, callbackMinutes?: number) {
     if (!looksLikeUuid(call.id)) {
@@ -401,14 +257,6 @@ export function CallCenterModule({
     if (busyActionBlocks(busyAction, `${call.id}:call_back`)) {
       return;
     }
-    if (workplacePhoneMutationPending) {
-      setActionNotice("Najprv dokonči zmenu pracovného miesta. Telefón počas presunu nezačne nový hovor.");
-      return;
-    }
-    if (!defaultExtension) {
-      setActionNotice("Najprv si v Pracovisku vyber pracovné miesto.");
-      return;
-    }
 
     setBusyAction(`${call.id}:call_back`);
     setActionNotice(null);
@@ -429,14 +277,6 @@ export function CallCenterModule({
     if (busyActionBlocks(busyAction, `quick:${entry.id}`) || !entry.phone.trim()) {
       return;
     }
-    if (workplacePhoneMutationPending) {
-      setActionNotice("Najprv dokonči zmenu pracovného miesta. Telefón počas presunu nezačne nový hovor.");
-      return;
-    }
-    if (!defaultExtension) {
-      setActionNotice("Tvoj profil nemá priradenú aktívnu VIPTel klapku.");
-      return;
-    }
 
     const busyKey = `quick:${entry.id}`;
     setBusyAction(busyKey);
@@ -447,451 +287,106 @@ export function CallCenterModule({
       setActionNotice(`Volanie na ${entry.label} bolo spustené.`);
       onTelephonyChanged();
     } catch (error) {
-      setActionNotice(error instanceof Error ? error.message : "Telefónny príkaz VIPTel zlyhal.");
+      setActionNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo spustiť.");
     } finally {
       setBusyAction(null);
     }
   }
 
   return (
-    <main className={`min-h-0 flex-1 overflow-x-hidden bg-zinc-50 p-3 sm:p-4 ${
-      moduleView === "overview" ? "overflow-y-auto xl:flex xl:flex-col xl:overflow-y-hidden" : "overflow-y-auto"
-    }`}>
+    <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-zinc-50 p-3 sm:p-4 xl:flex xl:flex-col xl:overflow-y-hidden">
       <OperatorAvailabilityPanel
-        commandPending={availabilityPending}
-        commandTarget={availabilityTarget}
         currentOperatorName={currentPresence?.operatorName ?? currentOperator?.name}
-        generalHealth={telephonyPresenceHealth}
-        health={queueHealth}
-        myExtension={defaultExtension}
         myPresence={currentPresence}
-        operatorPresences={operatorPresences}
-        recoveryPending={workplaceRecoveryPending}
-        sessionNotice={workplaceSessionNotice}
-        status={queueStatus}
-        statuses={telephonyPresence?.queueStatuses ?? []}
-        workplaceRecoveryRequired={workplaceRecoveryRequired}
         onAction={onAvailabilityAction}
-        onRecoverWorkplace={() => void recoverCurrentWorkplace()}
       />
 
       {actionNotice && <div className="mb-3 shrink-0 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900">{actionNotice}</div>}
 
-      <div className="mb-3 flex shrink-0 border-b border-zinc-200" role="tablist" aria-label="Pohľady ústredne">
-        <div className="flex min-w-0 gap-1">
-          <button
-            ref={workplaceTabRef}
-            type="button"
-            id="call-center-workplace-tab"
-            role="tab"
-            aria-controls="call-center-workplace-panel"
-            aria-selected={moduleView === "workplace"}
-            tabIndex={moduleView === "workplace" ? 0 : -1}
-            onClick={() => setModuleView("workplace")}
-            onKeyDown={(event) => {
-              if (["ArrowLeft", "ArrowRight", "End"].includes(event.key)) {
-                event.preventDefault();
-                setModuleView("overview");
-                overviewTabRef.current?.focus();
-              }
-            }}
-            className={`relative inline-flex min-h-10 items-center justify-center gap-2 px-3 text-sm font-bold outline-none transition focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-inset ${
-              moduleView === "workplace" ? "text-zinc-950 after:absolute after:inset-x-1 after:bottom-[-1px] after:h-0.5 after:bg-[#F4C900]" : "text-zinc-500 hover:text-zinc-900"
-            }`}
-          >
-            <Building2 size={17} aria-hidden="true" />
-            Pracovisko
-          </button>
-          <button
-            ref={overviewTabRef}
-            type="button"
-            id="call-center-overview-tab"
-            role="tab"
-            aria-controls="call-center-overview-panel"
-            aria-selected={moduleView === "overview"}
-            tabIndex={moduleView === "overview" ? 0 : -1}
-            onClick={() => setModuleView("overview")}
-            onKeyDown={(event) => {
-              if (["ArrowLeft", "ArrowRight", "Home"].includes(event.key)) {
-                event.preventDefault();
-                setModuleView("workplace");
-                workplaceTabRef.current?.focus();
-              }
-            }}
-            className={`relative inline-flex min-h-10 items-center justify-center gap-2 px-3 text-sm font-bold outline-none transition focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-inset ${
-              moduleView === "overview" ? "text-zinc-950 after:absolute after:inset-x-1 after:bottom-[-1px] after:h-0.5 after:bg-[#F4C900]" : "text-zinc-500 hover:text-zinc-900"
-            }`}
-          >
-            <List size={17} aria-hidden="true" />
-            Prehľad hovorov
-          </button>
+      <div className="xl:min-h-0 xl:flex-1">
+        <div className="grid min-w-0 max-w-full gap-4 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(240px,280px)_minmax(0,1fr)_minmax(280px,320px)] 2xl:grid-cols-[minmax(280px,320px)_minmax(0,1fr)_minmax(300px,340px)]">
+          <aside className="grid min-w-0 max-w-full content-start gap-4 overflow-hidden xl:flex xl:h-full xl:min-h-0 xl:flex-col [&>*]:min-w-0">
+            <PhonebookPanel
+              busyAction={busyAction}
+              onQuickCall={(entry) => void startQuickCall(entry)}
+            />
+          </aside>
+
+          <HistoryPanel
+            busyAction={busyAction}
+            calls={filteredHistoryCalls}
+            cases={cases}
+            filter={historyFilter}
+            onCallBack={callBack}
+            onFilterChange={setHistoryFilter}
+            onLinkCall={linkCallToCase}
+            onNewCase={onNewCase}
+            onOpenCase={onOpenCase}
+            onOpenDetail={setDetailCall}
+            totalCalls={storedCalls.length}
+          />
+
+          <aside className="grid min-w-0 max-w-full content-start gap-4 overflow-hidden xl:h-full xl:min-h-0 xl:grid-cols-1 xl:overflow-y-auto xl:overscroll-contain [&>*]:min-w-0">
+            <CallCommandPanel
+              activeCount={activeCalls.length}
+              metrics={metrics}
+              missedCount={missedCalls.length}
+              primaryQueueWait={primaryQueueWait}
+            />
+            <CallbackInbox
+              busyAction={busyAction}
+              calls={missedCalls}
+              onCallBack={callBack}
+              onComplete={(call) => void postCallOutcome(call, "reached")}
+              onNewCase={onNewCase}
+              onSchedule={(call) => void postCallOutcome(call, "callback", 30)}
+            />
+          </aside>
         </div>
       </div>
-
-      {moduleView === "overview" ? (
-        <div id="call-center-overview-panel" className="xl:min-h-0 xl:flex-1" role="tabpanel" aria-labelledby="call-center-overview-tab">
-          <div className="grid min-w-0 max-w-full gap-4 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(240px,280px)_minmax(0,1fr)_minmax(280px,320px)] 2xl:grid-cols-[minmax(280px,320px)_minmax(0,1fr)_minmax(300px,340px)]">
-            <aside className="grid min-w-0 max-w-full content-start gap-4 overflow-hidden xl:flex xl:h-full xl:min-h-0 xl:flex-col [&>*]:min-w-0">
-              <PhonebookPanel
-                busyAction={busyAction}
-                onQuickCall={(entry) => void startQuickCall(entry)}
-              />
-            </aside>
-
-            <HistoryPanel
-              busyAction={busyAction}
-              calls={filteredHistoryCalls}
-              cases={cases}
-              filter={historyFilter}
-              onCallBack={callBack}
-              onFilterChange={setHistoryFilter}
-              onLinkCall={linkCallToCase}
-              onNewCase={onNewCase}
-              onOpenCase={onOpenCase}
-              onOpenDetail={setDetailCall}
-              totalCalls={storedCalls.length}
-            />
-
-            <aside className="grid min-w-0 max-w-full content-start gap-4 overflow-hidden xl:h-full xl:min-h-0 xl:grid-cols-1 xl:overflow-y-auto xl:overscroll-contain [&>*]:min-w-0">
-              <CallCommandPanel
-                activeCall={activeCall}
-                activeCount={activeCalls.length}
-                browserWebphone={browserWebphone}
-                defaultExtension={defaultExtension}
-                metrics={metrics}
-                missedCount={missedCalls.length}
-                primaryQueueWait={primaryQueueWait}
-                restHealth={activeCallsHealth}
-                selectedWebphoneExtension={selectedWebphoneExtension}
-                workplacePhoneMutationPending={workplacePhoneMutationPending}
-                workplaceFence={workplaceFence}
-                webphoneConfig={webphoneConfig}
-                onTelephonyChanged={onTelephonyChanged}
-              />
-              <CallbackInbox
-                busyAction={busyAction}
-                calls={missedCalls}
-                onCallBack={callBack}
-                onComplete={(call) => void postCallOutcome(call, "reached")}
-                onNewCase={onNewCase}
-                onSchedule={(call) => void postCallOutcome(call, "callback", 30)}
-              />
-            </aside>
-          </div>
-        </div>
-      ) : (
-        <div id="call-center-workplace-panel" role="tabpanel" aria-labelledby="call-center-workplace-tab">
-          <WorkplaceView
-            activeCalls={presentedActiveCalls}
-            browserPhoneStatus={browserWebphone.registrationStatus}
-            canControlCall={canControlCall}
-            currentExtension={defaultExtension}
-            currentOperatorId={currentOperatorId}
-            health={telephonyPresenceHealth}
-            operatorPresences={operatorPresences}
-            operators={operators}
-            snapshot={telephonyPresence}
-            workplaceSelection={workplaceSelection}
-            workplaceSelectionError={workplaceSelectionError}
-            workplaceTakeover={workplaceTakeover}
-            workplaceTakeoverError={workplaceTakeoverError}
-            waitingCallPickupState={waitingPickup.waitingCallPickupState}
-            onRefreshWorkplace={onRefreshWorkplace}
-            onRecoverWorkplacePriority={onRecoverWorkplacePriority}
-            onCancelWorkplaceTakeover={onCancelWorkplaceTakeover}
-            onRequestWorkplaceTakeover={onRequestWorkplaceTakeover}
-            onReleaseOccupiedWorkplace={onReleaseOccupiedWorkplace}
-            onReleaseWorkplace={onReleaseWorkplace}
-            onSelectWorkplace={onSelectWorkplace}
-            onTakeoverWorkplace={onTakeoverWorkplace}
-            onPickupWaitingCall={(call) => void waitingPickup.pickupWaitingCall(call)}
-            actions={(selectedWorkplaceCall) => {
-              const controlledCall = selectedWorkplaceCall && canControlCall(selectedWorkplaceCall)
-                ? selectedWorkplaceCall
-                : undefined;
-              const presentedControlledCall = controlledCall && activeCall?.id === controlledCall.id
-                ? activeCall
-                : controlledCall;
-              return (
-                <>
-                {selectedWorkplaceCall && !controlledCall ? (
-                  <section className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-700">
-                    <p className="font-bold text-zinc-950">Hovor je iba na sledovanie</p>
-                    <p className="mt-1 leading-5">Prepojiť alebo ukončiť ho môže operátor, ktorému práve patrí. Na ovládanie svojho hovoru vyber jeho značku v pracovisku.</p>
-                  </section>
-                ) : null}
-                <CallCommandPanel
-                  activeCall={presentedControlledCall}
-                  activeCount={activeCalls.length}
-                  browserWebphone={browserWebphone}
-                  defaultExtension={defaultExtension}
-                  metrics={metrics}
-                  missedCount={missedCalls.length}
-                  primaryQueueWait={primaryQueueWait}
-                  restHealth={activeCallsHealth}
-                  selectedWebphoneExtension={selectedWebphoneExtension}
-                  workplacePhoneMutationPending={workplacePhoneMutationPending}
-                  workplaceFence={workplaceFence}
-                  webphoneConfig={webphoneConfig}
-                  onTelephonyChanged={onTelephonyChanged}
-                />
-                </>
-              );
-            }}
-          />
-        </div>
-      )}
 
       <CallDetailDrawer call={detailCall} open={Boolean(detailCall)} onClose={() => setDetailCall(null)} onNewCase={onNewCase} />
     </main>
   );
 }
 
+/**
+ * Dialer shell. It keeps its place in the layout so the module reads the same
+ * once a provider is wired in, but every control is disabled until then.
+ */
 function CallCommandPanel({
-  activeCall,
   activeCount,
-  browserWebphone,
-  defaultExtension,
   metrics,
   missedCount,
   primaryQueueWait,
-  restHealth,
-  selectedWebphoneExtension,
-  workplacePhoneMutationPending,
-  workplaceFence,
-  webphoneConfig,
-  onTelephonyChanged,
 }: {
-  activeCall?: CallCenterCall;
   activeCount: number;
-  browserWebphone: ViptelBrowserWebphone;
-  defaultExtension: string;
   metrics: DispatchMetrics;
   missedCount: number;
   primaryQueueWait: number;
-  restHealth: TelephonyHealthSignal;
-  selectedWebphoneExtension: string;
-  workplacePhoneMutationPending: boolean;
-  workplaceFence?: WorkplaceWebphoneSessionFence;
-  webphoneConfig: ViptelWebphoneConfig | null;
-  onTelephonyChanged: () => void;
 }) {
-  const [pickedMode, setPickedMode] = useState<CallDialMode | null>(null);
   const [toNumber, setToNumber] = useState("");
-  const [isCalling, setIsCalling] = useState(false);
-  const [callFeedback, setCallFeedback] = useState<{ tone: "error" | "success" | "waiting"; message: string } | null>(null);
-  const webphoneExtensions = webphoneConfig?.extensions ?? [];
-  const webphoneAvailable = isViptelWebphoneReadyForBrowser(webphoneConfig, selectedWebphoneExtension);
-  // Default na webphone, len čo je dostupný; voľba operátora má prednosť.
-  const dialMode: CallDialMode = pickedMode ?? (webphoneAvailable ? "webphone" : "extension_callback");
-  const setDialMode = setPickedMode;
-  const activeFromExtension = dialMode === "webphone" ? selectedWebphoneExtension : defaultExtension;
-  const browserReadyForCall = dialMode !== "webphone" || browserWebphone.isRegistered;
-  const canCall =
-    activeFromExtension.trim().length > 0 &&
-    toNumber.trim().length > 0 &&
-    !isCalling &&
-    browserReadyForCall &&
-    !workplacePhoneMutationPending &&
-    (dialMode !== "webphone" || !browserWebphone.hasActiveCall);
-  const phone = describePhoneState(browserWebphone.registrationStatus, browserWebphone.callStatus, browserWebphone.mode);
-  const activeCallsVerified = restHealth.state === "live";
-  const phonePreparing = Boolean(
-    defaultExtension &&
-    selectedWebphoneExtension &&
-    webphoneAvailable &&
-    browserWebphone.registrationStatus === "idle",
-  );
-  const workplaceStatus = !defaultExtension
-    ? { label: "bez pracovného miesta", tone: "neutral" as const }
-    : activeCall
-      ? { label: "zvoní / prebieha", tone: "warn" as const }
-      : browserWebphone.isRegistered
-        ? { label: "telefón pripojený", tone: "ok" as const }
-        : browserWebphone.registrationStatus === "failed"
-          ? { label: "chyba pripojenia", tone: "bad" as const }
-          : !webphoneAvailable
-            ? { label: "telefón nedostupný", tone: "bad" as const }
-          : { label: "pripravuje sa", tone: "neutral" as const };
-  const workplaceDetail = !defaultExtension
-    ? "V Pracovisku si vyber voľné pracovné miesto a poradie zvonenia."
-    : activeCall
-      ? `${formatPhoneNumberForDisplay(customerNumberForCall(activeCall))} · hovor na pracovnom mieste ${defaultExtension}`
-      : browserWebphone.isRegistered
-        ? `Odchádzajúce telefonovanie z pracovného miesta ${defaultExtension} je pripojené.`
-        : browserWebphone.registrationStatus === "failed"
-          ? "Telefonovanie sa nepodarilo pripraviť. Použi možnosť Skúsiť znova nižšie."
-          : !webphoneAvailable
-            ? "Telefonovanie v prehliadači nie je pre toto pracovné miesto dostupné."
-          : `Pripravujem telefonovanie na pracovnom mieste ${defaultExtension}…`;
-  const visibleCallFeedback = browserWebphone.callStatus === "ended" &&
-    !isCalling &&
-    callFeedback?.tone !== "error"
-    ? null
-    : callFeedback;
-
-  async function submitCall() {
-    if (workplacePhoneMutationPending) {
-      setCallFeedback({
-        tone: "error",
-        message: "Najprv dokonči zmenu pracovného miesta. Telefón počas presunu nezačne nový hovor.",
-      });
-      return;
-    }
-    if (!canCall) {
-      return;
-    }
-
-    setIsCalling(true);
-    setCallFeedback(null);
-
-    try {
-      if (dialMode === "webphone") {
-        if (browserWebphone.hasActiveCall) {
-          setCallFeedback({ tone: "error", message: "Najprv ukončite alebo odmietnite aktuálny hovor v prehliadači." });
-          return;
-        }
-        if (!browserWebphone.isRegistered) {
-          setCallFeedback({ tone: "error", message: "Telefonovanie sa ešte pripravuje. Počkaj na stav Pripravený volať." });
-          return;
-        }
-
-        if (browserWebphone.mode === "mock") {
-          browserWebphone.simulateOutgoing(toNumber);
-          setCallFeedback({ tone: "success", message: `Testovací hovor v prehliadači na ${toNumber}.` });
-          return;
-        }
-
-        if (webphoneConfig?.dialMode === "sip_invite") {
-          const intentResponse = await telephonyFetch("/api/telephony/call/create", {
-            label: "autorizácia hovoru",
-            timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              mode: "browser_sip",
-              fromExtension: activeFromExtension,
-              webphoneExtension: activeFromExtension,
-              toNumber,
-              ...workplaceFence,
-            }),
-          });
-          const intent = (await intentResponse.json().catch(() => null)) as EnqueuedCommandResponse | null;
-          if (!intentResponse.ok || !intent?.command?.id) {
-            throw new Error(intent?.error ?? "Hovor v prehliadači sa nepodarilo bezpečne zapísať.");
-          }
-          const attempt = await runAuditedBrowserSipInvite(
-            intent.command.id,
-            () => browserWebphone.startDirectCall(toNumber),
-          );
-          setCallFeedback({ tone: "waiting", message: "Hovor sa vytáča a čaká na potvrdenie VIPTel." });
-          await confirmAuditedBrowserSipCall(intent.command.id, attempt);
-          setCallFeedback({ tone: "success", message: `VIPTel potvrdil hovor z pracovného miesta ${activeFromExtension}.` });
-          onTelephonyChanged();
-          return;
-        }
-      }
-
-      const response = await telephonyFetch("/api/telephony/call/create", {
-        label: "vytvorenie hovoru",
-        timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: dialMode,
-          fromExtension: activeFromExtension,
-          webphoneExtension: dialMode === "webphone" ? activeFromExtension : undefined,
-          toNumber,
-          ...workplaceFence,
-        }),
-      });
-      const result = (await response.json().catch(() => null)) as EnqueuedCommandResponse | null;
-
-      if (!response.ok || !result?.command?.id) {
-        throw new Error(result?.error ?? "Telefónny príkaz VIPTel zlyhal.");
-      }
-
-      setCallFeedback({ tone: "waiting", message: "Hovor čaká na potvrdenie VIPTel." });
-      await confirmEnqueuedCommand(result);
-      setCallFeedback({ tone: "success", message: `VIPTel potvrdil hovor z pracovného miesta ${activeFromExtension}.` });
-      onTelephonyChanged();
-    } catch (error) {
-      setCallFeedback({
-        tone: "error",
-        message: error instanceof Error ? error.message : "Telefónny príkaz VIPTel zlyhal.",
-      });
-    } finally {
-      setIsCalling(false);
-    }
-  }
+  const configured = false;
 
   return (
-    <section className={`rounded-md border bg-white ${activeCall ? "border-amber-300 ring-1 ring-amber-100" : "border-zinc-200"}`}>
+    <section className="rounded-md border border-zinc-200 bg-white" aria-label="Odchádzajúci hovor">
       <div className="border-b border-zinc-200 p-3">
         <div className="flex min-w-0 items-start gap-2">
-          <div
-            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${
-              !defaultExtension
-                ? "bg-zinc-100 text-zinc-600"
-                : activeCall
-                  ? "bg-amber-100 text-amber-800"
-                  : browserWebphone.isRegistered
-                    ? "bg-emerald-100 text-emerald-800"
-                    : browserWebphone.registrationStatus === "failed"
-                      ? "bg-red-100 text-red-800"
-                      : "bg-zinc-100 text-zinc-600"
-            }`}
-          >
-            <RadioTower size={18} />
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-zinc-100 text-zinc-600">
+            <PhoneOff size={18} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-sm font-semibold text-zinc-950">Moje pracovné miesto</span>
-              <StatusBadge
-                label={workplaceStatus.label}
-                tone={workplaceStatus.tone}
-              />
+              <span className="text-sm font-semibold text-zinc-950">Odchádzajúci hovor</span>
+              <StatusBadge label="nenakonfigurované" tone="neutral" />
             </div>
-            <div className="mt-1 text-xs font-medium leading-5 text-zinc-600">{workplaceDetail}</div>
+            <div className="mt-1 text-xs font-medium leading-5 text-zinc-600">{TELEPHONY_NOT_CONFIGURED_MESSAGE} Volať bude možné po zapojení telefónneho poskytovateľa.</div>
           </div>
         </div>
       </div>
 
       <div className="grid gap-3 p-3">
         <div className="grid min-w-0 gap-2">
-          <div className="grid grid-cols-2 gap-1 rounded-md bg-zinc-100 p-1">
-            <CallModeTab active={dialMode === "extension_callback"} icon={PhoneOutgoing} label="Cez linku" onClick={() => setDialMode("extension_callback")} />
-            <CallModeTab
-              active={dialMode === "webphone"}
-              disabled={!webphoneAvailable}
-              icon={Headphones}
-              label="V prehliadači"
-              onClick={() => setDialMode("webphone")}
-            />
-          </div>
-          {dialMode === "webphone" ? (
-            webphoneExtensions.length > 0 ? (
-              <div className="flex h-11 min-w-0 items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 text-sm font-semibold text-zinc-700">
-                <Headphones size={15} className="shrink-0 text-zinc-400" />
-                <span className="shrink-0 text-xs font-medium text-zinc-500">Interná linka</span>
-                <span className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-800">
-                  {selectedWebphoneExtension || "nepriradená"}
-                </span>
-              </div>
-            ) : (
-              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">
-                {defaultExtension
-                  ? "Telefonovanie v prehliadači čaká na prístupové údaje od VIPTel."
-                  : "Najprv si v Pracovisku vyber pracovné miesto."}
-              </div>
-            )
-          ) : (
-            <div className="flex h-11 min-w-0 items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 text-sm">
-              <PhoneOutgoing size={15} className="shrink-0 text-zinc-400" />
-              <span className="text-xs font-medium text-zinc-500">Interná linka</span>
-              <span className="truncate font-semibold text-zinc-800">{defaultExtension || "nepriradená"}</span>
-            </div>
-          )}
           <input
             type="tel"
             inputMode="tel"
@@ -900,82 +395,28 @@ function CallCommandPanel({
             onChange={(event) => setToNumber(event.target.value)}
             placeholder="+421 900 000 000"
             aria-label="Číslo"
-            className="h-11 min-w-0 rounded-md border border-zinc-200 bg-white px-3 text-sm outline-none ring-yellow-300 transition focus:ring-2"
+            disabled={!configured}
+            className="h-11 min-w-0 rounded-md border border-zinc-200 bg-white px-3 text-sm outline-none ring-yellow-300 transition focus:ring-2 disabled:bg-zinc-50 disabled:text-zinc-400"
           />
           <div>
             <button
               type="button"
-              onClick={() => void submitCall()}
-              disabled={!canCall}
+              disabled={!configured || toNumber.trim().length === 0}
+              title={configured ? undefined : TELEPHONY_NOT_CONFIGURED_MESSAGE}
               className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white hover:bg-zinc-800 disabled:bg-zinc-300 disabled:text-zinc-600"
             >
-              {isCalling ? <Loader2 size={15} className="animate-spin" /> : <PhoneOutgoing size={15} />}
-              {dialMode === "webphone" ? "Volať" : "Volať z linky"}
+              <PhoneOutgoing size={15} />
+              Volať
             </button>
           </div>
-          {visibleCallFeedback && (
-            <div
-              role={visibleCallFeedback.tone === "error" ? "alert" : "status"}
-              aria-live={visibleCallFeedback.tone === "error" ? "assertive" : "polite"}
-              className={`rounded-md border px-3 py-2 text-xs font-semibold leading-5 ${
-                visibleCallFeedback.tone === "error"
-                  ? "border-red-200 bg-red-50 text-red-900"
-                  : visibleCallFeedback.tone === "success"
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                    : "border-amber-200 bg-amber-50 text-amber-950"
-              }`}
-            >
-              {visibleCallFeedback.message}
-            </div>
-          )}
+          <div role="status" aria-live="polite" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-950">
+            {TELEPHONY_NOT_CONFIGURED_MESSAGE}
+          </div>
         </div>
 
-        {dialMode === "webphone" && (
-          <div className="grid gap-2 rounded-md bg-zinc-50 p-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <span className="inline-flex min-w-0 items-center gap-2 text-xs font-semibold text-zinc-700">
-                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${!webphoneAvailable ? "bg-red-500" : phone.dot} ${phone.pulse ? "animate-pulse motion-reduce:animate-none" : ""}`} aria-hidden="true" />
-                <span className="truncate" role="status" aria-live="polite" aria-atomic="true">
-                  {!webphoneAvailable
-                    ? "Telefón v prehliadači nie je dostupný"
-                    : phonePreparing
-                      ? "Pripravujem telefonovanie…"
-                      : phone.label}
-                </span>
-              </span>
-              {browserWebphone.registrationStatus === "failed" && (
-                <button
-                  type="button"
-                  onClick={() => void browserWebphone.connect()}
-                  disabled={!webphoneAvailable}
-                  aria-describedby={browserWebphone.notice ? "browser-phone-notice" : undefined}
-                  className="inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 rounded-md bg-zinc-950 px-3 text-xs font-semibold text-white outline-none hover:bg-zinc-800 focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 disabled:bg-zinc-300 disabled:text-zinc-600"
-                >
-                  <RefreshCw size={14} aria-hidden="true" />
-                  Skúsiť znova
-                </button>
-              )}
-            </div>
-            {browserWebphone.notice && (
-              <p
-                id="browser-phone-notice"
-                role={browserWebphone.registrationStatus === "failed" ? "alert" : "status"}
-                aria-live={browserWebphone.registrationStatus === "failed" ? "assertive" : "polite"}
-                className={`break-words rounded-md border px-2.5 py-2 text-xs font-medium leading-5 ${
-                  browserWebphone.registrationStatus === "failed"
-                    ? "border-red-200 bg-red-50 text-red-900"
-                    : "border-emerald-200 bg-emerald-50 text-emerald-900"
-                }`}
-              >
-                {browserWebphone.notice}
-              </p>
-            )}
-          </div>
-        )}
-
         <div className="grid grid-cols-2 gap-1.5">
-          <CommandMetric icon={PhoneIncoming} label="Prebieha" value={activeCallsVerified ? String(activeCount) : "—"} tone={activeCallsVerified ? (activeCount > 0 ? "warn" : "ok") : "bad"} />
-          <CommandMetric icon={Clock3} label="Čaká" value={activeCallsVerified ? String(primaryQueueWait) : "—"} tone={activeCallsVerified ? (primaryQueueWait > 0 ? "warn" : "ok") : "bad"} />
+          <CommandMetric icon={PhoneIncoming} label="Prebieha" value={configured ? String(activeCount) : "—"} tone={configured ? (activeCount > 0 ? "warn" : "ok") : "neutral"} />
+          <CommandMetric icon={Clock3} label="Čaká" value={configured ? String(primaryQueueWait) : "—"} tone={configured ? (primaryQueueWait > 0 ? "warn" : "ok") : "neutral"} />
           <CommandMetric icon={PhoneMissed} label="Spätné" value={String(missedCount)} tone={missedCount > 0 ? "warn" : "ok"} />
           <CommandMetric icon={CheckCircle2} label="Úspešnosť" value={`${metrics.answerRate}%`} tone="neutral" />
         </div>
@@ -985,63 +426,24 @@ function CallCommandPanel({
 }
 
 function OperatorAvailabilityPanel({
-  commandPending,
-  commandTarget,
   currentOperatorName,
-  generalHealth,
-  health,
-  myExtension,
   myPresence,
-  operatorPresences,
-  recoveryPending,
-  sessionNotice,
-  status,
-  statuses,
-  workplaceRecoveryRequired,
   onAction,
-  onRecoverWorkplace,
 }: {
-  commandPending: boolean;
-  commandTarget: TelephonyAvailabilityAction | null;
   currentOperatorName?: string;
-  generalHealth: TelephonyHealthSignal;
-  health: TelephonyHealthSignal;
-  myExtension: string;
   myPresence?: TelephonyOperatorPresence;
-  operatorPresences: TelephonyOperatorPresence[];
-  recoveryPending: boolean;
-  sessionNotice: string | null;
-  status: ViptelQueueStatus | null;
-  statuses: ViptelQueueStatus[];
-  workplaceRecoveryRequired: boolean;
   onAction: (action: TelephonyAvailabilityAction) => void;
-  onRecoverWorkplace: () => void;
 }) {
-  const members = status?.members ?? [];
-  const me = members.find((member) => member.extension === myExtension);
-  const inQueue = Boolean(me);
-  const paused = me?.paused ?? false;
-  const coverage = getQueueCoverage(statuses.length > 0 ? statuses : status, operatorPresences);
-  const verified = health.state === "live";
-  const generalDataVerified = generalHealth.state === "live";
-  const busy = myPresence?.inUse === true;
-  const state = myPresence?.state ?? (myExtension ? "stale" : "unassigned");
-  const needsAttention = workplaceRecoveryRequired || Boolean(sessionNotice) || !["available", "ringing", "on_call"].includes(state);
+  const state: TelephonyOperatorPresenceState = myPresence?.state ?? "unassigned";
+  // Presence cannot be changed without a provider; the buttons stay visible so
+  // the layout is stable, but they are disabled and explain why.
+  const controlsEnabled = false;
   const workingState = state === "ringing" || state === "on_call";
-  const stateSurface = workplaceRecoveryRequired
-    ? "border-amber-300 bg-amber-50 text-amber-800"
-    : state === "available"
+  const stateSurface = state === "available"
     ? "border-emerald-300 bg-emerald-50 text-emerald-800"
     : workingState || state === "paused" || state === "unassigned"
       ? "border-amber-300 bg-amber-50 text-amber-800"
       : "border-red-300 bg-red-50 text-red-800";
-  const guidanceSurface = workplaceRecoveryRequired || sessionNotice
-    ? "border-amber-200 bg-amber-50 text-amber-950"
-    : state === "available"
-    ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-    : workingState || state === "paused" || state === "unassigned"
-      ? "border-amber-200 bg-amber-50 text-amber-900"
-      : "border-red-200 bg-red-50 text-red-900";
 
   return (
     <section className="mb-4 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-white" aria-label="Môj stav operátora">
@@ -1063,92 +465,50 @@ function OperatorAvailabilityPanel({
           </div>
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold text-zinc-950">{currentOperatorName ?? "Prihlásený operátor"}</h1>
-            <div className="mt-1 text-sm font-medium text-zinc-700">
-              {myExtension ? `Interná linka ${myExtension}` : "Bez priradenej internej linky"}
-            </div>
+            <div className="mt-1 text-sm font-medium text-zinc-700">{myPresence?.detail ?? TELEPHONY_NOT_CONFIGURED_MESSAGE}</div>
           </div>
         </div>
 
         <div className="min-w-0">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Môj pracovný stav</span>
-            <div className="flex flex-wrap gap-1.5">
-              {generalDataVerified ? (
-                <>
-                  <StatusBadge label={`Voľní ${coverage.available}/${coverage.total}`} tone={coverage.needsOperator ? "bad" : coverage.available > 0 ? "ok" : "neutral"} />
-                  {coverage.waiting > 0 && <StatusBadge label={`${coverage.waiting} čaká`} tone="warn" />}
-                </>
-              ) : (
-                <StatusBadge label="Údaje sa obnovujú" tone="warn" />
-              )}
-            </div>
+            <StatusBadge label="Telefónia nenakonfigurovaná" tone="neutral" />
           </div>
           <div className="grid grid-cols-3 gap-1 rounded-md bg-zinc-100 p-1">
             <AvailabilityButton
-              active={commandPending
-                ? commandTarget === "available"
-                : verified && myPresence?.available === true}
-              disabled={commandPending || workplaceRecoveryRequired || !myExtension || !verified || busy}
+              active={false}
+              disabled={!controlsEnabled}
               icon={Check}
               label="Dostupný"
-              pending={commandPending && commandTarget === "available"}
+              pending={false}
               onClick={() => onAction("available")}
             />
             <AvailabilityButton
-              active={commandPending
-                ? commandTarget === "pause"
-                : verified && inQueue && paused}
-              disabled={commandPending || workplaceRecoveryRequired || !inQueue || !verified}
+              active={false}
+              disabled={!controlsEnabled}
               icon={Pause}
               label="Pauza"
-              pending={commandPending && commandTarget === "pause"}
+              pending={false}
               onClick={() => onAction("pause")}
             />
             <AvailabilityButton
-              active={commandPending
-                ? commandTarget === "offline"
-                : verified && !inQueue && Boolean(myExtension)}
-              disabled={commandPending || workplaceRecoveryRequired || !myExtension || !verified || busy}
+              active={false}
+              disabled={!controlsEnabled}
               icon={LogOut}
               label="Mimo radu"
-              pending={commandPending && commandTarget === "offline"}
+              pending={false}
               onClick={() => onAction("offline")}
             />
           </div>
-          {commandPending && (
-            <div className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-zinc-600">
-              <Loader2 size={12} className="animate-spin" />
-              {commandTarget === "available"
-                ? "Nastavujem Dostupný…"
-                : commandTarget === "pause"
-                  ? "Nastavujem Pauzu…"
-                  : commandTarget === "offline"
-                    ? "Vyraďujem z radu…"
-                    : "Čakám na potvrdenie VIPTel…"}
-            </div>
-          )}
         </div>
       </div>
 
-      {needsAttention && <div className={`flex flex-wrap items-center justify-between gap-3 border-t px-3 py-2.5 text-xs font-semibold sm:px-4 ${guidanceSurface}`}>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-amber-200 bg-amber-50 px-3 py-2.5 text-xs font-semibold text-amber-900 sm:px-4">
         <div className="flex min-w-0 flex-1 items-start gap-2">
-          {needsAttention ? <AlertTriangle size={15} className="mt-0.5 shrink-0" /> : <CheckCircle2 size={15} className="mt-0.5 shrink-0" />}
-          <span>{workplaceRecoveryRequired
-            ? "Predchádzajúce okno zostalo priradené k tomuto miestu. Obnov pracovisko a telefón sa bezpečne pripojí znova."
-            : sessionNotice ?? availabilityGuidance(state, myExtension, busy, verified, coverage.needsOperator)}</span>
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
+          <span>{TELEPHONY_NOT_CONFIGURED_MESSAGE} Dostupnosť a prichádzajúce hovory budú fungovať po zapojení telefónneho poskytovateľa.</span>
         </div>
-        {workplaceRecoveryRequired && (
-          <button
-            type="button"
-            onClick={onRecoverWorkplace}
-            disabled={recoveryPending}
-            className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-zinc-950 px-3 text-xs font-bold text-white outline-none hover:bg-zinc-800 focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 disabled:cursor-wait disabled:bg-zinc-400"
-          >
-            {recoveryPending && <Loader2 size={14} className="motion-safe:animate-spin" aria-hidden="true" />}
-            {recoveryPending ? "Obnovujem…" : "Obnoviť pracovisko"}
-          </button>
-        )}
-      </div>}
+      </div>
     </section>
   );
 }
@@ -1187,7 +547,7 @@ function CallbackInbox({
         {calls.length > 0 ? (
           visibleCalls.map((call) => (
             <CallbackRow
-              key={telephonyCallReactKey(call)}
+              key={call.id}
               busyAction={busyAction}
               call={call}
               onCallBack={() => onCallBack(call)}
@@ -1306,7 +666,7 @@ function HistoryPanel({
           <div className="divide-y divide-zinc-100 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain">
             {visibleCalls.map((call) => (
               <HistoryCallRow
-                key={telephonyCallReactKey(call)}
+                key={call.id}
                 busyAction={busyAction}
                 call={call}
                 cases={cases}
@@ -1392,38 +752,7 @@ function HistoryCallRow({
       ? `Volaná klapka ${employeeEndpoint}`
       : `Finálny cieľ ${employeeEndpoint}`;
   const DirectionIcon = call.direction === "outbound" ? PhoneOutgoing : call.direction === "internal" ? PhoneCall : PhoneIncoming;
-  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
-  const [recordingState, setRecordingState] = useState<"idle" | "loading" | "error">("idle");
-  const hasRecording = call.recordingStatus === "available" && Boolean(call.recordingId);
   const displayedStartedAt = historyDisplayStartedAt(call);
-
-  const toggleRecording = async () => {
-    if (recordingUrl) {
-      setRecordingUrl(null);
-      setRecordingState("idle");
-      return;
-    }
-
-    setRecordingState("loading");
-
-    try {
-      const response = await telephonyFetch(`/api/telephony/recordings/${call.recordingId}/url`, {
-        label: "odkaz na nahrávku",
-        timeoutMs: TELEPHONY_TIMEOUT_MS.read,
-      });
-      const result = (await response.json()) as { signedUrl?: string };
-
-      if (!response.ok || !result.signedUrl) {
-        setRecordingState("error");
-        return;
-      }
-
-      setRecordingUrl(result.signedUrl);
-      setRecordingState("idle");
-    } catch {
-      setRecordingState("error");
-    }
-  };
 
   return (
     <div className="min-w-0 hover:bg-zinc-50">
@@ -1488,18 +817,6 @@ function HistoryCallRow({
         <div className="min-w-0 @md:col-span-2 @4xl:col-span-1">
           <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 @4xl:hidden">Akcie</div>
           <div className="flex min-w-0 flex-wrap gap-1.5 @4xl:justify-end">
-            {hasRecording ? (
-              <button
-                type="button"
-                onClick={toggleRecording}
-                aria-expanded={Boolean(recordingUrl)}
-                title={recordingUrl ? "Skryť nahrávku" : "Prehrať nahrávku"}
-                className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
-              >
-                {recordingState === "loading" ? <Loader2 size={13} className="animate-spin" /> : <Headphones size={13} />}
-                Nahrávka
-              </button>
-            ) : null}
             <button
               type="button"
               onClick={() => onCallBack(call)}
@@ -1513,15 +830,6 @@ function HistoryCallRow({
           </div>
         </div>
       </div>
-      {recordingUrl ? (
-        <div className="border-t border-zinc-100 bg-zinc-50 px-3 py-3">
-          <div className="mb-2 text-xs font-semibold text-zinc-700">Nahrávka hovoru</div>
-          <audio controls autoPlay src={recordingUrl} className="h-9 w-full" />
-        </div>
-      ) : null}
-      {recordingState === "error" ? (
-        <div className="border-t border-red-100 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">Nahrávku sa nepodarilo načítať. Skús to znova alebo skontroluj oprávnenia.</div>
-      ) : null}
     </div>
   );
 }
@@ -1867,34 +1175,6 @@ function PhonebookTab({
   );
 }
 
-function CallModeTab({
-  active,
-  disabled = false,
-  icon: Icon,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  disabled?: boolean;
-  icon: LucideIcon;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`inline-flex h-10 min-w-0 items-center justify-center gap-1.5 rounded-md text-xs font-semibold ${
-        active ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-600 hover:text-zinc-950 disabled:text-zinc-400"
-      }`}
-    >
-      <Icon size={14} />
-      <span className="truncate">{label}</span>
-    </button>
-  );
-}
-
 function CommandMetric({ icon: Icon, label, tone, value }: { icon: LucideIcon; label: string; tone: "ok" | "warn" | "neutral" | "bad"; value: string }) {
   return (
     <div className="min-w-0 rounded-md bg-zinc-50 px-2 py-1.5">
@@ -2135,28 +1415,6 @@ function isAbortError(error: unknown) {
 
 function messageFromError(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function availabilityGuidance(
-  state: TelephonyOperatorPresenceState,
-  extension: string,
-  busy: boolean,
-  verified: boolean,
-  queueNeedsOperator: boolean,
-) {
-  if (state === "unassigned") return "Vyber si pracovisko. Po pripojení telefónu ťa systém automaticky nastaví ako Dostupný pre prichádzajúce hovory.";
-  if (!verified) return "Tvoj stav sa teraz nedá bezpečne overiť. Po obnovení spojenia sa ovládanie znovu sprístupní.";
-  if (state === "available") return "Si dostupný a môžeš prijímať hovory z radu.";
-  if (state === "ringing") return `Interná linka ${extension} zvoní — prijmi hovor na telefóne alebo v prehliadači.`;
-  if (state === "on_call" || busy) return `Interná linka ${extension} práve vybavuje hovor. Po ukončení sa automaticky vráti do nastaveného pracovného stavu.`;
-  if (state === "paused") return "Si na pauze. Keď môžeš prijímať hovory, klikni na Dostupný.";
-  if (state === "unregistered") return `Interná linka ${extension} nie je pripojená. Pripoj telefón alebo telefonovanie v prehliadači a potom nastav Dostupný.`;
-  if (state === "offline") {
-    return queueNeedsOperator
-      ? "Si mimo radu a čaká v ňom hovor bez voľného operátora. Ak môžeš pracovať, klikni na Dostupný."
-      : "Si mimo radu a hovory z neho k tebe nepôjdu. Keď začneš pracovať, klikni na Dostupný.";
-  }
-  return "Stav operátora je zastaraný alebo chybný. Počkaj na obnovenie údajov a nemeň stav naslepo.";
 }
 
 export function historyDisplayStartedAt(

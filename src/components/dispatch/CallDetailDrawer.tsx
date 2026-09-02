@@ -120,7 +120,6 @@ export function CallDetailDrawer({
 function CallDetailContent({ call }: { call: CallCenterCall }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [detail, setDetail] = useState<TranscriptDetail | null>(null);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -128,27 +127,15 @@ function CallDetailContent({ call }: { call: CallCenterCall }) {
 
     (async () => {
       try {
-        const [transcriptResponse, urlResponse] = await Promise.all([
-          telephonyFetch(`/api/telephony/calls/${call.id}/transcript`, {
-            label: "prepis hovoru",
-            signal: controller.signal,
-            timeoutMs: TELEPHONY_TIMEOUT_MS.read,
-          }),
-          call.recordingId
-            ? telephonyFetch(`/api/telephony/recordings/${call.recordingId}/url`, {
-              label: "odkaz na nahrávku",
-              signal: controller.signal,
-              timeoutMs: TELEPHONY_TIMEOUT_MS.read,
-            })
-            : null,
-        ]);
+        // Recording playback returns with the next telephony provider; only
+        // the stored transcript is readable until then.
+        const transcriptResponse = await telephonyFetch(`/api/telephony/calls/${call.id}/transcript`, {
+          label: "prepis hovoru",
+          signal: controller.signal,
+          timeoutMs: TELEPHONY_TIMEOUT_MS.read,
+        });
 
         setDetail(transcriptResponse.ok ? ((await transcriptResponse.json()) as TranscriptDetail) : { found: false });
-
-        if (urlResponse?.ok) {
-          const result = (await urlResponse.json()) as { signedUrl?: string };
-          setAudioUrl(result.signedUrl ?? null);
-        }
       } catch {
         if (!controller.signal.aborted) {
           setDetail({ found: false });
@@ -186,8 +173,6 @@ function CallDetailContent({ call }: { call: CallCenterCall }) {
             {call.queueLabel && <span>Rad: {call.queueLabel}</span>}
           </div>
         </section>
-
-        {audioUrl ? <audio ref={audioRef} controls src={audioUrl} className="h-10 w-full" /> : null}
 
         {loading ? (
           <div className="flex items-center gap-2 text-sm text-zinc-500">

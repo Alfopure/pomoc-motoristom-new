@@ -4,7 +4,6 @@ import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import type { DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCase, FleetAsset, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
-import type { WorkplaceWebphoneSessionFence } from "@/lib/telephony/webphone-client";
 import { CaseDetail } from "./CaseDetail";
 
 type CaseDrawerProps = {
@@ -18,10 +17,9 @@ type CaseDrawerProps = {
   onClose: () => void;
   onDataChange?: (dispatchData: DispatchData) => void;
   viewerProfileId?: string;
-  workplaceFence?: WorkplaceWebphoneSessionFence;
 };
 
-export function CaseDrawer({ caseItem, branches, assets, focusedTaskId, onDataChange, partnerDirectory, priceRule, open, onClose, viewerProfileId, workplaceFence }: CaseDrawerProps) {
+export function CaseDrawer({ caseItem, branches, assets, focusedTaskId, onDataChange, partnerDirectory, priceRule, open, onClose, viewerProfileId }: CaseDrawerProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -73,7 +71,6 @@ export function CaseDrawer({ caseItem, branches, assets, focusedTaskId, onDataCh
             partnerDirectory={partnerDirectory}
             priceRule={priceRule}
             viewerProfileId={viewerProfileId}
-            workplaceFence={workplaceFence}
           />
         ) : null}
       </div>
