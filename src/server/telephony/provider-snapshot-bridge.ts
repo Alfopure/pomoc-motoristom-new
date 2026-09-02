@@ -550,7 +550,31 @@ function normalizeWireQueueStatuses(value: unknown): ViptelQueueStatus[] {
     if (new Set(members.map((member) => member.extension)).size !== members.length) {
       throw new Error("VIPTel snapshot queue contains duplicate members.");
     }
-    return { queue, waitingCalls, members };
+    // Optional per-caller identities from queue/status waiting_calls[]. An
+    // older listener does not send them; a malformed entry is dropped rather
+    // than failing the snapshot, because the count above remains the bound.
+    const waitingCallEntries = Array.isArray(record.waitingCallEntries)
+      ? record.waitingCallEntries.slice(0, 200).flatMap((entry) => {
+          const candidate = jsonRecord(entry);
+          const uniqueId = typeof candidate.uniqueId === "string" && candidate.uniqueId.trim()
+            ? candidate.uniqueId.trim()
+            : undefined;
+          if (!uniqueId) return [];
+          const waitSeconds = readInteger(candidate.waitSeconds);
+          return [{
+            uniqueId,
+            ...(typeof candidate.caller === "string" && candidate.caller.trim() ? { caller: candidate.caller.trim() } : {}),
+            ...(typeof candidate.callerName === "string" && candidate.callerName.trim() ? { callerName: candidate.callerName.trim() } : {}),
+            ...(waitSeconds === undefined || waitSeconds < 0 ? {} : { waitSeconds }),
+          }];
+        })
+      : undefined;
+    return {
+      queue,
+      waitingCalls,
+      members,
+      ...(waitingCallEntries ? { waitingCallEntries } : {}),
+    };
   });
   assertExactQueues(statuses.map((status) => status.queue));
   return statuses;

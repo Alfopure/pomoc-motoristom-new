@@ -53,7 +53,36 @@ describe("VIPTel strict live-read payloads", () => {
 
   it("accepts the observed empty queue shape with waiting_calls as an array", async () => {
     stubJson({ queue: "601", members: [], waiting_calls: [] });
-    await expect(client.getQueueStatus("601")).resolves.toEqual({ queue: "601", members: [], waitingCalls: 0 });
+    // An empty entries array is meaningful: the provider reported the waiting
+    // list and it is empty, unlike an older payload with only a count.
+    await expect(client.getQueueStatus("601")).resolves.toEqual({
+      queue: "601",
+      members: [],
+      waitingCalls: 0,
+      waitingCallEntries: [],
+    });
+  });
+
+  it("keeps the per-caller waiting identities the waiting room is built from", async () => {
+    stubJson({
+      queue: "601",
+      members: [],
+      waiting_calls: [
+        { unique_id: "1788338494.1379", caller: "00421904626370", caller_name: "00421904626370", wait_time: 41 },
+        { caller: "no-id-entry" },
+      ],
+    });
+    await expect(client.getQueueStatus("601")).resolves.toEqual({
+      queue: "601",
+      members: [],
+      waitingCalls: 2,
+      waitingCallEntries: [{
+        uniqueId: "1788338494.1379",
+        caller: "00421904626370",
+        callerName: "00421904626370",
+        waitSeconds: 41,
+      }],
+    });
   });
 
   it("accepts the observed non-empty member booleans and call counter", async () => {
@@ -72,6 +101,7 @@ describe("VIPTel strict live-read payloads", () => {
     await expect(client.getQueueStatus("601")).resolves.toEqual({
       queue: "601",
       waitingCalls: 0,
+      waitingCallEntries: [],
       members: [{ extension: "20", callsTaken: 3, dynamic: true, paused: false, inUse: true }],
     });
   });

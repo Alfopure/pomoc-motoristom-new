@@ -433,13 +433,20 @@ export function nextCallStatus(
 }
 
 export function terminalSnapshotIsForSupersededLeg(
-  existing: Pick<CallMatch, "viptel_unique_id"> | null,
+  existing: Pick<CallMatch, "from_queue_unique_id" | "viptel_unique_id"> | null,
   snapshot: Pick<ViptelCallSnapshot, "authoritativeTerminal" | "uniqueId">,
 ) {
-  return Boolean(
-    snapshot.authoritativeTerminal && existing?.viptel_unique_id && snapshot.uniqueId &&
-    existing.viptel_unique_id !== snapshot.uniqueId
-  );
+  if (!snapshot.authoritativeTerminal || !existing?.viptel_unique_id || !snapshot.uniqueId) return false;
+  // The caller's own queue channel ending is the whole journey ending, no
+  // matter how many agent legs came and went in between. When a waiting call
+  // is picked up or transferred, the channel itself dials the workstation, so
+  // the row's identity stays on the last dead agent leg while the live
+  // conversation runs on the channel -- and its call.end then looked like a
+  // stale superseded-leg event. Every call answered that way stayed open
+  // forever, which is what later refused outbound calls with "Na osobnej
+  // klapke uz prebieha aktivny hovor".
+  if (existing.from_queue_unique_id && snapshot.uniqueId === existing.from_queue_unique_id) return false;
+  return existing.viptel_unique_id !== snapshot.uniqueId;
 }
 
 type CallMatch = Pick<

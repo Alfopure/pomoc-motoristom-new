@@ -42,6 +42,7 @@ export async function GET(request?: Request) {
     let providerCalls: ViptelActiveCall[] = [];
     let providerCapturedAt: string | undefined;
     let providerError: unknown;
+    const providerWaitingChannelIds = new Set<string>();
     try {
       const providerSnapshot = await requestViptelProviderSnapshot(
         actor.organizationId,
@@ -52,6 +53,11 @@ export async function GET(request?: Request) {
       );
       providerCapturedAt = providerSnapshot.capturedAt;
       providerCalls = currentViptelProviderCallLegs(providerSnapshot.activeCalls);
+      for (const status of providerSnapshot.queueStatuses ?? []) {
+        for (const entry of status.waitingCallEntries ?? []) {
+          providerWaitingChannelIds.add(entry.uniqueId);
+        }
+      }
     } catch (error) {
       // Explicit fresh reads are used for call control and stay fail-closed.
       // The ordinary UI poll may show listener-confirmed queue calls while
@@ -83,13 +89,26 @@ export async function GET(request?: Request) {
     // snapshot; otherwise their ingestion lag could keep a dead call visible.
     const providerCapturedAtMs = providerCapturedAt ? Date.parse(providerCapturedAt) : Number.NaN;
     const handoffCalls = provisionalQueueCalls
-      .filter((stored) => isListenerWaitingCall(stored, checkedAt))
+      .filter((stored) =>
+        storedCallIsProviderWaiting(stored, providerWaitingChannelIds) ||
+        isListenerWaitingCall(stored, checkedAt))
       .filter((stored) => !mappedProviderCalls.some((live) => storedCallMatchesActiveCall(stored, live)))
-      // A listener event newer than the shared provider snapshot is valid
-      // supplemental evidence. This keeps ringing responsive while every open
-      // browser reuses one organization-wide capture instead of creating a
-      // VIPTel command every second.
-      .filter((stored) => !providerVerified || !Number.isFinite(providerCapturedAtMs) || Date.parse(stored.updated_at) > providerCapturedAtMs)
+      // Three ways a stored waiting row is corroborated. (1) The snapshot's
+      // queue statuses list the caller's channel as waiting right now -- the
+      // authoritative case, and the one that keeps a second caller steadily
+      // visible: while the only agent rings with the first caller, the second
+      // has no agent leg at all, so the active-call list cannot represent
+      // them and only the queue status knows they exist. (2) The snapshot
+      // failed or predates the listener's event, so listener evidence stands
+      // in. (3) No snapshot timestamp to compare against. Requiring the row
+      // to be newer than every snapshot made the second caller invisible
+      // except for a blink at each rotation step, at different moments in
+      // each browser.
+      .filter((stored) =>
+        storedCallIsProviderWaiting(stored, providerWaitingChannelIds) ||
+        !providerVerified ||
+        !Number.isFinite(providerCapturedAtMs) ||
+        Date.parse(stored.updated_at) > providerCapturedAtMs)
       .map((stored) => mapProvisionalQueueCall(stored, lineCatalog));
     const calls = collapseLogicalTelephonyCalls([...mappedProviderCalls, ...handoffCalls]);
 
@@ -150,6 +169,16 @@ async function loadProvisionalQueueCalls(
     .limit(25);
   if (result.error) throw new Error(`Queue handoff calls could not be loaded: ${result.error.message}`);
   return result.data ?? [];
+}
+
+/** True when the provider's queue statuses list this row's own channel as waiting. */
+export function storedCallIsProviderWaiting(
+  call: Pick<CallRow, "from_queue_unique_id" | "viptel_unique_id">,
+  waitingChannelIds: ReadonlySet<string>,
+) {
+  if (waitingChannelIds.size === 0) return false;
+  const channel = call.from_queue_unique_id?.trim() || call.viptel_unique_id?.trim();
+  return Boolean(channel && waitingChannelIds.has(channel));
 }
 
 export function isListenerWaitingCall(call: CallRow, checkedAt: string) {

@@ -7,6 +7,7 @@ import {
   mapActiveCall,
   mapProvisionalQueueCall,
   providerCallPresentationStatus,
+  storedCallIsProviderWaiting,
 } from "./route";
 
 const checkedAt = "2026-08-04T12:00:00.000Z";
@@ -281,6 +282,31 @@ describe("listener waiting-call fallback", () => {
     expect(isListenerWaitingCall({ ...baseRow, status: "missed" }, checkedAt)).toBe(false);
     expect(isListenerWaitingCall({ ...baseRow, ended_at: checkedAt }, checkedAt)).toBe(false);
     expect(isListenerWaitingCall({ ...baseRow, status: "abandoned_queue", ended_at: checkedAt }, checkedAt)).toBe(false);
+  });
+
+  it("recognises a stored row whose channel the provider lists as waiting", () => {
+    // The second simultaneous caller has no agent leg while the only agent
+    // rings with the first, so the active-call list cannot represent them --
+    // only the queue status knows they exist. Matching that waiting set by
+    // the caller's own channel id is what keeps them steadily visible instead
+    // of blinking once per rotation step, at different moments per browser.
+    const waiting = new Set(["queue-channel-b"]);
+    expect(storedCallIsProviderWaiting(
+      { from_queue_unique_id: "queue-channel-b", viptel_unique_id: "agent-leg-old" },
+      waiting,
+    )).toBe(true);
+    expect(storedCallIsProviderWaiting(
+      { from_queue_unique_id: null, viptel_unique_id: "queue-channel-b" },
+      waiting,
+    )).toBe(true);
+    expect(storedCallIsProviderWaiting(
+      { from_queue_unique_id: "queue-channel-a", viptel_unique_id: "agent-leg-a" },
+      waiting,
+    )).toBe(false);
+    expect(storedCallIsProviderWaiting(
+      { from_queue_unique_id: "queue-channel-b", viptel_unique_id: null },
+      new Set(),
+    )).toBe(false);
   });
 
   it("keeps a caller visible between rotation steps instead of blinking", () => {
