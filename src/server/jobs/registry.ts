@@ -6,11 +6,8 @@ import { syncSwhouseOccupancy } from "@/server/integrations/swhouse/occupancy-sy
 import { syncSwhouseFleet } from "@/server/integrations/swhouse/sync";
 import { resolveDefaultOrganizationId } from "@/server/default-organization";
 import { materializeDueTaskReminders } from "@/server/task-notifications";
-import { syncRecordings } from "@/server/telephony/recordings-sync";
 import { processTranscripts } from "@/server/telephony/transcripts-process";
 import { syncWebdispecinkFleet } from "@/server/webdispecink-sync";
-import { reconcileViptelCalls } from "@/server/telephony/viptel-reconcile";
-import { sweepStuckWorkplaceState } from "@/server/telephony/workplace-sweeper";
 import type { JobContext, JobDefinition, JobExecutionResult, JobName } from "./types";
 
 const MINUTE = 60_000;
@@ -184,34 +181,6 @@ const DEFINITIONS: { [K in JobName]: JobDefinition<K> } = {
       return success(result);
     },
   },
-  "telephony.recordings.sync": {
-    name: "telephony.recordings.sync",
-    schedule: { everyMs: 10 * MINUTE, offsetMs: 0 },
-    timeoutMs: 180_000,
-    leaseSeconds: 300,
-    maxAttempts: 3,
-    failureThreshold: 2,
-    freshnessMs: 20 * MINUTE,
-    run: async (context, payload) => {
-      assertNotAborted(context);
-      const result = await syncRecordings({
-        dateFrom: payload.dateFrom,
-        maxDownloads: payload.maxDownloads,
-      });
-      if (result.status !== "ok") {
-        throw new Error("Recordings sync failed.");
-      }
-      assertNotAborted(context);
-      return success({
-        status: result.status,
-        cdrWithRecording: result.cdrWithRecording,
-        discovered: result.discovered,
-        processed: result.processed,
-        failed: result.failed,
-        pendingLeft: result.pendingLeft,
-      });
-    },
-  },
   "telephony.transcripts.process": {
     name: "telephony.transcripts.process",
     schedule: { everyMs: 10 * MINUTE, offsetMs: 2 * MINUTE },
@@ -238,49 +207,6 @@ const DEFINITIONS: { [K in JobName]: JobDefinition<K> } = {
         skipped: result.skipped,
         aiProcessed: result.aiProcessed,
         aiFailed: result.aiFailed,
-      });
-    },
-  },
-  "telephony.viptel.reconcile": {
-    name: "telephony.viptel.reconcile",
-    schedule: { everyMs: 2 * MINUTE, offsetMs: 30_000 },
-    timeoutMs: 90_000,
-    leaseSeconds: 150,
-    maxAttempts: 2,
-    failureThreshold: 2,
-    freshnessMs: 5 * MINUTE,
-    run: async (context) => {
-      assertNotAborted(context);
-      const result = await reconcileViptelCalls();
-      assertNotAborted(context);
-      return success(result);
-    },
-  },
-  "telephony.workplace.sweep": {
-    name: "telephony.workplace.sweep",
-    schedule: { everyMs: MINUTE, offsetMs: 45_000 },
-    timeoutMs: 45_000,
-    leaseSeconds: 90,
-    maxAttempts: 2,
-    failureThreshold: 2,
-    freshnessMs: 5 * MINUTE,
-    run: async (context) => {
-      assertNotAborted(context);
-      const organizationId = await resolveDefaultOrganizationId();
-      // This is the only recovery path that runs with no browser open, which is
-      // exactly when stuck workplace state goes unnoticed.
-      const summary = await sweepStuckWorkplaceState({
-        organizationId,
-        recoveryOwner: `job:${context.runId}`,
-      });
-      assertNotAborted(context);
-      return success({
-        scanned: summary.scanned,
-        recoveredOperations: summary.recoveredOperations,
-        releasedClaims: summary.releasedClaims,
-        reapedLeases: summary.reapedLeases,
-        markedManualRecovery: summary.markedManualRecovery,
-        skipped: JSON.stringify(summary.skipped),
       });
     },
   },

@@ -8,10 +8,7 @@ export const JOB_NAMES = [
   "fleet.swhouse.occupancy",
   "fleet.swhouse.roster",
   "notifications.materialize",
-  "telephony.recordings.sync",
   "telephony.transcripts.process",
-  "telephony.viptel.reconcile",
-  "telephony.workplace.sweep",
   "infra.hetzner.audit",
 ] as const;
 
@@ -25,10 +22,7 @@ export type JobPayloadMap = {
   "fleet.swhouse.occupancy": Record<string, never>;
   "fleet.swhouse.roster": Record<string, never>;
   "notifications.materialize": { limit?: number };
-  "telephony.recordings.sync": { dateFrom?: string; maxDownloads?: number };
   "telephony.transcripts.process": { maxItems?: number };
-  "telephony.viptel.reconcile": Record<string, never>;
-  "telephony.workplace.sweep": Record<string, never>;
   "infra.hetzner.audit": Record<string, never>;
 };
 

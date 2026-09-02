@@ -40,7 +40,7 @@ function commonArguments(job: string) {
 
 describe("one-shot job contract", () => {
   it("uses a closed allowlist without either SWHouse job", () => {
-    expect(ONE_SHOT_JOB_NAMES).toHaveLength(9);
+    expect(ONE_SHOT_JOB_NAMES).toHaveLength(7);
     expect(ONE_SHOT_JOB_NAMES).not.toContain("fleet.swhouse.occupancy");
     expect(ONE_SHOT_JOB_NAMES).not.toContain("fleet.swhouse.roster");
     expect(() => parseOneShotRequest(commonArguments("fleet.swhouse.roster"), productionEnv())).toThrow();
@@ -49,11 +49,11 @@ describe("one-shot job contract", () => {
   it("returns fixed, minimal payloads rather than accepting caller payloads", () => {
     expect(parseOneShotRequest(commonArguments("notifications.materialize").concat("--acknowledge-external-delivery"), productionEnv()))
       .toMatchObject({ job: "notifications.materialize", payload: { limit: 1 } });
-    expect(parseOneShotRequest(commonArguments("telephony.recordings.sync"), productionEnv()))
-      .toMatchObject({ job: "telephony.recordings.sync", payload: { maxDownloads: 1 } });
+    expect(parseOneShotRequest(commonArguments("fleet.commander.catalog"), productionEnv()))
+      .toMatchObject({ job: "fleet.commander.catalog", payload: {} });
     expect(parseOneShotRequest(commonArguments("telephony.transcripts.process").concat("--acknowledge-paid-ai"), productionEnv()))
       .toMatchObject({ job: "telephony.transcripts.process", payload: { maxItems: 1 } });
-    expect(() => parseOneShotRequest(commonArguments("telephony.recordings.sync").concat("--payload", "{}"), productionEnv()))
+    expect(() => parseOneShotRequest(commonArguments("fleet.commander.catalog").concat("--payload", "{}"), productionEnv()))
       .toThrow();
   });
 

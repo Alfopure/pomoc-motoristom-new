@@ -101,20 +101,16 @@ export class RunLedger {
     deploymentVersion: string;
     schedulerStatus: string;
     schedulerTickAt: string | null;
-    viptelWsStatus: string;
-    lastViptelEventAt?: string | null;
   }) {
     const now = new Date().toISOString();
     const heartbeat = {
-        instance_id: input.workerId,
-        deployment_version: input.deploymentVersion,
-        heartbeat_at: now,
-        scheduler_tick_at: input.schedulerTickAt,
-        scheduler_status: input.schedulerStatus,
-        viptel_ws_status: input.viptelWsStatus,
-        updated_at: now,
-        ...(input.lastViptelEventAt !== undefined ? { last_viptel_event_at: input.lastViptelEventAt } : {}),
-      };
+      instance_id: input.workerId,
+      deployment_version: input.deploymentVersion,
+      heartbeat_at: now,
+      scheduler_tick_at: input.schedulerTickAt,
+      scheduler_status: input.schedulerStatus,
+      updated_at: now,
+    };
     const result = await this.client.from("motorist_worker_status").upsert(
       heartbeat,
       { onConflict: "instance_id" },

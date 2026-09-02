@@ -9,9 +9,7 @@ export const ONE_SHOT_JOB_NAMES = [
   "fleet.commander.positions",
   "fleet.commander.catalog",
   "notifications.materialize",
-  "telephony.recordings.sync",
   "telephony.transcripts.process",
-  "telephony.viptel.reconcile",
   "infra.hetzner.audit",
 ] as const satisfies readonly JobName[];
 
@@ -25,9 +23,7 @@ const FIXED_PAYLOADS: OneShotPayloads = {
   "fleet.commander.positions": {},
   "fleet.commander.catalog": {},
   "notifications.materialize": { limit: 1 },
-  "telephony.recordings.sync": { maxDownloads: 1 },
   "telephony.transcripts.process": { maxItems: 1 },
-  "telephony.viptel.reconcile": {},
   "infra.hetzner.audit": {},
 };
 
@@ -37,9 +33,7 @@ const NUMERIC_SUMMARY_FIELDS: Record<OneShotJobName, readonly string[]> = {
   "fleet.commander.positions": ["fetchedCount", "updatedCount", "skippedCount", "errorCount"],
   "fleet.commander.catalog": ["fetchedCount", "createdCount", "updatedCount", "errorCount"],
   "notifications.materialize": ["processed", "sent", "cancelled", "failed"],
-  "telephony.recordings.sync": ["cdrWithRecording", "discovered", "processed", "failed", "pendingLeft"],
   "telephony.transcripts.process": ["candidates", "processed", "failed", "skipped", "aiProcessed", "aiFailed"],
-  "telephony.viptel.reconcile": ["activeFetched", "activeUpserts", "cdrFetched", "cdrUpserts", "terminalRepairs"],
   "infra.hetzner.audit": ["servers", "primaryIps", "volumes", "floatingIps", "loadBalancers", "backups"],
 };
 
@@ -48,7 +42,6 @@ const STATUS_SUMMARY_FIELDS: Partial<Record<OneShotJobName, Readonly<Record<stri
   "fleet.webdispecink.catalog": { mode: ["catalog"] },
   "fleet.commander.positions": { status: ["success"] },
   "fleet.commander.catalog": { status: ["success"] },
-  "telephony.recordings.sync": { status: ["ok"] },
   "telephony.transcripts.process": { status: ["ok"] },
 };
 

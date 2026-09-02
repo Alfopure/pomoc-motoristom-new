@@ -78,8 +78,7 @@ The project is a modular monolith: UI, API handlers, and most business services 
 | `src/lib/integrations/viptel/` | VIPTel REST/provider adapter and provider data parsing. |
 | `src/lib/integrations/webdispecink/` | WebDispecink provider adapter. |
 | `src/server/integrations/` | Server-side Commander, SWHouse, and other provider services. |
-| `src/worker/viptel-listener.ts` | Always-on VIPTel WebSocket listener and command consumer. |
-| `src/worker/` | Scheduler, one-shot jobs, alerts, runtime ledger, and listener entry points. |
+| `src/worker/` | Scheduler, one-shot jobs, alerts, and runtime ledger. |
 | `supabase/migrations/` | Ordered database schema and RLS changes. Never edit an already-applied migration. |
 | `scripts/` | Local probes, smoke tests, sync/discovery helpers, and demo seed scripts. |
 | `tests/`, `e2e/`, colocated `*.test.ts` | Infrastructure, integration-contract, UI, and Playwright tests. |
@@ -219,7 +218,6 @@ See:
 - `src/server/telephony/telephony-commands.ts`
 - `src/server/telephony/viptel-command-outbox.ts`
 - `src/server/telephony/call-commands.ts`
-- `src/worker/viptel-listener.ts`
 
 ### Browser SIP and control API are different connections
 
