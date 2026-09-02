@@ -12,7 +12,6 @@ import {
   notifications as mockNotifications,
   operators as mockOperators,
   priceRules as mockPriceRules,
-  telephonyStats as mockTelephonyStats,
 } from "../src/mock/seed";
 
 // These scenarios all boot the data-heavy dispatch dashboard against the same
@@ -904,7 +903,6 @@ function createMockDispatchData(overrides: Partial<DispatchData> = {}): Dispatch
     notifications: mockNotifications,
     metrics: mockMetrics,
     integrations: mockIntegrations,
-    telephonyStats: mockTelephonyStats,
     source: "supabase",
     ...overrides,
   };

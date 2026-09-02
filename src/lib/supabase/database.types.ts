@@ -41,7 +41,7 @@ export type Database = {
       motorist_organization_integrations: Table<{
         id: string;
         organization_id: string;
-        provider: "viptel" | "viptel_sms" | "google_maps" | "fleet" | "ai" | "commander" | "client_vehicle_db";
+        provider: "telnyx" | "telnyx_sms" | "google_maps" | "fleet" | "ai" | "commander" | "client_vehicle_db";
         enabled: boolean;
         config: Json;
         secret_ref: string | null;

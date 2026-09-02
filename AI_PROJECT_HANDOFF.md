@@ -75,7 +75,6 @@ The project is a modular monolith: UI, API handlers, and most business services 
 | `src/server/access-policy.ts` | Role and access-management rules. |
 | `src/server/telephony/` | Call history loading, transcript processing, and the bearer guard for the transcript job route. |
 | `src/lib/telephony/` | Browser telephony state, SIP.js lifecycle, call control, phone normalization, transfer helpers, and workplace client logic. |
-| `src/lib/integrations/viptel/` | VIPTel REST/provider adapter and provider data parsing. |
 | `src/lib/integrations/webdispecink/` | WebDispecink provider adapter. |
 | `src/server/integrations/` | Server-side Commander, SWHouse, and other provider services. |
 | `src/worker/` | Scheduler, one-shot jobs, alerts, and runtime ledger. |

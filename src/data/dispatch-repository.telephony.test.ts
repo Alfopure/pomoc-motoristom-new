@@ -95,7 +95,6 @@ function args(callOverrides: Record<string, unknown>): Parameters<typeof mapCall
   const call = {
     id: "call-1",
     provider_call_id: "provider-1",
-    viptel_unique_id: "unique-1",
     status: "ended",
     direction: "inbound",
     caller_number: "+421900111222",
@@ -129,14 +128,14 @@ function args(callOverrides: Record<string, unknown>): Parameters<typeof mapCall
   const linesById = new Map([
     ["line-allianz", {
       id: "line-allianz",
-      provider: "viptel",
+      provider: "telnyx",
       phone_number: "+421900000001",
       external_id: null,
       label: "Allianz Assistance",
     }],
     ["line-axa", {
       id: "line-axa",
-      provider: "viptel",
+      provider: "telnyx",
       phone_number: "+421900000002",
       external_id: null,
       label: "AXA Assistance CZ s.r.o.",

@@ -73,7 +73,6 @@ import {
   notifications as mockNotifications,
   operators as mockOperators,
   priceRules as mockPriceRules,
-  telephonyStats as mockTelephonyStats,
 } from "@/mock/seed";
 import {
   deriveReplacementOccupancy,
@@ -99,7 +98,6 @@ type AttendanceTimeOffBalanceRow = Row<"motorist_attendance_time_off_balances">;
 type AttendanceScheduleBatchRow = Row<"motorist_attendance_schedule_batches">;
 type LineRow = Row<"motorist_telephony_lines">;
 type QueueRow = Row<"motorist_telephony_queues">;
-type TelephonyExtensionRow = Row<"motorist_telephony_extensions">;
 type ContactRow = Row<"motorist_contacts">;
 type VehicleRow = Row<"motorist_vehicles">;
 type LocationRow = Row<"motorist_locations">;
@@ -159,7 +157,6 @@ export function getMockDispatchData(warning?: string): DispatchData {
     commanderGpsLastSuccessAt: mockIntegrations.find((integration) => integration.provider === "commander")?.lastSuccessAt,
     commanderGpsLatestRunAt: mockIntegrations.find((integration) => integration.provider === "commander")?.lastSuccessAt,
     commanderGpsLatestStatus: "success",
-    telephonyStats: mockTelephonyStats,
     source: "mock",
     warning,
   };
@@ -210,7 +207,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     attendanceScheduleBatchesResult,
     linesResult,
     queuesResult,
-    telephonyExtensionsResult,
     contactsResult,
     vehiclesResult,
     locationsResult,
@@ -231,11 +227,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     integrationsResult,
     commanderGpsSyncResult,
     commanderGpsLatestRunResult,
-    rawEventsResult,
-    commandsResult,
-    queueMembershipsResult,
-    queueSnapshotsResult,
-    transcriptsResult,
     recordingsResult,
   ] = await Promise.all([
     supabase.from("motorist_organization_profiles").select("*").eq("organization_id", organizationId).limit(1),
@@ -251,13 +242,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     supabase.from("motorist_attendance_schedule_batches").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false }).limit(50),
     supabase.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("active", true).order("label"),
     supabase.from("motorist_telephony_queues").select("*").eq("organization_id", organizationId).eq("active", true).order("label"),
-    supabase
-      .from("motorist_telephony_extensions")
-      .select("*")
-      .eq("organization_id", organizationId)
-      .eq("provider", "viptel")
-      .eq("active", true)
-      .order("extension"),
     supabase.from("motorist_contacts").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false }),
     supabase.from("motorist_vehicles").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false }),
     supabase.from("motorist_locations").select("*").eq("organization_id", organizationId),
@@ -312,11 +296,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
       .order("started_at", { ascending: false })
       .limit(1)
       .maybeSingle(),
-    supabase.from("motorist_integration_raw_events").select("id", { count: "exact", head: true }).eq("organization_id", organizationId),
-    supabase.from("motorist_telephony_commands").select("id", { count: "exact", head: true }).eq("organization_id", organizationId),
-    supabase.from("motorist_queue_memberships").select("id", { count: "exact", head: true }).eq("organization_id", organizationId),
-    supabase.from("motorist_queue_snapshots").select("id", { count: "exact", head: true }).eq("organization_id", organizationId),
-    supabase.from("motorist_call_transcripts").select("id", { count: "exact", head: true }).eq("organization_id", organizationId),
     supabase
       .from("motorist_call_recordings")
       .select("id, call_id, created_at")
@@ -350,7 +329,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     { label: "motorist_attendance_schedule_batches", result: attendanceScheduleBatchesResult },
     { label: "motorist_telephony_lines", result: linesResult },
     { label: "motorist_telephony_queues", result: queuesResult },
-    { label: "motorist_telephony_extensions", result: telephonyExtensionsResult },
     { label: "motorist_location_submissions", result: locationSubmissionsResult },
     { label: "motorist_partner_directory", result: partnerDirectoryResult },
     { label: "motorist_fleet_provider_vehicles", result: fleetProviderVehiclesResult },
@@ -364,11 +342,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     { label: "motorist_organization_integrations", result: integrationsResult },
     { label: "motorist_fleet_sync_runs.commander_gps", result: commanderGpsSyncResult },
     { label: "motorist_fleet_sync_runs.commander_gps_latest", result: commanderGpsLatestRunResult },
-    { label: "motorist_integration_raw_events.count", result: rawEventsResult },
-    { label: "motorist_telephony_commands.count", result: commandsResult },
-    { label: "motorist_queue_memberships.count", result: queueMembershipsResult },
-    { label: "motorist_queue_snapshots.count", result: queueSnapshotsResult },
-    { label: "motorist_call_transcripts.count", result: transcriptsResult },
     { label: "motorist_call_recordings", result: recordingsResult },
   ].forEach(({ label, result }) => warnOnOptionalSupabaseError(result, label));
 
@@ -399,23 +372,22 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
 
   const latestStatusByProfile = latestOperatorStatuses(statusesResult.data ?? []);
   const profiles = profilesResult.data ?? [];
-  const extensionByProfileId = primaryExtensionByProfile(telephonyExtensionsResult.data ?? []);
-  const operators = profiles.map((profile) => mapOperator(profile, latestStatusByProfile.get(profile.id), extensionByProfileId.get(profile.id)));
+  const operators = profiles.map((profile) => mapOperator(profile, latestStatusByProfile.get(profile.id)));
   const accessProfiles = accessProfilesResult.data ?? [];
   const authUsersById = await loadAuthUsersById(
     supabase,
     accessProfiles.map((profile) => profile.user_id).filter((userId): userId is string => Boolean(userId)),
   );
-  const users = accessProfiles.map((profile) => mapAccessUser(profile, authUsersById.get(profile.user_id ?? ""), extensionByProfileId.get(profile.id)));
+  const users = accessProfiles.map((profile) => mapAccessUser(profile, authUsersById.get(profile.user_id ?? "")));
   const profilesById = new Map(profiles.map((profile) => [profile.id, profile]));
   const attendanceTemplates = (attendanceTemplatesResult.data ?? []).map(mapAttendanceTemplate);
   const attendanceSessions = (attendanceSessionsResult.data ?? []).map((session) => mapAttendanceSession(session, profilesById));
   const sessionsByShiftId = latestAttendanceSessionsByShift(attendanceSessions);
   const attendanceShifts = (attendanceShiftsResult.data ?? []).map((shift) =>
-    mapAttendanceShift(shift, profilesById, attendanceTemplates, extensionByProfileId, sessionsByShiftId.get(shift.id)),
+    mapAttendanceShift(shift, profilesById, attendanceTemplates, sessionsByShiftId.get(shift.id)),
   );
   const attendanceEmployeeSettings = (attendanceEmployeeSettingsResult.error ? [] : (attendanceEmployeeSettingsResult.data ?? [])).map((setting) =>
-    mapAttendanceEmployeeSettings(setting, profilesById, extensionByProfileId),
+    mapAttendanceEmployeeSettings(setting, profilesById),
   );
   const attendanceRequests = (attendanceRequestsResult.error ? [] : (attendanceRequestsResult.data ?? [])).map((request) => mapAttendanceRequest(request, profilesById));
   const attendanceBalances = (attendanceBalancesResult.error ? [] : (attendanceBalancesResult.data ?? [])).map((balance) => mapAttendanceBalance(balance, profilesById));
@@ -507,13 +479,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     commanderGpsLatestRunAt:
       commanderGpsLatestRunResult.data?.finished_at ?? commanderGpsLatestRunResult.data?.started_at ?? undefined,
     commanderGpsLatestStatus: commanderGpsLatestRunResult.data?.status ?? undefined,
-    telephonyStats: {
-      rawEvents: rawEventsResult.count ?? 0,
-      commands: commandsResult.count ?? 0,
-      queueMemberships: queueMembershipsResult.count ?? 0,
-      queueSnapshots: queueSnapshotsResult.count ?? 0,
-      transcripts: transcriptsResult.count ?? 0,
-    },
     source: "supabase",
   };
 }
@@ -597,34 +562,25 @@ async function loadAuthUsersById(supabase: ReturnType<typeof createSupabaseAdmin
   return users;
 }
 
-function primaryExtensionByProfile(extensions: TelephonyExtensionRow[]) {
-  const result = new Map<string, string>();
+// Operator extensions belonged to the removed PBX provider; the next provider
+// models per-operator devices instead, so every profile reads as unassigned.
+const NO_OPERATOR_EXTENSION = "-";
 
-  for (const extension of extensions) {
-    if (extension.profile_id && !result.has(extension.profile_id)) {
-      result.set(extension.profile_id, extension.extension);
-    }
-  }
-
-  return result;
-}
-
-function mapOperator(profile: ProfileRow, status: OperatorStatusRow | undefined, extension: string | undefined): Operator {
+function mapOperator(profile: ProfileRow, status: OperatorStatusRow | undefined): Operator {
   return {
     id: profile.id,
     name: profile.display_name,
-    extension: extension ?? "-",
+    extension: NO_OPERATOR_EXTENSION,
     status: status?.status ?? "offline",
   };
 }
 
-function mapAccessUser(profile: ProfileRow, authUser: AuthUserSummary | undefined, extension: string | undefined): AccessUser {
+function mapAccessUser(profile: ProfileRow, authUser: AuthUserSummary | undefined): AccessUser {
   return {
     id: profile.id,
     name: profile.display_name,
     email: profile.email ?? authUser?.email,
     role: profile.role,
-    extension,
     active: profile.active,
     accessStatus: profile.access_status,
     userId: profile.user_id ?? undefined,
@@ -655,7 +611,6 @@ function mapAttendanceShift(
   row: AttendanceShiftRow,
   profilesById: Map<string, ProfileRow>,
   templates: AttendanceShiftTemplate[],
-  extensionByProfileId: Map<string, string>,
   latestSession?: AttendanceSession,
 ): AttendanceShift {
   const profile = profilesById.get(row.profile_id);
@@ -665,7 +620,7 @@ function mapAttendanceShift(
     id: row.id,
     profileId: row.profile_id,
     operatorName: profile?.display_name ?? "Neznámy operátor",
-    operatorExtension: extensionByProfileId.get(row.profile_id) ?? "-",
+    operatorExtension: NO_OPERATOR_EXTENSION,
     templateId: row.template_id ?? undefined,
     templateLabel: template?.label,
     status: row.status,
@@ -705,7 +660,6 @@ function mapAttendanceSession(row: AttendanceSessionRow, profilesById: Map<strin
 function mapAttendanceEmployeeSettings(
   row: AttendanceEmployeeSettingsRow,
   profilesById: Map<string, ProfileRow>,
-  extensionByProfileId: Map<string, string>,
 ): AttendanceEmployeeSettings {
   const profile = profilesById.get(row.profile_id);
 
@@ -713,7 +667,7 @@ function mapAttendanceEmployeeSettings(
     id: row.id,
     profileId: row.profile_id,
     operatorName: profile?.display_name ?? "Neznámy operátor",
-    operatorExtension: extensionByProfileId.get(row.profile_id) ?? "-",
+    operatorExtension: NO_OPERATOR_EXTENSION,
     defaultAvailable: row.default_available,
     active: profile?.active ?? true,
     vacationDaysPerYear: row.vacation_days_per_year,
@@ -849,8 +803,8 @@ export function mapCallCenterCall({
   return {
     id: call.id,
     providerCallId: call.provider_call_id ?? undefined,
-    viptelUniqueId: call.viptel_unique_id ?? undefined,
-    fromQueueUniqueId: call.from_queue_unique_id ?? undefined,
+    // Column keeps its legacy name until the schema step renames it to provider_session_id.
+    providerSessionId: call.viptel_unique_id ?? undefined,
     status,
     direction: call.direction,
     callerNumber: call.caller_number ?? "Neznáme číslo",
@@ -1847,12 +1801,8 @@ function getErrorMessage(error: unknown) {
 }
 
 function isIntegrationSecretConfigured(provider: IntegrationConnection["provider"]) {
-  if (provider === "viptel") {
-    return hasUsableEnv("VIPTEL_USERNAME") && hasUsableEnv("VIPTEL_PASSWORD");
-  }
-
-  if (provider === "viptel_sms") {
-    return hasUsableEnv("VIPTEL_SMS_USERNAME") && hasUsableEnv("VIPTEL_SMS_PASSWORD");
+  if (provider === "telnyx" || provider === "telnyx_sms") {
+    return hasUsableEnv("TELNYX_API_KEY");
   }
 
   if (provider === "google_maps") {

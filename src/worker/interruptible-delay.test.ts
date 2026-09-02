@@ -5,7 +5,7 @@ import { interruptibleDelay } from "./interruptible-delay";
 afterEach(() => vi.useRealTimers());
 
 describe("interruptibleDelay", () => {
-  it("ends a maximum VIPTel backoff immediately on shutdown", async () => {
+  it("ends a maximum provider backoff immediately on shutdown", async () => {
     vi.useFakeTimers();
     const controller = new AbortController();
     let completed = false;

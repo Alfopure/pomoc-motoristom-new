@@ -150,7 +150,7 @@ async function transcriptsEnabled(supabase: AdminClient, organizationId: string)
     .from("motorist_organization_integrations")
     .select("enabled_features")
     .eq("organization_id", organizationId)
-    .eq("provider", "viptel")
+    .eq("provider", "telnyx")
     .maybeSingle();
   throwOnError(integration.error);
 
@@ -506,7 +506,7 @@ async function loadQaRubric(supabase: AdminClient, organizationId: string) {
     .from("motorist_organization_integrations")
     .select("config")
     .eq("organization_id", organizationId)
-    .eq("provider", "viptel")
+    .eq("provider", "telnyx")
     .maybeSingle();
 
   if (integration.error) {
@@ -528,7 +528,7 @@ function parseSegments(value: Json): SpeakerSegment[] {
 async function writeSummaryEvent(supabase: AdminClient, organizationId: string, summary: TranscriptsProcessSummary) {
   const result = await supabase.from("motorist_integration_raw_events").insert({
     organization_id: organizationId,
-    provider: "viptel",
+    provider: "telnyx",
     channel: "internal",
     direction: "inbound",
     event_type: "transcripts.process_summary",
