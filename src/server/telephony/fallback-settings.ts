@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database, Json } from "@/lib/supabase/database.types";
-import { cleanPhoneInput, formatViptelDialTarget, TelephonyPhoneInputError } from "@/lib/telephony/phone";
+import { cleanPhoneInput, formatDialTarget, TelephonyPhoneInputError } from "@/lib/telephony/phone";
 import type { MotoristActor } from "@/server/api-auth";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { MutationError } from "@/server/motorist-mutations";
@@ -73,7 +73,7 @@ export async function updateViptelFallbackSettings(
       if (parsed.kind !== "phone") {
         throw new MutationError("Záložný cieľ musí byť celé externé telefónne číslo, nie interná klapka.", 400);
       }
-      destination = formatViptelDialTarget(destinationInput, "Záložné telefónne číslo");
+      destination = formatDialTarget(destinationInput, "Záložné telefónne číslo");
     } catch (error) {
       if (error instanceof MutationError) throw error;
       if (error instanceof TelephonyPhoneInputError) throw new MutationError(error.message, 400);

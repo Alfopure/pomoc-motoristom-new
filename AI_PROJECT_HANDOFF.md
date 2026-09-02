@@ -245,8 +245,6 @@ Use the correlation and provider-state modules:
 - `src/server/telephony/viptel-correlation.ts`
 - `src/server/telephony/provider-call-state.ts`
 - `src/server/telephony/viptel-events.ts`
-- `src/lib/telephony/browser-call-session.ts`
-- `src/lib/telephony/call-control.ts`
 
 Multi-call behavior must be keyed by exact call/leg identity. A single global `incomingCall` boolean or “current call” chosen from an unordered list will leak one operator’s call into another operator’s UI.
 
@@ -256,14 +254,11 @@ Workplaces use server-side ownership, leases, generations, compare-and-set guard
 
 Relevant modules:
 
-- `workplace-selection.ts`
 - `workplace-lease.ts`
 - `workplace-operation.ts`
 - `workplace-runtime-state.ts`
 - `workplace-owner-transition.ts`
 - `workplace-handoff.ts`
-- `workplace-takeover-service.ts`
-- client-side `src/lib/telephony/workplace-lease-client.ts`
 
 Closing a window is not reliable proof that SIP disconnected or that a lease was released. Recovery must use current database state plus fresh provider evidence. Do not “fix” a stuck workplace with an unconditional database update.
 

@@ -3,7 +3,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
 import {
-  formatViptelDialTarget,
+  formatDialTarget,
   sameDialNumber as phoneNumbersMatch,
   TelephonyPhoneInputError,
 } from "@/lib/telephony/phone";
@@ -501,7 +501,7 @@ export function cleanExtension(value: unknown, fieldName = "extension") {
 
 export function cleanDialTarget(value: unknown, fieldName = "number") {
   try {
-    return formatViptelDialTarget(value, fieldName);
+    return formatDialTarget(value, fieldName);
   } catch (error) {
     if (error instanceof TelephonyPhoneInputError) {
       throw new ViptelInputError(error.message);

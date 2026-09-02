@@ -1,6 +1,5 @@
 import "server-only";
 
-import { isWorkplaceTakeoverPayload } from "@/lib/telephony/workplace-takeover";
 
 import type {
   AccessComplication,
@@ -455,7 +454,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
   });
   const caseNumberById = new Map(dispatchCases.map((caseItem) => [caseItem.id, caseItem.caseNumber]));
   const notifications = (notificationsResult.data ?? [])
-    .filter((notification) => !isWorkplaceTakeoverPayload(notification.payload))
     .map(mapNotification)
     .sort(compareNotifications);
   const recordingIdByCallId = new Map<string, string>();
@@ -538,7 +536,6 @@ export async function loadDispatchNotifications(organizationId: string): Promise
   if (isOptionalTableSchemaMiss(result.error, "motorist_notifications")) return [];
   throwOnSupabaseError(result, "motorist_notifications");
   return (result.data ?? [])
-    .filter((notification) => !isWorkplaceTakeoverPayload(notification.payload))
     .map(mapNotification)
     .sort(compareNotifications);
 }
