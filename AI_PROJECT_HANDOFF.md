@@ -81,7 +81,6 @@ The project is a modular monolith: UI, API handlers, and most business services 
 | `src/worker/viptel-listener.ts` | Always-on VIPTel WebSocket listener and command consumer. |
 | `src/worker/` | Scheduler, one-shot jobs, alerts, runtime ledger, and listener entry points. |
 | `supabase/migrations/` | Ordered database schema and RLS changes. Never edit an already-applied migration. |
-| `deploy/` | Hetzner/container/release scripts, runtime config, and manual Supabase operational artifacts. |
 | `scripts/` | Local probes, smoke tests, sync/discovery helpers, and demo seed scripts. |
 | `tests/`, `e2e/`, colocated `*.test.ts` | Infrastructure, integration-contract, UI, and Playwright tests. |
 | `docs/` | Architecture, data model, integration strategy, and operational runbooks. Some plans may be historical. |
@@ -221,7 +220,6 @@ See:
 - `src/server/telephony/viptel-command-outbox.ts`
 - `src/server/telephony/call-commands.ts`
 - `src/worker/viptel-listener.ts`
-- [`docs/operations/viptel-phase-4-unified-commands.md`](./docs/operations/viptel-phase-4-unified-commands.md)
 
 ### Browser SIP and control API are different connections
 
@@ -334,13 +332,6 @@ Feature gates are intentionally fail-closed. Important names include:
 - `VIPTEL_SIP_WEBPHONE_ENABLED`
 
 The web and listener need matching independent tokens for guarded bridges, but the values must never enter source control.
-
-For the current workplace/routing contract, read:
-
-- [`docs/operations/viptel-runtime-boundaries.md`](./docs/operations/viptel-runtime-boundaries.md)
-- [`docs/operations/viptel-dispatch-routing-rollout.md`](./docs/operations/viptel-dispatch-routing-rollout.md)
-- [`docs/operations/viptel-workplace-bootstrap.md`](./docs/operations/viptel-workplace-bootstrap.md)
-- [`docs/viptel-data-contract.md`](./docs/viptel-data-contract.md)
 
 PBX behavior that cannot be created by application code includes purchased channel capacity, SIP accounts/passwords, public DID routing, queue overflow timers, queue loop strategy, and some transfer sequences. Obtain provider evidence rather than guessing.
 
@@ -472,7 +463,6 @@ pnpm typecheck
 pnpm lint
 pnpm test
 pnpm build
-pnpm build:viptel-listener
 pnpm test:e2e
 ```
 
@@ -537,12 +527,6 @@ For telephony/workplace changes:
 - [`docs/domain-model.md`](./docs/domain-model.md) — business entities and statuses.
 - [`docs/integration-strategy.md`](./docs/integration-strategy.md) — provider boundaries.
 - [`docs/deployment-vercel.md`](./docs/deployment-vercel.md) — Vercel environments and release behavior.
-- [`docs/viptel-data-contract.md`](./docs/viptel-data-contract.md) — normalized VIPTel contract.
-- [`docs/operations/viptel-runtime-boundaries.md`](./docs/operations/viptel-runtime-boundaries.md) — where REST, WS, CDR, and web code may run.
-- [`docs/operations/viptel-phase-3-activation.md`](./docs/operations/viptel-phase-3-activation.md) — durable history/listener activation context.
-- [`docs/operations/viptel-phase-4-unified-commands.md`](./docs/operations/viptel-phase-4-unified-commands.md) — command outbox and transfers.
-- [`docs/operations/viptel-dispatch-routing-rollout.md`](./docs/operations/viptel-dispatch-routing-rollout.md) — current PBX/workplace routing contract and external evidence.
-- [`docs/operations/viptel-workplace-bootstrap.md`](./docs/operations/viptel-workplace-bootstrap.md) — guarded workplace bootstrap/recovery.
 
 ## Suggested first prompt for a new AI assistant
 

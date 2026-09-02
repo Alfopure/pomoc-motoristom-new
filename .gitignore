@@ -23,13 +23,10 @@ __pycache__/
 # production
 /build
 /dist
-/deploy/env/*.env
-/deploy/releases
 
 # misc
 .DS_Store
 *.pem
-viptel-transfer-*.tmp.*
 .context/
 .omc/
 supabase/.temp/

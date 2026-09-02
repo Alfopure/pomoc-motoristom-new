@@ -39,7 +39,7 @@ Vercel priradí [dispecing.linkapomoci.sk](https://dispecing.linkapomoci.sk) až
 - Nespúšťaj migrácie, seed, živé SMS/hovory/emaily, workery, listenery, schedulery ani integračné joby ako súčasť frontend workflow.
 - Nepridávaj Vercel cron definície.
 - Google Maps credentials možno pridať iba na vetvu `dev`, ak ich referrer restrictions už povoľujú dev doménu. Obmedzenia kľúčov neoslabuj.
-- Tento workflow neoprávňuje ani nevykonáva Hetzner aktiváciu. Budúci cutover sa riadi výhradne `docs/operations/dispecing-hetzner-handoff.md`.
+- Tento workflow neoprávňuje ani nevykonáva Hetzner aktiváciu.
 
 ## Lokálne overenie produkčnej gate
 

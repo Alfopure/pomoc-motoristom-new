@@ -57,7 +57,6 @@ Online Supabase projekt už obsahoval cudzie tabuľky, preto foundation migráci
 - `docs/security-model.md` - role, RLS, audit, secrets a GDPR poznámky.
 - `docs/integration-strategy.md` - VIPTel, SMS, mapy, fleet a AI cez provider adaptéry.
 - `docs/client-configuration.md` - single-client first, multi-client-ready nastavenia.
-- `docs/viptel-data-contract.md` - mapovanie VIPTel udalostí, REST backfill a nahrávky.
 
 ## Foundation konfigurácia
 
