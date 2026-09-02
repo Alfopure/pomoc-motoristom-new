@@ -73,7 +73,7 @@ The project is a modular monolith: UI, API handlers, and most business services 
 | `src/server/motorist-mutations.ts` | Core server-side business mutations for cases and related entities. |
 | `src/server/api-auth.ts` | Maps Supabase sessions to an active organization profile and enforces roles. |
 | `src/server/access-policy.ts` | Role and access-management rules. |
-| `src/server/telephony/` | Telephony authorization, commands, correlation, provider snapshots, routing, workplace leases, takeover, and reconciliation. |
+| `src/server/telephony/` | Call history loading, transcript processing, and the bearer guard for the transcript job route. |
 | `src/lib/telephony/` | Browser telephony state, SIP.js lifecycle, call control, phone normalization, transfer helpers, and workplace client logic. |
 | `src/lib/integrations/viptel/` | VIPTel REST/provider adapter and provider data parsing. |
 | `src/lib/integrations/webdispecink/` | WebDispecink provider adapter. |
@@ -213,12 +213,6 @@ Provider-affecting actions follow a durable outbox pattern:
 6. A matching provider event/snapshot confirms or rejects the command.
 7. The UI polls/refreshes the command and provider projection. It must not announce success merely because a button was clicked.
 
-See:
-
-- `src/server/telephony/telephony-commands.ts`
-- `src/server/telephony/viptel-command-outbox.ts`
-- `src/server/telephony/call-commands.ts`
-
 ### Browser SIP and control API are different connections
 
 - `VIPTEL_SIP_WS_URL` is the SIP-over-WebSocket endpoint used by SIP.js for registration, signalling, and media setup.
@@ -240,25 +234,11 @@ Never match a live call using only:
 - a queue number;
 - a suffix/partial DID match.
 
-Use the correlation and provider-state modules:
-
-- `src/server/telephony/viptel-correlation.ts`
-- `src/server/telephony/provider-call-state.ts`
-- `src/server/telephony/viptel-events.ts`
-
 Multi-call behavior must be keyed by exact call/leg identity. A single global `incomingCall` boolean or “current call” chosen from an unordered list will leak one operator’s call into another operator’s UI.
 
 ### Workplace ownership and stale sessions
 
 Workplaces use server-side ownership, leases, generations, compare-and-set guards, operation records, and browser session fencing. This prevents two people or an old browser tab from controlling the same extension.
-
-Relevant modules:
-
-- `workplace-lease.ts`
-- `workplace-operation.ts`
-- `workplace-runtime-state.ts`
-- `workplace-owner-transition.ts`
-- `workplace-handoff.ts`
 
 Closing a window is not reliable proof that SIP disconnected or that a lease was released. Recovery must use current database state plus fresh provider evidence. Do not “fix” a stuck workplace with an unconditional database update.
 

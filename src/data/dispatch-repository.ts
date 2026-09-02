@@ -80,10 +80,6 @@ import {
   loadLatestOccupancySnapshot,
   type OccupancySnapshot,
 } from "@/server/integrations/swhouse/occupancy-snapshot";
-import {
-  buildViptelLineCatalog,
-  resolveViptelLineIdentity,
-} from "@/server/telephony/viptel-line-catalog";
 import type { CallCenterCall, CallOutcome, CommanderVehicleConnection, DispatchData, FleetProviderVehicle, IntegrationConnection } from "./dispatch-types";
 import { deriveEffectiveIntegrationStatus } from "./integration-status";
 
@@ -819,6 +815,8 @@ function mapIntegrationConnection(integration: OrganizationIntegrationRow): Inte
   };
 }
 
+const UNKNOWN_LINE_LABEL = "Neznáma linka";
+
 export function mapCallCenterCall({
   call,
   callEvents,
@@ -837,13 +835,9 @@ export function mapCallCenterCall({
   recordingIdByCallId?: Map<string, string>;
 }): CallCenterCall {
   const inbound = call.direction === "inbound";
+  // Provider-neutral line identity: the persisted line row is the only source
+  // until the session model of the next telephony provider lands.
   const line = inbound && call.line_id ? linesById.get(call.line_id) : undefined;
-  const lineIdentity = resolveViptelLineIdentity({
-    catalog: buildViptelLineCatalog([...linesById.values()].filter((candidate) => candidate.provider === "viptel")),
-    storedLineId: inbound ? call.line_id : undefined,
-    storedReceivedNumber: inbound ? call.received_number : undefined,
-    providerNumbers: inbound ? [call.called_number] : [],
-  });
   const queue = call.queue_id ? queuesById.get(call.queue_id) : undefined;
   const operator = call.operator_id ? profilesById.get(call.operator_id) : undefined;
   const caseNumber = call.case_id ? caseNumberById.get(call.case_id) : undefined;
@@ -862,15 +856,15 @@ export function mapCallCenterCall({
     callerNumber: call.caller_number ?? "Neznáme číslo",
     callerName: call.caller_name ?? undefined,
     calledNumber: call.called_number ?? line?.phone_number ?? "-",
-    receivedNumber: inbound ? lineIdentity.phoneNumber ?? call.received_number ?? undefined : undefined,
+    receivedNumber: inbound ? call.received_number ?? line?.phone_number ?? undefined : undefined,
     destinationNumber: call.destination_number ?? undefined,
     callerExtension: call.caller_extension ?? undefined,
     receivedExtension: call.received_extension ?? undefined,
     destinationExtension: call.destination_extension ?? undefined,
     extensionId: call.extension_id ?? undefined,
     operatorId: call.operator_id ?? undefined,
-    lineId: lineIdentity.lineId,
-    lineLabel: lineIdentity.lineLabel,
+    lineId: line?.id,
+    lineLabel: line?.label ?? UNKNOWN_LINE_LABEL,
     queueLabel: queue?.label ?? call.queue_number ?? undefined,
     operatorName: operator?.display_name ?? undefined,
     caseId: call.case_id ?? undefined,

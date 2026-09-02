@@ -3,71 +3,68 @@ import { describe, expect, it } from "vitest";
 import { mapCallCenterCall } from "./dispatch-repository";
 
 describe("historical call line identity", () => {
-  it("carries stored number fields and resolves an exact configured insurer DID", () => {
+  it("resolves the stored line row on an inbound call and keeps the persisted received number", () => {
     const result = mapCallCenterCall(args({
-      line_id: null,
-      called_number: "0412289243",
-      received_number: "+421 41 228 92 43",
+      line_id: "line-axa",
+      called_number: "+421900000002",
+      received_number: "+421 900 000 002",
       destination_number: "20",
     }));
 
     expect(result).toMatchObject({
-      receivedNumber: "+421 41 228 92 43",
+      receivedNumber: "+421 900 000 002",
       destinationNumber: "20",
       lineId: "line-axa",
       lineLabel: "AXA Assistance CZ s.r.o.",
     });
   });
 
-  it("fails closed instead of combining a stored line id with a conflicting received DID", () => {
+  it("falls back to the line phone number when no received number was persisted", () => {
     const result = mapCallCenterCall(args({
       line_id: "line-allianz",
-      called_number: "0412289243",
-      received_number: "0412289243",
+      called_number: null,
+      received_number: null,
     }));
 
     expect(result).toMatchObject({
-      receivedNumber: "0412289243",
-      lineId: undefined,
-      lineLabel: "Neznáma linka",
-    });
-  });
-
-  it("uses the exact called DID when a stored queue scalar is not a public line", () => {
-    const result = mapCallCenterCall(args({
-      line_id: null,
-      called_number: "0412289241",
-      received_number: "601",
-      destination_number: "20",
-    }));
-
-    expect(result).toMatchObject({
-      receivedNumber: "0412289241",
-      destinationNumber: "20",
+      receivedNumber: "+421900000001",
       lineId: "line-allianz",
       lineLabel: "Allianz Assistance",
     });
   });
 
-  it("never reuses a generic or stale label for an unknown DID", () => {
+  it("never invents a line label for an inbound call without a stored line", () => {
     const result = mapCallCenterCall(args({
       line_id: null,
       called_number: "601",
-      received_number: "0412289999",
+      received_number: "+421900009999",
     }));
 
     expect(result).toMatchObject({
-      receivedNumber: "0412289999",
+      receivedNumber: "+421900009999",
       lineId: undefined,
       lineLabel: "Neznáma linka",
     });
   });
 
-  it("ignores legacy insurer fields on an outbound call", () => {
+  it("fails closed when the stored line id is not in the organisation's lines", () => {
+    const result = mapCallCenterCall(args({
+      line_id: "line-missing",
+      received_number: "+421900000002",
+    }));
+
+    expect(result).toMatchObject({
+      receivedNumber: "+421900000002",
+      lineId: undefined,
+      lineLabel: "Neznáma linka",
+    });
+  });
+
+  it("ignores line fields on an outbound call", () => {
     const result = mapCallCenterCall(args({
       direction: "outbound",
       line_id: "line-allianz",
-      received_number: "0412289241",
+      received_number: "+421900000001",
       called_number: "0905123456",
       destination_number: "0905123456",
     }));
@@ -133,16 +130,16 @@ function args(callOverrides: Record<string, unknown>): Parameters<typeof mapCall
     ["line-allianz", {
       id: "line-allianz",
       provider: "viptel",
-      phone_number: "0412289241",
+      phone_number: "+421900000001",
       external_id: null,
-      label: "stale Allianz label",
+      label: "Allianz Assistance",
     }],
     ["line-axa", {
       id: "line-axa",
       provider: "viptel",
-      phone_number: "0412289243",
+      phone_number: "+421900000002",
       external_id: null,
-      label: "stale AXA label",
+      label: "AXA Assistance CZ s.r.o.",
     }],
   ]) as Parameters<typeof mapCallCenterCall>[0]["linesById"];
 
