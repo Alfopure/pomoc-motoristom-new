@@ -40,7 +40,7 @@ function commonArguments(job: string) {
 
 describe("one-shot job contract", () => {
   it("uses a closed allowlist without either SWHouse job", () => {
-    expect(ONE_SHOT_JOB_NAMES).toHaveLength(7);
+    expect(ONE_SHOT_JOB_NAMES).toHaveLength(6);
     expect(ONE_SHOT_JOB_NAMES).not.toContain("fleet.swhouse.occupancy");
     expect(ONE_SHOT_JOB_NAMES).not.toContain("fleet.swhouse.roster");
     expect(() => parseOneShotRequest(commonArguments("fleet.swhouse.roster"), productionEnv())).toThrow();

@@ -9,7 +9,6 @@ export const JOB_NAMES = [
   "fleet.swhouse.roster",
   "notifications.materialize",
   "telephony.transcripts.process",
-  "infra.hetzner.audit",
 ] as const;
 
 export type JobName = (typeof JOB_NAMES)[number];
@@ -23,7 +22,6 @@ export type JobPayloadMap = {
   "fleet.swhouse.roster": Record<string, never>;
   "notifications.materialize": { limit?: number };
   "telephony.transcripts.process": { maxItems?: number };
-  "infra.hetzner.audit": Record<string, never>;
 };
 
 export type JobSchedule = {

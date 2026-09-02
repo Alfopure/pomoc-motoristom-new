@@ -20,7 +20,6 @@ export type IntegrationConnection = {
   status: "not_configured" | "configured" | "live" | "degraded" | "disabled";
   enabledFeatures: string[];
   baseUrl?: string;
-  websocketUrl?: string;
   secretRef?: string;
   secretConfigured: boolean;
   lastSuccessAt?: string;
@@ -108,10 +107,6 @@ export type CallCenterCall = {
   calledNumber: string;
   receivedNumber?: string;
   destinationNumber?: string;
-  callerExtension?: string;
-  receivedExtension?: string;
-  destinationExtension?: string;
-  extensionId?: string;
   operatorId?: string;
   lineId?: string;
   lineLabel: string;

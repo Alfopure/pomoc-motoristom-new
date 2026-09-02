@@ -736,8 +736,8 @@ function HistoryCallRow({
   const customerNumber = call.direction === "outbound" ? call.calledNumber : call.callerNumber;
   const customerName = call.direction === "outbound" ? undefined : call.callerName;
   const employeeEndpoint = call.direction === "outbound"
-    ? call.callerExtension ?? call.callerNumber
-    : call.destinationExtension ?? call.destinationNumber ?? call.calledNumber;
+    ? call.callerNumber
+    : call.destinationNumber ?? call.calledNumber;
   const customerLabel = call.direction === "internal" ? "Volajúci" : "Zákazník";
   const operatorLabel = call.direction === "internal" ? "Volaný / operátor" : "Operátor";
   const operatorName = call.operatorName

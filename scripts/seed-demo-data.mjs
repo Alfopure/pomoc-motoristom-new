@@ -31,9 +31,23 @@ const IDS = {
   miso: "00000000-0000-4000-8000-000000000103",
   lenka: "00000000-0000-4000-8000-000000000104",
   peter: "00000000-0000-4000-8000-000000000105",
-  line: "00000000-0000-4000-8000-000000000201",
-  queue: "00000000-0000-4000-8000-000000000202",
+  lineNeutral: "00000000-0000-4000-8000-000000000201",
+  lineAllianz: "00000000-0000-4000-8000-000000000202",
+  lineAutoklub: "00000000-0000-4000-8000-000000000203",
+  lineAxa: "00000000-0000-4000-8000-000000000204",
+  lineEurocross: "00000000-0000-4000-8000-000000000205",
 };
+
+// Placeholder E.164 numbers; replace with the canonical strings from Telnyx
+// `GET /v2/phone_numbers` once the numbers are assigned to the call-control app.
+const LINES = [
+  { id: IDS.lineNeutral, phone_number: "+421232408700", label: "Neutrálna linka" },
+  { id: IDS.lineAllianz, phone_number: "+421232408718", label: "Allianz Assistance" },
+  { id: IDS.lineAutoklub, phone_number: "+421232408732", label: "Autoklub Slovakia Assistance" },
+  { id: IDS.lineAxa, phone_number: "+421232408760", label: "AXA Assistance CZ" },
+  { id: IDS.lineEurocross, phone_number: "+421232408783", label: "Eurocross Assistance CR" },
+];
+const LINE_BY_ID = new Map(LINES.map((line) => [line.id, line]));
 
 const rows = {
   organizations: [
@@ -59,7 +73,6 @@ const rows = {
       organization_id: ORG,
       display_name: "Natália",
       role: "dispatcher",
-      phone_extension: "101",
       active: true,
     },
     {
@@ -67,7 +80,6 @@ const rows = {
       organization_id: ORG,
       display_name: "Mango",
       role: "senior_dispatcher",
-      phone_extension: "102",
       active: true,
     },
     {
@@ -75,7 +87,6 @@ const rows = {
       organization_id: ORG,
       display_name: "Michal",
       role: "manager",
-      phone_extension: "103",
       active: true,
     },
     {
@@ -83,7 +94,6 @@ const rows = {
       organization_id: ORG,
       display_name: "Lenka",
       role: "dispatcher",
-      phone_extension: "104",
       active: true,
     },
     {
@@ -91,7 +101,6 @@ const rows = {
       organization_id: ORG,
       display_name: "Peter",
       role: "dispatcher",
-      phone_extension: "105",
       active: true,
     },
   ],
@@ -159,27 +168,14 @@ const rows = {
     attendanceSession("00000000-0000-4000-8000-000000001201", IDS.natalia, "00000000-0000-4000-8000-000000001102", "open", "login", "2026-05-27T08:03:00+02:00", null, "Automaticky pripravené pre budúci login flow."),
     attendanceSession("00000000-0000-4000-8000-000000001202", IDS.peter, "00000000-0000-4000-8000-000000001101", "closed", "manual", "2026-05-27T00:01:00+02:00", "2026-05-27T08:02:00+02:00"),
   ],
-  telephonyLines: [
-    {
-      id: IDS.line,
-      organization_id: ORG,
-      provider: "viptel",
-      phone_number: "0850 005 006",
-      label: "Linka pomoci",
-      active: true,
-    },
-  ],
-  telephonyQueues: [
-    {
-      id: IDS.queue,
-      organization_id: ORG,
-      provider: "viptel",
-      external_id: "queue-help-line",
-      label: "Pomoc motoristom",
-      line_id: IDS.line,
-      active: true,
-    },
-  ],
+  telephonyLines: LINES.map((line) => ({
+    id: line.id,
+    organization_id: ORG,
+    provider: "telnyx",
+    phone_number: line.phone_number,
+    label: line.label,
+    active: true,
+  })),
   locations: [
     location(
       "00000000-0000-4000-8000-000000000301",
@@ -812,29 +808,25 @@ const rows = {
     event("00000000-0000-4000-8000-000000000844", "00000000-0000-4000-8000-000000000804", IDS.natalia, "case_created", "Prípad založený", "Dodávka pri Košiciach, odporúčaná špecializovaná technika.", "2026-05-22T09:22:00+02:00"),
   ],
   calls: [
-    call("00000000-0000-4000-8000-000000000901", "mock-viptel-2026-0517", "incoming", "+421 905 778 122", "Peter Kováč", "00000000-0000-4000-8000-000000000801", IDS.natalia, "2026-05-22T09:12:00+02:00", 42),
-    call("00000000-0000-4000-8000-000000000902", "mock-viptel-2026-0518", "answered", "+421 232 111 222", "Europe Assistance", "00000000-0000-4000-8000-000000000802", IDS.mango, "2026-05-22T08:42:00+02:00", 14, "2026-05-22T08:42:14+02:00", "2026-05-22T08:48:00+02:00"),
-    call("00000000-0000-4000-8000-000000000903", "mock-viptel-2026-0521", "answered", "+421 918 442 909", "Marek Sýkora", "00000000-0000-4000-8000-000000000804", IDS.natalia, "2026-05-22T09:20:00+02:00", 18, "2026-05-22T09:20:18+02:00", null),
+    call("00000000-0000-4000-8000-000000000901", "mock-telnyx-2026-0517", IDS.lineNeutral, "incoming", "+421 905 778 122", "Peter Kováč", "00000000-0000-4000-8000-000000000801", IDS.natalia, "2026-05-22T09:12:00+02:00", 42),
+    call("00000000-0000-4000-8000-000000000902", "mock-telnyx-2026-0518", IDS.lineAllianz, "answered", "+421 232 111 222", "Europe Assistance", "00000000-0000-4000-8000-000000000802", IDS.mango, "2026-05-22T08:42:00+02:00", 14, "2026-05-22T08:42:14+02:00", "2026-05-22T08:48:00+02:00"),
+    call("00000000-0000-4000-8000-000000000903", "mock-telnyx-2026-0521", IDS.lineNeutral, "answered", "+421 918 442 909", "Marek Sýkora", "00000000-0000-4000-8000-000000000804", IDS.natalia, "2026-05-22T09:20:00+02:00", 18, "2026-05-22T09:20:18+02:00", null),
   ],
   callEvents: [
-    callEvent("00000000-0000-4000-8000-000000000911", "00000000-0000-4000-8000-000000000901", "mock-viptel-2026-0517", "queue.join", "mock-viptel-2026-0517-queue-join", "2026-05-22T09:12:00+02:00"),
-    callEvent("00000000-0000-4000-8000-000000000912", "00000000-0000-4000-8000-000000000902", "mock-viptel-2026-0518", "call.answered", "mock-viptel-2026-0518-answered", "2026-05-22T08:42:14+02:00"),
-    callEvent("00000000-0000-4000-8000-000000000913", "00000000-0000-4000-8000-000000000903", "mock-viptel-2026-0521", "call.answered", "mock-viptel-2026-0521-answered", "2026-05-22T09:20:18+02:00"),
+    callEvent("00000000-0000-4000-8000-000000000911", "00000000-0000-4000-8000-000000000901", "mock-telnyx-2026-0517", "call.initiated", "mock-telnyx-2026-0517-initiated", "2026-05-22T09:12:00+02:00"),
+    callEvent("00000000-0000-4000-8000-000000000912", "00000000-0000-4000-8000-000000000902", "mock-telnyx-2026-0518", "call.answered", "mock-telnyx-2026-0518-answered", "2026-05-22T08:42:14+02:00"),
+    callEvent("00000000-0000-4000-8000-000000000913", "00000000-0000-4000-8000-000000000903", "mock-telnyx-2026-0521", "call.answered", "mock-telnyx-2026-0521-answered", "2026-05-22T09:20:18+02:00"),
   ],
 };
 
 await upsert("motorist_organizations", rows.organizations);
 await upsert("motorist_organization_profiles", rows.organizationProfiles);
-// Telephony ownership is managed only by the guarded VIPTel assignment flow.
-// Stripping this field keeps repeated demo seeding from reverting 20–23 back
-// to the original 101–105 profile values.
-await upsert("motorist_profiles", rows.profiles.map(withoutProfileTelephonyOwnership));
+await upsert("motorist_profiles", rows.profiles);
 await upsert("motorist_operator_statuses", rows.operatorStatuses);
 await upsert("motorist_attendance_shift_templates", rows.attendanceShiftTemplates);
 await upsert("motorist_attendance_shifts", rows.attendanceShifts);
 await upsert("motorist_attendance_sessions", rows.attendanceSessions);
 await upsert("motorist_telephony_lines", rows.telephonyLines);
-await upsert("motorist_telephony_queues", rows.telephonyQueues);
 await upsert("motorist_locations", rows.locations);
 await upsert("motorist_branches", rows.branches);
 await upsert("motorist_fleet_assets", rows.fleetAssets);
@@ -889,12 +881,6 @@ function unquote(value) {
   }
 
   return value;
-}
-
-function withoutProfileTelephonyOwnership(profile) {
-  const safeProfile = { ...profile };
-  Reflect.deleteProperty(safeProfile, "phone_extension");
-  return safeProfile;
 }
 
 async function upsert(table, data, onConflict = "id") {
@@ -1090,19 +1076,20 @@ function event(id, caseId, actorProfileId, eventType, title, body, createdAt) {
   };
 }
 
-function call(id, viptelUniqueId, status, callerNumber, callerName, caseId, operatorId, startedAt, waitSeconds, answeredAt = null, endedAt = null) {
+function call(id, providerSessionId, lineId, status, callerNumber, callerName, caseId, operatorId, startedAt, waitSeconds, answeredAt = null, endedAt = null) {
+  const line = LINE_BY_ID.get(lineId);
   return {
     id,
     organization_id: ORG,
-    provider: "viptel",
-    viptel_unique_id: viptelUniqueId,
+    provider: "telnyx",
+    provider_session_id: providerSessionId,
     direction: "inbound",
     status,
     caller_number: callerNumber,
     caller_name: callerName,
-    called_number: "0850 005 006",
-    line_id: IDS.line,
-    queue_id: IDS.queue,
+    called_number: line.phone_number,
+    received_number: line.phone_number,
+    line_id: lineId,
     operator_id: operatorId,
     case_id: caseId,
     started_at: startedAt,
@@ -1113,13 +1100,13 @@ function call(id, viptelUniqueId, status, callerNumber, callerName, caseId, oper
   };
 }
 
-function callEvent(id, callId, viptelUniqueId, eventType, fingerprint, providerCreatedAt) {
+function callEvent(id, callId, providerSessionId, eventType, fingerprint, providerCreatedAt) {
   return {
     id,
     organization_id: ORG,
     call_id: callId,
-    provider: "viptel",
-    viptel_unique_id: viptelUniqueId,
+    provider: "telnyx",
+    provider_session_id: providerSessionId,
     event_type: eventType,
     event_fingerprint: fingerprint,
     payload: { source: "seed" },

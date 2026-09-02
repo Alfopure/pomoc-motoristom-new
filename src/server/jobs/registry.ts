@@ -210,81 +210,12 @@ const DEFINITIONS: { [K in JobName]: JobDefinition<K> } = {
       });
     },
   },
-  "infra.hetzner.audit": {
-    name: "infra.hetzner.audit",
-    schedule: { everyMs: 24 * HOUR, offsetMs: 3 * HOUR + 30 * MINUTE },
-    timeoutMs: 30_000,
-    leaseSeconds: 90,
-    maxAttempts: 2,
-    failureThreshold: 1,
-    freshnessMs: 26 * HOUR,
-    run: runHetznerAudit,
-  },
 };
 
 export const JOB_DEFINITIONS = DEFINITIONS;
 
 export function jobDefinition<K extends JobName>(jobName: K): JobDefinition<K> {
   return DEFINITIONS[jobName];
-}
-
-async function runHetznerAudit(context: JobContext) {
-  const token = process.env.HCLOUD_READ_TOKEN?.trim();
-  if (!token) {
-    return skipped("read_token_missing");
-  }
-
-  const [servers, primaryIps, volumes, floatingIps, loadBalancers, backups, pricing] = await Promise.all([
-    hcloudGet("/servers?per_page=50", token, context.signal),
-    hcloudGet("/primary_ips?per_page=50", token, context.signal),
-    hcloudGet("/volumes?per_page=50", token, context.signal),
-    hcloudGet("/floating_ips?per_page=50", token, context.signal),
-    hcloudGet("/load_balancers?per_page=50", token, context.signal),
-    hcloudGet("/images?type=backup&sort=created:desc&per_page=50", token, context.signal),
-    hcloudGet("/pricing", token, context.signal),
-  ]);
-
-  return success({
-    servers: totalEntries(servers),
-    primaryIps: totalEntries(primaryIps),
-    volumes: totalEntries(volumes),
-    floatingIps: totalEntries(floatingIps),
-    loadBalancers: totalEntries(loadBalancers),
-    backups: totalEntries(backups),
-    currency: nestedString(pricing, ["pricing", "currency"]),
-    vatRate: nestedString(pricing, ["pricing", "vat_rate"]),
-    checkedAt: new Date().toISOString(),
-  });
-}
-
-async function hcloudGet(path: string, token: string, signal: AbortSignal) {
-  const response = await fetch(`https://api.hetzner.cloud/v1${path}`, {
-    headers: { authorization: `Bearer ${token}` },
-    signal,
-  });
-  if (!response.ok) {
-    throw new Error(`Hetzner audit request failed with HTTP ${response.status}.`);
-  }
-  return (await response.json()) as unknown;
-}
-
-function totalEntries(value: unknown) {
-  if (!value || typeof value !== "object") return 0;
-  const meta = (value as Record<string, unknown>).meta;
-  if (!meta || typeof meta !== "object") return 0;
-  const pagination = (meta as Record<string, unknown>).pagination;
-  if (!pagination || typeof pagination !== "object") return 0;
-  const total = (pagination as Record<string, unknown>).total_entries;
-  return typeof total === "number" ? total : 0;
-}
-
-function nestedString(value: unknown, keys: string[]) {
-  let current: unknown = value;
-  for (const key of keys) {
-    if (!current || typeof current !== "object") return null;
-    current = (current as Record<string, unknown>)[key];
-  }
-  return typeof current === "string" ? current : null;
 }
 
 function assertNotAborted(context: JobContext) {

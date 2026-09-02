@@ -168,8 +168,7 @@ function CallDetailContent({ call }: { call: CallCenterCall }) {
           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-600">
             <span>Volajúci: {call.callerNumber}</span>
             {call.receivedNumber && <span>Volané číslo: {call.receivedNumber}</span>}
-            {call.destinationExtension && <span>Finálna klapka: {call.destinationExtension}</span>}
-            {!call.destinationExtension && call.destinationNumber && <span>Finálny cieľ: {call.destinationNumber}</span>}
+            {call.destinationNumber && <span>Finálny cieľ: {call.destinationNumber}</span>}
             {call.queueLabel && <span>Rad: {call.queueLabel}</span>}
           </div>
         </section>

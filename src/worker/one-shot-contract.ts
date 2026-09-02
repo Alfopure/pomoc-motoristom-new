@@ -10,7 +10,6 @@ export const ONE_SHOT_JOB_NAMES = [
   "fleet.commander.catalog",
   "notifications.materialize",
   "telephony.transcripts.process",
-  "infra.hetzner.audit",
 ] as const satisfies readonly JobName[];
 
 export type OneShotJobName = (typeof ONE_SHOT_JOB_NAMES)[number];
@@ -24,7 +23,6 @@ const FIXED_PAYLOADS: OneShotPayloads = {
   "fleet.commander.catalog": {},
   "notifications.materialize": { limit: 1 },
   "telephony.transcripts.process": { maxItems: 1 },
-  "infra.hetzner.audit": {},
 };
 
 const NUMERIC_SUMMARY_FIELDS: Record<OneShotJobName, readonly string[]> = {
@@ -34,7 +32,6 @@ const NUMERIC_SUMMARY_FIELDS: Record<OneShotJobName, readonly string[]> = {
   "fleet.commander.catalog": ["fetchedCount", "createdCount", "updatedCount", "errorCount"],
   "notifications.materialize": ["processed", "sent", "cancelled", "failed"],
   "telephony.transcripts.process": ["candidates", "processed", "failed", "skipped", "aiProcessed", "aiFailed"],
-  "infra.hetzner.audit": ["servers", "primaryIps", "volumes", "floatingIps", "loadBalancers", "backups"],
 };
 
 const STATUS_SUMMARY_FIELDS: Partial<Record<OneShotJobName, Readonly<Record<string, readonly string[]>>>> = {
