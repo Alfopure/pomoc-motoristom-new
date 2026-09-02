@@ -86,11 +86,11 @@ vi.mock("@/server/integrations/commander/sync", () => ({
   syncCommander: vi.fn(async () => ({ status: "success" })),
 }));
 
-vi.mock("@/server/telephony/recordings-sync", () => ({
-  RecordingsSyncError: class RecordingsSyncError extends Error {
+vi.mock("@/server/telephony/transcripts-process", () => ({
+  TranscriptsProcessError: class TranscriptsProcessError extends Error {
     status = 500;
   },
-  syncRecordings: vi.fn(async () => ({ status: "success" })),
+  processTranscripts: vi.fn(async () => ({ status: "disabled", processed: 0, failed: 0, errors: [] })),
 }));
 
 // Neutrálne test tajomstvá pre bearer / dual-cron vetvy (part c) — inak by padli na 500 "secret not configured".
@@ -194,11 +194,11 @@ describe("route-csrf coverage (US-103)", () => {
     expect(status).toBe(401);
   });
 
-  it("(b) POST telephony/call/create (motoristAccessGuard) passes CSRF on same-origin and falls to auth -> 401", async () => {
-    const found = sessionMutatingCases.find((entry) => entry.route === "telephony/call/create" && entry.method === "POST");
-    expect(found, "POST telephony/call/create handler not found").toBeDefined();
+  it("(b) POST telephony/calls/[id]/link-case (motoristAccessGuard) passes CSRF on same-origin and falls to auth -> 401", async () => {
+    const found = sessionMutatingCases.find((entry) => entry.route === "telephony/calls/[id]/link-case" && entry.method === "POST");
+    expect(found, "POST telephony/calls/[id]/link-case handler not found").toBeDefined();
 
-    const status = await statusFor(found!.handler, sameOriginRequest("telephony/call/create", "POST"));
+    const status = await statusFor(found!.handler, sameOriginRequest("telephony/calls/[id]/link-case", "POST"));
     expect(status).toBe(401);
   });
 
@@ -210,7 +210,7 @@ describe("route-csrf coverage (US-103)", () => {
       { route: "integrations/fleet/webdispecink/sync", method: "GET", token: "test-webdispecink-sync-token" },
       // pure bearer (nikdy nemá CSRF).
       { route: "integrations/commander/sync", method: "POST", token: "test-commander-sync-secret" },
-      { route: "telephony/recordings/sync", method: "POST", token: "test-recordings-sync-secret" },
+      { route: "telephony/transcripts/process", method: "POST", token: "test-recordings-sync-secret" },
     ];
 
     for (const { route, method, token } of bearerCases) {

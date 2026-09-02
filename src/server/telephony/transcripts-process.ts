@@ -6,13 +6,15 @@ import { analyzeCallTranscript, isCallAnalysisConfigured, DEFAULT_QA_RUBRIC } fr
 import { transcribeWithScribe, ScribeError, type ScribeWord } from "@/lib/integrations/asr/scribe-client";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/database.types";
-import { RECORDINGS_BUCKET, resolveOrganization } from "@/server/telephony/recordings-sync";
 
 type AdminClient = SupabaseClient<Database>;
 type Tables = Database["public"]["Tables"];
 type RecordingRow = Tables["motorist_call_recordings"]["Row"];
 type TranscriptRow = Tables["motorist_call_transcripts"]["Row"];
 
+export const RECORDINGS_BUCKET = "motorist-call-recordings";
+
+const DEFAULT_ORGANIZATION_SLUG = "pomoc-motoristom";
 const MAX_ITEMS_PER_RUN = 3;
 const MAX_AI_PER_RUN = 5;
 const MAX_RETRIES = 3;
@@ -546,6 +548,25 @@ function retryCount(transcript: TranscriptRow) {
 
 function jsonRecord(value: Json | null): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+}
+
+async function resolveOrganization(supabase: AdminClient) {
+  const organizationId = process.env.MOTORIST_ORGANIZATION_ID?.trim();
+  const query = organizationId
+    ? supabase.from("motorist_organizations").select("id, active").eq("id", organizationId).maybeSingle()
+    : supabase
+        .from("motorist_organizations")
+        .select("id, active")
+        .eq("slug", process.env.MOTORIST_ORGANIZATION_SLUG?.trim() || DEFAULT_ORGANIZATION_SLUG)
+        .maybeSingle();
+  const result = await query;
+  throwOnError(result.error);
+
+  if (!result.data?.active) {
+    throw new TranscriptsProcessError("Active organization was not found.", 404);
+  }
+
+  return result.data;
 }
 
 function throwOnError(error: { message: string } | null): asserts error is null {

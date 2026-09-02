@@ -1,5 +1,5 @@
 import { MutationError } from "@/server/motorist-mutations";
-import { requireTelephonyActor } from "@/server/telephony-access";
+import { requireDefaultMotoristActor } from "@/server/api-auth";
 import { loadTelephonyCallHistory } from "@/server/telephony/call-history";
 
 export const runtime = "nodejs";
@@ -8,7 +8,7 @@ export async function GET() {
   const checkedAt = new Date().toISOString();
 
   try {
-    const actor = await requireTelephonyActor();
+    const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
     const calls = await loadTelephonyCallHistory(actor.organizationId);
 
     return Response.json(

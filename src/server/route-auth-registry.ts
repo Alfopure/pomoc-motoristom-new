@@ -3,7 +3,7 @@
  * (bezpečnostný audit, Milestone 0, task 0.4).
  *
  * Kľúč = cesta route relatívna k `src/app/api/`, bez koncového `/route.ts`
- * (napr. `telephony/call/create`, `public/location-links/[token]`).
+ * (napr. `telephony/calls/history`, `public/location-links/[token]`).
  *
  * Triedy:
  *  - `public`  — bez akejkoľvek autentifikácie (anonymný prístup je zámer).
@@ -36,14 +36,12 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "health/ready": { class: "public", note: "Sanitized dependency readiness probe." },
   "public/location-links/[token]": { class: "public" },
 
-  // ── bearer (6) — zdieľané tajomstvo (cron/stroj) ────────────────────────
+  // ── bearer (4) — zdieľané tajomstvo (cron/stroj) ────────────────────────
   // commander/* majú INLINE authorize() + safeEquals (COMMANDER_SYNC_SECRET + timingSafeEqual)
   "integrations/commander/sync": { class: "bearer" },
   "integrations/commander/import-all": { class: "bearer" },
-  // recordings/transcripts/cdr-probe cez authorizeRecordingsSync (timingSafeEqual)
-  "telephony/recordings/sync": { class: "bearer" },
+  // transcripts/process cez authorizeRecordingsSync (RECORDINGS_SYNC_SECRET + timingSafeEqual)
   "telephony/transcripts/process": { class: "bearer" },
-  "telephony/viptel/cdr/probe": { class: "bearer" },
   // occupancy-sync: INLINE authorize() + safeEquals (SWHOUSE_SYNC_SECRET + timingSafeEqual)
   "integrations/swhouse/occupancy-sync": { class: "bearer" },
 
@@ -118,46 +116,16 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // SMS
   "sms/send": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
 
-  // telephony
-  "telephony/call/create": { class: "session" },
-  "telephony/calls/[id]/hangup": { class: "session" },
-  "telephony/calls/[id]/dtmf-transfer": { class: "session" },
+  // telephony (provider-neutral routes; call control returns with the Telnyx provider)
   "telephony/calls/[id]/link-case": { class: "session" },
   "telephony/calls/[id]/outcome": { class: "session" },
-  "telephony/calls/[id]/pickup": { class: "session" },
-  "telephony/calls/[id]/redirect": { class: "session" },
-  "telephony/calls/[id]/sip-transfer": { class: "session" },
-  "telephony/calls/[id]/transfer-targets": { class: "session" },
   "telephony/calls/[id]/transcript": { class: "session", role: ["senior_dispatcher", "manager", "admin"] },
-  "telephony/calls/active": { class: "session" },
   "telephony/calls/history": { class: "session" },
   "telephony/calls/match": { class: "session" },
-  "telephony/commands/[id]": { class: "session" },
   "telephony/directory": { class: "session" },
   "telephony/directory/favorites": { class: "session" },
   "telephony/directory/favorites/[contactId]": { class: "session" },
-  "telephony/extensions": { class: "session" },
-  "telephony/fallback": { class: "session", note: "GET is org-member readable; PATCH enforces manager/admin." },
-  "telephony/extension-assignments": { class: "session", role: ["manager", "admin"] },
-  "telephony/health": { class: "session" },
-  "telephony/presence": { class: "session" },
   "telephony/qa/dashboard": { class: "session", role: ["senior_dispatcher", "manager", "admin"] },
-  "telephony/queues": { class: "session" },
-  "telephony/queues/agent": { class: "session" },
-  "telephony/routing/priority": { class: "session", role: ["manager", "admin"] },
-  "telephony/recordings/[id]/url": { class: "session", role: ["senior_dispatcher", "manager", "admin"] },
-  "telephony/routing/lines": { class: "session", role: ["manager", "admin"] },
-  // ⚠ ODCHÝLKA OD ŠPECIFIKÁCIE: task 0.4 spec ich uvádza ako `bearer` "po 1.2", ale 1.2 (konverzia
-  // na bearer token) NEBOLO nasadené — aktuálny kód používa motoristAccessGuard({ roles: ["admin"] }),
-  // teda SESSION admin guard. Klasifikované podľa reálneho kódu (register = zdroj pravdy pre 1.4/2.1).
-  "telephony/viptel/probe": { class: "session", role: ["admin"] },
-  "telephony/viptel/sms/probe": { class: "session", role: ["admin"] },
-  // Webphone config aj session sú auth-gated a vracajú iba klapky priradené actorovi.
-  "telephony/webphone/config": { class: "session" },
-  "telephony/webphone/session": { class: "session" },
-  "telephony/workplace-presence": { class: "session" },
-  "telephony/workplace-selection": { class: "session" },
-  "telephony/workplace-takeover": { class: "session" },
 
   // users
   users: { class: "session", role: ["manager", "admin"] },
