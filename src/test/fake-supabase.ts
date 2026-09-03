@@ -76,8 +76,21 @@ export const DEFAULT_UNIQUE_KEYS: Record<string, UniqueKeySpec[]> = {
     ["session_id", "step_index", "external_number"],
     { columns: ["profile_id"], where: (row) => row.result === "offered" },
   ],
+  motorist_ring_groups: [["id"], ["organization_id", "name"]],
+  motorist_ring_group_members: [
+    ["id"],
+    ["ring_group_id", "position"],
+    { columns: ["ring_group_id", "profile_id"], where: (row) => !isNil(row.profile_id) },
+    { columns: ["ring_group_id", "external_number"], where: (row) => !isNil(row.external_number) },
+  ],
+  motorist_ring_plans: [["id"], ["organization_id", "name"]],
+  motorist_ring_plan_steps: [["id"], ["ring_plan_id", "step_index"]],
+  motorist_business_hours: [["id"], ["organization_id", "name"]],
+  motorist_business_hours_intervals: [["id"], ["business_hours_id", "weekday", "opens"]],
+  motorist_business_hours_exceptions: [["id"], ["business_hours_id", "date"]],
+  motorist_pause_reasons: [["id"], ["organization_id", "code"]],
   motorist_operator_presence: [["id"], ["profile_id"]],
-  motorist_operator_devices: [["id"], ["profile_id", "environment"]],
+  motorist_operator_devices: [["id"], ["organization_id", "profile_id", "environment"]],
   motorist_operator_telephony_settings: [["id"], ["profile_id"]],
   motorist_telephony_settings: [["id"], ["organization_id"]],
   motorist_telephony_daily_usage: [["id"], ["organization_id", "day"]],
@@ -773,6 +786,239 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     row.sms_count = Number(row.sms_count ?? 0) + Math.max(0, Number(args.p_sms ?? 0));
     row.updated_at = db.nowIso();
     return Number(row.legs);
+  });
+
+  // Mirror of `motorist_replace_ring_plan` (20260918100000_ring_config_rpc.sql):
+  // replaces whole sections of the routing document in one transaction. The
+  // affected tables are snapshotted first, so a constraint violation or an
+  // in-use conflict leaves the database exactly as it was.
+  db.registerRpc("motorist_replace_ring_plan", (args) => {
+    const organizationId = args.p_organization_id;
+    if (isNil(organizationId)) throw fakeError("organization_required", "P0001");
+    const document = (args.p_document ?? {}) as Record<string, unknown>;
+    const expectedVersion = isNil(args.p_expected_version) ? null : Number(args.p_expected_version);
+    const section = (key: string): FakeRow[] | null => {
+      const value = document[key];
+      return Array.isArray(value) ? (value as FakeRow[]) : null;
+    };
+    const groups = section("groups");
+    const plans = section("plans");
+    const hours = section("business_hours");
+    const reasons = section("pause_reasons");
+
+    const TOUCHED = [
+      "motorist_telephony_settings",
+      "motorist_ring_groups",
+      "motorist_ring_group_members",
+      "motorist_ring_plans",
+      "motorist_ring_plan_steps",
+      "motorist_business_hours",
+      "motorist_business_hours_intervals",
+      "motorist_business_hours_exceptions",
+      "motorist_pause_reasons",
+    ];
+    const snapshot = new Map(TOUCHED.map((table) => [table, clone(db.storage(table))]));
+    const rollback = () => {
+      for (const [table, rows] of snapshot) db.tables.set(table, rows);
+    };
+
+    const ownsOrThrow = (table: string, ids: unknown[], label: string) => {
+      const foreign = db.storage(table).find((row) => ids.includes(row.id) && row.organization_id !== organizationId);
+      if (foreign) throw fakeError(`cross_organization: ${label} ${String(foreign.id)}`, "P0001");
+    };
+    // `array_position(v_ids, null) is not null` in the SQL: a null id would make
+    // `not (x = any (array[null]))` evaluate to NULL and quietly match nothing,
+    // so the whole delete-what-is-missing pass would silently do nothing.
+    const idsOf = (rows: FakeRow[], code: string) => {
+      if (rows.some((row) => isNil(row.id))) throw fakeError(code, "P0001");
+      return rows.map((row) => row.id);
+    };
+    const mine = (row: FakeRow) => row.organization_id === organizationId;
+
+    if (!db.storage("motorist_telephony_settings").some(mine)) {
+      db.insert("motorist_telephony_settings", { organization_id: organizationId, routing_version: 0 });
+    }
+    const settingsRow = db.storage("motorist_telephony_settings").find(mine) as FakeRow;
+    const currentVersion = Number(settingsRow.routing_version ?? 0);
+    if (expectedVersion !== null && expectedVersion !== currentVersion) {
+      throw fakeError(`stale_document: expected ${expectedVersion}, current ${currentVersion}`, "P0001");
+    }
+
+    try {
+      if (groups) {
+        const groupIds = idsOf(groups, "group_id_required");
+        ownsOrThrow("motorist_ring_groups", groupIds, "ring group");
+        const stamps = new Map(db.storage("motorist_ring_group_members").filter(mine).map((row) => [row.id, row]));
+
+        db.delete("motorist_ring_group_members", (row) => mine(row) && groupIds.includes(row.ring_group_id));
+        for (const group of groups) {
+          db.upsert("motorist_ring_groups", {
+            id: group.id,
+            organization_id: organizationId,
+            name: group.name,
+            description: group.description ?? null,
+            active: group.active ?? true,
+          });
+          for (const member of (group.members as FakeRow[] | undefined) ?? []) {
+            const previous = stamps.get(member.id);
+            db.insert("motorist_ring_group_members", {
+              id: member.id ?? randomUUID(),
+              organization_id: organizationId,
+              ring_group_id: group.id,
+              member_kind: member.member_kind,
+              profile_id: member.profile_id ?? null,
+              external_number: member.external_number ?? null,
+              position: member.position,
+              ring_secs: member.ring_secs ?? null,
+              last_offered_at: previous?.last_offered_at ?? null,
+              last_answered_at: previous?.last_answered_at ?? null,
+            });
+          }
+        }
+      }
+
+      if (plans) {
+        const planIds = idsOf(plans, "plan_id_required");
+        ownsOrThrow("motorist_ring_plans", planIds, "ring plan");
+        const boundLine = db.storage("motorist_telephony_lines").find((row) => mine(row) && !isNil(row.ring_plan_id) && !planIds.includes(row.ring_plan_id));
+        if (boundLine) throw fakeError(`ring_plan_in_use: ${String(boundLine.phone_number)}`, "P0001");
+        const boundOption = db.storage("motorist_ivr_options").find((row) => mine(row) && !isNil(row.target_ring_plan_id) && !planIds.includes(row.target_ring_plan_id));
+        if (boundOption) throw fakeError(`ring_plan_in_use: ${String(boundOption.label)}`, "P0001");
+
+        db.delete("motorist_ring_plan_steps", (row) => mine(row) && planIds.includes(row.ring_plan_id));
+        for (const plan of plans) {
+          db.upsert("motorist_ring_plans", {
+            id: plan.id,
+            organization_id: organizationId,
+            name: plan.name,
+            fallback_kind: plan.fallback_kind ?? "callback_prompt",
+            fallback_number: plan.fallback_number ?? null,
+            active: plan.active ?? true,
+          });
+          for (const step of (plan.steps as FakeRow[] | undefined) ?? []) {
+            db.insert("motorist_ring_plan_steps", {
+              id: step.id ?? randomUUID(),
+              organization_id: organizationId,
+              ring_plan_id: plan.id,
+              step_index: step.step_index,
+              ring_group_id: step.ring_group_id,
+              timeout_secs: step.timeout_secs,
+              strategy: step.strategy ?? "all",
+            });
+          }
+        }
+        db.delete("motorist_ring_plans", (row) => mine(row) && !planIds.includes(row.id));
+      }
+
+      if (groups) {
+        const groupIds = idsOf(groups, "group_id_required");
+        const usedStep = db.storage("motorist_ring_plan_steps").find((row) => mine(row) && !groupIds.includes(row.ring_group_id));
+        if (usedStep) throw fakeError(`ring_group_in_use: ${String(usedStep.ring_group_id)}`, "P0001");
+        db.delete("motorist_ring_groups", (row) => mine(row) && !groupIds.includes(row.id));
+      }
+
+      if (hours) {
+        const hoursIds = idsOf(hours, "business_hours_id_required");
+        ownsOrThrow("motorist_business_hours", hoursIds, "business hours");
+        const boundLine = db.storage("motorist_telephony_lines").find((row) => mine(row) && !isNil(row.business_hours_id) && !hoursIds.includes(row.business_hours_id));
+        if (boundLine) throw fakeError(`business_hours_in_use: ${String(boundLine.phone_number)}`, "P0001");
+
+        db.delete("motorist_business_hours_intervals", (row) => mine(row) && hoursIds.includes(row.business_hours_id));
+        db.delete("motorist_business_hours_exceptions", (row) => mine(row) && hoursIds.includes(row.business_hours_id));
+        for (const schedule of hours) {
+          db.upsert("motorist_business_hours", {
+            id: schedule.id,
+            organization_id: organizationId,
+            name: schedule.name,
+            timezone: schedule.timezone ?? "Europe/Bratislava",
+            active: schedule.active ?? true,
+          });
+          for (const interval of (schedule.intervals as FakeRow[] | undefined) ?? []) {
+            db.insert("motorist_business_hours_intervals", {
+              organization_id: organizationId,
+              business_hours_id: schedule.id,
+              weekday: interval.weekday,
+              opens: interval.opens,
+              closes: interval.closes,
+            });
+          }
+          for (const exception of (schedule.exceptions as FakeRow[] | undefined) ?? []) {
+            db.insert("motorist_business_hours_exceptions", {
+              organization_id: organizationId,
+              business_hours_id: schedule.id,
+              date: exception.date,
+              closed: exception.closed ?? true,
+              intervals: exception.intervals ?? [],
+              label: exception.label ?? null,
+            });
+          }
+        }
+        db.delete("motorist_business_hours", (row) => mine(row) && !hoursIds.includes(row.id));
+      }
+
+      if (reasons) {
+        const reasonIds = idsOf(reasons, "pause_reason_id_required");
+        ownsOrThrow("motorist_pause_reasons", reasonIds, "pause reason");
+        // `motorist_operator_presence.pause_reason_id` is `on delete set null`:
+        // deleting the reason an operator is paused under would silently strip
+        // it from the live presence row.
+        const pausedUnder = db.storage("motorist_operator_presence").find((row) => mine(row) && !isNil(row.pause_reason_id) && !reasonIds.includes(row.pause_reason_id));
+        if (pausedUnder) {
+          const label = db.storage("motorist_pause_reasons").find((row) => row.id === pausedUnder.pause_reason_id)?.label;
+          throw fakeError(`pause_reason_in_use: ${String(label ?? pausedUnder.pause_reason_id)}`, "P0001");
+        }
+        for (const reason of reasons) {
+          db.upsert("motorist_pause_reasons", {
+            id: reason.id,
+            organization_id: organizationId,
+            code: reason.code,
+            label: reason.label,
+            max_minutes: reason.max_minutes ?? null,
+            sort_order: reason.sort_order ?? 0,
+            active: reason.active ?? true,
+          });
+        }
+        db.delete("motorist_pause_reasons", (row) => mine(row) && !reasonIds.includes(row.id));
+      }
+
+      // Structural invariants re-asserted on the committed state, exactly like
+      // the SQL: `validateRoutingReplace` runs before the call and against the
+      // world as it was read, so two concurrent editors could each pass it.
+      const members = db.storage("motorist_ring_group_members").filter(mine);
+      if (groups || plans) {
+        const emptyStep = db.storage("motorist_ring_plan_steps").find((step) => mine(step) && !members.some((member) => member.ring_group_id === step.ring_group_id));
+        if (emptyStep) {
+          const name = db.storage("motorist_ring_groups").find((row) => row.id === emptyStep.ring_group_id)?.name;
+          throw fakeError(`ring_group_empty: ${String(name ?? emptyStep.ring_group_id)}`, "P0001");
+        }
+      }
+      const contiguous = (positions: number[]) => positions.every((_, index) => positions.includes(index)) && new Set(positions).size === positions.length;
+      if (groups) {
+        for (const group of db.storage("motorist_ring_groups").filter(mine)) {
+          const positions = members.filter((member) => member.ring_group_id === group.id).map((member) => Number(member.position));
+          if (positions.length > 0 && !contiguous(positions)) throw fakeError(`position_gap: ring group ${String(group.name)}`, "P0001");
+        }
+      }
+      if (plans) {
+        for (const plan of db.storage("motorist_ring_plans").filter(mine)) {
+          const positions = db.storage("motorist_ring_plan_steps").filter((step) => mine(step) && step.ring_plan_id === plan.id).map((step) => Number(step.step_index));
+          if (positions.length > 0 && !contiguous(positions)) throw fakeError(`position_gap: ring plan ${String(plan.name)}`, "P0001");
+        }
+      }
+
+      settingsRow.routing_version = currentVersion + 1;
+    } catch (error) {
+      rollback();
+      throw error;
+    }
+
+    return {
+      ...(groups ? { groups: groups.length } : {}),
+      ...(plans ? { plans: plans.length } : {}),
+      ...(hours ? { business_hours: hours.length } : {}),
+      ...(reasons ? { pause_reasons: reasons.length } : {}),
+      routing_version: currentVersion + 1,
+    };
   });
 
   db.registerRpc("motorist_advance_ring_step", (args) => {

@@ -7,6 +7,12 @@
  * time zone with `Intl.DateTimeFormat`, so DST changes and the difference
  * between UTC and Europe/Bratislava are handled by the runtime, never by
  * hand-written offsets.
+ *
+ * It lives in `src/lib` rather than under `src/server` because both sides need
+ * the same rule: the session runner decides `after_hours` with it, and
+ * `BusinessHoursEditor` (Phase 3) previews "otvorené/zatvorené teraz" with the
+ * very same function instead of a second, drifting implementation. Pure, no
+ * Node built-ins, so it is safe in the browser bundle.
  */
 
 export type BusinessHoursInterval = {

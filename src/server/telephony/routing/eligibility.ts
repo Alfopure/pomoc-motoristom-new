@@ -1,3 +1,4 @@
+import { DEVICE_LIVENESS_WINDOW_MS, isDeviceLive } from "@/lib/telephony/device-liveness";
 import type { OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
 /**
@@ -11,7 +12,9 @@ import type { OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/d
  *   `USER_NOT_REGISTERED` / `UNALLOCATED_NUMBER` becomes `skipped_offline`.
  */
 
-export const DEVICE_LIVENESS_WINDOW_MS = 120_000;
+// The liveness rule itself lives in `src/lib/telephony/device-liveness.ts`: the
+// operator screens show the same "connected / stale" verdict the router uses.
+export { DEVICE_LIVENESS_WINDOW_MS, isDeviceLive };
 
 export type EligibilityMember =
   | { kind: "operator"; profileId: string }
@@ -70,17 +73,6 @@ function ms(value: string | null | undefined): number | null {
   if (!value) return null;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? null : parsed;
-}
-
-/** Device heartbeat freshness (`device_seen_at` within the liveness window). */
-export function isDeviceLive(device: EligibilityDevice | undefined, now: Date, windowMs = DEVICE_LIVENESS_WINDOW_MS): boolean {
-  if (!device) return false;
-  // Only a registered phone can take an invite; `null` stays live for rows written
-  // before the heartbeat reported a state.
-  if (device.registrationState !== null && device.registrationState !== "registered") return false;
-  const seen = ms(device.deviceSeenAt);
-  if (seen === null) return false;
-  return now.getTime() - seen <= windowMs;
 }
 
 /** Whether the presence row allows a new offer right now. */

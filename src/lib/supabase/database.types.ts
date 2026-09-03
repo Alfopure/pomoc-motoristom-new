@@ -1140,6 +1140,7 @@ export type Database = {
         destination_allowlist: string[];
         max_ring_fanout: number;
         max_concurrent_legs: number;
+        routing_version: number;
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
@@ -1292,6 +1293,14 @@ export type Database = {
           p_expected_step: number;
         };
         Returns: boolean;
+      };
+      motorist_replace_ring_plan: {
+        Args: {
+          p_organization_id: string;
+          p_document: Json;
+          p_expected_version?: number | null;
+        };
+        Returns: Json;
       };
       motorist_telephony_usage_add: {
         Args: {

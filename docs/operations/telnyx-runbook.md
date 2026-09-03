@@ -8,6 +8,23 @@ Rules that apply to every procedure below:
 - Secrets stay in Vercel environment variables and the owner's private notes. Never paste an API key, SIP password or WebRTC token into a document, a commit or a ticket.
 - Live calls and live SMS cost money and reach real people. Both kill switches are `false` by default; flip them on immediately before a test and back off afterwards.
 - Applying a Supabase migration or seed is a separate, explicitly requested operation against this copy's project (`ifpaeegaesdmljfkdvcn`) only.
+- **The settings screens ("Nastavenia → Telefonovanie") must not be reachable on a database without migrations `20260918100000_ring_config_rpc.sql` and `20260919100000_telnyx_phase3_fixes.sql`.** Until both are applied, `motorist_replace_ring_plan(uuid, jsonb, integer)` does not exist (every configuration save answers 503 with a message naming the migration) and the foundation policies still let any organisation member `PATCH` the routing tables straight through PostgREST — a dispatcher could repoint a production number and a manager could flip the admin-only kill switches, with no validation, no transaction and no audit row. Verify after applying:
+
+```sql
+-- 1 row, three arguments
+select p.oid::regprocedure from pg_proc p
+ where p.proname = 'motorist_replace_ring_plan';
+-- must be empty: no write privilege for the session roles on the routing tables
+select table_name, grantee, privilege_type from information_schema.role_table_grants
+ where table_schema = 'public' and grantee in ('anon', 'authenticated')
+   and privilege_type in ('INSERT', 'UPDATE', 'DELETE')
+   and table_name like 'motorist_ring%' or table_name in
+     ('motorist_business_hours', 'motorist_business_hours_intervals', 'motorist_business_hours_exceptions',
+      'motorist_ivr_menus', 'motorist_ivr_options', 'motorist_pause_reasons',
+      'motorist_operator_telephony_settings', 'motorist_telephony_settings', 'motorist_telephony_lines');
+-- must list only `select` policies for those tables
+select tablename, policyname, cmd from pg_policies where schemaname = 'public' and tablename like 'motorist_%';
+```
 
 ## 1. Spikes to run against the real account
 
@@ -115,9 +132,9 @@ The value comes from `GET /v2/public_key`. It is account-wide and rarely changes
 
 Credentials live in `motorist_operator_devices` (one row per `(profile_id, environment)`) and are provisioned lazily on the first token request (`ensureOperatorCredential`). Tokens are short-lived JWTs; the browser refreshes at 50 % of the remaining lifetime and reconnects with a fresh token on a `401`.
 
-- **Rotate one operator:** delete the operator's `motorist_operator_devices` row (or clear `telnyx_credential_id`) and delete the matching telephony credential in Telnyx. The next `POST /api/telephony/webphone/token` provisions a new one.
-- **Kick a stale tab:** issuing a new token rotates `device_session_id`; the previous tab's next heartbeat gets `409` and disconnects with a Slovak message. Only one active device per operator per environment is allowed.
-- **Departing employee:** deactivate the profile *and* delete the Telnyx credential; deactivating the profile alone leaves a registerable SIP credential behind.
+- **Rotate one operator:** press „Nové prihlasovacie údaje" in Nastavenia → Telefonovanie → Operátori (or `POST /api/telephony/operators/{id}/credential { "rotate": true }`). The route mints a new credential, **deletes the superseded one at Telnyx** and revokes the browser session; the audit row carries both ids (`credentialId`, `revokedCredentialId`). A delete Telnyx refuses answers `502`: the old identity is then still registerable and has to be removed in the portal by hand.
+- **Kick a stale tab:** issuing a new token rotates `device_session_id`; the previous tab's next heartbeat gets `409` and disconnects with a Slovak message. Only one active device per operator per environment is allowed. Note that this alone is cooperative — a tab that never sends the heartbeat keeps its registration until its token expires (24 h).
+- **Departing employee:** press „Odpojiť telefón" (`POST /api/telephony/operators/{id}/disconnect`) and deactivate the profile. The disconnect deletes the Telnyx credential and clears `telnyx_credential_id`/`sip_username`, so no token minted earlier can re-register; the audit row records `deletedCredentialId`. If the response is `502`, delete the credential in the Telnyx portal before the profile is deactivated.
 
 ## 5. Adding a phone number (line)
 
@@ -146,7 +163,7 @@ and remember that re-running the seed does **not** overwrite it (`on conflict (i
 | --- | --- | --- |
 | Daily spend, per-minute destination price, concurrency, destination whitelist | Telnyx outbound voice profile (one per environment) | prod 20 USD/day, concurrency 10, EU27; dev 2 USD/day, concurrency 4, SK+CZ |
 | `max_ring_fanout` (legs dialled per ring step) | `motorist_telephony_settings` | 8 |
-| `max_concurrent_legs` (per organisation) | `motorist_telephony_settings` | 9 |
+| `max_concurrent_legs` (per organisation, **includes the caller's own leg**, so it must stay ≥ `max_ring_fanout + 1`) | `motorist_telephony_settings` | 9 |
 | `daily_leg_soft_cap` (enforced on operator-initiated legs) | `motorist_telephony_settings` | seeded value (500) |
 | `park_max_minutes` (park guard before the callback prompt) | `motorist_telephony_settings` | 30 |
 | `destination_allowlist` (dial prefixes) | `motorist_telephony_settings` | SK, CZ |

@@ -133,6 +133,9 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       const id = nextId("cred");
       return { id, sipUsername: `gencred${id.replace(/\D/g, "")}`, sipPassword: "secret", expiresAt: params.expiresAt ?? null, raw: {} };
     },
+    async deleteTelephonyCredential(credentialId) {
+      record("deleteTelephonyCredential", { credentialId });
+    },
     async mintCredentialToken(credentialId) {
       record("mintCredentialToken", { credentialId });
       // Unsigned JWT with a 24 h expiry relative to now.

@@ -4,7 +4,7 @@ import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
-import { normalizeE164 } from "../phone/normalize-e164";
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { effectsDeps, runSessionEvent, type SessionRunnerDeps } from "../session-runner";
 import { recordCallEvent, type CommandOutcome } from "../state/effects";

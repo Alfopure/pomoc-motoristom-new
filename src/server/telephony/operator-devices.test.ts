@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 
 import { credentialName, decodeJwtExpiry, disconnectDevice, ensureOperatorCredential, issueWebphoneToken, OperatorDeviceError, touchDevice, type DeviceDeps } from "./operator-devices";
+import { TelnyxCommandError } from "./telnyx/client";
 
 function deps(h: ReturnType<typeof createTelephonyHarness>, overrides: Partial<DeviceDeps> = {}): DeviceDeps {
   return { admin: h.admin, telnyx: h.telnyx.client, environment: "development", now: () => h.now(), ...overrides };
@@ -127,8 +128,56 @@ describe("operator devices", () => {
     expect(await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o4, deviceSessionId: "x" })).toEqual({ ok: false, reason: "unknown_device" });
 
     const disconnected = await disconnectDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
-    expect(disconnected).toMatchObject({ registration_state: "unregistered", device_seen_at: null });
+    expect(disconnected?.device).toMatchObject({ registration_state: "unregistered", device_seen_at: null });
     expect(await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: issued.deviceSessionId })).toEqual({ ok: false, reason: "stale_session" });
+  });
+
+  it("deletes the credential at Telnyx when the phone is disconnected, so a stale token cannot re-register", async () => {
+    const h = createTelephonyHarness();
+    const before = h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)!;
+    expect(before.telnyx_credential_id).toBeTruthy();
+
+    const result = await disconnectDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
+
+    expect(result?.deletedCredentialId).toBe(before.telnyx_credential_id);
+    expect(h.telnyx.of("deleteTelephonyCredential")[0].params).toEqual({ credentialId: before.telnyx_credential_id });
+    // The SIP identity is gone from the row as well: the next login provisions a new one.
+    expect(result?.device).toMatchObject({ telnyx_credential_id: null, sip_username: null });
+  });
+
+  it("keeps the credential on the rotate path and reports a failed Telnyx delete as 502", async () => {
+    const h = createTelephonyHarness();
+    const kept = await disconnectDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, keepCredential: true });
+    expect(kept?.deletedCredentialId).toBeNull();
+    expect(h.telnyx.of("deleteTelephonyCredential")).toHaveLength(0);
+
+    const other = createTelephonyHarness();
+    other.telnyx.failNext("deleteTelephonyCredential", "credential delete refused");
+    await expect(disconnectDevice(deps(other), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 502 });
+    // The browser session is revoked either way; only the provider side failed.
+    expect(other.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.device_session_id).toMatch(/^revoked:/);
+  });
+
+  it("treats an already-deleted credential as revoked instead of bricking the phone", async () => {
+    const h = createTelephonyHarness();
+    // The ordinary renewal path deletes the superseded credential too. If
+    // Telnyx already expired it (or somebody removed it in the portal), a 404
+    // means access is revoked — failing here would leave the operator unable to
+    // get a token at all.
+    h.telnyx.failNext("deleteTelephonyCredential", new TelnyxCommandError({ code: "resource_not_found", status: 404, detail: "not found" }));
+    const result = await disconnectDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
+    expect(result?.device).toMatchObject({ telnyx_credential_id: null, sip_username: null });
+  });
+
+  it("deletes the superseded credential when a manager regenerates one", async () => {
+    const h = createTelephonyHarness();
+    const first = await ensureOperatorCredential(deps(h), { organizationId: ORG, profileId: PROFILES.o3 });
+    const rotated = await ensureOperatorCredential(deps(h), { organizationId: ORG, profileId: PROFILES.o3, force: true });
+
+    expect(rotated.telnyx_credential_id).not.toBe(first.telnyx_credential_id);
+    // Without the delete, "new credentials" would only rename the identity: the
+    // old one keeps registering and its 24 h JWT keeps working.
+    expect(h.telnyx.of("deleteTelephonyCredential")[0].params).toEqual({ credentialId: first.telnyx_credential_id });
   });
 
   it("wraps database failures in OperatorDeviceError", async () => {
