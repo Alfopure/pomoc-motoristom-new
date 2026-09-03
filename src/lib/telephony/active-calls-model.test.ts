@@ -51,6 +51,7 @@ function payload(overrides: Partial<ActiveCallsPayload> = {}): ActiveCallsPayloa
   return {
     checkedAt: "2026-09-03T08:05:00.000Z",
     configured: true,
+    organizationId: "8c2f9b1e-0f3d-4c1a-9f61-3b2c1d4e5f60",
     actorProfileId: ME,
     calls: [],
     waiting: [],

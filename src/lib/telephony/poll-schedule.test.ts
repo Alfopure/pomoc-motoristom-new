@@ -4,10 +4,55 @@ import {
   ACTIVE_CALL_POLL_MS,
   activeCallPollDelayMs,
   POLL_BACKOFF_MAX_MS,
+  REALTIME_ACTIVE_CALL_POLL_MS,
   supportPollDelayMs,
   takeoverPollDelayMs,
   telephonyPollActivity,
 } from "./poll-schedule";
+
+describe("poll cadence with Realtime connected", () => {
+  it("relaxes to 3 s while engaged and 10 s while idle", () => {
+    // Broadcast delivers the change; polling is only the safety net now.
+    expect(activeCallPollDelayMs({ activity: "in_call", documentHidden: false, realtimeConnected: true })).toBe(3_000);
+    expect(activeCallPollDelayMs({ activity: "ringing", documentHidden: false, realtimeConnected: true })).toBe(3_000);
+    expect(activeCallPollDelayMs({ activity: "idle", documentHidden: false, realtimeConnected: true })).toBe(10_000);
+  });
+
+  it("never polls faster than the polling-only cadence", () => {
+    for (const activity of ["in_call", "ringing", "idle"] as const) {
+      for (const documentHidden of [false, true]) {
+        expect(activeCallPollDelayMs({ activity, documentHidden, realtimeConnected: true }))
+          .toBeGreaterThanOrEqual(activeCallPollDelayMs({ activity, documentHidden }));
+      }
+    }
+  });
+
+  it("returns to the fast cadence the moment the channel is not connected", () => {
+    // CLOSED / CHANNEL_ERROR must be indistinguishable from "never connected":
+    // a stale console during a live call is the failure we cannot ship.
+    expect(activeCallPollDelayMs({ activity: "in_call", documentHidden: false, realtimeConnected: false })).toBe(750);
+    expect(activeCallPollDelayMs({ activity: "idle", documentHidden: false, realtimeConnected: false })).toBe(2_000);
+  });
+
+  it("still keeps a hidden tab slower than a visible one", () => {
+    expect(activeCallPollDelayMs({ activity: "idle", documentHidden: true, realtimeConnected: true }))
+      .toBe(REALTIME_ACTIVE_CALL_POLL_MS.idleHidden);
+    expect(REALTIME_ACTIVE_CALL_POLL_MS.idleHidden).toBeGreaterThan(REALTIME_ACTIVE_CALL_POLL_MS.idleVisible);
+  });
+
+  it("keeps backing off on failures while connected", () => {
+    const healthy = activeCallPollDelayMs({ activity: "idle", documentHidden: false, realtimeConnected: true });
+    const failing = activeCallPollDelayMs({
+      activity: "idle",
+      documentHidden: false,
+      realtimeConnected: true,
+      consecutiveFailures: 3,
+      random: () => 0.5,
+    });
+    expect(failing).toBeGreaterThan(healthy);
+    expect(failing).toBeLessThanOrEqual(POLL_BACKOFF_MAX_MS);
+  });
+});
 
 describe("active call poll cadence", () => {
   it("keeps a live call in a visible tab at the original 750 ms", () => {

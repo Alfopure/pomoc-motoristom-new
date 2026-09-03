@@ -16,6 +16,7 @@ import {
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { activeCallPollDelayMs, telephonyPollActivity } from "@/lib/telephony/poll-schedule";
+import { subscribeTelephonyRealtime } from "@/lib/telephony/realtime-client";
 import {
   deriveTelephonyOperatorPresences,
   type TelephonyAvailabilityAction,
@@ -97,6 +98,12 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const [degraded, setDegraded] = useState<Set<string>>(() => new Set());
   const webphoneRef = useRef<TelnyxWebphone | null>(null);
   const refreshRef = useRef<(() => void) | null>(null);
+  // Read inside the poll loop rather than through state: a reconnect must not
+  // restart the poll effect (it would fire an extra request every time).
+  const realtimeConnectedRef = useRef(false);
+  // The console learns its organisation from the first snapshot; the Realtime
+  // topic is keyed on it, so the channel opens only after that answer.
+  const organizationId = snapshot.organizationId;
 
   // --- browser phone ---------------------------------------------------------
 
@@ -125,11 +132,18 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     let cancelled = false;
     let timeoutId: number | undefined;
     let inFlight = false;
+    // A Realtime doorbell that rings while a snapshot request is in flight
+    // describes a change that answer may predate, so it queues one more read
+    // instead of being dropped until the next poll tick.
+    let coalesced = false;
     let failures = 0;
     let activity: Parameters<typeof activeCallPollDelayMs>[0]["activity"] = "idle";
 
     async function load() {
-      if (inFlight) return;
+      if (inFlight) {
+        coalesced = true;
+        return;
+      }
       inFlight = true;
       try {
         const result = await telephonyJson<ActiveCallsPayload & { error?: string }>("/api/telephony/calls/active", {
@@ -153,6 +167,10 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         failures += 1;
       } finally {
         inFlight = false;
+        if (coalesced && !cancelled) {
+          coalesced = false;
+          void load();
+        }
       }
     }
 
@@ -161,7 +179,12 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       timeoutId = window.setTimeout(async () => {
         await load();
         schedule();
-      }, activeCallPollDelayMs({ activity, documentHidden: document.visibilityState === "hidden", consecutiveFailures: failures }));
+      }, activeCallPollDelayMs({
+        activity,
+        documentHidden: document.visibilityState === "hidden",
+        consecutiveFailures: failures,
+        realtimeConnected: realtimeConnectedRef.current,
+      }));
     }
 
     const refresh = () => {
@@ -184,6 +207,28 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     };
   }, [configured, enabled]);
+
+  // --- realtime --------------------------------------------------------------
+
+  // Supabase Broadcast is a doorbell, never a data source: every message just
+  // refetches the snapshot above. While the channel is connected the poll
+  // relaxes to 3 s / 10 s; the moment it closes or errors the console is back
+  // on the 750 ms / 2 s cadence, so a dead socket costs reads, not correctness.
+  useEffect(() => {
+    if (!enabled || configured !== true || !organizationId) return;
+    realtimeConnectedRef.current = false;
+    const unsubscribe = subscribeTelephonyRealtime({
+      organizationId,
+      onChange: () => refreshRef.current?.(),
+      onStatus: (status) => {
+        realtimeConnectedRef.current = status === "connected";
+      },
+    });
+    return () => {
+      realtimeConnectedRef.current = false;
+      unsubscribe();
+    };
+  }, [configured, enabled, organizationId]);
 
   // --- presence --------------------------------------------------------------
 

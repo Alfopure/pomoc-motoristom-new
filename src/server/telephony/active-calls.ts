@@ -63,6 +63,8 @@ export type ActiveCallView = {
 export type ActiveCallsSnapshot = {
   checkedAt: string;
   configured: boolean;
+  /** Topic key for the Realtime channel the console subscribes to (design §2.4). */
+  organizationId: string;
   actorProfileId: string;
   calls: ActiveCallView[];
   waiting: ActiveCallView[];
@@ -190,6 +192,7 @@ export async function loadActiveCalls(
   return {
     checkedAt: now.toISOString(),
     configured: deps.configured,
+    organizationId,
     actorProfileId: actor.profileId,
     calls,
     waiting: calls.filter((call) => WAITING_STATES.has(call.state)),

@@ -6,6 +6,10 @@ const migration = readFileSync(
   new URL("../supabase/migrations/20260903100000_telnyx_telephony_foundation.sql", import.meta.url),
   "utf8",
 );
+const realtimeMigration = readFileSync(
+  new URL("../supabase/migrations/20260915100000_telephony_realtime.sql", import.meta.url),
+  "utf8",
+);
 const seed = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
 const seedScript = readFileSync(new URL("../scripts/seed-demo-data.mjs", import.meta.url), "utf8");
 
@@ -163,8 +167,43 @@ test("registers updated_at triggers for every table with an updated_at column", 
   }
 });
 
+test("broadcasts telephony changes to the private organisation topic", () => {
+  const fn = realtimeMigration.match(
+    /create or replace function app_private\.motorist_broadcast_telephony_change\(\)[\s\S]*?\$\$;/,
+  );
+  assert.ok(fn, "the broadcast trigger function is not defined");
+  assert.match(fn[0], /security definer/);
+  assert.match(fn[0], /set search_path = ''/);
+  assert.match(fn[0], /realtime\.broadcast_changes\(/);
+  assert.match(fn[0], /'org:' \|\| v_organization_id::text \|\| ':telephony'/);
+  // OLD/NEW must never be touched outside their own operation.
+  assert.match(fn[0], /if tg_op = 'DELETE' then\n\s+v_organization_id := old\.organization_id;/);
+
+  for (const table of ["motorist_call_sessions", "motorist_call_legs", "motorist_operator_presence"]) {
+    assert.ok(new RegExp(`'${table}',?\\n`).test(realtimeMigration), `${table} must get a broadcast trigger`);
+  }
+  assert.match(
+    realtimeMigration,
+    /create trigger %I after insert or update or delete on public\.%I for each row execute function app_private\.motorist_broadcast_telephony_change\(\)/,
+  );
+});
+
+test("authorises the private topic through organisation membership only", () => {
+  assert.match(realtimeMigration, /create policy motorist_telephony_broadcast_read\n\s+on realtime\.messages\n\s+for select\n\s+to authenticated/);
+  assert.match(realtimeMigration, /extension = 'broadcast'/);
+  assert.match(
+    realtimeMigration,
+    /app_private\.motorist_is_org_member\(split_part\(realtime\.topic\(\), ':', 2\)::uuid\)/,
+  );
+  // The uuid cast must be guarded, otherwise any other private topic raises.
+  assert.match(realtimeMigration, /when realtime\.topic\(\) ~ '\^org:\[0-9a-fA-F\]\{8\}/);
+  assert.match(realtimeMigration, /drop policy if exists motorist_telephony_broadcast_read on realtime\.messages/);
+  // Broadcast only: `postgres_changes` publications must not be touched.
+  assert.doesNotMatch(realtimeMigration, /supabase_realtime|add table/);
+});
+
 test("does not reference the previous provider or dropped objects", () => {
-  for (const text of [migration, seed, seedScript]) {
+  for (const text of [migration, realtimeMigration, seed, seedScript]) {
     assert.doesNotMatch(text, /viptel/i);
     assert.doesNotMatch(text, /motorist_telephony_numbers/);
     assert.doesNotMatch(text, /sjcsrygkkmersoczpunh/);

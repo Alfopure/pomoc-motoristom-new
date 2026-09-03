@@ -75,6 +75,8 @@ export type ActiveCallPayload = {
 export type ActiveCallsPayload = {
   checkedAt: string;
   configured: boolean;
+  /** Organisation whose Realtime topic carries telephony changes. */
+  organizationId: string;
   actorProfileId: string;
   calls: ActiveCallPayload[];
   waiting: ActiveCallPayload[];
@@ -84,6 +86,7 @@ export type ActiveCallsPayload = {
 export const EMPTY_ACTIVE_CALLS: ActiveCallsPayload = {
   checkedAt: "",
   configured: false,
+  organizationId: "",
   actorProfileId: "",
   calls: [],
   waiting: [],
