@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/assert-target-project.mjs && next build",
     "build:worker": "esbuild src/worker/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/worker.mjs --alias:server-only=./src/test/stubs/server-only.ts --tsconfig=tsconfig.json",
     "build:one-shot": "esbuild src/worker/one-shot-index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/one-shot.mjs --alias:server-only=./src/test/stubs/server-only.ts --tsconfig=tsconfig.json",
     "build:production": "pnpm build && pnpm build:worker && pnpm build:one-shot",

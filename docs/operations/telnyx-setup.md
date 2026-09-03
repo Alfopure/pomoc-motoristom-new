@@ -42,3 +42,21 @@ The first number's API string carries an extra leading `0` (provider quirk); alw
 ## Environment mapping
 
 `TELNYX_CALL_CONTROL_APP_ID`, `TELNYX_CREDENTIAL_CONNECTION_ID`, `TELNYX_OUTBOUND_VOICE_PROFILE_ID` and `TELNYX_MESSAGING_PROFILE_ID` take the production IDs on `main` and the dev IDs on Preview and `dev`. `TELNYX_DEFAULT_FROM_NUMBER` is the canonical string of the Neutrálna linka. See `.env.example` for the full `TELNYX_*` block.
+
+## Development / preview resources
+
+| Resource | ID | Notes |
+|---|---|---|
+| Call Control application | 3040143024395913209 | `pomoc-motoristom-dev`; webhook on the `dev` branch alias |
+| Credential connection (webphone) | 3040143034428688382 | `pomoc-motoristom-webrtc-dev`, SRTP, Frankfurt anchor |
+| Outbound voice profile | 3040143019555686391 | SK + CZ only, daily cap 2 USD, concurrency 4 |
+| Messaging profile | 4001a062-7f1b-45cc-9daf-5e110f66db17 | SK only, alpha sender `PomocMotor` |
+
+## Webhook endpoints
+
+| Environment | Voice | SMS |
+|---|---|---|
+| Production (`main`) | `https://dispecing-test.vercel.app/api/telephony/telnyx/webhook` (failover on the project's default `*.vercel.app` alias) | `https://dispecing-test.vercel.app/api/sms/telnyx/webhook` |
+| Development (`dev` branch alias) | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/telephony/telnyx/webhook` | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/sms/telnyx/webhook` |
+
+The production outbound voice profile whitelists all EU27 destinations; the development profile only SK and CZ. Both keep a daily spend cap and a per-minute destination price ceiling.

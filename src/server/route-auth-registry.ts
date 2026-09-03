@@ -40,6 +40,8 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // commander/* majú INLINE authorize() + safeEquals (COMMANDER_SYNC_SECRET + timingSafeEqual)
   "integrations/commander/sync": { class: "bearer" },
   "integrations/commander/import-all": { class: "bearer" },
+  // telephony/cron: Vercel cron (*/5) s `Authorization: Bearer ${CRON_SECRET}` + timingSafeEqual
+  "telephony/cron": { class: "bearer", note: "Vercel cron každých 5 minút; zosúladenie a upratovanie telefónie." },
   // transcripts/process cez authorizeRecordingsSync (RECORDINGS_SYNC_SECRET + timingSafeEqual)
   "telephony/transcripts/process": { class: "bearer" },
   // occupancy-sync: INLINE authorize() + safeEquals (SWHOUSE_SYNC_SECRET + timingSafeEqual)
