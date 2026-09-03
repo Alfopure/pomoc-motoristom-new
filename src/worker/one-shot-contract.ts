@@ -1,7 +1,12 @@
 import type { Json } from "@/lib/supabase/database.types";
 import type { JobName, JobPayloadMap } from "@/server/jobs/types";
 
-export const ONE_SHOT_TARGET_REF = "sjcsrygkkmersoczpunh";
+/**
+ * The only Supabase project this copy may ever run one-shot jobs against.
+ * This is the isolated Telnyx project (Frankfurt); the original production
+ * project is deliberately not representable here (see AGENTS.md).
+ */
+export const ONE_SHOT_TARGET_REF = "ifpaeegaesdmljfkdvcn";
 
 export const ONE_SHOT_JOB_NAMES = [
   "fleet.webdispecink.positions",
@@ -192,10 +197,10 @@ function parseArguments(argv: readonly string[]) {
 
 function assertProductionRuntime(env: NodeJS.ProcessEnv, expectedProjectRef: string) {
   const targetUrl = `https://${ONE_SHOT_TARGET_REF}.supabase.co`;
-  if (expectedProjectRef !== ONE_SHOT_TARGET_REF) throw new Error("expected project is not production target");
+  if (expectedProjectRef !== ONE_SHOT_TARGET_REF) throw new Error("expected project is not this copy's target");
   if (env.NODE_ENV !== "production") throw new Error("runtime is not production");
   if (env.MOTORIST_DEV_AUTH_BYPASS !== "false") throw new Error("development auth bypass is not disabled");
-  if (!/^hetzner-[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(env.DEPLOYMENT_VERSION ?? "")) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(env.DEPLOYMENT_VERSION ?? "")) {
     throw new Error("deployment version is invalid");
   }
   if (env.SCHEDULER_ENABLED !== "false") throw new Error("scheduler is not exactly disabled");

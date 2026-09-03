@@ -562,15 +562,17 @@ async function loadAuthUsersById(supabase: ReturnType<typeof createSupabaseAdmin
   return users;
 }
 
-// Operator extensions belonged to the removed PBX provider; the next provider
-// models per-operator devices instead, so every profile reads as unassigned.
-const NO_OPERATOR_EXTENSION = "-";
+// The provider-neutral "klapka" lives on the profile itself; the previous PBX
+// extension catalogue is gone and the Telnyx model adds per-operator devices.
+function profileExtension(profile: ProfileRow | undefined): string {
+  return profile?.phone_extension?.trim() ?? "";
+}
 
 function mapOperator(profile: ProfileRow, status: OperatorStatusRow | undefined): Operator {
   return {
     id: profile.id,
     name: profile.display_name,
-    extension: NO_OPERATOR_EXTENSION,
+    extension: profileExtension(profile),
     status: status?.status ?? "offline",
   };
 }
@@ -580,6 +582,7 @@ function mapAccessUser(profile: ProfileRow, authUser: AuthUserSummary | undefine
     id: profile.id,
     name: profile.display_name,
     email: profile.email ?? authUser?.email,
+    extension: profileExtension(profile) || undefined,
     role: profile.role,
     active: profile.active,
     accessStatus: profile.access_status,
@@ -620,7 +623,7 @@ function mapAttendanceShift(
     id: row.id,
     profileId: row.profile_id,
     operatorName: profile?.display_name ?? "Neznámy operátor",
-    operatorExtension: NO_OPERATOR_EXTENSION,
+    operatorExtension: profileExtension(profile),
     templateId: row.template_id ?? undefined,
     templateLabel: template?.label,
     status: row.status,
@@ -667,7 +670,7 @@ function mapAttendanceEmployeeSettings(
     id: row.id,
     profileId: row.profile_id,
     operatorName: profile?.display_name ?? "Neznámy operátor",
-    operatorExtension: NO_OPERATOR_EXTENSION,
+    operatorExtension: profileExtension(profile),
     defaultAvailable: row.default_available,
     active: profile?.active ?? true,
     vacationDaysPerYear: row.vacation_days_per_year,
@@ -1795,8 +1798,14 @@ function getErrorMessage(error: unknown) {
 }
 
 function isIntegrationSecretConfigured(provider: IntegrationConnection["provider"]) {
-  if (provider === "telnyx" || provider === "telnyx_sms") {
-    return hasUsableEnv("TELNYX_API_KEY");
+  // A Telnyx key alone does not make telephony usable: the call/SMS paths are
+  // gated by explicit live switches, so the integration badge follows them.
+  if (provider === "telnyx") {
+    return hasUsableEnv("TELNYX_API_KEY") && process.env.TELNYX_LIVE_CALLS_ENABLED === "true";
+  }
+
+  if (provider === "telnyx_sms") {
+    return hasUsableEnv("TELNYX_API_KEY") && process.env.TELNYX_SMS_LIVE_SENDS === "true";
   }
 
   if (provider === "google_maps") {

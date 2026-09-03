@@ -864,7 +864,8 @@ function ShiftCard({ shift }: { shift: AttendanceShift }) {
             <StatusPill label={shiftStatusLabel[shift.status]} tone={shiftTone(shift.status)} />
           </div>
           <div className="mt-1 text-xs font-medium text-zinc-600">
-            {formatShiftTimeRange(shift)} · {shift.templateLabel ?? "Custom"} · klapka {shift.operatorExtension}
+            {formatShiftTimeRange(shift)} · {shift.templateLabel ?? "Custom"}
+            {shift.operatorExtension ? ` · klapka ${shift.operatorExtension}` : ""}
           </div>
           {shift.notes && <div className="mt-1 text-xs text-zinc-500">{shift.notes}</div>}
         </div>

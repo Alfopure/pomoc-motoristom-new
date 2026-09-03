@@ -16,7 +16,7 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Node
   return {
     NODE_ENV: "production",
     MOTORIST_DEV_AUTH_BYPASS: "false",
-    DEPLOYMENT_VERSION: "hetzner-test",
+    DEPLOYMENT_VERSION: "manual-test",
     SCHEDULER_ENABLED: "false",
     SUPABASE_PROJECT_REF: ONE_SHOT_TARGET_REF,
     SUPABASE_URL: TARGET_URL,

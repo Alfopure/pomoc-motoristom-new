@@ -4,7 +4,7 @@ declare
   affected_vehicle_rows integer;
 begin
   update public.vehicle_photos p
-  set public_url = 'https://sjcsrygkkmersoczpunh.supabase.co/storage/v1/object/public/vehicle-photos/' || p.storage_path
+  set public_url = 'https://ifpaeegaesdmljfkdvcn.supabase.co/storage/v1/object/public/vehicle-photos/' || p.storage_path
   where p.public_url = 'https://jcwbiulwuwyrnmzjjbgr.supabase.co/storage/v1/object/public/vehicle-photos/' || p.storage_path
     and exists (
       select 1
@@ -19,7 +19,7 @@ begin
   set photo_url = replace(
     v.photo_url,
     'https://jcwbiulwuwyrnmzjjbgr.supabase.co/storage/v1/object/public/vehicle-photos/',
-    'https://sjcsrygkkmersoczpunh.supabase.co/storage/v1/object/public/vehicle-photos/'
+    'https://ifpaeegaesdmljfkdvcn.supabase.co/storage/v1/object/public/vehicle-photos/'
   )
   where v.photo_url like 'https://jcwbiulwuwyrnmzjjbgr.supabase.co/storage/v1/object/public/vehicle-photos/%'
     and exists (

@@ -808,9 +808,11 @@ const rows = {
     event("00000000-0000-4000-8000-000000000844", "00000000-0000-4000-8000-000000000804", IDS.natalia, "case_created", "Prípad založený", "Dodávka pri Košiciach, odporúčaná špecializovaná technika.", "2026-05-22T09:22:00+02:00"),
   ],
   calls: [
-    call("00000000-0000-4000-8000-000000000901", "mock-telnyx-2026-0517", IDS.lineNeutral, "incoming", "+421 905 778 122", "Peter Kováč", "00000000-0000-4000-8000-000000000801", IDS.natalia, "2026-05-22T09:12:00+02:00", 42),
-    call("00000000-0000-4000-8000-000000000902", "mock-telnyx-2026-0518", IDS.lineAllianz, "answered", "+421 232 111 222", "Europe Assistance", "00000000-0000-4000-8000-000000000802", IDS.mango, "2026-05-22T08:42:00+02:00", 14, "2026-05-22T08:42:14+02:00", "2026-05-22T08:48:00+02:00"),
-    call("00000000-0000-4000-8000-000000000903", "mock-telnyx-2026-0521", IDS.lineNeutral, "answered", "+421 918 442 909", "Marek Sýkora", "00000000-0000-4000-8000-000000000804", IDS.natalia, "2026-05-22T09:20:00+02:00", 18, "2026-05-22T09:20:18+02:00", null),
+    // Demo calls are terminal on purpose: without a live provider nothing could
+    // end them, and only ended calls show up in the call history.
+    call("00000000-0000-4000-8000-000000000901", "mock-telnyx-2026-0517", IDS.lineNeutral, "ended", "+421 905 778 122", "Peter Kováč", "00000000-0000-4000-8000-000000000801", IDS.natalia, "2026-05-22T09:12:00+02:00", 42, "2026-05-22T09:12:42+02:00", "2026-05-22T09:19:05+02:00"),
+    call("00000000-0000-4000-8000-000000000902", "mock-telnyx-2026-0518", IDS.lineAllianz, "ended", "+421 232 111 222", "Europe Assistance", "00000000-0000-4000-8000-000000000802", IDS.mango, "2026-05-22T08:42:00+02:00", 14, "2026-05-22T08:42:14+02:00", "2026-05-22T08:48:00+02:00"),
+    call("00000000-0000-4000-8000-000000000903", "mock-telnyx-2026-0521", IDS.lineNeutral, "missed", "+421 918 442 909", "Marek Sýkora", "00000000-0000-4000-8000-000000000804", IDS.natalia, "2026-05-22T09:20:00+02:00", 18, null, "2026-05-22T09:20:18+02:00"),
   ],
   callEvents: [
     callEvent("00000000-0000-4000-8000-000000000911", "00000000-0000-4000-8000-000000000901", "mock-telnyx-2026-0517", "call.initiated", "mock-telnyx-2026-0517-initiated", "2026-05-22T09:12:00+02:00"),
@@ -1096,6 +1098,8 @@ function call(id, providerSessionId, lineId, status, callerNumber, callerName, c
     answered_at: answeredAt,
     ended_at: endedAt,
     wait_seconds: waitSeconds,
+    duration_seconds:
+      answeredAt && endedAt ? Math.max(0, Math.round((Date.parse(endedAt) - Date.parse(answeredAt)) / 1000)) : null,
     raw_payload: { source: "seed" },
   };
 }

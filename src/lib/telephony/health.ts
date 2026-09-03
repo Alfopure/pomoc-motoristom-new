@@ -15,19 +15,6 @@ export type TelephonyHealthSignal = {
   lastSuccessAt?: string;
 };
 
-export type TelephonyInfrastructureHealth = {
-  checkedAt: string;
-  websocket: TelephonyHealthSignal;
-  reconciliation: TelephonyHealthSignal;
-  lastEventAt?: string;
-  lastReconcileAt?: string;
-};
-
-export type TelephonyUiHealth = {
-  rest: TelephonyHealthSignal;
-  browserSip: TelephonyHealthSignal;
-  websocket: TelephonyHealthSignal;
-  reconciliation: TelephonyHealthSignal;
-  lastEventAt?: string;
-  lastReconcileAt?: string;
-};
+// The provider-specific health aggregates (websocket, reconciliation, browser
+// SIP) were removed with the previous provider; the Telnyx implementation adds
+// its own aggregate (webhook freshness, ledger failures, stuck sessions).

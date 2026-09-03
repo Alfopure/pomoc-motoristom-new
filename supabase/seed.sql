@@ -252,7 +252,10 @@ insert into public.motorist_calls (
   operator_id,
   case_id,
   started_at,
+  answered_at,
+  ended_at,
   wait_seconds,
+  duration_seconds,
   raw_payload
 )
 values (
@@ -261,7 +264,7 @@ values (
   'telnyx',
   'mock-telnyx-2026-0517',
   'inbound',
-  'incoming',
+  'ended',
   '+421 905 778 122',
   'Peter Kováč',
   '+421232408700',
@@ -270,7 +273,10 @@ values (
   '00000000-0000-4000-8000-000000000101',
   '00000000-0000-4000-8000-000000000801',
   '2026-05-20T18:31:00+02:00',
+  '2026-05-20T18:31:42+02:00',
+  '2026-05-20T18:38:10+02:00',
   42,
+  388,
   '{"source":"seed"}'::jsonb
 );
 
