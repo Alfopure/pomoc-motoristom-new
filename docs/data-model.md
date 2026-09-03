@@ -27,7 +27,27 @@ This application uses a `motorist_` table prefix in the `public` schema. For exa
 
 Every call row stores `provider_session_id` when available. It is the only correlation key between legs, events and the call log.
 
-The Telnyx phases add call sessions and legs, a webhook ledger, ring groups/plans, business hours, IVR menus, callback requests, operator devices and presence, pause reasons and telephony settings. Their shape is described in [`telnyx-data-contract.md`](./telnyx-data-contract.md).
+#### Telnyx runtime tables
+
+Written by the webhook pipeline through the service role; organization members may read them. Full column semantics are in [`telnyx-data-contract.md`](./telnyx-data-contract.md).
+
+- `motorist_telnyx_webhook_events`: idempotency ledger keyed by the provider `event_id` (`status` `queued|processed|failed`, `attempts`, `claimed_at`, `error`, raw `payload`). No grants to `anon`/`authenticated`; the claim RPC is the only writer.
+- `motorist_call_sessions`: one row per provider call session (`telnyx_session_id`, `state`, `version`, `lease_token`/`lease_until`, `line_id`, `ring_plan_id`, `current_step`, `conference_id`, `customer_leg_id`, `answered_by_profile_id`, `case_id`, timings, `metadata`).
+- `motorist_call_legs`: one row per provider leg (`telnyx_call_control_id` unique, `role` `customer|operator|consult|supervisor|external`, `profile_id`, numbers, `state`, `hangup_cause`, `client_state`).
+- `motorist_ring_attempts`: one row per offered ring member per step, with the attempt `result`. A partial unique index on `(profile_id) where result = 'offered'` guarantees a single open offer per operator.
+- `motorist_operator_presence` and `motorist_operator_devices`: current availability (`status`, `current_session_id`, `pause_reason_id`, `wrap_up_until`) and the browser phone registration (`telnyx_credential_id`, `sip_username`, `device_seen_at`, `device_session_id`, one row per `(profile_id, environment)`). Presence changes continue to be mirrored into `motorist_operator_statuses` for history.
+- `motorist_callback_requests`: after-hours and missed-call callbacks (`caller_number`, `source`, `status`, `session_id`, `case_id`, `claimed_by`, `due_at`).
+- `motorist_telephony_daily_usage`: per-day leg/minute/SMS counters behind the soft cap alert.
+
+#### Telnyx configuration tables
+
+Member-readable, manager/admin writable, org-scoped: `motorist_ring_groups`, `motorist_ring_group_members`, `motorist_ring_plans`, `motorist_ring_plan_steps`, `motorist_business_hours` (+ `_intervals`, `_exceptions`), `motorist_ivr_menus` (+ `motorist_ivr_options`), `motorist_pause_reasons`, `motorist_operator_telephony_settings` (per operator: default outbound line, wrap-up seconds, auto-answer, ring volume) and `motorist_telephony_settings` (one row per organization: the database kill switches `live_calls_enabled`/`sms_live_sends`, `daily_leg_soft_cap`, `park_max_minutes`, `destination_allowlist`, `max_ring_fanout`, `max_concurrent_legs`).
+
+`motorist_telephony_lines` is extended with `telnyx_number_id`, `partner_name`, `ring_plan_id`, `ivr_menu_id`, `business_hours_id`, `environment` and `active`, and is unique on `(organization_id, phone_number)`.
+
+#### Telephony RPCs
+
+`motorist_telnyx_claim_webhook_event`, `motorist_session_lease_acquire`/`_release`, `motorist_reserve_operator` and `motorist_advance_ring_step` are all `SECURITY DEFINER` with `search_path = ''`, revoked from `public`/`anon`/`authenticated` and granted to `service_role` only. They exist because PostgREST cannot hold a transaction across the TypeScript reducer, so serialization and atomic claims must live inside single statements.
 
 ### Cases
 
@@ -56,13 +76,19 @@ Calls and cases are deliberately separate. A call can stay unassigned, be linked
 
 ### Runtime
 
-- `motorist_job_controls`, `motorist_job_runs`, `motorist_job_incidents`, `motorist_worker_status`: job runtime ledger for manual one-shot jobs and the cron; `motorist_worker_status.last_webhook_at` records the freshness of the provider webhook stream.
+- `motorist_job_controls`, `motorist_job_runs`, `motorist_job_incidents`, `motorist_worker_status`: job runtime ledger for manual one-shot jobs and the cron; `motorist_worker_status.last_webhook_at` records the freshness of the provider webhook stream. Telephony uses the job control rows `telephony.ring.sweep`, `telephony.sessions.stuck`, `telephony.ledger.prune` (seeded disabled) and `telephony.telnyx.reconcile`, and raises incidents under `telephony.telnyx.webhook|commands|actions`.
 
 ### Audit
 
 - `motorist_audit_log`: actor, action, entity, before/after payload references, source, IP/user-agent where available.
 
 Audit must cover case changes, call-to-case linking, SMS sends, recording access, integration setting changes, branch/fleet changes, and security-sensitive admin actions.
+
+## Retention
+
+- `motorist_telnyx_webhook_events`: `processed` rows are deleted after 30 days and the `payload` of high-volume, low-value events (`call.playback.*`, `call.speak.*`, `call.cost`) is nulled after 7 days, by the `telephony.ledger.prune` job on the 5-minute cron.
+- `motorist_calls.raw_latest_payload` is nulled after 30 days and `motorist_call_events.raw_payload` after 90 days.
+- These payloads contain caller numbers, so retention is a GDPR Art. 5(1)(e) storage-limitation control rather than housekeeping. Recording and transcripts stay disabled for the Telnyx rollout.
 
 ## Status Defaults
 
@@ -78,6 +104,8 @@ Call statuses:
 - `failed`
 
 Case statuses remain aligned with the existing domain model: `new`, `triage`, `open`, `waiting_for_client`, `scheduled`, `assigned`, `dispatched`, `in_progress`, `waiting_for_docs`, `completed_assisted`, `completed_no_assistance`, `rejected`, `cancelled`, `futile_trip`.
+
+Call session states (`motorist_call_sessions.state`): `received`, `greeting`, `ivr`, `ringing`, `talking`, `held`, `consulting`, `conference`, `parked`, `waiting`, `wrap_up`, `after_hours`, `callback_offered`, `missed`, `failed`, `ended`. `motorist_calls.status` is derived from the session state and direction; terminal call statuses are never overwritten.
 
 Operator statuses:
 

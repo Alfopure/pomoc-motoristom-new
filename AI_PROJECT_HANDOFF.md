@@ -74,9 +74,11 @@ The project is a modular monolith: UI, API handlers, business services, provider
 | `src/server/access-policy.ts` | Role and access-management rules. |
 | `src/server/telephony-workflow.ts` | Caller matching, call-to-case linking and call outcomes (provider-neutral). |
 | `src/server/telephony-directory.ts` | Contact directory and favourites for the phone panel. |
-| `src/server/telephony/` | Call history loading, transcript processing, and the bearer guard for the transcript job route. Telnyx modules land here in Phase 2. |
-| `src/server/sms-workflow.ts` | Case and custom SMS workflow behind the `SmsTransport` seam (`notConfiguredTransport` until Telnyx). |
-| `src/lib/telephony/` | Browser-side telephony helpers: phone normalization, presence derivation, polling schedule, request helper, directory types, ringtone, and the not-configured seam. |
+| `src/server/telephony/` | Call history loading, transcript processing, the transcript-job bearer guard, and the Telnyx stack: `telnyx/` (REST client, Ed25519 signature, client state, command ids, webhook ledger, event processor), `state/` (event parsing, pure reducer, effects), `routing/` (business hours, eligibility, ring plans, reservation), plus `call-actions.ts`, `presence-service.ts`, `operator-devices.ts`, `active-calls.ts`, `session-runner.ts`, `cron-jobs.ts`, `runtime.ts`. |
+| `src/server/sms-workflow.ts` + `src/lib/integrations/telnyx/sms-client.ts` | SMS workflow behind the `SmsTransport` seam and the Telnyx transport that implements it. |
+| `src/test/fake-supabase.ts`, `src/test/fake-telnyx.ts`, `src/test/telephony-harness.ts` | Offline test harness: in-memory Supabase (queries + the telephony RPCs) and a fake Telnyx client. Telephony tests never touch the network. |
+| `src/lib/telephony/` | Browser-side telephony: phone normalization, presence derivation, polling schedule, request helper, directory types, ringtone, the not-configured seam, plus `telnyx-webphone.ts`/`webphone-model.ts` (WebRTC registration and its pure state), `active-calls-model.ts` and `realtime-client.ts`. |
+| `src/components/dispatch/PhoneBar.tsx`, `useTelephonyConsole.ts`, `phone-bar-model.ts` | Operator phone bar, the hook that owns webphone + polling + Realtime + call actions, and the pure view helpers behind them. |
 | `src/lib/integrations/webdispecink/` | WebDispecink provider adapter. |
 | `src/server/integrations/` | Server-side Commander, SWHouse, and other provider services. |
 | `src/server/jobs/` | Job registry and schedule for fleet syncs, notifications and transcript processing. |
@@ -84,7 +86,7 @@ The project is a modular monolith: UI, API handlers, business services, provider
 | `supabase/migrations/` | Ordered database schema and RLS changes. |
 | `scripts/` | Demo seed and WebDispecink discovery helpers. |
 | `tests/`, `e2e/`, colocated `*.test.ts` | Node contract tests, Playwright responsive test, and Vitest unit/route tests. |
-| `docs/` | Architecture, data model, integration strategy, deployment runbook and Telnyx contract. Some plans may be historical. |
+| `docs/` | Architecture, data model, integration strategy, deployment runbook, the Telnyx data contract and the Telnyx operations runbook. Some plans may be historical. |
 
 ## Application entry and data flow
 
@@ -147,7 +149,7 @@ Principal table groups include:
 
 - Organization and people: `motorist_organizations`, `motorist_profiles`, organization-profile/access tables, `motorist_operator_statuses`.
 - Cases: `motorist_cases`, case contacts/vehicles, `motorist_case_tasks`, `motorist_case_events`.
-- Telephony: `motorist_telephony_lines`, `motorist_calls`, `motorist_call_events`, `motorist_call_recordings`, `motorist_call_transcripts` (Telnyx sessions, legs, ring plans, presence and devices arrive with Phase 2).
+- Telephony: `motorist_telephony_lines`, `motorist_calls`, `motorist_call_events`, `motorist_call_recordings`, `motorist_call_transcripts`, plus the Telnyx tables (`motorist_call_sessions`, `motorist_call_legs`, `motorist_telnyx_webhook_events`, `motorist_ring_*`, `motorist_business_hours*`, `motorist_ivr_*`, `motorist_operator_presence`, `motorist_operator_devices`, `motorist_callback_requests`, `motorist_telephony_settings`).
 - Operations and maps: locations, branches, fleet assets, route estimates, external vehicle records and links.
 - Messaging/integrations: `motorist_sms_messages`, `motorist_sms_attempts`, `motorist_integration_raw_events`, `motorist_organization_integrations`, notifications.
 - Audit and runtime: `motorist_audit_log`, `motorist_job_*`, `motorist_worker_status`.
@@ -187,18 +189,20 @@ When adding a task, preserve its relationship to the case and the responsible pr
 | --- | --- |
 | Line / public number | A telephone number the customer dialled, stored in `motorist_telephony_lines` with a label and partner (e.g. `Allianz Assistance`). Preserve the dialled number exactly; resolve it to a line by exact match after E.164 normalization. |
 | Call | Logical application call in `motorist_calls`, correlated by `provider_session_id`. One conversation can span several provider legs. |
-| Session / leg (Phase 2) | Provider-side call session and its individual legs (customer, operator, consult, external). State transitions are defined on leg rows, never on "the newest call". |
-| Ring group / ring plan (Phase 2) | Application-owned routing: which operators ring, in which order, for how long, and what happens when nobody answers. The provider has no queue of its own. |
+| Session / leg | Provider-side call session and its individual legs (customer, operator, consult, external). State transitions are defined on leg rows, never on "the newest call". |
+| Ring group / ring plan | Application-owned routing: which operators ring, in which order, for how long, and what happens when nobody answers. The provider has no queue of its own. |
 | Presence | Operator availability derived from device registration, presence status and current session (`src/lib/telephony/presence.ts`). |
-| Browser phone | WebRTC registration with a per-operator credential and a short-lived server-minted token. Not implemented yet. |
+| Browser phone | WebRTC registration with a per-operator credential and a short-lived server-minted token. One active device per operator per environment; a stale heartbeat gets `409` and the tab disconnects. |
 | Profile/operator | The authenticated human. A profile is not the same as a device or a line. |
 
 ### What works today
 
-- Call history (`/api/telephony/calls/history`), caller matching (`/api/telephony/calls/match`), call-to-case linking and outcomes (`/api/telephony/calls/[id]/{link-case,outcome}`), transcripts (`/api/telephony/calls/[id]/transcript`, `/api/telephony/transcripts/process`), directory and favourites (`/api/telephony/directory/**`), QA dashboard shell (`/api/telephony/qa/dashboard`).
-- Dialing, presence changes, click-to-call from a case and SMS sending report the not-configured state through `src/lib/telephony/not-configured.ts` and `notConfiguredTransport` in `src/server/sms-workflow.ts`.
+- Provider-neutral: call history (`/api/telephony/calls/history`), caller matching (`/api/telephony/calls/match`), call-to-case linking and outcomes (`/api/telephony/calls/[id]/{link-case,outcome}`), transcripts (`/api/telephony/calls/[id]/transcript`, `/api/telephony/transcripts/process`), directory and favourites (`/api/telephony/directory/**`), QA dashboard shell (`/api/telephony/qa/dashboard`).
+- Telnyx (Phase 2): signed webhooks with a claim ledger, the call state machine over sessions and legs, ring plans/groups with business hours and an IVR entry, operator presence and devices, the browser phone (PhoneBar) with click-to-call, internal calls, hold/unhold, blind and attended transfer, park and the waiting room with pickup, outbound SMS with delivery statuses, and Realtime broadcast of call/presence changes.
+- Not yet built: the configuration UI for ring plans/hours/IVR (Phase 3), the callback queue UI, add-party/supervision and the wallboard (Phase 4), chaos tests, `telephony/health` and reconciliation (Phase 5).
+- Without `TELNYX_API_KEY` every telephony route answers `503` with the Slovak not-configured message and the UI shows the notice (`src/lib/telephony/not-configured.ts`, `notConfiguredTransport` in `src/server/sms-workflow.ts`).
 
-### Planned command path (Telnyx)
+### Command path (Telnyx)
 
 Provider-affecting actions are synchronous but guarded:
 
@@ -206,7 +210,9 @@ Provider-affecting actions are synchronous but guarded:
 2. The server validates the actor, organization, call ownership (or senior role), destination allowlist, rate limit and kill switches (`TELNYX_LIVE_CALLS_ENABLED` plus the database settings row).
 3. The server issues the Telnyx command with a deterministic `command_id` and persists the intent.
 4. The provider confirms through a signed webhook; the webhook pipeline (claim ledger, per-session lease, reducer) updates the projection.
-5. The UI refreshes through polling (later Realtime Broadcast). It must not announce success merely because a button was clicked.
+5. The UI refreshes through polling, and immediately on a Realtime Broadcast message when the channel is connected. It must not announce success merely because a button was clicked.
+
+Serialization is deliberate and load-bearing: PostgREST cannot hold a transaction across the TypeScript reducer, so per-session ordering comes from a lease RPC plus a `version` CAS, and every concurrency-critical decision (webhook claim, operator reservation, ring-step advance) is a single CAS statement in Postgres.
 
 ### Call correlation is high risk
 
@@ -259,14 +265,16 @@ Telnyx replaces the previous provider and its always-on listener. Everything run
 - signed webhooks at `/api/telephony/telnyx/webhook` and `/api/sms/telnyx/webhook` (public routes with Ed25519 verification and an idempotent claim ledger);
 - a thin REST client in `src/server/telephony/telnyx/` with timeouts and deterministic command ids;
 - a per-operator WebRTC credential and token route for the browser phone;
-- one Vercel cron (`*/5 * * * *` -> `/api/telephony/cron`, bearer `CRON_SECRET`) for reconciliation, stuck-session sweeps and ledger retention.
+- one Vercel cron (`*/5 * * * *` -> `/api/telephony/cron`, bearer `CRON_SECRET`) for the ring sweep, stuck-session detection and webhook-ledger retention.
+
+The contract (webhook handling, event classes, state machine, ring tables, command ids, retention) is [`docs/telnyx-data-contract.md`](./docs/telnyx-data-contract.md); the operational procedures (spikes, stuck call, credential rotation, adding a number, raising caps, degraded conference mode, `simulate-inbound`, flipping the kill switches) are [`docs/operations/telnyx-runbook.md`](./docs/operations/telnyx-runbook.md).
 
 Environments are isolated: dev/preview and production each have their own Call Control application, credential connection, outbound voice profile and messaging profile. Identifiers (never secrets) are listed in [`docs/operations/telnyx-setup.md`](./docs/operations/telnyx-setup.md).
 
 Feature gates are intentionally fail-closed. Important names include:
 
-- `TELNYX_LIVE_CALLS_ENABLED`
-- `TELNYX_SMS_LIVE_SENDS`
+- `TELNYX_LIVE_CALLS_ENABLED` (ANDed with `motorist_telephony_settings.live_calls_enabled`)
+- `TELNYX_SMS_LIVE_SENDS` (ANDed with `motorist_telephony_settings.sms_live_sends`)
 - `TRANSCRIPTS_ENABLED`
 - `SCHEDULER_ENABLED`
 
@@ -308,7 +316,7 @@ SWHouse provides replacement-vehicle/occupancy information. It has its own authe
 
 ### SMS and public location links
 
-SMS is server-side through `src/server/sms-workflow.ts` and the `SmsTransport` seam; the Telnyx transport (`src/lib/integrations/telnyx/sms-client.ts`) lands in Phase 2. Location sharing uses signed/tokenized public links under `src/app/l/` and `/api/public/location-links/**`. Treat location tokens like credentials: do not log them, expose their hashes, or make public routes return unrelated case data.
+SMS is server-side through `src/server/sms-workflow.ts` and the `SmsTransport` seam, implemented by `src/lib/integrations/telnyx/sms-client.ts`. The alphanumeric sender is one-way: inbound SMS cannot be received, and delivery statuses arrive at `/api/sms/telnyx/webhook`. Location sharing uses signed/tokenized public links under `src/app/l/` and `/api/public/location-links/**`. Treat location tokens like credentials: do not log them, expose their hashes, or make public routes return unrelated case data.
 
 ### Recordings, transcript, and AI
 
@@ -373,7 +381,7 @@ Verify the actual current task columns in migrations/generated types. Reports sh
 
 ### Editing phone behavior
 
-Trace the complete flow: UI -> browser hook -> API route -> access/service validation -> provider command -> provider webhook -> Supabase projection -> UI refresh. Add tests for inbound and outbound, ringing and answered, one and multiple simultaneous calls, two browser profiles, stale devices, decline, hangup, and transfer. Until Telnyx lands, keep the not-configured mode truthful: no optimistic success anywhere.
+Trace the complete flow: UI -> `useTelephonyConsole` -> API route -> `call-actions`/`event-processor` -> reducer (`state/transitions.ts`) -> effects -> Telnyx command -> provider webhook -> Supabase projection -> UI refresh. Keep the reducer pure and add its case to `transitions.test.ts` on the fake-Supabase harness; never call the real Telnyx API or Supabase from a test. Add tests for inbound and outbound, ringing and answered, one and multiple simultaneous calls, two browser profiles, stale devices, decline, hangup, and transfer. Keep the not-configured and kill-switch modes truthful: no optimistic success anywhere.
 
 ### Editing a provider integration
 
@@ -451,7 +459,8 @@ For telephony changes:
 - [`docs/data-model.md`](./docs/data-model.md) — table-level model.
 - [`docs/domain-model.md`](./docs/domain-model.md) — business entities and statuses.
 - [`docs/integration-strategy.md`](./docs/integration-strategy.md) — provider boundaries.
-- [`docs/telnyx-data-contract.md`](./docs/telnyx-data-contract.md) — telephony contract and phase status.
+- [`docs/telnyx-data-contract.md`](./docs/telnyx-data-contract.md) — telephony webhook contract, state machine, ring tables and retention.
+- [`docs/operations/telnyx-runbook.md`](./docs/operations/telnyx-runbook.md) — telephony operations: spikes, stuck calls, kill switches, credential rotation, caps.
 - [`docs/operations/telnyx-setup.md`](./docs/operations/telnyx-setup.md) — Telnyx resource identifiers.
 - [`docs/deployment-vercel.md`](./docs/deployment-vercel.md) — Vercel environments and release behavior.
 
@@ -461,4 +470,4 @@ For telephony changes:
 
 ---
 
-Last reviewed against the repository on 2026-09-02 (Phase 0 of the Telnyx rollout). Revalidate rapidly changing telephony and deployment details before acting.
+Last reviewed against the repository on 2026-09-03 (Phase 2 of the Telnyx rollout). Revalidate rapidly changing telephony and deployment details before acting.
