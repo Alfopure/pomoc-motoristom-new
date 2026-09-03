@@ -655,7 +655,6 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
       clientState,
       linkTo: customer.telnyx_call_control_id,
       timeoutSecs: attempt.ringSecs,
-      parkAfterUnbridge: "self",
       attempt: { stepIndex, profileId: attempt.profileId, externalNumber: attempt.externalNumber },
     });
     if (attempt.profileId) ringingProfileIds.push(attempt.profileId);
@@ -1437,7 +1436,6 @@ function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): Red
     clientState: { sid: b.session.id, role: "operator", operatorId: event.picker.profileId, intent: "pickup", autoAnswer: true },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: PICKUP_TIMEOUT_SECS,
-    parkAfterUnbridge: "self",
     autoAnswer: true,
   };
   b.cmd(dial);
@@ -1519,7 +1517,6 @@ function appConsult(b: TransitionBuilder, customer: LegRow, event: AppEvent): Re
     clientState: target.kind === "operator" ? { sid: b.session.id, role: "consult", operatorId: target.profileId, intent: "consult" } : { sid: b.session.id, role: "consult", intent: "consult" },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: CONSULT_TIMEOUT_SECS,
-    parkAfterUnbridge: "self",
   };
   b.cmd(dial);
   b.setState("consulting").patchSession({ hold_started_at: b.session.hold_started_at ?? b.nowIso });

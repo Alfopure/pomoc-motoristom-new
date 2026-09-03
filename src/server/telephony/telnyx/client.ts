@@ -119,7 +119,6 @@ export type DialParams = {
   bridgeIntent?: boolean;
   bridgeOnAnswer?: boolean;
   preventDoubleBridge?: boolean;
-  parkAfterUnbridge?: "self";
   customHeaders?: Array<{ name: string; value: string }>;
   superviseCallControlId?: string;
   supervisorRole?: "barge" | "whisper" | "monitor";
@@ -462,6 +461,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       if (!connectionId) {
         throw new TelnyxCommandError({ code: "missing_connection_id", status: 400, detail: "TELNYX_CALL_CONTROL_APP_ID is not set", commandId: params.commandId });
       }
+      // `park_after_unbridge` deliberately absent: the dial endpoint rejects it
+      // outright ("The 'park_after_unbridge' parameter is invalid", code 10000),
+      // for every value. It belongs to the bridge and transfer commands only.
       const response = await request<unknown>("POST", "/calls", {
         commandId: params.commandId,
         body: compact({
@@ -478,7 +480,6 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
           bridge_intent: params.bridgeIntent,
           bridge_on_answer: params.bridgeOnAnswer,
           prevent_double_bridge: params.preventDoubleBridge,
-          park_after_unbridge: params.parkAfterUnbridge,
           custom_headers: headers(params.customHeaders),
           supervise_call_control_id: params.superviseCallControlId,
           supervisor_role: params.supervisorRole,

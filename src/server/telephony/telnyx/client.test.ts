@@ -121,6 +121,23 @@ describe("createTelnyxClient", () => {
     });
   });
 
+  it("never sends park_after_unbridge on a dial, whatever the caller passes", async () => {
+    const { impl, calls } = makeFetch([jsonResponse(200, { data: { call_control_id: "cc-p", call_leg_id: "leg-p", call_session_id: "sess-p" } })]);
+    const { client } = makeClient(impl);
+
+    // Telnyx rejects the whole request with code 10000 when the dial endpoint
+    // receives this parameter; it is only valid on bridge and transfer.
+    await client.dial({
+      commandId: "cmd-park",
+      to: "sip:gencred1@sip.telnyx.com",
+      from: "+421232408718",
+      ...({ parkAfterUnbridge: "self" } as unknown as Record<string, never>),
+    });
+
+    expect(calls[0].body).not.toHaveProperty("park_after_unbridge");
+    expect(calls[0].body).toEqual({ to: "sip:gencred1@sip.telnyx.com", from: "+421232408718", connection_id: "app-1", command_id: "cmd-park" });
+  });
+
   it("refuses call-creating commands when the kill switch is off and never touches the network", async () => {
     const { impl } = makeFetch([]);
     const { client } = makeClient(impl, { liveGate: { callsEnabled: false, smsEnabled: false } });

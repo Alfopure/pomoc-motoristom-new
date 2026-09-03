@@ -591,7 +591,6 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     sipRegion: "Europe",
     mediaEncryption: isSip ? "SRTP" : undefined,
     customHeaders: command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" }] : undefined,
-    parkAfterUnbridge: command.parkAfterUnbridge,
     fromDisplayName: command.fromDisplayName,
   });
   ctx.dialResults.set(command.commandId, result);
