@@ -200,6 +200,7 @@ export type PlaybackStartParams = CallLegRef & {
 };
 export type PlaybackStopParams = CallLegRef & { overlay?: boolean; stop?: "current" | "all"; clientState?: string };
 export type SendDtmfParams = CallLegRef & { digits: string; durationMillis?: number; clientState?: string };
+export type GatherStopParams = CallLegRef & { clientState?: string };
 
 export type CreateConferenceParams = {
   commandId: string;
@@ -258,6 +259,7 @@ export type TelnyxClient = {
   transfer(params: TransferParams): Promise<void>;
   gatherUsingAudio(params: GatherUsingAudioParams): Promise<void>;
   gatherUsingSpeak(params: GatherUsingSpeakParams): Promise<void>;
+  gatherStop(params: GatherStopParams): Promise<void>;
   speak(params: SpeakParams): Promise<void>;
   playbackStart(params: PlaybackStartParams): Promise<void>;
   playbackStop(params: PlaybackStopParams): Promise<void>;
@@ -564,6 +566,10 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         terminating_digit: params.terminatingDigit,
         valid_digits: params.validDigits,
       });
+    },
+
+    gatherStop(params) {
+      return callAction(params.callControlId, "gather_stop", params.commandId, { client_state: params.clientState });
     },
 
     speak(params) {

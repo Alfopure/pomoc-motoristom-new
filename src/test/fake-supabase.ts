@@ -50,20 +50,54 @@ type OrderSpec = { column: string; ascending: boolean; nullsFirst: boolean };
 
 type ErrorInjection = { table: string; operation: FakeOperation | "*"; error: FakeError };
 
+/**
+ * A unique key is a column list, optionally restricted to rows matching
+ * `where` (emulates partial unique indexes such as "one open offer per
+ * operator").
+ */
+export type UniqueKeySpec = string[] | { columns: string[]; where?: (row: FakeRow) => boolean };
+
+function uniqueColumns(spec: UniqueKeySpec): string[] {
+  return Array.isArray(spec) ? spec : spec.columns;
+}
+
+function uniqueApplies(spec: UniqueKeySpec, row: FakeRow): boolean {
+  return Array.isArray(spec) || !spec.where ? true : spec.where(row);
+}
+
 /** Natural keys used to emulate unique constraints of the telephony schema. */
-export const DEFAULT_UNIQUE_KEYS: Record<string, string[][]> = {
+export const DEFAULT_UNIQUE_KEYS: Record<string, UniqueKeySpec[]> = {
   motorist_telnyx_webhook_events: [["event_id"]],
   motorist_call_sessions: [["id"], ["telnyx_session_id"]],
   motorist_call_legs: [["id"], ["telnyx_call_control_id"], ["telnyx_call_leg_id"]],
-  motorist_ring_attempts: [["id"], ["session_id", "step_index", "profile_id"], ["session_id", "step_index", "external_number"]],
+  motorist_ring_attempts: [
+    ["id"],
+    ["session_id", "step_index", "profile_id"],
+    ["session_id", "step_index", "external_number"],
+    { columns: ["profile_id"], where: (row) => row.result === "offered" },
+  ],
   motorist_operator_presence: [["id"], ["profile_id"]],
   motorist_operator_devices: [["id"], ["profile_id", "environment"]],
   motorist_operator_telephony_settings: [["id"], ["profile_id"]],
   motorist_telephony_settings: [["id"], ["organization_id"]],
   motorist_telephony_daily_usage: [["id"], ["organization_id", "day"]],
   motorist_telephony_lines: [["id"], ["organization_id", "phone_number"]],
-  motorist_calls: [["id"]],
+  motorist_calls: [["id"], ["session_id"]],
   motorist_call_events: [["id"], ["event_fingerprint"]],
+  motorist_job_incidents: [["incident_id"], { columns: ["job_name"], where: (row) => row.status === "open" }],
+  motorist_job_controls: [["job_name"]],
+};
+
+/** Column defaults of the telephony schema that production code relies on (mirrors the migrations). */
+export const TABLE_DEFAULTS: Record<string, FakeRow> = {
+  motorist_call_sessions: { state: "received", version: 0, current_step: 0, metadata: {}, lease_token: null, lease_until: null, conference_id: null, conference_name: null, customer_leg_id: null, answered_by_profile_id: null, case_id: null, answered_at: null, ended_at: null, hold_started_at: null, parked_at: null },
+  motorist_call_legs: { state: "initiated", client_state: {}, metadata: {}, profile_id: null, hangup_cause: null, hangup_source: null, answered_at: null, bridged_at: null, ended_at: null, telnyx_call_leg_id: null },
+  motorist_ring_attempts: { result: "pending", position: 0, ring_secs: 20, leg_id: null, offered_at: null, answered_at: null, ended_at: null },
+  motorist_operator_presence: { status: "offline", current_session_id: null, pause_reason_id: null, wrap_up_until: null },
+  motorist_operator_devices: { registration_state: "unregistered", metadata: {}, device_seen_at: null, device_session_id: null },
+  motorist_calls: { recording_status: "not_requested", transcript_status: "not_requested", raw_payload: {}, raw_latest_payload: {} },
+  motorist_callback_requests: { status: "open", metadata: {} },
+  motorist_job_incidents: { status: "open", consecutive_failures: 0 },
 };
 
 export function fakeError(message: string, code = "FAKE", details: string | null = null): FakeError {
@@ -118,11 +152,11 @@ export class FakeDatabase {
   readonly tables = new Map<string, FakeRow[]>();
   readonly rpcHandlers = new Map<string, FakeRpcHandler>();
   readonly log: FakeLogEntry[] = [];
-  readonly uniqueKeys: Record<string, string[][]>;
+  readonly uniqueKeys: Record<string, UniqueKeySpec[]>;
   private readonly injections: ErrorInjection[] = [];
   private clock: () => Date;
 
-  constructor(options: { now?: () => Date; uniqueKeys?: Record<string, string[][]> } = {}) {
+  constructor(options: { now?: () => Date; uniqueKeys?: Record<string, UniqueKeySpec[]> } = {}) {
     this.clock = options.now ?? (() => new Date());
     this.uniqueKeys = { ...DEFAULT_UNIQUE_KEYS, ...(options.uniqueKeys ?? {}) };
     registerTelephonyRpcs(this);
@@ -185,18 +219,26 @@ export class FakeDatabase {
     return rows;
   }
 
-  private withDefaults(row: FakeRow): FakeRow {
-    const next: FakeRow = { ...row };
-    if (isNil(next.id)) next.id = randomUUID();
+  private withDefaults(table: string, row: FakeRow): FakeRow {
+    const next: FakeRow = { ...(TABLE_DEFAULTS[table] ?? {}), ...row };
+    if (table === "motorist_job_incidents") {
+      if (isNil(next.incident_id)) next.incident_id = randomUUID();
+    } else if (table !== "motorist_job_controls" && table !== "motorist_telnyx_webhook_events" && isNil(next.id)) {
+      next.id = randomUUID();
+    }
     if (!("created_at" in next) || isNil(next.created_at)) next.created_at = this.nowIso();
     if (!("updated_at" in next) || isNil(next.updated_at)) next.updated_at = this.nowIso();
     return next;
   }
 
   private findConflict(table: string, row: FakeRow, exclude?: FakeRow): { key: string[]; existing: FakeRow } | null {
-    for (const key of this.uniqueKeys[table] ?? [["id"]]) {
+    for (const spec of this.uniqueKeys[table] ?? [["id"]]) {
+      const key = uniqueColumns(spec);
       if (key.some((column) => isNil(row[column]))) continue;
-      const existing = this.storage(table).find((candidate) => candidate !== exclude && key.every((column) => sameValue(candidate[column], row[column])));
+      if (!uniqueApplies(spec, row)) continue;
+      const existing = this.storage(table).find(
+        (candidate) => candidate !== exclude && uniqueApplies(spec, candidate) && key.every((column) => sameValue(candidate[column], row[column])),
+      );
       if (existing) return { key, existing };
     }
     return null;
@@ -204,7 +246,7 @@ export class FakeDatabase {
 
   insert(table: string, rows: FakeRow | FakeRow[]): FakeRow[] {
     const list = Array.isArray(rows) ? rows : [rows];
-    const prepared = list.map((row) => this.withDefaults(clone(row)));
+    const prepared = list.map((row) => this.withDefaults(table, clone(row)));
     for (const row of prepared) {
       const conflict = this.findConflict(table, row);
       if (conflict) {
@@ -227,11 +269,13 @@ export class FakeDatabase {
     const results: FakeRow[] = [];
     for (const raw of list) {
       const row = clone(raw);
-      const keys = target ? [target] : this.uniqueKeys[table] ?? [["id"]];
+      const keys: UniqueKeySpec[] = target ? [target] : this.uniqueKeys[table] ?? [["id"]];
       let existing: FakeRow | undefined;
-      for (const key of keys) {
+      for (const spec of keys) {
+        const key = uniqueColumns(spec);
         if (key.some((column) => isNil(row[column]))) continue;
-        existing = this.storage(table).find((candidate) => key.every((column) => sameValue(candidate[column], row[column])));
+        if (!uniqueApplies(spec, row)) continue;
+        existing = this.storage(table).find((candidate) => uniqueApplies(spec, candidate) && key.every((column) => sameValue(candidate[column], row[column])));
         if (existing) break;
       }
       if (existing) {
@@ -580,7 +624,7 @@ export type FakeSupabase = {
   admin: SupabaseClient<Database>;
 };
 
-export function createFakeSupabase(options: { now?: () => Date; uniqueKeys?: Record<string, string[][]> } = {}): FakeSupabase {
+export function createFakeSupabase(options: { now?: () => Date; uniqueKeys?: Record<string, UniqueKeySpec[]> } = {}): FakeSupabase {
   const db = new FakeDatabase(options);
   const client: FakeSupabaseClient = {
     from(table) {

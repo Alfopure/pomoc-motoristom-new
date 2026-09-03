@@ -218,6 +218,16 @@ describe("createTelnyxClient", () => {
     await expect(client.sendDtmf({ callControlId: "cc-1", commandId: "cmd", digits: "1w2" })).rejects.toMatchObject({ code: "network", status: 502, detail: "fetch failed" });
   });
 
+  it("posts gather_stop with the command id", async () => {
+    const { impl, calls } = makeFetch([jsonResponse(200, { data: { result: "ok" } })]);
+    const { client } = makeClient(impl);
+
+    await client.gatherStop({ callControlId: "cc-1", commandId: "cmd-9" });
+
+    expect(calls[0].url).toBe("https://telnyx.test/v2/calls/cc-1/actions/gather_stop");
+    expect(calls[0].body).toEqual({ command_id: "cmd-9" });
+  });
+
   it("creates conferences and posts conference actions", async () => {
     const { impl, calls } = makeFetch([jsonResponse(200, { data: { id: "conf-1", name: "sess-1", expires_at: "2026-09-03T14:00:00Z" } }), jsonResponse(200, { data: { result: "ok" } })]);
     const { client } = makeClient(impl);
