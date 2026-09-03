@@ -54,6 +54,8 @@ const PUBLIC_ROUTES = new Set<string>([
   "/health/live", // verejný, sanitizovaný infra liveness probe
   "/health/ready", // verejný, sanitizovaný dependency readiness probe
   "/public/location-links/[token]", // verejný token link pre klienta
+  "/telephony/telnyx/webhook", // Telnyx Call Control webhook — auth = Ed25519 podpis (400 pri neplatnom)
+  "/sms/telnyx/webhook", // Telnyx messaging delivery-status webhook — auth = Ed25519 podpis
 ]);
 
 // Bearer secrety nastavíme, nech bearer/cron routes bez hlavičky vrátia 401 (nie 500).
