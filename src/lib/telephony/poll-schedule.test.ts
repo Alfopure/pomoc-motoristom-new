@@ -5,9 +5,11 @@ import {
   activeCallPollDelayMs,
   POLL_BACKOFF_MAX_MS,
   REALTIME_ACTIVE_CALL_POLL_MS,
+  callbackPollDelayMs,
   supportPollDelayMs,
   takeoverPollDelayMs,
   telephonyPollActivity,
+  wallboardPollDelayMs,
 } from "./poll-schedule";
 
 describe("poll cadence with Realtime connected", () => {
@@ -118,6 +120,32 @@ describe("support and takeover cadence", () => {
   it("keeps support reads at their original visible rate", () => {
     expect(supportPollDelayMs({ documentHidden: false })).toBe(10_000);
     expect(supportPollDelayMs({ documentHidden: true })).toBe(30_000);
+  });
+
+  it("polls the wallboard no faster than the snapshot it reads is cached", () => {
+    // The server serves one snapshot per organisation for 5 s; a faster poll
+    // would return the identical bytes to every wall display in the building.
+    expect(wallboardPollDelayMs({ documentHidden: false })).toBe(5_000);
+    expect(wallboardPollDelayMs({ documentHidden: true })).toBe(60_000);
+    // A failing endpoint backs off instead of being hammered by a screen
+    // nobody is standing in front of.
+    expect(wallboardPollDelayMs({ documentHidden: false, consecutiveFailures: 3, random: () => 0.5 })).toBeGreaterThan(5_000);
+    // While the statistics views are missing every poll aggregates raw rows, so
+    // the board asks three times less often until the migration is applied.
+    expect(wallboardPollDelayMs({ documentHidden: false, fallback: true })).toBe(15_000);
+    expect(wallboardPollDelayMs({ documentHidden: true, fallback: true })).toBe(60_000);
+  });
+
+  it("keeps the callback queue gentle and gates it on visibility", () => {
+    // A promise to ring somebody back is a tens-of-minutes affair and each poll
+    // is four Supabase queries; a console left open overnight must not run at
+    // the visible rate.
+    expect(callbackPollDelayMs({ documentHidden: false })).toBe(30_000);
+    expect(callbackPollDelayMs({ documentHidden: true })).toBe(120_000);
+    // Its base already sits at the backoff ceiling, so a failing endpoint is
+    // never polled faster than 30 s and never slower than the hidden cadence.
+    expect(callbackPollDelayMs({ documentHidden: false, consecutiveFailures: 3, random: () => 0.5 })).toBe(30_000);
+    expect(callbackPollDelayMs({ documentHidden: true, consecutiveFailures: 3, random: () => 0.5 })).toBeLessThanOrEqual(120_000);
   });
 
   it("stays fast only while a handover decision is actually open", () => {

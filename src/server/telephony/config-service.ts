@@ -8,9 +8,11 @@ import type { Database, Json } from "@/lib/supabase/database.types";
 import { COUNTRY_DIAL_PREFIXES, isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS } from "@/lib/telephony/operator-settings";
+import { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "./routing/ivr";
 import type { TelephonyEnvironment } from "./state/types";
 
 export { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS };
+export { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction };
 
 /**
  * Routing configuration read model and validated replace operations
@@ -83,6 +85,8 @@ export const MAX_ROWS_PER_SECTION = 200;
 export const MAX_MEMBERS_PER_GROUP = 50;
 export const MAX_STEPS_PER_PLAN = 20;
 export const MAX_INTERVALS_PER_SCHEDULE = 100;
+/** One digit per option, and a keypad has twelve of them. */
+export const MAX_OPTIONS_PER_MENU = 12;
 export const MAX_EXCEPTIONS_PER_SCHEDULE = 200;
 export const MAX_ALLOWLIST_ENTRIES = 100;
 
@@ -96,6 +100,14 @@ const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)(:[0-5]\d)?$/;
  */
 const CLOSE_TIME_PATTERN = /^(([01]\d|2[0-3]):([0-5]\d)|24:00)(:[0-5]\d)?$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * A prompt is either a file served from `TELNYX_MEDIA_BASE_URL`
+ * (`ivr-main.mp3`, `partners/allianz.mp3`) or an absolute https URL Telnyx can
+ * fetch. Anything else would reach `gather_using_audio` as an `audio_url` the
+ * provider rejects, which the caller hears as silence.
+ */
+const MEDIA_REF_PATTERN = /^(https:\/\/[^\s"']+|[A-Za-z0-9][A-Za-z0-9._/-]{0,199})$/;
+export const MAX_TTS_LENGTH = 600;
 
 const FALLBACK_KINDS = ["external_number", "waiting_room", "callback_prompt", "hangup_message"] as const;
 const STRATEGIES = ["all", "ordered"] as const;
@@ -163,6 +175,29 @@ export type PauseReasonInput = {
   maxMinutes?: number | null;
   sortOrder?: number;
   active?: boolean;
+};
+
+export type IvrOptionInput = {
+  id?: string | null;
+  digit: string;
+  action: IvrAction;
+  targetRingPlanId?: string | null;
+  targetNumber?: string | null;
+  label: string;
+  promptMediaUrl?: string | null;
+  ttsText?: string | null;
+};
+
+export type IvrMenuInput = {
+  id?: string | null;
+  name: string;
+  promptMediaUrl?: string | null;
+  ttsText?: string | null;
+  invalidMediaUrl?: string | null;
+  timeoutSecs: number;
+  maxTries: number;
+  active?: boolean;
+  options: IvrOptionInput[];
 };
 
 export type LinePatchInput = {
@@ -238,14 +273,40 @@ export type LineDoc = {
 };
 
 /**
+ * One IVR menu with its digit options (`IvrMenuEditor`, plan "Fáza 4").
+ *
  * `ringPlanIds` are the plans the menu's digit options route to
  * (`motorist_ivr_options.target_ring_plan_id`). Without them the plan editor
  * cannot tell that switching a plan off silently reroutes the callers who press
- * that digit: `transitions.ts` resolves the digit with
- * `(option.target_ring_plan_id && ringPlans[...]) || plan`, and an inactive plan
- * is materialised as `null`, so the `||` falls through to the line's own plan.
+ * that digit: `decideIvr` treats a target plan that could not be materialised
+ * (deleted or inactive) as missing and falls through to the line's own plan.
  */
-export type IvrMenuDoc = { id: string; name: string; active: boolean; ringPlanIds: string[] };
+export type IvrMenuDoc = {
+  id: string;
+  name: string;
+  active: boolean;
+  /** Recorded menu prompt (file name or https URL); `ttsText` is the spoken fallback. */
+  promptMediaUrl: string | null;
+  ttsText: string | null;
+  /** Played when the caller presses a digit no option owns. */
+  invalidMediaUrl: string | null;
+  timeoutSecs: number;
+  maxTries: number;
+  options: IvrOptionDoc[];
+  ringPlanIds: string[];
+};
+
+export type IvrOptionDoc = {
+  id: string;
+  digit: string;
+  action: IvrAction;
+  targetRingPlanId: string | null;
+  targetNumber: string | null;
+  label: string;
+  /** Only `callback` and `hangup` play it; see `routing/ivr.ts`. */
+  promptMediaUrl: string | null;
+  ttsText: string | null;
+};
 
 export type OperatorDoc = {
   profileId: string;
@@ -533,6 +594,43 @@ export function parsePauseReasons(value: unknown): PauseReasonInput[] {
   return parsed;
 }
 
+export function parseIvrMenus(value: unknown): IvrMenuInput[] {
+  if (!Array.isArray(value)) throw new ConfigServiceError("Zoznam IVR menu chýba alebo nie je pole.", 400, "config_invalid");
+  const issues: ValidationIssue[] = [];
+  assertSectionSize(value, "ivrMenus");
+  const parsed = value.map((raw, menuIndex) => {
+    const row = isRecord(raw) ? raw : {};
+    const path = `ivrMenus[${menuIndex}]`;
+    const options = Array.isArray(row.options) ? row.options : [];
+    assertNestedSize(options.length, MAX_OPTIONS_PER_MENU, path, "menu_too_large", `IVR menu môže mať najviac ${MAX_OPTIONS_PER_MENU} volieb.`);
+    return {
+      id: readId(row.id),
+      name: typeof row.name === "string" ? row.name.trim() : "",
+      promptMediaUrl: readText(row.promptMediaUrl),
+      ttsText: readText(row.ttsText),
+      invalidMediaUrl: readText(row.invalidMediaUrl),
+      timeoutSecs: readInteger(row.timeoutSecs) ?? Number.NaN,
+      maxTries: readInteger(row.maxTries) ?? Number.NaN,
+      active: readFlag(row, "active", true, path, issues),
+      options: options.map((rawOption) => {
+        const option = isRecord(rawOption) ? rawOption : {};
+        return {
+          id: readId(option.id),
+          digit: typeof option.digit === "string" ? option.digit.trim() : "",
+          action: (readText(option.action) ?? "") as IvrAction,
+          targetRingPlanId: readId(option.targetRingPlanId),
+          targetNumber: readText(option.targetNumber),
+          label: typeof option.label === "string" ? option.label.trim() : "",
+          promptMediaUrl: readText(option.promptMediaUrl),
+          ttsText: readText(option.ttsText),
+        };
+      }),
+    };
+  });
+  assertValid(issues);
+  return parsed;
+}
+
 /** `PATCH` bodies carry only the fields the user touched; absent ≠ null. */
 export function parseLinePatch(value: unknown): LinePatchInput {
   const row = isRecord(value) ? value : {};
@@ -598,6 +696,8 @@ export type ValidationContext = {
   businessHoursInUse: ReadonlySet<string>;
   /** Ring plans referenced by a line or an IVR option; they may not disappear. */
   ringPlansInUse: ReadonlySet<string>;
+  /** IVR menus referenced by a line; deleting one would take the menu off that number. */
+  ivrMenusInUse: ReadonlySet<string>;
   destinationAllowlist: readonly string[];
   /** The world as it is stored today; the replace merges its own section over it. */
   groups: RingGroupInput[];
@@ -619,6 +719,7 @@ export function contextFromDocument(document: RoutingDocument): ValidationContex
     businessHoursIds: new Set(document.businessHours.map((hours) => hours.id)),
     ringPlanIds: new Set(document.plans.map((plan) => plan.id)),
     businessHoursInUse: new Set(document.lines.map((line) => line.businessHoursId).filter((id): id is string => Boolean(id))),
+    ivrMenusInUse: new Set(document.lines.map((line) => line.ivrMenuId).filter((id): id is string => Boolean(id))),
     // An IVR option target is as much "in use" as a line's plan; the RPC raises
     // `ring_plan_in_use` for it, so the validator must refuse it first, with a
     // message that names the menu.
@@ -939,6 +1040,107 @@ export function validatePauseReasons(input: PauseReasonInput[]): ValidationIssue
   return issues;
 }
 
+/**
+ * Whole-section validation of the IVR menus.
+ *
+ * The rules protect what the caller hears: a digit maps to exactly one option,
+ * an option that routes somewhere has to name a target that exists, a prompt
+ * has to be a reference Telnyx can fetch, and a menu a line still uses cannot
+ * disappear (the RPC raises `ivr_menu_in_use` for the same reason).
+ */
+export function validateIvrMenus(input: IvrMenuInput[], context: ValidationContext): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const names = new Set<string>();
+  const ids = new Set<string>();
+  const optionIds = new Set<string>();
+
+  const checkMedia = (value: string | null | undefined, path: string, field: string): void => {
+    if (!value) return;
+    if (!MEDIA_REF_PATTERN.test(value)) {
+      issues.push(issue(path, `${field}_invalid`, "Nahrávka musí byť názov súboru (napr. ivr-main.mp3) alebo https adresa."));
+    }
+  };
+  const checkTts = (value: string | null | undefined, path: string): void => {
+    if (value && value.length > MAX_TTS_LENGTH) {
+      issues.push(issue(path, "tts_too_long", `Text na prečítanie môže mať najviac ${MAX_TTS_LENGTH} znakov.`));
+    }
+  };
+
+  input.forEach((menu, menuIndex) => {
+    const path = `ivrMenus[${menuIndex}]`;
+    if (!menu.name) issues.push(issue(path, "name_required", "IVR menu potrebuje názov."));
+    const key = menu.name.toLocaleLowerCase("sk");
+    if (key && names.has(key)) issues.push(issue(path, "duplicate_name", `IVR menu s názvom „${menu.name}" už existuje.`));
+    names.add(key);
+    if (menu.id) {
+      if (ids.has(menu.id)) issues.push(issue(path, "duplicate_id", "IVR menu je v zozname dvakrát."));
+      ids.add(menu.id);
+    }
+
+    checkMedia(menu.promptMediaUrl, path, "prompt");
+    checkMedia(menu.invalidMediaUrl, path, "invalid_prompt");
+    checkTts(menu.ttsText, path);
+    // Without either the caller would hear the shipped main-menu recording,
+    // which almost certainly describes different digits than this menu.
+    if (!menu.promptMediaUrl && !menu.ttsText) {
+      issues.push(issue(path, "prompt_required", "Menu potrebuje nahrávku alebo text, ktorý sa volajúcemu prečíta."));
+    }
+
+    if (!Number.isInteger(menu.timeoutSecs) || menu.timeoutSecs < MIN_IVR_TIMEOUT_SECS || menu.timeoutSecs > MAX_IVR_TIMEOUT_SECS) {
+      issues.push(issue(path, "timeout_invalid", `Čas na voľbu musí byť ${MIN_IVR_TIMEOUT_SECS} až ${MAX_IVR_TIMEOUT_SECS} sekúnd.`));
+    }
+    if (!Number.isInteger(menu.maxTries) || menu.maxTries < MIN_IVR_TRIES || menu.maxTries > MAX_IVR_TRIES) {
+      issues.push(issue(path, "tries_invalid", `Počet prehratí menu musí byť ${MIN_IVR_TRIES} až ${MAX_IVR_TRIES}.`));
+    }
+
+    const digits = new Set<string>();
+    menu.options.forEach((option, optionIndex) => {
+      const optionPath = `${path}.options[${optionIndex}]`;
+      if (option.id) {
+        if (optionIds.has(option.id)) issues.push(issue(optionPath, "duplicate_id", "Rovnaká voľba je v konfigurácii dvakrát."));
+        optionIds.add(option.id);
+      }
+      if (option.digit.length !== 1 || !IVR_DIGITS.includes(option.digit)) {
+        issues.push(issue(optionPath, "digit_invalid", "Voľba musí byť jedna klávesa: 0 až 9, * alebo #."));
+      } else if (digits.has(option.digit)) {
+        issues.push(issue(optionPath, "duplicate_digit", `Klávesa „${option.digit}" je v menu dvakrát.`));
+      }
+      digits.add(option.digit);
+
+      if (!option.label) issues.push(issue(optionPath, "label_required", "Voľba potrebuje názov, aby bolo v prehľadoch vidno, čo si volajúci vybral."));
+      checkMedia(option.promptMediaUrl, optionPath, "prompt");
+      checkTts(option.ttsText, optionPath);
+
+      if (!IVR_ACTIONS.includes(option.action)) {
+        issues.push(issue(optionPath, "action_invalid", "Neplatná akcia voľby."));
+        return;
+      }
+      if (option.action === "ring_plan") {
+        if (!option.targetRingPlanId) issues.push(issue(optionPath, "plan_required", "Vyber plán zvonenia, na ktorý voľba smeruje."));
+        else if (!context.ringPlanIds.has(option.targetRingPlanId)) issues.push(issue(optionPath, "plan_foreign", "Plán zvonenia nepatrí do tejto organizácie."));
+      } else if (option.targetRingPlanId) {
+        issues.push(issue(optionPath, "target_shape", "Plán zvonenia sa dá zvoliť len pri akcii „Plán zvonenia“."));
+      }
+
+      if (option.action === "external_number") {
+        const normalized = normalizeE164(option.targetNumber);
+        if (!normalized) issues.push(issue(optionPath, "number_invalid", "Presmerovanie na číslo potrebuje platné číslo v tvare E.164 (napr. +421900123456)."));
+        else if (!isDestinationAllowed(normalized, context.destinationAllowlist)) {
+          issues.push(issue(optionPath, "number_not_allowed", `Číslo ${normalized} nie je v povolených cieľoch organizácie.`));
+        }
+      } else if (option.targetNumber) {
+        issues.push(issue(optionPath, "target_shape", "Číslo sa dá zadať len pri akcii „Presmerovanie na číslo“."));
+      }
+    });
+  });
+
+  for (const menuId of context.ivrMenusInUse) {
+    if (!ids.has(menuId)) issues.push(issue("ivrMenus", "ivr_menu_in_use", "IVR menu používa niektorá linka, nedá sa zmazať. Najprv ho odober z čísla."));
+  }
+
+  return issues;
+}
+
 export function validateLinePatch(patch: LinePatchInput, context: ValidationContext): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (patch.label !== undefined && !patch.label.trim()) issues.push(issue("label", "label_required", "Linka potrebuje štítok."));
@@ -1090,8 +1292,8 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
     ),
     scoped<Tables["motorist_telephony_lines"]["Row"][]>(deps.admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).order("phone_number"), "Linky"),
     scoped<Tables["motorist_ivr_menus"]["Row"][]>(deps.admin.from("motorist_ivr_menus").select("*").eq("organization_id", organizationId).order("name"), "IVR menu"),
-    scoped<Array<Pick<Tables["motorist_ivr_options"]["Row"], "ivr_menu_id" | "target_ring_plan_id">>>(
-      deps.admin.from("motorist_ivr_options").select("ivr_menu_id, target_ring_plan_id").eq("organization_id", organizationId),
+    scoped<Tables["motorist_ivr_options"]["Row"][]>(
+      deps.admin.from("motorist_ivr_options").select("*").eq("organization_id", organizationId).order("digit"),
       "Voľby IVR",
     ),
     scoped<Array<Pick<Tables["motorist_profiles"]["Row"], "id" | "display_name" | "role" | "active" | "access_status">>>(
@@ -1186,16 +1388,30 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
       environment: line.environment,
       active: line.active,
     })),
-    ivrMenus: ivrMenus.map((menu) => ({
-      id: menu.id,
-      name: menu.name,
-      active: menu.active,
-      ringPlanIds: [
-        ...new Set(
-          ivrOptions.filter((option) => option.ivr_menu_id === menu.id && option.target_ring_plan_id).map((option) => option.target_ring_plan_id as string),
-        ),
-      ],
-    })),
+    ivrMenus: ivrMenus.map((menu) => {
+      const options = ivrOptions.filter((option) => option.ivr_menu_id === menu.id).sort((left, right) => left.digit.localeCompare(right.digit));
+      return {
+        id: menu.id,
+        name: menu.name,
+        active: menu.active,
+        promptMediaUrl: menu.prompt_media_url,
+        ttsText: menu.tts_text,
+        invalidMediaUrl: menu.invalid_media_url,
+        timeoutSecs: menu.timeout_secs,
+        maxTries: menu.max_tries,
+        options: options.map((option) => ({
+          id: option.id,
+          digit: option.digit,
+          action: option.action as IvrAction,
+          targetRingPlanId: option.target_ring_plan_id,
+          targetNumber: option.target_number,
+          label: option.label,
+          promptMediaUrl: option.prompt_media_url,
+          ttsText: option.tts_text,
+        })),
+        ringPlanIds: [...new Set(options.map((option) => option.target_ring_plan_id).filter((id): id is string => Boolean(id)))],
+      };
+    }),
     operators: profiles
       .filter((profile) => profile.active !== false)
       .map((profile) => {
@@ -1332,6 +1548,7 @@ const RPC_MESSAGES: Array<{ match: RegExp; message: string; status: number; code
   { match: /ring_group_empty/, message: "Skupina použitá v pláne zvonenia by ostala bez člena.", status: 409, code: "ring_group_empty" },
   { match: /ring_plan_in_use/, message: "Plán používa linka alebo IVR, najprv ho odpoj.", status: 409, code: "ring_plan_in_use" },
   { match: /business_hours_in_use/, message: "Otváracie hodiny používa linka, najprv ju prepni.", status: 409, code: "business_hours_in_use" },
+  { match: /ivr_menu_in_use/, message: "IVR menu používa linka, najprv ho odober z čísla.", status: 409, code: "ivr_menu_in_use" },
   { match: /pause_reason_in_use/, message: "Dôvod pauzy práve používa operátor na pauze, najprv ho prepni späť na dostupného.", status: 409, code: "pause_reason_in_use" },
   { match: /position_gap/, message: "Poradie členov alebo krokov nie je súvislé. Načítaj konfiguráciu znova.", status: 409, code: "position_gap" },
   { match: /duplicate key|23505/, message: "Názov alebo kód sa už v organizácii používa.", status: 409, code: "duplicate" },
@@ -1354,13 +1571,13 @@ const RPC_MESSAGES: Array<{ match: RegExp; message: string; status: number; code
  * state the validators forbid. `null` skips the check (server-side callers that
  * hold no document).
  */
-async function applyReplace(deps: ConfigDeps, organizationId: string, document: Json, expectedVersion: number | null): Promise<void> {
-  const { error } = await deps.admin.rpc("motorist_replace_ring_plan", {
+async function applyReplace(deps: ConfigDeps, organizationId: string, document: Json, expectedVersion: number | null): Promise<Record<string, unknown>> {
+  const { data, error } = await deps.admin.rpc("motorist_replace_ring_plan", {
     p_organization_id: organizationId,
     p_document: document,
     p_expected_version: expectedVersion,
   });
-  if (!error) return;
+  if (!error) return data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
   const mapped = RPC_MESSAGES.find((entry) => entry.match.test(error.message));
   if (mapped) throw new ConfigServiceError(mapped.message, mapped.status, mapped.code);
   // The raw text names columns and constraints; it belongs in the server log,
@@ -1415,6 +1632,29 @@ function hoursToRpc(hours: BusinessHoursInput[]): Json {
       closed: exception.closed ?? true,
       intervals: (exception.intervals ?? []).map((interval) => ({ opens: interval.opens, closes: interval.closes })),
       label: exception.label ?? null,
+    })),
+  })) as unknown as Json;
+}
+
+function menusToRpc(menus: IvrMenuInput[]): Json {
+  return menus.map((menu) => ({
+    id: menu.id ?? randomUUID(),
+    name: menu.name,
+    prompt_media_url: menu.promptMediaUrl ?? null,
+    tts_text: menu.ttsText ?? null,
+    invalid_media_url: menu.invalidMediaUrl ?? null,
+    timeout_secs: menu.timeoutSecs,
+    max_tries: menu.maxTries,
+    active: menu.active ?? true,
+    options: menu.options.map((option) => ({
+      id: option.id ?? randomUUID(),
+      digit: option.digit,
+      action: option.action,
+      target_ring_plan_id: option.action === "ring_plan" ? option.targetRingPlanId ?? null : null,
+      target_number: option.action === "external_number" ? normalizeE164(option.targetNumber) : null,
+      label: option.label,
+      prompt_media_url: option.promptMediaUrl ?? null,
+      tts_text: option.ttsText ?? null,
     })),
   })) as unknown as Json;
 }
@@ -1540,6 +1780,51 @@ export async function replacePauseReasons(
     (reason) => ({ code: reason.code, label: reason.label, maxMinutes: reason.maxMinutes, sortOrder: reason.sortOrder, active: reason.active }),
   );
   const warning = await auditReplace(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.pause_reasons.replace", diff });
+  return { document: after, diff, warning };
+}
+
+/**
+ * Whole-section replace of the IVR menus with their digit options.
+ *
+ * Editing a menu cannot disturb a call in progress: `loadIvr` reads the menu
+ * once, when the customer leg is answered, and everything after that is decided
+ * from the frozen ring plan and `metadata.ivr`.
+ */
+export async function replaceIvrMenus(
+  deps: ConfigDeps,
+  input: { organizationId: string; actor: ConfigActor; ivrMenus: IvrMenuInput[]; expectedVersion?: number | null },
+): Promise<ReplaceResult> {
+  const before = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
+  assertValid(validateIvrMenus(input.ivrMenus, contextFromDocument(before)));
+
+  const applied = await applyReplace(deps, input.organizationId, { ivr_menus: menusToRpc(input.ivrMenus) } as unknown as Json, input.expectedVersion ?? null);
+  // A database still on the Phase 3 function ignores the unknown `ivr_menus`
+  // key, bumps the version and reports success — the editor would show "saved"
+  // over an unchanged menu. The function echoes every section it applied, so a
+  // missing echo is the migration, not the payload.
+  if (!("ivr_menus" in applied)) {
+    throw new ConfigServiceError(
+      "Databáza tejto inštalácie nemá nasadenú migráciu IVR menu (20260920100000). Menu sa nedá uložiť, kým ju administrátor nenasadí.",
+      503,
+      "config_migration_missing",
+    );
+  }
+
+  const after = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
+  const diff = compactDiff(
+    before.ivrMenus,
+    after.ivrMenus,
+    (menu) => menu.id,
+    (menu) => menu.name,
+    (menu) => ({
+      name: menu.name,
+      active: menu.active,
+      prompt: [menu.promptMediaUrl, menu.ttsText, menu.invalidMediaUrl],
+      timing: [menu.timeoutSecs, menu.maxTries],
+      options: menu.options.map((option) => [option.digit, option.action, option.targetRingPlanId ?? option.targetNumber, option.label, option.promptMediaUrl]),
+    }),
+  );
+  const warning = await auditReplace(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.ivr_menus.replace", diff });
   return { document: after, diff, warning };
 }
 

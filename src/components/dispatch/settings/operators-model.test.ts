@@ -143,6 +143,7 @@ describe("validation mirror", () => {
       businessHoursIds: new Set(),
       ringPlanIds: new Set(),
       businessHoursInUse: new Set(),
+      ivrMenusInUse: new Set(),
       ringPlansInUse: new Set(),
       destinationAllowlist: ["SK"],
       groups: [],

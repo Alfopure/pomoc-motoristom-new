@@ -18,6 +18,7 @@ import {
   parseSettingsPatch,
   requireOperatorOfOrganization,
   replaceBusinessHours,
+  replaceIvrMenus,
   replacePauseReasons,
   replaceRingGroups,
   replaceRingPlans,
@@ -80,6 +81,7 @@ function context(overrides: Partial<ValidationContext> = {}): ValidationContext 
     ringPlanIds: new Set([PLAN_A]),
     businessHoursInUse: new Set<string>(),
     ringPlansInUse: new Set<string>(),
+    ivrMenusInUse: new Set<string>(),
     destinationAllowlist: ["SK", "CZ"],
     groups: [group()],
     plans: [plan()],
@@ -609,6 +611,86 @@ describe("replaceBusinessHours and replacePauseReasons", () => {
     expect(document.pauseReasons.map((reason) => reason.code)).toEqual(["porada"]);
     expect(diff.removed).toEqual(["obed"]);
     expect(harness.rows("motorist_pause_reasons")).toHaveLength(1);
+  });
+});
+
+describe("replaceIvrMenus", () => {
+  it("swaps the digit options of a menu and audits the change once", async () => {
+    const { harness, deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    const menu = before.ivrMenus[0];
+
+    const { document, diff } = await replaceIvrMenus(deps, {
+      organizationId: ORG,
+      actor: ACTOR,
+      expectedVersion: before.routingVersion,
+      ivrMenus: [
+        {
+          ...menu,
+          options: [
+            // Digit 1 keeps its plan, digit 2 becomes a closing message and a new
+            // digit 3 waits in the čakáreň: all three shapes in one save.
+            { ...menu.options[0] },
+            { ...menu.options[1], action: "hangup", targetRingPlanId: null, promptMediaUrl: "after-hours.mp3", label: "Odkaz" },
+            { id: null, digit: "3", action: "waiting_room", targetRingPlanId: null, targetNumber: null, label: "Počkám", promptMediaUrl: null, ttsText: null },
+          ],
+        },
+      ],
+    });
+
+    const saved = document.ivrMenus[0];
+    expect(saved.options.map((option) => [option.digit, option.action])).toEqual([
+      ["1", "ring_plan"],
+      ["2", "hangup"],
+      ["3", "waiting_room"],
+    ]);
+    expect(saved.ringPlanIds).toEqual([PLAN_ID]);
+    expect(harness.rows("motorist_ivr_options")).toHaveLength(3);
+    expect(diff.changed.map((entry) => entry.label)).toEqual(["Hlavné menu"]);
+    expect(auditRows(harness).map((row) => row.action)).toEqual(["telephony.ivr_menus.replace"]);
+  });
+
+  it("refuses to delete a menu the neutral line still plays", async () => {
+    const { harness, deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+
+    await expect(replaceIvrMenus(deps, { organizationId: ORG, actor: ACTOR, ivrMenus: [], expectedVersion: before.routingVersion })).rejects.toMatchObject({
+      status: 400,
+      code: "config_invalid",
+    });
+    // Straight at the RPC (a second writer that validated against an older
+    // world): the transaction refuses it too and nothing is lost.
+    const result = await harness.admin.rpc("motorist_replace_ring_plan", { p_organization_id: ORG, p_document: { ivr_menus: [] } as never });
+    expect(result.error?.message).toMatch(/ivr_menu_in_use/);
+    expect(harness.rows("motorist_ivr_menus")).toHaveLength(1);
+    expect(harness.rows("motorist_ivr_options")).toHaveLength(2);
+  });
+
+  it("refuses to report success when the database is still on the Phase 3 function", async () => {
+    const { harness, deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    // The old function ignores the unknown `ivr_menus` key and answers with the
+    // sections it does know, so the save would look like it landed.
+    harness.db.registerRpc("motorist_replace_ring_plan", () => ({ routing_version: before.routingVersion + 1 }));
+
+    await expect(
+      replaceIvrMenus(deps, { organizationId: ORG, actor: ACTOR, ivrMenus: [before.ivrMenus[0]], expectedVersion: before.routingVersion }),
+    ).rejects.toMatchObject({ status: 503, code: "config_migration_missing" });
+  });
+
+  it("refuses an option that points at a plan of another organisation", async () => {
+    const { deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    const menu = before.ivrMenus[0];
+
+    await expect(
+      replaceIvrMenus(deps, {
+        organizationId: ORG,
+        actor: ACTOR,
+        expectedVersion: before.routingVersion,
+        ivrMenus: [{ ...menu, options: [{ ...menu.options[0], targetRingPlanId: "00000000-0000-4000-8000-0000000029ff" }, menu.options[1]] }],
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "config_invalid" });
   });
 });
 

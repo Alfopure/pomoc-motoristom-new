@@ -19,6 +19,7 @@ export default async function Home() {
       initialData={dispatchData}
       viewerOrganizationId={authState.profile?.organizationId}
       viewerProfileId={authState.profile?.profileId}
+      viewerRole={authState.profile?.role}
     />
   );
 }

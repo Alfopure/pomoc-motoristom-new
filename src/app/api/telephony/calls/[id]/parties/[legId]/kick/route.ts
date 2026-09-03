@@ -1,0 +1,11 @@
+import { removeCallParty } from "@/server/telephony/call-actions";
+import { handleCallActionRoute } from "@/server/telephony/call-action-route";
+
+export const runtime = "nodejs";
+
+export async function POST(request: Request, context: { params: Promise<{ id: string; legId: string }> }) {
+  return handleCallActionRoute<{ id: string; legId: string }>(request, context, {
+    fallback: "Účastníka sa nepodarilo odpojiť.",
+    run: ({ deps, actor, sessionId, params }) => removeCallParty(deps, actor, sessionId, params.legId),
+  });
+}

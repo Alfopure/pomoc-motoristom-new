@@ -65,6 +65,37 @@ describe("active calls snapshot", () => {
     expect(snapshot.presence.canManageAssignments).toBe(true);
   });
 
+  it("names the operator who parked a caller and the limit they arrived with", async () => {
+    // The waiting room has to be able to say who odložil the caller and how
+    // long they still have before the state machine offers them a callback.
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    h.db.update(
+      "motorist_call_sessions",
+      {
+        state: "parked",
+        answered_by_profile_id: null,
+        parked_at: h.now().toISOString(),
+        metadata: {
+          park: { by: PROFILES.o2, at: h.now().toISOString() },
+          waiting: { since: h.now().toISOString(), reason: "parked", ticks: 0, max_minutes: 30 },
+        },
+      },
+      (row) => row.id === sessionId,
+    );
+    h.db.update("motorist_ring_attempts", { result: "cancelled" }, (row) => row.session_id === sessionId);
+
+    const snapshot = await loadActiveCalls(deps(h), { profileId: PROFILES.o1, canManageAssignments: false });
+
+    expect(snapshot.waiting[0]).toMatchObject({
+      state: "parked",
+      parkedAt: h.now().toISOString(),
+      parkedByProfileId: PROFILES.o2,
+      waitingReason: "parked",
+      waitingMaxMinutes: 30,
+    });
+  });
+
   it("ignores ended sessions", async () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
     const { sessionId } = await h.inbound({ to: "+421232408718" });

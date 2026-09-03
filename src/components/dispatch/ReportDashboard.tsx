@@ -5,6 +5,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Activity,
   AlertTriangle,
+  Award,
   BriefcaseBusiness,
   CheckCircle2,
   Clock3,
@@ -18,11 +19,15 @@ import {
 } from "lucide-react";
 import type { ReportChartPoint, ReportDashboardData, ReportOperatorRow, ReportRangeKey } from "@/lib/reporting";
 
-type ReportTab = "overview" | "calls" | "operators" | "cases";
+import { QaDashboard } from "./QaDashboard";
+import { TelephonyStatsWidgets } from "./TelephonyStatsWidgets";
+
+type ReportTab = "overview" | "calls" | "quality" | "operators" | "cases";
 
 const tabs: Array<{ icon: LucideIcon; label: string; value: ReportTab }> = [
   { icon: Gauge, label: "Prehľad", value: "overview" },
   { icon: PhoneCall, label: "Hovory", value: "calls" },
+  { icon: Award, label: "Kvalita", value: "quality" },
   { icon: Users, label: "Operátori", value: "operators" },
   { icon: BriefcaseBusiness, label: "Prípady", value: "cases" },
 ];
@@ -75,7 +80,7 @@ export function ReportDashboard() {
       <h1 className="sr-only">Reporty</h1>
       <div className="mx-auto max-w-[1500px]">
         <nav className="sticky top-0 z-30 mb-3 bg-zinc-100/95 py-2 backdrop-blur" aria-label="Kategórie reportov">
-          <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
             {tabs.map(({ icon: Icon, label, value }) => {
               const active = activeTab === value;
               return (
@@ -139,6 +144,7 @@ export function ReportDashboard() {
             {error && <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">{error}</div>}
             {activeTab === "overview" && <OverviewDashboard data={data} />}
             {activeTab === "calls" && <CallsDashboard data={data} />}
+            {activeTab === "quality" && <QualityDashboard />}
             {activeTab === "operators" && <OperatorsDashboard data={data} />}
             {activeTab === "cases" && <CasesDashboard data={data} />}
           </>
@@ -202,6 +208,7 @@ function CallsDashboard({ data }: { data: ReportDashboardData }) {
   const calls = data.calls;
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-12">
+      <TelephonyStatsWidgets />
       <StatCard className="xl:col-span-2" icon={PhoneCall} label="Prichádzajúce" value={formatNumber(calls.inboundCalls)} detail={`${calls.answeredCalls} prijatých`} tone="dark" />
       <StatCard className="xl:col-span-2" icon={AlertTriangle} label="Zmeškané" value={formatNumber(calls.missedCalls)} detail="vrátane opustených v rade" tone={calls.missedCalls > 0 ? "red" : "default"} />
       <StatCard className="xl:col-span-2" icon={Activity} label="Odchádzajúce" value={formatNumber(calls.outboundCalls)} detail={`${calls.linkedToCaseRate}% všetkých prepojených s prípadom`} />
@@ -241,6 +248,23 @@ function OperatorsDashboard({ data }: { data: ReportDashboardData }) {
         <BarChart data={data.operators.talkTimeByOperator} height={250} compactLabels />
       </ChartCard>
       <OperatorTable rows={data.operators.rows} />
+    </div>
+  );
+}
+
+/**
+ * Quality without recordings: the QA panel gates itself on the reader's role,
+ * so a dispatcher who opens the tab is told why it is empty rather than left
+ * looking at nothing.
+ */
+function QualityDashboard() {
+  return (
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-12">
+      <QaDashboard />
+      <section className="rounded-md border border-zinc-200 bg-white p-4 text-xs leading-5 text-zinc-600 md:col-span-2 xl:col-span-12">
+        Prehľad kvality vidia služobne starší dispečeri, manažéri a administrátori. Hovory sa v tejto verzii nenahrávajú ani neprepisujú,
+        takže sa hodnotí zapísaný výsledok hovoru a dodržanie sľúbených spätných volaní.
+      </section>
     </div>
   );
 }

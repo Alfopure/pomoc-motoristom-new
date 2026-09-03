@@ -3,9 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Ear,
   Grid3x3,
+  Headphones,
   Link2,
+  LogOut,
   Loader2,
+  Megaphone,
   Mic,
   MicOff,
   Pause,
@@ -17,15 +21,18 @@ import {
   PhoneOff,
   PlayCircle,
   Plus,
+  UserPlus,
+  UserX,
   Users,
 } from "lucide-react";
 
 import type { OperatorPresenceStatus } from "@/lib/supabase/database.types";
-import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
+import type { CallParticipant, PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
+import { SUPERVISOR_MODE_HINTS, SUPERVISOR_MODE_LABELS, SUPERVISOR_MODE_ORDER, type SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
-import { CallTransferPicker, type TransferRequest } from "./CallTransferPicker";
+import { CallTransferPicker, type TransferPickerMode, type TransferRequest } from "./CallTransferPicker";
 import { EmergencyNotice } from "./EmergencyNotice";
 // The status vocabulary is shared with "Môj telefón" so both surfaces name the
 // same state the same way.
@@ -34,11 +41,13 @@ import {
   callElapsedSeconds,
   DTMF_KEYS,
   formatCallTimer,
+  partyBusyKey,
   phoneBarCapabilities,
   phoneBarStateLabel,
   phoneTakeoverAvailable,
   PHONE_ACTION_LABELS,
   type PhoneCallAction,
+  type PhonePartyAction,
 } from "./phone-bar-model";
 
 export type PhonePauseReason = { id: string; code: string; label: string };
@@ -56,6 +65,12 @@ export type PhoneBarProps = {
   onDismissNotice: () => void;
   onPresenceChange: (action: PhonePresenceAction) => void;
   onCallAction: (action: PhoneCallAction, sessionId: string, target?: TransferRequest) => void;
+  /** Mute / unmute / disconnect one added participant of the conference. */
+  onPartyAction: (action: PhonePartyAction, sessionId: string, legId: string) => void;
+  /** Manager and admin only: supervision of a colleague's live call. */
+  canSupervise: boolean;
+  onSupervise: (sessionId: string, mode: SupervisorMode) => void;
+  onStopSupervise: (sessionId: string) => void;
   onAnswer: () => void;
   onHangupBrowser: () => void;
   onToggleMute: () => void;
@@ -95,7 +110,9 @@ export function PhoneBar(props: PhoneBarProps) {
   const { model, phone } = props;
   const [now, setNow] = useState(() => Date.now());
   const [keypadOpen, setKeypadOpen] = useState(false);
-  const [transferMode, setTransferMode] = useState<"transfer" | "consult" | null>(null);
+  const [transferMode, setTransferMode] = useState<TransferPickerMode | null>(null);
+  const [partiesOpen, setPartiesOpen] = useState(false);
+  const [superviseOpen, setSuperviseOpen] = useState(false);
   const [dtmfLog, setDtmfLog] = useState("");
   const unlockedRef = useRef(false);
 
@@ -217,6 +234,37 @@ export function PhoneBar(props: PhoneBarProps) {
         {capabilities.cancelConsult && (
           <BarButton tone="default" icon={PhoneOff} label={PHONE_ACTION_LABELS["cancel-consult"]} busy={props.busyAction === "cancel-consult"} disabled={busy} onClick={() => runAction("cancel-consult")} />
         )}
+        {capabilities.addParty && (
+          <BarButton
+            tone="default"
+            icon={UserPlus}
+            label={PHONE_ACTION_LABELS["add-party"]}
+            disabled={busy}
+            compact
+            onClick={() => setTransferMode((mode) => (mode === "add-party" ? null : "add-party"))}
+          />
+        )}
+        {focus?.kind === "active" && focus.participants.length > 2 && (
+          <BarButton
+            tone={partiesOpen ? "warn" : "default"}
+            icon={Users}
+            label={`Účastníci (${focus.participants.length})`}
+            compact
+            onClick={() => setPartiesOpen((open) => !open)}
+          />
+        )}
+        {capabilities.leaveConference && (
+          <BarButton tone="default" icon={LogOut} label={PHONE_ACTION_LABELS.leave} busy={props.busyAction === "leave"} disabled={busy} onClick={() => runAction("leave")} />
+        )}
+        {props.canSupervise && (model.others.length > 0 || model.supervising) && (
+          <BarButton
+            tone={model.supervising ? "warn" : "default"}
+            icon={Headphones}
+            label={model.supervising ? "Dozor prebieha" : "Dozor"}
+            compact={!model.supervising}
+            onClick={() => setSuperviseOpen((open) => !open)}
+          />
+        )}
         {capabilities.park && (
           <BarButton tone="default" icon={Pause} label={PHONE_ACTION_LABELS.park} busy={props.busyAction === "park"} disabled={busy} onClick={() => runAction("park")} />
         )}
@@ -299,11 +347,31 @@ export function PhoneBar(props: PhoneBarProps) {
             busy={busy}
             onCancel={() => setTransferMode(null)}
             onSubmit={(target) => {
-              props.onCallAction(transferMode === "transfer" ? "transfer" : "consult", focus.sessionId, target);
+              props.onCallAction(transferMode, focus.sessionId, target);
               setTransferMode(null);
             }}
           />
         </div>
+      )}
+
+      {partiesOpen && focus?.kind === "active" && (
+        <ParticipantsPanel
+          busyAction={props.busyAction}
+          call={focus}
+          onAction={(action, legId) => props.onPartyAction(action, focus.sessionId, legId)}
+          onClose={() => setPartiesOpen(false)}
+        />
+      )}
+
+      {superviseOpen && props.canSupervise && (
+        <SupervisePanel
+          busyAction={props.busyAction}
+          model={model}
+          now={now}
+          onClose={() => setSuperviseOpen(false)}
+          onStopSupervise={props.onStopSupervise}
+          onSupervise={props.onSupervise}
+        />
       )}
     </div>
   );
@@ -382,6 +450,211 @@ function RingingPanel({
           </div>
         </div>
       ))}
+    </section>
+  );
+}
+
+/**
+ * Who is on the call right now.
+ *
+ * Only the third parties the operator added can be muted or thrown out
+ * (`controllable`); the caller and the operator's own leg are listed for
+ * orientation. A supervisor is shown with the mode they are in, because an
+ * operator being coached should not have to guess whether they are alone.
+ */
+function ParticipantsPanel({
+  busyAction,
+  call,
+  onAction,
+  onClose,
+}: {
+  busyAction: string | null;
+  call: PhoneBarCall;
+  onAction: (action: PhonePartyAction, legId: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <section
+      aria-label="Účastníci hovoru"
+      data-testid="phone-bar-participants"
+      className="absolute right-3 top-[calc(100%+6px)] z-50 w-80 max-w-[calc(100vw-24px)] rounded-xl border border-zinc-200 bg-white p-3 text-zinc-950 shadow-2xl"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-bold">Účastníci hovoru</h3>
+        <button type="button" onClick={onClose} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100" aria-label="Zavrieť">
+          ×
+        </button>
+      </div>
+      <ul className="mt-2 grid gap-1">
+        {call.participants.map((participant) => (
+          <li key={participant.legId} className="flex min-w-0 items-center gap-2 rounded-md border border-zinc-200 px-2 py-1.5">
+            <span className="min-w-0 flex-1">
+              <span className="flex min-w-0 items-center gap-1.5 text-xs font-bold">
+                <span className="truncate">{participant.name}</span>
+                {participant.self && <span className="shrink-0 text-[10px] font-bold text-zinc-500">(ty)</span>}
+                {participant.muted && <MicOff size={12} className="shrink-0 text-amber-600" aria-label="Stlmený" />}
+              </span>
+              <span className="mt-0.5 block truncate text-[11px] font-medium text-zinc-500">
+                {participantSubtitle(participant)}
+              </span>
+            </span>
+            {participant.controllable && (
+              <span className="flex shrink-0 items-center gap-1">
+                <PartyButton
+                  busy={busyAction === partyBusyKey(participant.muted ? "unmute" : "mute", call.sessionId, participant.legId)}
+                  disabled={busyAction !== null}
+                  icon={participant.muted ? Mic : MicOff}
+                  label={participant.muted ? "Odtlmiť" : "Stlmiť"}
+                  onClick={() => onAction(participant.muted ? "unmute" : "mute", participant.legId)}
+                />
+                <PartyButton
+                  busy={busyAction === partyBusyKey("kick", call.sessionId, participant.legId)}
+                  disabled={busyAction !== null}
+                  danger
+                  icon={UserX}
+                  label="Odpojiť"
+                  onClick={() => onAction("kick", participant.legId)}
+                />
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function participantSubtitle(participant: CallParticipant): string {
+  if (participant.kind === "supervisor") {
+    const mode = participant.supervisorMode as SupervisorMode | null;
+    return mode ? `Dozor · ${SUPERVISOR_MODE_LABELS[mode]}` : "Dozor · pripája sa";
+  }
+  if (!participant.answered) return participant.kind === "party" ? "Zvoní…" : "Pripája sa…";
+  if (participant.kind === "caller") return participant.detail ?? "Volajúci";
+  if (participant.kind === "consult") return "Konzultácia";
+  return participant.detail ?? (participant.kind === "party" ? "Pridaný účastník" : "Operátor");
+}
+
+function PartyButton({
+  busy,
+  danger = false,
+  disabled,
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  busy: boolean;
+  danger?: boolean;
+  disabled: boolean;
+  icon: typeof Phone;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      aria-label={label}
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition disabled:cursor-not-allowed disabled:opacity-50 ${
+        danger ? "border-red-200 text-red-700 hover:bg-red-50" : "border-zinc-200 text-zinc-700 hover:bg-zinc-100"
+      }`}
+    >
+      {busy ? <Loader2 size={13} className="motion-safe:animate-spin" aria-hidden="true" /> : <Icon size={13} aria-hidden="true" />}
+    </button>
+  );
+}
+
+/**
+ * Supervision (manager and admin only): pick a colleague's live call and the
+ * mode. Every press writes an audit row server-side, so the panel names the
+ * consequence of each mode instead of hiding it behind an icon.
+ */
+function SupervisePanel({
+  busyAction,
+  model,
+  now,
+  onClose,
+  onStopSupervise,
+  onSupervise,
+}: {
+  busyAction: string | null;
+  model: PhoneBarModel;
+  now: number;
+  onClose: () => void;
+  onStopSupervise: (sessionId: string) => void;
+  onSupervise: (sessionId: string, mode: SupervisorMode) => void;
+}) {
+  const supervising = model.supervising;
+  return (
+    <section
+      aria-label="Dozor nad hovorom"
+      data-testid="phone-bar-supervise"
+      className="absolute right-3 top-[calc(100%+6px)] z-50 w-96 max-w-[calc(100vw-24px)] rounded-xl border border-zinc-200 bg-white p-3 text-zinc-950 shadow-2xl"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-bold">Dozor nad hovorom</h3>
+        <button type="button" onClick={onClose} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100" aria-label="Zavrieť">
+          ×
+        </button>
+      </div>
+
+      {supervising && (
+        <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5">
+          <p className="text-[11px] font-bold text-amber-900">
+            {supervising.pending ? "Dozor sa pripája…" : `Prebieha dozor · ${SUPERVISOR_MODE_LABELS[(supervising.mode ?? "monitor") as SupervisorMode]}`}
+          </p>
+          <button
+            type="button"
+            disabled={busyAction !== null}
+            onClick={() => onStopSupervise(supervising.sessionId)}
+            className="mt-1.5 inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-300 px-2 text-xs font-bold text-zinc-800 transition hover:bg-white disabled:opacity-50"
+          >
+            <PhoneOff size={13} aria-hidden="true" />
+            Ukončiť dozor
+          </button>
+        </div>
+      )}
+
+      <div className="mt-2 grid max-h-64 gap-2 overflow-y-auto pr-1">
+        {model.others.length === 0 && <p className="px-1 py-2 text-xs font-medium text-zinc-500">Žiadny kolega práve netelefonuje.</p>}
+        {model.others.map((call) => {
+          const operator = call.participants.find((participant) => participant.kind === "operator");
+          const current = supervising?.sessionId === call.sessionId ? ((supervising.mode ?? null) as SupervisorMode | null) : null;
+          return (
+            <div key={call.sessionId} className="rounded-md border border-zinc-200 p-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-xs font-bold">{operator?.name ?? "Operátor"}</span>
+                <span className="shrink-0 font-mono text-[11px] font-semibold tabular-nums text-zinc-600">{formatCallTimer(callElapsedSeconds(call, now))}</span>
+              </div>
+              <p className="mt-0.5 truncate text-[11px] font-medium text-zinc-500">
+                {call.lineLabel} · {call.callerName ?? (formatPhoneNumberForDisplay(call.number) || call.number || "Neznáme číslo")}
+              </p>
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {SUPERVISOR_MODE_ORDER.map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    disabled={busyAction !== null || current === mode}
+                    title={SUPERVISOR_MODE_HINTS[mode]}
+                    onClick={() => onSupervise(call.sessionId, mode)}
+                    className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2 text-[11px] font-bold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                      current === mode ? "border-amber-400 bg-amber-100 text-amber-900" : "border-zinc-200 text-zinc-800 hover:bg-zinc-100"
+                    }`}
+                  >
+                    {mode === "monitor" ? <Ear size={13} aria-hidden="true" /> : mode === "whisper" ? <Megaphone size={13} aria-hidden="true" /> : <PhoneCall size={13} aria-hidden="true" />}
+                    {SUPERVISOR_MODE_LABELS[mode]}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-2 border-t border-zinc-200 pt-1.5 text-[11px] font-medium leading-4 text-zinc-500">
+        Každý dozor sa zapisuje do auditu spolu s režimom a hovorom. Ak hovor ešte nie je v konferencii, volajúci môže pri spustení dozoru počuť krátke ticho.
+      </p>
     </section>
   );
 }

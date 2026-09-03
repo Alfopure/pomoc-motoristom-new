@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { AppRole } from "@/domain/types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
+import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
+import { isUuid } from "@/lib/telephony/uuid";
 
+import { writeCallAudit } from "./audit";
 import { deviceIsLive, deviceSipUri, getOperatorDevice, type DeviceDeps } from "./operator-devices";
 import { presenceAllowsOffer } from "./routing/eligibility";
 import { releaseOperator, reserveOperator } from "./routing/reservation";
@@ -11,7 +14,21 @@ import { effectsDeps, loadRoutingSettings, runSessionEvent, type SessionRunnerDe
 import { isOverLegCap, loadDailyUsage } from "./usage";
 import { upsertCallRow, upsertDialedLeg, type CommandOutcome } from "./state/effects";
 import { CallActionRejected } from "./state/transitions";
-import { ACTIVE_SESSION_STATES, LEG_TIME_LIMIT_SECS, WAITING_STATES, toJson, type AppEvent, type AppEventType, type DeviceRow, type LineRow, type SessionRow, type TransferTarget } from "./state/types";
+import {
+  ACTIVE_SESSION_STATES,
+  LEG_TIME_LIMIT_SECS,
+  TALKING_STATES,
+  WAITING_STATES,
+  toJson,
+  type AppEvent,
+  type AppEventType,
+  type DeviceRow,
+  type LegRow,
+  type LineRow,
+  type SessionRow,
+  type SupervisorMode,
+  type TransferTarget,
+} from "./state/types";
 import { TelnyxCommandError, TelnyxLiveCallsDisabledError } from "./telnyx/client";
 import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
@@ -101,6 +118,34 @@ async function assertOutboundRate(deps: CallActionDeps, actor: CallActor): Promi
   }
 }
 
+/**
+ * The same per-minute ceiling as a dial, on its own bucket: a supervisor
+ * flipping between calls creates one leg per round, and nothing else stops a
+ * client stuck in a supervise/stop loop.
+ *
+ * Backed by the legs this supervisor actually created, for the same reason
+ * `assertOutboundRate` is: the in-memory bucket lives in one serverless
+ * instance, so ten warm instances would otherwise allow ten times the limit.
+ */
+async function assertSuperviseRate(deps: CallActionDeps, actor: CallActor): Promise<void> {
+  const limiter = deps.rateLimiter ?? defaultRateLimiter;
+  if (!limiter.hit(`supervise:${actor.profileId}`, OUTBOUND_RATE_LIMIT.limit, OUTBOUND_RATE_LIMIT.windowMs)) {
+    throw new CallActionError("Príliš veľa pokusov o dozor za minútu.", 429, "rate_limited");
+  }
+  const since = new Date(nowOf(deps).getTime() - OUTBOUND_RATE_LIMIT.windowMs).toISOString();
+  const { count, error } = await deps.admin
+    .from("motorist_call_legs")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", deps.organizationId)
+    .eq("profile_id", actor.profileId)
+    .eq("role", "supervisor")
+    .gte("created_at", since);
+  if (error) return; // never block on a failing counter
+  if ((count ?? 0) >= OUTBOUND_RATE_LIMIT.limit) {
+    throw new CallActionError("Príliš veľa pokusov o dozor za minútu.", 429, "rate_limited");
+  }
+}
+
 /** Refuses operator-initiated legs once the organisation reached its daily soft cap. */
 async function assertLegBudget(deps: CallActionDeps): Promise<void> {
   const now = nowOf(deps);
@@ -148,6 +193,7 @@ async function requireLiveDevice(deps: CallActionDeps, profileId: string, messag
 }
 
 export async function loadSession(deps: CallActionDeps, sessionId: string): Promise<SessionRow> {
+  if (!isUuid(sessionId)) throw new CallActionError("Hovor sa nenašiel.", 404, "not_found");
   const { data, error } = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).maybeSingle();
   if (error) throw new CallActionError(`Hovor sa nepodarilo načítať: ${error.message}`, 500);
   if (!data) throw new CallActionError("Hovor sa nenašiel.", 404, "not_found");
@@ -456,6 +502,185 @@ export async function pickupWaitingCall(deps: CallActionDeps, actor: CallActor, 
   if (!allowed.eligible) throw new CallActionError("Prevziať hovor je možné len v stave dostupný.", 409, "operator_unavailable");
   const device = await requireLiveDevice(deps, actor.profileId);
   return runAction(deps, session, appEvent("pickup", actor, deps, { picker: { profileId: actor.profileId, sipUri: device.sipUri } }), "Prevzatie hovoru zlyhalo.");
+}
+
+// --- conference and supervision ---------------------------------------------
+
+// One source of truth with the console (`PhoneBar` hides the action for the
+// roles this refuses), re-exported so the server callers keep one import.
+export { canSuperviseRole as canSupervise, SUPERVISOR_ROLES } from "@/lib/telephony/supervisor-mode";
+
+/**
+ * Audit trail for the conference and supervision actions (design §4 Phase 4:
+ * "every supervision writes an audit row"). The row itself is written by
+ * `audit.ts`, which the session runner shares so a supervision that ends
+ * without anybody clicking still produces its closing row.
+ */
+async function auditAction(
+  deps: CallActionDeps,
+  actor: CallActor,
+  input: { action: string; sessionId: string; before?: Record<string, unknown> | null; after?: Record<string, unknown> | null },
+): Promise<void> {
+  await writeCallAudit(deps, { action: input.action, actorProfileId: actor.profileId, entityId: input.sessionId, before: input.before, after: input.after });
+}
+
+/**
+ * The session for a conference action, with the tighter ownership rule those
+ * actions need.
+ *
+ * `ownedActiveSession` lets any senior dispatcher act on any live call, which
+ * is right for the visible, destructive actions (hang up, transfer) but wrong
+ * here: adding a leg and muting it is silent listening, and silent listening is
+ * `superviseCall`, which is manager/admin only and writes a supervision audit
+ * row. So a conference action requires the actor to be *on* the call — they
+ * answered it or they hold an open leg — and anybody else has to clear the
+ * supervision bar.
+ */
+async function conferenceSession(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<SessionRow> {
+  const session = await loadSession(deps, sessionId);
+  if (!ACTIVE_SESSION_STATES.has(session.state)) throw new CallActionError("Hovor už nie je aktívny.", 409, "not_active");
+  if (session.answered_by_profile_id === actor.profileId) return session;
+  const legs = await deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", session.id).is("ended_at", null);
+  const openLegProfileIds = (legs.data ?? []).map((leg) => leg.profile_id).filter((id): id is string => Boolean(id));
+  if (openLegProfileIds.includes(actor.profileId)) return session;
+  if (canSuperviseRole(actor.role)) return session;
+  throw new CallActionError("Účastníkov hovoru môže meniť len operátor na tomto hovore.", 403, "forbidden");
+}
+
+/** An open leg of this session, addressed by its row id (never by a call-control id from the browser). */
+async function loadSessionLeg(deps: CallActionDeps, sessionId: string, legId: string): Promise<LegRow> {
+  if (!isUuid(legId)) throw new CallActionError("Účastník už nie je v hovore.", 404, "party_not_found");
+  const { data, error } = await deps.admin.from("motorist_call_legs").select("*").eq("session_id", sessionId).eq("id", legId).maybeSingle();
+  if (error) throw new CallActionError(`Účastníka sa nepodarilo načítať: ${error.message}`, 500);
+  if (!data || data.ended_at) throw new CallActionError("Účastník už nie je v hovore.", 404, "party_not_found");
+  return data;
+}
+
+async function partyLabel(deps: CallActionDeps, leg: LegRow): Promise<string> {
+  if (leg.profile_id) {
+    const { data } = await deps.admin.from("motorist_profiles").select("display_name").eq("id", leg.profile_id).maybeSingle();
+    if (data?.display_name) return data.display_name;
+  }
+  return leg.to_number ?? leg.from_number ?? "Účastník";
+}
+
+/** Adds a colleague or an external number to the live call as a third party. */
+export async function addCallParty(deps: CallActionDeps, actor: CallActor, sessionId: string, target: { profileId?: string | null; number?: string | null }): Promise<CallActionResult> {
+  const session = await conferenceSession(deps, actor, sessionId);
+  const resolved = await resolveTransferTarget(deps, actor, target);
+  const result = await runAction(deps, session, appEvent("add_party", actor, deps, { target: resolved }), "Účastníka sa nepodarilo pridať.");
+  await auditAction(deps, actor, { action: "telephony.conference.add_party", sessionId, after: { target: resolved.label, kind: resolved.kind } });
+  return result;
+}
+
+/** Mutes or unmutes one added participant of the conference. */
+export async function setCallPartyMuted(deps: CallActionDeps, actor: CallActor, sessionId: string, legId: string, muted: boolean): Promise<CallActionResult> {
+  const session = await conferenceSession(deps, actor, sessionId);
+  const leg = await loadSessionLeg(deps, sessionId, legId);
+  const label = await partyLabel(deps, leg);
+  const result = await runAction(
+    deps,
+    session,
+    appEvent(muted ? "mute_party" : "unmute_party", actor, deps, { party: { callControlId: leg.telnyx_call_control_id, label } }),
+    muted ? "Účastníka sa nepodarilo stlmiť." : "Účastníka sa nepodarilo odtlmiť.",
+  );
+  await auditAction(deps, actor, { action: muted ? "telephony.conference.mute_party" : "telephony.conference.unmute_party", sessionId, before: { muted: !muted }, after: { participant: label, muted } });
+  return result;
+}
+
+/** Removes an added participant from the call (their leg leaves the conference and hangs up). */
+export async function removeCallParty(deps: CallActionDeps, actor: CallActor, sessionId: string, legId: string): Promise<CallActionResult> {
+  const session = await conferenceSession(deps, actor, sessionId);
+  const leg = await loadSessionLeg(deps, sessionId, legId);
+  const label = await partyLabel(deps, leg);
+  const result = await runAction(deps, session, appEvent("remove_party", actor, deps, { party: { callControlId: leg.telnyx_call_control_id, label } }), "Účastníka sa nepodarilo odpojiť.");
+  await auditAction(deps, actor, { action: "telephony.conference.remove_party", sessionId, after: { participant: label } });
+  return result;
+}
+
+/** The operator steps out of a three-way; the caller and the remaining party keep talking. */
+export async function leaveConferenceCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
+  const session = await conferenceSession(deps, actor, sessionId);
+  // Unlike the other conference actions, this one is not "change a participant"
+  // but "remove *me*": the reducer always takes the answering operator's leg
+  // out. A manager or a supervisor passing the bar above would therefore eject
+  // the dispatcher who is on the call and sign the audit row with their own
+  // name. Only the operator on the call may leave it.
+  if (session.answered_by_profile_id !== actor.profileId) {
+    throw new CallActionError("Z konferencie môže odísť len operátor, ktorý je na hovore.", 403, "forbidden");
+  }
+  const result = await runAction(deps, session, appEvent("leave_conference", actor, deps), "Z konferencie sa nepodarilo odísť.");
+  await auditAction(deps, actor, { action: "telephony.conference.leave", sessionId, after: { state: result.state } });
+  return result;
+}
+
+/**
+ * Starts (or re-points) supervision of somebody else's live call.
+ *
+ * Manager/admin only. The supervisor's own browser phone is dialled and joins
+ * the call's conference with the Telnyx `supervisor_role`: `monitor` listens,
+ * `whisper` is heard only by the operator, `barge` by everyone. Their presence
+ * is reserved best-effort so an *available* supervisor is not offered a call
+ * mid-supervision — a manager who is paused or logged out may still supervise.
+ */
+export async function superviseCall(deps: CallActionDeps, actor: CallActor, sessionId: string, mode: SupervisorMode): Promise<CallActionResult> {
+  requireConfigured(deps);
+  if (!canSuperviseRole(actor.role)) throw new CallActionError("Dozor nad hovorom je dostupný len pre manažéra alebo administrátora.", 403, "forbidden");
+  const session = await loadSession(deps, sessionId);
+  if (!TALKING_STATES.has(session.state)) throw new CallActionError("Dozor je možný len pri prebiehajúcom hovore.", 409, "not_active");
+  if (session.answered_by_profile_id === actor.profileId) throw new CallActionError("Na vlastný hovor sa dozerať nedá.", 409, "own_call");
+  // A call whose operator already stepped out (a three-way handed over to an
+  // external number) has nobody to whisper to: the remaining leg is the outside
+  // party, and whispering to them would put the manager in the caller's ear.
+  if (!session.answered_by_profile_id) throw new CallActionError("Hovor nemá pripojeného operátora.", 409, "no_operator");
+  // Supervision dials a real leg, so it is inside the same budgets as every
+  // other operator-initiated leg: the daily soft cap and a per-supervisor rate
+  // limit (its own bucket, so listening in does not eat an operator's dials).
+  await assertSuperviseRate(deps, actor);
+  await assertLegBudget(deps);
+  const device = await requireLiveDevice(deps, actor.profileId, "Tvoj telefón nie je pripojený.");
+
+  const already = await deps.admin.from("motorist_call_legs").select("id").eq("session_id", sessionId).eq("profile_id", actor.profileId).eq("role", "supervisor").is("ended_at", null).maybeSingle();
+  let reserved = false;
+  if (!already.data) {
+    // Best effort: a paused or logged-out manager is still allowed to supervise,
+    // an available one is taken out of the ring plan while they listen.
+    try {
+      reserved = await reserveOperator(deps.admin, { profileId: actor.profileId, sessionId });
+    } catch (error) {
+      deps.logger?.({ level: "warn", scope: "call-actions", message: "supervisor reservation failed", sessionId, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  try {
+    const result = await runAction(
+      deps,
+      session,
+      appEvent("supervise", actor, deps, { supervisor: { profileId: actor.profileId, sipUri: device.sipUri, mode, label: actor.displayName ?? actor.profileId } }),
+      "Dozor nad hovorom sa nepodarilo spustiť.",
+    );
+    await auditAction(deps, actor, {
+      action: already.data ? "telephony.supervise.switch" : "telephony.supervise.start",
+      sessionId,
+      after: { mode, operator: session.answered_by_profile_id, supervisor: actor.profileId },
+    });
+    return result;
+  } catch (error) {
+    if (reserved) await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId, status: "available", now: nowOf(deps) });
+    throw error;
+  }
+}
+
+/** Ends this supervisor's own supervision of the call. */
+export async function stopSupervisingCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
+  requireConfigured(deps);
+  if (!canSuperviseRole(actor.role)) throw new CallActionError("Dozor nad hovorom je dostupný len pre manažéra alebo administrátora.", 403, "forbidden");
+  const session = await loadSession(deps, sessionId);
+  // No audit row here: `telephony.supervise.stop` is written by the session
+  // runner for *every* way a supervision ends (this button, the supervisor's
+  // browser leg dropping, the call ending under them, a refused conference
+  // join), so the log can answer "how long did the manager listen".
+  return runAction(deps, session, appEvent("stop_supervise", actor, deps, { supervisor: { profileId: actor.profileId, sipUri: "", mode: "monitor", label: actor.displayName ?? actor.profileId } }), "Dozor sa nepodarilo ukončiť.");
 }
 
 export type TransferTargetOption = { profileId: string; displayName: string; role: AppRole; available: boolean; status: string; deviceLive: boolean };

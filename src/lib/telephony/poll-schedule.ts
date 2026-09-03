@@ -61,6 +61,44 @@ export const SUPPORT_POLL_MS = {
   hidden: 30_000,
 } as const;
 
+/**
+ * Wallboard and the statistics widgets in the reports view.
+ *
+ * `/api/telephony/stats` answers every reader from one per-organisation
+ * snapshot that lives for `STATS_CACHE_TTL_MS` (5 s), so polling faster than
+ * that cannot produce fresher data — only more invocations. Between polls the
+ * screen keeps moving anyway: every duration on it is re-derived from the
+ * timestamps in the payload against the browser's own clock.
+ */
+export const WALLBOARD_POLL_MS = {
+  visible: 5_000,
+  /**
+   * While `/api/telephony/stats` answers `source: "fallback"` — the Phase 4
+   * statistics views are not applied yet — every miss aggregates raw call and
+   * presence rows instead of reading a grouped view. Three times slower on a
+   * board that is left on a wall all day is the difference between ~17k and
+   * ~6k of those passes per day, and the cadence returns to 5 s by itself the
+   * moment the migration lands.
+   */
+  fallbackVisible: 15_000,
+  /** A wall display is rarely hidden; a background reports tab always is. */
+  hidden: 60_000,
+} as const;
+
+/**
+ * The callback queue in the call-centre view.
+ *
+ * A promise to ring somebody back is measured in tens of minutes, so half a
+ * minute of latency costs nothing — and each poll is four Supabase queries
+ * (open, resolved, line labels, claimant names). A dispatch room leaves eight
+ * consoles open overnight, so the hidden cadence matters more here than the
+ * visible one.
+ */
+export const CALLBACK_POLL_MS = {
+  visible: 30_000,
+  hidden: 120_000,
+} as const;
+
 export const TAKEOVER_POLL_MS = {
   /** A handover is a 30-second decision, so it stays responsive while live. */
   activeVisible: 4_000,
@@ -99,6 +137,26 @@ export function supportPollDelayMs(input: {
   random?: () => number;
 }) {
   const base = input.documentHidden ? SUPPORT_POLL_MS.hidden : SUPPORT_POLL_MS.visible;
+  return withBackoff(base, input.consecutiveFailures, input.random);
+}
+
+export function wallboardPollDelayMs(input: {
+  documentHidden: boolean;
+  /** The last payload's `source`: `"fallback"` means the views are missing. */
+  fallback?: boolean;
+  consecutiveFailures?: number;
+  random?: () => number;
+}) {
+  const base = input.documentHidden ? WALLBOARD_POLL_MS.hidden : input.fallback ? WALLBOARD_POLL_MS.fallbackVisible : WALLBOARD_POLL_MS.visible;
+  return withBackoff(base, input.consecutiveFailures, input.random);
+}
+
+export function callbackPollDelayMs(input: {
+  documentHidden: boolean;
+  consecutiveFailures?: number;
+  random?: () => number;
+}) {
+  const base = input.documentHidden ? CALLBACK_POLL_MS.hidden : CALLBACK_POLL_MS.visible;
   return withBackoff(base, input.consecutiveFailures, input.random);
 }
 
