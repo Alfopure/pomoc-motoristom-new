@@ -150,6 +150,19 @@ describe("startOutboundCall", () => {
     await expect(startOutboundCall(deps, o1, { to: "+421905123456" })).resolves.toBeTruthy();
   });
 
+  it("counts every dialled leg and refuses new outbound calls over the daily soft cap", async () => {
+    const h = createTelephonyHarness();
+    const deps = actionDeps(h);
+
+    await startOutboundCall(deps, o1, { to: "+421905123456" });
+    expect(h.rows("motorist_telephony_daily_usage")).toEqual([expect.objectContaining({ legs: 1 })]);
+
+    h.db.update("motorist_telephony_settings", { daily_leg_soft_cap: 1 }, () => true);
+    h.setPresence(PROFILES.o1, { status: "available", current_session_id: null });
+    const error = await fail(startOutboundCall(deps, o1, { to: "+421905123456" }));
+    expect(error).toMatchObject({ status: 429, code: "daily_cap_reached" });
+  });
+
   it("refuses destinations outside the allowlist and invalid numbers", async () => {
     const h = createTelephonyHarness();
     expect(await fail(startOutboundCall(actionDeps(h), o1, { to: "+49 151 123456" }))).toMatchObject({ status: 403, code: "destination_not_allowed" });

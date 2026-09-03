@@ -9,11 +9,11 @@ const DAY = 24 * 60 * 60 * 1000;
 function seedLedger(h: ReturnType<typeof createTelephonyHarness>) {
   const at = (ms: number) => new Date(h.now().getTime() - ms).toISOString();
   h.db.seed("motorist_telnyx_webhook_events", [
-    { event_id: "old-processed", event_type: "call.hangup", status: "processed", attempts: 1, received_at: at(31 * DAY), payload: { a: 1 } },
-    { event_id: "old-failed", event_type: "call.hangup", status: "failed", attempts: 3, received_at: at(31 * DAY), payload: { a: 1 } },
-    { event_id: "recent-processed", event_type: "call.hangup", status: "processed", attempts: 1, received_at: at(2 * DAY), payload: { a: 1 } },
-    { event_id: "playback-8d", event_type: "call.playback.ended", status: "processed", attempts: 1, received_at: at(8 * DAY), payload: { a: 1 } },
-    { event_id: "playback-1d", event_type: "call.playback.ended", status: "processed", attempts: 1, received_at: at(1 * DAY), payload: { a: 1 } },
+    { organization_id: ORG, event_id: "old-processed", event_type: "call.hangup", status: "processed", attempts: 1, received_at: at(31 * DAY), payload: { a: 1 } },
+    { organization_id: ORG, event_id: "old-failed", event_type: "call.hangup", status: "failed", attempts: 3, received_at: at(31 * DAY), payload: { a: 1 } },
+    { organization_id: ORG, event_id: "recent-processed", event_type: "call.hangup", status: "processed", attempts: 1, received_at: at(2 * DAY), payload: { a: 1 } },
+    { organization_id: ORG, event_id: "playback-8d", event_type: "call.playback.ended", status: "processed", attempts: 1, received_at: at(8 * DAY), payload: { a: 1 } },
+    { organization_id: ORG, event_id: "playback-1d", event_type: "call.playback.ended", status: "processed", attempts: 1, received_at: at(1 * DAY), payload: { a: 1 } },
   ]);
 }
 

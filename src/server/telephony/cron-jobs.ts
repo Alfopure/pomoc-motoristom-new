@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
-import { sweepOverdueRingSteps } from "./routing/ring-plan";
+import { closeOrphanLegs, sweepOverdueRingSteps } from "./routing/ring-plan";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
 import { ACTIVE_SESSION_STATES, type AppEvent, type SessionRow } from "./state/types";
 
@@ -80,7 +80,15 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
     if (result.errors.length > 0) {
       await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error: new Error(result.errors[0].error), context: { job: RING_SWEEP_JOB, sessionId: result.errors[0].sessionId } });
     }
-    return { job: RING_SWEEP_JOB, status: result.errors.length > 0 ? "failed" : "ok", detail: { checked: result.checked, swept: result.swept.length, errors: result.errors } };
+    // Legs whose `call.hangup` never arrived would otherwise count against
+    // `max_concurrent_legs` forever and silently stop inbound ringing.
+    const orphans = await closeOrphanLegs(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) });
+    if (orphans.length > 0) deps.logger?.({ level: "warn", scope: "cron", job: RING_SWEEP_JOB, orphanLegsClosed: orphans.length });
+    return {
+      job: RING_SWEEP_JOB,
+      status: result.errors.length > 0 ? "failed" : "ok",
+      detail: { checked: result.checked, swept: result.swept.length, deferred: result.deferred.length, orphanLegsClosed: orphans.length, errors: result.errors },
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error, context: { job: RING_SWEEP_JOB } });
@@ -135,12 +143,19 @@ export async function pruneWebhookLedger(deps: TelephonyCronDeps): Promise<Telep
   const deleteBefore = new Date(now.getTime() - (deps.ledgerRetentionDays ?? LEDGER_RETENTION_DAYS) * day).toISOString();
   const payloadBefore = new Date(now.getTime() - (deps.payloadRetentionDays ?? LEDGER_PAYLOAD_RETENTION_DAYS) * day).toISOString();
 
-  const deleted = await deps.admin.from("motorist_telnyx_webhook_events").delete().eq("status", "processed").lt("received_at", deleteBefore).select("event_id");
+  const deleted = await deps.admin
+    .from("motorist_telnyx_webhook_events")
+    .delete()
+    .eq("organization_id", deps.organizationId)
+    .eq("status", "processed")
+    .lt("received_at", deleteBefore)
+    .select("event_id");
   if (deleted.error) return { job: LEDGER_PRUNE_JOB, status: "failed", detail: {}, error: deleted.error.message };
 
   const nulled = await deps.admin
     .from("motorist_telnyx_webhook_events")
     .update({ payload: null })
+    .eq("organization_id", deps.organizationId)
     .in("event_type", LEDGER_PAYLOAD_EVENT_TYPES)
     .lt("received_at", payloadBefore)
     .not("payload", "is", null)

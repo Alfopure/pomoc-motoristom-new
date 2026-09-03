@@ -16,6 +16,8 @@ import { pathToFileURL } from "node:url";
 
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
+import { PUBLIC_ROUTES as REGISTRY_PUBLIC_ROUTES } from "@/server/route-auth-registry";
+
 // ── Supabase mocky (hoisted pred importom routes) ─────────────────────────────
 function makeChainableQuery() {
   const single = { data: { id: "org-test-id", role: "admin", active: true }, error: null };
@@ -47,16 +49,14 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 // ── Allowlist: iba tieto routes smú byť dostupné bez prihlásenia ──────────────
-// Kľúč = cesta pod src/app/api (bez /route.ts), so zachovanými [param] segmentmi.
-const PUBLIC_ROUTES = new Set<string>([
-  "/auth/forgot-password", // verejný, rate-limited (reset hesla)
-  "/auth/password-completed", // same-origin callback po nastavení hesla (pred loginom)
-  "/health/live", // verejný, sanitizovaný infra liveness probe
-  "/health/ready", // verejný, sanitizovaný dependency readiness probe
-  "/public/location-links/[token]", // verejný token link pre klienta
-  "/telephony/telnyx/webhook", // Telnyx Call Control webhook — auth = Ed25519 podpis (400 pri neplatnom)
-  "/sms/telnyx/webhook", // Telnyx messaging delivery-status webhook — auth = Ed25519 podpis
-]);
+// Jediný zdroj pravdy je `ROUTE_AUTH_REGISTRY` (class: "public"); tento test
+// z neho odvodzuje kľúče, takže sa obe strany nemôžu rozísť. Kľúč = cesta pod
+// src/app/api (bez /route.ts), so zachovanými [param] segmentmi.
+//
+// Dnes sú to: /auth/forgot-password, /health/live, /health/ready,
+// /public/location-links/[token], /telephony/telnyx/webhook (Ed25519 podpis),
+// /sms/telnyx/webhook (Ed25519 podpis).
+const PUBLIC_ROUTES = new Set<string>(REGISTRY_PUBLIC_ROUTES.map((route) => `/${route}`));
 
 // Bearer secrety nastavíme, nech bearer/cron routes bez hlavičky vrátia 401 (nie 500).
 const BEARER_SECRET_ENV = [

@@ -27,9 +27,10 @@ Route: `POST /api/telephony/telnyx/webhook` (`runtime = "nodejs"`, `dynamic = "f
 2. Verify `telnyx-signature-ed25519` over `${telnyx-timestamp}|${raw}` with the Ed25519 public key (`TELNYX_PUBLIC_KEY`, raw 32-byte key base64; the verifier prepends the SPKI DER prefix). Tolerance 300 s. Failure → `400`.
 3. `TELNYX_PUBLIC_KEY` missing or `getTelnyxConfig().configured === false` → `503` with the Slovak not-configured message. Nothing can be verified, so the request is not labelled forged.
 4. Reject events whose `payload.connection_id` is neither `TELNYX_CALL_CONTROL_APP_ID` nor `TELNYX_CREDENTIAL_CONNECTION_ID` of this environment → `200 {outcome: "unverified_connection"}`.
-5. **Claim, not insert.** `motorist_telnyx_claim_webhook_event(...)` upserts the ledger row and returns `claimed` (we own it), `duplicate` (already `processed` → return 200 at once) or `busy` (another invocation holds a claim younger than 30 s → return 200 without processing). A `failed` or stale `queued` row is reclaimed, so retries are a real recovery path.
-6. Acquire the per-session lease (`motorist_session_lease_acquire`, TTL 4 s, 50-150 ms jittered retries for at most 3 s), run the reducer, persist under a `version` CAS (retry budget 20), release the lease.
-7. Structured log per event: `{eventId, type, sessionId, verified, claim, ms, commands[]}`.
+5. **Claim, not insert.** `motorist_telnyx_claim_webhook_event(...)` upserts the ledger row and returns `claimed` (we own it), `duplicate` (already `processed` → return 200 at once) or `busy` (another invocation holds a claim younger than 30 s → return 200 without processing). A `failed` or stale `queued` row is reclaimed, so retries are a real recovery path. The RPC also returns `event_claimed_at`; the closing `processed`/`failed` update is scoped to that stamp, so an invocation whose claim was taken over cannot release the new owner's claim.
+6. Acquire the per-session lease (`motorist_session_lease_acquire`, TTL 4 s, 50-150 ms jittered retries for at most 3 s), run the reducer, persist under a `version` CAS (retry budget 20), release the lease. The lease is renewed before every dial of a ring fan-out, which can otherwise outlive its TTL.
+7. Sweep at most `INLINE_SWEEP_LIMIT` (2) other overdue sessions, and only within `INLINE_SWEEP_BUDGET_MS` (4 s) of the event's own start, so the sweep can never consume the route's `maxDuration = 10`. The exhaustive pass belongs to `/api/telephony/cron`.
+8. Structured log per event: `{eventId, type, sessionId, verified, claim, ms, commands[]}`.
 
 Failover: the Call Control application's failover URL points at the same route on the project's `*.vercel.app` alias. Double delivery is safe because of the claim.
 
@@ -37,7 +38,7 @@ Failover: the Call Control application's failover URL points at the same route o
 
 | Class | Types | Handling |
 | --- | --- | --- |
-| Control | `call.initiated`, `call.answered`, `call.bridged`, `call.hangup`, `call.gather.ended`, `call.playback.ended`, `call.dtmf.received`, `call.hold`, `call.unhold`, `call.refer.*`, `conference.created`, `conference.ended`, `conference.participant.joined`, `conference.participant.left` | Processed synchronously. Commands are best-effort with compensation (failed `answer` → `hangup`; failed fan-out → next step or fallback; failed `bridge` → hang up the operator leg, customer to `waiting`). The route **always answers 200** once compensation was attempted, writes `status='failed'` + `error` to the ledger and raises a `motorist_job_incidents` row. Telnyx retries are not a real-time recovery path (`first_command_timeout_secs: 20` would already have torn the call down). |
+| Control | `call.initiated`, `call.answered`, `call.bridged`, `call.hangup`, `call.gather.ended`, `call.playback.ended`, `call.dtmf.received`, `call.hold`, `call.unhold`, `call.refer.*`, `conference.created`, `conference.ended`, `conference.participant.joined`, `conference.participant.left` | Processed synchronously. Commands are best-effort with compensation (failed `answer` → `hangup`; failed fan-out → next step or fallback; failed `bridge` → hang up the operator leg, customer to `waiting`). The route answers **200** once the event was attached to a session and compensation was attempted, writes `status='failed'` + `error` to the ledger and raises a `motorist_job_incidents` row; Telnyx retries are not a real-time recovery path (`first_command_timeout_secs: 20` would already have torn the call down). A failure *before* the session exists (session lookup, `call.initiated` session creation) answers **500** instead: nothing was issued yet and the redelivery a few seconds later is the only thing that can rescue the call. |
 | Bookkeeping | `call.cost`, `call.speak.*`, `call.playback.started`, `message.*`, unknown types | May answer 500 so Telnyx retries; the claim semantics make reprocessing safe. |
 
 App intents (`hold`, `unhold`, `park`, `pickup`, `blind_transfer`, `consult`, `complete_transfer`, `cancel_consult`, `hangup`, `sweep`) enter the same reducer as `{kind: "app"}` events, so an operator action and a webhook are serialised by the same lease.
@@ -62,7 +63,7 @@ Every DB write is an upsert on a natural key: legs on `telnyx_call_control_id`, 
 | `held` | `POST …/hold` | promote to a conference if needed; `conferences/{id}/actions/hold {call_control_ids, audio_url}`; unhold reverses |
 | `consulting` | attended transfer start | promote; customer held; dial the target with `link_to`; on answer `join` (3-way) or operator `leave` (completes the transfer) |
 | `conference` | add-party / supervision (Phase 4) | promote; dial with `link_to`; `join` on answer |
-| `waiting` / `parked` | IVR wait, overflow, operator park, lost operator leg | customer leaves the conference (or is unbridged), then a `gather_using_audio` MOH tick loop; the row appears in the čakáreň; pickup dials the picker's WebRTC leg and bridges; after `park_max_minutes` the callback prompt replaces the indefinite park |
+| `waiting` / `parked` | IVR wait, overflow, operator park, lost operator leg | customer leaves the conference (or is unbridged), then a `gather_using_audio` MOH tick loop (`moh.mp3` ≈ 8 s + `MOH_TICK_TIMEOUT_MS` 2 s = one `MOH_TICK_MS` cycle; the sweeper re-arms after `WAITING_TICK_STALE_MS` = 3 cycles, min 30 s); the row appears in the čakáreň; pickup dials the picker's WebRTC leg and bridges; after `park_max_minutes` the callback prompt replaces the indefinite park |
 | `after_hours` | greeting outside business hours | after-hours prompt as the callback gather in one round trip |
 | `callback_offered` | caller pressed 1 | `motorist_callback_requests` row + confirmation prompt + `hangup` |
 | `missed` | all steps exhausted, or the customer hung up while ringing | plan fallback; callback task; remaining legs cancelled |
@@ -104,8 +105,9 @@ Configuration tables (org-scoped, member-readable, manager/admin writable):
 - `materialiseRingPlan()` **freezes** the plan into `metadata.ring.plan` at ring start; configuration edits never alter a live call.
 - Strategy `all` dials every eligible member at once for `step.timeout_secs`. Strategy `ordered` dials one member at a time in `position` order, each for `max(5, member.ring_secs ?? step.timeout_secs)`; the step ends when the list is exhausted.
 - Eligibility: `external_number` members are always eligible (coverage of last resort when every browser is closed). Operators need `presence.status = 'available'` (or `after_call_work` past `wrap_up_until`), `device_seen_at` within 120 s and no open `offered|answered` attempt. The real liveness truth is the dial result: an immediate `call.hangup` with `USER_NOT_REGISTERED`/`UNALLOCATED_NUMBER` marks the attempt `skipped_offline` and does not consume step time.
-- Atomic reservation: `motorist_reserve_operator(profile_id, session_id)` CAS-updates `motorist_operator_presence` to `on_call`; 0 rows → hang that leg up immediately and mark the attempt `cancelled`. A partial unique index on `motorist_ring_attempts (profile_id) where result = 'offered'` guarantees one open offer per operator.
-- Caps: `MAX_RING_FANOUT` 8 per step, `MAX_CONCURRENT_LEGS` 9 per organisation (both overridable per organisation in `motorist_telephony_settings`). When no capacity is left the step is skipped in favour of the next step or the fallback.
+- Atomic reservation: `motorist_reserve_operator(profile_id, session_id)` CAS-updates `motorist_operator_presence` to `on_call`; 0 rows → hang that leg up immediately and mark the attempt `cancelled`. The RPC is re-entrant for the session that already holds the reservation, because a lost `version` CAS makes the runner re-run the guard. A partial unique index on `motorist_ring_attempts (profile_id) where result = 'offered'` guarantees one open offer per operator.
+- Caps: `MAX_RING_FANOUT` 8 per step, `MAX_CONCURRENT_LEGS` 9 per organisation (both overridable per organisation in `motorist_telephony_settings`). Only legs started in the last 4 hours count. When no capacity is left the step stays armed and is re-checked every `CAPACITY_RETRY_SECS` (5 s) for at most `CAPACITY_WAIT_MAX_MS` (30 s) before the plan moves on; reaching the cap opens a `telephony.routing.capacity` incident.
+- Billing counters: every dial writes `motorist_telephony_daily_usage.legs` and every SMS `sms_count` (RPC `motorist_telephony_usage_add`). Operator-initiated legs (click-to-call, internal call, PSTN transfer/consult target) are refused with 429 once `legs >= daily_leg_soft_cap`; inbound routing is never blocked by it.
 - Sweeper triggers: end of every webhook, `GET /api/telephony/calls/active` (throttled to one sweep per 5 s per instance), Telnyx-driven MOH gather ticks on unbridged customer legs, and the 5-minute Vercel cron.
 
 ## Database RPCs
@@ -114,11 +116,17 @@ All `SECURITY DEFINER`, `search_path = ''`, revoked from `public`/`anon`/`authen
 
 | RPC | Contract |
 | --- | --- |
-| `motorist_telnyx_claim_webhook_event(p_event_id, p_event_type, p_payload, …, p_stale_after_ms := 30000)` | `outcome` `claimed|duplicate|busy`, plus `event_status`, `event_attempts` |
+| `motorist_telnyx_claim_webhook_event(p_event_id, p_event_type, p_payload, …, p_stale_after_ms := 30000)` | `outcome` `claimed|duplicate|busy`, plus `event_status`, `event_attempts`, `event_claimed_at` |
 | `motorist_session_lease_acquire(p_session_id, p_token, p_ttl_ms := 4000)` | boolean; re-entrant for the same token |
 | `motorist_session_lease_release(p_session_id, p_token)` | boolean |
-| `motorist_reserve_operator(p_profile_id, p_session_id)` | boolean (CAS on presence) |
+| `motorist_reserve_operator(p_profile_id, p_session_id)` | boolean (CAS on presence); re-entrant for the session that already holds it |
+| `motorist_telephony_usage_add(p_organization_id, p_day, p_legs, p_minutes, p_sms)` | integer (new `legs` value); atomic upsert of `motorist_telephony_daily_usage` |
+| `app_private.motorist_normalize_e164(p_value, p_default_cc := '421')` | text; trigger `motorist_telephony_lines_normalize` keeps `phone_number` canonical |
 | `motorist_advance_ring_step(p_session_id, p_expected_step)` | boolean (CAS on `current_step`) |
+
+## Browser phone auto-answer
+
+An invite is answered without operator action when it is the operator leg of a dial this tab started. The primary discriminator is `telnyxIDs.telnyxCallControlId` against the legs recorded by `expectOperatorLeg()`; because the SIP invite usually beats the `POST /api/telephony/calls` response, the currently ringing call is re-evaluated whenever a new expected leg is registered. Legs the *server* dials for the operator (pickup), where the tab never learns the call-control id, are recognised by the `X-PM-Auto-Answer: 1` invite header. Everything else rings.
 
 ## Realtime
 
@@ -133,8 +141,8 @@ The browser calls `supabase.realtime.setAuth(accessToken)` on session load and r
 | `POST /api/telephony/telnyx/webhook` | `public` | Ed25519 signature, claim ledger |
 | `POST /api/sms/telnyx/webhook` | `public` | Ed25519 signature; monotone delivery-status ranking |
 | `GET /api/telephony/cron` | `bearer CRON_SECRET` | ring sweep, stuck-session detection, ledger prune |
-| `POST /api/telephony/webphone/token` | `session` | mints a short-lived WebRTC JWT, rotates `device_session_id` |
-| `POST /api/telephony/devices/heartbeat` | `session` | stale `device_session_id` → `409`, the tab disconnects |
+| `POST /api/telephony/webphone/token` | `session` | mints a short-lived WebRTC JWT, rotates `device_session_id`; refuses with `409` while the current device is live and its operator is `ringing`/`on_call`, unless the body carries `{"takeover": true}` |
+| `POST /api/telephony/devices/heartbeat` | `session` | stale `device_session_id` → `409`, the tab disconnects; a `registrationState: "unregistered"` beacon (sent on `pagehide`) clears `device_seen_at` so the ring plan stops allocating steps to a closed tab |
 | `GET/POST /api/telephony/presence`, `POST /api/telephony/presence/end-wrap-up` | `session` | presence + pause reasons; mirrored into `motorist_operator_statuses` |
 | `POST /api/telephony/calls`, `POST /api/telephony/calls/internal` | `session` | click-to-call / colleague call; kill switch, rate limit 10/min per operator, destination allowlist |
 | `GET /api/telephony/calls/active` | `session` | console snapshot (calls, waiting room, presence, `organizationId`) |
@@ -150,13 +158,15 @@ Degraded mode: when `getTelnyxConfig().configured === false`, every telephony se
 
 `resolveSmsTransport()` returns the Telnyx transport whenever `TELNYX_API_KEY` exists, otherwise `notConfiguredTransport`. Sends go to `POST /v2/messages {from: TELNYX_SMS_ALPHA_SENDER, to, text, messaging_profile_id}` with an `Idempotency-Key` header; `motorist_sms_messages.idempotency_key` is unique and remains the audit link. `preflight()` runs before any row is inserted, so a blocked send leaves no audit rows. The alphanumeric sender is one-way: inbound `message.received` events are acknowledged as `not_applicable` and the composer shows a Slovak notice that replies must be handled by phone.
 
+The transport enforces two guards of its own before the HTTP call: the recipient must pass the same `destination_allowlist` as a voice destination (403 otherwise) and the organisation may send at most `SMS_RATE_LIMIT` (20) messages per minute (429). A delivered send increments `motorist_telephony_daily_usage.sms_count`.
+
 ## Retention
 
 | Data | Policy |
 | --- | --- |
 | `motorist_telnyx_webhook_events` | `processed` rows deleted after 30 days; `payload` nulled after 7 days for `call.playback.*`, `call.speak.*` and `call.cost`. Job `telephony.ledger.prune` in `motorist_job_controls`, run by the 5-minute cron; seeded **disabled**, so the cron reports `disabled` until it is enabled. |
-| `motorist_calls.raw_latest_payload` | nulled after 30 days (Phase 5 job). |
-| `motorist_call_events.raw_payload` | nulled after 90 days (Phase 5 job) — GDPR Art. 5(1)(e) storage limitation, see [`data-model.md`](./data-model.md). |
+| `motorist_calls.raw_latest_payload` | emptied after 30 days (Phase 5 job). The column is `jsonb not null default '{}'` (inherited from the foundation schema), so the job writes `'{}'::jsonb`, not `NULL`. |
+| `motorist_call_events.raw_payload` | emptied after 90 days (Phase 5 job) with the same `'{}'::jsonb` contract — GDPR Art. 5(1)(e) storage limitation, see [`data-model.md`](./data-model.md). |
 | Recordings / transcripts | Recording stays disabled for the Telnyx rollout; the tables exist but are not populated. |
 
 The ledger holds caller numbers inside raw payloads, so the prune job is the data-minimisation control, not a housekeeping nicety.

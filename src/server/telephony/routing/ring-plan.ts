@@ -5,8 +5,8 @@ import type { Database } from "@/lib/supabase/database.types";
 import {
   MAX_CONCURRENT_LEGS,
   MAX_RING_FANOUT,
-  MOH_TICK_MS,
   RING_STEP_GRACE_SECS,
+  WAITING_TICK_STALE_MS,
   readMeta,
   type AppEvent,
   type AttemptPlan,
@@ -16,6 +16,7 @@ import {
   type FrozenRingStep,
   type PresenceRow,
   type SessionRow,
+  TERMINAL_STATES,
 } from "../state/types";
 import { evaluateMemberEligibility, type EligibilityDevice, type EligibilityPresence, type IneligibilityReason } from "./eligibility";
 
@@ -234,12 +235,12 @@ export function isRingStepOverdue(session: SessionRow, now: Date): boolean {
   return deadline !== null && deadline < now.getTime();
 }
 
-/** A waiting/parked session whose MOH tick has not re-armed for two tick periods. */
-export function isWaitingTickStale(session: SessionRow, now: Date, tickMs: number = MOH_TICK_MS): boolean {
+/** A waiting/parked session whose MOH tick has not re-armed for `WAITING_TICK_STALE_MS`. */
+export function isWaitingTickStale(session: SessionRow, now: Date, staleMs: number = WAITING_TICK_STALE_MS): boolean {
   if (session.state !== "waiting" && session.state !== "parked") return false;
   const waiting = readMeta(session).waiting;
   const last = ms(waiting?.last_tick_at) ?? ms(waiting?.since) ?? ms(session.parked_at) ?? ms(session.updated_at);
-  return last !== null && last + 2 * tickMs < now.getTime();
+  return last !== null && last + staleMs < now.getTime();
 }
 
 /** `wrap_up` / `missed` sessions untouched for two minutes (leg hangup webhooks lost). */
@@ -251,12 +252,17 @@ export function isSessionStale(session: SessionRow, now: Date, staleMs: number =
   return updated !== null && updated + staleMs < now.getTime();
 }
 
-export async function findOverdueSessions(admin: AdminClient, input: { organizationId: string; now: Date }): Promise<{ ringing: SessionRow[]; waiting: SessionRow[]; stale: SessionRow[] }> {
+/** Upper bound on the scan itself; the stalest sessions come first. */
+export const OVERDUE_SCAN_LIMIT = 200;
+
+export async function findOverdueSessions(admin: AdminClient, input: { organizationId: string; now: Date; scanLimit?: number }): Promise<{ ringing: SessionRow[]; waiting: SessionRow[]; stale: SessionRow[] }> {
   const { data, error } = await admin
     .from("motorist_call_sessions")
     .select("*")
     .eq("organization_id", input.organizationId)
-    .in("state", ["ringing", "waiting", "parked", "wrap_up", "missed"]);
+    .in("state", ["ringing", "waiting", "parked", "wrap_up", "missed"])
+    .order("updated_at", { ascending: true })
+    .limit(input.scanLimit ?? OVERDUE_SCAN_LIMIT);
   if (error) throw new Error(`overdue session scan failed: ${error.message}`);
   const rows = data ?? [];
   return {
@@ -266,6 +272,57 @@ export async function findOverdueSessions(admin: AdminClient, input: { organizat
   };
 }
 
+/** Legs left open by a lost `call.hangup` webhook (they would eat `max_concurrent_legs`). */
+export const ORPHAN_LEG_MAX_AGE_MS = 4 * 60 * 60 * 1000;
+export const ORPHAN_LEG_SCAN_LIMIT = 200;
+
+/**
+ * Closes leg rows that can no longer belong to a live call: their session is
+ * terminal, or the leg is older than `ORPHAN_LEG_MAX_AGE_MS`. Bookkeeping only —
+ * the Telnyx side of such a leg is long gone.
+ */
+export async function closeOrphanLegs(
+  admin: AdminClient,
+  input: { organizationId: string; now: Date; maxAgeMs?: number; limit?: number },
+): Promise<string[]> {
+  const cutoff = new Date(input.now.getTime() - (input.maxAgeMs ?? ORPHAN_LEG_MAX_AGE_MS)).toISOString();
+  const open = await admin
+    .from("motorist_call_legs")
+    .select("id, session_id, initiated_at")
+    .eq("organization_id", input.organizationId)
+    .is("ended_at", null)
+    .order("initiated_at", { ascending: true })
+    .limit(input.limit ?? ORPHAN_LEG_SCAN_LIMIT);
+  if (open.error) throw new Error(`orphan leg scan failed: ${open.error.message}`);
+  const rows = open.data ?? [];
+  if (rows.length === 0) return [];
+
+  const sessionIds = [...new Set(rows.map((row) => row.session_id))];
+  const sessions = await admin.from("motorist_call_sessions").select("id, state").eq("organization_id", input.organizationId).in("id", sessionIds);
+  if (sessions.error) throw new Error(`orphan leg session load failed: ${sessions.error.message}`);
+  const stateById = new Map((sessions.data ?? []).map((row) => [row.id, row.state]));
+
+  const orphans = rows
+    .filter((row) => {
+      const state = stateById.get(row.session_id);
+      if (state === undefined) return true;
+      if (TERMINAL_STATES.has(state) || state === "missed") return true;
+      const initiated = ms(row.initiated_at);
+      return initiated !== null && initiated < Date.parse(cutoff);
+    })
+    .map((row) => row.id);
+  if (orphans.length === 0) return [];
+
+  const closed = await admin
+    .from("motorist_call_legs")
+    .update({ state: "ended", ended_at: input.now.toISOString(), hangup_cause: "orphan_sweep" })
+    .in("id", orphans)
+    .is("ended_at", null)
+    .select("id");
+  if (closed.error) throw new Error(`orphan leg close failed: ${closed.error.message}`);
+  return (closed.data ?? []).map((row) => row.id);
+}
+
 export type SweepDeps = {
   admin: AdminClient;
   organizationId: string;
@@ -273,16 +330,32 @@ export type SweepDeps = {
   /** Runs one session through lease → reducer → effects (provided by the session runner). */
   runSessionEvent: (sessionId: string, event: AppEvent) => Promise<unknown>;
   eventId?: () => string;
+  /** Maximum number of sessions re-driven in this pass (unbounded by default). */
+  limit?: number;
+  /** Wall-clock budget: no further session is started once it is exhausted. */
+  budgetMs?: number;
+  /** Monotonic clock for the budget (defaults to `Date.now`; `now` may be a frozen test clock). */
+  clock?: () => number;
 };
 
-export type SweepResult = { checked: number; swept: string[]; errors: Array<{ sessionId: string; error: string }> };
+export type SweepResult = { checked: number; swept: string[]; deferred: string[]; errors: Array<{ sessionId: string; error: string }> };
 
 export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResult> {
   const now = (deps.now ?? (() => new Date()))();
   const overdue = await findOverdueSessions(deps.admin, { organizationId: deps.organizationId, now });
+  // Ringing sessions first: a caller is listening to them right now.
   const targets = [...overdue.ringing, ...overdue.waiting, ...overdue.stale];
-  const result: SweepResult = { checked: targets.length, swept: [], errors: [] };
-  for (const session of targets) {
+  const result: SweepResult = { checked: targets.length, swept: [], deferred: [], errors: [] };
+  const clock = deps.clock ?? (() => Date.now());
+  const started = clock();
+  const limit = deps.limit ?? targets.length;
+  for (const [index, session] of targets.entries()) {
+    // Bounded so the caller (the webhook route, `maxDuration = 10`) can never be
+    // killed mid-processing; the cron pass runs unbounded.
+    if (index >= limit || (deps.budgetMs !== undefined && clock() - started >= deps.budgetMs)) {
+      result.deferred.push(session.id);
+      continue;
+    }
     const id = deps.eventId ? deps.eventId() : `sweep:${session.id}:${now.getTime()}`;
     try {
       await deps.runSessionEvent(session.id, { kind: "app", id, type: "sweep", actorProfileId: null, occurredAt: now.toISOString() });

@@ -122,12 +122,20 @@ Never point a new number at a Call Control application of another environment: t
 | Daily spend, per-minute destination price, concurrency, destination whitelist | Telnyx outbound voice profile (one per environment) | prod 20 USD/day, concurrency 10, EU27; dev 2 USD/day, concurrency 4, SK+CZ |
 | `max_ring_fanout` (legs dialled per ring step) | `motorist_telephony_settings` | 8 |
 | `max_concurrent_legs` (per organisation) | `motorist_telephony_settings` | 9 |
-| `daily_leg_soft_cap` (alerting) | `motorist_telephony_settings` | seeded value |
+| `daily_leg_soft_cap` (enforced on operator-initiated legs) | `motorist_telephony_settings` | seeded value (500) |
 | `park_max_minutes` (park guard before the callback prompt) | `motorist_telephony_settings` | 30 |
 | `destination_allowlist` (dial prefixes) | `motorist_telephony_settings` | SK, CZ |
-| Outbound rate limit | `OUTBOUND_RATE_LIMIT` in `src/server/telephony/call-actions.ts` | 10 calls/min per operator (code change) |
+| Outbound rate limit | `OUTBOUND_RATE_LIMIT` in `src/server/telephony/call-actions.ts`; enforced in-memory **and** against `motorist_call_sessions` created by the operator in the last 60 s | 10 calls/min per operator (code change) |
+| SMS rate limit | `SMS_RATE_LIMIT` in `src/lib/integrations/telnyx/sms-client.ts` | 20 SMS/min per organisation (code change) |
+| SMS destinations | `destination_allowlist` (the same list as voice), checked in the transport before the send | SK, CZ |
 
-Raise the Telnyx profile cap and the database cap together: the database cap protects the ring engine from fanning out beyond the provider's concurrency, and the provider cap protects the account from a runaway loop. When a step finds no capacity it is skipped in favour of the next step or the plan fallback, so an under-sized `max_concurrent_legs` silently shortens ring plans.
+Every dialled leg is counted into `motorist_telephony_daily_usage.legs` (RPC
+`motorist_telephony_usage_add`) and every SMS into `sms_count`. Once `legs`
+reaches `daily_leg_soft_cap`, click-to-call, internal calls and PSTN
+transfer/consult targets are refused with 429 (`daily_cap_reached`); inbound
+calls are never refused by the cap.
+
+Raise the Telnyx profile cap and the database cap together: the database cap protects the ring engine from fanning out beyond the provider's concurrency, and the provider cap protects the account from a runaway loop. A step that finds no capacity stays armed for `CAPACITY_WAIT_MAX_MS` (30 s, re-checked by the sweep every 5 s) and only then moves on to the next step or the fallback; hitting the cap opens an incident under `telephony.routing.capacity`. Legs are counted only when they were started in the last 4 hours, and `telephony.ring.sweep` closes leg rows whose session is terminal or that are older than that window, so a lost `call.hangup` webhook cannot silently disable inbound ringing.
 
 ## 7. Simulating an inbound call
 
@@ -162,8 +170,8 @@ Hold, attended transfer, add-party, park and supervision need the session to be 
 
 - `GET /api/telephony/cron` (bearer `CRON_SECRET`) — the single scheduled job; `status: "degraded"` means a sub-job failed.
 - `motorist_telnyx_webhook_events`: rows with `status = 'failed'`, or `attempts > 1`, indicate lost or retried webhooks.
-- `motorist_job_incidents` under `telephony.telnyx.webhook|commands|actions`.
-- `motorist_telephony_daily_usage` against `daily_leg_soft_cap`.
+- `motorist_job_incidents` under `telephony.telnyx.webhook|commands|actions` and `telephony.routing.capacity` (the org-wide leg cap was reached).
+- `motorist_telephony_daily_usage` against `daily_leg_soft_cap` (legs and SMS are written by the app; the cap is enforced, not only alerted).
 - The ledger prune job (`telephony.ledger.prune` in `motorist_job_controls`) is seeded **disabled**; enable it when retention should start running, otherwise the cron keeps reporting `disabled` and raw payloads accumulate.
 
 ## 10. Official references

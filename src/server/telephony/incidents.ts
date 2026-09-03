@@ -17,6 +17,7 @@ export const TELEPHONY_INCIDENT_JOBS = {
   webhook: "telephony.telnyx.webhook",
   commands: "telephony.telnyx.commands",
   actions: "telephony.telnyx.actions",
+  capacity: "telephony.routing.capacity",
 } as const;
 
 export type TelephonyIncidentJob = (typeof TELEPHONY_INCIDENT_JOBS)[keyof typeof TELEPHONY_INCIDENT_JOBS];

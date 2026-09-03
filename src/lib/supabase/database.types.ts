@@ -1261,6 +1261,7 @@ export type Database = {
           outcome: "claimed" | "duplicate" | "busy";
           event_status: "queued" | "processed" | "failed";
           event_attempts: number;
+          event_claimed_at: Timestamp | null;
         }[];
       };
       motorist_session_lease_acquire: {
@@ -1291,6 +1292,16 @@ export type Database = {
           p_expected_step: number;
         };
         Returns: boolean;
+      };
+      motorist_telephony_usage_add: {
+        Args: {
+          p_organization_id: string;
+          p_day: string;
+          p_legs?: number;
+          p_minutes?: number;
+          p_sms?: number;
+        };
+        Returns: number;
       };
     };
     Enums: { [_ in never]: never };

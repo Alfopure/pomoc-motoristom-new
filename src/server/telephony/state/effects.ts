@@ -4,6 +4,7 @@ import type { Database, Json } from "@/lib/supabase/database.types";
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "../incidents";
+import { addTelephonyUsage } from "../usage";
 import { advanceRingStep } from "../routing/ring-plan";
 import { reserveOperator } from "../routing/reservation";
 import { encodeClientState } from "../telnyx/client-state";
@@ -56,6 +57,12 @@ export type EffectsDeps = {
   logger?: (entry: Record<string, unknown>) => void;
   /** Wrap-up seconds for an operator (defaults to 30 when unknown). */
   wrapUpSecondsFor?: (profileId: string) => Promise<number>;
+  /**
+   * Extends the per-session lease held by the caller. A ring fan-out issues up to
+   * `MAX_RING_FANOUT` sequential dials, each with its own command timeout, which
+   * easily outlives the 4 s lease; the RPC is re-entrant for the same token.
+   */
+  renewLease?: () => Promise<void>;
 };
 
 export type CommandOutcome = {
@@ -616,6 +623,8 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
   const upserted = await admin.from("motorist_call_legs").upsert(values, { onConflict: "telnyx_call_control_id" }).select("*").single();
   if (upserted.error) fail("dialed leg upsert failed", upserted.error);
   const leg = upserted.data;
+  // Every dial is a billable leg: count it for the daily soft cap (best effort).
+  await addTelephonyUsage(admin, { organizationId: session.organization_id, now: deps.now(), legs: 1, logger: deps.logger });
   if (command.attempt) {
     let query = admin
       .from("motorist_ring_attempts")
@@ -696,6 +705,9 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   const failures: Array<{ to: string; error: string }> = [];
   for (const dial of dials) {
     try {
+      // Keep the lease alive across a slow fan-out so a concurrent `call.answered`
+      // cannot start dialling the rest of the group behind our back.
+      await deps.renewLease?.();
       await executeDial(deps, ctx, dial);
       succeeded += 1;
     } catch (error) {

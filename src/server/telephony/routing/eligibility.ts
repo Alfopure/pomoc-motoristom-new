@@ -75,7 +75,9 @@ function ms(value: string | null | undefined): number | null {
 /** Device heartbeat freshness (`device_seen_at` within the liveness window). */
 export function isDeviceLive(device: EligibilityDevice | undefined, now: Date, windowMs = DEVICE_LIVENESS_WINDOW_MS): boolean {
   if (!device) return false;
-  if (device.registrationState === "error") return false;
+  // Only a registered phone can take an invite; `null` stays live for rows written
+  // before the heartbeat reported a state.
+  if (device.registrationState !== null && device.registrationState !== "registered") return false;
   const seen = ms(device.deviceSeenAt);
   if (seen === null) return false;
   return now.getTime() - seen <= windowMs;

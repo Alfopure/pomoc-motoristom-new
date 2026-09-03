@@ -13,8 +13,10 @@ import {
   TelnyxCommandError,
   type TelnyxClient,
 } from "@/server/telephony/telnyx/client";
+import { isDestinationAllowed } from "@/server/telephony/call-actions";
 import { getTelnyxConfig, type EnvRecord, type TelnyxConfig } from "@/server/telephony/telnyx/env";
 import { TELNYX_MESSAGE_STATUS_MAP } from "@/server/telephony/telnyx/sms-status";
+import { addTelephonyUsage } from "@/server/telephony/usage";
 
 /**
  * Telnyx implementation of the provider-neutral `SmsTransport`.
@@ -71,10 +73,10 @@ export function smsErrorFromTelnyx(error: unknown): SmsWorkflowError {
   return new SmsWorkflowError(error instanceof Error ? error.message : "SMS odoslanie zlyhalo.", 502);
 }
 
-async function loadSmsSwitch(admin: AdminClient, organizationId: string) {
+async function loadSmsSettings(admin: AdminClient, organizationId: string) {
   const result = await admin
     .from("motorist_telephony_settings")
-    .select("live_calls_enabled, sms_live_sends")
+    .select("live_calls_enabled, sms_live_sends, destination_allowlist")
     .eq("organization_id", organizationId)
     .maybeSingle();
 
@@ -85,24 +87,44 @@ async function loadSmsSwitch(admin: AdminClient, organizationId: string) {
   return result.data ?? null;
 }
 
+/** Per-organisation send ceiling; the in-memory bucket is per lambda, the usage row is shared. */
+export const SMS_RATE_LIMIT = { limit: 20, windowMs: 60_000 } as const;
+const smsBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function hitSmsRateLimit(organizationId: string, now: number): boolean {
+  const bucket = smsBuckets.get(organizationId);
+  if (!bucket || bucket.resetAt <= now) {
+    smsBuckets.set(organizationId, { count: 1, resetAt: now + SMS_RATE_LIMIT.windowMs });
+    return true;
+  }
+  if (bucket.count >= SMS_RATE_LIMIT.limit) return false;
+  bucket.count += 1;
+  return true;
+}
+
+/** Test seam: the bucket is module state. */
+export function resetSmsRateLimit(): void {
+  smsBuckets.clear();
+}
+
 export function createTelnyxSmsTransport(options: TelnyxSmsTransportOptions = {}): TelnyxSmsTransport {
   const config = options.config ?? getTelnyxConfig(options.env ?? process.env);
 
-  async function resolveClient(organizationId: string): Promise<TelnyxClient> {
+  async function resolveClient(organizationId: string): Promise<{ client: TelnyxClient; admin: AdminClient; allowlist: string[] | null }> {
     if (!config.configured) {
       throw new SmsWorkflowError(SMS_NOT_CONFIGURED_MESSAGE, 503);
     }
 
     const admin = options.admin ?? createSupabaseAdminClient();
-    const gate = resolveTelnyxLiveGate(config, await loadSmsSwitch(admin, organizationId));
+    const settings = await loadSmsSettings(admin, organizationId);
+    const gate = resolveTelnyxLiveGate(config, settings);
 
     if (!gate.smsEnabled) {
       throw new SmsWorkflowError(SMS_SENDS_DISABLED_MESSAGE, 423);
     }
 
-    return options.createClient
-      ? options.createClient({ config, smsEnabled: gate.smsEnabled })
-      : createTelnyxClient({ config, liveGate: gate, fetch: options.fetch });
+    const client = options.createClient ? options.createClient({ config, smsEnabled: gate.smsEnabled }) : createTelnyxClient({ config, liveGate: gate, fetch: options.fetch });
+    return { client, admin, allowlist: settings?.destination_allowlist ?? null };
   }
 
   return {
@@ -113,7 +135,15 @@ export function createTelnyxSmsTransport(options: TelnyxSmsTransportOptions = {}
 
     async send(input: SmsTransportSendInput): Promise<SmsTransportSendResult> {
       const organizationId = requireOrganizationId(input.organizationId);
-      const client = await resolveClient(organizationId);
+      const { client, admin, allowlist } = await resolveClient(organizationId);
+      // The same allowlist that guards voice: a mistyped international recipient
+      // is premium-rate traffic with no ceiling otherwise.
+      if (!isDestinationAllowed(input.to, allowlist)) {
+        throw new SmsWorkflowError("Cieľové číslo nie je povolené (allowlist).", 403);
+      }
+      if (!hitSmsRateLimit(organizationId, Date.now())) {
+        throw new SmsWorkflowError("Príliš veľa SMS za minútu.", 429);
+      }
       const from = client.config.smsAlphaSender;
       const messagingProfileId = client.config.messagingProfileId;
 
@@ -125,6 +155,8 @@ export function createTelnyxSmsTransport(options: TelnyxSmsTransportOptions = {}
           messagingProfileId: messagingProfileId ?? undefined,
           idempotencyKey: input.idempotencyKey,
         });
+
+        await addTelephonyUsage(admin, { organizationId, sms: 1 });
 
         return {
           providerMessageId: message.id,

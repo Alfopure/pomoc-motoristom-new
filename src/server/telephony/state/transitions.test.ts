@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
+import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
 import { advanceRingStep } from "../routing/ring-plan";
-import { loadRoutingContext, loadSessionSnapshot, effectsDeps } from "../session-runner";
+import { loadRoutingContext, loadSessionSnapshot, effectsDeps, runSessionEvent } from "../session-runner";
 import { applyReduceResult, SessionConflictError } from "./effects";
 import { reduce } from "./transitions";
 import type { RingFanout } from "./types";
@@ -281,6 +281,120 @@ describe("inbound ring plan", () => {
 
     // And the RPC guard alone refuses a second advance from the same expected step.
     expect(await advanceRingStep(h.admin, call.sessionId, 1)).toBe(false);
+  });
+
+  it("holds the ring step while the org is at the concurrent-leg cap and rings once capacity frees up", async () => {
+    const h = createTelephonyHarness();
+    // Nine open legs of another call: `max_concurrent_legs` is exhausted.
+    const [other] = h.db.seed("motorist_call_sessions", [{ organization_id: ORG, direction: "inbound", state: "talking" }]);
+    const blockers = h.db.seed(
+      "motorist_call_legs",
+      Array.from({ length: 9 }, (unused, index) => ({
+        organization_id: ORG,
+        session_id: other.id,
+        telnyx_call_control_id: `cc-block-${index}`,
+        role: "operator" as const,
+        state: "answered",
+        initiated_at: h.now().toISOString(),
+      })),
+    );
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const session = h.session(call.sessionId);
+    expect(session.state).toBe("ringing");
+    expect(session.current_step).toBe(0);
+    expect((session.metadata as { ring: { capacity_wait_since: string | null } }).ring.capacity_wait_since).toBe(h.now().toISOString());
+    expect(h.telnyx.of("dial")).toHaveLength(0);
+    expect(h.rows("motorist_job_incidents")).toEqual([expect.objectContaining({ job_name: "telephony.routing.capacity" })]);
+
+    // Capacity frees up; the sweep re-drives the same step instead of falling back.
+    for (const leg of blockers) h.db.update("motorist_call_legs", { ended_at: h.now().toISOString(), state: "ended" }, (row) => row.id === leg.id);
+    h.advance(6_000);
+    const { sweepOverdueRingSteps } = await import("../routing/ring-plan");
+    await sweepOverdueRingSteps({ admin: h.admin, organizationId: ORG, now: () => h.now(), runSessionEvent: (id, event) => runSessionEvent(h.deps, id, event) });
+
+    expect(h.telnyx.of("dial").length).toBeGreaterThan(0);
+    // The same step is re-fanned (no guard, so `current_step` stays where the hold left it).
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ringing", current_step: 0 });
+    expect(h.attempts(call.sessionId).filter((attempt) => attempt.step_index === 0).length).toBeGreaterThan(0);
+    expect((h.session(call.sessionId).metadata as { ring: { capacity_wait_since: string | null } }).ring.capacity_wait_since).toBeNull();
+  });
+
+  it("gives up the capacity wait after CAPACITY_WAIT_MAX_MS and falls back", async () => {
+    const h = createTelephonyHarness();
+    const [other] = h.db.seed("motorist_call_sessions", [{ organization_id: ORG, direction: "inbound", state: "talking" }]);
+    h.db.seed(
+      "motorist_call_legs",
+      Array.from({ length: 9 }, (unused, index) => ({
+        organization_id: ORG,
+        session_id: other.id,
+        telnyx_call_control_id: `cc-full-${index}`,
+        role: "operator" as const,
+        state: "answered",
+        initiated_at: h.now().toISOString(),
+      })),
+    );
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    expect(h.session(call.sessionId).state).toBe("ringing");
+
+    h.advance(40_000);
+    const { sweepOverdueRingSteps } = await import("../routing/ring-plan");
+    await sweepOverdueRingSteps({ admin: h.admin, organizationId: ORG, now: () => h.now(), runSessionEvent: (id, event) => runSessionEvent(h.deps, id, event) });
+
+    expect(h.session(call.sessionId).state).toBe("callback_offered");
+  });
+
+  it("keeps the answer when a lost version CAS makes the reservation guard run twice", async () => {
+    const h = createTelephonyHarness();
+    const call = await ringingInbound(h);
+
+    const snapshot = await loadSessionSnapshot(h.deps, call.sessionId);
+    const context = await loadRoutingContext(h.deps, snapshot.session);
+    const event = {
+      kind: "telnyx" as const,
+      id: "evt-answer-retry",
+      type: "call.answered",
+      occurredAt: h.now().toISOString(),
+      callControlId: call.o1,
+      callLegId: null,
+      callSessionId: call.telnyxSessionId,
+      connectionId: "app-test",
+      clientState: h.clientStateOf(call.o1),
+      rawClientState: null,
+      from: null,
+      to: null,
+      direction: null,
+      state: null,
+      hangupCause: null,
+      hangupSource: null,
+      sipHangupCause: null,
+      digits: null,
+      status: null,
+      conferenceId: null,
+      customHeaders: [],
+      payload: {},
+    };
+    const result = reduce(snapshot.session, snapshot.legs, snapshot.attempts, event, context);
+    expect(result.guard?.profileId).toBe(PROFILES.o1);
+
+    // Another event for the same session lands first, so the CAS below loses.
+    await h.legEvent(call.o2, "call.hangup", { hangup_cause: "timeout" });
+    const effects = effectsDeps(h.deps);
+    await expect(applyReduceResult(effects, { session: snapshot.session, result, event, expectedVersion: snapshot.session.version })).rejects.toBeInstanceOf(SessionConflictError);
+    // The guard already reserved the operator for this session.
+    expect(h.presence(PROFILES.o1)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
+
+    // The runner retries the whole reduce + apply; the reservation must be re-entrant.
+    const retrySnapshot = await loadSessionSnapshot(h.deps, call.sessionId);
+    const retryContext = await loadRoutingContext(h.deps, retrySnapshot.session);
+    const retryResult = reduce(retrySnapshot.session, retrySnapshot.legs, retrySnapshot.attempts, event, retryContext);
+    const applied = await applyReduceResult(effects, { session: retrySnapshot.session, result: retryResult, event, expectedVersion: retrySnapshot.session.version });
+
+    expect(applied.branch).toBe("main");
+    expect(applied.failed).toBe(false);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o1 });
+    expect(h.presence(PROFILES.o1)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
+    expect(h.telnyx.of("hangup").some((entry) => entry.params.callControlId === call.o1)).toBe(false);
   });
 
   it("compensates a failed answer: hangs up, marks the session failed, records the incident and still returns 200", async () => {

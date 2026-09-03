@@ -136,8 +136,23 @@ export type WebphoneToken = {
 
 const DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
-export async function issueWebphoneToken(deps: DeviceDeps, input: { organizationId: string; profileId: string; userAgent?: string | null }): Promise<WebphoneToken> {
+export const TOKEN_TAKEOVER_MESSAGE = "Telefón je prihlásený v inom okne a prebieha hovor. Potvrď prevzatie.";
+
+export async function issueWebphoneToken(
+  deps: DeviceDeps,
+  input: { organizationId: string; profileId: string; userAgent?: string | null; takeover?: boolean },
+): Promise<WebphoneToken> {
   if (!deps.telnyx) throw new OperatorDeviceError(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
+  // Minting rotates `device_session_id` and kills the other tab. Refuse while
+  // that tab is live and on a call unless the operator confirmed the takeover.
+  if (!input.takeover) {
+    const current = await getOperatorDevice(deps, input);
+    if (current && deviceIsLive(current, nowOf(deps))) {
+      const presence = await deps.admin.from("motorist_operator_presence").select("status").eq("profile_id", input.profileId).maybeSingle();
+      const status = presence.data?.status;
+      if (status === "on_call" || status === "ringing") throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+    }
+  }
   const device = await ensureOperatorCredential(deps, input);
   const credentialId = device.telnyx_credential_id;
   const sipUsername = device.sip_username;
@@ -179,7 +194,11 @@ export async function touchDevice(
   if (!device) return { ok: false, reason: "unknown_device" };
   if (!input.deviceSessionId || device.device_session_id !== input.deviceSessionId) return { ok: false, reason: "stale_session" };
   const now = nowOf(deps).toISOString();
-  const values: Database["public"]["Tables"]["motorist_operator_devices"]["Update"] = { device_seen_at: now };
+  // An `unregistered` report is the tab saying goodbye (pagehide): clear the
+  // liveness stamp instead of refreshing it, or the ring plan keeps allocating
+  // steps to a phone that is gone.
+  const leaving = input.registrationState === "unregistered";
+  const values: Database["public"]["Tables"]["motorist_operator_devices"]["Update"] = { device_seen_at: leaving ? null : now };
   if (input.registrationState) values.registration_state = input.registrationState;
   if (input.userAgent) values.user_agent = input.userAgent;
   const updated = await deps.admin.from("motorist_operator_devices").update(values).eq("id", device.id).eq("device_session_id", input.deviceSessionId).select("*").maybeSingle();

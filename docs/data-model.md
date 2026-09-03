@@ -87,7 +87,7 @@ Audit must cover case changes, call-to-case linking, SMS sends, recording access
 ## Retention
 
 - `motorist_telnyx_webhook_events`: `processed` rows are deleted after 30 days and the `payload` of high-volume, low-value events (`call.playback.*`, `call.speak.*`, `call.cost`) is nulled after 7 days, by the `telephony.ledger.prune` job on the 5-minute cron.
-- `motorist_calls.raw_latest_payload` is nulled after 30 days and `motorist_call_events.raw_payload` after 90 days.
+- `motorist_calls.raw_latest_payload` is emptied after 30 days and `motorist_call_events.raw_payload` after 90 days. Both columns are `not null default '{}'::jsonb`, so the retention job overwrites them with `'{}'::jsonb` rather than `NULL`.
 - These payloads contain caller numbers, so retention is a GDPR Art. 5(1)(e) storage-limitation control rather than housekeeping. Recording and transcripts stay disabled for the Telnyx rollout.
 
 ## Status Defaults

@@ -171,6 +171,39 @@ describe("TelnyxWebphone", () => {
     expect(h.phone.getSnapshot().call?.active).toBe(true);
   });
 
+  it("answers an invite that arrived before the dial response registered its leg", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+
+    // The SIP invite wins the race against `POST /api/telephony/calls`.
+    const call = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
+    expect(call.answered).toBe(false);
+
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+
+    expect(call.answered).toBe(true);
+    expect(h.phone.getSnapshot().call?.sessionId).toBe("sess-1");
+  });
+
+  it("answers a server-dialled leg (pickup) by its X-PM-Auto-Answer invite header", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+
+    const call = fakeCall({
+      telnyxIDs: { telnyxCallControlId: "cc-pickup", telnyxSessionId: "ts", telnyxLegId: "leg" },
+      options: { remoteCallerNumber: "+421900111222", customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] },
+    });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
+
+    expect(call.answered).toBe(true);
+    expect(h.phone.getSnapshot().call?.active).toBe(true);
+  });
+
   it("leaves an unexpected invite ringing for the operator", async () => {
     const h = harness();
     h.phone.start();

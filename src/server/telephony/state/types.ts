@@ -368,13 +368,27 @@ export const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
 
 export const MAX_RING_FANOUT = 8;
 export const MAX_CONCURRENT_LEGS = 9;
-/** Staleness window of the waiting-room tick (a tick re-arms after each MOH playback). */
-export const MOH_TICK_MS = 60_000;
+/**
+ * Waiting-room cadence. `gather_using_audio` plays `moh.mp3` once and then waits
+ * `MOH_TICK_TIMEOUT_MS` for digits, so one cycle is the file plus the timeout
+ * (plus a webhook round trip): the music stays continuous instead of leaving the
+ * caller in a long silence, which is why the design's `playback_start` +
+ * detached 60 s gather timer is not used here.
+ */
+export const MOH_AUDIO_MS = 8_000;
 /** Silence tolerated after the MOH file before the gather ends and music is re-armed. */
 export const MOH_TICK_TIMEOUT_MS = 2_000;
+/** One waiting-room tick: MOH playback + gather timeout. */
+export const MOH_TICK_MS = MOH_AUDIO_MS + MOH_TICK_TIMEOUT_MS;
+/** No tick for this long → the gather chain broke and the sweeper re-arms it. */
+export const WAITING_TICK_STALE_MS = Math.max(3 * MOH_TICK_MS, 30_000);
 export const CALLBACK_OFFER_TIMEOUT_MS = 8_000;
 export const DEFAULT_TRANSFER_TIMEOUT_SECS = 30;
 export const RING_STEP_GRACE_SECS = 5;
+/** How long a step stays armed while the org-wide leg cap blocks its dials. */
+export const CAPACITY_WAIT_MAX_MS = 30_000;
+/** Re-check cadence of a step held back by the leg cap. */
+export const CAPACITY_RETRY_SECS = 5;
 export const TELNYX_SIP_DOMAIN = "sip.telnyx.com";
 
 /** SIP URI of an operator's WebRTC credential (SRTP is requested via `media_encryption`). */
@@ -420,6 +434,8 @@ export type SessionMeta = {
     step_deadline_at?: string | null;
     exhausted?: boolean;
     fallback?: string | null;
+    /** Set while a step is armed but waiting for `max_concurrent_legs` capacity. */
+    capacity_wait_since?: string | null;
   } | null;
   outbound?: { to: string; by: string; from: string; case_id?: string | null } | null;
   internal?: { target_profile_id: string; target_sip: string; by: string } | null;

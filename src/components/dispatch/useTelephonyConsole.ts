@@ -53,9 +53,13 @@ const IDLE_SNAPSHOT: WebphoneSnapshot = {
   message: null,
 };
 
+export const TELEPHONY_STALE_MESSAGE = "Spojenie s telefóniou je dočasne nedostupné.";
+
 export type TelephonyConsole = {
   /** `null` until the first answer arrives. */
   configured: boolean | null;
+  /** True while `calls/active` is failing but telephony is configured. */
+  stale: boolean;
   snapshot: ActiveCallsPayload;
   phoneBar: PhoneBarModel;
   phone: WebphoneSnapshot;
@@ -72,6 +76,8 @@ export type TelephonyConsole = {
   changePresence: (action: PhonePresenceAction) => void;
   availabilityAction: (action: TelephonyAvailabilityAction) => void;
   answer: () => void;
+  /** Explicit confirmation after a 409: take the phone over from another tab. */
+  takeoverPhone: () => void;
   hangupBrowser: () => void;
   toggleMute: () => void;
   sendDtmf: (digit: string) => void;
@@ -95,6 +101,9 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const [presenceBusy, setPresenceBusy] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // `calls/active` is failing while telephony itself is configured: the console
+  // stays usable and shows a transient-outage notice instead of "not configured".
+  const [stale, setStale] = useState(false);
   const [degraded, setDegraded] = useState<Set<string>>(() => new Set());
   const webphoneRef = useRef<TelnyxWebphone | null>(null);
   const refreshRef = useRef<(() => void) | null>(null);
@@ -157,14 +166,21 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         }
         if (!result.ok || !result.body || !Array.isArray(result.body.calls)) {
           failures += 1;
+          // Anything that is not a 503 proves the stack exists; keep the console
+          // usable and report the outage separately instead of showing the
+          // "not configured" notice.
+          setConfigured(true);
+          setStale(true);
           return;
         }
         failures = 0;
         setConfigured(true);
+        setStale(false);
         setSnapshot(result.body);
         activity = telephonyPollActivity(pollActivityInput(buildPhoneBarModel(result.body)));
       } catch {
         failures += 1;
+        setStale(true);
       } finally {
         inFlight = false;
         if (coalesced && !cancelled) {
@@ -428,6 +444,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   }, []);
   // Stable identities: the PhoneBar registers window listeners keyed on them.
   const answer = useCallback(() => webphoneRef.current?.answer(), []);
+  const takeoverPhone = useCallback(() => webphoneRef.current?.takeover(), []);
   const hangupBrowser = useCallback(() => void webphoneRef.current?.hangup(), []);
   const toggleMute = useCallback(() => webphoneRef.current?.toggleMute(), []);
   const sendDtmf = useCallback((digit: string) => webphoneRef.current?.sendDtmf(digit), []);
@@ -436,6 +453,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
 
   return {
     configured,
+    stale,
     snapshot,
     phoneBar,
     phone,
@@ -452,6 +470,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     changePresence,
     availabilityAction,
     answer,
+    takeoverPhone,
     hangupBrowser,
     toggleMute,
     sendDtmf,

@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 
+import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { buildBusinessHoursSchedule, type BusinessHoursSchedule } from "./routing/business-hours";
 import { materialiseRingPlan } from "./routing/ring-plan";
 import { applyReduceResult, recordCallEvent, SessionConflictError, type ApplyResult, type CommandOutcome, type EffectsDeps } from "./state/effects";
@@ -62,6 +63,8 @@ export const LEASE_TTL_MS = 4_000;
 export const LEASE_JITTER_MIN_MS = 50;
 export const LEASE_JITTER_MAX_MS = 150;
 export const MAX_CONFLICT_RETRIES = 20;
+/** Legs older than this no longer count against `max_concurrent_legs`. */
+export const ACTIVE_LEG_WINDOW_MS = 4 * 60 * 60 * 1000;
 
 export type SessionRunResult =
   | { outcome: "ignored"; reason: string; session: SessionRow; leaseAcquired: boolean; retries: number }
@@ -107,6 +110,13 @@ export async function acquireSessionLease(deps: SessionRunnerDeps, sessionId: st
     waited += jitter;
     await sleep(jitter);
   }
+}
+
+/** Re-acquires the lease with the same token (re-entrant RPC); best effort. */
+export async function renewSessionLease(deps: SessionRunnerDeps, sessionId: string, token: string): Promise<void> {
+  const { data, error } = await deps.admin.rpc("motorist_session_lease_acquire", { p_session_id: sessionId, p_token: token, p_ttl_ms: deps.leaseTtlMs ?? LEASE_TTL_MS });
+  if (error) deps.logger?.({ level: "warn", scope: "lease", sessionId, message: "renew failed", error: error.message });
+  else if (data !== true) deps.logger?.({ level: "warn", scope: "lease", sessionId, message: "lease lost during effects" });
 }
 
 export async function releaseSessionLease(deps: SessionRunnerDeps, sessionId: string, token: string): Promise<void> {
@@ -217,7 +227,14 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
       ids.length > 0
         ? admin.from("motorist_ring_attempts").select("profile_id, session_id").eq("organization_id", organizationId).eq("result", "offered").in("profile_id", ids).neq("session_id", session.id)
         : Promise.resolve({ data: [] as Array<{ profile_id: string | null; session_id: string }>, error: null }),
-      admin.from("motorist_call_legs").select("id", { count: "exact", head: true }).eq("organization_id", organizationId).is("ended_at", null),
+      admin
+        .from("motorist_call_legs")
+        .select("id", { count: "exact", head: true })
+        .eq("organization_id", organizationId)
+        .is("ended_at", null)
+        // Bounded: a leg orphaned by a lost `call.hangup` webhook must not eat the
+        // org-wide capacity forever (the sweep closes them, see `closeOrphanLegs`).
+        .gte("initiated_at", new Date(now.getTime() - ACTIVE_LEG_WINDOW_MS).toISOString()),
     ]);
     if (presenceResult.error) throw new Error(`presence load failed: ${presenceResult.error.message}`);
     if (devicesResult.error) throw new Error(`devices load failed: ${devicesResult.error.message}`);
@@ -227,6 +244,16 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     devices = (devicesResult.data ?? []) as DeviceRow[];
     openOffers = [...new Set(((offersResult.data ?? []) as Array<{ profile_id: string | null }>).map((row) => row.profile_id).filter((id): id is string => Boolean(id)))];
     activeLegCount = legsResult.count ?? 0;
+    if (activeLegCount >= settings.maxConcurrentLegs) {
+      // Every ring step would be skipped for `capacity`: make the outage visible.
+      deps.logger?.({ level: "warn", scope: "routing", sessionId: session.id, message: "concurrent leg cap reached", activeLegCount, cap: settings.maxConcurrentLegs });
+      await recordTelephonyIncident(admin, {
+        job: TELEPHONY_INCIDENT_JOBS.capacity,
+        error: new Error(`concurrent leg cap reached (${activeLegCount}/${settings.maxConcurrentLegs})`),
+        context: { sessionId: session.id },
+        now,
+      });
+    }
   }
 
   const config = deps.config;
@@ -272,7 +299,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
   const token = randomUUID();
   const leaseAcquired = await acquireSessionLease(deps, sessionId, token);
   if (!leaseAcquired) deps.logger?.({ level: "warn", scope: "lease", sessionId, eventId: event.id, message: "processing without lease (CAS protected)" });
-  const effects = effectsDeps(deps);
+  const effects: EffectsDeps = { ...effectsDeps(deps), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token) : undefined };
   const maxRetries = deps.maxConflictRetries ?? MAX_CONFLICT_RETRIES;
 
   try {

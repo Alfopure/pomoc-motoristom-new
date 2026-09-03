@@ -9,8 +9,10 @@ import {
   ACTIVE_SESSION_STATES,
   CALLBACK_OFFER_TIMEOUT_MS,
   DEFAULT_TRANSFER_TIMEOUT_SECS,
-  MOH_TICK_MS,
+  CAPACITY_RETRY_SECS,
+  CAPACITY_WAIT_MAX_MS,
   MOH_TICK_TIMEOUT_MS,
+  WAITING_TICK_STALE_MS,
   TALKING_STATES,
   TERMINAL_STATES,
   WAITING_STATES,
@@ -598,6 +600,12 @@ function ringFromStep(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPl
     const step = plan.steps[index];
     const planned = planStep(b, plan, index);
     if (planned.attempts.length === 0) {
+      // Design §2.6: over the org-wide leg cap the step waits for capacity instead
+      // of burning through the plan; the fallback only follows after the wait.
+      if (planned.capacityLimited && capacityWaitedMs(b) < CAPACITY_WAIT_MAX_MS) {
+        holdStepForCapacity(b, index);
+        return true;
+      }
       b.note(`step ${index} (${step.groupName}) skipped: ${planned.skipped.map((skip) => `${memberKey(skip.member)}=${skip.reason}`).join(",") || "no members"}`);
       continue;
     }
@@ -626,6 +634,31 @@ function planStep(b: TransitionBuilder, plan: FrozenRingPlan, index: number): Ri
     maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs,
     activeLegCount: b.ctx.activeLegCount,
   });
+}
+
+/** Milliseconds this session has already spent waiting for leg capacity. */
+function capacityWaitedMs(b: TransitionBuilder): number {
+  const since = b.meta.ring?.capacity_wait_since;
+  if (!since) return 0;
+  const parsed = Date.parse(since);
+  return Number.isNaN(parsed) ? 0 : Math.max(0, b.ctx.now.getTime() - parsed);
+}
+
+/** Keeps `stepIndex` armed (no dials) so a sweep re-tries it once a leg frees up. */
+function holdStepForCapacity(b: TransitionBuilder, stepIndex: number): void {
+  const ring = b.meta.ring ?? {};
+  b.setState("ringing").patchMeta({
+    ring: {
+      ...ring,
+      mode: "plan",
+      active_step: stepIndex,
+      step_started_at: ring.step_started_at ?? b.nowIso,
+      step_deadline_at: stepDeadline(b.ctx.now, CAPACITY_RETRY_SECS, 0),
+      capacity_wait_since: ring.capacity_wait_since ?? b.nowIso,
+      exhausted: false,
+    },
+  });
+  b.note(`step ${stepIndex}: waiting for leg capacity`);
 }
 
 function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, planned: RingStepPlanResult, guard: RingFanout["guard"]): void {
@@ -662,7 +695,7 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
   const deadlineAt = stepDeadline(b.ctx.now, planned.ringSecs);
   b.cmd({ kind: "ring_fanout", step: stepIndex, guard, attempts: planned.attempts, dials, ringingProfileIds, deadlineAt });
   b.setState("ringing").patchMeta({
-    ring: { ...(b.meta.ring ?? {}), mode: "plan", active_step: stepIndex, step_started_at: b.nowIso, step_deadline_at: deadlineAt, exhausted: false },
+    ring: { ...(b.meta.ring ?? {}), mode: "plan", active_step: stepIndex, step_started_at: b.nowIso, step_deadline_at: deadlineAt, capacity_wait_since: null, exhausted: false },
   });
   for (const member of planned.members) {
     if (member.memberId) b.memberTouches.push({ memberId: member.memberId, field: "last_offered_at" });
@@ -1164,13 +1197,16 @@ function continueRinging(b: TransitionBuilder, customer: LegRow): void {
     b.note(`step ${active}: still ringing others`);
     return;
   }
-  const step = plan.steps[active];
-  if (step?.strategy === "ordered") {
-    const planned = planStep(b, plan, active);
-    if (planned.attempts.length > 0) {
-      fanout(b, customer, active, planned, null);
-      return;
-    }
+  const planned = planStep(b, plan, active);
+  if (planned.attempts.length > 0) {
+    // `ordered` walks to the next member; `all` only gets here when a member was
+    // held back earlier (leg cap) and has become dialable meanwhile.
+    fanout(b, customer, active, planned, null);
+    return;
+  }
+  if (planned.capacityLimited && capacityWaitedMs(b) < CAPACITY_WAIT_MAX_MS) {
+    holdStepForCapacity(b, active);
+    return;
   }
   if (ringFromStep(b, customer, plan, active + 1)) return;
   applyFallback(b, customer, plan);
@@ -1620,7 +1656,7 @@ function onSweep(b: TransitionBuilder): ReduceResult {
 
   if (WAITING_STATES.has(state)) {
     const last = Date.parse(meta.waiting?.last_tick_at ?? meta.waiting?.since ?? b.session.parked_at ?? b.session.updated_at);
-    if (!Number.isNaN(last) && last + 2 * MOH_TICK_MS >= b.ctx.now.getTime()) return ignoredResult("sweep: tick fresh");
+    if (!Number.isNaN(last) && last + WAITING_TICK_STALE_MS >= b.ctx.now.getTime()) return ignoredResult("sweep: tick fresh");
     return onWaitingTick(b, customer);
   }
 
