@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 
 const migration = readFileSync(
@@ -391,4 +391,52 @@ test("the replace RPC carries optimistic concurrency and every in-use guard", ()
 test("the phase 3 migration does not reference the previous provider or project", () => {
   assert.doesNotMatch(phase3Migration, /viptel/i);
   assert.doesNotMatch(phase3Migration, /sjcsrygkkmersoczpunh/);
+});
+
+/**
+ * The lock-down is only true while no later migration hands a write back.
+ *
+ * Every routing write goes through the service-role client
+ * (`validateRoutingReplace` → `motorist_replace_ring_plan` → audit row); a
+ * `grant insert/update/delete … to authenticated` or a write policy added later
+ * would let a dispatcher repoint a production number straight through PostgREST
+ * again, with none of that on the way.
+ */
+test("no migration after the lock-down gives the session roles a routing write back", () => {
+  const LOCKDOWN = "20260919100000";
+  const later = readdirSync(new URL("../supabase/migrations", import.meta.url))
+    .filter((name) => name.endsWith(".sql") && name.slice(0, 14) > LOCKDOWN)
+    .sort();
+
+  for (const name of later) {
+    const sql = readFileSync(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8");
+    for (const table of PHASE3_LOCKED_TABLES) {
+      const grant = new RegExp(`grant[^;]*\\b(insert|update|delete|all)\\b[^;]*on\\s+table\\s+public\\.${table}[^;]*to[^;]*\\b(anon|authenticated)\\b`, "is");
+      assert.doesNotMatch(sql, grant, `${name} grants a write on ${table} back to a session role`);
+      const policy = new RegExp(`create policy[^;]*on\\s+public\\.${table}[^;]*\\bfor\\s+(all|insert|update|delete)\\b`, "is");
+      assert.doesNotMatch(sql, policy, `${name} creates a write policy on ${table}`);
+    }
+    assert.doesNotMatch(
+      sql,
+      /drop function if exists public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)/,
+      `${name} drops the 3-argument replace RPC the config service calls`,
+    );
+  }
+});
+
+/**
+ * The service calls `motorist_replace_ring_plan(uuid, jsonb, integer)`. Until
+ * both routing migrations are applied, every configuration `PUT` fails at
+ * runtime — `config-service.ts` maps that onto a 503 that names the migration,
+ * and these two files are the only place the function is defined.
+ */
+test("the three-argument replace RPC exists exactly once and is service-role only", () => {
+  const definitions = readdirSync(new URL("../supabase/migrations", import.meta.url))
+    .filter((name) => name.endsWith(".sql"))
+    .map((name) => readFileSync(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"))
+    .filter((sql) => /create or replace function public\.motorist_replace_ring_plan\([\s\S]*?p_expected_version/.test(sql));
+
+  assert.equal(definitions.length, 1, "the 3-argument RPC must be defined once");
+  assert.match(definitions[0], /grant execute on function public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)\n\s+to service_role;/);
+  assert.match(definitions[0], /revoke all on function public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)\n\s+from public, anon, authenticated;/);
 });

@@ -14,6 +14,7 @@
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import type {
+  IvrMenuDoc,
   LineDoc,
   RingFallbackKind,
   RingGroupDoc,
@@ -174,7 +175,7 @@ export function ringPlansDirty(plans: readonly PlanDraft[], original: readonly R
 export type PlanValidationContext = {
   groups: readonly RingGroupDoc[];
   destinationAllowlist: readonly string[];
-  /** Plans referenced by a line; removing one is refused by the server. */
+  /** Plans referenced by a line or an IVR option; removing one is refused by the server. */
   planIdsInUse: readonly string[];
   /**
    * `motorist_telephony_settings.max_ring_fanout`: how many devices `planRingStep`
@@ -230,7 +231,9 @@ export function validateRingPlanDrafts(plans: readonly PlanDraft[], context: Pla
   }
 
   for (const planId of context.planIdsInUse) {
-    if (!keptIds.has(planId)) issues.push(issue("", "plan_in_use", "Plán, ktorý používa niektorá linka, sa nedá odstrániť. Najprv prepni linku na iný plán."));
+    if (!keptIds.has(planId)) {
+      issues.push(issue("", "plan_in_use", "Plán, ktorý používa niektorá linka alebo voľba IVR, sa nedá odstrániť. Najprv prepni linku alebo IVR na iný plán."));
+    }
   }
 
   return issues;
@@ -291,6 +294,30 @@ function describeStep(step: StepDraft, group: RingGroupDoc | undefined, maxRingF
   return `skupina „${group.name}" zvoní po jednom, každý svojím časom (spolu ${total} s)`;
 }
 
+/**
+ * What the engine really does when a plan freezes with **no** step.
+ *
+ * `startRingPlan` branches on `!plan || plan.steps.length === 0` and offers a
+ * callback *before* `applyFallback` is ever reached, so `fallback_kind` is not
+ * consulted at all. Two configurations land there: an inactive plan
+ * (`materialiseRingPlan` returns `null`) and a plan whose every step points at a
+ * missing or switched-off group (the freeze drops those steps). Describing the
+ * configured fallback for either would be a lie — and with
+ * `external_number` the lie is the whole point of the setting.
+ */
+export const NO_RUNNABLE_STEP_OUTCOME =
+  "hovor dostane ponuku spätného volania — nastavené správanie po vyčerpaní plánu sa nepoužije, plán sa vôbec nespustí";
+
+/** True while at least one step would survive `materialiseRingPlan`. */
+export function planHasRunnableStep(plan: PlanDraft, groups: readonly RingGroupDoc[]): boolean {
+  if (!plan.active) return false;
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+  return plan.steps.some((step) => {
+    const group = groupsById.get(step.ringGroupId);
+    return Boolean(group && group.active);
+  });
+}
+
 export function describeFallback(plan: PlanDraft): string {
   switch (plan.fallbackKind) {
     case "external_number": {
@@ -316,13 +343,15 @@ export function describeRingPlanParts(plan: PlanDraft, groups: readonly RingGrou
 /**
  * The whole plan as one Slovak sentence shown above the steps.
  *
- * An inactive plan is described as inactive first: `materialiseRingPlan` returns
- * `null` for it and `startRingStep` goes straight to the fallback, so listing
- * steps that will never run would be a lie.
+ * A plan that would freeze without a single step is described by what the engine
+ * actually does (`NO_RUNNABLE_STEP_OUTCOME`), not by its configured fallback.
  */
 export function describeRingPlan(plan: PlanDraft, groups: readonly RingGroupDoc[], maxRingFanout?: number): string {
-  if (!plan.active) return `Plán je vypnutý — žiadny krok sa nevykoná a hovor pokračuje rovno: ${describeFallback(plan)}.`;
-  if (plan.steps.length === 0) return `Plán zatiaľ nemá žiadny krok, hovor rovno pokračuje: ${describeFallback(plan)}.`;
+  if (!plan.active) return `Plán je vypnutý — žiadny krok sa nevykoná a ${NO_RUNNABLE_STEP_OUTCOME}.`;
+  if (plan.steps.length === 0) return `Plán zatiaľ nemá žiadny krok — ${NO_RUNNABLE_STEP_OUTCOME}.`;
+  if (!planHasRunnableStep(plan, groups)) {
+    return `Každý krok plánu odkazuje na chýbajúcu alebo vypnutú skupinu, takže po zmrazení plánu neostane ani jeden krok — ${NO_RUNNABLE_STEP_OUTCOME}.`;
+  }
   const [first, ...rest] = describeRingPlanParts(plan, groups, maxRingFanout);
   const sentence = [first.charAt(0).toLocaleUpperCase("sk") + first.slice(1), ...rest.map((part) => `potom ${part}`)].join(", ");
   return `${sentence}.`;
@@ -335,25 +364,62 @@ export function linesUsingPlan(planId: string | null, lines: readonly LineDoc[])
 }
 
 /**
+ * Names of the IVR menus whose digit options route to this plan.
+ *
+ * A plan reachable only through an IVR option used to be invisible here:
+ * `transitions.ts` resolves the digit with
+ * `(option.target_ring_plan_id && ringPlans[id]) || plan`, and an inactive plan
+ * materialises as `null`, so switching it off silently sends those callers to
+ * the line's default plan instead.
+ */
+export function ivrMenusUsingPlan(planId: string | null, ivrMenus: readonly IvrMenuDoc[]): string[] {
+  if (!planId) return [];
+  return ivrMenus.filter((menu) => menu.ringPlanIds.includes(planId)).map((menu) => menu.name);
+}
+
+/** Every plan id a line or an IVR option points at (mirror of `ringPlansInUse`). */
+export function ringPlanIdsInUse(lines: readonly LineDoc[], ivrMenus: readonly IvrMenuDoc[] = []): string[] {
+  return [
+    ...new Set([
+      ...lines.map((line) => line.ringPlanId).filter((id): id is string => Boolean(id)),
+      ...ivrMenus.flatMap((menu) => menu.ringPlanIds),
+    ]),
+  ];
+}
+
+export type PlanUsageContext = { ivrMenus?: readonly IvrMenuDoc[]; groups?: readonly RingGroupDoc[] };
+
+/**
  * Sentence under the plan header, mirroring `groupUsageNote`.
  *
  * Switching a plan off is allowed, but `materialiseRingPlan` then returns
  * `null` and `startRingPlan` takes the "no ring plan" branch: nobody's phone
- * rings and every caller on those lines is pushed straight to the fallback. The
- * most damaging of the three toggles must not be the silent one.
+ * rings and every caller is offered a callback — the configured fallback is
+ * never reached. The most damaging of the three toggles must not be the silent
+ * one, and an IVR digit that targets the plan counts as a user of it just like a
+ * line does.
  */
-export function planUsageNote(plan: PlanDraft, lines: readonly LineDoc[]): { tone: "info" | "warning"; text: string } | null {
-  const used = linesUsingPlan(plan.id, lines);
-  if (used.length === 0) {
-    return plan.active ? null : { tone: "info", text: "Plán je vypnutý a zatiaľ ho nepoužíva žiadna linka." };
+export function planUsageNote(plan: PlanDraft, lines: readonly LineDoc[], context: PlanUsageContext = {}): { tone: "info" | "warning"; text: string } | null {
+  const usedByLines = linesUsingPlan(plan.id, lines);
+  const usedByIvr = ivrMenusUsingPlan(plan.id, context.ivrMenus ?? []);
+  const users = [
+    ...(usedByLines.length > 0 ? [`linky: ${usedByLines.join(", ")}`] : []),
+    ...(usedByIvr.length > 0 ? [`voľby IVR menu: ${usedByIvr.join(", ")}`] : []),
+  ];
+  // "Runnable" is the engine's own test: an inactive plan, or one whose every
+  // step points at a missing/switched-off group, freezes with zero steps.
+  const runnable = planHasRunnableStep(plan, context.groups ?? []);
+
+  if (users.length === 0) {
+    return runnable ? null : { tone: "info", text: `Plán zatiaľ nepoužíva žiadna linka ani IVR menu, a v tomto stave by sa ani nespustil (${NO_RUNNABLE_STEP_OUTCOME}).` };
   }
-  const list = used.join(", ");
-  return plan.active
-    ? { tone: "info", text: `Používajú ho linky: ${list}.` }
-    : {
-        tone: "warning",
-        text: `Plán je vypnutý, ale používajú ho linky: ${list}. Hovory na ne nikomu nezazvonia a pôjdu rovno na ${describeFallback(plan)}.`,
-      };
+  const list = users.join(", ");
+  if (runnable) return { tone: "info", text: `Používajú ho ${list}.` };
+  const ivrNote = usedByIvr.length > 0 ? " Volajúci, ktorí si zvolia takúto voľbu IVR, skončia na pôvodnom pláne linky." : "";
+  return {
+    tone: "warning",
+    text: `Plán sa v tomto stave nespustí, ale používajú ho ${list}. Nikomu nezazvoní a ${NO_RUNNABLE_STEP_OUTCOME}.${ivrNote}`,
+  };
 }
 
 /**

@@ -158,7 +158,10 @@ export function TelephonySettingsPanel({
           </div>
 
           <div>
-            <SettingsField label="Maximum v čakárni (min)" hint={`1 až ${MAX_PARK_MINUTES}. Potom systém ponúkne spätné volanie.`}>
+            <SettingsField
+              label="Maximum v čakárni (min)"
+              hint={`1 až ${MAX_PARK_MINUTES}. Potom systém ponúkne spätné volanie. Zmena platí pre hovory, ktoré do čakárne prídu po uložení; volajúci, ktorí v nej už čakajú, dočakajú podľa limitu platného v čase zaparkovania.`}
+            >
               <input
                 className={settingsInputClass}
                 disabled={!canEdit}
@@ -171,7 +174,10 @@ export function TelephonySettingsPanel({
           </div>
 
           <div>
-            <SettingsField label="Denný limit hovorov" hint="Mäkký strop na počet liniek za deň; po prekročení sa zapíše incident.">
+            <SettingsField
+              label="Denný limit hovorov"
+              hint="Strop na počet liniek za deň. Po jeho dosiahnutí systém odmietne (429) odchádzajúce hovory, prepojenia aj spätné volania až do polnoci (Europe/Bratislava); prichádzajúcich volajúcich neodmieta."
+            >
               <input
                 className={settingsInputClass}
                 disabled={!canEdit}
@@ -197,7 +203,10 @@ export function TelephonySettingsPanel({
           </div>
 
           <div>
-            <SettingsField label="Súčasných liniek spolu" hint="Strop pre celú organizáciu; nad ním krok počká na kapacitu.">
+            <SettingsField
+              label="Súčasných liniek spolu"
+              hint="Strop pre celú organizáciu vrátane linky samotného volajúceho, takže musí byť aspoň o jednu vyšší ako počet súčasne zvoniacich zariadení; nad ním krok počká na kapacitu."
+            >
               <input
                 className={settingsInputClass}
                 disabled={!canEdit}

@@ -52,7 +52,7 @@ function hours(overrides: Partial<BusinessHoursDoc> = {}): BusinessHoursDoc {
 }
 
 function menu(overrides: Partial<IvrMenuDoc> = {}): IvrMenuDoc {
-  return { id: "ivr-1", name: "Hlavné menu", active: true, ...overrides };
+  return { id: "ivr-1", name: "Hlavné menu", active: true, ringPlanIds: [], ...overrides };
 }
 
 const CONTEXT: LineValidationContext = { plans: [plan()], ivrMenus: [menu()], businessHours: [hours()] };
@@ -139,9 +139,17 @@ describe("lineWarnings", () => {
     expect(lineWarnings(draft, CONTEXT)).toEqual([]);
   });
 
-  it("explains an inactive line and stops there", () => {
+  it("explains an inactive line honestly: the call is still answered, only unrouted", () => {
     const drafts = updateLine(lineDraftsFromDocument([line()]), "line-1", { active: false, ringPlanId: null });
-    expect(lineWarnings(drafts[0], CONTEXT)).toEqual(["Linka je vypnutá — hovor na toto číslo sa nespracuje a nedá sa z nej ani volať von."]);
+    const warnings = lineWarnings(drafts[0], CONTEXT);
+
+    expect(warnings).toHaveLength(1);
+    // `createInboundSession` answers the call with `line_id: null` even when
+    // `findLine` finds nothing, so "nespracuje sa" would be the opposite of the
+    // truth for an admin parking a number they still pay for.
+    expect(warnings[0]).toContain("Hovor sa však aj tak prijme");
+    expect(warnings[0]).toContain("spätné volanie");
+    expect(warnings[0]).toContain("odpojiť u operátora");
   });
 
   it("warns about a missing plan, an inactive schedule and an inactive IVR menu", () => {

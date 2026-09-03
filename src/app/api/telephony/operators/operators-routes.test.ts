@@ -22,7 +22,8 @@ const auditOperatorDeviceAction = vi.fn(async () => undefined);
 const requireOperatorOfOrganization = vi.fn(async (_deps: unknown, input: { profileId: string }) => ({ profileId: input.profileId, displayName: "Peter" }));
 const assertOperatorNotOnCall = vi.fn(async () => undefined);
 const ensureOperatorCredential = vi.fn(async () => ({ environment: "development", telnyx_credential_id: "cred-9", sip_username: "gencred009", registration_state: "registered" }));
-const disconnectDevice = vi.fn(async () => ({ environment: "development", registration_state: "unregistered" }));
+const disconnectDevice = vi.fn(async () => ({ device: { environment: "development", registration_state: "unregistered" }, deletedCredentialId: "cred-8" }));
+const getOperatorDevice = vi.fn(async () => ({ environment: "development", telnyx_credential_id: "cred-8", sip_username: "gencred008", registration_state: "registered" }));
 
 vi.mock("@/server/api-auth", () => ({
   assertSameOriginRequest: (...args: unknown[]) => assertSameOriginRequest(...args),
@@ -51,6 +52,7 @@ vi.mock("@/server/telephony/operator-devices", async (importOriginal) => {
     ...actual,
     ensureOperatorCredential: (...args: unknown[]) => ensureOperatorCredential(...(args as [])),
     disconnectDevice: (...args: unknown[]) => disconnectDevice(...(args as [])),
+    getOperatorDevice: (...args: unknown[]) => getOperatorDevice(...(args as [])),
   };
 });
 
@@ -78,7 +80,7 @@ beforeEach(() => {
   // `mockReset` (not `mockClear`): the CSRF test above installs a throwing
   // implementation that would otherwise leak into the next case.
   assertSameOriginRequest.mockReset();
-  for (const mock of [updateOperatorTelephonySettings, auditOperatorDeviceAction, ensureOperatorCredential, disconnectDevice, requireOperatorOfOrganization, assertOperatorNotOnCall]) {
+  for (const mock of [updateOperatorTelephonySettings, auditOperatorDeviceAction, ensureOperatorCredential, disconnectDevice, getOperatorDevice, requireOperatorOfOrganization, assertOperatorNotOnCall]) {
     mock.mockClear();
   }
 });
@@ -141,8 +143,16 @@ describe("POST /api/telephony/operators/[id]/credential", () => {
 
     expect(response.status).toBe(200);
     expect(ensureOperatorCredential).toHaveBeenCalledWith(expect.anything(), { organizationId: "org-1", profileId: PROFILE_2, force: true });
-    expect(disconnectDevice).toHaveBeenCalledTimes(1);
+    // The rotate path only revokes the browser session; the credential it just
+    // minted must survive (the superseded one is deleted inside
+    // `ensureOperatorCredential`).
+    expect(disconnectDevice).toHaveBeenCalledWith(expect.anything(), { organizationId: "org-1", profileId: PROFILE_2, keepCredential: true });
     await expect(response.json()).resolves.toMatchObject({ device: { registrationState: "unregistered" } });
+    // The audit row names the credential that lost access, not only its replacement.
+    expect(auditOperatorDeviceAction).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "credential.rotate", details: expect.objectContaining({ revokedCredentialId: "cred-8", credentialId: "cred-9" }) }),
+    );
   });
 
   it("answers 503 while telephony is not configured", async () => {
@@ -190,8 +200,11 @@ describe("POST /api/telephony/operators/[id]/disconnect", () => {
     const response = await postDisconnect(request(PROFILE_2, "POST"), context(PROFILE_2));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, profileId: PROFILE_2, registrationState: "unregistered" });
-    expect(auditOperatorDeviceAction).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "device.disconnect" }));
+    await expect(response.json()).resolves.toMatchObject({ ok: true, profileId: PROFILE_2, registrationState: "unregistered", deletedCredentialId: "cred-8" });
+    expect(auditOperatorDeviceAction).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "device.disconnect", details: expect.objectContaining({ deletedCredentialId: "cred-8" }) }),
+    );
   });
 
   it("answers 404 when the operator has no device row", async () => {
@@ -209,6 +222,16 @@ describe("POST /api/telephony/operators/[id]/disconnect", () => {
     const response = await postDisconnect(request(PROFILE_2, "POST"), context(PROFILE_2));
 
     expect(response.status).toBe(500);
+  });
+
+  it("reports a credential that Telnyx refused to delete as 502 (access is not revoked)", async () => {
+    state.role = "manager";
+    disconnectDevice.mockRejectedValueOnce(new OperatorDeviceError("Telefón sme odhlásili, ale prihlasovacie údaje sa nepodarilo zrušiť u operátora (cred-8). Prístup zatiaľ nie je odobratý.", 502));
+    const response = await postDisconnect(request(PROFILE_2, "POST"), context(PROFILE_2));
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({ error: expect.stringContaining("Prístup zatiaľ nie je odobratý") });
+    expect(auditOperatorDeviceAction).not.toHaveBeenCalled();
   });
 
   it("refuses while the operator is on a call unless the takeover is confirmed", async () => {

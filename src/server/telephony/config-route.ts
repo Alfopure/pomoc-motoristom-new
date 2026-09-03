@@ -53,9 +53,30 @@ export type ConfigDocumentResponse = {
   warning?: string;
 };
 
+/**
+ * Redacts the document to what the caller's role may see, whatever produced it.
+ *
+ * The write paths hand back the document the service loaded for validation
+ * (`includeSettings: true`, every operator's device), so the gate cannot live in
+ * `getRoutingDocument` alone: without this the `PUT` response would give a
+ * manager the admin-only kill switches they are refused on
+ * `/api/telephony/config/settings`.
+ */
+export function visibleDocument(actor: MotoristActor, document: RoutingDocument): RoutingDocument {
+  const manager = canEditConfig(actor.role);
+  return {
+    ...document,
+    settings: actor.role === "admin" ? document.settings : null,
+    limits: manager ? document.limits : null,
+    operators: manager
+      ? document.operators
+      : document.operators.map((operator) => (operator.profileId === actor.profileId ? operator : { ...operator, settings: null, device: null })),
+  };
+}
+
 export function documentResponse(actor: MotoristActor, document: RoutingDocument, warning?: string | null): Response {
   const body: ConfigDocumentResponse = {
-    document,
+    document: visibleDocument(actor, document),
     canEdit: canEditConfig(actor.role),
     canManageSettings: actor.role === "admin",
     ...(warning ? { warning } : {}),
@@ -88,7 +109,21 @@ export function readExpectedVersion(body: Record<string, unknown>): number {
 export async function handleConfigRead(options: { roles?: AppRole[]; fallback: string } = { fallback: "Konfiguráciu sa nepodarilo načítať." }): Promise<Response> {
   try {
     const actor = await requireDefaultMotoristActor(options.roles ?? CONFIG_READ_ROLES);
-    const document = await getRoutingDocument(configDeps(), { organizationId: actor.organizationId, includeSettings: canEditConfig(actor.role) });
+    // Three visibility levels in one read model:
+    // - the kill switches and the caps are admin-only, exactly like
+    //   `/api/telephony/config/settings` (a manager refused there must not read
+    //   them out of this response instead);
+    // - the routing caps and the destination allowlist are manager-level,
+    //   because the group and plan editors pre-validate against them;
+    // - another operator's device identity is manager-level too; a dispatcher
+    //   sees only their own row.
+    const document = await getRoutingDocument(configDeps(), {
+      organizationId: actor.organizationId,
+      includeSettings: actor.role === "admin",
+      includeLimits: canEditConfig(actor.role),
+      includeOperatorDetails: canEditConfig(actor.role),
+      viewerProfileId: actor.profileId,
+    });
     return documentResponse(actor, document);
   } catch (error) {
     return configErrorResponse(error, options.fallback);

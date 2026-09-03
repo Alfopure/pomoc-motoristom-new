@@ -7,6 +7,7 @@ import {
   groupDraftsFromDocument,
   groupFanoutNote,
   groupUsageNote,
+  plansEmptiedByGroup,
   issuesByPath,
   memberRingSecsNote,
   moveMember,
@@ -197,6 +198,33 @@ describe("groupUsageNote", () => {
     const [draft] = groupDraftsFromDocument([group()]);
     expect(groupUsageNote(draft, [])).toBeNull();
     expect(groupUsageNote({ ...draft, active: false }, [])).toBe("Skupina je vypnutá a zatiaľ ju nepoužíva žiadny plán.");
+  });
+
+  it("says when switching the group off leaves a plan without a single step", () => {
+    // `materialiseRingPlan` drops the step, the plan freezes empty and
+    // `startRingPlan` offers a callback *before* `applyFallback` — so promising
+    // the plan's configured fallback here would be the same lie the plan editor
+    // was fixed for.
+    const drafts = groupDraftsFromDocument([group(), group({ id: "group-b", name: "Dispečing B" })]);
+    const off = drafts.map((entry) => (entry.id === "group-a" ? { ...entry, active: false } : entry));
+
+    const note = groupUsageNote(off[0], [plan()], off);
+    expect(note).toContain("neostane ani jeden krok");
+    expect(note).toContain("ponuku spätného volania");
+    expect(plansEmptiedByGroup(off[0], [plan()], off)).toEqual(["Denný"]);
+
+    // A second, still active group in the same plan keeps it runnable, so the
+    // note stays at "krok sa preskočí".
+    const twoStep = plan({
+      steps: [
+        { id: "s1", stepIndex: 0, ringGroupId: "group-a", timeoutSecs: 20, strategy: "all" },
+        { id: "s2", stepIndex: 1, ringGroupId: "group-b", timeoutSecs: 20, strategy: "all" },
+      ],
+    });
+    expect(plansEmptiedByGroup(off[0], [twoStep], off)).toEqual([]);
+    expect(groupUsageNote(off[0], [twoStep], off)).toBe("Skupina je vypnutá, v týchto plánoch sa krok preskočí: Denný.");
+    // An inactive plan is the plan editor's business, not this note's.
+    expect(plansEmptiedByGroup(off[0], [plan({ active: false })], off)).toEqual([]);
   });
 });
 

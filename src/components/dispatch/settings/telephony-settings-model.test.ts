@@ -1,13 +1,25 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_SETTINGS, MAX_PARK_MINUTES as SERVER_MAX_PARK_MINUTES, validateSettingsPatch } from "@/server/telephony/config-service";
+import {
+  DEFAULT_SETTINGS,
+  MAX_ALLOWLIST_ENTRIES as SERVER_MAX_ALLOWLIST_ENTRIES,
+  MAX_CONCURRENT_LEGS_LIMIT as SERVER_MAX_CONCURRENT_LEGS_LIMIT,
+  MAX_DAILY_LEG_SOFT_CAP as SERVER_MAX_DAILY_LEG_SOFT_CAP,
+  MAX_PARK_MINUTES as SERVER_MAX_PARK_MINUTES,
+  MAX_RING_FANOUT_LIMIT as SERVER_MAX_RING_FANOUT_LIMIT,
+  MIN_CONCURRENT_LEGS as SERVER_MIN_CONCURRENT_LEGS,
+  validateSettingsPatch,
+} from "@/server/telephony/config-service";
 import type { RingGroupDoc, RingPlanDoc, TelephonySettingsDoc } from "@/server/telephony/config-service";
 
 import {
   ENV_GATE_NOTE,
+  MAX_ALLOWLIST_ENTRIES,
   MAX_CONCURRENT_LEGS_LIMIT,
+  MAX_DAILY_LEG_SOFT_CAP,
   MAX_PARK_MINUTES,
   MAX_RING_FANOUT_LIMIT,
+  MIN_CONCURRENT_LEGS,
   describeAllowlist,
   describeKillSwitches,
   parseAllowlist,
@@ -97,12 +109,37 @@ describe("validateSettingsDraft", () => {
     expect(validateSettingsDraft(updateSettingsDraft(base, { destinationAllowlist: "SK CZ +43 *" }))).toEqual([]);
   });
 
+  it("refuses a fan-out the org-wide leg cap cannot carry", () => {
+    // One leg is always the caller's own, so `maxConcurrentLegs: 1` means no
+    // phone can ever ring and anything below `maxRingFanout + 1` truncates the
+    // fan-out through the capacity guard instead of the intended limit.
+    expect(validateSettingsDraft(updateSettingsDraft(base, { maxConcurrentLegs: "1" }))[0].code).toBe("legs_invalid");
+    expect(validateSettingsDraft(updateSettingsDraft(base, { maxRingFanout: "8", maxConcurrentLegs: "8" }))[0].code).toBe("legs_below_fanout");
+    expect(validateSettingsDraft(updateSettingsDraft(base, { maxRingFanout: "3", maxConcurrentLegs: "4" }))).toEqual([]);
+    expect(MIN_CONCURRENT_LEGS).toBe(SERVER_MIN_CONCURRENT_LEGS);
+  });
+
   it("agrees with the server validator, bounds included", () => {
     expect(MAX_PARK_MINUTES).toBe(SERVER_MAX_PARK_MINUTES);
-    const draft = updateSettingsDraft(base, { parkMaxMinutes: "0", dailyLegSoftCap: "0", destinationAllowlist: "SK, XX", maxRingFanout: "99" });
-    const local = validateSettingsDraft(draft).map((entry) => entry.code);
-    const server = validateSettingsPatch(settingsPayload(draft)).map((entry) => entry.code);
-    expect([...server].sort()).toEqual([...local].sort());
+    expect(MAX_DAILY_LEG_SOFT_CAP).toBe(SERVER_MAX_DAILY_LEG_SOFT_CAP);
+    expect(MAX_ALLOWLIST_ENTRIES).toBe(SERVER_MAX_ALLOWLIST_ENTRIES);
+    expect(MAX_RING_FANOUT_LIMIT).toBe(SERVER_MAX_RING_FANOUT_LIMIT);
+    expect(MAX_CONCURRENT_LEGS_LIMIT).toBe(SERVER_MAX_CONCURRENT_LEGS_LIMIT);
+
+    const drafts = [
+      updateSettingsDraft(base, { parkMaxMinutes: "0", dailyLegSoftCap: "0", destinationAllowlist: "SK, XX", maxRingFanout: "99" }),
+      // The two bounds the mirror used to miss: the button stayed enabled and
+      // the server answered 400 into the generic error banner.
+      updateSettingsDraft(base, { dailyLegSoftCap: String(MAX_DAILY_LEG_SOFT_CAP + 1) }),
+      updateSettingsDraft(base, { destinationAllowlist: Array.from({ length: MAX_ALLOWLIST_ENTRIES + 1 }, (_, index) => `+${index + 1}`).join(", ") }),
+      updateSettingsDraft(base, { maxRingFanout: "8", maxConcurrentLegs: "8" }),
+      updateSettingsDraft(base, { maxConcurrentLegs: "1" }),
+    ];
+    for (const draft of drafts) {
+      const local = validateSettingsDraft(draft).map((entry) => entry.code);
+      const server = validateSettingsPatch(settingsPayload(draft)).map((entry) => entry.code);
+      expect([...server].sort()).toEqual([...local].sort());
+    }
   });
 });
 
@@ -120,11 +157,20 @@ describe("settingsWarnings", () => {
     expect(warnings[1].text).toContain("skutočným príjemcom");
   });
 
-  it("explains switching a kill switch off", () => {
+  it("explains switching a kill switch off without pretending inbound stops", () => {
     const live = settings({ liveCallsEnabled: true, smsLiveSends: true });
     const warnings = settingsWarnings(settingsDraftFromDocument(settings()), live);
     expect(warnings.map((warning) => warning.tone)).toEqual(["warning", "warning"]);
     expect(warnings[0].text).toContain("423");
+    // `answer` is deliberately not gated: the caller is still answered and billed.
+    expect(warnings[0].text).toContain("Prichádzajúce hovory sa ale naďalej prijmú");
+  });
+
+  it("says out loud that lowering the daily cap refuses outbound calls", () => {
+    const warnings = settingsWarnings(updateSettingsDraft(base, { dailyLegSoftCap: "10" }), settings());
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].text).toContain("429");
+    expect(warnings[0].text).toContain("Prichádzajúcich volajúcich limit neodmieta");
   });
 
   it("names the destinations that are about to be removed", () => {

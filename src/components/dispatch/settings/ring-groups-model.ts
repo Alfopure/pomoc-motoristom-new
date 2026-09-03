@@ -22,6 +22,8 @@ import type {
   ValidationIssue,
 } from "@/server/telephony/config-service";
 
+import { NO_RUNNABLE_STEP_OUTCOME } from "./ring-plan-model";
+
 /** Mirrors the CHECK constraints and `config-service.ts`. */
 export const MIN_RING_SECS = 5;
 export const MAX_RING_SECS = 120;
@@ -270,18 +272,44 @@ export function plansUsingGroup(groupId: string | null, plans: readonly RingPlan
 }
 
 /**
+ * Active plans that would freeze **without a single step** once this group is
+ * switched off.
+ *
+ * `materialiseRingPlan` drops a step whose group is missing or inactive, and
+ * `startRingPlan` answers a plan with no step by offering a callback *before*
+ * `applyFallback` is reached — the configured fallback (an on-call mobile, the
+ * closing message) is never used. Skipping "one step" and losing the whole plan
+ * are two very different things, so the note must not stop at the first.
+ */
+export function plansEmptiedByGroup(group: GroupDraft, plans: readonly RingPlanDoc[], allGroups: readonly GroupDraft[]): string[] {
+  // Without the draft list the active/inactive state of the *other* groups is
+  // unknown, so the honest answer is "no claim" rather than "every plan dies".
+  if (!group.id || group.active || allGroups.length === 0) return [];
+  const activeGroupIds = new Set(allGroups.filter((candidate) => candidate.active && candidate.id).map((candidate) => candidate.id as string));
+  return plans
+    .filter((plan) => plan.active && plan.steps.some((step) => step.ringGroupId === group.id))
+    .filter((plan) => !plan.steps.some((step) => activeGroupIds.has(step.ringGroupId)))
+    .map((plan) => plan.name);
+}
+
+/**
  * Sentence under the group header. Switching a group off is allowed even when a
  * plan uses it — that is how a shift is taken out of the rota for a while — but
  * `materialiseRingPlan` then skips the whole step, so the editor has to say so
  * out loud instead of letting the manager believe the group still rings.
+ *
+ * `allGroups` (the full draft list) is what tells apart "one step is skipped"
+ * from "this plan has no step left at all"; without it the note would promise
+ * the plan's configured fallback, which the engine never reaches.
  */
-export function groupUsageNote(group: GroupDraft, plans: readonly RingPlanDoc[]): string | null {
+export function groupUsageNote(group: GroupDraft, plans: readonly RingPlanDoc[], allGroups: readonly GroupDraft[] = []): string | null {
   const used = plansUsingGroup(group.id, plans);
   if (used.length === 0) return group.active ? null : "Skupina je vypnutá a zatiaľ ju nepoužíva žiadny plán.";
   const list = used.join(", ");
-  return group.active
-    ? `Používajú ju plány: ${list}.`
-    : `Skupina je vypnutá, v týchto plánoch sa krok preskočí: ${list}.`;
+  if (group.active) return `Používajú ju plány: ${list}.`;
+  const emptied = plansEmptiedByGroup(group, plans, allGroups);
+  if (emptied.length === 0) return `Skupina je vypnutá, v týchto plánoch sa krok preskočí: ${list}.`;
+  return `Skupina je vypnutá, v týchto plánoch sa krok preskočí: ${list}. Plánom ${emptied.join(", ")} tým neostane ani jeden krok — ${NO_RUNNABLE_STEP_OUTCOME}.`;
 }
 
 /** Steps that use this group, with the strategy each of them rings with. */

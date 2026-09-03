@@ -278,6 +278,8 @@ export type TelnyxClient = {
   conferenceAction(conferenceId: string, action: ConferenceAction, body: Record<string, unknown> & { commandId?: string }): Promise<void>;
   listPhoneNumbers(params?: { pageSize?: number; phoneNumber?: string }): Promise<TelnyxPhoneNumber[]>;
   createTelephonyCredential(params: CreateTelephonyCredentialParams): Promise<TelephonyCredential>;
+  /** Revokes a SIP identity for good: the credential can no longer register or mint a token. */
+  deleteTelephonyCredential(credentialId: string): Promise<void>;
   mintCredentialToken(credentialId: string): Promise<string>;
   sendMessage(params: SendMessageParams): Promise<SendMessageResult>;
   /** Escape hatch used by later stages for endpoints not wrapped above. */
@@ -711,6 +713,15 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       const id = str(raw.id);
       if (!id) throw new TelnyxCommandError({ code: "invalid_response", status: 502, detail: "credential response has no id" });
       return { id, sipUsername: str(raw.sip_username), sipPassword: str(raw.sip_password), expiresAt: str(raw.expires_at), raw };
+    },
+
+    async deleteTelephonyCredential(credentialId) {
+      if (!credentialId) throw new TelnyxCommandError({ code: "invalid_credential_id", status: 400, detail: "credentialId is required" });
+      // Revocation is otherwise cooperative: a token minted from this credential
+      // stays valid for up to 24 h and a registered client keeps placing
+      // (billable) calls, so "disconnect" and "rotate" must remove the identity
+      // at the provider, not only in our own table.
+      await request<unknown>("DELETE", `/telephony_credentials/${encodeURIComponent(credentialId)}`);
     },
 
     async mintCredentialToken(credentialId) {

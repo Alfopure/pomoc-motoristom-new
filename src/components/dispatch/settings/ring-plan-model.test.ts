@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { LineDoc, RingGroupDoc, RingPlanDoc } from "@/server/telephony/config-service";
+import type { IvrMenuDoc, LineDoc, RingGroupDoc, RingPlanDoc } from "@/server/telephony/config-service";
 
 import {
   addStep,
@@ -12,8 +12,10 @@ import {
   moveStepInPlans,
   newPlanDraft,
   planDraftsFromDocument,
+  planHasRunnableStep,
   planUsageNote,
   removeStep,
+  ringPlanIdsInUse,
   ringPlanSeconds,
   ringPlansDirty,
   ringPlansPayload,
@@ -251,9 +253,13 @@ describe("plain-language preview", () => {
     expect(describeFallback({ ...draft, fallbackKind: "external_number", fallbackNumber: "" })).toBe("presmerovanie na externé číslo");
   });
 
-  it("describes a plan that has no step yet", () => {
+  it("describes a plan that has no step yet by what the engine really does", () => {
     const draft = newPlanDraft("Nový");
-    expect(describeRingPlan(draft, [groupA()])).toBe("Plán zatiaľ nemá žiadny krok, hovor rovno pokračuje: ponuka spätného volania.");
+    // `startRingPlan` offers a callback *before* `applyFallback` is reached, so
+    // the configured fallback is never consulted for a plan that freezes empty.
+    expect(describeRingPlan(draft, [groupA()])).toBe(
+      "Plán zatiaľ nemá žiadny krok — hovor dostane ponuku spätného volania — nastavené správanie po vyčerpaní plánu sa nepoužije, plán sa vôbec nespustí.",
+    );
   });
 
   it("keeps the preview in step with a freshly added step", () => {
@@ -283,22 +289,53 @@ describe("what the preview must not hide", () => {
     };
   }
 
+  function menu(overrides: Partial<IvrMenuDoc> = {}): IvrMenuDoc {
+    return { id: "ivr-1", name: "Hlavné menu", active: true, ringPlanIds: ["plan-1"], ...overrides };
+  }
+
   it("warns that an inactive plan a line uses skips ringing entirely", () => {
     const [draft] = planDraftsFromDocument([plan()]);
-    expect(planUsageNote(draft, [line()])).toMatchObject({ tone: "info" });
-    expect(planUsageNote({ ...draft, active: false }, [line()])).toMatchObject({ tone: "warning" });
-    expect(planUsageNote({ ...draft, active: false }, [line()])?.text).toContain("Hlavná linka");
-    expect(planUsageNote({ ...draft, active: false }, [line()])?.text).toContain("nezazvonia");
+    const groups = [groupA(), groupB()];
+    expect(planUsageNote(draft, [line()], { groups })).toMatchObject({ tone: "info" });
+    expect(planUsageNote({ ...draft, active: false }, [line()], { groups })).toMatchObject({ tone: "warning" });
+    expect(planUsageNote({ ...draft, active: false }, [line()], { groups })?.text).toContain("Hlavná linka");
+    expect(planUsageNote({ ...draft, active: false }, [line()], { groups })?.text).toContain("nezazvoní");
     // No line points at it: switching it off is harmless, so the note is calm.
-    expect(planUsageNote({ ...draft, active: false }, [line({ ringPlanId: null })])).toMatchObject({ tone: "info" });
-    expect(planUsageNote(draft, [line({ ringPlanId: null })])).toBeNull();
+    expect(planUsageNote({ ...draft, active: false }, [line({ ringPlanId: null })], { groups })).toMatchObject({ tone: "info" });
+    expect(planUsageNote(draft, [line({ ringPlanId: null })], { groups })).toBeNull();
   });
 
-  it("describes an inactive plan as inactive instead of listing steps that never run", () => {
+  it("counts a plan an IVR digit targets as used and names the menu", () => {
+    const [draft] = planDraftsFromDocument([plan()]);
+    const groups = [groupA(), groupB()];
+    const detached = [line({ ringPlanId: null })];
+
+    const note = planUsageNote({ ...draft, active: false }, detached, { groups, ivrMenus: [menu()] });
+    expect(note).toMatchObject({ tone: "warning" });
+    expect(note?.text).toContain("Hlavné menu");
+    expect(note?.text).toContain("pôvodnom pláne linky");
+    expect(planUsageNote(draft, detached, { groups, ivrMenus: [menu()] })).toMatchObject({ tone: "info" });
+    // ...and it is refused for deletion exactly like a line's plan.
+    expect(ringPlanIdsInUse(detached, [menu()])).toEqual(["plan-1"]);
+    expect(ringPlanIdsInUse([line()], [menu()])).toEqual(["plan-1"]);
+  });
+
+  it("describes an inactive plan by the callback offer the engine really makes", () => {
     const [draft] = planDraftsFromDocument([plan()]);
     expect(describeRingPlan({ ...draft, active: false }, [groupA(), groupB()])).toBe(
-      "Plán je vypnutý — žiadny krok sa nevykoná a hovor pokračuje rovno: ponuka spätného volania.",
+      "Plán je vypnutý — žiadny krok sa nevykoná a hovor dostane ponuku spätného volania — nastavené správanie po vyčerpaní plánu sa nepoužije, plán sa vôbec nespustí.",
     );
+  });
+
+  it("says the same when every step points at a switched-off group", () => {
+    const [draft] = planDraftsFromDocument([plan()]);
+    const off = [groupA({ active: false }), groupB({ active: false })];
+    // `materialiseRingPlan` drops inactive groups, so the plan freezes with zero
+    // steps and `fallback_kind` (e.g. an on-call mobile) is never applied.
+    expect(planHasRunnableStep(draft, off)).toBe(false);
+    expect(describeRingPlan(draft, off)).toContain("neostane ani jeden krok");
+    expect(planUsageNote(draft, [line()], { groups: off })).toMatchObject({ tone: "warning" });
+    expect(planHasRunnableStep(draft, [groupA(), groupB({ active: false })])).toBe(true);
   });
 
   it("says how many members an `all` step really reaches under the fan-out cap", () => {

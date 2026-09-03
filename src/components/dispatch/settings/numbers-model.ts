@@ -144,7 +144,13 @@ export function validateLineDrafts(drafts: readonly LineDraft[], context: LineVa
 export function lineWarnings(draft: LineDraft, context: LineValidationContext): string[] {
   const warnings: string[] = [];
   if (!draft.active) {
-    warnings.push("Linka je vypnutá — hovor na toto číslo sa nespracuje a nedá sa z nej ani volať von.");
+    // `findLine` filters on `active`, but `createInboundSession` still creates
+    // the session and answers the call with `line_id: null`: no plan, no IVR, no
+    // opening hours, and `startRingPlan(…, null)` offers a callback. Deactivating
+    // is therefore "unrouted", not "not processed".
+    warnings.push(
+      "Linka je vypnutá — nedá sa z nej volať von a prichádzajúci hovor stratí plán zvonenia, IVR aj otváracie hodiny. Hovor sa však aj tak prijme, zaznamená a účtuje a volajúcemu sa ponúkne spätné volanie. Ak má číslo prestať zvoniť úplne, treba ho odpojiť u operátora (Telnyx), nestačí ho vypnúť tu.",
+    );
     return warnings;
   }
   const plan = context.plans.find((candidate) => candidate.id === draft.ringPlanId) ?? null;

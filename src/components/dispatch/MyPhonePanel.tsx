@@ -252,7 +252,7 @@ export function MyPhonePanel({
   const [testNumberTouched, setTestNumberTouched] = useState(false);
   const [testBusy, setTestBusy] = useState(false);
   const effectiveTestNumber = testNumberTouched ? testNumber : target.number;
-  const testCheck = checkTestCallNumber(effectiveTestNumber, { allowlist: document.settings?.destinationAllowlist ?? null, lines: document.lines });
+  const testCheck = checkTestCallNumber(effectiveTestNumber, { allowlist: document.limits?.destinationAllowlist ?? null, lines: document.lines });
 
   async function startTestCall() {
     if (!onTestCall || !testCheck.number || testBusy) return;

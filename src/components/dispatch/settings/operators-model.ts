@@ -299,13 +299,19 @@ export const RING_VOLUME_PENDING_NOTE =
  * call in progress goes down with it. The server refuses outright while the
  * operator is `on_call`/`ringing` (409 `operator_on_call`) unless the manager
  * confirms the takeover — `confirmTakeover` is that second question.
+ *
+ * Both also delete a SIP identity at Telnyx (the superseded one on rotate, the
+ * current one on disconnect), which is what makes the revocation real rather
+ * than cooperative — an already minted token stays valid for up to 24 h. The
+ * texts say so, because "odpojiť" that leaves a registerable credential behind
+ * would be exactly the wrong thing to promise while offboarding somebody.
  */
 export function confirmRotateCredential(displayName: string): string {
-  return `Vygenerovať nové prihlasovacie údaje pre operátora ${displayName}?\n\nJeho telefón v prehliadači sa odhlási a musí sa znova prihlásiť. Ak práve telefonuje, hovor sa preruší.`;
+  return `Vygenerovať nové prihlasovacie údaje pre operátora ${displayName}?\n\nJeho telefón v prehliadači sa odhlási a musí sa znova prihlásiť. Pôvodné prihlasovacie údaje sa zrušia aj u operátora (Telnyx), takže sa s nimi už nikto nezaregistruje. Ak práve telefonuje, hovor sa preruší.`;
 }
 
 export function confirmDisconnectDevice(displayName: string): string {
-  return `Odpojiť telefón operátora ${displayName}?\n\nJeho okno stratí registráciu pri najbližšom heartbeate a hovor mu prestane zvoniť. Ak práve telefonuje, hovor sa preruší.`;
+  return `Odpojiť telefón operátora ${displayName}?\n\nJeho okno stratí registráciu pri najbližšom heartbeate a hovor mu prestane zvoniť. Prihlasovacie údaje sa zrušia aj u operátora (Telnyx), takže sa s nimi už nedá volať; nové sa vytvoria až pri ďalšom prihlásení. Ak práve telefonuje, hovor sa preruší.`;
 }
 
 /** Second question, asked only after the server answered 409 `operator_on_call`. */

@@ -26,6 +26,10 @@ import type { RingGroupDoc, RingPlanDoc, TelephonySettingsDoc, TelephonySettings
 export const MAX_PARK_MINUTES = 240;
 export const MAX_RING_FANOUT_LIMIT = 20;
 export const MAX_CONCURRENT_LEGS_LIMIT = 50;
+export const MAX_DAILY_LEG_SOFT_CAP = 100_000;
+export const MAX_ALLOWLIST_ENTRIES = 100;
+/** One concurrent leg is always the caller's own, so a fan-out needs at least one more. */
+export const MIN_CONCURRENT_LEGS = 2;
 
 export type SettingsDraft = {
   liveCallsEnabled: boolean;
@@ -113,8 +117,8 @@ export function validateSettingsDraft(draft: SettingsDraft): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
 
   const dailyLegSoftCap = parseCount(draft.dailyLegSoftCap);
-  if (!Number.isInteger(dailyLegSoftCap) || dailyLegSoftCap <= 0) {
-    issues.push(issue("dailyLegSoftCap", "cap_invalid", "Denný limit hovorov musí byť kladné číslo."));
+  if (!Number.isInteger(dailyLegSoftCap) || dailyLegSoftCap <= 0 || dailyLegSoftCap > MAX_DAILY_LEG_SOFT_CAP) {
+    issues.push(issue("dailyLegSoftCap", "cap_invalid", `Denný limit hovorov musí byť 1 až ${MAX_DAILY_LEG_SOFT_CAP}.`));
   }
 
   const parkMaxMinutes = parseCount(draft.parkMaxMinutes);
@@ -127,14 +131,31 @@ export function validateSettingsDraft(draft: SettingsDraft): ValidationIssue[] {
     issues.push(issue("maxRingFanout", "fanout_invalid", `Počet súčasne zvoniacich zariadení musí byť 1 až ${MAX_RING_FANOUT_LIMIT}.`));
   }
 
+  // The organisation-wide leg count includes the caller's own leg, so
+  // `planRingStep` gets `maxConcurrentLegs - 1` free slots: at 1 nobody's phone
+  // can ever ring, and below `maxRingFanout + 1` the fan-out is cut down by the
+  // capacity guard instead of by the intended limit.
   const maxConcurrentLegs = parseCount(draft.maxConcurrentLegs);
-  if (!Number.isInteger(maxConcurrentLegs) || maxConcurrentLegs < 1 || maxConcurrentLegs > MAX_CONCURRENT_LEGS_LIMIT) {
-    issues.push(issue("maxConcurrentLegs", "legs_invalid", `Počet súčasných liniek musí byť 1 až ${MAX_CONCURRENT_LEGS_LIMIT}.`));
+  if (!Number.isInteger(maxConcurrentLegs) || maxConcurrentLegs < MIN_CONCURRENT_LEGS || maxConcurrentLegs > MAX_CONCURRENT_LEGS_LIMIT) {
+    issues.push(
+      issue("maxConcurrentLegs", "legs_invalid", `Počet súčasných liniek musí byť ${MIN_CONCURRENT_LEGS} až ${MAX_CONCURRENT_LEGS_LIMIT} — jedna linka vždy patrí volajúcemu.`),
+    );
+  } else if (Number.isInteger(maxRingFanout) && maxConcurrentLegs < maxRingFanout + 1) {
+    issues.push(
+      issue(
+        "maxConcurrentLegs",
+        "legs_below_fanout",
+        `Počet súčasných liniek musí byť aspoň o jednu vyšší ako počet súčasne zvoniacich zariadení (teraz aspoň ${maxRingFanout + 1}) — jedna linka patrí volajúcemu.`,
+      ),
+    );
   }
 
   const allowlist = parseAllowlist(draft.destinationAllowlist);
   if (allowlist.length === 0) {
     issues.push(issue("destinationAllowlist", "allowlist_empty", "Zoznam povolených cieľov nesmie byť prázdny — volanie by sa nedalo uskutočniť."));
+  }
+  if (allowlist.length > MAX_ALLOWLIST_ENTRIES) {
+    issues.push(issue("destinationAllowlist", "allowlist_too_long", `Zoznam povolených cieľov môže mať najviac ${MAX_ALLOWLIST_ENTRIES} položiek.`));
   }
   for (const entry of allowlist) {
     const known = entry === "*" || /^\+\d{1,4}$/.test(entry) || Boolean(COUNTRY_DIAL_PREFIXES[entry.toUpperCase()]);
@@ -212,7 +233,13 @@ export function settingsWarnings(draft: SettingsDraft, original: TelephonySettin
     warnings.push({ tone: "error", text: "Zapínaš ostré hovory. Systém začne po uložení volať na skutočné čísla a hovory sa účtujú." });
   }
   if (!draft.liveCallsEnabled && original.liveCallsEnabled) {
-    warnings.push({ tone: "warning", text: "Vypínaš ostré hovory. Nové hovory sa odmietnu (423), prebiehajúce hovory dobehnú." });
+    // `assertCallsAllowed` gates only `dial` and `transfer`; `answer` is
+    // deliberately not gated, so an inbound caller is still answered.
+    warnings.push({
+      tone: "warning",
+      text:
+        "Vypínaš ostré hovory. Odchádzajúce hovory a prepojenia sa odmietnu (423), prebiehajúce hovory dobehnú. Prichádzajúce hovory sa ale naďalej prijmú a účtujú — nikomu nezazvonia, volajúci skončí na správaní po vyčerpaní plánu (spravidla ponuka spätného volania). Ak má prestať aj príjem, číslo treba odpojiť u operátora.",
+    });
   }
   if (draft.smsLiveSends && !original.smsLiveSends) {
     warnings.push({ tone: "error", text: "Zapínaš ostré SMS. Správy pôjdu skutočným príjemcom a účtujú sa." });
@@ -240,6 +267,17 @@ export function settingsWarnings(draft: SettingsDraft, original: TelephonySettin
   }
   if (next.includes("*")) {
     warnings.push({ tone: "warning", text: "Hviezdička povoľuje volanie do celého sveta vrátane drahých destinácií. Radšej vymenuj krajiny." });
+  }
+
+  // `assertLegBudget` throws 429 on every operator-initiated leg once the cap is
+  // reached — it is not a monitoring threshold, so lowering it has to be said
+  // out loud.
+  const cap = parseCount(draft.dailyLegSoftCap);
+  if (Number.isInteger(cap) && cap < original.dailyLegSoftCap) {
+    warnings.push({
+      tone: "warning",
+      text: `Znižuješ denný limit hovorov z ${original.dailyLegSoftCap} na ${cap}. Po jeho vyčerpaní systém odmietne (429) každé odchádzajúce volanie, prepojenie aj spätné volanie až do polnoci (Europe/Bratislava). Prichádzajúcich volajúcich limit neodmieta.`,
+    });
   }
 
   const fanout = parseCount(draft.maxRingFanout);

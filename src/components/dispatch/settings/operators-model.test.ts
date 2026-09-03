@@ -293,11 +293,15 @@ describe("honesty of the panel's wording", () => {
     expect(RING_VOLUME_PENDING_NOTE).toContain("zatiaľ nepoužíva");
   });
 
-  it("tells the manager that a device action ends a call in progress", () => {
+  it("tells the manager that a device action ends a call in progress and revokes the SIP identity", () => {
     // Both actions revoke `device_session_id`; the tab disconnects its WebRTC
-    // client at the next heartbeat and the live leg goes with it.
+    // client at the next heartbeat and the live leg goes with it. Both also
+    // delete a credential at Telnyx, which is the half that a tab ignoring the
+    // heartbeat cannot survive — the promise of "odpojiť" depends on it.
     expect(confirmRotateCredential("Peter")).toContain("hovor sa preruší");
+    expect(confirmRotateCredential("Peter")).toContain("zrušia aj u operátora");
     expect(confirmDisconnectDevice("Peter")).toContain("hovor sa preruší");
+    expect(confirmDisconnectDevice("Peter")).toContain("zrušia aj u operátora");
     expect(confirmTakeover("Peter", "Operátor má práve hovor.")).toContain("ukončiť mu prebiehajúci hovor");
   });
 });

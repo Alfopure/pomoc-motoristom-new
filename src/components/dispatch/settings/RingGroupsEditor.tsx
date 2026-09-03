@@ -61,10 +61,10 @@ export function RingGroupsEditor({
     () =>
       validateRingGroupDrafts(groups, {
         operatorIds: operators.map((operator) => operator.profileId),
-        destinationAllowlist: document.settings?.destinationAllowlist ?? FALLBACK_DESTINATION_ALLOWLIST,
+        destinationAllowlist: document.limits?.destinationAllowlist ?? FALLBACK_DESTINATION_ALLOWLIST,
         plans: document.plans,
       }),
-    [document.plans, document.settings, groups, operators],
+    [document.plans, document.limits, groups, operators],
   );
 
   const issuesFor = useMemo(() => issuesByPath(issues), [issues]);
@@ -115,11 +115,13 @@ export function RingGroupsEditor({
         {groups.length === 0 && <SettingsNotice tone="warning">Zatiaľ nie je vytvorená žiadna skupina zvonenia.</SettingsNotice>}
 
         {groups.map((group) => {
-          const usageNote = groupUsageNote(group, document.plans);
+          // The full draft list is what lets the note tell "one step is skipped"
+          // apart from "this plan has no runnable step left".
+          const usageNote = groupUsageNote(group, document.plans, groups);
           // Both notes describe what `planRingStep` will really do with this
           // group: the fan-out cap truncates an "all" step, and a per-member
           // ring time is dropped outside an "ordered" step.
-          const fanoutNote = groupFanoutNote(group, document.plans, document.settings?.maxRingFanout);
+          const fanoutNote = groupFanoutNote(group, document.plans, document.limits?.maxRingFanout);
           const ringSecsNote = memberRingSecsNote(group, document.plans);
           const groupIssues = issuesFor.get(group.key) ?? [];
 

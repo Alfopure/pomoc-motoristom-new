@@ -68,6 +68,10 @@ export const MAX_RING_SECS = 120;
 export const MAX_PARK_MINUTES = 240;
 export const MAX_PAUSE_MINUTES = 480;
 export const MAX_DAILY_LEG_SOFT_CAP = 100_000;
+export const MAX_RING_FANOUT_LIMIT = 20;
+export const MAX_CONCURRENT_LEGS_LIMIT = 50;
+/** One concurrent leg is always the caller's own; a fan-out needs at least one more. */
+export const MIN_CONCURRENT_LEGS = 2;
 export const MAX_SORT_ORDER = 100_000;
 
 /**
@@ -233,7 +237,15 @@ export type LineDoc = {
   active: boolean;
 };
 
-export type IvrMenuDoc = { id: string; name: string; active: boolean };
+/**
+ * `ringPlanIds` are the plans the menu's digit options route to
+ * (`motorist_ivr_options.target_ring_plan_id`). Without them the plan editor
+ * cannot tell that switching a plan off silently reroutes the callers who press
+ * that digit: `transitions.ts` resolves the digit with
+ * `(option.target_ring_plan_id && ringPlans[...]) || plan`, and an inactive plan
+ * is materialised as `null`, so the `||` falls through to the line's own plan.
+ */
+export type IvrMenuDoc = { id: string; name: string; active: boolean; ringPlanIds: string[] };
 
 export type OperatorDoc = {
   profileId: string;
@@ -242,6 +254,18 @@ export type OperatorDoc = {
   active: boolean;
   settings: { defaultFromLineId: string | null; wrapUpSeconds: number; autoAnswerOutbound: boolean; ringDeviceVolume: number } | null;
   device: { environment: TelephonyEnvironment; credentialId: string | null; sipUsername: string | null; registrationState: string; deviceSeenAt: string | null } | null;
+};
+
+/**
+ * The routing caps a manager needs to edit groups, plans and lines correctly.
+ * They are *not* the kill switches: `settings` stays admin-only, this subset is
+ * manager-level because `RingGroupsEditor`/`RingPlanEditor` pre-validate
+ * external numbers against the allowlist and describe the fan-out truncation.
+ */
+export type RoutingLimitsDoc = {
+  destinationAllowlist: string[];
+  maxRingFanout: number;
+  maxConcurrentLegs: number;
 };
 
 export type TelephonySettingsDoc = {
@@ -272,7 +296,14 @@ export type RoutingDocument = {
   lines: LineDoc[];
   ivrMenus: IvrMenuDoc[];
   operators: OperatorDoc[];
-  /** `null` for member-level readers: the kill switches are manager/admin material. */
+  /** `null` below manager level: the routing caps and the destination allowlist. */
+  limits: RoutingLimitsDoc | null;
+  /**
+   * `null` for everybody but an admin: the kill switches, the daily leg cap and
+   * the park limit are the admin-only half of `motorist_telephony_settings`
+   * (`/api/telephony/config/settings` is `CONFIG_ADMIN_ROLES`), so they must not
+   * leak through the member/manager-level GET of the other config routes.
+   */
   settings: TelephonySettingsDoc | null;
 };
 
@@ -349,23 +380,40 @@ function normalizeTime(value: unknown, pattern: RegExp = TIME_PATTERN): string |
 // Payload parsing (structure only; the semantic rules live in the validators)
 // ---------------------------------------------------------------------------
 
-function assertSectionSize(value: unknown[], label: string, issues: ValidationIssue[]): void {
+/**
+ * Size caps are refused *before* the payload is mapped into objects: pushing an
+ * issue and carrying on used to materialise the whole oversized array (a
+ * million stub rows allocate a million member records) for a request that was
+ * already known to be invalid on its first line.
+ */
+function assertSectionSize(value: unknown[], label: string): void {
   if (value.length > MAX_ROWS_PER_SECTION) {
-    issues.push(issue(label, "section_too_large", `Zoznam „${label}" môže mať najviac ${MAX_ROWS_PER_SECTION} položiek.`));
+    throw new ConfigServiceError(`Zoznam „${label}" môže mať najviac ${MAX_ROWS_PER_SECTION} položiek.`, 400, "config_invalid", [
+      issue(label, "section_too_large", `Zoznam „${label}" môže mať najviac ${MAX_ROWS_PER_SECTION} položiek.`),
+    ]);
   }
+}
+
+/** Same, one level down (members, steps, intervals, exceptions). */
+function assertNestedSize(length: number, max: number, path: string, code: string, message: string): void {
+  if (length > max) throw new ConfigServiceError(message, 400, "config_invalid", [issue(path, code, message)]);
+}
+
+/** Intervals of one exception day; an oversized list is refused, never silently truncated. */
+function assertNestedIntervals(nested: unknown[], path: string): unknown[] {
+  assertNestedSize(nested.length, MAX_INTERVALS_PER_SCHEDULE, path, "intervals_too_many", `Výnimka môže mať najviac ${MAX_INTERVALS_PER_SCHEDULE} intervalov.`);
+  return nested;
 }
 
 export function parseRingGroups(value: unknown): RingGroupInput[] {
   if (!Array.isArray(value)) throw new ConfigServiceError("Zoznam skupín chýba alebo nie je pole.", 400, "config_invalid");
   const issues: ValidationIssue[] = [];
-  assertSectionSize(value, "groups", issues);
+  assertSectionSize(value, "groups");
   const parsed = value.map((raw, groupIndex) => {
     const row = isRecord(raw) ? raw : {};
     const path = `groups[${groupIndex}]`;
     const members = Array.isArray(row.members) ? row.members : [];
-    if (members.length > MAX_MEMBERS_PER_GROUP) {
-      issues.push(issue(path, "group_too_large", `Skupina môže mať najviac ${MAX_MEMBERS_PER_GROUP} členov.`));
-    }
+    assertNestedSize(members.length, MAX_MEMBERS_PER_GROUP, path, "group_too_large", `Skupina môže mať najviac ${MAX_MEMBERS_PER_GROUP} členov.`);
     return {
       id: readId(row.id),
       name: typeof row.name === "string" ? row.name.trim() : "",
@@ -392,14 +440,12 @@ export function parseRingGroups(value: unknown): RingGroupInput[] {
 export function parseRingPlans(value: unknown): RingPlanInput[] {
   if (!Array.isArray(value)) throw new ConfigServiceError("Zoznam plánov chýba alebo nie je pole.", 400, "config_invalid");
   const issues: ValidationIssue[] = [];
-  assertSectionSize(value, "plans", issues);
+  assertSectionSize(value, "plans");
   const parsed = value.map((raw, planIndex) => {
     const row = isRecord(raw) ? raw : {};
     const path = `plans[${planIndex}]`;
     const steps = Array.isArray(row.steps) ? row.steps : [];
-    if (steps.length > MAX_STEPS_PER_PLAN) {
-      issues.push(issue(path, "plan_too_large", `Plán môže mať najviac ${MAX_STEPS_PER_PLAN} krokov.`));
-    }
+    assertNestedSize(steps.length, MAX_STEPS_PER_PLAN, path, "plan_too_large", `Plán môže mať najviac ${MAX_STEPS_PER_PLAN} krokov.`);
     return {
       id: readId(row.id),
       name: typeof row.name === "string" ? row.name.trim() : "",
@@ -425,18 +471,14 @@ export function parseRingPlans(value: unknown): RingPlanInput[] {
 export function parseBusinessHours(value: unknown): BusinessHoursInput[] {
   if (!Array.isArray(value)) throw new ConfigServiceError("Zoznam otváracích hodín chýba alebo nie je pole.", 400, "config_invalid");
   const issues: ValidationIssue[] = [];
-  assertSectionSize(value, "businessHours", issues);
+  assertSectionSize(value, "businessHours");
   const parsed = value.map((raw, scheduleIndex) => {
     const row = isRecord(raw) ? raw : {};
     const path = `businessHours[${scheduleIndex}]`;
     const intervals = Array.isArray(row.intervals) ? row.intervals : [];
     const exceptions = Array.isArray(row.exceptions) ? row.exceptions : [];
-    if (intervals.length > MAX_INTERVALS_PER_SCHEDULE) {
-      issues.push(issue(path, "intervals_too_many", `Rozvrh môže mať najviac ${MAX_INTERVALS_PER_SCHEDULE} intervalov.`));
-    }
-    if (exceptions.length > MAX_EXCEPTIONS_PER_SCHEDULE) {
-      issues.push(issue(path, "exceptions_too_many", `Rozvrh môže mať najviac ${MAX_EXCEPTIONS_PER_SCHEDULE} výnimiek.`));
-    }
+    assertNestedSize(intervals.length, MAX_INTERVALS_PER_SCHEDULE, path, "intervals_too_many", `Rozvrh môže mať najviac ${MAX_INTERVALS_PER_SCHEDULE} intervalov.`);
+    assertNestedSize(exceptions.length, MAX_EXCEPTIONS_PER_SCHEDULE, path, "exceptions_too_many", `Rozvrh môže mať najviac ${MAX_EXCEPTIONS_PER_SCHEDULE} výnimiek.`);
     return {
       id: readId(row.id),
       name: typeof row.name === "string" ? row.name.trim() : "",
@@ -456,7 +498,7 @@ export function parseBusinessHours(value: unknown): BusinessHoursInput[] {
         return {
           date: readText(exception.date) ?? "",
           closed: readFlag(exception, "closed", true, `${path}.exceptions[${exceptionIndex}]`, issues),
-          intervals: nested.slice(0, MAX_INTERVALS_PER_SCHEDULE).map((rawInterval) => {
+          intervals: assertNestedIntervals(nested, `${path}.exceptions[${exceptionIndex}]`).map((rawInterval) => {
             const interval = isRecord(rawInterval) ? rawInterval : {};
             return {
               opens: normalizeTime(interval.opens) ?? String(interval.opens ?? ""),
@@ -475,7 +517,7 @@ export function parseBusinessHours(value: unknown): BusinessHoursInput[] {
 export function parsePauseReasons(value: unknown): PauseReasonInput[] {
   if (!Array.isArray(value)) throw new ConfigServiceError("Zoznam dôvodov pauzy chýba alebo nie je pole.", 400, "config_invalid");
   const issues: ValidationIssue[] = [];
-  assertSectionSize(value, "pauseReasons", issues);
+  assertSectionSize(value, "pauseReasons");
   const parsed = value.map((raw, index) => {
     const row = isRecord(raw) ? raw : {};
     return {
@@ -577,8 +619,14 @@ export function contextFromDocument(document: RoutingDocument): ValidationContex
     businessHoursIds: new Set(document.businessHours.map((hours) => hours.id)),
     ringPlanIds: new Set(document.plans.map((plan) => plan.id)),
     businessHoursInUse: new Set(document.lines.map((line) => line.businessHoursId).filter((id): id is string => Boolean(id))),
-    ringPlansInUse: new Set(document.lines.map((line) => line.ringPlanId).filter((id): id is string => Boolean(id))),
-    destinationAllowlist: document.settings?.destinationAllowlist ?? DEFAULT_SETTINGS.destinationAllowlist,
+    // An IVR option target is as much "in use" as a line's plan; the RPC raises
+    // `ring_plan_in_use` for it, so the validator must refuse it first, with a
+    // message that names the menu.
+    ringPlansInUse: new Set([
+      ...document.lines.map((line) => line.ringPlanId).filter((id): id is string => Boolean(id)),
+      ...document.ivrMenus.flatMap((menu) => menu.ringPlanIds),
+    ]),
+    destinationAllowlist: document.limits?.destinationAllowlist ?? document.settings?.destinationAllowlist ?? DEFAULT_SETTINGS.destinationAllowlist,
     groups: document.groups.map(groupToInput),
     plans: document.plans.map(planToInput),
   };
@@ -635,6 +683,13 @@ export function validateRoutingReplace(input: { groups?: RingGroupInput[]; plans
   const issues: ValidationIssue[] = [];
   const groups = input.groups ?? context.groups;
   const plans = input.plans ?? context.plans;
+  // Row ids must be unique across the *whole* payload, not only inside their
+  // parent: the RPC upserts one set per section, and a repeated id reaches
+  // Postgres as `ON CONFLICT DO UPDATE command cannot affect row a second time`
+  // (or as a primary-key violation), which comes back as an opaque 500/409 that
+  // names no row.
+  const memberIds = new Set<string>();
+  const stepIds = new Set<string>();
 
   // --- groups -------------------------------------------------------------
   const groupNames = new Set<string>();
@@ -667,6 +722,10 @@ export function validateRoutingReplace(input: { groups?: RingGroupInput[]; plans
 
     group.members.forEach((member, memberIndex) => {
       const memberPath = `${path}.members[${memberIndex}]`;
+      if (member.id) {
+        if (memberIds.has(member.id)) issues.push(issue(memberPath, "duplicate_id", "Rovnaký člen je v konfigurácii dvakrát."));
+        memberIds.add(member.id);
+      }
       if (!MEMBER_KINDS.includes(member.memberKind)) {
         issues.push(issue(memberPath, "member_kind_invalid", "Neplatný typ člena skupiny."));
         return;
@@ -743,6 +802,10 @@ export function validateRoutingReplace(input: { groups?: RingGroupInput[]; plans
 
     plan.steps.forEach((step, stepIndex) => {
       const stepPath = `${path}.steps[${stepIndex}]`;
+      if (step.id) {
+        if (stepIds.has(step.id)) issues.push(issue(stepPath, "duplicate_id", "Rovnaký krok je v konfigurácii dvakrát."));
+        stepIds.add(step.id);
+      }
       if (!STRATEGIES.includes(step.strategy)) issues.push(issue(stepPath, "strategy_invalid", "Neplatná stratégia kroku."));
       if (step.timeoutSecs < MIN_TIMEOUT_SECS) issues.push(issue(stepPath, "timeout_too_low", `Čas kroku musí byť aspoň ${MIN_TIMEOUT_SECS} s.`));
       else if (step.timeoutSecs > MAX_TIMEOUT_SECS) issues.push(issue(stepPath, "timeout_too_high", `Čas kroku môže byť najviac ${MAX_TIMEOUT_SECS} s.`));
@@ -787,7 +850,10 @@ export function validateBusinessHours(input: BusinessHoursInput[], context: Vali
     const key = hours.name.toLocaleLowerCase("sk");
     if (key && names.has(key)) issues.push(issue(path, "duplicate_name", `Otváracie hodiny s názvom „${hours.name}" už existujú.`));
     names.add(key);
-    if (hours.id) ids.add(hours.id);
+    if (hours.id) {
+      if (ids.has(hours.id)) issues.push(issue(path, "duplicate_id", "Otváracie hodiny sú v zozname dvakrát."));
+      ids.add(hours.id);
+    }
     if (hours.timezone && !/^[A-Za-z]+\/[A-Za-z_+-]+$/.test(hours.timezone)) {
       issues.push(issue(path, "timezone_invalid", "Neplatné časové pásmo."));
     }
@@ -844,9 +910,14 @@ export function validateBusinessHours(input: BusinessHoursInput[], context: Vali
 export function validatePauseReasons(input: PauseReasonInput[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const codes = new Set<string>();
+  const ids = new Set<string>();
 
   input.forEach((reason, index) => {
     const path = `pauseReasons[${index}]`;
+    if (reason.id) {
+      if (ids.has(reason.id)) issues.push(issue(path, "duplicate_id", "Dôvod pauzy je v zozname dvakrát."));
+      ids.add(reason.id);
+    }
     if (!reason.code || !/^[a-z0-9_-]{2,32}$/.test(reason.code)) {
       issues.push(issue(path, "code_invalid", "Kód môže obsahovať len malé písmená, číslice, - a _ (2 až 32 znakov)."));
     } else if (codes.has(reason.code)) {
@@ -894,11 +965,36 @@ export function validateSettingsPatch(patch: TelephonySettingsPatchInput): Valid
   if (patch.parkMaxMinutes !== undefined && (!Number.isInteger(patch.parkMaxMinutes) || patch.parkMaxMinutes < 1 || patch.parkMaxMinutes > MAX_PARK_MINUTES)) {
     issues.push(issue("parkMaxMinutes", "park_invalid", `Maximálny čas v čakárni musí byť 1 až ${MAX_PARK_MINUTES} minút.`));
   }
-  if (patch.maxRingFanout !== undefined && (!Number.isInteger(patch.maxRingFanout) || patch.maxRingFanout < 1 || patch.maxRingFanout > 20)) {
-    issues.push(issue("maxRingFanout", "fanout_invalid", "Počet súčasne zvoniacich zariadení musí byť 1 až 20."));
+  if (patch.maxRingFanout !== undefined && (!Number.isInteger(patch.maxRingFanout) || patch.maxRingFanout < 1 || patch.maxRingFanout > MAX_RING_FANOUT_LIMIT)) {
+    issues.push(issue("maxRingFanout", "fanout_invalid", `Počet súčasne zvoniacich zariadení musí byť 1 až ${MAX_RING_FANOUT_LIMIT}.`));
   }
-  if (patch.maxConcurrentLegs !== undefined && (!Number.isInteger(patch.maxConcurrentLegs) || patch.maxConcurrentLegs < 1 || patch.maxConcurrentLegs > 50)) {
-    issues.push(issue("maxConcurrentLegs", "legs_invalid", "Počet súčasných liniek musí byť 1 až 50."));
+  // The org-wide leg count includes the caller's own leg (`loadRoutingContext`
+  // counts every open leg), so `planRingStep` has `maxConcurrentLegs - 1` free
+  // slots for an inbound call. A value of 1 leaves none: every member is
+  // skipped with reason `capacity`, the step waits 30 s and the call drops to
+  // the fallback — for every call, silently. Hence the floor of 2 and the
+  // cross-field rule below.
+  if (patch.maxConcurrentLegs !== undefined && (!Number.isInteger(patch.maxConcurrentLegs) || patch.maxConcurrentLegs < MIN_CONCURRENT_LEGS || patch.maxConcurrentLegs > MAX_CONCURRENT_LEGS_LIMIT)) {
+    issues.push(
+      issue(
+        "maxConcurrentLegs",
+        "legs_invalid",
+        `Počet súčasných liniek musí byť ${MIN_CONCURRENT_LEGS} až ${MAX_CONCURRENT_LEGS_LIMIT} — jedna linka vždy patrí volajúcemu.`,
+      ),
+    );
+  } else if (
+    patch.maxConcurrentLegs !== undefined &&
+    patch.maxRingFanout !== undefined &&
+    Number.isInteger(patch.maxRingFanout) &&
+    patch.maxConcurrentLegs < patch.maxRingFanout + 1
+  ) {
+    issues.push(
+      issue(
+        "maxConcurrentLegs",
+        "legs_below_fanout",
+        `Počet súčasných liniek musí byť aspoň o jednu vyšší ako počet súčasne zvoniacich zariadení (teraz aspoň ${patch.maxRingFanout + 1}) — jedna linka patrí volajúcemu.`,
+      ),
+    );
   }
   if (patch.destinationAllowlist !== undefined) {
     if (patch.destinationAllowlist.length === 0) {
@@ -950,7 +1046,24 @@ function exceptionIntervals(value: Json | null): Array<{ opens: string; closes: 
     .filter((entry): entry is { opens: string; closes: string } => Boolean(entry?.opens && entry?.closes));
 }
 
-export async function getRoutingDocument(deps: ConfigDeps, input: { organizationId: string; includeSettings: boolean }): Promise<RoutingDocument> {
+export type RoutingDocumentInput = {
+  organizationId: string;
+  /** Admin-level half of `motorist_telephony_settings` (kill switches, caps). */
+  includeSettings: boolean;
+  /** Manager-level routing caps and allowlist; defaults to `includeSettings`. */
+  includeLimits?: boolean;
+  /**
+   * Telnyx device identity (`credentialId`, `sipUsername`) and the per-operator
+   * settings of *other* operators. Defaults to `true` for server-internal
+   * callers; the member-level GET passes `false` plus `viewerProfileId`, so a
+   * dispatcher only ever sees their own row (`MyPhonePanel` needs no other).
+   */
+  includeOperatorDetails?: boolean;
+  /** The reader's own profile; their own device/settings are always included. */
+  viewerProfileId?: string | null;
+};
+
+export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumentInput): Promise<RoutingDocument> {
   const { organizationId } = input;
   const scoped = <T>(promise: PromiseLike<{ data: T | null; error: { message: string } | null }>, label: string) =>
     Promise.resolve(promise).then((result) => {
@@ -958,7 +1071,11 @@ export async function getRoutingDocument(deps: ConfigDeps, input: { organization
       return (result.data ?? []) as T;
     });
 
-  const [groups, members, plans, steps, hours, intervals, exceptions, pauseReasons, presence, lines, ivrMenus, profiles, operatorSettings, devices, settings] = await Promise.all([
+  const includeOperatorDetails = input.includeOperatorDetails ?? true;
+  const viewerProfileId = input.viewerProfileId ?? null;
+
+  const [groups, members, plans, steps, hours, intervals, exceptions, pauseReasons, presence, lines, ivrMenus, ivrOptions, profiles, operatorSettings, devices, settings] =
+    await Promise.all([
     scoped<Tables["motorist_ring_groups"]["Row"][]>(deps.admin.from("motorist_ring_groups").select("*").eq("organization_id", organizationId).order("name"), "Skupiny"),
     scoped<Tables["motorist_ring_group_members"]["Row"][]>(deps.admin.from("motorist_ring_group_members").select("*").eq("organization_id", organizationId).order("position"), "Členovia skupín"),
     scoped<Tables["motorist_ring_plans"]["Row"][]>(deps.admin.from("motorist_ring_plans").select("*").eq("organization_id", organizationId).order("name"), "Plány zvonenia"),
@@ -973,6 +1090,10 @@ export async function getRoutingDocument(deps: ConfigDeps, input: { organization
     ),
     scoped<Tables["motorist_telephony_lines"]["Row"][]>(deps.admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).order("phone_number"), "Linky"),
     scoped<Tables["motorist_ivr_menus"]["Row"][]>(deps.admin.from("motorist_ivr_menus").select("*").eq("organization_id", organizationId).order("name"), "IVR menu"),
+    scoped<Array<Pick<Tables["motorist_ivr_options"]["Row"], "ivr_menu_id" | "target_ring_plan_id">>>(
+      deps.admin.from("motorist_ivr_options").select("ivr_menu_id, target_ring_plan_id").eq("organization_id", organizationId),
+      "Voľby IVR",
+    ),
     scoped<Array<Pick<Tables["motorist_profiles"]["Row"], "id" | "display_name" | "role" | "active" | "access_status">>>(
       deps.admin.from("motorist_profiles").select("id, display_name, role, active, access_status").eq("organization_id", organizationId).order("display_name"),
       "Operátori",
@@ -1065,12 +1186,25 @@ export async function getRoutingDocument(deps: ConfigDeps, input: { organization
       environment: line.environment,
       active: line.active,
     })),
-    ivrMenus: ivrMenus.map((menu) => ({ id: menu.id, name: menu.name, active: menu.active })),
+    ivrMenus: ivrMenus.map((menu) => ({
+      id: menu.id,
+      name: menu.name,
+      active: menu.active,
+      ringPlanIds: [
+        ...new Set(
+          ivrOptions.filter((option) => option.ivr_menu_id === menu.id && option.target_ring_plan_id).map((option) => option.target_ring_plan_id as string),
+        ),
+      ],
+    })),
     operators: profiles
       .filter((profile) => profile.active !== false)
       .map((profile) => {
-        const operatorSetting = settingsByProfile.get(profile.id) ?? null;
-        const device = deviceByProfile.get(profile.id) ?? null;
+        // A dispatcher reading the document for "Môj telefón" has no use for a
+        // colleague's SIP identity, and the screen that renders it
+        // (`OperatorsTelephonyPanel`) is manager-only.
+        const visible = includeOperatorDetails || profile.id === viewerProfileId;
+        const operatorSetting = visible ? settingsByProfile.get(profile.id) ?? null : null;
+        const device = visible ? deviceByProfile.get(profile.id) ?? null : null;
         return {
           profileId: profile.id,
           displayName: profile.display_name,
@@ -1095,6 +1229,13 @@ export async function getRoutingDocument(deps: ConfigDeps, input: { organization
             : null,
         };
       }),
+    limits: (input.includeLimits ?? input.includeSettings)
+      ? {
+          destinationAllowlist: settings?.destination_allowlist ?? DEFAULT_SETTINGS.destinationAllowlist,
+          maxRingFanout: settings?.max_ring_fanout ?? DEFAULT_SETTINGS.maxRingFanout,
+          maxConcurrentLegs: settings?.max_concurrent_legs ?? DEFAULT_SETTINGS.maxConcurrentLegs,
+        }
+      : null,
     settings: input.includeSettings
       ? settings
         ? {
@@ -1194,6 +1335,16 @@ const RPC_MESSAGES: Array<{ match: RegExp; message: string; status: number; code
   { match: /pause_reason_in_use/, message: "Dôvod pauzy práve používa operátor na pauze, najprv ho prepni späť na dostupného.", status: 409, code: "pause_reason_in_use" },
   { match: /position_gap/, message: "Poradie členov alebo krokov nie je súvislé. Načítaj konfiguráciu znova.", status: 409, code: "position_gap" },
   { match: /duplicate key|23505/, message: "Názov alebo kód sa už v organizácii používa.", status: 409, code: "duplicate" },
+  // PostgREST answers PGRST202 when the 3-argument RPC is missing, i.e. the
+  // routing-config migrations are not applied on this database. That is a
+  // deployment fault, not a bad request, and the message has to say so.
+  {
+    match: /PGRST202|Could not find the function|function public\.motorist_replace_ring_plan.*does not exist|schema cache/i,
+    message:
+      "Databáza tejto inštalácie nemá nasadenú migráciu konfigurácie zvonenia (motorist_replace_ring_plan). Konfigurácia sa nedá uložiť, kým ju administrátor nenasadí.",
+    status: 503,
+    code: "config_migration_missing",
+  },
 ];
 
 /**
@@ -1508,6 +1659,11 @@ export async function updateTelephonySettings(
     maxRingFanout: input.patch.maxRingFanout ?? current.maxRingFanout,
     maxConcurrentLegs: input.patch.maxConcurrentLegs ?? current.maxConcurrentLegs,
   };
+
+  // The cross-field rules (`maxConcurrentLegs > maxRingFanout`) have to hold for
+  // the *merged* row: a PATCH that carries only one of the two fields would
+  // otherwise land a combination neither validator ever saw.
+  assertValid(validateSettingsPatch(next));
 
   if (input.patch.destinationAllowlist !== undefined) {
     const document = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: false });

@@ -119,6 +119,41 @@ describe("validateRoutingReplace", () => {
     expect(codes(issues)).toContain("group_empty");
   });
 
+  it("names the row when a member or a step id is repeated anywhere in the payload", () => {
+    // Postgres answers a repeated id inside one upsert set with
+    // "ON CONFLICT DO UPDATE command cannot affect row a second time" (or a PK
+    // violation across two groups), which maps to no RPC message and comes back
+    // as an opaque 500/409 naming nothing.
+    const MEMBER = "00000000-0000-4000-8000-00000000a001";
+    const STEP = "00000000-0000-4000-8000-00000000a002";
+    const member = (position: number) => ({ id: MEMBER, memberKind: "operator" as const, profileId: PROFILES.o1, externalNumber: null, position, ringSecs: null });
+    const twiceInOneGroup = validateRoutingReplace({ groups: [group({ members: [member(0), { ...member(1), profileId: PROFILES.o2 }] })] }, context());
+    expect(codes(twiceInOneGroup)).toContain("duplicate_id");
+    expect(twiceInOneGroup.find((issue) => issue.code === "duplicate_id")?.path).toBe("groups[0].members[1]");
+
+    const acrossGroups = validateRoutingReplace(
+      { groups: [group({ members: [member(0)] }), group({ id: GROUP_B, name: "Dispečing B", members: [member(0)] })] },
+      context(),
+    );
+    expect(codes(acrossGroups)).toContain("duplicate_id");
+
+    const steps = validateRoutingReplace(
+      {
+        plans: [
+          plan({
+            steps: [
+              { id: STEP, stepIndex: 0, ringGroupId: GROUP_A, timeoutSecs: 20, strategy: "all" },
+              { id: STEP, stepIndex: 1, ringGroupId: GROUP_A, timeoutSecs: 20, strategy: "all" },
+            ],
+          }),
+        ],
+      },
+      context(),
+    );
+    expect(codes(steps)).toContain("duplicate_id");
+    expect(steps.find((issue) => issue.code === "duplicate_id")?.path).toBe("plans[0].steps[1]");
+  });
+
   it("refuses duplicate and non-contiguous positions in a group and in a plan", () => {
     const duplicated = group({
       members: [
@@ -247,6 +282,22 @@ describe("validateBusinessHours / validatePauseReasons / patches", () => {
     expect(validateBusinessHours(hours({ closed: true, intervals: [] }), context())).toEqual([]);
   });
 
+  it("refuses a business-hours or pause-reason id that appears twice", () => {
+    const HOURS = "00000000-0000-4000-8000-00000000b001";
+    const REASON = "00000000-0000-4000-8000-00000000b002";
+    const schedule = (id: string) => ({ id, name: `Rozvrh ${id.slice(-1)}`, timezone: "Europe/Bratislava", active: true, intervals: [], exceptions: [] });
+    const hours = validateBusinessHours([schedule(HOURS), { ...schedule(HOURS), name: "Rozvrh 2" }], context());
+    expect(codes(hours)).toContain("duplicate_id");
+    expect(hours.find((issue) => issue.code === "duplicate_id")?.path).toBe("businessHours[1]");
+
+    const reasons = validatePauseReasons([
+      { id: REASON, code: "obed", label: "Obed", maxMinutes: null, sortOrder: 0, active: true },
+      { id: REASON, code: "porada", label: "Porada", maxMinutes: null, sortOrder: 10, active: true },
+    ]);
+    expect(codes(reasons)).toContain("duplicate_id");
+    expect(reasons.find((issue) => issue.code === "duplicate_id")?.path).toBe("pauseReasons[1]");
+  });
+
   it("refuses removing business hours a line still uses", () => {
     expect(codes(validateBusinessHours([], context({ businessHoursInUse: new Set(["hours-1"]) })))).toContain("business_hours_in_use");
   });
@@ -279,6 +330,16 @@ describe("validateBusinessHours / validatePauseReasons / patches", () => {
     expect(codes(validateSettingsPatch({ parkMaxMinutes: 0 }))).toContain("park_invalid");
     expect(codes(validateSettingsPatch({ dailyLegSoftCap: -1 }))).toContain("cap_invalid");
     expect(validateSettingsPatch({ destinationAllowlist: ["SK", "+420"], parkMaxMinutes: 15, dailyLegSoftCap: 200 })).toEqual([]);
+  });
+
+  it("keeps the concurrency guards above the caller's own leg", () => {
+    // `loadRoutingContext` counts the customer leg too, so `maxConcurrentLegs: 1`
+    // leaves `planRingStep` zero capacity: every member is skipped, the step
+    // waits 30 s and the call drops to the fallback — for every call.
+    expect(codes(validateSettingsPatch({ maxConcurrentLegs: 1 }))).toContain("legs_invalid");
+    expect(codes(validateSettingsPatch({ maxRingFanout: 20, maxConcurrentLegs: 5 }))).toContain("legs_below_fanout");
+    expect(validateSettingsPatch({ maxRingFanout: 8, maxConcurrentLegs: 9 })).toEqual([]);
+    expect(validateSettingsPatch({ maxRingFanout: 4, maxConcurrentLegs: 5 })).toEqual([]);
   });
 
   it("validates the per-operator settings patch", () => {
@@ -337,8 +398,44 @@ describe("routing document read model", () => {
 
   it("hides the organisation settings from a member-level read", async () => {
     const { deps } = harnessDeps();
-    const document = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: false });
+    const document = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: false, includeLimits: false });
     expect(document.settings).toBeNull();
+    expect(document.limits).toBeNull();
+  });
+
+  it("keeps the routing limits available to a manager without the kill switches", async () => {
+    const { deps } = harnessDeps();
+    const document = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: false, includeLimits: true });
+    expect(document.settings).toBeNull();
+    expect(document.limits).toEqual({ destinationAllowlist: ["SK", "CZ"], maxRingFanout: 8, maxConcurrentLegs: 9 });
+  });
+
+  it("gives a member-level reader only their own device and settings", async () => {
+    const { deps } = harnessDeps();
+    const document = await getRoutingDocument(deps, {
+      organizationId: ORG,
+      includeSettings: false,
+      includeLimits: false,
+      includeOperatorDetails: false,
+      viewerProfileId: PROFILES.o1,
+    });
+
+    // A dispatcher opening "Môj telefón" has no use for a colleague's Telnyx
+    // credential id or SIP username.
+    expect(document.operators.find((operator) => operator.profileId === PROFILES.o1)?.device?.sipUsername).toBeTruthy();
+    for (const operator of document.operators.filter((entry) => entry.profileId !== PROFILES.o1)) {
+      expect(operator.device).toBeNull();
+      expect(operator.settings).toBeNull();
+    }
+    // The manager-level read still carries everybody's row.
+    const full = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    expect(full.operators.filter((operator) => operator.device !== null).length).toBeGreaterThan(1);
+  });
+
+  it("carries the ring plans every IVR option targets", async () => {
+    const { deps } = harnessDeps();
+    const document = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    expect(document.ivrMenus[0].ringPlanIds).toEqual([PLAN_ID]);
   });
 
   it("falls back to the documented defaults when the settings row is missing", async () => {
@@ -599,6 +696,25 @@ describe("contextFromDocument", () => {
     expect(derived.profileIds.size).toBe(5);
     expect(derived.destinationAllowlist).toEqual(["SK", "CZ"]);
   });
+
+  it("counts a plan only an IVR option points at as in use", async () => {
+    const { harness, deps } = harnessDeps();
+    const OTHER_PLAN = "00000000-0000-4000-8000-00000000c001";
+    harness.db.seed("motorist_ring_plans", [
+      { id: OTHER_PLAN, organization_id: ORG, name: "Odťahovka", fallback_kind: "callback_prompt", fallback_number: null, active: true },
+    ]);
+    harness.db.update("motorist_ivr_options", { target_ring_plan_id: OTHER_PLAN }, (row) => row.digit === "1");
+
+    const document = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    const derived = contextFromDocument(document);
+
+    // The RPC raises `ring_plan_in_use` for it, so the validator has to refuse
+    // the deletion first — with a message that names something.
+    expect([...derived.ringPlansInUse].sort()).toEqual([OTHER_PLAN, PLAN_ID].sort());
+    expect(codes(validateRoutingReplace({ plans: document.plans.filter((plan) => plan.id === PLAN_ID).map((plan) => ({ ...plan, steps: plan.steps })) }, derived))).toContain(
+      "plan_in_use",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -622,6 +738,23 @@ describe("replace RPC guards (fake mirror parity)", () => {
       ...(expectedVersion === undefined ? {} : { p_expected_version: expectedVersion }),
     });
   }
+
+  it("says so when the database has no such function (the migration is not applied)", async () => {
+    const { harness, deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    // PostgREST answers PGRST202 while `motorist_replace_ring_plan(uuid, jsonb,
+    // integer)` is missing; a generic 500 would send the manager hunting for a
+    // bug in their draft instead of at the deployment.
+    harness.db.failNext(
+      "motorist_replace_ring_plan",
+      "rpc",
+      "Could not find the function public.motorist_replace_ring_plan(p_document, p_expected_version, p_organization_id) in the schema cache",
+    );
+
+    await expect(
+      replaceRingGroups(deps, { organizationId: ORG, actor: ACTOR, groups: before.groups, expectedVersion: before.routingVersion }),
+    ).rejects.toMatchObject({ status: 503, code: "config_migration_missing" });
+  });
 
   it("bumps the routing version and refuses a stale one", async () => {
     const { harness, deps } = harnessDeps();
@@ -703,11 +836,30 @@ describe("payload parsing rejects instead of guessing", () => {
     expect(parseLinePatch({ active: false })).toEqual({ active: false });
   });
 
-  it("caps the size of every section", () => {
+  it("caps the size of every section before it materialises the payload", () => {
     const many = Array.from({ length: 201 }, (_, index) => ({ name: `Skupina ${index}`, members: [] }));
     expect(() => parseRingGroups(many)).toThrowError(/najviac 200/);
     expect(() => parseRingGroups([{ name: "A", members: Array.from({ length: 51 }, () => ({ memberKind: "operator" })) }])).toThrowError(/najviac 50 členov/);
     expect(() => parseRingPlans([{ name: "P", steps: Array.from({ length: 21 }, () => ({})) }])).toThrowError(/najviac 20 krokov/);
+    expect(() => parseBusinessHours([{ name: "R", intervals: Array.from({ length: 101 }, () => ({})), exceptions: [] }])).toThrowError(/najviac 100 intervalov/);
+    expect(() => parseBusinessHours([{ name: "R", intervals: [], exceptions: Array.from({ length: 201 }, () => ({})) }])).toThrowError(/najviac 200 výnimiek/);
+    // The intervals of one exception day used to be silently truncated.
+    expect(() =>
+      parseBusinessHours([{ name: "R", intervals: [], exceptions: [{ date: "2026-12-24", closed: false, intervals: Array.from({ length: 101 }, () => ({})) }] }]),
+    ).toThrowError(/Výnimka môže mať najviac 100 intervalov/);
+
+    // The cap is refused on the first line, not after the whole array has been
+    // mapped into member objects: a mapped row would have to touch `memberKind`.
+    let touched = 0;
+    const hostile = Array.from({ length: 201 }, () => ({
+      name: "Skupina",
+      get members() {
+        touched += 1;
+        return [];
+      },
+    }));
+    expect(() => parseRingGroups(hostile)).toThrowError(/najviac 200/);
+    expect(touched).toBe(0);
   });
 
   it("refuses an out-of-range sort order and daily cap", () => {

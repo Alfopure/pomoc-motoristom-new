@@ -35,7 +35,11 @@ const document = {
   pauseReasonsInUse: [],
   lines: [{ id: "line-1", phoneNumber: "+421232408700", label: "Hlavná linka" }],
   ivrMenus: [],
-  operators: [],
+  operators: [
+    { profileId: "profile-1", displayName: "Manažér", role: "manager", active: true, settings: null, device: { environment: "development", credentialId: "cred-1", sipUsername: "gencred001", registrationState: "registered", deviceSeenAt: null } },
+    { profileId: "profile-2", displayName: "Kolega", role: "dispatcher", active: true, settings: null, device: { environment: "development", credentialId: "cred-2", sipUsername: "gencred002", registrationState: "registered", deviceSeenAt: null } },
+  ],
+  limits: { destinationAllowlist: ["SK"], maxRingFanout: 8, maxConcurrentLegs: 9 },
   settings: { liveCallsEnabled: true, smsLiveSends: false, dailyLegSoftCap: 500, parkMaxMinutes: 30, destinationAllowlist: ["SK"], maxRingFanout: 8, maxConcurrentLegs: 9 },
 };
 
@@ -85,20 +89,47 @@ beforeEach(() => {
 });
 
 describe("GET /api/telephony/config/*", () => {
-  it("serves the whole routing document to a dispatcher without the organisation settings", async () => {
+  it("serves the routing document to a dispatcher without the settings, the limits or a colleague's SIP identity", async () => {
     state.role = "dispatcher";
     const response = await getGroups();
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ canEdit: false, canManageSettings: false });
-    expect(getRoutingDocument).toHaveBeenCalledWith({ admin: { marker: "admin" } }, { organizationId: "org-1", includeSettings: false });
+    const body = (await response.json()) as { canEdit: boolean; document: typeof document };
+    expect(body).toMatchObject({ canEdit: false, canManageSettings: false });
+    expect(body.document.settings).toBeNull();
+    expect(body.document.limits).toBeNull();
+    // Own row keeps its device; every colleague's Telnyx credential and SIP user is stripped.
+    expect(body.document.operators.find((operator) => operator.profileId === "profile-1")?.device).not.toBeNull();
+    expect(body.document.operators.find((operator) => operator.profileId === "profile-2")?.device).toBeNull();
+    expect(getRoutingDocument).toHaveBeenCalledWith(
+      { admin: { marker: "admin" } },
+      { organizationId: "org-1", includeSettings: false, includeLimits: false, includeOperatorDetails: false, viewerProfileId: "profile-1" },
+    );
   });
 
-  it("includes the settings for a manager and marks the document editable", async () => {
+  it("gives a manager the routing limits but never the admin-only kill switches", async () => {
     const response = await getPlans();
 
-    await expect(response.json()).resolves.toMatchObject({ canEdit: true, canManageSettings: false });
-    expect(getRoutingDocument).toHaveBeenCalledWith(expect.anything(), { organizationId: "org-1", includeSettings: true });
+    const body = (await response.json()) as { canEdit: boolean; document: typeof document };
+    expect(body).toMatchObject({ canEdit: true, canManageSettings: false });
+    // A manager is refused GET /config/settings, so the same fields must not
+    // arrive through this response either.
+    expect(body.document.settings).toBeNull();
+    expect(body.document.limits).toEqual({ destinationAllowlist: ["SK"], maxRingFanout: 8, maxConcurrentLegs: 9 });
+    expect(body.document.operators.find((operator) => operator.profileId === "profile-2")?.device).not.toBeNull();
+    expect(getRoutingDocument).toHaveBeenCalledWith(expect.anything(), {
+      organizationId: "org-1",
+      includeSettings: false,
+      includeLimits: true,
+      includeOperatorDetails: true,
+      viewerProfileId: "profile-1",
+    });
+  });
+
+  it("gives an admin the whole settings row", async () => {
+    state.role = "admin";
+    const body = (await (await getPlans()).json()) as { document: typeof document };
+    expect(body.document.settings).toMatchObject({ liveCallsEnabled: true, dailyLegSoftCap: 500 });
   });
 
   it("keeps the numbers panel readable for every member", async () => {

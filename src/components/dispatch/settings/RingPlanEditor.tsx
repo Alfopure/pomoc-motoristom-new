@@ -20,6 +20,7 @@ import {
   planDraftsFromDocument,
   planUsageNote,
   removeStep,
+  ringPlanIdsInUse,
   ringPlanSeconds,
   ringPlansDirty,
   ringPlansPayload,
@@ -54,25 +55,24 @@ export function RingPlanEditor({
   const [serverIssues, setServerIssues] = useState<ValidationIssue[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const planIdsInUse = useMemo(
-    () => document.lines.map((line) => line.ringPlanId).filter((id): id is string => Boolean(id)),
-    [document.lines],
-  );
+  // A plan an IVR digit targets is as much "in use" as a line's plan: the RPC
+  // refuses to delete it and switching it off reroutes those callers silently.
+  const planIdsInUse = useMemo(() => ringPlanIdsInUse(document.lines, document.ivrMenus), [document.ivrMenus, document.lines]);
 
   // The organisation fan-out cap is only visible to a manager/admin (the
-  // settings are stripped for a member), so the preview simply omits the note
+  // limits are stripped for a member), so the preview simply omits the note
   // when it is unknown rather than guessing a number.
-  const maxRingFanout = document.settings?.maxRingFanout;
+  const maxRingFanout = document.limits?.maxRingFanout;
 
   const issues = useMemo(
     () =>
       validateRingPlanDrafts(plans, {
         groups: document.groups,
-        destinationAllowlist: document.settings?.destinationAllowlist ?? FALLBACK_DESTINATION_ALLOWLIST,
+        destinationAllowlist: document.limits?.destinationAllowlist ?? FALLBACK_DESTINATION_ALLOWLIST,
         planIdsInUse,
         maxRingFanout,
       }),
-    [document.groups, document.settings, maxRingFanout, planIdsInUse, plans],
+    [document.groups, document.limits, maxRingFanout, planIdsInUse, plans],
   );
 
   const issuesFor = useMemo(() => issuesByPath(issues), [issues]);
@@ -156,7 +156,7 @@ export function RingPlanEditor({
             </p>
 
             {(() => {
-              const usage = planUsageNote(plan, document.lines);
+              const usage = planUsageNote(plan, document.lines, { ivrMenus: document.ivrMenus, groups: document.groups });
               if (!usage) return null;
               return (
                 <p
