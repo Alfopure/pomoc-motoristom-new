@@ -15,15 +15,9 @@
 
 import type { AppRole } from "@/domain/types";
 import { DEVICE_LIVENESS_WINDOW_MS, isDeviceLive } from "@/lib/telephony/device-liveness";
+import { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS } from "@/lib/telephony/operator-settings";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
-import {
-  DEFAULT_OPERATOR_SETTINGS,
-  MAX_WRAP_UP_SECONDS,
-  type LineDoc,
-  type OperatorDoc,
-  type OperatorSettingsPatchInput,
-  type ValidationIssue,
-} from "@/server/telephony/config-service";
+import type { LineDoc, OperatorDoc, OperatorSettingsPatchInput, ValidationIssue } from "@/server/telephony/config-service";
 
 export const ROLE_LABELS: Record<AppRole, string> = {
   dispatcher: "Dispečer",
@@ -129,7 +123,7 @@ export function validateOperatorDraft(draft: OperatorDraft, context: OperatorVal
   if (!Number.isInteger(draft.wrapUpSeconds) || draft.wrapUpSeconds < 0 || draft.wrapUpSeconds > MAX_WRAP_UP_SECONDS) {
     issues.push(issue(draft.profileId, "wrap_up_invalid", `Čas po hovore musí byť 0 až ${MAX_WRAP_UP_SECONDS} sekúnd.`));
   }
-  if (!Number.isInteger(draft.ringDeviceVolume) || draft.ringDeviceVolume < 0 || draft.ringDeviceVolume > 100) {
+  if (!Number.isInteger(draft.ringDeviceVolume) || draft.ringDeviceVolume < 0 || draft.ringDeviceVolume > MAX_RING_DEVICE_VOLUME) {
     issues.push(issue(draft.profileId, "volume_invalid", "Hlasitosť zvonenia musí byť 0 až 100."));
   }
   if (draft.defaultFromLineId && !context.lines.some((line) => line.id === draft.defaultFromLineId)) {
@@ -285,20 +279,36 @@ export function describeCallHandling(draft: OperatorDraft): string {
 export const AUTO_ANSWER_PENDING_NOTE =
   "Prehliadačový telefón dnes vlastnú vetvu odchádzajúceho hovoru prijíma vždy automaticky. Voľba sa uloží do profilu operátora, ale zatiaľ hovor neovplyvní.";
 
+/**
+ * The same honesty for the ring volume: the column is stored and audited, but
+ * `BrowserIncomingRingtone` plays at its own module constant and
+ * `telnyx-webphone.ts` never touches gain, so nothing reads
+ * `ring_device_volume` yet.
+ */
+export const RING_VOLUME_PENDING_NOTE =
+  "Hlasitosť sa uloží do profilu operátora, ale prehliadačový telefón ju zatiaľ nepoužíva — zvonenie hrá vždy rovnako nahlas.";
+
 // ---------------------------------------------------------------------------
 // Device actions
 // ---------------------------------------------------------------------------
 
 /**
  * Both device actions are destructive for the operator's browser tab, so the
- * confirmation says exactly what happens — and, just as importantly, what does
- * not: neither action touches a call that is already running, they only revoke
- * the device session.
+ * confirmation says exactly what happens: the revoked `device_session_id` makes
+ * the tab's next heartbeat fail, the tab disconnects its WebRTC client and a
+ * call in progress goes down with it. The server refuses outright while the
+ * operator is `on_call`/`ringing` (409 `operator_on_call`) unless the manager
+ * confirms the takeover — `confirmTakeover` is that second question.
  */
 export function confirmRotateCredential(displayName: string): string {
-  return `Vygenerovať nové prihlasovacie údaje pre operátora ${displayName}?\n\nJeho telefón v prehliadači sa odhlási a musí sa znova prihlásiť. Prebiehajúci hovor sa neukončí.`;
+  return `Vygenerovať nové prihlasovacie údaje pre operátora ${displayName}?\n\nJeho telefón v prehliadači sa odhlási a musí sa znova prihlásiť. Ak práve telefonuje, hovor sa preruší.`;
 }
 
 export function confirmDisconnectDevice(displayName: string): string {
-  return `Odpojiť telefón operátora ${displayName}?\n\nJeho okno stratí registráciu pri najbližšom heartbeate a hovor mu prestane zvoniť. Prebiehajúci hovor sa neukončí.`;
+  return `Odpojiť telefón operátora ${displayName}?\n\nJeho okno stratí registráciu pri najbližšom heartbeate a hovor mu prestane zvoniť. Ak práve telefonuje, hovor sa preruší.`;
+}
+
+/** Second question, asked only after the server answered 409 `operator_on_call`. */
+export function confirmTakeover(displayName: string, message: string): string {
+  return `${message}\n\nOperátor: ${displayName}. Naozaj pokračovať a ukončiť mu prebiehajúci hovor?`;
 }

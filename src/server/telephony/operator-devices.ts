@@ -105,7 +105,10 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
     registration_state: "unregistered" as const,
     metadata: toJson({ ...(existing ? metadataOf(existing) : {}), credential_created_at: now.toISOString(), previous_credential_id: existing?.telnyx_credential_id ?? null }),
   };
-  const upserted = await deps.admin.from("motorist_operator_devices").upsert(values, { onConflict: "profile_id,environment" }).select("*").single();
+  // The unique key is per organisation (`operator_devices_org_profile_env_idx`):
+  // a global `(profile_id, environment)` key would let an upsert with a profile
+  // from another organisation rewrite that organisation's device row.
+  const upserted = await deps.admin.from("motorist_operator_devices").upsert(values, { onConflict: "organization_id,profile_id,environment" }).select("*").single();
   if (upserted.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo uložiť: ${upserted.error.message}`, 500);
   return upserted.data;
 }

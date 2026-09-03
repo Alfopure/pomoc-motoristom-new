@@ -14,13 +14,16 @@ import {
   describeNow,
   describeWeek,
   evaluateDraft,
+  isAroundTheClock,
   isEmptySchedule,
+  MIDNIGHT_CLOSE,
   newScheduleDraft,
   overlappingWeekdays,
   removeException,
   removeInterval,
   removeSchedule,
   scheduleDraftsFromDocument,
+  setDayAroundTheClock,
   todayInSchedule,
   updateException,
   updateExceptionInterval,
@@ -302,5 +305,30 @@ describe("preview", () => {
     const schedule = draft();
     // 23:30 UTC on 6 September is already 7 September in Bratislava.
     expect(todayInSchedule(schedule, new Date("2026-09-06T23:30:00Z"))).toBe("2026-09-07");
+  });
+});
+
+describe("open around the clock", () => {
+  it("uses 24:00 so the last minute of the day is not silently closed", () => {
+    const [draft] = scheduleDraftsFromDocument([doc()]);
+    const [nonstop] = setDayAroundTheClock([draft], draft.key, 6);
+
+    expect(isAroundTheClock(nonstop, 6)).toBe(true);
+    expect(nonstop.days.get(6)).toEqual([expect.objectContaining({ opens: "00:00", closes: MIDNIGHT_CLOSE })]);
+    expect(validateScheduleDrafts([nonstop], { lines: [] })).toEqual([]);
+
+    // `withinAny` compares `minutes < closes`: 23:59 would leave 23:59-24:00
+    // after-hours, 24:00 keeps the whole Saturday open.
+    const lastMinute = new Date("2026-09-05T21:59:30Z"); // Saturday 23:59:30 local
+    expect(evaluateDraft(nonstop, lastMinute).open).toBe(true);
+
+    const almost = { ...nonstop, days: new Map(nonstop.days).set(6, [{ key: "k", opens: "00:00", closes: "23:59" }]) };
+    expect(evaluateDraft(almost, lastMinute).open).toBe(false);
+  });
+
+  it("keeps 24:00 out of the opening time", () => {
+    const [draft] = scheduleDraftsFromDocument([doc()]);
+    const broken = { ...draft, days: new Map(draft.days).set(3, [{ key: "k", opens: "24:00", closes: "24:00" }]) };
+    expect(validateScheduleDrafts([broken], { lines: [] }).map((issue) => issue.code)).toContain("time_invalid");
   });
 });

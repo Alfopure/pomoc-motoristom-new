@@ -3,12 +3,20 @@ import { describe, expect, it } from "vitest";
 import { createTelephonyHarness, GROUPS, LINES, NUMBERS, ORG, PLAN_ID, PROFILES } from "@/test/telephony-harness";
 
 import {
+  assertOperatorNotOnCall,
   compactDiff,
   contextFromDocument,
   DEFAULT_SETTINGS,
+  destinationsOutsideAllowlist,
   getRoutingDocument,
+  parseBusinessHours,
+  parseLinePatch,
+  parseOperatorSettingsPatch,
+  parsePauseReasons,
   parseRingGroups,
   parseRingPlans,
+  parseSettingsPatch,
+  requireOperatorOfOrganization,
   replaceBusinessHours,
   replacePauseReasons,
   replaceRingGroups,
@@ -534,7 +542,7 @@ describe("line, settings and operator patches", () => {
 
   it("flips the kill switch and normalises the allowlist", async () => {
     const { harness, deps } = harnessDeps();
-    const settings = await updateTelephonySettings(deps, { organizationId: ORG, actor: ACTOR, patch: { liveCallsEnabled: false, destinationAllowlist: ["sk"], parkMaxMinutes: 15 } });
+    const { settings } = await updateTelephonySettings(deps, { organizationId: ORG, actor: ACTOR, patch: { liveCallsEnabled: false, destinationAllowlist: ["sk"], parkMaxMinutes: 15 } });
 
     expect(settings).toMatchObject({ liveCallsEnabled: false, destinationAllowlist: ["SK"], parkMaxMinutes: 15 });
     expect(harness.db.find("motorist_telephony_settings", () => true)).toMatchObject({ live_calls_enabled: false, park_max_minutes: 15 });
@@ -590,5 +598,194 @@ describe("contextFromDocument", () => {
     expect([...derived.ringPlansInUse]).toEqual([PLAN_ID]);
     expect(derived.profileIds.size).toBe(5);
     expect(derived.destinationAllowlist).toEqual(["SK", "CZ"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mirror parity with `motorist_replace_ring_plan`
+// ---------------------------------------------------------------------------
+
+/**
+ * `src/test/fake-supabase.ts` re-implements the RPC in JavaScript; the SQL runs
+ * nowhere in this suite. These cases feed the mirror the hostile documents the
+ * SQL is written to refuse and pin the exact error codes, so a divergence shows
+ * up here instead of the first time the migration meets a real database
+ * (`tests/telnyx-migration-shape.test.mjs` pins the same codes in the SQL text).
+ */
+describe("replace RPC guards (fake mirror parity)", () => {
+  const PAUSE_REASON = "00000000-0000-4000-8000-000000002501";
+
+  async function callRpc(harness: ReturnType<typeof createTelephonyHarness>, document: Record<string, unknown>, expectedVersion?: number | null) {
+    return harness.admin.rpc("motorist_replace_ring_plan", {
+      p_organization_id: ORG,
+      p_document: document as never,
+      ...(expectedVersion === undefined ? {} : { p_expected_version: expectedVersion }),
+    });
+  }
+
+  it("bumps the routing version and refuses a stale one", async () => {
+    const { harness, deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+
+    const first = await replaceRingGroups(deps, { organizationId: ORG, actor: ACTOR, groups: before.groups, expectedVersion: before.routingVersion });
+    expect(first.document.routingVersion).toBe(before.routingVersion + 1);
+
+    // A second editor still holding the old document must not silently win.
+    await expect(
+      replaceRingGroups(deps, { organizationId: ORG, actor: ACTOR, groups: before.groups, expectedVersion: before.routingVersion }),
+    ).rejects.toMatchObject({ status: 409, code: "stale_document" });
+    expect(harness.rows("motorist_ring_groups")).toHaveLength(2);
+  });
+
+  it("refuses to delete a pause reason an operator is paused under", async () => {
+    const { harness, deps } = harnessDeps();
+    harness.db.update("motorist_operator_presence", { status: "paused", pause_reason_id: PAUSE_REASON }, (row) => row.profile_id === PROFILES.o1);
+
+    await expect(replacePauseReasons(deps, { organizationId: ORG, actor: ACTOR, pauseReasons: [], expectedVersion: null })).rejects.toMatchObject({
+      status: 409,
+      code: "pause_reason_in_use",
+    });
+    expect(harness.rows("motorist_pause_reasons")).toHaveLength(1);
+  });
+
+  it("re-asserts the structural invariants inside the transaction", async () => {
+    const { harness, deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    const usedGroup = before.plans[0].steps[0].ringGroupId;
+
+    // Emptying a group a step uses bypasses `validateRoutingReplace` only if the
+    // caller goes straight to the RPC — which is exactly what a second writer
+    // does when it validated against a world that still had members.
+    const emptied = await callRpc(harness, {
+      groups: before.groups.map((group) => ({ id: group.id, name: group.name, active: group.active, members: group.id === usedGroup ? [] : group.members.map((member, index) => ({ id: member.id, member_kind: member.memberKind, profile_id: member.profileId, external_number: member.externalNumber, position: index, ring_secs: member.ringSecs })) })),
+    });
+    expect(emptied.error?.message).toMatch(/ring_group_empty/);
+    expect(harness.rows("motorist_ring_group_members").filter((row) => row.ring_group_id === usedGroup).length).toBeGreaterThan(0);
+
+    const gapped = await callRpc(harness, {
+      plans: before.plans.map((plan) => ({
+        id: plan.id,
+        name: plan.name,
+        fallback_kind: plan.fallbackKind,
+        active: plan.active,
+        steps: plan.steps.map((step, index) => ({ id: step.id, step_index: index + 1, ring_group_id: step.ringGroupId, timeout_secs: step.timeoutSecs, strategy: step.strategy })),
+      })),
+    });
+    expect(gapped.error?.message).toMatch(/position_gap/);
+  });
+
+  it("refuses a row without an id (a null in the id array would match nothing)", async () => {
+    const { harness } = harnessDeps();
+    const result = await callRpc(harness, { groups: [{ id: null, name: "Bez id", active: true, members: [] }] });
+    expect(result.error?.message).toMatch(/group_id_required/);
+    expect(harness.rows("motorist_ring_groups")).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Payload parsing: a malformed field is a 400, never a guessed value
+// ---------------------------------------------------------------------------
+
+describe("payload parsing rejects instead of guessing", () => {
+  it("tells a detach (null) apart from a malformed id", () => {
+    expect(parseLinePatch({ ringPlanId: null })).toEqual({ ringPlanId: null });
+    // A typo used to be saved as "detach" with 200 OK, silently unrouting a DID.
+    expect(() => parseLinePatch({ ringPlanId: "abc" })).toThrowError(/identifikátor/);
+    expect(() => parseLinePatch({ businessHoursId: 42 })).toThrowError(/identifikátor/);
+    expect(() => parseOperatorSettingsPatch({ defaultFromLineId: "nope" })).toThrowError(/identifikátor/);
+  });
+
+  it("refuses a wrong-typed boolean instead of coercing it to `true`", () => {
+    expect(() => parseLinePatch({ active: "false" })).toThrowError(/true alebo false/);
+    expect(() => parseOperatorSettingsPatch({ autoAnswerOutbound: "no" })).toThrowError(/true alebo false/);
+    expect(() => parseSettingsPatch({ liveCallsEnabled: 1 })).toThrowError(/true alebo false/);
+    expect(() => parseRingGroups([{ name: "A", active: "yes", members: [] }])).toThrowError(/true alebo false/);
+    expect(parseLinePatch({ active: false })).toEqual({ active: false });
+  });
+
+  it("caps the size of every section", () => {
+    const many = Array.from({ length: 201 }, (_, index) => ({ name: `Skupina ${index}`, members: [] }));
+    expect(() => parseRingGroups(many)).toThrowError(/najviac 200/);
+    expect(() => parseRingGroups([{ name: "A", members: Array.from({ length: 51 }, () => ({ memberKind: "operator" })) }])).toThrowError(/najviac 50 členov/);
+    expect(() => parseRingPlans([{ name: "P", steps: Array.from({ length: 21 }, () => ({})) }])).toThrowError(/najviac 20 krokov/);
+  });
+
+  it("refuses an out-of-range sort order and daily cap", () => {
+    expect(codes(validatePauseReasons(parsePauseReasons([{ code: "obed", label: "Obed", sortOrder: 99_999_999_999 }])))).toContain("sort_order_invalid");
+    expect(codes(validateSettingsPatch({ dailyLegSoftCap: 99_999_999_999 }))).toContain("cap_invalid");
+  });
+
+  it("accepts 24:00 as a closing time so a line can be open around the clock", () => {
+    const parsed = parseBusinessHours([
+      { id: null, name: "Nonstop", intervals: [{ weekday: 6, opens: "00:00", closes: "24:00" }], exceptions: [] },
+    ]);
+    expect(parsed[0].intervals[0].closes).toBe("24:00");
+    expect(validateBusinessHours(parsed, context())).toEqual([]);
+    // 24:00 stays a *closing* time only.
+    expect(codes(validateBusinessHours(parseBusinessHours([{ name: "X", intervals: [{ weekday: 1, opens: "24:00", closes: "24:00" }], exceptions: [] }]), context()))).toContain("time_invalid");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Settings, audit and the operator guards
+// ---------------------------------------------------------------------------
+
+describe("settings, audit and operator guards", () => {
+  it("refuses to narrow the allowlist while a stored number would fall outside it", async () => {
+    const { harness, deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    const target = before.groups[0];
+    await replaceRingGroups(deps, {
+      organizationId: ORG,
+      actor: ACTOR,
+      expectedVersion: before.routingVersion,
+      groups: before.groups.map((group) =>
+        group.id === target.id
+          ? { ...group, members: [...group.members, { id: null, memberKind: "external_number" as const, profileId: null, externalNumber: "+420720123456", position: group.members.length, ringSecs: null, lastOfferedAt: null, lastAnsweredAt: null }] }
+          : group,
+      ),
+    });
+
+    // The ring engine never consults the allowlist, so the Czech number would
+    // keep being dialled — and billed — after "CZ" disappeared from it.
+    await expect(updateTelephonySettings(deps, { organizationId: ORG, actor: ACTOR, patch: { destinationAllowlist: ["SK"] } })).rejects.toMatchObject({
+      status: 409,
+      code: "destination_in_use",
+    });
+    expect(harness.db.find("motorist_telephony_settings", () => true)?.destination_allowlist).not.toEqual(["SK"]);
+
+    const document = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    expect(destinationsOutsideAllowlist(document, ["SK"]).map((entry) => entry.number)).toContain("+420720123456");
+    expect(destinationsOutsideAllowlist(document, ["SK", "CZ"])).toEqual([]);
+  });
+
+  it("writes no audit row for a save that changed nothing", async () => {
+    const { harness, deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+
+    const { diff } = await replaceRingGroups(deps, { organizationId: ORG, actor: ACTOR, groups: before.groups, expectedVersion: before.routingVersion });
+
+    expect(diff).toEqual({ added: [], removed: [], changed: [] });
+    expect(auditRows(harness)).toHaveLength(0);
+  });
+
+  it("only accepts an active profile of the caller's own organisation", async () => {
+    const { harness, deps } = harnessDeps();
+
+    await expect(requireOperatorOfOrganization(deps, { organizationId: ORG, profileId: "not-a-uuid" })).rejects.toMatchObject({ status: 400 });
+    await expect(requireOperatorOfOrganization(deps, { organizationId: ORG, profileId: FOREIGN })).rejects.toMatchObject({ status: 404, code: "operator_not_found" });
+    await expect(requireOperatorOfOrganization(deps, { organizationId: ORG, profileId: PROFILES.o1 })).resolves.toMatchObject({ profileId: PROFILES.o1 });
+
+    harness.db.update("motorist_profiles", { active: false }, (row) => row.id === PROFILES.o1);
+    await expect(requireOperatorOfOrganization(deps, { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("refuses a device action while the operator is on a call unless it is a takeover", async () => {
+    const { harness, deps } = harnessDeps();
+    harness.db.update("motorist_operator_presence", { status: "on_call" }, (row) => row.profile_id === PROFILES.o1);
+
+    await expect(assertOperatorNotOnCall(deps, { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 409, code: "operator_on_call" });
+    await expect(assertOperatorNotOnCall(deps, { organizationId: ORG, profileId: PROFILES.o1, takeover: true })).resolves.toBeUndefined();
+    await expect(assertOperatorNotOnCall(deps, { organizationId: ORG, profileId: PROFILES.o2 })).resolves.toBeUndefined();
   });
 });

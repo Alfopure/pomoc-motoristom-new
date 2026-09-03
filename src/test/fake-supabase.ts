@@ -90,7 +90,7 @@ export const DEFAULT_UNIQUE_KEYS: Record<string, UniqueKeySpec[]> = {
   motorist_business_hours_exceptions: [["id"], ["business_hours_id", "date"]],
   motorist_pause_reasons: [["id"], ["organization_id", "code"]],
   motorist_operator_presence: [["id"], ["profile_id"]],
-  motorist_operator_devices: [["id"], ["profile_id", "environment"]],
+  motorist_operator_devices: [["id"], ["organization_id", "profile_id", "environment"]],
   motorist_operator_telephony_settings: [["id"], ["profile_id"]],
   motorist_telephony_settings: [["id"], ["organization_id"]],
   motorist_telephony_daily_usage: [["id"], ["organization_id", "day"]],
@@ -796,6 +796,7 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     const organizationId = args.p_organization_id;
     if (isNil(organizationId)) throw fakeError("organization_required", "P0001");
     const document = (args.p_document ?? {}) as Record<string, unknown>;
+    const expectedVersion = isNil(args.p_expected_version) ? null : Number(args.p_expected_version);
     const section = (key: string): FakeRow[] | null => {
       const value = document[key];
       return Array.isArray(value) ? (value as FakeRow[]) : null;
@@ -806,6 +807,7 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     const reasons = section("pause_reasons");
 
     const TOUCHED = [
+      "motorist_telephony_settings",
       "motorist_ring_groups",
       "motorist_ring_group_members",
       "motorist_ring_plans",
@@ -824,12 +826,27 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
       const foreign = db.storage(table).find((row) => ids.includes(row.id) && row.organization_id !== organizationId);
       if (foreign) throw fakeError(`cross_organization: ${label} ${String(foreign.id)}`, "P0001");
     };
-    const idsOf = (rows: FakeRow[]) => rows.map((row) => row.id);
+    // `array_position(v_ids, null) is not null` in the SQL: a null id would make
+    // `not (x = any (array[null]))` evaluate to NULL and quietly match nothing,
+    // so the whole delete-what-is-missing pass would silently do nothing.
+    const idsOf = (rows: FakeRow[], code: string) => {
+      if (rows.some((row) => isNil(row.id))) throw fakeError(code, "P0001");
+      return rows.map((row) => row.id);
+    };
     const mine = (row: FakeRow) => row.organization_id === organizationId;
+
+    if (!db.storage("motorist_telephony_settings").some(mine)) {
+      db.insert("motorist_telephony_settings", { organization_id: organizationId, routing_version: 0 });
+    }
+    const settingsRow = db.storage("motorist_telephony_settings").find(mine) as FakeRow;
+    const currentVersion = Number(settingsRow.routing_version ?? 0);
+    if (expectedVersion !== null && expectedVersion !== currentVersion) {
+      throw fakeError(`stale_document: expected ${expectedVersion}, current ${currentVersion}`, "P0001");
+    }
 
     try {
       if (groups) {
-        const groupIds = idsOf(groups);
+        const groupIds = idsOf(groups, "group_id_required");
         ownsOrThrow("motorist_ring_groups", groupIds, "ring group");
         const stamps = new Map(db.storage("motorist_ring_group_members").filter(mine).map((row) => [row.id, row]));
 
@@ -861,7 +878,7 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
       }
 
       if (plans) {
-        const planIds = idsOf(plans);
+        const planIds = idsOf(plans, "plan_id_required");
         ownsOrThrow("motorist_ring_plans", planIds, "ring plan");
         const boundLine = db.storage("motorist_telephony_lines").find((row) => mine(row) && !isNil(row.ring_plan_id) && !planIds.includes(row.ring_plan_id));
         if (boundLine) throw fakeError(`ring_plan_in_use: ${String(boundLine.phone_number)}`, "P0001");
@@ -894,14 +911,14 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
       }
 
       if (groups) {
-        const groupIds = idsOf(groups);
+        const groupIds = idsOf(groups, "group_id_required");
         const usedStep = db.storage("motorist_ring_plan_steps").find((row) => mine(row) && !groupIds.includes(row.ring_group_id));
         if (usedStep) throw fakeError(`ring_group_in_use: ${String(usedStep.ring_group_id)}`, "P0001");
         db.delete("motorist_ring_groups", (row) => mine(row) && !groupIds.includes(row.id));
       }
 
       if (hours) {
-        const hoursIds = idsOf(hours);
+        const hoursIds = idsOf(hours, "business_hours_id_required");
         ownsOrThrow("motorist_business_hours", hoursIds, "business hours");
         const boundLine = db.storage("motorist_telephony_lines").find((row) => mine(row) && !isNil(row.business_hours_id) && !hoursIds.includes(row.business_hours_id));
         if (boundLine) throw fakeError(`business_hours_in_use: ${String(boundLine.phone_number)}`, "P0001");
@@ -940,8 +957,16 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
       }
 
       if (reasons) {
-        const reasonIds = idsOf(reasons);
+        const reasonIds = idsOf(reasons, "pause_reason_id_required");
         ownsOrThrow("motorist_pause_reasons", reasonIds, "pause reason");
+        // `motorist_operator_presence.pause_reason_id` is `on delete set null`:
+        // deleting the reason an operator is paused under would silently strip
+        // it from the live presence row.
+        const pausedUnder = db.storage("motorist_operator_presence").find((row) => mine(row) && !isNil(row.pause_reason_id) && !reasonIds.includes(row.pause_reason_id));
+        if (pausedUnder) {
+          const label = db.storage("motorist_pause_reasons").find((row) => row.id === pausedUnder.pause_reason_id)?.label;
+          throw fakeError(`pause_reason_in_use: ${String(label ?? pausedUnder.pause_reason_id)}`, "P0001");
+        }
         for (const reason of reasons) {
           db.upsert("motorist_pause_reasons", {
             id: reason.id,
@@ -955,6 +980,33 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
         }
         db.delete("motorist_pause_reasons", (row) => mine(row) && !reasonIds.includes(row.id));
       }
+
+      // Structural invariants re-asserted on the committed state, exactly like
+      // the SQL: `validateRoutingReplace` runs before the call and against the
+      // world as it was read, so two concurrent editors could each pass it.
+      const members = db.storage("motorist_ring_group_members").filter(mine);
+      if (groups || plans) {
+        const emptyStep = db.storage("motorist_ring_plan_steps").find((step) => mine(step) && !members.some((member) => member.ring_group_id === step.ring_group_id));
+        if (emptyStep) {
+          const name = db.storage("motorist_ring_groups").find((row) => row.id === emptyStep.ring_group_id)?.name;
+          throw fakeError(`ring_group_empty: ${String(name ?? emptyStep.ring_group_id)}`, "P0001");
+        }
+      }
+      const contiguous = (positions: number[]) => positions.every((_, index) => positions.includes(index)) && new Set(positions).size === positions.length;
+      if (groups) {
+        for (const group of db.storage("motorist_ring_groups").filter(mine)) {
+          const positions = members.filter((member) => member.ring_group_id === group.id).map((member) => Number(member.position));
+          if (positions.length > 0 && !contiguous(positions)) throw fakeError(`position_gap: ring group ${String(group.name)}`, "P0001");
+        }
+      }
+      if (plans) {
+        for (const plan of db.storage("motorist_ring_plans").filter(mine)) {
+          const positions = db.storage("motorist_ring_plan_steps").filter((step) => mine(step) && step.ring_plan_id === plan.id).map((step) => Number(step.step_index));
+          if (positions.length > 0 && !contiguous(positions)) throw fakeError(`position_gap: ring plan ${String(plan.name)}`, "P0001");
+        }
+      }
+
+      settingsRow.routing_version = currentVersion + 1;
     } catch (error) {
       rollback();
       throw error;
@@ -965,6 +1017,7 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
       ...(plans ? { plans: plans.length } : {}),
       ...(hours ? { business_hours: hours.length } : {}),
       ...(reasons ? { pause_reasons: reasons.length } : {}),
+      routing_version: currentVersion + 1,
     };
   });
 

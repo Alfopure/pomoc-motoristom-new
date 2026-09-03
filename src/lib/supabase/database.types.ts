@@ -1140,6 +1140,7 @@ export type Database = {
         destination_allowlist: string[];
         max_ring_fanout: number;
         max_concurrent_legs: number;
+        routing_version: number;
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
@@ -1297,6 +1298,7 @@ export type Database = {
         Args: {
           p_organization_id: string;
           p_document: Json;
+          p_expected_version?: number | null;
         };
         Returns: Json;
       };

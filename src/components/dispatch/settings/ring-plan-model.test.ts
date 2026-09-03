@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { RingGroupDoc, RingPlanDoc } from "@/server/telephony/config-service";
+import type { LineDoc, RingGroupDoc, RingPlanDoc } from "@/server/telephony/config-service";
 
 import {
   addStep,
@@ -12,6 +12,7 @@ import {
   moveStepInPlans,
   newPlanDraft,
   planDraftsFromDocument,
+  planUsageNote,
   removeStep,
   ringPlanSeconds,
   ringPlansDirty,
@@ -262,5 +263,53 @@ describe("plain-language preview", () => {
     expect(describeRingPlan(withStep[0], [groupA()])).toBe(
       'Skupina „Dispečing A" zvoní všetkým 20 s, potom ponuka spätného volania.',
     );
+  });
+});
+
+describe("what the preview must not hide", () => {
+  function line(overrides: Partial<LineDoc> = {}): LineDoc {
+    return {
+      id: "line-1",
+      phoneNumber: "+421232408700",
+      label: "Hlavná linka",
+      partnerName: null,
+      telnyxNumberId: null,
+      ringPlanId: "plan-1",
+      ivrMenuId: null,
+      businessHoursId: null,
+      environment: "production",
+      active: true,
+      ...overrides,
+    };
+  }
+
+  it("warns that an inactive plan a line uses skips ringing entirely", () => {
+    const [draft] = planDraftsFromDocument([plan()]);
+    expect(planUsageNote(draft, [line()])).toMatchObject({ tone: "info" });
+    expect(planUsageNote({ ...draft, active: false }, [line()])).toMatchObject({ tone: "warning" });
+    expect(planUsageNote({ ...draft, active: false }, [line()])?.text).toContain("Hlavná linka");
+    expect(planUsageNote({ ...draft, active: false }, [line()])?.text).toContain("nezazvonia");
+    // No line points at it: switching it off is harmless, so the note is calm.
+    expect(planUsageNote({ ...draft, active: false }, [line({ ringPlanId: null })])).toMatchObject({ tone: "info" });
+    expect(planUsageNote(draft, [line({ ringPlanId: null })])).toBeNull();
+  });
+
+  it("describes an inactive plan as inactive instead of listing steps that never run", () => {
+    const [draft] = planDraftsFromDocument([plan()]);
+    expect(describeRingPlan({ ...draft, active: false }, [groupA(), groupB()])).toBe(
+      "Plán je vypnutý — žiadny krok sa nevykoná a hovor pokračuje rovno: ponuka spätného volania.",
+    );
+  });
+
+  it("says how many members an `all` step really reaches under the fan-out cap", () => {
+    const [draft] = planDraftsFromDocument([plan()]);
+    // Two members, cap 1: `planRingStep` slices the eligible list and finishes
+    // the step after that single fan-out, so the second member never rings.
+    expect(describeRingPlanParts(draft, [groupA(), groupB()], 1)[0]).toBe(
+      'skupina „Dispečing A" zvoní naraz najviac 1 z 2 členov (limit organizácie) 20 s, na ostatných sa v tomto kroku nedostane',
+    );
+    expect(describeRingPlanParts(draft, [groupA(), groupB()], 8)[0]).toBe('skupina „Dispečing A" zvoní všetkým 20 s');
+    // An `ordered` step is unaffected: it dials one member at a time.
+    expect(describeRingPlanParts(draft, [groupA(), groupB()], 1)[1]).toBe('skupina „Dispečing B" zvoní po jednom po 15 s');
   });
 });

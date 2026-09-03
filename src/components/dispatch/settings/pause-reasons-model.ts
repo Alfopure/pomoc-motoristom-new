@@ -158,18 +158,48 @@ export function validatePauseReasonDrafts(reasons: readonly PauseReasonDraft[]):
 }
 
 /**
- * Non-blocking warning: the server accepts a list where everything is switched
- * off, but the operator then has no way to go on a break at all.
+ * Non-blocking warning.
+ *
+ * With no active reason the operator does *not* lose the break: `setPresence`
+ * accepts `paused` with a null `pauseReasonId` and `MyPhonePanel` then offers a
+ * plain "Pauza" button, so the honest sentence is that the reason disappears
+ * from the record, not the pause.
  */
 export function pauseReasonsWarning(reasons: readonly PauseReasonDraft[]): string | null {
-  if (reasons.length === 0) return "Bez dôvodu pauzy sa operátor nevie prepnúť na pauzu.";
-  if (reasons.every((reason) => !reason.active)) return "Všetky dôvody pauzy sú vypnuté — operátor sa nevie prepnúť na pauzu.";
+  if (reasons.length === 0) return "Bez dôvodu pauzy si operátor dá pauzu bez uvedenia dôvodu — v prehľadoch nebude vidno prečo.";
+  if (reasons.every((reason) => !reason.active)) {
+    return "Všetky dôvody pauzy sú vypnuté — operátor si dá pauzu bez uvedenia dôvodu, prepnúť sa vie aj tak.";
+  }
   return null;
 }
 
-/** Sentence under a row: what the operator will see and how long the pause may last. */
+/**
+ * Reasons an operator is paused under right now (`document.pauseReasonsInUse`).
+ * Deleting one is refused by the RPC (`pause_reason_in_use`), because
+ * `motorist_operator_presence.pause_reason_id` is `on delete set null` and the
+ * live presence row would silently lose its reason.
+ */
+export function pauseReasonsInUseWarning(reasons: readonly PauseReasonDraft[], inUse: readonly string[]): string | null {
+  if (inUse.length === 0) return null;
+  const keptIds = new Set(reasons.map((reason) => reason.id).filter((id): id is string => Boolean(id)));
+  const removed = inUse.filter((id) => !keptIds.has(id));
+  if (removed.length === 0) return null;
+  return "Odstraňuješ dôvod pauzy, ktorý má práve niektorý operátor nastavený. Server takú zmenu odmietne — počkaj, kým sa vráti medzi dostupných.";
+}
+
+/**
+ * Sentence under a row: what the operator will see and how long the pause may
+ * last.
+ *
+ * `max_minutes` is a recommendation, not a cap: nothing in the engine reads it
+ * — `presence-service.ts` never looks at it and no sweep returns a long-paused
+ * operator to `available` — so the sentence must not read like a limit.
+ */
 export function describePauseReason(reason: PauseReasonDraft): string {
   const maxMinutes = parseMaxMinutes(reason.maxMinutes);
-  const limit = maxMinutes !== null && Number.isFinite(maxMinutes) && maxMinutes > 0 ? `najviac ${maxMinutes} min` : "bez časového limitu";
+  const limit =
+    maxMinutes !== null && Number.isFinite(maxMinutes) && maxMinutes > 0
+      ? `odporúčaná dĺžka ${maxMinutes} min (systém pauzu sám neukončí)`
+      : "bez časového limitu";
   return reason.active ? `V ponuke operátora, ${limit}.` : "Vypnutý — operátor si ho nevie zvoliť.";
 }

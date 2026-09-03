@@ -13,8 +13,10 @@ import {
   addGroup,
   addMember,
   groupDraftsFromDocument,
+  groupFanoutNote,
   groupUsageNote,
   issuesByPath,
+  memberRingSecsNote,
   moveMemberInGroups,
   removeMember,
   ringGroupsDirty,
@@ -76,9 +78,10 @@ export function RingGroupsEditor({
     setNotice(null);
     setServerIssues([]);
     try {
-      const response = await saveRoutingConfig("ringGroups", { groups: ringGroupsPayload(groups) });
+      const response = await saveRoutingConfig("ringGroups", { groups: ringGroupsPayload(groups), version: document.routingVersion });
       onSaved(response);
-      setNotice("Skupiny zvonenia sú uložené. Prebiehajúce hovory ostávajú na pláne, s ktorým začali.");
+      const saved = "Skupiny zvonenia sú uložené. Prebiehajúce hovory ostávajú na pláne, s ktorým začali.";
+      setNotice(response.warning ? `${saved} ${response.warning}` : saved);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Skupiny zvonenia sa nepodarilo uložiť.");
       if (caught instanceof ConfigRequestError) setServerIssues(caught.issues);
@@ -113,6 +116,11 @@ export function RingGroupsEditor({
 
         {groups.map((group) => {
           const usageNote = groupUsageNote(group, document.plans);
+          // Both notes describe what `planRingStep` will really do with this
+          // group: the fan-out cap truncates an "all" step, and a per-member
+          // ring time is dropped outside an "ordered" step.
+          const fanoutNote = groupFanoutNote(group, document.plans, document.settings?.maxRingFanout);
+          const ringSecsNote = memberRingSecsNote(group, document.plans);
           const groupIssues = issuesFor.get(group.key) ?? [];
 
           return (
@@ -149,6 +157,8 @@ export function RingGroupsEditor({
               </div>
 
               {usageNote && <p className={`mt-2 text-xs ${group.active ? "text-zinc-600" : "text-amber-700"}`}>{usageNote}</p>}
+              {fanoutNote && <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">{fanoutNote}</p>}
+              {ringSecsNote && <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">{ringSecsNote}</p>}
               <SettingsIssueList issues={groupIssues} />
 
               <div className="mt-3">
@@ -204,13 +214,13 @@ export function RingGroupsEditor({
                             </SettingsField>
                           )}
 
-                          <SettingsField label="Zvonenie (s)">
+                          <SettingsField label="Zvonenie (s)" hint="Len v krokoch „postupne“.">
                             <input
                               className={settingsInputClass}
                               disabled={!canEdit}
                               inputMode="numeric"
                               placeholder="podľa kroku"
-                              title={`Prázdne = čas kroku. Inak ${MIN_RING_SECS} až ${MAX_RING_SECS} s.`}
+                              title={`Prázdne = čas kroku. Inak ${MIN_RING_SECS} až ${MAX_RING_SECS} s. Použije sa len v kroku „postupne“; v kroku „všetkým naraz“ platí čas kroku.`}
                               value={member.ringSecs}
                               onChange={(event) => setGroups((current) => updateMember(current, group.key, member.key, { ringSecs: event.target.value }))}
                             />

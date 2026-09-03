@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_SETTINGS, MAX_PARK_MINUTES as SERVER_MAX_PARK_MINUTES, validateSettingsPatch } from "@/server/telephony/config-service";
-import type { TelephonySettingsDoc } from "@/server/telephony/config-service";
+import type { RingGroupDoc, RingPlanDoc, TelephonySettingsDoc } from "@/server/telephony/config-service";
 
 import {
   ENV_GATE_NOTE,
@@ -16,6 +16,7 @@ import {
   settingsDraftFromDocument,
   settingsPayload,
   settingsWarnings,
+  storedDestinationsOutside,
   updateSettingsDraft,
   validateSettingsDraft,
 } from "./telephony-settings-model";
@@ -154,5 +155,69 @@ describe("wording", () => {
     expect(describeAllowlist(base)).toBe("SK (+421), CZ (+420)");
     expect(describeAllowlist(updateSettingsDraft(base, { destinationAllowlist: "*, +43, XX" }))).toBe("všetky krajiny, +43, XX");
     expect(describeAllowlist(updateSettingsDraft(base, { destinationAllowlist: "" }))).toBe("Žiadny povolený cieľ.");
+  });
+});
+
+describe("cross-checks against the stored configuration", () => {
+  const base = settingsDraftFromDocument(settings());
+
+  function group(members: number): RingGroupDoc {
+    return {
+      id: "group-a",
+      name: "Dispečing",
+      description: null,
+      active: true,
+      members: Array.from({ length: members }, (_, index) => ({
+        id: `m${index}`,
+        memberKind: "operator" as const,
+        profileId: `p${index}`,
+        externalNumber: null,
+        position: index,
+        ringSecs: null,
+        lastOfferedAt: null,
+        lastAnsweredAt: null,
+      })),
+    };
+  }
+
+  const austrian: RingGroupDoc = {
+    ...group(1),
+    members: [{ id: "mx", memberKind: "external_number", profileId: null, externalNumber: "+43664123456", position: 0, ringSecs: null, lastOfferedAt: null, lastAnsweredAt: null }],
+  };
+
+  const plan: RingPlanDoc = {
+    id: "plan-1",
+    name: "Denný",
+    fallbackKind: "callback_prompt",
+    fallbackNumber: null,
+    active: true,
+    steps: [{ id: "s1", stepIndex: 0, ringGroupId: "group-a", timeoutSecs: 20, strategy: "all" }],
+  };
+
+  it("lists the stored numbers a narrower allowlist would strand", () => {
+    // The ring engine never consults the allowlist, so such a number keeps
+    // being dialled; the server refuses the save and the panel says why.
+    expect(storedDestinationsOutside(["SK"], { groups: [austrian], plans: [] })[0]).toContain("+43664123456");
+    expect(storedDestinationsOutside(["SK", "AT"], { groups: [austrian], plans: [] })).toEqual([]);
+    expect(
+      storedDestinationsOutside(["SK"], { groups: [], plans: [{ ...plan, fallbackKind: "external_number", fallbackNumber: "+43664123456" }] })[0],
+    ).toContain("Denný");
+
+    const warnings = settingsWarnings(updateSettingsDraft(base, { destinationAllowlist: "SK" }), settings({ destinationAllowlist: ["SK", "AT"] }), {
+      groups: [austrian],
+      plans: [],
+    });
+    expect(warnings.some((warning) => warning.tone === "error" && warning.text.includes("+43664123456"))).toBe(true);
+    // The honest wording about what removing a destination actually stops.
+    expect(warnings.some((warning) => warning.text.includes("vytáčalo ďalej"))).toBe(true);
+  });
+
+  it("warns when the fan-out cap would truncate an `all` step", () => {
+    const context = { groups: [group(12)], plans: [plan] };
+    expect(settingsWarnings(updateSettingsDraft(base, { maxRingFanout: "3" }), settings(), context).some((warning) => warning.text.includes("Dispečing (12)"))).toBe(true);
+    expect(settingsWarnings(updateSettingsDraft(base, { maxRingFanout: "20" }), settings(), context)).toEqual([]);
+    // An `ordered` step dials one at a time, so the cap does not truncate it.
+    const ordered = { groups: [group(12)], plans: [{ ...plan, steps: plan.steps.map((step) => ({ ...step, strategy: "ordered" as const })) }] };
+    expect(settingsWarnings(updateSettingsDraft(base, { maxRingFanout: "3" }), settings(), ordered)).toEqual([]);
   });
 });

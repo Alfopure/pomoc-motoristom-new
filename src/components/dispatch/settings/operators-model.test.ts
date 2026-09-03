@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_OPERATOR_SETTINGS, validateOperatorSettingsPatch } from "@/server/telephony/config-service";
@@ -5,7 +7,11 @@ import type { LineDoc, OperatorDoc, ValidationContext } from "@/server/telephony
 
 import {
   AUTO_ANSWER_PENDING_NOTE,
+  RING_VOLUME_PENDING_NOTE,
   ROLE_LABELS,
+  confirmDisconnectDevice,
+  confirmRotateCredential,
+  confirmTakeover,
   activeLines,
   describeCallHandling,
   describeDevice,
@@ -267,5 +273,31 @@ describe("describeCallHandling", () => {
 describe("ROLE_LABELS", () => {
   it("covers every role", () => {
     expect(Object.keys(ROLE_LABELS).sort()).toEqual(["admin", "dispatcher", "manager", "senior_dispatcher"]);
+  });
+});
+
+describe("honesty of the panel's wording", () => {
+  it("keeps the server module out of the browser bundle graph", () => {
+    // Every value this model needs lives in `src/lib/telephony`; only *types*
+    // come from `config-service.ts`, which pulls in `node:crypto` and the
+    // Supabase client. A value import would put that file in the client graph
+    // for the default "Môj telefón"/"Operátori" tabs.
+    const source = readFileSync(new URL("./operators-model.ts", import.meta.url), "utf8");
+    const configImports = [...source.matchAll(/^import (type )?\{[\s\S]*?\} from "@\/server\/telephony\/config-service";$/gm)];
+    expect(configImports).toHaveLength(1);
+    expect(configImports[0][1]).toBe("type ");
+    expect(DEFAULT_OPERATOR_SETTINGS).toEqual({ defaultFromLineId: null, wrapUpSeconds: 30, autoAnswerOutbound: true, ringDeviceVolume: 80 });
+  });
+
+  it("says that the ring volume is stored but not used yet", () => {
+    expect(RING_VOLUME_PENDING_NOTE).toContain("zatiaľ nepoužíva");
+  });
+
+  it("tells the manager that a device action ends a call in progress", () => {
+    // Both actions revoke `device_session_id`; the tab disconnects its WebRTC
+    // client at the next heartbeat and the live leg goes with it.
+    expect(confirmRotateCredential("Peter")).toContain("hovor sa preruší");
+    expect(confirmDisconnectDevice("Peter")).toContain("hovor sa preruší");
+    expect(confirmTakeover("Peter", "Operátor má práve hovor.")).toContain("ukončiť mu prebiehajúci hovor");
   });
 });

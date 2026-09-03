@@ -49,11 +49,35 @@ export type ConfigDocumentResponse = {
   document: RoutingDocument;
   canEdit: boolean;
   canManageSettings: boolean;
+  /** Non-fatal note about a save that landed (today: a missing audit row). */
+  warning?: string;
 };
 
-export function documentResponse(actor: MotoristActor, document: RoutingDocument): Response {
-  const body: ConfigDocumentResponse = { document, canEdit: canEditConfig(actor.role), canManageSettings: actor.role === "admin" };
+export function documentResponse(actor: MotoristActor, document: RoutingDocument, warning?: string | null): Response {
+  const body: ConfigDocumentResponse = {
+    document,
+    canEdit: canEditConfig(actor.role),
+    canManageSettings: actor.role === "admin",
+    ...(warning ? { warning } : {}),
+  };
   return Response.json(body, { headers: { "Cache-Control": "private, no-store" } });
+}
+
+/**
+ * `routingVersion` of the document the editor was working on.
+ *
+ * Every whole-section `PUT` is a list swap, so a draft built on a stale read
+ * would delete the rows a colleague added in the meantime. The version is
+ * mandatory on the wire; `motorist_replace_ring_plan` compares it inside the
+ * transaction and answers 409 `stale_document`.
+ */
+export function readExpectedVersion(body: Record<string, unknown>): number {
+  const raw = body.version;
+  const value = typeof raw === "number" ? raw : typeof raw === "string" && /^\d+$/.test(raw.trim()) ? Number.parseInt(raw.trim(), 10) : null;
+  if (value === null || !Number.isInteger(value) || value < 0) {
+    throw new ConfigServiceError("Chýba verzia konfigurácie. Načítaj nastavenia znova a ulož ich nad aktuálnym stavom.", 400, "version_required");
+  }
+  return value;
 }
 
 /**

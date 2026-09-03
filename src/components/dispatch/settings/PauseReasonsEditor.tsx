@@ -15,6 +15,7 @@ import {
   pauseReasonDraftsFromDocument,
   pauseReasonsDirty,
   pauseReasonsPayload,
+  pauseReasonsInUseWarning,
   pauseReasonsWarning,
   removePauseReason,
   updatePauseReason,
@@ -54,6 +55,9 @@ export function PauseReasonsEditor({
   const formIssues = [...(issuesFor.get("") ?? []), ...serverIssues];
   const dirty = pauseReasonsDirty(reasons, document.pauseReasons);
   const warning = pauseReasonsWarning(reasons);
+  // `motorist_operator_presence.pause_reason_id` is `on delete set null`, so the
+  // RPC refuses to delete a reason somebody is paused under (`pause_reason_in_use`).
+  const inUseWarning = pauseReasonsInUseWarning(reasons, document.pauseReasonsInUse);
 
   async function save() {
     if (saving || !canEdit) return;
@@ -62,9 +66,10 @@ export function PauseReasonsEditor({
     setNotice(null);
     setServerIssues([]);
     try {
-      const response = await saveRoutingConfig("pauseReasons", { pauseReasons: pauseReasonsPayload(reasons) });
+      const response = await saveRoutingConfig("pauseReasons", { pauseReasons: pauseReasonsPayload(reasons), version: document.routingVersion });
       onSaved(response);
-      setNotice("Dôvody pauzy sú uložené.");
+      const saved = "Dôvody pauzy sú uložené.";
+      setNotice(response.warning ? `${saved} ${response.warning}` : saved);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Dôvody pauzy sa nepodarilo uložiť.");
       if (caught instanceof ConfigRequestError) setServerIssues(caught.issues);
@@ -90,6 +95,7 @@ export function PauseReasonsEditor({
         {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
         {notice && <SettingsNotice tone="success">{notice}</SettingsNotice>}
         {warning && <SettingsNotice tone="warning">{warning}</SettingsNotice>}
+        {inUseWarning && <SettingsNotice tone="error">{inUseWarning}</SettingsNotice>}
         {formIssues.length > 0 && (
           <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2">
             <SettingsIssueList issues={formIssues} />

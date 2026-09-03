@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { AlertTriangle, Loader2, Save, ShieldAlert } from "lucide-react";
 
-import type { TelephonySettingsDoc, ValidationIssue } from "@/server/telephony/config-service";
+import type { RoutingDocument, TelephonySettingsDoc, ValidationIssue } from "@/server/telephony/config-service";
 
 import { ConfigRequestError, saveTelephonySettings } from "./config-client";
 import { SettingsField, SettingsIssueList, SettingsNotice, SettingsSectionHeader, settingsInputClass } from "./settings-ui";
@@ -31,10 +31,13 @@ import {
  */
 export function TelephonySettingsPanel({
   canEdit,
+  document,
   settings,
   onSaved,
 }: {
   canEdit: boolean;
+  /** Groups and plans are needed to cross-check the allowlist and the fan-out cap. */
+  document: RoutingDocument;
   settings: TelephonySettingsDoc;
   onSaved: (settings: TelephonySettingsDoc) => void;
 }) {
@@ -45,7 +48,10 @@ export function TelephonySettingsPanel({
   const [notice, setNotice] = useState<string | null>(null);
 
   const issues = useMemo(() => validateSettingsDraft(draft), [draft]);
-  const warnings = useMemo(() => settingsWarnings(draft, settings), [draft, settings]);
+  const warnings = useMemo(
+    () => settingsWarnings(draft, settings, { groups: document.groups, plans: document.plans }),
+    [document.groups, document.plans, draft, settings],
+  );
   const dirty = settingsDirty(draft, settings);
   const issuesFor = (path: string) => issues.filter((issue) => issue.path === path);
 
@@ -60,9 +66,9 @@ export function TelephonySettingsPanel({
     setNotice(null);
     setServerIssues([]);
     try {
-      const saved = await saveTelephonySettings(settingsPayload(draft));
+      const { settings: saved, warning } = await saveTelephonySettings(settingsPayload(draft));
       onSaved(saved);
-      setNotice("Nastavenia telefónie sú uložené.");
+      setNotice(warning ? `Nastavenia telefónie sú uložené. ${warning}` : "Nastavenia telefónie sú uložené.");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Nastavenia telefónie sa nepodarilo uložiť.");
       if (caught instanceof ConfigRequestError) setServerIssues(caught.issues);

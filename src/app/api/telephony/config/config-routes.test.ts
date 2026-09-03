@@ -27,10 +27,12 @@ vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => ({ mar
 
 const document = {
   organizationId: "org-1",
+  routingVersion: 7,
   groups: [],
   plans: [],
   businessHours: [],
   pauseReasons: [],
+  pauseReasonsInUse: [],
   lines: [{ id: "line-1", phoneNumber: "+421232408700", label: "Hlavná linka" }],
   ivrMenus: [],
   operators: [],
@@ -38,12 +40,12 @@ const document = {
 };
 
 const getRoutingDocument = vi.fn(async () => document);
-const replaceRingGroups = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] } }));
-const replaceRingPlans = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] } }));
-const replaceBusinessHours = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] } }));
-const replacePauseReasons = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] } }));
+const replaceRingGroups = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
+const replaceRingPlans = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
+const replaceBusinessHours = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
+const replacePauseReasons = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
 const updateTelephonyLine = vi.fn(async () => ({ document, line: document.lines[0] }));
-const updateTelephonySettings = vi.fn(async () => document.settings);
+const updateTelephonySettings = vi.fn(async () => ({ settings: document.settings, warning: null }));
 
 vi.mock("@/server/telephony/config-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/server/telephony/config-service")>();
@@ -117,13 +119,13 @@ describe("GET /api/telephony/config/*", () => {
 
 describe("PUT/PATCH /api/telephony/config/*", () => {
   it("replaces ring groups for a manager and returns the fresh document", async () => {
-    const response = await putGroups(request("ring-groups", "PUT", { groups: VALID_GROUPS }));
+    const response = await putGroups(request("ring-groups", "PUT", { groups: VALID_GROUPS, version: document.routingVersion }));
 
     expect(response.status).toBe(200);
     expect(assertSameOriginRequest).toHaveBeenCalledTimes(1);
     expect(replaceRingGroups).toHaveBeenCalledWith(
       { admin: { marker: "admin" } },
-      expect.objectContaining({ organizationId: "org-1", actor: { profileId: "profile-1", role: "manager", displayName: "Manažér" } }),
+      expect.objectContaining({ organizationId: "org-1", actor: { profileId: "profile-1", role: "manager", displayName: "Manažér" }, expectedVersion: 7 }),
     );
     await expect(response.json()).resolves.toMatchObject({ canEdit: true });
   });
@@ -131,10 +133,10 @@ describe("PUT/PATCH /api/telephony/config/*", () => {
   it("refuses every write from a dispatcher", async () => {
     state.role = "dispatcher";
     const responses = await Promise.all([
-      putGroups(request("ring-groups", "PUT", { groups: [] })),
-      putPlans(request("ring-plans", "PUT", { plans: [] })),
-      putHours(request("business-hours", "PUT", { businessHours: [] })),
-      putReasons(request("pause-reasons", "PUT", { pauseReasons: [] })),
+      putGroups(request("ring-groups", "PUT", { groups: [], version: document.routingVersion })),
+      putPlans(request("ring-plans", "PUT", { plans: [], version: document.routingVersion })),
+      putHours(request("business-hours", "PUT", { businessHours: [], version: document.routingVersion })),
+      putReasons(request("pause-reasons", "PUT", { pauseReasons: [], version: document.routingVersion })),
       patchNumbers(request("numbers", "PATCH", { lineId: "line-1", patch: {} })),
     ]);
 
@@ -148,7 +150,7 @@ describe("PUT/PATCH /api/telephony/config/*", () => {
       throw new MutationError("Požiadavka neprešla bezpečnostnou kontrolou.", 403);
     });
 
-    const response = await putPlans(request("ring-plans", "PUT", { plans: [] }));
+    const response = await putPlans(request("ring-plans", "PUT", { plans: [], version: document.routingVersion }));
     expect(response.status).toBe(403);
     expect(replaceRingPlans).not.toHaveBeenCalled();
   });
@@ -158,7 +160,7 @@ describe("PUT/PATCH /api/telephony/config/*", () => {
       new ConfigServiceError("Plán zvonenia potrebuje aspoň jeden krok.", 400, "config_invalid", [{ path: "plans[0]", code: "plan_empty", message: "Plán zvonenia potrebuje aspoň jeden krok." }]),
     );
 
-    const response = await putPlans(request("ring-plans", "PUT", { plans: [] }));
+    const response = await putPlans(request("ring-plans", "PUT", { plans: [], version: document.routingVersion }));
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ code: "config_invalid", issues: [{ code: "plan_empty" }] });
@@ -167,13 +169,20 @@ describe("PUT/PATCH /api/telephony/config/*", () => {
   it("maps an in-use conflict from the RPC onto 409", async () => {
     replaceRingGroups.mockRejectedValueOnce(new ConfigServiceError("Skupinu používa plán zvonenia, najprv ju odober z plánu.", 409, "ring_group_in_use"));
 
-    const response = await putGroups(request("ring-groups", "PUT", { groups: VALID_GROUPS }));
+    const response = await putGroups(request("ring-groups", "PUT", { groups: VALID_GROUPS, version: document.routingVersion }));
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toMatchObject({ code: "ring_group_in_use" });
   });
 
+  it("refuses a whole-document save that carries no document version", async () => {
+    const response = await putGroups(request("ring-groups", "PUT", { groups: VALID_GROUPS }));
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ code: "version_required" });
+    expect(replaceRingGroups).not.toHaveBeenCalled();
+  });
+
   it("rejects a body that is not a list of groups", async () => {
-    const response = await putGroups(request("ring-groups", "PUT", { groups: { nope: true } }));
+    const response = await putGroups(request("ring-groups", "PUT", { groups: { nope: true }, version: document.routingVersion }));
     expect(response.status).toBe(400);
     expect(replaceRingGroups).not.toHaveBeenCalled();
   });

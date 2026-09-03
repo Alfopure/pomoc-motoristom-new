@@ -14,11 +14,14 @@ import {
   addSchedule,
   businessHoursDirty,
   businessHoursPayload,
+  clearDay,
   copyDayToWeekdays,
   describeException,
   describeNow,
   describeWeek,
+  isAroundTheClock,
   isEmptySchedule,
+  MIDNIGHT_CLOSE,
   linesUsingSchedule,
   overlappingWeekdays,
   removeException,
@@ -26,6 +29,7 @@ import {
   removeInterval,
   removeSchedule,
   scheduleDraftsFromDocument,
+  setDayAroundTheClock,
   todayInSchedule,
   updateException,
   updateExceptionInterval,
@@ -78,9 +82,10 @@ export function BusinessHoursEditor({
     setNotice(null);
     setServerIssues([]);
     try {
-      const response = await saveRoutingConfig("businessHours", { businessHours: businessHoursPayload(schedules) });
+      const response = await saveRoutingConfig("businessHours", { businessHours: businessHoursPayload(schedules), version: document.routingVersion });
       onSaved(response);
-      setNotice("Otváracie hodiny sú uložené. Prebiehajúce hovory sa nemenia.");
+      const saved = "Otváracie hodiny sú uložené. Prebiehajúce hovory sa nemenia.";
+      setNotice(response.warning ? `${saved} ${response.warning}` : saved);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Otváracie hodiny sa nepodarilo uložiť.");
       if (caught instanceof ConfigRequestError) setServerIssues(caught.issues);
@@ -180,6 +185,11 @@ export function BusinessHoursEditor({
                 <span className="text-xs font-semibold uppercase text-zinc-500">Týždenný rozvrh</span>
                 {WEEKDAYS.map(({ weekday, label }) => {
                   const intervals = schedule.days.get(weekday) ?? [];
+                  // `00:00 – 24:00` is the only honest "open around the clock":
+                  // the evaluator is `minutes < closes`, so 23:59 would leave
+                  // the last minute of the day after-hours. `<input type="time">`
+                  // cannot express 24:00, hence the dedicated toggle.
+                  const aroundTheClock = isAroundTheClock(schedule, weekday);
                   return (
                     <div key={weekday} className="grid gap-2 rounded-md border border-zinc-200 bg-white p-2 sm:grid-cols-[110px_minmax(0,1fr)_auto] sm:items-start">
                       <div className="pt-2 text-sm font-semibold text-zinc-800">
@@ -188,7 +198,10 @@ export function BusinessHoursEditor({
                       </div>
 
                       <div className="grid gap-2">
-                        {intervals.map((interval) => (
+                        {aroundTheClock ? (
+                          <p className="pt-2 text-sm font-medium text-emerald-800">Otvorené nonstop (00:00 – {MIDNIGHT_CLOSE}).</p>
+                        ) : (
+                          intervals.map((interval) => (
                           <div key={interval.key}>
                             <div className="flex flex-wrap items-center gap-2">
                               <input
@@ -220,20 +233,35 @@ export function BusinessHoursEditor({
                             </div>
                             <SettingsIssueList issues={issuesFor.get(interval.key) ?? []} />
                           </div>
-                        ))}
+                          ))
+                        )}
                       </div>
 
                       <div className="flex flex-wrap gap-2">
                         <button
                           type="button"
-                          disabled={!canEdit}
+                          disabled={!canEdit || aroundTheClock}
                           onClick={() => setSchedules((current) => addInterval(current, schedule.key, weekday))}
                           className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-xs font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           <Plus size={14} aria-hidden="true" />
                           Interval
                         </button>
-                        {intervals.length > 0 && (
+                        <button
+                          type="button"
+                          disabled={!canEdit}
+                          title={`Otvorené celý deň, 00:00 – ${MIDNIGHT_CLOSE}. Zatvorenie o 23:59 by nechalo poslednú minútu dňa mimo otváracích hodín.`}
+                          onClick={() =>
+                            setSchedules((current) => (aroundTheClock ? clearDay(current, schedule.key, weekday) : setDayAroundTheClock(current, schedule.key, weekday)))
+                          }
+                          className={`inline-flex h-10 items-center justify-center gap-2 rounded-md border px-3 text-xs font-semibold hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 ${
+                            aroundTheClock ? "border-emerald-300 bg-emerald-50 text-emerald-900" : "border-zinc-200 bg-white text-zinc-800"
+                          }`}
+                        >
+                          <Clock size={14} aria-hidden="true" />
+                          {aroundTheClock ? "Zrušiť nonstop" : "Nonstop"}
+                        </button>
+                        {intervals.length > 0 && !aroundTheClock && (
                           <button
                             type="button"
                             disabled={!canEdit}

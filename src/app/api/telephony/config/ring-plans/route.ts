@@ -1,5 +1,5 @@
 import { parseRingPlans, replaceRingPlans } from "@/server/telephony/config-service";
-import { documentResponse, handleConfigRead, handleConfigWrite } from "@/server/telephony/config-route";
+import { documentResponse, handleConfigRead, handleConfigWrite, readExpectedVersion } from "@/server/telephony/config-route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,8 +17,8 @@ export async function PUT(request: Request) {
     fallback: "Plány zvonenia sa nepodarilo uložiť.",
     run: async ({ deps, actor, configActor, body, organizationId }) => {
       const plans = parseRingPlans(body.plans);
-      const { document } = await replaceRingPlans(deps, { organizationId, actor: configActor, plans });
-      return documentResponse(actor, document);
+      const { document, warning } = await replaceRingPlans(deps, { organizationId, actor: configActor, plans, expectedVersion: readExpectedVersion(body) });
+      return documentResponse(actor, document, warning);
     },
   });
 }

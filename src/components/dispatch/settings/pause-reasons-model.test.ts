@@ -14,6 +14,7 @@ import {
   parseMaxMinutes,
   pauseReasonDraftsFromDocument,
   pauseReasonsDirty,
+  pauseReasonsInUseWarning,
   pauseReasonsPayload,
   pauseReasonsWarning,
   removePauseReason,
@@ -128,7 +129,9 @@ describe("validatePauseReasonDrafts", () => {
 
 describe("notes", () => {
   it("warns when nobody can go on a break", () => {
-    expect(pauseReasonsWarning([])).toContain("nevie prepnúť");
+    // The honest wording: `setPresence` accepts `paused` with no reason, so the
+    // manager loses the reason, not the break.
+    expect(pauseReasonsWarning([])).toContain("bez uvedenia dôvodu");
     const drafts = pauseReasonDraftsFromDocument(SEEDED).map((reason) => ({ ...reason, active: false }));
     expect(pauseReasonsWarning(drafts)).toContain("vypnuté");
     expect(pauseReasonsWarning(pauseReasonDraftsFromDocument(SEEDED))).toBeNull();
@@ -136,8 +139,20 @@ describe("notes", () => {
 
   it("describes a row in Slovak", () => {
     const drafts = pauseReasonDraftsFromDocument(SEEDED);
-    expect(describePauseReason(drafts[0])).toBe("V ponuke operátora, najviac 30 min.");
+    expect(describePauseReason(drafts[0])).toBe("V ponuke operátora, odporúčaná dĺžka 30 min (systém pauzu sám neukončí).");
     expect(describePauseReason(drafts[2])).toBe("V ponuke operátora, bez časového limitu.");
     expect(describePauseReason({ ...drafts[0], active: false })).toContain("Vypnutý");
+  });
+});
+
+describe("a reason somebody is paused under", () => {
+  it("warns before a save the RPC would refuse", () => {
+    const drafts = pauseReasonDraftsFromDocument(SEEDED);
+    const inUse = [drafts[0].id as string];
+    // `motorist_operator_presence.pause_reason_id` is `on delete set null`, so
+    // the RPC raises `pause_reason_in_use` instead of stripping the live row.
+    expect(pauseReasonsInUseWarning(drafts, inUse)).toBeNull();
+    expect(pauseReasonsInUseWarning(removePauseReason(drafts, drafts[0].key), inUse)).toContain("odmietne");
+    expect(pauseReasonsInUseWarning(drafts, [])).toBeNull();
   });
 });

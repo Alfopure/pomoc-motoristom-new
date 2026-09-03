@@ -14,6 +14,7 @@
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import type {
+  LineDoc,
   RingFallbackKind,
   RingGroupDoc,
   RingPlanDoc,
@@ -175,6 +176,13 @@ export type PlanValidationContext = {
   destinationAllowlist: readonly string[];
   /** Plans referenced by a line; removing one is refused by the server. */
   planIdsInUse: readonly string[];
+  /**
+   * `motorist_telephony_settings.max_ring_fanout`: how many devices `planRingStep`
+   * lets ring at once. Members past the cap in an `all` step are marked
+   * `fanout` and, because `remainingAfter` is 0 for `all`, never dialled in that
+   * step at all — so the preview has to say so.
+   */
+  maxRingFanout?: number;
 };
 
 function issue(path: string, code: string, message: string): ValidationIssue {
@@ -261,14 +269,21 @@ export function ringPlanSeconds(plan: PlanDraft, groups: readonly RingGroupDoc[]
   return plan.steps.reduce((total, step) => total + stepSeconds(step, groupsById.get(step.ringGroupId)), 0);
 }
 
-function describeStep(step: StepDraft, group: RingGroupDoc | undefined): string {
+function describeStep(step: StepDraft, group: RingGroupDoc | undefined, maxRingFanout?: number): string {
   const timeout = parseTimeout(step.timeoutSecs);
   const seconds = Number.isFinite(timeout) ? timeout : 0;
   if (!group) return "krok bez vybratej skupiny sa preskočí";
   // materialiseRingPlan skips an inactive group, so the step simply disappears.
   if (!group.active) return `skupina „${group.name}" je vypnutá, krok sa preskočí`;
   if (group.members.length === 0) return `skupina „${group.name}" nemá žiadneho člena, krok sa preskočí`;
-  if (step.strategy === "all") return `skupina „${group.name}" zvoní všetkým ${seconds} s`;
+  if (step.strategy === "all") {
+    // `planRingStep` keeps only the first `maxRingFanout` eligible members and
+    // finishes the step after that single fan-out, so the rest never ring.
+    if (typeof maxRingFanout === "number" && maxRingFanout > 0 && group.members.length > maxRingFanout) {
+      return `skupina „${group.name}" zvoní naraz najviac ${maxRingFanout} z ${group.members.length} členov (limit organizácie) ${seconds} s, na ostatných sa v tomto kroku nedostane`;
+    }
+    return `skupina „${group.name}" zvoní všetkým ${seconds} s`;
+  }
   const times = group.members.map((member) => memberRingSeconds(member.ringSecs, seconds));
   const distinct = new Set(times);
   if (distinct.size === 1) return `skupina „${group.name}" zvoní po jednom po ${times[0]} s`;
@@ -293,15 +308,68 @@ export function describeFallback(plan: PlanDraft): string {
 }
 
 /** One phrase per step plus the fallback phrase, in the order they happen. */
-export function describeRingPlanParts(plan: PlanDraft, groups: readonly RingGroupDoc[]): string[] {
+export function describeRingPlanParts(plan: PlanDraft, groups: readonly RingGroupDoc[], maxRingFanout?: number): string[] {
   const groupsById = new Map(groups.map((group) => [group.id, group]));
-  return [...plan.steps.map((step) => describeStep(step, groupsById.get(step.ringGroupId))), describeFallback(plan)];
+  return [...plan.steps.map((step) => describeStep(step, groupsById.get(step.ringGroupId), maxRingFanout)), describeFallback(plan)];
 }
 
-/** The whole plan as one Slovak sentence shown above the steps. */
-export function describeRingPlan(plan: PlanDraft, groups: readonly RingGroupDoc[]): string {
+/**
+ * The whole plan as one Slovak sentence shown above the steps.
+ *
+ * An inactive plan is described as inactive first: `materialiseRingPlan` returns
+ * `null` for it and `startRingStep` goes straight to the fallback, so listing
+ * steps that will never run would be a lie.
+ */
+export function describeRingPlan(plan: PlanDraft, groups: readonly RingGroupDoc[], maxRingFanout?: number): string {
+  if (!plan.active) return `Plán je vypnutý — žiadny krok sa nevykoná a hovor pokračuje rovno: ${describeFallback(plan)}.`;
   if (plan.steps.length === 0) return `Plán zatiaľ nemá žiadny krok, hovor rovno pokračuje: ${describeFallback(plan)}.`;
-  const [first, ...rest] = describeRingPlanParts(plan, groups);
+  const [first, ...rest] = describeRingPlanParts(plan, groups, maxRingFanout);
   const sentence = [first.charAt(0).toLocaleUpperCase("sk") + first.slice(1), ...rest.map((part) => `potom ${part}`)].join(", ");
   return `${sentence}.`;
+}
+
+/** Labels of the lines that route to this plan (only a saved plan has an id). */
+export function linesUsingPlan(planId: string | null, lines: readonly LineDoc[]): string[] {
+  if (!planId) return [];
+  return lines.filter((line) => line.ringPlanId === planId).map((line) => line.label.trim() || line.phoneNumber);
+}
+
+/**
+ * Sentence under the plan header, mirroring `groupUsageNote`.
+ *
+ * Switching a plan off is allowed, but `materialiseRingPlan` then returns
+ * `null` and `startRingPlan` takes the "no ring plan" branch: nobody's phone
+ * rings and every caller on those lines is pushed straight to the fallback. The
+ * most damaging of the three toggles must not be the silent one.
+ */
+export function planUsageNote(plan: PlanDraft, lines: readonly LineDoc[]): { tone: "info" | "warning"; text: string } | null {
+  const used = linesUsingPlan(plan.id, lines);
+  if (used.length === 0) {
+    return plan.active ? null : { tone: "info", text: "Plán je vypnutý a zatiaľ ho nepoužíva žiadna linka." };
+  }
+  const list = used.join(", ");
+  return plan.active
+    ? { tone: "info", text: `Používajú ho linky: ${list}.` }
+    : {
+        tone: "warning",
+        text: `Plán je vypnutý, ale používajú ho linky: ${list}. Hovory na ne nikomu nezazvonia a pôjdu rovno na ${describeFallback(plan)}.`,
+      };
+}
+
+/**
+ * Groups whose `all` step would be truncated by the organisation fan-out cap.
+ * The manager sees the same fact from the group side and from the settings side.
+ */
+export function groupsOverFanout(plans: readonly PlanDraft[], groups: readonly RingGroupDoc[], maxRingFanout: number): Array<{ name: string; members: number }> {
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+  const over = new Map<string, { name: string; members: number }>();
+  for (const plan of plans) {
+    for (const step of plan.steps) {
+      if (step.strategy !== "all") continue;
+      const group = groupsById.get(step.ringGroupId);
+      if (!group || group.members.length <= maxRingFanout) continue;
+      over.set(group.id, { name: group.name, members: group.members.length });
+    }
+  }
+  return [...over.values()];
 }

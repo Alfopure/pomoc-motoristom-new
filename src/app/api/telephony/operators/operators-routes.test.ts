@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppRole } from "@/domain/types";
 import { MutationError } from "@/server/motorist-mutations";
+import { ConfigServiceError, DEVICE_TAKEOVER_MESSAGE } from "@/server/telephony/config-service";
 import { OperatorDeviceError } from "@/server/telephony/operator-devices";
 
 /**
@@ -10,10 +11,16 @@ import { OperatorDeviceError } from "@/server/telephony/operator-devices";
  * manager/admin only.
  */
 
-const state = { role: "dispatcher" as AppRole, profileId: "profile-1" };
+/** Route ids must be uuids: `requireOperatorOfOrganization` rejects anything else. */
+const PROFILE_1 = "11111111-1111-4111-8111-111111111111";
+const PROFILE_2 = "22222222-2222-4222-8222-222222222222";
+
+const state = { role: "dispatcher" as AppRole, profileId: PROFILE_1 };
 const assertSameOriginRequest = vi.fn();
 const updateOperatorTelephonySettings = vi.fn(async () => ({ defaultFromLineId: null, wrapUpSeconds: 45, autoAnswerOutbound: true, ringDeviceVolume: 80 }));
 const auditOperatorDeviceAction = vi.fn(async () => undefined);
+const requireOperatorOfOrganization = vi.fn(async (_deps: unknown, input: { profileId: string }) => ({ profileId: input.profileId, displayName: "Peter" }));
+const assertOperatorNotOnCall = vi.fn(async () => undefined);
 const ensureOperatorCredential = vi.fn(async () => ({ environment: "development", telnyx_credential_id: "cred-9", sip_username: "gencred009", registration_state: "registered" }));
 const disconnectDevice = vi.fn(async () => ({ environment: "development", registration_state: "unregistered" }));
 
@@ -33,6 +40,8 @@ vi.mock("@/server/telephony/config-service", async (importOriginal) => {
     ...actual,
     updateOperatorTelephonySettings: (...args: unknown[]) => updateOperatorTelephonySettings(...(args as [])),
     auditOperatorDeviceAction: (...args: unknown[]) => auditOperatorDeviceAction(...(args as [])),
+    requireOperatorOfOrganization: (...args: unknown[]) => requireOperatorOfOrganization(...(args as unknown as [unknown, { profileId: string }])),
+    assertOperatorNotOnCall: (...args: unknown[]) => assertOperatorNotOnCall(...(args as [])),
   };
 });
 
@@ -64,27 +73,27 @@ function context(id: string) {
 
 beforeEach(() => {
   state.role = "dispatcher";
-  state.profileId = "profile-1";
+  state.profileId = PROFILE_1;
   process.env.TELNYX_API_KEY = "KEYtest";
   // `mockReset` (not `mockClear`): the CSRF test above installs a throwing
   // implementation that would otherwise leak into the next case.
   assertSameOriginRequest.mockReset();
-  for (const mock of [updateOperatorTelephonySettings, auditOperatorDeviceAction, ensureOperatorCredential, disconnectDevice]) {
+  for (const mock of [updateOperatorTelephonySettings, auditOperatorDeviceAction, ensureOperatorCredential, disconnectDevice, requireOperatorOfOrganization, assertOperatorNotOnCall]) {
     mock.mockClear();
   }
 });
 
 describe("PATCH /api/telephony/operators/[id]/settings", () => {
   it("lets an operator change their own settings", async () => {
-    const response = await patchSettings(request("profile-1", "PATCH", { patch: { wrapUpSeconds: 45 } }), context("profile-1"));
+    const response = await patchSettings(request(PROFILE_1, "PATCH", { patch: { wrapUpSeconds: 45 } }), context(PROFILE_1));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, profileId: "profile-1", settings: { wrapUpSeconds: 45 } });
-    expect(updateOperatorTelephonySettings).toHaveBeenCalledWith({ admin: { marker: "admin" } }, expect.objectContaining({ profileId: "profile-1", patch: { wrapUpSeconds: 45 } }));
+    await expect(response.json()).resolves.toMatchObject({ ok: true, profileId: PROFILE_1, settings: { wrapUpSeconds: 45 } });
+    expect(updateOperatorTelephonySettings).toHaveBeenCalledWith({ admin: { marker: "admin" } }, expect.objectContaining({ profileId: PROFILE_1, patch: { wrapUpSeconds: 45 } }));
   });
 
   it("refuses a dispatcher changing somebody else's settings", async () => {
-    const response = await patchSettings(request("profile-2", "PATCH", { patch: { wrapUpSeconds: 45 } }), context("profile-2"));
+    const response = await patchSettings(request(PROFILE_2, "PATCH", { patch: { wrapUpSeconds: 45 } }), context(PROFILE_2));
 
     expect(response.status).toBe(403);
     expect(updateOperatorTelephonySettings).not.toHaveBeenCalled();
@@ -92,17 +101,17 @@ describe("PATCH /api/telephony/operators/[id]/settings", () => {
 
   it("lets a manager change somebody else's settings", async () => {
     state.role = "manager";
-    const response = await patchSettings(request("profile-2", "PATCH", { patch: { autoAnswerOutbound: false } }), context("profile-2"));
+    const response = await patchSettings(request(PROFILE_2, "PATCH", { patch: { autoAnswerOutbound: false } }), context(PROFILE_2));
 
     expect(response.status).toBe(200);
-    expect(updateOperatorTelephonySettings).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ profileId: "profile-2" }));
+    expect(updateOperatorTelephonySettings).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ profileId: PROFILE_2 }));
   });
 
   it("runs the same-origin check first", async () => {
     assertSameOriginRequest.mockImplementation(() => {
       throw new MutationError("Požiadavka neprešla bezpečnostnou kontrolou.", 403);
     });
-    const response = await patchSettings(request("profile-1", "PATCH", { patch: {} }), context("profile-1"));
+    const response = await patchSettings(request(PROFILE_1, "PATCH", { patch: {} }), context(PROFILE_1));
 
     expect(response.status).toBe(403);
     expect(updateOperatorTelephonySettings).not.toHaveBeenCalled();
@@ -111,27 +120,27 @@ describe("PATCH /api/telephony/operators/[id]/settings", () => {
 
 describe("POST /api/telephony/operators/[id]/credential", () => {
   it("is refused for a dispatcher", async () => {
-    const response = await postCredential(request("profile-2", "POST"), context("profile-2"));
+    const response = await postCredential(request(PROFILE_2, "POST"), context(PROFILE_2));
     expect(response.status).toBe(403);
     expect(ensureOperatorCredential).not.toHaveBeenCalled();
   });
 
   it("provisions a credential for a manager without revoking the live session", async () => {
     state.role = "manager";
-    const response = await postCredential(request("profile-2", "POST"), context("profile-2"));
+    const response = await postCredential(request(PROFILE_2, "POST"), context(PROFILE_2));
 
     expect(response.status).toBe(200);
-    expect(ensureOperatorCredential).toHaveBeenCalledWith(expect.anything(), { organizationId: "org-1", profileId: "profile-2", force: false });
+    expect(ensureOperatorCredential).toHaveBeenCalledWith(expect.anything(), { organizationId: "org-1", profileId: PROFILE_2, force: false });
     expect(disconnectDevice).not.toHaveBeenCalled();
-    expect(auditOperatorDeviceAction).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "credential.rotate", profileId: "profile-2" }));
+    expect(auditOperatorDeviceAction).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "credential.rotate", profileId: PROFILE_2 }));
   });
 
   it("regenerates and disconnects the browser on { rotate: true }", async () => {
     state.role = "admin";
-    const response = await postCredential(request("profile-2", "POST", { rotate: true }), context("profile-2"));
+    const response = await postCredential(request(PROFILE_2, "POST", { rotate: true }), context(PROFILE_2));
 
     expect(response.status).toBe(200);
-    expect(ensureOperatorCredential).toHaveBeenCalledWith(expect.anything(), { organizationId: "org-1", profileId: "profile-2", force: true });
+    expect(ensureOperatorCredential).toHaveBeenCalledWith(expect.anything(), { organizationId: "org-1", profileId: PROFILE_2, force: true });
     expect(disconnectDevice).toHaveBeenCalledTimes(1);
     await expect(response.json()).resolves.toMatchObject({ device: { registrationState: "unregistered" } });
   });
@@ -139,33 +148,56 @@ describe("POST /api/telephony/operators/[id]/credential", () => {
   it("answers 503 while telephony is not configured", async () => {
     state.role = "manager";
     delete process.env.TELNYX_API_KEY;
-    const response = await postCredential(request("profile-2", "POST"), context("profile-2"));
+    const response = await postCredential(request(PROFILE_2, "POST"), context(PROFILE_2));
 
     expect(response.status).toBe(503);
     expect(ensureOperatorCredential).not.toHaveBeenCalled();
+  });
+
+  it("refuses an id that is not an operator of the caller's organisation before touching Telnyx", async () => {
+    state.role = "manager";
+    requireOperatorOfOrganization.mockRejectedValueOnce(new ConfigServiceError("Operátor neexistuje alebo nie je aktívny v tejto organizácii.", 404, "operator_not_found") as never);
+    const response = await postCredential(request(PROFILE_2, "POST"), context(PROFILE_2));
+
+    expect(response.status).toBe(404);
+    expect(ensureOperatorCredential).not.toHaveBeenCalled();
+  });
+
+  it("refuses to rotate while the operator is on a call unless the takeover is confirmed", async () => {
+    state.role = "manager";
+    assertOperatorNotOnCall.mockRejectedValueOnce(new ConfigServiceError(DEVICE_TAKEOVER_MESSAGE, 409, "operator_on_call") as never);
+    const refused = await postCredential(request(PROFILE_2, "POST", { rotate: true }), context(PROFILE_2));
+
+    expect(refused.status).toBe(409);
+    await expect(refused.json()).resolves.toMatchObject({ code: "operator_on_call" });
+    expect(ensureOperatorCredential).not.toHaveBeenCalled();
+
+    const confirmed = await postCredential(request(PROFILE_2, "POST", { rotate: true, takeover: true }), context(PROFILE_2));
+    expect(confirmed.status).toBe(200);
+    expect(assertOperatorNotOnCall).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ takeover: true }));
   });
 });
 
 describe("POST /api/telephony/operators/[id]/disconnect", () => {
   it("is refused for a dispatcher", async () => {
-    const response = await postDisconnect(request("profile-2", "POST"), context("profile-2"));
+    const response = await postDisconnect(request(PROFILE_2, "POST"), context(PROFILE_2));
     expect(response.status).toBe(403);
     expect(disconnectDevice).not.toHaveBeenCalled();
   });
 
   it("revokes the device session for a manager", async () => {
     state.role = "manager";
-    const response = await postDisconnect(request("profile-2", "POST"), context("profile-2"));
+    const response = await postDisconnect(request(PROFILE_2, "POST"), context(PROFILE_2));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, profileId: "profile-2", registrationState: "unregistered" });
+    await expect(response.json()).resolves.toMatchObject({ ok: true, profileId: PROFILE_2, registrationState: "unregistered" });
     expect(auditOperatorDeviceAction).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "device.disconnect" }));
   });
 
   it("answers 404 when the operator has no device row", async () => {
     state.role = "manager";
     disconnectDevice.mockResolvedValueOnce(null as never);
-    const response = await postDisconnect(request("profile-2", "POST"), context("profile-2"));
+    const response = await postDisconnect(request(PROFILE_2, "POST"), context(PROFILE_2));
 
     expect(response.status).toBe(404);
     expect(auditOperatorDeviceAction).not.toHaveBeenCalled();
@@ -174,8 +206,21 @@ describe("POST /api/telephony/operators/[id]/disconnect", () => {
   it("maps a device service failure onto its own status", async () => {
     state.role = "manager";
     disconnectDevice.mockRejectedValueOnce(new OperatorDeviceError("Zariadenie sa nepodarilo odpojiť.", 500));
-    const response = await postDisconnect(request("profile-2", "POST"), context("profile-2"));
+    const response = await postDisconnect(request(PROFILE_2, "POST"), context(PROFILE_2));
 
     expect(response.status).toBe(500);
+  });
+
+  it("refuses while the operator is on a call unless the takeover is confirmed", async () => {
+    state.role = "manager";
+    assertOperatorNotOnCall.mockRejectedValueOnce(new ConfigServiceError(DEVICE_TAKEOVER_MESSAGE, 409, "operator_on_call") as never);
+    const refused = await postDisconnect(request(PROFILE_2, "POST"), context(PROFILE_2));
+
+    expect(refused.status).toBe(409);
+    expect(disconnectDevice).not.toHaveBeenCalled();
+
+    const confirmed = await postDisconnect(request(PROFILE_2, "POST", { takeover: true }), context(PROFILE_2));
+    expect(confirmed.status).toBe(200);
+    expect(disconnectDevice).toHaveBeenCalledTimes(1);
   });
 });

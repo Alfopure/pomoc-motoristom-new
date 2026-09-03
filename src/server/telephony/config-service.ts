@@ -7,7 +7,10 @@ import type { Database, Json } from "@/lib/supabase/database.types";
 
 import { COUNTRY_DIAL_PREFIXES, isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS } from "@/lib/telephony/operator-settings";
 import type { TelephonyEnvironment } from "./state/types";
+
+export { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS };
 
 /**
  * Routing configuration read model and validated replace operations
@@ -62,12 +65,32 @@ export const MIN_TIMEOUT_SECS = 5;
 export const MAX_TIMEOUT_SECS = 120;
 export const MIN_RING_SECS = 5;
 export const MAX_RING_SECS = 120;
-export const MAX_WRAP_UP_SECONDS = 600;
 export const MAX_PARK_MINUTES = 240;
 export const MAX_PAUSE_MINUTES = 480;
+export const MAX_DAILY_LEG_SOFT_CAP = 100_000;
+export const MAX_SORT_ORDER = 100_000;
+
+/**
+ * Size caps. A section is a whole-list replace, so an unbounded payload would
+ * build an arbitrarily large document and two full reads around it; these are
+ * an order of magnitude above anything a dispatch centre needs.
+ */
+export const MAX_ROWS_PER_SECTION = 200;
+export const MAX_MEMBERS_PER_GROUP = 50;
+export const MAX_STEPS_PER_PLAN = 20;
+export const MAX_INTERVALS_PER_SCHEDULE = 100;
+export const MAX_EXCEPTIONS_PER_SCHEDULE = 200;
+export const MAX_ALLOWLIST_ENTRIES = 100;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)(:[0-5]\d)?$/;
+/**
+ * A closing time may also be `24:00` — "open until midnight". Postgres `time`
+ * and `parseClock` both accept it, and `withinAny` compares `minutes < closes`,
+ * so 23:59 would leave the last minute of the day after-hours; a line that is
+ * open around the clock needs the real end of the day.
+ */
+const CLOSE_TIME_PATTERN = /^(([01]\d|2[0-3]):([0-5]\d)|24:00)(:[0-5]\d)?$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 const FALLBACK_KINDS = ["external_number", "waiting_room", "callback_prompt", "hangup_message"] as const;
@@ -233,10 +256,19 @@ export type TelephonySettingsDoc = {
 
 export type RoutingDocument = {
   organizationId: string;
+  /**
+   * Optimistic-concurrency token of the routing sections (groups, plans,
+   * business hours, pause reasons). The editors send it back with their
+   * whole-document `PUT`; `motorist_replace_ring_plan` refuses a stale one so a
+   * draft can never delete rows a colleague added in the meantime.
+   */
+  routingVersion: number;
   groups: RingGroupDoc[];
   plans: RingPlanDoc[];
   businessHours: BusinessHoursDoc[];
   pauseReasons: PauseReasonDoc[];
+  /** Pause reason ids an operator is paused under right now; they may not be deleted. */
+  pauseReasonsInUse: string[];
   lines: LineDoc[];
   ivrMenus: IvrMenuDoc[];
   operators: OperatorDoc[];
@@ -272,10 +304,6 @@ function readInteger(value: unknown): number | null {
   return null;
 }
 
-function readBoolean(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback;
-}
-
 function readId(value: unknown): string | null {
   const text = readText(value);
   return text && UUID_PATTERN.test(text) ? text.toLowerCase() : null;
@@ -285,10 +313,35 @@ function issue(path: string, code: string, message: string): ValidationIssue {
   return { path, code, message };
 }
 
+/**
+ * A wrong-typed flag is a bug in the caller, not a preference: coercing it to a
+ * fallback used to turn things *on* (`active`, `autoAnswerOutbound`) from a
+ * malformed body. Anything that is not a boolean is a 400.
+ */
+function readFlag(row: Record<string, unknown>, field: string, fallback: boolean, path: string, issues: ValidationIssue[]): boolean {
+  if (!(field in row) || row[field] === undefined) return fallback;
+  if (typeof row[field] === "boolean") return row[field];
+  issues.push(issue(path ? `${path}.${field}` : field, "type_invalid", `Pole ${field} musí byť true alebo false.`));
+  return fallback;
+}
+
+/**
+ * `null` detaches (no ring plan / no IVR / no schedule); anything that is
+ * neither `null` nor a valid uuid is a parse error, never a silent detach — a
+ * typo used to unroute a production number and answer 200 OK.
+ */
+function readOptionalId(row: Record<string, unknown>, field: string, path: string, issues: ValidationIssue[]): string | null {
+  const value = row[field];
+  if (value === null) return null;
+  const id = readId(value);
+  if (!id) issues.push(issue(path ? `${path}.${field}` : field, "id_invalid", `Pole ${field} musí byť platný identifikátor alebo null.`));
+  return id;
+}
+
 /** `HH:MM` (the DB stores `time`, PostgREST returns `HH:MM:SS`). */
-function normalizeTime(value: unknown): string | null {
+function normalizeTime(value: unknown, pattern: RegExp = TIME_PATTERN): string | null {
   const text = readText(value);
-  if (!text || !TIME_PATTERN.test(text)) return null;
+  if (!text || !pattern.test(text)) return null;
   return text.slice(0, 5);
 }
 
@@ -296,16 +349,28 @@ function normalizeTime(value: unknown): string | null {
 // Payload parsing (structure only; the semantic rules live in the validators)
 // ---------------------------------------------------------------------------
 
+function assertSectionSize(value: unknown[], label: string, issues: ValidationIssue[]): void {
+  if (value.length > MAX_ROWS_PER_SECTION) {
+    issues.push(issue(label, "section_too_large", `Zoznam „${label}" môže mať najviac ${MAX_ROWS_PER_SECTION} položiek.`));
+  }
+}
+
 export function parseRingGroups(value: unknown): RingGroupInput[] {
   if (!Array.isArray(value)) throw new ConfigServiceError("Zoznam skupín chýba alebo nie je pole.", 400, "config_invalid");
-  return value.map((raw) => {
+  const issues: ValidationIssue[] = [];
+  assertSectionSize(value, "groups", issues);
+  const parsed = value.map((raw, groupIndex) => {
     const row = isRecord(raw) ? raw : {};
+    const path = `groups[${groupIndex}]`;
     const members = Array.isArray(row.members) ? row.members : [];
+    if (members.length > MAX_MEMBERS_PER_GROUP) {
+      issues.push(issue(path, "group_too_large", `Skupina môže mať najviac ${MAX_MEMBERS_PER_GROUP} členov.`));
+    }
     return {
       id: readId(row.id),
       name: typeof row.name === "string" ? row.name.trim() : "",
       description: readText(row.description),
-      active: readBoolean(row.active, true),
+      active: readFlag(row, "active", true, path, issues),
       members: members.map((rawMember, index) => {
         const member = isRecord(rawMember) ? rawMember : {};
         const kind = readText(member.memberKind);
@@ -320,19 +385,27 @@ export function parseRingGroups(value: unknown): RingGroupInput[] {
       }),
     };
   });
+  assertValid(issues);
+  return parsed;
 }
 
 export function parseRingPlans(value: unknown): RingPlanInput[] {
   if (!Array.isArray(value)) throw new ConfigServiceError("Zoznam plánov chýba alebo nie je pole.", 400, "config_invalid");
-  return value.map((raw) => {
+  const issues: ValidationIssue[] = [];
+  assertSectionSize(value, "plans", issues);
+  const parsed = value.map((raw, planIndex) => {
     const row = isRecord(raw) ? raw : {};
+    const path = `plans[${planIndex}]`;
     const steps = Array.isArray(row.steps) ? row.steps : [];
+    if (steps.length > MAX_STEPS_PER_PLAN) {
+      issues.push(issue(path, "plan_too_large", `Plán môže mať najviac ${MAX_STEPS_PER_PLAN} krokov.`));
+    }
     return {
       id: readId(row.id),
       name: typeof row.name === "string" ? row.name.trim() : "",
       fallbackKind: (readText(row.fallbackKind) ?? "callback_prompt") as RingFallbackKind,
       fallbackNumber: readText(row.fallbackNumber),
-      active: readBoolean(row.active, true),
+      active: readFlag(row, "active", true, path, issues),
       steps: steps.map((rawStep, index) => {
         const step = isRecord(rawStep) ? rawStep : {};
         return {
@@ -345,47 +418,65 @@ export function parseRingPlans(value: unknown): RingPlanInput[] {
       }),
     };
   });
+  assertValid(issues);
+  return parsed;
 }
 
 export function parseBusinessHours(value: unknown): BusinessHoursInput[] {
   if (!Array.isArray(value)) throw new ConfigServiceError("Zoznam otváracích hodín chýba alebo nie je pole.", 400, "config_invalid");
-  return value.map((raw) => {
+  const issues: ValidationIssue[] = [];
+  assertSectionSize(value, "businessHours", issues);
+  const parsed = value.map((raw, scheduleIndex) => {
     const row = isRecord(raw) ? raw : {};
+    const path = `businessHours[${scheduleIndex}]`;
     const intervals = Array.isArray(row.intervals) ? row.intervals : [];
     const exceptions = Array.isArray(row.exceptions) ? row.exceptions : [];
+    if (intervals.length > MAX_INTERVALS_PER_SCHEDULE) {
+      issues.push(issue(path, "intervals_too_many", `Rozvrh môže mať najviac ${MAX_INTERVALS_PER_SCHEDULE} intervalov.`));
+    }
+    if (exceptions.length > MAX_EXCEPTIONS_PER_SCHEDULE) {
+      issues.push(issue(path, "exceptions_too_many", `Rozvrh môže mať najviac ${MAX_EXCEPTIONS_PER_SCHEDULE} výnimiek.`));
+    }
     return {
       id: readId(row.id),
       name: typeof row.name === "string" ? row.name.trim() : "",
       timezone: readText(row.timezone) ?? "Europe/Bratislava",
-      active: readBoolean(row.active, true),
+      active: readFlag(row, "active", true, path, issues),
       intervals: intervals.map((rawInterval) => {
         const interval = isRecord(rawInterval) ? rawInterval : {};
         return {
           weekday: readInteger(interval.weekday) ?? 0,
           opens: normalizeTime(interval.opens) ?? String(interval.opens ?? ""),
-          closes: normalizeTime(interval.closes) ?? String(interval.closes ?? ""),
+          closes: normalizeTime(interval.closes, CLOSE_TIME_PATTERN) ?? String(interval.closes ?? ""),
         };
       }),
-      exceptions: exceptions.map((rawException) => {
+      exceptions: exceptions.map((rawException, exceptionIndex) => {
         const exception = isRecord(rawException) ? rawException : {};
         const nested = Array.isArray(exception.intervals) ? exception.intervals : [];
         return {
           date: readText(exception.date) ?? "",
-          closed: readBoolean(exception.closed, true),
-          intervals: nested.map((rawInterval) => {
+          closed: readFlag(exception, "closed", true, `${path}.exceptions[${exceptionIndex}]`, issues),
+          intervals: nested.slice(0, MAX_INTERVALS_PER_SCHEDULE).map((rawInterval) => {
             const interval = isRecord(rawInterval) ? rawInterval : {};
-            return { opens: normalizeTime(interval.opens) ?? String(interval.opens ?? ""), closes: normalizeTime(interval.closes) ?? String(interval.closes ?? "") };
+            return {
+              opens: normalizeTime(interval.opens) ?? String(interval.opens ?? ""),
+              closes: normalizeTime(interval.closes, CLOSE_TIME_PATTERN) ?? String(interval.closes ?? ""),
+            };
           }),
           label: readText(exception.label),
         };
       }),
     };
   });
+  assertValid(issues);
+  return parsed;
 }
 
 export function parsePauseReasons(value: unknown): PauseReasonInput[] {
   if (!Array.isArray(value)) throw new ConfigServiceError("Zoznam dôvodov pauzy chýba alebo nie je pole.", 400, "config_invalid");
-  return value.map((raw, index) => {
+  const issues: ValidationIssue[] = [];
+  assertSectionSize(value, "pauseReasons", issues);
+  const parsed = value.map((raw, index) => {
     const row = isRecord(raw) ? raw : {};
     return {
       id: readId(row.id),
@@ -393,49 +484,60 @@ export function parsePauseReasons(value: unknown): PauseReasonInput[] {
       label: typeof row.label === "string" ? row.label.trim() : "",
       maxMinutes: readInteger(row.maxMinutes),
       sortOrder: readInteger(row.sortOrder) ?? index * 10,
-      active: readBoolean(row.active, true),
+      active: readFlag(row, "active", true, `pauseReasons[${index}]`, issues),
     };
   });
+  assertValid(issues);
+  return parsed;
 }
 
 /** `PATCH` bodies carry only the fields the user touched; absent ≠ null. */
 export function parseLinePatch(value: unknown): LinePatchInput {
   const row = isRecord(value) ? value : {};
+  const issues: ValidationIssue[] = [];
   const patch: LinePatchInput = {};
   if ("label" in row) patch.label = typeof row.label === "string" ? row.label : "";
   if ("partnerName" in row) patch.partnerName = readText(row.partnerName);
-  if ("ringPlanId" in row) patch.ringPlanId = readId(row.ringPlanId);
-  if ("ivrMenuId" in row) patch.ivrMenuId = readId(row.ivrMenuId);
-  if ("businessHoursId" in row) patch.businessHoursId = readId(row.businessHoursId);
+  if ("ringPlanId" in row) patch.ringPlanId = readOptionalId(row, "ringPlanId", "", issues);
+  if ("ivrMenuId" in row) patch.ivrMenuId = readOptionalId(row, "ivrMenuId", "", issues);
+  if ("businessHoursId" in row) patch.businessHoursId = readOptionalId(row, "businessHoursId", "", issues);
   if ("environment" in row) patch.environment = (readText(row.environment) ?? "") as TelephonyEnvironment;
-  if ("active" in row) patch.active = readBoolean(row.active, true);
+  if ("active" in row) patch.active = readFlag(row, "active", true, "", issues);
+  assertValid(issues);
   return patch;
 }
 
 export function parseSettingsPatch(value: unknown): TelephonySettingsPatchInput {
   const row = isRecord(value) ? value : {};
+  const issues: ValidationIssue[] = [];
   const patch: TelephonySettingsPatchInput = {};
-  if ("liveCallsEnabled" in row) patch.liveCallsEnabled = readBoolean(row.liveCallsEnabled, false);
-  if ("smsLiveSends" in row) patch.smsLiveSends = readBoolean(row.smsLiveSends, false);
+  if ("liveCallsEnabled" in row) patch.liveCallsEnabled = readFlag(row, "liveCallsEnabled", false, "", issues);
+  if ("smsLiveSends" in row) patch.smsLiveSends = readFlag(row, "smsLiveSends", false, "", issues);
   if ("dailyLegSoftCap" in row) patch.dailyLegSoftCap = readInteger(row.dailyLegSoftCap) ?? Number.NaN;
   if ("parkMaxMinutes" in row) patch.parkMaxMinutes = readInteger(row.parkMaxMinutes) ?? Number.NaN;
   if ("maxRingFanout" in row) patch.maxRingFanout = readInteger(row.maxRingFanout) ?? Number.NaN;
   if ("maxConcurrentLegs" in row) patch.maxConcurrentLegs = readInteger(row.maxConcurrentLegs) ?? Number.NaN;
   if ("destinationAllowlist" in row) {
     patch.destinationAllowlist = Array.isArray(row.destinationAllowlist)
-      ? row.destinationAllowlist.map((entry) => (typeof entry === "string" ? entry.trim() : String(entry))).filter((entry) => entry.length > 0)
+      ? row.destinationAllowlist
+          .slice(0, MAX_ALLOWLIST_ENTRIES + 1)
+          .map((entry) => (typeof entry === "string" ? entry.trim() : String(entry)))
+          .filter((entry) => entry.length > 0)
       : [];
   }
+  assertValid(issues);
   return patch;
 }
 
 export function parseOperatorSettingsPatch(value: unknown): OperatorSettingsPatchInput {
   const row = isRecord(value) ? value : {};
+  const issues: ValidationIssue[] = [];
   const patch: OperatorSettingsPatchInput = {};
-  if ("defaultFromLineId" in row) patch.defaultFromLineId = readId(row.defaultFromLineId);
+  if ("defaultFromLineId" in row) patch.defaultFromLineId = readOptionalId(row, "defaultFromLineId", "", issues);
   if ("wrapUpSeconds" in row) patch.wrapUpSeconds = readInteger(row.wrapUpSeconds) ?? Number.NaN;
-  if ("autoAnswerOutbound" in row) patch.autoAnswerOutbound = readBoolean(row.autoAnswerOutbound, true);
+  if ("autoAnswerOutbound" in row) patch.autoAnswerOutbound = readFlag(row, "autoAnswerOutbound", true, "", issues);
   if ("ringDeviceVolume" in row) patch.ringDeviceVolume = readInteger(row.ringDeviceVolume) ?? Number.NaN;
+  assertValid(issues);
   return patch;
 }
 
@@ -697,8 +799,8 @@ export function validateBusinessHours(input: BusinessHoursInput[], context: Vali
         issues.push(issue(intervalPath, "weekday_invalid", "Deň v týždni musí byť 1 (pondelok) až 7 (nedeľa)."));
         return;
       }
-      if (!TIME_PATTERN.test(interval.opens) || !TIME_PATTERN.test(interval.closes)) {
-        issues.push(issue(intervalPath, "time_invalid", "Čas musí byť v tvare HH:MM."));
+      if (!TIME_PATTERN.test(interval.opens) || !CLOSE_TIME_PATTERN.test(interval.closes)) {
+        issues.push(issue(intervalPath, "time_invalid", "Čas musí byť v tvare HH:MM (zatvorenie smie byť aj 24:00)."));
         return;
       }
       if (interval.opens >= interval.closes) {
@@ -725,8 +827,8 @@ export function validateBusinessHours(input: BusinessHoursInput[], context: Vali
         issues.push(issue(exceptionPath, "exception_intervals_required", "Otvorená výnimka potrebuje aspoň jeden interval, inak by deň platil ako otvorený nonstop."));
       }
       for (const interval of exception.intervals ?? []) {
-        if (!TIME_PATTERN.test(interval.opens) || !TIME_PATTERN.test(interval.closes) || interval.opens >= interval.closes) {
-          issues.push(issue(exceptionPath, "time_invalid", "Interval výnimky musí byť platný (HH:MM, otvorenie pred zatvorením)."));
+        if (!TIME_PATTERN.test(interval.opens) || !CLOSE_TIME_PATTERN.test(interval.closes) || interval.opens >= interval.closes) {
+          issues.push(issue(exceptionPath, "time_invalid", "Interval výnimky musí byť platný (HH:MM, otvorenie pred zatvorením; zatvorenie smie byť aj 24:00)."));
         }
       }
     });
@@ -757,6 +859,10 @@ export function validatePauseReasons(input: PauseReasonInput[]): ValidationIssue
     } else if (reason.maxMinutes !== null && reason.maxMinutes !== undefined && reason.maxMinutes > MAX_PAUSE_MINUTES) {
       issues.push(issue(path, "max_minutes_too_high", `Maximálny čas pauzy môže byť najviac ${MAX_PAUSE_MINUTES} minút.`));
     }
+    const sortOrder = reason.sortOrder ?? 0;
+    if (!Number.isInteger(sortOrder) || sortOrder < 0 || sortOrder > MAX_SORT_ORDER) {
+      issues.push(issue(path, "sort_order_invalid", `Poradie musí byť celé číslo 0 až ${MAX_SORT_ORDER}.`));
+    }
   });
 
   return issues;
@@ -782,8 +888,8 @@ export function validateLinePatch(patch: LinePatchInput, context: ValidationCont
 
 export function validateSettingsPatch(patch: TelephonySettingsPatchInput): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  if (patch.dailyLegSoftCap !== undefined && (!Number.isInteger(patch.dailyLegSoftCap) || patch.dailyLegSoftCap <= 0)) {
-    issues.push(issue("dailyLegSoftCap", "cap_invalid", "Denný limit hovorov musí byť kladné číslo."));
+  if (patch.dailyLegSoftCap !== undefined && (!Number.isInteger(patch.dailyLegSoftCap) || patch.dailyLegSoftCap <= 0 || patch.dailyLegSoftCap > MAX_DAILY_LEG_SOFT_CAP)) {
+    issues.push(issue("dailyLegSoftCap", "cap_invalid", `Denný limit hovorov musí byť 1 až ${MAX_DAILY_LEG_SOFT_CAP}.`));
   }
   if (patch.parkMaxMinutes !== undefined && (!Number.isInteger(patch.parkMaxMinutes) || patch.parkMaxMinutes < 1 || patch.parkMaxMinutes > MAX_PARK_MINUTES)) {
     issues.push(issue("parkMaxMinutes", "park_invalid", `Maximálny čas v čakárni musí byť 1 až ${MAX_PARK_MINUTES} minút.`));
@@ -797,6 +903,9 @@ export function validateSettingsPatch(patch: TelephonySettingsPatchInput): Valid
   if (patch.destinationAllowlist !== undefined) {
     if (patch.destinationAllowlist.length === 0) {
       issues.push(issue("destinationAllowlist", "allowlist_empty", "Zoznam povolených cieľov nesmie byť prázdny — volanie by sa nedalo uskutočniť."));
+    }
+    if (patch.destinationAllowlist.length > MAX_ALLOWLIST_ENTRIES) {
+      issues.push(issue("destinationAllowlist", "allowlist_too_long", `Zoznam povolených cieľov môže mať najviac ${MAX_ALLOWLIST_ENTRIES} položiek.`));
     }
     for (const entry of patch.destinationAllowlist) {
       const trimmed = entry.trim();
@@ -812,7 +921,7 @@ export function validateOperatorSettingsPatch(patch: OperatorSettingsPatchInput,
   if (patch.wrapUpSeconds !== undefined && (!Number.isInteger(patch.wrapUpSeconds) || patch.wrapUpSeconds < 0 || patch.wrapUpSeconds > MAX_WRAP_UP_SECONDS)) {
     issues.push(issue("wrapUpSeconds", "wrap_up_invalid", `Čas po hovore musí byť 0 až ${MAX_WRAP_UP_SECONDS} sekúnd.`));
   }
-  if (patch.ringDeviceVolume !== undefined && (!Number.isInteger(patch.ringDeviceVolume) || patch.ringDeviceVolume < 0 || patch.ringDeviceVolume > 100)) {
+  if (patch.ringDeviceVolume !== undefined && (!Number.isInteger(patch.ringDeviceVolume) || patch.ringDeviceVolume < 0 || patch.ringDeviceVolume > MAX_RING_DEVICE_VOLUME)) {
     issues.push(issue("ringDeviceVolume", "volume_invalid", "Hlasitosť zvonenia musí byť 0 až 100."));
   }
   if (patch.defaultFromLineId !== undefined && patch.defaultFromLineId !== null && !context.lineIds.has(patch.defaultFromLineId)) {
@@ -849,7 +958,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: { organization
       return (result.data ?? []) as T;
     });
 
-  const [groups, members, plans, steps, hours, intervals, exceptions, pauseReasons, lines, ivrMenus, profiles, operatorSettings, devices, settings] = await Promise.all([
+  const [groups, members, plans, steps, hours, intervals, exceptions, pauseReasons, presence, lines, ivrMenus, profiles, operatorSettings, devices, settings] = await Promise.all([
     scoped<Tables["motorist_ring_groups"]["Row"][]>(deps.admin.from("motorist_ring_groups").select("*").eq("organization_id", organizationId).order("name"), "Skupiny"),
     scoped<Tables["motorist_ring_group_members"]["Row"][]>(deps.admin.from("motorist_ring_group_members").select("*").eq("organization_id", organizationId).order("position"), "Členovia skupín"),
     scoped<Tables["motorist_ring_plans"]["Row"][]>(deps.admin.from("motorist_ring_plans").select("*").eq("organization_id", organizationId).order("name"), "Plány zvonenia"),
@@ -858,6 +967,10 @@ export async function getRoutingDocument(deps: ConfigDeps, input: { organization
     scoped<Tables["motorist_business_hours_intervals"]["Row"][]>(deps.admin.from("motorist_business_hours_intervals").select("*").eq("organization_id", organizationId).order("weekday"), "Intervaly otváracích hodín"),
     scoped<Tables["motorist_business_hours_exceptions"]["Row"][]>(deps.admin.from("motorist_business_hours_exceptions").select("*").eq("organization_id", organizationId).order("date"), "Výnimky otváracích hodín"),
     scoped<Tables["motorist_pause_reasons"]["Row"][]>(deps.admin.from("motorist_pause_reasons").select("*").eq("organization_id", organizationId).order("sort_order"), "Dôvody pauzy"),
+    scoped<Array<Pick<Tables["motorist_operator_presence"]["Row"], "pause_reason_id">>>(
+      deps.admin.from("motorist_operator_presence").select("pause_reason_id").eq("organization_id", organizationId),
+      "Prítomnosť operátorov",
+    ),
     scoped<Tables["motorist_telephony_lines"]["Row"][]>(deps.admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).order("phone_number"), "Linky"),
     scoped<Tables["motorist_ivr_menus"]["Row"][]>(deps.admin.from("motorist_ivr_menus").select("*").eq("organization_id", organizationId).order("name"), "IVR menu"),
     scoped<Array<Pick<Tables["motorist_profiles"]["Row"], "id" | "display_name" | "role" | "active" | "access_status">>>(
@@ -914,6 +1027,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: { organization
 
   return {
     organizationId,
+    routingVersion: settings?.routing_version ?? 0,
     groups: groups.map((group) => ({
       id: group.id,
       name: group.name,
@@ -938,6 +1052,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: { organization
       exceptions: (exceptionsByHours.get(row.id) ?? []).sort((left, right) => left.date.localeCompare(right.date)),
     })),
     pauseReasons: pauseReasons.map((row) => ({ id: row.id, code: row.code, label: row.label, maxMinutes: row.max_minutes, sortOrder: row.sort_order, active: row.active })),
+    pauseReasonsInUse: [...new Set(presence.map((row) => row.pause_reason_id).filter((id): id is string => Boolean(id)))],
     lines: lines.map((line) => ({
       id: line.id,
       phoneNumber: line.phone_number,
@@ -1033,10 +1148,12 @@ export function isEmptyDiff(diff: CompactDiff): boolean {
   return diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0;
 }
 
+export type AuditOutcome = { written: boolean; failed: boolean };
+
 async function writeAudit(
   deps: ConfigDeps,
   input: { organizationId: string; actor: ConfigActor; action: string; entityId: string | null; before: Json | null; after: Json | null },
-): Promise<void> {
+): Promise<AuditOutcome> {
   const { error } = await deps.admin.from("motorist_audit_log").insert({
     organization_id: input.organizationId,
     actor_profile_id: input.actor.profileId,
@@ -1048,28 +1165,57 @@ async function writeAudit(
     after_payload: input.after,
   });
   // An audit failure must not roll back a configuration that is already applied;
-  // it is loud in the logs instead.
-  if (error) console.error("telephony config audit failed", { action: input.action, message: error.message });
+  // it is loud in the logs and reported back to the caller, which surfaces it
+  // as a warning next to the saved change.
+  if (error) {
+    console.error("telephony config audit failed", { action: input.action, message: error.message });
+    return { written: false, failed: true };
+  }
+  return { written: true, failed: false };
 }
+
+export const AUDIT_FAILED_WARNING = "Zmena sa uložila, ale nepodarilo sa ju zapísať do auditu. Nahlás to administrátorovi.";
 
 // ---------------------------------------------------------------------------
 // Transactional replace through the RPC
 // ---------------------------------------------------------------------------
 
+export const STALE_DOCUMENT_MESSAGE =
+  "Konfiguráciu medzitým zmenil niekto iný. Načítaj ju znova a uprav ju nad aktuálnym stavom, inak by si jeho zmeny prepísal.";
+
 const RPC_MESSAGES: Array<{ match: RegExp; message: string; status: number; code: string }> = [
+  { match: /stale_document/, message: STALE_DOCUMENT_MESSAGE, status: 409, code: "stale_document" },
   { match: /cross_organization/, message: "Konfigurácia odkazuje na záznam inej organizácie.", status: 403, code: "cross_organization" },
+  { match: /_id_required/, message: "Konfigurácia obsahuje záznam bez identifikátora. Načítaj ju znova.", status: 400, code: "id_required" },
   { match: /ring_group_in_use/, message: "Skupinu používa plán zvonenia, najprv ju odober z plánu.", status: 409, code: "ring_group_in_use" },
+  { match: /ring_group_empty/, message: "Skupina použitá v pláne zvonenia by ostala bez člena.", status: 409, code: "ring_group_empty" },
   { match: /ring_plan_in_use/, message: "Plán používa linka alebo IVR, najprv ho odpoj.", status: 409, code: "ring_plan_in_use" },
   { match: /business_hours_in_use/, message: "Otváracie hodiny používa linka, najprv ju prepni.", status: 409, code: "business_hours_in_use" },
+  { match: /pause_reason_in_use/, message: "Dôvod pauzy práve používa operátor na pauze, najprv ho prepni späť na dostupného.", status: 409, code: "pause_reason_in_use" },
+  { match: /position_gap/, message: "Poradie členov alebo krokov nie je súvislé. Načítaj konfiguráciu znova.", status: 409, code: "position_gap" },
   { match: /duplicate key|23505/, message: "Názov alebo kód sa už v organizácii používa.", status: 409, code: "duplicate" },
 ];
 
-async function applyReplace(deps: ConfigDeps, organizationId: string, document: Json): Promise<void> {
-  const { error } = await deps.admin.rpc("motorist_replace_ring_plan", { p_organization_id: organizationId, p_document: document });
+/**
+ * `expectedVersion` is the `routingVersion` the editor read. The RPC takes an
+ * advisory lock per organisation, compares it and re-asserts the structural
+ * invariants after the inserts, so two managers saving at once cannot commit a
+ * state the validators forbid. `null` skips the check (server-side callers that
+ * hold no document).
+ */
+async function applyReplace(deps: ConfigDeps, organizationId: string, document: Json, expectedVersion: number | null): Promise<void> {
+  const { error } = await deps.admin.rpc("motorist_replace_ring_plan", {
+    p_organization_id: organizationId,
+    p_document: document,
+    p_expected_version: expectedVersion,
+  });
   if (!error) return;
   const mapped = RPC_MESSAGES.find((entry) => entry.match.test(error.message));
   if (mapped) throw new ConfigServiceError(mapped.message, mapped.status, mapped.code);
-  throw new ConfigServiceError(`Konfiguráciu sa nepodarilo uložiť: ${error.message}`, 500, "config_write_failed");
+  // The raw text names columns and constraints; it belongs in the server log,
+  // not in the browser.
+  console.error("telephony config replace failed", { organizationId, message: error.message });
+  throw new ConfigServiceError("Konfiguráciu sa nepodarilo uložiť. Skús to znova, chyba je zapísaná v logu.", 500, "config_write_failed");
 }
 
 function groupsToRpc(groups: RingGroupInput[]): Json {
@@ -1137,14 +1283,38 @@ function reasonsToRpc(reasons: PauseReasonInput[]): Json {
 // Write operations
 // ---------------------------------------------------------------------------
 
-export type ReplaceResult = { document: RoutingDocument; diff: CompactDiff };
+export type ReplaceResult = { document: RoutingDocument; diff: CompactDiff; warning: string | null };
 
-export async function replaceRingGroups(deps: ConfigDeps, input: { organizationId: string; actor: ConfigActor; groups: RingGroupInput[] }): Promise<ReplaceResult> {
+/**
+ * A save that changed nothing writes no audit row: a `PUT` of an untouched
+ * document used to log `{ added: [], removed: [], changed: [] }` and dilute the
+ * trail. A failed insert is reported back so the caller can say so.
+ */
+async function auditReplace(
+  deps: ConfigDeps,
+  input: { organizationId: string; actor: ConfigActor; action: string; diff: CompactDiff },
+): Promise<string | null> {
+  if (isEmptyDiff(input.diff)) return null;
+  const outcome = await writeAudit(deps, {
+    organizationId: input.organizationId,
+    actor: input.actor,
+    action: input.action,
+    entityId: null,
+    before: null,
+    after: input.diff as unknown as Json,
+  });
+  return outcome.failed ? AUDIT_FAILED_WARNING : null;
+}
+
+export async function replaceRingGroups(
+  deps: ConfigDeps,
+  input: { organizationId: string; actor: ConfigActor; groups: RingGroupInput[]; expectedVersion?: number | null },
+): Promise<ReplaceResult> {
   const before = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
   const context = contextFromDocument(before);
   assertValid(validateRoutingReplace({ groups: input.groups }, context));
 
-  await applyReplace(deps, input.organizationId, { groups: groupsToRpc(input.groups) } as unknown as Json);
+  await applyReplace(deps, input.organizationId, { groups: groupsToRpc(input.groups) } as unknown as Json, input.expectedVersion ?? null);
 
   const after = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
   const diff = compactDiff(
@@ -1154,16 +1324,19 @@ export async function replaceRingGroups(deps: ConfigDeps, input: { organizationI
     (group) => group.name,
     (group) => ({ name: group.name, active: group.active, members: group.members.map((member) => [member.position, member.memberKind, member.profileId ?? member.externalNumber, member.ringSecs]) }),
   );
-  await writeAudit(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.ring_groups.replace", entityId: null, before: null, after: diff as unknown as Json });
-  return { document: after, diff };
+  const warning = await auditReplace(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.ring_groups.replace", diff });
+  return { document: after, diff, warning };
 }
 
-export async function replaceRingPlans(deps: ConfigDeps, input: { organizationId: string; actor: ConfigActor; plans: RingPlanInput[] }): Promise<ReplaceResult> {
+export async function replaceRingPlans(
+  deps: ConfigDeps,
+  input: { organizationId: string; actor: ConfigActor; plans: RingPlanInput[]; expectedVersion?: number | null },
+): Promise<ReplaceResult> {
   const before = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
   const context = contextFromDocument(before);
   assertValid(validateRoutingReplace({ plans: input.plans }, context));
 
-  await applyReplace(deps, input.organizationId, { plans: plansToRpc(input.plans) } as unknown as Json);
+  await applyReplace(deps, input.organizationId, { plans: plansToRpc(input.plans) } as unknown as Json, input.expectedVersion ?? null);
 
   const after = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
   const diff = compactDiff(
@@ -1173,15 +1346,18 @@ export async function replaceRingPlans(deps: ConfigDeps, input: { organizationId
     (plan) => plan.name,
     (plan) => ({ name: plan.name, active: plan.active, fallback: [plan.fallbackKind, plan.fallbackNumber], steps: plan.steps.map((step) => [step.stepIndex, step.ringGroupId, step.timeoutSecs, step.strategy]) }),
   );
-  await writeAudit(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.ring_plans.replace", entityId: null, before: null, after: diff as unknown as Json });
-  return { document: after, diff };
+  const warning = await auditReplace(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.ring_plans.replace", diff });
+  return { document: after, diff, warning };
 }
 
-export async function replaceBusinessHours(deps: ConfigDeps, input: { organizationId: string; actor: ConfigActor; businessHours: BusinessHoursInput[] }): Promise<ReplaceResult> {
+export async function replaceBusinessHours(
+  deps: ConfigDeps,
+  input: { organizationId: string; actor: ConfigActor; businessHours: BusinessHoursInput[]; expectedVersion?: number | null },
+): Promise<ReplaceResult> {
   const before = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
   assertValid(validateBusinessHours(input.businessHours, contextFromDocument(before)));
 
-  await applyReplace(deps, input.organizationId, { business_hours: hoursToRpc(input.businessHours) } as unknown as Json);
+  await applyReplace(deps, input.organizationId, { business_hours: hoursToRpc(input.businessHours) } as unknown as Json, input.expectedVersion ?? null);
 
   const after = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
   const diff = compactDiff(
@@ -1191,15 +1367,18 @@ export async function replaceBusinessHours(deps: ConfigDeps, input: { organizati
     (hours) => hours.name,
     (hours) => ({ name: hours.name, timezone: hours.timezone, active: hours.active, intervals: hours.intervals, exceptions: hours.exceptions }),
   );
-  await writeAudit(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.business_hours.replace", entityId: null, before: null, after: diff as unknown as Json });
-  return { document: after, diff };
+  const warning = await auditReplace(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.business_hours.replace", diff });
+  return { document: after, diff, warning };
 }
 
-export async function replacePauseReasons(deps: ConfigDeps, input: { organizationId: string; actor: ConfigActor; pauseReasons: PauseReasonInput[] }): Promise<ReplaceResult> {
+export async function replacePauseReasons(
+  deps: ConfigDeps,
+  input: { organizationId: string; actor: ConfigActor; pauseReasons: PauseReasonInput[]; expectedVersion?: number | null },
+): Promise<ReplaceResult> {
   const before = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
   assertValid(validatePauseReasons(input.pauseReasons));
 
-  await applyReplace(deps, input.organizationId, { pause_reasons: reasonsToRpc(input.pauseReasons) } as unknown as Json);
+  await applyReplace(deps, input.organizationId, { pause_reasons: reasonsToRpc(input.pauseReasons) } as unknown as Json, input.expectedVersion ?? null);
 
   const after = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
   const diff = compactDiff(
@@ -1209,8 +1388,8 @@ export async function replacePauseReasons(deps: ConfigDeps, input: { organizatio
     (reason) => reason.code,
     (reason) => ({ code: reason.code, label: reason.label, maxMinutes: reason.maxMinutes, sortOrder: reason.sortOrder, active: reason.active }),
   );
-  await writeAudit(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.pause_reasons.replace", entityId: null, before: null, after: diff as unknown as Json });
-  return { document: after, diff };
+  const warning = await auditReplace(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.pause_reasons.replace", diff });
+  return { document: after, diff, warning };
 }
 
 export async function updateTelephonyLine(
@@ -1272,10 +1451,37 @@ function pick(line: LineDoc, columns: string[]): Record<string, unknown> {
   return out;
 }
 
+/**
+ * Numbers already stored in the routing document that the given allowlist would
+ * reject: external ring-group members and `external_number` plan fallbacks.
+ *
+ * The allowlist is *not* consulted by the ring engine — `planRingStep` and
+ * `applyFallback` dial what the configuration says — so narrowing it while such
+ * a number is still stored would keep dialling (and billing) it while the admin
+ * believes it can no longer happen. Narrowing is therefore refused until the
+ * stored numbers are removed.
+ */
+export function destinationsOutsideAllowlist(document: RoutingDocument, allowlist: readonly string[]): Array<{ where: string; number: string }> {
+  const offenders: Array<{ where: string; number: string }> = [];
+  for (const group of document.groups) {
+    for (const member of group.members) {
+      if (member.memberKind !== "external_number") continue;
+      const normalized = normalizeE164(member.externalNumber);
+      if (normalized && !isDestinationAllowed(normalized, allowlist)) offenders.push({ where: `skupina „${group.name}"`, number: normalized });
+    }
+  }
+  for (const plan of document.plans) {
+    if (plan.fallbackKind !== "external_number") continue;
+    const normalized = normalizeE164(plan.fallbackNumber);
+    if (normalized && !isDestinationAllowed(normalized, allowlist)) offenders.push({ where: `plán „${plan.name}"`, number: normalized });
+  }
+  return offenders;
+}
+
 export async function updateTelephonySettings(
   deps: ConfigDeps,
   input: { organizationId: string; actor: ConfigActor; patch: TelephonySettingsPatchInput },
-): Promise<TelephonySettingsDoc> {
+): Promise<{ settings: TelephonySettingsDoc; warning: string | null }> {
   assertValid(validateSettingsPatch(input.patch));
 
   const existing = await deps.admin.from("motorist_telephony_settings").select("*").eq("organization_id", input.organizationId).maybeSingle();
@@ -1303,6 +1509,19 @@ export async function updateTelephonySettings(
     maxConcurrentLegs: input.patch.maxConcurrentLegs ?? current.maxConcurrentLegs,
   };
 
+  if (input.patch.destinationAllowlist !== undefined) {
+    const document = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: false });
+    const offenders = destinationsOutsideAllowlist(document, next.destinationAllowlist);
+    if (offenders.length > 0) {
+      throw new ConfigServiceError(
+        `Nový zoznam povolených cieľov by nepokryl čísla, ktoré sú stále v konfigurácii: ${offenders.map((entry) => `${entry.number} (${entry.where})`).join(", ")}. Najprv ich odstráň, inak by sa na ne volalo ďalej.`,
+        409,
+        "destination_in_use",
+        offenders.map((entry) => issue("destinationAllowlist", "destination_in_use", `${entry.number} — ${entry.where}`)),
+      );
+    }
+  }
+
   const { error } = await deps.admin.from("motorist_telephony_settings").upsert(
     {
       ...(existing.data ? { id: existing.data.id } : {}),
@@ -1320,8 +1539,9 @@ export async function updateTelephonySettings(
   if (error) throw new ConfigServiceError(`Nastavenia sa nepodarilo uložiť: ${error.message}`, 500, "config_write_failed");
 
   const changed = (Object.keys(next) as Array<keyof TelephonySettingsDoc>).filter((key) => JSON.stringify(current[key]) !== JSON.stringify(next[key]));
+  let warning: string | null = null;
   if (changed.length > 0) {
-    await writeAudit(deps, {
+    const outcome = await writeAudit(deps, {
       organizationId: input.organizationId,
       actor: input.actor,
       action: "telephony.settings.update",
@@ -1329,18 +1549,14 @@ export async function updateTelephonySettings(
       before: Object.fromEntries(changed.map((key) => [key, current[key]])) as unknown as Json,
       after: Object.fromEntries(changed.map((key) => [key, next[key]])) as unknown as Json,
     });
+    // The kill switches are the one place where a missing audit row matters
+    // enough to tell the admin about it in the response.
+    if (outcome.failed) warning = AUDIT_FAILED_WARNING;
   }
-  return next;
+  return { settings: next, warning };
 }
 
 export type OperatorSettingsDoc = NonNullable<OperatorDoc["settings"]>;
-
-export const DEFAULT_OPERATOR_SETTINGS: OperatorSettingsDoc = {
-  defaultFromLineId: null,
-  wrapUpSeconds: 30,
-  autoAnswerOutbound: true,
-  ringDeviceVolume: 80,
-};
 
 export async function updateOperatorTelephonySettings(
   deps: ConfigDeps,
@@ -1384,6 +1600,58 @@ export async function updateOperatorTelephonySettings(
     });
   }
   return next;
+}
+
+/**
+ * The `[id]` of an operator route must be an active profile of the caller's own
+ * organisation.
+ *
+ * `ensureOperatorCredential` filters its device read by organisation but takes
+ * the profile id on trust, so an unchecked id created a real (billable) Telnyx
+ * credential for a profile that does not exist, provisioned SIP for a
+ * deactivated user, and — with a profile from another organisation — upserted
+ * over that organisation's device row.
+ */
+export async function requireOperatorOfOrganization(
+  deps: ConfigDeps,
+  input: { organizationId: string; profileId: string },
+): Promise<{ profileId: string; displayName: string }> {
+  if (!UUID_PATTERN.test(input.profileId)) throw new ConfigServiceError("Neplatný identifikátor operátora.", 400, "operator_invalid");
+  const { data, error } = await deps.admin
+    .from("motorist_profiles")
+    .select("id, display_name, active")
+    .eq("organization_id", input.organizationId)
+    .eq("id", input.profileId)
+    .maybeSingle();
+  if (error) throw new ConfigServiceError(`Operátora sa nepodarilo načítať: ${error.message}`, 500, "config_read_failed");
+  if (!data || data.active === false) throw new ConfigServiceError("Operátor neexistuje alebo nie je aktívny v tejto organizácii.", 404, "operator_not_found");
+  return { profileId: data.id, displayName: data.display_name };
+}
+
+export const DEVICE_TAKEOVER_MESSAGE =
+  "Operátor má práve hovor. Zásah do jeho telefónu mu hovor ukončí — ak to naozaj chceš, potvrď prevzatie.";
+
+/**
+ * Both device actions revoke `device_session_id`, and the tab tears its WebRTC
+ * socket down at the next heartbeat, which drops the leg carrying the call.
+ * `issueWebphoneToken` already refuses the same takeover without an explicit
+ * confirmation; the manager-side actions must not be gentler.
+ */
+export async function assertOperatorNotOnCall(
+  deps: ConfigDeps,
+  input: { organizationId: string; profileId: string; takeover?: boolean },
+): Promise<void> {
+  if (input.takeover) return;
+  const { data, error } = await deps.admin
+    .from("motorist_operator_presence")
+    .select("status")
+    .eq("organization_id", input.organizationId)
+    .eq("profile_id", input.profileId)
+    .maybeSingle();
+  if (error) throw new ConfigServiceError(`Stav operátora sa nepodarilo načítať: ${error.message}`, 500, "config_read_failed");
+  if (data?.status === "on_call" || data?.status === "ringing") {
+    throw new ConfigServiceError(DEVICE_TAKEOVER_MESSAGE, 409, "operator_on_call");
+  }
 }
 
 /** Audit row for the credential/disconnect actions (the work itself is in `operator-devices.ts`). */

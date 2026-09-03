@@ -18,6 +18,7 @@ import {
   describeRingPlan,
   moveStepInPlans,
   planDraftsFromDocument,
+  planUsageNote,
   removeStep,
   ringPlanSeconds,
   ringPlansDirty,
@@ -58,14 +59,20 @@ export function RingPlanEditor({
     [document.lines],
   );
 
+  // The organisation fan-out cap is only visible to a manager/admin (the
+  // settings are stripped for a member), so the preview simply omits the note
+  // when it is unknown rather than guessing a number.
+  const maxRingFanout = document.settings?.maxRingFanout;
+
   const issues = useMemo(
     () =>
       validateRingPlanDrafts(plans, {
         groups: document.groups,
         destinationAllowlist: document.settings?.destinationAllowlist ?? FALLBACK_DESTINATION_ALLOWLIST,
         planIdsInUse,
+        maxRingFanout,
       }),
-    [document.groups, document.settings, planIdsInUse, plans],
+    [document.groups, document.settings, maxRingFanout, planIdsInUse, plans],
   );
 
   const issuesFor = useMemo(() => issuesByPath(issues), [issues]);
@@ -79,9 +86,10 @@ export function RingPlanEditor({
     setNotice(null);
     setServerIssues([]);
     try {
-      const response = await saveRoutingConfig("ringPlans", { plans: ringPlansPayload(plans) });
+      const response = await saveRoutingConfig("ringPlans", { plans: ringPlansPayload(plans), version: document.routingVersion });
       onSaved(response);
-      setNotice("Plány zvonenia sú uložené. Prebiehajúce hovory dozvonia podľa plánu, s ktorým začali.");
+      const saved = "Plány zvonenia sú uložené. Prebiehajúce hovory dozvonia podľa plánu, s ktorým začali.";
+      setNotice(response.warning ? `${saved} ${response.warning}` : saved);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Plány zvonenia sa nepodarilo uložiť.");
       if (caught instanceof ConfigRequestError) setServerIssues(caught.issues);
@@ -141,9 +149,25 @@ export function RingPlanEditor({
             </div>
 
             <p className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
-              {describeRingPlan(plan, document.groups)}
-              {plan.steps.length > 0 && <span className="mt-1 block text-xs text-blue-800">Najdlhšie zvonenie spolu: {ringPlanSeconds(plan, document.groups)} s.</span>}
+              {describeRingPlan(plan, document.groups, maxRingFanout)}
+              {plan.active && plan.steps.length > 0 && (
+                <span className="mt-1 block text-xs text-blue-800">Najdlhšie zvonenie spolu: {ringPlanSeconds(plan, document.groups)} s.</span>
+              )}
             </p>
+
+            {(() => {
+              const usage = planUsageNote(plan, document.lines);
+              if (!usage) return null;
+              return (
+                <p
+                  className={`mt-2 rounded-md border px-3 py-2 text-xs font-medium ${
+                    usage.tone === "warning" ? "border-amber-200 bg-amber-50 text-amber-900" : "border-zinc-200 bg-white text-zinc-600"
+                  }`}
+                >
+                  {usage.text}
+                </p>
+              );
+            })()}
 
             <SettingsIssueList issues={issuesFor.get(plan.key) ?? []} />
 

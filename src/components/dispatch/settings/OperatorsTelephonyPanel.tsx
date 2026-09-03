@@ -8,6 +8,7 @@ import type { RoutingDocument, ValidationIssue } from "@/server/telephony/config
 import {
   ConfigRequestError,
   disconnectOperatorDevice,
+  isOperatorOnCallError,
   loadRoutingConfig,
   rotateOperatorCredential,
   saveOperatorSettings,
@@ -15,10 +16,12 @@ import {
 } from "./config-client";
 import {
   AUTO_ANSWER_PENDING_NOTE,
+  RING_VOLUME_PENDING_NOTE,
   ROLE_LABELS,
   activeLines,
   confirmDisconnectDevice,
   confirmRotateCredential,
+  confirmTakeover,
   describeCallHandling,
   describeDevice,
   describeLineOption,
@@ -40,8 +43,10 @@ import { SettingsField, SettingsIssueList, SettingsNotice, SettingsSectionHeader
  * Per operator: which line their outbound calls leave from, how long their
  * wrap-up lasts, whether their phone answers its own outbound leg, and the
  * state of their browser phone with the two device actions — regenerate the SIP
- * credential and disconnect the phone. Neither action touches a call in
- * progress; they revoke the device session only.
+ * credential and disconnect the phone. Both device actions revoke the device
+ * session, and the operator's tab drops its WebRTC client at the next
+ * heartbeat, so a call in progress ends with it: the server answers 409
+ * `operator_on_call` and the panel asks a second time before it insists.
  *
  * Operators themselves are created in "Používatelia"; nothing here adds or
  * removes one.
@@ -111,13 +116,30 @@ export function OperatorsTelephonyPanel({
     }
   }
 
+  /**
+   * Runs a device action and, if the server refused because the operator is
+   * mid-call, asks the manager once more and retries with `takeover: true`.
+   */
+  async function withTakeover(draft: OperatorDraft, action: (takeover: boolean) => Promise<unknown>): Promise<boolean> {
+    try {
+      await action(false);
+      return true;
+    } catch (caught) {
+      if (!isOperatorOnCallError(caught)) throw caught;
+      if (typeof window === "undefined" || !window.confirm(confirmTakeover(draft.displayName, caught.message))) return false;
+      await action(true);
+      return true;
+    }
+  }
+
   async function rotateCredential(draft: OperatorDraft) {
     if (!canEdit || busyId) return;
     if (typeof window !== "undefined" && !window.confirm(confirmRotateCredential(draft.displayName))) return;
 
     begin(draft.profileId);
     try {
-      await rotateOperatorCredential(draft.profileId);
+      const done = await withTakeover(draft, (takeover) => rotateOperatorCredential(draft.profileId, { takeover }));
+      if (!done) return;
       await reloadDocument();
       setNotice(`Operátor ${draft.displayName} má nové prihlasovacie údaje. Telefón sa musí znova prihlásiť.`);
     } catch (caught) {
@@ -133,7 +155,8 @@ export function OperatorsTelephonyPanel({
 
     begin(draft.profileId);
     try {
-      await disconnectOperatorDevice(draft.profileId);
+      const done = await withTakeover(draft, (takeover) => disconnectOperatorDevice(draft.profileId, { takeover }));
+      if (!done) return;
       await reloadDocument();
       setNotice(`Telefón operátora ${draft.displayName} je odpojený.`);
     } catch (caught) {
@@ -154,7 +177,7 @@ export function OperatorsTelephonyPanel({
 
         {!canEdit && <SettingsNotice tone="info">Nastavenia vidíš len na čítanie. Zmeny môže uložiť manažér alebo admin.</SettingsNotice>}
         <SettingsNotice tone="info">
-          {"Operátorov pridáva a odoberá sekcia „Používatelia\". Tu sa nastavuje len telefonovanie. Odpojenie telefónu ani nové prihlasovacie údaje neukončia prebiehajúci hovor."}
+          {"Operátorov pridáva a odoberá sekcia „Používatelia\". Tu sa nastavuje len telefonovanie. Odpojenie telefónu aj nové prihlasovacie údaje odhlásia jeho okno — ak práve telefonuje, hovor sa preruší, a systém sa najprv spýta."}
         </SettingsNotice>
         {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
         {notice && <SettingsNotice tone="success">{notice}</SettingsNotice>}
@@ -214,7 +237,7 @@ export function OperatorsTelephonyPanel({
                   />
                 </SettingsField>
 
-                <SettingsField label="Hlasitosť zvonenia (%)" hint="Predvolená hlasitosť zvonenia v prehliadači.">
+                <SettingsField label="Hlasitosť zvonenia (%)" hint="Uloží sa do profilu; telefón ju zatiaľ nepoužíva.">
                   <input
                     className={settingsInputClass}
                     disabled={!canEdit || busy}
@@ -244,6 +267,7 @@ export function OperatorsTelephonyPanel({
               <p className="mt-2 text-xs text-zinc-600">{describeOutboundLine(draft, document.lines)}</p>
               <p className="mt-1 text-xs text-zinc-600">{describeCallHandling(draft)}</p>
               <p className="mt-1 text-xs text-zinc-500">{AUTO_ANSWER_PENDING_NOTE}</p>
+              <p className="mt-1 text-xs text-zinc-500">{RING_VOLUME_PENDING_NOTE}</p>
               {device && <p className="mt-1 text-xs text-zinc-600">{device.detail}</p>}
               <SettingsIssueList issues={issues} />
 
@@ -262,7 +286,7 @@ export function OperatorsTelephonyPanel({
                   type="button"
                   disabled={!canEdit || busy}
                   onClick={() => void rotateCredential(draft)}
-                  title="Vytvorí nový SIP účet operátora a odhlási jeho telefón."
+                  title="Vytvorí nový SIP účet operátora a odhlási jeho telefón; ak práve telefonuje, hovor sa preruší."
                   className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
                 >
                   <KeyRound size={15} aria-hidden="true" />
@@ -273,7 +297,7 @@ export function OperatorsTelephonyPanel({
                   type="button"
                   disabled={!canEdit || busy || !device?.provisioned}
                   onClick={() => void disconnect(draft)}
-                  title={device?.provisioned ? "Zruší registráciu telefónu operátora." : "Operátor nemá zaregistrovaný telefón."}
+                  title={device?.provisioned ? "Zruší registráciu telefónu operátora; ak práve telefonuje, hovor sa preruší." : "Operátor nemá zaregistrovaný telefón."}
                   className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-zinc-200 disabled:text-zinc-400"
                 >
                   <PhoneOff size={15} aria-hidden="true" />

@@ -13,8 +13,9 @@
  * live here.
  */
 
-import { COUNTRY_DIAL_PREFIXES } from "@/lib/telephony/destinations";
-import type { TelephonySettingsDoc, TelephonySettingsPatchInput, ValidationIssue } from "@/server/telephony/config-service";
+import { COUNTRY_DIAL_PREFIXES, isDestinationAllowed } from "@/lib/telephony/destinations";
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import type { RingGroupDoc, RingPlanDoc, TelephonySettingsDoc, TelephonySettingsPatchInput, ValidationIssue } from "@/server/telephony/config-service";
 
 /**
  * Mirrors the bounds of `validateSettingsPatch`. They are re-declared instead of
@@ -150,11 +151,61 @@ export function validateSettingsDraft(draft: SettingsDraft): ValidationIssue[] {
 export type SettingsWarning = { tone: "warning" | "error" | "info"; text: string };
 
 /**
+ * The routing rows the warnings have to cross-check: numbers already stored in
+ * the configuration against the allowlist, and group sizes against the fan-out
+ * cap.
+ */
+export type SettingsWarningContext = {
+  groups: readonly RingGroupDoc[];
+  plans: readonly RingPlanDoc[];
+};
+
+/**
+ * Numbers stored in the configuration that the drafted allowlist would reject.
+ *
+ * Mirrors `destinationsOutsideAllowlist` on the server, which refuses the save
+ * (409 `destination_in_use`): neither `planRingStep` nor `applyFallback` checks
+ * the allowlist, so such a number would keep being dialled — and billed — while
+ * the admin believed the opposite.
+ */
+export function storedDestinationsOutside(allowlist: readonly string[], context: SettingsWarningContext): string[] {
+  const offenders: string[] = [];
+  for (const group of context.groups) {
+    for (const member of group.members) {
+      if (member.memberKind !== "external_number") continue;
+      const normalized = normalizeE164(member.externalNumber);
+      if (normalized && !isDestinationAllowed(normalized, allowlist)) offenders.push(`${normalized} (skupina „${group.name}")`);
+    }
+  }
+  for (const plan of context.plans) {
+    if (plan.fallbackKind !== "external_number") continue;
+    const normalized = normalizeE164(plan.fallbackNumber);
+    if (normalized && !isDestinationAllowed(normalized, allowlist)) offenders.push(`${normalized} (plán „${plan.name}")`);
+  }
+  return offenders;
+}
+
+/** Groups an `all` step would truncate under the drafted fan-out cap. */
+export function groupsOverFanout(maxRingFanout: number, context: SettingsWarningContext): Array<{ name: string; members: number }> {
+  const groupsById = new Map(context.groups.map((group) => [group.id, group]));
+  const over = new Map<string, { name: string; members: number }>();
+  for (const plan of context.plans) {
+    for (const step of plan.steps) {
+      if (step.strategy !== "all") continue;
+      const group = groupsById.get(step.ringGroupId);
+      if (!group || group.members.length <= maxRingFanout) continue;
+      over.set(group.id, { name: group.name, members: group.members.length });
+    }
+  }
+  return [...over.values()];
+}
+
+/**
  * What is about to change, in words. Switching a kill switch **on** is the
  * dangerous direction: from that moment the system dials real numbers and sends
  * real SMS, and it must not be possible to do it by accident.
  */
-export function settingsWarnings(draft: SettingsDraft, original: TelephonySettingsDoc): SettingsWarning[] {
+export function settingsWarnings(draft: SettingsDraft, original: TelephonySettingsDoc, context: SettingsWarningContext = { groups: [], plans: [] }): SettingsWarning[] {
   const warnings: SettingsWarning[] = [];
 
   if (draft.liveCallsEnabled && !original.liveCallsEnabled) {
@@ -173,10 +224,35 @@ export function settingsWarnings(draft: SettingsDraft, original: TelephonySettin
   const next = parseAllowlist(draft.destinationAllowlist);
   const removed = parseAllowlist(original.destinationAllowlist.join(",")).filter((entry) => !next.includes(entry));
   if (removed.length > 0) {
-    warnings.push({ tone: "warning", text: `Odoberáš z povolených cieľov: ${removed.join(", ")}. Na takéto čísla sa už nedá volať ani ich pridať do skupiny zvonenia.` });
+    // Honest wording: the allowlist gates the operator's own dialling
+    // (`normalizeDestination` in call-actions) and SMS, not the ring engine.
+    warnings.push({
+      tone: "warning",
+      text: `Odoberáš z povolených cieľov: ${removed.join(", ")}. Operátor už na takéto číslo nezavolá ani ho nepridá do skupiny zvonenia; číslo, ktoré v konfigurácii ostane, by sa ale vytáčalo ďalej.`,
+    });
+  }
+  const stranded = storedDestinationsOutside(next, context);
+  if (stranded.length > 0) {
+    warnings.push({
+      tone: "error",
+      text: `Tieto čísla sú stále v konfigurácii a nový zoznam ich nepokrýva: ${stranded.join(", ")}. Uloženie server odmietne — najprv ich odstráň zo skupiny alebo z plánu.`,
+    });
   }
   if (next.includes("*")) {
     warnings.push({ tone: "warning", text: "Hviezdička povoľuje volanie do celého sveta vrátane drahých destinácií. Radšej vymenuj krajiny." });
+  }
+
+  const fanout = parseCount(draft.maxRingFanout);
+  if (Number.isInteger(fanout) && fanout > 0) {
+    const truncated = groupsOverFanout(fanout, context);
+    if (truncated.length > 0) {
+      warnings.push({
+        tone: "warning",
+        text: `Pri limite ${fanout} sa v krokoch „všetkým naraz" nedostane na všetkých členov skupín: ${truncated
+          .map((group) => `${group.name} (${group.members})`)
+          .join(", ")}.`,
+      });
+    }
   }
 
   return warnings;

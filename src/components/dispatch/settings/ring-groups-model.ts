@@ -284,6 +284,45 @@ export function groupUsageNote(group: GroupDraft, plans: readonly RingPlanDoc[])
     : `Skupina je vypnutá, v týchto plánoch sa krok preskočí: ${list}.`;
 }
 
+/** Steps that use this group, with the strategy each of them rings with. */
+export function stepsUsingGroup(groupId: string | null, plans: readonly RingPlanDoc[]): Array<{ planName: string; strategy: string }> {
+  if (!groupId) return [];
+  return plans.flatMap((plan) => plan.steps.filter((step) => step.ringGroupId === groupId).map((step) => ({ planName: plan.name, strategy: step.strategy })));
+}
+
+/**
+ * Amber note when the group has more members than the organisation lets ring at
+ * once.
+ *
+ * `planRingStep` sorts by position, keeps `eligible.slice(0, maxFanout)` and
+ * marks the rest `fanout`; for the `all` strategy `remainingAfter` is 0, so the
+ * step is finished after that single fan-out and the members past the cap are
+ * never dialled in it. "Zvoní všetkým" would be a lie.
+ */
+export function groupFanoutNote(group: GroupDraft, plans: readonly RingPlanDoc[], maxRingFanout: number | undefined): string | null {
+  if (!maxRingFanout || maxRingFanout <= 0) return null;
+  if (group.members.length <= maxRingFanout) return null;
+  const usedByAll = stepsUsingGroup(group.id, plans).some((step) => step.strategy === "all");
+  if (!usedByAll) return null;
+  return `Skupina má ${group.members.length} členov, ale organizácia dovolí zvoniť naraz najviac ${maxRingFanout}. V kroku „všetkým naraz" sa na zvyšných v tomto kroku nedostane.`;
+}
+
+/**
+ * Amber note when the per-member ring time cannot do anything.
+ *
+ * `planRingStep` builds every attempt with
+ * `ringSecs: step.strategy === "ordered" ? member.ringSecs : step.timeoutSecs`,
+ * so in an `all` step the member's own time is dropped and the phone rings for
+ * the step timeout.
+ */
+export function memberRingSecsNote(group: GroupDraft, plans: readonly RingPlanDoc[]): string | null {
+  const steps = stepsUsingGroup(group.id, plans);
+  if (steps.length === 0) return null;
+  if (steps.some((step) => step.strategy === "ordered")) return null;
+  if (!group.members.some((member) => member.ringSecs.trim())) return null;
+  return `Vlastný čas zvonenia člena sa použije len v kroku „postupne". Túto skupinu používajú len kroky „všetkým naraz", kde platí čas kroku.`;
+}
+
 /** Groups the issues by the draft key they belong to (`""` = whole form). */
 export function issuesByPath(issues: readonly ValidationIssue[]): Map<string, ValidationIssue[]> {
   const map = new Map<string, ValidationIssue[]>();

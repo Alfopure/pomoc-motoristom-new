@@ -5,8 +5,10 @@ import type { RingGroupDoc, RingPlanDoc } from "@/server/telephony/config-servic
 import {
   addMember,
   groupDraftsFromDocument,
+  groupFanoutNote,
   groupUsageNote,
   issuesByPath,
+  memberRingSecsNote,
   moveMember,
   moveMemberInGroups,
   newGroupDraft,
@@ -195,5 +197,28 @@ describe("groupUsageNote", () => {
     const [draft] = groupDraftsFromDocument([group()]);
     expect(groupUsageNote(draft, [])).toBeNull();
     expect(groupUsageNote({ ...draft, active: false }, [])).toBe("Skupina je vypnutá a zatiaľ ju nepoužíva žiadny plán.");
+  });
+});
+
+describe("notes about what the ring engine really does", () => {
+  it("warns when a group is bigger than the organisation fan-out cap", () => {
+    const [draft] = groupDraftsFromDocument([group()]);
+    const usedByAll = [plan()];
+    expect(groupFanoutNote(draft, usedByAll, 8)).toBeNull();
+    expect(groupFanoutNote(draft, usedByAll, 1)).toContain("najviac 1");
+    // An `ordered` step dials one member at a time, so the cap never truncates it.
+    const orderedPlan: RingPlanDoc = { ...plan(), steps: plan().steps.map((step) => ({ ...step, strategy: "ordered" as const })) };
+    expect(groupFanoutNote(draft, [orderedPlan], 1)).toBeNull();
+    expect(groupFanoutNote(draft, [], 1)).toBeNull();
+  });
+
+  it("warns that a per-member ring time is inert in an `all` step", () => {
+    const [draft] = groupDraftsFromDocument([group()]);
+    const withTime = { ...draft, members: draft.members.map((member, index) => (index === 0 ? { ...member, ringSecs: "60" } : member)) };
+    const withoutTime = { ...draft, members: draft.members.map((member) => ({ ...member, ringSecs: "" })) };
+    expect(memberRingSecsNote(withoutTime, [plan()])).toBeNull();
+    expect(memberRingSecsNote(withTime, [plan()])).toContain("postupne");
+    const orderedPlan: RingPlanDoc = { ...plan(), steps: plan().steps.map((step) => ({ ...step, strategy: "ordered" as const })) };
+    expect(memberRingSecsNote(withTime, [orderedPlan])).toBeNull();
   });
 });

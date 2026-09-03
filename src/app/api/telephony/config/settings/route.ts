@@ -18,8 +18,8 @@ export async function PATCH(request: Request) {
     roles: CONFIG_ADMIN_ROLES,
     fallback: "Nastavenia telefónie sa nepodarilo uložiť.",
     run: async ({ deps, configActor, body, organizationId }) => {
-      const settings = await updateTelephonySettings(deps, { organizationId, actor: configActor, patch: parseSettingsPatch(body.patch ?? body) });
-      return Response.json({ ok: true, settings });
+      const { settings, warning } = await updateTelephonySettings(deps, { organizationId, actor: configActor, patch: parseSettingsPatch(body.patch ?? body) });
+      return Response.json({ ok: true, settings, ...(warning ? { warning } : {}) });
     },
   });
 }

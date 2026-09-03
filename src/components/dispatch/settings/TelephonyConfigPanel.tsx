@@ -154,7 +154,13 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
         <OperatorsTelephonyPanel key={`operators-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />
       )}
       {tab === "settings" && state.canManageSettings && state.document.settings && (
-        <TelephonySettingsPanel key={`settings-${version}`} canEdit={state.canManageSettings} settings={state.document.settings} onSaved={applySettings} />
+        <TelephonySettingsPanel
+          key={`settings-${version}`}
+          canEdit={state.canManageSettings}
+          document={state.document}
+          settings={state.document.settings}
+          onSaved={applySettings}
+        />
       )}
     </div>
   );

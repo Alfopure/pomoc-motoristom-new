@@ -27,6 +27,8 @@ export type RoutingConfigResponse = {
   document: RoutingDocument;
   canEdit: boolean;
   canManageSettings: boolean;
+  /** Non-fatal note about a save that landed (today: the audit row was lost). */
+  warning?: string;
 };
 
 export class ConfigRequestError extends Error {
@@ -43,7 +45,7 @@ export class ConfigRequestError extends Error {
   }
 }
 
-type ErrorBody = { error?: string; code?: string; issues?: ValidationIssue[] };
+type ErrorBody = { error?: string; code?: string; issues?: ValidationIssue[]; warning?: string };
 
 type Runtime = Parameters<typeof telephonyJson>[2];
 
@@ -54,7 +56,12 @@ function unwrap(result: { ok: boolean; status: number; body: (RoutingConfigRespo
     const body = (result.body ?? {}) as ErrorBody;
     throw new ConfigRequestError(body.error ?? fallback, result.status, body.code ?? "config_failed", body.issues ?? []);
   }
-  return { document: result.body.document, canEdit: Boolean(result.body.canEdit), canManageSettings: Boolean(result.body.canManageSettings) };
+  return {
+    document: result.body.document,
+    canEdit: Boolean(result.body.canEdit),
+    canManageSettings: Boolean(result.body.canManageSettings),
+    ...(typeof result.body.warning === "string" ? { warning: result.body.warning } : {}),
+  };
 }
 
 export async function loadRoutingConfig(section: TelephonyConfigSection, options: ConfigRequestOptions = {}): Promise<RoutingConfigResponse> {
@@ -92,8 +99,11 @@ export async function saveRoutingConfig(
  * never widens its response). The panel merges the result into the document it
  * already holds.
  */
-export async function saveTelephonySettings(patch: Record<string, unknown>, options: ConfigRequestOptions = {}): Promise<TelephonySettingsDoc> {
-  const result = await telephonyJson<{ ok?: boolean; settings?: TelephonySettingsDoc } & ErrorBody>(
+export async function saveTelephonySettings(
+  patch: Record<string, unknown>,
+  options: ConfigRequestOptions = {},
+): Promise<{ settings: TelephonySettingsDoc; warning?: string }> {
+  const result = await telephonyJson<{ ok?: boolean; settings?: TelephonySettingsDoc; warning?: string } & ErrorBody>(
     TELEPHONY_CONFIG_ENDPOINTS.settings,
     {
       method: "PATCH",
@@ -109,7 +119,7 @@ export async function saveTelephonySettings(patch: Record<string, unknown>, opti
     const body = (result.body ?? {}) as ErrorBody;
     throw new ConfigRequestError(body.error ?? "Nastavenia telefónie sa nepodarilo uložiť.", result.status, body.code ?? "config_failed", body.issues ?? []);
   }
-  return result.body.settings;
+  return { settings: result.body.settings, ...(typeof result.body.warning === "string" ? { warning: result.body.warning } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -166,24 +176,39 @@ export async function saveOperatorSettings(profileId: string, patch: Record<stri
  * mints a new SIP credential and revokes the live browser session, because the
  * token minted from the old credential stops working.
  */
-export async function rotateOperatorCredential(profileId: string, options: ConfigRequestOptions = {}): Promise<OperatorDeviceResult | null> {
+export async function rotateOperatorCredential(
+  profileId: string,
+  options: ConfigRequestOptions & { takeover?: boolean } = {},
+): Promise<OperatorDeviceResult | null> {
   const body = await operatorRequest<{ device?: OperatorDeviceResult } & ErrorBody>(
     TELEPHONY_OPERATOR_ENDPOINTS.credential(profileId),
-    { method: "POST", body: { rotate: true } },
+    { method: "POST", body: { rotate: true, ...(options.takeover ? { takeover: true } : {}) } },
     options,
     "Prihlasovacie údaje telefónu sa nepodarilo vytvoriť.",
   );
   return body.device ?? null;
 }
 
-/** `POST /api/telephony/operators/[id]/disconnect`: the phone, not the call. */
-export async function disconnectOperatorDevice(profileId: string, options: ConfigRequestOptions = {}): Promise<void> {
+/**
+ * `POST /api/telephony/operators/[id]/disconnect`.
+ *
+ * The revoked device session makes the operator's tab drop its WebRTC client at
+ * the next heartbeat, so a call in progress ends with it. The server answers
+ * 409 `operator_on_call` while the operator is on a call; `takeover: true` is
+ * the manager's explicit confirmation.
+ */
+export async function disconnectOperatorDevice(profileId: string, options: ConfigRequestOptions & { takeover?: boolean } = {}): Promise<void> {
   await operatorRequest<ErrorBody>(
     TELEPHONY_OPERATOR_ENDPOINTS.disconnect(profileId),
-    { method: "POST", body: {} },
+    { method: "POST", body: options.takeover ? { takeover: true } : {} },
     options,
     "Telefón sa nepodarilo odpojiť.",
   );
+}
+
+/** `true` when the server refused because the operator is mid-call. */
+export function isOperatorOnCallError(error: unknown): error is ConfigRequestError {
+  return error instanceof ConfigRequestError && error.code === "operator_on_call";
 }
 
 /** Message shown above the form when a request failed as a whole. */

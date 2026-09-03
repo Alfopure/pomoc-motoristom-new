@@ -158,7 +158,9 @@ export function addInterval(schedules: readonly ScheduleDraft[], scheduleKey: st
 }
 
 function laterOf(left: string, right: string): string {
-  return left >= right ? "23:59" : right;
+  // `24:00` and not `23:59`: the evaluator is `minutes < closes`, so 23:59 would
+  // leave the last minute of the day after-hours.
+  return left >= right ? MIDNIGHT_CLOSE : right;
 }
 
 export function updateInterval(
@@ -285,6 +287,16 @@ export function businessHoursDirty(schedules: readonly ScheduleDraft[], original
 // ---------------------------------------------------------------------------
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
+/**
+ * A closing time may also be `24:00` — "open until midnight".
+ *
+ * `withinAny` compares `minutes < closes`, so `23:59` leaves the last minute of
+ * the day after-hours; on a 24/7 assistance line that is one silently closed
+ * minute every day. Postgres `time` and `parseClock` both accept `24:00`, and
+ * `config-service.ts` mirrors this pattern.
+ */
+const CLOSE_TIME_PATTERN = /^(([01]\d|2[0-3]):([0-5]\d)|24:00)$/;
+export const MIDNIGHT_CLOSE = "24:00";
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 function issue(path: string, code: string, message: string): ValidationIssue {
@@ -317,8 +329,8 @@ export function validateScheduleDrafts(schedules: readonly ScheduleDraft[], cont
       const intervals = schedule.days.get(weekday) ?? [];
       const seen = new Set<string>();
       for (const interval of intervals) {
-        if (!TIME_PATTERN.test(interval.opens) || !TIME_PATTERN.test(interval.closes)) {
-          issues.push(issue(interval.key, "time_invalid", `${label}: čas musí byť v tvare HH:MM.`));
+        if (!TIME_PATTERN.test(interval.opens) || !CLOSE_TIME_PATTERN.test(interval.closes)) {
+          issues.push(issue(interval.key, "time_invalid", `${label}: čas musí byť v tvare HH:MM (zatvorenie smie byť aj ${MIDNIGHT_CLOSE}).`));
           continue;
         }
         if (interval.opens >= interval.closes) {
@@ -345,8 +357,8 @@ export function validateScheduleDrafts(schedules: readonly ScheduleDraft[], cont
         continue;
       }
       for (const interval of exception.intervals) {
-        if (!TIME_PATTERN.test(interval.opens) || !TIME_PATTERN.test(interval.closes) || interval.opens >= interval.closes) {
-          issues.push(issue(interval.key, "time_invalid", "Interval výnimky musí byť platný (HH:MM, otvorenie pred zatvorením)."));
+        if (!TIME_PATTERN.test(interval.opens) || !CLOSE_TIME_PATTERN.test(interval.closes) || interval.opens >= interval.closes) {
+          issues.push(issue(interval.key, "time_invalid", `Interval výnimky musí byť platný (HH:MM, otvorenie pred zatvorením; zatvorenie smie byť aj ${MIDNIGHT_CLOSE}).`));
         }
       }
     }
@@ -408,7 +420,7 @@ export function todayInSchedule(schedule: ScheduleDraft, at: Date): string {
 /** One line per weekday: `Pondelok: 07:00 – 12:00, 12:30 – 19:00` / `Zatvorené`. */
 export function describeWeek(schedule: ScheduleDraft): Array<{ weekday: number; label: string; text: string; open: boolean }> {
   return WEEKDAYS.map(({ weekday, label }) => {
-    const intervals = (schedule.days.get(weekday) ?? []).filter((interval) => TIME_PATTERN.test(interval.opens) && TIME_PATTERN.test(interval.closes));
+    const intervals = (schedule.days.get(weekday) ?? []).filter((interval) => TIME_PATTERN.test(interval.opens) && CLOSE_TIME_PATTERN.test(interval.closes));
     if (intervals.length === 0) return { weekday, label, text: "Zatvorené", open: false };
     const text = [...intervals]
       .sort((left, right) => left.opens.localeCompare(right.opens))
@@ -451,9 +463,25 @@ export function describeNow(schedule: ScheduleDraft, at: Date): string {
 /** Short label for one exception row. */
 export function describeException(exception: ExceptionDraft): string {
   if (exception.closed) return "Zatvorené celý deň";
-  const valid = exception.intervals.filter((interval) => TIME_PATTERN.test(interval.opens) && TIME_PATTERN.test(interval.closes));
+  const valid = exception.intervals.filter((interval) => TIME_PATTERN.test(interval.opens) && CLOSE_TIME_PATTERN.test(interval.closes));
   if (valid.length === 0) return "Otvorené (bez intervalu)";
   return `Otvorené ${valid.map((interval) => `${interval.opens} – ${interval.closes}`).join(", ")}`;
+}
+
+/** Replaces one weekday with a single `00:00 – 24:00` interval ("otvorené nonstop"). */
+export function setDayAroundTheClock(schedules: readonly ScheduleDraft[], scheduleKey: string, weekday: number): ScheduleDraft[] {
+  return mapSchedule(schedules, scheduleKey, (schedule) => withDays(schedule, weekday, () => [newIntervalDraft("00:00", MIDNIGHT_CLOSE)]));
+}
+
+/** Empties one weekday (the counterpart of "otvorené nonstop"). */
+export function clearDay(schedules: readonly ScheduleDraft[], scheduleKey: string, weekday: number): ScheduleDraft[] {
+  return mapSchedule(schedules, scheduleKey, (schedule) => withDays(schedule, weekday, () => []));
+}
+
+/** `true` when the weekday is a single interval covering the whole day. */
+export function isAroundTheClock(schedule: ScheduleDraft, weekday: number): boolean {
+  const intervals = schedule.days.get(weekday) ?? [];
+  return intervals.length === 1 && intervals[0].opens === "00:00" && intervals[0].closes === MIDNIGHT_CLOSE;
 }
 
 /** Names of the lines that use a saved schedule; the editor shows it as a note. */
