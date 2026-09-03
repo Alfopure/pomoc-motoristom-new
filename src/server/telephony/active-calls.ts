@@ -30,7 +30,24 @@ export type ActiveCallLegView = {
   fromNumber: string | null;
   answeredAt: string | null;
   bridgedAt: string | null;
+  /** `client_state.intent` (`party` marks a third party added to the conference). */
+  intent: string | null;
+  /** Conference mute flag written by the mute/unmute action. */
+  muted: boolean;
+  /** Telnyx `supervisor_role` of a supervisor leg (`monitor` / `whisper` / `barge`). */
+  supervisorMode: string | null;
 };
+
+function legIntentOf(leg: LegRow): string | null {
+  const state = leg.client_state;
+  if (!state || typeof state !== "object" || Array.isArray(state)) return null;
+  const intent = (state as Record<string, unknown>).intent;
+  return typeof intent === "string" ? intent : null;
+}
+
+function legMetaOf(leg: LegRow): Record<string, unknown> {
+  return leg.metadata && typeof leg.metadata === "object" && !Array.isArray(leg.metadata) ? (leg.metadata as Record<string, unknown>) : {};
+}
 
 export type ActiveCallView = {
   sessionId: string;
@@ -137,6 +154,7 @@ export async function loadActiveCalls(
   const legsBySession = new Map<string, ActiveCallLegView[]>();
   for (const leg of legs) {
     const list = legsBySession.get(leg.session_id) ?? [];
+    const meta = legMetaOf(leg);
     list.push({
       id: leg.id,
       role: leg.role,
@@ -146,6 +164,9 @@ export async function loadActiveCalls(
       fromNumber: leg.from_number,
       answeredAt: leg.answered_at,
       bridgedAt: leg.bridged_at,
+      intent: legIntentOf(leg),
+      muted: meta.muted === true,
+      supervisorMode: typeof meta.supervisor_mode === "string" ? meta.supervisor_mode : null,
     });
     legsBySession.set(leg.session_id, list);
   }

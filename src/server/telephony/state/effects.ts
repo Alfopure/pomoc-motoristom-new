@@ -563,8 +563,25 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       return { skipped: false, detail: { conferenceId: conference.id } };
     }
     case "conference_join":
-      await telnyx.conferenceAction(requireConference(ctx), "join", { call_control_id: resolveLeg(ctx, command.leg), commandId: command.commandId });
-      return { skipped: false };
+      // Verified against the published Call Control API (join a conference):
+      // `supervisor_role` accepts `barge | monitor | none | whisper` and
+      // `whisper_call_control_ids` is the array of legs a whispering supervisor
+      // is heard by. Both are omitted for an ordinary participant.
+      await telnyx.conferenceAction(requireConference(ctx), "join", {
+        call_control_id: resolveLeg(ctx, command.leg),
+        supervisor_role: command.supervisorRole,
+        whisper_call_control_ids: command.whisper?.map((leg) => resolveLeg(ctx, leg)),
+        commandId: command.commandId,
+      });
+      return { skipped: false, ...(command.supervisorRole ? { detail: { supervisorRole: command.supervisorRole } } : {}) };
+    case "conference_update":
+      await telnyx.conferenceAction(requireConference(ctx), "update", {
+        call_control_id: resolveLeg(ctx, command.leg),
+        supervisor_role: command.supervisorRole,
+        whisper_call_control_ids: command.whisper?.map((leg) => resolveLeg(ctx, leg)),
+        commandId: command.commandId,
+      });
+      return { skipped: false, detail: { supervisorRole: command.supervisorRole } };
     case "conference_leave":
       await telnyx.conferenceAction(requireConference(ctx), "leave", { call_control_id: resolveLeg(ctx, command.leg), commandId: command.commandId });
       return { skipped: false };
@@ -579,6 +596,15 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
     }
     case "conference_unhold":
       await telnyx.conferenceAction(requireConference(ctx), "unhold", { call_control_ids: command.legs.map((leg) => resolveLeg(ctx, leg)), commandId: command.commandId });
+      return { skipped: false };
+    case "conference_mute":
+    case "conference_unmute":
+      // `mute` / `unmute` take `call_control_ids` (an array) and, like the other
+      // participant commands, do not declare `command_id` in the Telnyx schema.
+      await telnyx.conferenceAction(requireConference(ctx), command.kind === "conference_mute" ? "mute" : "unmute", {
+        call_control_ids: command.legs.map((leg) => resolveLeg(ctx, leg)),
+        commandId: command.commandId,
+      });
       return { skipped: false };
     case "ring_fanout":
       return executeRingFanout(deps, ctx, command);

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import type { ActiveCallsSnapshot } from "@/server/telephony/active-calls";
+import type { SupervisorMode as ServerSupervisorMode } from "@/server/telephony/state/types";
 
+import { isSupervisorMode, SUPERVISOR_MODE_ORDER, type SupervisorMode } from "./supervisor-mode";
 import {
   buildPhoneBarModel,
+  callParticipants,
   callCenterCallFromActive,
   callCenterStatusFor,
   counterpartNumber,
@@ -77,6 +80,68 @@ describe("snapshot contract", () => {
     const fromServer = {} as ActiveCallsSnapshot;
     const asClient: ActiveCallsPayload = fromServer;
     expect(typeof asClient).toBe("object");
+  });
+});
+
+function leg(overrides: Partial<ActiveCallPayload["legs"][number]> = {}): ActiveCallPayload["legs"][number] {
+  return {
+    id: "leg-1",
+    role: "operator",
+    profileId: ME,
+    state: "bridged",
+    toNumber: "+421905000111",
+    fromNumber: null,
+    answeredAt: "2026-09-03T08:00:20.000Z",
+    bridgedAt: "2026-09-03T08:00:20.000Z",
+    intent: null,
+    muted: false,
+    supervisorMode: null,
+    ...overrides,
+  };
+}
+
+describe("supervision contract", () => {
+  it("shares one supervisor-mode vocabulary with the server", () => {
+    // The console must not import server modules at runtime; the reducer
+    // re-exports this very type, so the assignment is the compile-time proof.
+    const fromServer = "whisper" as ServerSupervisorMode;
+    const asClient: SupervisorMode = fromServer;
+    expect(SUPERVISOR_MODE_ORDER).toEqual(["monitor", "whisper", "barge"]);
+    expect(SUPERVISOR_MODE_ORDER).toContain(asClient);
+    expect(isSupervisorMode("spy")).toBe(false);
+  });
+});
+
+describe("callParticipants", () => {
+  it("orders the caller first and marks only added parties controllable", () => {
+    const participants = callParticipants(
+      call({
+        legs: [
+          leg({ id: "leg-party", role: "external", profileId: null, intent: "party", toNumber: "+421900000000", muted: true }),
+          leg({ id: "leg-caller", role: "customer", profileId: null, toNumber: null }),
+          leg({ id: "leg-me" }),
+        ],
+      }),
+      { actorProfileId: ME, operatorName: (id) => (id === ME ? "Jana" : undefined) },
+    );
+
+    expect(participants.map((participant) => [participant.legId, participant.kind, participant.controllable])).toEqual([
+      ["leg-caller", "caller", false],
+      ["leg-me", "operator", false],
+      ["leg-party", "party", true],
+    ]);
+    expect(participants[1]).toMatchObject({ name: "Jana", self: true });
+    expect(participants[2]).toMatchObject({ muted: true, name: "+421 900 000 000" });
+    // The caller's number comes from the call, not from the leg row.
+    expect(participants[0].name).toBe("+421 900 111 222");
+  });
+
+  it("describes a supervisor by their mode and never makes them controllable", () => {
+    const participants = callParticipants(
+      call({ legs: [leg({ id: "leg-sup", role: "supervisor", profileId: "profile-boss", supervisorMode: "whisper" })] }),
+      { actorProfileId: ME, operatorName: () => "Manažér" },
+    );
+    expect(participants).toEqual([expect.objectContaining({ kind: "supervisor", supervisorMode: "whisper", controllable: false, name: "Manažér" })]);
   });
 });
 
@@ -255,5 +320,34 @@ describe("PhoneBar model", () => {
       payload({ calls: [call({ answeredAt: null, answeredByProfileId: null, offeredProfileIds: [ME] })] }),
     );
     expect(ringing.offers[0].timerSince).toBe("2026-09-03T08:00:00.000Z");
+  });
+});
+
+describe("supervision in the phone bar model", () => {
+  it("lists other operators' live calls as supervision targets", () => {
+    const mine = call({ sessionId: "sess-mine", answeredByProfileId: ME });
+    const theirs = call({ sessionId: "sess-theirs", answeredByProfileId: COLLEAGUE, legs: [leg({ id: "leg-them", profileId: COLLEAGUE })] });
+    const model = buildPhoneBarModel(payload({ calls: [mine, theirs] }), { operatorName: () => "Peter" });
+
+    expect(model.others.map((entry) => entry.sessionId)).toEqual(["sess-theirs"]);
+    expect(model.otherActiveCount).toBe(1);
+    expect(model.others[0].participants[0]).toMatchObject({ kind: "operator", name: "Peter" });
+    expect(model.supervising).toBeNull();
+  });
+
+  it("reports the supervisor's own leg with its mode, and while it is still ringing", () => {
+    const theirs = call({
+      sessionId: "sess-theirs",
+      answeredByProfileId: COLLEAGUE,
+      legs: [leg({ id: "leg-them", profileId: COLLEAGUE }), leg({ id: "leg-sup", role: "supervisor", profileId: ME, supervisorMode: "monitor" })],
+    });
+    expect(buildPhoneBarModel(payload({ calls: [theirs] })).supervising).toEqual({ sessionId: "sess-theirs", mode: "monitor", pending: false });
+
+    const ringing = call({
+      sessionId: "sess-theirs",
+      answeredByProfileId: COLLEAGUE,
+      legs: [leg({ id: "leg-sup", role: "supervisor", profileId: ME, answeredAt: null, supervisorMode: null })],
+    });
+    expect(buildPhoneBarModel(payload({ calls: [ringing] })).supervising).toEqual({ sessionId: "sess-theirs", mode: null, pending: true });
   });
 });

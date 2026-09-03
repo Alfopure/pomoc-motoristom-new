@@ -17,6 +17,21 @@ export type TransferTargetOption = {
 
 export type TransferRequest = { profileId?: string; number?: string };
 
+/** Which action the picker feeds: blind transfer, attended consult or "add a third party". */
+export type TransferPickerMode = "transfer" | "consult" | "add-party";
+
+const PICKER_TITLES: Record<TransferPickerMode, string> = {
+  transfer: "Prepojiť hovor",
+  consult: "Konzultovať s",
+  "add-party": "Pridať do hovoru",
+};
+
+const PICKER_SUBMIT_LABELS: Record<TransferPickerMode, string> = {
+  transfer: "Prepojiť",
+  consult: "Volať",
+  "add-party": "Pridať",
+};
+
 const STATUS_LABELS: Record<string, string> = {
   available: "Dostupný",
   ringing: "Zvoní",
@@ -42,7 +57,7 @@ export function CallTransferPicker({
   onSubmit,
 }: {
   sessionId: string;
-  mode: "transfer" | "consult";
+  mode: TransferPickerMode;
   busy: boolean;
   onCancel: () => void;
   onSubmit: (target: TransferRequest) => void;
@@ -77,7 +92,7 @@ export function CallTransferPicker({
   }, [sessionId]);
 
   const externalValid = isDialablePhoneInput(externalNumber);
-  const title = mode === "transfer" ? "Prepojiť hovor" : "Konzultovať s";
+  const title = PICKER_TITLES[mode];
 
   return (
     <section
@@ -156,7 +171,7 @@ export function CallTransferPicker({
             className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-zinc-950 px-2.5 text-xs font-bold text-white transition hover:bg-zinc-800 disabled:bg-zinc-300 disabled:text-zinc-600"
           >
             {busy ? <Loader2 size={13} className="motion-safe:animate-spin" aria-hidden="true" /> : <PhoneForwarded size={13} aria-hidden="true" />}
-            {mode === "transfer" ? "Prepojiť" : "Volať"}
+            {PICKER_SUBMIT_LABELS[mode]}
           </button>
         </div>
         {externalNumber.trim() && !externalValid && (

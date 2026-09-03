@@ -23,12 +23,13 @@ import {
   type TelephonyAvailabilityAction,
   type TelephonyOperatorPresence,
 } from "@/lib/telephony/presence";
+import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import { TelnyxWebphone, type WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "@/lib/telephony/webphone-model";
 
 import type { TransferRequest } from "./CallTransferPicker";
 import type { PhonePauseReason, PhonePresenceAction } from "./PhoneBar";
-import { PHONE_ACTION_ERRORS, type PhoneCallAction } from "./phone-bar-model";
+import { partyBusyKey, PHONE_ACTION_ERRORS, type PhoneCallAction, type PhonePartyAction } from "./phone-bar-model";
 
 /**
  * All telephony wiring of the dispatch console in one place: the browser
@@ -77,6 +78,11 @@ export type TelephonyConsole = {
   /** Rings a callback request's caller back through the ordinary outbound path. */
   callBackRequest: (requestId: string) => Promise<void>;
   callAction: (action: PhoneCallAction, sessionId: string, target?: TransferRequest) => Promise<void>;
+  /** Mute, unmute or throw out one added participant (`parties/[legId]/…`). */
+  partyAction: (action: PhonePartyAction, sessionId: string, legId: string) => Promise<void>;
+  /** Manager/admin: monitor, whisper into or barge a colleague's live call. */
+  supervise: (sessionId: string, mode: SupervisorMode) => Promise<void>;
+  stopSupervise: (sessionId: string) => Promise<void>;
   changePresence: (action: PhonePresenceAction) => void;
   availabilityAction: (action: TelephonyAvailabilityAction) => void;
   answer: () => void;
@@ -371,6 +377,83 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     [busyAction],
   );
 
+  /**
+   * The participant routes and the supervisor routes are keyed differently from
+   * the plain call actions (`parties/[legId]/…`, a `mode` body), so they get
+   * their own thin wrapper rather than bending `callAction` out of shape. Both
+   * share its busy flag so two call commands can never overlap.
+   */
+  const postCallCommand = useCallback(
+    async (input: { busyKey: string; sessionId: string; path: string; body?: Record<string, unknown>; label: string; error: string }) => {
+      if (busyAction) return;
+      setBusyAction(input.busyKey);
+      setNotice(null);
+      try {
+        const result = await telephonyJson<{ error?: string; operatorLegCallControlId?: string }>(input.path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input.body ?? {}),
+          label: input.label,
+          timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+        });
+        if (result.status === 503) {
+          setConfigured(false);
+          setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+          return;
+        }
+        if (!result.ok) throw new Error(result.body?.error ?? input.error);
+        // Supervision dials the supervisor's own leg: the tab must answer that
+        // invite and no other (design §2.2).
+        if (result.body?.operatorLegCallControlId) {
+          webphoneRef.current?.expectOperatorLeg({ callControlId: result.body.operatorLegCallControlId, sessionId: input.sessionId });
+        }
+        refreshRef.current?.();
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : input.error);
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [busyAction],
+  );
+
+  const partyAction = useCallback(
+    (action: PhonePartyAction, sessionId: string, legId: string) =>
+      postCallCommand({
+        busyKey: partyBusyKey(action, sessionId, legId),
+        sessionId,
+        path: `/api/telephony/calls/${encodeURIComponent(sessionId)}/parties/${encodeURIComponent(legId)}/${action}`,
+        label: PARTY_ACTION_LABELS[action],
+        error: PARTY_ACTION_ERRORS[action],
+      }),
+    [postCallCommand],
+  );
+
+  const supervise = useCallback(
+    (sessionId: string, mode: SupervisorMode) =>
+      postCallCommand({
+        busyKey: `supervise:${sessionId}`,
+        sessionId,
+        path: `/api/telephony/calls/${encodeURIComponent(sessionId)}/supervise`,
+        body: { mode },
+        label: "dozor nad hovorom",
+        error: "Dozor nad hovorom sa nepodarilo spustiť.",
+      }),
+    [postCallCommand],
+  );
+
+  const stopSupervise = useCallback(
+    (sessionId: string) =>
+      postCallCommand({
+        busyKey: `stop-supervise:${sessionId}`,
+        sessionId,
+        path: `/api/telephony/calls/${encodeURIComponent(sessionId)}/stop-supervise`,
+        label: "ukončenie dozoru",
+        error: "Dozor sa nepodarilo ukončiť.",
+      }),
+    [postCallCommand],
+  );
+
   // `lineId` is optional and only "Môj telefón" sends it: a test call has to
   // leave from the operator's own line even when the server default differs.
   const dial = useCallback(async (phoneNumber: string, caseId?: string, options?: { lineId?: string | null }) => {
@@ -445,11 +528,11 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
 
   // --- derived ---------------------------------------------------------------
 
-  const phoneBar = useMemo(() => buildPhoneBarModel(snapshot), [snapshot]);
   const operatorName = useCallback(
     (profileId: string) => operators.find((operator) => operator.id === profileId)?.name,
     [operators],
   );
+  const phoneBar = useMemo(() => buildPhoneBarModel(snapshot, { operatorName }), [operatorName, snapshot]);
   // The snapshot's own timestamp is the clock for derived durations: it keeps
   // every row consistent with the data it was computed from and keeps this
   // memo pure across re-renders.
@@ -516,6 +599,9 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     dial,
     callBackRequest,
     callAction,
+    partyAction,
+    supervise,
+    stopSupervise,
     changePresence,
     availabilityAction,
     answer,
@@ -529,7 +615,21 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   };
 }
 
+const PARTY_ACTION_LABELS: Record<PhonePartyAction, string> = {
+  mute: "stlmenie účastníka",
+  unmute: "odtlmenie účastníka",
+  kick: "odpojenie účastníka",
+};
+
+const PARTY_ACTION_ERRORS: Record<PhonePartyAction, string> = {
+  mute: "Účastníka sa nepodarilo stlmiť.",
+  unmute: "Účastníka sa nepodarilo odtlmiť.",
+  kick: "Účastníka sa nepodarilo odpojiť.",
+};
+
 const PHONE_ACTION_LABEL_FOR_REQUEST: Record<PhoneCallAction, string> = {
+  "add-party": "pridanie účastníka",
+  leave: "odchod z konferencie",
   hold: "podržanie hovoru",
   unhold: "obnovenie hovoru",
   park: "odloženie hovoru",

@@ -47,6 +47,7 @@ import {
   type SessionMeta,
   type SessionPatch,
   type SessionRow,
+  type SupervisorMode,
   type TelephonyEvent,
   type Transition,
   type TransferTarget,
@@ -69,7 +70,20 @@ const OUTBOUND_TIMEOUT_SECS = 45;
 const INTERNAL_TIMEOUT_SECS = 30;
 const PICKUP_TIMEOUT_SECS = 30;
 const CONSULT_TIMEOUT_SECS = 30;
+const PARTY_TIMEOUT_SECS = 30;
+const SUPERVISE_TIMEOUT_SECS = 30;
 const PICKUP_STALE_MS = 30_000;
+/**
+ * Third parties an operator may add on top of the caller and themselves.
+ * A conference of four is already at the edge of what a dispatcher can steer by
+ * ear, and every leg is billed, so the reducer refuses the fourth party rather
+ * than letting a mis-click fan out.
+ */
+export const MAX_CONFERENCE_PARTIES = 3;
+/** `client_state.intent` of a leg dialled by "add participant". */
+const PARTY_INTENT = "party";
+/** `client_state.intent` of a supervisor's own leg. */
+const SUPERVISE_INTENT = "supervise";
 export const STALE_FINALISE_MS = 120_000;
 
 const CALLBACK_OFFER_TTS = "Momentálne sú všetci operátori obsadení. Ak chcete, aby sme vám zavolali späť, stlačte jednotku.";
@@ -374,6 +388,36 @@ function isCustomer(leg: LegRow): boolean {
   return leg.role === "customer";
 }
 
+/** A third party the operator added to the conference (never the caller, never a supervisor). */
+function isPartyLeg(leg: LegRow): boolean {
+  return !isCustomer(leg) && leg.role !== "supervisor" && legIntent(leg) === PARTY_INTENT;
+}
+
+/** Added parties whose leg is still up (a ringing one included). */
+function openParties(b: TransitionBuilder): LegRow[] {
+  return b.openLegs().filter(isPartyLeg);
+}
+
+/** Added parties that are actually in the conference. */
+function answeredParties(b: TransitionBuilder): LegRow[] {
+  return openParties(b).filter((leg) => Boolean(leg.answered_at));
+}
+
+function openSupervisorLegs(b: TransitionBuilder): LegRow[] {
+  return b.openLegs().filter((leg) => leg.role === "supervisor");
+}
+
+/** Merges into a leg's `metadata` instead of replacing it (mute flag, supervisor mode). */
+function legMetaPatch(leg: LegRow, patch: Record<string, unknown>): Json {
+  const current = leg.metadata && typeof leg.metadata === "object" && !Array.isArray(leg.metadata) ? (leg.metadata as Record<string, unknown>) : {};
+  return JSON.parse(JSON.stringify({ ...current, ...patch })) as Json;
+}
+
+/** The state a three-way falls back to once the last added party is gone. */
+function twoPartyState(b: TransitionBuilder): CallSessionState {
+  return b.session.hold_started_at ? "held" : "talking";
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -563,7 +607,8 @@ function onLegAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged
   }
 
   if (leg.role === "consult") return onConsultAnswered(b, leg);
-  if (leg.role === "supervisor") return b.note("supervisor answered").result();
+  if (leg.role === "supervisor") return onSupervisorAnswered(b, leg);
+  if (intent === PARTY_INTENT) return onAddedPartyAnswered(b, leg);
 
   if (intent === "outbound" || intent === "internal_caller") return onOwnLegAnswered(b, leg, intent);
   if (intent === "internal") return onInternalCalleeAnswered(b, leg, opts);
@@ -1001,6 +1046,88 @@ function onConsultAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
   return b.result();
 }
 
+/**
+ * A third party added with "Pridať účastníka" answered: it joins the same
+ * conference the call was promoted to, and a caller who was on hold while the
+ * party rang is taken off hold so all three are audible.
+ */
+function onAddedPartyAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
+  const previous = b.session.state;
+  const customer = b.customerLeg();
+  if (!customer || b.legEnded(customer) || !b.session.conference_id || (previous !== "talking" && previous !== "held" && previous !== "conference")) {
+    b.cmd(hangupCmd(b, leg, "party_unavailable", false));
+    b.patchMeta({ party_pending: null });
+    return b.note("added party answered after the call moved on → hang up").result();
+  }
+
+  const join = () => {
+    const joinId = b.cmdId(leg.telnyx_call_control_id, "conference:join:party");
+    b.cmd({ kind: "conference_join", commandId: joinId, leg: ref(leg) });
+    if (b.session.hold_started_at) {
+      b.cmd({ kind: "conference_unhold", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:unhold:party"), legs: [ref(customer)], bestEffort: true });
+      b.patchSession({ hold_started_at: null });
+    }
+    b.setState("conference").patchMeta({ party_pending: null });
+    b.leg(leg.telnyx_call_control_id, { metadata: legMetaPatch(leg, { muted: false }) });
+    // The party is on a live leg it cannot hear anything on: hang it up rather
+    // than leave a stranger holding a silent call.
+    const failed = b.fork();
+    failed.setState(previous).patchMeta({ party_pending: null });
+    b.compensate(joinId, "party could not join the conference → party leg hung up", [hangupCmd(b, leg, "party_join_failed")], failed.transition());
+    b.note("added party answered → joined the conference");
+  };
+
+  if (leg.profile_id) {
+    const rejected = b.fork();
+    rejected.cmd(hangupCmd(rejected, leg, "operator_busy", false));
+    rejected.patchMeta({ party_pending: null });
+    join();
+    b.guard = { profileId: leg.profile_id, onRejected: { next: rejected.transition(), commands: rejected.commands } };
+    return b.result();
+  }
+  join();
+  return b.result();
+}
+
+/**
+ * A supervisor's own leg answered: it joins the conference with the Telnyx
+ * `supervisor_role` they asked for. `whisper` names the operator leg in
+ * `whisper_call_control_ids`, so the caller never hears the supervisor.
+ *
+ * Supervision must not move the call: no state change, no presence change of
+ * the supervised operator, and a failed join only ends the supervisor's leg.
+ */
+function onSupervisorAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
+  const entry = leg.profile_id ? b.meta.supervise?.[leg.profile_id] : null;
+  const mode: SupervisorMode = entry?.mode ?? "monitor";
+  const operator = b.answeringLeg();
+  if (!b.session.conference_id || !TALKING_STATES.has(b.session.state) || !operator) {
+    b.cmd(hangupCmd(b, leg, "supervise_unavailable", false));
+    if (leg.profile_id) b.patchMeta({ supervise: withoutSupervisor(b, leg.profile_id) });
+    return b.note("supervisor answered but the call is no longer supervisable → hang up").result();
+  }
+  const joinId = b.cmdId(leg.telnyx_call_control_id, `conference:join:supervise:${mode}`);
+  b.cmd({
+    kind: "conference_join",
+    commandId: joinId,
+    leg: ref(leg),
+    supervisorRole: mode,
+    ...(mode === "whisper" ? { whisper: [ref(operator)] } : {}),
+  });
+  b.leg(leg.telnyx_call_control_id, { metadata: legMetaPatch(leg, { supervisor_mode: mode }) });
+  const failed = b.fork();
+  if (leg.profile_id) failed.patchMeta({ supervise: withoutSupervisor(b, leg.profile_id) });
+  b.compensate(joinId, "supervisor could not join → supervisor leg hung up", [hangupCmd(b, leg, "supervise_join_failed")], failed.transition());
+  return b.note(`supervisor joined (${mode})`).result();
+}
+
+/** `metadata.supervise` without one supervisor (`null` once nobody supervises). */
+function withoutSupervisor(b: TransitionBuilder, profileId: string): SessionMeta["supervise"] {
+  const entries = { ...(b.meta.supervise ?? {}) };
+  delete entries[profileId];
+  return Object.keys(entries).length > 0 ? entries : null;
+}
+
 // ---------------------------------------------------------------------------
 // call.hangup
 // ---------------------------------------------------------------------------
@@ -1108,7 +1235,9 @@ function releaseTalkingOperators(b: TransitionBuilder, wrapUp: boolean): void {
   for (const leg of b.legs) {
     if (!leg.profile_id || isCustomer(leg) || seen.has(leg.profile_id)) continue;
     seen.add(leg.profile_id);
-    const talked = Boolean(leg.answered_at) || leg.profile_id === b.session.answered_by_profile_id;
+    // A supervisor only listened to the call: they owe it no after-call work
+    // and must go straight back into the ring plan (design §4 Phase 4).
+    const talked = leg.role !== "supervisor" && (Boolean(leg.answered_at) || leg.profile_id === b.session.answered_by_profile_id);
     b.presenceChange({
       profileId: leg.profile_id,
       status: wrapUp && talked ? "after_call_work" : "available",
@@ -1138,6 +1267,17 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
   const intent = legIntent(leg);
   const attempt = b.attemptForLeg(leg);
   const answered = Boolean(leg.answered_at);
+
+  // 0. A supervisor's leg: supervision is invisible to the call, so its end
+  // changes nothing except the supervisor's own bookkeeping.
+  if (leg.role === "supervisor") {
+    if (leg.profile_id) {
+      b.patchMeta({ supervise: withoutSupervisor(b, leg.profile_id) });
+      b.presenceChange({ profileId: leg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, onlyIfStatus: ["on_call", "ringing"], reason: "supervision ended" });
+    }
+    finishIfQuiet(b, at);
+    return b.note("supervisor left").result();
+  }
 
   // 1. An offer that ended without being answered.
   if (!answered) {
@@ -1171,6 +1311,10 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
       b.patchMeta({ pickup: null });
     } else if (state === "consulting" && leg.role === "consult" && customer && !b.legEnded(customer)) {
       backFromConsult(b, customer, "consult_no_answer");
+    } else if (isPartyLeg(leg)) {
+      // The added party never picked up: the two-party call carries on untouched.
+      b.patchMeta({ party_pending: null });
+      b.note("added party did not answer");
     }
     finishIfQuiet(b, at);
     return b.result();
@@ -1192,6 +1336,12 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
       if (consultLeg) b.cmd(hangupCmd(b, consultLeg, "operator_left"));
       operatorLost(b, customer, leg);
     }
+  } else if (state === "conference" && isOwner && customerOpen && !meta.hangup) {
+    // The operator of a three-way dropped (tab closed, network): the remaining
+    // party keeps the caller instead of the caller being sent to the čakáreň.
+    const remaining = answeredParties(b).filter((party) => party.telnyx_call_control_id !== leg.telnyx_call_control_id);
+    if (remaining.length > 0) handOverConference(b, leg, remaining, "operator_lost");
+    else operatorLost(b, customer, leg);
   } else if ((TALKING_STATES.has(state) || state === "wrap_up") && isOwner && customerOpen && !meta.hangup) {
     operatorLost(b, customer, leg);
   } else if (leg.profile_id) {
@@ -1199,8 +1349,33 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
     const reason = state === "parked" || state === "waiting" ? "parked" : state === "wrap_up" || state === "missed" || state === "ended" || meta.hangup ? "leg ended" : "left call";
     b.presenceChange({ profileId: leg.profile_id, status: "after_call_work", sessionId: null, startWrapUp: true, onlyIfSession: b.session.id, onlyIfStatus: ["on_call", "ringing"], reason });
   }
+  // The last added party left a three-way: back to the ordinary two-party call.
+  if (b.state === "conference" && customerOpen && answeredParties(b).length === 0) {
+    b.setState(twoPartyState(b));
+    b.note("last participant left → two-party call");
+  }
   finishIfQuiet(b, at);
   return b.result();
+}
+
+/**
+ * The operator steps out of a three-way and the rest keep talking: the first
+ * remaining party takes the call over, exactly as the second half of an
+ * attended transfer does, but without claiming a transfer happened.
+ */
+function handOverConference(b: TransitionBuilder, operator: LegRow, remaining: LegRow[], reason: string): void {
+  const next = remaining.find((leg) => leg.profile_id) ?? remaining[0];
+  b.setState(remaining.length > 1 ? "conference" : twoPartyState(b));
+  b.patchSession({ answered_by_profile_id: next.profile_id ?? null });
+  b.patchMeta({ previous_operator: operator.profile_id ?? null });
+  if (next.profile_id) {
+    b.call.operator_id = next.profile_id;
+    b.presenceChange({ profileId: next.profile_id, status: "on_call", sessionId: b.session.id, reason: "took over the conference" });
+  }
+  if (operator.profile_id) {
+    b.presenceChange({ profileId: operator.profile_id, status: "after_call_work", sessionId: null, startWrapUp: true, onlyIfSession: b.session.id, reason: `left the conference (${reason})` });
+  }
+  b.note(`operator left the conference (${reason}) → ${next.profile_id ?? next.to_number ?? "participant"} keeps the call`);
 }
 
 /** Operator dropped (tab closed, network) while the customer is still there → waiting room. */
@@ -1480,6 +1655,19 @@ function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
       return appCompleteTransfer(b, customer, event);
     case "cancel_consult":
       return appCancelConsult(b, customer);
+    case "add_party":
+      return appAddParty(b, customer, event);
+    case "mute_party":
+    case "unmute_party":
+      return appMuteParty(b, event, event.type === "mute_party");
+    case "remove_party":
+      return appRemoveParty(b, event);
+    case "leave_conference":
+      return appLeaveConference(b);
+    case "supervise":
+      return appSupervise(b, customer, event);
+    case "stop_supervise":
+      return appStopSupervise(b, event);
     case "hangup":
       return appHangup(b, customer, event);
     default:
@@ -1700,6 +1888,191 @@ function appCancelConsult(b: TransitionBuilder, customer: LegRow): ReduceResult 
   backFromConsult(b, customer, "cancelled");
   if (consultLeg?.profile_id) b.presenceChange({ profileId: consultLeg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, reason: "consult cancelled" });
   return b.result();
+}
+
+// ---------------------------------------------------------------------------
+// Conference (three-way) and supervision
+// ---------------------------------------------------------------------------
+
+const CONFERENCE_STATES: ReadonlySet<CallSessionState> = new Set<CallSessionState>(["talking", "held", "conference"]);
+
+/**
+ * Adds a colleague or an external number to the live call.
+ *
+ * The call is promoted to its conference first (the same lazy promotion hold
+ * and consult use), then the third party is dialled with `link_to` so it shares
+ * the Telnyx `call_session_id`. The session only becomes `conference` once that
+ * party answers — until then the operator keeps every control they had, and a
+ * party that never picks up leaves no trace beyond a note.
+ */
+function appAddParty(b: TransitionBuilder, customer: LegRow, event: AppEvent): ReduceResult {
+  if (!CONFERENCE_STATES.has(b.session.state)) throw new CallActionRejected("Účastníka je možné pridať len do prebiehajúceho hovoru.", 409);
+  if (!event.target) throw new CallActionRejected("Chýba účastník.", 400);
+  if (b.meta.party_pending) throw new CallActionRejected("Predchádzajúci účastník ešte len zvoní.", 409);
+  if (openParties(b).length >= MAX_CONFERENCE_PARTIES) throw new CallActionRejected(`Do hovoru je možné pridať najviac ${MAX_CONFERENCE_PARTIES} účastníkov.`, 409);
+  const operator = requireOperatorLeg(b);
+  const target = event.target;
+  if (target.kind === "operator" && b.openLegs().some((leg) => leg.profile_id === target.profileId)) {
+    throw new CallActionRejected("Kolega už je v hovore.", 409);
+  }
+  promoteToConference(b, customer, operator, event.actorProfileId);
+  const dial: DialCommand = {
+    kind: "dial",
+    commandId: b.cmdId(target.kind === "operator" ? target.profileId : target.number, "dial:party"),
+    to: target.kind === "operator" ? target.sipUri : target.number,
+    from: b.ctx.fromNumber ?? b.session.called_number ?? "",
+    role: target.kind === "operator" ? "operator" : "external",
+    profileId: target.kind === "operator" ? target.profileId : null,
+    externalNumber: target.kind === "number" ? target.number : null,
+    clientState:
+      target.kind === "operator"
+        ? { sid: b.session.id, role: "operator", operatorId: target.profileId, intent: PARTY_INTENT }
+        : { sid: b.session.id, role: "external", intent: PARTY_INTENT },
+    linkTo: customer.telnyx_call_control_id,
+    timeoutSecs: PARTY_TIMEOUT_SECS,
+  };
+  b.cmd(dial);
+  b.patchMeta({ party_pending: { target, by: event.actorProfileId, at: b.nowIso } });
+  const failed = b.fork();
+  failed.patchMeta({ party_pending: null });
+  b.compensate(dial.commandId, "add party dial failed → call unchanged", [], failed.transition());
+  return b.note(`add party → ${target.label}`).result();
+}
+
+/** The leg an action names, restricted to the added participants. */
+function requirePartyLeg(b: TransitionBuilder, event: AppEvent): LegRow {
+  if (!event.party) throw new CallActionRejected("Chýba účastník.", 400);
+  const leg = b.findLeg(event.party.callControlId);
+  if (!leg || b.legEnded(leg)) throw new CallActionRejected("Účastník už nie je v hovore.", 409);
+  if (!isPartyLeg(leg)) throw new CallActionRejected("Tohto účastníka nie je možné takto ovládať.", 409);
+  return leg;
+}
+
+function appMuteParty(b: TransitionBuilder, event: AppEvent, mute: boolean): ReduceResult {
+  if (!b.session.conference_id) throw new CallActionRejected("Hovor nie je v konferencii.", 409);
+  const leg = requirePartyLeg(b, event);
+  const commandId = b.cmdId(leg.telnyx_call_control_id, mute ? "conference:mute" : "conference:unmute");
+  b.cmd({ kind: mute ? "conference_mute" : "conference_unmute", commandId, legs: [ref(leg)] });
+  b.leg(leg.telnyx_call_control_id, { metadata: legMetaPatch(leg, { muted: mute }) });
+  const failed = b.fork();
+  failed.leg(leg.telnyx_call_control_id, { metadata: legMetaPatch(leg, { muted: !mute }) });
+  b.compensate(commandId, `${mute ? "mute" : "unmute"} refused → participant flag restored`, [], failed.transition());
+  return b.note(`${mute ? "muted" : "unmuted"} ${event.party?.label ?? leg.telnyx_call_control_id}`).result();
+}
+
+/**
+ * Removes an added participant. The leg leaves the conference and is hung up;
+ * everything else (state, presence, the fall back to a two-party call) follows
+ * from its `call.hangup`, exactly as when the participant hangs up themselves.
+ */
+function appRemoveParty(b: TransitionBuilder, event: AppEvent): ReduceResult {
+  const leg = requirePartyLeg(b, event);
+  if (b.session.conference_id) {
+    b.cmd({ kind: "conference_leave", commandId: b.cmdId(leg.telnyx_call_control_id, "conference:leave:kick"), leg: ref(leg), bestEffort: true });
+  }
+  b.cmd(hangupCmd(b, leg, "party_removed", false));
+  if (!leg.answered_at) b.patchMeta({ party_pending: null });
+  return b.note(`removed ${event.party?.label ?? leg.telnyx_call_control_id}`).result();
+}
+
+/** The operator steps out of a three-way; the caller and the remaining party keep talking. */
+function appLeaveConference(b: TransitionBuilder): ReduceResult {
+  if (b.session.state !== "conference") throw new CallActionRejected("Hovor nie je konferenciou.", 409);
+  const operator = requireOperatorLeg(b);
+  const remaining = answeredParties(b).filter((leg) => leg.telnyx_call_control_id !== operator.telnyx_call_control_id);
+  if (remaining.length === 0) throw new CallActionRejected("V hovore nie je ďalší účastník, ktorý by v ňom mohol pokračovať.", 409);
+  // `leave` is the command that must succeed: while it fails the operator is
+  // still in the conference, so the call may not be recorded as handed over.
+  // The hangup that follows is best-effort — the leg is already out of the call.
+  const leaveId = b.cmdId(operator.telnyx_call_control_id, "conference:leave:operator");
+  b.cmd({ kind: "conference_leave", commandId: leaveId, leg: ref(operator) });
+  b.cmd(hangupCmd(b, operator, "left_conference"));
+  // Built before the hand-over so it restores the *pre-action* bookkeeping: a
+  // compensation is applied on top of the already-persisted transition.
+  const failed = b.fork();
+  failed.patchSession({ state: b.session.state, answered_by_profile_id: b.session.answered_by_profile_id });
+  failed.patchMeta({ previous_operator: b.meta.previous_operator ?? null });
+  if (operator.profile_id) {
+    failed.presenceChange({ profileId: operator.profile_id, status: "on_call", sessionId: b.session.id, reason: "conference leave failed" });
+    failed.call.operator_id = operator.profile_id;
+  }
+  handOverConference(b, operator, remaining, "operator_left");
+  b.compensate(leaveId, "leaving the conference failed → the operator stays on the call", [], failed.transition());
+  return b.result();
+}
+
+/**
+ * Supervision (design §4 Phase 4). The call is promoted to its conference and
+ * the supervisor's own WebRTC leg is dialled; the Telnyx `supervisor_role` is
+ * applied when that leg joins (`onSupervisorAnswered`). Calling it again with a
+ * different mode switches the role live through `conferences/…/actions/update`
+ * instead of re-dialling.
+ *
+ * Role gating (manager/admin only) lives in `call-actions.ts`: the reducer is
+ * pure and knows nothing about who the actor is.
+ */
+function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): ReduceResult {
+  const supervisor = event.supervisor;
+  if (!supervisor) throw new CallActionRejected("Chýba dozorujúci operátor.", 400);
+  if (!TALKING_STATES.has(b.session.state)) throw new CallActionRejected("Dozor je možný len pri prebiehajúcom hovore.", 409);
+  const operator = requireOperatorLeg(b);
+  if (operator.profile_id === supervisor.profileId) throw new CallActionRejected("Na vlastný hovor sa dozerať nedá.", 409);
+  const existing = openSupervisorLegs(b).find((leg) => leg.profile_id === supervisor.profileId);
+  const entries = { ...(b.meta.supervise ?? {}) };
+  const previous = entries[supervisor.profileId] ?? null;
+
+  if (existing) {
+    if (!existing.answered_at) throw new CallActionRejected("Dozor sa práve pripája.", 409);
+    const commandId = b.cmdId(existing.telnyx_call_control_id, `conference:update:${supervisor.mode}`);
+    b.cmd({
+      kind: "conference_update",
+      commandId,
+      leg: ref(existing),
+      supervisorRole: supervisor.mode,
+      ...(supervisor.mode === "whisper" ? { whisper: [ref(operator)] } : {}),
+    });
+    entries[supervisor.profileId] = { mode: supervisor.mode, at: b.nowIso, by: previous?.by ?? supervisor.profileId };
+    b.patchMeta({ supervise: entries });
+    b.leg(existing.telnyx_call_control_id, { metadata: legMetaPatch(existing, { supervisor_mode: supervisor.mode }) });
+    const failed = b.fork();
+    if (previous) failed.patchMeta({ supervise: { ...entries, [supervisor.profileId]: previous } });
+    b.compensate(commandId, "supervisor role switch refused → previous mode kept", [], failed.transition());
+    return b.note(`supervisor mode → ${supervisor.mode}`).result();
+  }
+
+  promoteToConference(b, customer, operator, event.actorProfileId);
+  const dial: DialCommand = {
+    kind: "dial",
+    commandId: b.cmdId(supervisor.profileId, "dial:supervise"),
+    to: supervisor.sipUri,
+    from: b.ctx.fromNumber ?? b.session.called_number ?? "",
+    role: "supervisor",
+    profileId: supervisor.profileId,
+    externalNumber: null,
+    clientState: { sid: b.session.id, role: "supervisor", operatorId: supervisor.profileId, intent: SUPERVISE_INTENT, autoAnswer: true },
+    linkTo: customer.telnyx_call_control_id,
+    timeoutSecs: SUPERVISE_TIMEOUT_SECS,
+    autoAnswer: true,
+  };
+  b.cmd(dial);
+  entries[supervisor.profileId] = { mode: supervisor.mode, at: b.nowIso, by: supervisor.profileId };
+  b.patchMeta({ supervise: entries });
+  const failed = b.fork();
+  failed.patchMeta({ supervise: withoutSupervisor(b, supervisor.profileId) });
+  b.compensate(dial.commandId, "supervisor dial failed → supervision not started", [], failed.transition());
+  return b.note(`supervise (${supervisor.mode}) by ${supervisor.profileId}`).result();
+}
+
+function appStopSupervise(b: TransitionBuilder, event: AppEvent): ReduceResult {
+  const profileId = event.supervisor?.profileId ?? event.actorProfileId;
+  const leg = profileId ? openSupervisorLegs(b).find((candidate) => candidate.profile_id === profileId) : undefined;
+  if (!leg || !profileId) throw new CallActionRejected("Dozor neprebieha.", 409);
+  if (b.session.conference_id) {
+    b.cmd({ kind: "conference_leave", commandId: b.cmdId(leg.telnyx_call_control_id, "conference:leave:supervise"), leg: ref(leg), bestEffort: true });
+  }
+  b.cmd(hangupCmd(b, leg, "supervise_stopped", false));
+  b.patchMeta({ supervise: withoutSupervisor(b, profileId) });
+  return b.note(`supervision stopped by ${profileId}`).result();
 }
 
 function appHangup(b: TransitionBuilder, customer: LegRow | null, event: AppEvent): ReduceResult {
