@@ -61,8 +61,8 @@ export function mediaUrl(base: string | null | undefined, ref: MediaRef): string
 }
 
 /** TTS fallback (used only when no prompt media is reachable). */
+// The voice carries the locale; Telnyx has no `sk-SK` value for `language`.
 export const DEFAULT_TTS_VOICE = "Azure.sk-SK-ViktoriaNeural";
-export const DEFAULT_TTS_LANGUAGE = "sk-SK";
 
 // --- frozen ring plan ------------------------------------------------------
 
