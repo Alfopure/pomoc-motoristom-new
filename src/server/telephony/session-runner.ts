@@ -244,7 +244,9 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     openOffers,
     activeLegCount,
     settings,
-    fromNumber: line?.phone_number ?? (config.configured ? config.defaultFromNumber : null),
+    // Only a verified origination number may place calls; the dialled DID is not always one
+    // (.context/telnyx-setup.md S3: +421232408700 is rejected with 10010), so the env default wins.
+    fromNumber: (config.configured ? config.defaultFromNumber : null) ?? line?.phone_number ?? null,
     mediaAvailable: config.configured ? Boolean(config.mediaBaseUrl) : false,
   };
 }

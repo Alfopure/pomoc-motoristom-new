@@ -238,7 +238,8 @@ describe("createTelnyxClient", () => {
 
     await client.conferenceAction("conf-1", "hold", { commandId: "cmd-hold", call_control_ids: ["cc-1"], audio_url: "https://media.test/moh.mp3" });
     expect(calls[1].url).toBe("https://telnyx.test/v2/conferences/conf-1/actions/hold");
-    expect(calls[1].body).toEqual({ call_control_ids: ["cc-1"], audio_url: "https://media.test/moh.mp3", command_id: "cmd-hold" });
+    // `hold`/`unhold` have no `command_id` in the Telnyx schema, so the client drops it.
+    expect(calls[1].body).toEqual({ call_control_ids: ["cc-1"], audio_url: "https://media.test/moh.mp3" });
   });
 
   it("lists phone numbers, creates credentials, mints tokens and sends messages", async () => {

@@ -500,6 +500,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     },
 
     answer(params) {
+      assertCallsAllowed();
       return callAction(params.callControlId, "answer", params.commandId, {
         client_state: params.clientState,
         custom_headers: headers(params.customHeaders),
@@ -645,7 +646,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     async conferenceAction(conferenceId, action, body) {
       if (!conferenceId) throw new TelnyxCommandError({ code: "invalid_conference_id", status: 400, detail: `${action}: conferenceId is required` });
       const { commandId, ...rest } = body;
-      await request<unknown>("POST", `/conferences/${encodeURIComponent(conferenceId)}/actions/${action}`, { body: compact(rest), commandId });
+      // `hold`/`unhold` are the two conference actions whose schema has no `command_id`.
+      const idempotencyId = action === "hold" || action === "unhold" ? undefined : commandId;
+      await request<unknown>("POST", `/conferences/${encodeURIComponent(conferenceId)}/actions/${action}`, { body: compact(rest), commandId: idempotencyId });
     },
 
     async listPhoneNumbers(params = {}) {

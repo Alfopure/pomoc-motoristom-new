@@ -235,13 +235,13 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     if (run.apply.failed) {
       await markWebhookEventFailed(deps.admin, event.id, run.apply.failure?.error ?? "command failed");
       logResult(deps, event, claim, session.id, "failed", run.commands, started, now);
-      await maybeSweep(deps, session.id);
+      await maybeSweep(deps);
       return done({ ...identity, claim, sessionId: session.id, status: 200, outcome: "failed", commands: run.commands, notes: run.apply.notes, error: run.apply.failure?.error ?? null });
     }
 
     await markWebhookEventProcessed(deps.admin, event.id, { now });
     logResult(deps, event, claim, session.id, "processed", run.commands, started, now);
-    await maybeSweep(deps, session.id);
+    await maybeSweep(deps);
     return done({ ...identity, claim, sessionId: session.id, status: 200, outcome: "processed", commands: run.commands, notes: run.apply.notes });
   } catch (error) {
     const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -256,14 +256,16 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
   }
 }
 
-async function maybeSweep(deps: ProcessorDeps, currentSessionId: string): Promise<void> {
+async function maybeSweep(deps: ProcessorDeps): Promise<void> {
   if (deps.sweepAfterEvent === false) return;
   try {
     await sweepOverdueRingSteps({
       admin: deps.admin,
       organizationId: deps.organizationId,
       now: nowOf(deps),
-      runSessionEvent: (sessionId, event) => (sessionId === currentSessionId ? Promise.resolve(null) : runSessionEvent(deps, sessionId, event)),
+      // The current session is included on purpose: when every dial of a step failed the fan-out
+      // backdates `step_deadline_at` and no Telnyx event will ever arrive to advance it.
+      runSessionEvent: (sessionId, event) => runSessionEvent(deps, sessionId, event),
     });
   } catch (error) {
     deps.logger?.({ level: "warn", scope: "sweep", error: error instanceof Error ? error.message : String(error) });

@@ -315,7 +315,15 @@ function gatherCmd(b: TransitionBuilder, leg: LegRow, spec: GatherSpec, intentSu
 }
 
 function mohTickSpec(): GatherSpec {
-  return { media: { key: "moh" }, purpose: "moh_tick", maximumDigits: 1, maximumTries: 1, timeoutMillis: MOH_TICK_TIMEOUT_MS, validDigits: "0123456789#*" };
+  return {
+    media: { key: "moh" },
+    ttsText: "Prosím, čakajte, spájame vás s operátorom.",
+    purpose: "moh_tick",
+    maximumDigits: 1,
+    maximumTries: 1,
+    timeoutMillis: MOH_TICK_TIMEOUT_MS,
+    validDigits: "0123456789#*",
+  };
 }
 
 function callbackOfferSpec(media: MediaRef, ttsText: string): GatherSpec {
@@ -647,6 +655,7 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
       clientState,
       linkTo: customer.telnyx_call_control_id,
       timeoutSecs: attempt.ringSecs,
+      parkAfterUnbridge: "self",
       attempt: { stepIndex, profileId: attempt.profileId, externalNumber: attempt.externalNumber },
     });
     if (attempt.profileId) ringingProfileIds.push(attempt.profileId);
@@ -1348,12 +1357,24 @@ function promoteToConference(b: TransitionBuilder, customer: LegRow, operator: L
   if (b.session.conference_id) return;
   const createId = b.cmdId(customer.telnyx_call_control_id, "conference:create");
   b.cmd({ kind: "conference_create", commandId: createId, leg: ref(customer), name: `sess-${b.session.id}` });
-  b.cmd({ kind: "conference_join", commandId: b.cmdId(operator.telnyx_call_control_id, "conference:join"), leg: ref(operator) });
+  const joinId = b.cmdId(operator.telnyx_call_control_id, "conference:join");
+  b.cmd({ kind: "conference_join", commandId: joinId, leg: ref(operator) });
   b.patchMeta({ conference: { promoted_at: b.nowIso, by: actor } });
   const failed = b.fork();
   failed.patchSession({ state: b.session.state, hold_started_at: b.session.hold_started_at, conference_id: null, conference_name: null });
   failed.patchMeta({ conference: null, consult: null });
   b.compensate(createId, "conference promotion failed → call stays bridged", [], failed.transition());
+  // The create already moved the customer into the conference: take them back out and re-bridge,
+  // otherwise the customer would sit alone in a conference the operator never joined.
+  b.compensate(
+    joinId,
+    "conference join failed → customer left the conference and re-bridged",
+    [
+      { kind: "conference_leave", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:leave:join_failed"), leg: ref(customer), bestEffort: true },
+      { kind: "bridge", commandId: b.cmdId(customer.telnyx_call_control_id, "bridge:rejoin"), leg: ref(customer), target: ref(operator), parkAfterUnbridge: "self", bestEffort: true },
+    ],
+    failed.transition(),
+  );
 }
 
 function requireOperatorLeg(b: TransitionBuilder): LegRow {
@@ -1409,13 +1430,14 @@ function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): Red
     kind: "dial",
     commandId: b.cmdId(event.picker.profileId, "dial:pickup"),
     to: event.picker.sipUri,
-    from: b.session.called_number ?? b.ctx.fromNumber ?? "",
+    from: b.ctx.fromNumber ?? b.session.called_number ?? "",
     role: "operator",
     profileId: event.picker.profileId,
     externalNumber: null,
     clientState: { sid: b.session.id, role: "operator", operatorId: event.picker.profileId, intent: "pickup", autoAnswer: true },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: PICKUP_TIMEOUT_SECS,
+    parkAfterUnbridge: "self",
     autoAnswer: true,
   };
   b.cmd(dial);
@@ -1444,7 +1466,7 @@ function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: T
     commandId: transferId,
     leg: ref(customer),
     to: target.kind === "operator" ? target.sipUri : target.number,
-    from: b.session.called_number ?? b.ctx.fromNumber,
+    from: b.ctx.fromNumber ?? b.session.called_number,
     targetClientState,
     timeoutSecs: DEFAULT_TRANSFER_TIMEOUT_SECS,
   });
@@ -1490,13 +1512,14 @@ function appConsult(b: TransitionBuilder, customer: LegRow, event: AppEvent): Re
     kind: "dial",
     commandId: b.cmdId(target.kind === "operator" ? target.profileId : target.number, "dial:consult"),
     to: target.kind === "operator" ? target.sipUri : target.number,
-    from: b.session.called_number ?? b.ctx.fromNumber ?? "",
+    from: b.ctx.fromNumber ?? b.session.called_number ?? "",
     role: "consult",
     profileId: target.kind === "operator" ? target.profileId : null,
     externalNumber: target.kind === "number" ? target.number : null,
     clientState: target.kind === "operator" ? { sid: b.session.id, role: "consult", operatorId: target.profileId, intent: "consult" } : { sid: b.session.id, role: "consult", intent: "consult" },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: CONSULT_TIMEOUT_SECS,
+    parkAfterUnbridge: "self",
   };
   b.cmd(dial);
   b.setState("consulting").patchSession({ hold_started_at: b.session.hold_started_at ?? b.nowIso });
@@ -1523,7 +1546,7 @@ function appCompleteTransfer(b: TransitionBuilder, customer: LegRow, event: AppE
 function appCancelConsult(b: TransitionBuilder, customer: LegRow): ReduceResult {
   if (b.session.state !== "consulting") throw new CallActionRejected("Hovor nie je v konzultácii.", 409);
   const consultLeg = b.openLegs().find((leg) => leg.role === "consult");
-  if (consultLeg) b.cmd(hangupCmd(b, consultLeg, "consult_cancelled", false));
+  if (consultLeg) b.cmd(hangupCmd(b, consultLeg, "consult_cancelled"));
   backFromConsult(b, customer, "cancelled");
   if (consultLeg?.profile_id) b.presenceChange({ profileId: consultLeg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, reason: "consult cancelled" });
   return b.result();

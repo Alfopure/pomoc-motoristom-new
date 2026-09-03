@@ -272,6 +272,7 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
       timeoutSecs: dial.timeoutSecs,
       sipRegion: "Europe",
       mediaEncryption: "SRTP",
+      parkAfterUnbridge: "self",
       customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }],
       fromDisplayName: actor.displayName?.replace(/[^A-Za-z0-9 \-_~!.+]/g, "").slice(0, 128) || undefined,
     });
@@ -336,6 +337,7 @@ export async function callColleague(deps: CallActionDeps, actor: CallActor, inpu
       timeoutSecs: dial.timeoutSecs,
       sipRegion: "Europe",
       mediaEncryption: "SRTP",
+      parkAfterUnbridge: "self",
       customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }],
     });
     const effects = effectsFor(deps);
