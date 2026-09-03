@@ -10,6 +10,10 @@ const realtimeMigration = readFileSync(
   new URL("../supabase/migrations/20260915100000_telephony_realtime.sql", import.meta.url),
   "utf8",
 );
+const round2Migration = readFileSync(
+  new URL("../supabase/migrations/20260917100000_telnyx_fixes_round2.sql", import.meta.url),
+  "utf8",
+);
 const seed = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
 const seedScript = readFileSync(new URL("../scripts/seed-demo-data.mjs", import.meta.url), "utf8");
 
@@ -202,6 +206,20 @@ test("authorises the private topic through organisation membership only", () => 
   assert.doesNotMatch(realtimeMigration, /supabase_realtime|add table/);
 });
 
+test("lease-only session writes touch neither updated_at nor the realtime doorbell", () => {
+  // The lease is taken before the reducer loads its snapshot, so a lease write
+  // that refreshed `updated_at` would blind the stale-session safety net, and a
+  // broadcast per lease write would triple the console's refetch rate.
+  for (const trigger of ["motorist_call_sessions_updated_at", "motorist_call_sessions_broadcast_update"]) {
+    assert.match(round2Migration, new RegExp(`create trigger ${trigger}[\\s\\S]*?when \\(`), trigger);
+  }
+  for (const column of ["'lease_token'", "'lease_until'", "'updated_at'"]) {
+    assert.ok(round2Migration.includes(column), `WHEN clause ignores ${column}`);
+  }
+  // INSERT/DELETE keep a WHEN-less trigger (WHEN may not reference the missing row).
+  assert.match(round2Migration, /create trigger motorist_call_sessions_broadcast\s+after insert or delete/);
+});
+
 test("does not reference the previous provider or dropped objects", () => {
   for (const text of [migration, realtimeMigration, seed, seedScript]) {
     assert.doesNotMatch(text, /viptel/i);
@@ -214,7 +232,7 @@ test("seed files populate the routing configuration", () => {
   for (const text of [seed, seedScript]) {
     assert.match(text, /Dispečing A/);
     assert.match(text, /Dispečing B/);
-    assert.match(text, /\+421910988882/);
+    assert.match(text, /\+421900000000/);
     assert.match(text, /callback_prompt/);
     assert.match(text, /2026-12-24/);
     for (const code of ["obed", "porada", "admin"]) {

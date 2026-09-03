@@ -76,6 +76,32 @@ describe("processTelnyxEvent", () => {
     expect(h.session(call.sessionId).state).toBe("talking");
   });
 
+  it("returns 500 when the inbound session could not be created (Telnyx must retry)", async () => {
+    const h = createTelephonyHarness();
+    h.db.failNext("motorist_call_sessions", "insert", "connection reset");
+
+    const result = await h.process(h.envelope("call.initiated", { call_control_id: "cc-boom", call_session_id: "tsess-boom", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "evt-boom"));
+
+    expect(result).toMatchObject({ status: 500, outcome: "failed", sessionId: null, error: expect.stringContaining("connection reset") });
+    expect(h.rows("motorist_call_sessions")).toHaveLength(0);
+    expect(h.rows("motorist_telnyx_webhook_events").at(-1)).toMatchObject({ status: "failed" });
+    // The redelivery after the stale window rescues the call.
+    h.advance(31_000);
+    const retry = await h.process(h.envelope("call.initiated", { call_control_id: "cc-boom", call_session_id: "tsess-boom", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "evt-boom"));
+    expect(retry).toMatchObject({ status: 200, outcome: "processed" });
+    expect(h.rows("motorist_call_sessions")).toHaveLength(1);
+  });
+
+  it("finds the line even when its stored number is not canonical E.164", async () => {
+    const h = createTelephonyHarness();
+    h.db.update("motorist_telephony_lines", { phone_number: "02/3240 8718" }, (row) => row.id === "00000000-0000-4000-8000-000000000202");
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+
+    expect(h.session(call.sessionId).line_id).toBe("00000000-0000-4000-8000-000000000202");
+    expect(h.logs.some((entry) => entry.message === "line number is not canonical E.164")).toBe(true);
+  });
+
   it("waits for a contended lease and continues once it is released", async () => {
     const h = createTelephonyHarness();
     const call = await h.inbound({ to: NUMBERS.allianz });

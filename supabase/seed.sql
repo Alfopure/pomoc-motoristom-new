@@ -443,8 +443,10 @@ values
   ('00000000-0000-4000-8000-000000002213', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002201', 'operator', '00000000-0000-4000-8000-000000000105', null, 2, null),
   ('00000000-0000-4000-8000-000000002221', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002202', 'operator', '00000000-0000-4000-8000-000000000104', null, 0, 15),
   ('00000000-0000-4000-8000-000000002222', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002202', 'operator', '00000000-0000-4000-8000-000000000103', null, 1, 15),
-  -- Placeholder external number (dispatcher mobile); replace before go-live.
-  ('00000000-0000-4000-8000-000000002223', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002202', 'external_number', null, '+421910988882', 2, 15)
+  -- Placeholder external number. The real escalation mobile is PII and is
+  -- never committed: set it directly on this row in the target project
+  -- (update public.motorist_ring_group_members set external_number = '+421…').
+  ('00000000-0000-4000-8000-000000002223', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002202', 'external_number', null, '+421900000000', 2, 15)
 on conflict (id) do nothing;
 
 insert into public.motorist_ring_plans (id, organization_id, name, fallback_kind, fallback_number, active)

@@ -22,7 +22,7 @@ import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import {
   heartbeatRegistrationState,
-  matchExpectedLeg,
+  matchAutoAnswer,
   rememberExpectedLeg,
   reduceWebphone,
   WEBPHONE_HEARTBEAT_MS,
@@ -139,10 +139,12 @@ export class TelnyxWebphone {
   private notification: Notification | null = null;
   private started = false;
   private connecting = false;
+  /** Set by `takeover()`: the next mint may revoke another tab's live device. */
+  private takeoverRequested = false;
   private snapshot: WebphoneSnapshot;
   private readonly options: TelnyxWebphoneOptions;
   private readonly boundVisibility = () => this.onVisibilityChange();
-  private readonly boundPageHide = () => this.beaconHeartbeat();
+  private readonly boundPageHide = () => this.beaconHeartbeat({ leaving: true });
 
   constructor(options: TelnyxWebphoneOptions = {}) {
     this.options = options;
@@ -191,6 +193,20 @@ export class TelnyxWebphone {
    */
   expectOperatorLeg(input: { callControlId: string; sessionId: string }): void {
     this.expected = rememberExpectedLeg(this.expected, { ...input, at: this.now() }, this.now());
+    // The invite usually arrives before `POST /api/telephony/calls` answers (the
+    // route still writes leg/session rows), so the ringing call is re-evaluated
+    // here instead of only at invite time.
+    this.autoAnswerCurrentCall();
+  }
+
+  /**
+   * Takes the phone over from another tab that is ringing or on a call. The
+   * server refuses a plain mint in that situation (409); this is the operator's
+   * explicit confirmation.
+   */
+  takeover(): void {
+    this.takeoverRequested = true;
+    this.dispatch({ type: "start" });
   }
 
   /** Unlocks the ringtone's AudioContext and asks for notification permission (needs a user gesture). */
@@ -303,11 +319,15 @@ export class TelnyxWebphone {
   }
 
   private async mintToken(): Promise<void> {
+    const takeover = this.takeoverRequested;
+    this.takeoverRequested = false;
     try {
       const result = await this.requestJson<WebphoneCredentials & { error?: string }>(TOKEN_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: "{}",
+        // The current session id makes the server treat this as a renewal of
+        // our own credential rather than a takeover of another tab.
+        body: JSON.stringify({ takeover, deviceSessionId: this.state.credentials?.deviceSessionId ?? null }),
         label: "prihlásenie telefónu",
         timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
       });
@@ -335,10 +355,13 @@ export class TelnyxWebphone {
     this.clearTimer("heartbeatTimer");
   }
 
-  private heartbeatBody(): string | null {
+  private heartbeatBody(options: { leaving?: boolean } = {}): string | null {
     const deviceSessionId = this.state.credentials?.deviceSessionId;
     if (!deviceSessionId) return null;
-    return JSON.stringify({ deviceSessionId, registrationState: heartbeatRegistrationState(this.state.status) });
+    // The tab is going away: report the phone as gone instead of refreshing
+    // `device_seen_at`, which would keep the operator ringable for two minutes.
+    const registrationState = options.leaving ? "unregistered" : heartbeatRegistrationState(this.state.status);
+    return JSON.stringify({ deviceSessionId, registrationState });
   }
 
   private async sendHeartbeat(): Promise<void> {
@@ -363,8 +386,8 @@ export class TelnyxWebphone {
   }
 
   /** Fire-and-forget heartbeat that survives the tab being hidden or closed. */
-  private beaconHeartbeat(): void {
-    const body = this.heartbeatBody();
+  private beaconHeartbeat(options: { leaving?: boolean } = {}): void {
+    const body = this.heartbeatBody(options);
     if (!body) return;
     if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") {
       void this.sendHeartbeat();
@@ -448,16 +471,9 @@ export class TelnyxWebphone {
     this.call = call;
 
     if (RINGING_STATES.has(state) && String(call.direction ?? "").toLowerCase() === "inbound") {
-      const expected = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now());
-      if (expected) {
-        // Our own click-to-call leg: answer it silently, the operator already
-        // asked for this call.
-        this.expected = this.expected.filter((entry) => entry.callControlId !== expected.callControlId);
-        this.callSessionId = expected.sessionId;
-        call.answer();
-        this.publish();
-        return;
-      }
+      // Our own click-to-call / pickup leg: answer it silently, the operator
+      // already asked for this call.
+      if (this.autoAnswerCurrentCall()) return;
       this.startRinging(call);
       this.publish();
       return;
@@ -465,6 +481,33 @@ export class TelnyxWebphone {
 
     if (ACTIVE_STATES.has(state)) this.stopRinging();
     this.publish();
+  }
+
+  /**
+   * Answers the call currently held by this tab when it is the operator leg of a
+   * dial we started: by `telnyxIDs.telnyxCallControlId` (design §2.2), with the
+   * `X-PM-Auto-Answer` invite header as a tiebreaker while exactly one leg this
+   * tab asked for is still outstanding. Returns true when the call was answered.
+   */
+  private autoAnswerCurrentCall(): boolean {
+    const call = this.call;
+    if (!call) return false;
+    const state = String(call.state ?? "").toLowerCase();
+    if (!RINGING_STATES.has(state) || String(call.direction ?? "").toLowerCase() !== "inbound") return false;
+
+    const expected = matchAutoAnswer(
+      this.expected,
+      { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId, customHeaders: call.options?.customHeaders },
+      this.now(),
+    );
+    if (!expected) return false;
+    this.expected = this.expected.filter((entry) => entry.callControlId !== expected.callControlId);
+    this.callSessionId = expected.sessionId;
+
+    this.stopRinging();
+    call.answer();
+    this.publish();
+    return true;
   }
 
   // --- ringing ---------------------------------------------------------------

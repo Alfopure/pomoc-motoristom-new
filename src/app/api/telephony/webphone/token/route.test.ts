@@ -43,8 +43,23 @@ describe("POST /api/telephony/webphone/token", () => {
     await expect(response.json()).resolves.toMatchObject({ token: "jwt", deviceSessionId: "dev-2", sipUsername: "gencred001" });
     expect(issueWebphoneToken).toHaveBeenCalledWith(
       { admin: { marker: "admin" }, telnyx: { marker: "telnyx" }, environment: "development" },
-      { organizationId: "org-1", profileId: "profile-1", userAgent: "vitest" },
+      { organizationId: "org-1", profileId: "profile-1", userAgent: "vitest", takeover: false, deviceSessionId: null },
     );
+  });
+
+  it("passes an explicit takeover through to the device layer", async () => {
+    issueWebphoneToken.mockResolvedValue({ token: "jwt", expiresAt: "2026-09-04T08:00:00.000Z", deviceSessionId: "dev-3", sipUsername: "gencred001", credentialId: "cred-1" });
+
+    const response = await POST(
+      new Request("https://app.test/api/telephony/webphone/token", {
+        method: "POST",
+        headers: { "user-agent": "vitest", "content-type": "application/json" },
+        body: JSON.stringify({ takeover: true }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(issueWebphoneToken).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ takeover: true }));
   });
 
   it("maps a provisioning failure onto its own status", async () => {

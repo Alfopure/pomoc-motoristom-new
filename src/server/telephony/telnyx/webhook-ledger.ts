@@ -45,6 +45,8 @@ export type WebhookClaim = {
   outcome: WebhookClaimOutcome;
   status: WebhookEventStatus;
   attempts: number;
+  /** Claim stamp of this invocation; the release is scoped to it. */
+  claimedAt: string | null;
 };
 
 export class WebhookLedgerError extends Error {
@@ -69,10 +71,11 @@ function parseClaimRow(eventId: string, row: unknown): WebhookClaim {
   const outcome = record.outcome;
   const status = record.event_status;
   const attempts = Number(record.event_attempts ?? 0);
+  const claimedAt = typeof record.event_claimed_at === "string" ? record.event_claimed_at : null;
   if (typeof outcome !== "string" || !OUTCOMES.has(outcome) || typeof status !== "string" || !STATUSES.has(status)) {
     throw new WebhookLedgerError("Claim RPC returned an unexpected row", eventId, row);
   }
-  return { outcome: outcome as WebhookClaimOutcome, status: status as WebhookEventStatus, attempts: Number.isFinite(attempts) ? attempts : 0 };
+  return { outcome: outcome as WebhookClaimOutcome, status: status as WebhookEventStatus, attempts: Number.isFinite(attempts) ? attempts : 0, claimedAt };
 }
 
 export async function claimWebhookEvent(client: AdminClient, input: ClaimWebhookEventInput): Promise<WebhookClaim> {
@@ -100,14 +103,23 @@ export async function claimWebhookEvent(client: AdminClient, input: ClaimWebhook
   return parseClaimRow(eventId, data);
 }
 
-/** Marks an owned event as processed and releases the claim. */
-export async function markWebhookEventProcessed(client: AdminClient, eventId: string, options: { now?: () => Date } = {}): Promise<void> {
+/**
+ * Marks an owned event as processed and releases the claim.
+ *
+ * The update is scoped to `claimedAt` when the caller knows it: if this
+ * invocation's claim went stale and a redelivery took it over, the write must
+ * not release the new owner's claim (a third delivery could then run the same
+ * event concurrently). Zero updated rows means "claim lost" and is logged.
+ */
+export async function markWebhookEventProcessed(client: AdminClient, eventId: string, options: { now?: () => Date; claimedAt?: string | null; logger?: (entry: Record<string, unknown>) => void } = {}): Promise<boolean> {
   const now = (options.now ?? (() => new Date()))().toISOString();
-  const { error } = await client
-    .from("motorist_telnyx_webhook_events")
-    .update({ status: "processed", processed_at: now, error: null, claimed_at: null })
-    .eq("event_id", eventId);
+  let query = client.from("motorist_telnyx_webhook_events").update({ status: "processed", processed_at: now, error: null, claimed_at: null }).eq("event_id", eventId);
+  if (options.claimedAt) query = query.eq("claimed_at", options.claimedAt);
+  const { data, error } = await query.select("event_id");
   if (error) throw new WebhookLedgerError(`Could not mark event processed: ${error.message}`, eventId, error);
+  const owned = (data ?? []).length > 0;
+  if (!owned) options.logger?.({ level: "warn", scope: "webhook", eventId, message: "claim lost before processed" });
+  return owned;
 }
 
 /**
@@ -115,13 +127,20 @@ export async function markWebhookEventProcessed(client: AdminClient, eventId: st
  * retry can only take over after `staleAfterMs`; `error` is truncated so a
  * huge stack trace never blocks the update.
  */
-export async function markWebhookEventFailed(client: AdminClient, eventId: string, failure: unknown): Promise<void> {
+export async function markWebhookEventFailed(
+  client: AdminClient,
+  eventId: string,
+  failure: unknown,
+  options: { claimedAt?: string | null; logger?: (entry: Record<string, unknown>) => void } = {},
+): Promise<boolean> {
   const message = failure instanceof Error ? `${failure.name}: ${failure.message}` : String(failure);
-  const { error } = await client
-    .from("motorist_telnyx_webhook_events")
-    .update({ status: "failed", error: message.slice(0, 2000) })
-    .eq("event_id", eventId);
+  let query = client.from("motorist_telnyx_webhook_events").update({ status: "failed", error: message.slice(0, 2000) }).eq("event_id", eventId);
+  if (options.claimedAt) query = query.eq("claimed_at", options.claimedAt);
+  const { data, error } = await query.select("event_id");
   if (error) throw new WebhookLedgerError(`Could not mark event failed: ${error.message}`, eventId, error);
+  const owned = (data ?? []).length > 0;
+  if (!owned) options.logger?.({ level: "warn", scope: "webhook", eventId, message: "claim lost before failed" });
+  return owned;
 }
 
 /** Small description helper for structured webhook logs. */

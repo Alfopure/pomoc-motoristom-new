@@ -697,23 +697,23 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
         processed_at: null,
       };
       db.storage(table).push(row);
-      return [{ outcome: "claimed", event_status: "queued", event_attempts: 1 }];
+      return [{ outcome: "claimed", event_status: "queued", event_attempts: 1, event_claimed_at: row.claimed_at }];
     }
 
     if (existing.status === "processed") {
-      return [{ outcome: "duplicate", event_status: existing.status, event_attempts: existing.attempts }];
+      return [{ outcome: "duplicate", event_status: existing.status, event_attempts: existing.attempts, event_claimed_at: existing.claimed_at ?? null }];
     }
 
     const claimedAt = toMs(existing.claimed_at);
     if (claimedAt !== null && claimedAt > nowMs - staleMs) {
-      return [{ outcome: "busy", event_status: existing.status, event_attempts: existing.attempts }];
+      return [{ outcome: "busy", event_status: existing.status, event_attempts: existing.attempts, event_claimed_at: existing.claimed_at ?? null }];
     }
 
     existing.claimed_at = db.nowIso();
     existing.attempts = Number(existing.attempts ?? 0) + 1;
     existing.payload = existing.payload ?? args.p_payload ?? null;
     existing.organization_id = existing.organization_id ?? args.p_organization_id ?? null;
-    return [{ outcome: "claimed", event_status: existing.status, event_attempts: existing.attempts }];
+    return [{ outcome: "claimed", event_status: existing.status, event_attempts: existing.attempts, event_claimed_at: existing.claimed_at }];
   });
 
   db.registerRpc("motorist_session_lease_acquire", (args) => {
@@ -726,6 +726,12 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     const ttl = Math.max(250, Math.min(Number(args.p_ttl_ms ?? 4000), 30000));
     session.lease_token = String(args.p_token);
     session.lease_until = new Date(nowMs + ttl).toISOString();
+    // Pessimistic on purpose: `20260917100000_telnyx_fixes_round2.sql` makes the
+    // `updated_at` trigger skip lease-only writes, but the harness keeps bumping
+    // it so no logic may quietly start deriving session activity from
+    // `updated_at` again (see `onStaleFinalise`, which trusts the sweeper's
+    // pre-lease verdict instead).
+    session.updated_at = db.nowIso();
     return true;
   });
 
@@ -734,14 +740,17 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     if (!session || session.lease_token !== args.p_token) return false;
     session.lease_token = null;
     session.lease_until = null;
+    session.updated_at = db.nowIso();
     return true;
   });
 
   db.registerRpc("motorist_reserve_operator", (args) => {
     const presence = db.storage("motorist_operator_presence").find((row) => row.profile_id === args.p_profile_id);
     if (!presence) return false;
-    const eligibleStatus = ["available", "ringing", "after_call_work"].includes(String(presence.status));
-    const sessionFree = isNil(presence.current_session_id) || presence.current_session_id === args.p_session_id;
+    const ownSession = presence.current_session_id === args.p_session_id;
+    // Re-entrant for the holder: a version CAS retry re-runs the guard.
+    const eligibleStatus = ["available", "ringing", "after_call_work"].includes(String(presence.status)) || ownSession;
+    const sessionFree = isNil(presence.current_session_id) || ownSession;
     if (!eligibleStatus || !sessionFree) return false;
     presence.status = "on_call";
     presence.current_session_id = args.p_session_id;
@@ -749,6 +758,21 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     presence.status_since = db.nowIso();
     presence.updated_at = db.nowIso();
     return true;
+  });
+
+  db.registerRpc("motorist_telephony_usage_add", (args) => {
+    const day = String(args.p_day);
+    const rows = db.storage("motorist_telephony_daily_usage");
+    let row = rows.find((candidate) => candidate.organization_id === args.p_organization_id && candidate.day === day);
+    if (!row) {
+      row = { id: randomUUID(), organization_id: args.p_organization_id, day, legs: 0, minutes: 0, sms_count: 0, created_at: db.nowIso(), updated_at: db.nowIso() };
+      rows.push(row);
+    }
+    row.legs = Number(row.legs ?? 0) + Math.max(0, Number(args.p_legs ?? 0));
+    row.minutes = Number(row.minutes ?? 0) + Math.max(0, Number(args.p_minutes ?? 0));
+    row.sms_count = Number(row.sms_count ?? 0) + Math.max(0, Number(args.p_sms ?? 0));
+    row.updated_at = db.nowIso();
+    return Number(row.legs);
   });
 
   db.registerRpc("motorist_advance_ring_step", (args) => {

@@ -299,9 +299,10 @@ export function CallCenterModule({
     }
   }
 
-  async function startQuickCall(entry: PhonebookEntry) {
+  /** Returns true when the dial was accepted (the dialer keeps the number otherwise). */
+  async function startQuickCall(entry: PhonebookEntry): Promise<boolean> {
     if (busyActionBlocks(busyAction, `quick:${entry.id}`) || !entry.phone.trim()) {
-      return;
+      return false;
     }
 
     const busyKey = `quick:${entry.id}`;
@@ -312,8 +313,10 @@ export function CallCenterModule({
       await onDial(entry.phone);
       setActionNotice(`Volanie na ${entry.label} bolo spustené.`);
       onTelephonyChanged();
+      return true;
     } catch (error) {
       setActionNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo spustiť.");
+      return false;
     } finally {
       setBusyAction(null);
     }
@@ -387,7 +390,7 @@ export function CallCenterModule({
               configured={telephonyConfigured}
               metrics={metrics}
               missedCount={missedCalls.length}
-              onDial={(phone) => void startQuickCall({ id: "manual", detail: phone, label: phone, phone, type: "contact" })}
+              onDial={(phone) => startQuickCall({ id: "manual", detail: phone, label: phone, phone, type: "contact" })}
               primaryQueueWait={primaryQueueWait}
             />
             <CallbackInbox
@@ -426,7 +429,8 @@ function CallCommandPanel({
   configured: boolean;
   metrics: DispatchMetrics;
   missedCount: number;
-  onDial: (phone: string) => void;
+  /** Resolves true when the dial was accepted; the number is kept on failure. */
+  onDial: (phone: string) => Promise<boolean>;
   primaryQueueWait: number;
 }) {
   const [toNumber, setToNumber] = useState("");
@@ -457,8 +461,14 @@ function CallCommandPanel({
         onSubmit={(event) => {
           event.preventDefault();
           if (!configured || busy || !toNumber.trim()) return;
-          onDial(toNumber.trim());
-          setToNumber("");
+          // The dial can be refused (kill switch, allowlist, offline phone):
+          // keep the number so the operator can retry, and never float the
+          // promise (the parent handler renders the reason).
+          void onDial(toNumber.trim())
+            .then((accepted) => {
+              if (accepted) setToNumber("");
+            })
+            .catch(() => setToNumber(toNumber.trim()));
         }}
       >
         <div className="grid min-w-0 gap-2">
