@@ -32,6 +32,7 @@ import type { CallCenterCall, CallOutcome, DispatchData } from "@/data/dispatch-
 import type { DispatchCase, DispatchMetrics, Operator } from "@/domain/types";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
 import { callStatusLabels } from "@/domain/statuses";
+import { CallbackQueuePanel } from "./CallbackQueuePanel";
 import { CallDetailDrawer } from "./CallDetailDrawer";
 import { CallQueuePanel } from "./CallQueuePanel";
 import { EmergencyNotice } from "./EmergencyNotice";
@@ -43,7 +44,7 @@ import type {
   TelephonyFavoriteMutationResponse,
   TelephonyFavoritesResponse,
 } from "@/lib/telephony/directory";
-import type { PhoneBarModel } from "@/lib/telephony/active-calls-model";
+import type { PhoneBarModel, WaitingRoomRow } from "@/lib/telephony/active-calls-model";
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import type {
@@ -57,8 +58,8 @@ import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 type CallCenterModuleProps = {
   /** Live telephony surface; `undefined` while no provider is configured. */
   activeSnapshot?: PhoneBarModel;
-  /** Waiting room rows (`CallCenterCall` shape, as `CallQueuePanel` speaks it). */
-  waitingCalls?: CallCenterCall[];
+  /** Waiting room rows (`CallCenterCall` plus who parked the caller). */
+  waitingCalls?: WaitingRoomRow[];
   telephonyConfigured?: boolean;
   /** Browser-phone registration, shown next to the operator's own status. */
   phone?: WebphoneSnapshot;
@@ -76,6 +77,8 @@ type CallCenterModuleProps = {
   onNewCase: (call?: CallCenterCall) => void;
   onOpenCase: (caseId: string) => void;
   onAvailabilityAction: (action: TelephonyAvailabilityAction) => void;
+  /** Console-owned outbound path for the callback queue (arms the browser phone). */
+  onCallbackCall?: (requestId: string) => Promise<void>;
   onTelephonyChanged: () => void;
 };
 
@@ -162,6 +165,7 @@ export function CallCenterModule({
   onNewCase,
   onOpenCase,
   onAvailabilityAction,
+  onCallbackCall,
   onTelephonyChanged,
   operators,
 }: CallCenterModuleProps) {
@@ -345,7 +349,7 @@ export function CallCenterModule({
       {telephonyConfigured && (
         <div className="mb-4 overflow-hidden rounded-md border border-amber-200">
           <CallQueuePanel
-            calls={waitingCalls.map((call) => ({ call }))}
+            calls={waitingCalls}
             now={waitingRoomNow}
             onPickup={(call) => onCallAction?.("pickup", call.providerSessionId ?? call.id)}
             pickupState={() => ({
@@ -392,6 +396,11 @@ export function CallCenterModule({
               missedCount={missedCalls.length}
               onDial={(phone) => startQuickCall({ id: "manual", detail: phone, label: phone, phone, type: "contact" })}
               primaryQueueWait={primaryQueueWait}
+            />
+            <CallbackQueuePanel
+              configured={telephonyConfigured}
+              onCallBack={onCallbackCall}
+              onChanged={onTelephonyChanged}
             />
             <CallbackInbox
               busyAction={busyAction}

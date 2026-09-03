@@ -17,6 +17,7 @@ import {
   mediaUrl,
   readMeta,
   toJson,
+  type AppEvent,
   type AttemptPlan,
   type CallbackPlan,
   type CallRow,
@@ -391,6 +392,22 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
   if (inserted.error && !isDuplicate(inserted.error)) fail("call insert failed", inserted.error);
 }
 
+/**
+ * The target of an app event, without the identity that must not be persisted.
+ *
+ * `motorist_call_events` is readable by every member of the organisation (RLS
+ * `motorist_is_org_member`), so anything written here is visible to every
+ * signed-in dispatcher through PostgREST. A `TransferTarget` for a colleague
+ * carries their Telnyx SIP username — half of a registrable credential — and a
+ * transfer, consultation or add-party would otherwise hand it out. The label
+ * and the profile id are what the event log is read for; nothing downstream
+ * reads `sipUri` back out of a row.
+ */
+function safeEventTarget(target: AppEvent["target"] | null | undefined): Json {
+  if (!target) return null;
+  return target.kind === "operator" ? { kind: "operator", profileId: target.profileId, label: target.label } : { kind: "number", number: target.number, label: target.label };
+}
+
 /** Audit row per processed event (`event_fingerprint` = event id → idempotent). */
 export async function recordCallEvent(
   deps: Pick<EffectsDeps, "admin" | "organizationId" | "now">,
@@ -412,7 +429,8 @@ export async function recordCallEvent(
     callId = call.data?.id ?? null;
   }
   const event = input.event;
-  const rawPayload = event.kind === "telnyx" ? toJson(event.payload) : toJson({ type: event.type, actor: event.actorProfileId, target: event.target ?? null });
+  const target = event.kind === "app" ? safeEventTarget(event.target) : null;
+  const rawPayload = event.kind === "telnyx" ? toJson(event.payload) : toJson({ type: event.type, actor: event.actorProfileId, target });
   const inserted = await admin.from("motorist_call_events").insert({
     organization_id: deps.organizationId,
     call_id: callId,
@@ -423,7 +441,7 @@ export async function recordCallEvent(
     payload: toJson(
       event.kind === "telnyx"
         ? { call_control_id: event.callControlId, call_leg_id: event.callLegId, from: event.from, to: event.to, direction: event.direction, hangup_cause: event.hangupCause, digits: event.digits, status: event.status }
-        : { actor: event.actorProfileId, target: event.target ?? null },
+        : { actor: event.actorProfileId, target },
     ),
     raw_payload: rawPayload,
     normalized_payload: toJson({
@@ -563,8 +581,25 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       return { skipped: false, detail: { conferenceId: conference.id } };
     }
     case "conference_join":
-      await telnyx.conferenceAction(requireConference(ctx), "join", { call_control_id: resolveLeg(ctx, command.leg), commandId: command.commandId });
-      return { skipped: false };
+      // Verified against the published Call Control API (join a conference):
+      // `supervisor_role` accepts `barge | monitor | none | whisper` and
+      // `whisper_call_control_ids` is the array of legs a whispering supervisor
+      // is heard by. Both are omitted for an ordinary participant.
+      await telnyx.conferenceAction(requireConference(ctx), "join", {
+        call_control_id: resolveLeg(ctx, command.leg),
+        supervisor_role: command.supervisorRole,
+        whisper_call_control_ids: command.whisper?.map((leg) => resolveLeg(ctx, leg)),
+        commandId: command.commandId,
+      });
+      return { skipped: false, ...(command.supervisorRole ? { detail: { supervisorRole: command.supervisorRole } } : {}) };
+    case "conference_update":
+      await telnyx.conferenceAction(requireConference(ctx), "update", {
+        call_control_id: resolveLeg(ctx, command.leg),
+        supervisor_role: command.supervisorRole,
+        whisper_call_control_ids: command.whisper?.map((leg) => resolveLeg(ctx, leg)),
+        commandId: command.commandId,
+      });
+      return { skipped: false, detail: { supervisorRole: command.supervisorRole } };
     case "conference_leave":
       await telnyx.conferenceAction(requireConference(ctx), "leave", { call_control_id: resolveLeg(ctx, command.leg), commandId: command.commandId });
       return { skipped: false };
@@ -579,6 +614,15 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
     }
     case "conference_unhold":
       await telnyx.conferenceAction(requireConference(ctx), "unhold", { call_control_ids: command.legs.map((leg) => resolveLeg(ctx, leg)), commandId: command.commandId });
+      return { skipped: false };
+    case "conference_mute":
+    case "conference_unmute":
+      // `mute` / `unmute` take `call_control_ids` (an array) and, like the other
+      // participant commands, do not declare `command_id` in the Telnyx schema.
+      await telnyx.conferenceAction(requireConference(ctx), command.kind === "conference_mute" ? "mute" : "unmute", {
+        call_control_ids: command.legs.map((leg) => resolveLeg(ctx, leg)),
+        commandId: command.commandId,
+      });
       return { skipped: false };
     case "ring_fanout":
       return executeRingFanout(deps, ctx, command);
@@ -621,6 +665,10 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     mediaEncryption: isSip ? "SRTP" : undefined,
     customHeaders: command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" }] : undefined,
     fromDisplayName: command.fromDisplayName,
+    // Supervision attaches to a live call at dial time; the caller's bridge is
+    // never touched. `supervisor_role` is only meaningful together with it.
+    superviseCallControlId: command.superviseCallControlId,
+    supervisorRole: command.superviseCallControlId ? command.supervisorRole : undefined,
   });
   ctx.dialResults.set(command.commandId, result);
   await upsertDialedLeg(deps, ctx.session, command, result);

@@ -13,6 +13,12 @@ type Table<Row> = {
   Relationships: [];
 };
 
+/** A read-only view: `Insert`/`Update` are `never`, so a write cannot compile. */
+type View<Row> = {
+  Row: Row;
+  Relationships: [];
+};
+
 type Timestamp = string;
 type ExternalVehicleSourceProvider = "commander" | "client_vehicle_db";
 type TelephonyEnvironment = "production" | "development";
@@ -1200,7 +1206,36 @@ export type Database = {
         updated_at: Timestamp;
       }>;
     };
-    Views: { [_ in never]: never };
+    Views: {
+      // Phase 4 statistics views (migration 20260921100000). Read-only: the
+      // typed client only ever selects from them.
+      motorist_call_stats_daily: View<{
+        organization_id: string;
+        /** Local (Europe/Bratislava) calendar day, `YYYY-MM-DD`. */
+        day: string;
+        direction: "inbound" | "outbound" | "internal";
+        operator_id: string | null;
+        calls: number;
+        answered: number;
+        unanswered: number;
+        system_handled: number;
+        abandoned: number;
+        answered_with_wait: number;
+        answered_within_20s: number;
+        answer_seconds_total: number;
+        talk_seconds: number;
+      }>;
+      motorist_operator_status_durations: View<{
+        organization_id: string;
+        profile_id: string;
+        day: string;
+        status: Database["public"]["Tables"]["motorist_operator_statuses"]["Row"]["status"];
+        entries: number;
+        seconds: number;
+        last_started_at: Timestamp;
+        open_since: Timestamp | null;
+      }>;
+    };
     Functions: {
       motorist_enqueue_job_run: {
         Args: {

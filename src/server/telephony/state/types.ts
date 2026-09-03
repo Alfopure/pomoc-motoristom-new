@@ -2,6 +2,7 @@ import type { CallerMatch } from "@/data/dispatch-types";
 import type { CallLegRole, CallSessionState, Database, Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
 import type { BusinessHoursSchedule } from "@/lib/telephony/business-hours";
+import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import type { TelnyxClientState } from "../telnyx/client-state";
 
 /**
@@ -135,8 +136,30 @@ export type AppEventType =
   | "consult"
   | "complete_transfer"
   | "cancel_consult"
+  | "add_party"
+  | "mute_party"
+  | "unmute_party"
+  | "remove_party"
+  | "leave_conference"
+  | "supervise"
+  | "stop_supervise"
   | "hangup"
   | "sweep";
+
+/**
+ * Telnyx conference supervisor roles (`supervisor_role` on
+ * `POST /conferences/{id}/actions/join` and `…/actions/update`).
+ *
+ * `monitor` joins muted and only listens, `whisper` is heard exclusively by the
+ * legs named in `whisper_call_control_ids`, `barge` is an ordinary participant
+ * everyone hears. Telnyx also accepts `none` (an ordinary participant with the
+ * role cleared), which is only ever sent by `conference_update`.
+ *
+ * Declared in `src/lib/telephony` because the console renders the same three
+ * choices and must not import server modules.
+ */
+export type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
+export { isSupervisorMode, SUPERVISOR_MODE_ORDER as SUPERVISOR_MODES } from "@/lib/telephony/supervisor-mode";
 
 export type AppEvent = {
   kind: "app";
@@ -148,6 +171,10 @@ export type AppEvent = {
   target?: TransferTarget;
   /** For `pickup`: the picking operator's device. */
   picker?: { profileId: string; sipUri: string };
+  /** For `mute_party` / `unmute_party` / `remove_party`: the participant leg the action targets. */
+  party?: { callControlId: string; label: string };
+  /** For `supervise`: the supervisor's own device and the mode they asked for. */
+  supervisor?: { profileId: string; sipUri: string; mode: SupervisorMode; label: string };
   /**
    * For `sweep`: the scanner already decided this session is stale. The verdict
    * is computed *before* the session lease is taken, because acquiring the lease
@@ -199,6 +226,14 @@ export type DialCommand = CommandBase & {
   attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null } | null;
   autoAnswer?: boolean;
   fromDisplayName?: string;
+  /**
+   * Supervision without a conference: the dial endpoint attaches the new leg to
+   * a live call as monitor, whisper or barge, leaving the existing bridge alone.
+   * Promoting an ordinary bridged call to a conference just to listen would
+   * unbridge the caller for two round trips of dead air.
+   */
+  superviseCallControlId?: string;
+  supervisorRole?: SupervisorMode;
 };
 
 export type AttemptPlan = {
@@ -252,10 +287,22 @@ export type Command = CommandBase &
       timeoutSecs: number;
     }
   | { kind: "conference_create"; commandId: string; leg: LegRef; name: string }
-  | { kind: "conference_join"; commandId: string; leg: LegRef }
+  | {
+      kind: "conference_join";
+      commandId: string;
+      leg: LegRef;
+      /** Supervision (design §4 Phase 4): `supervisor_role` on the join. */
+      supervisorRole?: SupervisorMode;
+      /** `whisper_call_control_ids`: the only legs that hear a `whisper` supervisor. */
+      whisper?: LegRef[];
+    }
   | { kind: "conference_leave"; commandId: string; leg: LegRef }
   | { kind: "conference_hold"; commandId: string; legs: LegRef[]; media: MediaRef }
   | { kind: "conference_unhold"; commandId: string; legs: LegRef[] }
+  | { kind: "conference_mute"; commandId: string; legs: LegRef[] }
+  | { kind: "conference_unmute"; commandId: string; legs: LegRef[] }
+  /** `POST /conferences/{id}/actions/update`: switches a participant's supervisor role live. */
+  | { kind: "conference_update"; commandId: string; leg: LegRef; supervisorRole: SupervisorMode | "none"; whisper?: LegRef[] }
   | RingFanout
   );
 
@@ -462,6 +509,10 @@ export type SessionMeta = {
   callback?: { requested_at?: string | null; source?: CallbackSource | null; confirmed?: boolean; declined_at?: string | null } | null;
   hangup?: { by: string | null; at: string; scope: "session" } | null;
   conference?: { promoted_at: string; by: string | null } | null;
+  /** A third party dialled into the conference that has not answered yet. */
+  party_pending?: { target: TransferTarget; by: string | null; at: string } | null;
+  /** Live supervision, keyed by the supervisor's profile id. */
+  supervise?: Record<string, { mode: SupervisorMode; at: string; by?: string | null }> | null;
   park?: { by: string | null; at: string; timed_out_at?: string | null } | null;
   ivr?: { menu_id: string; tries: number; chosen?: string | null; action?: string | null } | null;
   after_hours?: { reason: string; at: string } | null;

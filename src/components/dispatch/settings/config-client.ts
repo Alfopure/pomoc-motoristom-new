@@ -16,6 +16,7 @@ export const TELEPHONY_CONFIG_ENDPOINTS = {
   ringPlans: "/api/telephony/config/ring-plans",
   businessHours: "/api/telephony/config/business-hours",
   pauseReasons: "/api/telephony/config/pause-reasons",
+  ivrMenus: "/api/telephony/config/ivr-menus",
   numbers: "/api/telephony/config/numbers",
   settings: "/api/telephony/config/settings",
 } as const;

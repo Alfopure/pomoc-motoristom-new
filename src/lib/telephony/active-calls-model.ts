@@ -13,6 +13,7 @@
  */
 
 import type { CallCenterCall, CallerMatch } from "@/data/dispatch-types";
+import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { TelephonyPresenceSnapshot, TelephonyPresenceStatus } from "@/lib/telephony/presence";
 
 export type ActiveCallSessionState =
@@ -44,6 +45,11 @@ export type ActiveCallLegPayload = {
   fromNumber: string | null;
   answeredAt: string | null;
   bridgedAt: string | null;
+  /** `client_state.intent`; `party` marks a third party added to the conference. */
+  intent: string | null;
+  muted: boolean;
+  /** `monitor` / `whisper` / `barge` for a supervisor leg. */
+  supervisorMode: string | null;
 };
 
 export type ActiveCallPayload = {
@@ -64,7 +70,10 @@ export type ActiveCallPayload = {
   answeredByProfileId: string | null;
   holdStartedAt: string | null;
   parkedAt: string | null;
+  parkedByProfileId: string | null;
   waitingSince: string | null;
+  waitingReason: string | null;
+  waitingMaxMinutes: number | null;
   currentStep: number;
   ringMode: string | null;
   offeredProfileIds: string[];
@@ -214,7 +223,71 @@ export type PhoneBarCall = {
   conference: boolean;
   /** True when this operator owns the call rather than merely watching it. */
   mine: boolean;
+  /** Everyone on the call right now: caller, operator, added parties, supervisors. */
+  participants: CallParticipant[];
 };
+
+export type CallParticipantKind = "caller" | "operator" | "party" | "supervisor" | "consult";
+
+export type CallParticipant = {
+  /** `motorist_call_legs.id` — the id the party routes are keyed on. */
+  legId: string;
+  kind: CallParticipantKind;
+  profileId: string | null;
+  name: string;
+  /** Secondary line: the number behind a colleague, or the supervision mode. */
+  detail: string | null;
+  answered: boolean;
+  muted: boolean;
+  supervisorMode: string | null;
+  /** The operator reading the bar. */
+  self: boolean;
+  /** Only added third parties may be muted or thrown out. */
+  controllable: boolean;
+};
+
+function participantKind(leg: ActiveCallLegPayload): CallParticipantKind {
+  if (leg.role === "customer") return "caller";
+  if (leg.role === "supervisor") return "supervisor";
+  if (leg.role === "consult") return "consult";
+  return leg.intent === "party" ? "party" : "operator";
+}
+
+/**
+ * The participant list the PhoneBar renders during a conference.
+ *
+ * Only legs the console can address are listed (a leg row always has an id);
+ * `controllable` marks the third parties the mute/kick routes accept, so the
+ * caller and the operator's own leg cannot be muted away by a mis-click.
+ */
+export function callParticipants(
+  call: Pick<ActiveCallPayload, "legs" | "direction" | "callerNumber" | "calledNumber">,
+  options: { actorProfileId: string; operatorName?: OperatorNameLookup },
+): CallParticipant[] {
+  const order: Record<CallParticipantKind, number> = { caller: 0, operator: 1, party: 2, consult: 3, supervisor: 4 };
+  return call.legs
+    .map((leg) => {
+      const kind = participantKind(leg);
+      const number = kind === "caller" ? counterpartNumber(call) : (leg.toNumber ?? leg.fromNumber ?? "");
+      const name =
+        (leg.profileId ? options.operatorName?.(leg.profileId) : undefined) ??
+        (number ? formatPhoneNumberForDisplay(number) || number : null) ??
+        (kind === "caller" ? "Volajúci" : "Účastník");
+      return {
+        legId: leg.id,
+        kind,
+        profileId: leg.profileId,
+        name,
+        detail: leg.profileId && number ? (formatPhoneNumberForDisplay(number) || number) : null,
+        answered: Boolean(leg.answeredAt),
+        muted: leg.muted,
+        supervisorMode: leg.supervisorMode,
+        self: leg.profileId === options.actorProfileId,
+        controllable: kind === "party",
+      } satisfies CallParticipant;
+    })
+    .sort((left, right) => order[left.kind] - order[right.kind] || left.name.localeCompare(right.name, "sk"));
+}
 
 export type PhoneBarModel = {
   checkedAt: string;
@@ -227,11 +300,17 @@ export type PhoneBarModel = {
   waiting: PhoneBarCall[];
   /** Live calls of other operators, for the "prebieha" counter. */
   otherActiveCount: number;
+  /** Live calls of other operators that still have an operator on them — the supervision targets of a manager. */
+  others: PhoneBarCall[];
+  /** The call this operator is supervising right now (their own supervisor leg is up). */
+  supervising: { sessionId: string; mode: string | null; pending: boolean } | null;
   presence: TelephonyPresenceSnapshot;
   ownPresenceStatus: TelephonyPresenceStatus | null;
 };
 
-function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorProfileId: string): PhoneBarCall {
+export type PhoneBarModelOptions = { operatorName?: OperatorNameLookup };
+
+function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorProfileId: string, options: PhoneBarModelOptions = {}): PhoneBarCall {
   return {
     sessionId: call.sessionId,
     callId: call.callId,
@@ -252,6 +331,7 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
     consulting: call.state === "consulting",
     conference: call.state === "conference",
     mine: call.answeredByProfileId === actorProfileId,
+    participants: callParticipants(call, { actorProfileId, operatorName: options.operatorName }),
   };
 }
 
@@ -262,7 +342,7 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
  * ringing at their phone (`offeredProfileIds`), which becomes the active call
  * the moment the reservation names them. Waiting-room rows are everyone's.
  */
-export function buildPhoneBarModel(payload: ActiveCallsPayload): PhoneBarModel {
+export function buildPhoneBarModel(payload: ActiveCallsPayload, options: PhoneBarModelOptions = {}): PhoneBarModel {
   const actorProfileId = payload.actorProfileId;
   const active =
     payload.calls.find((call) => call.answeredByProfileId === actorProfileId && !WAITING_STATES.has(call.state)) ?? null;
@@ -270,17 +350,32 @@ export function buildPhoneBarModel(payload: ActiveCallsPayload): PhoneBarModel {
     (call) => call.offeredProfileIds.includes(actorProfileId) && call.sessionId !== active?.sessionId,
   );
   const waiting = payload.waiting;
-  const otherActiveCount = payload.calls.filter(
-    (call) => isTalkingState(call.state) && call.answeredByProfileId !== actorProfileId,
-  ).length;
+  const others = payload.calls.filter((call) => isTalkingState(call.state) && call.answeredByProfileId !== actorProfileId);
+  // Supervision whispers into the leg that answered the caller. A three-way the
+  // operator already left has no colleague on it any more (`answered_by_profile_id`
+  // is null and the remaining leg is the outside party), so it is not a target:
+  // the server refuses it with 409 and offering the buttons would only teach the
+  // manager to press a button that never works.
+  const supervisable = others.filter((call) => call.answeredByProfileId !== null);
+  // The supervisor's own leg on somebody else's call: it is what tells the bar
+  // to offer "ukončiť dozor" and which mode is currently in force.
+  const supervisedCall = payload.calls.find((call) =>
+    call.legs.some((leg) => leg.role === "supervisor" && leg.profileId === actorProfileId),
+  );
+  const supervisorLeg = supervisedCall?.legs.find((leg) => leg.role === "supervisor" && leg.profileId === actorProfileId) ?? null;
 
   return {
     checkedAt: payload.checkedAt,
     configured: payload.configured,
-    active: active ? toPhoneBarCall(active, "active", actorProfileId) : null,
-    offers: offers.map((call) => toPhoneBarCall(call, "offer", actorProfileId)),
-    waiting: waiting.map((call) => toPhoneBarCall(call, "waiting", actorProfileId)),
-    otherActiveCount,
+    active: active ? toPhoneBarCall(active, "active", actorProfileId, options) : null,
+    offers: offers.map((call) => toPhoneBarCall(call, "offer", actorProfileId, options)),
+    waiting: waiting.map((call) => toPhoneBarCall(call, "waiting", actorProfileId, options)),
+    otherActiveCount: others.length,
+    others: supervisable.map((call) => toPhoneBarCall(call, "active", actorProfileId, options)),
+    supervising:
+      supervisedCall && supervisorLeg
+        ? { sessionId: supervisedCall.sessionId, mode: supervisorLeg.supervisorMode, pending: !supervisorLeg.answeredAt }
+        : null,
     presence: payload.presence,
     ownPresenceStatus: payload.presence.presence.find((row) => row.profileId === actorProfileId)?.status ?? null,
   };
@@ -294,12 +389,65 @@ export function pollActivityInput(model: PhoneBarModel): { hasBrowserCall: boole
   };
 }
 
+/**
+ * What the waiting room says about a caller beyond the call row itself: who put
+ * them there and how long they have before the park limit turns into a callback
+ * offer.
+ *
+ * A caller nobody rescues is not left in the waiting room forever — the state
+ * machine offers them a callback once `park_max_minutes` (frozen when they
+ * entered, `meta.waiting.max_minutes`) runs out. The dispatcher has to be able
+ * to see that clock, otherwise the caller disappears from the queue with no
+ * explanation on screen.
+ */
+export type WaitingRoomPark = {
+  /** True for `parked`: an operator put this caller here, they did not overflow into it. */
+  parked: boolean;
+  byProfileId: string | null;
+  byName: string | null;
+  /** ISO moment the caller entered the waiting room. */
+  since: string | null;
+  /** Seconds spent in the waiting room, measured against the snapshot clock. */
+  seconds: number;
+  /** Seconds left before the callback offer; `null` when the limit is unknown. */
+  secondsToLimit: number | null;
+  limitMinutes: number | null;
+};
+
+export function waitingRoomPark(
+  call: Pick<ActiveCallPayload, "state" | "parkedAt" | "parkedByProfileId" | "waitingSince" | "waitingMaxMinutes">,
+  options: { now: number; operatorName?: OperatorNameLookup },
+): WaitingRoomPark {
+  const parked = call.state === "parked";
+  // `parked_at` is stamped by the park action; the overflow path only has the
+  // waiting-room timestamp.
+  const since = call.parkedAt ?? call.waitingSince;
+  const started = since ? Date.parse(since) : Number.NaN;
+  const seconds = Number.isFinite(started) ? Math.max(0, Math.floor((options.now - started) / 1_000)) : 0;
+  const limitMinutes = call.waitingMaxMinutes && call.waitingMaxMinutes > 0 ? call.waitingMaxMinutes : null;
+  const byProfileId = parked ? call.parkedByProfileId : null;
+  return {
+    parked,
+    byProfileId,
+    byName: byProfileId ? options.operatorName?.(byProfileId) ?? null : null,
+    since,
+    seconds,
+    secondsToLimit: limitMinutes === null || !Number.isFinite(started) ? null : Math.max(0, limitMinutes * 60 - seconds),
+    limitMinutes,
+  };
+}
+
+export type WaitingRoomRow = { call: CallCenterCall; park: WaitingRoomPark };
+
 /** Waiting-room rows for `CallQueuePanel` (which speaks `CallCenterCall`). */
 export function waitingRoomCalls(
   payload: ActiveCallsPayload,
   options: { now: number; operatorName?: OperatorNameLookup },
-): CallCenterCall[] {
-  return payload.waiting.map((call) => callCenterCallFromActive(call, options));
+): WaitingRoomRow[] {
+  return payload.waiting.map((call) => ({
+    call: callCenterCallFromActive(call, options),
+    park: waitingRoomPark(call, options),
+  }));
 }
 
 /** Live rows for the Ústredňa list: everything that is not waiting. */

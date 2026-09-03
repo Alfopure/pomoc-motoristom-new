@@ -429,7 +429,9 @@ function percentage(numerator: number, denominator: number) {
   return denominator > 0 ? Math.round((numerator / denominator) * 100) : 0;
 }
 
-function localDateKey(value: string | null | undefined) {
+/** Local (Europe/Bratislava) calendar day of an instant, `YYYY-MM-DD`. Exported for the
+ * telephony statistics, which group by the same day the wall clock shows. */
+export function localDateKey(value: string | null | undefined) {
   if (!value) return undefined;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return undefined;

@@ -6,6 +6,7 @@ import {
   callElapsedSeconds,
   formatCallTimer,
   isDtmfKey,
+  partyBusyKey,
   phoneBarCapabilities,
   phoneBarStateLabel,
   phoneBarVisible,
@@ -27,6 +28,7 @@ function call(overrides: Partial<PhoneBarCall> = {}): PhoneBarCall {
     caseId: null,
     match: null,
     matchCount: 0,
+    participants: [],
     timerSince: "2026-09-03T08:00:00.000Z",
     answered: true,
     held: false,
@@ -135,5 +137,48 @@ describe("presentation helpers", () => {
   it("accepts only real DTMF keys", () => {
     expect(isDtmfKey("#")).toBe(true);
     expect(isDtmfKey("A")).toBe(false);
+  });
+});
+
+describe("conference capabilities", () => {
+  const party = { legId: "leg-party", kind: "party" as const, profileId: null, name: "+421 900 000 000", detail: null, answered: true, muted: false, supervisorMode: null, self: false, controllable: true };
+
+  it("offers adding a participant on a live or held call, but not while degraded", () => {
+    expect(phoneBarCapabilities({ call: call({ state: "talking" }), browserCallActive: true, browserCallRinging: false }).addParty).toBe(true);
+    expect(phoneBarCapabilities({ call: call({ state: "held" }), browserCallActive: true, browserCallRinging: false }).addParty).toBe(true);
+    expect(phoneBarCapabilities({ call: call({ state: "talking" }), browserCallActive: true, browserCallRinging: false, degraded: true }).addParty).toBe(false);
+    expect(phoneBarCapabilities({ call: call({ state: "talking", answered: false }), browserCallActive: true, browserCallRinging: false }).addParty).toBe(false);
+    expect(phoneBarCapabilities({ call: call({ kind: "waiting" }), browserCallActive: false, browserCallRinging: false }).addParty).toBe(false);
+  });
+
+  it("offers leaving only once another participant is actually in the conference", () => {
+    expect(phoneBarCapabilities({ call: call({ state: "conference", participants: [party] }), browserCallActive: true, browserCallRinging: false }).leaveConference).toBe(true);
+    expect(phoneBarCapabilities({ call: call({ state: "conference", participants: [{ ...party, answered: false }] }), browserCallActive: true, browserCallRinging: false }).leaveConference).toBe(false);
+    expect(phoneBarCapabilities({ call: call({ state: "talking", participants: [party] }), browserCallActive: true, browserCallRinging: false }).leaveConference).toBe(false);
+  });
+
+  it("narrows the two-party controls while a three-way is running", () => {
+    const three = call({ state: "conference", participants: [party] });
+    expect(phoneBarCapabilities({ call: three, browserCallActive: true, browserCallRinging: false })).toMatchObject({
+      hold: false,
+      park: false,
+      transfer: false,
+      consult: false,
+      addParty: true,
+      leaveConference: true,
+      hangup: true,
+    });
+  });
+
+  it("names the conference actions in Slovak", () => {
+    expect(PHONE_ACTION_LABELS["add-party"]).toBe("Pridať účastníka");
+    expect(PHONE_ACTION_LABELS.leave).toBe("Odísť z hovoru");
+  });
+
+  it("keys a participant command by action, call and leg", () => {
+    // The hook sets this key and the bar compares against it: two participants
+    // of the same call must not share a spinner.
+    expect(partyBusyKey("mute", "sess-1", "leg-a")).toBe("mute:sess-1:leg-a");
+    expect(partyBusyKey("kick", "sess-1", "leg-a")).not.toBe(partyBusyKey("kick", "sess-1", "leg-b"));
   });
 });

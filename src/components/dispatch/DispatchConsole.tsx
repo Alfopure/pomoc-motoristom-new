@@ -39,13 +39,14 @@ import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
 import { isNotificationForProfile, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
 import { isTaskOpen, taskPriorityLabels } from "@/domain/tasks";
-import type { Branch, CallStatus, CaseTask, CustomerSharedLocation, DispatchCall, DispatchCase, DispatchNotification, FleetAsset, NotificationStatus, Operator, TimelineEvent } from "@/domain/types";
+import type { AppRole, Branch, CallStatus, CaseTask, CustomerSharedLocation, DispatchCall, DispatchCase, DispatchNotification, FleetAsset, NotificationStatus, Operator, TimelineEvent } from "@/domain/types";
 import { requiresTowDestination } from "@/domain/case-card";
 import { caseAssistanceServiceName } from "@/lib/dispatch-calculations";
 import { createDispatchMapModel } from "@/lib/map-adapter";
 import { mergeCallCenterCalls, type PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { supportPollDelayMs } from "@/lib/telephony/poll-schedule";
+import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 import type { TelephonyAvailabilityAction } from "@/lib/telephony/presence";
 
@@ -122,10 +123,13 @@ const sourceLabels: Record<NonNullable<DispatchCase["sourceType"]>, string> = {
 export function DispatchConsole({
   initialData,
   viewerProfileId,
+  viewerRole,
 }: {
   initialData: DispatchData;
   viewerOrganizationId?: string;
   viewerProfileId?: string;
+  /** The signed-in profile's role; only supervision is gated on it in the console. */
+  viewerRole?: AppRole;
 }) {
   const [dispatchData, setDispatchData] = useState(initialData);
   const {
@@ -216,6 +220,9 @@ export function DispatchConsole({
   // nakonfigurovaný (503 z token/active route), hook vráti `configured=false`
   // a konzola ostáva v pôvodnom režime „Telefónia nie je nakonfigurovaná".
   const isOperator = Boolean(viewerProfileId && operators.some((operator) => operator.id === viewerProfileId));
+  // Supervision of a colleague's live call is a manager/admin tool; the server
+  // enforces it again in `call-actions.ts` (a dispatcher gets 403 either way).
+  const viewerCanSupervise = canSuperviseRole(viewerRole);
   const telephony = useTelephonyConsole({ enabled: isOperator, operators });
   // `null` means "not answered yet"; only an explicit 503 parks the surface, so a
   // transient `calls/active` outage keeps the console (and the phone) usable.
@@ -1209,7 +1216,7 @@ export function DispatchConsole({
           {telephonyConfigured ? (
             <div className="hidden sm:block">
               <CallQueuePanel
-                calls={telephony.waitingCalls.map((call) => ({ call }))}
+                calls={telephony.waitingCalls}
                 now={waitingRoomNow}
                 onPickup={(call) => runPhoneCallAction("pickup", call.providerSessionId ?? call.id)}
                 pickupState={waitingPickupState}
@@ -1250,6 +1257,10 @@ export function DispatchConsole({
             onDismissNotice={telephony.dismissNotice}
             onPresenceChange={telephony.changePresence}
             onCallAction={runPhoneCallAction}
+            onPartyAction={(action, sessionId, legId) => void telephony.partyAction(action, sessionId, legId)}
+            canSupervise={viewerCanSupervise}
+            onSupervise={(sessionId, mode) => void telephony.supervise(sessionId, mode)}
+            onStopSupervise={(sessionId) => void telephony.stopSupervise(sessionId)}
             onAnswer={telephony.answer}
             onHangupBrowser={telephony.hangupBrowser}
             onToggleMute={telephony.toggleMute}
@@ -1465,6 +1476,7 @@ export function DispatchConsole({
           onNewCase={startNewCaseFromCall}
           onOpenCase={openCase}
           onAvailabilityAction={onQueueAvailabilityAction}
+          onCallbackCall={telephony.callBackRequest}
           onTelephonyChanged={handleTelephonyChanged}
         />
       )}

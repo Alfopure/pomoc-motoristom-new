@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, Clock3, Loader2, PhoneIncoming } from "lucide-react";
+import { ChevronDown, Clock3, Loader2, Pause, PhoneIncoming } from "lucide-react";
 
 import type { CallCenterCall } from "@/data/dispatch-types";
+import type { WaitingRoomPark } from "@/lib/telephony/active-calls-model";
 
 export type WaitingRoomStation = {
   extension: string;
@@ -14,6 +15,8 @@ export type WaitingRoomEntry = {
   call: CallCenterCall;
   /** Where the call is ringing right now; undefined while it waits unassigned. */
   station?: WaitingRoomStation;
+  /** Who put the caller here and how long the park limit still allows. */
+  park?: WaitingRoomPark;
 };
 
 export type WaitingCallPickupAction = {
@@ -55,7 +58,7 @@ export function CallQueuePanel({
         ? "max-h-[min(50vh,420px)] sm:grid-cols-2"
         : "max-h-[min(60vh,520px)]"
     }`}>
-      {calls.map(({ call, station }) => {
+      {calls.map(({ call, station, park }) => {
         const startedAt = Date.parse(call.startedAt);
         const elapsed = Number.isFinite(startedAt)
           ? Math.max(call.waitSeconds ?? 0, Math.floor((now - startedAt) / 1_000))
@@ -76,11 +79,12 @@ export function CallQueuePanel({
                 {callerName ? call.callerNumber : call.lineLabel ?? "Prichádzajúci hovor"}
               </span>
               <span className={`shrink-0 rounded-full px-2 py-0.5 font-bold ${
-                station ? "bg-yellow-100 text-yellow-900" : "bg-zinc-100 text-zinc-700"
+                station ? "bg-yellow-100 text-yellow-900" : park?.parked ? "bg-sky-100 text-sky-900" : "bg-zinc-100 text-zinc-700"
               }`}>
-                {station ? `Zvoní: ${station.name}` : "Čaká na pridelenie"}
+                {station ? `Zvoní: ${station.name}` : park?.parked ? "Odložený hovor" : "Čaká na pridelenie"}
               </span>
             </div>
+            {park && <ParkedNote park={park} />}
             <button
               type="button"
               onClick={() => onPickup(call)}
@@ -216,6 +220,30 @@ function QueueRail({
         {!collapsed && <div className="border-t border-amber-200 px-4 pb-3 pt-2">{children}</div>}
       </div>
     </aside>
+  );
+}
+
+/**
+ * The waiting room half of the park limit: who odložil the caller and how long
+ * they still have before the state machine stops waiting for a rescue and
+ * offers them a callback instead (`park_max_minutes`, frozen on entry).
+ */
+function ParkedNote({ park }: { park: WaitingRoomPark }) {
+  const limit = park.secondsToLimit;
+  if (!park.parked && limit === null) return null;
+  const expired = limit !== null && limit <= 0;
+  return (
+    <p className={`mt-1 flex min-w-0 items-center gap-1 text-[11px] font-medium leading-4 ${expired ? "text-red-700" : "text-zinc-500"}`}>
+      <Pause size={11} className="shrink-0" aria-hidden="true" />
+      <span className="min-w-0 truncate">
+        {park.parked ? `Odložil ${park.byName ?? "iný dispečer"} · ${formatWaitingDuration(park.seconds)}` : `V čakárni ${formatWaitingDuration(park.seconds)}`}
+        {limit === null
+          ? ""
+          : expired
+            ? " · limit vypršal, ponúkame spätné volanie"
+            : ` · spätné volanie o ${Math.ceil(limit / 60)} min`}
+      </span>
+    </p>
   );
 }
 

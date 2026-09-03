@@ -19,6 +19,8 @@ export type PhoneCallAction =
   | "consult"
   | "complete-transfer"
   | "cancel-consult"
+  | "add-party"
+  | "leave"
   | "hangup";
 
 export const PHONE_ACTION_LABELS: Record<PhoneCallAction, string> = {
@@ -30,8 +32,22 @@ export const PHONE_ACTION_LABELS: Record<PhoneCallAction, string> = {
   consult: "Konzultovať",
   "complete-transfer": "Dokončiť prepojenie",
   "cancel-consult": "Zrušiť konzultáciu",
+  "add-party": "Pridať účastníka",
+  leave: "Odísť z hovoru",
   hangup: "Zavesiť",
 };
+
+/** Mute / unmute / disconnect of one added conference participant. */
+export type PhonePartyAction = "mute" | "unmute" | "kick";
+
+/**
+ * Busy key of a participant command. It names the exact button that was
+ * pressed, so a second participant's row is not shown spinning as well.
+ * `useTelephonyConsole` sets it and `PhoneBar` compares against it.
+ */
+export function partyBusyKey(action: PhonePartyAction, sessionId: string, legId: string): string {
+  return `${action}:${sessionId}:${legId}`;
+}
 
 export const PHONE_ACTION_ERRORS: Record<PhoneCallAction, string> = {
   hold: "Hovor sa nepodarilo podržať.",
@@ -42,6 +58,8 @@ export const PHONE_ACTION_ERRORS: Record<PhoneCallAction, string> = {
   consult: "Konzultáciu sa nepodarilo spustiť.",
   "complete-transfer": "Prepojenie sa nepodarilo dokončiť.",
   "cancel-consult": "Konzultáciu sa nepodarilo zrušiť.",
+  "add-party": "Účastníka sa nepodarilo pridať.",
+  leave: "Z hovoru sa nepodarilo odísť.",
   hangup: "Hovor sa nepodarilo ukončiť.",
 };
 
@@ -56,6 +74,8 @@ export type PhoneBarCapabilities = {
   consult: boolean;
   completeTransfer: boolean;
   cancelConsult: boolean;
+  addParty: boolean;
+  leaveConference: boolean;
   mute: boolean;
   dtmf: boolean;
   newCase: boolean;
@@ -73,6 +93,8 @@ const NO_CAPABILITIES: PhoneBarCapabilities = {
   consult: false,
   completeTransfer: false,
   cancelConsult: false,
+  addParty: false,
+  leaveConference: false,
   mute: false,
   dtmf: false,
   newCase: false,
@@ -113,19 +135,28 @@ export function phoneBarCapabilities(input: {
     };
   }
 
-  const talking = call.state === "talking" || call.state === "conference";
+  // A three-way is deliberately a narrower surface than a two-party call: hold,
+  // park and transfer act on the caller alone and the reducer refuses them in
+  // `conference`, so the bar must not offer them either. What is left is the
+  // participant list, adding one more, leaving and hanging up.
+  const twoParty = call.state === "talking" || call.state === "held";
+  const conference = call.state === "conference";
   const advanced = !input.degraded;
   return {
     answer: false,
     hangup: true,
-    hold: talking && advanced,
+    hold: call.state === "talking" && advanced,
     unhold: call.state === "held",
-    park: (talking || call.state === "held") && call.answered,
+    park: twoParty && call.answered,
     pickup: false,
-    transfer: talking || call.state === "held",
-    consult: (talking || call.state === "held") && advanced,
+    transfer: twoParty,
+    consult: twoParty && advanced,
     completeTransfer: call.state === "consulting",
     cancelConsult: call.state === "consulting",
+    addParty: (twoParty || conference) && call.answered && advanced,
+    // Leaving is only honest once somebody else is actually in the conference:
+    // otherwise "odísť" would simply drop the caller.
+    leaveConference: conference && call.participants.some((party) => party.kind === "party" && party.answered),
     mute: input.browserCallActive,
     dtmf: input.browserCallActive,
     newCase: true,

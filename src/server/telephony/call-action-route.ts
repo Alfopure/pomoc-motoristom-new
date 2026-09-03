@@ -22,23 +22,27 @@ import {
  * telephony-not-configured gate, then the action itself.
  */
 
-export type CallActionRouteInput = {
+export type CallActionRouteParams = { id: string };
+
+export type CallActionRouteInput<P extends CallActionRouteParams = CallActionRouteParams> = {
   deps: TelephonyRuntimeDeps;
   actor: CallActor;
   sessionId: string;
+  /** Every dynamic segment of the route (`parties/[legId]/…` needs `legId`). */
+  params: P;
   body: Record<string, unknown>;
   request: Request;
 };
 
-export type CallActionRouteOptions = {
+export type CallActionRouteOptions<P extends CallActionRouteParams = CallActionRouteParams> = {
   fallback: string;
-  run: (input: CallActionRouteInput) => Promise<unknown>;
+  run: (input: CallActionRouteInput<P>) => Promise<unknown>;
 };
 
-export async function handleCallActionRoute(
+export async function handleCallActionRoute<P extends CallActionRouteParams = CallActionRouteParams>(
   request: Request,
-  context: { params: Promise<{ id: string }> },
-  options: CallActionRouteOptions,
+  context: { params: Promise<P> },
+  options: CallActionRouteOptions<P>,
 ): Promise<Response> {
   try {
     assertSameOriginRequest(request);
@@ -46,10 +50,10 @@ export async function handleCallActionRoute(
     const notConfigured = telephonyConfiguredOrResponse();
     if (notConfigured) return notConfigured;
 
-    const { id } = await context.params;
+    const params = await context.params;
     const body = await readJsonBody(request);
     const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
-    const result = await options.run({ deps, actor: toCallActor(actor), sessionId: id, body, request });
+    const result = await options.run({ deps, actor: toCallActor(actor), sessionId: params.id, params, body, request });
 
     return Response.json({ ok: true, ...(result && typeof result === "object" ? result : {}) });
   } catch (error) {

@@ -48,6 +48,7 @@ const replaceRingGroups = vi.fn(async () => ({ document, diff: { added: [], remo
 const replaceRingPlans = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
 const replaceBusinessHours = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
 const replacePauseReasons = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
+const replaceIvrMenus = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
 const updateTelephonyLine = vi.fn(async () => ({ document, line: document.lines[0] }));
 const updateTelephonySettings = vi.fn(async () => ({ settings: document.settings, warning: null }));
 
@@ -60,6 +61,7 @@ vi.mock("@/server/telephony/config-service", async (importOriginal) => {
     replaceRingPlans: (...args: unknown[]) => replaceRingPlans(...(args as [])),
     replaceBusinessHours: (...args: unknown[]) => replaceBusinessHours(...(args as [])),
     replacePauseReasons: (...args: unknown[]) => replacePauseReasons(...(args as [])),
+    replaceIvrMenus: (...args: unknown[]) => replaceIvrMenus(...(args as [])),
     updateTelephonyLine: (...args: unknown[]) => updateTelephonyLine(...(args as [])),
     updateTelephonySettings: (...args: unknown[]) => updateTelephonySettings(...(args as [])),
   };
@@ -71,6 +73,7 @@ import { GET as getGroups, PUT as putGroups } from "./ring-groups/route";
 import { GET as getPlans, PUT as putPlans } from "./ring-plans/route";
 import { PUT as putHours } from "./business-hours/route";
 import { PUT as putReasons } from "./pause-reasons/route";
+import { GET as getIvrMenus, PUT as putIvrMenus } from "./ivr-menus/route";
 import { GET as getNumbers, PATCH as patchNumbers } from "./numbers/route";
 import { GET as getSettings, PATCH as patchSettings } from "./settings/route";
 
@@ -83,7 +86,7 @@ const VALID_GROUPS = [{ id: "00000000-0000-4000-8000-000000000001", name: "Dispe
 beforeEach(() => {
   state.role = "manager";
   assertSameOriginRequest.mockReset();
-  for (const mock of [getRoutingDocument, replaceRingGroups, replaceRingPlans, replaceBusinessHours, replacePauseReasons, updateTelephonyLine, updateTelephonySettings]) {
+  for (const mock of [getRoutingDocument, replaceRingGroups, replaceRingPlans, replaceBusinessHours, replacePauseReasons, replaceIvrMenus, updateTelephonyLine, updateTelephonySettings]) {
     mock.mockClear();
   }
 });
@@ -168,11 +171,13 @@ describe("PUT/PATCH /api/telephony/config/*", () => {
       putPlans(request("ring-plans", "PUT", { plans: [], version: document.routingVersion })),
       putHours(request("business-hours", "PUT", { businessHours: [], version: document.routingVersion })),
       putReasons(request("pause-reasons", "PUT", { pauseReasons: [], version: document.routingVersion })),
+      putIvrMenus(request("ivr-menus", "PUT", { ivrMenus: [], version: document.routingVersion })),
       patchNumbers(request("numbers", "PATCH", { lineId: "line-1", patch: {} })),
     ]);
 
-    expect(responses.map((response) => response.status)).toEqual([403, 403, 403, 403, 403]);
+    expect(responses.map((response) => response.status)).toEqual([403, 403, 403, 403, 403, 403]);
     expect(replaceRingGroups).not.toHaveBeenCalled();
+    expect(replaceIvrMenus).not.toHaveBeenCalled();
     expect(updateTelephonyLine).not.toHaveBeenCalled();
   });
 
@@ -203,6 +208,41 @@ describe("PUT/PATCH /api/telephony/config/*", () => {
     const response = await putGroups(request("ring-groups", "PUT", { groups: VALID_GROUPS, version: document.routingVersion }));
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toMatchObject({ code: "ring_group_in_use" });
+  });
+
+  it("replaces the IVR menus for a manager and keeps the read member-level", async () => {
+    state.role = "senior_dispatcher";
+    expect((await getIvrMenus()).status).toBe(200);
+
+    state.role = "manager";
+    const menus = [
+      {
+        id: "00000000-0000-4000-8000-000000002401",
+        name: "Hlavné menu",
+        promptMediaUrl: "ivr-main.mp3",
+        timeoutSecs: 5,
+        maxTries: 2,
+        options: [{ digit: "1", action: "ring_plan", targetRingPlanId: "00000000-0000-4000-8000-000000002301", label: "Dispečing" }],
+      },
+    ];
+    const response = await putIvrMenus(request("ivr-menus", "PUT", { ivrMenus: menus, version: document.routingVersion }));
+
+    expect(response.status).toBe(200);
+    expect(assertSameOriginRequest).toHaveBeenCalledTimes(1);
+    expect(replaceIvrMenus).toHaveBeenCalledWith(
+      { admin: { marker: "admin" } },
+      expect.objectContaining({
+        organizationId: "org-1",
+        expectedVersion: 7,
+        ivrMenus: [expect.objectContaining({ name: "Hlavné menu", options: [expect.objectContaining({ digit: "1", action: "ring_plan" })] })],
+      }),
+    );
+  });
+
+  it("rejects a body that is not a list of IVR menus", async () => {
+    const response = await putIvrMenus(request("ivr-menus", "PUT", { ivrMenus: { nope: true }, version: document.routingVersion }));
+    expect(response.status).toBe(400);
+    expect(replaceIvrMenus).not.toHaveBeenCalled();
   });
 
   it("refuses a whole-document save that carries no document version", async () => {

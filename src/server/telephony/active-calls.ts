@@ -30,7 +30,24 @@ export type ActiveCallLegView = {
   fromNumber: string | null;
   answeredAt: string | null;
   bridgedAt: string | null;
+  /** `client_state.intent` (`party` marks a third party added to the conference). */
+  intent: string | null;
+  /** Conference mute flag written by the mute/unmute action. */
+  muted: boolean;
+  /** Telnyx `supervisor_role` of a supervisor leg (`monitor` / `whisper` / `barge`). */
+  supervisorMode: string | null;
 };
+
+function legIntentOf(leg: LegRow): string | null {
+  const state = leg.client_state;
+  if (!state || typeof state !== "object" || Array.isArray(state)) return null;
+  const intent = (state as Record<string, unknown>).intent;
+  return typeof intent === "string" ? intent : null;
+}
+
+function legMetaOf(leg: LegRow): Record<string, unknown> {
+  return leg.metadata && typeof leg.metadata === "object" && !Array.isArray(leg.metadata) ? (leg.metadata as Record<string, unknown>) : {};
+}
 
 export type ActiveCallView = {
   sessionId: string;
@@ -50,7 +67,13 @@ export type ActiveCallView = {
   answeredByProfileId: string | null;
   holdStartedAt: string | null;
   parkedAt: string | null;
+  /** Operator who put the caller in the waiting room (`meta.park.by`). */
+  parkedByProfileId: string | null;
   waitingSince: string | null;
+  /** Why the caller is waiting: `parked`, `transfer_timeout`, a ring fallback… */
+  waitingReason: string | null;
+  /** `park_max_minutes` frozen when the caller entered the waiting room. */
+  waitingMaxMinutes: number | null;
   currentStep: number;
   ringMode: string | null;
   /** Operators with an open offer for this session (ringing right now). */
@@ -131,6 +154,7 @@ export async function loadActiveCalls(
   const legsBySession = new Map<string, ActiveCallLegView[]>();
   for (const leg of legs) {
     const list = legsBySession.get(leg.session_id) ?? [];
+    const meta = legMetaOf(leg);
     list.push({
       id: leg.id,
       role: leg.role,
@@ -140,6 +164,9 @@ export async function loadActiveCalls(
       fromNumber: leg.from_number,
       answeredAt: leg.answered_at,
       bridgedAt: leg.bridged_at,
+      intent: legIntentOf(leg),
+      muted: meta.muted === true,
+      supervisorMode: typeof meta.supervisor_mode === "string" ? meta.supervisor_mode : null,
     });
     legsBySession.set(leg.session_id, list);
   }
@@ -174,7 +201,10 @@ export async function loadActiveCalls(
       answeredByProfileId: session.answered_by_profile_id,
       holdStartedAt: session.hold_started_at,
       parkedAt: session.parked_at,
+      parkedByProfileId: meta.park?.by ?? null,
       waitingSince: meta.waiting?.since ?? null,
+      waitingReason: meta.waiting?.reason ?? null,
+      waitingMaxMinutes: typeof meta.waiting?.max_minutes === "number" ? meta.waiting.max_minutes : null,
       currentStep: session.current_step,
       ringMode: meta.ring?.mode ?? null,
       offeredProfileIds,
