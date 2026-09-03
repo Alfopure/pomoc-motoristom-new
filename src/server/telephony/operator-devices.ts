@@ -80,10 +80,12 @@ function credentialUsable(device: DeviceRow, now: Date): boolean {
   return Number.isNaN(expires) || expires - now.getTime() > CREDENTIAL_RENEW_WINDOW_MS;
 }
 
-export async function ensureOperatorCredential(deps: DeviceDeps, input: { organizationId: string; profileId: string }): Promise<DeviceRow> {
+export async function ensureOperatorCredential(deps: DeviceDeps, input: { organizationId: string; profileId: string; force?: boolean }): Promise<DeviceRow> {
   const now = nowOf(deps);
   const existing = await getOperatorDevice(deps, input);
-  if (existing && credentialUsable(existing, now)) return existing;
+  // `force` is the manager pressing "regenerate": mint a new credential even
+  // when the stored one is still usable (Phase 3 OperatorsTelephonyPanel).
+  if (existing && !input.force && credentialUsable(existing, now)) return existing;
   if (!deps.telnyx) throw new OperatorDeviceError(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
 
   const credential = await deps.telnyx.createTelephonyCredential({

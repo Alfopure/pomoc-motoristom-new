@@ -125,6 +125,9 @@ All `SECURITY DEFINER`, `search_path = ''`, revoked from `public`/`anon`/`authen
 | `motorist_telephony_usage_add(p_organization_id, p_day, p_legs, p_minutes, p_sms)` | integer (new `legs` value); atomic upsert of `motorist_telephony_daily_usage` |
 | `app_private.motorist_normalize_e164(p_value, p_default_cc := '421')` | text; trigger `motorist_telephony_lines_normalize` keeps `phone_number` canonical |
 | `motorist_advance_ring_step(p_session_id, p_expected_step)` | boolean (CAS on `current_step`) |
+| `motorist_replace_ring_plan(p_organization_id, p_document)` | jsonb (`{groups,plans,business_hours,pause_reasons}` counts); transactional replace of the routing-configuration sections present in the document |
+
+`motorist_replace_ring_plan` is the write path of the Phase 3 configuration screens. A section absent from the document is left untouched; members and steps are deleted and re-inserted (their positions are unique, so an in-place swap would trip the constraint) while `last_offered_at`/`last_answered_at` travel with the member id. Deleting a group a surviving step still uses, a plan a line or an IVR option still points at, or business hours a line still uses aborts the transaction (`ring_group_in_use`, `ring_plan_in_use`, `business_hours_in_use`), and a row id owned by another organisation aborts with `cross_organization`. Document validation (at least one step per plan, timeouts 5–120 s, member ring seconds ≥ 5 s, no empty group in a plan, contiguous positions, E.164 members inside `destination_allowlist`, no cross-organisation reference) runs in `src/server/telephony/config-service.ts` before the RPC is called; every applied change writes a `motorist_audit_log` row with a compact diff. A call in progress is never affected — its plan is frozen by `materialiseRingPlan` at call start.
 
 ## Browser phone auto-answer
 

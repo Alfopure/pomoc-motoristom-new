@@ -1293,6 +1293,13 @@ export type Database = {
         };
         Returns: boolean;
       };
+      motorist_replace_ring_plan: {
+        Args: {
+          p_organization_id: string;
+          p_document: Json;
+        };
+        Returns: Json;
+      };
       motorist_telephony_usage_add: {
         Args: {
           p_organization_id: string;

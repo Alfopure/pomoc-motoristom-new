@@ -11,7 +11,7 @@ declare global {
 /**
  * 1.4 (US-103) — CSRF same-origin coverage pre session-mutačné routes (bezpečnostný audit, Milestone 1).
  *
- * Pravidlo (acceptance): KAŽDÁ route klasifikovaná `session` v registri, ktorá exportuje POST/PATCH/DELETE,
+ * Pravidlo (acceptance): KAŽDÁ route klasifikovaná `session` v registri, ktorá exportuje POST/PUT/PATCH/DELETE,
  * musí anonymnému requestu s MISMATCHED Origin vrátiť STRIKTNE 403 — a to PRED auth vrstvou (403, nie 401,
  * dokazuje, že CSRF beží prvé). Množina sa derivuje PROGRAMATICKY z registra (žiaden hardcoded zoznam).
  *
@@ -19,7 +19,7 @@ declare global {
  * aby o výsledku rozhodovala CSRF/auth vrstva, nie chýbajúce env (500).
  *
  * Časti:
- *  (a) session ∩ {POST,PATCH,DELETE} + MISMATCHED Origin → 403 (CSRF beží pred auth).
+ *  (a) session ∩ {POST,PUT,PATCH,DELETE} + MISMATCHED Origin → 403 (CSRF beží pred auth).
  *  (b) vzorová session-mutačná route + MATCHING same-origin → 401 (prejde CSRF, padne na auth).
  *  (c) bearer / dual-cron handler s platným tokenom a BEZ Origin → NIE 403 (CSRF ich neovplyvňuje).
  */
@@ -100,7 +100,8 @@ process.env.WEBDISPECINK_SYNC_TOKEN = "test-webdispecink-sync-token";
 process.env.MOTORIST_NOTIFICATIONS_CRON_SECRET = "test-notifications-cron-secret";
 // CSRF flip (:227) je DEFERRED — no-Origin ostáva permisívne; tento test to nespochybňuje.
 
-const MUTATING_METHODS = ["POST", "PATCH", "DELETE"] as const;
+// PUT patrí do množiny od Fázy 3 (`telephony/config/*` používa PUT na výmenu celej sekcie dokumentu).
+const MUTATING_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
 type MutatingMethod = (typeof MUTATING_METHODS)[number];
 type Handler = (request: Request, context: { params: Promise<Record<string, string>> }) => Promise<Response> | Response;
 

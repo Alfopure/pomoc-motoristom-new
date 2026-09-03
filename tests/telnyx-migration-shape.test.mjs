@@ -14,6 +14,10 @@ const round2Migration = readFileSync(
   new URL("../supabase/migrations/20260917100000_telnyx_fixes_round2.sql", import.meta.url),
   "utf8",
 );
+const ringConfigMigration = readFileSync(
+  new URL("../supabase/migrations/20260918100000_ring_config_rpc.sql", import.meta.url),
+  "utf8",
+);
 const seed = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
 const seedScript = readFileSync(new URL("../scripts/seed-demo-data.mjs", import.meta.url), "utf8");
 
@@ -245,4 +249,44 @@ test("seed files populate the routing configuration", () => {
   assert.match(seed, /insert into public\.motorist_ring_plans[\s\S]*?on conflict/);
   assert.match(seed, /'Denný'/);
   assert.match(seed, /destination_allowlist/);
+});
+
+test("the routing-configuration replace RPC is transactional, org-scoped and service-role only", () => {
+  const definition = ringConfigMigration.match(
+    /create or replace function public\.motorist_replace_ring_plan\([\s\S]*?\$\$;/,
+  );
+  assert.ok(definition, "motorist_replace_ring_plan is not defined");
+  assert.match(definition[0], /security definer/);
+  assert.match(definition[0], /set search_path = ''/);
+  assert.match(
+    ringConfigMigration,
+    /revoke all on function public\.motorist_replace_ring_plan\(uuid, jsonb\)\n\s+from public, anon, authenticated;/,
+  );
+  assert.match(
+    ringConfigMigration,
+    /grant execute on function public\.motorist_replace_ring_plan\(uuid, jsonb\)\n\s+to service_role;/,
+  );
+
+  // Every section is optional and everything is scoped by the organisation.
+  for (const section of ["'groups'", "'plans'", "'business_hours'", "'pause_reasons'"]) {
+    assert.ok(definition[0].includes(section), `section ${section} must be handled`);
+  }
+  assert.match(definition[0], /organization_id = p_organization_id/);
+
+  // Guards that only a transaction can enforce.
+  for (const guard of ["cross_organization", "ring_group_in_use", "ring_plan_in_use", "business_hours_in_use"]) {
+    assert.ok(definition[0].includes(guard), `guard ${guard} is missing`);
+  }
+
+  // Members and steps are re-inserted (positions are unique), and the ordered
+  // strategy keeps its liveness stamps.
+  assert.match(definition[0], /delete from public\.motorist_ring_group_members/);
+  assert.match(definition[0], /insert into public\.motorist_ring_group_members/);
+  assert.match(definition[0], /last_offered_at/);
+  assert.match(definition[0], /delete from public\.motorist_ring_plan_steps/);
+});
+
+test("the ring config migration does not reference the previous provider or project", () => {
+  assert.doesNotMatch(ringConfigMigration, /viptel/i);
+  assert.doesNotMatch(ringConfigMigration, /sjcsrygkkmersoczpunh/);
 });
