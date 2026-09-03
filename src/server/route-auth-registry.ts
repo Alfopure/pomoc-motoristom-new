@@ -30,18 +30,22 @@ export type RouteAuthEntry = {
 };
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
-  // ── public (4) ──────────────────────────────────────────────────────────
+  // ── public (6) ──────────────────────────────────────────────────────────
   "auth/forgot-password": { class: "public" },
   "health/live": { class: "public", note: "Sanitized infrastructure liveness probe." },
   "health/ready": { class: "public", note: "Sanitized dependency readiness probe." },
   "public/location-links/[token]": { class: "public" },
+  // Telnyx webhooky: autentifikáciou je Ed25519 podpis (`telnyx-signature-ed25519` + `telnyx-timestamp`,
+  // tolerancia 300 s) overený PRED akoukoľvek prácou; neplatný podpis → 400, cudzí `connection_id` → 200 ignored.
+  "telephony/telnyx/webhook": { class: "public", note: "Telnyx Call Control webhook; Ed25519 signature verification namiesto session." },
+  "sms/telnyx/webhook": { class: "public", note: "Telnyx messaging delivery-status webhook; Ed25519 signature verification." },
 
   // ── bearer (4) — zdieľané tajomstvo (cron/stroj) ────────────────────────
   // commander/* majú INLINE authorize() + safeEquals (COMMANDER_SYNC_SECRET + timingSafeEqual)
   "integrations/commander/sync": { class: "bearer" },
   "integrations/commander/import-all": { class: "bearer" },
   // telephony/cron: Vercel cron (*/5) s `Authorization: Bearer ${CRON_SECRET}` + timingSafeEqual
-  "telephony/cron": { class: "bearer", note: "Vercel cron každých 5 minút; zosúladenie a upratovanie telefónie." },
+  "telephony/cron": { class: "bearer", note: "Vercel cron každých 5 minút; ring sweep, detekcia zaseknutých hovorov a prune webhook ledgera." },
   // transcripts/process cez authorizeRecordingsSync (RECORDINGS_SYNC_SECRET + timingSafeEqual)
   "telephony/transcripts/process": { class: "bearer" },
   // occupancy-sync: INLINE authorize() + safeEquals (SWHOUSE_SYNC_SECRET + timingSafeEqual)
@@ -118,7 +122,25 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // SMS
   "sms/send": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
 
-  // telephony (provider-neutral routes; call control returns with the Telnyx provider)
+  // telephony (provider-neutral routes + Telnyx call control)
+  "telephony/calls": { class: "session", note: "Click-to-call; kill switch, rate limit 10/min a allowlist sú v call-actions." },
+  "telephony/calls/active": { class: "session" },
+  "telephony/calls/internal": { class: "session" },
+  "telephony/calls/[id]/cancel-consult": { class: "session" },
+  "telephony/calls/[id]/complete-transfer": { class: "session" },
+  "telephony/calls/[id]/consult": { class: "session" },
+  "telephony/calls/[id]/hangup": { class: "session" },
+  "telephony/calls/[id]/hold": { class: "session" },
+  "telephony/calls/[id]/park": { class: "session" },
+  "telephony/calls/[id]/pickup": { class: "session" },
+  "telephony/calls/[id]/transfer": { class: "session" },
+  "telephony/calls/[id]/transfer-targets": { class: "session" },
+  "telephony/calls/[id]/unhold": { class: "session" },
+  "telephony/devices/heartbeat": { class: "session", note: "Heartbeat prehliadačového telefónu; zastaraná device_session_id → 409." },
+  "telephony/dev/simulate-inbound": { class: "session", role: ["admin"], note: "Vývojový simulátor prichádzajúceho hovoru; v produkcii (VERCEL_ENV=production) vracia 403." },
+  "telephony/presence": { class: "session" },
+  "telephony/presence/end-wrap-up": { class: "session" },
+  "telephony/webphone/token": { class: "session", note: "Vydáva krátkodobý Telnyx WebRTC token a rotuje device_session_id." },
   "telephony/calls/[id]/link-case": { class: "session" },
   "telephony/calls/[id]/outcome": { class: "session" },
   "telephony/calls/[id]/transcript": { class: "session", role: ["senior_dispatcher", "manager", "admin"] },

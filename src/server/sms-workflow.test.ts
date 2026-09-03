@@ -6,7 +6,7 @@ vi.mock("@/lib/supabase/admin", () => ({
   createSupabaseAdminClient: adminMock,
 }));
 
-import { normalizeSmsRecipient, notConfiguredTransport, sendCustomSms, SmsWorkflowError, type SmsTransport } from "./sms-workflow";
+import { normalizeSmsRecipient, notConfiguredTransport, resolveSmsTransport, sendCustomSms, SmsWorkflowError, type SmsTransport } from "./sms-workflow";
 
 type QueryCall = { method: string; args: unknown[] };
 type QueryRecorder = { calls: QueryCall[]; query: Record<string, unknown> };
@@ -20,7 +20,7 @@ describe("notConfiguredTransport", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network must stay untouched"));
 
     const failure = await notConfiguredTransport
-      .send({ to: "+421905123456", body: "Test", idempotencyKey: "case:1:sms:location_request" })
+      .send({ to: "+421905123456", body: "Test", idempotencyKey: "case:1:sms:location_request", organizationId: "org-1" })
       .catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(SmsWorkflowError);
@@ -60,7 +60,9 @@ describe("sendCustomSms", () => {
       return recorder.query;
     });
     adminMock.mockReturnValue({ from });
-    const send = vi.fn().mockResolvedValue({ providerMessageId: "msg-1", status: "sent" });
+    const send = vi
+      .fn()
+      .mockResolvedValue({ providerMessageId: "msg-1", status: "sent", providerStatus: "sent", fromSender: "PomocMotor", messagingProfileId: "profile-1" });
     const transport: SmsTransport = { send };
 
     const result = await sendCustomSms(
@@ -72,6 +74,7 @@ describe("sendCustomSms", () => {
     expect(send).toHaveBeenCalledWith({
       body: "Ahoj",
       idempotencyKey: expect.stringMatching(/^custom-sms:profile-1:/),
+      organizationId: "org-1",
       to: "+421905123456",
     });
 
@@ -89,11 +92,13 @@ describe("sendCustomSms", () => {
     expect(argOf(attemptUpdate, "update")).toMatchObject({ status: "accepted", provider_message_id: "msg-1" });
     expect(argOf(messageUpdate, "update")).toMatchObject({
       status: "sent",
-      status_detail: "sent_to_provider",
+      status_detail: "sent",
       provider_message_id: "msg-1",
+      from_sender: "PomocMotor",
+      messaging_profile_id: "profile-1",
       error: null,
     });
-    expect(result).toEqual({ providerMessageId: "msg-1", smsMessageId: "sms-1", status: "sent", statusDetail: "sent_to_provider" });
+    expect(result).toEqual({ providerMessageId: "msg-1", smsMessageId: "sms-1", status: "sent", statusDetail: "sent" });
   });
 
   it("marks both audit rows failed and propagates the transport error status", async () => {
@@ -119,6 +124,51 @@ describe("sendCustomSms", () => {
     const [, attemptUpdate] = recorders.get("motorist_sms_attempts") ?? [];
     expect(argOf(attemptUpdate, "update")).toMatchObject({ status: "failed", error: "Poskytovateľ odmietol správu." });
     expect(argOf(messageUpdate, "update")).toMatchObject({ status: "failed", status_detail: "send_failed" });
+  });
+});
+
+describe("transport preflight", () => {
+  beforeEach(() => adminMock.mockReset());
+
+  it("refuses before any audit row when the transport preflight rejects (kill switch)", async () => {
+    const from = vi.fn();
+    adminMock.mockReturnValue({ from });
+    const send = vi.fn();
+    const transport: SmsTransport = {
+      preflight: vi.fn().mockRejectedValue(new SmsWorkflowError("Odosielanie SMS je vypnuté (kill switch).", 423)),
+      send,
+    };
+
+    const failure = await sendCustomSms(
+      { actorProfileId: "profile-1", body: "Ahoj", caseId: null, organizationId: "org-1", toNumber: "0905 123 456" },
+      { transport },
+    ).catch((error: unknown) => error);
+
+    expect((failure as SmsWorkflowError).status).toBe(423);
+    expect(transport.preflight).toHaveBeenCalledWith({ organizationId: "org-1" });
+    expect(send).not.toHaveBeenCalled();
+    expect(from).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveSmsTransport", () => {
+  const previous = process.env.TELNYX_API_KEY;
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.TELNYX_API_KEY;
+    else process.env.TELNYX_API_KEY = previous;
+  });
+
+  it("falls back to the not-configured transport without an API key", () => {
+    delete process.env.TELNYX_API_KEY;
+    expect(resolveSmsTransport()).toBe(notConfiguredTransport);
+  });
+
+  it("returns the Telnyx transport once the API key is present", () => {
+    process.env.TELNYX_API_KEY = "KEYtest";
+    const transport = resolveSmsTransport();
+    expect(transport).not.toBe(notConfiguredTransport);
+    expect(typeof transport.preflight).toBe("function");
   });
 });
 

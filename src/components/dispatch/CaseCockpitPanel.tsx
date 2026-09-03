@@ -72,6 +72,8 @@ type CaseCockpitPanelProps = {
   priceRule?: PriceRule;
   onCollapse: () => void;
   onDataChange: (dispatchData: DispatchData) => void;
+  /** Click-to-call from the case card; absent while telephony is not configured. */
+  onDial?: (phone: string, caseId?: string) => Promise<void>;
   onDirtyChange: (dirty: boolean) => void;
   onExpand: () => void;
   onRestore: () => void;
@@ -98,6 +100,7 @@ export function CaseCockpitPanel({
   model,
   onCollapse,
   onDataChange,
+  onDial,
   onDirtyChange,
   onExpand,
   onRestore,
@@ -276,6 +279,7 @@ export function CaseCockpitPanel({
           embedded
           focusedTaskId={focusedTaskId}
           onDataChange={onDataChange}
+          onDial={onDial}
           onDirtyChange={onDirtyChange}
           onSaveDraftChange={onSaveDraftChange}
           onSavingChange={onSavingChange}

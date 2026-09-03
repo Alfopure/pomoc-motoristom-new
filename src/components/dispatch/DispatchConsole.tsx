@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { AttendanceModule } from "./AttendanceModule";
 import { CallCenterModule } from "./CallCenterModule";
+import { CallQueuePanel } from "./CallQueuePanel";
 import { CaseDirectory } from "./CaseDirectory";
 import { CaseList, type CaseFilters } from "./CaseList";
 import { DashboardPhone } from "./DashboardPhone";
@@ -30,6 +31,9 @@ import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { ReportDashboard } from "./ReportDashboard";
 import { HeaderNotificationMenu } from "./HeaderNotificationMenu";
 import { NotificationToastStack } from "./NotificationToastStack";
+import { PhoneBar } from "./PhoneBar";
+import { phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
+import { useTelephonyConsole } from "./useTelephonyConsole";
 import { TaskPanel, type TaskCreateInput, type TaskDeleteInput, type TaskUpdateInput } from "./TaskPanel";
 import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
 import { isNotificationForProfile, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
@@ -39,10 +43,11 @@ import type { Branch, CallStatus, CaseTask, CustomerSharedLocation, DispatchCall
 import { requiresTowDestination } from "@/domain/case-card";
 import { caseAssistanceServiceName } from "@/lib/dispatch-calculations";
 import { createDispatchMapModel } from "@/lib/map-adapter";
+import { mergeCallCenterCalls, type PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { supportPollDelayMs } from "@/lib/telephony/poll-schedule";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
-import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
+import type { TelephonyAvailabilityAction } from "@/lib/telephony/presence";
 
 type View = "dispatch" | "tasks" | "cases" | "call-center" | "attendance" | "fleet" | "reports" | "settings";
 
@@ -206,31 +211,43 @@ export function DispatchConsole({
     };
   }, []);
 
-  // Telefónia zatiaľ nie je nakonfigurovaná: poskytovateľ bol odstránený a nový
-  // ešte nie je zapojený. Stavy operátorov sú preto len informatívne a každý
-  // pokus o hovor alebo zmenu dostupnosti skončí upozornením.
-  const operatorPresences = useMemo<TelephonyOperatorPresence[]>(
-    () => operators.map((operator) => ({
-      profileId: operator.id,
-      operatorName: operator.name,
-      extensions: [],
-      state: "unassigned",
-      available: false,
-      queueMember: false,
-      queueNumbers: [],
-      availableQueues: [],
-      paused: false,
-      inUse: false,
-      registered: false,
-      detail: TELEPHONY_NOT_CONFIGURED_MESSAGE,
-    })),
-    [operators],
-  );
+  // Telefónia (Telnyx): browser phone, `calls/active` polling, prezencia a
+  // akcie hovoru žijú v `useTelephonyConsole`. Kým poskytovateľ nie je
+  // nakonfigurovaný (503 z token/active route), hook vráti `configured=false`
+  // a konzola ostáva v pôvodnom režime „Telefónia nie je nakonfigurovaná".
+  const isOperator = Boolean(viewerProfileId && operators.some((operator) => operator.id === viewerProfileId));
+  const telephony = useTelephonyConsole({ enabled: isOperator, operators });
+  const telephonyConfigured = telephony.configured === true;
+  const operatorPresences = telephony.presences;
   const effectiveOperators = operators;
-  const onQueueAvailabilityAction = useCallback(() => {
-    setMutationNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
-  }, []);
-  const visibleCallCenterCalls = callCenterCalls;
+  const onQueueAvailabilityAction = useCallback(
+    (action: TelephonyAvailabilityAction) => {
+      if (!telephonyConfigured) {
+        setMutationNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+        return;
+      }
+      telephony.availabilityAction(action);
+    },
+    [telephony, telephonyConfigured],
+  );
+  // The waiting room ticks from the snapshot's own timestamp: it is the clock
+  // every duration in that snapshot was computed against.
+  const waitingRoomNow = useMemo(() => {
+    const parsed = Date.parse(telephony.snapshot.checkedAt);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }, [telephony.snapshot.checkedAt]);
+  const waitingPickupState = useCallback(
+    () => ({
+      disabled: telephony.busyAction !== null || Boolean(telephony.phoneBar.active),
+      label: telephony.busyAction === "pickup" ? "Preberám…" : "Prevziať hovor",
+      ...(telephony.phoneBar.active ? { reason: "Najprv ukončite alebo odložte prebiehajúci hovor." } : {}),
+    }),
+    [telephony.busyAction, telephony.phoneBar.active],
+  );
+  const visibleCallCenterCalls = useMemo(
+    () => (telephonyConfigured ? mergeCallCenterCalls(telephony.liveCalls, callCenterCalls) : callCenterCalls),
+    [callCenterCalls, telephony.liveCalls, telephonyConfigured],
+  );
 
   const callsByCaseId = useMemo(() => latestCallByCaseId(visibleCallCenterCalls), [visibleCallCenterCalls]);
   const filteredCases = useMemo(() => {
@@ -886,9 +903,56 @@ export function DispatchConsole({
     }
   }
 
-  async function dialFromDashboard(): Promise<void> {
-    setMutationNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
-    throw new TelephonyNotConfiguredError();
+  /** Click-to-call from the dashboard phone, a case card or the call log. */
+  async function dialNumber(phone: string, caseId?: string): Promise<void> {
+    if (!telephonyConfigured || !phone) {
+      setMutationNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+      throw new TelephonyNotConfiguredError();
+    }
+
+    await telephony.dial(phone, caseId);
+    setMutationNotice(`Volanie na ${phone} bolo spustené.`);
+  }
+
+  /** Links a live or logged call to the case the console currently shows. */
+  async function linkPhoneCallToCase(call: PhoneBarCall) {
+    const caseId = call.caseId ?? workspaceCase?.id;
+    if (!call.callId) {
+      setMutationNotice("Hovor sa dá priradiť až po tom, čo je zapísaný v call logu.");
+      return;
+    }
+    if (!caseId) {
+      setMutationNotice("Najprv otvorte prípad, ku ktorému sa má hovor priradiť.");
+      return;
+    }
+    await linkCreatedCaseToCall(call.callId, caseId);
+    telephony.refresh();
+  }
+
+  function startNewCaseFromPhoneBar(call: PhoneBarCall) {
+    // The live row is normally already in the merged list; the fallback keeps a
+    // brand-new session from prefilling the card with the placeholder call.
+    const logged = visibleCallCenterCalls.find((row) => row.providerSessionId === call.sessionId);
+    startNewCaseFromCall(logged ?? {
+      id: call.callId ?? call.sessionId,
+      providerSessionId: call.sessionId,
+      status: call.answered ? "answered" : "incoming",
+      direction: call.direction,
+      callerNumber: call.direction === "inbound" ? call.number : "",
+      calledNumber: call.direction === "inbound" ? "" : call.number,
+      ...(call.callerName ? { callerName: call.callerName } : {}),
+      ...(call.caseId ? { caseId: call.caseId } : {}),
+      lineLabel: call.lineLabel,
+      startedAt: call.timerSince,
+      waitSeconds: 0,
+      recordingStatus: "not_requested",
+      transcriptStatus: "not_requested",
+      history: [],
+    });
+  }
+
+  function runPhoneCallAction(action: PhoneCallAction, sessionId: string, target?: { profileId?: string; number?: string }) {
+    void telephony.callAction(action, sessionId, target);
   }
 
   async function handleSendCaseSms(template: "location_request" | "eta_update") {
@@ -1125,9 +1189,21 @@ export function DispatchConsole({
             onOpenCase={openCase}
             onOpenTask={openTask}
           />
-          <div className="hidden sm:block">
-            <TelephonyNotConfiguredPill />
-          </div>
+          {telephonyConfigured ? (
+            <div className="hidden sm:block">
+              <CallQueuePanel
+                calls={telephony.waitingCalls.map((call) => ({ call }))}
+                now={waitingRoomNow}
+                onPickup={(call) => runPhoneCallAction("pickup", call.providerSessionId ?? call.id)}
+                pickupState={waitingPickupState}
+                variant="header"
+              />
+            </div>
+          ) : (
+            <div className="hidden sm:block">
+              <TelephonyNotConfiguredPill />
+            </div>
+          )}
           <button
             type="button"
             onClick={() => startNewCase()}
@@ -1138,6 +1214,35 @@ export function DispatchConsole({
           </button>
         </div>
       </header>
+
+      {telephonyConfigured &&
+        phoneBarVisible({
+          status: telephony.phone.status,
+          hasCall: Boolean(telephony.phoneBar.active),
+          hasOffer: telephony.phoneBar.offers.length > 0,
+          hasWaiting: telephony.phoneBar.waiting.length > 0,
+        }) && (
+          <PhoneBar
+            model={telephony.phoneBar}
+            phone={telephony.phone}
+            degradedSessionIds={telephony.degradedSessionIds}
+            pauseReasons={telephony.pauseReasons}
+            presenceBusy={telephony.presenceBusy}
+            busyAction={telephony.busyAction}
+            notice={telephony.notice}
+            onDismissNotice={telephony.dismissNotice}
+            onPresenceChange={telephony.changePresence}
+            onCallAction={runPhoneCallAction}
+            onAnswer={telephony.answer}
+            onHangupBrowser={telephony.hangupBrowser}
+            onToggleMute={telephony.toggleMute}
+            onDtmf={telephony.sendDtmf}
+            onNewCase={startNewCaseFromPhoneBar}
+            onLinkCase={(call) => void linkPhoneCallToCase(call)}
+            onOpenCase={openCase}
+            onUnlockAudio={telephony.unlockAudio}
+          />
+        )}
 
       {visibleWarning && (
         <div role="alert" className="relative z-40 flex min-h-[42px] shrink-0 items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 sm:px-4">
@@ -1172,6 +1277,7 @@ export function DispatchConsole({
               onBackToCockpit={returnToCockpit}
               onCaseCreated={handleCaseCreated}
               onDataChange={setDispatchData}
+              onDial={telephonyConfigured ? dialNumber : undefined}
               onDirtyChange={setHasUnsavedChanges}
               onSaveDraftChange={handleSaveDraftChange}
               onSavingChange={setIsCaseSaveLocked}
@@ -1210,7 +1316,7 @@ export function DispatchConsole({
           className="relative z-0 isolate grid h-full min-h-0 min-w-0 flex-1 grid-cols-1 overflow-x-hidden overflow-y-auto lg:h-auto lg:grid-rows-[auto_minmax(0,1fr)] lg:overflow-hidden lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-rows-[minmax(0,1fr)] xl:grid-cols-[330px_minmax(0,1fr)_330px] 2xl:grid-cols-[340px_minmax(0,1fr)_330px]"
         >
           <div className="min-w-0 p-2 lg:col-span-2 xl:hidden">
-            <DashboardPhone caseContext={dashboardSmsCaseContext} onDataChange={setDispatchData} onDial={dialFromDashboard} />
+            <DashboardPhone caseContext={dashboardSmsCaseContext} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
           </div>
           <CaseList
             activeCaseId={visibleActiveCaseId}
@@ -1258,6 +1364,7 @@ export function DispatchConsole({
             onCaseCreated={handleCaseCreated}
             onCollapse={collapseWorkspace}
             onDataChange={setDispatchData}
+            onDial={telephonyConfigured ? dialNumber : undefined}
             onDirtyChange={setHasUnsavedChanges}
             onSaveDraftChange={handleSaveDraftChange}
             onSavingChange={setIsCaseSaveLocked}
@@ -1269,7 +1376,7 @@ export function DispatchConsole({
             onSortChange={setCaseSort}
           />
           <div className="hidden min-h-0 min-w-0 flex-col border-l border-zinc-200 bg-white xl:flex">
-            <DashboardPhone caseContext={dashboardSmsCaseContext} className="shrink-0" onDataChange={setDispatchData} onDial={dialFromDashboard} variant="rail" />
+            <DashboardPhone caseContext={dashboardSmsCaseContext} className="shrink-0" onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} variant="rail" />
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden" data-testid="dashboard-task-panel-shell">
               <TaskPanel
                 activeTaskId={focusedTaskId}
@@ -1322,13 +1429,19 @@ export function DispatchConsole({
 
       {activeView === "call-center" && (
         <CallCenterModule
+          activeSnapshot={telephonyConfigured ? telephony.phoneBar : undefined}
+          busyCallAction={telephony.busyAction}
           calls={visibleCallCenterCalls}
+          onCallAction={runPhoneCallAction}
+          phone={telephony.phone}
+          telephonyConfigured={telephonyConfigured}
+          waitingCalls={telephony.waitingCalls}
           cases={dispatchCases}
           currentOperatorId={viewerProfileId}
           dataSource={source}
           metrics={metrics}
           onDataChange={setDispatchData}
-          onDial={dialFromDashboard}
+          onDial={dialNumber}
           operatorPresences={operatorPresences}
           operators={effectiveOperators}
           onNewCase={startNewCaseFromCall}

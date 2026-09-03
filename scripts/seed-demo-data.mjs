@@ -36,16 +36,24 @@ const IDS = {
   lineAutoklub: "00000000-0000-4000-8000-000000000203",
   lineAxa: "00000000-0000-4000-8000-000000000204",
   lineEurocross: "00000000-0000-4000-8000-000000000205",
+  businessHours: "00000000-0000-4000-8000-000000002001",
+  ringGroupA: "00000000-0000-4000-8000-000000002201",
+  ringGroupB: "00000000-0000-4000-8000-000000002202",
+  ringPlanDaily: "00000000-0000-4000-8000-000000002301",
+  ivrMain: "00000000-0000-4000-8000-000000002401",
+  telephonySettings: "00000000-0000-4000-8000-000000002601",
 };
 
 // Placeholder E.164 numbers; replace with the canonical strings from Telnyx
 // `GET /v2/phone_numbers` once the numbers are assigned to the call-control app.
+// Telnyx stores the first number as +4210232408700 (extra leading 0); the app
+// normalises inbound `to` before the lookup, so the canonical form is kept here.
 const LINES = [
-  { id: IDS.lineNeutral, phone_number: "+421232408700", label: "Neutrálna linka" },
-  { id: IDS.lineAllianz, phone_number: "+421232408718", label: "Allianz Assistance" },
-  { id: IDS.lineAutoklub, phone_number: "+421232408732", label: "Autoklub Slovakia Assistance" },
-  { id: IDS.lineAxa, phone_number: "+421232408760", label: "AXA Assistance CZ" },
-  { id: IDS.lineEurocross, phone_number: "+421232408783", label: "Eurocross Assistance CR" },
+  { id: IDS.lineNeutral, phone_number: "+421232408700", label: "Neutrálna linka", partner_name: null, telnyx_number_id: "3040091148564563176", ivr_menu_id: IDS.ivrMain },
+  { id: IDS.lineAllianz, phone_number: "+421232408718", label: "Allianz Assistance", partner_name: "Allianz Assistance", telnyx_number_id: null, ivr_menu_id: null },
+  { id: IDS.lineAutoklub, phone_number: "+421232408732", label: "Autoklub Slovakia Assistance", partner_name: "Autoklub Slovakia Assistance", telnyx_number_id: null, ivr_menu_id: null },
+  { id: IDS.lineAxa, phone_number: "+421232408760", label: "AXA Assistance CZ", partner_name: "AXA Assistance CZ", telnyx_number_id: null, ivr_menu_id: null },
+  { id: IDS.lineEurocross, phone_number: "+421232408783", label: "Eurocross Assistance CR", partner_name: "Eurocross Assistance CR", telnyx_number_id: null, ivr_menu_id: null },
 ];
 const LINE_BY_ID = new Map(LINES.map((line) => [line.id, line]));
 
@@ -174,8 +182,85 @@ const rows = {
     provider: "telnyx",
     phone_number: line.phone_number,
     label: line.label,
+    partner_name: line.partner_name,
+    telnyx_number_id: line.telnyx_number_id,
+    ring_plan_id: IDS.ringPlanDaily,
+    business_hours_id: IDS.businessHours,
+    ivr_menu_id: line.ivr_menu_id,
+    environment: "production",
     active: true,
   })),
+  telephonySettings: [
+    {
+      id: IDS.telephonySettings,
+      organization_id: ORG,
+      live_calls_enabled: false,
+      sms_live_sends: false,
+      daily_leg_soft_cap: 500,
+      park_max_minutes: 30,
+      destination_allowlist: ["SK", "CZ"],
+    },
+  ],
+  businessHours: [
+    { id: IDS.businessHours, organization_id: ORG, name: "Pracovný čas", timezone: "Europe/Bratislava", active: true },
+  ],
+  // Mon-Fri 07:00-12:00 and 12:30-19:00 (ISO weekday 1 = Monday).
+  businessHoursIntervals: [1, 2, 3, 4, 5].flatMap((weekday) => [
+    { organization_id: ORG, business_hours_id: IDS.businessHours, weekday, opens: "07:00", closes: "12:00" },
+    { organization_id: ORG, business_hours_id: IDS.businessHours, weekday, opens: "12:30", closes: "19:00" },
+  ]),
+  businessHoursExceptions: [
+    { organization_id: ORG, business_hours_id: IDS.businessHours, date: "2026-12-24", closed: true, label: "Štedrý deň" },
+  ],
+  ringGroups: [
+    { id: IDS.ringGroupA, organization_id: ORG, name: "Dispečing A", description: "Primárna skupina, zvoní všetkým naraz.", active: true },
+    { id: IDS.ringGroupB, organization_id: ORG, name: "Dispečing B", description: "Záložná skupina, zvoní postupne, externé číslo posledné.", active: true },
+  ],
+  ringGroupMembers: [
+    ringMember("00000000-0000-4000-8000-000000002211", IDS.ringGroupA, "operator", IDS.natalia, null, 0, null),
+    ringMember("00000000-0000-4000-8000-000000002212", IDS.ringGroupA, "operator", IDS.mango, null, 1, null),
+    ringMember("00000000-0000-4000-8000-000000002213", IDS.ringGroupA, "operator", IDS.peter, null, 2, null),
+    ringMember("00000000-0000-4000-8000-000000002221", IDS.ringGroupB, "operator", IDS.lenka, null, 0, 15),
+    ringMember("00000000-0000-4000-8000-000000002222", IDS.ringGroupB, "operator", IDS.miso, null, 1, 15),
+    // Placeholder external number (dispatcher mobile); replace before go-live.
+    ringMember("00000000-0000-4000-8000-000000002223", IDS.ringGroupB, "external_number", null, "+421910988882", 2, 15),
+  ],
+  ringPlans: [
+    { id: IDS.ringPlanDaily, organization_id: ORG, name: "Denný", fallback_kind: "callback_prompt", fallback_number: null, active: true },
+  ],
+  ringPlanSteps: [
+    { id: "00000000-0000-4000-8000-000000002311", organization_id: ORG, ring_plan_id: IDS.ringPlanDaily, step_index: 0, ring_group_id: IDS.ringGroupA, timeout_secs: 20, strategy: "all" },
+    { id: "00000000-0000-4000-8000-000000002312", organization_id: ORG, ring_plan_id: IDS.ringPlanDaily, step_index: 1, ring_group_id: IDS.ringGroupB, timeout_secs: 15, strategy: "ordered" },
+  ],
+  ivrMenus: [
+    {
+      id: IDS.ivrMain,
+      organization_id: ORG,
+      name: "Hlavné menu",
+      prompt_media_url: "ivr-main.mp3",
+      tts_text: "Pre spojenie s dispečingom stlačte jednotku. Ak chcete, aby sme vám zavolali späť, stlačte dvojku.",
+      invalid_media_url: "invalid-input.mp3",
+      timeout_secs: 5,
+      max_tries: 2,
+      active: true,
+    },
+  ],
+  ivrOptions: [
+    { id: "00000000-0000-4000-8000-000000002411", organization_id: ORG, ivr_menu_id: IDS.ivrMain, digit: "1", action: "ring_plan", target_ring_plan_id: IDS.ringPlanDaily, target_number: null, label: "Dispečing", prompt_media_url: null, tts_text: null },
+    { id: "00000000-0000-4000-8000-000000002412", organization_id: ORG, ivr_menu_id: IDS.ivrMain, digit: "2", action: "callback", target_ring_plan_id: null, target_number: null, label: "Spätné volanie", prompt_media_url: "callback-offer.mp3", tts_text: "Zavoláme vám späť, hneď ako sa uvoľní operátor." },
+  ],
+  pauseReasons: [
+    { id: "00000000-0000-4000-8000-000000002501", organization_id: ORG, code: "obed", label: "Obed", max_minutes: 45, sort_order: 10, active: true },
+    { id: "00000000-0000-4000-8000-000000002502", organization_id: ORG, code: "porada", label: "Porada", max_minutes: 90, sort_order: 20, active: true },
+    { id: "00000000-0000-4000-8000-000000002503", organization_id: ORG, code: "admin", label: "Administratíva", max_minutes: null, sort_order: 30, active: true },
+  ],
+  operatorPresence: [
+    presence("00000000-0000-4000-8000-000000002701", IDS.natalia, "available"),
+    presence("00000000-0000-4000-8000-000000002702", IDS.mango, "available"),
+    presence("00000000-0000-4000-8000-000000002703", IDS.miso, "offline"),
+    presence("00000000-0000-4000-8000-000000002704", IDS.lenka, "offline"),
+    presence("00000000-0000-4000-8000-000000002705", IDS.peter, "available"),
+  ],
   locations: [
     location(
       "00000000-0000-4000-8000-000000000301",
@@ -828,7 +913,19 @@ await upsert("motorist_operator_statuses", rows.operatorStatuses);
 await upsert("motorist_attendance_shift_templates", rows.attendanceShiftTemplates);
 await upsert("motorist_attendance_shifts", rows.attendanceShifts);
 await upsert("motorist_attendance_sessions", rows.attendanceSessions);
+await upsert("motorist_telephony_settings", rows.telephonySettings, "organization_id");
+await upsert("motorist_business_hours", rows.businessHours);
+await upsert("motorist_business_hours_intervals", rows.businessHoursIntervals, "business_hours_id,weekday,opens");
+await upsert("motorist_business_hours_exceptions", rows.businessHoursExceptions, "business_hours_id,date");
+await upsert("motorist_ring_groups", rows.ringGroups);
+await upsert("motorist_ring_group_members", rows.ringGroupMembers);
+await upsert("motorist_ring_plans", rows.ringPlans);
+await upsert("motorist_ring_plan_steps", rows.ringPlanSteps);
+await upsert("motorist_ivr_menus", rows.ivrMenus);
+await upsert("motorist_ivr_options", rows.ivrOptions);
+await upsert("motorist_pause_reasons", rows.pauseReasons);
 await upsert("motorist_telephony_lines", rows.telephonyLines);
+await upsert("motorist_operator_presence", rows.operatorPresence, "profile_id");
 await upsert("motorist_locations", rows.locations);
 await upsert("motorist_branches", rows.branches);
 await upsert("motorist_fleet_assets", rows.fleetAssets);
@@ -852,6 +949,7 @@ console.log(`- ${rows.fleetAssets.length} fleet assets`);
 console.log(`- ${rows.cases.length} dispatch cases`);
 console.log(`- ${rows.notifications.length} notifications`);
 console.log(`- ${rows.attendanceShifts.length} attendance shifts`);
+console.log(`- ${rows.telephonyLines.length} telephony lines, ${rows.ringGroups.length} ring groups, ${rows.ringPlans.length} ring plan`);
 
 function loadDotenv(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -891,6 +989,29 @@ async function upsert(table, data, onConflict = "id") {
   if (error) {
     throw new Error(`${table}: ${error.message}`);
   }
+}
+
+function ringMember(id, ringGroupId, memberKind, profileId, externalNumber, position, ringSecs) {
+  return {
+    id,
+    organization_id: ORG,
+    ring_group_id: ringGroupId,
+    member_kind: memberKind,
+    profile_id: profileId,
+    external_number: externalNumber,
+    position,
+    ring_secs: ringSecs,
+  };
+}
+
+function presence(id, profileId, status) {
+  return {
+    id,
+    organization_id: ORG,
+    profile_id: profileId,
+    status,
+    status_since: "2026-09-03T07:00:00+02:00",
+  };
 }
 
 function attendanceTemplate(id, label, kind, startsAtLocal, endsAtLocal, plannedMinutes, color, sortOrder) {

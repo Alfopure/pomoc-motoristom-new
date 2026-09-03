@@ -1,0 +1,230 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+
+const migration = readFileSync(
+  new URL("../supabase/migrations/20260903100000_telnyx_telephony_foundation.sql", import.meta.url),
+  "utf8",
+);
+const realtimeMigration = readFileSync(
+  new URL("../supabase/migrations/20260915100000_telephony_realtime.sql", import.meta.url),
+  "utf8",
+);
+const seed = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
+const seedScript = readFileSync(new URL("../scripts/seed-demo-data.mjs", import.meta.url), "utf8");
+
+const NEW_TABLES = [
+  "motorist_telnyx_webhook_events",
+  "motorist_call_sessions",
+  "motorist_call_legs",
+  "motorist_ring_plans",
+  "motorist_ring_plan_steps",
+  "motorist_ring_groups",
+  "motorist_ring_group_members",
+  "motorist_ring_attempts",
+  "motorist_business_hours",
+  "motorist_business_hours_intervals",
+  "motorist_business_hours_exceptions",
+  "motorist_ivr_menus",
+  "motorist_ivr_options",
+  "motorist_callback_requests",
+  "motorist_operator_devices",
+  "motorist_operator_presence",
+  "motorist_pause_reasons",
+  "motorist_operator_telephony_settings",
+  "motorist_telephony_settings",
+  "motorist_telephony_daily_usage",
+];
+
+const RECREATED_TABLES = ["motorist_call_transcripts", "motorist_sms_attempts"];
+
+const RPCS = [
+  "motorist_telnyx_claim_webhook_event",
+  "motorist_session_lease_acquire",
+  "motorist_session_lease_release",
+  "motorist_reserve_operator",
+  "motorist_advance_ring_step",
+];
+
+const CONFIG_TABLES = [
+  "motorist_business_hours",
+  "motorist_ring_groups",
+  "motorist_ring_group_members",
+  "motorist_ring_plans",
+  "motorist_ring_plan_steps",
+  "motorist_ivr_menus",
+  "motorist_ivr_options",
+  "motorist_pause_reasons",
+  "motorist_telephony_settings",
+];
+
+function tableBlock(name) {
+  const match = migration.match(new RegExp(`create table if not exists public\\.${name} \\(([\\s\\S]*?)\\n\\);`));
+  assert.ok(match, `table ${name} is not created`);
+  return match[1];
+}
+
+test("creates every new telephony table idempotently", () => {
+  for (const table of [...NEW_TABLES, ...RECREATED_TABLES]) {
+    assert.match(migration, new RegExp(`create table if not exists public\\.${table} \\(`), table);
+  }
+});
+
+test("extends the existing call, SMS and line tables", () => {
+  assert.match(migration, /alter table public\.motorist_calls\n(?:\s+add column if not exists [^\n]+\n)+/);
+  for (const column of ["session_id", "ring_seconds", "ring_group_id", "operator_leg_id", "raw_latest_payload"]) {
+    assert.match(migration, new RegExp(`add column if not exists ${column} `), `motorist_calls.${column}`);
+  }
+  assert.match(migration, /add column if not exists provider_timestamp timestamptz/);
+  for (const column of ["from_sender", "messaging_profile_id", "locked_at"]) {
+    assert.match(migration, new RegExp(`add column if not exists ${column} `), `motorist_sms_messages.${column}`);
+  }
+  for (const column of ["telnyx_number_id", "partner_name", "ring_plan_id", "ivr_menu_id", "business_hours_id", "environment"]) {
+    assert.match(migration, new RegExp(`add column if not exists ${column} `), `motorist_telephony_lines.${column}`);
+  }
+  assert.match(migration, /create unique index if not exists telephony_lines_org_number_idx\n\s+on public\.motorist_telephony_lines \(organization_id, phone_number\)/);
+});
+
+test("defines the RPCs as SECURITY DEFINER callable by the service role only", () => {
+  for (const rpc of RPCS) {
+    const definition = migration.match(new RegExp(`create or replace function public\\.${rpc}\\([\\s\\S]*?\\$\\$;`));
+    assert.ok(definition, `${rpc} is not defined`);
+    assert.match(definition[0], /security definer/, `${rpc} must be SECURITY DEFINER`);
+    assert.match(definition[0], /set search_path = ''/, `${rpc} must pin search_path`);
+    assert.match(migration, new RegExp(`revoke all on function public\\.${rpc}\\([^)]*\\)\\n\\s+from public, anon, authenticated;`), `${rpc} revoke`);
+    assert.match(migration, new RegExp(`grant execute on function public\\.${rpc}\\([^)]*\\)\\n\\s+to service_role;`), `${rpc} grant`);
+  }
+});
+
+test("claim RPC implements the ledger contract", () => {
+  const definition = migration.match(/create or replace function public\.motorist_telnyx_claim_webhook_event\([\s\S]*?\$\$;/)[0];
+  assert.match(definition, /on conflict \(event_id\) do nothing/);
+  assert.match(definition, /outcome := 'duplicate'/);
+  assert.match(definition, /outcome := 'busy'/);
+  assert.match(definition, /outcome := 'claimed'/);
+  assert.match(definition, /attempts = motorist_telnyx_webhook_events\.attempts \+ 1/);
+});
+
+test("reservation and step advance are compare-and-set updates", () => {
+  const reserve = migration.match(/create or replace function public\.motorist_reserve_operator\([\s\S]*?\$\$;/)[0];
+  assert.match(reserve, /status in \('available', 'ringing', 'after_call_work'\)/);
+  assert.match(reserve, /current_session_id is null or current_session_id = p_session_id/);
+  const advance = migration.match(/create or replace function public\.motorist_advance_ring_step\([\s\S]*?\$\$;/)[0];
+  assert.match(advance, /current_step = p_expected_step \+ 1/);
+  assert.match(advance, /and current_step = p_expected_step/);
+  const lease = migration.match(/create or replace function public\.motorist_session_lease_acquire\([\s\S]*?\$\$;/)[0];
+  assert.match(lease, /lease_until is null/);
+  assert.match(lease, /lease_until < pg_catalog\.now\(\)/);
+});
+
+test("enables RLS with the app_private helpers and locks the webhook ledger", () => {
+  for (const table of NEW_TABLES) {
+    const enabledDirectly = migration.includes(`alter table public.${table} enable row level security`);
+    const enabledInLoop = new RegExp(`'${table}',?\\n`).test(migration);
+    assert.ok(enabledDirectly || enabledInLoop, `${table} must be listed for RLS`);
+  }
+  assert.match(migration, /app_private\.motorist_is_org_member\(organization_id\)/);
+  assert.match(migration, /app_private\.motorist_has_org_role\(organization_id, array\[''manager'', ''admin''\]\)/);
+  assert.doesNotMatch(migration, /public\.motorist_is_org_member|public\.motorist_has_org_role/);
+  assert.match(migration, /revoke all on table public\.motorist_telnyx_webhook_events from public, anon, authenticated;/);
+  assert.match(migration, /grant select, insert, update, delete on table public\.motorist_telnyx_webhook_events to service_role;/);
+  for (const table of CONFIG_TABLES) {
+    assert.ok(new RegExp(`'${table}',?\\n`).test(migration), `${table} must be in the config RLS loop`);
+  }
+});
+
+test("carries the CHECK constraints and uniqueness rules from the design", () => {
+  assert.match(tableBlock("motorist_ring_plan_steps"), /timeout_secs between 5 and 120/);
+  assert.match(tableBlock("motorist_ring_plan_steps"), /strategy in \('all', 'ordered'\)/);
+  assert.match(tableBlock("motorist_ring_group_members"), /ring_secs between 5 and 120/);
+  assert.match(tableBlock("motorist_ring_group_members"), /member_kind in \('operator', 'external_number'\)/);
+  assert.match(tableBlock("motorist_ring_plans"), /fallback_kind in \('external_number', 'waiting_room', 'callback_prompt', 'hangup_message'\)/);
+  assert.match(tableBlock("motorist_call_sessions"), /'received', 'greeting', 'ivr', 'ringing', 'talking', 'held', 'consulting', 'conference',\n\s+'parked', 'waiting', 'wrap_up', 'after_hours', 'callback_offered', 'missed', 'failed', 'ended'/);
+  assert.match(tableBlock("motorist_call_sessions"), /telnyx_session_id text unique/);
+  assert.match(tableBlock("motorist_call_legs"), /telnyx_call_control_id text not null unique/);
+  assert.match(tableBlock("motorist_call_legs"), /role in \('customer', 'operator', 'consult', 'supervisor', 'external'\)/);
+  assert.match(tableBlock("motorist_operator_presence"), /profile_id uuid not null unique/);
+  assert.match(tableBlock("motorist_operator_presence"), /status in \('available', 'ringing', 'on_call', 'after_call_work', 'paused', 'offline'\)/);
+  assert.match(tableBlock("motorist_telnyx_webhook_events"), /event_id text primary key/);
+  assert.match(tableBlock("motorist_telnyx_webhook_events"), /status in \('queued', 'processed', 'failed'\)/);
+  assert.match(tableBlock("motorist_telephony_settings"), /organization_id uuid not null unique/);
+  assert.match(tableBlock("motorist_telephony_settings"), /destination_allowlist text\[\]/);
+  assert.match(tableBlock("motorist_callback_requests"), /status in \('open', 'scheduled', 'done', 'cancelled'\)/);
+  assert.match(migration, /create unique index if not exists ring_attempts_profile_open_offer_idx\n\s+on public\.motorist_ring_attempts \(profile_id\)\n\s+where result = 'offered'/);
+  assert.match(migration, /create unique index if not exists ring_attempts_session_step_profile_idx\n\s+on public\.motorist_ring_attempts \(session_id, step_index, profile_id\)/);
+  assert.match(migration, /create unique index if not exists ring_attempts_session_step_external_idx\n\s+on public\.motorist_ring_attempts \(session_id, step_index, external_number\)/);
+  assert.match(migration, /create index if not exists call_sessions_active_idx\n\s+on public\.motorist_call_sessions \(organization_id, state\)\n\s+where state not in \('ended', 'failed'\)/);
+  assert.match(migration, /create index if not exists telnyx_webhook_events_session_idx\n\s+on public\.motorist_telnyx_webhook_events \(call_session_id, received_at\)\n\s+where call_session_id is not null/);
+});
+
+test("registers updated_at triggers for every table with an updated_at column", () => {
+  const triggerLoop = migration.match(/-- 13\. updated_at triggers[\s\S]*?end \$\$;/)[0];
+  for (const table of [...NEW_TABLES, ...RECREATED_TABLES]) {
+    if (!/updated_at timestamptz/.test(tableBlock(table))) {
+      continue;
+    }
+    assert.ok(triggerLoop.includes(`'${table}'`), `${table} needs an updated_at trigger`);
+  }
+});
+
+test("broadcasts telephony changes to the private organisation topic", () => {
+  const fn = realtimeMigration.match(
+    /create or replace function app_private\.motorist_broadcast_telephony_change\(\)[\s\S]*?\$\$;/,
+  );
+  assert.ok(fn, "the broadcast trigger function is not defined");
+  assert.match(fn[0], /security definer/);
+  assert.match(fn[0], /set search_path = ''/);
+  assert.match(fn[0], /realtime\.broadcast_changes\(/);
+  assert.match(fn[0], /'org:' \|\| v_organization_id::text \|\| ':telephony'/);
+  // OLD/NEW must never be touched outside their own operation.
+  assert.match(fn[0], /if tg_op = 'DELETE' then\n\s+v_organization_id := old\.organization_id;/);
+
+  for (const table of ["motorist_call_sessions", "motorist_call_legs", "motorist_operator_presence"]) {
+    assert.ok(new RegExp(`'${table}',?\\n`).test(realtimeMigration), `${table} must get a broadcast trigger`);
+  }
+  assert.match(
+    realtimeMigration,
+    /create trigger %I after insert or update or delete on public\.%I for each row execute function app_private\.motorist_broadcast_telephony_change\(\)/,
+  );
+});
+
+test("authorises the private topic through organisation membership only", () => {
+  assert.match(realtimeMigration, /create policy motorist_telephony_broadcast_read\n\s+on realtime\.messages\n\s+for select\n\s+to authenticated/);
+  assert.match(realtimeMigration, /extension = 'broadcast'/);
+  assert.match(
+    realtimeMigration,
+    /app_private\.motorist_is_org_member\(split_part\(realtime\.topic\(\), ':', 2\)::uuid\)/,
+  );
+  // The uuid cast must be guarded, otherwise any other private topic raises.
+  assert.match(realtimeMigration, /when realtime\.topic\(\) ~ '\^org:\[0-9a-fA-F\]\{8\}/);
+  assert.match(realtimeMigration, /drop policy if exists motorist_telephony_broadcast_read on realtime\.messages/);
+  // Broadcast only: `postgres_changes` publications must not be touched.
+  assert.doesNotMatch(realtimeMigration, /supabase_realtime|add table/);
+});
+
+test("does not reference the previous provider or dropped objects", () => {
+  for (const text of [migration, realtimeMigration, seed, seedScript]) {
+    assert.doesNotMatch(text, /viptel/i);
+    assert.doesNotMatch(text, /motorist_telephony_numbers/);
+    assert.doesNotMatch(text, /sjcsrygkkmersoczpunh/);
+  }
+});
+
+test("seed files populate the routing configuration", () => {
+  for (const text of [seed, seedScript]) {
+    assert.match(text, /Dispečing A/);
+    assert.match(text, /Dispečing B/);
+    assert.match(text, /\+421910988882/);
+    assert.match(text, /callback_prompt/);
+    assert.match(text, /2026-12-24/);
+    for (const code of ["obed", "porada", "admin"]) {
+      assert.match(text, new RegExp(`['"]${code}['"]`), `pause reason ${code}`);
+    }
+    assert.match(text, /Spätné volanie|spätné volanie/);
+    assert.match(text, /motorist_telephony_settings/);
+    assert.match(text, /motorist_operator_presence/);
+  }
+  assert.match(seed, /insert into public\.motorist_ring_plans[\s\S]*?on conflict/);
+  assert.match(seed, /'Denný'/);
+  assert.match(seed, /destination_allowlist/);
+});

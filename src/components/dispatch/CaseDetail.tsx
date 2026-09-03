@@ -136,6 +136,8 @@ type CaseDetailProps = {
   partnerDirectory: PartnerDirectoryEntry[];
   priceRule?: PriceRule;
   onDataChange?: (dispatchData: DispatchData) => void;
+  /** Click-to-call; absent (or refusing) while no telephony provider is wired in. */
+  onDial?: (phone: string, caseId?: string) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
   onEditingChange?: (editing: boolean, force?: boolean) => boolean | void;
   onSaveDraftChange?: (saveDraft: SaveCaseDraft | null) => void;
@@ -234,6 +236,7 @@ export function CaseDetail({
   embedded = false,
   focusedTaskId,
   onDataChange,
+  onDial,
   onDirtyChange,
   onEditingChange,
   onSaveDraftChange,
@@ -527,9 +530,20 @@ export function CaseDetail({
         return;
       }
 
-      // Click-to-call returns together with the next telephony provider
-      // (through an onDial prop); until then the card only reports the state.
-      setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+      if (!onDial) {
+        setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+        return;
+      }
+
+      setIsRunningAction(true);
+      try {
+        await onDial(contactPhone, caseItem.id);
+        setNotice(`Volanie na ${contactPhone} bolo spustené.`);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo spustiť.");
+      } finally {
+        setIsRunningAction(false);
+      }
       return;
     }
 

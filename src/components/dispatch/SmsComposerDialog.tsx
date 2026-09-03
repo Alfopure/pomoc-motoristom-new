@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Link2, Loader2, MapPin, MessageSquareText, Send, X } from "lucide-react";
+import { Info, Link2, Loader2, MapPin, MessageSquareText, Send, X } from "lucide-react";
 import type { DispatchData } from "@/data/dispatch-types";
 import { MAX_CUSTOM_SMS_LENGTH, validateCustomSmsDraft } from "@/lib/sms/custom-message";
 import { renderLocationRequestSmsPreview } from "@/lib/sms/templates";
@@ -246,6 +246,11 @@ export function SmsComposerDialog({
               Žiadosť o polohu sa viaže ku konkrétnemu prípadu. Najprv otvorte prípad s vyplneným telefónnym číslom klienta a potom znovu otvorte SMS.
             </div>
           )}
+
+          <p className="flex items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs leading-5 text-zinc-600">
+            <Info size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
+            <span>SMS sa odosielajú z odosielateľa <strong className="font-semibold">PomocMotor</strong> a sú jednosmerné — klient na ne nevie odpovedať. Odpovede riešte telefonicky.</span>
+          </p>
 
           {error && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-red-800">{error}</div>}
 
