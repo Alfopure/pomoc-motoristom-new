@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Clock3, Loader2, PhoneOutgoing, RefreshCw, UserRound, X } from "lucide-react";
 
 import { TELEPHONY_TIMEOUT_MS, telephonyJson } from "@/lib/telephony/client-request";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
+import { callbackPollDelayMs } from "@/lib/telephony/poll-schedule";
 import {
   callbackPermissions,
   callbackQueueSummary,
@@ -35,12 +36,14 @@ import { useTickingClock } from "./settings/settings-ui";
  *
  * It polls the queue itself rather than riding the 1 s/5 s `calls/active` loop:
  * these rows change on the scale of minutes, and the console's poll is sized
- * for live call control. The one action that touches the phone (ringing the
- * caller back) is delegated to the console through `onCallBack`, so the browser
- * answers its own leg exactly as it does for the dialer.
+ * for live call control. The cadence comes from `poll-schedule.ts` like every
+ * other telephony reader, so a console left open behind another window all
+ * night drops to one poll every two minutes and a failing endpoint backs off
+ * instead of being hit at full rate forever. The one action that touches the
+ * phone (ringing the caller back) is delegated to the console through
+ * `onCallBack`, so the browser answers its own leg exactly as it does for the
+ * dialer.
  */
-
-const QUEUE_POLL_MS = 30_000;
 
 const URGENCY_ROW_CLASS: Record<CallbackUrgency, string> = {
   fresh: "border-zinc-200 bg-white",
@@ -73,6 +76,7 @@ export function CallbackQueuePanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  const failures = useRef(0);
   // Ageing is re-derived against the browser's own clock: the answer on screen
   // is up to a poll interval old, and a request must not look fresher than it
   // is just because the last poll was 29 seconds ago.
@@ -85,30 +89,65 @@ export function CallbackQueuePanel({
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
 
   useEffect(() => {
+    let cancelled = false;
+    let timeoutId: number | undefined;
     const controller = new AbortController();
-    void (async () => {
+
+    const load = async () => {
       const result = await telephonyJson<CallbackQueuePayload & { error?: string }>("/api/telephony/callbacks", {
         label: "fronta spätných volaní",
         signal: controller.signal,
         timeoutMs: TELEPHONY_TIMEOUT_MS.read,
       }).catch(() => null);
-      if (!result || controller.signal.aborted) return;
-      if (!result.ok || !result.body) {
+      if (cancelled) return;
+      if (!result?.ok || !result.body) {
+        failures.current += 1;
         setError(result?.body?.error ?? "Frontu spätných volaní sa nepodarilo načítať.");
         setLoaded(true);
         return;
       }
+      failures.current = 0;
       setQueue(result.body);
       setError(null);
       setLoaded(true);
-    })();
-    return () => controller.abort();
-  }, [reloadToken]);
+    };
 
-  useEffect(() => {
-    const timer = window.setInterval(reload, QUEUE_POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [reload]);
+    // One chain at a time, generation-counted: a tab that becomes visible while
+    // the previous tick is still awaiting its response would otherwise leave
+    // that tick to schedule a second chain, and every hide/show cycle would
+    // double the poll rate.
+    let chain = 0;
+
+    const schedule = (generation: number) => {
+      if (cancelled || generation !== chain) return;
+      timeoutId = window.setTimeout(async () => {
+        await load();
+        schedule(generation);
+      }, callbackPollDelayMs({ documentHidden: document.visibilityState === "hidden", consecutiveFailures: failures.current }));
+    };
+
+    const restart = () => {
+      if (cancelled) return;
+      chain += 1;
+      const generation = chain;
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      void load().then(() => schedule(generation));
+    };
+
+    const onVisibility = () => {
+      if (cancelled || document.visibilityState !== "visible") return;
+      restart();
+    };
+
+    restart();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+  }, [reloadToken]);
 
   const open = useMemo(() => sortCallbackQueue(queue.open), [queue.open]);
   const summary = useMemo(

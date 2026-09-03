@@ -59,7 +59,16 @@ export type TelephonyStatsDeps = {
  */
 export const STATS_CACHE_TTL_MS = 5_000;
 
-type CacheEntry = { at: number; payload: WallboardPayload };
+/**
+ * The cached entry holds the *promise*, not the resolved payload.
+ *
+ * A wall display, a couple of report tabs and the cron all miss the cache
+ * within the same few milliseconds after it expires. Caching the payload only
+ * means each of them starts its own aggregation pass — the exact stampede the
+ * cache exists to prevent. Storing the in-flight promise makes the second and
+ * later readers await the first one's pass.
+ */
+type CacheEntry = { at: number; payload: Promise<WallboardPayload> };
 const cache = new Map<string, CacheEntry>();
 
 /** Test seam: drops the per-instance snapshot cache. */
@@ -319,7 +328,14 @@ export async function loadTelephonyStatsCached(deps: TelephonyStatsDeps, options
   const hit = cache.get(key);
   if (hit && now - hit.at < STATS_CACHE_TTL_MS && now >= hit.at) return hit.payload;
 
-  const payload = await loadTelephonyStats(deps, options);
-  cache.set(key, { at: now, payload });
-  return payload;
+  // A failed pass must not be cached: the next reader has to be allowed to try
+  // again rather than being served the same rejection for five seconds.
+  const pending = loadTelephonyStats(deps, options);
+  cache.set(key, { at: now, payload: pending });
+  try {
+    return await pending;
+  } catch (error) {
+    if (cache.get(key)?.payload === pending) cache.delete(key);
+    throw error;
+  }
 }

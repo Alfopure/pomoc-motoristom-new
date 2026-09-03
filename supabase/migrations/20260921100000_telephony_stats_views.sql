@@ -23,10 +23,23 @@
 --
 -- Cost note: a query with `where organization_id = … and day = …` is pushed
 -- down into the grouped scan (the predicate is on grouping columns), but the
--- day expression is `stable`, not `immutable`, so it cannot be indexed and the
--- scan is bounded by the organisation, not by the day. That is why
--- `src/server/telephony/stats.ts` reads these views behind a short-lived
--- per-organisation cache instead of once per open wallboard.
+-- day expression is `stable`, not `immutable`, so it cannot be indexed. Without
+-- a second bound the scan would therefore cover the organisation's *entire*
+-- call history on every cache miss, and a wallboard left on a wall would get
+-- slower every month it ran — the opposite of what these views are for.
+--
+-- Both views are therefore bounded to the last `7 days` of base rows, on the
+-- indexed `started_at` column (`calls_org_started_at_idx`), which is what
+-- actually drives the scan. Seven days and not one: the day boundary is local
+-- and the open interval of an operator status has to reach back past it, and a
+-- week leaves room for a report asking about yesterday without another
+-- migration. Nothing reads these views for an older day —
+-- `src/server/telephony/stats.ts` asks for today and falls back to raw rows —
+-- so the bound is invisible to every caller.
+--
+-- On top of that, `stats.ts` answers every reader from one short-lived
+-- per-organisation snapshot and coalesces concurrent misses onto one pass, so N
+-- open screens are one database pass, not N.
 
 -- ---------------------------------------------------------------------------
 -- 1. Daily call statistics
@@ -75,6 +88,9 @@ with base as (
     greatest(coalesce(c.duration_seconds, 0), 0)::numeric as talk_seconds
   from public.motorist_calls c
   where c.started_at is not null
+    -- Bounded on the indexed column so the scan is driven by
+    -- `calls_org_started_at_idx` rather than by the organisation's whole history.
+    and c.started_at >= (pg_catalog.now() - interval '7 days')
 )
 select
   base.organization_id,
@@ -134,6 +150,10 @@ select
   max(s.started_at) as last_started_at,
   max(s.started_at) filter (where s.ended_at is null) as open_since
 from public.motorist_operator_statuses s
+-- Same bound as the call view, plus every still-open interval whatever its age:
+-- an operator who has been `available` since yesterday morning is exactly the
+-- row a live wallboard needs.
+where s.started_at >= (pg_catalog.now() - interval '7 days') or s.ended_at is null
 group by s.organization_id, s.profile_id, (s.started_at at time zone 'Europe/Bratislava')::date, s.status;
 
 comment on view public.motorist_operator_status_durations is
@@ -158,11 +178,12 @@ grant select on table public.motorist_operator_status_durations to service_role;
 -- 4. Supporting index
 -- ---------------------------------------------------------------------------
 --
--- Used by the fallback path in `stats.ts` (which asks for one day of raw calls
--- by timestamp range while these views are not applied yet) and by the report
--- dashboard's range queries. The view's own `day` predicate cannot use it —
--- `timestamptz at time zone text` is `stable`, so no expression index on it is
--- possible — which is the reason the stats route caches.
+-- Used by the `started_at >= now() - interval '7 days'` bound of both views
+-- above, by the fallback path in `stats.ts` (which asks for one day of raw
+-- calls by timestamp range while these views are not applied yet) and by the
+-- report dashboard's range queries. The views' own `day` predicate cannot use
+-- it — `timestamptz at time zone text` is `stable`, so no expression index on
+-- it is possible — which is why the bound is expressed on `started_at`.
 
 create index if not exists calls_org_started_at_idx
   on public.motorist_calls (organization_id, started_at desc);

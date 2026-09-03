@@ -35,11 +35,21 @@ export const MAX_IVR_TIMEOUT_SECS = 30;
 export type IvrConfig = { menu: IvrMenuRow; options: IvrOptionRow[] };
 
 /**
- * How the caller's input ended. Telnyx reports `valid | invalid | call_hangup |
- * cancelled | cancelled_amd`; the reducer only forwards the digits it got, so
- * "nothing pressed" is an empty string whatever the label was.
+ * How the caller's input ended.
+ *
+ * Telnyx reports `valid | invalid | call_hangup | cancelled | cancelled_amd |
+ * timeout`, and the two the menu has to tell apart are `invalid` and
+ * `timeout`. `valid_digits` is derived from the menu's own options, so a caller
+ * pressing an unmapped key never produces a `valid` gather with an unknown
+ * digit — it produces `invalid`. Collapsing that into "nothing pressed" would
+ * route a wrong key straight to the ring plan and make the re-prompt
+ * unreachable, so the status is carried here explicitly.
  */
-export type IvrGatherOutcome = { digits: string };
+export type IvrGatherOutcome = {
+  digits: string;
+  /** True for Telnyx status `invalid`: a key was pressed and it is not on the menu. */
+  invalid?: boolean;
+};
 
 export type IvrDecision =
   /** Route to a ring plan; `planId === null` means "the line's own plan". */
@@ -148,13 +158,17 @@ export function decideIvr(input: IvrDecisionInput): IvrDecision {
 
   const digits = input.outcome.digits.trim();
   const mayRetry = input.tries < ivrMaxTries(config.menu);
+  const option = digits ? findIvrOption(config.options, digits) : null;
 
-  if (!digits) return { kind: "default", reason: "silence" };
-
-  const option = findIvrOption(config.options, digits);
-  if (!option) {
+  // A key that is not on the menu: re-play it while the budget allows. Telnyx's
+  // own `invalid` status is authoritative here (it compares against the same
+  // `valid_digits` the menu produced), and a digit with no option row is the
+  // same case for anything that reaches this function without a status.
+  if (input.outcome.invalid || (digits && !option)) {
     return mayRetry ? { kind: "retry", tries: input.tries + 1, reason: "invalid_digit" } : { kind: "default", reason: "tries_exhausted" };
   }
+
+  if (!option) return { kind: "default", reason: "silence" };
 
   switch (option.action as IvrAction) {
     case "ring_plan": {

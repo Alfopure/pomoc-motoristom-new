@@ -56,12 +56,19 @@ const TONE_BADGE: Record<WallboardTone, string> = {
 };
 
 export function TelephonyStatsWidgets() {
-  const { error, forbidden, loaded, reload, stats } = useTelephonyStats();
+  const { error, forbidden, loaded, reload, signedOut, stats } = useTelephonyStats();
   const clock = useTickingClock(5_000);
   const checkedAt = stats ? Date.parse(stats.checkedAt) : Number.NaN;
   const now = clock?.getTime() ?? (Number.isFinite(checkedAt) ? checkedAt : 0);
 
   if (forbidden) return null;
+  if (signedOut) {
+    return (
+      <section className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs font-medium text-amber-900 xl:col-span-12">
+        Relácia vypršala — prihlás sa znova, aby sa štatistiky ústredne obnovili.
+      </section>
+    );
+  }
   if (!stats) {
     return loaded && error ? (
       <section className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs font-medium text-amber-900 xl:col-span-12">{error}</section>

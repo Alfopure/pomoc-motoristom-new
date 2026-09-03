@@ -300,7 +300,7 @@ export type PhoneBarModel = {
   waiting: PhoneBarCall[];
   /** Live calls of other operators, for the "prebieha" counter. */
   otherActiveCount: number;
-  /** Live calls of other operators — the supervision targets of a manager. */
+  /** Live calls of other operators that still have an operator on them — the supervision targets of a manager. */
   others: PhoneBarCall[];
   /** The call this operator is supervising right now (their own supervisor leg is up). */
   supervising: { sessionId: string; mode: string | null; pending: boolean } | null;
@@ -351,6 +351,12 @@ export function buildPhoneBarModel(payload: ActiveCallsPayload, options: PhoneBa
   );
   const waiting = payload.waiting;
   const others = payload.calls.filter((call) => isTalkingState(call.state) && call.answeredByProfileId !== actorProfileId);
+  // Supervision whispers into the leg that answered the caller. A three-way the
+  // operator already left has no colleague on it any more (`answered_by_profile_id`
+  // is null and the remaining leg is the outside party), so it is not a target:
+  // the server refuses it with 409 and offering the buttons would only teach the
+  // manager to press a button that never works.
+  const supervisable = others.filter((call) => call.answeredByProfileId !== null);
   // The supervisor's own leg on somebody else's call: it is what tells the bar
   // to offer "ukončiť dozor" and which mode is currently in force.
   const supervisedCall = payload.calls.find((call) =>
@@ -365,7 +371,7 @@ export function buildPhoneBarModel(payload: ActiveCallsPayload, options: PhoneBa
     offers: offers.map((call) => toPhoneBarCall(call, "offer", actorProfileId, options)),
     waiting: waiting.map((call) => toPhoneBarCall(call, "waiting", actorProfileId, options)),
     otherActiveCount: others.length,
-    others: others.map((call) => toPhoneBarCall(call, "active", actorProfileId, options)),
+    others: supervisable.map((call) => toPhoneBarCall(call, "active", actorProfileId, options)),
     supervising:
       supervisedCall && supervisorLeg
         ? { sessionId: supervisedCall.sessionId, mode: supervisorLeg.supervisorMode, pending: !supervisorLeg.answeredAt }

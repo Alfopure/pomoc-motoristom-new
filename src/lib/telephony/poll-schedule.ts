@@ -76,6 +76,20 @@ export const WALLBOARD_POLL_MS = {
   hidden: 60_000,
 } as const;
 
+/**
+ * The callback queue in the call-centre view.
+ *
+ * A promise to ring somebody back is measured in tens of minutes, so half a
+ * minute of latency costs nothing — and each poll is four Supabase queries
+ * (open, resolved, line labels, claimant names). A dispatch room leaves eight
+ * consoles open overnight, so the hidden cadence matters more here than the
+ * visible one.
+ */
+export const CALLBACK_POLL_MS = {
+  visible: 30_000,
+  hidden: 120_000,
+} as const;
+
 export const TAKEOVER_POLL_MS = {
   /** A handover is a 30-second decision, so it stays responsive while live. */
   activeVisible: 4_000,
@@ -123,6 +137,15 @@ export function wallboardPollDelayMs(input: {
   random?: () => number;
 }) {
   const base = input.documentHidden ? WALLBOARD_POLL_MS.hidden : WALLBOARD_POLL_MS.visible;
+  return withBackoff(base, input.consecutiveFailures, input.random);
+}
+
+export function callbackPollDelayMs(input: {
+  documentHidden: boolean;
+  consecutiveFailures?: number;
+  random?: () => number;
+}) {
+  const base = input.documentHidden ? CALLBACK_POLL_MS.hidden : CALLBACK_POLL_MS.visible;
   return withBackoff(base, input.consecutiveFailures, input.random);
 }
 

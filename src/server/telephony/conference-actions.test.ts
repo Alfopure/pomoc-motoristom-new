@@ -154,6 +154,31 @@ describe("addCallParty", () => {
     expect(h.presence(PROFILES.o1).status).toBe("on_call");
   });
 
+  it("refuses a senior dispatcher who is not on the call, so add+mute is not a back door into monitoring", async () => {
+    const h = createTelephonyHarness();
+    const call = await talkingWith(h);
+
+    // `senior` may hang up or transfer anybody's call, but adding a leg and
+    // muting it is silent listening — that is `superviseCall`, manager/admin
+    // only, and it writes a supervision audit row.
+    expect(await fail(addCallParty(actionDeps(h), senior, call.sessionId, { number: NUMBERS.external }))).toMatchObject({ status: 403, code: "forbidden" });
+    expect(await fail(leaveConferenceCall(actionDeps(h), senior, call.sessionId))).toMatchObject({ status: 403, code: "forbidden" });
+    expect(h.telnyx.of("dial").filter((command) => command.params.to === NUMBERS.external)).toHaveLength(0);
+    expect(h.rows("motorist_audit_log")).toHaveLength(0);
+
+    // The manager may: they already have supervision, and every one of these
+    // actions is audited.
+    await addCallParty(actionDeps(h), manager, call.sessionId, { number: NUMBERS.external });
+    expect(h.rows("motorist_audit_log").map((row) => row.action)).toEqual(["telephony.conference.add_party"]);
+  });
+
+  it("refuses a party id that is not a uuid with 404 rather than a database error", async () => {
+    const h = createTelephonyHarness();
+    const call = await threeWay(h);
+    expect(await fail(setCallPartyMuted(actionDeps(h), o1, call.sessionId, "not-a-uuid", true))).toMatchObject({ status: 404, code: "party_not_found" });
+    expect(await fail(removeCallParty(actionDeps(h), o1, "abc", String(call.partyLeg.id)))).toMatchObject({ status: 404, code: "not_found" });
+  });
+
   it("writes an audit row naming the participant", async () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
@@ -394,6 +419,27 @@ describe("superviseCall", () => {
     expect(h.presence(PROFILES.o1)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
     expect(h.rows("motorist_audit_log").map((row) => row.action)).toEqual(["telephony.supervise.start", "telephony.supervise.stop"]);
     expect(await fail(stopSupervisingCall(actionDeps(h), manager, call.sessionId))).toMatchObject({ status: 409 });
+  });
+
+  it("closes the audit trail when the supervisor's own leg drops without them pressing stop", async () => {
+    const h = createTelephonyHarness();
+    giveSupervisorDevice(h);
+    const call = await talkingWith(h);
+    await superviseCall(actionDeps(h), manager, call.sessionId, "whisper");
+    const supervisorLeg = h.legFor(call.sessionId, PROFILES.o4)!;
+    await h.legEvent(String(supervisorLeg.telnyx_call_control_id), "call.answered");
+
+    // The manager closes the tab: nothing calls stop-supervise, but the log
+    // still has to say when the listening ended.
+    await h.legEvent(String(supervisorLeg.telnyx_call_control_id), "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(h.rows("motorist_audit_log").map((row) => row.action)).toEqual(["telephony.supervise.start", "telephony.supervise.stop"]);
+    expect(h.rows("motorist_audit_log").at(-1)).toMatchObject({
+      actor_profile_id: PROFILES.o4,
+      entity_id: call.sessionId,
+      before_payload: expect.objectContaining({ mode: "whisper" }),
+      after_payload: expect.objectContaining({ reason: "leg_ended", supervisor: PROFILES.o4 }),
+    });
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: null });
   });
 
   it("leaves the supervisor available when the supervised call ends", async () => {

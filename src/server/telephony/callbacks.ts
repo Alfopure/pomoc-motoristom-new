@@ -4,7 +4,10 @@ import type { Database } from "@/lib/supabase/database.types";
 import type { CallbackActorRole, CallbackQueuePayload, CallbackRequestPayload } from "@/lib/telephony/callback-queue";
 import { canTakeOverCallback } from "@/lib/telephony/callback-queue";
 
-import { CallActionError, loadSession, startOutboundCall, type CallActionDeps, type CallActor, type StartOutboundResult } from "./call-actions";
+import { isUuid } from "@/lib/telephony/uuid";
+
+import { writeCallAudit } from "./audit";
+import { CallActionError, startOutboundCall, type CallActionDeps, type CallActor, type StartOutboundResult } from "./call-actions";
 import { toJson, type LineRow } from "./state/types";
 
 /**
@@ -155,6 +158,10 @@ export type CallbackActionResult = { request: CallbackRequestPayload };
 export type CallbackCallResult = CallbackActionResult & { call: StartOutboundResult; linked: boolean };
 
 async function loadRequest(deps: CallbackQueueDeps, id: string): Promise<CallbackRow> {
+  // A malformed segment is a request that does not exist, not a server failure:
+  // without this Postgres raises `22P02 invalid input syntax for type uuid` and
+  // its message is echoed to the client as a 500.
+  if (!isUuid(id)) throw new CallActionError("Požiadavka na spätné volanie sa nenašla.", 404, "not_found");
   const { data, error } = await deps.admin
     .from("motorist_callback_requests")
     .select("*")
@@ -183,6 +190,34 @@ function assertLive(row: CallbackRow): void {
   if (row.status === "done" || row.status === "cancelled") {
     throw new CallActionError("Požiadavka je už uzavretá.", 409, "already_resolved");
   }
+}
+
+/**
+ * Audit row for a queue action. A promise made to a caller can be closed or
+ * cancelled by any dispatcher (`assertClaimable` lets an unclaimed request go
+ * to whoever presses the button first), so who did it has to be attributable
+ * somewhere other than a JSON key on a row the panel stops showing after a day.
+ * The payload carries the same kind of detail as the conference audits: status,
+ * claimant and the caller's number, nothing else.
+ */
+async function auditCallback(
+  deps: CallbackQueueDeps,
+  actor: CallActor,
+  action: "claim" | "done" | "cancel",
+  before: CallbackRow,
+  after: CallbackRow,
+): Promise<void> {
+  await writeCallAudit(
+    { admin: deps.admin, organizationId: deps.organizationId, logger: deps.logger },
+    {
+      action: `telephony.callback.${action}`,
+      actorProfileId: actor.profileId,
+      entityType: "telephony_callback",
+      entityId: after.id,
+      before: { status: before.status, claimed_by: before.claimed_by },
+      after: { status: after.status, claimed_by: after.claimed_by, caller_number: after.caller_number, source: after.source },
+    },
+  );
 }
 
 /**
@@ -229,6 +264,7 @@ export async function claimCallbackRequest(deps: CallbackQueueDeps, actor: CallA
     const name = await claimantName(deps, fresh.claimed_by);
     throw new CallActionError(`Požiadavku medzitým prevzal ${name ?? "iný dispečer"}.`, 409, "already_claimed");
   }
+  await auditCallback(deps, actor, "claim", row, updated);
   return { request: await present(deps, updated) };
 }
 
@@ -244,7 +280,7 @@ export async function resolveCallbackRequest(
   const now = nowOf(deps);
   const notes = typeof input.notes === "string" && input.notes.trim() ? input.notes.trim().slice(0, 500) : null;
 
-  const updated = await deps.admin
+  const query = deps.admin
     .from("motorist_callback_requests")
     .update({
       status: input.status,
@@ -256,11 +292,21 @@ export async function resolveCallbackRequest(
     })
     .eq("organization_id", deps.organizationId)
     .eq("id", id)
-    .in("status", [...CALLBACK_LIVE_STATUSES])
-    .select("*");
+    .in("status", [...CALLBACK_LIVE_STATUSES]);
+  // Conditional on the claimant we just read, exactly like the claim: a `done`
+  // racing somebody else's claim must not overwrite it and hand the same caller
+  // to two dispatchers, one of whom then rings a person the queue already
+  // records as settled.
+  const updated = await (row.claimed_by ? query.eq("claimed_by", row.claimed_by) : query.is("claimed_by", null)).select("*");
   if (updated.error) throw new CallActionError(`Uzavretie požiadavky zlyhalo: ${updated.error.message}`, 500);
   const result = (updated.data ?? [])[0] as CallbackRow | undefined;
-  if (!result) throw new CallActionError("Požiadavka je už uzavretá.", 409, "already_resolved");
+  if (!result) {
+    const fresh = await loadRequest(deps, id);
+    assertLive(fresh);
+    const name = await claimantName(deps, fresh.claimed_by);
+    throw new CallActionError(`Požiadavku medzitým prevzal ${name ?? "iný dispečer"}.`, 409, "already_claimed");
+  }
+  await auditCallback(deps, actor, input.status === "done" ? "done" : "cancel", row, result);
 
   // The state machine also opens a `kind: 'callback'` task on the case; leaving
   // it open after the caller was rung back would keep the case looking unfinished.
@@ -324,6 +370,13 @@ async function activeLineId(deps: CallbackQueueDeps, lineId: string | null): Pro
  * Best effort on purpose: the call is already live, so a failed bookkeeping
  * write must not be reported as a failed callback. The caller learns about it
  * through `linked: false` and a warning in the log.
+ *
+ * The link is written on the **request** row only. A live session's metadata
+ * belongs to the session runner, which writes it under a lease with a `version`
+ * compare-and-set; a read-modify-write from here would race the reducer's own
+ * `call.initiated` / `call.answered` writes for the operator leg and could drop
+ * `meta.ring.mode`, on which the hangup paths branch. Nothing needs the reverse
+ * pointer: the request row carries `session_id` and `metadata.callback_call`.
  */
 async function linkCallToRequest(
   deps: CallActionDeps,
@@ -342,18 +395,6 @@ async function linkCallToRequest(
     .eq("id", row.id);
   if (updated.error) {
     deps.logger?.({ level: "warn", scope: "callbacks", message: "callback link failed", error: updated.error.message, requestId: row.id });
-    return false;
-  }
-  try {
-    const session = await loadSession(deps, input.sessionId);
-    const sessionMeta = session.metadata && typeof session.metadata === "object" && !Array.isArray(session.metadata) ? { ...(session.metadata as Record<string, unknown>) } : {};
-    const patched = await deps.admin
-      .from("motorist_call_sessions")
-      .update({ metadata: toJson({ ...sessionMeta, callback_request_id: row.id }) })
-      .eq("id", input.sessionId);
-    if (patched.error) throw new Error(patched.error.message);
-  } catch (error) {
-    deps.logger?.({ level: "warn", scope: "callbacks", message: "session link failed", error: error instanceof Error ? error.message : String(error), requestId: row.id });
     return false;
   }
   return true;

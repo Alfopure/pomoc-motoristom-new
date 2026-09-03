@@ -119,6 +119,23 @@ describe("ivr decisions", () => {
     expect(decide("9", 2)).toEqual({ kind: "default", reason: "tries_exhausted" });
   });
 
+  it("retries on the Telnyx `invalid` status, which is how an unmapped key really arrives", () => {
+    // `valid_digits` is the menu's own digits, so Telnyx answers a wrong key
+    // with status `invalid` and the digit — not with `valid`.
+    expect(decideIvr({ config: config(options), outcome: { digits: "9", invalid: true }, tries: 1, availablePlanIds: [PLAN_ID] })).toEqual({
+      kind: "retry",
+      tries: 2,
+      reason: "invalid_digit",
+    });
+    expect(decideIvr({ config: config(options), outcome: { digits: "9", invalid: true }, tries: 2, availablePlanIds: [PLAN_ID] })).toEqual({
+      kind: "default",
+      reason: "tries_exhausted",
+    });
+    // The flag wins over the digit lookup: a menu edited between the gather and
+    // the answer must not turn a refused key into a routing decision.
+    expect(decideIvr({ config: config(options), outcome: { digits: "1", invalid: true }, tries: 1, availablePlanIds: [PLAN_ID] })).toMatchObject({ kind: "retry" });
+  });
+
   it("counts the repeat option against the same budget", () => {
     expect(decide("5", 1)).toEqual({ kind: "retry", tries: 2, reason: "repeat" });
     expect(decide("5", 2)).toEqual({ kind: "default", reason: "tries_exhausted" });
@@ -160,11 +177,18 @@ describe("ivr through the pipeline", () => {
     return call;
   }
 
+  /**
+   * The event Telnyx actually sends. `valid_digits` on the gather is exactly the
+   * menu's own option digits, so a key outside it comes back as `invalid` (with
+   * the digit) and never as `valid`; pressing nothing comes back as `timeout`.
+   */
   async function press(harness: ReturnType<typeof createTelephonyHarness>, callControlId: string, digits: string) {
     const gather = harness.telnyx.of("gatherUsingAudio").at(-1)!;
+    const validDigits = String(gather.params.validDigits ?? "");
+    const status = !digits ? "timeout" : validDigits.includes(digits) ? "valid" : "invalid";
     return harness.legEvent(callControlId, "call.gather.ended", {
       digits,
-      status: digits ? "valid" : "timeout",
+      status,
       client_state: gather.params.clientState,
     });
   }
@@ -256,5 +280,24 @@ describe("ivr through the pipeline", () => {
 
     await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing" });
     expect(h.call(call.sessionId)).toMatchObject({ status: "missed", end_reason: "ivr_message" });
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+  });
+
+  it("ends the call with the same outcome when the closing option has no recording", async () => {
+    const h = createTelephonyHarness();
+    h.db.update("motorist_ivr_options", { action: "hangup", target_ring_plan_id: null, prompt_media_url: null, label: "Odkaz" }, (row) => row.digit === "1");
+    const call = await ivrCall(h, "cc-ivr-message-silent");
+
+    await press(h, call.callControlId, "1");
+
+    // No recording → hang up straight away, but the call is still booked as a
+    // message the app played, not as a caller we failed to reach: no callback
+    // request, and the statistics count it as system-handled.
+    expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(call.callControlId);
+    expect(h.session(call.sessionId).state).toBe("missed");
+
+    await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(h.call(call.sessionId)).toMatchObject({ status: "missed", end_reason: "ivr_message" });
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
   });
 });

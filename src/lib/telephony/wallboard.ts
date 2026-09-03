@@ -225,7 +225,7 @@ export function aggregateCallStats(rows: RawCallRow[], day: string): CallStatsRo
   for (const row of rows) {
     if (!row.started_at || !isCallDirection(row.direction)) continue;
     const operatorId = row.operator_id ?? null;
-    const key = `${row.direction} ${operatorId ?? ""}`;
+    const key = `${row.direction}|${operatorId ?? ""}`;
     const group = groups.get(key) ?? { day, direction: row.direction, operatorId, ...EMPTY_CALL_TOTALS };
 
     const answered = Boolean(row.answered_at);

@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 
+import { writeCallAudit } from "./audit";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { buildBusinessHoursSchedule, type BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import { materialiseRingPlan } from "./routing/ring-plan";
@@ -299,6 +300,45 @@ export function effectsDeps(deps: SessionRunnerDeps): EffectsDeps {
   };
 }
 
+/**
+ * Closes the audit trail of every supervision that ended in this transition.
+ *
+ * The stop button is only one of the ways it can end: the supervisor's browser
+ * leg drops, the supervised call ends under them, or the conference join is
+ * refused and the compensation clears the entry. All of them go through the
+ * reducer, so `metadata.supervise` losing a key is the one signal that covers
+ * them — and without it `motorist_audit_log` holds a `supervise.start` with no
+ * terminating row, which is exactly the question the audit exists to answer.
+ */
+async function auditSupervisionEnd(deps: SessionRunnerDeps, before: SessionRow, after: SessionRow, event: SessionEvent, compensated: boolean): Promise<void> {
+  const was = readMeta(before).supervise ?? {};
+  const now = readMeta(after).supervise ?? {};
+  const ended = Object.keys(was).filter((profileId) => !now[profileId]);
+  if (ended.length === 0) return;
+  const reason = compensated
+    ? "join_failed"
+    : event.kind === "app"
+      ? event.type === "stop_supervise"
+        ? "stopped"
+        : `app:${event.type}`
+      : event.type === "call.hangup"
+        ? "leg_ended"
+        : `telnyx:${event.type}`;
+  for (const profileId of ended) {
+    await writeCallAudit(
+      { admin: deps.admin, organizationId: deps.organizationId, logger: deps.logger },
+      {
+        action: "telephony.supervise.stop",
+        actorProfileId: profileId,
+        entityId: after.id,
+        before: { mode: was[profileId]?.mode ?? null, started_at: was[profileId]?.at ?? null },
+        after: { supervisor: profileId, reason, operator: after.answered_by_profile_id },
+        source: event.kind === "app" ? "dispatch_console" : "telephony",
+      },
+    );
+  }
+}
+
 export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent): Promise<SessionRunResult> {
   const token = randomUUID();
   const leaseAcquired = await acquireSessionLease(deps, sessionId, token);
@@ -337,6 +377,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
           commands: apply.commands.map((command) => ({ kind: command.kind, ok: command.ok })),
           error: apply.failure?.error ?? null,
         });
+        await auditSupervisionEnd(deps, snapshot.session, apply.session, event, apply.compensations.length > 0);
         deps.logger?.({
           scope: "session",
           sessionId,

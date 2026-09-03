@@ -2,7 +2,7 @@ import type { CallLegRole, CallLegState, CallSessionState, Json, RingAttemptResu
 
 import { evaluateBusinessHours } from "@/lib/telephony/business-hours";
 import { classifyRingHangup } from "../routing/eligibility";
-import { decideIvr, describeIvrDecision, ivrGatherSpec } from "../routing/ivr";
+import { decideIvr, describeIvrDecision, ivrGatherSpec, type IvrGatherOutcome } from "../routing/ivr";
 import { memberKey, planRingStep, stepDeadline, toEligibilityDevices, toEligibilityPresence, type RingStepPlanResult } from "../routing/ring-plan";
 import type { TelnyxClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
@@ -1451,10 +1451,14 @@ function onGatherEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceResul
   if (b.legEnded(leg)) return ignoredResult("customer leg ended");
   if (event.status === "call_hangup" || event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`gather ${event.status}`);
   const purpose = event.clientState?.intent ?? null;
+  // `invalid` means the caller pressed a key that is not on the menu; the menu
+  // has to re-prompt for it, so it must not be flattened into "nothing pressed"
+  // the way `timeout` is (`decideIvr`, `routing/ivr.ts`).
+  const invalid = event.status === "invalid";
   const digits = event.status === "valid" ? (event.digits ?? "") : "";
   const state = b.session.state;
 
-  if (state === "ivr" && (purpose === "ivr" || purpose === null)) return onIvrChoice(b, leg, digits);
+  if (state === "ivr" && (purpose === "ivr" || purpose === null)) return onIvrChoice(b, leg, { digits: invalid ? (event.digits ?? "") : digits, invalid });
   if ((state === "after_hours" || state === "callback_offered") && purpose !== "moh_tick") return onCallbackChoice(b, leg, digits);
   if (WAITING_STATES.has(state)) return onWaitingTick(b, leg);
   return ignoredResult(`gather in ${state}`);
@@ -1465,11 +1469,12 @@ function onGatherEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceResul
  * the fallbacks live in `routing/ivr.ts`; this function only turns the decision
  * into commands.
  */
-function onIvrChoice(b: TransitionBuilder, leg: LegRow, digits: string): ReduceResult {
+function onIvrChoice(b: TransitionBuilder, leg: LegRow, outcome: IvrGatherOutcome): ReduceResult {
   const ivr = b.ctx.ivr;
   const plan = b.ringPlan();
   const tries = b.meta.ivr?.tries ?? 1;
-  const decision = decideIvr({ config: ivr, outcome: { digits }, tries, availablePlanIds: Object.keys(b.ctx.ringPlans) });
+  const digits = outcome.digits;
+  const decision = decideIvr({ config: ivr, outcome, tries, availablePlanIds: Object.keys(b.ctx.ringPlans) });
   b.patchMeta({
     ivr: {
       ...(b.meta.ivr ?? { tries }),
@@ -1517,10 +1522,15 @@ function onIvrChoice(b: TransitionBuilder, leg: LegRow, digits: string): ReduceR
  * leaving the caller in silence.
  */
 function closeWithIvrMessage(b: TransitionBuilder, leg: LegRow, prompt: MediaRef | null): void {
+  // The outcome is recorded before the branch, exactly like `applyFallback`'s
+  // `hangup_message`: an option with no recording used to leave the session in
+  // `ivr`, so the caller's own hangup was later classified as a missed call,
+  // counted as an abandonment and answered with a callback request — for a
+  // caller who was deliberately shown the door.
+  b.setState("missed").patchSession({ ended_at: null });
+  b.call.status = "missed";
+  b.call.end_reason = "ivr_message";
   if (prompt && b.ctx.mediaAvailable) {
-    b.setState("missed").patchSession({ ended_at: null });
-    b.call.status = "missed";
-    b.call.end_reason = "ivr_message";
     b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:ivr_message"), leg: ref(leg), media: prompt });
     return;
   }
@@ -2016,6 +2026,12 @@ function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): 
   if (!supervisor) throw new CallActionRejected("Chýba dozorujúci operátor.", 400);
   if (!TALKING_STATES.has(b.session.state)) throw new CallActionRejected("Dozor je možný len pri prebiehajúcom hovore.", 409);
   const operator = requireOperatorLeg(b);
+  // The leg that answers the customer can be an external number: `answeringLeg`
+  // falls back to any answered operator/external leg, and `handOverConference`
+  // clears `answered_by_profile_id` when the operator steps out of a three-way.
+  // Whispering into that leg would put the supervisor in an outsider's ear, so
+  // supervision requires a colleague on the call.
+  if (!operator.profile_id) throw new CallActionRejected("Hovor nemá pripojeného operátora — dozor nie je možný.", 409);
   if (operator.profile_id === supervisor.profileId) throw new CallActionRejected("Na vlastný hovor sa dozerať nedá.", 409);
   const existing = openSupervisorLegs(b).find((leg) => leg.profile_id === supervisor.profileId);
   const entries = { ...(b.meta.supervise ?? {}) };

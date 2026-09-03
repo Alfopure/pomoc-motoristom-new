@@ -5,6 +5,7 @@ import {
   activeCallPollDelayMs,
   POLL_BACKOFF_MAX_MS,
   REALTIME_ACTIVE_CALL_POLL_MS,
+  callbackPollDelayMs,
   supportPollDelayMs,
   takeoverPollDelayMs,
   telephonyPollActivity,
@@ -129,6 +130,18 @@ describe("support and takeover cadence", () => {
     // A failing endpoint backs off instead of being hammered by a screen
     // nobody is standing in front of.
     expect(wallboardPollDelayMs({ documentHidden: false, consecutiveFailures: 3, random: () => 0.5 })).toBeGreaterThan(5_000);
+  });
+
+  it("keeps the callback queue gentle and gates it on visibility", () => {
+    // A promise to ring somebody back is a tens-of-minutes affair and each poll
+    // is four Supabase queries; a console left open overnight must not run at
+    // the visible rate.
+    expect(callbackPollDelayMs({ documentHidden: false })).toBe(30_000);
+    expect(callbackPollDelayMs({ documentHidden: true })).toBe(120_000);
+    // Its base already sits at the backoff ceiling, so a failing endpoint is
+    // never polled faster than 30 s and never slower than the hidden cadence.
+    expect(callbackPollDelayMs({ documentHidden: false, consecutiveFailures: 3, random: () => 0.5 })).toBe(30_000);
+    expect(callbackPollDelayMs({ documentHidden: true, consecutiveFailures: 3, random: () => 0.5 })).toBeLessThanOrEqual(120_000);
   });
 
   it("stays fast only while a handover decision is actually open", () => {

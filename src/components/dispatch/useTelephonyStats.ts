@@ -16,6 +16,11 @@ import type { WallboardPayload } from "@/lib/telephony/wallboard";
  *   opening the reports view gets one 403 and the poller stops for good; the
  *   widget then hides itself, exactly as `QaDashboard` does. Retrying a 403
  *   every five seconds would be a permission check turned into a load test.
+ *   A 401 stops the chain the same way, but for the opposite reason: a wall
+ *   display whose session expired must say so rather than keep the last good
+ *   numbers on screen behind a small "Neaktuálne" badge — a board that looks
+ *   merely a little behind while showing hours-old figures is the one failure
+ *   mode a wallboard must not have.
  * * **Cadence.** `wallboardPollDelayMs` never polls faster than the server's
  *   own snapshot cache, and backs off when the endpoint fails.
  * * **Continuity.** A failed poll keeps the last good payload on screen and
@@ -29,6 +34,8 @@ export type TelephonyStatsState = {
   error: string | null;
   /** The reader may not see the statistics at all: the surface hides itself. */
   forbidden: boolean;
+  /** The session expired: the surface must ask for a sign-in, not show stale numbers. */
+  signedOut: boolean;
   /** False until the first answer (success or failure) arrived. */
   loaded: boolean;
   reload: () => void;
@@ -38,6 +45,7 @@ export function useTelephonyStats(): TelephonyStatsState {
   const [stats, setStats] = useState<WallboardPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
+  const [signedOut, setSignedOut] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   const failures = useRef(0);
@@ -45,7 +53,7 @@ export function useTelephonyStats(): TelephonyStatsState {
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
 
   useEffect(() => {
-    if (forbidden) return;
+    if (forbidden || signedOut) return;
     let cancelled = false;
     let timeoutId: number | undefined;
     const controller = new AbortController();
@@ -60,6 +68,11 @@ export function useTelephonyStats(): TelephonyStatsState {
 
       if (result?.status === 403) {
         setForbidden(true);
+        setLoaded(true);
+        return;
+      }
+      if (result?.status === 401) {
+        setSignedOut(true);
         setLoaded(true);
         return;
       }
@@ -111,7 +124,7 @@ export function useTelephonyStats(): TelephonyStatsState {
       document.removeEventListener("visibilitychange", onVisibility);
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     };
-  }, [forbidden, reloadToken]);
+  }, [forbidden, signedOut, reloadToken]);
 
-  return { stats, error, forbidden, loaded, reload };
+  return { stats, error, forbidden, signedOut, loaded, reload };
 }

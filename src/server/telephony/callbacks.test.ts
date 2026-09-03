@@ -220,6 +220,50 @@ describe("resolveCallbackRequest", () => {
     expect(request).toMatchObject({ status: "done", claimedByProfileId: PROFILES.o1 });
   });
 
+  it("lets exactly one of a claim and a concurrent cancel win", async () => {
+    const h = createTelephonyHarness();
+    const id = seedRequest(h);
+
+    // Dispatcher B reads the request as unclaimed and cancels it in the same
+    // instant A claims it. Without the conditional update both succeed: A's
+    // panel shows the caller as theirs and rings them, while the queue records
+    // the promise as closed by B.
+    const results = await Promise.allSettled([
+      claimCallbackRequest(queueDeps(h), o1, id),
+      resolveCallbackRequest(queueDeps(h), o2, id, { status: "cancelled" }),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejection = (results.find((result) => result.status === "rejected") as PromiseRejectedResult).reason as CallActionError;
+    expect(rejection.status).toBe(409);
+    const row = h.db.find("motorist_callback_requests", (candidate) => candidate.id === id)!;
+    // Either A holds an open request or B closed an unclaimed one — never both.
+    expect(row.status === "scheduled" ? row.claimed_by : row.status).toBeTruthy();
+    expect(row.status === "scheduled" || row.status === "cancelled").toBe(true);
+  });
+
+  it("writes an audit row for every claim, close and cancel", async () => {
+    const h = createTelephonyHarness();
+    const id = seedRequest(h);
+
+    await claimCallbackRequest(queueDeps(h), o1, id);
+    await resolveCallbackRequest(queueDeps(h), o1, id, { status: "cancelled" });
+
+    expect(h.rows("motorist_audit_log").map((row) => row.action)).toEqual(["telephony.callback.claim", "telephony.callback.cancel"]);
+    expect(h.rows("motorist_audit_log").at(-1)).toMatchObject({
+      entity_type: "telephony_callback",
+      entity_id: id,
+      actor_profile_id: PROFILES.o1,
+      after_payload: expect.objectContaining({ status: "cancelled", caller_number: NUMBERS.customer }),
+    });
+  });
+
+  it("answers 404 for an id that is not a uuid instead of a database error", async () => {
+    const h = createTelephonyHarness();
+    expect(await fail(resolveCallbackRequest(queueDeps(h), o1, "abc", { status: "done" }))).toMatchObject({ status: 404, code: "not_found" });
+    expect(await fail(claimCallbackRequest(queueDeps(h), o1, "../../etc/passwd"))).toMatchObject({ status: 404, code: "not_found" });
+  });
+
   it("refuses to close the same request twice", async () => {
     const h = createTelephonyHarness();
     const id = seedRequest(h);
@@ -241,7 +285,10 @@ describe("callBackRequest", () => {
     // reached, so the operator still has to settle it.
     expect(result.request).toMatchObject({ status: "scheduled", claimedByProfileId: PROFILES.o1, lastCallSessionId: result.call.sessionId });
     expect(h.session(result.call.sessionId)).toMatchObject({ direction: "outbound", case_id: CASE_ID });
-    expect((h.session(result.call.sessionId).metadata as { callback_request_id?: string }).callback_request_id).toBe(id);
+    // The link is written on the request row only. A live session's metadata is
+    // the session runner's, written under a lease with a version CAS; a
+    // read-modify-write from here would race the reducer for the operator leg.
+    expect(h.rows("motorist_callback_requests")[0].metadata).toMatchObject({ callback_call: { session_id: result.call.sessionId, by: PROFILES.o1 } });
     expect(h.telnyx.of("dial")).toHaveLength(1);
   });
 

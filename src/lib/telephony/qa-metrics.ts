@@ -17,7 +17,7 @@
 
 import type { CallOutcome } from "@/data/dispatch-types";
 
-import { CALLBACK_OVERDUE_MINUTES, callbackDeadline, type CallbackSource, type CallbackStatus } from "./callback-queue";
+import { callbackDeadline, type CallbackSource, type CallbackStatus } from "./callback-queue";
 
 /**
  * Thirty days, and not by taste: the outcome is stored inside
@@ -94,17 +94,6 @@ export type QaDashboardPayload = {
   };
   callbacks: QaCallbackCompliance;
   operators: QaOperatorRow[];
-};
-
-export const EMPTY_QA_DASHBOARD: QaDashboardPayload = {
-  checkedAt: "",
-  lookbackDays: QA_LOOKBACK_DAYS,
-  recordingEnabled: false,
-  transcriptsEnabled: false,
-  promiseMinutes: CALLBACK_OVERDUE_MINUTES,
-  calls: { completed: 0, documented: 0, documentedRate: null, linkedToCase: 0, linkedRate: null, byOutcome: [] },
-  callbacks: { created: 0, done: 0, cancelled: 0, open: 0, overdue: 0, onTime: 0, measured: 0, onTimeRate: null, averageMinutesToClose: null, medianMinutesToClose: null, bySource: [] },
-  operators: [],
 };
 
 export function qaPercentage(part: number, whole: number): number | null {

@@ -324,4 +324,33 @@ describe("loadTelephonyStatsCached", () => {
     expect(h.db.log.length).toBeGreaterThan(0);
     expect(third.checkedAt).not.toBe(first.checkedAt);
   });
+
+  it("runs one pass when several screens miss the cache at the same instant", async () => {
+    const h = createTelephonyHarness();
+    seedStatsView(h);
+    h.db.log.length = 0;
+
+    // A wallboard TV, two report tabs and the cron all poll on the same tick.
+    const [a, b, c] = await Promise.all([loadTelephonyStatsCached(deps(h)), loadTelephonyStatsCached(deps(h)), loadTelephonyStatsCached(deps(h))]);
+    const oneReads = h.db.log.length;
+
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+    // Caching the resolved payload would have started three aggregation passes.
+    h.advance(STATS_CACHE_TTL_MS + 1);
+    h.db.log.length = 0;
+    await loadTelephonyStatsCached(deps(h));
+    expect(h.db.log.length).toBe(oneReads);
+  });
+
+  it("does not cache a failed pass", async () => {
+    const h = createTelephonyHarness();
+    seedStatsView(h);
+    h.db.failNext("motorist_call_sessions", "select", fakeError("connection reset", "08006"));
+
+    await expect(loadTelephonyStatsCached(deps(h))).rejects.toThrow(/sessions load failed/);
+    // The next reader gets a real answer instead of five seconds of the same
+    // rejection.
+    await expect(loadTelephonyStatsCached(deps(h))).resolves.toMatchObject({ source: "view" });
+  });
 });

@@ -66,7 +66,7 @@ const TONE_BADGE: Record<WallboardTone, string> = {
 const STALE_AFTER_SECONDS = 30;
 
 export function WallboardScreen() {
-  const { error, forbidden, loaded, stats } = useTelephonyStats();
+  const { error, forbidden, loaded, signedOut, stats } = useTelephonyStats();
   // One second: this is the only surface in the application where a caller's
   // waiting time is watched as it runs.
   const clock = useTickingClock(1_000);
@@ -75,6 +75,12 @@ export function WallboardScreen() {
 
   if (forbidden) {
     return <WallboardNotice title="Wallboard nie je dostupný" detail="Nástenný prehľad vidia služobne starší dispečeri, manažéri a administrátori." />;
+  }
+  // An expired session on a screen nobody types on would otherwise leave hours-old
+  // numbers on the wall behind a small "Neaktuálne" badge. The board blanks and
+  // asks for a sign-in instead.
+  if (signedOut) {
+    return <WallboardNotice title="Relácia vypršala" detail="Prihlás sa znova, aby nástenný prehľad ukazoval aktuálne čísla." />;
   }
   if (!stats) {
     return <WallboardNotice title={loaded ? "Údaje sa nepodarilo načítať" : "Načítavam prehľad…"} detail={loaded ? (error ?? "Skúste to o chvíľu znova.") : "Ústredňa práve zbiera aktuálne čísla."} />;

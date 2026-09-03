@@ -653,7 +653,7 @@ function SupervisePanel({
         })}
       </div>
       <p className="mt-2 border-t border-zinc-200 pt-1.5 text-[11px] font-medium leading-4 text-zinc-500">
-        Každý dozor sa zapisuje do auditu spolu s režimom a hovorom.
+        Každý dozor sa zapisuje do auditu spolu s režimom a hovorom. Ak hovor ešte nie je v konferencii, volajúci môže pri spustení dozoru počuť krátke ticho.
       </p>
     </section>
   );
