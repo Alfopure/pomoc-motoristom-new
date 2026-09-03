@@ -2,9 +2,21 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, ORG, type TelephonyHarness } from "@/test/telephony-harness";
 
-import { alertsFromReport, runTelephonyAlerts } from "./alerts";
+import { alertsFromReport, runTelephonyAlerts, type TelephonyAlertDeps } from "./alerts";
 import type { TelephonyHealthReport } from "./health";
 import { usageDay } from "./usage";
+
+type SentMessage = Parameters<NonNullable<TelephonyAlertDeps["send"]>>[0];
+
+/** Typed so the assertions can read the message instead of casting it. */
+function mailbox() {
+  const sent: SentMessage[] = [];
+  const send = vi.fn(async (message: SentMessage) => {
+    sent.push(message);
+    return {};
+  });
+  return { sent, send };
+}
 
 function report(checks: TelephonyHealthReport["checks"], status: TelephonyHealthReport["status"] = "fail"): TelephonyHealthReport {
   return { status, checkedAt: "2026-09-03T08:00:00.000Z", organizationId: ORG, checks };
@@ -33,20 +45,20 @@ describe("telephony alerts", () => {
 
   it("sends one mail and records the keys it covered", async () => {
     const h = createTelephonyHarness();
-    const send = vi.fn(async () => ({}));
+    const { sent, send } = mailbox();
     const result = await runTelephonyAlerts(alertDeps(h, { send, report: report([{ key: "sessions", status: "fail", detail: { stuck: 2 } }]) }));
 
     expect(result).toMatchObject({ status: "ok", detail: { sent: 1 } });
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(send.mock.calls[0][0]).toMatchObject({ to: "alerts@example.test" });
-    expect(String((send.mock.calls[0][0] as { subject: string }).subject)).toContain("chybu");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ to: "alerts@example.test" });
+    expect(sent[0].subject).toContain("chybu");
     expect(h.rows("motorist_telephony_alerts")).toHaveLength(1);
     expect(h.rows("motorist_telephony_alerts")[0]).toMatchObject({ alert_key: `${usageDay(h.now())}:sessions:fail`, status: "fail", sends: 1 });
   });
 
   it("does not mail the same problem twice in one day", async () => {
     const h = createTelephonyHarness();
-    const send = vi.fn(async () => ({}));
+    const { send } = mailbox();
     const failing = report([{ key: "sessions", status: "fail", detail: { stuck: 2 } }]);
     await runTelephonyAlerts(alertDeps(h, { send, report: failing }));
 
@@ -59,7 +71,7 @@ describe("telephony alerts", () => {
 
   it("mails again when the same check gets worse", async () => {
     const h = createTelephonyHarness();
-    const send = vi.fn(async () => ({}));
+    const { send } = mailbox();
     await runTelephonyAlerts(alertDeps(h, { send, report: report([{ key: "usage", status: "warn", detail: { legs: 90 } }], "warn") }));
     await runTelephonyAlerts(alertDeps(h, { send, report: report([{ key: "usage", status: "fail", detail: { legs: 120 } }]) }));
 
@@ -69,7 +81,7 @@ describe("telephony alerts", () => {
 
   it("stays quiet when nothing is wrong", async () => {
     const h = createTelephonyHarness();
-    const send = vi.fn(async () => ({}));
+    const { send } = mailbox();
     const result = await runTelephonyAlerts(alertDeps(h, { send, report: report([{ key: "sessions", status: "ok", detail: {} }], "ok") }));
 
     expect(result).toMatchObject({ status: "ok", detail: { alerts: 0, sent: 0 } });
@@ -79,7 +91,7 @@ describe("telephony alerts", () => {
 
   it("records nothing when there is no recipient, so the first configured address still hears about it", async () => {
     const h = createTelephonyHarness();
-    const send = vi.fn(async () => ({}));
+    const { send } = mailbox();
     const result = await runTelephonyAlerts(alertDeps(h, { send, recipient: null, report: report([{ key: "sessions", status: "fail", detail: {} }]) }));
 
     expect(result).toMatchObject({ status: "skipped", detail: { reason: "no_recipient" } });
@@ -88,7 +100,7 @@ describe("telephony alerts", () => {
 
   it("reports a failed send and leaves the alert unsent, so the next tick retries", async () => {
     const h = createTelephonyHarness();
-    const send = vi.fn(async () => {
+    const send = vi.fn(async (): Promise<unknown> => {
       throw new Error("resend is down");
     });
     const result = await runTelephonyAlerts(alertDeps(h, { send, report: report([{ key: "sessions", status: "fail", detail: {} }]) }));
@@ -101,7 +113,7 @@ describe("telephony alerts", () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
     const { sessionId } = await h.inbound({ to: "+421232408718" });
     h.db.update("motorist_call_sessions", { state: "talking", updated_at: new Date(h.now().getTime() - 20 * 60_000).toISOString() }, (row) => row.id === sessionId);
-    const send = vi.fn(async () => ({}));
+    const { send } = mailbox();
 
     const result = await runTelephonyAlerts(alertDeps(h, { send }));
     expect(result).toMatchObject({ status: "ok", detail: { health: "fail", sent: 1 } });
