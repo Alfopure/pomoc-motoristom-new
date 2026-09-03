@@ -21,7 +21,19 @@ Time-boxed verifications that cannot be done offline. Record the outcome (date, 
 
 **Pass criteria.** `telnyxIDs.telnyxCallControlId` is present on the invite and equals the value the route returned. Note separately whether custom headers survive to the SDK.
 
-**If it fails.** `rememberExpectedLeg`/`matchExpectedLeg` fall back to a 90 s TTL window; auto-answer must then be replaced by an explicit "Prijať" click in the PhoneBar. Do not guess by caller number.
+**If it fails.** `rememberExpectedLeg`/`matchExpectedLeg` fall back to a 90 s TTL window; auto-answer must then be replaced by an explicit "Prijať" click in the PhoneBar. Do not guess by caller number. The `X-PM-Auto-Answer` header is only a tiebreaker inside that window (it carries no session identity), so it cannot substitute for the id.
+
+**Result.** _Not yet run._
+
+### S6 — Conference promotion must not drop the operator leg
+
+**Why.** Hold, consult, attended transfer, park and supervision all promote a bridged call to a conference. Creating a conference from a bridged leg ends the bridge, and Telnyx documents `park_after_unbridge: "self"` as the only thing that saves a leg when its bridge ends. Inbound calls are bridged **from the customer leg** with that flag, so the customer is protected and the operator is not — which is why the code creates the conference **on the operator leg** and joins the customer. This has to be confirmed against the real API before hold/consult are used in production: a compensation can restore database state, but it cannot resurrect a hung-up WebRTC leg.
+
+**How.** On the `dev` alias with both kill switches on, take a real inbound call, press "Podržať", then "Pokračovať". Watch the PhoneBar and `motorist_call_legs` for the session.
+
+**Pass criteria.** Both legs stay open (`ended_at is null`), the session reaches `held` and returns to `talking` on unhold, the operator hears the caller again and `motorist_job_incidents` gains no `telephony.telnyx.commands` row.
+
+**If it fails** (the operator leg drops on promotion): add `hold_after_unbridge: true` (or `park_after_unbridge: "opposite"`) to the original bridge, and extend the `conference_create` compensation with a re-dial of the operator leg instead of the database-only rollback. Until then, keep hold/consult off in production and use blind transfer.
 
 **Result.** _Not yet run._
 
@@ -59,6 +71,7 @@ Pre-recorded Slovak prompts in `public/telephony/` are primary and are served fr
 
 A "stuck" session is one that is not in `ended`/`failed` and has had no leg event for a long time — usually a lost webhook, a cold-start timeout or a command that failed after the leg had already gone.
 
+0. **Note.** Staleness is judged from `motorist_call_sessions.updated_at`, and the session lease deliberately does **not** refresh it (`20260917100000_telnyx_fixes_round2.sql`); the ring sweep additionally carries its pre-lease verdict into the `sweep` event. A `wrap_up`/`missed` session whose last leg webhook was lost is finalised by that path after `STALE_FINALISE_MS` (2 min).
 1. **Detect.** The 5-minute cron job `telephony.sessions.stuck` reports sessions untouched for more than 15 minutes and pushes a synthetic `sweep` event through the reducer. `GET /api/telephony/cron` (bearer `CRON_SECRET`) returns the per-job summary; a `degraded` status means at least one job failed.
 2. **Confirm the call is really gone.** Ask the operator, or check `GET /v2/calls/{call_control_id}` in the Telnyx portal. A parked customer in the čakáreň is *not* stuck: it is a supported state with a MOH gather tick every 60 s.
 3. **Operator-side fix (preferred).** The owning operator (or a senior dispatcher) presses "Zložiť" in the PhoneBar, which posts `/api/telephony/calls/[id]/hangup`. This runs the normal reducer path and finalises `motorist_calls`.
@@ -77,7 +90,9 @@ Two independent layers, ANDed. Both must be on for a provider-affecting command;
 | Environment | `TELNYX_LIVE_CALLS_ENABLED` | `TELNYX_SMS_LIVE_SENDS` | Vercel project env, per environment scope; requires a redeploy of that environment |
 | Database | `motorist_telephony_settings.live_calls_enabled` | `motorist_telephony_settings.sms_live_sends` | one row per organisation; takes effect on the next request, no redeploy |
 
-**Emergency stop (fastest path).** Set the database column to `false` for the organisation. Everything provider-affecting starts answering `423` with the Slovak kill-switch message within one request; in-call cleanup commands (`hangup`, `bridge`, playback and conference actions) stay allowed so a live call can always be torn down.
+**Emergency stop (fastest path).** Set the database column to `false` for the organisation. Everything that *creates* a leg or a message (`dial`, `transfer`, `sendMessage`) starts answering `423` with the Slovak kill-switch message within one request; commands that only steer an existing call (`answer`, `hangup`, `bridge`, playback, gather and conference actions) stay allowed so an inbound call can still be answered and any live call can always be torn down.
+
+Scope note: the calls switch does **not** block `answer`, so inbound calls are still picked up, greeted and routed while it is off — only outbound legs (including ring fan-out and transfers) are refused. A test that must reach an operator's phone therefore needs the switch **on**.
 
 **Enabling for a live test.** Flip the environment variable for the target environment (only `dev`/Preview unless the owner asks for production), redeploy, then flip the database column. Turn both back off immediately after the test and record what was tested.
 
@@ -114,6 +129,16 @@ Credentials live in `motorist_operator_devices` (one row per `(profile_id, envir
 6. Verify: an inbound call resolves to the right line label and partner name in the PhoneBar and in the call log. Use `simulate-inbound` (section 7) if the DID is not reachable yet.
 
 Never point a new number at a Call Control application of another environment: the webhook rejects events whose `connection_id` does not belong to the environment, and the call would be dropped silently with `unverified_connection`.
+
+**External escalation number in a ring group.** `supabase/seed.sql` and `scripts/seed-demo-data.mjs` ship the last member of "Dispečing B" with the placeholder `+421900000000`. A real mobile is personal data and must never be committed: set it directly on that row in the target project after seeding
+
+```sql
+update public.motorist_ring_group_members
+   set external_number = '+421…'
+ where id = '00000000-0000-4000-8000-000000002223';
+```
+
+and remember that re-running the seed does **not** overwrite it (`on conflict (id) do nothing`). While the placeholder is in place, that ring step simply fails to answer and the plan moves on to its fallback.
 
 ## 6. Raising caps
 
@@ -164,17 +189,24 @@ Hold, attended transfer, add-party, park and supervision need the session to be 
 - Any other promotion error leaves the call **bridged and talking**. The action is refused, the PhoneBar shows the degraded chip ("rozšírené funkcie nedostupné") and the client marks the session degraded until the next successful unhold. The conversation is never dropped to gain a feature.
 - Operator workaround while degraded: use a blind transfer (which does not require the conference) or ask the caller to be called back.
 - Diagnose from `motorist_job_incidents` under `telephony.telnyx.commands` and from the ledger row of the triggering event; a repeated failure across sessions points at the Call Control application configuration rather than at one call.
-- Conferences expire after 4 hours, which is why parked and waiting customers are deliberately kept **out** of the conference and held on a `gather_using_audio` MOH tick loop instead.
+- Conferences expire after 4 hours, which is why parked and waiting customers are deliberately kept **out** of the conference and held on a detached `playback_start {loop: "infinity"}` with a silent 60 s `gather` heartbeat instead.
+- Verify on the first live park that `call.gather.ended` for a waiting caller arrives about once per minute (not every 5 s) and that the music has no gap: the silent tick sets **both** `timeout_millis` and `initial_timeout_millis` to 60 s, because Telnyx defaults the wait for the first digit to 5 s. A faster cadence in `motorist_telnyx_webhook_events` means the parameter was ignored — lower `MOH_TICK_TIMEOUT_MS` expectations accordingly and raise the sweep budget.
+- Promotion is issued on the **operator** leg (`conference_create` there, `conference_join` for the customer) because the inbound bridge protects only the customer with `park_after_unbridge: "self"`. Confirm this with spike S6 before enabling hold/consult in production.
 
 ## 9. Routine checks
 
 - `GET /api/telephony/cron` (bearer `CRON_SECRET`) — the single scheduled job; `status: "degraded"` means a sub-job failed.
 - `motorist_telnyx_webhook_events`: rows with `status = 'failed'`, or `attempts > 1`, indicate lost or retried webhooks.
-- `motorist_job_incidents` under `telephony.telnyx.webhook|commands|actions` and `telephony.routing.capacity` (the org-wide leg cap was reached).
+- `motorist_job_incidents` under `telephony.telnyx.webhook|commands|actions` and `telephony.routing.capacity` (the org-wide leg cap was reached). Open rows close themselves (`status = 'recovered'`) after the first clean run of that job — a webhook processed, a transition applied with no failed command, or the leg count back under the cap — at most one check per minute per instance, so an incident that stays open means the failure is still happening.
+- The ring sweep also repairs bookkeeping the reducer could not: `orphanLegsClosed` (legs left open by a lost `call.hangup`) and `staleAttemptsClosed` (leaked `offered` ring attempts, which would otherwise keep their operator out of *every* future ring plan through the global partial unique index).
 - `motorist_telephony_daily_usage` against `daily_leg_soft_cap` (legs and SMS are written by the app; the cap is enforced, not only alerted).
 - The ledger prune job (`telephony.ledger.prune` in `motorist_job_controls`) is seeded **disabled**; enable it when retention should start running, otherwise the cron keeps reporting `disabled` and raw payloads accumulate.
 
-## 10. Official references
+## 10. Test coverage gaps
+
+- **`e2e/telephony-phonebar.spec.ts` is deliberately not written yet (deferred past Phase 2).** The PhoneBar flow (ringing → answer → hold → transfer → hangup) needs the `@telnyx/webrtc` SDK stubbed inside the browser as well as `/api/telephony/{calls/active,webphone/token,devices/heartbeat}`, which is a Playwright harness of its own; the state machine behind it is covered end-to-end offline (`src/server/telephony/state/transitions.test.ts`, `call-actions.test.ts`, `src/lib/telephony/telnyx-webphone.test.ts`, `src/components/dispatch/phone-bar-model.test.ts`). Write it together with the Phase 4 supervision UI, or replace it with the manual acceptance script in section 7 until then.
+
+## 11. Official references
 
 - Telnyx Call Control: https://developers.telnyx.com/docs/voice/programmable-voice/call-control
 - Telnyx webhook signature verification: https://developers.telnyx.com/docs/development/webhooks

@@ -157,7 +157,7 @@ describe("transport preflight", () => {
     ).catch((error: unknown) => error);
 
     expect((failure as SmsWorkflowError).status).toBe(423);
-    expect(transport.preflight).toHaveBeenCalledWith({ organizationId: "org-1" });
+    expect(transport.preflight).toHaveBeenCalledWith({ organizationId: "org-1", to: "+421905123456" });
     expect(send).not.toHaveBeenCalled();
     expect(from).not.toHaveBeenCalled();
   });

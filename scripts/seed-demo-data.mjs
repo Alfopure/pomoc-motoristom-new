@@ -223,7 +223,7 @@ const rows = {
     ringMember("00000000-0000-4000-8000-000000002221", IDS.ringGroupB, "operator", IDS.lenka, null, 0, 15),
     ringMember("00000000-0000-4000-8000-000000002222", IDS.ringGroupB, "operator", IDS.miso, null, 1, 15),
     // Placeholder external number (dispatcher mobile); replace before go-live.
-    ringMember("00000000-0000-4000-8000-000000002223", IDS.ringGroupB, "external_number", null, "+421910988882", 2, 15),
+    ringMember("00000000-0000-4000-8000-000000002223", IDS.ringGroupB, "external_number", null, "+421900000000", 2, 15),
   ],
   ringPlans: [
     { id: IDS.ringPlanDaily, organization_id: ORG, name: "Denný", fallback_kind: "callback_prompt", fallback_number: null, active: true },

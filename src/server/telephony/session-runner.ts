@@ -4,7 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 
-import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
+import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { buildBusinessHoursSchedule, type BusinessHoursSchedule } from "./routing/business-hours";
 import { materialiseRingPlan } from "./routing/ring-plan";
 import { applyReduceResult, recordCallEvent, SessionConflictError, type ApplyResult, type CommandOutcome, type EffectsDeps } from "./state/effects";
@@ -253,6 +253,10 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
         context: { sessionId: session.id },
         now,
       });
+    } else {
+      // Back under the cap: close the incident (throttled per instance) so the
+      // health surface does not report telephony as permanently overloaded.
+      await recoverTelephonyIncidentThrottled(admin, TELEPHONY_INCIDENT_JOBS.capacity, now);
     }
   }
 

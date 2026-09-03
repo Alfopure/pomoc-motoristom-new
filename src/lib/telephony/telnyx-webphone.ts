@@ -22,8 +22,7 @@ import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import {
   heartbeatRegistrationState,
-  inviteHasAutoAnswerHeader,
-  matchExpectedLeg,
+  matchAutoAnswer,
   rememberExpectedLeg,
   reduceWebphone,
   WEBPHONE_HEARTBEAT_MS,
@@ -326,7 +325,9 @@ export class TelnyxWebphone {
       const result = await this.requestJson<WebphoneCredentials & { error?: string }>(TOKEN_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ takeover }),
+        // The current session id makes the server treat this as a renewal of
+        // our own credential rather than a takeover of another tab.
+        body: JSON.stringify({ takeover, deviceSessionId: this.state.credentials?.deviceSessionId ?? null }),
         label: "prihlásenie telefónu",
         timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
       });
@@ -484,10 +485,9 @@ export class TelnyxWebphone {
 
   /**
    * Answers the call currently held by this tab when it is the operator leg of a
-   * dial we started: primarily by `telnyxIDs.telnyxCallControlId` (design §2.2),
-   * otherwise by the `X-PM-Auto-Answer` invite header — the server sets it on
-   * legs it dials for this operator (pickup) where the tab never learns the
-   * call-control id. Returns true when the call was answered.
+   * dial we started: by `telnyxIDs.telnyxCallControlId` (design §2.2), with the
+   * `X-PM-Auto-Answer` invite header as a tiebreaker while exactly one leg this
+   * tab asked for is still outstanding. Returns true when the call was answered.
    */
   private autoAnswerCurrentCall(): boolean {
     const call = this.call;
@@ -495,13 +495,14 @@ export class TelnyxWebphone {
     const state = String(call.state ?? "").toLowerCase();
     if (!RINGING_STATES.has(state) || String(call.direction ?? "").toLowerCase() !== "inbound") return false;
 
-    const expected = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now());
-    if (expected) {
-      this.expected = this.expected.filter((entry) => entry.callControlId !== expected.callControlId);
-      this.callSessionId = expected.sessionId;
-    } else if (!inviteHasAutoAnswerHeader({ customHeaders: call.options?.customHeaders })) {
-      return false;
-    }
+    const expected = matchAutoAnswer(
+      this.expected,
+      { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId, customHeaders: call.options?.customHeaders },
+      this.now(),
+    );
+    if (!expected) return false;
+    this.expected = this.expected.filter((entry) => entry.callControlId !== expected.callControlId);
+    this.callSessionId = expected.sessionId;
 
     this.stopRinging();
     call.answer();

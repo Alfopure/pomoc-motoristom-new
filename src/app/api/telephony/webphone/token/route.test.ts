@@ -43,7 +43,7 @@ describe("POST /api/telephony/webphone/token", () => {
     await expect(response.json()).resolves.toMatchObject({ token: "jwt", deviceSessionId: "dev-2", sipUsername: "gencred001" });
     expect(issueWebphoneToken).toHaveBeenCalledWith(
       { admin: { marker: "admin" }, telnyx: { marker: "telnyx" }, environment: "development" },
-      { organizationId: "org-1", profileId: "profile-1", userAgent: "vitest", takeover: false },
+      { organizationId: "org-1", profileId: "profile-1", userAgent: "vitest", takeover: false, deviceSessionId: null },
     );
   });
 

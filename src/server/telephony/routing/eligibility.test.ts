@@ -20,7 +20,7 @@ function input(overrides: Partial<Parameters<typeof evaluateMemberEligibility>[1
 
 describe("evaluateMemberEligibility", () => {
   it("always accepts external numbers", () => {
-    expect(evaluateMemberEligibility({ kind: "external_number", externalNumber: "+421910988882" }, input({ presence: [], devices: [] }))).toEqual({ eligible: true });
+    expect(evaluateMemberEligibility({ kind: "external_number", externalNumber: "+421900000000" }, input({ presence: [], devices: [] }))).toEqual({ eligible: true });
   });
 
   it("accepts an available operator with a live device and no open offer", () => {

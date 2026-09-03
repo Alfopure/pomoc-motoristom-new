@@ -306,6 +306,15 @@ function hangupCmd(b: TransitionBuilder, leg: LegRow, reason: string, bestEffort
   return { kind: "hangup", commandId: b.cmdId(leg.telnyx_call_control_id, `hangup:${reason}`), leg: ref(leg), reason, bestEffort };
 }
 
+/**
+ * Hangs up a leg that belongs to a session which is already terminal (the leg
+ * may not even have a row yet: a dial that timed out client-side).
+ */
+function hangupOrphanLeg(b: TransitionBuilder, callControlId: string, role: CallLegRole): void {
+  b.cmd({ kind: "hangup", commandId: b.cmdId(callControlId, "hangup:terminal_session"), leg: { callControlId }, reason: "terminal_session", bestEffort: true });
+  b.leg(callControlId, { role, state: "ended", ended_at: b.nowIso, hangup_cause: "terminal_session" }, true);
+}
+
 function gatherCmd(b: TransitionBuilder, leg: LegRow, spec: GatherSpec, intentSuffix = ""): Command {
   return {
     kind: "gather",
@@ -316,16 +325,35 @@ function gatherCmd(b: TransitionBuilder, leg: LegRow, spec: GatherSpec, intentSu
   };
 }
 
+/**
+ * The waiting-room heartbeat: a silent `gather` that only times out. The music
+ * itself is a detached `playback_start { loop: "infinity" }` (see `startMoh`),
+ * so re-arming the tick never interrupts it.
+ */
 function mohTickSpec(): GatherSpec {
   return {
-    media: { key: "moh" },
-    ttsText: "Prosím, čakajte, spájame vás s operátorom.",
+    media: null,
     purpose: "moh_tick",
     maximumDigits: 1,
-    maximumTries: 1,
     timeoutMillis: MOH_TICK_TIMEOUT_MS,
+    // Telnyx waits `initial_timeout_millis` (default 5 s) for the first digit:
+    // without this the tick would fire twelve times a minute.
+    initialTimeoutMillis: MOH_TICK_TIMEOUT_MS,
     validDigits: "0123456789#*",
   };
+}
+
+/**
+ * Starts the continuous waiting-room music on the customer leg (stopped by
+ * `stopMoh`). Idempotent inside one transition: the ring plan and the waiting
+ * room share the command id, so a fallback that walks from one to the other
+ * cannot issue the same `playback_start` twice.
+ */
+function startMoh(b: TransitionBuilder, customer: LegRow): void {
+  if (!b.ctx.mediaAvailable) return;
+  const commandId = b.cmdId(customer.telnyx_call_control_id, "playback:moh");
+  if (b.commands.some((command) => "commandId" in command && command.commandId === commandId)) return;
+  b.cmd({ kind: "playback_start", commandId, leg: ref(customer), media: { key: "moh" }, loop: "infinity", bestEffort: true });
 }
 
 function callbackOfferSpec(media: MediaRef, ttsText: string): GatherSpec {
@@ -385,9 +413,17 @@ function reduceTelnyx(b: TransitionBuilder, event: TelephonyEvent): ReduceResult
 
 function onInitiated(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
   if (!event.callControlId) return ignoredResult("call.initiated without call_control_id");
-  if (TERMINAL_STATES.has(b.session.state)) return ignoredResult("session already terminal");
   const leg = b.findLeg(event.callControlId);
   const state = event.clientState;
+  if (TERMINAL_STATES.has(b.session.state)) {
+    // A dial whose HTTP response never arrived (timeout) still created this leg,
+    // and the caller marked the session `failed`. Nothing will ever bridge it:
+    // hang it up instead of leaving a live leg nobody owns.
+    if (!leg && (!state || state.sid !== b.session.id)) return ignoredResult("session already terminal");
+    if (leg && b.legEnded(leg)) return ignoredResult("session already terminal");
+    hangupOrphanLeg(b, event.callControlId, state?.role ?? "operator");
+    return b.note("leg initiated for a terminal session → hangup").result();
+  }
 
   if (!leg) {
     // A leg we dialed (or a transfer target) whose webhook overtook our own upsert.
@@ -513,7 +549,11 @@ function legValuesFromSynthetic(leg: LegRow): LegValues {
 }
 
 function onLegAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
-  if (TERMINAL_STATES.has(b.session.state)) return ignoredResult("session already terminal");
+  if (TERMINAL_STATES.has(b.session.state)) {
+    if (b.legEnded(leg)) return ignoredResult("session already terminal");
+    hangupOrphanLeg(b, leg.telnyx_call_control_id, leg.role);
+    return b.note("leg answered in a terminal session → hangup").result();
+  }
   const intent = legIntent(leg);
 
   if (isCustomer(leg)) {
@@ -588,7 +628,7 @@ function startRingPlan(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
   b.patchSession({ ring_plan_id: plan.planId });
   if (b.ctx.mediaAvailable) {
     b.cmd({ kind: "playback_start", commandId: b.cmdId(customer.telnyx_call_control_id, "playback:greeting"), leg: ref(customer), media: { key: "greeting" }, bestEffort: true });
-    b.cmd({ kind: "playback_start", commandId: b.cmdId(customer.telnyx_call_control_id, "playback:moh"), leg: ref(customer), media: { key: "moh" }, loop: "infinity", bestEffort: true });
+    startMoh(b, customer);
   }
   const started = ringFromStep(b, customer, plan, 0);
   if (!started) applyFallback(b, customer, plan);
@@ -617,6 +657,9 @@ function ringFromStep(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPl
 
 function planStep(b: TransitionBuilder, plan: FrozenRingPlan, index: number): RingStepPlanResult {
   const step = plan.steps[index];
+  // `applyFallback` fans out the synthetic external-number step at
+  // `plan.steps.length`, so an index past the last real step can reach here.
+  if (!step) return { attempts: [], members: [], skipped: [], capacityLimited: false, ringSecs: 0, exhaustedAfter: true };
   const attempted = new Set(
     b
       .attemptsView()
@@ -743,20 +786,33 @@ function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
   offerCallback(b, customer, { key: "callbackOffer" }, "missed");
 }
 
+/** True while a `playback_start` loop is running on the customer leg. */
+function mohIsPlaying(b: TransitionBuilder): boolean {
+  if (!b.ctx.mediaAvailable) return false;
+  return (b.session.state === "ringing" && b.meta.ring?.mode === "plan") || WAITING_STATES.has(b.session.state);
+}
+
 function stopMoh(b: TransitionBuilder, customer: LegRow): void {
-  if (b.session.state === "ringing" && b.meta.ring?.mode === "plan" && b.ctx.mediaAvailable) {
-    b.cmd({ kind: "playback_stop", commandId: b.cmdId(customer.telnyx_call_control_id, "playback_stop"), leg: ref(customer), bestEffort: true });
-  }
+  if (!mohIsPlaying(b)) return;
+  const commandId = b.cmdId(customer.telnyx_call_control_id, "playback_stop");
+  // One transition can pass through two callers (fallback → callback offer).
+  if (b.commands.some((command) => "commandId" in command && command.commandId === commandId)) return;
+  b.cmd({ kind: "playback_stop", commandId, leg: ref(customer), bestEffort: true });
 }
 
 function offerCallback(b: TransitionBuilder, customer: LegRow, media: MediaRef, source: SessionMeta["callback"] extends infer T ? (T extends { source?: infer S } ? NonNullable<S> : never) : never): void {
+  // The prompt must not compete with the waiting-room loop.
+  stopMoh(b, customer);
   b.setState("callback_offered").patchMeta({ callback: { source, confirmed: false } });
   b.cmd(gatherCmd(b, customer, callbackOfferSpec(media, CALLBACK_OFFER_TTS)));
   b.note(`callback offer (${source})`);
 }
 
 function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, state: "waiting" | "parked" = "waiting"): void {
+  const musicRunning = mohIsPlaying(b);
   b.setState(state).patchMeta({ waiting: { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso } });
+  // The ring plan already started the loop; restarting it would jump the audio.
+  if (!musicRunning) startMoh(b, customer);
   b.cmd(gatherCmd(b, customer, mohTickSpec()));
   b.note(`${state} (${reason})`);
 }
@@ -884,7 +940,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
     if (intent === "transfer") b.patchMeta({ transfer: b.meta.transfer ? { ...b.meta.transfer, completed_at: opts.at } : null });
     b.patchMeta({ ring: { ...(b.meta.ring ?? {}), active_step: null, step_deadline_at: null } });
 
-    if (b.session.state === "ringing" && b.meta.ring?.mode === "plan") stopMoh(b, customer);
+    stopMoh(b, customer);
     if (WAITING_STATES.has(b.session.state)) {
       b.cmd({ kind: "gather_stop", commandId: b.cmdId(customer.telnyx_call_control_id, "gather_stop"), leg: ref(customer), bestEffort: true });
     }
@@ -1197,6 +1253,12 @@ function continueRinging(b: TransitionBuilder, customer: LegRow): void {
     b.note(`step ${active}: still ringing others`);
     return;
   }
+  if (active >= plan.steps.length) {
+    // The synthetic `external_number` fallback step just ended unanswered:
+    // there is no plan step to walk to, go straight to the next fallback.
+    applyFallback(b, customer, plan);
+    return;
+  }
   const planned = planStep(b, plan, active);
   if (planned.attempts.length > 0) {
     // `ordered` walks to the next member; `all` only gets here when a member was
@@ -1322,6 +1384,12 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
     b.cmd(hangupCmd(b, leg, "all_busy", false));
     return b.note("all-busy message played → hangup").result();
   }
+  if (WAITING_STATES.has(state) && b.ctx.mediaAvailable) {
+    // An infinite loop should never end on its own; if it did, the caller would
+    // sit in silence until pickup.
+    startMoh(b, leg);
+    return b.note("waiting-room music restarted").result();
+  }
   return ignoredResult(`playback ended in ${state}`);
 }
 
@@ -1387,25 +1455,39 @@ function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
   }
 }
 
-/** Lazy conference promotion (design §2.1): customer creates it, the operator joins. */
+/**
+ * Lazy conference promotion (design §2.1): the **operator** leg creates the
+ * conference and the customer joins it.
+ *
+ * Creating a conference from a bridged leg ends the bridge, and Telnyx documents
+ * `park_after_unbridge` as the only thing that saves a leg from being hung up
+ * when its bridge ends. The inbound bridge is issued on the customer leg with
+ * `park_after_unbridge: "self"` (`onLegAnswered`), so the customer is protected
+ * by definition while the operator leg is not: the operator must therefore be
+ * the leg that moves *itself* into the conference. Promoting from the customer
+ * side would risk tearing down the operator's WebRTC leg, which no compensation
+ * could restore (see docs/operations/telnyx-runbook.md, spike "conference
+ * promotion").
+ */
 function promoteToConference(b: TransitionBuilder, customer: LegRow, operator: LegRow, actor: string | null): void {
   if (b.session.conference_id) return;
-  const createId = b.cmdId(customer.telnyx_call_control_id, "conference:create");
-  b.cmd({ kind: "conference_create", commandId: createId, leg: ref(customer), name: `sess-${b.session.id}` });
-  const joinId = b.cmdId(operator.telnyx_call_control_id, "conference:join");
-  b.cmd({ kind: "conference_join", commandId: joinId, leg: ref(operator) });
+  const createId = b.cmdId(operator.telnyx_call_control_id, "conference:create");
+  b.cmd({ kind: "conference_create", commandId: createId, leg: ref(operator), name: `sess-${b.session.id}` });
+  const joinId = b.cmdId(customer.telnyx_call_control_id, "conference:join");
+  b.cmd({ kind: "conference_join", commandId: joinId, leg: ref(customer) });
   b.patchMeta({ conference: { promoted_at: b.nowIso, by: actor } });
   const failed = b.fork();
   failed.patchSession({ state: b.session.state, hold_started_at: b.session.hold_started_at, conference_id: null, conference_name: null });
   failed.patchMeta({ conference: null, consult: null });
   b.compensate(createId, "conference promotion failed → call stays bridged", [], failed.transition());
-  // The create already moved the customer into the conference: take them back out and re-bridge,
-  // otherwise the customer would sit alone in a conference the operator never joined.
+  // The create already moved the operator into the conference and parked the
+  // customer: take the operator back out and re-bridge, otherwise the operator
+  // would sit alone in a conference the customer never joined.
   b.compensate(
     joinId,
-    "conference join failed → customer left the conference and re-bridged",
+    "conference join failed → operator left the conference and re-bridged",
     [
-      { kind: "conference_leave", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:leave:join_failed"), leg: ref(customer), bestEffort: true },
+      { kind: "conference_leave", commandId: b.cmdId(operator.telnyx_call_control_id, "conference:leave:join_failed"), leg: ref(operator), bestEffort: true },
       { kind: "bridge", commandId: b.cmdId(customer.telnyx_call_control_id, "bridge:rejoin"), leg: ref(customer), target: ref(operator), parkAfterUnbridge: "self", bestEffort: true },
     ],
     failed.transition(),
@@ -1484,6 +1566,9 @@ function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): Red
 
 function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: TransferTarget, actor: string | null): void {
   const operator = b.answeringLeg();
+  // A caller transferred straight out of the waiting room must not carry the
+  // music loop into the transfer.
+  stopMoh(b, customer);
   if (b.session.state === "held") {
     b.cmd({ kind: "conference_unhold", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:unhold:transfer"), legs: [ref(customer)], bestEffort: true });
   }
@@ -1665,8 +1750,17 @@ function onSweep(b: TransitionBuilder): ReduceResult {
 
 /** Sweep for sessions whose customer already left but whose remaining leg webhooks never arrived. */
 function onStaleFinalise(b: TransitionBuilder): ReduceResult {
-  const updated = Date.parse(b.session.updated_at);
-  if (Number.isNaN(updated) || updated + STALE_FINALISE_MS > b.ctx.now.getTime()) return ignoredResult("sweep: not stale yet");
+  // `updated_at` cannot be trusted here: the session lease is acquired before
+  // the snapshot is loaded and its UPDATE fires the `updated_at` trigger, so the
+  // row always looks fresh. The scanner's pre-lease verdict wins when present.
+  const scanned = b.event.kind === "app" && b.event.type === "sweep" && b.event.stale === true;
+  if (!scanned) {
+    const updated = Date.parse(b.session.updated_at);
+    if (Number.isNaN(updated) || updated + STALE_FINALISE_MS > b.ctx.now.getTime()) return ignoredResult("sweep: not stale yet");
+  }
+  // A leaked `offered` attempt keeps its operator out of every future ring plan
+  // (the cross-session partial unique index), so terminalise them here too.
+  cancelOpenAttempts(b, b.nowIso, "stale finalise");
   for (const leg of b.openLegs()) {
     b.cmd(hangupCmd(b, leg, "stale_finalise"));
     b.leg(leg.telnyx_call_control_id, { state: "ended", ended_at: b.nowIso, hangup_cause: "stale_finalise" });

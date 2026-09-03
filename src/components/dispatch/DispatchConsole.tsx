@@ -1248,6 +1248,7 @@ export function DispatchConsole({
             onLinkCase={(call) => void linkPhoneCallToCase(call)}
             onOpenCase={openCase}
             onUnlockAudio={telephony.unlockAudio}
+            onTakeover={telephony.takeoverPhone}
           />
         )}
 

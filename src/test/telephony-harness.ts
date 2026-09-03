@@ -23,7 +23,7 @@ export const PROFILES = {
   o5: "00000000-0000-4000-8000-000000000105",
 } as const;
 export const LINES = { neutral: "00000000-0000-4000-8000-000000000201", allianz: "00000000-0000-4000-8000-000000000202" } as const;
-export const NUMBERS = { neutral: "+421232408700", allianz: "+421232408718", external: "+421910988882", customer: "+421905123456" } as const;
+export const NUMBERS = { neutral: "+421232408700", allianz: "+421232408718", external: "+421900000000", customer: "+421905123456" } as const;
 export const GROUPS = { a: "00000000-0000-4000-8000-000000002201", b: "00000000-0000-4000-8000-000000002202" } as const;
 export const PLAN_ID = "00000000-0000-4000-8000-000000002301";
 export const BUSINESS_HOURS_ID = "00000000-0000-4000-8000-000000002001";

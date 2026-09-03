@@ -148,6 +148,12 @@ export type AppEvent = {
   target?: TransferTarget;
   /** For `pickup`: the picking operator's device. */
   picker?: { profileId: string; sipUri: string };
+  /**
+   * For `sweep`: the scanner already decided this session is stale. The verdict
+   * is computed *before* the session lease is taken, because acquiring the lease
+   * writes to `motorist_call_sessions` and therefore refreshes `updated_at`.
+   */
+  stale?: boolean;
 };
 
 export type SessionEvent = TelephonyEvent | AppEvent;
@@ -158,7 +164,8 @@ export type SessionEvent = TelephonyEvent | AppEvent;
 export type LegRef = { callControlId: string; fromDial?: undefined } | { callControlId?: undefined; fromDial: string };
 
 export type GatherSpec = {
-  media: MediaRef;
+  /** `null` = a silent `gather` (no audio, no TTS): the waiting-room tick. */
+  media: MediaRef | null;
   invalidMedia?: MediaRef | null;
   ttsText?: string | null;
   validDigits?: string;
@@ -166,6 +173,12 @@ export type GatherSpec = {
   minimumDigits?: number;
   maximumTries?: number;
   timeoutMillis?: number;
+  /**
+   * Plain `gather` only: how long to wait for the *first* digit. Telnyx
+   * defaults it to 5 s, which would end the silent waiting-room tick twelve
+   * times a minute instead of once.
+   */
+  initialTimeoutMillis?: number;
   interDigitTimeoutMillis?: number;
   /** What the gather is for; echoed in `client_state.intent`. */
   purpose: "ivr" | "callback_offer" | "moh_tick";
@@ -369,19 +382,18 @@ export const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
 export const MAX_RING_FANOUT = 8;
 export const MAX_CONCURRENT_LEGS = 9;
 /**
- * Waiting-room cadence. `gather_using_audio` plays `moh.mp3` once and then waits
- * `MOH_TICK_TIMEOUT_MS` for digits, so one cycle is the file plus the timeout
- * (plus a webhook round trip): the music stays continuous instead of leaving the
- * caller in a long silence, which is why the design's `playback_start` +
- * detached 60 s gather timer is not used here.
+ * Waiting-room cadence (design §2.3 item 9c). The music is one detached
+ * `playback_start { loop: "infinity" }` so it never breaks, and the state
+ * machine's heartbeat is a separate silent `gather` that simply times out after
+ * `MOH_TICK_TIMEOUT_MS`: one webhook per minute per waiting caller, no audible
+ * gap and no re-arm race between the two.
  */
-export const MOH_AUDIO_MS = 8_000;
-/** Silence tolerated after the MOH file before the gather ends and music is re-armed. */
-export const MOH_TICK_TIMEOUT_MS = 2_000;
-/** One waiting-room tick: MOH playback + gather timeout. */
-export const MOH_TICK_MS = MOH_AUDIO_MS + MOH_TICK_TIMEOUT_MS;
+/** Silent gather window: how long one waiting-room tick lasts. */
+export const MOH_TICK_TIMEOUT_MS = 60_000;
+/** One waiting-room tick (the gather timeout, plus a webhook round trip). */
+export const MOH_TICK_MS = MOH_TICK_TIMEOUT_MS;
 /** No tick for this long → the gather chain broke and the sweeper re-arms it. */
-export const WAITING_TICK_STALE_MS = Math.max(3 * MOH_TICK_MS, 30_000);
+export const WAITING_TICK_STALE_MS = Math.max(2 * MOH_TICK_MS, 90_000);
 export const CALLBACK_OFFER_TIMEOUT_MS = 8_000;
 export const DEFAULT_TRANSFER_TIMEOUT_SECS = 30;
 export const RING_STEP_GRACE_SECS = 5;
@@ -389,6 +401,12 @@ export const RING_STEP_GRACE_SECS = 5;
 export const CAPACITY_WAIT_MAX_MS = 30_000;
 /** Re-check cadence of a step held back by the leg cap. */
 export const CAPACITY_RETRY_SECS = 5;
+/**
+ * Hard ceiling on every leg we create (`time_limit_secs`, Telnyx maximum).
+ * A dial whose HTTP call timed out client-side may still have created a live
+ * leg we never learn the id of; this guarantees it cannot run forever.
+ */
+export const LEG_TIME_LIMIT_SECS = 4 * 60 * 60;
 export const TELNYX_SIP_DOMAIN = "sip.telnyx.com";
 
 /** SIP URI of an operator's WebRTC credential (SRTP is requested via `media_encryption`). */

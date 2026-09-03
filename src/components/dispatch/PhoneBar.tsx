@@ -32,6 +32,7 @@ import {
   formatCallTimer,
   phoneBarCapabilities,
   phoneBarStateLabel,
+  phoneTakeoverAvailable,
   PHONE_ACTION_LABELS,
   type PhoneCallAction,
 } from "./phone-bar-model";
@@ -59,6 +60,8 @@ export type PhoneBarProps = {
   onLinkCase: (call: PhoneBarCall) => void;
   onOpenCase: (caseId: string) => void;
   onUnlockAudio: () => void;
+  /** Re-mints the browser phone's credential from this tab (409 recovery). */
+  onTakeover: () => void;
 };
 
 const REGISTRATION_TONES: Record<"ok" | "warn" | "error" | "neutral", string> = {
@@ -146,7 +149,7 @@ export function PhoneBar(props: PhoneBarProps) {
       data-testid="phone-bar"
       className="relative z-40 flex min-h-12 flex-wrap items-center gap-2 border-b border-zinc-800 bg-zinc-900 px-3 py-1.5 text-white sm:px-4"
     >
-      <RegistrationChip phone={phone} />
+      <RegistrationChip phone={phone} onTakeover={props.onTakeover} />
       <PresenceSelector
         status={model.ownPresenceStatus}
         pauseReasons={props.pauseReasons}
@@ -441,15 +444,33 @@ function CallSummary({
   );
 }
 
-function RegistrationChip({ phone }: { phone: WebphoneSnapshot }) {
+function RegistrationChip({ phone, onTakeover }: { phone: WebphoneSnapshot; onTakeover: () => void }) {
+  // `failed` (the server refused: another tab is on a call) and `superseded`
+  // (a newer tab took the credential) are terminal: nothing retries on its own,
+  // so this button is the only way back without reloading the page.
+  const canTakeover = phoneTakeoverAvailable(phone.status);
   return (
-    <span
-      data-testid="phone-registration"
-      className={`inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-[11px] font-bold ${REGISTRATION_TONES[phone.registration.tone]}`}
-      title={phone.registration.detail}
-    >
-      {phone.registration.tone === "ok" ? <Phone size={12} aria-hidden="true" /> : <PhoneOff size={12} aria-hidden="true" />}
-      {phone.registration.label}
+    <span className="inline-flex shrink-0 items-center gap-1.5">
+      <span
+        data-testid="phone-registration"
+        className={`inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-[11px] font-bold ${REGISTRATION_TONES[phone.registration.tone]}`}
+        title={phone.registration.detail}
+      >
+        {phone.registration.tone === "ok" ? <Phone size={12} aria-hidden="true" /> : <PhoneOff size={12} aria-hidden="true" />}
+        {phone.registration.label}
+      </span>
+      {canTakeover && (
+        <button
+          type="button"
+          data-testid="phone-takeover"
+          onClick={onTakeover}
+          title="Prevziať telefón do tohto okna"
+          className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-white/25 bg-white/10 px-2 text-[11px] font-bold text-white hover:bg-white/20"
+        >
+          <PhoneCall size={12} aria-hidden="true" />
+          Prevziať telefón
+        </button>
+      )}
     </span>
   );
 }

@@ -323,6 +323,57 @@ export async function closeOrphanLegs(
   return (closed.data ?? []).map((row) => row.id);
 }
 
+/**
+ * A leaked `offered` ring attempt blocks its operator in *every* future session
+ * (`ring_attempts_profile_open_offer_idx` is a global partial unique index on
+ * `profile_id`), so anything older than the longest possible step plus grace, or
+ * belonging to a session that is already terminal, must be terminalised.
+ */
+export const STALE_ATTEMPT_MAX_AGE_MS = (120 + RING_STEP_GRACE_SECS + 60) * 1000;
+export const STALE_ATTEMPT_SCAN_LIMIT = 200;
+
+export async function closeStaleRingAttempts(
+  admin: AdminClient,
+  input: { organizationId: string; now: Date; maxAgeMs?: number; limit?: number },
+): Promise<string[]> {
+  const cutoff = new Date(input.now.getTime() - (input.maxAgeMs ?? STALE_ATTEMPT_MAX_AGE_MS)).toISOString();
+  const open = await admin
+    .from("motorist_ring_attempts")
+    .select("id, session_id, offered_at")
+    .eq("organization_id", input.organizationId)
+    .eq("result", "offered")
+    .order("offered_at", { ascending: true })
+    .limit(input.limit ?? STALE_ATTEMPT_SCAN_LIMIT);
+  if (open.error) throw new Error(`stale ring attempt scan failed: ${open.error.message}`);
+  const rows = open.data ?? [];
+  if (rows.length === 0) return [];
+
+  const sessionIds = [...new Set(rows.map((row) => row.session_id))];
+  const sessions = await admin.from("motorist_call_sessions").select("id, state").eq("organization_id", input.organizationId).in("id", sessionIds);
+  if (sessions.error) throw new Error(`stale ring attempt session load failed: ${sessions.error.message}`);
+  const stateById = new Map((sessions.data ?? []).map((row) => [row.id, row.state]));
+
+  const stale = rows
+    .filter((row) => {
+      const state = stateById.get(row.session_id);
+      if (state === undefined) return true;
+      if (TERMINAL_STATES.has(state) || state === "missed" || state === "wrap_up") return true;
+      const offered = ms(row.offered_at);
+      return offered === null || offered < Date.parse(cutoff);
+    })
+    .map((row) => row.id);
+  if (stale.length === 0) return [];
+
+  const closed = await admin
+    .from("motorist_ring_attempts")
+    .update({ result: "failed", ended_at: input.now.toISOString() })
+    .in("id", stale)
+    .eq("result", "offered")
+    .select("id");
+  if (closed.error) throw new Error(`stale ring attempt close failed: ${closed.error.message}`);
+  return (closed.data ?? []).map((row) => row.id);
+}
+
 export type SweepDeps = {
   admin: AdminClient;
   organizationId: string;
@@ -343,13 +394,19 @@ export type SweepResult = { checked: number; swept: string[]; deferred: string[]
 export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResult> {
   const now = (deps.now ?? (() => new Date()))();
   const overdue = await findOverdueSessions(deps.admin, { organizationId: deps.organizationId, now });
-  // Ringing sessions first: a caller is listening to them right now.
-  const targets = [...overdue.ringing, ...overdue.waiting, ...overdue.stale];
+  // Ringing sessions first: a caller is listening to them right now. The stale
+  // verdict is carried into the event because it is computed here, before the
+  // session lease bumps `updated_at` (see `onStaleFinalise`).
+  const targets = [
+    ...overdue.ringing.map((session) => ({ session, stale: false })),
+    ...overdue.waiting.map((session) => ({ session, stale: false })),
+    ...overdue.stale.map((session) => ({ session, stale: true })),
+  ];
   const result: SweepResult = { checked: targets.length, swept: [], deferred: [], errors: [] };
   const clock = deps.clock ?? (() => Date.now());
   const started = clock();
   const limit = deps.limit ?? targets.length;
-  for (const [index, session] of targets.entries()) {
+  for (const [index, { session, stale }] of targets.entries()) {
     // Bounded so the caller (the webhook route, `maxDuration = 10`) can never be
     // killed mid-processing; the cron pass runs unbounded.
     if (index >= limit || (deps.budgetMs !== undefined && clock() - started >= deps.budgetMs)) {
@@ -358,7 +415,7 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
     }
     const id = deps.eventId ? deps.eventId() : `sweep:${session.id}:${now.getTime()}`;
     try {
-      await deps.runSessionEvent(session.id, { kind: "app", id, type: "sweep", actorProfileId: null, occurredAt: now.toISOString() });
+      await deps.runSessionEvent(session.id, { kind: "app", id, type: "sweep", actorProfileId: null, occurredAt: now.toISOString(), stale });
       result.swept.push(session.id);
     } catch (error) {
       result.errors.push({ sessionId: session.id, error: error instanceof Error ? error.message : String(error) });

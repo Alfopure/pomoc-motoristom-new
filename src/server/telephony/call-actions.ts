@@ -8,9 +8,9 @@ import { presenceAllowsOffer } from "./routing/eligibility";
 import { releaseOperator, reserveOperator } from "./routing/reservation";
 import { effectsDeps, loadRoutingSettings, runSessionEvent, type SessionRunnerDeps, type SessionRunResult } from "./session-runner";
 import { isOverLegCap, loadDailyUsage } from "./usage";
-import { upsertCallRow, upsertDialedLeg } from "./state/effects";
+import { upsertCallRow, upsertDialedLeg, type CommandOutcome } from "./state/effects";
 import { CallActionRejected } from "./state/transitions";
-import { ACTIVE_SESSION_STATES, WAITING_STATES, toJson, type AppEvent, type AppEventType, type DeviceRow, type LineRow, type SessionRow, type TransferTarget } from "./state/types";
+import { ACTIVE_SESSION_STATES, LEG_TIME_LIMIT_SECS, WAITING_STATES, toJson, type AppEvent, type AppEventType, type DeviceRow, type LineRow, type SessionRow, type TransferTarget } from "./state/types";
 import { TelnyxCommandError, TelnyxLiveCallsDisabledError } from "./telnyx/client";
 import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
@@ -306,6 +306,9 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
       from,
       clientState: encodeState(dial.clientState),
       timeoutSecs: dial.timeoutSecs,
+      // Backstop: if this HTTP call times out while Telnyx did create the leg,
+      // we never learn its id and could not hang it up.
+      timeLimitSecs: LEG_TIME_LIMIT_SECS,
       sipRegion: "Europe",
       mediaEncryption: "SRTP",
       customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }],
@@ -368,6 +371,9 @@ export async function callColleague(deps: CallActionDeps, actor: CallActor, inpu
       from,
       clientState: encodeState(dial.clientState),
       timeoutSecs: dial.timeoutSecs,
+      // Backstop: if this HTTP call times out while Telnyx did create the leg,
+      // we never learn its id and could not hang it up.
+      timeLimitSecs: LEG_TIME_LIMIT_SECS,
       sipRegion: "Europe",
       mediaEncryption: "SRTP",
       customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }],
@@ -386,7 +392,28 @@ export async function callColleague(deps: CallActionDeps, actor: CallActor, inpu
 
 // --- in-call actions ---------------------------------------------------------
 
-export type CallActionResult = { sessionId: string; state: SessionRow["state"]; commands: Array<{ kind: string; ok: boolean; error: string | null }>; ignored: string | null };
+export type CallActionResult = {
+  sessionId: string;
+  state: SessionRow["state"];
+  commands: Array<{ kind: string; ok: boolean; error: string | null }>;
+  ignored: string | null;
+  /**
+   * Call-control id of an operator leg this action dialled (pickup). The tab
+   * needs it to auto-answer exactly that invite (design §2.2) instead of
+   * trusting the `X-PM-Auto-Answer` header alone.
+   */
+  operatorLegCallControlId?: string;
+};
+
+/** `detail.callControlId` of the first successful `dial` command of a transition. */
+function dialedLegCallControlId(commands: CommandOutcome[]): string | undefined {
+  for (const command of commands) {
+    if (command.kind !== "dial" || !command.ok) continue;
+    const id = command.detail?.callControlId;
+    if (typeof id === "string" && id) return id;
+  }
+  return undefined;
+}
 
 async function runAction(deps: CallActionDeps, session: SessionRow, event: AppEvent, failureMessage: string): Promise<CallActionResult> {
   requireConfigured(deps);
@@ -402,7 +429,7 @@ async function runAction(deps: CallActionDeps, session: SessionRow, event: AppEv
   if (run.apply.failed) {
     throw new CallActionError(`${failureMessage} (${run.apply.failure?.error ?? "neznáma chyba"})`, 502, "command_failed");
   }
-  return { sessionId: session.id, state: run.session.state, commands, ignored: null };
+  return { sessionId: session.id, state: run.session.state, commands, ignored: null, operatorLegCallControlId: dialedLegCallControlId(run.commands) };
 }
 
 function appEvent(type: AppEventType, actor: CallActor | null, deps: CallActionDeps, extra: Partial<AppEvent> = {}): AppEvent {

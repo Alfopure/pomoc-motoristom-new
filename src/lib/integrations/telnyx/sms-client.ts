@@ -45,7 +45,7 @@ export type TelnyxSmsTransportOptions = {
 };
 
 export type TelnyxSmsTransport = SmsTransport & {
-  preflight(input: { organizationId: string }): Promise<void>;
+  preflight(input: { organizationId: string; to?: string }): Promise<void>;
 };
 
 /** Telnyx recipient status -> the three states the workflow persists. */
@@ -91,6 +91,12 @@ async function loadSmsSettings(admin: AdminClient, organizationId: string) {
 export const SMS_RATE_LIMIT = { limit: 20, windowMs: 60_000 } as const;
 const smsBuckets = new Map<string, { count: number; resetAt: number }>();
 
+/** Read-only view of the bucket: `preflight` must not consume an attempt. */
+function smsRateLimitAvailable(organizationId: string, now: number): boolean {
+  const bucket = smsBuckets.get(organizationId);
+  return !bucket || bucket.resetAt <= now || bucket.count < SMS_RATE_LIMIT.limit;
+}
+
 function hitSmsRateLimit(organizationId: string, now: number): boolean {
   const bucket = smsBuckets.get(organizationId);
   if (!bucket || bucket.resetAt <= now) {
@@ -128,9 +134,20 @@ export function createTelnyxSmsTransport(options: TelnyxSmsTransportOptions = {}
   }
 
   return {
-    /** Fails closed before the workflow writes an audit row for a blocked send. */
+    /**
+     * Fails closed before the workflow writes an audit row for a blocked send:
+     * kill switches, the destination allowlist and the rate limit (peeked, not
+     * consumed — `send` counts the message). `send` re-checks all three.
+     */
     async preflight(input) {
-      await resolveClient(requireOrganizationId(input.organizationId));
+      const organizationId = requireOrganizationId(input.organizationId);
+      const { allowlist } = await resolveClient(organizationId);
+      if (input.to && !isDestinationAllowed(input.to, allowlist)) {
+        throw new SmsWorkflowError("Cieľové číslo nie je povolené (allowlist).", 403);
+      }
+      if (!smsRateLimitAvailable(organizationId, Date.now())) {
+        throw new SmsWorkflowError("Príliš veľa SMS za minútu.", 429);
+      }
     },
 
     async send(input: SmsTransportSendInput): Promise<SmsTransportSendResult> {

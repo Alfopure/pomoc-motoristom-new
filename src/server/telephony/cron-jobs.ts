@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
-import { closeOrphanLegs, sweepOverdueRingSteps } from "./routing/ring-plan";
+import { closeOrphanLegs, closeStaleRingAttempts, sweepOverdueRingSteps } from "./routing/ring-plan";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
 import { ACTIVE_SESSION_STATES, type AppEvent, type SessionRow } from "./state/types";
 
@@ -84,10 +84,21 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
     // `max_concurrent_legs` forever and silently stop inbound ringing.
     const orphans = await closeOrphanLegs(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) });
     if (orphans.length > 0) deps.logger?.({ level: "warn", scope: "cron", job: RING_SWEEP_JOB, orphanLegsClosed: orphans.length });
+    // A leaked `offered` attempt keeps its operator out of every ring plan
+    // (global partial unique index), so it must be terminalised too.
+    const attempts = await closeStaleRingAttempts(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) });
+    if (attempts.length > 0) deps.logger?.({ level: "warn", scope: "cron", job: RING_SWEEP_JOB, staleAttemptsClosed: attempts.length });
     return {
       job: RING_SWEEP_JOB,
       status: result.errors.length > 0 ? "failed" : "ok",
-      detail: { checked: result.checked, swept: result.swept.length, deferred: result.deferred.length, orphanLegsClosed: orphans.length, errors: result.errors },
+      detail: {
+        checked: result.checked,
+        swept: result.swept.length,
+        deferred: result.deferred.length,
+        orphanLegsClosed: orphans.length,
+        staleAttemptsClosed: attempts.length,
+        errors: result.errors,
+      },
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -114,7 +125,9 @@ export async function detectStuckSessions(deps: TelephonyCronDeps): Promise<Tele
     const run = sessionRunner(deps);
     for (const session of stuck) {
       try {
-        await run(session.id, { kind: "app", id: `cron-stuck:${session.id}:${randomUUID()}`, type: "sweep", actorProfileId: null, occurredAt: now.toISOString() });
+        // The 15-minute cutoff was evaluated on the pre-lease row, so the
+        // verdict travels with the event (the lease write is not activity).
+        await run(session.id, { kind: "app", id: `cron-stuck:${session.id}:${randomUUID()}`, type: "sweep", actorProfileId: null, occurredAt: now.toISOString(), stale: true });
         swept.push(session.id);
       } catch (sweepError) {
         errors.push({ sessionId: session.id, error: sweepError instanceof Error ? sweepError.message : String(sweepError) });

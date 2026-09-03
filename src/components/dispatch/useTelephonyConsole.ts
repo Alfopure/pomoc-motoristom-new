@@ -320,7 +320,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       setBusyAction(action);
       setNotice(null);
       try {
-        const result = await telephonyJson<{ error?: string; code?: string }>(
+        const result = await telephonyJson<{ error?: string; code?: string; operatorLegCallControlId?: string }>(
           `/api/telephony/calls/${encodeURIComponent(sessionId)}/${action}`,
           {
             method: "POST",
@@ -343,6 +343,11 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             setDegraded((current) => new Set(current).add(sessionId));
           }
           throw new Error(result.body?.error ?? PHONE_ACTION_ERRORS[action]);
+        }
+        // A pickup dials this operator's own leg server-side: remember its
+        // call-control id so the browser answers exactly that invite.
+        if (result.body?.operatorLegCallControlId) {
+          webphoneRef.current?.expectOperatorLeg({ callControlId: result.body.operatorLegCallControlId, sessionId });
         }
         if (action === "unhold") {
           setDegraded((current) => {

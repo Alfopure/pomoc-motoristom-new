@@ -140,14 +140,18 @@ export const TOKEN_TAKEOVER_MESSAGE = "Telefón je prihlásený v inom okne a pr
 
 export async function issueWebphoneToken(
   deps: DeviceDeps,
-  input: { organizationId: string; profileId: string; userAgent?: string | null; takeover?: boolean },
+  input: { organizationId: string; profileId: string; userAgent?: string | null; takeover?: boolean; deviceSessionId?: string | null },
 ): Promise<WebphoneToken> {
   if (!deps.telnyx) throw new OperatorDeviceError(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
   // Minting rotates `device_session_id` and kills the other tab. Refuse while
   // that tab is live and on a call unless the operator confirmed the takeover.
+  // A tab renewing its own credential (`deviceSessionId` equal to the row's
+  // current session) is never a takeover: refusing it would tear down the
+  // socket carrying the call in progress.
   if (!input.takeover) {
     const current = await getOperatorDevice(deps, input);
-    if (current && deviceIsLive(current, nowOf(deps))) {
+    const sameTab = Boolean(input.deviceSessionId && current?.device_session_id === input.deviceSessionId);
+    if (current && !sameTab && deviceIsLive(current, nowOf(deps))) {
       const presence = await deps.admin.from("motorist_operator_presence").select("status").eq("profile_id", input.profileId).maybeSingle();
       const status = presence.data?.status;
       if (status === "on_call" || status === "ringing") throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);

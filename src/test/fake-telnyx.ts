@@ -93,6 +93,9 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       if (!liveGate.callsEnabled) throw new TelnyxLiveCallsDisabledError();
       record("transfer", params);
     },
+    async gather(params) {
+      record("gather", params);
+    },
     async gatherUsingAudio(params) {
       record("gatherUsingAudio", params);
     },

@@ -63,6 +63,24 @@ describe("operator devices", () => {
     expect(takeover.deviceSessionId).not.toBe(first.deviceSessionId);
   });
 
+  it("lets the tab that owns the credential renew it while on a call", async () => {
+    const h = createTelephonyHarness();
+    const first = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
+    await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: first.deviceSessionId, registrationState: "registered" });
+    h.setPresence(PROFILES.o1, { status: "on_call", current_session_id: null });
+
+    // Same tab (its own `device_session_id`): a scheduled refresh, not a takeover.
+    const refreshed = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: first.deviceSessionId });
+    expect(refreshed.deviceSessionId).not.toBe(first.deviceSessionId);
+    expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.device_session_id).toBe(refreshed.deviceSessionId);
+
+    // A different tab (a stale session id, or none at all) is still refused
+    // once the renewed tab has registered again.
+    await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: refreshed.deviceSessionId, registrationState: "registered" });
+    await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: first.deviceSessionId })).rejects.toMatchObject({ status: 409 });
+    await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 409 });
+  });
+
   it("clears the liveness stamp when a leaving tab reports itself unregistered", async () => {
     const h = createTelephonyHarness();
     const issued = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });

@@ -14,6 +14,7 @@ import {
   planRingStep,
   stepDeadline,
   closeOrphanLegs,
+  closeStaleRingAttempts,
   sweepOverdueRingSteps,
 } from "./ring-plan";
 
@@ -253,5 +254,24 @@ describe("advanceRingStep and sweep", () => {
     expect(closed.sort()).toEqual([String(orphanBySession.id), String(orphanByAge.id)].sort());
     expect(h.db.find("motorist_call_legs", (row) => row.id === fresh.id)).toMatchObject({ ended_at: null });
     expect(h.db.find("motorist_call_legs", (row) => row.id === orphanBySession.id)).toMatchObject({ state: "ended", hangup_cause: "orphan_sweep" });
+  });
+
+  it("terminalises leaked open ring offers so their operator can be rung again", async () => {
+    const h = createTelephonyHarness();
+    const [live, dead] = h.db.seed("motorist_call_sessions", [
+      { organization_id: ORG, direction: "inbound", state: "ringing" },
+      { organization_id: ORG, direction: "inbound", state: "missed" },
+    ]);
+    const [fresh, leakedBySession, leakedByAge] = h.db.seed("motorist_ring_attempts", [
+      { organization_id: ORG, session_id: live.id, step_index: 0, member_kind: "operator", profile_id: PROFILES.o1, result: "offered", offered_at: h.now().toISOString() },
+      { organization_id: ORG, session_id: dead.id, step_index: 0, member_kind: "operator", profile_id: PROFILES.o2, result: "offered", offered_at: h.now().toISOString() },
+      { organization_id: ORG, session_id: live.id, step_index: 1, member_kind: "operator", profile_id: PROFILES.o3, result: "offered", offered_at: new Date(h.now().getTime() - 10 * 60_000).toISOString() },
+    ]);
+
+    const closed = await closeStaleRingAttempts(h.admin, { organizationId: ORG, now: h.now() });
+
+    expect(closed.sort()).toEqual([String(leakedBySession.id), String(leakedByAge.id)].sort());
+    expect(h.db.find("motorist_ring_attempts", (row) => row.id === fresh.id)).toMatchObject({ result: "offered" });
+    expect(h.db.find("motorist_ring_attempts", (row) => row.id === leakedByAge.id)).toMatchObject({ result: "failed", ended_at: h.now().toISOString() });
   });
 });

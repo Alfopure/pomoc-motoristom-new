@@ -154,6 +154,25 @@ describe("telnyx sms transport", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("refuses an allowlisted-out recipient and an exhausted rate limit already in preflight", async () => {
+    const { fetchMock, transport } = harness({ destinationAllowlist: ["SK"] });
+
+    // The workflow writes its audit rows between preflight and send, so both
+    // guards must already refuse here.
+    const blocked = await transport.preflight({ organizationId: ORGANIZATION_ID, to: "+18005550100" }).catch((error: unknown) => error);
+    expect((blocked as SmsWorkflowError).status).toBe(403);
+    await expect(transport.preflight({ organizationId: ORGANIZATION_ID, to: "+421905123456" })).resolves.toBeUndefined();
+
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(ACCEPTED)));
+    for (let index = 0; index < 20; index += 1) {
+      await transport.send({ to: "+421905123456", body: "Ahoj", idempotencyKey: `k-${index}`, organizationId: ORGANIZATION_ID });
+    }
+    const limited = await transport.preflight({ organizationId: ORGANIZATION_ID, to: "+421905123456" }).catch((error: unknown) => error);
+    expect((limited as SmsWorkflowError).status).toBe(429);
+    // Preflight only peeks: the 20 sends are what consumed the window.
+    expect(fetchMock).toHaveBeenCalledTimes(20);
+  });
+
   it("maps a response without a message id to a 502 workflow error", async () => {
     const { fetchMock, transport } = harness();
     fetchMock.mockResolvedValue(jsonResponse({ data: {} }));

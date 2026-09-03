@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 
-import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "../incidents";
+import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { normalizeE164 } from "../phone/normalize-e164";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { effectsDeps, runSessionEvent, type SessionRunnerDeps } from "../session-runner";
@@ -158,7 +158,14 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
   let session: SessionRow;
   if (inserted.error) {
     if (inserted.error.code !== "23505" || !event.callSessionId) throw new Error(`session insert failed: ${inserted.error.message}`);
-    const existing = await admin.from("motorist_call_sessions").select("*").eq("telnyx_session_id", event.callSessionId).maybeSingle();
+    // Org-scoped like every other read here: a row that belongs to another
+    // organisation must never be adopted, however unique the Telnyx id is.
+    const existing = await admin
+      .from("motorist_call_sessions")
+      .select("*")
+      .eq("organization_id", organizationId)
+      .eq("telnyx_session_id", event.callSessionId)
+      .maybeSingle();
     if (existing.error || !existing.data) throw new Error(`session insert conflict but no row: ${existing.error?.message ?? "missing"}`);
     session = existing.data;
   } else {
@@ -272,6 +279,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
 
     await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
     logResult(deps, event, claim, session.id, "processed", run.commands, started, now);
+    // A clean run closes the open webhook incident (throttled per instance).
+    await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.webhook, now());
     await maybeSweep(deps, started);
     return done({ ...identity, claim, sessionId: session.id, status: 200, outcome: "processed", commands: run.commands, notes: run.apply.notes });
   } catch (error) {

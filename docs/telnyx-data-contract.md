@@ -63,7 +63,7 @@ Every DB write is an upsert on a natural key: legs on `telnyx_call_control_id`, 
 | `held` | `POST …/hold` | promote to a conference if needed; `conferences/{id}/actions/hold {call_control_ids, audio_url}`; unhold reverses |
 | `consulting` | attended transfer start | promote; customer held; dial the target with `link_to`; on answer `join` (3-way) or operator `leave` (completes the transfer) |
 | `conference` | add-party / supervision (Phase 4) | promote; dial with `link_to`; `join` on answer |
-| `waiting` / `parked` | IVR wait, overflow, operator park, lost operator leg | customer leaves the conference (or is unbridged), then a `gather_using_audio` MOH tick loop (`moh.mp3` ≈ 8 s + `MOH_TICK_TIMEOUT_MS` 2 s = one `MOH_TICK_MS` cycle; the sweeper re-arms after `WAITING_TICK_STALE_MS` = 3 cycles, min 30 s); the row appears in the čakáreň; pickup dials the picker's WebRTC leg and bridges; after `park_max_minutes` the callback prompt replaces the indefinite park |
+| `waiting` / `parked` | IVR wait, overflow, operator park, lost operator leg | customer leaves the conference (or is unbridged); the music is one detached `playback_start {loop: "infinity"}` and the state machine's heartbeat is a separate silent `gather {timeout_millis: MOH_TICK_TIMEOUT_MS = 60 s}`, so re-arming the tick never interrupts the audio (the sweeper re-arms after `WAITING_TICK_STALE_MS` = 2 ticks, min 90 s); the row appears in the čakáreň; pickup dials the picker's WebRTC leg and bridges; after `park_max_minutes` the callback prompt replaces the indefinite park |
 | `after_hours` | greeting outside business hours | after-hours prompt as the callback gather in one round trip |
 | `callback_offered` | caller pressed 1 | `motorist_callback_requests` row + confirmation prompt + `hangup` |
 | `missed` | all steps exhausted, or the customer hung up while ringing | plan fallback; callback task; remaining legs cancelled |
@@ -75,7 +75,9 @@ Transitions are defined on leg rows (`answered_at`, `bridged_at`, `ended_at`), s
 
 Bridging asymmetry: inbound calls bridge **from the customer leg** with `park_after_unbridge: "self"`, so an operator drop parks the customer in the waiting room; outbound and internal calls bridge from the operator leg at dial time with `play_ringtone` (`cz`).
 
-Lazy conference: an ordinary two-party call is bridged only. The session is promoted to a Telnyx conference (`name: "sess-<session_id>"`) on the first hold, attended transfer, add-party, park or supervise. "Already exists" → look up by name and `join`. Any other error leaves the call bridged, the PhoneBar shows the degraded chip and the action is refused; the conversation continues.
+Lazy conference: an ordinary two-party call is bridged only. The session is promoted to a Telnyx conference (`name: "sess-<session_id>"`) on the first hold, attended transfer, add-party, park or supervise. Promotion runs **on the operator leg** (`conference_create` there, `conference_join` for the customer): creating the conference ends the bridge, and `park_after_unbridge: "self"` protects only the leg that carries it — the customer. Promoting from the customer side would risk hanging up the operator's WebRTC leg, which no compensation could restore. "Already exists" → look up by name and `join`. Any other error leaves the call bridged, the PhoneBar shows the degraded chip and the action is refused; the conversation continues.
+
+Every leg the app creates carries `time_limit_secs = LEG_TIME_LIMIT_SECS` (4 h). It is a backstop for the one case the app cannot clean up itself: a `POST /v2/calls` whose HTTP response times out while Telnyx did create the leg, so its `call_control_id` is never learnt. Such a leg is also hung up by the reducer as soon as any webhook for it arrives (its `client_state.sid` points at a session that is already terminal).
 
 ### `motorist_calls.status` derivation
 
@@ -126,11 +128,11 @@ All `SECURITY DEFINER`, `search_path = ''`, revoked from `public`/`anon`/`authen
 
 ## Browser phone auto-answer
 
-An invite is answered without operator action when it is the operator leg of a dial this tab started. The primary discriminator is `telnyxIDs.telnyxCallControlId` against the legs recorded by `expectOperatorLeg()`; because the SIP invite usually beats the `POST /api/telephony/calls` response, the currently ringing call is re-evaluated whenever a new expected leg is registered. Legs the *server* dials for the operator (pickup), where the tab never learns the call-control id, are recognised by the `X-PM-Auto-Answer: 1` invite header. Everything else rings.
+An invite is answered without operator action when it is the operator leg of a dial this tab started. The discriminator is `telnyxIDs.telnyxCallControlId` against the legs recorded by `expectOperatorLeg()`; because the SIP invite usually beats the route response, the currently ringing call is re-evaluated whenever a new expected leg is registered. Server-initiated legs (pickup) return their `operatorLegCallControlId` in the action response, so they are correlated the same way. The `X-PM-Auto-Answer: 1` invite header is only a tiebreaker: it may decide when this tab has exactly one outstanding leg it asked for whose id has not arrived yet, and never answers on its own (it carries no session identity). Everything else rings.
 
 ## Realtime
 
-`app_private.motorist_broadcast_telephony_change()` fires `realtime.broadcast_changes` from row triggers on `motorist_call_sessions`, `motorist_call_legs` and `motorist_operator_presence` to the private topic `org:<organization_id>:telephony`. A `realtime.messages` select policy authorises `authenticated` through `app_private.motorist_is_org_member(split_part(realtime.topic(), ':', 2)::uuid)`; the uuid cast is guarded by a regex so a foreign topic cannot raise.
+`app_private.motorist_broadcast_telephony_change()` fires `realtime.broadcast_changes` from row triggers on `motorist_call_sessions`, `motorist_call_legs` and `motorist_operator_presence` to the private topic `org:<organization_id>:telephony`. On `motorist_call_sessions` the UPDATE trigger carries a `WHEN` clause that ignores lease-only writes (`lease_token`, `lease_until`, `updated_at`, `version`), which otherwise rang the doorbell three times per processed webhook; the same `WHEN` clause keeps `updated_at` from being refreshed by the lease, so the stale-session safety net can still see real inactivity. A `realtime.messages` select policy authorises `authenticated` through `app_private.motorist_is_org_member(split_part(realtime.topic(), ':', 2)::uuid)`; the uuid cast is guarded by a regex so a foreign topic cannot raise.
 
 The browser calls `supabase.realtime.setAuth(accessToken)` on session load and refresh, subscribes once per browser per organisation (`src/lib/telephony/realtime-client.ts`) and refetches `calls/active` on every message. When the channel is connected the poll cadence relaxes to 3 s visible / 10 s hidden; on `CLOSED|CHANNEL_ERROR|TIMED_OUT` it falls back to the fast polling table and reopens with jittered backoff. Polling alone is always sufficient; Realtime is only a latency optimisation.
 
@@ -140,12 +142,12 @@ The browser calls `supabase.realtime.setAuth(accessToken)` on session load and r
 | --- | --- | --- |
 | `POST /api/telephony/telnyx/webhook` | `public` | Ed25519 signature, claim ledger |
 | `POST /api/sms/telnyx/webhook` | `public` | Ed25519 signature; monotone delivery-status ranking |
-| `GET /api/telephony/cron` | `bearer CRON_SECRET` | ring sweep, stuck-session detection, ledger prune |
-| `POST /api/telephony/webphone/token` | `session` | mints a short-lived WebRTC JWT, rotates `device_session_id`; refuses with `409` while the current device is live and its operator is `ringing`/`on_call`, unless the body carries `{"takeover": true}` |
+| `GET /api/telephony/cron` | `bearer CRON_SECRET` | ring sweep (plus orphan-leg and leaked ring-offer cleanup), stuck-session detection, ledger prune |
+| `POST /api/telephony/webphone/token` | `session` | mints a short-lived WebRTC JWT, rotates `device_session_id`; refuses with `409` while the current device is live and its operator is `ringing`/`on_call`, unless the body carries `{"takeover": true}` or the tab's own `{"deviceSessionId": …}` (a scheduled refresh of its own credential is never a takeover). A `409` while already registered keeps the socket and retries the renewal; the PhoneBar offers "Prevziať telefón" for the terminal `failed`/`superseded` statuses |
 | `POST /api/telephony/devices/heartbeat` | `session` | stale `device_session_id` → `409`, the tab disconnects; a `registrationState: "unregistered"` beacon (sent on `pagehide`) clears `device_seen_at` so the ring plan stops allocating steps to a closed tab |
 | `GET/POST /api/telephony/presence`, `POST /api/telephony/presence/end-wrap-up` | `session` | presence + pause reasons; mirrored into `motorist_operator_statuses` |
 | `POST /api/telephony/calls`, `POST /api/telephony/calls/internal` | `session` | click-to-call / colleague call; kill switch, rate limit 10/min per operator, destination allowlist |
-| `GET /api/telephony/calls/active` | `session` | console snapshot (calls, waiting room, presence, `organizationId`) |
+| `GET /api/telephony/calls/active` | `session` | console snapshot (calls, waiting room, presence, `organizationId`); also sweeper trigger (b): throttled to one pass per 5 s per instance, bounded by `ACTIVE_SWEEP_LIMIT`/`ACTIVE_SWEEP_BUDGET_MS` and run **after** the snapshot so it can never delay the poll |
 | `POST /api/telephony/calls/[id]/{hold,unhold,park,pickup,transfer,consult,complete-transfer,cancel-consult,hangup}` | `session` | shared guard: same-origin → actor → not-configured → action |
 | `GET /api/telephony/calls/[id]/transfer-targets` | `session` | colleagues + external targets |
 | `POST /api/telephony/dev/simulate-inbound` | `session`, admin | non-production only; injects a synthetic `call.initiated`/`call.answered` |
@@ -156,9 +158,9 @@ Degraded mode: when `getTelnyxConfig().configured === false`, every telephony se
 
 ## SMS
 
-`resolveSmsTransport()` returns the Telnyx transport whenever `TELNYX_API_KEY` exists, otherwise `notConfiguredTransport`. Sends go to `POST /v2/messages {from: TELNYX_SMS_ALPHA_SENDER, to, text, messaging_profile_id}` with an `Idempotency-Key` header; `motorist_sms_messages.idempotency_key` is unique and remains the audit link. `preflight()` runs before any row is inserted, so a blocked send leaves no audit rows. The alphanumeric sender is one-way: inbound `message.received` events are acknowledged as `not_applicable` and the composer shows a Slovak notice that replies must be handled by phone.
+`resolveSmsTransport()` returns the Telnyx transport whenever `TELNYX_API_KEY` exists, otherwise `notConfiguredTransport`. Sends go to `POST /v2/messages {from: TELNYX_SMS_ALPHA_SENDER, to, text, messaging_profile_id}` with an `Idempotency-Key` header; `motorist_sms_messages.idempotency_key` is unique and remains the audit link. `preflight(to)` runs before any row is inserted — kill switches, the destination allowlist and the rate limit (peeked, not consumed) — so a blocked send leaves no audit rows. The alphanumeric sender is one-way: inbound `message.received` events are acknowledged as `not_applicable` and the composer shows a Slovak notice that replies must be handled by phone.
 
-The transport enforces two guards of its own before the HTTP call: the recipient must pass the same `destination_allowlist` as a voice destination (403 otherwise) and the organisation may send at most `SMS_RATE_LIMIT` (20) messages per minute (429). A delivered send increments `motorist_telephony_daily_usage.sms_count`.
+The transport re-checks both guards before the HTTP call (second line of defence): the recipient must pass the same `destination_allowlist` as a voice destination (403 otherwise) and the organisation may send at most `SMS_RATE_LIMIT` (20) messages per minute (429; the limiter is consumed here, not in `preflight`). A delivered send increments `motorist_telephony_daily_usage.sms_count`.
 
 ## Retention
 

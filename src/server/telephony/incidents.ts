@@ -41,6 +41,9 @@ export type TelephonyIncidentResult = { recorded: boolean; incidentId: string | 
 
 export async function recordTelephonyIncident(admin: AdminClient, input: TelephonyIncidentInput): Promise<TelephonyIncidentResult> {
   const now = (input.now ?? new Date()).toISOString();
+  // A new failure invalidates the "this job is clean" memo, so the next clean
+  // run closes the incident immediately instead of waiting out the throttle.
+  lastRecoveryCheck.delete(input.job);
   const message = describeIncidentError(input.error, input.context);
   try {
     const existing = await admin.from("motorist_job_incidents").select("incident_id, consecutive_failures").eq("job_name", input.job).eq("status", "open").maybeSingle();
@@ -82,4 +85,32 @@ export async function recoverTelephonyIncident(admin: AdminClient, job: Telephon
   } catch {
     return false;
   }
+}
+
+/**
+ * How often one serverless instance may look for an open incident to close.
+ * The clean paths (every processed webhook, every applied transition, every
+ * call action) run far too often for an unconditional UPDATE.
+ */
+export const INCIDENT_RECOVERY_INTERVAL_MS = 60_000;
+
+const lastRecoveryCheck = new Map<TelephonyIncidentJob, number>();
+
+/** Test seam: clears the per-instance recovery throttle. */
+export function resetIncidentRecoveryThrottle(): void {
+  lastRecoveryCheck.clear();
+}
+
+/**
+ * Closes the open incident of a job after a clean run, at most once per
+ * `INCIDENT_RECOVERY_INTERVAL_MS` per instance. Without this an incident opened
+ * by a single transient failure would stay `open` forever and every health
+ * surface would report telephony as permanently down.
+ */
+export async function recoverTelephonyIncidentThrottled(admin: AdminClient, job: TelephonyIncidentJob, now: Date = new Date()): Promise<boolean> {
+  const at = now.getTime();
+  const last = lastRecoveryCheck.get(job);
+  if (last !== undefined && at - last < INCIDENT_RECOVERY_INTERVAL_MS && at >= last) return false;
+  lastRecoveryCheck.set(job, at);
+  return recoverTelephonyIncident(admin, job, now);
 }

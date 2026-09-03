@@ -726,6 +726,12 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     const ttl = Math.max(250, Math.min(Number(args.p_ttl_ms ?? 4000), 30000));
     session.lease_token = String(args.p_token);
     session.lease_until = new Date(nowMs + ttl).toISOString();
+    // Pessimistic on purpose: `20260917100000_telnyx_fixes_round2.sql` makes the
+    // `updated_at` trigger skip lease-only writes, but the harness keeps bumping
+    // it so no logic may quietly start deriving session activity from
+    // `updated_at` again (see `onStaleFinalise`, which trusts the sweeper's
+    // pre-lease verdict instead).
+    session.updated_at = db.nowIso();
     return true;
   });
 
@@ -734,6 +740,7 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     if (!session || session.lease_token !== args.p_token) return false;
     session.lease_token = null;
     session.lease_until = null;
+    session.updated_at = db.nowIso();
     return true;
   });
 

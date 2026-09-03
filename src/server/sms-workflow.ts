@@ -85,8 +85,12 @@ export type SmsTransportSendResult = {
  */
 export type SmsTransport = {
   send(input: SmsTransportSendInput): Promise<SmsTransportSendResult>;
-  /** Optional gate run before any audit row is written (kill switches). */
-  preflight?(input: { organizationId: string }): Promise<void>;
+  /**
+   * Optional gate run before any audit row is written: kill switches, the
+   * destination allowlist and the rate limit (evaluated read-only — `send`
+   * is what counts the message).
+   */
+  preflight?(input: { organizationId: string; to?: string }): Promise<void>;
 };
 
 /** Fails closed while no SMS provider is wired in; never touches the network. */
@@ -196,9 +200,10 @@ export async function sendCaseSms(input: SendCaseSmsInput, options: SmsSendOptio
   }
 
   const transport = requireConfiguredTransport(options.transport);
-  // Kill switches refuse before any audit row exists, like the not-configured gate.
-  await transport.preflight?.({ organizationId });
   const toNumber = normalizeSmsRecipient(contact.phone, "Telefón klienta");
+  // Kill switches, allowlist and rate limit refuse before any audit row exists,
+  // like the not-configured gate.
+  await transport.preflight?.({ organizationId, to: toNumber });
   const actorProfileId = caseRow.owner_id ?? (await resolveDefaultOwnerId(supabase, organizationId));
   const locationLink =
     input.template === "location_request"
@@ -307,10 +312,10 @@ export async function sendCustomSms(input: SendCustomSmsInput, options: SmsSendO
     throw new SmsWorkflowError("Odosielateľa SMS sa nepodarilo bezpečne overiť.", 403);
   }
 
-  // Gate before any read or write so an unconfigured SMS stack leaves no trace.
+  // Gate before any read or write so a blocked SMS stack leaves no trace.
   const transport = requireConfiguredTransport(options.transport);
-  await transport.preflight?.({ organizationId: input.organizationId });
   const toNumber = normalizeSmsRecipient(draft.toNumber, "Telefónne číslo");
+  await transport.preflight?.({ organizationId: input.organizationId, to: toNumber });
   const supabase = createSupabaseAdminClient();
   const caseRow = input.caseId?.trim() ? await getCase(supabase, input.organizationId, input.caseId.trim()) : null;
   const idempotencyKey = `custom-sms:${input.actorProfileId}:${randomUUID()}`;
