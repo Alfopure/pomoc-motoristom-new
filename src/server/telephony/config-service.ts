@@ -5,8 +5,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { AppRole } from "@/domain/types";
 import type { Database, Json } from "@/lib/supabase/database.types";
 
-import { COUNTRY_DIAL_PREFIXES, isDestinationAllowed } from "./call-actions";
-import { normalizeE164 } from "./phone/normalize-e164";
+import { COUNTRY_DIAL_PREFIXES, isDestinationAllowed } from "@/lib/telephony/destinations";
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import type { TelephonyEnvironment } from "./state/types";
 
 /**
