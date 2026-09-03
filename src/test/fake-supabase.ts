@@ -805,6 +805,7 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     const plans = section("plans");
     const hours = section("business_hours");
     const reasons = section("pause_reasons");
+    const ivrMenus = section("ivr_menus");
 
     const TOUCHED = [
       "motorist_telephony_settings",
@@ -816,6 +817,8 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
       "motorist_business_hours_intervals",
       "motorist_business_hours_exceptions",
       "motorist_pause_reasons",
+      "motorist_ivr_menus",
+      "motorist_ivr_options",
     ];
     const snapshot = new Map(TOUCHED.map((table) => [table, clone(db.storage(table))]));
     const rollback = () => {
@@ -981,6 +984,45 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
         db.delete("motorist_pause_reasons", (row) => mine(row) && !reasonIds.includes(row.id));
       }
 
+      if (ivrMenus) {
+        const menuIds = idsOf(ivrMenus, "ivr_menu_id_required");
+        ownsOrThrow("motorist_ivr_menus", menuIds, "ivr menu");
+        // `motorist_telephony_lines.ivr_menu_id` is `on delete set null`: the
+        // number would silently lose its menu.
+        const boundLine = db.storage("motorist_telephony_lines").find((row) => mine(row) && !isNil(row.ivr_menu_id) && !menuIds.includes(row.ivr_menu_id));
+        if (boundLine) throw fakeError(`ivr_menu_in_use: ${String(boundLine.phone_number)}`, "P0001");
+
+        db.delete("motorist_ivr_options", (row) => mine(row) && menuIds.includes(row.ivr_menu_id));
+        for (const menu of ivrMenus) {
+          db.upsert("motorist_ivr_menus", {
+            id: menu.id,
+            organization_id: organizationId,
+            name: menu.name,
+            prompt_media_url: menu.prompt_media_url ?? null,
+            tts_text: menu.tts_text ?? null,
+            invalid_media_url: menu.invalid_media_url ?? null,
+            timeout_secs: menu.timeout_secs ?? 5,
+            max_tries: menu.max_tries ?? 2,
+            active: menu.active ?? true,
+          });
+          for (const option of (menu.options as FakeRow[] | undefined) ?? []) {
+            db.insert("motorist_ivr_options", {
+              id: option.id ?? randomUUID(),
+              organization_id: organizationId,
+              ivr_menu_id: menu.id,
+              digit: option.digit,
+              action: option.action,
+              target_ring_plan_id: option.target_ring_plan_id ?? null,
+              target_number: option.target_number ?? null,
+              label: option.label,
+              prompt_media_url: option.prompt_media_url ?? null,
+              tts_text: option.tts_text ?? null,
+            });
+          }
+        }
+        db.delete("motorist_ivr_menus", (row) => mine(row) && !menuIds.includes(row.id));
+      }
+
       // Structural invariants re-asserted on the committed state, exactly like
       // the SQL: `validateRoutingReplace` runs before the call and against the
       // world as it was read, so two concurrent editors could each pass it.
@@ -1017,6 +1059,7 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
       ...(plans ? { plans: plans.length } : {}),
       ...(hours ? { business_hours: hours.length } : {}),
       ...(reasons ? { pause_reasons: reasons.length } : {}),
+      ...(ivrMenus ? { ivr_menus: ivrMenus.length } : {}),
       routing_version: currentVersion + 1,
     };
   });

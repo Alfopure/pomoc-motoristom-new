@@ -139,6 +139,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // konfigurácia telefónie (Fáza 3): čítanie member-level, zápis manager/admin,
   // nastavenia organizácie (kill switch, allowlist, limit čakárne) len admin.
   "telephony/config/business-hours": { class: "session", role: ["manager", "admin"], note: "GET je member-level (CONFIG_READ_ROLES), ale redigovaný: kill switche len admin, limity a allowlist manager/admin, cudzie SIP identity manager/admin. PUT manager/admin cez handleConfigWrite." },
+  "telephony/config/ivr-menus": { class: "session", role: ["manager", "admin"], note: "GET je member-level (redigovaný ako pri business-hours); PUT manager/admin — celé IVR menu aj s voľbami cez motorist_replace_ring_plan." },
   "telephony/config/numbers": { class: "session", role: ["manager", "admin"], note: "GET je member-level (redigovaný ako pri business-hours); PATCH manager/admin. Kúpa čísla cez Telnyx nie je súčasťou tejto fázy." },
   "telephony/config/pause-reasons": { class: "session", role: ["manager", "admin"], note: "GET je member-level (redigovaný); PUT manager/admin." },
   "telephony/config/ring-groups": { class: "session", role: ["manager", "admin"], note: "GET je member-level (redigovaný); PUT manager/admin (transakčná výmena cez motorist_replace_ring_plan)." },

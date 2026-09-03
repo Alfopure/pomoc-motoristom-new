@@ -52,7 +52,7 @@ function hours(overrides: Partial<BusinessHoursDoc> = {}): BusinessHoursDoc {
 }
 
 function menu(overrides: Partial<IvrMenuDoc> = {}): IvrMenuDoc {
-  return { id: "ivr-1", name: "Hlavné menu", active: true, ringPlanIds: [], ...overrides };
+  return { id: "ivr-1", name: "Hlavné menu", active: true, promptMediaUrl: "ivr-main.mp3", ttsText: null, invalidMediaUrl: null, timeoutSecs: 5, maxTries: 2, options: [], ringPlanIds: [], ...overrides };
 }
 
 const CONTEXT: LineValidationContext = { plans: [plan()], ivrMenus: [menu()], businessHours: [hours()] };
@@ -124,6 +124,7 @@ describe("validateLineDraft", () => {
       businessHoursIds: new Set(["hours-1"]),
       ringPlanIds: new Set(["plan-1"]),
       businessHoursInUse: new Set(),
+      ivrMenusInUse: new Set(),
       ringPlansInUse: new Set(),
       destinationAllowlist: ["SK"],
       groups: [],

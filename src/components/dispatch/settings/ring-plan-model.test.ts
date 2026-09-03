@@ -290,7 +290,7 @@ describe("what the preview must not hide", () => {
   }
 
   function menu(overrides: Partial<IvrMenuDoc> = {}): IvrMenuDoc {
-    return { id: "ivr-1", name: "Hlavné menu", active: true, ringPlanIds: ["plan-1"], ...overrides };
+    return { id: "ivr-1", name: "Hlavné menu", active: true, promptMediaUrl: "ivr-main.mp3", ttsText: null, invalidMediaUrl: null, timeoutSecs: 5, maxTries: 2, options: [], ringPlanIds: ["plan-1"], ...overrides };
   }
 
   it("warns that an inactive plan a line uses skips ringing entirely", () => {

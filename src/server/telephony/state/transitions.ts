@@ -2,6 +2,7 @@ import type { CallLegRole, CallLegState, CallSessionState, Json, RingAttemptResu
 
 import { evaluateBusinessHours } from "@/lib/telephony/business-hours";
 import { classifyRingHangup } from "../routing/eligibility";
+import { decideIvr, describeIvrDecision, ivrGatherSpec } from "../routing/ivr";
 import { memberKey, planRingStep, stepDeadline, toEligibilityDevices, toEligibilityPresence, type RingStepPlanResult } from "../routing/ring-plan";
 import type { TelnyxClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
@@ -579,7 +580,7 @@ function onCustomerAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
     return b.result();
   }
   if (b.ctx.ivr && b.ctx.line?.ivr_menu_id && b.ctx.ivr.menu.id === b.ctx.line.ivr_menu_id && b.ctx.ivr.menu.active) {
-    startIvr(b, leg);
+    startIvr(b, leg, 1);
     return b.result();
   }
   startRingPlan(b, leg, b.ringPlan());
@@ -592,30 +593,16 @@ function startAfterHours(b: TransitionBuilder, leg: LegRow, reason: string): voi
   b.note(`closed (${reason}) → after-hours callback offer`);
 }
 
-function startIvr(b: TransitionBuilder, leg: LegRow, repeat = false): void {
+/**
+ * Plays the menu. `tries` counts the prompts already played, so a re-prompt
+ * (invalid digit or the `repeat` option) carries a distinct command id and the
+ * budget in `metadata.ivr.tries` is the same one `decideIvr` checks.
+ */
+function startIvr(b: TransitionBuilder, leg: LegRow, tries: number): void {
   const ivr = b.ctx.ivr;
   if (!ivr) return;
-  const digits = ivr.options.map((option) => option.digit).join("");
-  const tries = repeat ? (b.meta.ivr?.tries ?? 0) + 1 : 0;
-  b.setState("ivr").patchMeta({ ivr: { menu_id: ivr.menu.id, tries } });
-  b.cmd(
-    gatherCmd(
-      b,
-      leg,
-      {
-        media: ivr.menu.prompt_media_url ? { file: ivr.menu.prompt_media_url } : { key: "ivrMain" },
-        invalidMedia: ivr.menu.invalid_media_url ? { file: ivr.menu.invalid_media_url } : { key: "invalidInput" },
-        ttsText: ivr.menu.tts_text,
-        purpose: "ivr",
-        validDigits: digits || "0123456789#*",
-        maximumDigits: 1,
-        minimumDigits: 1,
-        maximumTries: ivr.menu.max_tries,
-        timeoutMillis: ivr.menu.timeout_secs * 1000,
-      },
-      repeat ? `:${tries}` : "",
-    ),
-  );
+  b.setState("ivr").patchMeta({ ivr: { ...(b.meta.ivr ?? {}), menu_id: ivr.menu.id, tries } });
+  b.cmd(gatherCmd(b, leg, ivrGatherSpec(ivr), tries > 1 ? `:${tries}` : ""));
 }
 
 function startRingPlan(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPlan | null): void {
@@ -1298,44 +1285,71 @@ function onGatherEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceResul
   return ignoredResult(`gather in ${state}`);
 }
 
+/**
+ * One `call.gather.ended` in the `ivr` state. The mapping, the retry budget and
+ * the fallbacks live in `routing/ivr.ts`; this function only turns the decision
+ * into commands.
+ */
 function onIvrChoice(b: TransitionBuilder, leg: LegRow, digits: string): ReduceResult {
   const ivr = b.ctx.ivr;
-  const option = ivr?.options.find((candidate) => candidate.digit === digits);
   const plan = b.ringPlan();
-  b.patchMeta({ ivr: { ...(b.meta.ivr ?? { menu_id: ivr?.menu.id ?? "", tries: 0 }), chosen: digits || null, action: option?.action ?? "default" } });
+  const tries = b.meta.ivr?.tries ?? 1;
+  const decision = decideIvr({ config: ivr, outcome: { digits }, tries, availablePlanIds: Object.keys(b.ctx.ringPlans) });
+  b.patchMeta({
+    ivr: {
+      ...(b.meta.ivr ?? { tries }),
+      menu_id: ivr?.menu.id ?? b.meta.ivr?.menu_id ?? "",
+      tries,
+      chosen: digits || null,
+      action: decision.kind === "default" ? "default" : decision.kind === "retry" ? "repeat" : decision.kind,
+    },
+  });
+  b.note(describeIvrDecision(decision));
 
-  if (!option) {
-    b.note("IVR: no valid choice → default route");
-    startRingPlan(b, leg, plan);
-    return b.result();
-  }
-  switch (option.action) {
+  switch (decision.kind) {
     case "ring_plan": {
-      const target = (option.target_ring_plan_id && b.ctx.ringPlans[option.target_ring_plan_id]) || plan;
-      startRingPlan(b, leg, target);
+      const target = decision.planId ? b.ctx.ringPlans[decision.planId] : plan;
+      startRingPlan(b, leg, target ?? plan);
       return b.result();
     }
     case "callback":
-      confirmCallback(b, leg, "ivr");
+      confirmCallback(b, leg, "ivr", decision.prompt);
       return b.result();
     case "external_number":
-      if (!option.target_number) {
-        startRingPlan(b, leg, plan);
-        return b.result();
-      }
-      blindTransferCustomer(b, leg, { kind: "number", number: option.target_number, label: option.label }, null);
+      blindTransferCustomer(b, leg, { kind: "number", number: decision.number, label: decision.option.label }, null);
       return b.result();
     case "waiting_room":
       enterWaiting(b, leg, "ivr");
       return b.result();
-    case "repeat":
-      startIvr(b, leg, true);
+    case "retry":
+      startIvr(b, leg, decision.tries);
       return b.result();
     case "hangup":
-    default:
-      b.cmd(hangupCmd(b, leg, "ivr_hangup", false));
-      return b.note("IVR: hangup").result();
+      closeWithIvrMessage(b, leg, decision.prompt);
+      return b.result();
+    case "default":
+      startRingPlan(b, leg, plan);
+      return b.result();
   }
+}
+
+/**
+ * The "closing message" target: the caller is told something and the call ends.
+ *
+ * With a recording the message is played first and the hangup follows
+ * `call.playback.ended` (`onPlaybackEnded`); without one — no recording on the
+ * option, or no media base configured — the call ends straight away rather than
+ * leaving the caller in silence.
+ */
+function closeWithIvrMessage(b: TransitionBuilder, leg: LegRow, prompt: MediaRef | null): void {
+  if (prompt && b.ctx.mediaAvailable) {
+    b.setState("missed").patchSession({ ended_at: null });
+    b.call.status = "missed";
+    b.call.end_reason = "ivr_message";
+    b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:ivr_message"), leg: ref(leg), media: prompt });
+    return;
+  }
+  b.cmd(hangupCmd(b, leg, "ivr_hangup", false));
 }
 
 function onCallbackChoice(b: TransitionBuilder, leg: LegRow, digits: string): ReduceResult {
@@ -1349,11 +1363,17 @@ function onCallbackChoice(b: TransitionBuilder, leg: LegRow, digits: string): Re
   return b.note("callback declined → hangup").result();
 }
 
-function confirmCallback(b: TransitionBuilder, leg: LegRow, source: "ivr" | "after_hours" | "park_timeout" | "missed" | "manual"): void {
+function confirmCallback(
+  b: TransitionBuilder,
+  leg: LegRow,
+  source: "ivr" | "after_hours" | "park_timeout" | "missed" | "manual",
+  /** Recording of the IVR option that asked for the callback; the shared confirmation otherwise. */
+  prompt: MediaRef | null = null,
+): void {
   b.setState("callback_offered").patchMeta({ callback: { requested_at: b.nowIso, source, confirmed: true } });
   b.callback({ source, callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id) });
   if (b.ctx.mediaAvailable) {
-    b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:callback_confirmed"), leg: ref(leg), media: { key: "callbackConfirmed" } });
+    b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:callback_confirmed"), leg: ref(leg), media: prompt ?? { key: "callbackConfirmed" } });
   } else {
     b.cmd(hangupCmd(b, leg, "callback_confirmed", false));
   }
@@ -1391,6 +1411,10 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
   if (state === "missed" && b.meta.ring?.fallback === "hangup_message") {
     b.cmd(hangupCmd(b, leg, "all_busy", false));
     return b.note("all-busy message played → hangup").result();
+  }
+  if (state === "missed" && b.meta.ivr?.action === "hangup") {
+    b.cmd(hangupCmd(b, leg, "ivr_hangup", false));
+    return b.note("IVR closing message played → hangup").result();
   }
   if (WAITING_STATES.has(state) && b.ctx.mediaAvailable) {
     // An infinite loop should never end on its own; if it did, the caller would

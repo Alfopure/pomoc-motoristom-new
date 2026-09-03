@@ -426,17 +426,33 @@ test("no migration after the lock-down gives the session roles a routing write b
 
 /**
  * The service calls `motorist_replace_ring_plan(uuid, jsonb, integer)`. Until
- * both routing migrations are applied, every configuration `PUT` fails at
- * runtime — `config-service.ts` maps that onto a 503 that names the migration,
- * and these two files are the only place the function is defined.
+ * the routing migrations are applied, every configuration `PUT` fails at
+ * runtime — `config-service.ts` maps that onto a 503 that names the migration.
+ *
+ * The function may be redefined by a later migration (phase 4 adds the
+ * `ivr_menus` section), but every definition has to keep the same signature and
+ * the same service-role-only grants, and the newest one is what the database
+ * ends up with.
  */
-test("the three-argument replace RPC exists exactly once and is service-role only", () => {
+test("every definition of the three-argument replace RPC is service-role only", () => {
   const definitions = readdirSync(new URL("../supabase/migrations", import.meta.url))
     .filter((name) => name.endsWith(".sql"))
-    .map((name) => readFileSync(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"))
-    .filter((sql) => /create or replace function public\.motorist_replace_ring_plan\([\s\S]*?p_expected_version/.test(sql));
+    .sort()
+    .map((name) => ({ name, sql: readFileSync(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8") }))
+    .filter(({ sql }) => /create or replace function public\.motorist_replace_ring_plan\([\s\S]*?p_expected_version/.test(sql));
 
-  assert.equal(definitions.length, 1, "the 3-argument RPC must be defined once");
-  assert.match(definitions[0], /grant execute on function public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)\n\s+to service_role;/);
-  assert.match(definitions[0], /revoke all on function public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)\n\s+from public, anon, authenticated;/);
+  assert.ok(definitions.length >= 1, "the 3-argument RPC must be defined");
+  for (const { name, sql } of definitions) {
+    assert.match(sql, /grant execute on function public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)\n\s+to service_role;/, `${name} grant`);
+    assert.match(sql, /revoke all on function public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)\n\s+from public, anon, authenticated;/, `${name} revoke`);
+  }
+
+  // The last definition governs, and it is the one that knows about IVR menus.
+  const latest = definitions.at(-1);
+  const body = latest.sql.match(/create or replace function public\.motorist_replace_ring_plan\([\s\S]*?\$\$;/)[0];
+  for (const guard of ["ivr_menu_in_use", "ivr_menu_id_required", "cross_organization", "ring_plan_in_use", "stale_document", "pg_advisory_xact_lock"]) {
+    assert.ok(body.includes(guard), `${latest.name}: guard ${guard} is missing`);
+  }
+  assert.match(body, /nullif\(p_document -> 'ivr_menus', 'null'::jsonb\)/);
+  assert.match(body, /delete from public\.motorist_ivr_options o/);
 });
