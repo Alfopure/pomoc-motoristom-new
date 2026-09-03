@@ -170,13 +170,20 @@ export async function issueWebphoneToken(
   const revoked = Array.isArray(metadata.revoked_sessions) ? (metadata.revoked_sessions as unknown[]).slice(-9) : [];
   if (device.device_session_id) revoked.push({ id: device.device_session_id, revoked_at: now.toISOString() });
 
+  // A refresh for a phone that is already registered and still sending
+  // heartbeats must not report it as registering: the ring engine skips any
+  // operator who is not "registered", so downgrading here made the operator
+  // invisible until the next heartbeat and inbound calls silently walked past
+  // them. Only a genuinely new or stale registration starts as "registering".
+  const stillLive = deviceIsLive(device, now);
+
   const updated = await deps.admin
     .from("motorist_operator_devices")
     .update({
       last_token_issued_at: now.toISOString(),
       token_expires_at: expiresAt.toISOString(),
       device_session_id: deviceSessionId,
-      registration_state: "registering",
+      registration_state: stillLive ? "registered" : "registering",
       user_agent: input.userAgent ?? device.user_agent,
       metadata: toJson({ ...metadata, revoked_sessions: revoked }),
     })

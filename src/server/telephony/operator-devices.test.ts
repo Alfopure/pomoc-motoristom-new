@@ -41,13 +41,39 @@ describe("operator devices", () => {
     expect(first.token.split(".")).toHaveLength(3);
     expect(decodeJwtExpiry(first.token)?.toISOString()).toBe(first.expiresAt);
     const row1 = h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)!;
-    expect(row1).toMatchObject({ device_session_id: first.deviceSessionId, registration_state: "registering", user_agent: "tab-1", last_token_issued_at: h.now().toISOString(), token_expires_at: first.expiresAt });
+    // The seeded device is registered and still sending heartbeats, so a token
+    // refresh keeps it registered — downgrading it would hide the operator from
+    // the ring engine until the next heartbeat.
+    expect(row1).toMatchObject({ device_session_id: first.deviceSessionId, registration_state: "registered", user_agent: "tab-1", last_token_issued_at: h.now().toISOString(), token_expires_at: first.expiresAt });
 
     const second = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, userAgent: "tab-2" });
     expect(second.deviceSessionId).not.toBe(first.deviceSessionId);
     const row2 = h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)!;
     expect((row2.metadata as { revoked_sessions: Array<{ id: string }> }).revoked_sessions.map((entry) => entry.id)).toEqual(["dev-1", first.deviceSessionId]);
     expect(decodeJwtExpiry("not-a-jwt")).toBeNull();
+  });
+
+  it("starts a token as registering when the phone is not live, and keeps it registered when it is", async () => {
+    const h = createTelephonyHarness();
+    // A device whose heartbeat has gone stale must re-register before it can be
+    // offered a call again.
+    h.db.update(
+      "motorist_operator_devices",
+      { registration_state: "registered", device_seen_at: new Date(h.now().getTime() - 10 * 60_000).toISOString() },
+      (row) => row.profile_id === PROFILES.o1,
+    );
+    await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
+    expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.registration_state).toBe("registering");
+
+    const live = await touchDevice(deps(h), {
+      organizationId: ORG,
+      profileId: PROFILES.o1,
+      deviceSessionId: String(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)!.device_session_id),
+      registrationState: "registered",
+    });
+    expect(live.ok).toBe(true);
+    await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
+    expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.registration_state).toBe("registered");
   });
 
   it("refuses to revoke a live device that is on a call unless the takeover is explicit", async () => {
