@@ -122,10 +122,26 @@ async function assertOutboundRate(deps: CallActionDeps, actor: CallActor): Promi
  * The same per-minute ceiling as a dial, on its own bucket: a supervisor
  * flipping between calls creates one leg per round, and nothing else stops a
  * client stuck in a supervise/stop loop.
+ *
+ * Backed by the legs this supervisor actually created, for the same reason
+ * `assertOutboundRate` is: the in-memory bucket lives in one serverless
+ * instance, so ten warm instances would otherwise allow ten times the limit.
  */
 async function assertSuperviseRate(deps: CallActionDeps, actor: CallActor): Promise<void> {
   const limiter = deps.rateLimiter ?? defaultRateLimiter;
   if (!limiter.hit(`supervise:${actor.profileId}`, OUTBOUND_RATE_LIMIT.limit, OUTBOUND_RATE_LIMIT.windowMs)) {
+    throw new CallActionError("Príliš veľa pokusov o dozor za minútu.", 429, "rate_limited");
+  }
+  const since = new Date(nowOf(deps).getTime() - OUTBOUND_RATE_LIMIT.windowMs).toISOString();
+  const { count, error } = await deps.admin
+    .from("motorist_call_legs")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", deps.organizationId)
+    .eq("profile_id", actor.profileId)
+    .eq("role", "supervisor")
+    .gte("created_at", since);
+  if (error) return; // never block on a failing counter
+  if ((count ?? 0) >= OUTBOUND_RATE_LIMIT.limit) {
     throw new CallActionError("Príliš veľa pokusov o dozor za minútu.", 429, "rate_limited");
   }
 }
@@ -585,6 +601,14 @@ export async function removeCallParty(deps: CallActionDeps, actor: CallActor, se
 /** The operator steps out of a three-way; the caller and the remaining party keep talking. */
 export async function leaveConferenceCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   const session = await conferenceSession(deps, actor, sessionId);
+  // Unlike the other conference actions, this one is not "change a participant"
+  // but "remove *me*": the reducer always takes the answering operator's leg
+  // out. A manager or a supervisor passing the bar above would therefore eject
+  // the dispatcher who is on the call and sign the audit row with their own
+  // name. Only the operator on the call may leave it.
+  if (session.answered_by_profile_id !== actor.profileId) {
+    throw new CallActionError("Z konferencie môže odísť len operátor, ktorý je na hovore.", 403, "forbidden");
+  }
   const result = await runAction(deps, session, appEvent("leave_conference", actor, deps), "Z konferencie sa nepodarilo odísť.");
   await auditAction(deps, actor, { action: "telephony.conference.leave", sessionId, after: { state: result.state } });
   return result;

@@ -17,6 +17,7 @@ import {
   mediaUrl,
   readMeta,
   toJson,
+  type AppEvent,
   type AttemptPlan,
   type CallbackPlan,
   type CallRow,
@@ -391,6 +392,22 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
   if (inserted.error && !isDuplicate(inserted.error)) fail("call insert failed", inserted.error);
 }
 
+/**
+ * The target of an app event, without the identity that must not be persisted.
+ *
+ * `motorist_call_events` is readable by every member of the organisation (RLS
+ * `motorist_is_org_member`), so anything written here is visible to every
+ * signed-in dispatcher through PostgREST. A `TransferTarget` for a colleague
+ * carries their Telnyx SIP username — half of a registrable credential — and a
+ * transfer, consultation or add-party would otherwise hand it out. The label
+ * and the profile id are what the event log is read for; nothing downstream
+ * reads `sipUri` back out of a row.
+ */
+function safeEventTarget(target: AppEvent["target"] | null | undefined): Json {
+  if (!target) return null;
+  return target.kind === "operator" ? { kind: "operator", profileId: target.profileId, label: target.label } : { kind: "number", number: target.number, label: target.label };
+}
+
 /** Audit row per processed event (`event_fingerprint` = event id → idempotent). */
 export async function recordCallEvent(
   deps: Pick<EffectsDeps, "admin" | "organizationId" | "now">,
@@ -412,7 +429,8 @@ export async function recordCallEvent(
     callId = call.data?.id ?? null;
   }
   const event = input.event;
-  const rawPayload = event.kind === "telnyx" ? toJson(event.payload) : toJson({ type: event.type, actor: event.actorProfileId, target: event.target ?? null });
+  const target = event.kind === "app" ? safeEventTarget(event.target) : null;
+  const rawPayload = event.kind === "telnyx" ? toJson(event.payload) : toJson({ type: event.type, actor: event.actorProfileId, target });
   const inserted = await admin.from("motorist_call_events").insert({
     organization_id: deps.organizationId,
     call_id: callId,
@@ -423,7 +441,7 @@ export async function recordCallEvent(
     payload: toJson(
       event.kind === "telnyx"
         ? { call_control_id: event.callControlId, call_leg_id: event.callLegId, from: event.from, to: event.to, direction: event.direction, hangup_cause: event.hangupCause, digits: event.digits, status: event.status }
-        : { actor: event.actorProfileId, target: event.target ?? null },
+        : { actor: event.actorProfileId, target },
     ),
     raw_payload: rawPayload,
     normalized_payload: toJson({

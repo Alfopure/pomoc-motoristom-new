@@ -249,8 +249,15 @@ export async function loadTelephonyStats(deps: TelephonyStatsDeps, options: { co
   waiting.sort((left, right) => Date.parse(left.since) - Date.parse(right.since));
 
   // --- operators -----------------------------------------------------------
+  // Inbound only, exactly like the organisation totals below. The view is
+  // grouped by direction as well as by operator, so summing every row here
+  // would add each operator's click-to-calls and internal colleague calls to
+  // their "answered today" while the "Prijaté dnes" tile on the same screen
+  // counts inbound — two numbers on one wallboard that could never be
+  // reconciled.
+  const inbound = stats.rows.filter((row) => row.direction === "inbound");
   const answeredByOperator = new Map<string, { answered: number; talkSeconds: number }>();
-  for (const row of stats.rows) {
+  for (const row of inbound) {
     if (!row.operatorId) continue;
     const bucket = answeredByOperator.get(row.operatorId) ?? { answered: 0, talkSeconds: 0 };
     bucket.answered += row.answered;
@@ -299,7 +306,6 @@ export async function loadTelephonyStats(deps: TelephonyStatsDeps, options: { co
     if (!oldestSince || Date.parse(row.created_at) < Date.parse(oldestSince)) oldestSince = row.created_at;
   }
 
-  const inbound = stats.rows.filter((row) => row.direction === "inbound");
   const totals = deriveCallMetrics(sumCallStats(inbound));
 
   return {

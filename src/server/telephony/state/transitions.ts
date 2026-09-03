@@ -407,6 +407,35 @@ function openSupervisorLegs(b: TransitionBuilder): LegRow[] {
   return b.openLegs().filter((leg) => leg.role === "supervisor");
 }
 
+/**
+ * Takes every supervisor off a call that is about to leave its conference.
+ *
+ * Park, blind transfer and a lost operator all dissolve the conference the
+ * supervisor is joined to: the customer leaves it, the operator's leg is hung
+ * up and `conference_id` is cleared. A supervisor leg left behind would sit in
+ * an empty conference hearing silence — with the phone bar still claiming
+ * supervision, the manager's presence still `on_call` (so no ring plan offers
+ * them anything) and a billed leg alive until `LEG_TIME_LIMIT_SECS`. The same
+ * three steps `appStopSupervise` performs are therefore applied to each of
+ * them, including clearing `metadata.supervise` so the audit trail is closed
+ * by `auditSupervisionEnd`.
+ *
+ * Must be called *before* `conference_id` is cleared, so the leave command is
+ * still issued against a live conference.
+ */
+function detachSupervisors(b: TransitionBuilder, reason: string): void {
+  for (const leg of openSupervisorLegs(b)) {
+    if (b.session.conference_id) {
+      b.cmd({ kind: "conference_leave", commandId: b.cmdId(leg.telnyx_call_control_id, `conference:leave:supervise:${reason}`), leg: ref(leg), bestEffort: true });
+    }
+    // Best-effort on purpose: park, transfer and a lost operator are actions on
+    // a live call, and a supervisor leg that Telnyx already tore down must not
+    // fail them.
+    b.cmd(hangupCmd(b, leg, `supervise_${reason}`));
+    if (leg.profile_id) b.patchMeta({ supervise: withoutSupervisor(b, leg.profile_id) });
+  }
+}
+
 /** Merges into a leg's `metadata` instead of replacing it (mute flag, supervisor mode). */
 function legMetaPatch(leg: LegRow, patch: Record<string, unknown>): Json {
   const current = leg.metadata && typeof leg.metadata === "object" && !Array.isArray(leg.metadata) ? (leg.metadata as Record<string, unknown>) : {};
@@ -1382,6 +1411,7 @@ function handOverConference(b: TransitionBuilder, operator: LegRow, remaining: L
 function operatorLost(b: TransitionBuilder, customer: LegRow, leg: LegRow): void {
   if (b.session.conference_id) {
     b.cmd({ kind: "conference_leave", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:leave"), leg: ref(customer), bestEffort: true });
+    detachSupervisors(b, "operator_lost");
     b.patchSession({ conference_id: null, conference_name: null });
   }
   b.patchSession({ answered_by_profile_id: null, hold_started_at: null });
@@ -1757,6 +1787,8 @@ function appPark(b: TransitionBuilder, customer: LegRow, event: AppEvent): Reduc
     }
     b.cmd({ kind: "conference_leave", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:leave:park"), leg: ref(customer), bestEffort: true });
   }
+  // The conference is dissolved below; nobody may stay behind in it.
+  detachSupervisors(b, "park");
   b.cmd(hangupCmd(b, operator, "parked", false));
   b.patchSession({ parked_at: b.nowIso, answered_by_profile_id: null, hold_started_at: null, conference_id: null, conference_name: null });
   b.patchMeta({ park: { by: event.actorProfileId, at: b.nowIso }, previous_operator: operator.profile_id ?? null, conference: null });
@@ -1805,6 +1837,8 @@ function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: T
   if (b.session.conference_id) {
     b.cmd({ kind: "conference_leave", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:leave:transfer"), leg: ref(customer), bestEffort: true });
   }
+  // The customer is handed to the transfer target and the conference goes away.
+  detachSupervisors(b, "transfer");
   const targetClientState: TelnyxClientState =
     target.kind === "operator"
       ? { sid: b.session.id, role: "operator", operatorId: target.profileId, intent: "transfer" }

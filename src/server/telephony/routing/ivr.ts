@@ -15,9 +15,10 @@ import type { GatherSpec, IvrMenuRow, IvrOptionRow, MediaRef } from "../state/ty
  * - a `repeat` option shares the same budget, so a caller pressing it forever
  *   cannot keep a leg (and a Telnyx charge) alive indefinitely.
  *
- * Telnyx's own `maximum_tries` only re-plays the file when there is *no* input
- * within one `gather_using_audio` (verified against the published Call Control
- * API), so the invalid-digit and repeat loops have to be counted here.
+ * Telnyx's own `maximum_tries` is pinned to 1 (one gather = one prompt), so the
+ * whole budget is counted here: `max_tries` in the editor means the number of
+ * times the caller hears the menu, whether they stayed silent or pressed a key
+ * that is not on it.
  */
 
 /** Actions a digit can map to (`motorist_ivr_options.action`). */
@@ -120,12 +121,14 @@ export function ivrGatherSpec(config: IvrConfig): GatherSpec {
     validDigits: validDigits || IVR_DIGITS,
     maximumDigits: 1,
     minimumDigits: 1,
-    // Telnyx re-plays the file inside one gather only while the caller stays
-    // silent (`maximum_tries`); an unmapped digit ends the gather and the
-    // re-prompt is issued by `decideIvr`, against the same budget. Worst case
-    // the caller hears the menu `max_tries` times per round and at most
-    // `max_tries` rounds — bounded, and the same number in both places.
-    maximumTries: ivrMaxTries(menu),
+    // One gather is exactly one prompt. Telnyx's own `maximum_tries` re-plays
+    // the file inside a single gather both on silence and on a digit outside
+    // `valid_digits` (it plays `invalid_audio_url` and asks again), so leaving
+    // it at the menu's budget would multiply with the rounds `decideIvr` runs:
+    // `max_tries: 5` would let a caller hear the menu 25 times. The whole
+    // budget therefore lives in `metadata.ivr.tries`, which is what the
+    // editor's field hint promises.
+    maximumTries: 1,
     timeoutMillis: ivrTimeoutSecs(menu) * 1000,
   };
 }

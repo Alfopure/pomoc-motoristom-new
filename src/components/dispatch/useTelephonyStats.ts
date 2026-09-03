@@ -49,6 +49,14 @@ export function useTelephonyStats(): TelephonyStatsState {
   const [loaded, setLoaded] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   const failures = useRef(0);
+  /**
+   * The last payload's `source`. While it says `fallback` the server is
+   * aggregating raw rows instead of reading the Phase 4 views, so the board
+   * slows down until the migration is applied — read from a ref because the
+   * cadence is decided inside the poll chain, which must not be restarted by a
+   * state change.
+   */
+  const fallbackRef = useRef(false);
 
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
 
@@ -83,6 +91,7 @@ export function useTelephonyStats(): TelephonyStatsState {
         return;
       }
       failures.current = 0;
+      fallbackRef.current = result.body.source === "fallback";
       setStats(result.body);
       setError(null);
       setLoaded(true);
@@ -100,7 +109,7 @@ export function useTelephonyStats(): TelephonyStatsState {
       timeoutId = window.setTimeout(async () => {
         await load();
         schedule(generation);
-      }, wallboardPollDelayMs({ documentHidden: document.visibilityState === "hidden", consecutiveFailures: failures.current }));
+      }, wallboardPollDelayMs({ documentHidden: document.visibilityState === "hidden", fallback: fallbackRef.current, consecutiveFailures: failures.current }));
     };
 
     const restart = () => {

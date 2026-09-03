@@ -81,8 +81,9 @@ export type WallboardOperator = {
   since: string | null;
   registered: boolean;
   pauseReason: string | null;
-  /** Calls this operator answered today. */
+  /** Inbound calls this operator answered today (the same direction as the organisation totals). */
   answeredToday: number;
+  /** Talk time on those inbound calls. */
   talkSecondsToday: number;
   /** Time spent available today, from `motorist_operator_status_durations`. */
   availableSecondsToday: number;

@@ -149,11 +149,26 @@ select
   )::numeric as seconds,
   max(s.started_at) as last_started_at,
   max(s.started_at) filter (where s.ended_at is null) as open_since
-from public.motorist_operator_statuses s
--- Same bound as the call view, plus every still-open interval whatever its age:
--- an operator who has been `available` since yesterday morning is exactly the
--- row a live wallboard needs.
-where s.started_at >= (pg_catalog.now() - interval '7 days') or s.ended_at is null
+from (
+  -- Same bound as the call view, plus every still-open interval whatever its
+  -- age: an operator who has been `available` since yesterday morning is
+  -- exactly the row a live wallboard needs.
+  --
+  -- The two arms are a `union` and not one `or`: an `or` across two different
+  -- columns cannot be driven by a single index, so the planner would fall back
+  -- to a sequential scan of the whole presence log — a table that gains a row
+  -- on every presence change and is read again on every wallboard cache miss.
+  -- Split, each arm is index-driven (`operator_statuses_org_started_at_idx`
+  -- and the partial `operator_statuses_open_idx`), and the `union` de-duplicates
+  -- the open intervals that are also inside the seven days on `id`.
+  select s.id, s.organization_id, s.profile_id, s.status, s.started_at, s.ended_at
+  from public.motorist_operator_statuses s
+  where s.started_at >= (pg_catalog.now() - interval '7 days')
+  union
+  select s.id, s.organization_id, s.profile_id, s.status, s.started_at, s.ended_at
+  from public.motorist_operator_statuses s
+  where s.ended_at is null
+) s
 group by s.organization_id, s.profile_id, (s.started_at at time zone 'Europe/Bratislava')::date, s.status;
 
 comment on view public.motorist_operator_status_durations is
@@ -175,7 +190,7 @@ grant select on table public.motorist_call_stats_daily to service_role;
 grant select on table public.motorist_operator_status_durations to service_role;
 
 -- ---------------------------------------------------------------------------
--- 4. Supporting index
+-- 4. Supporting indexes
 -- ---------------------------------------------------------------------------
 --
 -- Used by the `started_at >= now() - interval '7 days'` bound of both views
@@ -187,3 +202,18 @@ grant select on table public.motorist_operator_status_durations to service_role;
 
 create index if not exists calls_org_started_at_idx
   on public.motorist_calls (organization_id, started_at desc);
+
+-- The same story for the presence log, which had no index at all beyond its
+-- primary key: `motorist_operator_status_durations` and the raw fallback in
+-- `stats.ts` both read it by organisation and `started_at` range, several times
+-- a minute for as long as a wall display is open, on a table that grows with
+-- every presence change.
+create index if not exists operator_statuses_org_started_at_idx
+  on public.motorist_operator_statuses (organization_id, started_at desc);
+
+-- The open-interval arm of the view (`ended_at is null`): a handful of rows,
+-- one per logged-in operator, but without this partial index finding them means
+-- reading the whole history.
+create index if not exists operator_statuses_open_idx
+  on public.motorist_operator_statuses (organization_id, profile_id)
+  where ended_at is null;

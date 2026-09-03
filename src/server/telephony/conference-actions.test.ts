@@ -4,9 +4,11 @@ import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness }
 
 import {
   addCallParty,
+  blindTransfer,
   CallActionError,
   createRateLimiter,
   leaveConferenceCall,
+  parkCall,
   removeCallParty,
   setCallPartyMuted,
   stopSupervisingCall,
@@ -131,6 +133,12 @@ describe("addCallParty", () => {
     expect(h.session(call.sessionId)).toMatchObject({ state: "conference", hold_started_at: null });
     expect(h.telnyx.of("conference:unhold").at(-1)!.params).toMatchObject({ call_control_ids: [call.callControlId] });
     expect(h.presence(PROFILES.o2)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
+
+    // `motorist_call_events` is readable by every member of the organisation,
+    // so the colleague's SIP credential must not be written into it.
+    const addEvent = h.rows("motorist_call_events").find((row) => row.event_type === "app.add_party")!;
+    expect(addEvent.payload).toMatchObject({ target: { kind: "operator", profileId: PROFILES.o2 } });
+    expect(JSON.stringify([addEvent.payload, addEvent.raw_payload])).not.toContain("sip:");
   });
 
   it("refuses a second party while the first is still ringing, and the caller's own operator", async () => {
@@ -268,6 +276,17 @@ describe("leaveConferenceCall", () => {
     expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o2 });
     expect(h.call(call.sessionId)).toMatchObject({ operator_id: PROFILES.o2 });
     expect(h.presence(PROFILES.o2)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
+  });
+
+  it("refuses a manager who is not the operator on the call", async () => {
+    const h = createTelephonyHarness();
+    giveSupervisorDevice(h);
+    const call = await threeWay(h);
+    // The reducer always removes the *answering* leg, so anybody else pressing
+    // leave would eject the dispatcher and sign the audit row with their name.
+    expect(await fail(leaveConferenceCall(actionDeps(h), manager, call.sessionId))).toMatchObject({ status: 403, code: "forbidden" });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "conference", answered_by_profile_id: PROFILES.o1 });
+    expect(h.rows("motorist_audit_log").map((row) => row.action)).not.toContain("telephony.conference.leave");
   });
 
   it("refuses to leave a call nobody else is on", async () => {
@@ -461,11 +480,99 @@ describe("superviseCall", () => {
     expect(h.presence(PROFILES.o4)).toMatchObject({ status: "available", current_session_id: null, wrap_up_until: null });
   });
 
+  it("counts the supervisor legs in the database, so the limit holds across instances", async () => {
+    const h = createTelephonyHarness();
+    giveSupervisorDevice(h);
+    const call = await talkingWith(h);
+    // Ten supervisor legs created inside the window by this manager, as ten warm
+    // serverless instances with ten empty in-memory buckets would have left.
+    for (let index = 0; index < 10; index += 1) {
+      h.db.insert("motorist_call_legs", {
+        organization_id: ORG,
+        session_id: call.sessionId,
+        telnyx_call_control_id: `cc-supervise-${index}`,
+        role: "supervisor",
+        profile_id: PROFILES.o4,
+        state: "ended",
+        client_state: {},
+        metadata: {},
+        created_at: h.now().toISOString(),
+        ended_at: h.now().toISOString(),
+      });
+    }
+
+    // A fresh limiter each time: the in-memory bucket never sees a second hit.
+    expect(await fail(superviseCall(actionDeps(h), manager, call.sessionId, "monitor"))).toMatchObject({ status: 429, code: "rate_limited" });
+    h.advance(61_000);
+    await expect(superviseCall(actionDeps(h), manager, call.sessionId, "monitor")).resolves.toBeTruthy();
+  });
+
   it("refuses supervision when the supervisor's own phone is not connected", async () => {
     const h = createTelephonyHarness();
     giveSupervisorDevice(h);
     const call = await talkingWith(h);
     h.touchDevice(PROFILES.o4, 300_000);
     expect(await fail(superviseCall(actionDeps(h), manager, call.sessionId, "monitor"))).toMatchObject({ status: 409, code: "device_offline" });
+  });
+});
+
+/**
+ * Park, blind transfer and a lost operator all dissolve the conference the call
+ * was promoted to. A supervisor left inside it would hear silence in an empty
+ * conference on a billed leg, with their presence stuck `on_call` (so no ring
+ * plan would offer them anything) until the four-hour leg limit expired.
+ */
+describe("supervision when the call leaves its conference", () => {
+  async function supervised(h: TelephonyHarness) {
+    giveSupervisorDevice(h);
+    // The manager has to be `available` for the reservation to take, which is
+    // what makes the stuck-`on_call` half of this regression observable.
+    h.setPresence(PROFILES.o4, { status: "available", current_session_id: null });
+    const call = await talkingWith(h);
+    await superviseCall(actionDeps(h), manager, call.sessionId, "whisper");
+    const supervisorLeg = h.legFor(call.sessionId, PROFILES.o4)!;
+    await h.legEvent(String(supervisorLeg.telnyx_call_control_id), "call.answered");
+    expect(h.presence(PROFILES.o4)).toMatchObject({ status: "on_call" });
+    return { ...call, supervisorLeg: String(supervisorLeg.telnyx_call_control_id) };
+  }
+
+  it("hangs the supervisor up when the operator parks the call", async () => {
+    const h = createTelephonyHarness();
+    const call = await supervised(h);
+
+    await parkCall(actionDeps(h), o1, call.sessionId);
+
+    expect(h.telnyx.of("hangup").map((command) => command.params.callControlId)).toContain(call.supervisorLeg);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "parked", conference_id: null });
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: null });
+    // Clearing `metadata.supervise` is what closes the audit trail.
+    expect(h.rows("motorist_audit_log").map((row) => row.action)).toContain("telephony.supervise.stop");
+
+    await h.legEvent(call.supervisorLeg, "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(h.presence(PROFILES.o4)).toMatchObject({ status: "available", current_session_id: null });
+  });
+
+  it("hangs the supervisor up when the operator blind-transfers the caller", async () => {
+    const h = createTelephonyHarness();
+    const call = await supervised(h);
+
+    await blindTransfer(actionDeps(h), o1, call.sessionId, { number: NUMBERS.external });
+
+    expect(h.telnyx.of("hangup").map((command) => command.params.callControlId)).toContain(call.supervisorLeg);
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: null });
+
+    await h.legEvent(call.supervisorLeg, "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(h.presence(PROFILES.o4)).toMatchObject({ status: "available", current_session_id: null });
+  });
+
+  it("hangs the supervisor up when the operator's own leg drops", async () => {
+    const h = createTelephonyHarness();
+    const call = await supervised(h);
+
+    await h.legEvent(call.operatorLeg, "call.hangup", { hangup_cause: "normal_clearing" });
+
+    expect(h.session(call.sessionId)).toMatchObject({ conference_id: null });
+    expect(h.telnyx.of("hangup").map((command) => command.params.callControlId)).toContain(call.supervisorLeg);
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: null });
   });
 });

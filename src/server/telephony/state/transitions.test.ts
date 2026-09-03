@@ -527,7 +527,7 @@ describe("after hours and IVR", () => {
     const call = await h.inbound({ to: "+4210232408700", callControlId: "cc-ivr-1", telnyxSessionId: "tsess-ivr-1" });
     expect(h.session(call.sessionId)).toMatchObject({ state: "ivr", line_id: "00000000-0000-4000-8000-000000000201", called_number: NUMBERS.neutral });
     const gather = h.telnyx.of("gatherUsingAudio")[0];
-    expect(gather.params).toMatchObject({ audioUrl: "https://media.test/telephony/ivr-main.mp3", invalidAudioUrl: "https://media.test/telephony/invalid-input.mp3", validDigits: "12", maximumTries: 2, timeoutMillis: 5000 });
+    expect(gather.params).toMatchObject({ audioUrl: "https://media.test/telephony/ivr-main.mp3", invalidAudioUrl: "https://media.test/telephony/invalid-input.mp3", validDigits: "12", maximumTries: 1, timeoutMillis: 5000 });
 
     await h.legEvent(call.callControlId, "call.gather.ended", { digits: "1", status: "valid", client_state: gather.params.clientState });
     expect(h.session(call.sessionId).state).toBe("ringing");

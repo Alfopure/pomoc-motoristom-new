@@ -130,6 +130,10 @@ describe("support and takeover cadence", () => {
     // A failing endpoint backs off instead of being hammered by a screen
     // nobody is standing in front of.
     expect(wallboardPollDelayMs({ documentHidden: false, consecutiveFailures: 3, random: () => 0.5 })).toBeGreaterThan(5_000);
+    // While the statistics views are missing every poll aggregates raw rows, so
+    // the board asks three times less often until the migration is applied.
+    expect(wallboardPollDelayMs({ documentHidden: false, fallback: true })).toBe(15_000);
+    expect(wallboardPollDelayMs({ documentHidden: true, fallback: true })).toBe(60_000);
   });
 
   it("keeps the callback queue gentle and gates it on visibility", () => {

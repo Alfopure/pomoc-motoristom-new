@@ -72,6 +72,15 @@ export const SUPPORT_POLL_MS = {
  */
 export const WALLBOARD_POLL_MS = {
   visible: 5_000,
+  /**
+   * While `/api/telephony/stats` answers `source: "fallback"` — the Phase 4
+   * statistics views are not applied yet — every miss aggregates raw call and
+   * presence rows instead of reading a grouped view. Three times slower on a
+   * board that is left on a wall all day is the difference between ~17k and
+   * ~6k of those passes per day, and the cadence returns to 5 s by itself the
+   * moment the migration lands.
+   */
+  fallbackVisible: 15_000,
   /** A wall display is rarely hidden; a background reports tab always is. */
   hidden: 60_000,
 } as const;
@@ -133,10 +142,12 @@ export function supportPollDelayMs(input: {
 
 export function wallboardPollDelayMs(input: {
   documentHidden: boolean;
+  /** The last payload's `source`: `"fallback"` means the views are missing. */
+  fallback?: boolean;
   consecutiveFailures?: number;
   random?: () => number;
 }) {
-  const base = input.documentHidden ? WALLBOARD_POLL_MS.hidden : WALLBOARD_POLL_MS.visible;
+  const base = input.documentHidden ? WALLBOARD_POLL_MS.hidden : input.fallback ? WALLBOARD_POLL_MS.fallbackVisible : WALLBOARD_POLL_MS.visible;
   return withBackoff(base, input.consecutiveFailures, input.random);
 }
 

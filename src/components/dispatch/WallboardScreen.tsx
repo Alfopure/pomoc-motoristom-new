@@ -17,7 +17,6 @@ import {
   type WallboardTone,
   type WallboardWaitingCall,
 } from "@/lib/telephony/wallboard";
-import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 
 import { useTelephonyStats } from "./useTelephonyStats";
 import { useTickingClock } from "./settings/settings-ui";
@@ -40,6 +39,23 @@ import { useTickingClock } from "./settings/settings-ui";
  *    second from the timestamps in the payload against the browser's own clock,
  *    so a five-second poll does not produce a board that freezes and jumps.
  */
+
+/**
+ * The caller's number, masked.
+ *
+ * The threat model of a wall display is not the session — the page is
+ * senior-dispatcher gated — but everybody who walks past the television:
+ * visitors, contractors, anyone with a phone camera. The scope of this screen
+ * is *how many* are waiting and *how long*, so the last three digits are enough
+ * for an operator standing at the board to recognise the call they just picked
+ * up. The full number stays in the payload and in the console widgets, where it
+ * is on somebody's own desk and is needed to work the call.
+ */
+function maskedCaller(callerNumber: string | null): string {
+  if (!callerNumber) return "Neznáme číslo";
+  const digits = callerNumber.replace(/\D/g, "");
+  return digits.length >= 3 ? `••• ${digits.slice(-3)}` : "•••";
+}
 
 const TONE_TILE: Record<WallboardTone, string> = {
   ok: "border-emerald-500/40 bg-emerald-500/10",
@@ -236,9 +252,9 @@ function WaitingList({ now, waiting }: { now: number; waiting: WallboardWaitingC
             return (
               <li key={call.sessionId} className="flex items-center justify-between gap-3 px-4 py-3">
                 <div className="min-w-0">
-                  <div className="truncate text-base font-semibold sm:text-lg">{call.callerNumber ? formatPhoneNumberForDisplay(call.callerNumber) : "Neznáme číslo"}</div>
+                  <div className="truncate text-base font-semibold sm:text-lg">{call.lineLabel ?? "Volajúci"}</div>
                   <div className="truncate text-xs text-zinc-400 sm:text-sm">
-                    {call.lineLabel ?? "Bez linky"}
+                    {maskedCaller(call.callerNumber)}
                     {call.parkedByName ? ` · odložil ${call.parkedByName}` : ""}
                   </div>
                 </div>
@@ -294,7 +310,9 @@ function OperatorGrid({ now, operators }: { now: number; operators: WallboardOpe
                         bez telefónu
                       </span>
                     ) : null}
-                    <span className="tabular-nums">{operator.answeredToday}× dnes</span>
+                    <span className="tabular-nums" title="Prijaté prichádzajúce hovory dnes">
+                      {operator.answeredToday}× dnes
+                    </span>
                   </span>
                 </div>
               </li>

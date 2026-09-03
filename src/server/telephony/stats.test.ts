@@ -260,6 +260,12 @@ describe("loadTelephonyStats — operators", () => {
       availableSecondsToday: 5_400,
       pausedSecondsToday: 600,
     });
+    // Inbound only, like the organisation tile: o2 answered one inbound call and
+    // made one outbound one, and the operator rows have to add up to "Prijaté
+    // dnes" on the same screen.
+    const peter = stats.operators.find((operator) => operator.profileId === PROFILES.o2);
+    expect(peter).toMatchObject({ answeredToday: 1, talkSecondsToday: 60 });
+    expect(stats.operators.reduce((sum, operator) => sum + operator.answeredToday, 0)).toBe(stats.today.answered);
     // The senior dispatcher never registered a browser phone in the harness.
     expect(stats.operators.find((operator) => operator.profileId === PROFILES.o3)).toMatchObject({ state: "offline", registered: false });
     expect(stats.operators.map((operator) => operator.name)).toEqual([...stats.operators.map((operator) => operator.name)].sort((a, b) => a.localeCompare(b, "sk")));

@@ -62,7 +62,8 @@ describe("ivr gather spec", () => {
       validDigits: "12",
       minimumDigits: 1,
       maximumDigits: 1,
-      maximumTries: 2,
+      // One gather is one prompt; the retry budget is counted by `decideIvr`.
+      maximumTries: 1,
       timeoutMillis: 5000,
       purpose: "ivr",
     });
