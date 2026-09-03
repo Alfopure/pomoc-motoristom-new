@@ -1160,6 +1160,19 @@ export type Database = {
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
+      motorist_telephony_alerts: Table<{
+        id: string;
+        organization_id: string;
+        alert_key: string;
+        status: "warn" | "fail";
+        detail: Json;
+        sends: number;
+        first_sent_at: Timestamp;
+        last_sent_at: Timestamp;
+        last_seen_at: Timestamp;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
       motorist_job_controls: Table<{
         job_name: string;
         enabled: boolean;

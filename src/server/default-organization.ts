@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import { MutationError } from "@/server/motorist-mutations";
+import { MutationError } from "@/server/mutation-error";
 
 const DEFAULT_ORGANIZATION_SLUG = "pomoc-motoristom";
 

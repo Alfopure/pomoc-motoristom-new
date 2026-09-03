@@ -35,6 +35,11 @@ import { defaultTaskTitle, taskKinds, taskPriorities } from "@/domain/tasks";
 import type { CaseAttachmentCategory, CasePriority, CaseStatus, CaseTaskKind, CustomerContactRole, FleetAssetOccupancy, JobType, TaskReminderChannel, VehicleConditionFlag } from "@/domain/types";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/database.types";
+// Lives in its own module so that latency-sensitive routes (the Telnyx webhook)
+// can catch it without loading this file; re-exported for existing importers.
+import { MutationError } from "@/server/mutation-error";
+
+export { MutationError };
 import { cancelPendingTaskReminders, createDefaultTaskReminder, createTaskAssignmentNotification, latestTaskReminderChannels } from "./task-notifications";
 import {
   deriveReplacementOccupancy,
@@ -2275,11 +2280,6 @@ export async function endAttendanceSession(id: string, input: EndAttendanceSessi
   return session;
 }
 
-export class MutationError extends Error {
-  constructor(message: string, readonly status = 500, readonly code?: string) {
-    super(message);
-  }
-}
 
 async function resolveOrganization(supabase: AdminClient): Promise<OrganizationRow> {
   const organizationId = process.env.MOTORIST_ORGANIZATION_ID?.trim();
