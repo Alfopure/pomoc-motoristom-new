@@ -236,7 +236,7 @@ export async function disconnectDevice(deps: DeviceDeps, input: { organizationId
 
 export function deviceIsLive(device: DeviceRow | null, now: Date): boolean {
   if (!device) return false;
-  return isDeviceLive({ profileId: device.profile_id, deviceSeenAt: device.device_seen_at, registrationState: device.registration_state, sipUsername: device.sip_username }, now);
+  return isDeviceLive({ deviceSeenAt: device.device_seen_at, registrationState: device.registration_state }, now);
 }
 
 export function deviceSipUri(device: DeviceRow): string | null {

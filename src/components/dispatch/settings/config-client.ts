@@ -9,7 +9,7 @@
  */
 
 import { TELEPHONY_TIMEOUT_MS, telephonyJson } from "@/lib/telephony/client-request";
-import type { RoutingDocument, TelephonySettingsDoc, ValidationIssue } from "@/server/telephony/config-service";
+import type { OperatorSettingsDoc, RoutingDocument, TelephonySettingsDoc, ValidationIssue } from "@/server/telephony/config-service";
 
 export const TELEPHONY_CONFIG_ENDPOINTS = {
   ringGroups: "/api/telephony/config/ring-groups",
@@ -110,6 +110,80 @@ export async function saveTelephonySettings(patch: Record<string, unknown>, opti
     throw new ConfigRequestError(body.error ?? "Nastavenia telefónie sa nepodarilo uložiť.", result.status, body.code ?? "config_failed", body.issues ?? []);
   }
   return result.body.settings;
+}
+
+// ---------------------------------------------------------------------------
+// Operator routes (`/api/telephony/operators/[id]/…`)
+// ---------------------------------------------------------------------------
+
+export const TELEPHONY_OPERATOR_ENDPOINTS = {
+  settings: (profileId: string) => `/api/telephony/operators/${encodeURIComponent(profileId)}/settings`,
+  credential: (profileId: string) => `/api/telephony/operators/${encodeURIComponent(profileId)}/credential`,
+  disconnect: (profileId: string) => `/api/telephony/operators/${encodeURIComponent(profileId)}/disconnect`,
+} as const;
+
+export type OperatorDeviceResult = {
+  environment: string;
+  credentialId: string | null;
+  sipUsername: string | null;
+  registrationState: string;
+};
+
+async function operatorRequest<T extends ErrorBody>(url: string, init: { method: "PATCH" | "POST"; body: Record<string, unknown> }, options: ConfigRequestOptions, fallback: string): Promise<T> {
+  const result = await telephonyJson<T>(
+    url,
+    {
+      method: init.method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(init.body),
+      label: "nastavenia operátora",
+      timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
+      signal: options.signal ?? null,
+    },
+    options.runtime,
+  );
+  if (!result.ok || !result.body) {
+    const body = (result.body ?? {}) as ErrorBody;
+    throw new ConfigRequestError(body.error ?? fallback, result.status, body.code ?? "config_failed", body.issues ?? []);
+  }
+  return result.body;
+}
+
+/** `PATCH /api/telephony/operators/[id]/settings` — self, or anyone for a manager. */
+export async function saveOperatorSettings(profileId: string, patch: Record<string, unknown>, options: ConfigRequestOptions = {}): Promise<OperatorSettingsDoc> {
+  const body = await operatorRequest<{ settings?: OperatorSettingsDoc } & ErrorBody>(
+    TELEPHONY_OPERATOR_ENDPOINTS.settings(profileId),
+    { method: "PATCH", body: { patch } },
+    options,
+    "Nastavenia operátora sa nepodarilo uložiť.",
+  );
+  if (!body.settings) throw new ConfigRequestError("Nastavenia operátora sa nepodarilo uložiť.", 500, "config_failed");
+  return body.settings;
+}
+
+/**
+ * `POST /api/telephony/operators/[id]/credential` with `{ rotate: true }`:
+ * mints a new SIP credential and revokes the live browser session, because the
+ * token minted from the old credential stops working.
+ */
+export async function rotateOperatorCredential(profileId: string, options: ConfigRequestOptions = {}): Promise<OperatorDeviceResult | null> {
+  const body = await operatorRequest<{ device?: OperatorDeviceResult } & ErrorBody>(
+    TELEPHONY_OPERATOR_ENDPOINTS.credential(profileId),
+    { method: "POST", body: { rotate: true } },
+    options,
+    "Prihlasovacie údaje telefónu sa nepodarilo vytvoriť.",
+  );
+  return body.device ?? null;
+}
+
+/** `POST /api/telephony/operators/[id]/disconnect`: the phone, not the call. */
+export async function disconnectOperatorDevice(profileId: string, options: ConfigRequestOptions = {}): Promise<void> {
+  await operatorRequest<ErrorBody>(
+    TELEPHONY_OPERATOR_ENDPOINTS.disconnect(profileId),
+    { method: "POST", body: {} },
+    options,
+    "Telefón sa nepodarilo odpojiť.",
+  );
 }
 
 /** Message shown above the form when a request failed as a whole. */

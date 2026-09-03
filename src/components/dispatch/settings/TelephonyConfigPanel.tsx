@@ -1,13 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CalendarClock, Coffee, Hash, ListOrdered, Loader2, PhoneCall, RefreshCw, ShieldAlert, Users } from "lucide-react";
+import { CalendarClock, Coffee, Hash, ListOrdered, Loader2, PhoneCall, RefreshCw, ShieldAlert, Smartphone, Users, UserCog } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import type { TelephonySettingsDoc } from "@/server/telephony/config-service";
 
+import { MyPhonePanel, type MyPhoneTestCall } from "../MyPhonePanel";
 import { BusinessHoursEditor } from "./BusinessHoursEditor";
 import { NumbersPanel } from "./NumbersPanel";
+import { OperatorsTelephonyPanel } from "./OperatorsTelephonyPanel";
 import { PauseReasonsEditor } from "./PauseReasonsEditor";
 import { configErrorMessage, loadRoutingConfig, type RoutingConfigResponse } from "./config-client";
 import { RingGroupsEditor } from "./RingGroupsEditor";
@@ -23,19 +25,23 @@ import { TelephonySettingsPanel } from "./TelephonySettingsPanel";
  * back so the neighbouring screens see the new world without a reload.
  */
 
-type TelephonyConfigTab = "groups" | "plans" | "hours" | "pauses" | "numbers" | "settings";
+type TelephonyConfigTab = "phone" | "groups" | "plans" | "hours" | "pauses" | "numbers" | "operators" | "settings";
 
-const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; adminOnly?: boolean }> = [
+const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; adminOnly?: boolean; managerOnly?: boolean }> = [
+  // "Môj telefón" is first and open to every operator; everything after it is
+  // configuration a manager owns.
+  { icon: Smartphone, label: "Môj telefón", value: "phone" },
   { icon: Users, label: "Skupiny", value: "groups" },
   { icon: ListOrdered, label: "Plány zvonenia", value: "plans" },
   { icon: CalendarClock, label: "Otváracie hodiny", value: "hours" },
   { icon: Coffee, label: "Dôvody pauzy", value: "pauses" },
   { icon: Hash, label: "Čísla", value: "numbers" },
+  { icon: UserCog, label: "Operátori", value: "operators", managerOnly: true },
   { icon: ShieldAlert, label: "Bezpečnosť", value: "settings", adminOnly: true },
 ];
 
-export function TelephonyConfigPanel() {
-  const [tab, setTab] = useState<TelephonyConfigTab>("groups");
+export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestCall } = {}) {
+  const [tab, setTab] = useState<TelephonyConfigTab>("phone");
   const [state, setState] = useState<RoutingConfigResponse | null>(null);
   // Bumped on every fresh document so the editors re-key and drop their drafts
   // instead of synchronising them from an effect.
@@ -119,7 +125,7 @@ export function TelephonyConfigPanel() {
       {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
 
       <nav className="flex flex-wrap gap-2" aria-label="Nastavenia telefónie">
-        {TABS.filter((entry) => !entry.adminOnly || state.canManageSettings).map(({ icon: Icon, label, value }) => {
+        {TABS.filter((entry) => (!entry.adminOnly || state.canManageSettings) && (!entry.managerOnly || state.canEdit)).map(({ icon: Icon, label, value }) => {
           const active = tab === value;
           return (
             <button
@@ -138,11 +144,15 @@ export function TelephonyConfigPanel() {
         })}
       </nav>
 
+      {tab === "phone" && <MyPhonePanel key={`phone-${version}`} document={state.document} onSaved={applyResponse} onTestCall={onTestCall} />}
       {tab === "groups" && <RingGroupsEditor key={`groups-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "plans" && <RingPlanEditor key={`plans-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "hours" && <BusinessHoursEditor key={`hours-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "pauses" && <PauseReasonsEditor key={`pauses-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "numbers" && <NumbersPanel key={`numbers-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
+      {tab === "operators" && state.canEdit && (
+        <OperatorsTelephonyPanel key={`operators-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />
+      )}
       {tab === "settings" && state.canManageSettings && state.document.settings && (
         <TelephonySettingsPanel key={`settings-${version}`} canEdit={state.canManageSettings} settings={state.document.settings} onSaved={applySettings} />
       )}

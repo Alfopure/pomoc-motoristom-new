@@ -916,6 +916,16 @@ export function DispatchConsole({
     setMutationNotice(`Volanie na ${phone} bolo spustené.`);
   }
 
+  /** "Môj telefón" test call: a normal outbound dial from a chosen line. */
+  async function testCall(input: { to: string; lineId: string | null }): Promise<void> {
+    if (!telephonyConfigured) {
+      setMutationNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+      throw new TelephonyNotConfiguredError();
+    }
+    await telephony.dial(input.to, undefined, { lineId: input.lineId });
+    setMutationNotice(`Skúšobný hovor na ${input.to} bol spustený.`);
+  }
+
   /** Links a live or logged call to the case the console currently shows. */
   async function linkPhoneCallToCase(call: PhoneBarCall) {
     const caseId = call.caseId ?? workspaceCase?.id;
@@ -1479,6 +1489,7 @@ export function DispatchConsole({
           partnerDirectory={partnerDirectory}
           users={users}
           onDataChange={setDispatchData}
+          onTestCall={telephonyConfigured ? testCall : undefined}
         />
       )}
 

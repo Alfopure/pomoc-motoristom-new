@@ -71,7 +71,7 @@ export type TelephonyConsole = {
   degradedSessionIds: Set<string>;
   liveCalls: CallCenterCall[];
   waitingCalls: CallCenterCall[];
-  dial: (phone: string, caseId?: string) => Promise<void>;
+  dial: (phone: string, caseId?: string, options?: { lineId?: string | null }) => Promise<void>;
   callAction: (action: PhoneCallAction, sessionId: string, target?: TransferRequest) => Promise<void>;
   changePresence: (action: PhonePresenceAction) => void;
   availabilityAction: (action: TelephonyAvailabilityAction) => void;
@@ -367,14 +367,16 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     [busyAction],
   );
 
-  const dial = useCallback(async (phoneNumber: string, caseId?: string) => {
+  // `lineId` is optional and only "Môj telefón" sends it: a test call has to
+  // leave from the operator's own line even when the server default differs.
+  const dial = useCallback(async (phoneNumber: string, caseId?: string, options?: { lineId?: string | null }) => {
     setNotice(null);
     const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
       "/api/telephony/calls",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to: phoneNumber, caseId }),
+        body: JSON.stringify({ to: phoneNumber, caseId, lineId: options?.lineId ?? undefined }),
         label: "odchádzajúci hovor",
         timeoutMs: TELEPHONY_TIMEOUT_MS.control,
       },

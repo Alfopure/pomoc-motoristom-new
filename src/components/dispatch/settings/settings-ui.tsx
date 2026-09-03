@@ -15,25 +15,40 @@ import type { ValidationIssue } from "@/server/telephony/config-service";
  */
 
 /**
- * Wall clock at one-minute resolution, `null` on the server.
+ * Wall clock bucketed to `bucketMs`, `null` on the server.
  *
- * The business-hours preview needs "what time is it now", but a clock read
- * during render would differ between the server pass and hydration. An external
- * store solves exactly that: the snapshot is the minute bucket (stable within a
- * minute, so no render loop) and the server snapshot is `0`, which the callers
- * read as "no clock yet".
+ * The business-hours preview needs "what time is it now" and the wrap-up
+ * countdown needs it every second, but a clock read during render would differ
+ * between the server pass and hydration. An external store solves exactly that:
+ * the snapshot is the bucket index (stable inside a bucket, so no render loop)
+ * and the server snapshot is `0`, which the callers read as "no clock yet".
  */
-export function useMinuteClock(): Date | null {
-  const subscribe = useCallback((onStoreChange: () => void) => {
-    const timer = window.setInterval(onStoreChange, 15_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const minute = useSyncExternalStore(
+export function useTickingClock(bucketMs: number): Date | null {
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      // Poll faster than the bucket so a change is at most a quarter of a
+      // minute late; the snapshot itself is still bucketed, so a re-render only
+      // happens when the value the caller reads actually changed.
+      const timer = window.setInterval(onStoreChange, Math.min(bucketMs, 15_000));
+      return () => window.clearInterval(timer);
+    },
+    [bucketMs],
+  );
+  const bucket = useSyncExternalStore(
     subscribe,
-    () => Math.floor(Date.now() / 60_000),
+    () => Math.floor(Date.now() / bucketMs),
     () => 0,
   );
-  return minute === 0 ? null : new Date(minute * 60_000);
+  return bucket === 0 ? null : new Date(bucket * bucketMs);
+}
+
+export function useMinuteClock(): Date | null {
+  return useTickingClock(60_000);
+}
+
+/** Same store at one-second resolution, for the wrap-up countdown. */
+export function useSecondClock(): Date | null {
+  return useTickingClock(1_000);
 }
 
 export function SettingsSectionHeader({ description, icon: Icon, title }: { description: string; icon: LucideIcon; title: string }) {

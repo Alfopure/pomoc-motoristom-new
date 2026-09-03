@@ -21,6 +21,7 @@ import { partnerDirectoryKindLabels } from "@/domain/case-card";
 import type { AccessUser, Branch, PartnerDirectoryEntry, PartnerDirectoryKind } from "@/domain/types";
 import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { useReplacementVehicleAvailability } from "./useReplacementVehicleAvailability";
+import type { MyPhoneTestCall } from "./MyPhonePanel";
 import { TelephonyConfigPanel } from "./settings/TelephonyConfigPanel";
 import { SettingsSectionHeader } from "./settings/settings-ui";
 import { UserAccessSettings } from "./UserAccessSettings";
@@ -30,6 +31,11 @@ type IntegrationSettingsProps = {
   partnerDirectory: PartnerDirectoryEntry[];
   users: AccessUser[];
   onDataChange: (dispatchData: DispatchData) => void;
+  /**
+   * Click-to-call of the console. "Môj telefón" uses it for its test call so
+   * the browser phone answers its own leg exactly like for any other dial.
+   */
+  onTestCall?: MyPhoneTestCall;
 };
 
 type ApiMutationResponse = {
@@ -49,6 +55,7 @@ const settingsSections: Array<{ icon: LucideIcon; label: string; shortLabel: str
 export function IntegrationSettings({
   branches,
   onDataChange,
+  onTestCall,
   partnerDirectory,
   users,
 }: IntegrationSettingsProps) {
@@ -91,7 +98,7 @@ export function IntegrationSettings({
           <UserAccessSettings users={users} onDataChange={onDataChange} onNotice={setMessage} />
         )}
 
-        {activeSection === "telephony" && <TelephonyConfigPanel />}
+        {activeSection === "telephony" && <TelephonyConfigPanel onTestCall={onTestCall} />}
 
         {activeSection === "partners" && (
           <PartnerDirectoryForm
