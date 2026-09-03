@@ -31,7 +31,19 @@ describe("notConfiguredTransport", () => {
 });
 
 describe("sendCustomSms", () => {
-  beforeEach(() => adminMock.mockReset());
+  const previousApiKey = process.env.TELNYX_API_KEY;
+
+  // The "no transport configured" case must not depend on the ambient
+  // environment: a Vercel build carries TELNYX_API_KEY, a local run does not.
+  beforeEach(() => {
+    adminMock.mockReset();
+    delete process.env.TELNYX_API_KEY;
+  });
+
+  afterEach(() => {
+    if (previousApiKey === undefined) delete process.env.TELNYX_API_KEY;
+    else process.env.TELNYX_API_KEY = previousApiKey;
+  });
 
   it("fails closed before any Supabase access while no transport is configured", async () => {
     const from = vi.fn();
