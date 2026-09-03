@@ -114,7 +114,7 @@ export type DialParams = {
   timeoutSecs?: number;
   timeLimitSecs?: number;
   fromDisplayName?: string;
-  sipRegion?: "Europe" | "US" | "Canada" | "Australia" | "Asia";
+  sipRegion?: "Europe" | "US" | "Canada" | "Australia" | "Middle East";
   mediaEncryption?: "disabled" | "SRTP" | "DTLS";
   bridgeIntent?: boolean;
   bridgeOnAnswer?: boolean;
@@ -133,7 +133,7 @@ export type DialResult = {
   isAlive: boolean;
 };
 
-export type AnswerParams = CallLegRef & { clientState?: string; customHeaders?: Array<{ name: string; value: string }>; preferredCodecs?: string; webhookUrl?: string };
+export type AnswerParams = CallLegRef & { clientState?: string; customHeaders?: Array<{ name: string; value: string }>; preferredCodecs?: "G722,PCMU,PCMA,G729,OPUS,VP8,H264"; webhookUrl?: string };
 export type HangupParams = CallLegRef & { clientState?: string };
 export type BridgeParams = CallLegRef & {
   targetCallControlId: string;
@@ -141,7 +141,7 @@ export type BridgeParams = CallLegRef & {
   playRingtone?: boolean;
   ringtone?: string;
   parkAfterUnbridge?: "self";
-  holdAfterUnbridge?: "self";
+  holdAfterUnbridge?: boolean;
   preventDoubleBridge?: boolean;
   muteDtmf?: "none" | "both" | "self" | "opposite";
 };
@@ -176,7 +176,6 @@ export type GatherUsingAudioParams = CallLegRef & {
 export type GatherUsingSpeakParams = CallLegRef & {
   payload: string;
   voice: string;
-  language?: string;
   invalidPayload?: string;
   clientState?: string;
   minimumDigits?: number;
@@ -187,7 +186,7 @@ export type GatherUsingSpeakParams = CallLegRef & {
   terminatingDigit?: string;
   validDigits?: string;
 };
-export type SpeakParams = CallLegRef & { payload: string; voice: string; language?: string; clientState?: string; stop?: "current" | "all" };
+export type SpeakParams = CallLegRef & { payload: string; voice: string; clientState?: string; stop?: "current" | "all" };
 export type PlaybackStartParams = CallLegRef & {
   audioUrl?: string;
   mediaName?: string;
@@ -461,9 +460,10 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       if (!connectionId) {
         throw new TelnyxCommandError({ code: "missing_connection_id", status: 400, detail: "TELNYX_CALL_CONTROL_APP_ID is not set", commandId: params.commandId });
       }
-      // `park_after_unbridge` deliberately absent: the dial endpoint rejects it
-      // outright ("The 'park_after_unbridge' parameter is invalid", code 10000),
-      // for every value. It belongs to the bridge and transfer commands only.
+      // `park_after_unbridge` deliberately absent. The endpoint does document it,
+      // but only together with `link_to`; without it the whole request is refused
+      // with code 10000. The operator leg is dialled before any leg exists to link
+      // to, so the parameter can never apply here — bridge and transfer carry it.
       const response = await request<unknown>("POST", "/calls", {
         commandId: params.commandId,
         body: compact({
@@ -566,7 +566,6 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       return callAction(params.callControlId, "gather_using_speak", params.commandId, {
         payload: params.payload,
         voice: params.voice,
-        language: params.language,
         invalid_payload: params.invalidPayload,
         client_state: params.clientState,
         minimum_digits: params.minimumDigits,
@@ -587,7 +586,6 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       return callAction(params.callControlId, "speak", params.commandId, {
         payload: params.payload,
         voice: params.voice,
-        language: params.language,
         client_state: params.clientState,
         stop: params.stop,
       });
@@ -647,8 +645,11 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     async conferenceAction(conferenceId, action, body) {
       if (!conferenceId) throw new TelnyxCommandError({ code: "invalid_conference_id", status: 400, detail: `${action}: conferenceId is required` });
       const { commandId, ...rest } = body;
-      // `hold`/`unhold` are the two conference actions whose schema has no `command_id`.
-      const idempotencyId = action === "hold" || action === "unhold" ? undefined : commandId;
+      // Only these conference actions declare `command_id` in the Telnyx schema;
+      // the others (hold, unhold, mute, unmute, play, stop, send_dtmf,
+      // gather_using_audio) would receive an undocumented key.
+      const acceptsCommandId = action === "join" || action === "leave" || action === "speak" || action === "update" || action === "end";
+      const idempotencyId = acceptsCommandId ? commandId : undefined;
       await request<unknown>("POST", `/conferences/${encodeURIComponent(conferenceId)}/actions/${action}`, { body: compact(rest), commandId: idempotencyId });
     },
 
@@ -696,12 +697,18 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     async sendMessage(params) {
       if (!liveGate.smsEnabled) throw new TelnyxSmsDisabledError();
       const messagingProfileId = params.messagingProfileId ?? configured.messagingProfileId ?? undefined;
+      const from = params.from ?? configured.smsAlphaSender;
+      if (!messagingProfileId && !/^\+[0-9]+$/.test(from)) {
+        // Telnyx requires a messaging profile whenever the sender is not an
+        // E.164 number, which our alphanumeric sender never is.
+        throw new TelnyxCommandError({ code: "missing_messaging_profile", status: 400, detail: "TELNYX_MESSAGING_PROFILE_ID is required for an alphanumeric sender" });
+      }
       const response = await request<unknown>("POST", "/messages", {
         // Telnyx does not document server-side dedup for /messages; the header is
         // best-effort and the key is the audit link to `motorist_sms_messages`.
         headers: params.idempotencyKey ? { "idempotency-key": params.idempotencyKey } : undefined,
         body: compact({
-          from: params.from ?? configured.smsAlphaSender,
+          from,
           to: params.to,
           text: params.text,
           messaging_profile_id: messagingProfileId,
