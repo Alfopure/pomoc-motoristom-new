@@ -77,6 +77,21 @@ describe("telnyx sms delivery status", () => {
     expect(fake.db.find("motorist_sms_messages", (row) => row.id === "sms-1")).toMatchObject({ status: "delivered" });
   });
 
+  it("stays idempotent when Telnyx redelivers the same finalized event", async () => {
+    const fake = harness();
+    const event = messageEvent({ status: "delivered" });
+    const first = await applyTelnyxMessageStatus(fake.admin, event, { now: () => NOW });
+    const second = await applyTelnyxMessageStatus(fake.admin, event, { now: () => NOW });
+
+    expect(first).toMatchObject({ outcome: "updated", status: "delivered" });
+    expect(second).toMatchObject({ outcome: "updated", status: "delivered", smsMessageId: "sms-1" });
+    expect(fake.db.rows("motorist_sms_messages")).toHaveLength(1);
+    expect(fake.db.find("motorist_sms_messages", (row) => row.id === "sms-1")).toMatchObject({
+      status: "delivered",
+      delivered_at: NOW.toISOString(),
+    });
+  });
+
   it("acknowledges an unknown message id and a foreign event type", async () => {
     const fake = harness();
     await expect(applyTelnyxMessageStatus(fake.admin, messageEvent({ id: "msg-other" }), { now: () => NOW })).resolves.toMatchObject({ outcome: "unknown_message" });

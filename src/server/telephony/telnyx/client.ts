@@ -245,7 +245,7 @@ export type CreateTelephonyCredentialParams = { name: string; connectionId?: str
 
 export type TelephonyCredential = { id: string; sipUsername: string | null; sipPassword: string | null; expiresAt: string | null; raw: Record<string, unknown> };
 
-export type SendMessageParams = { to: string; text: string; from?: string; messagingProfileId?: string; webhookUrl?: string };
+export type SendMessageParams = { to: string; text: string; from?: string; messagingProfileId?: string; webhookUrl?: string; idempotencyKey?: string };
 
 export type SendMessageResult = { id: string; status: string | null; raw: Record<string, unknown> };
 
@@ -278,6 +278,8 @@ export type RequestOptions = {
   body?: Record<string, unknown>;
   query?: Record<string, string | number | undefined>;
   commandId?: string;
+  /** Extra request headers (messaging uses it for `Idempotency-Key`). */
+  headers?: Record<string, string | undefined>;
 };
 
 // --- helpers ---------------------------------------------------------------
@@ -341,7 +343,13 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
   const now = options.now ?? (() => Date.now());
   const liveGate = { ...options.liveGate };
 
-  async function attempt(method: string, url: string, body: string | undefined, commandId: string | null): Promise<Response> {
+  async function attempt(
+    method: string,
+    url: string,
+    body: string | undefined,
+    commandId: string | null,
+    extraHeaders: Record<string, string | undefined> = {},
+  ): Promise<Response> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -351,6 +359,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
           authorization: `Bearer ${configured.apiKey}`,
           accept: "application/json",
           "content-type": body !== undefined ? "application/json" : undefined,
+          ...extraHeaders,
         }) as Record<string, string>,
         body,
         signal: controller.signal,
@@ -400,13 +409,13 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     let parsed: unknown;
 
     try {
-      response = await attempt(method, url.toString(), body, commandId);
+      response = await attempt(method, url.toString(), body, commandId, requestOptions.headers);
       if (response.status === 429) {
         const retryAfter = parseRetryAfterMs(response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS;
         await response.text().catch(() => undefined);
         await sleep(Math.min(retryAfter, maxRetryAfterMs));
         retried = true;
-        response = await attempt(method, url.toString(), body, commandId);
+        response = await attempt(method, url.toString(), body, commandId, requestOptions.headers);
       }
       parsed = await readBody(response);
       if (!response.ok) {
@@ -684,6 +693,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       if (!liveGate.smsEnabled) throw new TelnyxSmsDisabledError();
       const messagingProfileId = params.messagingProfileId ?? configured.messagingProfileId ?? undefined;
       const response = await request<unknown>("POST", "/messages", {
+        // Telnyx does not document server-side dedup for /messages; the header is
+        // best-effort and the key is the audit link to `motorist_sms_messages`.
+        headers: params.idempotencyKey ? { "idempotency-key": params.idempotencyKey } : undefined,
         body: compact({
           from: params.from ?? configured.smsAlphaSender,
           to: params.to,
