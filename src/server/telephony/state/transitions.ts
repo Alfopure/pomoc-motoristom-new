@@ -2130,7 +2130,6 @@ function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): 
   // dial endpoint attaches a supervisor to a live call directly, which is what
   // supervision is for.
   const inConference = Boolean(b.session.conference_id);
-  if (inConference) promoteToConference(b, customer, operator, event.actorProfileId);
   const dial: DialCommand = {
     kind: "dial",
     commandId: b.cmdId(supervisor.profileId, `dial:supervise:${supervisor.mode}`),
