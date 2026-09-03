@@ -40,6 +40,8 @@ type MapWorkspaceProps = {
   onCaseCreated: (dispatchData: DispatchData, caseId: string, notice?: string) => void;
   onCollapse: () => void;
   onDataChange: (dispatchData: DispatchData) => void;
+  /** Click-to-call from the case card; absent while telephony is not configured. */
+  onDial?: (phone: string, caseId?: string) => Promise<void>;
   onDirtyChange: (dirty: boolean) => void;
   onSaveDraftChange: (saveDraft: SaveCaseDraft | null) => void;
   onSavingChange: (saving: boolean) => void;
@@ -97,6 +99,7 @@ export function MapWorkspace({
   onCaseCreated,
   onCollapse,
   onDataChange,
+  onDial,
   onDirtyChange,
   onSaveDraftChange,
   onSavingChange,
@@ -484,6 +487,7 @@ export function MapWorkspace({
               onBackToCockpit={onBackToCockpit}
               onCaseCreated={onCaseCreated}
               onDataChange={onDataChange}
+              onDial={onDial}
               onDirtyChange={onDirtyChange}
               onSaveDraftChange={onSaveDraftChange}
               onSavingChange={onSavingChange}
@@ -503,6 +507,7 @@ export function MapWorkspace({
               model={mapModel}
               onCollapse={onCollapse}
               onDataChange={onDataChange}
+              onDial={onDial}
               onDirtyChange={onDirtyChange}
               onExpand={onExpand}
               onRestore={onRestore}

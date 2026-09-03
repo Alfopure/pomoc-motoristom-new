@@ -20,6 +20,8 @@ type ExpandedCasePanelProps = {
   onBackToCockpit: () => void;
   onCaseCreated: (dispatchData: DispatchData, caseId: string, notice?: string) => void;
   onDataChange?: (dispatchData: DispatchData) => void;
+  /** Click-to-call from the case card; absent while telephony is not configured. */
+  onDial?: (phone: string, caseId?: string) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
   onSaveDraftChange?: (saveDraft: SaveCaseDraft | null) => void;
   onSavingChange?: (saving: boolean) => void;
@@ -38,6 +40,7 @@ export function ExpandedCasePanel({
   onBackToCockpit,
   onCaseCreated,
   onDataChange,
+  onDial,
   onDirtyChange,
   onSaveDraftChange,
   onSavingChange,
@@ -103,6 +106,7 @@ export function ExpandedCasePanel({
               editing
               embedded
               onDataChange={onDataChange}
+              onDial={onDial}
               onDirtyChange={handleDirtyChange}
               onSaveDraftChange={onSaveDraftChange}
               onSavingChange={handleSavingChange}

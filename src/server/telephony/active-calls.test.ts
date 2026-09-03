@@ -43,6 +43,11 @@ describe("active calls snapshot", () => {
       mine: true,
     });
     expect(call.offeredProfileIds).toEqual(expect.arrayContaining([PROFILES.o1, PROFILES.o2]));
+    // The console links a live call to a case through the call-log row, so its
+    // id has to travel with the snapshot.
+    const callRow = h.db.rows("motorist_calls").find((row) => row.session_id === sessionId);
+    expect(call.callId).toBe(callRow?.id ?? null);
+    expect(call.callId).not.toBeNull();
     expect(call.legs.some((leg) => leg.role === "customer")).toBe(true);
     expect(call.legs.filter((leg) => leg.role === "operator").length).toBeGreaterThan(0);
   });

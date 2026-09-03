@@ -34,6 +34,8 @@ export type ActiveCallLegView = {
 
 export type ActiveCallView = {
   sessionId: string;
+  /** `motorist_calls.id` of the log row, once one exists (link-case / outcome). */
+  callId: string | null;
   state: SessionRow["state"];
   direction: SessionRow["direction"];
   callerNumber: string | null;
@@ -98,17 +100,27 @@ export async function loadActiveCalls(
   const sessions = (sessionsResult.data ?? []) as SessionRow[];
   const sessionIds = sessions.map((session) => session.id);
 
-  const [legsResult, attemptsResult] = sessionIds.length
+  const [legsResult, attemptsResult, callRowsResult] = sessionIds.length
     ? await Promise.all([
         admin.from("motorist_call_legs").select("*").in("session_id", sessionIds).is("ended_at", null),
         admin.from("motorist_ring_attempts").select("*").in("session_id", sessionIds).eq("result", "offered"),
+        // The console links a live call to a case and stores its outcome
+        // through the existing `motorist_calls` routes, which are keyed on the
+        // log row, not on the session.
+        admin.from("motorist_calls").select("id, session_id").in("session_id", sessionIds),
       ])
     : [
         { data: [] as LegRow[], error: null },
         { data: [] as AttemptRow[], error: null },
+        { data: [] as Array<{ id: string; session_id: string | null }>, error: null },
       ];
   if (legsResult.error) throw new Error(`legs load failed: ${legsResult.error.message}`);
   if (attemptsResult.error) throw new Error(`ring attempts load failed: ${attemptsResult.error.message}`);
+  if (callRowsResult.error) throw new Error(`call rows load failed: ${callRowsResult.error.message}`);
+
+  const callIdBySession = new Map(
+    (callRowsResult.data ?? []).flatMap((row) => (row.session_id ? [[row.session_id, row.id] as const] : [])),
+  );
 
   const legs = (legsResult.data ?? []) as LegRow[];
   const attempts = (attemptsResult.data ?? []) as AttemptRow[];
@@ -145,6 +157,7 @@ export async function loadActiveCalls(
     const sessionLegs = legsBySession.get(session.id) ?? [];
     return {
       sessionId: session.id,
+      callId: callIdBySession.get(session.id) ?? null,
       state: session.state,
       direction: session.direction,
       callerNumber: session.caller_number,
