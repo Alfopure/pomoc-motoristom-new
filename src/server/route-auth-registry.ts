@@ -45,7 +45,8 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "integrations/commander/sync": { class: "bearer" },
   "integrations/commander/import-all": { class: "bearer" },
   // telephony/cron: Vercel cron (*/5) s `Authorization: Bearer ${CRON_SECRET}` + timingSafeEqual
-  "telephony/cron": { class: "bearer", note: "Vercel cron každých 5 minút; ring sweep, detekcia zaseknutých hovorov a prune webhook ledgera." },
+  "telephony/cron": { class: "bearer", note: "Vercel cron každých 5 minút; ring sweep, replay ledgera, zmierenie s Telnyxom, detekcia zaseknutých hovorov, e-mailové alerty a prune ledgera." },
+  "telephony/health": { class: "bearer", note: "Prevádzkový stav ústredne (zaseknuté relácie, zlyhané webhooky, incidenty, denné využitie) pre externý monitoring; rovnaký CRON_SECRET ako cron, 503 pri stave fail." },
   // transcripts/process cez authorizeRecordingsSync (RECORDINGS_SYNC_SECRET + timingSafeEqual)
   "telephony/transcripts/process": { class: "bearer" },
   // occupancy-sync: INLINE authorize() + safeEquals (SWHOUSE_SYNC_SECRET + timingSafeEqual)
@@ -139,7 +140,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "telephony/calls/[id]/parties/[legId]/mute": { class: "session" },
   "telephony/calls/[id]/parties/[legId]/unmute": { class: "session" },
   "telephony/calls/[id]/stop-supervise": { class: "session", role: ["manager", "admin"], note: "Ukončí vlastný dozor; role-gate je v call-actions (canSupervise)." },
-  "telephony/calls/[id]/supervise": { class: "session", role: ["manager", "admin"], note: "Dozor nad cudzím hovorom (monitor/whisper/barge) cez Telnyx supervisor_role v konferencii; role-gate je v call-actions (canSupervise), dispečer dostane 403. Každý dozor zapisuje audit riadok." },
+  "telephony/calls/[id]/supervise": { class: "session", role: ["manager", "admin"], note: "Dozor nad cudzím hovorom (monitor/whisper/barge). Na bežne premostenom hovore sa dozorca pripája priamo cez Telnyx supervise_call_control_id (volajúci sa nerozpája), v konferencii cez supervisor_role. Role-gate je v call-actions (canSupervise), dispečer dostane 403. Každý dozor zapisuje audit riadok." },
   "telephony/calls/[id]/transfer": { class: "session" },
   "telephony/calls/[id]/transfer-targets": { class: "session" },
   "telephony/calls/[id]/unhold": { class: "session" },

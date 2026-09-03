@@ -37,6 +37,8 @@ export type FakeTelnyx = {
   /** Commands of one kind (e.g. `dial`), most recent last. */
   of(method: string): FakeTelnyxCall[];
   failNext(method: string, error?: TelnyxCommandError | string): void;
+  /** What `retrieveCall` reports for a leg (default: alive and known). */
+  setCallStatus(callControlId: string, verdict: { alive: boolean; known?: boolean }): void;
   failAlways(method: string, error?: TelnyxCommandError | string): void;
   clearFailures(): void;
   reset(): void;
@@ -49,6 +51,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   const liveGate: TelnyxLiveGate = { callsEnabled: true, smsEnabled: true, ...(options.liveGate ?? {}) };
   const calls: FakeTelnyxCall[] = [];
   const oneShot = new Map<string, TelnyxCommandError[]>();
+  const callStatuses = new Map<string, { alive: boolean; known?: boolean }>();
   const always = new Map<string, TelnyxCommandError>();
   let counter = 0;
 
@@ -124,6 +127,11 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     async conferenceAction(conferenceId: string, action: ConferenceAction, body) {
       record(`conference:${action}`, { conferenceId, ...body });
     },
+    async retrieveCall(callControlId: string) {
+      record("retrieveCall", { callControlId });
+      const verdict = callStatuses.get(callControlId);
+      return { callControlId, known: verdict?.known ?? true, alive: verdict?.alive ?? true, callSessionId: null, raw: verdict ? {} : null };
+    },
     async listPhoneNumbers(params = {}) {
       record("listPhoneNumbers", params);
       return [];
@@ -157,6 +165,9 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     of(method) {
       return calls.filter((call) => call.method === method);
     },
+    setCallStatus(callControlId, verdict) {
+      callStatuses.set(callControlId, verdict);
+    },
     failNext(method, error) {
       const list = oneShot.get(method) ?? [];
       list.push(toError(error, method));
@@ -171,6 +182,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     },
     reset() {
       calls.length = 0;
+      callStatuses.clear();
       oneShot.clear();
       always.clear();
     },

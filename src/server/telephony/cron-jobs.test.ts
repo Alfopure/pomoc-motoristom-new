@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 
-import { detectStuckSessions, LEDGER_PRUNE_JOB,
-  LEDGER_REPLAY_JOB, pruneWebhookLedger, replayStalledWebhookEvents, runRingSweep, runTelephonyCronJobs, RING_SWEEP_JOB, STUCK_SESSION_JOB } from "./cron-jobs";
+import { ALERT_JOB, detectStuckSessions, LEDGER_PRUNE_JOB,
+  LEDGER_REPLAY_JOB, pruneWebhookLedger, RECONCILE_JOB, reconcileWithTelnyx, replayStalledWebhookEvents, runRingSweep, runTelephonyCronJobs, RING_SWEEP_JOB, STUCK_SESSION_JOB } from "./cron-jobs";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -122,6 +122,68 @@ describe("telephony cron jobs", () => {
     expect(summary.status).toBe("ok");
     expect(summary.configured).toBe(true);
     expect(summary.organizationId).toBe(ORG);
-    expect(summary.jobs.map((job) => job.job)).toEqual([RING_SWEEP_JOB, LEDGER_REPLAY_JOB, STUCK_SESSION_JOB, LEDGER_PRUNE_JOB]);
+    expect(summary.jobs.map((job) => job.job)).toEqual([RING_SWEEP_JOB, LEDGER_REPLAY_JOB, RECONCILE_JOB, STUCK_SESSION_JOB, ALERT_JOB, LEDGER_PRUNE_JOB]);
+  });
+
+  it("skips reconciliation when telephony is not configured", async () => {
+    const h = createTelephonyHarness();
+    const result = await reconcileWithTelnyx({ ...h.deps, telnyx: null });
+    expect(result).toMatchObject({ job: RECONCILE_JOB, status: "skipped", detail: { reason: "not_configured" } });
+  });
+
+  it("leaves a quiet session alone while Telnyx still reports its legs as alive", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    h.db.update("motorist_call_sessions", { updated_at: new Date(h.now().getTime() - 5 * 60_000).toISOString() }, (row) => row.id === sessionId);
+    const runSession = vi.fn(async () => ({ outcome: "applied" }));
+
+    const result = await reconcileWithTelnyx({ ...h.deps, runSession });
+    expect(result.status).toBe("ok");
+    expect(result.detail).toMatchObject({ sessions: 1, deadLegs: 0 });
+    expect(h.telnyx.of("retrieveCall").length).toBeGreaterThan(0);
+    expect(runSession).not.toHaveBeenCalled();
+  });
+
+  it("closes a leg Telnyx has already ended by replaying the missing hangup", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const call = await h.inbound({ to: "+421232408718" });
+    h.db.update("motorist_call_sessions", { state: "talking", updated_at: new Date(h.now().getTime() - 5 * 60_000).toISOString() }, (row) => row.id === call.sessionId);
+    h.telnyx.setCallStatus(call.callControlId, { alive: false });
+
+    const result = await reconcileWithTelnyx(h.deps);
+    expect(result.status).toBe("ok");
+    expect(result.detail).toMatchObject({ deadLegs: 1, closedSessions: 1 });
+    // The ordinary reducer path ran: the leg is closed, not just flagged.
+    expect(h.legs(call.sessionId).find((leg) => leg.telnyx_call_control_id === call.callControlId)?.ended_at).toBeTruthy();
+  });
+
+  it("treats a leg Telnyx has never heard of as dead", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const call = await h.inbound({ to: "+421232408718" });
+    h.db.update("motorist_call_sessions", { state: "talking", updated_at: new Date(h.now().getTime() - 5 * 60_000).toISOString() }, (row) => row.id === call.sessionId);
+    h.telnyx.setCallStatus(call.callControlId, { alive: false, known: false });
+
+    const result = await reconcileWithTelnyx(h.deps);
+    expect(result.detail).toMatchObject({ deadLegs: 1 });
+  });
+
+  it("does not touch a session that is still moving", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    await h.inbound({ to: "+421232408718" });
+
+    const result = await reconcileWithTelnyx(h.deps);
+    expect(result.detail).toMatchObject({ sessions: 0, checkedLegs: 0 });
+    expect(h.telnyx.of("retrieveCall")).toHaveLength(0);
+  });
+
+  it("reports a provider failure without stopping the tick", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const call = await h.inbound({ to: "+421232408718" });
+    h.db.update("motorist_call_sessions", { updated_at: new Date(h.now().getTime() - 5 * 60_000).toISOString() }, (row) => row.id === call.sessionId);
+    h.telnyx.failAlways("retrieveCall", "telnyx is down");
+
+    const result = await reconcileWithTelnyx(h.deps);
+    expect(result.status).toBe("failed");
+    expect(h.rows("motorist_job_incidents").length).toBeGreaterThan(0);
   });
 });

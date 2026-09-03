@@ -213,11 +213,14 @@ Hold, attended transfer, add-party, park and supervision need the session to be 
 
 ## 9. Routine checks
 
+- `GET /api/telephony/health` (bearer `CRON_SECRET`) — one call answers "is the exchange working?". It reports per check (`configuration`, `sessions`, `webhooks`, `ledger`, `incidents`, `usage`, `devices`) and answers **503** when any check is `fail`, so an uptime monitor can watch it without parsing the body. `skipped` means telephony is not configured in that environment — it is deliberately not `ok`, so a half-provisioned preview never looks healthy.
 - `GET /api/telephony/cron` (bearer `CRON_SECRET`) — the single scheduled job; `status: "degraded"` means a sub-job failed.
 - `motorist_telnyx_webhook_events`: rows with `status = 'failed'`, or `attempts > 1`, indicate lost or retried webhooks.
 - `motorist_job_incidents` under `telephony.telnyx.webhook|commands|actions` and `telephony.routing.capacity` (the org-wide leg cap was reached). Open rows close themselves (`status = 'recovered'`) after the first clean run of that job — a webhook processed, a transition applied with no failed command, or the leg count back under the cap — at most one check per minute per instance, so an incident that stays open means the failure is still happening.
 - The ring sweep also repairs bookkeeping the reducer could not: `orphanLegsClosed` (legs left open by a lost `call.hangup`) and `staleAttemptsClosed` (leaked `offered` ring attempts, which would otherwise keep their operator out of *every* future ring plan through the global partial unique index).
 - `motorist_telephony_daily_usage` against `daily_leg_soft_cap` (legs and SMS are written by the app; the cap is enforced, not only alerted).
+- `telephony.telnyx.reconcile` asks Telnyx about the legs of sessions that have been quiet for three minutes and replays the `call.hangup` that never arrived. `deadLegs > 0` in the cron summary means webhook deliveries were lost — check the Telnyx portal's webhook delivery log for that window before assuming it was a one-off.
+- `telephony.alerts` mails the failing health checks to `ALERT_EMAIL_TO`, at most once per problem per day (`motorist_telephony_alerts`, key `<deň>:<check>:<status>`). No `ALERT_EMAIL_TO` means the job reports `skipped` and writes nothing, so the first address that is configured still hears about the problem. To force a re-send, delete the row for that key. An escalation (`warn` → `fail`) is a new key and is always delivered.
 - The ledger prune job (`telephony.ledger.prune` in `motorist_job_controls`) is seeded **disabled**; enable it when retention should start running, otherwise the cron keeps reporting `disabled` and raw payloads accumulate.
 
 ## 10. Test coverage gaps
