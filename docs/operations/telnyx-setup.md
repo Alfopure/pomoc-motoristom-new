@@ -6,8 +6,8 @@ Non-secret identifiers only. The API key, SIP passwords, WebRTC tokens and any r
 
 | Number | API string | Number ID | Status | Line |
 |---|---|---|---|---|
-| +421 2 324 087 00 | `+4210232408700` | 3040091148564563176 | active | Neutrálna linka (default outbound) |
-| +421 2 324 087 18 | `+421232408718` | see `GET /v2/phone_numbers` | active | Allianz Assistance |
+| +421 2 324 087 00 | `+4210232408700` | 3040091148564563176 | active, **inbound only** | Neutrálna linka; cannot originate (malformed E.164 record, spike S3) |
+| +421 2 324 087 18 | `+421232408718` | see `GET /v2/phone_numbers` | active | Allianz Assistance; current `TELNYX_DEFAULT_FROM_NUMBER` |
 | +421 2 324 087 32 | `+421232408732` | see `GET /v2/phone_numbers` | active | Autoklub Slovakia Assistance |
 | +421 2 324 087 60 | `+421232408760` | see `GET /v2/phone_numbers` | active | AXA Assistance CZ |
 | +421 2 324 087 83 | `+421232408783` | see `GET /v2/phone_numbers` | active | Eurocross Assistance CR |
@@ -33,30 +33,19 @@ The first number's API string carries an extra leading `0` (provider quirk); alw
 | Outbound voice profile | 3040143019555686391 | SK+CZ, daily cap 2 USD, concurrency 4 |
 | Messaging profile | 4001a062-7f1b-45cc-9daf-5e110f66db17 | SK only, alpha sender `PomocMotor` |
 
-## Webhook URLs
-
-- Production voice: `https://test.dispecing.linkapomoci.sk/api/telephony/telnyx/webhook` (failover: the project's `*.vercel.app` alias).
-- Production SMS: `https://test.dispecing.linkapomoci.sk/api/sms/telnyx/webhook`.
-- Dev voice/SMS: the `dev` branch alias of this Vercel project.
-
-## Environment mapping
-
-`TELNYX_CALL_CONTROL_APP_ID`, `TELNYX_CREDENTIAL_CONNECTION_ID`, `TELNYX_OUTBOUND_VOICE_PROFILE_ID` and `TELNYX_MESSAGING_PROFILE_ID` take the production IDs on `main` and the dev IDs on Preview and `dev`. `TELNYX_DEFAULT_FROM_NUMBER` is the canonical string of the Neutrálna linka. See `.env.example` for the full `TELNYX_*` block.
-
-## Development / preview resources
-
-| Resource | ID | Notes |
-|---|---|---|
-| Call Control application | 3040143024395913209 | `pomoc-motoristom-dev`; webhook on the `dev` branch alias |
-| Credential connection (webphone) | 3040143034428688382 | `pomoc-motoristom-webrtc-dev`, SRTP, Frankfurt anchor |
-| Outbound voice profile | 3040143019555686391 | SK + CZ only, daily cap 2 USD, concurrency 4 |
-| Messaging profile | 4001a062-7f1b-45cc-9daf-5e110f66db17 | SK only, alpha sender `PomocMotor` |
-
 ## Webhook endpoints
 
 | Environment | Voice | SMS |
 |---|---|---|
-| Production (`main`) | `https://dispecing-test.vercel.app/api/telephony/telnyx/webhook` (failover on the project's default `*.vercel.app` alias) | `https://dispecing-test.vercel.app/api/sms/telnyx/webhook` |
+| Production (`main`) | `https://dispecing-test.vercel.app/api/telephony/telnyx/webhook` (failover: the project's default `*.vercel.app` alias) | `https://dispecing-test.vercel.app/api/sms/telnyx/webhook` |
 | Development (`dev` branch alias) | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/telephony/telnyx/webhook` | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/sms/telnyx/webhook` |
 
+Once the `test.dispecing.linkapomoci.sk` CNAME exists, the production URLs move to that domain and the `*.vercel.app` alias stays the failover.
+
 The production outbound voice profile whitelists all EU27 destinations; the development profile only SK and CZ. Both keep a daily spend cap and a per-minute destination price ceiling.
+
+## Environment mapping
+
+`TELNYX_CALL_CONTROL_APP_ID`, `TELNYX_CREDENTIAL_CONNECTION_ID`, `TELNYX_OUTBOUND_VOICE_PROFILE_ID` and `TELNYX_MESSAGING_PROFILE_ID` take the production IDs on `main` and the dev IDs on Preview and `dev`. `TELNYX_DEFAULT_FROM_NUMBER` is `+421232408718`: spike S3 showed that the first number cannot originate calls because of the malformed E.164 record Telnyx stores for it (see [`telnyx-runbook.md`](./telnyx-runbook.md)). See `.env.example` for the full `TELNYX_*` block.
+
+Operational procedures for these resources are in [`telnyx-runbook.md`](./telnyx-runbook.md).

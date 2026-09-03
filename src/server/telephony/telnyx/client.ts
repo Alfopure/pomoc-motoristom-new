@@ -159,6 +159,17 @@ export type TransferParams = CallLegRef & {
   mediaEncryption?: DialParams["mediaEncryption"];
   customHeaders?: Array<{ name: string; value: string }>;
 };
+/** Plain `gather`: waits for DTMF without playing anything (waiting-room tick). */
+export type GatherParams = CallLegRef & {
+  clientState?: string;
+  minimumDigits?: number;
+  maximumDigits?: number;
+  timeoutMillis?: number;
+  initialTimeoutMillis?: number;
+  interDigitTimeoutMillis?: number;
+  terminatingDigit?: string;
+  validDigits?: string;
+};
 export type GatherUsingAudioParams = CallLegRef & {
   audioUrl?: string;
   mediaName?: string;
@@ -255,6 +266,7 @@ export type TelnyxClient = {
   hangup(params: HangupParams): Promise<void>;
   bridge(params: BridgeParams): Promise<void>;
   transfer(params: TransferParams): Promise<void>;
+  gather(params: GatherParams): Promise<void>;
   gatherUsingAudio(params: GatherUsingAudioParams): Promise<void>;
   gatherUsingSpeak(params: GatherUsingSpeakParams): Promise<void>;
   gatherStop(params: GatherStopParams): Promise<void>;
@@ -501,7 +513,10 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     },
 
     answer(params) {
-      assertCallsAllowed();
+      // Deliberately not gated by `assertCallsAllowed()`: the kill switch stops
+      // us from *creating* legs (dial/transfer/message). Answering an inbound
+      // call creates nothing, and refusing it would make the whole inbound
+      // branch untestable while the switch is off (design §4).
       return callAction(params.callControlId, "answer", params.commandId, {
         client_state: params.clientState,
         custom_headers: headers(params.customHeaders),
@@ -542,6 +557,19 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         sip_region: params.sipRegion,
         media_encryption: params.mediaEncryption,
         custom_headers: headers(params.customHeaders),
+      });
+    },
+
+    gather(params) {
+      return callAction(params.callControlId, "gather", params.commandId, {
+        client_state: params.clientState,
+        minimum_digits: params.minimumDigits,
+        maximum_digits: params.maximumDigits,
+        timeout_millis: params.timeoutMillis,
+        initial_timeout_millis: params.initialTimeoutMillis,
+        inter_digit_timeout_millis: params.interDigitTimeoutMillis,
+        terminating_digit: params.terminatingDigit,
+        valid_digits: params.validDigits,
       });
     },
 

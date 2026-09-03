@@ -18,7 +18,7 @@ Frontend workflow nespúšťa workery, schedulery ani samostatné listener proce
 - Trvalý vývoj: vetva `dev` na branch aliase `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app`.
 - Work branch: automatický Vercel Preview s branch aliasom a immutable deployment URL.
 - Vercel Preview Authentication je vypnutá, aby Preview URL vedela otvoriť aj kolegyňa alebo kolega bez Vercel účtu. Supabase autentifikácia aplikácie zostáva povinná.
-- Jediný povolený cron: `*/5 * * * *` na `/api/telephony/cron` (bearer `CRON_SECRET`), definovaný vo `vercel.json` spolu s `regions: ["fra1"]`. Pribudne s Telnyx fázami 1 až 2; iné cron definície sa nepridávajú.
+- Jediný povolený cron: `*/5 * * * *` na `/api/telephony/cron` (bearer `CRON_SECRET`), definovaný vo `vercel.json` spolu s `regions: ["fra1"]`. Spúšťa ring sweep, detekciu zaseknutých relácií a prune webhook ledgera (`telephony.ledger.prune` je v `motorist_job_controls` predvolene vypnutý). Bez hlavičky vracia `401`, odpoveď obsahuje súhrn jednotlivých jobov a `status: "degraded"`, ak niektorý zlyhal. Iné cron definície sa nepridávajú.
 
 Preview aj `dev` používajú Supabase projekt tejto kópie. Nejde o pôvodné produkčné dáta, ale všetky zápisy sú reálne pre každého, kto na týchto deploymentoch testuje.
 
@@ -111,7 +111,16 @@ http://localhost:3000/**
 
 ## Telnyx webhooky
 
-Call Control aplikácie a messaging profily posielajú webhooky na `/api/telephony/telnyx/webhook` a `/api/sms/telnyx/webhook` (Fáza 2). Produkčná aplikácia mieri na produkčnú doménu s failoverom na `*.vercel.app` alias; dev aplikácia mieri na dev branch alias. Podpis webhooku sa overuje cez `TELNYX_PUBLIC_KEY`.
+Call Control aplikácie a messaging profily posielajú webhooky na dve verejné routy (autentifikáciou je Ed25519 podpis, nie session):
+
+| Prostredie | Voice | SMS |
+|---|---|---|
+| Production (`main`) | `https://dispecing-test.vercel.app/api/telephony/telnyx/webhook` (failover: predvolený `*.vercel.app` alias projektu) | `https://dispecing-test.vercel.app/api/sms/telnyx/webhook` |
+| `dev` branch alias | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/telephony/telnyx/webhook` | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/sms/telnyx/webhook` |
+
+Failover URL zámerne ukazuje na tú istú route cez `*.vercel.app` alias: claim ledger robí dvojité doručenie bezpečným. Podpis sa overuje cez `TELNYX_PUBLIC_KEY` (tolerancia 300 s); pri chýbajúcom kľúči routa vráti `503`, nie `400`. Udalosti s cudzím `connection_id` sa ignorujú s `200`, takže webhook z produkčnej Call Control aplikácie nesmie mieriť na dev deployment a naopak.
+
+Aktuálne identifikátory sú v [`docs/operations/telnyx-setup.md`](./operations/telnyx-setup.md), kontrakt v [`docs/telnyx-data-contract.md`](./telnyx-data-contract.md) a prevádzkové postupy v [`docs/operations/telnyx-runbook.md`](./operations/telnyx-runbook.md).
 
 ## Bezpečné overenie deploymentu
 
@@ -133,6 +142,7 @@ Počas smoke testu nevytváraj prípady, neupravuj vozidlá, nespúšťaj sync e
 - Vercel Git deployments: https://vercel.com/docs/git
 - Vercel environment variables: https://vercel.com/docs/environment-variables
 - Vercel cron jobs: https://vercel.com/docs/cron-jobs
+- Telnyx webhooks a overenie podpisu: https://developers.telnyx.com/docs/development/webhooks
 - Vercel Deployment Protection: https://vercel.com/docs/deployment-protection
 - Vercel custom domains: https://vercel.com/docs/domains/working-with-domains/add-a-domain
 - Supabase Auth redirect URLs: https://supabase.com/docs/guides/auth/redirect-urls

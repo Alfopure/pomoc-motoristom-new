@@ -4,7 +4,7 @@ import { createFakeSupabase } from "@/test/fake-supabase";
 import { SmsWorkflowError } from "@/server/sms-workflow";
 import { getTelnyxConfig } from "@/server/telephony/telnyx/env";
 
-import { createTelnyxSmsTransport, mapTelnyxSendStatus } from "./sms-client";
+import { createTelnyxSmsTransport, mapTelnyxSendStatus, resetSmsRateLimit } from "./sms-client";
 
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -16,10 +16,10 @@ const ENV = {
   TELNYX_SMS_LIVE_SENDS: "true",
 };
 
-function harness(options: { env?: Record<string, string | undefined>; smsLiveSends?: boolean } = {}) {
+function harness(options: { env?: Record<string, string | undefined>; smsLiveSends?: boolean; destinationAllowlist?: string[] } = {}) {
   const supabase = createFakeSupabase();
   supabase.db.seed("motorist_telephony_settings", [
-    { organization_id: ORGANIZATION_ID, live_calls_enabled: true, sms_live_sends: options.smsLiveSends ?? true },
+    { organization_id: ORGANIZATION_ID, live_calls_enabled: true, sms_live_sends: options.smsLiveSends ?? true, destination_allowlist: options.destinationAllowlist ?? ["SK", "CZ"] },
   ]);
   const fetchMock = vi.fn();
   const transport = createTelnyxSmsTransport({
@@ -37,7 +37,10 @@ function jsonResponse(body: unknown, status = 200) {
 const ACCEPTED = { data: { id: "msg-1", to: [{ phone_number: "+421905123456", status: "queued" }] } };
 
 describe("telnyx sms transport", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetSmsRateLimit();
+  });
 
   it("posts the alpha sender, recipient, text and messaging profile", async () => {
     const { fetchMock, transport } = harness();
@@ -137,6 +140,37 @@ describe("telnyx sms transport", () => {
       .catch((error: unknown) => error);
 
     expect((failure as SmsWorkflowError).status).toBe(502);
+  });
+
+  it("refuses a recipient outside the destination allowlist without calling Telnyx", async () => {
+    const { fetchMock, transport } = harness({ destinationAllowlist: ["SK"] });
+
+    const failure = await transport
+      .send({ to: "+18005550100", body: "Ahoj", idempotencyKey: "case:1:sms:eta_update", organizationId: ORGANIZATION_ID })
+      .then(() => null)
+      .catch((error: unknown) => error);
+
+    expect((failure as SmsWorkflowError).status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses an allowlisted-out recipient and an exhausted rate limit already in preflight", async () => {
+    const { fetchMock, transport } = harness({ destinationAllowlist: ["SK"] });
+
+    // The workflow writes its audit rows between preflight and send, so both
+    // guards must already refuse here.
+    const blocked = await transport.preflight({ organizationId: ORGANIZATION_ID, to: "+18005550100" }).catch((error: unknown) => error);
+    expect((blocked as SmsWorkflowError).status).toBe(403);
+    await expect(transport.preflight({ organizationId: ORGANIZATION_ID, to: "+421905123456" })).resolves.toBeUndefined();
+
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(ACCEPTED)));
+    for (let index = 0; index < 20; index += 1) {
+      await transport.send({ to: "+421905123456", body: "Ahoj", idempotencyKey: `k-${index}`, organizationId: ORGANIZATION_ID });
+    }
+    const limited = await transport.preflight({ organizationId: ORGANIZATION_ID, to: "+421905123456" }).catch((error: unknown) => error);
+    expect((limited as SmsWorkflowError).status).toBe(429);
+    // Preflight only peeks: the 20 sends are what consumed the window.
+    expect(fetchMock).toHaveBeenCalledTimes(20);
   });
 
   it("maps a response without a message id to a 502 workflow error", async () => {

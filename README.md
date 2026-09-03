@@ -1,6 +1,6 @@
 # Linka pomoci motoristom - dispečing
 
-Next.js + TypeScript + Tailwind základ pre pracovný dispečing Pomoc Motoristom. UI beží proti Supabase (s deterministickým mock fallbackom) a repozitár smeruje na produkčný foundation stack: Supabase, telefónia cez Telnyx (vo výstavbe), provider adaptéry a organizáciou konfigurovateľný model.
+Next.js + TypeScript + Tailwind základ pre pracovný dispečing Pomoc Motoristom. UI beží proti Supabase (s deterministickým mock fallbackom) a repozitár smeruje na produkčný foundation stack: Supabase, telefónia cez Telnyx (Call Control, WebRTC, Messaging), provider adaptéry a organizáciou konfigurovateľný model.
 
 Tento repozitár je **samostatná kópia** dispečingu určená pre prechod na Telnyx. Má vlastný Supabase projekt (Frankfurt) aj vlastný Vercel projekt (región `fra1`) a nikdy sa nedotýka pôvodného produkčného projektu ani predchádzajúceho telefónneho providera.
 
@@ -45,7 +45,9 @@ Seed pridá konkrétne pobočky v Bratislave, Žiline, Liptovskom Mikuláši a K
 
 Aplikácia používa Supabase ako hlavný zdroj dát, Google Maps/Places v prehliadači a Google Routes API cez server route. UI stále obsahuje mock fallback, aby ostalo použiteľné bez Supabase alebo pri výpadku mapových služieb.
 
-Telefónia je po odstránení predchádzajúceho providera v režime **„Telefónia nie je nakonfigurovaná"**: log hovorov, spätné volania, adresár, výsledky hovorov a prepojenie hovoru s prípadom fungujú, ale vytáčanie, prezencia a SMS odosielanie hlásia nenakonfigurovaný stav, kým nepribudne Telnyx (plán v [docs/telnyx-data-contract.md](docs/telnyx-data-contract.md)). Telnyx sa nebude volať priamo z prehliadača: webhooky a REST príkazy spracúva server, prehliadač číta normalizované dáta zo Supabase a telefonuje cez WebRTC s krátkodobým tokenom vydaným serverom.
+Telefónia beží na Telnyxe (Call Control pre hovory, WebRTC pre prehliadačový telefón, Messaging pre odchádzajúce SMS). Fáza 2 priniesla podpísané webhooky s claim ledgerom, stavový automat hovoru (relácie a legy), ring plány a skupiny, pracovný čas, IVR vstup, prezenciu a zariadenia operátorov, PhoneBar s čakárňou, hold/prepojenie/park, SMS transport a Supabase Realtime broadcast. Telnyx sa nikdy nevolá priamo z prehliadača: webhooky a REST príkazy spracúva server, prehliadač číta normalizované dáta a telefonuje cez WebRTC s krátkodobým tokenom vydaným serverom.
+
+Bez `TELNYX_API_KEY` aplikácia naďalej beží v režime **„Telefónia nie je nakonfigurovaná"**: log hovorov, spätné volania, adresár, výsledky hovorov a prepojenie hovoru s prípadom fungujú, ale telefónne routy vracajú 503 a UI zobrazí upozornenie. Oba kill switche (`TELNYX_LIVE_CALLS_ENABLED`, `TELNYX_SMS_LIVE_SENDS`) sú predvolene vypnuté a kombinujú sa s databázovými prepínačmi v `motorist_telephony_settings`; kým sú vypnuté, žiadny príkaz voči providerovi ani SMS neodíde. Kontrakt je v [docs/telnyx-data-contract.md](docs/telnyx-data-contract.md), prevádzkové postupy v [docs/operations/telnyx-runbook.md](docs/operations/telnyx-runbook.md).
 
 Dispečerská konzola používa Supabase Auth s prihlásením heslom a mapovaním na aktívne `motorist_profiles`. Všetky aplikačné tabuľky používajú prefix `motorist_`.
 
@@ -60,7 +62,8 @@ Dispečerská konzola používa Supabase Auth s prihlásením heslom a mapovaní
 - `docs/security-model.md` - role, RLS, audit, secrets a GDPR poznámky.
 - `docs/integration-strategy.md` - telefónia, SMS, mapy, fleet a AI cez provider adaptéry.
 - `docs/client-configuration.md` - single-client first, multi-client-ready nastavenia.
-- `docs/telnyx-data-contract.md` - dátový kontrakt telefónie na Telnyxe (odkaz na návrh).
+- `docs/telnyx-data-contract.md` - dátový kontrakt telefónie na Telnyxe (webhooky, stavový automat, ring plány, retencia).
+- `docs/operations/telnyx-runbook.md` - prevádzkové postupy telefónie (spiky, zaseknutý hovor, rotácia prístupov, kill switche).
 - `docs/operations/telnyx-setup.md` - identifikátory Telnyx zdrojov (bez tajomstiev).
 - `docs/deployment-vercel.md` - Vercel prostredia, build gate a domény tejto kópie.
 

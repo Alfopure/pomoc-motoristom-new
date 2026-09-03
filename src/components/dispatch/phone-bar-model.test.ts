@@ -9,6 +9,7 @@ import {
   phoneBarCapabilities,
   phoneBarStateLabel,
   phoneBarVisible,
+  phoneTakeoverAvailable,
   PHONE_ACTION_LABELS,
 } from "./phone-bar-model";
 
@@ -121,6 +122,14 @@ describe("presentation helpers", () => {
     expect(phoneBarVisible({ status: "idle", hasCall: false, hasOffer: false, hasWaiting: false })).toBe(false);
     expect(phoneBarVisible({ status: "idle", hasCall: false, hasOffer: false, hasWaiting: true })).toBe(true);
     expect(phoneBarVisible({ status: "registered", hasCall: false, hasOffer: false, hasWaiting: false })).toBe(true);
+  });
+
+  it("offers the takeover only for the two terminal registration statuses", () => {
+    expect(phoneTakeoverAvailable("failed")).toBe(true);
+    expect(phoneTakeoverAvailable("superseded")).toBe(true);
+    for (const status of ["idle", "requesting_token", "connecting", "registered", "reconnecting", "not_configured"] as const) {
+      expect(phoneTakeoverAvailable(status)).toBe(false);
+    }
   });
 
   it("accepts only real DTMF keys", () => {

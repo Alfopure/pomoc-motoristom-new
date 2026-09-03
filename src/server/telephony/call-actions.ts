@@ -7,9 +7,10 @@ import { normalizeE164 } from "./phone/normalize-e164";
 import { presenceAllowsOffer } from "./routing/eligibility";
 import { releaseOperator, reserveOperator } from "./routing/reservation";
 import { effectsDeps, loadRoutingSettings, runSessionEvent, type SessionRunnerDeps, type SessionRunResult } from "./session-runner";
-import { upsertCallRow, upsertDialedLeg } from "./state/effects";
+import { isOverLegCap, loadDailyUsage } from "./usage";
+import { upsertCallRow, upsertDialedLeg, type CommandOutcome } from "./state/effects";
 import { CallActionRejected } from "./state/transitions";
-import { ACTIVE_SESSION_STATES, WAITING_STATES, toJson, type AppEvent, type AppEventType, type DeviceRow, type LineRow, type SessionRow, type TransferTarget } from "./state/types";
+import { ACTIVE_SESSION_STATES, LEG_TIME_LIMIT_SECS, WAITING_STATES, toJson, type AppEvent, type AppEventType, type DeviceRow, type LineRow, type SessionRow, type TransferTarget } from "./state/types";
 import { TelnyxCommandError, TelnyxLiveCallsDisabledError } from "./telnyx/client";
 import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
@@ -74,6 +75,40 @@ export function createRateLimiter(options: { now?: () => number } = {}): RateLim
 }
 
 const defaultRateLimiter = createRateLimiter();
+
+/**
+ * Serverless instances do not share the in-memory bucket above, so the limit is
+ * also checked against the sessions this operator actually created (the source
+ * of truth every instance sees).
+ */
+async function assertOutboundRate(deps: CallActionDeps, actor: CallActor): Promise<void> {
+  const limiter = deps.rateLimiter ?? defaultRateLimiter;
+  if (!limiter.hit(`dial:${actor.profileId}`, OUTBOUND_RATE_LIMIT.limit, OUTBOUND_RATE_LIMIT.windowMs)) {
+    throw new CallActionError("Príliš veľa odchádzajúcich hovorov za minútu.", 429, "rate_limited");
+  }
+  const since = new Date(nowOf(deps).getTime() - OUTBOUND_RATE_LIMIT.windowMs).toISOString();
+  const { count, error } = await deps.admin
+    .from("motorist_call_sessions")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", deps.organizationId)
+    .eq("answered_by_profile_id", actor.profileId)
+    .in("direction", ["outbound", "internal"])
+    .gte("started_at", since);
+  if (error) return; // never block a call on a failing counter
+  if ((count ?? 0) >= OUTBOUND_RATE_LIMIT.limit) {
+    throw new CallActionError("Príliš veľa odchádzajúcich hovorov za minútu.", 429, "rate_limited");
+  }
+}
+
+/** Refuses operator-initiated legs once the organisation reached its daily soft cap. */
+async function assertLegBudget(deps: CallActionDeps): Promise<void> {
+  const now = nowOf(deps);
+  const [usage, settings] = await Promise.all([loadDailyUsage(deps.admin, { organizationId: deps.organizationId, now }), loadRoutingSettings(deps.admin, deps.organizationId)]);
+  if (isOverLegCap(usage, settings.raw?.daily_leg_soft_cap ?? null)) {
+    deps.logger?.({ level: "warn", scope: "call-actions", message: "daily leg cap reached", legs: usage.legs, cap: settings.raw?.daily_leg_soft_cap ?? null });
+    throw new CallActionError("Denný limit hovorov bol vyčerpaný.", 429, "daily_cap_reached");
+  }
+}
 
 // --- allowlist ---------------------------------------------------------------
 
@@ -212,6 +247,9 @@ async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, tar
     return { kind: "operator", profileId: target.profileId, sipUri: device.sipUri, label: profile.data.display_name };
   }
   if (target.number) {
+    // A PSTN transfer/consult target is a billable outbound leg: same guards as a dial.
+    await assertOutboundRate(deps, actor);
+    await assertLegBudget(deps);
     const number = await normalizeDestination(deps, target.number);
     return { kind: "number", number, label: number };
   }
@@ -225,10 +263,8 @@ export type StartOutboundResult = { sessionId: string; operatorLegCallControlId:
 
 export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput): Promise<StartOutboundResult> {
   const telnyx = requireConfigured(deps);
-  const limiter = deps.rateLimiter ?? defaultRateLimiter;
-  if (!limiter.hit(`dial:${actor.profileId}`, OUTBOUND_RATE_LIMIT.limit, OUTBOUND_RATE_LIMIT.windowMs)) {
-    throw new CallActionError("Príliš veľa odchádzajúcich hovorov za minútu.", 429, "rate_limited");
-  }
+  await assertOutboundRate(deps, actor);
+  await assertLegBudget(deps);
   const to = await normalizeDestination(deps, input.to);
   const device = await requireLiveDevice(deps, actor.profileId);
   const { line, from } = await resolveFromLine(deps, actor.profileId, input.lineId);
@@ -270,6 +306,9 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
       from,
       clientState: encodeState(dial.clientState),
       timeoutSecs: dial.timeoutSecs,
+      // Backstop: if this HTTP call times out while Telnyx did create the leg,
+      // we never learn its id and could not hang it up.
+      timeLimitSecs: LEG_TIME_LIMIT_SECS,
       sipRegion: "Europe",
       mediaEncryption: "SRTP",
       customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }],
@@ -291,10 +330,8 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
 export async function callColleague(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string }): Promise<StartOutboundResult> {
   const telnyx = requireConfigured(deps);
   if (input.targetProfileId === actor.profileId) throw new CallActionError("Nie je možné volať sám sebe.", 400, "self_call");
-  const limiter = deps.rateLimiter ?? defaultRateLimiter;
-  if (!limiter.hit(`dial:${actor.profileId}`, OUTBOUND_RATE_LIMIT.limit, OUTBOUND_RATE_LIMIT.windowMs)) {
-    throw new CallActionError("Príliš veľa odchádzajúcich hovorov za minútu.", 429, "rate_limited");
-  }
+  await assertOutboundRate(deps, actor);
+  await assertLegBudget(deps);
   const target = await resolveTransferTarget(deps, actor, { profileId: input.targetProfileId });
   if (target.kind !== "operator") throw new CallActionError("Kolega sa nenašiel.", 404);
   const device = await requireLiveDevice(deps, actor.profileId);
@@ -334,6 +371,9 @@ export async function callColleague(deps: CallActionDeps, actor: CallActor, inpu
       from,
       clientState: encodeState(dial.clientState),
       timeoutSecs: dial.timeoutSecs,
+      // Backstop: if this HTTP call times out while Telnyx did create the leg,
+      // we never learn its id and could not hang it up.
+      timeLimitSecs: LEG_TIME_LIMIT_SECS,
       sipRegion: "Europe",
       mediaEncryption: "SRTP",
       customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }],
@@ -352,7 +392,28 @@ export async function callColleague(deps: CallActionDeps, actor: CallActor, inpu
 
 // --- in-call actions ---------------------------------------------------------
 
-export type CallActionResult = { sessionId: string; state: SessionRow["state"]; commands: Array<{ kind: string; ok: boolean; error: string | null }>; ignored: string | null };
+export type CallActionResult = {
+  sessionId: string;
+  state: SessionRow["state"];
+  commands: Array<{ kind: string; ok: boolean; error: string | null }>;
+  ignored: string | null;
+  /**
+   * Call-control id of an operator leg this action dialled (pickup). The tab
+   * needs it to auto-answer exactly that invite (design §2.2) instead of
+   * trusting the `X-PM-Auto-Answer` header alone.
+   */
+  operatorLegCallControlId?: string;
+};
+
+/** `detail.callControlId` of the first successful `dial` command of a transition. */
+function dialedLegCallControlId(commands: CommandOutcome[]): string | undefined {
+  for (const command of commands) {
+    if (command.kind !== "dial" || !command.ok) continue;
+    const id = command.detail?.callControlId;
+    if (typeof id === "string" && id) return id;
+  }
+  return undefined;
+}
 
 async function runAction(deps: CallActionDeps, session: SessionRow, event: AppEvent, failureMessage: string): Promise<CallActionResult> {
   requireConfigured(deps);
@@ -368,7 +429,7 @@ async function runAction(deps: CallActionDeps, session: SessionRow, event: AppEv
   if (run.apply.failed) {
     throw new CallActionError(`${failureMessage} (${run.apply.failure?.error ?? "neznáma chyba"})`, 502, "command_failed");
   }
-  return { sessionId: session.id, state: run.session.state, commands, ignored: null };
+  return { sessionId: session.id, state: run.session.state, commands, ignored: null, operatorLegCallControlId: dialedLegCallControlId(run.commands) };
 }
 
 function appEvent(type: AppEventType, actor: CallActor | null, deps: CallActionDeps, extra: Partial<AppEvent> = {}): AppEvent {
@@ -510,6 +571,9 @@ async function createSession(
 async function markSessionFailed(deps: CallActionDeps, session: SessionRow, reason: string): Promise<void> {
   const now = nowOf(deps).toISOString();
   await deps.admin.from("motorist_call_sessions").update({ state: "failed", ended_at: now, metadata: toJson({ ...(session.metadata as object), failure: reason }) }).eq("id", session.id);
+  // Close any leg the failed attempt left open: an open leg row counts against
+  // the org-wide `max_concurrent_legs` gate until something ends it.
+  await deps.admin.from("motorist_call_legs").update({ state: "ended", ended_at: now, hangup_cause: reason }).eq("session_id", session.id).is("ended_at", null);
   await upsertCallRow(effectsFor(deps), { ...session, state: "failed", ended_at: now }, { status: "failed", end_reason: reason });
 }
 

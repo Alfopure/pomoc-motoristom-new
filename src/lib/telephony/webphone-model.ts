@@ -103,6 +103,7 @@ export const WEBPHONE_INITIAL_STATE: WebphoneState = {
 const SUPERSEDED_MESSAGE = "Telefón je prihlásený v inom okne.";
 const NOT_CONFIGURED_MESSAGE = "Telefónia nie je nakonfigurovaná.";
 const FORBIDDEN_MESSAGE = "Prihlásený účet nemá telefón dispečingu.";
+export const TAKEOVER_MESSAGE = "Telefón je prihlásený v inom okne a prebieha hovor.";
 
 /** Terminal statuses: only an explicit `start` (a reload / new login) leaves them. */
 export function isTerminalWebphoneStatus(status: WebphoneStatus): boolean {
@@ -191,6 +192,24 @@ export function reduceWebphone(
       if (event.status === 403) {
         return {
           state: { status: "failed", attempts: 0, credentials: null, message: event.message ?? FORBIDDEN_MESSAGE },
+          effects: [{ kind: "clear_timers" }, { kind: "disconnect" }],
+        };
+      }
+      // 409: another tab holds the credential and is ringing / on a call.
+      // Retrying cannot help; only an explicit takeover may proceed.
+      if (event.status === 409) {
+        // …unless we are already registered: this was a scheduled refresh, and
+        // dropping the socket would kill the media of the call in progress.
+        // The current token is still valid, so keep it and retry the renewal.
+        if (state.status === "registered") {
+          const attempts = state.attempts + 1;
+          return {
+            state: { status: "registered", attempts, credentials: state.credentials, message: event.message ?? TAKEOVER_MESSAGE },
+            effects: [{ kind: "clear_timers" }, { kind: "retry_after", delayMs: webphoneRetryDelayMs(attempts, context.random) }],
+          };
+        }
+        return {
+          state: { status: "failed", attempts: 0, credentials: null, message: event.message ?? TAKEOVER_MESSAGE },
           effects: [{ kind: "clear_timers" }, { kind: "disconnect" }],
         };
       }
@@ -347,4 +366,25 @@ export function inviteHasAutoAnswerHeader(invite: InviteIdentity): boolean {
   return (invite.customHeaders ?? []).some(
     (header) => header?.name?.toLowerCase() === "x-pm-auto-answer" && header?.value === "1",
   );
+}
+
+/**
+ * Decides whether the invite may be answered without the operator: the
+ * call-control id is the discriminator (design §2.2), and the
+ * `X-PM-Auto-Answer` header is only a tiebreaker for the window in which this
+ * tab has exactly one outstanding leg it asked for but whose id has not come
+ * back from the API yet. A header on its own never auto-answers — it carries no
+ * session identity, so a leg for a call this tab has given up on (or one landing
+ * in a second tab during a takeover) would be answered silently.
+ */
+export function matchAutoAnswer(
+  expected: readonly ExpectedOperatorLeg[],
+  invite: InviteIdentity,
+  now: number,
+): ExpectedOperatorLeg | null {
+  const byId = matchExpectedLeg(expected, invite, now);
+  if (byId) return byId;
+  if (!inviteHasAutoAnswerHeader(invite)) return null;
+  const pending = pruneExpectedLegs(expected, now);
+  return pending.length === 1 ? pending[0] : null;
 }

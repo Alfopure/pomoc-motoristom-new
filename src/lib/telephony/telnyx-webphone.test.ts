@@ -171,6 +171,56 @@ describe("TelnyxWebphone", () => {
     expect(h.phone.getSnapshot().call?.active).toBe(true);
   });
 
+  it("answers an invite that arrived before the dial response registered its leg", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+
+    // The SIP invite wins the race against `POST /api/telephony/calls`.
+    const call = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
+    expect(call.answered).toBe(false);
+
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+
+    expect(call.answered).toBe(true);
+    expect(h.phone.getSnapshot().call?.sessionId).toBe("sess-1");
+  });
+
+  it("uses the X-PM-Auto-Answer header only as a tiebreaker for an outstanding leg", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+
+    // The header alone is not enough: it carries no session identity, and this
+    // tab has asked for no leg.
+    const stray = fakeCall({
+      id: "call-stray",
+      telnyxIDs: { telnyxCallControlId: "cc-stray", telnyxSessionId: "ts", telnyxLegId: "leg" },
+      options: { remoteCallerNumber: "+421900111222", customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] },
+    });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: stray } satisfies WebphoneSdkNotification);
+    expect(stray.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "call-stray", ringing: true, sessionId: null });
+    stray.hangup();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: stray } satisfies WebphoneSdkNotification);
+
+    // With exactly one leg this tab asked for outstanding, the header decides —
+    // the pickup invite can arrive before its call-control id does.
+    h.phone.expectOperatorLeg({ callControlId: "cc-pickup", sessionId: "sess-9" });
+    const call = fakeCall({
+      telnyxIDs: { telnyxCallControlId: "cc-other-id", telnyxSessionId: "ts", telnyxLegId: "leg" },
+      options: { remoteCallerNumber: "+421900111222", customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] },
+    });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
+
+    expect(call.answered).toBe(true);
+    expect(h.phone.getSnapshot().call?.active).toBe(true);
+    expect(h.phone.getSnapshot().call?.sessionId).toBe("sess-9");
+  });
+
   it("leaves an unexpected invite ringing for the operator", async () => {
     const h = harness();
     h.phone.start();

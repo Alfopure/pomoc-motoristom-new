@@ -728,7 +728,7 @@ create or replace function public.motorist_telnyx_claim_webhook_event(
   p_occurred_at timestamptz default null,
   p_stale_after_ms integer default 30000
 )
-returns table (outcome text, event_status text, event_attempts integer)
+returns table (outcome text, event_status text, event_attempts integer, event_claimed_at timestamptz)
 language plpgsql
 security definer
 set search_path = ''
@@ -772,6 +772,7 @@ begin
     outcome := 'claimed';
     event_status := v_row.status;
     event_attempts := v_row.attempts;
+    event_claimed_at := v_row.claimed_at;
     return next;
     return;
   end if;
@@ -786,6 +787,7 @@ begin
     outcome := 'duplicate';
     event_status := v_row.status;
     event_attempts := v_row.attempts;
+    event_claimed_at := v_row.claimed_at;
     return next;
     return;
   end if;
@@ -794,6 +796,7 @@ begin
     outcome := 'busy';
     event_status := v_row.status;
     event_attempts := v_row.attempts;
+    event_claimed_at := v_row.claimed_at;
     return next;
     return;
   end if;
@@ -810,6 +813,9 @@ begin
   outcome := 'claimed';
   event_status := v_row.status;
   event_attempts := v_row.attempts;
+  -- The claim stamp identifies this claim: the ledger update is scoped to it so a
+  -- late finisher cannot release a claim that a redelivery has already taken over.
+  event_claimed_at := v_row.claimed_at;
   return next;
 end;
 $$;
@@ -864,7 +870,9 @@ as $$
 $$;
 
 -- Atomic operator reservation on the operator leg's call.answered: exactly
--- one session may move an operator to on_call.
+-- one session may move an operator to on_call. Re-entrant for the session that
+-- already holds the reservation (a version CAS retry re-runs the guard, and a
+-- second `false` there would hang up the leg that legitimately answered).
 create or replace function public.motorist_reserve_operator(
   p_profile_id uuid,
   p_session_id uuid
@@ -883,7 +891,10 @@ as $$
       status_since = pg_catalog.now(),
       updated_at = pg_catalog.now()
     where profile_id = p_profile_id
-      and status in ('available', 'ringing', 'after_call_work')
+      and (
+        status in ('available', 'ringing', 'after_call_work')
+        or current_session_id = p_session_id
+      )
       and (current_session_id is null or current_session_id = p_session_id)
     returning 1
   )

@@ -28,7 +28,7 @@ describe("claimWebhookEvent", () => {
 
     const claim = await claimWebhookEvent(admin, input);
 
-    expect(claim).toEqual({ outcome: "claimed", status: "queued", attempts: 1 });
+    expect(claim).toEqual({ outcome: "claimed", status: "queued", attempts: 1, claimedAt: expect.any(String) });
     expect(describeWebhookClaim(claim)).toBe("claimed(queued#1)");
     expect(db.rows("motorist_telnyx_webhook_events")).toEqual([
       expect.objectContaining({
@@ -62,7 +62,7 @@ describe("claimWebhookEvent", () => {
     });
 
     db.setNow(new Date(START + 60_000));
-    expect(await claimWebhookEvent(admin, input)).toEqual({ outcome: "duplicate", status: "processed", attempts: 1 });
+    expect(await claimWebhookEvent(admin, input)).toEqual({ outcome: "duplicate", status: "processed", attempts: 1, claimedAt: null });
   });
 
   it("reports busy while another invocation holds a fresh claim", async () => {
@@ -70,7 +70,7 @@ describe("claimWebhookEvent", () => {
     await claimWebhookEvent(admin, input);
 
     db.setNow(new Date(START + 10_000));
-    expect(await claimWebhookEvent(admin, input)).toEqual({ outcome: "busy", status: "queued", attempts: 1 });
+    expect(await claimWebhookEvent(admin, input)).toEqual({ outcome: "busy", status: "queued", attempts: 1, claimedAt: expect.any(String) });
     expect(db.rows("motorist_telnyx_webhook_events")[0]).toMatchObject({ attempts: 1, claimed_at: "2026-09-03T10:00:00.000Z" });
   });
 
@@ -84,7 +84,7 @@ describe("claimWebhookEvent", () => {
     expect(await claimWebhookEvent(admin, input)).toMatchObject({ outcome: "busy" });
 
     db.setNow(new Date(START + 31_000));
-    expect(await claimWebhookEvent(admin, input)).toEqual({ outcome: "claimed", status: "failed", attempts: 2 });
+    expect(await claimWebhookEvent(admin, input)).toEqual({ outcome: "claimed", status: "failed", attempts: 2, claimedAt: expect.any(String) });
     expect(db.rows("motorist_telnyx_webhook_events")[0]).toMatchObject({ attempts: 2, claimed_at: "2026-09-03T10:00:31.000Z" });
 
     // A custom stale window is passed through to the RPC.

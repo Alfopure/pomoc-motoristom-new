@@ -120,14 +120,14 @@ describe("fake-supabase telephony RPCs", () => {
     const args = { p_event_id: "evt-1", p_event_type: "call.initiated", p_payload: { a: 1 } };
 
     const first = await client.rpc("motorist_telnyx_claim_webhook_event", args).single();
-    expect(first.data).toEqual({ outcome: "claimed", event_status: "queued", event_attempts: 1 });
+    expect(first.data).toEqual({ outcome: "claimed", event_status: "queued", event_attempts: 1, event_claimed_at: "2026-09-03T10:00:00.000Z" });
 
     const busy = await client.rpc("motorist_telnyx_claim_webhook_event", args).single();
     expect(busy.data).toMatchObject({ outcome: "busy", event_attempts: 1 });
 
     db.setNow(new Date(start + 31_000));
     const reclaimed = await client.rpc("motorist_telnyx_claim_webhook_event", args).single();
-    expect(reclaimed.data).toEqual({ outcome: "claimed", event_status: "queued", event_attempts: 2 });
+    expect(reclaimed.data).toEqual({ outcome: "claimed", event_status: "queued", event_attempts: 2, event_claimed_at: "2026-09-03T10:00:31.000Z" });
 
     await client.from("motorist_telnyx_webhook_events").update({ status: "processed" }).eq("event_id", "evt-1");
     db.setNow(new Date(start + 120_000));

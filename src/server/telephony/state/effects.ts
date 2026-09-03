@@ -3,13 +3,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/database.types";
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 
-import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "../incidents";
+import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
+import { addTelephonyUsage } from "../usage";
 import { advanceRingStep } from "../routing/ring-plan";
 import { reserveOperator } from "../routing/reservation";
 import { encodeClientState } from "../telnyx/client-state";
 import { TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
 import {
   DEFAULT_TTS_VOICE,
+  LEG_TIME_LIMIT_SECS,
   callStatusForSession,
   commandKey,
   mediaUrl,
@@ -56,6 +58,12 @@ export type EffectsDeps = {
   logger?: (entry: Record<string, unknown>) => void;
   /** Wrap-up seconds for an operator (defaults to 30 when unknown). */
   wrapUpSecondsFor?: (profileId: string) => Promise<number>;
+  /**
+   * Extends the per-session lease held by the caller. A ring fan-out issues up to
+   * `MAX_RING_FANOUT` sequential dials, each with its own command timeout, which
+   * easily outlives the 4 s lease; the RPC is re-entrant for the same token.
+   */
+  renewLease?: () => Promise<void>;
 };
 
 export type CommandOutcome = {
@@ -455,6 +463,11 @@ function requireTelnyx(deps: EffectsDeps): TelnyxClient {
   return deps.telnyx;
 }
 
+/** A hangup for a leg Telnyx no longer knows (404) or refuses to touch because it ended (422). */
+function isLegAlreadyGone(error: unknown): boolean {
+  return error instanceof TelnyxCommandError && (error.status === 404 || error.status === 422);
+}
+
 async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command: Command): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   const telnyx = requireTelnyx(deps);
   switch (command.kind) {
@@ -462,7 +475,16 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       await telnyx.answer({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, clientState: encodeClientState(command.clientState) });
       return { skipped: false };
     case "hangup":
-      await telnyx.hangup({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId });
+      try {
+        await telnyx.hangup({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId });
+      } catch (error) {
+        // The leg is already gone (the far end hung up a moment earlier): that
+        // is exactly the outcome we asked for, not a failed transition. Without
+        // this, an operator pressing "Ukončiť" on a call the caller just ended
+        // gets a 502 for a session that is already terminal.
+        if (!isLegAlreadyGone(error)) throw error;
+        return { skipped: true, detail: { reason: command.reason, alreadyGone: true } };
+      }
       return { skipped: false, detail: { reason: command.reason } };
     case "bridge":
       await telnyx.bridge({
@@ -485,7 +507,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       return { skipped: false };
     case "gather": {
       const leg = resolveLeg(ctx, command.leg);
-      const url = mediaUrl(deps.mediaBaseUrl, command.spec.media);
+      const url = command.spec.media ? mediaUrl(deps.mediaBaseUrl, command.spec.media) : null;
       const common = {
         callControlId: leg,
         commandId: command.commandId,
@@ -494,6 +516,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         maximumDigits: command.spec.maximumDigits,
         maximumTries: command.spec.maximumTries,
         timeoutMillis: command.spec.timeoutMillis,
+        initialTimeoutMillis: command.spec.initialTimeoutMillis,
         interDigitTimeoutMillis: command.spec.interDigitTimeoutMillis,
         validDigits: command.spec.validDigits,
       };
@@ -504,6 +527,12 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       if (command.spec.ttsText) {
         await telnyx.gatherUsingSpeak({ ...common, payload: command.spec.ttsText, voice: DEFAULT_TTS_VOICE });
         return { skipped: false, detail: { tts: true, purpose: command.spec.purpose } };
+      }
+      if (command.spec.media === null) {
+        // Silent gather: the waiting-room tick, which must not interrupt the
+        // `playback_start` loop that carries the music.
+        await telnyx.gather(common);
+        return { skipped: false, detail: { silent: true, purpose: command.spec.purpose } };
       }
       return { skipped: true, detail: { reason: "no media and no tts text", purpose: command.spec.purpose } };
     }
@@ -587,6 +616,7 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     clientState: encodeClientState(command.clientState),
     linkTo: command.linkTo ?? undefined,
     timeoutSecs: command.timeoutSecs,
+    timeLimitSecs: LEG_TIME_LIMIT_SECS,
     sipRegion: "Europe",
     mediaEncryption: isSip ? "SRTP" : undefined,
     customHeaders: command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" }] : undefined,
@@ -616,6 +646,8 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
   const upserted = await admin.from("motorist_call_legs").upsert(values, { onConflict: "telnyx_call_control_id" }).select("*").single();
   if (upserted.error) fail("dialed leg upsert failed", upserted.error);
   const leg = upserted.data;
+  // Every dial is a billable leg: count it for the daily soft cap (best effort).
+  await addTelephonyUsage(admin, { organizationId: session.organization_id, now: deps.now(), legs: 1, logger: deps.logger });
   if (command.attempt) {
     let query = admin
       .from("motorist_ring_attempts")
@@ -696,6 +728,9 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   const failures: Array<{ to: string; error: string }> = [];
   for (const dial of dials) {
     try {
+      // Keep the lease alive across a slow fan-out so a concurrent `call.answered`
+      // cannot start dialling the rest of the group behind our back.
+      await deps.renewLease?.();
       await executeDial(deps, ctx, dial);
       succeeded += 1;
     } catch (error) {
@@ -716,8 +751,10 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     }
   }
 
-  if (dials.length > 0 && succeeded === 0) {
-    // Nobody will hang up, so nothing would advance the step: make it overdue for the next sweep.
+  if (command.attempts.length > 0 && succeeded === 0) {
+    // Nobody is ringing (every dial failed, or every member was already offered
+    // in a concurrent session), so no Telnyx event will advance the step:
+    // make it overdue so the next sweep or webhook moves on immediately.
     const meta = readMeta(ctx.session);
     const updated = await admin
       .from("motorist_call_sessions")
@@ -803,6 +840,8 @@ export async function applyReduceResult(
   if (!failure) {
     const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("id", session.id).maybeSingle();
     if (fresh.data) session = fresh.data;
+    // Clean transition: close the open command incident (throttled per instance).
+    await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.commands, deps.now());
   }
 
   return { session, branch, commands: outcomes, compensations: compensated, failed: failure !== null, failure, notes: transition.notes };

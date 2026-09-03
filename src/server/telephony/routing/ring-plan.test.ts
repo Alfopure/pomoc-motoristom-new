@@ -13,6 +13,8 @@ import {
   memberKey,
   planRingStep,
   stepDeadline,
+  closeOrphanLegs,
+  closeStaleRingAttempts,
   sweepOverdueRingSteps,
 } from "./ring-plan";
 
@@ -197,6 +199,79 @@ describe("advanceRingStep and sweep", () => {
       },
     });
     expect(ran).toEqual([a.id, c.id, d.id]);
-    expect(result).toMatchObject({ checked: 3, swept: [a.id, d.id], errors: [{ sessionId: c.id, error: "boom" }] });
+    expect(result).toMatchObject({ checked: 3, swept: [a.id, d.id], deferred: [], errors: [{ sessionId: c.id, error: "boom" }] });
+  });
+
+  it("defers targets beyond the inline limit and the time budget", async () => {
+    const h = createTelephonyHarness();
+    const overdue = new Date(h.now().getTime() - 1_000).toISOString();
+    const seeded = h.db.seed(
+      "motorist_call_sessions",
+      [0, 1, 2].map(() => ({ organization_id: ORG, direction: "inbound" as const, state: "ringing", metadata: { ring: { step_deadline_at: overdue } } })),
+    );
+
+    const ran: string[] = [];
+    const limited = await sweepOverdueRingSteps({
+      admin: h.admin,
+      organizationId: ORG,
+      now: () => h.now(),
+      limit: 2,
+      runSessionEvent: async (sessionId) => void ran.push(sessionId),
+    });
+    expect(ran).toHaveLength(2);
+    expect(limited).toMatchObject({ checked: 3, deferred: [String(seeded[2].id)] });
+
+    // The budget stops the pass before the second session even starts.
+    let clock = 0;
+    const budgeted = await sweepOverdueRingSteps({
+      admin: h.admin,
+      organizationId: ORG,
+      now: () => h.now(),
+      budgetMs: 100,
+      clock: () => clock,
+      runSessionEvent: async () => {
+        clock += 200;
+      },
+    });
+    expect(budgeted.swept).toHaveLength(1);
+    expect(budgeted.deferred).toHaveLength(2);
+  });
+
+  it("closes legs whose session is terminal or that are older than the orphan window", async () => {
+    const h = createTelephonyHarness();
+    const [live, dead] = h.db.seed("motorist_call_sessions", [
+      { organization_id: ORG, direction: "inbound", state: "talking" },
+      { organization_id: ORG, direction: "inbound", state: "failed" },
+    ]);
+    const [fresh, orphanBySession, orphanByAge] = h.db.seed("motorist_call_legs", [
+      { organization_id: ORG, session_id: live.id, telnyx_call_control_id: "cc-fresh", role: "customer", state: "answered", initiated_at: h.now().toISOString() },
+      { organization_id: ORG, session_id: dead.id, telnyx_call_control_id: "cc-dead", role: "operator", state: "ringing", initiated_at: h.now().toISOString() },
+      { organization_id: ORG, session_id: live.id, telnyx_call_control_id: "cc-old", role: "operator", state: "ringing", initiated_at: new Date(h.now().getTime() - 5 * 60 * 60 * 1000).toISOString() },
+    ]);
+
+    const closed = await closeOrphanLegs(h.admin, { organizationId: ORG, now: h.now() });
+
+    expect(closed.sort()).toEqual([String(orphanBySession.id), String(orphanByAge.id)].sort());
+    expect(h.db.find("motorist_call_legs", (row) => row.id === fresh.id)).toMatchObject({ ended_at: null });
+    expect(h.db.find("motorist_call_legs", (row) => row.id === orphanBySession.id)).toMatchObject({ state: "ended", hangup_cause: "orphan_sweep" });
+  });
+
+  it("terminalises leaked open ring offers so their operator can be rung again", async () => {
+    const h = createTelephonyHarness();
+    const [live, dead] = h.db.seed("motorist_call_sessions", [
+      { organization_id: ORG, direction: "inbound", state: "ringing" },
+      { organization_id: ORG, direction: "inbound", state: "missed" },
+    ]);
+    const [fresh, leakedBySession, leakedByAge] = h.db.seed("motorist_ring_attempts", [
+      { organization_id: ORG, session_id: live.id, step_index: 0, member_kind: "operator", profile_id: PROFILES.o1, result: "offered", offered_at: h.now().toISOString() },
+      { organization_id: ORG, session_id: dead.id, step_index: 0, member_kind: "operator", profile_id: PROFILES.o2, result: "offered", offered_at: h.now().toISOString() },
+      { organization_id: ORG, session_id: live.id, step_index: 1, member_kind: "operator", profile_id: PROFILES.o3, result: "offered", offered_at: new Date(h.now().getTime() - 10 * 60_000).toISOString() },
+    ]);
+
+    const closed = await closeStaleRingAttempts(h.admin, { organizationId: ORG, now: h.now() });
+
+    expect(closed.sort()).toEqual([String(leakedBySession.id), String(leakedByAge.id)].sort());
+    expect(h.db.find("motorist_ring_attempts", (row) => row.id === fresh.id)).toMatchObject({ result: "offered" });
+    expect(h.db.find("motorist_ring_attempts", (row) => row.id === leakedByAge.id)).toMatchObject({ result: "failed", ended_at: h.now().toISOString() });
   });
 });

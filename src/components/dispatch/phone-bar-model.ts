@@ -192,6 +192,15 @@ export function phoneBarVisible(input: {
   return input.status !== "idle";
 }
 
+/**
+ * `failed` (the token route refused: another tab is ringing / on a call) and
+ * `superseded` (a newer tab took the credential) are terminal statuses — the
+ * client never retries by itself, so the operator needs an explicit takeover.
+ */
+export function phoneTakeoverAvailable(status: WebphoneStatus): boolean {
+  return status === "failed" || status === "superseded";
+}
+
 export const DTMF_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"] as const;
 
 export function isDtmfKey(value: string): boolean {

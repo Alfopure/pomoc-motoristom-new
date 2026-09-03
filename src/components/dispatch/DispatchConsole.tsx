@@ -33,7 +33,7 @@ import { HeaderNotificationMenu } from "./HeaderNotificationMenu";
 import { NotificationToastStack } from "./NotificationToastStack";
 import { PhoneBar } from "./PhoneBar";
 import { phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
-import { useTelephonyConsole } from "./useTelephonyConsole";
+import { TELEPHONY_STALE_MESSAGE, useTelephonyConsole } from "./useTelephonyConsole";
 import { TaskPanel, type TaskCreateInput, type TaskDeleteInput, type TaskUpdateInput } from "./TaskPanel";
 import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
 import { isNotificationForProfile, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
@@ -217,7 +217,9 @@ export function DispatchConsole({
   // a konzola ostáva v pôvodnom režime „Telefónia nie je nakonfigurovaná".
   const isOperator = Boolean(viewerProfileId && operators.some((operator) => operator.id === viewerProfileId));
   const telephony = useTelephonyConsole({ enabled: isOperator, operators });
-  const telephonyConfigured = telephony.configured === true;
+  // `null` means "not answered yet"; only an explicit 503 parks the surface, so a
+  // transient `calls/active` outage keeps the console (and the phone) usable.
+  const telephonyConfigured = telephony.configured !== false;
   const operatorPresences = telephony.presences;
   const effectiveOperators = operators;
   const onQueueAvailabilityAction = useCallback(
@@ -1189,6 +1191,11 @@ export function DispatchConsole({
             onOpenCase={openCase}
             onOpenTask={openTask}
           />
+          {telephonyConfigured && telephony.stale ? (
+            <div className="hidden sm:block">
+              <TelephonyStalePill />
+            </div>
+          ) : null}
           {telephonyConfigured ? (
             <div className="hidden sm:block">
               <CallQueuePanel
@@ -1241,6 +1248,7 @@ export function DispatchConsole({
             onLinkCase={(call) => void linkPhoneCallToCase(call)}
             onOpenCase={openCase}
             onUnlockAudio={telephony.unlockAudio}
+            onTakeover={telephony.takeoverPhone}
           />
         )}
 
@@ -1521,6 +1529,19 @@ function TelephonyNotConfiguredPill() {
     >
       <PhoneOff size={14} className="shrink-0" aria-hidden="true" />
       <span>Telefónia nie je nakonfigurovaná</span>
+    </span>
+  );
+}
+
+function TelephonyStalePill() {
+  return (
+    <span
+      className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-400/40 bg-amber-400/10 px-2 text-xs font-semibold text-amber-200"
+      title={TELEPHONY_STALE_MESSAGE}
+      data-testid="telephony-stale"
+    >
+      <PhoneOff size={14} className="shrink-0" aria-hidden="true" />
+      <span>{TELEPHONY_STALE_MESSAGE}</span>
     </span>
   );
 }

@@ -39,8 +39,8 @@ describe("POST /api/telephony/calls/[id]/transfer", () => {
   });
 
   it("passes an external number target through", async () => {
-    await POST(request({ number: " +421910988882 " }), context);
-    expect(blindTransfer).toHaveBeenCalledWith(expect.anything(), expect.anything(), "sess-1", { profileId: null, number: "+421910988882" });
+    await POST(request({ number: " +421900000000 " }), context);
+    expect(blindTransfer).toHaveBeenCalledWith(expect.anything(), expect.anything(), "sess-1", { profileId: null, number: "+421900000000" });
   });
 
   it("lets the service reject an empty target with 400", async () => {

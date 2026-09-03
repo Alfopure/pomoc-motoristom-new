@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
+import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
 import { advanceRingStep } from "../routing/ring-plan";
-import { loadRoutingContext, loadSessionSnapshot, effectsDeps } from "../session-runner";
+import { loadRoutingContext, loadSessionSnapshot, effectsDeps, runSessionEvent } from "../session-runner";
 import { applyReduceResult, SessionConflictError } from "./effects";
 import { reduce } from "./transitions";
 import type { RingFanout } from "./types";
@@ -213,6 +213,29 @@ describe("inbound ring plan", () => {
     expect(h.call(call.sessionId)).toMatchObject({ status: "ended", end_reason: "callback_requested" });
   });
 
+  it("dials the external fallback number and offers a callback when it does not answer either", async () => {
+    const h = createTelephonyHarness({ fallbackKind: "external_number" });
+    const call = await ringingInbound(h);
+    for (const leg of [call.o1, call.o2, call.o5]) await h.legEvent(leg, "call.hangup", { hangup_cause: "timeout" });
+
+    // Step 1 (ordered) reaches the ring group's own external member first.
+    const stepLeg = h.legByNumber(call.sessionId, NUMBERS.external)!;
+    await h.legEvent(String(stepLeg.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
+
+    // The plan is exhausted: the synthetic fallback step (`stepIndex = steps.length`) dials the number.
+    const fallbackLeg = h.legs(call.sessionId).find((leg) => leg.to_number === NUMBERS.external && !leg.ended_at)!;
+    expect(fallbackLeg.telnyx_call_control_id).not.toBe(stepLeg.telnyx_call_control_id);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ringing" });
+    expect((h.session(call.sessionId).metadata as { ring: { fallback: string } }).ring.fallback).toBe("external_number");
+
+    // Hanging that leg up used to crash the reducer: the active step points past
+    // the last real plan step, so `planStep` had no step to read.
+    const result = await h.legEvent(String(fallbackLeg.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
+    expect(result).toMatchObject({ outcome: "processed" });
+    expect(h.session(call.sessionId).state).toBe("callback_offered");
+    expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/callback-offer.mp3");
+  });
+
   it("puts the caller into the waiting room when the plan's fallback is waiting_room", async () => {
     const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
     const call = await ringingInbound(h);
@@ -221,17 +244,24 @@ describe("inbound ring plan", () => {
     await h.legEvent(String(external.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
 
     expect(h.session(call.sessionId).state).toBe("waiting");
-    const tick = h.telnyx.of("gatherUsingAudio").at(-1)!;
-    expect(tick.params).toMatchObject({ audioUrl: "https://media.test/telephony/moh.mp3", timeoutMillis: 2_000, maximumTries: 1 });
+    // The music is one detached infinite playback; the tick is a silent gather.
+    expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ audioUrl: "https://media.test/telephony/moh.mp3", loop: "infinity" });
+    const tick = h.telnyx.of("gather").at(-1)!;
+    // Both timeouts: Telnyx waits `initial_timeout_millis` (default 5 s) for the first digit.
+    expect(tick.params).toMatchObject({ timeoutMillis: 60_000, initialTimeoutMillis: 60_000 });
+    const playbacksBefore = h.telnyx.of("playbackStart").length;
 
-    // Ticks re-arm; after park_max_minutes the caller gets the callback offer.
+    // Ticks re-arm without touching the music; after park_max_minutes the caller gets the callback offer.
     h.advance(60_000);
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
-    expect(h.telnyx.of("gatherUsingAudio")).toHaveLength(2);
+    expect(h.telnyx.of("gather")).toHaveLength(2);
+    expect(h.telnyx.of("playbackStart")).toHaveLength(playbacksBefore);
     h.advance(31 * 60_000);
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
     expect(h.session(call.sessionId).state).toBe("callback_offered");
     expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/callback-offer.mp3");
+    // The loop is silenced before the prompt plays.
+    expect(h.telnyx.of("playbackStop").length).toBeGreaterThan(0);
   });
 
   it("fans out a step exactly once when two invocations race on the same snapshot", async () => {
@@ -283,6 +313,120 @@ describe("inbound ring plan", () => {
     expect(await advanceRingStep(h.admin, call.sessionId, 1)).toBe(false);
   });
 
+  it("holds the ring step while the org is at the concurrent-leg cap and rings once capacity frees up", async () => {
+    const h = createTelephonyHarness();
+    // Nine open legs of another call: `max_concurrent_legs` is exhausted.
+    const [other] = h.db.seed("motorist_call_sessions", [{ organization_id: ORG, direction: "inbound", state: "talking" }]);
+    const blockers = h.db.seed(
+      "motorist_call_legs",
+      Array.from({ length: 9 }, (unused, index) => ({
+        organization_id: ORG,
+        session_id: other.id,
+        telnyx_call_control_id: `cc-block-${index}`,
+        role: "operator" as const,
+        state: "answered",
+        initiated_at: h.now().toISOString(),
+      })),
+    );
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const session = h.session(call.sessionId);
+    expect(session.state).toBe("ringing");
+    expect(session.current_step).toBe(0);
+    expect((session.metadata as { ring: { capacity_wait_since: string | null } }).ring.capacity_wait_since).toBe(h.now().toISOString());
+    expect(h.telnyx.of("dial")).toHaveLength(0);
+    expect(h.rows("motorist_job_incidents")).toEqual([expect.objectContaining({ job_name: "telephony.routing.capacity" })]);
+
+    // Capacity frees up; the sweep re-drives the same step instead of falling back.
+    for (const leg of blockers) h.db.update("motorist_call_legs", { ended_at: h.now().toISOString(), state: "ended" }, (row) => row.id === leg.id);
+    h.advance(6_000);
+    const { sweepOverdueRingSteps } = await import("../routing/ring-plan");
+    await sweepOverdueRingSteps({ admin: h.admin, organizationId: ORG, now: () => h.now(), runSessionEvent: (id, event) => runSessionEvent(h.deps, id, event) });
+
+    expect(h.telnyx.of("dial").length).toBeGreaterThan(0);
+    // The same step is re-fanned (no guard, so `current_step` stays where the hold left it).
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ringing", current_step: 0 });
+    expect(h.attempts(call.sessionId).filter((attempt) => attempt.step_index === 0).length).toBeGreaterThan(0);
+    expect((h.session(call.sessionId).metadata as { ring: { capacity_wait_since: string | null } }).ring.capacity_wait_since).toBeNull();
+  });
+
+  it("gives up the capacity wait after CAPACITY_WAIT_MAX_MS and falls back", async () => {
+    const h = createTelephonyHarness();
+    const [other] = h.db.seed("motorist_call_sessions", [{ organization_id: ORG, direction: "inbound", state: "talking" }]);
+    h.db.seed(
+      "motorist_call_legs",
+      Array.from({ length: 9 }, (unused, index) => ({
+        organization_id: ORG,
+        session_id: other.id,
+        telnyx_call_control_id: `cc-full-${index}`,
+        role: "operator" as const,
+        state: "answered",
+        initiated_at: h.now().toISOString(),
+      })),
+    );
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    expect(h.session(call.sessionId).state).toBe("ringing");
+
+    h.advance(40_000);
+    const { sweepOverdueRingSteps } = await import("../routing/ring-plan");
+    await sweepOverdueRingSteps({ admin: h.admin, organizationId: ORG, now: () => h.now(), runSessionEvent: (id, event) => runSessionEvent(h.deps, id, event) });
+
+    expect(h.session(call.sessionId).state).toBe("callback_offered");
+  });
+
+  it("keeps the answer when a lost version CAS makes the reservation guard run twice", async () => {
+    const h = createTelephonyHarness();
+    const call = await ringingInbound(h);
+
+    const snapshot = await loadSessionSnapshot(h.deps, call.sessionId);
+    const context = await loadRoutingContext(h.deps, snapshot.session);
+    const event = {
+      kind: "telnyx" as const,
+      id: "evt-answer-retry",
+      type: "call.answered",
+      occurredAt: h.now().toISOString(),
+      callControlId: call.o1,
+      callLegId: null,
+      callSessionId: call.telnyxSessionId,
+      connectionId: "app-test",
+      clientState: h.clientStateOf(call.o1),
+      rawClientState: null,
+      from: null,
+      to: null,
+      direction: null,
+      state: null,
+      hangupCause: null,
+      hangupSource: null,
+      sipHangupCause: null,
+      digits: null,
+      status: null,
+      conferenceId: null,
+      customHeaders: [],
+      payload: {},
+    };
+    const result = reduce(snapshot.session, snapshot.legs, snapshot.attempts, event, context);
+    expect(result.guard?.profileId).toBe(PROFILES.o1);
+
+    // Another event for the same session lands first, so the CAS below loses.
+    await h.legEvent(call.o2, "call.hangup", { hangup_cause: "timeout" });
+    const effects = effectsDeps(h.deps);
+    await expect(applyReduceResult(effects, { session: snapshot.session, result, event, expectedVersion: snapshot.session.version })).rejects.toBeInstanceOf(SessionConflictError);
+    // The guard already reserved the operator for this session.
+    expect(h.presence(PROFILES.o1)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
+
+    // The runner retries the whole reduce + apply; the reservation must be re-entrant.
+    const retrySnapshot = await loadSessionSnapshot(h.deps, call.sessionId);
+    const retryContext = await loadRoutingContext(h.deps, retrySnapshot.session);
+    const retryResult = reduce(retrySnapshot.session, retrySnapshot.legs, retrySnapshot.attempts, event, retryContext);
+    const applied = await applyReduceResult(effects, { session: retrySnapshot.session, result: retryResult, event, expectedVersion: retrySnapshot.session.version });
+
+    expect(applied.branch).toBe("main");
+    expect(applied.failed).toBe(false);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o1 });
+    expect(h.presence(PROFILES.o1)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
+    expect(h.telnyx.of("hangup").some((entry) => entry.params.callControlId === call.o1)).toBe(false);
+  });
+
   it("compensates a failed answer: hangs up, marks the session failed, records the incident and still returns 200", async () => {
     const h = createTelephonyHarness();
     h.telnyx.failNext("answer", "answer refused");
@@ -306,7 +450,7 @@ describe("inbound ring plan", () => {
     expect(result).toMatchObject({ outcome: "failed", status: 200 });
     expect(h.session(call.sessionId)).toMatchObject({ state: "waiting", answered_by_profile_id: null });
     expect(h.telnyx.of("hangup").some((entry) => entry.params.callControlId === call.o1)).toBe(true);
-    expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/moh.mp3");
+    expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ audioUrl: "https://media.test/telephony/moh.mp3", loop: "infinity" });
     expect(h.presence(PROFILES.o1).status).toBe("available");
   });
 
@@ -388,7 +532,8 @@ describe("talking-phase transitions", () => {
     const call = await talking(h);
     await h.legEvent(call.o1, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "callee" });
     expect(h.session(call.sessionId)).toMatchObject({ state: "waiting", answered_by_profile_id: null });
-    expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params).toMatchObject({ callControlId: call.callControlId, audioUrl: "https://media.test/telephony/moh.mp3" });
+    expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ callControlId: call.callControlId, audioUrl: "https://media.test/telephony/moh.mp3", loop: "infinity" });
+    expect(h.telnyx.of("gather").at(-1)?.params).toMatchObject({ callControlId: call.callControlId, timeoutMillis: 60_000 });
     expect(h.presence(PROFILES.o1)).toMatchObject({ status: "after_call_work", current_session_id: null });
     expect(h.call(call.sessionId)).toMatchObject({ status: "answered", operator_id: PROFILES.o1 });
   });

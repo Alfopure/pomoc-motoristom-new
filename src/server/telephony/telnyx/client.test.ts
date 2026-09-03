@@ -153,13 +153,18 @@ describe("createTelnyxClient", () => {
     expect(impl).not.toHaveBeenCalled();
   });
 
-  it("still allows non-creating commands (hangup) when live calls are disabled", async () => {
-    const { impl, calls } = makeFetch([jsonResponse(200, { data: { result: "ok" } })]);
+  it("still allows non-creating commands (hangup, answer) when live calls are disabled", async () => {
+    const { impl, calls } = makeFetch([jsonResponse(200, { data: { result: "ok" } }), jsonResponse(200, { data: { result: "ok" } })]);
     const { client } = makeClient(impl, { liveGate: { callsEnabled: false, smsEnabled: false } });
 
     await client.hangup({ callControlId: "cc-1", commandId: "cmd-h" });
     expect(calls[0].url).toBe("https://telnyx.test/v2/calls/cc-1/actions/hangup");
     expect(calls[0].body).toEqual({ command_id: "cmd-h" });
+
+    // Answering an inbound call creates no leg: the kill switch must not make
+    // the whole inbound branch unreachable.
+    await client.answer({ callControlId: "cc-1", commandId: "cmd-a" });
+    expect(calls[1].url).toBe("https://telnyx.test/v2/calls/cc-1/actions/answer");
   });
 
   it("retries exactly once on 429 honouring retry-after", async () => {
