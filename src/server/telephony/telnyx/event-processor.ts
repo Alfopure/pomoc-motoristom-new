@@ -208,7 +208,15 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
   let session: SessionRow | null = null;
   try {
     session = await findSession(deps.admin, deps.organizationId, event);
-    if (!session && event.type === "call.initiated" && event.direction === "incoming" && eventClass === "control") {
+    // Only the call-control application sees real customers. A leg arriving at
+    // the credential connection is our own dial reaching an operator's browser:
+    // it is "incoming" from that connection's point of view, and turning it
+    // into a customer session would fork the call in two and answer a leg the
+    // API refuses to answer. The connection's webhook URL is unset for this
+    // reason; this guard keeps the mistake harmless if it is ever set again.
+    const credentialConnectionId = deps.config.configured ? deps.config.credentialConnectionId : null;
+    const fromCredentialConnection = Boolean(credentialConnectionId && event.connectionId === credentialConnectionId);
+    if (!session && event.type === "call.initiated" && event.direction === "incoming" && eventClass === "control" && !fromCredentialConnection) {
       session = await createInboundSession(deps, event);
     }
 
