@@ -18,6 +18,7 @@
  * bundle does not carry a WebRTC stack for users who never open the phone.
  */
 
+import { applyStoredAudioOutput, REMOTE_AUDIO_ELEMENT_ID } from "@/lib/telephony/audio-output";
 import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import {
@@ -553,11 +554,14 @@ export class TelnyxWebphone {
     if (typeof document === "undefined") return null;
     if (this.remoteAudio) return this.remoteAudio;
     const element = document.createElement("audio");
-    element.id = "pm-telnyx-remote-audio";
+    element.id = REMOTE_AUDIO_ELEMENT_ID;
     element.autoplay = true;
     element.setAttribute("playsinline", "true");
     element.style.display = "none";
     document.body.appendChild(element);
+    // The operator's speaker choice belongs to this computer (localStorage), so
+    // a freshly created element has to be pointed at it again.
+    applyStoredAudioOutput(element);
     this.remoteAudio = element;
     return element;
   }

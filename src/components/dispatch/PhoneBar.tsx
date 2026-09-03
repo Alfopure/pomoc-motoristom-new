@@ -20,12 +20,16 @@ import {
   Users,
 } from "lucide-react";
 
+import type { OperatorPresenceStatus } from "@/lib/supabase/database.types";
 import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
 import { CallTransferPicker, type TransferRequest } from "./CallTransferPicker";
 import { EmergencyNotice } from "./EmergencyNotice";
+// The status vocabulary is shared with "Môj telefón" so both surfaces name the
+// same state the same way.
+import { presenceLabel } from "./my-phone-model";
 import {
   callElapsedSeconds,
   DTMF_KEYS,
@@ -475,15 +479,6 @@ function RegistrationChip({ phone, onTakeover }: { phone: WebphoneSnapshot; onTa
   );
 }
 
-const PRESENCE_LABELS: Record<string, string> = {
-  available: "Dostupný",
-  ringing: "Zvoní",
-  on_call: "Na hovore",
-  after_call_work: "Dopisuje",
-  paused: "Pauza",
-  offline: "Odhlásený",
-};
-
 function PresenceSelector({
   busy,
   onChange,
@@ -495,7 +490,7 @@ function PresenceSelector({
   pauseReasons: PhonePauseReason[];
   status: string | null;
 }) {
-  const label = status ? PRESENCE_LABELS[status] ?? status : "Neznámy stav";
+  const label = presenceLabel(status as OperatorPresenceStatus | null);
   const tone = status === "available" ? "ok" : status === "paused" || status === "after_call_work" ? "warn" : status === "offline" || !status ? "neutral" : "warn";
 
   return (

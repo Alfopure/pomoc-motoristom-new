@@ -1,6 +1,6 @@
 import type { CallLegRole, CallLegState, CallSessionState, Json, RingAttemptResult } from "@/lib/supabase/database.types";
 
-import { evaluateBusinessHours } from "../routing/business-hours";
+import { evaluateBusinessHours } from "@/lib/telephony/business-hours";
 import { classifyRingHangup } from "../routing/eligibility";
 import { memberKey, planRingStep, stepDeadline, toEligibilityDevices, toEligibilityPresence, type RingStepPlanResult } from "../routing/ring-plan";
 import type { TelnyxClientState } from "../telnyx/client-state";
@@ -810,7 +810,12 @@ function offerCallback(b: TransitionBuilder, customer: LegRow, media: MediaRef, 
 
 function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, state: "waiting" | "parked" = "waiting"): void {
   const musicRunning = mohIsPlaying(b);
-  b.setState(state).patchMeta({ waiting: { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso } });
+  // The waiting-room limit is frozen the moment the caller enters it, like the
+  // ring plan is frozen at call start: `loadRoutingSettings` re-reads the
+  // settings row on every event, so an admin lowering `park_max_minutes` used to
+  // eject callers who were already waiting — a configuration change disturbing a
+  // call in progress.
+  b.setState(state).patchMeta({ waiting: { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso, max_minutes: b.ctx.settings.parkMaxMinutes } });
   // The ring plan already started the loop; restarting it would jump the audio.
   if (!musicRunning) startMoh(b, customer);
   b.cmd(gatherCmd(b, customer, mohTickSpec()));
@@ -1358,7 +1363,10 @@ function confirmCallback(b: TransitionBuilder, leg: LegRow, source: "ivr" | "aft
 function onWaitingTick(b: TransitionBuilder, leg: LegRow): ReduceResult {
   const waiting = b.meta.waiting ?? { since: b.session.parked_at ?? b.nowIso, reason: "unknown", ticks: 0 };
   const since = Date.parse(b.session.parked_at ?? waiting.since ?? b.nowIso);
-  const limitMs = b.ctx.settings.parkMaxMinutes * 60_000;
+  // Frozen at `enterWaiting`; the live value only serves sessions that entered
+  // the waiting room before this field existed.
+  const limitMinutes = typeof waiting.max_minutes === "number" && waiting.max_minutes > 0 ? waiting.max_minutes : b.ctx.settings.parkMaxMinutes;
+  const limitMs = limitMinutes * 60_000;
   if (!Number.isNaN(since) && b.ctx.now.getTime() - since >= limitMs) {
     b.patchMeta({ waiting: { ...waiting, ticks: waiting.ticks + 1, last_tick_at: b.nowIso }, park: b.meta.park ? { ...b.meta.park, timed_out_at: b.nowIso } : null });
     offerCallback(b, leg, { key: "callbackOffer" }, "park_timeout");

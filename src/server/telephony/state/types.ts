@@ -1,7 +1,7 @@
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { CallLegRole, CallSessionState, Database, Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
-import type { BusinessHoursSchedule } from "../routing/business-hours";
+import type { BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import type { TelnyxClientState } from "../telnyx/client-state";
 
 /**
@@ -466,7 +466,8 @@ export type SessionMeta = {
   ivr?: { menu_id: string; tries: number; chosen?: string | null; action?: string | null } | null;
   after_hours?: { reason: string; at: string } | null;
   pickup?: { by: string; at: string } | null;
-  waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null } | null;
+  /** `max_minutes` is `park_max_minutes` frozen when the caller entered the waiting room. */
+  waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null } | null;
   previous_operator?: string | null;
   answered_external?: string | null;
   sdk_hold?: { leg: string; at: string } | null;

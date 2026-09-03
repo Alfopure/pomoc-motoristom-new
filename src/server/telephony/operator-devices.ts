@@ -6,7 +6,7 @@ import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured
 
 import { isDeviceLive } from "./routing/eligibility";
 import { telnyxSipUri, toJson, type DeviceRow, type TelephonyEnvironment } from "./state/types";
-import type { TelnyxClient } from "./telnyx/client";
+import { TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
 
 /**
  * Operator browser-phone devices (`motorist_operator_devices`, one row per
@@ -80,10 +80,12 @@ function credentialUsable(device: DeviceRow, now: Date): boolean {
   return Number.isNaN(expires) || expires - now.getTime() > CREDENTIAL_RENEW_WINDOW_MS;
 }
 
-export async function ensureOperatorCredential(deps: DeviceDeps, input: { organizationId: string; profileId: string }): Promise<DeviceRow> {
+export async function ensureOperatorCredential(deps: DeviceDeps, input: { organizationId: string; profileId: string; force?: boolean }): Promise<DeviceRow> {
   const now = nowOf(deps);
   const existing = await getOperatorDevice(deps, input);
-  if (existing && credentialUsable(existing, now)) return existing;
+  // `force` is the manager pressing "regenerate": mint a new credential even
+  // when the stored one is still usable (Phase 3 OperatorsTelephonyPanel).
+  if (existing && !input.force && credentialUsable(existing, now)) return existing;
   if (!deps.telnyx) throw new OperatorDeviceError(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
 
   const credential = await deps.telnyx.createTelephonyCredential({
@@ -93,6 +95,7 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
   });
   if (!credential.sipUsername) throw new OperatorDeviceError("Telnyx nevrátil SIP používateľa pre nové prihlasovacie údaje.", 502);
 
+  const previousCredentialId = existing?.telnyx_credential_id ?? null;
   const values = {
     organization_id: input.organizationId,
     profile_id: input.profileId,
@@ -101,11 +104,42 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
     sip_username: credential.sipUsername,
     credential_expires_at: credential.expiresAt,
     registration_state: "unregistered" as const,
-    metadata: toJson({ ...(existing ? metadataOf(existing) : {}), credential_created_at: now.toISOString(), previous_credential_id: existing?.telnyx_credential_id ?? null }),
+    metadata: toJson({ ...(existing ? metadataOf(existing) : {}), credential_created_at: now.toISOString(), previous_credential_id: previousCredentialId }),
   };
-  const upserted = await deps.admin.from("motorist_operator_devices").upsert(values, { onConflict: "profile_id,environment" }).select("*").single();
+  // The unique key is per organisation (`operator_devices_org_profile_env_idx`):
+  // a global `(profile_id, environment)` key would let an upsert with a profile
+  // from another organisation rewrite that organisation's device row.
+  const upserted = await deps.admin.from("motorist_operator_devices").upsert(values, { onConflict: "organization_id,profile_id,environment" }).select("*").single();
   if (upserted.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo uložiť: ${upserted.error.message}`, 500);
+  // The superseded credential has to die at Telnyx: it can still register and
+  // the JWT minted from it stays valid for up to 24 h, so keeping it would make
+  // "new credentials" a rename rather than a revocation.
+  if (previousCredentialId && previousCredentialId !== credential.id) {
+    await deleteCredentialAtProvider(deps, previousCredentialId, "Staré prihlasovacie údaje sa nepodarilo zrušiť u operátora");
+  }
   return upserted.data;
+}
+
+/**
+ * Deletes a telephony credential at Telnyx.
+ *
+ * A failure is a 502, never a silent pass: the manager has to know that the old
+ * SIP identity is still able to register and place billable calls. A `404` is
+ * the one exception — the credential is already gone, so access *is* revoked;
+ * treating it as a failure would brick the ordinary renewal path
+ * (`credentialUsable` false → mint a new one → delete a credential Telnyx
+ * expired or somebody removed in the portal) and leave the operator without a
+ * phone.
+ */
+async function deleteCredentialAtProvider(deps: DeviceDeps, credentialId: string, context: string): Promise<void> {
+  if (!deps.telnyx) throw new OperatorDeviceError(`${context}: ${TELEPHONY_NOT_CONFIGURED_MESSAGE}`, 503);
+  try {
+    await deps.telnyx.deleteTelephonyCredential(credentialId);
+  } catch (error) {
+    if (error instanceof TelnyxCommandError && error.status === 404) return;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new OperatorDeviceError(`${context} (${credentialId}): ${detail}. Prístup zatiaľ nie je odobratý.`, 502);
+  }
 }
 
 function metadataOf(device: DeviceRow): Record<string, unknown> {
@@ -218,10 +252,8 @@ export async function touchDevice(
   return { ok: true, device: updated.data };
 }
 
-/** Forces the current browser off (its next heartbeat gets 409). */
-export async function disconnectDevice(deps: DeviceDeps, input: { organizationId: string; profileId: string }): Promise<DeviceRow | null> {
-  const device = await getOperatorDevice(deps, input);
-  if (!device) return null;
+/** Revokes the browser session id only (the tab's next heartbeat gets 409). */
+async function revokeDeviceSession(deps: DeviceDeps, device: DeviceRow): Promise<DeviceRow> {
   const updated = await deps.admin
     .from("motorist_operator_devices")
     .update({ device_session_id: `revoked:${randomUUID()}`, registration_state: "unregistered", device_seen_at: null })
@@ -232,9 +264,51 @@ export async function disconnectDevice(deps: DeviceDeps, input: { organizationId
   return updated.data;
 }
 
+export type DisconnectResult = { device: DeviceRow; deletedCredentialId: string | null };
+
+/**
+ * Forces the operator's browser phone off — for good.
+ *
+ * Revoking `device_session_id` alone is cooperative: a tab that never sends the
+ * heartbeat (offline, paused in devtools) keeps its registration, and the JWT it
+ * already holds stays valid for up to `DEFAULT_TOKEN_TTL_MS`. Offboarding
+ * therefore also deletes the telephony credential at Telnyx and clears the SIP
+ * identity from the row, so no stale token can re-register.
+ *
+ * `keepCredential` is the rotate path: `ensureOperatorCredential({ force })` has
+ * already deleted the *previous* credential and minted a new one, which must
+ * survive.
+ */
+export async function disconnectDevice(
+  deps: DeviceDeps,
+  input: { organizationId: string; profileId: string; keepCredential?: boolean },
+): Promise<DisconnectResult | null> {
+  const device = await getOperatorDevice(deps, input);
+  if (!device) return null;
+  const revoked = await revokeDeviceSession(deps, device);
+  if (input.keepCredential || !revoked.telnyx_credential_id) return { device: revoked, deletedCredentialId: null };
+
+  const credentialId = revoked.telnyx_credential_id;
+  await deleteCredentialAtProvider(deps, credentialId, "Telefón sme odhlásili, ale prihlasovacie údaje sa nepodarilo zrušiť u operátora");
+  const cleared = await deps.admin
+    .from("motorist_operator_devices")
+    .update({
+      telnyx_credential_id: null,
+      sip_username: null,
+      credential_expires_at: null,
+      token_expires_at: null,
+      metadata: toJson({ ...metadataOf(revoked), deleted_credential_id: credentialId, deleted_credential_at: nowOf(deps).toISOString() }),
+    })
+    .eq("id", revoked.id)
+    .select("*")
+    .single();
+  if (cleared.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo odpojiť: ${cleared.error.message}`, 500);
+  return { device: cleared.data, deletedCredentialId: credentialId };
+}
+
 export function deviceIsLive(device: DeviceRow | null, now: Date): boolean {
   if (!device) return false;
-  return isDeviceLive({ profileId: device.profile_id, deviceSeenAt: device.device_seen_at, registrationState: device.registration_state, sipUsername: device.sip_username }, now);
+  return isDeviceLive({ deviceSeenAt: device.device_seen_at, registrationState: device.registration_state }, now);
 }
 
 export function deviceSipUri(device: DeviceRow): string | null {

@@ -264,6 +264,31 @@ describe("inbound ring plan", () => {
     expect(h.telnyx.of("playbackStop").length).toBeGreaterThan(0);
   });
 
+  it("keeps a caller who is already waiting on the limit that applied when they entered", async () => {
+    const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
+    const call = await ringingInbound(h);
+    for (const leg of [call.o1, call.o2, call.o5]) await h.legEvent(leg, "call.hangup", { hangup_cause: "timeout" });
+    const external = h.legByNumber(call.sessionId, NUMBERS.external)!;
+    await h.legEvent(String(external.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
+    expect(h.session(call.sessionId).state).toBe("waiting");
+
+    // An admin lowers the waiting-room limit while the caller is in the queue.
+    // `loadRoutingSettings` re-reads the row on every event, so without the
+    // frozen `meta.waiting.max_minutes` the next tick would eject them — a
+    // configuration change disturbing a call in progress.
+    h.db.update("motorist_telephony_settings", { park_max_minutes: 5 }, () => true);
+    const tick = h.telnyx.of("gather").at(-1)!;
+    h.advance(6 * 60_000);
+    await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
+    expect(h.session(call.sessionId).state).toBe("waiting");
+
+    // The limit they arrived with (30 min) still ends the wait.
+    const next = h.telnyx.of("gather").at(-1)!;
+    h.advance(25 * 60_000);
+    await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: next.params.clientState });
+    expect(h.session(call.sessionId).state).toBe("callback_offered");
+  });
+
   it("fans out a step exactly once when two invocations race on the same snapshot", async () => {
     const h = createTelephonyHarness();
     const call = await ringingInbound(h);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 
 const migration = readFileSync(
@@ -12,6 +12,14 @@ const realtimeMigration = readFileSync(
 );
 const round2Migration = readFileSync(
   new URL("../supabase/migrations/20260917100000_telnyx_fixes_round2.sql", import.meta.url),
+  "utf8",
+);
+const ringConfigMigration = readFileSync(
+  new URL("../supabase/migrations/20260918100000_ring_config_rpc.sql", import.meta.url),
+  "utf8",
+);
+const phase3Migration = readFileSync(
+  new URL("../supabase/migrations/20260919100000_telnyx_phase3_fixes.sql", import.meta.url),
   "utf8",
 );
 const seed = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
@@ -245,4 +253,190 @@ test("seed files populate the routing configuration", () => {
   assert.match(seed, /insert into public\.motorist_ring_plans[\s\S]*?on conflict/);
   assert.match(seed, /'Denný'/);
   assert.match(seed, /destination_allowlist/);
+});
+
+test("the routing-configuration replace RPC is transactional, org-scoped and service-role only", () => {
+  const definition = ringConfigMigration.match(
+    /create or replace function public\.motorist_replace_ring_plan\([\s\S]*?\$\$;/,
+  );
+  assert.ok(definition, "motorist_replace_ring_plan is not defined");
+  assert.match(definition[0], /security definer/);
+  assert.match(definition[0], /set search_path = ''/);
+  assert.match(
+    ringConfigMigration,
+    /revoke all on function public\.motorist_replace_ring_plan\(uuid, jsonb\)\n\s+from public, anon, authenticated;/,
+  );
+  assert.match(
+    ringConfigMigration,
+    /grant execute on function public\.motorist_replace_ring_plan\(uuid, jsonb\)\n\s+to service_role;/,
+  );
+
+  // Every section is optional and everything is scoped by the organisation.
+  for (const section of ["'groups'", "'plans'", "'business_hours'", "'pause_reasons'"]) {
+    assert.ok(definition[0].includes(section), `section ${section} must be handled`);
+  }
+  assert.match(definition[0], /organization_id = p_organization_id/);
+
+  // Guards that only a transaction can enforce.
+  for (const guard of ["cross_organization", "ring_group_in_use", "ring_plan_in_use", "business_hours_in_use"]) {
+    assert.ok(definition[0].includes(guard), `guard ${guard} is missing`);
+  }
+
+  // Members and steps are re-inserted (positions are unique), and the ordered
+  // strategy keeps its liveness stamps.
+  assert.match(definition[0], /delete from public\.motorist_ring_group_members/);
+  assert.match(definition[0], /insert into public\.motorist_ring_group_members/);
+  assert.match(definition[0], /last_offered_at/);
+  assert.match(definition[0], /delete from public\.motorist_ring_plan_steps/);
+});
+
+test("the ring config migration does not reference the previous provider or project", () => {
+  assert.doesNotMatch(ringConfigMigration, /viptel/i);
+  assert.doesNotMatch(ringConfigMigration, /sjcsrygkkmersoczpunh/);
+});
+
+
+// ---------------------------------------------------------------------------
+// Phase 3 fixes round 1
+// ---------------------------------------------------------------------------
+
+const PHASE3_LOCKED_TABLES = [
+  "motorist_business_hours",
+  "motorist_business_hours_intervals",
+  "motorist_business_hours_exceptions",
+  "motorist_ring_groups",
+  "motorist_ring_group_members",
+  "motorist_ring_plans",
+  "motorist_ring_plan_steps",
+  "motorist_ivr_menus",
+  "motorist_ivr_options",
+  "motorist_pause_reasons",
+  "motorist_operator_telephony_settings",
+  "motorist_telephony_settings",
+  "motorist_telephony_lines",
+];
+
+test("routing configuration is writable only by the service role", () => {
+  // Every config table is named in the lock-down loop...
+  for (const table of PHASE3_LOCKED_TABLES) {
+    assert.match(phase3Migration, new RegExp(`'${table}'`), `${table} must be locked down`);
+  }
+  // ...the loop drops both write policies and revokes DML from the session roles...
+  assert.match(phase3Migration, /drop policy if exists %I on public\.%I', table_name \|\| '_manager_write'/);
+  assert.match(phase3Migration, /drop policy if exists %I on public\.%I', table_name \|\| '_organization_access'/);
+  assert.match(phase3Migration, /revoke insert, update, delete on table public\.%I from anon, authenticated/);
+  assert.match(phase3Migration, /grant select, insert, update, delete on table public\.%I to service_role/);
+  // ...and keeps only a member `select`.
+  assert.match(phase3Migration, /for select using \(app_private\.motorist_is_org_member\(organization_id\)\)/);
+
+  // No policy anywhere in this migration may hand a write back to a manager.
+  assert.doesNotMatch(phase3Migration, /for all using \(app_private\.motorist_has_org_role/);
+  assert.doesNotMatch(phase3Migration, /create policy[\s\S]{0,200}for (all|insert|update|delete)/);
+});
+
+test("the device identity is per organisation", () => {
+  assert.match(phase3Migration, /drop constraint if exists motorist_operator_devices_profile_id_environment_key/);
+  assert.match(
+    phase3Migration,
+    /create unique index if not exists operator_devices_org_profile_env_idx\s+on public\.motorist_operator_devices \(organization_id, profile_id, environment\)/,
+  );
+});
+
+test("the replace RPC carries optimistic concurrency and every in-use guard", () => {
+  const definition = phase3Migration.match(
+    /create or replace function public\.motorist_replace_ring_plan\([\s\S]*?\$\$;/,
+  );
+  assert.ok(definition, "motorist_replace_ring_plan v2 is not defined");
+  const body = definition[0];
+
+  assert.match(phase3Migration, /drop function if exists public\.motorist_replace_ring_plan\(uuid, jsonb\);/);
+  assert.match(body, /p_expected_version integer default null/);
+  assert.match(body, /security definer/);
+  assert.match(body, /set search_path = ''/);
+
+  // Serialised per organisation, version compared and bumped inside the txn.
+  assert.match(body, /pg_advisory_xact_lock/);
+  assert.match(body, /stale_document/);
+  assert.match(body, /routing_version = routing_version \+ 1/);
+  assert.match(phase3Migration, /add column if not exists routing_version integer not null default 0/);
+
+  // Guards that only a transaction can enforce.
+  for (const guard of [
+    "cross_organization",
+    "ring_group_in_use",
+    "ring_plan_in_use",
+    "business_hours_in_use",
+    "pause_reason_in_use",
+    "ring_group_empty",
+    "position_gap",
+  ]) {
+    assert.ok(body.includes(guard), `guard ${guard} is missing`);
+  }
+
+  // Structural invariants re-asserted after the inserts, not only before them.
+  assert.match(body, /not exists \(\s*select 1 from public\.motorist_ring_group_members/);
+  assert.match(body, /having count\(\*\) <> max\(m\.position\) \+ 1/);
+  assert.match(body, /having count\(\*\) <> max\(s\.step_index\) \+ 1/);
+
+  assert.match(
+    phase3Migration,
+    /revoke all on function public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)\n\s+from public, anon, authenticated;/,
+  );
+  assert.match(
+    phase3Migration,
+    /grant execute on function public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)\n\s+to service_role;/,
+  );
+});
+
+test("the phase 3 migration does not reference the previous provider or project", () => {
+  assert.doesNotMatch(phase3Migration, /viptel/i);
+  assert.doesNotMatch(phase3Migration, /sjcsrygkkmersoczpunh/);
+});
+
+/**
+ * The lock-down is only true while no later migration hands a write back.
+ *
+ * Every routing write goes through the service-role client
+ * (`validateRoutingReplace` → `motorist_replace_ring_plan` → audit row); a
+ * `grant insert/update/delete … to authenticated` or a write policy added later
+ * would let a dispatcher repoint a production number straight through PostgREST
+ * again, with none of that on the way.
+ */
+test("no migration after the lock-down gives the session roles a routing write back", () => {
+  const LOCKDOWN = "20260919100000";
+  const later = readdirSync(new URL("../supabase/migrations", import.meta.url))
+    .filter((name) => name.endsWith(".sql") && name.slice(0, 14) > LOCKDOWN)
+    .sort();
+
+  for (const name of later) {
+    const sql = readFileSync(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8");
+    for (const table of PHASE3_LOCKED_TABLES) {
+      const grant = new RegExp(`grant[^;]*\\b(insert|update|delete|all)\\b[^;]*on\\s+table\\s+public\\.${table}[^;]*to[^;]*\\b(anon|authenticated)\\b`, "is");
+      assert.doesNotMatch(sql, grant, `${name} grants a write on ${table} back to a session role`);
+      const policy = new RegExp(`create policy[^;]*on\\s+public\\.${table}[^;]*\\bfor\\s+(all|insert|update|delete)\\b`, "is");
+      assert.doesNotMatch(sql, policy, `${name} creates a write policy on ${table}`);
+    }
+    assert.doesNotMatch(
+      sql,
+      /drop function if exists public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)/,
+      `${name} drops the 3-argument replace RPC the config service calls`,
+    );
+  }
+});
+
+/**
+ * The service calls `motorist_replace_ring_plan(uuid, jsonb, integer)`. Until
+ * both routing migrations are applied, every configuration `PUT` fails at
+ * runtime — `config-service.ts` maps that onto a 503 that names the migration,
+ * and these two files are the only place the function is defined.
+ */
+test("the three-argument replace RPC exists exactly once and is service-role only", () => {
+  const definitions = readdirSync(new URL("../supabase/migrations", import.meta.url))
+    .filter((name) => name.endsWith(".sql"))
+    .map((name) => readFileSync(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"))
+    .filter((sql) => /create or replace function public\.motorist_replace_ring_plan\([\s\S]*?p_expected_version/.test(sql));
+
+  assert.equal(definitions.length, 1, "the 3-argument RPC must be defined once");
+  assert.match(definitions[0], /grant execute on function public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)\n\s+to service_role;/);
+  assert.match(definitions[0], /revoke all on function public\.motorist_replace_ring_plan\(uuid, jsonb, integer\)\n\s+from public, anon, authenticated;/);
 });

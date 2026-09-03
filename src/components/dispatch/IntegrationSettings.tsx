@@ -9,7 +9,6 @@ import {
   Loader2,
   MapPinned,
   PhoneCall,
-  PhoneOff,
   RotateCcw,
   Save,
   Trash2,
@@ -20,9 +19,11 @@ import type { PlaceSelectionInput } from "@/data/case-inputs";
 import type { DispatchData } from "@/data/dispatch-types";
 import { partnerDirectoryKindLabels } from "@/domain/case-card";
 import type { AccessUser, Branch, PartnerDirectoryEntry, PartnerDirectoryKind } from "@/domain/types";
-import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { useReplacementVehicleAvailability } from "./useReplacementVehicleAvailability";
+import type { MyPhoneTestCall } from "./MyPhonePanel";
+import { TelephonyConfigPanel } from "./settings/TelephonyConfigPanel";
+import { SettingsSectionHeader } from "./settings/settings-ui";
 import { UserAccessSettings } from "./UserAccessSettings";
 
 type IntegrationSettingsProps = {
@@ -30,6 +31,11 @@ type IntegrationSettingsProps = {
   partnerDirectory: PartnerDirectoryEntry[];
   users: AccessUser[];
   onDataChange: (dispatchData: DispatchData) => void;
+  /**
+   * Click-to-call of the console. "Môj telefón" uses it for its test call so
+   * the browser phone answers its own leg exactly like for any other dial.
+   */
+  onTestCall?: MyPhoneTestCall;
 };
 
 type ApiMutationResponse = {
@@ -49,6 +55,7 @@ const settingsSections: Array<{ icon: LucideIcon; label: string; shortLabel: str
 export function IntegrationSettings({
   branches,
   onDataChange,
+  onTestCall,
   partnerDirectory,
   users,
 }: IntegrationSettingsProps) {
@@ -91,7 +98,7 @@ export function IntegrationSettings({
           <UserAccessSettings users={users} onDataChange={onDataChange} onNotice={setMessage} />
         )}
 
-        {activeSection === "telephony" && <TelephonyNotConfiguredPanel />}
+        {activeSection === "telephony" && <TelephonyConfigPanel onTestCall={onTestCall} />}
 
         {activeSection === "partners" && (
           <PartnerDirectoryForm
@@ -114,29 +121,6 @@ export function IntegrationSettings({
         )}
       </div>
     </main>
-  );
-}
-
-function TelephonyNotConfiguredPanel() {
-  return (
-    <section className="rounded-md border border-zinc-200 bg-white" aria-labelledby="telephony-settings-heading">
-      <SettingsSectionHeader
-        description="Nastavenia liniek, operátorov a smerovania hovorov sa zobrazia po zapojení telefónneho poskytovateľa."
-        icon={PhoneCall}
-        title="Telefonovanie"
-      />
-      <div className="p-4">
-        <div role="status" className="flex items-start gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-950">
-          <PhoneOff size={18} className="mt-0.5 shrink-0" aria-hidden="true" />
-          <div>
-            <div className="font-semibold">{TELEPHONY_NOT_CONFIGURED_MESSAGE}</div>
-            <p className="mt-1 text-xs leading-5">
-              Hovory, SMS a stavy operátorov zatiaľ nie sú prepojené so žiadnym poskytovateľom. Ostatné nastavenia fungujú bez zmeny.
-            </p>
-          </div>
-        </div>
-      </div>
-    </section>
   );
 }
 
@@ -546,20 +530,6 @@ function PartnerDirectoryForm({ entries, onSaved }: { entries: PartnerDirectoryE
         </div>
       </div>
     </section>
-  );
-}
-
-function SettingsSectionHeader({ description, icon: Icon, title }: { description: string; icon: LucideIcon; title: string }) {
-  return (
-    <div className="flex items-start gap-3 border-b border-yellow-200 bg-yellow-50 px-4 py-3">
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-zinc-950">
-        <Icon size={20} />
-      </div>
-      <div>
-        <h2 className="text-base font-semibold text-zinc-950">{title}</h2>
-        <p className="mt-0.5 text-sm text-zinc-600">{description}</p>
-      </div>
-    </div>
   );
 }
 
