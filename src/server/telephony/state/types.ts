@@ -226,6 +226,14 @@ export type DialCommand = CommandBase & {
   attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null } | null;
   autoAnswer?: boolean;
   fromDisplayName?: string;
+  /**
+   * Supervision without a conference: the dial endpoint attaches the new leg to
+   * a live call as monitor, whisper or barge, leaving the existing bridge alone.
+   * Promoting an ordinary bridged call to a conference just to listen would
+   * unbridge the caller for two round trips of dead air.
+   */
+  superviseCallControlId?: string;
+  supervisorRole?: SupervisorMode;
 };
 
 export type AttemptPlan = {

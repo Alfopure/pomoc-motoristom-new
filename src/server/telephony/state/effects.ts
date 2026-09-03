@@ -665,6 +665,10 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     mediaEncryption: isSip ? "SRTP" : undefined,
     customHeaders: command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" }] : undefined,
     fromDisplayName: command.fromDisplayName,
+    // Supervision attaches to a live call at dial time; the caller's bridge is
+    // never touched. `supervisor_role` is only meaningful together with it.
+    superviseCallControlId: command.superviseCallControlId,
+    supervisorRole: command.superviseCallControlId ? command.supervisorRole : undefined,
   });
   ctx.dialResults.set(command.commandId, result);
   await upsertDialedLeg(deps, ctx.session, command, result);

@@ -7,6 +7,7 @@ import {
   blindTransfer,
   CallActionError,
   createRateLimiter,
+  holdCall,
   leaveConferenceCall,
   parkCall,
   removeCallParty,
@@ -334,74 +335,114 @@ describe("superviseCall", () => {
     ["monitor", undefined],
     ["whisper", true],
     ["barge", undefined],
-  ] as const)("joins the conference as %s", async (mode, whispers) => {
+  ] as const)("attaches to an ordinary bridged call as %s without disturbing it", async (mode, whispers) => {
     const h = createTelephonyHarness();
     giveSupervisorDevice(h);
     const call = await talkingWith(h);
 
     const result = await superviseCall(actionDeps(h), manager, call.sessionId, mode);
     expect(result.state).toBe("talking");
+    // The dial attaches the supervisor to the live call. Promoting the call to a
+    // conference just to listen would unbridge the caller (see transitions.ts).
     const dial = h.telnyx.of("dial").at(-1)!.params;
-    expect(dial).toMatchObject({ to: SUPERVISOR_SIP, linkTo: call.callControlId });
+    expect(dial).toMatchObject({ to: SUPERVISOR_SIP, superviseCallControlId: call.operatorLeg, supervisorRole: mode });
+    expect(dial.linkTo ?? null).toBeNull();
+    expect(h.telnyx.of("conference:create")).toHaveLength(0);
     const supervisorLeg = h.legFor(call.sessionId, PROFILES.o4)!;
     expect(supervisorLeg.role).toBe("supervisor");
 
     await h.legEvent(String(supervisorLeg.telnyx_call_control_id), "call.answered");
-    const join = h.telnyx.of("conference:join").at(-1)!.params;
-    expect(join).toMatchObject({ call_control_id: supervisorLeg.telnyx_call_control_id, supervisor_role: mode });
-    expect(join.whisper_call_control_ids).toEqual(whispers ? [call.operatorLeg] : undefined);
+    expect(h.telnyx.of("conference:join")).toHaveLength(0);
     // Supervision never moves the supervised call.
-    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o1 });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o1, conference_id: null });
     expect(h.legs(call.sessionId).find((leg) => leg.id === supervisorLeg.id)!.metadata).toMatchObject({ supervisor_mode: mode });
     expect(h.rows("motorist_audit_log")).toEqual([
       expect.objectContaining({ action: "telephony.supervise.start", actor_profile_id: PROFILES.o4, after_payload: expect.objectContaining({ mode }) }),
     ]);
+    void whispers;
   });
 
-  it("switches the mode of a live supervision through conference update", async () => {
+  it("replaces the supervisor leg when the mode changes outside a conference", async () => {
     const h = createTelephonyHarness();
     giveSupervisorDevice(h);
     const call = await talkingWith(h);
     await superviseCall(actionDeps(h), manager, call.sessionId, "monitor");
-    const supervisorLeg = h.legFor(call.sessionId, PROFILES.o4)!;
-    await h.legEvent(String(supervisorLeg.telnyx_call_control_id), "call.answered");
+    const first = h.legFor(call.sessionId, PROFILES.o4)!;
+    await h.legEvent(String(first.telnyx_call_control_id), "call.answered");
 
+    // The supervisor role is fixed at dial time when there is no conference, so
+    // a switch drops the old leg and attaches a fresh one.
     await superviseCall(actionDeps(h), manager, call.sessionId, "whisper");
-    expect(h.telnyx.of("dial").filter((command) => command.params.to === SUPERVISOR_SIP)).toHaveLength(1);
-    expect(h.telnyx.of("conference:update").at(-1)!.params).toMatchObject({
-      call_control_id: supervisorLeg.telnyx_call_control_id,
-      supervisor_role: "whisper",
-      whisper_call_control_ids: [call.operatorLeg],
-    });
+    expect(h.telnyx.of("hangup").at(-1)!.params).toMatchObject({ callControlId: first.telnyx_call_control_id });
+    const redial = h.telnyx.of("dial").filter((command) => command.params.to === SUPERVISOR_SIP).at(-1)!.params;
+    expect(redial).toMatchObject({ superviseCallControlId: call.operatorLeg, supervisorRole: "whisper" });
     expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: { [PROFILES.o4]: { mode: "whisper" } } });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", conference_id: null });
     expect(h.rows("motorist_audit_log").map((row) => row.action)).toEqual(["telephony.supervise.start", "telephony.supervise.switch"]);
   });
 
-  it("keeps the previous mode when the switch is rejected", async () => {
+  it("moves an attached supervisor into the conference when the call is promoted", async () => {
+    const h = createTelephonyHarness();
+    giveSupervisorDevice(h);
+    const call = await talkingWith(h);
+    await superviseCall(actionDeps(h), manager, call.sessionId, "whisper");
+    const supervisorLeg = h.legFor(call.sessionId, PROFILES.o4)!;
+    await h.legEvent(String(supervisorLeg.telnyx_call_control_id), "call.answered");
+
+    // Hold promotes the bridge to a conference; the supervisor was attached to
+    // the operator's leg and has to follow it in.
+    await holdCall(actionDeps(h), o1, call.sessionId);
+    const join = h.telnyx.of("conference:join").find((command) => command.params.call_control_id === supervisorLeg.telnyx_call_control_id)!;
+    expect(join.params).toMatchObject({ supervisor_role: "whisper", whisper_call_control_ids: [call.operatorLeg] });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "held" });
+
+    // Now that they are a participant, the mode switch is a conference update.
+    await superviseCall(actionDeps(h), manager, call.sessionId, "monitor");
+    expect(h.telnyx.of("conference:update").at(-1)!.params).toMatchObject({
+      call_control_id: supervisorLeg.telnyx_call_control_id,
+      supervisor_role: "monitor",
+    });
+    expect(h.telnyx.of("dial").filter((command) => command.params.to === SUPERVISOR_SIP)).toHaveLength(1);
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: { [PROFILES.o4]: { mode: "monitor" } } });
+  });
+
+  it("keeps the previous mode when a conference switch is rejected", async () => {
     const h = createTelephonyHarness();
     giveSupervisorDevice(h);
     const call = await talkingWith(h);
     await superviseCall(actionDeps(h), manager, call.sessionId, "monitor");
     const supervisorLeg = h.legFor(call.sessionId, PROFILES.o4)!;
     await h.legEvent(String(supervisorLeg.telnyx_call_control_id), "call.answered");
+    await holdCall(actionDeps(h), o1, call.sessionId);
     h.telnyx.failNext("conference:update", new TelnyxCommandError({ code: "invalid_supervisor_role", status: 422, detail: "no" }));
 
     expect(await fail(superviseCall(actionDeps(h), manager, call.sessionId, "barge"))).toMatchObject({ status: 502 });
     expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: { [PROFILES.o4]: { mode: "monitor" } } });
-    expect(h.session(call.sessionId).state).toBe("talking");
+    expect(h.session(call.sessionId).state).toBe("held");
   });
 
-  it("hangs the supervisor leg up and forgets the supervision when the join is refused", async () => {
+  it("leaves the call untouched when the supervisor dial is refused", async () => {
+    const h = createTelephonyHarness();
+    giveSupervisorDevice(h);
+    const call = await talkingWith(h);
+    h.telnyx.failNext("dial", new TelnyxCommandError({ code: "invalid_supervisor_role", status: 422, detail: "no" }));
+
+    expect(await fail(superviseCall(actionDeps(h), manager, call.sessionId, "monitor"))).toMatchObject({ status: 502 });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", conference_id: null });
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: null });
+    expect(h.legs(call.sessionId).some((leg) => leg.role === "supervisor")).toBe(false);
+  });
+
+  it("hangs the supervisor up when the call is no longer supervisable by the time they answer", async () => {
     const h = createTelephonyHarness();
     giveSupervisorDevice(h);
     const call = await talkingWith(h);
     await superviseCall(actionDeps(h), manager, call.sessionId, "monitor");
     const supervisorLeg = h.legFor(call.sessionId, PROFILES.o4)!;
-    h.telnyx.failNext("conference:join", new TelnyxCommandError({ code: "conference_full", status: 422, detail: "full" }));
+    h.db.update("motorist_call_sessions", { state: "wrap_up" }, (row) => row.id === call.sessionId);
 
     await h.legEvent(String(supervisorLeg.telnyx_call_control_id), "call.answered");
     expect(h.telnyx.of("hangup").at(-1)!.params).toMatchObject({ callControlId: supervisorLeg.telnyx_call_control_id });
-    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o1 });
     expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: null });
   });
 

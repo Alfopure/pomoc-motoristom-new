@@ -1130,10 +1130,16 @@ function onSupervisorAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
   const entry = leg.profile_id ? b.meta.supervise?.[leg.profile_id] : null;
   const mode: SupervisorMode = entry?.mode ?? "monitor";
   const operator = b.answeringLeg();
-  if (!b.session.conference_id || !TALKING_STATES.has(b.session.state) || !operator) {
+  if (!TALKING_STATES.has(b.session.state) || !operator) {
     b.cmd(hangupCmd(b, leg, "supervise_unavailable", false));
     if (leg.profile_id) b.patchMeta({ supervise: withoutSupervisor(b, leg.profile_id) });
     return b.note("supervisor answered but the call is no longer supervisable → hang up").result();
+  }
+  if (!b.session.conference_id) {
+    // The dial already attached this leg to the live call with its supervisor
+    // role; there is no conference to join and the caller's bridge is intact.
+    b.leg(leg.telnyx_call_control_id, { metadata: legMetaPatch(leg, { supervisor_mode: mode }) });
+    return b.note(`supervisor attached to the live call (${mode})`).result();
   }
   const joinId = b.cmdId(leg.telnyx_call_control_id, `conference:join:supervise:${mode}`);
   b.cmd({
@@ -1411,9 +1417,12 @@ function handOverConference(b: TransitionBuilder, operator: LegRow, remaining: L
 function operatorLost(b: TransitionBuilder, customer: LegRow, leg: LegRow): void {
   if (b.session.conference_id) {
     b.cmd({ kind: "conference_leave", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:leave"), leg: ref(customer), bestEffort: true });
-    detachSupervisors(b, "operator_lost");
-    b.patchSession({ conference_id: null, conference_name: null });
   }
+  // Outside a conference the supervisor is attached to the operator's leg that
+  // just died, so they are stranded exactly as they would be in an emptied
+  // conference: detach them either way, before `conference_id` is cleared.
+  detachSupervisors(b, "operator_lost");
+  if (b.session.conference_id) b.patchSession({ conference_id: null, conference_name: null });
   b.patchSession({ answered_by_profile_id: null, hold_started_at: null });
   b.patchMeta({ previous_operator: leg.profile_id ?? null, consult: null, conference: null });
   enterWaiting(b, customer, "operator_lost");
@@ -1735,6 +1744,22 @@ function promoteToConference(b: TransitionBuilder, customer: LegRow, operator: L
   b.cmd({ kind: "conference_create", commandId: createId, leg: ref(operator), name: `sess-${b.session.id}` });
   const joinId = b.cmdId(customer.telnyx_call_control_id, "conference:join");
   b.cmd({ kind: "conference_join", commandId: joinId, leg: ref(customer) });
+  // Supervisors dialled onto the bridged call are attached to the operator's
+  // leg, not to a conference. Once the call becomes one they have to follow, or
+  // they would keep listening to a leg whose audio now lives in the conference
+  // and the mode switch would send `conference_update` for a non-participant.
+  for (const supervisor of openSupervisorLegs(b)) {
+    if (!supervisor.answered_at) continue;
+    const mode: SupervisorMode = (supervisor.profile_id ? b.meta.supervise?.[supervisor.profile_id]?.mode : null) ?? "monitor";
+    b.cmd({
+      kind: "conference_join",
+      commandId: b.cmdId(supervisor.telnyx_call_control_id, `conference:join:supervise:promote:${mode}`),
+      leg: ref(supervisor),
+      supervisorRole: mode,
+      ...(mode === "whisper" ? { whisper: [ref(operator)] } : {}),
+      bestEffort: true,
+    });
+  }
   b.patchMeta({ conference: { promoted_at: b.nowIso, by: actor } });
   const failed = b.fork();
   failed.patchSession({ state: b.session.state, hold_started_at: b.session.hold_started_at, conference_id: null, conference_name: null });
@@ -2071,7 +2096,14 @@ function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): 
   const entries = { ...(b.meta.supervise ?? {}) };
   const previous = entries[supervisor.profileId] ?? null;
 
-  if (existing) {
+  if (existing && !b.session.conference_id) {
+    // Outside a conference the supervisor role is fixed at dial time, so a mode
+    // switch replaces the leg: drop the old one and attach a fresh one. The
+    // supervised call is untouched either way.
+    if (!existing.answered_at) throw new CallActionRejected("Dozor sa práve pripája.", 409);
+    if (previous?.mode === supervisor.mode) return b.note("supervisor mode unchanged").result();
+    b.cmd(hangupCmd(b, existing, "supervise_mode_switch", false));
+  } else if (existing) {
     if (!existing.answered_at) throw new CallActionRejected("Dozor sa práve pripája.", 409);
     const commandId = b.cmdId(existing.telnyx_call_control_id, `conference:update:${supervisor.mode}`);
     b.cmd({
@@ -2090,19 +2122,28 @@ function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): 
     return b.note(`supervisor mode → ${supervisor.mode}`).result();
   }
 
-  promoteToConference(b, customer, operator, event.actorProfileId);
+  // A call that is already a conference (hold, consult, three-way) takes the
+  // supervisor in as a participant. An ordinary bridged call must NOT be
+  // promoted just so someone can listen: creating the conference ends the
+  // bridge and parks the caller in silence for two round trips, and a failed
+  // join can leave the call dead while the session still reads `talking`. The
+  // dial endpoint attaches a supervisor to a live call directly, which is what
+  // supervision is for.
+  const inConference = Boolean(b.session.conference_id);
+  if (inConference) promoteToConference(b, customer, operator, event.actorProfileId);
   const dial: DialCommand = {
     kind: "dial",
-    commandId: b.cmdId(supervisor.profileId, "dial:supervise"),
+    commandId: b.cmdId(supervisor.profileId, `dial:supervise:${supervisor.mode}`),
     to: supervisor.sipUri,
     from: b.ctx.fromNumber ?? b.session.called_number ?? "",
     role: "supervisor",
     profileId: supervisor.profileId,
     externalNumber: null,
     clientState: { sid: b.session.id, role: "supervisor", operatorId: supervisor.profileId, intent: SUPERVISE_INTENT, autoAnswer: true },
-    linkTo: customer.telnyx_call_control_id,
+    linkTo: inConference ? customer.telnyx_call_control_id : null,
     timeoutSecs: SUPERVISE_TIMEOUT_SECS,
     autoAnswer: true,
+    ...(inConference ? {} : { superviseCallControlId: operator.telnyx_call_control_id, supervisorRole: supervisor.mode }),
   };
   b.cmd(dial);
   entries[supervisor.profileId] = { mode: supervisor.mode, at: b.nowIso, by: supervisor.profileId };
