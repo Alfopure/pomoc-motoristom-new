@@ -185,7 +185,6 @@ export type DialCommand = CommandBase & {
   /** Ring attempt this dial belongs to (natural key, resolved by effects). */
   attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null } | null;
   autoAnswer?: boolean;
-  parkAfterUnbridge?: "self";
   fromDisplayName?: string;
 };
 
