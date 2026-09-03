@@ -64,6 +64,7 @@ export const MIN_RING_SECS = 5;
 export const MAX_RING_SECS = 120;
 export const MAX_WRAP_UP_SECONDS = 600;
 export const MAX_PARK_MINUTES = 240;
+export const MAX_PAUSE_MINUTES = 480;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)(:[0-5]\d)?$/;
@@ -718,6 +719,11 @@ export function validateBusinessHours(input: BusinessHoursInput[], context: Vali
       }
       if (seenDates.has(exception.date)) issues.push(issue(exceptionPath, "duplicate_date", "Dátum výnimky je v zozname dvakrát."));
       seenDates.add(exception.date);
+      // An "open" exception without intervals would silently mean "open around
+      // the clock" — never what a public-holiday row is meant to express.
+      if (exception.closed === false && (exception.intervals ?? []).length === 0) {
+        issues.push(issue(exceptionPath, "exception_intervals_required", "Otvorená výnimka potrebuje aspoň jeden interval, inak by deň platil ako otvorený nonstop."));
+      }
       for (const interval of exception.intervals ?? []) {
         if (!TIME_PATTERN.test(interval.opens) || !TIME_PATTERN.test(interval.closes) || interval.opens >= interval.closes) {
           issues.push(issue(exceptionPath, "time_invalid", "Interval výnimky musí byť platný (HH:MM, otvorenie pred zatvorením)."));
@@ -748,6 +754,8 @@ export function validatePauseReasons(input: PauseReasonInput[]): ValidationIssue
     if (!reason.label) issues.push(issue(path, "label_required", "Dôvod pauzy potrebuje názov."));
     if (reason.maxMinutes !== null && reason.maxMinutes !== undefined && reason.maxMinutes <= 0) {
       issues.push(issue(path, "max_minutes_invalid", "Maximálny čas pauzy musí byť kladný."));
+    } else if (reason.maxMinutes !== null && reason.maxMinutes !== undefined && reason.maxMinutes > MAX_PAUSE_MINUTES) {
+      issues.push(issue(path, "max_minutes_too_high", `Maximálny čas pauzy môže byť najviac ${MAX_PAUSE_MINUTES} minút.`));
     }
   });
 

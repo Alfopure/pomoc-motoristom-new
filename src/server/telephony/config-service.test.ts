@@ -16,6 +16,7 @@ import {
   updateOperatorTelephonySettings,
   updateTelephonyLine,
   updateTelephonySettings,
+  MAX_PAUSE_MINUTES,
   validateBusinessHours,
   validateLinePatch,
   validateOperatorSettingsPatch,
@@ -222,6 +223,22 @@ describe("validateBusinessHours / validatePauseReasons / patches", () => {
     expect(codes(issues)).toEqual(expect.arrayContaining(["weekday_invalid", "time_order", "time_invalid", "duplicate_date", "date_invalid"]));
   });
 
+  it("refuses an open exception without intervals (it would mean open around the clock)", () => {
+    const hours = (exception: { closed?: boolean; intervals?: Array<{ opens: string; closes: string }> }) => [
+      {
+        id: null,
+        name: "Pracovný čas",
+        timezone: "Europe/Bratislava",
+        active: true,
+        intervals: [{ weekday: 1, opens: "07:00", closes: "19:00" }],
+        exceptions: [{ date: "2026-12-24", ...exception }],
+      },
+    ];
+    expect(codes(validateBusinessHours(hours({ closed: false, intervals: [] }), context()))).toContain("exception_intervals_required");
+    expect(validateBusinessHours(hours({ closed: false, intervals: [{ opens: "09:00", closes: "12:00" }] }), context())).toEqual([]);
+    expect(validateBusinessHours(hours({ closed: true, intervals: [] }), context())).toEqual([]);
+  });
+
   it("refuses removing business hours a line still uses", () => {
     expect(codes(validateBusinessHours([], context({ businessHoursInUse: new Set(["hours-1"]) })))).toContain("business_hours_in_use");
   });
@@ -233,6 +250,12 @@ describe("validateBusinessHours / validatePauseReasons / patches", () => {
       { id: null, code: "porada", label: "Porada", maxMinutes: null, sortOrder: 20, active: true },
     ]);
     expect(codes(issues)).toEqual(expect.arrayContaining(["code_invalid", "label_required", "max_minutes_invalid", "duplicate_code"]));
+  });
+
+  it("caps the pause length at a shift", () => {
+    const reason = (maxMinutes: number) => [{ id: null, code: "obed", label: "Obed", maxMinutes, sortOrder: 0, active: true }];
+    expect(codes(validatePauseReasons(reason(MAX_PAUSE_MINUTES + 1)))).toContain("max_minutes_too_high");
+    expect(validatePauseReasons(reason(MAX_PAUSE_MINUTES))).toEqual([]);
   });
 
   it("keeps a line inside its own organisation", () => {

@@ -1,7 +1,7 @@
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { CallLegRole, CallSessionState, Database, Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
-import type { BusinessHoursSchedule } from "../routing/business-hours";
+import type { BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import type { TelnyxClientState } from "../telnyx/client-state";
 
 /**

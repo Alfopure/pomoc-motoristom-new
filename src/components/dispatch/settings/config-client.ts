@@ -9,7 +9,7 @@
  */
 
 import { TELEPHONY_TIMEOUT_MS, telephonyJson } from "@/lib/telephony/client-request";
-import type { RoutingDocument, ValidationIssue } from "@/server/telephony/config-service";
+import type { RoutingDocument, TelephonySettingsDoc, ValidationIssue } from "@/server/telephony/config-service";
 
 export const TELEPHONY_CONFIG_ENDPOINTS = {
   ringGroups: "/api/telephony/config/ring-groups",
@@ -84,6 +84,32 @@ export async function saveRoutingConfig(
     options.runtime,
   );
   return unwrap(result, "Nastavenia telefónie sa nepodarilo uložiť.");
+}
+
+/**
+ * `PATCH /api/telephony/config/settings` answers with the saved row, not with
+ * the whole routing document (the kill switches are admin-only, so the route
+ * never widens its response). The panel merges the result into the document it
+ * already holds.
+ */
+export async function saveTelephonySettings(patch: Record<string, unknown>, options: ConfigRequestOptions = {}): Promise<TelephonySettingsDoc> {
+  const result = await telephonyJson<{ ok?: boolean; settings?: TelephonySettingsDoc } & ErrorBody>(
+    TELEPHONY_CONFIG_ENDPOINTS.settings,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ patch }),
+      label: "uloženie nastavení telefónie",
+      timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
+      signal: options.signal ?? null,
+    },
+    options.runtime,
+  );
+  if (!result.ok || !result.body || !result.body.settings) {
+    const body = (result.body ?? {}) as ErrorBody;
+    throw new ConfigRequestError(body.error ?? "Nastavenia telefónie sa nepodarilo uložiť.", result.status, body.code ?? "config_failed", body.issues ?? []);
+  }
+  return result.body.settings;
 }
 
 /** Message shown above the form when a request failed as a whole. */

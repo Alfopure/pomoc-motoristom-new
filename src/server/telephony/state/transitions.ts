@@ -1,6 +1,6 @@
 import type { CallLegRole, CallLegState, CallSessionState, Json, RingAttemptResult } from "@/lib/supabase/database.types";
 
-import { evaluateBusinessHours } from "../routing/business-hours";
+import { evaluateBusinessHours } from "@/lib/telephony/business-hours";
 import { classifyRingHangup } from "../routing/eligibility";
 import { memberKey, planRingStep, stepDeadline, toEligibilityDevices, toEligibilityPresence, type RingStepPlanResult } from "../routing/ring-plan";
 import type { TelnyxClientState } from "../telnyx/client-state";

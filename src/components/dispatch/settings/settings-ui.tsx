@@ -2,6 +2,7 @@
 
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { AlertTriangle } from "lucide-react";
 
 import type { ValidationIssue } from "@/server/telephony/config-service";
@@ -12,6 +13,28 @@ import type { ValidationIssue } from "@/server/telephony/config-service";
  * section header, zinc cards, 10-tall inputs) instead of inventing a second
  * visual language.
  */
+
+/**
+ * Wall clock at one-minute resolution, `null` on the server.
+ *
+ * The business-hours preview needs "what time is it now", but a clock read
+ * during render would differ between the server pass and hydration. An external
+ * store solves exactly that: the snapshot is the minute bucket (stable within a
+ * minute, so no render loop) and the server snapshot is `0`, which the callers
+ * read as "no clock yet".
+ */
+export function useMinuteClock(): Date | null {
+  const subscribe = useCallback((onStoreChange: () => void) => {
+    const timer = window.setInterval(onStoreChange, 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const minute = useSyncExternalStore(
+    subscribe,
+    () => Math.floor(Date.now() / 60_000),
+    () => 0,
+  );
+  return minute === 0 ? null : new Date(minute * 60_000);
+}
 
 export function SettingsSectionHeader({ description, icon: Icon, title }: { description: string; icon: LucideIcon; title: string }) {
   return (

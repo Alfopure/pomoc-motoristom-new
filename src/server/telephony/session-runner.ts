@@ -5,7 +5,7 @@ import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
-import { buildBusinessHoursSchedule, type BusinessHoursSchedule } from "./routing/business-hours";
+import { buildBusinessHoursSchedule, type BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import { materialiseRingPlan } from "./routing/ring-plan";
 import { applyReduceResult, recordCallEvent, SessionConflictError, type ApplyResult, type CommandOutcome, type EffectsDeps } from "./state/effects";
 import { reduce } from "./state/transitions";
