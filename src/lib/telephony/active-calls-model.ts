@@ -64,7 +64,10 @@ export type ActiveCallPayload = {
   answeredByProfileId: string | null;
   holdStartedAt: string | null;
   parkedAt: string | null;
+  parkedByProfileId: string | null;
   waitingSince: string | null;
+  waitingReason: string | null;
+  waitingMaxMinutes: number | null;
   currentStep: number;
   ringMode: string | null;
   offeredProfileIds: string[];
@@ -294,12 +297,65 @@ export function pollActivityInput(model: PhoneBarModel): { hasBrowserCall: boole
   };
 }
 
+/**
+ * What the waiting room says about a caller beyond the call row itself: who put
+ * them there and how long they have before the park limit turns into a callback
+ * offer.
+ *
+ * A caller nobody rescues is not left in the waiting room forever — the state
+ * machine offers them a callback once `park_max_minutes` (frozen when they
+ * entered, `meta.waiting.max_minutes`) runs out. The dispatcher has to be able
+ * to see that clock, otherwise the caller disappears from the queue with no
+ * explanation on screen.
+ */
+export type WaitingRoomPark = {
+  /** True for `parked`: an operator put this caller here, they did not overflow into it. */
+  parked: boolean;
+  byProfileId: string | null;
+  byName: string | null;
+  /** ISO moment the caller entered the waiting room. */
+  since: string | null;
+  /** Seconds spent in the waiting room, measured against the snapshot clock. */
+  seconds: number;
+  /** Seconds left before the callback offer; `null` when the limit is unknown. */
+  secondsToLimit: number | null;
+  limitMinutes: number | null;
+};
+
+export function waitingRoomPark(
+  call: Pick<ActiveCallPayload, "state" | "parkedAt" | "parkedByProfileId" | "waitingSince" | "waitingMaxMinutes">,
+  options: { now: number; operatorName?: OperatorNameLookup },
+): WaitingRoomPark {
+  const parked = call.state === "parked";
+  // `parked_at` is stamped by the park action; the overflow path only has the
+  // waiting-room timestamp.
+  const since = call.parkedAt ?? call.waitingSince;
+  const started = since ? Date.parse(since) : Number.NaN;
+  const seconds = Number.isFinite(started) ? Math.max(0, Math.floor((options.now - started) / 1_000)) : 0;
+  const limitMinutes = call.waitingMaxMinutes && call.waitingMaxMinutes > 0 ? call.waitingMaxMinutes : null;
+  const byProfileId = parked ? call.parkedByProfileId : null;
+  return {
+    parked,
+    byProfileId,
+    byName: byProfileId ? options.operatorName?.(byProfileId) ?? null : null,
+    since,
+    seconds,
+    secondsToLimit: limitMinutes === null || !Number.isFinite(started) ? null : Math.max(0, limitMinutes * 60 - seconds),
+    limitMinutes,
+  };
+}
+
+export type WaitingRoomRow = { call: CallCenterCall; park: WaitingRoomPark };
+
 /** Waiting-room rows for `CallQueuePanel` (which speaks `CallCenterCall`). */
 export function waitingRoomCalls(
   payload: ActiveCallsPayload,
   options: { now: number; operatorName?: OperatorNameLookup },
-): CallCenterCall[] {
-  return payload.waiting.map((call) => callCenterCallFromActive(call, options));
+): WaitingRoomRow[] {
+  return payload.waiting.map((call) => ({
+    call: callCenterCallFromActive(call, options),
+    park: waitingRoomPark(call, options),
+  }));
 }
 
 /** Live rows for the Ústredňa list: everything that is not waiting. */

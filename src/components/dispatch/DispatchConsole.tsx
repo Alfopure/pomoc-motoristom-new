@@ -1209,7 +1209,7 @@ export function DispatchConsole({
           {telephonyConfigured ? (
             <div className="hidden sm:block">
               <CallQueuePanel
-                calls={telephony.waitingCalls.map((call) => ({ call }))}
+                calls={telephony.waitingCalls}
                 now={waitingRoomNow}
                 onPickup={(call) => runPhoneCallAction("pickup", call.providerSessionId ?? call.id)}
                 pickupState={waitingPickupState}
@@ -1465,6 +1465,7 @@ export function DispatchConsole({
           onNewCase={startNewCaseFromCall}
           onOpenCase={openCase}
           onAvailabilityAction={onQueueAvailabilityAction}
+          onCallbackCall={telephony.callBackRequest}
           onTelephonyChanged={handleTelephonyChanged}
         />
       )}

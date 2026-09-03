@@ -109,7 +109,7 @@ export const TABLE_DEFAULTS: Record<string, FakeRow> = {
   motorist_operator_presence: { status: "offline", current_session_id: null, pause_reason_id: null, wrap_up_until: null },
   motorist_operator_devices: { registration_state: "unregistered", metadata: {}, device_seen_at: null, device_session_id: null },
   motorist_calls: { recording_status: "not_requested", transcript_status: "not_requested", raw_payload: {}, raw_latest_payload: {} },
-  motorist_callback_requests: { status: "open", metadata: {} },
+  motorist_callback_requests: { status: "open", metadata: {}, caller_name: null, session_id: null, line_id: null, case_id: null, claimed_by: null, claimed_at: null, due_at: null, resolved_at: null, notes: null },
   motorist_job_incidents: { status: "open", consecutive_failures: 0 },
 };
 

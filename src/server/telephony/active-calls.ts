@@ -50,7 +50,13 @@ export type ActiveCallView = {
   answeredByProfileId: string | null;
   holdStartedAt: string | null;
   parkedAt: string | null;
+  /** Operator who put the caller in the waiting room (`meta.park.by`). */
+  parkedByProfileId: string | null;
   waitingSince: string | null;
+  /** Why the caller is waiting: `parked`, `transfer_timeout`, a ring fallback… */
+  waitingReason: string | null;
+  /** `park_max_minutes` frozen when the caller entered the waiting room. */
+  waitingMaxMinutes: number | null;
   currentStep: number;
   ringMode: string | null;
   /** Operators with an open offer for this session (ringing right now). */
@@ -174,7 +180,10 @@ export async function loadActiveCalls(
       answeredByProfileId: session.answered_by_profile_id,
       holdStartedAt: session.hold_started_at,
       parkedAt: session.parked_at,
+      parkedByProfileId: meta.park?.by ?? null,
       waitingSince: meta.waiting?.since ?? null,
+      waitingReason: meta.waiting?.reason ?? null,
+      waitingMaxMinutes: typeof meta.waiting?.max_minutes === "number" ? meta.waiting.max_minutes : null,
       currentStep: session.current_step,
       ringMode: meta.ring?.mode ?? null,
       offeredProfileIds,

@@ -136,6 +136,14 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "telephony/calls/[id]/transfer": { class: "session" },
   "telephony/calls/[id]/transfer-targets": { class: "session" },
   "telephony/calls/[id]/unhold": { class: "session" },
+  // fronta spätných volaní (Fáza 4): čítanie aj akcie sú member-level v rámci
+  // telefónie (dispatcher a vyššie, TELEPHONY_ROUTE_ROLES). Prevzatie cudzej
+  // požiadavky je obmedzené na senior_dispatcher+ v callbacks.ts, nie rolou route.
+  "telephony/callbacks": { class: "session", note: "Fronta spätných volaní; GET member-level, odpovedá aj keď telefónia nie je nakonfigurovaná (riadky sú bežné DB záznamy)." },
+  "telephony/callbacks/[id]/call": { class: "session", note: "Spätné volanie cez bežnú odchádzajúcu cestu (kill switch, rate limit, allowlist); jediná callback route, ktorá vyžaduje nakonfigurovaného providera." },
+  "telephony/callbacks/[id]/cancel": { class: "session" },
+  "telephony/callbacks/[id]/claim": { class: "session" },
+  "telephony/callbacks/[id]/done": { class: "session" },
   // konfigurácia telefónie (Fáza 3): čítanie member-level, zápis manager/admin,
   // nastavenia organizácie (kill switch, allowlist, limit čakárne) len admin.
   "telephony/config/business-hours": { class: "session", role: ["manager", "admin"], note: "GET je member-level (CONFIG_READ_ROLES), ale redigovaný: kill switche len admin, limity a allowlist manager/admin, cudzie SIP identity manager/admin. PUT manager/admin cez handleConfigWrite." },
