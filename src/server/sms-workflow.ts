@@ -2,19 +2,13 @@ import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import {
-  createViptelSmsClient,
-  getViptelSmsConfig,
-  normalizeViptelSmsMsisdn,
-  type ViptelSmsClient,
-  type ViptelSmsConfig,
-} from "@/lib/integrations/viptel/sms-client";
 import { calculateAssetArrivalEta, distanceKm } from "@/lib/dispatch-calculations";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/database.types";
 import { publicLocationLinkStatus } from "@/lib/sms/location-share";
 import { validateCustomSmsDraft } from "@/lib/sms/custom-message";
 import { renderSmsTemplate, type SmsTemplateKey } from "@/lib/sms/templates";
+import { SMS_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { createCaseLocationShareLink } from "@/server/location-share-links";
 
 type AdminClient = SupabaseClient<Database>;
@@ -32,6 +26,9 @@ type SmsAttemptRow = Row<"motorist_sms_attempts">;
 type SmsMessageRow = Row<"motorist_sms_messages">;
 
 const DEFAULT_ORGANIZATION_SLUG = "pomoc-motoristom";
+/** Provider literal persisted on every outbound SMS row and attempt. */
+const SMS_PROVIDER = "telnyx_sms";
+const SMS_FROM_LABEL = "Pomoc motoristom";
 
 export type SendCaseSmsInput = {
   caseId: string;
@@ -49,13 +46,82 @@ export type SendCustomSmsInput = {
   toNumber: string;
 };
 
+export type SmsSendOptions = {
+  /** Test/injection seam; server routes rely on `resolveSmsTransport()`. */
+  transport?: SmsTransport;
+};
+
 export class SmsWorkflowError extends Error {
   constructor(message: string, readonly status = 500) {
     super(message);
+    this.name = "SmsWorkflowError";
   }
 }
 
-export async function sendCaseSms(input: SendCaseSmsInput) {
+export type SmsTransportSendInput = {
+  /** E.164 recipient, see `normalizeSmsRecipient`. */
+  to: string;
+  body: string;
+  idempotencyKey: string;
+};
+
+export type SmsTransportSendResult = {
+  providerMessageId: string | null;
+  status: "queued" | "sent" | "failed";
+};
+
+/**
+ * Provider-neutral seam between the SMS workflow (audit rows, idempotency,
+ * case events, task completion) and whatever actually delivers the message.
+ */
+export type SmsTransport = {
+  send(input: SmsTransportSendInput): Promise<SmsTransportSendResult>;
+};
+
+/** Fails closed while no SMS provider is wired in; never touches the network. */
+export const notConfiguredTransport: SmsTransport = {
+  async send() {
+    throw new SmsWorkflowError(SMS_NOT_CONFIGURED_MESSAGE, 503);
+  },
+};
+
+/** Transport used by the server routes; the next provider replaces this body. */
+export function resolveSmsTransport(): SmsTransport {
+  return notConfiguredTransport;
+}
+
+/**
+ * Canonical E.164 recipient for the transport: Slovak local numbers get +421,
+ * `00`/`+` international prefixes are kept, anything else is rejected with 400.
+ */
+export function normalizeSmsRecipient(value: unknown, fieldName = "Telefónne číslo") {
+  const input = String(value ?? "").trim();
+
+  if (!input) {
+    throw new SmsWorkflowError(`${fieldName}: chýba telefónne číslo.`, 400);
+  }
+
+  if (!/^\+?[\d ()/.-]{1,40}$/.test(input)) {
+    throw new SmsWorkflowError(`${fieldName}: telefónne číslo nie je platné.`, 400);
+  }
+
+  const digits = input.replace(/\D/g, "");
+  const international = digits.startsWith("00")
+    ? digits.slice(2)
+    : input.startsWith("+") || digits.startsWith("421")
+      ? digits
+      : digits.startsWith("0")
+        ? `421${digits.slice(1)}`
+        : "";
+
+  if (!/^[1-9]\d{6,14}$/.test(international)) {
+    throw new SmsWorkflowError(`${fieldName}: použite slovenské číslo alebo medzinárodný tvar s +/00.`, 400);
+  }
+
+  return `+${international}`;
+}
+
+export async function sendCaseSms(input: SendCaseSmsInput, options: SmsSendOptions = {}) {
   if (!input.caseId.trim()) {
     throw new SmsWorkflowError("Chyba pripad.", 400);
   }
@@ -113,15 +179,8 @@ export async function sendCaseSms(input: SendCaseSmsInput) {
     }
   }
 
-  const config = getViptelSmsConfig();
-
-  if (!config.liveSendsEnabled) {
-    throw new SmsWorkflowError("VIPTel SMS realne odosielanie je vypnute. Nastav VIPTEL_SMS_LIVE_SENDS=true.", 503);
-  }
-
-  const client = createViptelSmsClient(config);
-  const fromIdentity = await resolveFromIdentity(client, config);
-  const toNumber = normalizeViptelSmsMsisdn(contact.phone, "contact.phone");
+  const transport = requireConfiguredTransport(options.transport);
+  const toNumber = normalizeSmsRecipient(contact.phone, "Telefón klienta");
   const actorProfileId = caseRow.owner_id ?? (await resolveDefaultOwnerId(supabase, organizationId));
   const locationLink =
     input.template === "location_request"
@@ -145,7 +204,6 @@ export async function sendCaseSms(input: SendCaseSmsInput) {
   const requestFingerprint = hashJson({
     body,
     caseId: caseRow.id,
-    fromIdentity,
     template: input.template,
     toNumber,
   });
@@ -155,12 +213,11 @@ export async function sendCaseSms(input: SendCaseSmsInput) {
       .from("motorist_sms_messages")
       .insert({
         organization_id: organizationId,
-        provider: "viptel_sms",
+        provider: SMS_PROVIDER,
         case_id: caseRow.id,
         call_id: null,
         to_number: toNumber,
-        from_label: "Pomoc motoristom",
-        from_identity: fromIdentity,
+        from_label: SMS_FROM_LABEL,
         direction: "outbound",
         status: "queued",
         status_detail: "queued_for_send",
@@ -184,51 +241,15 @@ export async function sendCaseSms(input: SendCaseSmsInput) {
       .select("*")
       .single(),
   );
-  const attempt = await insertSmsAttempt(supabase, smsMessage, requestFingerprint, {
-    body_length: body.length,
-    from_identity: fromIdentity,
-    to_number: toNumber,
+  const delivery = await deliverSms(supabase, transport, {
+    body,
+    requestFingerprint,
+    requestPayloadSafe: { body_length: body.length, to_number: toNumber },
+    smsMessage,
+    toNumber,
   });
 
-  try {
-    const result = await client.sendMessage({
-      body,
-      destMsisdn: toNumber,
-      fromIdentity,
-    });
-    const providerMessageId = extractProviderMessageId(result.providerResponse);
-    const sentAt = new Date().toISOString();
-
-    await throwOnResult(
-      supabase
-        .from("motorist_sms_attempts")
-        .update({
-          status: "accepted",
-          provider_status_code: result.normalizedStatus.providerStatusCode,
-          provider_message_id: providerMessageId,
-          provider_response_safe: safeJson(result.providerResponse),
-          finished_at: sentAt,
-        })
-        .eq("id", attempt.id),
-    );
-    await throwOnResult(
-      supabase
-        .from("motorist_sms_messages")
-        .update({
-          status: result.normalizedStatus.status,
-          status_detail: result.normalizedStatus.statusDetail,
-          provider_message_id: providerMessageId,
-          raw_payload: {
-            ...objectJson(smsMessage.raw_payload),
-            provider_request_id: result.requestId,
-            provider_status_code: result.normalizedStatus.providerStatusCode,
-          },
-          last_attempt_at: sentAt,
-          sent_at: result.normalizedStatus.status === "sent" || result.normalizedStatus.status === "delivered" ? sentAt : null,
-          delivered_at: result.normalizedStatus.status === "delivered" ? sentAt : null,
-        })
-        .eq("id", smsMessage.id),
-    );
+  if (delivery.status !== "failed") {
     await completeSmsTask(supabase, organizationId, caseRow.id, input.taskId ?? null, input.template);
     await insertSmsEvent(supabase, {
       actorProfileId,
@@ -238,53 +259,24 @@ export async function sendCaseSms(input: SendCaseSmsInput) {
       locationLinkId: locationLink?.linkId ?? null,
       organizationId,
       smsMessageId: smsMessage.id,
-      statusDetail: result.normalizedStatus.statusDetail,
+      statusDetail: delivery.statusDetail,
       template: input.template,
       toNumber,
     });
-
-    return {
-      etaMinutes: etaContext?.etaMinutes ?? null,
-      locationLinkExpiresAt: locationLink?.expiresAt ?? null,
-      providerMessageId,
-      reused: false,
-      smsMessageId: smsMessage.id,
-      status: result.normalizedStatus.status,
-      statusDetail: result.normalizedStatus.statusDetail,
-    };
-  } catch (error) {
-    const failedAt = new Date().toISOString();
-    const errorMessage = error instanceof Error ? error.message : "VIPTel SMS odoslanie zlyhalo.";
-
-    await throwOnResult(
-      supabase
-        .from("motorist_sms_attempts")
-        .update({
-          status: "failed",
-          provider_response_safe: safeJson(providerErrorPayload(error)),
-          error_class: error instanceof Error ? error.name : "Error",
-          error: errorMessage,
-          finished_at: failedAt,
-        })
-        .eq("id", attempt.id),
-    );
-    await throwOnResult(
-      supabase
-        .from("motorist_sms_messages")
-        .update({
-          status: "failed",
-          status_detail: "send_failed",
-          error: errorMessage,
-          last_attempt_at: failedAt,
-        })
-        .eq("id", smsMessage.id),
-    );
-
-    throw new SmsWorkflowError(errorMessage, 502);
   }
+
+  return {
+    etaMinutes: etaContext?.etaMinutes ?? null,
+    locationLinkExpiresAt: locationLink?.expiresAt ?? null,
+    providerMessageId: delivery.providerMessageId,
+    reused: false,
+    smsMessageId: smsMessage.id,
+    status: delivery.status,
+    statusDetail: delivery.statusDetail,
+  };
 }
 
-export async function sendCustomSms(input: SendCustomSmsInput) {
+export async function sendCustomSms(input: SendCustomSmsInput, options: SmsSendOptions = {}) {
   let draft: ReturnType<typeof validateCustomSmsDraft>;
 
   try {
@@ -297,30 +289,16 @@ export async function sendCustomSms(input: SendCustomSmsInput) {
     throw new SmsWorkflowError("Odosielateľa SMS sa nepodarilo bezpečne overiť.", 403);
   }
 
+  // Gate before any read or write so an unconfigured SMS stack leaves no trace.
+  const transport = requireConfiguredTransport(options.transport);
+  const toNumber = normalizeSmsRecipient(draft.toNumber, "Telefónne číslo");
   const supabase = createSupabaseAdminClient();
   const caseRow = input.caseId?.trim() ? await getCase(supabase, input.organizationId, input.caseId.trim()) : null;
-  const config = getViptelSmsConfig();
-
-  if (!config.liveSendsEnabled) {
-    throw new SmsWorkflowError("VIPTel SMS reálne odosielanie je vypnuté. Nastav VIPTEL_SMS_LIVE_SENDS=true.", 503);
-  }
-
-  const client = createViptelSmsClient(config);
-  const fromIdentity = await resolveFromIdentity(client, config);
-  let toNumber: string;
-
-  try {
-    toNumber = normalizeViptelSmsMsisdn(draft.toNumber, "Telefónne číslo");
-  } catch (error) {
-    throw new SmsWorkflowError(error instanceof Error ? error.message : "Telefónne číslo nie je platné.", 400);
-  }
-
   const idempotencyKey = `custom-sms:${input.actorProfileId}:${randomUUID()}`;
   const requestFingerprint = hashJson({
     actorProfileId: input.actorProfileId,
     body: draft.message,
     caseId: caseRow?.id ?? null,
-    fromIdentity,
     toNumber,
   });
   const smsMessage = await insertSingle<SmsMessageRow>(
@@ -328,12 +306,11 @@ export async function sendCustomSms(input: SendCustomSmsInput) {
       .from("motorist_sms_messages")
       .insert({
         organization_id: input.organizationId,
-        provider: "viptel_sms",
+        provider: SMS_PROVIDER,
         case_id: caseRow?.id ?? null,
         call_id: null,
         to_number: toNumber,
-        from_label: "Pomoc motoristom",
-        from_identity: fromIdentity,
+        from_label: SMS_FROM_LABEL,
         direction: "outbound",
         status: "queued",
         status_detail: "queued_for_send",
@@ -352,75 +329,80 @@ export async function sendCustomSms(input: SendCustomSmsInput) {
       .select("*")
       .single(),
   );
-  const attempt = await insertSmsAttempt(supabase, smsMessage, requestFingerprint, {
-    body_length: draft.message.length,
-    from_identity: fromIdentity,
-    to_number: toNumber,
+  const delivery = await deliverSms(supabase, transport, {
+    body: draft.message,
+    requestFingerprint,
+    requestPayloadSafe: { body_length: draft.message.length, to_number: toNumber },
+    smsMessage,
+    toNumber,
   });
 
-  try {
-    const result = await client.sendMessage({ body: draft.message, destMsisdn: toNumber, fromIdentity });
-    const providerMessageId = extractProviderMessageId(result.providerResponse);
-    const sentAt = new Date().toISOString();
-
-    await throwOnResult(
-      supabase
-        .from("motorist_sms_attempts")
-        .update({
-          status: "accepted",
-          provider_status_code: result.normalizedStatus.providerStatusCode,
-          provider_message_id: providerMessageId,
-          provider_response_safe: safeJson(result.providerResponse),
-          finished_at: sentAt,
-        })
-        .eq("id", attempt.id),
-    );
-    await throwOnResult(
-      supabase
-        .from("motorist_sms_messages")
-        .update({
-          status: result.normalizedStatus.status,
-          status_detail: result.normalizedStatus.statusDetail,
-          provider_message_id: providerMessageId,
-          raw_payload: {
-            ...objectJson(smsMessage.raw_payload),
-            provider_request_id: result.requestId,
-            provider_status_code: result.normalizedStatus.providerStatusCode,
-          },
-          last_attempt_at: sentAt,
-          sent_at: result.normalizedStatus.status === "sent" || result.normalizedStatus.status === "delivered" ? sentAt : null,
-          delivered_at: result.normalizedStatus.status === "delivered" ? sentAt : null,
-        })
-        .eq("id", smsMessage.id),
-    );
-
-    if (caseRow) {
-      await insertCustomSmsEvent(supabase, {
-        actorProfileId: input.actorProfileId,
-        caseId: caseRow.id,
-        organizationId: input.organizationId,
-        smsMessageId: smsMessage.id,
-        statusDetail: result.normalizedStatus.statusDetail,
-        toNumber,
-      });
-    }
-
-    return {
-      providerMessageId,
+  if (caseRow && delivery.status !== "failed") {
+    await insertCustomSmsEvent(supabase, {
+      actorProfileId: input.actorProfileId,
+      caseId: caseRow.id,
+      organizationId: input.organizationId,
       smsMessageId: smsMessage.id,
-      status: result.normalizedStatus.status,
-      statusDetail: result.normalizedStatus.statusDetail,
-    };
+      statusDetail: delivery.statusDetail,
+      toNumber,
+    });
+  }
+
+  return {
+    providerMessageId: delivery.providerMessageId,
+    smsMessageId: smsMessage.id,
+    status: delivery.status,
+    statusDetail: delivery.statusDetail,
+  };
+}
+
+function requireConfiguredTransport(override?: SmsTransport): SmsTransport {
+  const transport = override ?? resolveSmsTransport();
+
+  if (transport === notConfiguredTransport) {
+    // Same contract as the former live-sends gate: refuse before any audit row exists.
+    throw new SmsWorkflowError(SMS_NOT_CONFIGURED_MESSAGE, 503);
+  }
+
+  return transport;
+}
+
+/**
+ * Records one attempt, hands the message to the transport and mirrors the
+ * outcome onto the attempt and message rows. Throws `SmsWorkflowError` after
+ * marking both rows failed when the transport rejects.
+ */
+async function deliverSms(
+  supabase: AdminClient,
+  transport: SmsTransport,
+  input: {
+    body: string;
+    requestFingerprint: string;
+    requestPayloadSafe: Json;
+    smsMessage: SmsMessageRow;
+    toNumber: string;
+  },
+) {
+  const { smsMessage } = input;
+  const attempt = await insertSmsAttempt(supabase, smsMessage, input.requestFingerprint, input.requestPayloadSafe);
+  let result: SmsTransportSendResult;
+
+  try {
+    result = await transport.send({
+      body: input.body,
+      idempotencyKey: smsMessage.idempotency_key ?? smsMessage.id,
+      to: input.toNumber,
+    });
   } catch (error) {
     const failedAt = new Date().toISOString();
-    const errorMessage = error instanceof Error ? error.message : "VIPTel SMS odoslanie zlyhalo.";
+    const errorMessage = error instanceof Error ? error.message : "SMS odoslanie zlyhalo.";
 
     await throwOnResult(
       supabase
         .from("motorist_sms_attempts")
         .update({
           status: "failed",
-          provider_response_safe: safeJson(providerErrorPayload(error)),
+          provider_response_safe: providerErrorPayload(error),
           error_class: error instanceof Error ? error.name : "Error",
           error: errorMessage,
           finished_at: failedAt,
@@ -439,7 +421,52 @@ export async function sendCustomSms(input: SendCustomSmsInput) {
         .eq("id", smsMessage.id),
     );
 
-    throw new SmsWorkflowError(errorMessage, 502);
+    throw error instanceof SmsWorkflowError ? error : new SmsWorkflowError(errorMessage, 502);
+  }
+
+  const finishedAt = new Date().toISOString();
+  const statusDetail = transportStatusDetail(result.status);
+  const rejected = result.status === "failed";
+
+  await throwOnResult(
+    supabase
+      .from("motorist_sms_attempts")
+      .update({
+        status: rejected ? "failed" : "accepted",
+        provider_message_id: result.providerMessageId,
+        provider_response_safe: { provider_message_id: result.providerMessageId, status: result.status },
+        error: rejected ? PROVIDER_REJECTED_MESSAGE : null,
+        finished_at: finishedAt,
+      })
+      .eq("id", attempt.id),
+  );
+  await throwOnResult(
+    supabase
+      .from("motorist_sms_messages")
+      .update({
+        status: result.status,
+        status_detail: statusDetail,
+        provider_message_id: result.providerMessageId,
+        error: rejected ? PROVIDER_REJECTED_MESSAGE : null,
+        last_attempt_at: finishedAt,
+        sent_at: result.status === "sent" ? finishedAt : null,
+      })
+      .eq("id", smsMessage.id),
+  );
+
+  return { providerMessageId: result.providerMessageId, status: result.status, statusDetail };
+}
+
+const PROVIDER_REJECTED_MESSAGE = "Poskytovateľ SMS správu neprijal.";
+
+function transportStatusDetail(status: SmsTransportSendResult["status"]) {
+  switch (status) {
+    case "sent":
+      return "sent_to_provider";
+    case "queued":
+      return "queued_at_provider";
+    default:
+      return "send_failed";
   }
 }
 
@@ -508,7 +535,7 @@ async function findSmsByIdempotencyKey(supabase: AdminClient, organizationId: st
     .from("motorist_sms_messages")
     .select("*")
     .eq("organization_id", organizationId)
-    .eq("provider", "viptel_sms")
+    .eq("provider", SMS_PROVIDER)
     .eq("idempotency_key", idempotencyKey)
     .maybeSingle();
   await throwOnResult(result);
@@ -573,22 +600,6 @@ async function resolveEtaSmsContext(supabase: AdminClient, organizationId: strin
   };
 }
 
-async function resolveFromIdentity(client: ViptelSmsClient, config: ViptelSmsConfig) {
-  if (config.fromIdentity?.trim()) {
-    return config.fromIdentity.trim();
-  }
-
-  const identities = await client.listIdentities();
-  const preferred = identities.find((identity) => identity.value.startsWith("00") || identity.name?.startsWith("00")) ?? identities[0];
-  const fromIdentity = preferred?.name ?? preferred?.value ?? preferred?.id;
-
-  if (!fromIdentity) {
-    throw new SmsWorkflowError("VIPTel SMS nema nastavenu odosielaciu identitu.", 503);
-  }
-
-  return fromIdentity;
-}
-
 async function insertSmsAttempt(
   supabase: AdminClient,
   smsMessage: SmsMessageRow,
@@ -601,7 +612,7 @@ async function insertSmsAttempt(
       .insert({
         organization_id: smsMessage.organization_id,
         sms_message_id: smsMessage.id,
-        provider: "viptel_sms",
+        provider: SMS_PROVIDER,
         attempt_number: smsMessage.retry_count + 1,
         claim_id: randomUUID(),
         idempotency_key: smsMessage.idempotency_key ?? smsMessage.id,
@@ -780,48 +791,11 @@ function pointFromLocation(location: LocationRow) {
   };
 }
 
-function extractProviderMessageId(payload: unknown) {
-  const record = asRecord(payload);
-  return stringFromJson(record.hash_id) ?? stringFromJson(record.message_id) ?? stringFromJson(record.id) ?? stringFromJson(record.transaction_key);
-}
-
-function providerErrorPayload(error: unknown) {
-  if (error && typeof error === "object") {
-    const record = error as Record<string, unknown>;
-
-    return {
-      message: error instanceof Error ? error.message : stringFromJson(record.message),
-      name: error instanceof Error ? error.name : stringFromJson(record.name),
-      provider_response: safeJson(record.providerResponse),
-      provider_status: record.providerStatus,
-    };
-  }
-
-  return { message: String(error) };
-}
-
-function safeJson(value: unknown): Json {
-  if (value === null || value === undefined) {
-    return {};
-  }
-
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.slice(0, 20).map(safeJson);
-  }
-
-  if (typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .slice(0, 30)
-        .map(([key, item]) => [key, safeJson(item)]),
-    ) as Json;
-  }
-
-  return String(value);
+function providerErrorPayload(error: unknown): Json {
+  return {
+    message: error instanceof Error ? error.message : String(error),
+    name: error instanceof Error ? error.name : "Error",
+  };
 }
 
 function hashJson(value: unknown) {
@@ -839,10 +813,6 @@ function maskPhone(value: string) {
 }
 
 function objectJson(value: Json): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 

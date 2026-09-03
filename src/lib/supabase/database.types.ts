@@ -41,14 +41,13 @@ export type Database = {
       motorist_organization_integrations: Table<{
         id: string;
         organization_id: string;
-        provider: "viptel" | "viptel_sms" | "google_maps" | "fleet" | "ai" | "commander" | "client_vehicle_db";
+        provider: "telnyx" | "telnyx_sms" | "google_maps" | "fleet" | "ai" | "commander" | "client_vehicle_db";
         enabled: boolean;
         config: Json;
         secret_ref: string | null;
         status: "not_configured" | "configured" | "live" | "degraded" | "disabled";
         enabled_features: string[];
         base_url: string | null;
-        websocket_url: string | null;
         last_success_at: Timestamp | null;
         last_error_at: Timestamp | null;
         last_error: string | null;
@@ -231,120 +230,6 @@ export type Database = {
         metadata: Json;
         created_at: Timestamp;
         updated_at: Timestamp;
-      }>;
-      motorist_telephony_extensions: Table<{
-        id: string;
-        organization_id: string;
-        provider: string;
-        external_id: string | null;
-        extension: string;
-        profile_id: string | null;
-        active: boolean;
-        metadata: Json;
-        display_name: string | null;
-        outbound_cid: string | null;
-        call_forwarding: string | null;
-        is_registered: boolean | null;
-        is_viptel_phone_active: boolean | null;
-        allowed_changes: string[];
-        last_synced_at: Timestamp | null;
-        raw_payload: Json;
-        workplace_seat_generation: string | null;
-        created_at: Timestamp;
-        updated_at: Timestamp;
-      }>;
-      motorist_workplace_operations: Table<{
-        id: string;
-        organization_id: string;
-        idempotency_key: string;
-        intent_hash: string;
-        kind: "claim" | "takeover" | "switch" | "leave" | "browser_transfer";
-        actor_profile_id: string;
-        source_profile_id: string | null;
-        target_previous_profile_id: string | null;
-        source_extension_id: string | null;
-        target_extension_id: string | null;
-        source_lease_id: string | null;
-        target_lease_id: string | null;
-        browser_instance_id: string;
-        expected_source_assignment_generation: string | null;
-        expected_target_assignment_generation: string | null;
-        expected_source_lease_version: number | null;
-        expected_target_lease_version: number | null;
-        expected_source_heartbeat_at: Timestamp | null;
-        expected_target_heartbeat_at: Timestamp | null;
-        phase: "created" | "claimed" | "browser_presence_checked" | "provider_checked" |
-          "ownership_committed" | "audits_verified" | "completed" | "aborted" | "manual_recovery_required";
-        claim_generation: string;
-        locked_at: Timestamp | null;
-        claim_expires_at: Timestamp | null;
-        provider_checked_at: Timestamp | null;
-        provider_proof_hash: string | null;
-        committed_at: Timestamp | null;
-        completed_at: Timestamp | null;
-        recovery_owner: string | null;
-        recovery_expires_at: Timestamp | null;
-        last_error_safe: string | null;
-        result_safe: Json | null;
-        source_unassign_audit_id: string | null;
-        target_unassign_audit_id: string | null;
-        target_assign_audit_id: string | null;
-        created_at: Timestamp;
-        updated_at: Timestamp;
-      }>;
-      motorist_workplace_leases: Table<{
-        id: string;
-        organization_id: string;
-        extension_id: string;
-        profile_id: string;
-        assignment_generation: string;
-        browser_instance_id: string;
-        lease_version: number;
-        leader_epoch: number;
-        resume_secret_hash: string;
-        resume_requested_at: Timestamp | null;
-        heartbeat_suspended_at: Timestamp | null;
-        heartbeat_suspension_operation_id: string | null;
-        state: "active" | "ending" | "ended" | "revoked";
-        claimed_at: Timestamp;
-        heartbeat_at: Timestamp;
-        expires_at: Timestamp;
-        ended_at: Timestamp | null;
-        ended_reason: string | null;
-        revoked_by: string | null;
-        created_at: Timestamp;
-        updated_at: Timestamp;
-      }>;
-      motorist_telephony_guard_operations: Table<{
-        id: string;
-        organization_id: string;
-        kind: "workplace_claim" | "workplace_takeover" | "workplace_switch" | "workplace_leave" |
-          "workplace_browser_transfer" | "routing_apply" | "call_command" | "dtmf_intent" |
-          "queue_action" | "webphone_session_issue" | "assignment";
-        owner_entity_type: "workplace_operation" | "routing_operation" | "telephony_command" |
-          "webphone_session" | "assignment_transition";
-        owner_entity_id: string;
-        phase: string;
-        recovery_policy: "workplace_precommit_abort_postcommit_rollforward" | "provider_reconcile" | "safe_abort";
-        claim_generation: string;
-        claim_expires_at: Timestamp;
-        terminal_at: Timestamp | null;
-        last_error_safe: string | null;
-        created_at: Timestamp;
-        updated_at: Timestamp;
-      }>;
-      motorist_workplace_resource_claims: Table<{
-        organization_id: string;
-        resource_type: "profile" | "extension" | "workplace_lease" | "routing_plan" | "call" | "queue";
-        resource_id: string;
-        operation_id: string | null;
-        claim_generation: string | null;
-        acquired_at: Timestamp | null;
-        expires_at: Timestamp | null;
-        guard_version: number;
-        updated_at: Timestamp;
-        last_released_reason: string | null;
-        last_released_at: Timestamp | null;
       }>;
       motorist_contacts: Table<{
         id: string;
@@ -775,11 +660,9 @@ export type Database = {
         id: string;
         organization_id: string;
         provider: string;
-        viptel_unique_id: string | null;
+        provider_session_id: string | null;
         provider_call_id: string | null;
         direction: "inbound" | "outbound" | "internal";
-        type: string | null;
-        application: string | null;
         status: "incoming" | "ringing_agent" | "answered" | "missed" | "abandoned_queue" | "outbound" | "ended" | "failed";
         end_reason: string | null;
         caller_number: string | null;
@@ -787,25 +670,16 @@ export type Database = {
         called_number: string | null;
         received_number: string | null;
         destination_number: string | null;
-        caller_extension: string | null;
-        received_extension: string | null;
-        destination_extension: string | null;
         line_id: string | null;
         queue_id: string | null;
-        queue_number: string | null;
-        from_queue_unique_id: string | null;
-        extension_id: string | null;
         operator_id: string | null;
         case_id: string | null;
         started_at: Timestamp | null;
         answered_at: Timestamp | null;
         ended_at: Timestamp | null;
         wait_seconds: number | null;
-        ring_seconds: number | null;
         duration_seconds: number | null;
-        complete_duration_seconds: number | null;
         recording_status: "not_requested" | "pending" | "available" | "failed" | "deleted";
-        recording_file: string | null;
         transcript_status: "not_requested" | "pending" | "complete" | "failed";
         summary: string | null;
         raw_payload: Json;
@@ -818,7 +692,7 @@ export type Database = {
         organization_id: string;
         call_id: string | null;
         provider: string;
-        viptel_unique_id: string | null;
+        provider_session_id: string | null;
         event_type: string;
         event_fingerprint: string;
         payload: Json;
@@ -826,7 +700,6 @@ export type Database = {
         normalized_payload: Json;
         handled_status: "processed" | "ignored" | "failed" | "unknown";
         provider_created_at: Timestamp | null;
-        provider_timestamp: Timestamp | null;
         received_at: Timestamp;
         created_at: Timestamp;
       }>;
@@ -835,21 +708,14 @@ export type Database = {
         organization_id: string;
         call_id: string | null;
         provider: string;
-        viptel_unique_id: string | null;
+        provider_session_id: string | null;
         provider_recording_id: string | null;
-        cdr_id: string | null;
-        recording_file: string | null;
-        provider_download_ref: string | null;
         storage_bucket: string | null;
         storage_path: string | null;
         mime_type: string | null;
-        size_bytes: number | null;
-        checksum: string | null;
-        status: "pending" | "available" | "failed" | "deleted" | "restricted";
+        status: "pending" | "available" | "failed" | "deleted";
         duration_seconds: number | null;
         fetched_at: Timestamp | null;
-        deleted_at: Timestamp | null;
-        retention_until: Timestamp | null;
         metadata: Json;
         created_at: Timestamp;
         updated_at: Timestamp;
@@ -859,20 +725,16 @@ export type Database = {
         organization_id: string;
         provider: string;
         provider_message_id: string | null;
-        provider_conversation_id: string | null;
         case_id: string | null;
         call_id: string | null;
         to_number: string;
         from_label: string | null;
-        from_identity: string | null;
         direction: "outbound" | "inbound";
-        status: "draft" | "queued" | "sent" | "delivered" | "failed" | "received";
+        status: "queued" | "sent" | "delivered" | "failed" | "received";
         status_detail: string | null;
         template_key: string | null;
         body: string;
         error: string | null;
-        price: number | null;
-        segments: number | null;
         raw_payload: Json;
         idempotency_key: string | null;
         request_fingerprint: string | null;
@@ -880,11 +742,8 @@ export type Database = {
         next_attempt_at: Timestamp | null;
         last_attempt_at: Timestamp | null;
         retry_count: number;
-        locked_at: Timestamp | null;
-        locked_by: string | null;
         sent_at: Timestamp | null;
         delivered_at: Timestamp | null;
-        received_at: Timestamp | null;
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
@@ -937,57 +796,6 @@ export type Database = {
         received_at: Timestamp;
         processed_at: Timestamp | null;
         error: string | null;
-        created_at: Timestamp;
-      }>;
-      motorist_telephony_commands: Table<{
-        id: string;
-        organization_id: string;
-        provider: string;
-        command_type: string;
-        requested_by: string | null;
-        call_id: string | null;
-        queue_id: string | null;
-        extension_id: string | null;
-        request_payload: Json;
-        provider_response: Json;
-        status: "queued" | "sent" | "accepted" | "failed" | "confirmed_by_event";
-        idempotency_key: string;
-        created_at: Timestamp;
-        updated_at: Timestamp;
-        sent_at: Timestamp | null;
-        confirmed_at: Timestamp | null;
-      }>;
-      motorist_queue_memberships: Table<{
-        id: string;
-        organization_id: string;
-        provider: string;
-        queue_id: string | null;
-        extension_id: string | null;
-        queue_number: string;
-        extension_number: string;
-        member_name: string | null;
-        paused: boolean;
-        in_use: boolean;
-        calls_taken: number;
-        last_call_taken_ago: number | null;
-        joined_at: Timestamp | null;
-        last_synced_at: Timestamp | null;
-        raw_payload: Json;
-        created_at: Timestamp;
-        updated_at: Timestamp;
-      }>;
-      motorist_queue_snapshots: Table<{
-        id: string;
-        organization_id: string;
-        provider: string;
-        queue_id: string | null;
-        queue_number: string;
-        current_calls_count: number;
-        waiting_calls: number;
-        members: Json;
-        captured_at: Timestamp;
-        source: "rest_poll" | "websocket_event" | "manual_refresh";
-        raw_payload: Json;
         created_at: Timestamp;
       }>;
       motorist_call_transcripts: Table<{
@@ -1051,8 +859,7 @@ export type Database = {
         heartbeat_at: Timestamp;
         scheduler_tick_at: Timestamp | null;
         scheduler_status: string;
-        viptel_ws_status: string;
-        last_viptel_event_at: Timestamp | null;
+        last_webhook_at: Timestamp | null;
         updated_at: Timestamp;
       }>;
       motorist_job_incidents: Table<{
@@ -1111,169 +918,6 @@ export type Database = {
           p_terminal: boolean;
         };
         Returns: boolean;
-      };
-      motorist_acquire_telephony_resource_claims: {
-        Args: {
-          p_organization_id: string;
-          p_operation_id: string;
-          p_resources: Json;
-          p_claim_ttl_seconds: number;
-        };
-        Returns: Json;
-      };
-      motorist_release_telephony_resource_claims: {
-        Args: {
-          p_organization_id: string;
-          p_operation_id: string;
-          p_claim_generation: string;
-        };
-        Returns: number;
-      };
-      motorist_begin_workplace_operation: {
-        Args: {
-          p_operation_id: string;
-          p_organization_id: string;
-          p_idempotency_key: string;
-          p_intent_hash: string;
-          p_kind: "claim" | "takeover" | "switch" | "leave" | "browser_transfer";
-          p_actor_profile_id: string;
-          p_source_extension_id: string | null;
-          p_target_extension_id: string | null;
-          p_source_lease_id: string | null;
-          p_target_lease_id: string | null;
-          p_browser_instance_id: string;
-          p_expected_source_assignment_generation: string | null;
-          p_expected_target_assignment_generation: string | null;
-          p_expected_source_lease_version: number | null;
-          p_expected_target_lease_version: number | null;
-          p_expected_source_heartbeat_at: Timestamp | null;
-          p_expected_target_heartbeat_at: Timestamp | null;
-          p_resources: Json;
-          p_claim_ttl_seconds: number;
-        };
-        Returns: Json;
-      };
-      motorist_mark_workplace_provider_checked: {
-        Args: {
-          p_organization_id: string;
-          p_operation_id: string;
-          p_claim_generation: string;
-          p_provider_proof_hash: string;
-        };
-        Returns: Json;
-      };
-      motorist_finalize_workplace_operation: {
-        Args: {
-          p_organization_id: string;
-          p_operation_id: string;
-          p_claim_generation: string;
-          p_new_lease_id: string | null;
-          p_new_assignment_generation: string | null;
-          p_new_browser_instance_id: string | null;
-          p_new_resume_secret_hash: string | null;
-          p_source_lifecycle: Json | null;
-          p_target_lifecycle: Json | null;
-          p_source_unassign_audit_id: string | null;
-          p_target_unassign_audit_id: string | null;
-          p_target_assign_audit_id: string | null;
-        };
-        Returns: Json;
-      };
-      motorist_abort_workplace_operation: {
-        Args: {
-          p_organization_id: string;
-          p_operation_id: string;
-          p_claim_generation: string;
-          p_error_safe: string;
-        };
-        Returns: Json;
-      };
-      motorist_heartbeat_workplace_lease: {
-        Args: {
-          p_organization_id: string;
-          p_lease_id: string;
-          p_profile_id: string;
-          p_assignment_generation: string;
-          p_browser_instance_id: string;
-          p_leader_epoch: number;
-          p_lease_version: number;
-        };
-        Returns: Json;
-      };
-      motorist_resume_workplace_lease: {
-        Args: {
-          p_organization_id: string;
-          p_lease_id: string;
-          p_profile_id: string;
-          p_assignment_generation: string;
-          p_previous_resume_secret_hash: string;
-          p_new_resume_secret_hash: string;
-          p_new_browser_instance_id: string;
-          p_expected_leader_epoch: number;
-          p_expected_lease_version: number;
-          p_idempotency_key: string;
-        };
-        Returns: Json;
-      };
-      motorist_verify_workplace_lease: {
-        Args: {
-          p_organization_id: string;
-          p_profile_id: string;
-          p_extension_id: string;
-          p_lease_id: string | null;
-          p_assignment_generation: string | null;
-          p_browser_instance_id: string | null;
-          p_leader_epoch: number | null;
-          p_lease_version: number | null;
-          p_require_fence: boolean;
-        };
-        Returns: Json;
-      };
-      motorist_recover_expired_workplace_operation: {
-        Args: {
-          p_organization_id: string;
-          p_operation_id: string;
-          p_recovery_owner: string;
-        };
-        Returns: Json;
-      };
-      motorist_renew_workplace_operation_claim: {
-        Args: {
-          p_organization_id: string;
-          p_operation_id: string;
-          p_claim_generation: string;
-          p_claim_ttl_seconds: number;
-        };
-        Returns: Json;
-      };
-      motorist_release_terminal_telephony_resource_claims: {
-        Args: {
-          p_organization_id: string;
-          p_operation_id: string;
-          p_recovery_owner: string;
-        };
-        Returns: Json;
-      };
-      motorist_mark_workplace_operation_manual_recovery: {
-        Args: {
-          p_organization_id: string;
-          p_operation_id: string;
-          p_recovery_owner: string;
-          p_reason_safe: string;
-        };
-        Returns: Json;
-      };
-      motorist_reap_expired_workplace_lease: {
-        Args: {
-          p_organization_id: string;
-          p_lease_id: string;
-          p_recovery_owner: string;
-        };
-        Returns: Json;
-      };
-      motorist_workplace_database_now: {
-        Args: Record<PropertyKey, never>;
-        Returns: Json;
       };
     };
     Enums: { [_ in never]: never };

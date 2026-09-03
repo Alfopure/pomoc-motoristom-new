@@ -42,7 +42,7 @@ export function isDialablePhoneInput(value: unknown) {
   }
 }
 
-export function formatViptelDialTarget(value: unknown, fieldName = "number") {
+export function formatDialTarget(value: unknown, fieldName = "number") {
   const parsed = cleanPhoneInput(value, fieldName);
 
   if (parsed.kind === "extension") {
@@ -91,10 +91,10 @@ export function sameDialNumber(left: unknown, right: unknown) {
 }
 
 /**
- * Formats provider-facing phone identities for people. VIPTel commonly returns
- * international numbers with a `00` prefix; exposing that raw transport form
- * made an otherwise normal Slovak number look as if it had two extra zeroes.
- * Short PBX extensions intentionally stay untouched.
+ * Formats provider-facing phone identities for people. PBX feeds commonly
+ * return international numbers with a `00` prefix; exposing that raw transport
+ * form made an otherwise normal Slovak number look as if it had two extra
+ * zeroes. Short PBX extensions intentionally stay untouched.
  */
 export function formatPhoneNumberForDisplay(value: unknown) {
   const input = String(value ?? "").trim();

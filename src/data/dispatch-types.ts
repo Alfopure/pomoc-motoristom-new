@@ -15,12 +15,11 @@ import type {
 export type DispatchDataSource = "supabase" | "mock";
 
 export type IntegrationConnection = {
-  provider: "viptel" | "viptel_sms" | "google_maps" | "fleet" | "ai" | "commander" | "client_vehicle_db";
+  provider: "telnyx" | "telnyx_sms" | "google_maps" | "fleet" | "ai" | "commander" | "client_vehicle_db";
   enabled: boolean;
   status: "not_configured" | "configured" | "live" | "degraded" | "disabled";
   enabledFeatures: string[];
   baseUrl?: string;
-  websocketUrl?: string;
   secretRef?: string;
   secretConfigured: boolean;
   lastSuccessAt?: string;
@@ -79,14 +78,6 @@ export type CommanderVehicleConnection = {
   };
 };
 
-export type TelephonyFoundationStats = {
-  rawEvents: number;
-  commands: number;
-  queueMemberships: number;
-  queueSnapshots: number;
-  transcripts: number;
-};
-
 export type CallOutcome = "reached" | "not_reached" | "callback" | "informational" | "bad_contact" | "case_created";
 
 export type CallerMatch = {
@@ -107,8 +98,8 @@ export type CallerMatch = {
 export type CallCenterCall = {
   id: string;
   providerCallId?: string;
-  viptelUniqueId?: string;
-  fromQueueUniqueId?: string;
+  /** Provider-side session/conversation id that groups the legs of one call. */
+  providerSessionId?: string;
   status: "incoming" | "ringing_agent" | "answered" | "missed" | "abandoned_queue" | "outbound" | "ended" | "failed";
   direction: "inbound" | "outbound" | "internal";
   callerNumber: string;
@@ -116,10 +107,6 @@ export type CallCenterCall = {
   calledNumber: string;
   receivedNumber?: string;
   destinationNumber?: string;
-  callerExtension?: string;
-  receivedExtension?: string;
-  destinationExtension?: string;
-  extensionId?: string;
   operatorId?: string;
   lineId?: string;
   lineLabel: string;
@@ -163,7 +150,6 @@ export type DispatchData = {
   commanderGpsLastSuccessAt?: string;
   commanderGpsLatestRunAt?: string;
   commanderGpsLatestStatus?: "running" | "success" | "partial" | "failed";
-  telephonyStats: TelephonyFoundationStats;
   source: DispatchDataSource;
   warning?: string;
 };

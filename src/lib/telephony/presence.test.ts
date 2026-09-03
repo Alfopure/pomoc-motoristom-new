@@ -1,194 +1,164 @@
 import { describe, expect, it } from "vitest";
-
 import type { Operator } from "@/domain/types";
-import type { TelephonyHealthSignal } from "./health";
-import { deriveTelephonyOperatorPresences, type TelephonyPresenceSnapshot } from "./presence";
+import {
+  deriveTelephonyOperatorPresences,
+  type TelephonyPresenceSnapshot,
+} from "@/lib/telephony/presence";
 
 const operators: Operator[] = [
-  { id: "operator-1", name: "Anna", extension: "12", status: "offline" },
-  { id: "operator-2", name: "Boris", extension: "13", status: "offline" },
+  { id: "op-1", name: "Alena", extension: "", status: "available" },
+  { id: "op-2", name: "Boris", extension: "", status: "available" },
 ];
-const liveHealth: TelephonyHealthSignal = { state: "live", detail: "live", checkedAt: "2026-07-25T10:00:00.000Z" };
 
-describe("derived telephony operator presence", () => {
-  it("marks an operator available only when owned, active, queued, unpaused, unused and registered", () => {
-    const snapshot = makeSnapshot({
-      extensions: [
-        extension("extension-1", "operator-1", "12", true),
-        extension("extension-2", "operator-2", "13", false),
-      ],
-      members: [
-        { extension: "12", paused: false, inUse: false, dynamic: true, callsTaken: 0 },
-        { extension: "13", paused: false, inUse: false, dynamic: true, callsTaken: 0 },
-      ],
+function snapshot(overrides: Partial<TelephonyPresenceSnapshot> = {}): TelephonyPresenceSnapshot {
+  return {
+    actorProfileId: "op-1",
+    canManageAssignments: false,
+    checkedAt: "2026-09-02T10:00:00.000Z",
+    devices: [],
+    presence: [],
+    ...overrides,
+  };
+}
+
+function stateOf(input: TelephonyPresenceSnapshot | null, profileId = "op-1") {
+  const presence = deriveTelephonyOperatorPresences({ operators, snapshot: input }).find(
+    (entry) => entry.profileId === profileId,
+  );
+  if (!presence) throw new Error(`missing presence for ${profileId}`);
+  return presence;
+}
+
+describe("deriveTelephonyOperatorPresences", () => {
+  it("returns one entry per operator in input order and marks operators without a presence row as unassigned", () => {
+    const result = deriveTelephonyOperatorPresences({ operators, snapshot: snapshot() });
+
+    expect(result.map((entry) => entry.profileId)).toEqual(["op-1", "op-2"]);
+    expect(result.map((entry) => entry.state)).toEqual(["unassigned", "unassigned"]);
+    expect(result[0]).toMatchObject({
+      operatorName: "Alena",
+      available: false,
+      queueMember: false,
+      registered: false,
+      inUse: false,
+      paused: false,
+      checkedAt: "2026-09-02T10:00:00.000Z",
     });
-
-    const result = deriveTelephonyOperatorPresences({ operators, snapshot, activeCalls: [], health: liveHealth });
-
-    expect(result[0]).toMatchObject({ state: "available", available: true, queueMember: true, registered: true });
-    expect(result[1]).toMatchObject({ state: "unregistered", available: false, queueMember: true, registered: false });
   });
 
-  it("gives active calls precedence over availability", () => {
-    const snapshot = makeSnapshot({
-      extensions: [extension("extension-1", "operator-1", "12", true)],
-      members: [{ extension: "12", paused: false, inUse: false, dynamic: true, callsTaken: 0 }],
-    });
-    const activeCalls = [
-      {
-        id: "call-1",
-        status: "answered" as const,
-        direction: "outbound" as const,
-        callerNumber: "12",
-        calledNumber: "0900000000",
-        lineLabel: "VIPTel",
-        startedAt: "2026-07-25T10:00:00.000Z",
-        waitSeconds: 0,
-        recordingStatus: "not_requested" as const,
-        transcriptStatus: "not_requested" as const,
-        history: [],
-      },
-    ];
-
-    const [presence] = deriveTelephonyOperatorPresences({ operators: operators.slice(0, 1), snapshot, activeCalls, health: liveHealth });
-
-    expect(presence).toMatchObject({ state: "on_call", available: false, inUse: true });
+  it("treats a missing snapshot as unassigned without a checkedAt", () => {
+    expect(stateOf(null)).toMatchObject({ state: "unassigned", checkedAt: undefined });
   });
 
-  it("marks the destination extension as ringing when the caller number belongs to the client", () => {
-    const snapshot = makeSnapshot({
-      extensions: [extension("extension-1", "operator-1", "12", true)],
-      members: [{ extension: "12", paused: false, inUse: false, dynamic: true, callsTaken: 0 }],
-    });
-    const activeCalls = [
-      {
-        id: "call-destination-extension",
-        status: "ringing_agent" as const,
-        direction: "inbound" as const,
-        callerNumber: "+421900123456",
-        calledNumber: "0412289241",
-        destinationExtension: "12",
-        lineLabel: "Allianz Assistance",
-        startedAt: "2026-07-25T10:00:00.000Z",
-        waitSeconds: 8,
-        recordingStatus: "not_requested" as const,
-        transcriptStatus: "not_requested" as const,
-        history: [],
-      },
-    ];
+  it("is available only with a registered device and an available presence row", () => {
+    const entry = stateOf(
+      snapshot({
+        devices: [{ profileId: "op-1", registered: true, seenAt: "2026-09-02T09:59:50.000Z" }],
+        presence: [{ profileId: "op-1", status: "available" }],
+      }),
+    );
 
-    const [presence] = deriveTelephonyOperatorPresences({
+    expect(entry).toMatchObject({ state: "available", available: true, registered: true, queueMember: true });
+  });
+
+  it.each([
+    ["no device row", []],
+    ["an unregistered device", [{ profileId: "op-1", registered: false }]],
+  ])("reports unregistered when the operator is available but has %s", (_label, devices) => {
+    const entry = stateOf(snapshot({ devices, presence: [{ profileId: "op-1", status: "available" }] }));
+
+    expect(entry).toMatchObject({ state: "unregistered", available: false, registered: false });
+  });
+
+  it.each([
+    ["ringing", "ringing"],
+    ["on_call", "on_call"],
+  ] as const)("keeps the live call state %s even when the device heartbeat lapsed", (status, expected) => {
+    const entry = stateOf(
+      snapshot({
+        devices: [{ profileId: "op-1", registered: false }],
+        presence: [{ profileId: "op-1", status, currentSessionId: "session-1" }],
+      }),
+    );
+
+    expect(entry).toMatchObject({ state: expected, inUse: true, available: false });
+  });
+
+  it("marks an operator with a current session as in use", () => {
+    const entry = stateOf(
+      snapshot({
+        devices: [{ profileId: "op-1", registered: true }],
+        presence: [{ profileId: "op-1", status: "available", currentSessionId: "session-9" }],
+      }),
+    );
+
+    expect(entry.inUse).toBe(true);
+  });
+
+  it.each(["paused", "after_call_work"] as const)("maps %s to the paused state", (status) => {
+    const entry = stateOf(
+      snapshot({
+        devices: [{ profileId: "op-1", registered: true }],
+        presence: [{ profileId: "op-1", status }],
+      }),
+    );
+
+    expect(entry).toMatchObject({ state: "paused", paused: true, available: false });
+  });
+
+  it("gives an explicit offline presence precedence over device registration", () => {
+    const entry = stateOf(
+      snapshot({
+        devices: [{ profileId: "op-1", registered: true }],
+        presence: [{ profileId: "op-1", status: "offline" }],
+      }),
+    );
+
+    expect(entry).toMatchObject({ state: "offline", queueMember: true, registered: true });
+  });
+
+  it("does not leak one operator's presence onto another", () => {
+    const input = snapshot({
+      devices: [{ profileId: "op-1", registered: true }],
+      presence: [{ profileId: "op-1", status: "on_call", currentSessionId: "session-1" }],
+    });
+
+    expect(stateOf(input, "op-1").state).toBe("on_call");
+    expect(stateOf(input, "op-2").state).toBe("unassigned");
+  });
+
+  it.each([
+    ["degraded", "error"],
+    ["unavailable", "error"],
+    ["stale", "stale"],
+    ["checking", "stale"],
+  ] as const)("overrides every operator with %s health as %s and surfaces the health detail", (state, expected) => {
+    const result = deriveTelephonyOperatorPresences({
+      operators,
+      snapshot: snapshot({
+        devices: [{ profileId: "op-1", registered: true }],
+        presence: [{ profileId: "op-1", status: "available" }],
+      }),
+      health: { state, detail: "Telefónia neodpovedá.", checkedAt: "2026-09-02T10:00:05.000Z" },
+    });
+
+    expect(result.map((entry) => entry.state)).toEqual([expected, expected]);
+    expect(result[0].detail).toBe("Telefónia neodpovedá.");
+    expect(result[0].available).toBe(false);
+  });
+
+  it("does not let live health hide the derived state and falls back to health timestamps for checkedAt", () => {
+    const [entry] = deriveTelephonyOperatorPresences({
       operators: operators.slice(0, 1),
-      snapshot,
-      activeCalls,
-      health: liveHealth,
-    });
-
-    expect(presence).toMatchObject({ state: "ringing", available: false, inUse: true });
-  });
-
-  it("marks the caller extension as busy during an outbound call", () => {
-    const snapshot = makeSnapshot({
-      extensions: [extension("extension-1", "operator-1", "12", true)],
-      members: [{ extension: "12", paused: false, inUse: false, dynamic: true, callsTaken: 0 }],
-    });
-    const activeCalls = [
-      {
-        id: "call-caller-extension",
-        status: "outbound" as const,
-        direction: "outbound" as const,
-        callerNumber: "0412289240",
-        callerExtension: "12",
-        calledNumber: "+421900654321",
-        lineLabel: "VIPTel",
-        startedAt: "2026-07-25T10:00:00.000Z",
-        waitSeconds: 0,
-        recordingStatus: "not_requested" as const,
-        transcriptStatus: "not_requested" as const,
-        history: [],
+      snapshot: null,
+      health: {
+        state: "live",
+        detail: "OK",
+        checkedAt: "2026-09-02T10:00:05.000Z",
+        lastSuccessAt: "2026-09-02T10:00:04.000Z",
       },
-    ];
-
-    const [presence] = deriveTelephonyOperatorPresences({
-      operators: operators.slice(0, 1),
-      snapshot,
-      activeCalls,
-      health: liveHealth,
     });
 
-    expect(presence).toMatchObject({ state: "on_call", available: false, inUse: true });
-  });
-
-  it("uses the directional destination instead of a stale received extension and operator id", () => {
-    const snapshot = makeSnapshot({
-      extensions: [
-        extension("extension-1", "operator-1", "12", true),
-        extension("extension-2", "operator-2", "13", true),
-      ],
-      members: [
-        { extension: "12", paused: false, inUse: false, dynamic: true, callsTaken: 0 },
-        { extension: "13", paused: false, inUse: false, dynamic: true, callsTaken: 0 },
-      ],
-    });
-    const activeCalls = [
-      {
-        id: "call-conflicting-endpoints",
-        status: "ringing_agent" as const,
-        direction: "inbound" as const,
-        callerNumber: "+421900123456",
-        calledNumber: "0412289241",
-        receivedExtension: "12",
-        destinationExtension: "13",
-        operatorId: "operator-1",
-        lineLabel: "Allianz Assistance",
-        startedAt: "2026-07-25T10:00:00.000Z",
-        waitSeconds: 8,
-        recordingStatus: "not_requested" as const,
-        transcriptStatus: "not_requested" as const,
-        history: [],
-      },
-    ];
-
-    const result = deriveTelephonyOperatorPresences({ operators, snapshot, activeCalls, health: liveHealth });
-
-    expect(result[0]).toMatchObject({ state: "available", inUse: false });
-    expect(result[1]).toMatchObject({ state: "ringing", inUse: true });
-  });
-
-  it("marks all derived states as errors when the provider snapshot is not trustworthy", () => {
-    const snapshot = makeSnapshot({
-      extensions: [extension("extension-1", "operator-1", "12", true)],
-      members: [{ extension: "12", paused: false, inUse: false, dynamic: true, callsTaken: 0 }],
-    });
-    const health: TelephonyHealthSignal = { state: "degraded", detail: "VIPTel timeout", lastSuccessAt: snapshot.checkedAt };
-
-    const [presence] = deriveTelephonyOperatorPresences({ operators: operators.slice(0, 1), snapshot, activeCalls: [], health });
-
-    expect(presence).toMatchObject({ state: "error", available: false, detail: "VIPTel timeout" });
+    expect(entry).toMatchObject({ state: "unassigned", checkedAt: "2026-09-02T10:00:04.000Z" });
   });
 });
-
-function extension(id: string, profileId: string, number: string, registered: boolean) {
-  return {
-    id,
-    profileId,
-    extension: number,
-    active: true,
-    registered,
-    allowedChanges: [],
-  };
-}
-
-function makeSnapshot(input: {
-  extensions: TelephonyPresenceSnapshot["extensions"];
-  members: TelephonyPresenceSnapshot["queueStatuses"][number]["members"];
-}): TelephonyPresenceSnapshot {
-  return {
-    actorProfileId: "operator-1",
-    canManageAssignments: false,
-    checkedAt: "2026-07-25T10:00:00.000Z",
-    extensions: input.extensions,
-    queues: [{ id: "500", name: "Dispatch" }],
-    queueStatuses: [{ queue: "500", waitingCalls: 0, members: input.members }],
-  };
-}

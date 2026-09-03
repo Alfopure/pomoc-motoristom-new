@@ -201,7 +201,6 @@ export class ProductionWorker {
       deploymentVersion: this.deploymentVersion,
       schedulerStatus,
       schedulerTickAt: stoppedStatus ? null : this.lastSchedulerTickAt,
-      viptelWsStatus: "disabled",
     });
 
     if (

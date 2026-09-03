@@ -4,15 +4,17 @@
 
 External providers are adapters. The application core owns cases, calls, tasks, audit, reporting, and workflow. Provider payloads are normalized at the edge of the system.
 
-## VIPTel
+## Telephony (Telnyx)
 
-VIPTel is the first telephony provider.
+Telnyx is the telephony and SMS provider for this copy. The previous provider was removed entirely; until the Telnyx phases land, the app runs in the "Telefónia nie je nakonfigurovaná" mode.
 
-- WebSocket: realtime call, queue, and agent events.
-- REST: active calls, history/CDR, call details, recordings, queues, extensions, agent state, and click-to-call.
-- SMS: localization links, ETA updates, case confirmations, and future 2-way messages.
+- Call Control REST API: answer, dial, bridge, hold, transfer, conference, playback, gather, hangup, issued server-side with deterministic command ids and a 5 s timeout.
+- Signed webhooks: every call, conference and message event is Ed25519-verified, claimed in an idempotent ledger and processed per call session.
+- WebRTC: the browser phone registers with a per-operator credential using a short-lived JWT minted by the server; provider credentials never reach the browser.
+- SMS: outbound only, alpha sender `PomocMotor`, delivery receipts via webhook. Inbound SMS is not available on Slovak fixed numbers.
+- Environments: separate Call Control app, credential connection, outbound voice profile and messaging profile for dev/preview and production. Kill switches `TELNYX_LIVE_CALLS_ENABLED` and `TELNYX_SMS_LIVE_SENDS` plus database settings fail closed.
 
-VIPTel is accessed only through server-side bridge/API code. The browser receives normalized Supabase data.
+Resource identifiers live in [`operations/telnyx-setup.md`](./operations/telnyx-setup.md); the data contract in [`telnyx-data-contract.md`](./telnyx-data-contract.md).
 
 ## Supabase
 
@@ -20,11 +22,10 @@ Supabase is the application platform:
 
 - Postgres for canonical state and event history,
 - Auth for users and roles,
-- Realtime for active UI projections,
-- Storage for private recordings and attachments,
-- Edge Functions for short server-side tasks where suitable.
+- Realtime Broadcast for active UI projections (planned; polling first),
+- Storage for private attachments.
 
-A long-running VIPTel WebSocket listener may require a separate worker service with stable outbound IP and health monitoring.
+No long-running listener is needed: the provider pushes webhooks to Vercel route handlers, and one Vercel cron (every 5 minutes) handles reconciliation, sweeping and retention.
 
 ## Maps and Routing
 
@@ -44,18 +45,18 @@ Current implementation details:
 
 ## Fleet Locations
 
-Fleet data may later come from Webdispečink, Commander, a mobile driver app, or manual operator updates. The first foundation only defines the `FleetLocationProvider` boundary and stores fleet asset records.
+Fleet data comes from WebDispečink (tow vehicles), Commander (replacement cars) and SWHouse (replacement-vehicle occupancy) through server-side adapters and sync routes. The `FleetLocationProvider` boundary keeps the map independent of the provider.
 
 ## AI
 
-AI is downstream of recordings/transcripts. It must not block call handling, case creation, or dispatch operations. Transcript and scoring jobs should be asynchronous and clearly visible as pending, failed, or complete.
+AI is downstream of recordings/transcripts. It must not block call handling, case creation, or dispatch operations. Transcript and scoring jobs should be asynchronous and clearly visible as pending, failed, or complete. Recording is out of scope for the Telnyx rollout, so these jobs stay disabled.
 
 ## Failure Handling
 
 Each provider integration needs:
 
 - server-side credentials,
-- retries with backoff,
+- retries with backoff (or compensation for real-time call commands),
 - idempotency keys,
 - raw payload storage where legally allowed,
 - reconciliation/backfill path,

@@ -5,7 +5,7 @@ import type { IntegrationConnection } from "./dispatch-types";
  *
  * "configured" = env credentials sú provisioned; "live" je REZERVOVANÉ pre reálny
  * sync/heartbeat (GPS syncy `webdispecink-sync`/`commander/sync` nastavujú "live"
- * až po úspešnom syncu). Telefónne integrácie (viptel/viptel_sms) nemajú writer
+ * až po úspešnom syncu). Telefónne integrácie (telnyx/telnyx_sms) nemajú writer
  * statusu, takže ich DB riadok ostáva "not_configured" — `secretConfigured`
  * (počítané z env) je ich pravý readiness signál. Odvodzujeme tu, v zdroji
  * (`mapIntegrationConnection`), nech všetky views (Napojenia badge + CallCenter

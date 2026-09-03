@@ -3,7 +3,6 @@
 import { ArrowLeft, FileText, Plus } from "lucide-react";
 import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
-import type { WorkplaceWebphoneSessionFence } from "@/lib/telephony/webphone-client";
 import { CaseDetail } from "./CaseDetail";
 import { NewCaseForm, type SaveCaseDraft } from "./NewCaseDrawer";
 
@@ -25,7 +24,6 @@ type ExpandedCasePanelProps = {
   onSaveDraftChange?: (saveDraft: SaveCaseDraft | null) => void;
   onSavingChange?: (saving: boolean) => void;
   viewerProfileId?: string;
-  workplaceFence?: WorkplaceWebphoneSessionFence;
 };
 
 export function ExpandedCasePanel({
@@ -46,7 +44,6 @@ export function ExpandedCasePanel({
   partnerDirectory,
   priceRule,
   viewerProfileId,
-  workplaceFence,
 }: ExpandedCasePanelProps) {
   const isNew = kind === "new";
   function handleDirtyChange(dirty: boolean) {
@@ -115,7 +112,6 @@ export function ExpandedCasePanel({
               priceRule={priceRule}
               showInlineEditButton={false}
               viewerProfileId={viewerProfileId}
-              workplaceFence={workplaceFence}
             />
           </div>
         ) : (

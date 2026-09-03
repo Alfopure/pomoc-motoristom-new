@@ -413,80 +413,31 @@ Odporúčané interné stavy:
 
 Poznámka: Nepoužiť jednoduché tlačidlo "odísť" bez kontroly. Ak operátor nie je dostupný, musí existovať auditovateľný stav, dôvod a čas.
 
-## 11. VIPTel integrácia
+## 11. Telefónna ústredňa (integrácia)
 
-VIPTel je telefónna ústredňa / VoIP provider. Verejný web potvrdzuje VoIP telefonovanie, PBX, špeciálne čísla, call-centrové služby, SMS bránu, nahrávanie hovorov, čakacie rady, reporty a API integrácie.
+Poznámka (september 2026): pôvodná verzia tejto sekcie opisovala REST, WebSocket a SMS API predchádzajúceho telefónneho providera. Projekt prešiel na Telnyx (Call Control, WebRTC, Messaging); dodávateľské detaily sú v `docs/telnyx-data-contract.md` a `docs/operations/telnyx-setup.md`. Tu ostávajú iba požiadavky nezávislé od providera.
 
-### REST API
+### Čo potrebujeme od ústredne
 
-Dostupná verejná dokumentácia: `https://www.viptel.sk/images/pdfs/VIPTel_PBX_REST.pdf`
-
-REST API podľa dokumentácie slúži na získavanie informácií z ústredne a vykonanie niektorých operácií.
-
-Relevantné oblasti:
-
-- vytvorenie hovoru,
-- pokročilé vytvorenie hovoru,
-- aktívne hovory,
-- zoznam hovorov,
-- detail hovoru podľa `unique_id`,
-- zoznam hovorov s nahrávkami,
-- stiahnutie nahrávky,
-- zmazanie nahrávky,
-- zoznam čakacích radov,
-- pridanie/odobranie agenta do/z radu,
-- pozastavenie/povolenie agenta v rade,
-- stav čakacieho radu,
-- zoznam klapiek,
-- detail a úprava klapky,
-- outbound CID čísla,
-- zákaznícke key-value dáta.
+- vytvorenie odchádzajúceho hovoru z aplikácie (click-to-call),
+- prehľad aktívnych hovorov a história hovorov s trvaním a výsledkom,
+- jednoznačný identifikátor hovoru naprieč všetkými udalosťami (začiatok, prijatie, prepojenie, koniec),
+- smerovanie prichádzajúcich hovorov na skupiny operátorov s nastaviteľným poradím a časom zvonenia,
+- podržanie, slepé aj asistované prepojenie, čakáreň s prevzatím,
+- stav operátora (dostupný, pauza, hovor) riadený aplikáciou,
+- podpísané udalosti (webhooky) namiesto trvalého WebSocket pripojenia,
+- SMS odosielanie z aplikácie.
 
 Praktický návrh:
 
-- REST používať na historické dáta, backfill, CDR, nahrávky, stav radov, správu agentov a klapiek.
-- Nevolať VIPTel API priamo z klienta. Použiť server-side route/edge function, aby sa chránili credentials.
-- Ukladať `unique_id` ku každému hovoru v Supabase a používať ho ako väzbu na recording/transcript.
-
-### WebSocket API
-
-Dostupná verejná dokumentácia: `https://www.viptel.sk/images/pdfs/VIPTel_PBX_WebSocket.pdf`
-
-WebSocket API poskytuje real-time akcie a udalosti.
-
-Relevantné akcie:
-
-- login/logout,
-- vytvorenie hovoru,
-- zrušenie hovoru,
-- presmerovanie hovoru.
-
-Relevantné udalosti:
-
-- začiatok hovoru,
-- koniec hovoru,
-- prijatie hovoru,
-- vytvorenie hovoru cez API,
-- pridanie/odobranie agenta do/z radu,
-- pause/unpause agenta,
-- prichádzajúci hovor do radu (`queue.join`),
-- odchod hovoru z radu (`queue.left`).
-
-WebSocket eventy obsahujú `unique_id`, ktorý je kľúčový pre koreláciu hovoru naprieč začiatkom, prijatím, koncom, radom, presmerovaním a recordingom.
-
-Praktický návrh:
-
-- urobiť serverový VIPTel event bridge,
-- bridge počúva WebSocket a zapisuje eventy do Supabase,
-- frontend počúva Supabase Realtime, nie priamo VIPTel,
+- API ústredne nevolať priamo z klienta; príkazy posiela server, prehliadač telefonuje cez WebRTC s krátkodobým tokenom vydaným serverom,
+- ku každému hovoru ukladať `provider_session_id` v Supabase a používať ho ako väzbu na udalosti, prípad a prípadný prepis,
+- udalosti ústredne prijímať na serveri (webhook), deduplikovať ich a zapisovať do Supabase,
+- frontend číta normalizované dáta zo Supabase (polling, neskôr Realtime), nie priamo z ústredne,
 - pri prichádzajúcom hovore frontend otvorí call popover s históriou čísla,
-- pri `queue.join` založiť alebo aktualizovať záznam v `calls`,
-- pri `queue.left` vyhodnotiť, či je to missed/abandoned/redirected,
-- po ukončení hovoru asynchrónne dotiahnuť recording a spustiť transcript pipeline.
+- pri zvonení založiť alebo aktualizovať záznam v `calls`, pri ukončení vyhodnotiť, či ide o missed/abandoned/redirected.
 
 ### SMS
-
-VIPTel web uvádza SMS bránu a SMS API. SMS je možné posielať zo zákazníckej zóny, PBX managera, VoIP aplikácie alebo interného systému cez API. Web uvádza aj možnosť dvojcestných SMS na dočasných mobilných číslach.
 
 Pre tento projekt sú potrebné najmä:
 
@@ -494,15 +445,9 @@ Pre tento projekt sú potrebné najmä:
 - SMS s potvrdením prijatia prípadu,
 - SMS s ETA alebo informáciou, že vozidlo/odťah je na ceste,
 - SMS šablóny s jasným textom "neodpovedajte", ak sa použije jednosmerný kanál,
-- do budúcna 2-way SMS, ak bude potrebné prijímať odpovede.
+- do budúcna 2-way SMS, ak bude potrebné prijímať odpovede (slovenské pevné linky príjem SMS nepodporujú).
 
-Lokálna príloha `SMS_API_dokumentacia_v1.8 2.pdf` je teraz dostupná v pracovnom kontexte. Potvrdzuje Base URL `https://smsapi.viptel.sk/api/`, Basic Auth, `GET /identities/`, `GET /credits/`, `POST /messages/`, `GET /messages/`, `GET /messages/{hash_id}/` a inbound webhook s poľami `id`, `content`, `received_at`, `direction`, `sender`, `recipient`.
-
-Otvorené pre reálne testovanie: SMS API aktivácia, SMS API username/password, povolená odosielateľská identita, kredit/fakturačný režim, bezpečné testovacie číslo, SMS-specific limity, sandbox/live režim a potvrdenie pravidiel textu pre diakritiku/interpunkciu/segmenty.
-
-### VIPTel CRM/PBX návrh
-
-Príloha `CRM_PBX_navrh_2025-2.pdf` nebola dostupná v prostredí. Treba ju doplniť do repozitára alebo poslať znovu. Pravdepodobne obsahuje návrh centrálneho komunikačného okna od VIPTel. Po doplnení treba tento dokument aktualizovať.
+Otvorené pre reálne testovanie: povolená odosielateľská identita, kredit/fakturačný režim, bezpečné testovacie číslo, limity a potvrdenie pravidiel textu pre diakritiku/interpunkciu/segmenty.
 
 ## 12. Webdispečink a Commander integrácia
 
@@ -723,7 +668,7 @@ Toto nie je finálna SQL schéma, ale vývojový mentálny model.
 ### `calls`
 
 - `id`
-- `viptel_unique_id`
+- `provider_session_id`
 - `direction`
 - `status`
 - `caller_number`
@@ -747,7 +692,7 @@ Toto nie je finálna SQL schéma, ale vývojový mentálny model.
 
 - `id`
 - `call_id`
-- `viptel_unique_id`
+- `provider_session_id`
 - `event_type`
 - `payload`
 - `created_at`
@@ -907,7 +852,7 @@ Odporúčaný stack:
 Kľúčové pravidlá:
 
 - všetky API kľúče držať server-side,
-- VIPTel WebSocket počúvať cez serverový bridge, nie v prehliadači,
+- udalosti telefónnej ústredne prijímať na serveri (webhook), nie v prehliadači,
 - normalizovať externé eventy do vlastných tabuliek,
 - frontend má byť odpojený od detailov dodávateľov,
 - demo môže používať mocky, ale dátový model nech sedí na produkčný smer.
@@ -984,7 +929,7 @@ Tento prompt môže byť použitý v ďalšom Codex/iConductor kroku:
 Vytvor modernú svetlú webovú aplikáciu ako klikateľný prototyp dispečerského CRM pre "Linku pomoci motoristom". Nejde o landing page. Prvá obrazovka je pracovný dispečing pre operátora call centra.
 
 Doména:
-Firma rieši pomoc motoristom: nehody, odťahy, náhradné vozidlá, poruchy, samoplatcov, asistenčné spoločnosti a partnerské dealerstvá. Operátor prijíma hovory cez VIPTel PBX, zakladá prípady, pracuje s mapou, posiela SMS, plánuje úlohy a sleduje dostupnosť odťahoviek a náhradných vozidiel.
+Firma rieši pomoc motoristom: nehody, odťahy, náhradné vozidlá, poruchy, samoplatcov, asistenčné spoločnosti a partnerské dealerstvá. Operátor prijíma hovory cez telefónnu ústredňu, zakladá prípady, pracuje s mapou, posiela SMS, plánuje úlohy a sleduje dostupnosť odťahoviek a náhradných vozidiel.
 
 Vizuál:
 Svetlý, prehľadný, profesionálny dispečing. Použi bielu, jemnú sivú, čierny text a žltý akcent #FCD703 podľa PomocMotoristom.sk. Font Poppins alebo podobný sans-serif. Nepoužívaj marketingový hero, gradientové dekorácie ani zbytočné ilustrácie. Primárny vizuál je mapa a pracovné dáta.
@@ -1046,12 +991,12 @@ Klient má po otvorení aplikácie okamžite pochopiť, že toto je ich budúce 
 - prílohy,
 - základné reporty,
 - manuálne založenie prípadu,
-- call log import alebo mock VIPTel eventy.
+- call log import alebo mock eventy ústredne.
 
-### Fáza 2 - VIPTel PBX integrácia
+### Fáza 2 - integrácia telefónnej ústredne
 
-- WebSocket bridge,
-- REST CDR import,
+- webhook pipeline,
+- REST import histórie hovorov,
 - prichádzajúce hovory v UI,
 - click-to-call,
 - queue/agent status,
@@ -1088,7 +1033,7 @@ Klient má po otvorení aplikácie okamžite pochopiť, že toto je ich budúce 
 Tieto otázky sú potrebné, nie kozmetické:
 
 1. Doplniť presné PDF `SMS_API_dokumentacia_v1.8.pdf` a `CRM_PBX_navrh_2025-2.pdf` do repozitára alebo ich poslať znovu. Lokálne pasteboard cesty v tomto prostredí neexistovali.
-2. Ktoré VIPTel čísla/linky budú v pilote aktívne: iba `0850 005 006`, alebo aj samostatné linky pre asistenčky, samoplatcov a partnerov?
+2. Ktoré telefónne čísla/linky budú v pilote aktívne: iba `0850 005 006`, alebo aj samostatné linky pre asistenčky, samoplatcov a partnerov?
 3. Má mať každý hovor samostatný záznam aj keď je "zbytočný", alebo sa z každého hovoru ukladá call log automaticky a iba niektoré hovory sa menia na prípad? Odporúčanie: ukladať každý hovor ako call log, nie každý hovor ako case.
 4. Aké existujúce interné systémy má Braňo sprístupniť: databáza náhradných vozidiel, nájmy, fotky, fakturácia, dostupnosť, pobočky?
 5. Má existujúci systém API, prístup do databázy alebo iba export/import?
@@ -1111,7 +1056,7 @@ Projekt môže rýchlo narásť na CRM, call centrum, fleet tracking, booking, A
 
 ### Integrácie ako blokér
 
-VIPTel, Webdispečink, Commander a interné systémy nemusia mať rovnakú kvalitu API alebo dostupnosť. Demo musí fungovať s mockmi a architektúra musí mať integračné adaptéry.
+Telefónna ústredňa, Webdispečink, Commander a interné systémy nemusia mať rovnakú kvalitu API alebo dostupnosť. Demo musí fungovať s mockmi a architektúra musí mať integračné adaptéry.
 
 ### Právne veci
 
@@ -1128,11 +1073,8 @@ Ak operátor nezadá ŠPZ alebo číslo prípadu, neskôr sa veci zle hľadajú.
 ## 24. Zdroje
 
 - PomocMotoristom.sk: https://www.pomocmotoristom.sk/
-- VIPTel objednávkový formulár: https://www.viptel.sk/objednavkovy-formular
-- VIPTel PBX REST API PDF: https://www.viptel.sk/images/pdfs/VIPTel_PBX_REST.pdf
-- VIPTel PBX WebSocket API PDF: https://www.viptel.sk/images/pdfs/VIPTel_PBX_WebSocket.pdf
-- VIPTel SMS brána: https://www.viptel.sk/sms-brana-hromadne-sms-cez-internet
-- VIPTel API integrácie: https://www.viptel.sk/virtualna-telefonna-ustredna/api-integracie
+- Telnyx Call Control: https://developers.telnyx.com/docs/voice/programmable-voice
+- Telnyx Messaging: https://developers.telnyx.com/docs/messaging
 - Webdispečink: https://www.webdispecink.sk/sk/
 - Webdispečink API info: https://www.webdispecink.sk/sk/webdispecing-krok-za-krokom/prenos-udajov-z-webdispecingu/
 - Webdispečink developers: https://developers.webdispecink.cz/
@@ -1140,6 +1082,6 @@ Ak operátor nezadá ŠPZ alebo číslo prípadu, neskôr sa veci zle hľadajú.
 
 ## 25. Poznámka o lokálnych prílohách
 
-V tomto workspaci sú k dispozícii lokálne prílohy pre SMS API, VIPTel PBX REST API a VIPTel PBX WebSocket API. SMS API je už spresnené podľa prílohy `SMS_API_dokumentacia_v1.8 2.pdf`: používa `https://smsapi.viptel.sk/api/`, Basic Auth, čítacie probe endpointy `GET /identities/` a `GET /credits/` a odosielací endpoint `POST /messages/`.
+Pôvodné lokálne prílohy (SMS API, PBX REST API a PBX WebSocket API predchádzajúceho telefónneho providera) už nie sú pre projekt relevantné. Aktuálny provider je Telnyx; dátový kontrakt a identifikátory zdrojov sú v `docs/telnyx-data-contract.md` a `docs/operations/telnyx-setup.md`.
 
-Reálne SMS testovanie stále čaká na aktivované SMS API credentials, potvrdenú odosielateľskú identitu, kredit/fakturačný režim a bezpečné testovacie číslo.
+Reálne SMS testovanie stále čaká na potvrdenú odosielateľskú identitu, kredit/fakturačný režim a bezpečné testovacie číslo.

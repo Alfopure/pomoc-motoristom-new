@@ -32,14 +32,14 @@ file_size_limit = "50MiB"
 
 [auth]
 enabled = true
-site_url = "https://dispecing.linkapomoci.sk"
+site_url = "https://dispecing-test.vercel.app"
 additional_redirect_urls = [
-  "https://dispecing.linkapomoci.sk",
-  "https://dispecing.linkapomoci.sk/auth/callback",
-  "https://dev.dispecing.linkapomoci.sk",
-  "https://dev.dispecing.linkapomoci.sk/auth/callback",
-  "https://pomoc-motoristom-dispecing.vercel.app",
-  "https://pomoc-motoristom-dispecing.vercel.app/auth/callback",
+  "https://dispecing-test.vercel.app",
+  "https://dispecing-test.vercel.app/auth/callback",
+  "https://pomoc-motoristom-new.vercel.app",
+  "https://pomoc-motoristom-new.vercel.app/auth/callback",
+  "https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app",
+  "https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/auth/callback",
   "http://localhost:3000",
   "http://localhost:3000/auth/callback",
   "http://127.0.0.1:3000",

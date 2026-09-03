@@ -10,7 +10,7 @@
 6. Dispečer môže v mape použiť Google Places našeptávač pre adresu vyzdvihnutia a cieľ/servis; výber prepočíta náhľad trasy.
 7. SMS preview zobrazí lokalizačný link a ETA bez reálneho odoslania.
 8. Reporty ukážu denné metriky: hovory, prijaté, zmeškané, nové prípady, otvorené úlohy, marné výjazdy, dovolateľnosť.
-9. Integrácie ukážu roadmap panely pre VIPTel, SMS, Supabase, Webdispečink, Commander a AI.
+9. Integrácie ukážu roadmap panely pre telefóniu (Telnyx), SMS, Supabase, Webdispečink, Commander a AI.
 
 ## Map provider
 

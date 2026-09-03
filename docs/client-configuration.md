@@ -8,15 +8,15 @@ The first implementation targets one concrete client, but the system should be c
 
 - organization name, slug, locale, timezone, branding,
 - enabled modules such as calls, cases, maps, fleet, SMS, AI,
-- public lines and queue labels,
-- VIPTel queue/extension mappings,
+- public lines (telephone numbers) with partner labels,
+- ring groups, ring plans, business hours, IVR menus and pause reasons,
 - SMS sender, templates, and opt-out language,
 - branches and service standpoints,
 - fleet asset categories,
 - case sources and priority labels,
 - pricing profiles and billing modes,
 - map/routing provider,
-- retention defaults for recordings and transcripts.
+- retention defaults for call payloads, recordings and transcripts.
 
 ## Non-Configurable Core
 

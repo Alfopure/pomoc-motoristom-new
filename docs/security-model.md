@@ -26,7 +26,7 @@ Realtime should expose only active operational projections needed by the UI, not
 
 ## Secrets
 
-Never expose provider credentials to the browser. VIPTel, Google, SMS, fleet, AI, and Supabase service-role keys stay server-side. The committed `.env.example` lists variable names only.
+Never expose provider credentials to the browser. Telnyx, Google, SMS, fleet, AI, and Supabase service-role keys stay server-side. The browser phone receives only a short-lived WebRTC token. The committed `.env.example` lists variable names only.
 
 ## Audit Requirements
 

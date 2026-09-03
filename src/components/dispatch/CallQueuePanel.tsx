@@ -4,11 +4,25 @@ import { useState } from "react";
 import { ChevronDown, Clock3, Loader2, PhoneIncoming } from "lucide-react";
 
 import type { CallCenterCall } from "@/data/dispatch-types";
-import { telephonyCallReactKey } from "@/lib/telephony/call-endpoints";
-import type { buildWorkplaceWaitingRoom } from "./workplace-model";
-import type { WaitingCallPickupAction } from "./use-waiting-call-pickup";
 
-type WaitingRoomEntries = ReturnType<typeof buildWorkplaceWaitingRoom>;
+export type WaitingRoomStation = {
+  extension: string;
+  name: string;
+};
+
+export type WaitingRoomEntry = {
+  call: CallCenterCall;
+  /** Where the call is ringing right now; undefined while it waits unassigned. */
+  station?: WaitingRoomStation;
+};
+
+export type WaitingCallPickupAction = {
+  disabled: boolean;
+  label: string;
+  reason?: string;
+};
+
+type WaitingRoomEntries = WaitingRoomEntry[];
 
 /**
  * The waiting room, shown wherever the dispatcher happens to be.
@@ -49,7 +63,7 @@ export function CallQueuePanel({
         const callerName = call.callerName?.trim();
         const pickup = pickupState(call);
         return (
-          <div key={telephonyCallReactKey(call)} className="min-w-0 rounded-lg border border-amber-200 bg-white px-3 py-2 shadow-sm">
+          <div key={call.id} className="min-w-0 rounded-lg border border-amber-200 bg-white px-3 py-2 shadow-sm">
             <div className="flex min-w-0 items-center justify-between gap-2">
               <span className="truncate text-sm font-bold text-zinc-950">{callerName || call.callerNumber}</span>
               <span className="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-zinc-600">

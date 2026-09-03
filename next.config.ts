@@ -3,7 +3,6 @@ import type { NextConfig } from "next";
 const deploymentVersion = process.env.DEPLOYMENT_VERSION?.trim();
 
 const nextConfig: NextConfig = {
-  output: "standalone",
   deploymentId: deploymentVersion,
   generateBuildId: async () => deploymentVersion || "local",
   poweredByHeader: false,

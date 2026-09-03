@@ -12,7 +12,6 @@ import {
   notifications as mockNotifications,
   operators as mockOperators,
   priceRules as mockPriceRules,
-  telephonyStats as mockTelephonyStats,
 } from "../src/mock/seed";
 
 // These scenarios all boot the data-heavy dispatch dashboard against the same
@@ -515,7 +514,7 @@ test("quick dial shows favorite contacts in pages of five", async ({ page }) => 
   await expectNoElementOverflow(favoritesPanel, "quick dial favorites");
 });
 
-test("dashboard phone searches, favorites, and dials a directory contact", async ({ page }) => {
+test("dashboard phone searches, favorites, and reports the missing telephony setup on dial", async ({ page }) => {
   const contact = {
     id: "00000000-0000-4000-8000-000000000123",
     name: "Peter Kováč",
@@ -524,39 +523,12 @@ test("dashboard phone searches, favorites, and dials a directory contact", async
     role: "client",
     isFavorite: false,
   } as const;
-  let dialRequest: Record<string, unknown> | null = null;
 
-  await page.route("**/api/telephony/webphone/config", (route) =>
-    route.fulfill({
-      json: {
-        ok: true,
-        identity: {
-          defaultExtension: "20",
-          extensions: [{ extension: "20", registered: true }],
-        },
-        config: {
-          allowedOrigins: [],
-          codecs: [],
-          credentialsExposure: "redacted",
-          dialMode: "rest_first_leg",
-          enabled: false,
-          extensions: [],
-          iceServers: [],
-          missingFields: [],
-          status: "blocked",
-        },
-      },
-    }),
-  );
   await page.route("**/api/telephony/directory/favorites", (route) => route.fulfill({ json: { favorites: [] } }));
   await page.route("**/api/telephony/directory/favorites/*", async (route) => {
     await route.fulfill({ json: { contact: { ...contact, isFavorite: true }, contactId: contact.id, isFavorite: true } });
   });
   await page.route("**/api/telephony/directory?*", (route) => route.fulfill({ json: { contacts: [contact] } }));
-  await page.route("**/api/telephony/call/create", async (route) => {
-    dialRequest = route.request().postDataJSON() as Record<string, unknown>;
-    await route.fulfill({ json: { requestId: "e2e-call" } });
-  });
 
   await page.setViewportSize({ width: 1280, height: viewportHeight });
   const favoritesLoaded = page.waitForResponse((response) =>
@@ -580,8 +552,9 @@ test("dashboard phone searches, favorites, and dials a directory contact", async
   await option.locator("button").first().click();
   await phonePanel.getByRole("button", { name: "Volať", exact: true }).click();
 
-  await expect.poll(() => dialRequest).not.toBeNull();
-  expect(dialRequest).toMatchObject({ mode: "extension_callback", toNumber: contact.phone });
+  // No telephony provider is configured in this build: dialling must not hit
+  // any API and the phone panel explains why instead.
+  await expect(phonePanel.getByRole("alert").filter({ hasText: "Telefónia nie je nakonfigurovaná" })).toBeVisible();
 });
 
 test("selecting another case keeps a dirty new card open without a popup", async ({ page }) => {
@@ -930,7 +903,6 @@ function createMockDispatchData(overrides: Partial<DispatchData> = {}): Dispatch
     notifications: mockNotifications,
     metrics: mockMetrics,
     integrations: mockIntegrations,
-    telephonyStats: mockTelephonyStats,
     source: "supabase",
     ...overrides,
   };

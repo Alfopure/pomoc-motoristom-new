@@ -6,11 +6,8 @@ import { syncSwhouseOccupancy } from "@/server/integrations/swhouse/occupancy-sy
 import { syncSwhouseFleet } from "@/server/integrations/swhouse/sync";
 import { resolveDefaultOrganizationId } from "@/server/default-organization";
 import { materializeDueTaskReminders } from "@/server/task-notifications";
-import { syncRecordings } from "@/server/telephony/recordings-sync";
 import { processTranscripts } from "@/server/telephony/transcripts-process";
 import { syncWebdispecinkFleet } from "@/server/webdispecink-sync";
-import { reconcileViptelCalls } from "@/server/telephony/viptel-reconcile";
-import { sweepStuckWorkplaceState } from "@/server/telephony/workplace-sweeper";
 import type { JobContext, JobDefinition, JobExecutionResult, JobName } from "./types";
 
 const MINUTE = 60_000;
@@ -184,34 +181,6 @@ const DEFINITIONS: { [K in JobName]: JobDefinition<K> } = {
       return success(result);
     },
   },
-  "telephony.recordings.sync": {
-    name: "telephony.recordings.sync",
-    schedule: { everyMs: 10 * MINUTE, offsetMs: 0 },
-    timeoutMs: 180_000,
-    leaseSeconds: 300,
-    maxAttempts: 3,
-    failureThreshold: 2,
-    freshnessMs: 20 * MINUTE,
-    run: async (context, payload) => {
-      assertNotAborted(context);
-      const result = await syncRecordings({
-        dateFrom: payload.dateFrom,
-        maxDownloads: payload.maxDownloads,
-      });
-      if (result.status !== "ok") {
-        throw new Error("Recordings sync failed.");
-      }
-      assertNotAborted(context);
-      return success({
-        status: result.status,
-        cdrWithRecording: result.cdrWithRecording,
-        discovered: result.discovered,
-        processed: result.processed,
-        failed: result.failed,
-        pendingLeft: result.pendingLeft,
-      });
-    },
-  },
   "telephony.transcripts.process": {
     name: "telephony.transcripts.process",
     schedule: { everyMs: 10 * MINUTE, offsetMs: 2 * MINUTE },
@@ -241,124 +210,12 @@ const DEFINITIONS: { [K in JobName]: JobDefinition<K> } = {
       });
     },
   },
-  "telephony.viptel.reconcile": {
-    name: "telephony.viptel.reconcile",
-    schedule: { everyMs: 2 * MINUTE, offsetMs: 30_000 },
-    timeoutMs: 90_000,
-    leaseSeconds: 150,
-    maxAttempts: 2,
-    failureThreshold: 2,
-    freshnessMs: 5 * MINUTE,
-    run: async (context) => {
-      assertNotAborted(context);
-      const result = await reconcileViptelCalls();
-      assertNotAborted(context);
-      return success(result);
-    },
-  },
-  "telephony.workplace.sweep": {
-    name: "telephony.workplace.sweep",
-    schedule: { everyMs: MINUTE, offsetMs: 45_000 },
-    timeoutMs: 45_000,
-    leaseSeconds: 90,
-    maxAttempts: 2,
-    failureThreshold: 2,
-    freshnessMs: 5 * MINUTE,
-    run: async (context) => {
-      assertNotAborted(context);
-      const organizationId = await resolveDefaultOrganizationId();
-      // This is the only recovery path that runs with no browser open, which is
-      // exactly when stuck workplace state goes unnoticed.
-      const summary = await sweepStuckWorkplaceState({
-        organizationId,
-        recoveryOwner: `job:${context.runId}`,
-      });
-      assertNotAborted(context);
-      return success({
-        scanned: summary.scanned,
-        recoveredOperations: summary.recoveredOperations,
-        releasedClaims: summary.releasedClaims,
-        reapedLeases: summary.reapedLeases,
-        markedManualRecovery: summary.markedManualRecovery,
-        skipped: JSON.stringify(summary.skipped),
-      });
-    },
-  },
-  "infra.hetzner.audit": {
-    name: "infra.hetzner.audit",
-    schedule: { everyMs: 24 * HOUR, offsetMs: 3 * HOUR + 30 * MINUTE },
-    timeoutMs: 30_000,
-    leaseSeconds: 90,
-    maxAttempts: 2,
-    failureThreshold: 1,
-    freshnessMs: 26 * HOUR,
-    run: runHetznerAudit,
-  },
 };
 
 export const JOB_DEFINITIONS = DEFINITIONS;
 
 export function jobDefinition<K extends JobName>(jobName: K): JobDefinition<K> {
   return DEFINITIONS[jobName];
-}
-
-async function runHetznerAudit(context: JobContext) {
-  const token = process.env.HCLOUD_READ_TOKEN?.trim();
-  if (!token) {
-    return skipped("read_token_missing");
-  }
-
-  const [servers, primaryIps, volumes, floatingIps, loadBalancers, backups, pricing] = await Promise.all([
-    hcloudGet("/servers?per_page=50", token, context.signal),
-    hcloudGet("/primary_ips?per_page=50", token, context.signal),
-    hcloudGet("/volumes?per_page=50", token, context.signal),
-    hcloudGet("/floating_ips?per_page=50", token, context.signal),
-    hcloudGet("/load_balancers?per_page=50", token, context.signal),
-    hcloudGet("/images?type=backup&sort=created:desc&per_page=50", token, context.signal),
-    hcloudGet("/pricing", token, context.signal),
-  ]);
-
-  return success({
-    servers: totalEntries(servers),
-    primaryIps: totalEntries(primaryIps),
-    volumes: totalEntries(volumes),
-    floatingIps: totalEntries(floatingIps),
-    loadBalancers: totalEntries(loadBalancers),
-    backups: totalEntries(backups),
-    currency: nestedString(pricing, ["pricing", "currency"]),
-    vatRate: nestedString(pricing, ["pricing", "vat_rate"]),
-    checkedAt: new Date().toISOString(),
-  });
-}
-
-async function hcloudGet(path: string, token: string, signal: AbortSignal) {
-  const response = await fetch(`https://api.hetzner.cloud/v1${path}`, {
-    headers: { authorization: `Bearer ${token}` },
-    signal,
-  });
-  if (!response.ok) {
-    throw new Error(`Hetzner audit request failed with HTTP ${response.status}.`);
-  }
-  return (await response.json()) as unknown;
-}
-
-function totalEntries(value: unknown) {
-  if (!value || typeof value !== "object") return 0;
-  const meta = (value as Record<string, unknown>).meta;
-  if (!meta || typeof meta !== "object") return 0;
-  const pagination = (meta as Record<string, unknown>).pagination;
-  if (!pagination || typeof pagination !== "object") return 0;
-  const total = (pagination as Record<string, unknown>).total_entries;
-  return typeof total === "number" ? total : 0;
-}
-
-function nestedString(value: unknown, keys: string[]) {
-  let current: unknown = value;
-  for (const key of keys) {
-    if (!current || typeof current !== "object") return null;
-    current = (current as Record<string, unknown>)[key];
-  }
-  return typeof current === "string" ? current : null;
 }
 
 function assertNotAborted(context: JobContext) {

@@ -35,10 +35,16 @@ create table public.motorist_organization_profiles (
 create table public.motorist_organization_integrations (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
-  provider text not null check (provider in ('viptel', 'viptel_sms', 'google_maps', 'fleet', 'ai')),
+  provider text not null check (provider in ('telnyx', 'telnyx_sms', 'google_maps', 'fleet', 'ai')),
   enabled boolean not null default false,
+  status text not null default 'not_configured' check (status in ('not_configured', 'configured', 'live', 'degraded', 'disabled')),
+  enabled_features text[] not null default '{}'::text[],
+  base_url text,
   config jsonb not null default '{}'::jsonb,
   secret_ref text,
+  last_success_at timestamptz,
+  last_error_at timestamptz,
+  last_error text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (organization_id, provider)
@@ -73,7 +79,7 @@ create table public.motorist_operator_statuses (
 create table public.motorist_telephony_lines (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
-  provider text not null default 'viptel',
+  provider text not null default 'telnyx',
   external_id text,
   phone_number text not null,
   label text not null,
@@ -87,7 +93,7 @@ create table public.motorist_telephony_lines (
 create table public.motorist_telephony_queues (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
-  provider text not null default 'viptel',
+  provider text not null default 'telnyx',
   external_id text not null,
   label text not null,
   line_id uuid references public.motorist_telephony_lines(id) on delete set null,
@@ -96,20 +102,6 @@ create table public.motorist_telephony_queues (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (organization_id, provider, external_id)
-);
-
-create table public.motorist_telephony_extensions (
-  id uuid primary key default gen_random_uuid(),
-  organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
-  provider text not null default 'viptel',
-  external_id text,
-  extension text not null,
-  profile_id uuid references public.motorist_profiles(id) on delete set null,
-  active boolean not null default true,
-  metadata jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique (organization_id, provider, extension)
 );
 
 create table public.motorist_contacts (
@@ -236,16 +228,21 @@ create table public.motorist_case_events (
 create table public.motorist_calls (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
-  provider text not null default 'viptel',
-  viptel_unique_id text,
+  provider text not null default 'telnyx',
+  -- Provider-side session id that groups every leg of one call.
+  provider_session_id text,
+  -- Provider-side id of the leg this row was created from.
+  provider_call_id text,
   direction text not null check (direction in ('inbound', 'outbound', 'internal')),
   status text not null check (status in ('incoming', 'ringing_agent', 'answered', 'missed', 'abandoned_queue', 'outbound', 'ended', 'failed')),
+  end_reason text,
   caller_number text,
   caller_name text,
   called_number text,
+  received_number text,
+  destination_number text,
   line_id uuid references public.motorist_telephony_lines(id) on delete set null,
   queue_id uuid references public.motorist_telephony_queues(id) on delete set null,
-  extension_id uuid references public.motorist_telephony_extensions(id) on delete set null,
   operator_id uuid references public.motorist_profiles(id) on delete set null,
   case_id uuid references public.motorist_cases(id) on delete set null,
   started_at timestamptz,
@@ -257,39 +254,59 @@ create table public.motorist_calls (
   transcript_status text not null default 'not_requested' check (transcript_status in ('not_requested', 'pending', 'complete', 'failed')),
   summary text,
   raw_payload jsonb not null default '{}'::jsonb,
+  -- Latest app-side state (outcome, callback minutes, notes) merged by the workflow layer.
+  raw_latest_payload jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
-create unique index calls_org_provider_unique_id_idx
-  on public.motorist_calls (organization_id, provider, viptel_unique_id)
-  where viptel_unique_id is not null;
+create unique index calls_org_provider_session_idx
+  on public.motorist_calls (organization_id, provider, provider_session_id)
+  where provider_session_id is not null;
+
+create index calls_provider_call_id_idx
+  on public.motorist_calls (organization_id, provider, provider_call_id)
+  where provider_call_id is not null;
 
 create table public.motorist_call_events (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
   call_id uuid references public.motorist_calls(id) on delete cascade,
-  provider text not null default 'viptel',
-  viptel_unique_id text,
+  provider text not null default 'telnyx',
+  provider_session_id text,
   event_type text not null,
   event_fingerprint text not null,
   payload jsonb not null default '{}'::jsonb,
+  raw_payload jsonb not null default '{}'::jsonb,
+  normalized_payload jsonb not null default '{}'::jsonb,
+  handled_status text not null default 'processed' check (handled_status in ('processed', 'ignored', 'failed', 'unknown')),
   provider_created_at timestamptz,
+  received_at timestamptz not null default now(),
   created_at timestamptz not null default now(),
   unique (organization_id, provider, event_fingerprint)
 );
+
+create index call_events_session_idx
+  on public.motorist_call_events (organization_id, provider, provider_session_id, received_at desc)
+  where provider_session_id is not null;
+
+create index call_events_type_idx
+  on public.motorist_call_events (organization_id, provider, event_type, received_at desc);
 
 create table public.motorist_call_recordings (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
   call_id uuid references public.motorist_calls(id) on delete cascade,
-  provider text not null default 'viptel',
-  viptel_unique_id text,
+  provider text not null default 'telnyx',
+  provider_session_id text,
   provider_recording_id text,
   storage_bucket text,
   storage_path text,
+  mime_type text,
   status text not null check (status in ('pending', 'available', 'failed', 'deleted')),
   duration_seconds integer,
+  fetched_at timestamptz,
+  metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -298,10 +315,30 @@ create unique index call_recordings_provider_id_idx
   on public.motorist_call_recordings (organization_id, provider, provider_recording_id)
   where provider_recording_id is not null;
 
+create table public.motorist_call_transcripts (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
+  call_id uuid not null references public.motorist_calls(id) on delete cascade,
+  recording_id uuid references public.motorist_call_recordings(id) on delete set null,
+  status text not null default 'pending' check (status in ('pending', 'processing', 'complete', 'failed', 'restricted')),
+  language text not null default 'sk',
+  transcript_text text,
+  speaker_segments jsonb not null default '[]'::jsonb,
+  summary text,
+  extracted_fields jsonb not null default '{}'::jsonb,
+  qa_score numeric(5, 2),
+  model text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index call_transcripts_call_idx
+  on public.motorist_call_transcripts (organization_id, call_id, created_at desc);
+
 create table public.motorist_sms_messages (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
-  provider text not null default 'viptel_sms',
+  provider text not null default 'telnyx_sms',
   provider_message_id text,
   case_id uuid references public.motorist_cases(id) on delete set null,
   call_id uuid references public.motorist_calls(id) on delete set null,
@@ -309,14 +346,71 @@ create table public.motorist_sms_messages (
   from_label text,
   direction text not null check (direction in ('outbound', 'inbound')),
   status text not null check (status in ('queued', 'sent', 'delivered', 'failed', 'received')),
+  status_detail text,
   template_key text,
   body text not null,
   error text,
+  raw_payload jsonb not null default '{}'::jsonb,
+  idempotency_key text,
+  request_fingerprint text,
+  queued_at timestamptz,
+  next_attempt_at timestamptz,
+  last_attempt_at timestamptz,
+  retry_count integer not null default 0 check (retry_count >= 0),
   sent_at timestamptz,
   delivered_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+create index sms_messages_provider_id_idx
+  on public.motorist_sms_messages (organization_id, provider, provider_message_id)
+  where provider_message_id is not null;
+
+create unique index sms_messages_idempotency_idx
+  on public.motorist_sms_messages (organization_id, provider, idempotency_key)
+  where idempotency_key is not null;
+
+create index sms_messages_outbox_claim_idx
+  on public.motorist_sms_messages (organization_id, status, next_attempt_at, created_at)
+  where direction = 'outbound'
+    and status = 'queued';
+
+-- Provider-neutral per-attempt audit of outbound SMS delivery.
+create table public.motorist_sms_attempts (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
+  sms_message_id uuid not null references public.motorist_sms_messages(id) on delete cascade,
+  provider text not null default 'telnyx_sms',
+  attempt_number integer not null check (attempt_number >= 1),
+  claim_id uuid not null default gen_random_uuid(),
+  idempotency_key text not null,
+  request_fingerprint text not null,
+  status text not null check (status in ('queued', 'sending', 'accepted', 'failed', 'skipped')),
+  provider_status_code integer,
+  provider_message_id text,
+  request_payload_safe jsonb not null default '{}'::jsonb,
+  provider_response_safe jsonb not null default '{}'::jsonb,
+  error_class text,
+  error text,
+  started_at timestamptz,
+  finished_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index sms_attempts_message_attempt_number_idx
+  on public.motorist_sms_attempts (sms_message_id, attempt_number);
+
+create index sms_attempts_idempotency_idx
+  on public.motorist_sms_attempts (organization_id, provider, idempotency_key, created_at desc);
+
+create index sms_attempts_status_idx
+  on public.motorist_sms_attempts (organization_id, provider, status, created_at desc);
+
+create index sms_attempts_provider_message_idx
+  on public.motorist_sms_attempts (organization_id, provider, provider_message_id)
+  where provider_message_id is not null;
 
 create table public.motorist_route_estimates (
   id uuid primary key default gen_random_uuid(),
@@ -331,6 +425,33 @@ create table public.motorist_route_estimates (
   provider_payload jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
+
+-- Safe request/response log shared by every external integration (fleet syncs,
+-- telephony and SMS providers, internal job summaries).
+create table public.motorist_integration_raw_events (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
+  provider text not null,
+  channel text not null check (channel in ('rest', 'websocket', 'sms', 'internal')),
+  direction text not null check (direction in ('inbound', 'outbound')),
+  event_type text not null,
+  correlation_id text,
+  request_id text,
+  status_code integer,
+  payload jsonb not null default '{}'::jsonb,
+  headers_safe jsonb not null default '{}'::jsonb,
+  received_at timestamptz not null default now(),
+  processed_at timestamptz,
+  error text,
+  created_at timestamptz not null default now()
+);
+
+create index integration_raw_events_lookup_idx
+  on public.motorist_integration_raw_events (organization_id, provider, channel, received_at desc);
+
+create index integration_raw_events_correlation_idx
+  on public.motorist_integration_raw_events (organization_id, provider, correlation_id)
+  where correlation_id is not null;
 
 create table public.motorist_audit_log (
   id uuid primary key default gen_random_uuid(),
@@ -403,7 +524,6 @@ begin
     'motorist_operator_statuses',
     'motorist_telephony_lines',
     'motorist_telephony_queues',
-    'motorist_telephony_extensions',
     'motorist_contacts',
     'motorist_vehicles',
     'motorist_locations',
@@ -415,6 +535,7 @@ begin
     'motorist_calls',
     'motorist_call_events',
     'motorist_sms_messages',
+    'motorist_sms_attempts',
     'motorist_route_estimates'
   ]
   loop
@@ -441,6 +562,20 @@ create policy call_recordings_restricted_access
   using (public.motorist_has_org_role(organization_id, array['senior_dispatcher', 'manager', 'admin']))
   with check (public.motorist_has_org_role(organization_id, array['senior_dispatcher', 'manager', 'admin']));
 
+alter table public.motorist_call_transcripts enable row level security;
+create policy call_transcripts_restricted_access
+  on public.motorist_call_transcripts
+  for all
+  using (public.motorist_has_org_role(organization_id, array['senior_dispatcher', 'manager', 'admin']))
+  with check (public.motorist_has_org_role(organization_id, array['senior_dispatcher', 'manager', 'admin']));
+
+alter table public.motorist_integration_raw_events enable row level security;
+create policy integration_raw_events_admin_access
+  on public.motorist_integration_raw_events
+  for all
+  using (public.motorist_has_org_role(organization_id, array['manager', 'admin']))
+  with check (public.motorist_has_org_role(organization_id, array['manager', 'admin']));
+
 alter table public.motorist_audit_log enable row level security;
 create policy audit_log_admin_read
   on public.motorist_audit_log
@@ -458,8 +593,6 @@ create trigger profiles_updated_at before update on public.motorist_profiles
 create trigger telephony_lines_updated_at before update on public.motorist_telephony_lines
   for each row execute function public.motorist_set_updated_at();
 create trigger telephony_queues_updated_at before update on public.motorist_telephony_queues
-  for each row execute function public.motorist_set_updated_at();
-create trigger telephony_extensions_updated_at before update on public.motorist_telephony_extensions
   for each row execute function public.motorist_set_updated_at();
 create trigger contacts_updated_at before update on public.motorist_contacts
   for each row execute function public.motorist_set_updated_at();
@@ -481,7 +614,12 @@ create trigger call_recordings_updated_at before update on public.motorist_call_
   for each row execute function public.motorist_set_updated_at();
 create trigger sms_messages_updated_at before update on public.motorist_sms_messages
   for each row execute function public.motorist_set_updated_at();
+create trigger sms_attempts_updated_at before update on public.motorist_sms_attempts
+  for each row execute function public.motorist_set_updated_at();
+create trigger call_transcripts_updated_at before update on public.motorist_call_transcripts
+  for each row execute function public.motorist_set_updated_at();
 
+create index organization_integrations_status_idx on public.motorist_organization_integrations (organization_id, provider, status);
 create index calls_active_idx on public.motorist_calls (organization_id, status, started_at desc);
 create index call_events_call_idx on public.motorist_call_events (organization_id, call_id, created_at desc);
 create index cases_active_idx on public.motorist_cases (organization_id, status, updated_at desc);

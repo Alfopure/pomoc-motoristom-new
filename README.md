@@ -1,6 +1,8 @@
 # Linka pomoci motoristom - dispečing
 
-Next.js + TypeScript + Tailwind základ pre pracovný dispečing Pomoc Motoristom. Aktuálne UI beží ako klikateľné demo s deterministickými mock dátami, ale repozitár už smeruje na produkčný foundation stack: Supabase, VIPTel bridge, provider adaptéry a organizáciou konfigurovateľný model.
+Next.js + TypeScript + Tailwind základ pre pracovný dispečing Pomoc Motoristom. UI beží proti Supabase (s deterministickým mock fallbackom) a repozitár smeruje na produkčný foundation stack: Supabase, telefónia cez Telnyx (vo výstavbe), provider adaptéry a organizáciou konfigurovateľný model.
+
+Tento repozitár je **samostatná kópia** dispečingu určená pre prechod na Telnyx. Má vlastný Supabase projekt (Frankfurt) aj vlastný Vercel projekt (región `fra1`) a nikdy sa nedotýka pôvodného produkčného projektu ani predchádzajúceho telefónneho providera.
 
 ## Spustenie
 
@@ -9,14 +11,15 @@ pnpm install
 pnpm dev
 ```
 
-Demo beží na [http://localhost:3000](http://localhost:3000).
+Aplikácia beží na [http://localhost:3000](http://localhost:3000).
 
 ## Overenie
 
 ```bash
 pnpm lint
-pnpm exec vitest run
 pnpm typecheck
+pnpm exec vitest run
+node --test tests/*.test.mjs
 pnpm build
 ```
 
@@ -24,9 +27,9 @@ pnpm build
 
 Trvalá vývojová vetva je `dev`. Každá bežná zmena začína z aktuálneho `dev`, pokračuje samostatnou pracovnou vetvou a pull requestom späť do `dev`. Push pracovnej vetvy automaticky vytvorí verejne dostupný Vercel Preview; aplikácia na ňom naďalej vyžaduje Supabase prihlásenie.
 
-Po merge sa `dev` automaticky nasadí na [dev.dispecing.linkapomoci.sk](https://dev.dispecing.linkapomoci.sk). Produkcia [dispecing.linkapomoci.sk](https://dispecing.linkapomoci.sk) sa vydáva iba pull requestom `dev -> main`. Preview a `dev` spúšťajú iba Next.js build. Produkcia pred nasadením spustí Vitest aplikačné testy, TypeScript check a Next.js build.
+Po merge sa `dev` automaticky nasadí na branch alias vetvy `dev` v tomto Vercel projekte. Produkcia tejto kópie je `test.dispecing.linkapomoci.sk` na vetve `main` (kým neexistuje CNAME, slúži produkčný `*.vercel.app` alias projektu) a vydáva sa iba pull requestom `dev -> main`. Preview, `dev` aj `main` spúšťajú rovnakú build gate: Vitest aplikačné testy, TypeScript check a Next.js build.
 
-Preview aj `dev` používajú živé produkčné dáta z Frankfurt Supabase projektu, preto sú všetky zápisy reálne. Frontend workflow nespúšťa migrácie, workery, listenery, schedulery, živé integrácie ani Hetzner aktiváciu. Podrobný postup je v [CONTRIBUTING.md](CONTRIBUTING.md) a [docs/deployment-vercel.md](docs/deployment-vercel.md).
+Preview aj `dev` používajú Supabase projekt tejto kópie, nie pôvodné produkčné dáta; zápisy sú napriek tomu reálne pre každého, kto na nich testuje. Telefónne migrácie a seed tejto kópie sú v rozsahu, spúšťajú sa však iba na výslovnú žiadosť a iba proti Supabase projektu tejto kópie. Jediný povolený Vercel cron je `*/5 * * * *` na `/api/telephony/cron`. Podrobný postup je v [CONTRIBUTING.md](CONTRIBUTING.md) a [docs/deployment-vercel.md](docs/deployment-vercel.md).
 
 ## Demo dáta
 
@@ -36,15 +39,15 @@ Demo Supabase dáta vieš opakovateľne doplniť cez service key z `.env.local`:
 pnpm seed:demo
 ```
 
-Seed pridá konkrétne pobočky v Bratislave, Žiline, Liptovskom Mikuláši a Košiciach, odťahovky, náhradné vozidlá, prípady, úlohy a VIPTel mock hovory. Používa stabilné ID a `upsert`, takže ho môžeš spustiť znova bez zmazania ručne vytvorených prípadov.
+Seed pridá konkrétne pobočky v Bratislave, Žiline, Liptovskom Mikuláši a Košiciach, odťahovky, náhradné vozidlá, prípady, úlohy, päť telefónnych liniek s partnerskými štítkami a mock hovory (`provider = 'telnyx'`). Používa stabilné ID a `upsert`, takže ho môžeš spustiť znova bez zmazania ručne vytvorených prípadov.
 
 ## Aktuálny stav
 
-Demo používa Supabase ako hlavný zdroj dát, Google Maps/Places v prehliadači a Google Routes API cez server route. UI stále obsahuje mock fallback, aby ostalo použiteľné bez Supabase alebo pri výpadku mapových služieb.
+Aplikácia používa Supabase ako hlavný zdroj dát, Google Maps/Places v prehliadači a Google Routes API cez server route. UI stále obsahuje mock fallback, aby ostalo použiteľné bez Supabase alebo pri výpadku mapových služieb.
 
-Živý VIPTel WebSocket a reálne SMS odosielanie ešte nie sú zapojené. Dispečerská konzola používa Supabase Auth s prihlásením heslom a mapovaním na aktívne `motorist_profiles`. VIPTel sa nebude volať priamo z prehliadača; telefónne eventy pôjdu cez server-side bridge do Supabase a UI bude čítať normalizované dáta.
+Telefónia je po odstránení predchádzajúceho providera v režime **„Telefónia nie je nakonfigurovaná"**: log hovorov, spätné volania, adresár, výsledky hovorov a prepojenie hovoru s prípadom fungujú, ale vytáčanie, prezencia a SMS odosielanie hlásia nenakonfigurovaný stav, kým nepribudne Telnyx (plán v [docs/telnyx-data-contract.md](docs/telnyx-data-contract.md)). Telnyx sa nebude volať priamo z prehliadača: webhooky a REST príkazy spracúva server, prehliadač číta normalizované dáta zo Supabase a telefonuje cez WebRTC s krátkodobým tokenom vydaným serverom.
 
-Online Supabase projekt už obsahoval cudzie tabuľky, preto foundation migrácia používa bezpečný prefix `motorist_` pre všetky nové tabuľky.
+Dispečerská konzola používa Supabase Auth s prihlásením heslom a mapovaním na aktívne `motorist_profiles`. Všetky aplikačné tabuľky používajú prefix `motorist_`.
 
 ## Dokumentácia
 
@@ -55,10 +58,12 @@ Online Supabase projekt už obsahoval cudzie tabuľky, preto foundation migráci
 - `docs/architecture.md` - produkčný foundation návrh.
 - `docs/data-model.md` - Supabase dátový model a hranice domény.
 - `docs/security-model.md` - role, RLS, audit, secrets a GDPR poznámky.
-- `docs/integration-strategy.md` - VIPTel, SMS, mapy, fleet a AI cez provider adaptéry.
+- `docs/integration-strategy.md` - telefónia, SMS, mapy, fleet a AI cez provider adaptéry.
 - `docs/client-configuration.md` - single-client first, multi-client-ready nastavenia.
-- `docs/viptel-data-contract.md` - mapovanie VIPTel udalostí, REST backfill a nahrávky.
+- `docs/telnyx-data-contract.md` - dátový kontrakt telefónie na Telnyxe (odkaz na návrh).
+- `docs/operations/telnyx-setup.md` - identifikátory Telnyx zdrojov (bez tajomstiev).
+- `docs/deployment-vercel.md` - Vercel prostredia, build gate a domény tejto kópie.
 
 ## Foundation konfigurácia
 
-`.env.example` obsahuje iba názvy premenných. Reálne Supabase, VIPTel, Google alebo SMS credentials nepatria do repozitára.
+`.env.example` obsahuje iba názvy premenných. Reálne Supabase, Telnyx, Google alebo SMS credentials nepatria do repozitára.

@@ -1,36 +1,39 @@
-import type { CallCenterCall } from "@/data/dispatch-types";
 import type { Operator } from "@/domain/types";
-import type { ViptelQueue, ViptelQueueStatus } from "@/lib/integrations/viptel/client";
 import type { TelephonyHealthSignal } from "@/lib/telephony/health";
-import {
-  callIsCurrentAtTelephonyStation,
-  callIsRingingAtTelephonyStation,
-  type TelephonyExtensionIdentity,
-} from "@/lib/telephony/call-endpoints";
 
-export type TelephonyExtensionSnapshot = {
-  id: string;
-  profileId?: string;
-  extension: string;
-  active: boolean;
-  assignmentEligible?: boolean;
-  assignmentRequirement?: "initial_provisioning" | "rotation_required";
-  displayName?: string;
-  outboundCid?: string;
-  callForwarding?: string;
-  registered?: boolean;
-  viptelPhoneActive?: boolean;
-  allowedChanges: string[];
-  lastSyncedAt?: string;
+/**
+ * Provider-neutral operator presence snapshot.
+ *
+ * `devices` describes the browser phone registration per operator and
+ * `presence` the operator's own availability state. Both are keyed by profile
+ * id; an operator missing from `presence` is not part of the ring pool at all.
+ */
+export type TelephonyPresenceStatus =
+  | "available"
+  | "ringing"
+  | "on_call"
+  | "after_call_work"
+  | "paused"
+  | "offline";
+
+export type TelephonyDeviceSnapshot = {
+  profileId: string;
+  registered: boolean;
+  seenAt?: string;
+};
+
+export type TelephonyOperatorPresenceRow = {
+  profileId: string;
+  status: TelephonyPresenceStatus;
+  currentSessionId?: string | null;
 };
 
 export type TelephonyPresenceSnapshot = {
   actorProfileId: string;
   canManageAssignments: boolean;
   checkedAt: string;
-  extensions: TelephonyExtensionSnapshot[];
-  queues: ViptelQueue[];
-  queueStatuses: ViptelQueueStatus[];
+  devices: TelephonyDeviceSnapshot[];
+  presence: TelephonyOperatorPresenceRow[];
 };
 
 export type TelephonyOperatorPresenceState =
@@ -66,175 +69,95 @@ export type TelephonyOperatorPresence = {
 export function deriveTelephonyOperatorPresences(input: {
   operators: Operator[];
   snapshot: TelephonyPresenceSnapshot | null;
-  activeCalls: CallCenterCall[];
-  health: TelephonyHealthSignal;
+  health?: TelephonyHealthSignal;
 }): TelephonyOperatorPresence[] {
-  const { activeCalls, health, operators, snapshot } = input;
-  const snapshotsByProfile = groupExtensionsByProfile(snapshot?.extensions ?? []);
-  const queueMembersByExtension = groupQueueMembersByExtension(snapshot?.queueStatuses ?? []);
-  const extensionIdentities: TelephonyExtensionIdentity[] = (snapshot?.extensions ?? [])
-    .filter((extension) => extension.active)
-    .map((extension) => ({ extension: extension.extension, profileId: extension.profileId }));
+  const { health, operators, snapshot } = input;
+  const devicesByProfile = new Map(snapshot?.devices.map((device) => [device.profileId, device]) ?? []);
+  const presenceByProfile = new Map(snapshot?.presence.map((row) => [row.profileId, row]) ?? []);
+  const healthState = healthPresenceState(health);
+  const checkedAt = snapshot?.checkedAt ?? health?.lastSuccessAt ?? health?.checkedAt;
 
   return operators.map((operator) => {
-    const owned = snapshotsByProfile.get(operator.id) ?? [];
-    const extensions = owned.map((extension) => extension.extension);
-    const primaryExtension = extensions[0];
-    const registrations = owned.map((extension) => extension.registered === true);
-    const queueMemberships = owned.flatMap((extension) => queueMembersByExtension.get(extension.extension) ?? []);
-    const ringing = extensions.some((extension) => hasRingingCall(activeCalls, extension, operator.id, extensionIdentities));
-    const callInUse = extensions.some((extension) => hasActiveCall(activeCalls, extension, operator.id, extensionIdentities));
-    const queueInUse = queueMemberships.some(({ member }) => member.inUse);
-    const inUse = callInUse || queueInUse;
-    const queueMember = queueMemberships.length > 0;
-    const queueNumbers = [...new Set(queueMemberships.map((membership) => membership.queue))];
-    const paused = queueMember && queueMemberships.every(({ member }) => member.paused);
-    const registered = registrations.some(Boolean);
-    const availableQueues = [...new Set(owned.flatMap((extension) => {
-      const memberships = queueMembersByExtension.get(extension.extension) ?? [];
-      const usable =
-        extension.active &&
-        extension.registered === true &&
-        !hasActiveCall(activeCalls, extension.extension, operator.id, extensionIdentities);
-      return usable
-        ? memberships.filter(({ member }) => !member.paused && !member.inUse).map((membership) => membership.queue)
-        : [];
-    }))];
-    const available = availableQueues.length > 0;
-    const state = presenceState({
-      available,
-      health,
-      inUse,
-      ownedCount: owned.length,
-      paused,
-      queueMember,
-      registered,
-      ringing,
-    });
+    const device = devicesByProfile.get(operator.id);
+    const presence = presenceByProfile.get(operator.id);
+    const registered = device?.registered === true;
+    const paused = presence?.status === "paused" || presence?.status === "after_call_work";
+    const inUse =
+      presence?.status === "ringing" ||
+      presence?.status === "on_call" ||
+      Boolean(presence?.currentSessionId);
+    const state = healthState ?? presenceState({ presence, registered });
 
     return {
       profileId: operator.id,
       operatorName: operator.name,
-      extensions,
-      primaryExtension,
+      extensions: [],
       state,
       available: state === "available",
-      queueMember,
-      queueNumbers,
-      availableQueues,
+      queueMember: presence !== undefined,
+      queueNumbers: [],
+      availableQueues: [],
       paused,
       inUse,
       registered,
-      detail: presenceDetail({
-        extensions,
-        health,
-        inUse,
-        paused,
-        queueMember,
-        registered,
-        state,
-      }),
-      checkedAt: snapshot?.checkedAt ?? health.lastSuccessAt ?? health.checkedAt,
+      detail: presenceDetail({ health, presence, state }),
+      checkedAt,
     };
   });
 }
 
+function healthPresenceState(health: TelephonyHealthSignal | undefined): TelephonyOperatorPresenceState | null {
+  if (!health) return null;
+  if (health.state === "degraded" || health.state === "unavailable") return "error";
+  if (health.state === "stale" || health.state === "checking") return "stale";
+  return null;
+}
+
+/**
+ * Precedence: no presence row → unassigned; explicit offline wins; live call
+ * states come from the server and beat a lapsed device heartbeat; otherwise an
+ * unregistered browser phone cannot be reached regardless of availability.
+ */
 function presenceState(input: {
-  available: boolean;
-  health: TelephonyHealthSignal;
-  inUse: boolean;
-  ownedCount: number;
-  paused: boolean;
-  queueMember: boolean;
+  presence: TelephonyOperatorPresenceRow | undefined;
   registered: boolean;
-  ringing: boolean;
 }): TelephonyOperatorPresenceState {
-  if (input.health.state === "degraded" || input.health.state === "unavailable") return "error";
-  if (input.health.state === "stale") return "stale";
-  if (input.health.state !== "live") return "stale";
-  if (input.ownedCount === 0) return "unassigned";
-  if (input.ringing) return "ringing";
-  if (input.inUse) return "on_call";
-  if (input.available) return "available";
-  if (input.paused) return "paused";
-  if (input.queueMember && !input.registered) return "unregistered";
-  return "offline";
+  const { presence, registered } = input;
+  if (!presence) return "unassigned";
+  if (presence.status === "offline") return "offline";
+  if (presence.status === "ringing") return "ringing";
+  if (presence.status === "on_call") return "on_call";
+  if (!registered) return "unregistered";
+  if (presence.status === "paused" || presence.status === "after_call_work") return "paused";
+  return "available";
 }
 
 function presenceDetail(input: {
-  extensions: string[];
-  health: TelephonyHealthSignal;
-  inUse: boolean;
-  paused: boolean;
-  queueMember: boolean;
-  registered: boolean;
+  health: TelephonyHealthSignal | undefined;
+  presence: TelephonyOperatorPresenceRow | undefined;
   state: TelephonyOperatorPresenceState;
 }) {
-  if (input.state === "error" || input.state === "stale") return input.health.detail;
-  if (input.state === "unassigned") return "Bez priradenej aktívnej internej linky VIPTel.";
+  const { health, presence, state } = input;
+  if ((state === "error" || state === "stale") && health) return health.detail;
 
-  const identity = `Interná linka ${input.extensions.join(", ")}`;
-  if (input.state === "ringing") return `${identity} práve zvoní.`;
-  if (input.inUse) return `${identity} je na hovore.`;
-  if (!input.queueMember) return `${identity} je mimo radu.`;
-  if (input.paused) return `${identity} je v rade na pauze.`;
-  if (!input.registered) return `${identity} je v rade, ale nie je registrovaná.`;
-  return `${identity} je registrovaná a dostupná v rade.`;
-}
-
-function groupExtensionsByProfile(extensions: TelephonyExtensionSnapshot[]) {
-  const grouped = new Map<string, TelephonyExtensionSnapshot[]>();
-
-  for (const extension of extensions) {
-    if (!extension.active || !extension.profileId) continue;
-    const current = grouped.get(extension.profileId) ?? [];
-    current.push(extension);
-    grouped.set(extension.profileId, current);
+  switch (state) {
+    case "unassigned":
+      return "Operátor nie je zaradený do telefónie.";
+    case "offline":
+      return "Operátor je odhlásený z telefónie.";
+    case "ringing":
+      return "Operátorovi práve zvoní hovor.";
+    case "on_call":
+      return "Operátor je na hovore.";
+    case "unregistered":
+      return "Telefón operátora nie je pripojený.";
+    case "paused":
+      return presence?.status === "after_call_work"
+        ? "Operátor dokončuje predchádzajúci hovor."
+        : "Operátor má pauzu.";
+    case "available":
+      return "Operátor je pripojený a dostupný.";
+    default:
+      return "Stav telefónie nie je známy.";
   }
-
-  for (const current of grouped.values()) {
-    current.sort((left, right) => left.extension.localeCompare(right.extension, "en", { numeric: true }));
-  }
-
-  return grouped;
-}
-
-function groupQueueMembersByExtension(statuses: ViptelQueueStatus[]) {
-  const grouped = new Map<string, Array<{ queue: string; member: ViptelQueueStatus["members"][number] }>>();
-
-  for (const status of statuses) {
-    for (const member of status.members) {
-      const current = grouped.get(member.extension) ?? [];
-      current.push({ queue: status.queue, member });
-      grouped.set(member.extension, current);
-    }
-  }
-
-  return grouped;
-}
-
-function hasRingingCall(
-  calls: CallCenterCall[],
-  extension: string,
-  profileId: string,
-  stations: TelephonyExtensionIdentity[],
-) {
-  return calls.some(
-    (call) =>
-      (call.status === "incoming" || call.status === "ringing_agent") &&
-      callIsRingingAtTelephonyStation(call, { extension, profileId }, stations),
-  );
-}
-
-function hasActiveCall(
-  calls: CallCenterCall[],
-  extension: string,
-  profileId: string,
-  stations: TelephonyExtensionIdentity[],
-) {
-  return calls.some(
-    (call) =>
-      ["incoming", "ringing_agent", "answered", "outbound"].includes(call.status) &&
-      callIsCurrentAtTelephonyStation(call, { extension, profileId }, stations),
-  );
 }
