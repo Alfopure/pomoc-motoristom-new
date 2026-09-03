@@ -61,9 +61,9 @@ values
   ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000104', 'paused', 'seed', '2026-05-20T18:10:00+02:00'),
   ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000105', 'offline', 'seed', '2026-05-20T17:55:00+02:00');
 
--- Partner lines. Phone numbers are placeholders in E.164 form; replace them with
--- the canonical strings returned by Telnyx `GET /v2/phone_numbers` once the
--- numbers are assigned to the call-control application.
+-- Partner lines (Bratislava DIDs, normalised E.164). Telnyx stores the first
+-- number as +4210232408700 (extra leading 0); inbound `to` is normalised before
+-- the lookup. Routing columns are filled in the telephony section below.
 insert into public.motorist_telephony_lines (id, organization_id, provider, phone_number, label, active)
 values
   ('00000000-0000-4000-8000-000000000201', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408700', 'Neutrálna linka', true),
@@ -384,3 +384,136 @@ values (
   'Prípad založený z asistenčnej objednávky.',
   '2026-05-20T18:42:00+02:00'
 );
+
+-- ---------------------------------------------------------------------------
+-- Telnyx telephony routing configuration (Phase 2). Media paths are relative
+-- to TELNYX_MEDIA_BASE_URL (public/telephony/*.mp3).
+-- ---------------------------------------------------------------------------
+
+insert into public.motorist_telephony_settings (
+  id,
+  organization_id,
+  live_calls_enabled,
+  sms_live_sends,
+  daily_leg_soft_cap,
+  park_max_minutes,
+  destination_allowlist
+)
+values (
+  '00000000-0000-4000-8000-000000002601',
+  '00000000-0000-4000-8000-000000000001',
+  false,
+  false,
+  500,
+  30,
+  array['SK', 'CZ']::text[]
+)
+on conflict (organization_id) do nothing;
+
+insert into public.motorist_business_hours (id, organization_id, name, timezone, active)
+values ('00000000-0000-4000-8000-000000002001', '00000000-0000-4000-8000-000000000001', 'Pracovný čas', 'Europe/Bratislava', true)
+on conflict (id) do nothing;
+
+-- Mon-Fri 07:00-12:00 and 12:30-19:00 (ISO weekday 1 = Monday).
+insert into public.motorist_business_hours_intervals (organization_id, business_hours_id, weekday, opens, closes)
+select
+  '00000000-0000-4000-8000-000000000001',
+  '00000000-0000-4000-8000-000000002001',
+  weekday,
+  opens,
+  closes
+from (values (1), (2), (3), (4), (5)) as days(weekday)
+cross join (values ('07:00'::time, '12:00'::time), ('12:30'::time, '19:00'::time)) as slots(opens, closes)
+on conflict (business_hours_id, weekday, opens) do nothing;
+
+insert into public.motorist_business_hours_exceptions (organization_id, business_hours_id, date, closed, label)
+values ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002001', '2026-12-24', true, 'Štedrý deň')
+on conflict (business_hours_id, date) do nothing;
+
+insert into public.motorist_ring_groups (id, organization_id, name, description, active)
+values
+  ('00000000-0000-4000-8000-000000002201', '00000000-0000-4000-8000-000000000001', 'Dispečing A', 'Primárna skupina, zvoní všetkým naraz.', true),
+  ('00000000-0000-4000-8000-000000002202', '00000000-0000-4000-8000-000000000001', 'Dispečing B', 'Záložná skupina, zvoní postupne, externé číslo posledné.', true)
+on conflict (id) do nothing;
+
+insert into public.motorist_ring_group_members (id, organization_id, ring_group_id, member_kind, profile_id, external_number, position, ring_secs)
+values
+  ('00000000-0000-4000-8000-000000002211', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002201', 'operator', '00000000-0000-4000-8000-000000000101', null, 0, null),
+  ('00000000-0000-4000-8000-000000002212', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002201', 'operator', '00000000-0000-4000-8000-000000000102', null, 1, null),
+  ('00000000-0000-4000-8000-000000002213', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002201', 'operator', '00000000-0000-4000-8000-000000000105', null, 2, null),
+  ('00000000-0000-4000-8000-000000002221', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002202', 'operator', '00000000-0000-4000-8000-000000000104', null, 0, 15),
+  ('00000000-0000-4000-8000-000000002222', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002202', 'operator', '00000000-0000-4000-8000-000000000103', null, 1, 15),
+  -- Placeholder external number (dispatcher mobile); replace before go-live.
+  ('00000000-0000-4000-8000-000000002223', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002202', 'external_number', null, '+421910988882', 2, 15)
+on conflict (id) do nothing;
+
+insert into public.motorist_ring_plans (id, organization_id, name, fallback_kind, fallback_number, active)
+values ('00000000-0000-4000-8000-000000002301', '00000000-0000-4000-8000-000000000001', 'Denný', 'callback_prompt', null, true)
+on conflict (id) do nothing;
+
+insert into public.motorist_ring_plan_steps (id, organization_id, ring_plan_id, step_index, ring_group_id, timeout_secs, strategy)
+values
+  ('00000000-0000-4000-8000-000000002311', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002301', 0, '00000000-0000-4000-8000-000000002201', 20, 'all'),
+  ('00000000-0000-4000-8000-000000002312', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002301', 1, '00000000-0000-4000-8000-000000002202', 15, 'ordered')
+on conflict (id) do nothing;
+
+insert into public.motorist_ivr_menus (id, organization_id, name, prompt_media_url, tts_text, invalid_media_url, timeout_secs, max_tries, active)
+values (
+  '00000000-0000-4000-8000-000000002401',
+  '00000000-0000-4000-8000-000000000001',
+  'Hlavné menu',
+  'ivr-main.mp3',
+  'Pre spojenie s dispečingom stlačte jednotku. Ak chcete, aby sme vám zavolali späť, stlačte dvojku.',
+  'invalid-input.mp3',
+  5,
+  2,
+  true
+)
+on conflict (id) do nothing;
+
+insert into public.motorist_ivr_options (id, organization_id, ivr_menu_id, digit, action, target_ring_plan_id, target_number, label, prompt_media_url, tts_text)
+values
+  ('00000000-0000-4000-8000-000000002411', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002401', '1', 'ring_plan', '00000000-0000-4000-8000-000000002301', null, 'Dispečing', null, null),
+  ('00000000-0000-4000-8000-000000002412', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000002401', '2', 'callback', null, null, 'Spätné volanie', 'callback-offer.mp3', 'Zavoláme vám späť, hneď ako sa uvoľní operátor.')
+on conflict (id) do nothing;
+
+insert into public.motorist_pause_reasons (id, organization_id, code, label, max_minutes, sort_order, active)
+values
+  ('00000000-0000-4000-8000-000000002501', '00000000-0000-4000-8000-000000000001', 'obed', 'Obed', 45, 10, true),
+  ('00000000-0000-4000-8000-000000002502', '00000000-0000-4000-8000-000000000001', 'porada', 'Porada', 90, 20, true),
+  ('00000000-0000-4000-8000-000000002503', '00000000-0000-4000-8000-000000000001', 'admin', 'Administratíva', null, 30, true)
+on conflict (id) do nothing;
+
+-- Lines: every DID follows the "Denný" plan and the shared business hours; the
+-- neutral line additionally offers the IVR. telnyx_number_id comes from
+-- GET /v2/phone_numbers (only the first number's id is known at seed time).
+update public.motorist_telephony_lines
+set
+  ring_plan_id = '00000000-0000-4000-8000-000000002301',
+  business_hours_id = '00000000-0000-4000-8000-000000002001',
+  ivr_menu_id = case id when '00000000-0000-4000-8000-000000000201' then '00000000-0000-4000-8000-000000002401'::uuid else ivr_menu_id end,
+  telnyx_number_id = case id when '00000000-0000-4000-8000-000000000201' then '3040091148564563176' else telnyx_number_id end,
+  partner_name = case id
+    when '00000000-0000-4000-8000-000000000202' then 'Allianz Assistance'
+    when '00000000-0000-4000-8000-000000000203' then 'Autoklub Slovakia Assistance'
+    when '00000000-0000-4000-8000-000000000204' then 'AXA Assistance CZ'
+    when '00000000-0000-4000-8000-000000000205' then 'Eurocross Assistance CR'
+    else partner_name
+  end
+where organization_id = '00000000-0000-4000-8000-000000000001'
+  and id in (
+    '00000000-0000-4000-8000-000000000201',
+    '00000000-0000-4000-8000-000000000202',
+    '00000000-0000-4000-8000-000000000203',
+    '00000000-0000-4000-8000-000000000204',
+    '00000000-0000-4000-8000-000000000205'
+  );
+
+insert into public.motorist_operator_presence (id, organization_id, profile_id, status, status_since)
+values
+  ('00000000-0000-4000-8000-000000002701', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000101', 'available', '2026-09-03T07:00:00+02:00'),
+  ('00000000-0000-4000-8000-000000002702', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000102', 'available', '2026-09-03T07:00:00+02:00'),
+  ('00000000-0000-4000-8000-000000002703', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000103', 'offline', '2026-09-03T07:00:00+02:00'),
+  ('00000000-0000-4000-8000-000000002704', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000104', 'offline', '2026-09-03T07:00:00+02:00'),
+  ('00000000-0000-4000-8000-000000002705', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000105', 'available', '2026-09-03T07:00:00+02:00')
+on conflict (profile_id) do nothing;

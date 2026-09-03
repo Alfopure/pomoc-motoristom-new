@@ -9,6 +9,8 @@ import { publicLocationLinkStatus } from "@/lib/sms/location-share";
 import { validateCustomSmsDraft } from "@/lib/sms/custom-message";
 import { renderSmsTemplate, type SmsTemplateKey } from "@/lib/sms/templates";
 import { SMS_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
+import { createTelnyxSmsTransport } from "@/lib/integrations/telnyx/sms-client";
+import { getTelnyxConfig } from "@/server/telephony/telnyx/env";
 import { createCaseLocationShareLink } from "@/server/location-share-links";
 
 type AdminClient = SupabaseClient<Database>;
@@ -63,11 +65,18 @@ export type SmsTransportSendInput = {
   to: string;
   body: string;
   idempotencyKey: string;
+  /** Owning organisation; the transport reads its DB kill switch. */
+  organizationId: string;
 };
 
 export type SmsTransportSendResult = {
   providerMessageId: string | null;
   status: "queued" | "sent" | "failed";
+  /** Raw provider status, mirrored into `status_detail` when present. */
+  providerStatus?: string | null;
+  /** Sender and profile actually used, persisted for the audit trail. */
+  fromSender?: string | null;
+  messagingProfileId?: string | null;
 };
 
 /**
@@ -76,6 +85,8 @@ export type SmsTransportSendResult = {
  */
 export type SmsTransport = {
   send(input: SmsTransportSendInput): Promise<SmsTransportSendResult>;
+  /** Optional gate run before any audit row is written (kill switches). */
+  preflight?(input: { organizationId: string }): Promise<void>;
 };
 
 /** Fails closed while no SMS provider is wired in; never touches the network. */
@@ -85,9 +96,14 @@ export const notConfiguredTransport: SmsTransport = {
   },
 };
 
-/** Transport used by the server routes; the next provider replaces this body. */
+/**
+ * Transport used by the server routes: Telnyx as soon as `TELNYX_API_KEY` is
+ * present, otherwise the fail-closed stub. The live-send switches are enforced
+ * inside the Telnyx transport (423), so a configured-but-disabled stack is
+ * reported as a kill switch rather than as "not configured".
+ */
 export function resolveSmsTransport(): SmsTransport {
-  return notConfiguredTransport;
+  return getTelnyxConfig().configured ? createTelnyxSmsTransport() : notConfiguredTransport;
 }
 
 /**
@@ -180,6 +196,8 @@ export async function sendCaseSms(input: SendCaseSmsInput, options: SmsSendOptio
   }
 
   const transport = requireConfiguredTransport(options.transport);
+  // Kill switches refuse before any audit row exists, like the not-configured gate.
+  await transport.preflight?.({ organizationId });
   const toNumber = normalizeSmsRecipient(contact.phone, "Telefón klienta");
   const actorProfileId = caseRow.owner_id ?? (await resolveDefaultOwnerId(supabase, organizationId));
   const locationLink =
@@ -291,6 +309,7 @@ export async function sendCustomSms(input: SendCustomSmsInput, options: SmsSendO
 
   // Gate before any read or write so an unconfigured SMS stack leaves no trace.
   const transport = requireConfiguredTransport(options.transport);
+  await transport.preflight?.({ organizationId: input.organizationId });
   const toNumber = normalizeSmsRecipient(draft.toNumber, "Telefónne číslo");
   const supabase = createSupabaseAdminClient();
   const caseRow = input.caseId?.trim() ? await getCase(supabase, input.organizationId, input.caseId.trim()) : null;
@@ -391,6 +410,7 @@ async function deliverSms(
     result = await transport.send({
       body: input.body,
       idempotencyKey: smsMessage.idempotency_key ?? smsMessage.id,
+      organizationId: smsMessage.organization_id,
       to: input.toNumber,
     });
   } catch (error) {
@@ -425,7 +445,7 @@ async function deliverSms(
   }
 
   const finishedAt = new Date().toISOString();
-  const statusDetail = transportStatusDetail(result.status);
+  const statusDetail = result.providerStatus ?? transportStatusDetail(result.status);
   const rejected = result.status === "failed";
 
   await throwOnResult(
@@ -434,7 +454,11 @@ async function deliverSms(
       .update({
         status: rejected ? "failed" : "accepted",
         provider_message_id: result.providerMessageId,
-        provider_response_safe: { provider_message_id: result.providerMessageId, status: result.status },
+        provider_response_safe: {
+          provider_message_id: result.providerMessageId,
+          provider_status: result.providerStatus ?? null,
+          status: result.status,
+        },
         error: rejected ? PROVIDER_REJECTED_MESSAGE : null,
         finished_at: finishedAt,
       })
@@ -447,6 +471,8 @@ async function deliverSms(
         status: result.status,
         status_detail: statusDetail,
         provider_message_id: result.providerMessageId,
+        from_sender: result.fromSender ?? null,
+        messaging_profile_id: result.messagingProfileId ?? null,
         error: rejected ? PROVIDER_REJECTED_MESSAGE : null,
         last_attempt_at: finishedAt,
         sent_at: result.status === "sent" ? finishedAt : null,
