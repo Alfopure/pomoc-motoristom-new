@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 
+import { runTelephonyAlerts, type TelephonyAlertDeps } from "./alerts";
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { closeOrphanLegs, closeStaleRingAttempts, sweepOverdueRingSteps } from "./routing/ring-plan";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
 import { processTelnyxEvent } from "./telnyx/event-processor";
-import { ACTIVE_SESSION_STATES, type AppEvent, type SessionRow } from "./state/types";
+import { ACTIVE_SESSION_STATES, type SessionEvent, type SessionRow } from "./state/types";
 
 /**
  * Jobs behind the single allowed Vercel cron (every 5 minutes →
@@ -22,12 +23,20 @@ import { ACTIVE_SESSION_STATES, type AppEvent, type SessionRow } from "./state/t
  *    them again). Without this a single lost invocation leaves a leg open and
  *    its session hanging until the 15-minute stuck sweep, and any effect the
  *    event carried is simply lost.
- * 4. `telephony.ledger.prune` — 30-day retention of processed webhook ledger
+ * 4. `telephony.telnyx.reconcile` — asks Telnyx about the legs of sessions that
+ *    have gone quiet. Every job above reasons from our own rows; this is the
+ *    only one that can tell "the call is still up and nothing happened" apart
+ *    from "the hangup webhook never arrived", and it closes the second case.
+ * 5. `telephony.alerts` — the only path that reaches a human: it mails the
+ *    failing health checks to `ALERT_EMAIL_TO`, once per problem per day.
+ * 6. `telephony.ledger.prune` — 30-day retention of processed webhook ledger
  *    rows plus 7-day payload nulling for the noisy bookkeeping event types.
  *    Gated by the `motorist_job_controls` row so it can be switched off.
  */
 
 export const LEDGER_PRUNE_JOB = "telephony.ledger.prune";
+export const RECONCILE_JOB = "telephony.telnyx.reconcile";
+export const ALERT_JOB = "telephony.alerts";
 export const LEDGER_REPLAY_JOB = "telephony.ledger.replay";
 export const RING_SWEEP_JOB = "telephony.ring.sweep";
 export const STUCK_SESSION_JOB = "telephony.sessions.stuck";
@@ -45,6 +54,16 @@ export const LEDGER_PAYLOAD_RETENTION_DAYS = 7;
 export const LEDGER_PAYLOAD_EVENT_TYPES = ["call.playback.started", "call.playback.ended", "call.cost", "call.speak.started", "call.speak.ended"];
 /** An active session untouched for this long is reported as stuck. */
 export const STUCK_SESSION_MS = 15 * 60_000;
+/**
+ * A quiet session is asked about at Telnyx after this long. Well under the
+ * stuck threshold on purpose: reconciliation is how a lost `call.hangup` gets
+ * noticed, and waiting 15 minutes to notice it means 15 minutes of an operator
+ * pinned to a call that ended.
+ */
+export const RECONCILE_IDLE_MS = 3 * 60_000;
+/** Sessions per tick, and legs per session, so one bad night cannot blow the budget. */
+export const RECONCILE_SESSION_LIMIT = 10;
+export const RECONCILE_LEG_LIMIT = 6;
 
 export type TelephonyCronJobStatus = "ok" | "skipped" | "disabled" | "failed";
 
@@ -66,10 +85,13 @@ export type TelephonyCronSummary = {
 
 export type TelephonyCronDeps = SessionRunnerDeps & {
   /** Injection seam for tests; defaults to the shared per-session pipeline. */
-  runSession?: (sessionId: string, event: AppEvent) => Promise<unknown>;
+  runSession?: (sessionId: string, event: SessionEvent) => Promise<unknown>;
   ledgerRetentionDays?: number;
   payloadRetentionDays?: number;
   stuckAfterMs?: number;
+  reconcileIdleMs?: number;
+  /** Test seam; defaults to the health-report driven alert mailer. */
+  alerts?: Partial<Pick<TelephonyAlertDeps, "send" | "recipient" | "report">>;
   stalledEventMs?: number;
   /** Injection seam for tests; defaults to the real webhook processor. */
   replayEvent?: (envelope: unknown) => Promise<unknown>;
@@ -79,7 +101,7 @@ function nowOf(deps: TelephonyCronDeps): Date {
   return (deps.now ?? (() => new Date()))();
 }
 
-function sessionRunner(deps: TelephonyCronDeps): (sessionId: string, event: AppEvent) => Promise<unknown> {
+function sessionRunner(deps: TelephonyCronDeps): (sessionId: string, event: SessionEvent) => Promise<unknown> {
   return deps.runSession ?? ((sessionId, event) => runSessionEvent(deps, sessionId, event));
 }
 
@@ -254,9 +276,125 @@ export async function pruneWebhookLedger(deps: TelephonyCronDeps): Promise<Telep
   return { job: LEDGER_PRUNE_JOB, status: "ok", detail: { deleted: (deleted.data ?? []).length, payloadsCleared: (nulled.data ?? []).length, deleteBefore, payloadBefore } };
 }
 
+/**
+ * Closes legs that Telnyx says are over but whose `call.hangup` never arrived.
+ *
+ * A lost hangup is the one failure our own tables cannot detect: the session
+ * looks perfectly healthy, just quiet, so the ring sweep leaves it alone and
+ * the operator stays `on_call` — invisible to every ring plan — until the
+ * 15-minute stuck sweep. Here the provider is asked directly, and each dead leg
+ * is fed back through the ordinary reducer as the `call.hangup` that went
+ * missing, so wrap-up, presence and the `motorist_calls` row all close exactly
+ * as they would have.
+ */
+export async function reconcileWithTelnyx(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
+  const telnyx = deps.telnyx;
+  if (!telnyx) return { job: RECONCILE_JOB, status: "skipped", detail: { reason: "not_configured" } };
+
+  const now = nowOf(deps);
+  const cutoff = new Date(now.getTime() - (deps.reconcileIdleMs ?? RECONCILE_IDLE_MS)).toISOString();
+  const sessions = await deps.admin
+    .from("motorist_call_sessions")
+    .select("id, state, updated_at")
+    .eq("organization_id", deps.organizationId)
+    .in("state", [...ACTIVE_SESSION_STATES])
+    .lt("updated_at", cutoff)
+    .order("updated_at", { ascending: true })
+    .limit(RECONCILE_SESSION_LIMIT);
+  if (sessions.error) return { job: RECONCILE_JOB, status: "failed", detail: {}, error: sessions.error.message };
+
+  const run = sessionRunner(deps);
+  const errors: Array<{ sessionId: string; error: string }> = [];
+  let checkedLegs = 0;
+  let deadLegs = 0;
+  let closedSessions = 0;
+
+  for (const session of sessions.data ?? []) {
+    const legs = await deps.admin
+      .from("motorist_call_legs")
+      .select("id, telnyx_call_control_id, role")
+      .eq("session_id", session.id)
+      .is("ended_at", null)
+      .limit(RECONCILE_LEG_LIMIT);
+    if (legs.error) {
+      errors.push({ sessionId: session.id, error: legs.error.message });
+      continue;
+    }
+
+    let closedHere = 0;
+    for (const leg of legs.data ?? []) {
+      const callControlId = leg.telnyx_call_control_id;
+      if (!callControlId) continue;
+      try {
+        checkedLegs += 1;
+        const status = await telnyx.retrieveCall(callControlId);
+        if (status.alive) continue;
+        deadLegs += 1;
+        await run(session.id, {
+          kind: "telnyx",
+          // Deterministic per leg and minute: a reconcile that runs twice for
+          // the same dead leg must not write two call events.
+          id: `reconcile:${callControlId}:${Math.floor(now.getTime() / 60_000)}`,
+          type: "call.hangup",
+          occurredAt: now.toISOString(),
+          callControlId,
+          callLegId: null,
+          callSessionId: null,
+          connectionId: null,
+          clientState: null,
+          rawClientState: null,
+          from: null,
+          to: null,
+          direction: null,
+          state: null,
+          hangupCause: "reconciled",
+          hangupSource: null,
+          sipHangupCause: null,
+          digits: null,
+          status: null,
+          conferenceId: null,
+          customHeaders: [],
+          payload: { reconciled: true, known: status.known },
+        });
+        closedHere += 1;
+      } catch (error) {
+        errors.push({ sessionId: session.id, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (closedHere > 0) closedSessions += 1;
+  }
+
+  if (deadLegs > 0) {
+    deps.logger?.({ level: "warn", scope: "cron", job: RECONCILE_JOB, deadLegs, closedSessions, message: "Telnyx reported legs our webhooks never closed" });
+  }
+  if (errors.length > 0) {
+    await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error: new Error(errors[0].error), context: { job: RECONCILE_JOB, sessionId: errors[0].sessionId } });
+  }
+  return {
+    job: RECONCILE_JOB,
+    status: errors.length > 0 ? "failed" : "ok",
+    detail: { sessions: sessions.data?.length ?? 0, checkedLegs, deadLegs, closedSessions, cutoff, errors },
+  };
+}
+
+/** Mails the failing health checks to `ALERT_EMAIL_TO` (see `alerts.ts`). */
+export async function runAlertJob(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
+  const result = await runTelephonyAlerts({
+    admin: deps.admin,
+    organizationId: deps.organizationId,
+    config: deps.config,
+    now: () => nowOf(deps),
+    ...(deps.alerts ?? {}),
+  });
+  if (result.status === "failed") {
+    deps.logger?.({ level: "error", scope: "cron", job: ALERT_JOB, error: result.error });
+  }
+  return { job: ALERT_JOB, status: result.status, detail: result.detail, ...(result.error ? { error: result.error } : {}) };
+}
+
 export async function runTelephonyCronJobs(deps: TelephonyCronDeps): Promise<TelephonyCronSummary> {
   const started = nowOf(deps).getTime();
-  const jobs = [await runRingSweep(deps), await replayStalledWebhookEvents(deps), await detectStuckSessions(deps), await pruneWebhookLedger(deps)];
+  const jobs = [await runRingSweep(deps), await replayStalledWebhookEvents(deps), await reconcileWithTelnyx(deps), await detectStuckSessions(deps), await runAlertJob(deps), await pruneWebhookLedger(deps)];
   const checkedAt = nowOf(deps);
   return {
     status: jobs.some((job) => job.status === "failed") ? "degraded" : "ok",

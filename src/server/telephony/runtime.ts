@@ -4,7 +4,7 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 import type { MotoristActor } from "@/server/api-auth";
 import { resolveDefaultOrganizationId } from "@/server/default-organization";
-import { MutationError } from "@/server/motorist-mutations";
+import { MutationError } from "@/server/mutation-error";
 
 import { CallActionError, type CallActionDeps, type CallActor } from "./call-actions";
 import { OperatorDeviceError } from "./operator-devices";

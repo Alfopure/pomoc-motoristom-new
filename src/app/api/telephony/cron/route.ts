@@ -13,9 +13,10 @@ export const maxDuration = 60;
  *
  * Vercel sends `Authorization: Bearer <CRON_SECRET>`; anything else is rejected
  * before any work happens. It runs the overdue ring-step sweep (safety net for
- * lost webhooks), stuck-session detection and the webhook-ledger prune, and
- * answers with a per-job summary. When telephony is not configured the jobs
- * that need a provider report `skipped` instead of failing.
+ * lost webhooks), the ledger replay, reconciliation against Telnyx, stuck-session
+ * detection, the alert mailer and the webhook-ledger prune, and answers with a
+ * per-job summary. When telephony is not configured the jobs that need a
+ * provider report `skipped` instead of failing.
  */
 function authorized(request: Request): boolean {
   const secret = process.env.CRON_SECRET?.trim();
