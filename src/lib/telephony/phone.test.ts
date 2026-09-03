@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { formatPhoneNumberForDisplay, formatViptelDialTarget, isDialablePhoneInput } from "@/lib/telephony/phone";
+import { formatPhoneNumberForDisplay, formatDialTarget, isDialablePhoneInput } from "@/lib/telephony/phone";
 
-describe("VIPTel dial target", () => {
+describe("dial target", () => {
   it.each([
     ["+421 910 988 882", "0910988882"],
     ["00421 910 988 882", "00421910988882"],
@@ -9,7 +9,7 @@ describe("VIPTel dial target", () => {
     ["0910 988 882", "0910988882"],
     ["21", "21"],
   ])("normalizes %s to the SIP/REST dial form %s", (input, expected) => {
-    expect(formatViptelDialTarget(input)).toBe(expected);
+    expect(formatDialTarget(input)).toBe(expected);
   });
 });
 

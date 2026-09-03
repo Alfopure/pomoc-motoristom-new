@@ -26,29 +26,29 @@ vm.runInNewContext(
   { filename: "src/lib/telephony/phone.ts" },
 );
 
-const { formatViptelDialTarget, normalizeDialNumberForComparison, sameDialNumber } = moduleUnderTest.exports;
+const { formatDialTarget, normalizeDialNumberForComparison, sameDialNumber } = moduleUnderTest.exports;
 
-test("formats Slovak +421 destinations to local 0 prefix for VIPTel", () => {
-  assert.equal(formatViptelDialTarget("+421 910 541 622"), "0910541622");
-  assert.equal(formatViptelDialTarget("421910541622"), "0910541622");
-  assert.equal(formatViptelDialTarget("0910 541 622"), "0910541622");
+test("formats Slovak +421 destinations to local 0 prefix for the PBX dial form", () => {
+  assert.equal(formatDialTarget("+421 910 541 622"), "0910541622");
+  assert.equal(formatDialTarget("421910541622"), "0910541622");
+  assert.equal(formatDialTarget("0910 541 622"), "0910541622");
 });
 
 test("formats foreign plus destinations to 00 prefix and preserves existing 00 prefix", () => {
-  assert.equal(formatViptelDialTarget("+420 123 456 789"), "00420123456789");
-  assert.equal(formatViptelDialTarget("00420 123 456 789"), "00420123456789");
-  assert.equal(formatViptelDialTarget("+399 123 456 789"), "00399123456789");
+  assert.equal(formatDialTarget("+420 123 456 789"), "00420123456789");
+  assert.equal(formatDialTarget("00420 123 456 789"), "00420123456789");
+  assert.equal(formatDialTarget("+399 123 456 789"), "00399123456789");
 });
 
 test("keeps PBX extensions numeric", () => {
-  assert.equal(formatViptelDialTarget("10"), "10");
-  assert.equal(formatViptelDialTarget("1234"), "1234");
+  assert.equal(formatDialTarget("10"), "10");
+  assert.equal(formatDialTarget("1234"), "1234");
 });
 
 test("rejects malformed call targets", () => {
-  assert.throws(() => formatViptelDialTarget(""), /required/);
-  assert.throws(() => formatViptelDialTarget("abc"), /valid phone number/);
-  assert.throws(() => formatViptelDialTarget("+421<script>"), /valid phone number/);
+  assert.throws(() => formatDialTarget(""), /required/);
+  assert.throws(() => formatDialTarget("abc"), /valid phone number/);
+  assert.throws(() => formatDialTarget("+421<script>"), /valid phone number/);
 });
 
 test("normalizes equivalent Slovak numbers for caller matching", () => {

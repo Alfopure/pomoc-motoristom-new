@@ -27,7 +27,7 @@ begin
 
   alter table public.motorist_organization_integrations
     add constraint organization_integrations_provider_check
-    check (provider in ('viptel', 'viptel_sms', 'google_maps', 'fleet', 'ai', 'commander', 'client_vehicle_db'));
+    check (provider in ('telnyx', 'telnyx_sms', 'google_maps', 'fleet', 'ai', 'commander', 'client_vehicle_db'));
 end $$;
 
 create table public.motorist_external_vehicle_records (

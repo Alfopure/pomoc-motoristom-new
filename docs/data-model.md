@@ -4,7 +4,7 @@
 
 The foundation data model is single-client first and multi-client-ready. Seed data can contain one organization, but core tables include `organization_id` so a later client can be introduced without rewriting every table.
 
-In the hosted Supabase project, this application uses a `motorist_` table prefix in the `public` schema because the project already contained unrelated tables such as `profiles`. For example, the logical `calls` table is deployed as `motorist_calls`, and `cases` is deployed as `motorist_cases`.
+This application uses a `motorist_` table prefix in the `public` schema. For example, the logical `calls` table is deployed as `motorist_calls`, and `cases` is deployed as `motorist_cases`.
 
 ## Core Tables
 
@@ -12,22 +12,22 @@ In the hosted Supabase project, this application uses a `motorist_` table prefix
 
 - `motorist_organizations`: client account, slug, display name, active flag.
 - `motorist_organization_profiles`: branding, default locale, timezone, emergency line labels, enabled modules.
-- `motorist_profiles`: Supabase Auth user profile, organization, role, extension, active flag.
+- `motorist_organization_integrations`: one row per provider (`telnyx`, `telnyx_sms`, `google_maps`, `fleet`, `ai`, `commander`, `client_vehicle_db`, ...) with status, enabled features, base URL and last success/error metadata. Secrets are referenced by env name, never stored.
+- `motorist_profiles`: Supabase Auth user profile, organization, role, active flag.
 - `motorist_operator_statuses`: status history for availability, ringing, on-call, after-call work, pause, and offline.
 
 ### Telephony
 
-- `motorist_telephony_lines`: configured public numbers such as `0850 005 006`.
-- `motorist_telephony_queues`: VIPTel queue mapping and display labels.
-- `motorist_telephony_extensions`: operator extension mapping.
-- `motorist_calls`: latest normalized state of each call.
-- `motorist_call_events`: append-only event history from VIPTel WebSocket/REST.
-- `motorist_call_recordings`: recording metadata and private storage reference.
-- `motorist_queue_memberships`: current VIPTel queue membership and pause/in-use state per extension.
-- `motorist_queue_snapshots`: time-series snapshots for queue SLA and later reporting.
-- `motorist_telephony_commands`: auditable outbound commands such as click-to-call, hangup, redirect and queue pause.
+- `motorist_telephony_lines`: configured public numbers (one row per line) with a label and partner name, e.g. `Neutrálna linka`, `Allianz Assistance`. Inbound calls resolve the dialled number to a line so the partner is visible in the phone bar, call log and case.
+- `motorist_telephony_queues`: legacy label table kept only for call-history labels; it will be replaced by ring groups.
+- `motorist_calls`: latest normalized state of each call (`provider`, `provider_session_id`, `provider_call_id`, direction, status, numbers, `line_id`, `received_number`, `end_reason`, timings, `case_id`, `raw_latest_payload`).
+- `motorist_call_events`: append-only event history keyed by `provider_session_id` with raw and normalized payloads.
+- `motorist_call_recordings`: recording metadata and private storage reference. Recording is out of scope for the Telnyx rollout; the table stays but is not populated.
+- `motorist_call_transcripts`: optional transcript, summary and extracted fields for recordings (senior+ access).
 
-Every VIPTel call row stores `viptel_unique_id` when available. `call_events` also stores raw and normalized payloads for traceability.
+Every call row stores `provider_session_id` when available. It is the only correlation key between legs, events and the call log.
+
+The Telnyx phases add call sessions and legs, a webhook ledger, ring groups/plans, business hours, IVR menus, callback requests, operator devices and presence, pause reasons and telephony settings. Their shape is described in [`telnyx-data-contract.md`](./telnyx-data-contract.md).
 
 ### Cases
 
@@ -50,10 +50,13 @@ Calls and cases are deliberately separate. A call can stay unassigned, be linked
 - `motorist_fleet_position_samples`: append-only GPS sample history for audit, reporting, and later trip-book generation.
 - `motorist_fleet_provider_vehicles`: WebDispečink provider-side catalog/current state for tow vehicles.
 - `motorist_route_estimates`: cached provider route result with distance, duration, polyline, provider metadata, and freshness.
-- `motorist_sms_messages`: canonical outbound/inbound SMS row, provider message id, delivery state, body template reference, idempotency and worker claim fields.
+- `motorist_sms_messages`: canonical outbound SMS row (`provider = 'telnyx_sms'`), provider message id, delivery state, body template reference, idempotency and retry fields.
 - `motorist_sms_attempts`: one audit row per provider send attempt, with sanitized request/response payload, provider status, error class and retry timing.
-- `motorist_integration_raw_events`: append-only raw REST/WebSocket/SMS payload log. This is the first write target for provider bridges before normalizing into operational tables.
-- `motorist_call_transcripts`: optional transcript, summary and extracted fields for recordings.
+- `motorist_integration_raw_events`: append-only raw provider payload log. This is the first write target for fleet syncs and transcript processing before normalizing into operational tables.
+
+### Runtime
+
+- `motorist_job_controls`, `motorist_job_runs`, `motorist_job_incidents`, `motorist_worker_status`: job runtime ledger for manual one-shot jobs and the cron; `motorist_worker_status.last_webhook_at` records the freshness of the provider webhook stream.
 
 ### Audit
 
@@ -100,4 +103,5 @@ Operator statuses:
 - Enable RLS on app tables from the first migration.
 - Use `organization_id` on operational tables.
 - Avoid storing secrets in database rows; store references or non-sensitive metadata.
-- Store recordings in private storage and keep metadata in relational tables.
+- This copy's database was created empty for the Telnyx rollout, so the kept migrations were edited in place during the provider swap (`provider_session_id`, `telnyx`/`telnyx_sms` provider values, no PBX extension tables). From Phase 1 onward, add new timestamped migrations instead of editing applied ones.
+- Regenerate `src/lib/supabase/database.types.ts` after every schema change and keep repository mappings, domain types and tests in sync.

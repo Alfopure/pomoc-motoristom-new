@@ -6,6 +6,7 @@
 > **Dôležité:** audit aj plán boli iba analýza — pri nich sa žiaden aplikačný kód nemenil. Tento dokument je deliverable
 > vetvy `manazersky-vystup-slovensky` a slúži ako podklad pre exekúciu opráv.
 > Súvisiace: [`security-model.md`](./security-model.md).
+> **Poznámka (september 2026):** audit vznikol nad kódom s predchádzajúcim telefónnym providerom. Jeho routes a moduly (probe routes, `webphone/*`, `queues/*`, `calls/active`, `call/create`, `recordings/sync`) boli pri prechode na Telnyx odstránené; zmienky o nich nižšie sú historické a zoznamy routes treba pred exekúciou znovu overiť proti `src/server/route-auth-registry.ts`.
 
 ---
 
@@ -76,7 +77,7 @@ Predošlé drafty držali viac drift-náchylných zoznamov tej istej skutočnost
 | Trieda | Routes (OVERENÉ) | Poznámka |
 |---|---|---|
 | **public (2)** | `auth/forgot-password`, `public/location-links/[token]` | jediné 2 na 0.2 allowliste |
-| **bearer (7 po 1.2)** | `integrations/commander/sync`, `integrations/commander/import-all` (⚠ **inline `authorize()`+`safeEquals`**, NIE `authorizeRecordingsSync`), `telephony/recordings/sync`, `telephony/transcripts/process`, `telephony/viptel/cdr/probe` (`authorizeRecordingsSync`), + po 1.2: `viptel/probe`, `viptel/sms/probe` | anon bez tokenu → **401** (nie na allowliste) |
+| **bearer (7 po 1.2)** | `integrations/commander/sync`, `integrations/commander/import-all` (⚠ **inline `authorize()`+`safeEquals`**, NIE `authorizeRecordingsSync`), `telephony/recordings/sync`, `telephony/transcripts/process`, CDR probe predchádzajúceho providera (`authorizeRecordingsSync`), + po 1.2: probe a SMS probe predchádzajúceho providera | anon bez tokenu → **401** (nie na allowliste) |
 | **dual (2)** | `integrations/fleet/webdispecink/sync` (GET cron-bearer / POST session+CSRF), `notifications/materialize` (bearer secret / session) | CSRF LEN v session sub-vetve |
 | **session (~50)** | všetko ostatné vrátane 11 novo-guardovaných v 1.1 | anon → **401/403** |
 
@@ -165,7 +166,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 |---|---|---|---|---|---|---|
 | **1.3** | **Dev-bypass = env flag, nie `NODE_ENV`** (dev-ergonómia, NIE critical-path security) | `src/server/api-auth.ts` | Nahradiť 6 `NODE_ENV==="development"` short-circuitov (OVERENÉ riadky **27, 35, 49, 75, 97, 221**) za `MOTORIST_DEV_AUTH_BYPASS==="true"`. Acceptance: `grep 'NODE_ENV.*development' api-auth.ts` = 0. V prode nikdy nefíruje; vitest (`NODE_ENV=test`) už dnes beží mimo bypassu → **1.1 NEZÁVISÍ tvrdo na 1.3** | S | Nízke | — |
 | 1.1 | Guard 11 citlivých session routes | viď rozpis nižšie | `requireDefaultMotoristOrgMember()` / (len `extensions`) `requireDefaultMotoristActor(["manager","admin"])`. **LOAD-BEARING dôkaz = mocked integračný test** (naseedovaná session + stubnutý workflow → `anon → 401/403`, `dispatcher-role → povolené`). **Reálny `call/create`/`send SMS` = samostatná finálna MANUÁLNA brána, NIE primárne acceptance** | **M** | Med | ⚠ **HARD: hotový 0.2 harness** + ⚠ **HARD: 0.3 charakterizácia `call/create`+`findCallerMatches`**; soft: 1.3 skôr |
-| 1.2 | Guard probe routes (bearer) | `viptel/probe`, `viptel/sms/probe` | Bearer secret (vzor `authorizeRecordingsSync` + `timingSafeEqual`); bez tokenu → 401. Zaregistrovať v 0.4 ako `bearer` | S | Nízke | 0.4 |
+| 1.2 | Guard probe routes (bearer) | probe a SMS probe routes predchádzajúceho providera | Bearer secret (vzor `authorizeRecordingsSync` + `timingSafeEqual`); bez tokenu → 401. Zaregistrovať v 0.4 ako `bearer` | S | Nízke | 0.4 |
 | 1.4 | CSRF na cookie-authed mutácie (PROGRAMATICKY z registra) | `assertSameOriginRequest` (`api-auth.ts:220`) + `session`-mutačné routes z registra (0.4) | Rozšíriť CSRF z 7 OVERENÝCH use-sites na **VŠETKY `session` POST/PATCH/DELETE derivované z registra**. Sprísniť `if(!origin)return` (`:227`) na **403**. Presný audit + gates nižšie | **M** | Med | 0.4, 1.1 (soft: 1.3 skôr) |
 
 **⚠ Rozpis 1.1 (11 routes, OVERENÉ metódy/calleri/role):**
@@ -185,11 +186,11 @@ Reálny rozsah CSRF diery: derivácia `session ∩ {POST,PATCH,DELETE}` z regist
   - `webphone/session` (POST, `requireDefaultMotoristOrgMember`, vytvára webphone session) — ✅ potvrdené session-mutačné
   - Attendance mutačné (všetky POST/PATCH, `requireDefaultMotoristOrgRole`/`OrgMember`): `attendance/copy`, `attendance/planning/bulk-shifts`, `attendance/requests` (POST), `attendance/requests/[id]` (PATCH), `attendance/requests/[id]/approve`, `attendance/requests/[id]/decline`, `attendance/requests/[id]/cancel`, `attendance/schedule-batches/[id]/publish`, `attendance/sessions/start`, `attendance/sessions/[id]/end`, `attendance/shifts` (POST), `attendance/shifts/[id]` (PATCH), `attendance/shifts/[id]/confirm`, `attendance/shifts/[id]/decline`, `attendance/shifts/[id]/publish` — ✅ všetky potvrdené session-mutačné
   - Ďalšie potvrdené session-mutačné bez CSRF: `branches` (POST), `cases` (POST), `cases/[id]` (PATCH), `cases/[id]/assign` (PATCH), `cases/[id]/actions` (POST), `cases/[id]/attachments` (POST), `fleet-assets` (POST), `fleet-assets/[id]` (PATCH), `maps/route` (POST), `partner-directory` (POST), `partner-directory/[id]` (PATCH+DELETE) + 6 novo-guardovaných z 1.1 (`cases/[id]/sms`, `commander/vehicles/[id]`, `call/create`, `calls/[id]/link-case`, `calls/[id]/outcome`, `queues/agent`)
-  - ⚠ **VYLÚČENÉ z CSRF (OVERENÉ, NIE session-mutácia):** `webphone/config` je **GET-only** (podmienený guard len pri `isViptelBrowserCredentialExposureEnabled()`), teda read-only → **nie CSRF kandidát**. (Koriguje Criticov zoznam kandidátov.)
+  - ⚠ **VYLÚČENÉ z CSRF (OVERENÉ, NIE session-mutácia):** `webphone/config` je **GET-only** (podmienený guard len pri zapnutom flagu na vystavenie SIP credentials predchádzajúceho providera do prehliadača), teda read-only → **nie CSRF kandidát**. (Koriguje Criticov zoznam kandidátov.)
 - **(c) `dual`/`bearer` handler NIE JE CSRF-obalený — test (HARD):**
   - OVERENÉ `dual`: `webdispecink/sync` — `assertSameOriginRequest` sa volá LEN v `authorizeWebdispecinkSync` (session vetva POST), cron GET (`authorizeWebdispecinkCron`) ju NEVOLÁ → cron bez `Origin` ostáva 200.
   - OVERENÉ `dual`: `notifications/materialize` — `authorizeMaterializer` má bearer vetvu (`Bearer ${secret}`) ALEBO fallback `requireDefaultMotoristOrgMember()`. ⚠ CSRF sa pridá **len do session fallback vetvy** (za bearer-checkom), aby cron bearer bez `Origin` neskončil na 403.
-  - OVERENÉ `bearer`: `commander/sync`, `commander/import-all` (inline `authorize()`), `recordings/sync`, `transcripts/process`, `viptel/cdr/probe` (`authorizeRecordingsSync`) — žiadny CSRF.
+  - OVERENÉ `bearer`: `commander/sync`, `commander/import-all` (inline `authorize()`), `recordings/sync`, `transcripts/process`, CDR probe predchádzajúceho providera (`authorizeRecordingsSync`) — žiadny CSRF.
   - Test: pre každý `bearer`/`dual`-cron handler assert, že request bez `Origin` s platným bearer tokenom → NIE 403.
 - **(d) Grep interných server-side cookie-POST fetchov = HARD gate (nie poznámka):** pred flipnutím `:227` (`!origin → 403`) executor MUSÍ grepnúť RSC/server-actions/interné server-side `fetch` na vlastné `/api/**` s cookie ale bez `Origin` hlavičky; ktorýkoľvek taký fetch by po flipe dostal 403. Buď doplniť `Origin`/same-origin hlavičku volajúcemu, alebo route ponechať mimo CSRF. Toto je **blokujúca podmienka** merge 1.4, nie odporúčanie.
 - **Boundary testy (HARD pred flipom):** cookie-POST bez `Origin` → 403; `webdispecink/sync` GET cron bez `Origin` → 200; `notifications/materialize` bearer bez `Origin` → 200.
@@ -212,7 +213,7 @@ Reálny rozsah CSRF diery: derivácia `session ∩ {POST,PATCH,DELETE}` z regist
 5. `src/server/motorist-mutations.ts:1922` — throw
 6. `src/server/sms-workflow.ts:278` — throw
 7. `src/server/integrations/commander/sync.ts:791` — bearer/cron doména
-8. `src/server/telephony/recordings-sync.ts:385` — bearer/cron doména (exportovaný; reused `transcripts-process`, `viptel/cdr/probe`)
+8. `src/server/telephony/recordings-sync.ts:385` — bearer/cron doména (exportovaný; reused `transcripts-process` a CDR probe predchádzajúceho providera)
 
 > 2 kópie (call/create `:186`, dispatch-repository `:475`) ticho vyberú „prvú aktívnu org", zvyšok hodí chybu. Zlúčenie musí vedome rozhodnúť o cron/bearer doméne (7, 8).
 
@@ -277,6 +278,6 @@ Reálny rozsah CSRF diery: derivácia `session ∩ {POST,PATCH,DELETE}` z regist
 ### Non-blocking doplnky z finálnej Critic pass (verdikt APPROVE)
 > Plán je schválený. Toto sú 3 implementačné poznámky (OVERENÉ proti kódu), ktoré NIE SÚ blokujúce — všetky by ich zachytila samotná fail-closed brána 0.2 v CI čase, takže nemôžu vzniknúť ako tichý security false-pass. Sú to pokyny pre executora, aby 1.1 „zozelenilo" na prvý pokus.
 
-1. **Pri guardovaní `calls/match`, `queues`, `calls/active` ZÁROVEŇ oprav catch-blok.** OVERENÉ: `telephony/calls/match/route.ts:17` chytá len `TelephonyWorkflowError` (inak 500); `telephony/queues/route.ts:14` + `telephony/calls/active` používajú `serializeViptelError`. Ak sa `await requireDefaultMotoristOrgMember()` vloží DOVNÚTRA existujúceho `try`, vyhodený `MutationError(401)` sa v týchto 3 routes skonvertuje na **500**, nie 401/403 → 0.2 by na nich ostal RED. Fix: guard buď PRED `try`, alebo v catch-bloku mapovať `MutationError.status` (vzor `mutationErrorResponse` z `cases/route.ts:21`).
-2. **`telephony/webphone/config` má PODMIENENÝ guard** (GET-only; `requireDefaultMotoristOrgMember()` len keď `isViptelBrowserCredentialExposureEnabled()`). V `NODE_ENV=test` s flagom OFF → anon GET vráti 200 → 0.2 by na nej ostal RED, hoci nie je v zozname 11 (1.1). Rozhodni pri exekúcii: buď guardovať bezpodmienečne, alebo pridať `webphone/config` na 0.2 allowlist s dokumentovaným dôvodom (non-secret vetva pri flagu OFF). Nízka citlivosť (bez tajomstiev pri OFF), ale treba to explicitne uzavrieť, aby platilo „1.1–1.4 → 0.2 zozelenie".
+1. **Pri guardovaní `calls/match`, `queues`, `calls/active` ZÁROVEŇ oprav catch-blok.** OVERENÉ: `telephony/calls/match/route.ts:17` chytá len `TelephonyWorkflowError` (inak 500); `telephony/queues/route.ts:14` + `telephony/calls/active` používajú error serializer predchádzajúceho providera. Ak sa `await requireDefaultMotoristOrgMember()` vloží DOVNÚTRA existujúceho `try`, vyhodený `MutationError(401)` sa v týchto 3 routes skonvertuje na **500**, nie 401/403 → 0.2 by na nich ostal RED. Fix: guard buď PRED `try`, alebo v catch-bloku mapovať `MutationError.status` (vzor `mutationErrorResponse` z `cases/route.ts:21`).
+2. **`telephony/webphone/config` má PODMIENENÝ guard** (GET-only; `requireDefaultMotoristOrgMember()` len keď je zapnutý flag na vystavenie SIP credentials predchádzajúceho providera). V `NODE_ENV=test` s flagom OFF → anon GET vráti 200 → 0.2 by na nej ostal RED, hoci nie je v zozname 11 (1.1). Rozhodni pri exekúcii: buď guardovať bezpodmienečne, alebo pridať `webphone/config` na 0.2 allowlist s dokumentovaným dôvodom (non-secret vetva pri flagu OFF). Nízka citlivosť (bez tajomstiev pri OFF), ale treba to explicitne uzavrieť, aby platilo „1.1–1.4 → 0.2 zozelenie".
 3. **`telephony/extensions` (0 in-repo callerov)** — pri exekúcii ZNOVA over; ak je konzument len server-side, preferuj bearer (vzor `authorizeRecordingsSync`) namiesto `Actor`-role guardu.

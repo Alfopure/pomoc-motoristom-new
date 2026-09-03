@@ -10,29 +10,9 @@ values (
   array['calls', 'cases', 'maps', 'reports', 'sms', 'attendance']
 );
 
-insert into public.motorist_organization_integrations (
-  organization_id,
-  provider,
-  enabled,
-  status,
-  enabled_features,
-  base_url,
-  websocket_url,
-  secret_ref,
-  config
-)
-values (
-  '00000000-0000-4000-8000-000000000001',
-  'viptel',
-  false,
-  'not_configured',
-  array['rest', 'websocket', 'recordings', 'click_to_call', 'queue_control'],
-  'https://pbxmanager.viptel.sk/',
-  'wss://pbxmanager.viptel.sk:8088',
-  'env:VIPTEL_USERNAME,VIPTEL_PASSWORD',
-  '{"requires_activation":true,"requires_ip_allowlist":true,"rate_limit":{"requests":20,"interval_seconds":5,"block_minutes":30}}'::jsonb
-);
-
+-- Telephony and SMS run through Telnyx. The rows stay "not_configured" until the
+-- server env carries TELNYX_API_KEY; the app derives the effective status from
+-- the secret presence (see src/data/integration-status.ts).
 insert into public.motorist_organization_integrations (
   organization_id,
   provider,
@@ -43,16 +23,27 @@ insert into public.motorist_organization_integrations (
   secret_ref,
   config
 )
-values (
-  '00000000-0000-4000-8000-000000000001',
-  'viptel_sms',
-  false,
-  'not_configured',
-  array['sms'],
-  'https://smsapi.viptel.sk/api/',
-  'env:VIPTEL_SMS_USERNAME,VIPTEL_SMS_PASSWORD',
-  '{"requires_activation":true,"public_endpoint_docs_available":true,"smoke_tests":["GET /identities/","GET /credits/"]}'::jsonb
-);
+values
+  (
+    '00000000-0000-4000-8000-000000000001',
+    'telnyx',
+    false,
+    'not_configured',
+    array['voice', 'recordings', 'click_to_call'],
+    'https://api.telnyx.com/v2',
+    'env:TELNYX_API_KEY',
+    '{}'::jsonb
+  ),
+  (
+    '00000000-0000-4000-8000-000000000001',
+    'telnyx_sms',
+    false,
+    'not_configured',
+    array['sms'],
+    'https://api.telnyx.com/v2',
+    'env:TELNYX_API_KEY',
+    '{}'::jsonb
+  );
 
 insert into public.motorist_profiles (id, organization_id, display_name, role, phone_extension, active)
 values
@@ -70,19 +61,16 @@ values
   ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000104', 'paused', 'seed', '2026-05-20T18:10:00+02:00'),
   ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000105', 'offline', 'seed', '2026-05-20T17:55:00+02:00');
 
+-- Partner lines. Phone numbers are placeholders in E.164 form; replace them with
+-- the canonical strings returned by Telnyx `GET /v2/phone_numbers` once the
+-- numbers are assigned to the call-control application.
 insert into public.motorist_telephony_lines (id, organization_id, provider, phone_number, label, active)
-values ('00000000-0000-4000-8000-000000000201', '00000000-0000-4000-8000-000000000001', 'viptel', '0850 005 006', 'Linka pomoci', true);
-
-insert into public.motorist_telephony_queues (id, organization_id, provider, external_id, label, line_id, active)
-values ('00000000-0000-4000-8000-000000000202', '00000000-0000-4000-8000-000000000001', 'viptel', 'queue-help-line', 'Pomoc motoristom', '00000000-0000-4000-8000-000000000201', true);
-
-insert into public.motorist_telephony_extensions (organization_id, provider, extension, profile_id, active)
 values
-  ('00000000-0000-4000-8000-000000000001', 'viptel', '101', '00000000-0000-4000-8000-000000000101', false),
-  ('00000000-0000-4000-8000-000000000001', 'viptel', '102', '00000000-0000-4000-8000-000000000102', false),
-  ('00000000-0000-4000-8000-000000000001', 'viptel', '103', '00000000-0000-4000-8000-000000000103', false),
-  ('00000000-0000-4000-8000-000000000001', 'viptel', '104', '00000000-0000-4000-8000-000000000104', false),
-  ('00000000-0000-4000-8000-000000000001', 'viptel', '105', '00000000-0000-4000-8000-000000000105', false);
+  ('00000000-0000-4000-8000-000000000201', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408700', 'Neutrálna linka', true),
+  ('00000000-0000-4000-8000-000000000202', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408718', 'Allianz Assistance', true),
+  ('00000000-0000-4000-8000-000000000203', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408732', 'Autoklub Slovakia Assistance', true),
+  ('00000000-0000-4000-8000-000000000204', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408760', 'AXA Assistance CZ', true),
+  ('00000000-0000-4000-8000-000000000205', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408783', 'Eurocross Assistance CR', true);
 
 insert into public.motorist_attendance_shift_templates (id, organization_id, label, kind, starts_at_local, ends_at_local, planned_minutes, color, sort_order, active)
 values
@@ -253,48 +241,54 @@ insert into public.motorist_calls (
   id,
   organization_id,
   provider,
-  viptel_unique_id,
+  provider_session_id,
   direction,
   status,
   caller_number,
   caller_name,
   called_number,
+  received_number,
   line_id,
-  queue_id,
   operator_id,
   case_id,
   started_at,
+  answered_at,
+  ended_at,
   wait_seconds,
+  duration_seconds,
   raw_payload
 )
 values (
   '00000000-0000-4000-8000-000000000901',
   '00000000-0000-4000-8000-000000000001',
-  'viptel',
-  'mock-viptel-2026-0517',
+  'telnyx',
+  'mock-telnyx-2026-0517',
   'inbound',
-  'incoming',
+  'ended',
   '+421 905 778 122',
   'Peter Kováč',
-  '0850 005 006',
+  '+421232408700',
+  '+421232408700',
   '00000000-0000-4000-8000-000000000201',
-  '00000000-0000-4000-8000-000000000202',
   '00000000-0000-4000-8000-000000000101',
   '00000000-0000-4000-8000-000000000801',
   '2026-05-20T18:31:00+02:00',
+  '2026-05-20T18:31:42+02:00',
+  '2026-05-20T18:38:10+02:00',
   42,
+  388,
   '{"source":"seed"}'::jsonb
 );
 
-insert into public.motorist_call_events (organization_id, call_id, provider, viptel_unique_id, event_type, event_fingerprint, payload, provider_created_at)
+insert into public.motorist_call_events (organization_id, call_id, provider, provider_session_id, event_type, event_fingerprint, payload, provider_created_at)
 values (
   '00000000-0000-4000-8000-000000000001',
   '00000000-0000-4000-8000-000000000901',
-  'viptel',
-  'mock-viptel-2026-0517',
-  'queue.join',
-  'mock-viptel-2026-0517-queue-join',
-  '{"queue":"Pomoc motoristom","line":"0850 005 006"}'::jsonb,
+  'telnyx',
+  'mock-telnyx-2026-0517',
+  'call.initiated',
+  'mock-telnyx-2026-0517-initiated',
+  '{"line":"Neutrálna linka","to":"+421232408700"}'::jsonb,
   '2026-05-20T18:31:00+02:00'
 );
 

@@ -14,7 +14,7 @@ describe("custom SMS validation", () => {
     expect(() => validateCustomSmsDraft({ toNumber: "0904123456", message: "  " })).toThrow("text SMS");
   });
 
-  it("guards the same maximum body length as the VIPTel client", () => {
+  it("guards the maximum body length before the SMS transport is reached", () => {
     expect(() => validateCustomSmsDraft({ toNumber: "0904123456", message: "x".repeat(MAX_CUSTOM_SMS_LENGTH + 1) })).toThrow(
       `${MAX_CUSTOM_SMS_LENGTH} znakov`,
     );

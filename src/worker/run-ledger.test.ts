@@ -22,9 +22,4 @@ describe("scheduler job name recognition", () => {
     // No inline job-name string literals may reappear in the guard.
     expect(body).not.toMatch(/"(fleet|telephony|notifications|infra)\./);
   });
-
-  it("includes the workplace sweeper, which is what exposed the drift", () => {
-    expect(JOB_NAMES).toContain("telephony.workplace.sweep");
-    expect(Object.keys(JOB_DEFINITIONS)).toContain("telephony.workplace.sweep");
-  });
 });

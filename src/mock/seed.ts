@@ -15,7 +15,7 @@ import type {
   Operator,
   PriceRule,
 } from "@/domain/types";
-import type { CallCenterCall, IntegrationConnection, TelephonyFoundationStats } from "@/data/dispatch-types";
+import type { CallCenterCall, IntegrationConnection } from "@/data/dispatch-types";
 import { buildAttendanceOverview } from "@/lib/attendance";
 
 export const operators: Operator[] = [
@@ -166,33 +166,22 @@ export const priceRules: PriceRule[] = [
 
 export const integrations: IntegrationConnection[] = [
   {
-    provider: "viptel",
+    provider: "telnyx",
     enabled: false,
     status: "not_configured",
-    enabledFeatures: ["rest", "websocket", "recordings", "click_to_call", "queue_control"],
-    baseUrl: "https://pbxmanager.viptel.sk/",
-    websocketUrl: "wss://pbxwssv1.viptel.sk:8088/",
-    secretRef: "env:VIPTEL_USERNAME,VIPTEL_PASSWORD",
+    enabledFeatures: ["voice", "recordings", "click_to_call"],
+    secretRef: "env:TELNYX_API_KEY",
     secretConfigured: false,
   },
   {
-    provider: "viptel_sms",
+    provider: "telnyx_sms",
     enabled: false,
     status: "not_configured",
     enabledFeatures: ["sms"],
-    baseUrl: "https://smsapi.viptel.sk/api/",
-    secretRef: "env:VIPTEL_SMS_USERNAME,VIPTEL_SMS_PASSWORD",
+    secretRef: "env:TELNYX_API_KEY",
     secretConfigured: false,
   },
 ];
-
-export const telephonyStats: TelephonyFoundationStats = {
-  rawEvents: 0,
-  commands: 0,
-  queueMemberships: 0,
-  queueSnapshots: 0,
-  transcripts: 0,
-};
 
 export const incomingCall: DispatchCall = {
   id: "call-live-001",
@@ -537,7 +526,7 @@ export const callCenterCalls: CallCenterCall[] = [
     waitSeconds: incomingCall.waitSeconds,
     recordingStatus: "pending",
     transcriptStatus: "not_requested",
-    history: ["queue.join · viptel", "call.begin · viptel"],
+    history: ["queue.join · telnyx", "call.begin · telnyx"],
   },
   {
     id: "call-assist-0518",
@@ -557,7 +546,7 @@ export const callCenterCalls: CallCenterCall[] = [
     durationSeconds: 326,
     recordingStatus: "available",
     transcriptStatus: "pending",
-    history: ["call.begin · viptel", "call.pickup · viptel", "case.linked · app"],
+    history: ["call.begin · telnyx", "call.pickup · telnyx", "case.linked · app"],
   },
   {
     id: "call-missed-0518",
@@ -573,7 +562,7 @@ export const callCenterCalls: CallCenterCall[] = [
     waitSeconds: 72,
     recordingStatus: "not_requested",
     transcriptStatus: "not_requested",
-    history: ["queue.join · viptel", "call.end · viptel"],
+    history: ["queue.join · telnyx", "call.end · telnyx"],
   },
   {
     id: "call-out-0514",
@@ -594,7 +583,7 @@ export const callCenterCalls: CallCenterCall[] = [
     durationSeconds: 272,
     recordingStatus: "available",
     transcriptStatus: "complete",
-    history: ["call.create · app", "call.pickup · viptel", "call.end · viptel"],
+    history: ["call.create · app", "call.pickup · telnyx", "call.end · telnyx"],
   },
 ];
 

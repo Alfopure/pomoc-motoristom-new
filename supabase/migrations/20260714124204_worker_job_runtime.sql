@@ -41,8 +41,7 @@ create table if not exists public.motorist_worker_status (
   heartbeat_at timestamptz not null,
   scheduler_tick_at timestamptz,
   scheduler_status text not null default 'starting',
-  viptel_ws_status text not null default 'disabled',
-  last_viptel_event_at timestamptz,
+  last_webhook_at timestamptz,
   updated_at timestamptz not null default now()
 );
 
@@ -71,10 +70,8 @@ values
   ('fleet.swhouse.occupancy', false),
   ('fleet.swhouse.roster', false),
   ('notifications.materialize', false),
-  ('telephony.recordings.sync', false),
   ('telephony.transcripts.process', false),
-  ('telephony.viptel.reconcile', false),
-  ('infra.hetzner.audit', false)
+  ('telephony.telnyx.reconcile', false)
 on conflict (job_name) do nothing;
 
 alter table public.motorist_job_controls enable row level security;

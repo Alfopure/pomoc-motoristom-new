@@ -4,7 +4,7 @@ import { timingSafeEqual } from "node:crypto";
 
 export type SyncAuthResult = { ok: true } | { ok: false; status: number; error: string };
 
-// Shared bearer guard for the recordings sync/probe machinery (mirrors the
+// Bearer guard for the transcript processing route (mirrors the
 // COMMANDER_SYNC_SECRET pattern in src/app/api/integrations/commander/sync/route.ts).
 export function authorizeRecordingsSync(request: Request): SyncAuthResult {
   const expected = process.env.RECORDINGS_SYNC_SECRET?.trim();

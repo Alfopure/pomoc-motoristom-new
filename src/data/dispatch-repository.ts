@@ -1,6 +1,5 @@
 import "server-only";
 
-import { isWorkplaceTakeoverPayload } from "@/lib/telephony/workplace-takeover";
 
 import type {
   AccessComplication,
@@ -74,17 +73,12 @@ import {
   notifications as mockNotifications,
   operators as mockOperators,
   priceRules as mockPriceRules,
-  telephonyStats as mockTelephonyStats,
 } from "@/mock/seed";
 import {
   deriveReplacementOccupancy,
   loadLatestOccupancySnapshot,
   type OccupancySnapshot,
 } from "@/server/integrations/swhouse/occupancy-snapshot";
-import {
-  buildViptelLineCatalog,
-  resolveViptelLineIdentity,
-} from "@/server/telephony/viptel-line-catalog";
 import type { CallCenterCall, CallOutcome, CommanderVehicleConnection, DispatchData, FleetProviderVehicle, IntegrationConnection } from "./dispatch-types";
 import { deriveEffectiveIntegrationStatus } from "./integration-status";
 
@@ -104,7 +98,6 @@ type AttendanceTimeOffBalanceRow = Row<"motorist_attendance_time_off_balances">;
 type AttendanceScheduleBatchRow = Row<"motorist_attendance_schedule_batches">;
 type LineRow = Row<"motorist_telephony_lines">;
 type QueueRow = Row<"motorist_telephony_queues">;
-type TelephonyExtensionRow = Row<"motorist_telephony_extensions">;
 type ContactRow = Row<"motorist_contacts">;
 type VehicleRow = Row<"motorist_vehicles">;
 type LocationRow = Row<"motorist_locations">;
@@ -164,7 +157,6 @@ export function getMockDispatchData(warning?: string): DispatchData {
     commanderGpsLastSuccessAt: mockIntegrations.find((integration) => integration.provider === "commander")?.lastSuccessAt,
     commanderGpsLatestRunAt: mockIntegrations.find((integration) => integration.provider === "commander")?.lastSuccessAt,
     commanderGpsLatestStatus: "success",
-    telephonyStats: mockTelephonyStats,
     source: "mock",
     warning,
   };
@@ -215,7 +207,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     attendanceScheduleBatchesResult,
     linesResult,
     queuesResult,
-    telephonyExtensionsResult,
     contactsResult,
     vehiclesResult,
     locationsResult,
@@ -236,11 +227,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     integrationsResult,
     commanderGpsSyncResult,
     commanderGpsLatestRunResult,
-    rawEventsResult,
-    commandsResult,
-    queueMembershipsResult,
-    queueSnapshotsResult,
-    transcriptsResult,
     recordingsResult,
   ] = await Promise.all([
     supabase.from("motorist_organization_profiles").select("*").eq("organization_id", organizationId).limit(1),
@@ -256,13 +242,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     supabase.from("motorist_attendance_schedule_batches").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false }).limit(50),
     supabase.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("active", true).order("label"),
     supabase.from("motorist_telephony_queues").select("*").eq("organization_id", organizationId).eq("active", true).order("label"),
-    supabase
-      .from("motorist_telephony_extensions")
-      .select("*")
-      .eq("organization_id", organizationId)
-      .eq("provider", "viptel")
-      .eq("active", true)
-      .order("extension"),
     supabase.from("motorist_contacts").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false }),
     supabase.from("motorist_vehicles").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false }),
     supabase.from("motorist_locations").select("*").eq("organization_id", organizationId),
@@ -317,11 +296,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
       .order("started_at", { ascending: false })
       .limit(1)
       .maybeSingle(),
-    supabase.from("motorist_integration_raw_events").select("id", { count: "exact", head: true }).eq("organization_id", organizationId),
-    supabase.from("motorist_telephony_commands").select("id", { count: "exact", head: true }).eq("organization_id", organizationId),
-    supabase.from("motorist_queue_memberships").select("id", { count: "exact", head: true }).eq("organization_id", organizationId),
-    supabase.from("motorist_queue_snapshots").select("id", { count: "exact", head: true }).eq("organization_id", organizationId),
-    supabase.from("motorist_call_transcripts").select("id", { count: "exact", head: true }).eq("organization_id", organizationId),
     supabase
       .from("motorist_call_recordings")
       .select("id, call_id, created_at")
@@ -355,7 +329,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     { label: "motorist_attendance_schedule_batches", result: attendanceScheduleBatchesResult },
     { label: "motorist_telephony_lines", result: linesResult },
     { label: "motorist_telephony_queues", result: queuesResult },
-    { label: "motorist_telephony_extensions", result: telephonyExtensionsResult },
     { label: "motorist_location_submissions", result: locationSubmissionsResult },
     { label: "motorist_partner_directory", result: partnerDirectoryResult },
     { label: "motorist_fleet_provider_vehicles", result: fleetProviderVehiclesResult },
@@ -369,11 +342,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     { label: "motorist_organization_integrations", result: integrationsResult },
     { label: "motorist_fleet_sync_runs.commander_gps", result: commanderGpsSyncResult },
     { label: "motorist_fleet_sync_runs.commander_gps_latest", result: commanderGpsLatestRunResult },
-    { label: "motorist_integration_raw_events.count", result: rawEventsResult },
-    { label: "motorist_telephony_commands.count", result: commandsResult },
-    { label: "motorist_queue_memberships.count", result: queueMembershipsResult },
-    { label: "motorist_queue_snapshots.count", result: queueSnapshotsResult },
-    { label: "motorist_call_transcripts.count", result: transcriptsResult },
     { label: "motorist_call_recordings", result: recordingsResult },
   ].forEach(({ label, result }) => warnOnOptionalSupabaseError(result, label));
 
@@ -404,23 +372,22 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
 
   const latestStatusByProfile = latestOperatorStatuses(statusesResult.data ?? []);
   const profiles = profilesResult.data ?? [];
-  const extensionByProfileId = primaryExtensionByProfile(telephonyExtensionsResult.data ?? []);
-  const operators = profiles.map((profile) => mapOperator(profile, latestStatusByProfile.get(profile.id), extensionByProfileId.get(profile.id)));
+  const operators = profiles.map((profile) => mapOperator(profile, latestStatusByProfile.get(profile.id)));
   const accessProfiles = accessProfilesResult.data ?? [];
   const authUsersById = await loadAuthUsersById(
     supabase,
     accessProfiles.map((profile) => profile.user_id).filter((userId): userId is string => Boolean(userId)),
   );
-  const users = accessProfiles.map((profile) => mapAccessUser(profile, authUsersById.get(profile.user_id ?? ""), extensionByProfileId.get(profile.id)));
+  const users = accessProfiles.map((profile) => mapAccessUser(profile, authUsersById.get(profile.user_id ?? "")));
   const profilesById = new Map(profiles.map((profile) => [profile.id, profile]));
   const attendanceTemplates = (attendanceTemplatesResult.data ?? []).map(mapAttendanceTemplate);
   const attendanceSessions = (attendanceSessionsResult.data ?? []).map((session) => mapAttendanceSession(session, profilesById));
   const sessionsByShiftId = latestAttendanceSessionsByShift(attendanceSessions);
   const attendanceShifts = (attendanceShiftsResult.data ?? []).map((shift) =>
-    mapAttendanceShift(shift, profilesById, attendanceTemplates, extensionByProfileId, sessionsByShiftId.get(shift.id)),
+    mapAttendanceShift(shift, profilesById, attendanceTemplates, sessionsByShiftId.get(shift.id)),
   );
   const attendanceEmployeeSettings = (attendanceEmployeeSettingsResult.error ? [] : (attendanceEmployeeSettingsResult.data ?? [])).map((setting) =>
-    mapAttendanceEmployeeSettings(setting, profilesById, extensionByProfileId),
+    mapAttendanceEmployeeSettings(setting, profilesById),
   );
   const attendanceRequests = (attendanceRequestsResult.error ? [] : (attendanceRequestsResult.data ?? [])).map((request) => mapAttendanceRequest(request, profilesById));
   const attendanceBalances = (attendanceBalancesResult.error ? [] : (attendanceBalancesResult.data ?? [])).map((balance) => mapAttendanceBalance(balance, profilesById));
@@ -455,7 +422,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
   });
   const caseNumberById = new Map(dispatchCases.map((caseItem) => [caseItem.id, caseItem.caseNumber]));
   const notifications = (notificationsResult.data ?? [])
-    .filter((notification) => !isWorkplaceTakeoverPayload(notification.payload))
     .map(mapNotification)
     .sort(compareNotifications);
   const recordingIdByCallId = new Map<string, string>();
@@ -513,13 +479,6 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     commanderGpsLatestRunAt:
       commanderGpsLatestRunResult.data?.finished_at ?? commanderGpsLatestRunResult.data?.started_at ?? undefined,
     commanderGpsLatestStatus: commanderGpsLatestRunResult.data?.status ?? undefined,
-    telephonyStats: {
-      rawEvents: rawEventsResult.count ?? 0,
-      commands: commandsResult.count ?? 0,
-      queueMemberships: queueMembershipsResult.count ?? 0,
-      queueSnapshots: queueSnapshotsResult.count ?? 0,
-      transcripts: transcriptsResult.count ?? 0,
-    },
     source: "supabase",
   };
 }
@@ -538,7 +497,6 @@ export async function loadDispatchNotifications(organizationId: string): Promise
   if (isOptionalTableSchemaMiss(result.error, "motorist_notifications")) return [];
   throwOnSupabaseError(result, "motorist_notifications");
   return (result.data ?? [])
-    .filter((notification) => !isWorkplaceTakeoverPayload(notification.payload))
     .map(mapNotification)
     .sort(compareNotifications);
 }
@@ -604,34 +562,28 @@ async function loadAuthUsersById(supabase: ReturnType<typeof createSupabaseAdmin
   return users;
 }
 
-function primaryExtensionByProfile(extensions: TelephonyExtensionRow[]) {
-  const result = new Map<string, string>();
-
-  for (const extension of extensions) {
-    if (extension.profile_id && !result.has(extension.profile_id)) {
-      result.set(extension.profile_id, extension.extension);
-    }
-  }
-
-  return result;
+// The provider-neutral "klapka" lives on the profile itself; the previous PBX
+// extension catalogue is gone and the Telnyx model adds per-operator devices.
+function profileExtension(profile: ProfileRow | undefined): string {
+  return profile?.phone_extension?.trim() ?? "";
 }
 
-function mapOperator(profile: ProfileRow, status: OperatorStatusRow | undefined, extension: string | undefined): Operator {
+function mapOperator(profile: ProfileRow, status: OperatorStatusRow | undefined): Operator {
   return {
     id: profile.id,
     name: profile.display_name,
-    extension: extension ?? "-",
+    extension: profileExtension(profile),
     status: status?.status ?? "offline",
   };
 }
 
-function mapAccessUser(profile: ProfileRow, authUser: AuthUserSummary | undefined, extension: string | undefined): AccessUser {
+function mapAccessUser(profile: ProfileRow, authUser: AuthUserSummary | undefined): AccessUser {
   return {
     id: profile.id,
     name: profile.display_name,
     email: profile.email ?? authUser?.email,
+    extension: profileExtension(profile) || undefined,
     role: profile.role,
-    extension,
     active: profile.active,
     accessStatus: profile.access_status,
     userId: profile.user_id ?? undefined,
@@ -662,7 +614,6 @@ function mapAttendanceShift(
   row: AttendanceShiftRow,
   profilesById: Map<string, ProfileRow>,
   templates: AttendanceShiftTemplate[],
-  extensionByProfileId: Map<string, string>,
   latestSession?: AttendanceSession,
 ): AttendanceShift {
   const profile = profilesById.get(row.profile_id);
@@ -672,7 +623,7 @@ function mapAttendanceShift(
     id: row.id,
     profileId: row.profile_id,
     operatorName: profile?.display_name ?? "Neznámy operátor",
-    operatorExtension: extensionByProfileId.get(row.profile_id) ?? "-",
+    operatorExtension: profileExtension(profile),
     templateId: row.template_id ?? undefined,
     templateLabel: template?.label,
     status: row.status,
@@ -712,7 +663,6 @@ function mapAttendanceSession(row: AttendanceSessionRow, profilesById: Map<strin
 function mapAttendanceEmployeeSettings(
   row: AttendanceEmployeeSettingsRow,
   profilesById: Map<string, ProfileRow>,
-  extensionByProfileId: Map<string, string>,
 ): AttendanceEmployeeSettings {
   const profile = profilesById.get(row.profile_id);
 
@@ -720,7 +670,7 @@ function mapAttendanceEmployeeSettings(
     id: row.id,
     profileId: row.profile_id,
     operatorName: profile?.display_name ?? "Neznámy operátor",
-    operatorExtension: extensionByProfileId.get(row.profile_id) ?? "-",
+    operatorExtension: profileExtension(profile),
     defaultAvailable: row.default_available,
     active: profile?.active ?? true,
     vacationDaysPerYear: row.vacation_days_per_year,
@@ -813,7 +763,6 @@ function mapIntegrationConnection(integration: OrganizationIntegrationRow): Inte
     status: deriveEffectiveIntegrationStatus(integration.status, secretConfigured),
     enabledFeatures: integration.enabled_features,
     baseUrl: integration.base_url ?? undefined,
-    websocketUrl: integration.websocket_url ?? undefined,
     secretRef: integration.secret_ref ?? undefined,
     secretConfigured,
     lastSuccessAt: integration.last_success_at ?? undefined,
@@ -821,6 +770,8 @@ function mapIntegrationConnection(integration: OrganizationIntegrationRow): Inte
     lastError: integration.last_error ?? undefined,
   };
 }
+
+const UNKNOWN_LINE_LABEL = "Neznáma linka";
 
 export function mapCallCenterCall({
   call,
@@ -840,13 +791,9 @@ export function mapCallCenterCall({
   recordingIdByCallId?: Map<string, string>;
 }): CallCenterCall {
   const inbound = call.direction === "inbound";
+  // Provider-neutral line identity: the persisted line row is the only source
+  // until the session model of the next telephony provider lands.
   const line = inbound && call.line_id ? linesById.get(call.line_id) : undefined;
-  const lineIdentity = resolveViptelLineIdentity({
-    catalog: buildViptelLineCatalog([...linesById.values()].filter((candidate) => candidate.provider === "viptel")),
-    storedLineId: inbound ? call.line_id : undefined,
-    storedReceivedNumber: inbound ? call.received_number : undefined,
-    providerNumbers: inbound ? [call.called_number] : [],
-  });
   const queue = call.queue_id ? queuesById.get(call.queue_id) : undefined;
   const operator = call.operator_id ? profilesById.get(call.operator_id) : undefined;
   const caseNumber = call.case_id ? caseNumberById.get(call.case_id) : undefined;
@@ -858,23 +805,18 @@ export function mapCallCenterCall({
   return {
     id: call.id,
     providerCallId: call.provider_call_id ?? undefined,
-    viptelUniqueId: call.viptel_unique_id ?? undefined,
-    fromQueueUniqueId: call.from_queue_unique_id ?? undefined,
+    providerSessionId: call.provider_session_id ?? undefined,
     status,
     direction: call.direction,
     callerNumber: call.caller_number ?? "Neznáme číslo",
     callerName: call.caller_name ?? undefined,
     calledNumber: call.called_number ?? line?.phone_number ?? "-",
-    receivedNumber: inbound ? lineIdentity.phoneNumber ?? call.received_number ?? undefined : undefined,
+    receivedNumber: inbound ? call.received_number ?? line?.phone_number ?? undefined : undefined,
     destinationNumber: call.destination_number ?? undefined,
-    callerExtension: call.caller_extension ?? undefined,
-    receivedExtension: call.received_extension ?? undefined,
-    destinationExtension: call.destination_extension ?? undefined,
-    extensionId: call.extension_id ?? undefined,
     operatorId: call.operator_id ?? undefined,
-    lineId: lineIdentity.lineId,
-    lineLabel: lineIdentity.lineLabel,
-    queueLabel: queue?.label ?? call.queue_number ?? undefined,
+    lineId: line?.id,
+    lineLabel: line?.label ?? UNKNOWN_LINE_LABEL,
+    queueLabel: queue?.label,
     operatorName: operator?.display_name ?? undefined,
     caseId: call.case_id ?? undefined,
     caseNumber,
@@ -883,7 +825,7 @@ export function mapCallCenterCall({
     answeredAt: call.answered_at ?? undefined,
     endedAt: call.ended_at ?? undefined,
     waitSeconds: call.wait_seconds ?? 0,
-    durationSeconds: call.duration_seconds ?? call.complete_duration_seconds ?? undefined,
+    durationSeconds: call.duration_seconds ?? undefined,
     recordingStatus: call.recording_status,
     recordingId: recordingIdByCallId?.get(call.id),
     transcriptStatus: call.transcript_status,
@@ -1856,12 +1798,14 @@ function getErrorMessage(error: unknown) {
 }
 
 function isIntegrationSecretConfigured(provider: IntegrationConnection["provider"]) {
-  if (provider === "viptel") {
-    return hasUsableEnv("VIPTEL_USERNAME") && hasUsableEnv("VIPTEL_PASSWORD");
+  // A Telnyx key alone does not make telephony usable: the call/SMS paths are
+  // gated by explicit live switches, so the integration badge follows them.
+  if (provider === "telnyx") {
+    return hasUsableEnv("TELNYX_API_KEY") && process.env.TELNYX_LIVE_CALLS_ENABLED === "true";
   }
 
-  if (provider === "viptel_sms") {
-    return hasUsableEnv("VIPTEL_SMS_USERNAME") && hasUsableEnv("VIPTEL_SMS_PASSWORD");
+  if (provider === "telnyx_sms") {
+    return hasUsableEnv("TELNYX_API_KEY") && process.env.TELNYX_SMS_LIVE_SENDS === "true";
   }
 
   if (provider === "google_maps") {

@@ -28,8 +28,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import type { CaseAttachmentInput, CaseContactInput, PlaceSelectionInput, UpdateCaseInput } from "@/data/case-inputs";
 import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
-import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
-import { requireConfirmedTelephonyCommand, waitForTelephonyCommand } from "@/lib/telephony/commands";
+import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import type {
   AccessComplication,
   Branch,
@@ -124,8 +123,6 @@ import {
 import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { LocationPicker } from "./LocationPicker";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
-import type { WorkplaceWebphoneSessionFence } from "@/lib/telephony/webphone-client";
-import { buildCaseCustomerCallBody } from "./case-detail-telephony";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 
 type CaseDetailProps = {
@@ -150,7 +147,6 @@ type CaseDetailProps = {
   /** Kokpit (P-10) zobrazuje poznámky a aktivitu vo vlastnom bočnom stĺpci — potlačí interné vykreslenie. */
   hideNotesAndActivity?: boolean;
   viewerProfileId?: string;
-  workplaceFence?: WorkplaceWebphoneSessionFence;
 };
 
 type ApiMutationResponse = {
@@ -249,7 +245,6 @@ export function CaseDetail({
   showInlineEditButton = true,
   hideNotesAndActivity = false,
   viewerProfileId,
-  workplaceFence,
 }: CaseDetailProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
@@ -527,45 +522,14 @@ export function CaseDetail({
 
   async function runAction(action: keyof typeof actionLabels) {
     if (action === "call_customer") {
-      if (isRunningAction) {
-        return;
-      }
-
       if (!contactPhone) {
         setNotice("Hovor nie je možné spustiť, kým v karte nie je telefónne číslo.");
         return;
       }
 
-      setIsRunningAction(true);
-      setNotice(null);
-
-      try {
-        const response = await telephonyFetch("/api/telephony/call/create", {
-          label: "vytvorenie hovoru",
-          timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildCaseCustomerCallBody({
-            caseId: caseItem.id,
-            toNumber: contactPhone,
-            workplaceFence,
-          })),
-        });
-        const result = (await response.json().catch(() => null)) as { command?: { id: string }; error?: string } | null;
-
-        if (!response.ok || !result?.command?.id) {
-          throw new Error(result?.error ?? "VIPTel call command zlyhal.");
-        }
-
-        setNotice("Hovor čaká na potvrdenie VIPTel.");
-        requireConfirmedTelephonyCommand(await waitForTelephonyCommand(result.command.id));
-        setNotice("VIPTel potvrdil hovor a priradená klapka začne zvoniť.");
-      } catch (error) {
-        setNotice(error instanceof Error ? error.message : "VIPTel call command zlyhal.");
-      } finally {
-        setIsRunningAction(false);
-      }
-
+      // Click-to-call returns together with the next telephony provider
+      // (through an onDial prop); until then the card only reports the state.
+      setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
       return;
     }
 
