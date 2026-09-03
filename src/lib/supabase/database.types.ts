@@ -15,6 +15,38 @@ type Table<Row> = {
 
 type Timestamp = string;
 type ExternalVehicleSourceProvider = "commander" | "client_vehicle_db";
+type TelephonyEnvironment = "production" | "development";
+type RingMemberKind = "operator" | "external_number";
+
+export type CallSessionState =
+  | "received"
+  | "greeting"
+  | "ivr"
+  | "ringing"
+  | "talking"
+  | "held"
+  | "consulting"
+  | "conference"
+  | "parked"
+  | "waiting"
+  | "wrap_up"
+  | "after_hours"
+  | "callback_offered"
+  | "missed"
+  | "failed"
+  | "ended";
+export type CallLegRole = "customer" | "operator" | "consult" | "supervisor" | "external";
+export type CallLegState = "initiated" | "ringing" | "answered" | "bridged" | "held" | "ended" | "failed";
+export type RingAttemptResult =
+  | "pending"
+  | "offered"
+  | "answered"
+  | "no_answer"
+  | "skipped_offline"
+  | "busy"
+  | "cancelled"
+  | "failed";
+export type OperatorPresenceStatus = "available" | "ringing" | "on_call" | "after_call_work" | "paused" | "offline";
 
 export type Database = {
   public: {
@@ -214,6 +246,12 @@ export type Database = {
         external_id: string | null;
         phone_number: string;
         label: string;
+        telnyx_number_id: string | null;
+        partner_name: string | null;
+        ring_plan_id: string | null;
+        ivr_menu_id: string | null;
+        business_hours_id: string | null;
+        environment: TelephonyEnvironment;
         active: boolean;
         metadata: Json;
         created_at: Timestamp;
@@ -662,6 +700,7 @@ export type Database = {
         provider: string;
         provider_session_id: string | null;
         provider_call_id: string | null;
+        session_id: string | null;
         direction: "inbound" | "outbound" | "internal";
         status: "incoming" | "ringing_agent" | "answered" | "missed" | "abandoned_queue" | "outbound" | "ended" | "failed";
         end_reason: string | null;
@@ -678,7 +717,10 @@ export type Database = {
         answered_at: Timestamp | null;
         ended_at: Timestamp | null;
         wait_seconds: number | null;
+        ring_seconds: number | null;
         duration_seconds: number | null;
+        ring_group_id: string | null;
+        operator_leg_id: string | null;
         recording_status: "not_requested" | "pending" | "available" | "failed" | "deleted";
         transcript_status: "not_requested" | "pending" | "complete" | "failed";
         summary: string | null;
@@ -700,6 +742,7 @@ export type Database = {
         normalized_payload: Json;
         handled_status: "processed" | "ignored" | "failed" | "unknown";
         provider_created_at: Timestamp | null;
+        provider_timestamp: Timestamp | null;
         received_at: Timestamp;
         created_at: Timestamp;
       }>;
@@ -729,6 +772,8 @@ export type Database = {
         call_id: string | null;
         to_number: string;
         from_label: string | null;
+        from_sender: string | null;
+        messaging_profile_id: string | null;
         direction: "outbound" | "inbound";
         status: "queued" | "sent" | "delivered" | "failed" | "received";
         status_detail: string | null;
@@ -741,6 +786,7 @@ export type Database = {
         queued_at: Timestamp | null;
         next_attempt_at: Timestamp | null;
         last_attempt_at: Timestamp | null;
+        locked_at: Timestamp | null;
         retry_count: number;
         sent_at: Timestamp | null;
         delivered_at: Timestamp | null;
@@ -827,6 +873,285 @@ export type Database = {
         before_payload: Json | null;
         after_payload: Json | null;
         created_at: Timestamp;
+      }>;
+      motorist_telnyx_webhook_events: Table<{
+        event_id: string;
+        organization_id: string | null;
+        event_type: string;
+        call_session_id: string | null;
+        call_leg_id: string | null;
+        call_control_id: string | null;
+        connection_id: string | null;
+        status: "queued" | "processed" | "failed";
+        attempts: number;
+        claimed_at: Timestamp | null;
+        error: string | null;
+        payload: Json | null;
+        occurred_at: Timestamp | null;
+        received_at: Timestamp;
+        processed_at: Timestamp | null;
+      }>;
+      motorist_call_sessions: Table<{
+        id: string;
+        organization_id: string;
+        telnyx_session_id: string | null;
+        direction: "inbound" | "outbound" | "internal";
+        state: CallSessionState;
+        version: number;
+        lease_token: string | null;
+        lease_until: Timestamp | null;
+        line_id: string | null;
+        ring_plan_id: string | null;
+        current_step: number;
+        conference_id: string | null;
+        conference_name: string | null;
+        customer_leg_id: string | null;
+        answered_by_profile_id: string | null;
+        case_id: string | null;
+        caller_number: string | null;
+        called_number: string | null;
+        started_at: Timestamp;
+        answered_at: Timestamp | null;
+        ended_at: Timestamp | null;
+        hold_started_at: Timestamp | null;
+        parked_at: Timestamp | null;
+        metadata: Json;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_call_legs: Table<{
+        id: string;
+        organization_id: string;
+        session_id: string;
+        telnyx_call_control_id: string;
+        telnyx_call_leg_id: string | null;
+        role: CallLegRole;
+        profile_id: string | null;
+        to_number: string | null;
+        from_number: string | null;
+        state: CallLegState;
+        hangup_cause: string | null;
+        hangup_source: string | null;
+        initiated_at: Timestamp;
+        answered_at: Timestamp | null;
+        bridged_at: Timestamp | null;
+        ended_at: Timestamp | null;
+        client_state: Json;
+        metadata: Json;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_ring_plans: Table<{
+        id: string;
+        organization_id: string;
+        name: string;
+        fallback_kind: "external_number" | "waiting_room" | "callback_prompt" | "hangup_message";
+        fallback_number: string | null;
+        active: boolean;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_ring_plan_steps: Table<{
+        id: string;
+        organization_id: string;
+        ring_plan_id: string;
+        step_index: number;
+        ring_group_id: string;
+        timeout_secs: number;
+        strategy: "all" | "ordered";
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_ring_groups: Table<{
+        id: string;
+        organization_id: string;
+        name: string;
+        description: string | null;
+        active: boolean;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_ring_group_members: Table<{
+        id: string;
+        organization_id: string;
+        ring_group_id: string;
+        member_kind: RingMemberKind;
+        profile_id: string | null;
+        external_number: string | null;
+        position: number;
+        ring_secs: number | null;
+        last_offered_at: Timestamp | null;
+        last_answered_at: Timestamp | null;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_ring_attempts: Table<{
+        id: string;
+        organization_id: string;
+        session_id: string;
+        step_index: number;
+        ring_group_id: string | null;
+        member_kind: RingMemberKind;
+        profile_id: string | null;
+        external_number: string | null;
+        leg_id: string | null;
+        position: number;
+        ring_secs: number;
+        result: RingAttemptResult;
+        offered_at: Timestamp | null;
+        answered_at: Timestamp | null;
+        ended_at: Timestamp | null;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_business_hours: Table<{
+        id: string;
+        organization_id: string;
+        name: string;
+        timezone: string;
+        active: boolean;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_business_hours_intervals: Table<{
+        id: string;
+        organization_id: string;
+        business_hours_id: string;
+        weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+        opens: string;
+        closes: string;
+        created_at: Timestamp;
+      }>;
+      motorist_business_hours_exceptions: Table<{
+        id: string;
+        organization_id: string;
+        business_hours_id: string;
+        date: string;
+        closed: boolean;
+        intervals: Json;
+        label: string | null;
+        created_at: Timestamp;
+      }>;
+      motorist_ivr_menus: Table<{
+        id: string;
+        organization_id: string;
+        name: string;
+        prompt_media_url: string | null;
+        tts_text: string | null;
+        invalid_media_url: string | null;
+        timeout_secs: number;
+        max_tries: number;
+        active: boolean;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_ivr_options: Table<{
+        id: string;
+        organization_id: string;
+        ivr_menu_id: string;
+        digit: string;
+        action: "ring_plan" | "callback" | "external_number" | "waiting_room" | "repeat" | "hangup";
+        target_ring_plan_id: string | null;
+        target_number: string | null;
+        label: string;
+        prompt_media_url: string | null;
+        tts_text: string | null;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_callback_requests: Table<{
+        id: string;
+        organization_id: string;
+        caller_number: string;
+        caller_name: string | null;
+        source: "ivr" | "after_hours" | "park_timeout" | "missed" | "manual";
+        status: "open" | "scheduled" | "done" | "cancelled";
+        session_id: string | null;
+        line_id: string | null;
+        case_id: string | null;
+        claimed_by: string | null;
+        claimed_at: Timestamp | null;
+        due_at: Timestamp | null;
+        resolved_at: Timestamp | null;
+        notes: string | null;
+        metadata: Json;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_operator_devices: Table<{
+        id: string;
+        organization_id: string;
+        profile_id: string;
+        environment: TelephonyEnvironment;
+        telnyx_credential_id: string | null;
+        sip_username: string | null;
+        credential_expires_at: Timestamp | null;
+        last_token_issued_at: Timestamp | null;
+        token_expires_at: Timestamp | null;
+        device_seen_at: Timestamp | null;
+        device_session_id: string | null;
+        registration_state: "unregistered" | "registering" | "registered" | "error";
+        user_agent: string | null;
+        metadata: Json;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_operator_presence: Table<{
+        id: string;
+        organization_id: string;
+        profile_id: string;
+        status: OperatorPresenceStatus;
+        current_session_id: string | null;
+        pause_reason_id: string | null;
+        wrap_up_until: Timestamp | null;
+        status_since: Timestamp;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_pause_reasons: Table<{
+        id: string;
+        organization_id: string;
+        code: string;
+        label: string;
+        max_minutes: number | null;
+        sort_order: number;
+        active: boolean;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_operator_telephony_settings: Table<{
+        id: string;
+        organization_id: string;
+        profile_id: string;
+        default_from_line_id: string | null;
+        wrap_up_seconds: number;
+        auto_answer_outbound: boolean;
+        ring_device_volume: number;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_telephony_settings: Table<{
+        id: string;
+        organization_id: string;
+        live_calls_enabled: boolean;
+        sms_live_sends: boolean;
+        daily_leg_soft_cap: number;
+        park_max_minutes: number;
+        destination_allowlist: string[];
+        max_ring_fanout: number;
+        max_concurrent_legs: number;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_telephony_daily_usage: Table<{
+        id: string;
+        organization_id: string;
+        day: string;
+        legs: number;
+        minutes: number;
+        sms_count: number;
+        created_at: Timestamp;
+        updated_at: Timestamp;
       }>;
       motorist_job_controls: Table<{
         job_name: string;
@@ -916,6 +1241,54 @@ export type Database = {
           p_error_safe: string;
           p_next_attempt_at: Timestamp;
           p_terminal: boolean;
+        };
+        Returns: boolean;
+      };
+      motorist_telnyx_claim_webhook_event: {
+        Args: {
+          p_event_id: string;
+          p_event_type: string;
+          p_payload: Json;
+          p_organization_id?: string | null;
+          p_call_session_id?: string | null;
+          p_call_leg_id?: string | null;
+          p_call_control_id?: string | null;
+          p_connection_id?: string | null;
+          p_occurred_at?: Timestamp | null;
+          p_stale_after_ms?: number;
+        };
+        Returns: {
+          outcome: "claimed" | "duplicate" | "busy";
+          event_status: "queued" | "processed" | "failed";
+          event_attempts: number;
+        }[];
+      };
+      motorist_session_lease_acquire: {
+        Args: {
+          p_session_id: string;
+          p_token: string;
+          p_ttl_ms?: number;
+        };
+        Returns: boolean;
+      };
+      motorist_session_lease_release: {
+        Args: {
+          p_session_id: string;
+          p_token: string;
+        };
+        Returns: boolean;
+      };
+      motorist_reserve_operator: {
+        Args: {
+          p_profile_id: string;
+          p_session_id: string;
+        };
+        Returns: boolean;
+      };
+      motorist_advance_ring_step: {
+        Args: {
+          p_session_id: string;
+          p_expected_step: number;
         };
         Returns: boolean;
       };
