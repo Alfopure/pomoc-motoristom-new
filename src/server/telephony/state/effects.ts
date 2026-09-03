@@ -9,7 +9,6 @@ import { reserveOperator } from "../routing/reservation";
 import { encodeClientState } from "../telnyx/client-state";
 import { TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
 import {
-  DEFAULT_TTS_LANGUAGE,
   DEFAULT_TTS_VOICE,
   callStatusForSession,
   commandKey,
@@ -503,7 +502,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         return { skipped: false, detail: { url, purpose: command.spec.purpose } };
       }
       if (command.spec.ttsText) {
-        await telnyx.gatherUsingSpeak({ ...common, payload: command.spec.ttsText, voice: DEFAULT_TTS_VOICE, language: DEFAULT_TTS_LANGUAGE });
+        await telnyx.gatherUsingSpeak({ ...common, payload: command.spec.ttsText, voice: DEFAULT_TTS_VOICE });
         return { skipped: false, detail: { tts: true, purpose: command.spec.purpose } };
       }
       return { skipped: true, detail: { reason: "no media and no tts text", purpose: command.spec.purpose } };
