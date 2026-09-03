@@ -8,6 +8,7 @@ import {
   supportPollDelayMs,
   takeoverPollDelayMs,
   telephonyPollActivity,
+  wallboardPollDelayMs,
 } from "./poll-schedule";
 
 describe("poll cadence with Realtime connected", () => {
@@ -118,6 +119,16 @@ describe("support and takeover cadence", () => {
   it("keeps support reads at their original visible rate", () => {
     expect(supportPollDelayMs({ documentHidden: false })).toBe(10_000);
     expect(supportPollDelayMs({ documentHidden: true })).toBe(30_000);
+  });
+
+  it("polls the wallboard no faster than the snapshot it reads is cached", () => {
+    // The server serves one snapshot per organisation for 5 s; a faster poll
+    // would return the identical bytes to every wall display in the building.
+    expect(wallboardPollDelayMs({ documentHidden: false })).toBe(5_000);
+    expect(wallboardPollDelayMs({ documentHidden: true })).toBe(60_000);
+    // A failing endpoint backs off instead of being hammered by a screen
+    // nobody is standing in front of.
+    expect(wallboardPollDelayMs({ documentHidden: false, consecutiveFailures: 3, random: () => 0.5 })).toBeGreaterThan(5_000);
   });
 
   it("stays fast only while a handover decision is actually open", () => {

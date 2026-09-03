@@ -249,7 +249,11 @@ export function SmsComposerDialog({
 
           <p className="flex items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs leading-5 text-zinc-600">
             <Info size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
-            <span>SMS sa odosielajú z odosielateľa <strong className="font-semibold">PomocMotor</strong> a sú jednosmerné — klient na ne nevie odpovedať. Odpovede riešte telefonicky.</span>
+            <span>
+              SMS sa odosielajú z odosielateľa <strong className="font-semibold">PomocMotor</strong>.{" "}
+              <strong className="font-semibold">Príjem SMS nie je dostupný</strong> — slovenské čísla ani alfanumerický odosielateľ neprijímajú
+              správy, takže odpoveď klienta nikam nepríde a nikto ju neuvidí. Ak očakávate odpoveď, zavolajte.
+            </span>
           </p>
 
           {error && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-red-800">{error}</div>}

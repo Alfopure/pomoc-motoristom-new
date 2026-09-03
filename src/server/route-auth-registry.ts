@@ -177,6 +177,11 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "telephony/directory/favorites": { class: "session" },
   "telephony/directory/favorites/[contactId]": { class: "session" },
   "telephony/qa/dashboard": { class: "session", role: ["senior_dispatcher", "manager", "admin"] },
+  "telephony/stats": {
+    class: "session",
+    role: ["senior_dispatcher", "manager", "admin"],
+    note: "Wallboard a widgety v reportoch; odpoveď je nezávislá od čitateľa a servíruje sa z 5-sekundovej cache na organizáciu, aby nástenné displeje nemleli databázu.",
+  },
 
   // users
   users: { class: "session", role: ["manager", "admin"] },

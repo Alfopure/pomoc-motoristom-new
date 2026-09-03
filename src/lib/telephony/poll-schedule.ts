@@ -61,6 +61,21 @@ export const SUPPORT_POLL_MS = {
   hidden: 30_000,
 } as const;
 
+/**
+ * Wallboard and the statistics widgets in the reports view.
+ *
+ * `/api/telephony/stats` answers every reader from one per-organisation
+ * snapshot that lives for `STATS_CACHE_TTL_MS` (5 s), so polling faster than
+ * that cannot produce fresher data — only more invocations. Between polls the
+ * screen keeps moving anyway: every duration on it is re-derived from the
+ * timestamps in the payload against the browser's own clock.
+ */
+export const WALLBOARD_POLL_MS = {
+  visible: 5_000,
+  /** A wall display is rarely hidden; a background reports tab always is. */
+  hidden: 60_000,
+} as const;
+
 export const TAKEOVER_POLL_MS = {
   /** A handover is a 30-second decision, so it stays responsive while live. */
   activeVisible: 4_000,
@@ -99,6 +114,15 @@ export function supportPollDelayMs(input: {
   random?: () => number;
 }) {
   const base = input.documentHidden ? SUPPORT_POLL_MS.hidden : SUPPORT_POLL_MS.visible;
+  return withBackoff(base, input.consecutiveFailures, input.random);
+}
+
+export function wallboardPollDelayMs(input: {
+  documentHidden: boolean;
+  consecutiveFailures?: number;
+  random?: () => number;
+}) {
+  const base = input.documentHidden ? WALLBOARD_POLL_MS.hidden : WALLBOARD_POLL_MS.visible;
   return withBackoff(base, input.consecutiveFailures, input.random);
 }
 

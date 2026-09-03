@@ -139,6 +139,24 @@ All `SECURITY DEFINER`, `search_path = ''`, revoked from `public`/`anon`/`authen
 
 `motorist_replace_ring_plan` is the write path of the Phase 3 configuration screens. A section absent from the document is left untouched; members and steps are deleted and re-inserted (their positions are unique, so an in-place swap would trip the constraint) while `last_offered_at`/`last_answered_at` travel with the member id. Deleting a group a surviving step still uses, a plan a line or an IVR option still points at, business hours a line still uses, or an IVR menu a line still plays aborts the transaction (`ring_group_in_use`, `ring_plan_in_use`, `business_hours_in_use`, `ivr_menu_in_use`), and a row id owned by another organisation aborts with `cross_organization`. Phase 4 added the `ivr_menus` section (menu plus its digit options, options swapped wholesale because `(ivr_menu_id, digit)` is unique). Document validation (at least one step per plan, timeouts 5–120 s, member ring seconds ≥ 5 s, no empty group in a plan, contiguous positions, row ids unique across the whole payload, E.164 members inside `destination_allowlist`, an open business-hours exception needs at least one interval, pause length ≤ 480 min, no cross-organisation reference) runs in `src/server/telephony/config-service.ts` before the RPC is called; a section over its size cap is refused before the payload is mapped at all; every applied change writes a `motorist_audit_log` row with a compact diff. A call in progress is never affected — its plan is frozen by `materialiseRingPlan` at call start.
 
+## Statistics views (design §4 Phase 4)
+
+`20260921100000_telephony_stats_views.sql` adds two read-only views, both `security_invoker = on` and granted to `service_role` only — the browser never reads them through PostgREST, `/api/telephony/stats` does the role check and answers with a derived payload.
+
+| View | Grain | Notes |
+| --- | --- | --- |
+| `motorist_call_stats_daily` | organisation × local day × direction × operator | `calls`, `answered`, `unanswered`, `system_handled`, `abandoned`, `answered_with_wait`, `answered_within_20s`, `answer_seconds_total`, `talk_seconds` |
+| `motorist_operator_status_durations` | organisation × profile × local day × status | `seconds` (an interval still open counts up to `now()`), `entries`, `last_started_at`, `open_since` |
+
+Definitions that must not drift:
+
+- **`system_handled`** = unanswered on purpose (`end_reason` in `after_hours`, `callback_requested`, `ivr_message`, `all_busy`). Those callers were served, so the answer and abandonment rates are measured against `answered + abandoned` only — a caller the app closed deliberately neither inflates abandonment nor is silently forgiven.
+- **A call that has not ended** is counted in `calls` but is neither answered nor abandoned: a ringing phone must not raise the abandonment rate while it is still ringing.
+- **The day is the local (Europe/Bratislava) calendar day**, not UTC — "dnes" on the wallboard has to mean what the wall clock behind it says. The expression is `stable`, so it cannot be indexed; that is why the route caches and why `calls_org_started_at_idx` exists for the raw fallback.
+- `answer_seconds` prefers the timestamps over the stored `wait_seconds` column, which is rewritten several times in a call's life and can be a stale zero.
+
+`src/lib/telephony/wallboard.ts` re-implements the same arithmetic over raw `motorist_calls` rows (`aggregateCallStats`) and `stats.ts` falls back to it while the migration is not applied, reporting `source: "fallback"` in the payload and on screen. `tests/telnyx-migration-shape.test.mjs` asserts the SQL end-reason list and the TypeScript constant are the same list.
+
 ## Browser phone auto-answer
 
 An invite is answered without operator action when it is the operator leg of a dial this tab started. The discriminator is `telnyxIDs.telnyxCallControlId` against the legs recorded by `expectOperatorLeg()`; because the SIP invite usually beats the route response, the currently ringing call is re-evaluated whenever a new expected leg is registered. Server-initiated legs (pickup) return their `operatorLegCallControlId` in the action response, so they are correlated the same way. The `X-PM-Auto-Answer: 1` invite header is only a tiebreaker: it may decide when this tab has exactly one outstanding leg it asked for whose id has not arrived yet, and never answers on its own (it carries no session identity). Everything else rings.
@@ -166,6 +184,8 @@ The browser calls `supabase.realtime.setAuth(accessToken)` on session load and r
 | `GET /api/telephony/callbacks` | `session` | callback queue: live (`open`+`scheduled`, oldest first) + the last 24 h of settled requests; answers **even when telephony is not configured** (the rows are ordinary database records that still have to be settleable) |
 | `POST /api/telephony/callbacks/[id]/{claim,done,cancel}` | `session` | queue bookkeeping; no provider needed. `claim` is a conditional UPDATE on the claimant we read, so two dispatchers pressing it in the same second cannot both own the caller (loser → `409 already_claimed` naming the winner). Taking a request over from a colleague needs `senior_dispatcher`+ |
 | `POST /api/telephony/callbacks/[id]/call` | `session` | the only callback route that needs a configured provider: rings the caller back through `startOutboundCall` (kill switch, rate limit, allowlist, live device, reservation) from the line they originally rang, claiming the request first. The request stays `scheduled` — placing the call is not proof the caller was reached |
+| `GET /api/telephony/stats` | `session`, senior+ | wallboard and the live widgets in the reports view: waiting callers, longest wait, per-operator state and time in state, today's answered/missed, ASA, abandonment, service level < 20 s, callback queue health. The answer depends on no reader, so it is served from a **5 s per-organisation snapshot cache** (`STATS_CACHE_TTL_MS`) — a room full of screens costs one database pass. Answers with the provider switched off (`configured` is part of the payload) |
+| `GET /api/telephony/qa/dashboard` | `session`, senior+ | quality without recordings: outcome documentation and callback compliance over 30 days (`recordingEnabled`/`transcriptsEnabled` are `false` and the screen says why) |
 | `POST /api/telephony/dev/simulate-inbound` | `session`, admin | non-production only; injects a synthetic `call.initiated`/`call.answered` |
 
 Every mutation route calls `assertSameOriginRequest` **before** authentication, and every route is registered in `src/server/route-auth-registry.ts`; `src/app/api/route-auth.test.ts` and `route-csrf.test.ts` enforce both. Mute and DTMF are browser-side (`@telnyx/webrtc`) and have no routes.
@@ -174,7 +194,7 @@ Degraded mode: when `getTelnyxConfig().configured === false`, every telephony se
 
 ## SMS
 
-`resolveSmsTransport()` returns the Telnyx transport whenever `TELNYX_API_KEY` exists, otherwise `notConfiguredTransport`. Sends go to `POST /v2/messages {from: TELNYX_SMS_ALPHA_SENDER, to, text, messaging_profile_id}` with an `Idempotency-Key` header; `motorist_sms_messages.idempotency_key` is unique and remains the audit link. `preflight(to)` runs before any row is inserted — kill switches, the destination allowlist and the rate limit (peeked, not consumed) — so a blocked send leaves no audit rows. The alphanumeric sender is one-way: inbound `message.received` events are acknowledged as `not_applicable` and the composer shows a Slovak notice that replies must be handled by phone.
+`resolveSmsTransport()` returns the Telnyx transport whenever `TELNYX_API_KEY` exists, otherwise `notConfiguredTransport`. Sends go to `POST /v2/messages {from: TELNYX_SMS_ALPHA_SENDER, to, text, messaging_profile_id}` with an `Idempotency-Key` header; `motorist_sms_messages.idempotency_key` is unique and remains the audit link. `preflight(to)` runs before any row is inserted — kill switches, the destination allowlist and the rate limit (peeked, not consumed) — so a blocked send leaves no audit rows. The alphanumeric sender is one-way: inbound `message.received` events are acknowledged as `not_applicable` and `SmsComposerDialog` states plainly that **príjem SMS nie je dostupný** — neither the Slovak DID nor the alphanumeric sender receives messages, so a reply reaches nobody and must be handled by phone.
 
 The transport re-checks both guards before the HTTP call (second line of defence): the recipient must pass the same `destination_allowlist` as a voice destination (403 otherwise) and the organisation may send at most `SMS_RATE_LIMIT` (20) messages per minute (429; the limiter is consumed here, not in `preflight`). A delivered send increments `motorist_telephony_daily_usage.sms_count`.
 
@@ -185,7 +205,7 @@ The transport re-checks both guards before the HTTP call (second line of defence
 | `motorist_telnyx_webhook_events` | `processed` rows deleted after 30 days; `payload` nulled after 7 days for `call.playback.*`, `call.speak.*` and `call.cost`. Job `telephony.ledger.prune` in `motorist_job_controls`, run by the 5-minute cron; seeded **disabled**, so the cron reports `disabled` until it is enabled. |
 | `motorist_calls.raw_latest_payload` | emptied after 30 days (Phase 5 job). The column is `jsonb not null default '{}'` (inherited from the foundation schema), so the job writes `'{}'::jsonb`, not `NULL`. |
 | `motorist_call_events.raw_payload` | emptied after 90 days (Phase 5 job) with the same `'{}'::jsonb` contract — GDPR Art. 5(1)(e) storage limitation, see [`data-model.md`](./data-model.md). |
-| Recordings / transcripts | Recording stays disabled for the Telnyx rollout; the tables exist but are not populated. |
+| Recordings / transcripts | Recording stays disabled for the Telnyx rollout; the tables exist but are not populated. The QA dashboard therefore scores outcome documentation and callback compliance instead, and its 30-day window is bounded by the same retention: the outcome lives in `raw_latest_payload`, which the prune job empties at 30 days. |
 
 The ledger holds caller numbers inside raw payloads, so the prune job is the data-minimisation control, not a housekeeping nicety.
 

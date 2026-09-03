@@ -456,3 +456,57 @@ test("every definition of the three-argument replace RPC is service-role only", 
   assert.match(body, /nullif\(p_document -> 'ivr_menus', 'null'::jsonb\)/);
   assert.match(body, /delete from public\.motorist_ivr_options o/);
 });
+
+/**
+ * The Phase 4 statistics views (`20260921100000_telephony_stats_views.sql`).
+ *
+ * These are the wallboard's numbers. Three properties have to hold or the board
+ * lies:
+ *
+ * 1. the views exist under the names `src/server/telephony/stats.ts` selects;
+ * 2. they run with `security_invoker` and are granted to the service role only,
+ *    so a session token cannot pull per-operator statistics straight out of
+ *    PostgREST;
+ * 3. the "the application closed this call on purpose" list in the SQL is the
+ *    same list as `SYSTEM_HANDLED_END_REASONS` in
+ *    `src/lib/telephony/wallboard.ts`. The fallback path in TypeScript and the
+ *    view answer the same question for the same screen; a reason added to one
+ *    side only would turn served callers into abandonment on whichever path
+ *    happened to answer.
+ */
+test("the phase 4 statistics views are service-role only and agree with the TypeScript definitions", () => {
+  const statsMigration = readFileSync(
+    new URL("../supabase/migrations/20260921100000_telephony_stats_views.sql", import.meta.url),
+    "utf8",
+  );
+
+  for (const view of ["motorist_call_stats_daily", "motorist_operator_status_durations"]) {
+    assert.match(statsMigration, new RegExp(`create view public\\.${view}\\s*\\n?\\s*with \\(security_invoker = on\\)`, "i"), `${view} definition`);
+    assert.match(statsMigration, new RegExp(`revoke all on table public\\.${view} from public, anon, authenticated;`), `${view} revoke`);
+    assert.match(statsMigration, new RegExp(`grant select on table public\\.${view} to service_role;`), `${view} grant`);
+    assert.doesNotMatch(statsMigration, new RegExp(`grant[^;]*on table public\\.${view}[^;]*to[^;]*\\b(anon|authenticated)\\b`, "is"), `${view} must not be granted to a session role`);
+  }
+
+  // Both group by the local calendar day, not by UTC: the wall clock behind the
+  // display is what "dnes" means to the people reading it.
+  const dayExpressions = statsMigration.match(/at time zone 'Europe\/Bratislava'\)::date/g) ?? [];
+  assert.ok(dayExpressions.length >= 2, "both views must group by the local day");
+
+  const wallboard = readFileSync(new URL("../src/lib/telephony/wallboard.ts", import.meta.url), "utf8");
+  const declared = wallboard.match(/SYSTEM_HANDLED_END_REASONS[^=]*=\s*\[([^\]]*)\]/);
+  assert.ok(declared, "SYSTEM_HANDLED_END_REASONS must be a literal array");
+  const reasons = [...declared[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort();
+  assert.ok(reasons.length > 0, "at least one system-handled reason");
+
+  const sqlLists = [...statsMigration.matchAll(/end_reason\s*(?:=|<>)\s*(?:any|all)\s*\(array\[([^\]]+)\]\)/g)];
+  assert.equal(sqlLists.length, 2, "system_handled and abandoned each spell the list out");
+  for (const [, list] of sqlLists) {
+    const inSql = [...list.matchAll(/'([^']+)'/g)].map((match) => match[1]).sort();
+    assert.deepEqual(inSql, reasons, "the SQL end_reason list must match SYSTEM_HANDLED_END_REASONS");
+  }
+
+  // The service level is a product promise (< 20 s); it is spelled out in both
+  // places and must not drift.
+  assert.match(statsMigration, /answer_seconds <= 20\)::bigint as answered_within_20s/);
+  assert.match(wallboard, /SERVICE_LEVEL_SECONDS = 20/);
+});

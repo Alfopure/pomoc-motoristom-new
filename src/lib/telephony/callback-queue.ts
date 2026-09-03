@@ -104,14 +104,14 @@ export function callbackWaitSeconds(request: CallbackRequestPayload, now: number
  * request is created; a row without one falls back to the same 30 minutes, so a
  * request never ages silently just because the column is empty.
  */
-export function callbackDeadline(request: CallbackRequestPayload): number | null {
+export function callbackDeadline(request: Pick<CallbackRequestPayload, "dueAt" | "createdAt">): number | null {
   const due = parse(request.dueAt);
   if (due !== null) return due;
   const created = parse(request.createdAt);
   return created === null ? null : created + CALLBACK_OVERDUE_MINUTES * 60_000;
 }
 
-export function callbackUrgency(request: CallbackRequestPayload, now: number): CallbackUrgency {
+export function callbackUrgency(request: Pick<CallbackRequestPayload, "status" | "dueAt" | "createdAt">, now: number): CallbackUrgency {
   if (request.status === "done" || request.status === "cancelled") return "fresh";
   const deadline = callbackDeadline(request);
   if (deadline === null) return "fresh";
