@@ -236,6 +236,49 @@ input {
   background-size: 28px 28px;
 }
 
+/* Karta úlohy reaguje na používateľom nastavenú šírku pravého stĺpca,
+   nie na šírku viewportu. Názov tak dostane celý prvý riadok a spodná
+   časť využije voľné miesto medzi metadátami a akciami. */
+.dashboard-sidebar-task-card {
+  container-type: inline-size;
+}
+
+.dashboard-sidebar-task-card-layout[data-editing="false"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 0.5rem;
+  align-items: start;
+}
+
+.dashboard-sidebar-task-card-layout[data-editing="false"] .dashboard-task-card-header {
+  grid-column: 1 / -1;
+}
+
+.dashboard-sidebar-task-card-layout[data-editing="false"] .dashboard-task-card-meta {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: center;
+}
+
+.dashboard-sidebar-task-card-layout[data-editing="false"] .dashboard-task-card-actions {
+  grid-column: 2;
+  grid-row: 2;
+  align-self: center;
+  margin-top: 0.25rem;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.dashboard-sidebar-task-card-layout[data-editing="false"] .dashboard-task-card-actions > div {
+  flex-direction: column;
+}
+
+@container (min-width: 420px) {
+  .dashboard-sidebar-task-card-layout[data-editing="false"] .dashboard-task-card-actions > div {
+    flex-direction: row;
+  }
+}
+
 @media (max-width: 639px) {
   .dispatch-map-mobile-nav-safe .leaflet-bottom {
     bottom: calc(76px + env(safe-area-inset-bottom));

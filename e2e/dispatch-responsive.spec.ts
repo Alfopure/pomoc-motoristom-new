@@ -389,12 +389,24 @@ test("dashboard side columns resize horizontally and keep the preference", async
   await page.mouse.move(rightBox!.x + rightBox!.width / 2 - 30, rightBox!.y + 120, { steps: 3 });
   await page.mouse.up();
   await expect(rightResize).toHaveAttribute("aria-valuenow", "360");
+  const firstSidebarTask = page.getByTestId("task-card-sidebar").first();
+  await expect(firstSidebarTask.locator(".dashboard-task-card-actions > div")).toHaveCSS("flex-direction", "column");
+
+  const widerRightBox = await rightResize.boundingBox();
+  expect(widerRightBox).not.toBeNull();
+  await page.mouse.move(widerRightBox!.x + widerRightBox!.width / 2, widerRightBox!.y + 120);
+  await page.mouse.down();
+  await page.mouse.move(widerRightBox!.x + widerRightBox!.width / 2 - 120, widerRightBox!.y + 120, { steps: 4 });
+  await page.mouse.up();
+  await expect(rightResize).toHaveAttribute("aria-valuenow", "480");
+  await expect(firstSidebarTask.locator(".dashboard-task-card-actions > div")).toHaveCSS("flex-direction", "row");
+  expect(Math.round((await firstSidebarTask.boundingBox())!.height)).toBeLessThanOrEqual(90);
   await expectNoDocumentOverflow(page, "resized dashboard columns");
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("dispatch-console")).toHaveAttribute("data-hydrated", "true", { timeout: 30_000 });
   await expect(leftResize).toHaveAttribute("aria-valuenow", "370");
-  await expect(rightResize).toHaveAttribute("aria-valuenow", "360");
+  await expect(rightResize).toHaveAttribute("aria-valuenow", "480");
 
   await leftResize.dblclick();
   await rightResize.dblclick();
