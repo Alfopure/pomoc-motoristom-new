@@ -801,6 +801,76 @@ export async function markNotificationRead(notificationId: string) {
   return updateNotificationStatus(notificationId, "read");
 }
 
+export async function snoozeNotification(
+  notificationId: string,
+  snoozedUntil: string,
+  actor: Pick<ProfileRow, "id" | "organization_id">,
+) {
+  if (!nonEmpty(notificationId)) {
+    throw new MutationError("Chýba notifikácia.", 400);
+  }
+
+  const snoozedUntilTime = new Date(snoozedUntil).getTime();
+  const nowTime = Date.now();
+  if (!Number.isFinite(snoozedUntilTime) || snoozedUntilTime < nowTime + 30_000) {
+    throw new MutationError("Čas pripomenutia musí byť v budúcnosti.", 400);
+  }
+  if (snoozedUntilTime > nowTime + 366 * 24 * 60 * 60 * 1_000) {
+    throw new MutationError("Pripomenutie možno odložiť najviac o jeden rok.", 400);
+  }
+
+  const supabase = createSupabaseAdminClient();
+  const organizationId = actor.organization_id;
+  const ownerId = actor.id;
+  const now = new Date(nowTime).toISOString();
+  const normalizedSnoozedUntil = new Date(snoozedUntilTime).toISOString();
+  const existing = await supabase
+    .from("motorist_notifications")
+    .select("id,payload,recipient_profile_id")
+    .eq("organization_id", organizationId)
+    .eq("id", notificationId)
+    .maybeSingle();
+
+  if (isNotificationSchemaMiss(existing.error)) {
+    throw new MutationError("Notifikácie zatiaľ nie sú dostupné. Treba nasadiť Supabase migráciu pre notifikačné tabuľky.", 503);
+  }
+  await throwOnResult(existing);
+  if (!existing.data) {
+    throw new MutationError("Notifikácia sa nenašla.", 404);
+  }
+  if (existing.data.recipient_profile_id !== ownerId) {
+    throw new MutationError("Túto notifikáciu nemožno odložiť.", 403);
+  }
+
+  const result = await supabase
+    .from("motorist_notifications")
+    .update({
+      status: "unread",
+      read_at: null,
+      archived_at: null,
+      payload: {
+        ...objectJson(existing.data.payload),
+        snoozed_at: now,
+        snoozed_until: normalizedSnoozedUntil,
+      },
+    })
+    .eq("organization_id", organizationId)
+    .eq("id", notificationId)
+    .select("id")
+    .maybeSingle();
+
+  await throwOnResult(result);
+  if (!result.data) {
+    throw new MutationError("Notifikáciu sa nepodarilo odložiť.", 404);
+  }
+
+  await audit(supabase, organizationId, ownerId, "notification.snoozed", "motorist_notifications", result.data.id, {
+    snoozed_until: normalizedSnoozedUntil,
+  });
+
+  return result.data as Pick<NotificationRow, "id">;
+}
+
 export async function updateNotificationStatus(notificationId: string, status: NotificationRow["status"]) {
   if (!nonEmpty(notificationId)) {
     throw new MutationError("Chýba notifikácia.", 400);

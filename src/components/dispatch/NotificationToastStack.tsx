@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BellRing, Check, ExternalLink, X } from "lucide-react";
-import { compareNotifications, isNotificationUnread, notificationSeverityLabels } from "@/domain/notifications";
+import { compareNotifications, isNotificationReady, notificationSeverityLabels } from "@/domain/notifications";
 import type { DispatchNotification } from "@/domain/types";
+import { NotificationSnoozeButton } from "./NotificationSnoozeButton";
 
 const MAX_VISIBLE_TOASTS = 3;
 
@@ -12,26 +13,31 @@ type NotificationToastStackProps = {
   onMarkRead: (notificationId: string) => void;
   onOpenCase: (caseId: string) => void;
   onOpenTask: (taskId: string, caseId: string) => void;
+  onSnooze: (notificationId: string, snoozedUntil: string) => boolean | Promise<boolean>;
+  now: number;
 };
 
-export function NotificationToastStack({ notifications, onMarkRead, onOpenCase, onOpenTask }: NotificationToastStackProps) {
-  const knownIds = useRef(new Set(notifications.map((notification) => notification.id)));
+export function NotificationToastStack({ notifications, now, onMarkRead, onOpenCase, onOpenTask, onSnooze }: NotificationToastStackProps) {
+  const knownReadyIds = useRef(new Set(
+    notifications
+      .filter((notification) => isNotificationReady(notification, now) && !notification.snoozedUntil)
+      .map((notification) => notification.id),
+  ));
   const [queuedIds, setQueuedIds] = useState<string[]>([]);
 
   useEffect(() => {
-    const newlyArrived = notifications
-      .filter((notification) => isNotificationUnread(notification) && !knownIds.current.has(notification.id))
+    const readyNotifications = notifications.filter((notification) => isNotificationReady(notification, now));
+    const newlyArrived = readyNotifications
+      .filter((notification) => !knownReadyIds.current.has(notification.id))
       .sort(compareNotifications)
       .map((notification) => notification.id);
 
-    for (const notification of notifications) {
-      knownIds.current.add(notification.id);
-    }
+    knownReadyIds.current = new Set(readyNotifications.map((notification) => notification.id));
 
     if (newlyArrived.length > 0) {
       setQueuedIds((current) => [...current, ...newlyArrived.filter((id) => !current.includes(id))].slice(-20));
     }
-  }, [notifications]);
+  }, [notifications, now]);
 
   const notificationsById = useMemo(
     () => new Map(notifications.map((notification) => [notification.id, notification])),
@@ -39,7 +45,7 @@ export function NotificationToastStack({ notifications, onMarkRead, onOpenCase, 
   );
   const queuedNotifications = queuedIds
     .map((id) => notificationsById.get(id))
-    .filter((notification): notification is DispatchNotification => notification !== undefined && isNotificationUnread(notification));
+    .filter((notification): notification is DispatchNotification => notification !== undefined && isNotificationReady(notification, now));
   const visible = queuedNotifications.slice(0, MAX_VISIBLE_TOASTS);
 
   function dismiss(notificationId: string) {
@@ -59,6 +65,7 @@ export function NotificationToastStack({ notifications, onMarkRead, onOpenCase, 
       {visible.map((notification) => {
         const urgent = notification.severity === "urgent";
         const warning = notification.severity === "warning";
+        const returnedReminder = Boolean(notification.snoozedUntil && new Date(notification.snoozedUntil).getTime() <= now);
 
         return (
           <article
@@ -76,7 +83,7 @@ export function NotificationToastStack({ notifications, onMarkRead, onOpenCase, 
                 <div className="min-w-0 flex-1">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Nové upozornenie · {notificationSeverityLabels[notification.severity]}</p>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">{returnedReminder ? "Pripomenutie" : "Nové upozornenie"} · {notificationSeverityLabels[notification.severity]}</p>
                       <h2 className="mt-0.5 line-clamp-2 text-sm font-semibold leading-5 text-zinc-950">{notification.title}</h2>
                     </div>
                     <button
@@ -90,6 +97,12 @@ export function NotificationToastStack({ notifications, onMarkRead, onOpenCase, 
                   </div>
                   {notification.body && <p className="mt-1 line-clamp-2 text-xs leading-5 text-zinc-600">{notification.body}</p>}
                   <div className="mt-3 flex flex-wrap justify-end gap-2">
+                    <NotificationSnoozeButton
+                      notificationId={notification.id}
+                      notificationTitle={notification.title}
+                      onSnooze={onSnooze}
+                      onSnoozed={() => dismiss(notification.id)}
+                    />
                     <button
                       type="button"
                       onClick={() => {

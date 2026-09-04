@@ -64,6 +64,27 @@ export function isNotificationUnread(notification: Pick<DispatchNotification, "s
   return notification.status === "unread";
 }
 
+export function isNotificationSnoozed(
+  notification: Pick<DispatchNotification, "snoozedUntil" | "status">,
+  now: Date | number = new Date(),
+) {
+  if (!isNotificationUnread(notification) || !notification.snoozedUntil) {
+    return false;
+  }
+
+  const snoozedUntil = new Date(notification.snoozedUntil).getTime();
+  const currentTime = typeof now === "number" ? now : now.getTime();
+
+  return Number.isFinite(snoozedUntil) && snoozedUntil > currentTime;
+}
+
+export function isNotificationReady(
+  notification: Pick<DispatchNotification, "snoozedUntil" | "status">,
+  now: Date | number = new Date(),
+) {
+  return isNotificationUnread(notification) && !isNotificationSnoozed(notification, now);
+}
+
 export function isNotificationForProfile(
   notification: Pick<DispatchNotification, "recipientProfileId">,
   profileId: string | undefined,
@@ -92,6 +113,19 @@ export function notificationStatusLabel(status: NotificationStatus) {
   if (status === "archived") return "Archivované";
 
   return "Nové";
+}
+
+export function formatNotificationReminderTime(value: string) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+
+  return date.toLocaleString("sk-SK", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: MOTORIST_TIME_ZONE,
+  });
 }
 
 function severityForPriority(priority: CasePriority): NotificationSeverity {

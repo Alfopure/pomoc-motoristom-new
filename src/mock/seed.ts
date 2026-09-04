@@ -199,7 +199,7 @@ export const notifications: DispatchNotification[] = [
   {
     id: "notification-overdue-callback",
     caseId: "case-2026-0517",
-    taskId: "task-callback-kovac",
+    taskId: "task-0517-callback",
     reminderId: "reminder-callback-kovac",
     recipientProfileId: "op-natalia",
     visibility: "private",
@@ -216,7 +216,7 @@ export const notifications: DispatchNotification[] = [
   {
     id: "notification-team-handover",
     caseId: "case-2026-0516",
-    taskId: "task-handover-europe",
+    taskId: "task-0516-tech",
     reminderId: "reminder-handover-europe",
     visibility: "team",
     kind: "handover",

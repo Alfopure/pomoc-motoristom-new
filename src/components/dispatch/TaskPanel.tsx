@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { CircleAlert, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Edit3, Inbox, ListTodo, Loader2, Plus, Save, Trash2, UserRound, X } from "lucide-react";
+import { BellRing, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Edit3, Inbox, ListTodo, Loader2, Plus, Save, Trash2, UserRound, X } from "lucide-react";
 import type { CasePriority, CaseTask, DispatchCase, DispatchNotification, NotificationStatus, Operator, TaskReminderChannel } from "@/domain/types";
-import { isNotificationForProfile, isNotificationUnread } from "@/domain/notifications";
+import { isNotificationForProfile, isNotificationReady } from "@/domain/notifications";
 import { compareOperationalTasks, isTaskDueToday, isTaskHandoverRelevant, isTaskOpen, isTaskOverdue, taskPriorities, taskPriorityLabels, taskPriorityTone, taskStatusLabel } from "@/domain/tasks";
 import { formatTime } from "@/lib/dispatch-calculations";
 import { NotificationCenter } from "./NotificationCenter";
@@ -73,12 +73,15 @@ type TaskPanelProps = {
   lastNotificationSyncAt?: string;
   markingNotificationId?: string | null;
   notifications: DispatchNotification[];
+  notificationNow?: number;
+  notificationViewerProfileId?: string;
   notificationSyncEnabled?: boolean;
   onCreateTask?: (input: TaskCreateInput) => Promise<void> | void;
   onDeleteTask?: (input: TaskDeleteInput) => Promise<void> | void;
   onMarkNotificationRead: (notificationId: string) => void;
   onOpenTask: (taskId: string, caseId: string) => void;
   onRefreshNotifications?: () => void;
+  onSnoozeNotification?: (notificationId: string, snoozedUntil: string) => boolean | Promise<boolean>;
   onUpdateTask?: (input: TaskUpdateInput) => Promise<void> | void;
   onUpdateNotificationStatus?: (notificationId: string, status: NotificationStatus) => Promise<void> | void;
   operators: Operator[];
@@ -93,12 +96,15 @@ export function TaskPanel({
   lastNotificationSyncAt,
   markingNotificationId,
   notifications,
+  notificationNow,
+  notificationViewerProfileId,
   notificationSyncEnabled,
   onCreateTask,
   onDeleteTask,
   onMarkNotificationRead,
   onOpenTask,
   onRefreshNotifications,
+  onSnoozeNotification,
   onUpdateTask,
   onUpdateNotificationStatus,
   operators,
@@ -153,7 +159,7 @@ export function TaskPanel({
   const myOpenTasks = viewerProfileId ? allOpenTasks.filter((task) => task.assignedTo === viewerProfileId) : [];
   const attentionTaskIds = new Set(
     notifications
-      .filter((notification) => isNotificationUnread(notification) && isNotificationForProfile(notification, viewerProfileId) && notification.taskId)
+      .filter((notification) => isNotificationReady(notification, now) && isNotificationForProfile(notification, notificationViewerProfileId ?? viewerProfileId) && notification.taskId)
       .map((notification) => notification.taskId!),
   );
   const effectiveSidebarAudience: SidebarTaskAudience = viewerProfileId ? sidebarAudience : "all";
@@ -617,6 +623,7 @@ export function TaskPanel({
                   return (
                     <div
                       key={task.id}
+                      data-needs-attention={requiresAttention ? "true" : undefined}
                       data-testid={`task-card-${variant}`}
                       className={`min-w-0 overflow-hidden rounded-md border text-left transition ${variant === "page" ? "p-3" : "dashboard-sidebar-task-card px-2 py-1.5"} ${
                         recentlyCreated
@@ -635,15 +642,16 @@ export function TaskPanel({
                         data-editing={variant === "sidebar" ? Boolean(taskEditDraft) : undefined}
                       >
                       <div className={`dashboard-task-card-header flex items-start justify-between ${variant === "page" ? "gap-2" : "gap-1.5"}`}>
+                        {requiresAttention && (
+                          <span className="task-new-alert-indicator inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-[#FCD703] text-zinc-950" title="Nová neotvorená úloha">
+                            <BellRing size={15} strokeWidth={2.5} aria-hidden="true" />
+                            <span className="sr-only">Nová neotvorená úloha</span>
+                          </span>
+                        )}
                         <button type="button" onClick={() => onOpenTask(task.id, task.caseId)} className="min-w-0 flex-1 text-left">
                           <span className={`${variant === "page" ? "text-sm" : "text-[11px] leading-4"} line-clamp-2 font-semibold text-zinc-950`}>{task.title}</span>
                         </button>
                         <span className={`flex shrink-0 items-center ${variant === "page" ? "gap-1.5" : "gap-1"}`}>
-                          {variant === "page" && requiresAttention && (
-                            <span className="inline-flex size-5 items-center justify-center rounded-full bg-[#FCD703] text-zinc-950 shadow-sm motion-safe:animate-pulse" title="Nová pridelená úloha">
-                              <CircleAlert size={12} aria-label="Nová pridelená úloha" />
-                            </span>
-                          )}
                           {variant === "page" && recentlyCreated && <span className="rounded-full bg-zinc-950 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">Nová</span>}
                           {variant === "page" && <span className="rounded-full bg-yellow-100 px-1.5 py-0.5 text-[9px] font-semibold leading-4 text-zinc-900">{task.caseNumber}</span>}
                           {onDeleteTask && (
@@ -665,11 +673,6 @@ export function TaskPanel({
                       </div>
                       {variant === "sidebar" ? (
                         <button type="button" onClick={() => onOpenTask(task.id, task.caseId)} className="dashboard-task-card-meta mt-1 flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-left">
-                          {requiresAttention && (
-                            <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-[#FCD703] text-zinc-950 shadow-sm motion-safe:animate-pulse" title="Nová pridelená úloha">
-                              <CircleAlert size={12} aria-label="Nová pridelená úloha" />
-                            </span>
-                          )}
                           {recentlyCreated && <span className="rounded-full bg-zinc-950 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-4 tracking-wide text-white">Nová</span>}
                           <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold leading-4 ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
                           <span className={`inline-flex min-w-0 items-center gap-1 text-[10px] font-medium leading-4 ${overdue ? "text-red-700" : "text-zinc-600"}`}>
@@ -871,11 +874,13 @@ export function TaskPanel({
                 limit={6}
                 markingNotificationId={markingNotificationId}
                 notifications={notifications}
+                now={notificationNow ?? now.getTime()}
                 operators={operators}
                 refreshEnabled={Boolean(notificationSyncEnabled)}
                 onMarkRead={onMarkNotificationRead}
                 onOpenTask={onOpenTask}
                 onRefresh={onRefreshNotifications}
+                onSnooze={onSnoozeNotification}
                 onUpdateStatus={onUpdateNotificationStatus}
                 viewerProfileId={viewerProfileId}
               />

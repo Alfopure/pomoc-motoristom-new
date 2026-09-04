@@ -40,7 +40,7 @@ import { phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
 import { TELEPHONY_STALE_MESSAGE, useTelephonyConsole } from "./useTelephonyConsole";
 import { TaskPanel, type TaskCreateInput, type TaskDeleteInput, type TaskUpdateInput } from "./TaskPanel";
 import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
-import { isNotificationForProfile, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
+import { formatNotificationReminderTime, isNotificationForProfile, isNotificationReady, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
 import { isTaskOpen, taskPriorityLabels } from "@/domain/tasks";
 import type { AppRole, Branch, CallStatus, CaseTask, CustomerSharedLocation, DispatchCall, DispatchCase, DispatchNotification, FleetAsset, NotificationStatus, Operator, TimelineEvent } from "@/domain/types";
@@ -225,6 +225,7 @@ export function DispatchConsole({
     users,
     warning,
   } = dispatchData;
+  const notificationViewerProfileId = viewerProfileId ?? (source === "mock" ? operators[0]?.id : undefined);
   const signedInName =
     viewerDisplayName?.trim() ||
     users.find((user) => user.id === viewerProfileId)?.name ||
@@ -261,6 +262,7 @@ export function DispatchConsole({
   const [markingNotificationId, setMarkingNotificationId] = useState<string | null>(null);
   const [isNotificationSyncing, setIsNotificationSyncing] = useState(false);
   const [lastNotificationSyncAt, setLastNotificationSyncAt] = useState<string | undefined>(undefined);
+  const [notificationNow, setNotificationNow] = useState(() => Date.now());
   const notificationSyncInFlight = useRef(false);
   const locationUpdateCursorRef = useRef(new Date(Date.now() - 30_000).toISOString());
   const locationUpdatePollInFlight = useRef(false);
@@ -493,12 +495,12 @@ export function DispatchConsole({
     [dispatchCases],
   );
   const viewerNotifications = useMemo(
-    () => notifications.filter((notification) => isNotificationForProfile(notification, viewerProfileId)),
-    [notifications, viewerProfileId],
+    () => notifications.filter((notification) => isNotificationForProfile(notification, notificationViewerProfileId)),
+    [notificationViewerProfileId, notifications],
   );
   const unreadNotificationCount = useMemo(
-    () => viewerNotifications.filter(isNotificationUnread).length,
-    [viewerNotifications],
+    () => viewerNotifications.filter((notification) => isNotificationReady(notification, notificationNow)).length,
+    [notificationNow, viewerNotifications],
   );
   const taskAttentionCount = openTaskCount + unreadNotificationCount;
   const activeCase =
@@ -869,6 +871,22 @@ export function DispatchConsole({
     };
   }, [pollCustomerLocationUpdates, source]);
 
+  useEffect(() => {
+    const refreshNotificationClock = () => setNotificationNow(Date.now());
+    const interval = window.setInterval(refreshNotificationClock, 15_000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshNotificationClock();
+    };
+
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshNotificationClock);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshNotificationClock);
+    };
+  }, []);
+
   async function markNotificationRead(notificationId: string) {
     await updateNotificationStatusFromPanel(notificationId, "read");
   }
@@ -904,6 +922,44 @@ export function DispatchConsole({
       setMutationNotice(`Notifikácia: ${notificationStatusLabel(status)}.`);
     } catch (error) {
       setMutationNotice(error instanceof Error ? error.message : "Notifikáciu sa nepodarilo upraviť.");
+    } finally {
+      setMarkingNotificationId(null);
+    }
+  }
+
+  async function snoozeNotificationFromPanel(notificationId: string, snoozedUntil: string) {
+    if (markingNotificationId) {
+      return false;
+    }
+
+    setMarkingNotificationId(notificationId);
+    setMutationNotice(null);
+
+    if (source === "mock") {
+      setDispatchData((current) => applyMockNotificationSnooze(current, notificationId, snoozedUntil));
+      setMutationNotice(`Pripomenutie nastavené na ${formatNotificationReminderTime(snoozedUntil)}. Mock dáta boli upravené iba lokálne.`);
+      setMarkingNotificationId(null);
+      return true;
+    }
+
+    try {
+      const response = await fetch(`/api/notifications/${encodeURIComponent(notificationId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ snoozedUntil }),
+      });
+      const result = (await response.json()) as { notifications?: DispatchData["notifications"]; error?: string };
+
+      if (!response.ok || !result.notifications) {
+        throw new Error(result.error ?? "Pripomenutie sa nepodarilo nastaviť.");
+      }
+
+      setDispatchData((current) => ({ ...current, notifications: result.notifications ?? current.notifications }));
+      setMutationNotice(`Pripomenutie nastavené na ${formatNotificationReminderTime(snoozedUntil)}.`);
+      return true;
+    } catch (error) {
+      setMutationNotice(error instanceof Error ? error.message : "Pripomenutie sa nepodarilo nastaviť.");
+      return false;
     } finally {
       setMarkingNotificationId(null);
     }
@@ -1420,9 +1476,11 @@ export function DispatchConsole({
           <HeaderNotificationMenu
             cases={dispatchCases}
             notifications={viewerNotifications}
+            now={notificationNow}
             onMarkRead={(notificationId) => void markNotificationRead(notificationId)}
             onOpenCase={openCase}
             onOpenTask={openTask}
+            onSnooze={snoozeNotificationFromPanel}
           />
           {telephonyConfigured && telephony.stale ? (
             <div className="hidden xl:block">
@@ -1664,12 +1722,15 @@ export function DispatchConsole({
                 isNotificationSyncing={isNotificationSyncing}
                 lastNotificationSyncAt={lastNotificationSyncAt}
                 markingNotificationId={markingNotificationId}
+                notificationNow={notificationNow}
+                notificationViewerProfileId={notificationViewerProfileId}
                 notifications={notifications}
                 onCreateTask={createTaskFromPanel}
                 onDeleteTask={deleteTaskFromPanel}
                 onMarkNotificationRead={(notificationId) => void markNotificationRead(notificationId)}
                 onOpenTask={openTask}
                 onRefreshNotifications={() => void syncDueNotifications(false)}
+                onSnoozeNotification={snoozeNotificationFromPanel}
                 onUpdateTask={updateTaskFromPanel}
                 onUpdateNotificationStatus={updateNotificationStatusFromPanel}
                 operators={effectiveOperators}
@@ -1690,12 +1751,15 @@ export function DispatchConsole({
               isNotificationSyncing={isNotificationSyncing}
               lastNotificationSyncAt={lastNotificationSyncAt}
               markingNotificationId={markingNotificationId}
+              notificationNow={notificationNow}
+              notificationViewerProfileId={notificationViewerProfileId}
               notifications={notifications}
               onCreateTask={createTaskFromPanel}
               onDeleteTask={deleteTaskFromPanel}
               onMarkNotificationRead={(notificationId) => void markNotificationRead(notificationId)}
               onOpenTask={openTask}
               onRefreshNotifications={() => void syncDueNotifications(false)}
+              onSnoozeNotification={snoozeNotificationFromPanel}
               onUpdateTask={updateTaskFromPanel}
               onUpdateNotificationStatus={updateNotificationStatusFromPanel}
               operators={effectiveOperators}
@@ -1759,9 +1823,11 @@ export function DispatchConsole({
 
       <NotificationToastStack
         notifications={viewerNotifications}
+        now={notificationNow}
         onMarkRead={(notificationId) => void markNotificationRead(notificationId)}
         onOpenCase={openCase}
         onOpenTask={openTask}
+        onSnooze={snoozeNotificationFromPanel}
       />
 
       <nav className="fixed inset-x-0 bottom-0 z-[2147483000] border-t border-zinc-200 bg-white/95 px-2 pt-1.5 pb-[calc(8px+env(safe-area-inset-bottom))] shadow-[0_-10px_30px_rgba(24,24,27,0.12)] backdrop-blur sm:hidden" aria-label="Mobilná navigácia">
@@ -2213,6 +2279,26 @@ function applyMockNotificationStatus(current: DispatchData, notificationId: stri
         updatedAt: now,
       };
     }),
+  };
+}
+
+function applyMockNotificationSnooze(current: DispatchData, notificationId: string, snoozedUntil: string): DispatchData {
+  const now = new Date().toISOString();
+
+  return {
+    ...current,
+    notifications: current.notifications.map((notification) =>
+      notification.id === notificationId
+        ? {
+            ...notification,
+            status: "unread" as const,
+            snoozedUntil,
+            readAt: undefined,
+            archivedAt: undefined,
+            updatedAt: now,
+          }
+        : notification,
+    ),
   };
 }
 

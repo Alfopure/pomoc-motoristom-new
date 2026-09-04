@@ -172,7 +172,7 @@ test("constrained fields prevent letters and invalid identifier characters", asy
   await openNewCase(page);
 
   const productionYear = page.getByLabel("Rok výroby", { exact: true });
-  const phone = page.locator("input[type='tel']").first();
+  const phone = page.getByLabel("Telefón", { exact: true }).first();
   const vin = page.getByRole("textbox", { name: /^VIN/ });
 
   await expect(productionYear).toHaveAttribute("type", "number");
@@ -210,7 +210,7 @@ test("validation stays visible while an incomplete case can still be saved as a 
   await page.getByRole("checkbox", { name: "Asistencia na mieste", exact: true }).check();
   await page.getByRole("button", { name: "Súkromná osoba", exact: true }).click();
   await page.getByLabel("Meno", { exact: true }).fill("Ján");
-  await page.locator("input[type='tel']").first().fill("900 123 456");
+  await page.getByLabel("Telefón", { exact: true }).first().fill("900 123 456");
   await page.getByLabel("EČV", { exact: true }).fill("BA123AB");
   await page.getByLabel("Opis problému / situácie", { exact: true }).fill("Vozidlo sa nedá naštartovať.");
   await page.getByRole("button", { name: "Nepojazdné", exact: true }).click();
@@ -501,6 +501,43 @@ test("dashboard tasks can be edited inline with a multiline title", async ({ pag
   await expectNoElementOverflow(sidebar, "inline task editor");
 });
 
+test("a notification can be snoozed and returns as a prominent reminder", async ({ page }) => {
+  await page.clock.install({ time: new Date("2026-09-04T12:00:00.000Z") });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.setViewportSize({ width: 1440, height: viewportHeight });
+  await openDashboard(page);
+
+  const attentionCard = page.locator('[data-needs-attention="true"]');
+  await expect(attentionCard).toHaveCount(1);
+  await expect(attentionCard.locator(".task-new-alert-indicator")).toBeVisible();
+
+  const notificationTrigger = page.getByRole("button", { name: /Upozornenia, 1 nových/ });
+  await notificationTrigger.click();
+  const history = page.getByRole("dialog", { name: "História upozornení" });
+  await expect(history).toBeVisible();
+  await history.getByRole("button", { name: "Pripomenúť upozornenie neskôr" }).click();
+
+  const snoozeDialog = page.getByRole("dialog", { name: "Pripomenúť neskôr" });
+  await expect(snoozeDialog).toBeVisible();
+  await expect(snoozeDialog.getByRole("button", { name: "O 10 min", exact: true })).toBeVisible();
+  await expect(snoozeDialog.getByRole("button", { name: "O 30 min", exact: true })).toBeVisible();
+  await expect(snoozeDialog.getByRole("button", { name: "O 1 hodinu", exact: true })).toBeVisible();
+  await expect(snoozeDialog.getByRole("button", { name: "Zajtra 09:00", exact: true })).toBeVisible();
+  await expect(snoozeDialog.getByLabel("Vlastný dátum a čas pripomenutia", { exact: true })).toHaveAttribute("type", "datetime-local");
+  await snoozeDialog.getByRole("button", { name: "O 10 min", exact: true }).click();
+
+  await expect(snoozeDialog).toBeHidden();
+  await expect(page.getByRole("button", { name: "Upozornenia", exact: true })).toBeVisible();
+  await expect(page.locator('[data-needs-attention="true"]')).toHaveCount(0);
+  await expect(history.getByText(/Pripomenie 04\. 09\. 14:10/)).toBeVisible();
+
+  await page.clock.fastForward("10:15");
+  const reminderPopup = page.getByLabel("Nové upozornenia");
+  await expect(reminderPopup).toBeVisible();
+  await expect(reminderPopup.getByText(/Pripomenutie ·/)).toBeVisible();
+  await expect(page.locator('[data-needs-attention="true"]')).toHaveCount(1);
+});
+
 test("dispatch case sidebar searches case numbers and exposes operational sorting details", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: viewportHeight });
   await openDashboard(page);
@@ -511,7 +548,7 @@ test("dispatch case sidebar searches case numbers and exposes operational sortin
 
   const assistanceCase = sidebar.locator('[data-case-number="PM-2026-0516"]');
   await expect(assistanceCase).toBeVisible();
-  await expect(assistanceCase.getByText("Asistenčná služba: Europe Assistance", { exact: true })).toBeVisible();
+  await expect(assistanceCase.getByText("Europe Assistance", { exact: true })).toBeVisible();
   await expect(assistanceCase.getByText("Úlohy 1", { exact: true })).toBeVisible();
   await expect(sidebar.locator("[data-case-number]")).toHaveCount(1);
 

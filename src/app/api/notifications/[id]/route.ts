@@ -1,5 +1,5 @@
 import { loadDispatchNotifications } from "@/data/dispatch-repository";
-import { MutationError, updateNotificationStatus } from "@/server/motorist-mutations";
+import { MutationError, snoozeNotification, updateNotificationStatus } from "@/server/motorist-mutations";
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
 
 export const runtime = "nodejs";
@@ -9,7 +9,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     assertSameOriginRequest(request);
     const actor = await requireDefaultMotoristActor(["dispatcher", "manager", "admin"]);
     const { id } = await params;
-    const body = (await request.json().catch(() => ({}))) as { status?: unknown };
+    const body = (await request.json().catch(() => ({}))) as { snoozedUntil?: unknown; status?: unknown };
+    if (typeof body.snoozedUntil === "string") {
+      await snoozeNotification(id, body.snoozedUntil, {
+        id: actor.profileId,
+        organization_id: actor.organizationId,
+      });
+      const notifications = await loadDispatchNotifications(actor.organizationId);
+
+      return Response.json({ notificationId: id, notifications });
+    }
+
     const status = body.status;
 
     if (status !== "unread" && status !== "read" && status !== "archived") {

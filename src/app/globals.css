@@ -273,6 +273,32 @@ input {
   flex-direction: column;
 }
 
+.task-new-alert-indicator {
+  box-shadow: 0 0 0 3px rgb(252 211 3 / 0.28);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .task-new-alert-indicator {
+    animation: task-new-alert-pulse 1.15s ease-in-out infinite;
+  }
+}
+
+@keyframes task-new-alert-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    background: #fcd703;
+    color: #18181b;
+    box-shadow: 0 0 0 3px rgb(252 211 3 / 0.28);
+  }
+  50% {
+    transform: scale(1.13);
+    background: #ef4444;
+    color: #ffffff;
+    box-shadow: 0 0 0 7px rgb(239 68 68 / 0.2);
+  }
+}
+
 @container (min-width: 420px) {
   .dashboard-sidebar-task-card-layout[data-editing="false"] .dashboard-task-card-actions > div {
     flex-direction: row;

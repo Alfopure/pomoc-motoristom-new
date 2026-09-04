@@ -564,6 +564,7 @@ export type DispatchNotification = {
   status: NotificationStatus;
   deliveryStatus: NotificationDeliveryStatus;
   dedupeKey: string;
+  snoozedUntil?: string;
   readAt?: string;
   archivedAt?: string;
   createdAt: string;
