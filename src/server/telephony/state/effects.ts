@@ -600,6 +600,9 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         commandId: command.commandId,
       });
       return { skipped: false, detail: { supervisorRole: command.supervisorRole } };
+    case "supervisor_role_switch":
+      await telnyx.switchSupervisorRole({ callControlId: resolveLeg(ctx, command.leg), role: command.supervisorRole, commandId: command.commandId });
+      return { skipped: false, detail: { supervisorRole: command.supervisorRole } };
     case "conference_leave":
       await telnyx.conferenceAction(requireConference(ctx), "leave", { call_control_id: resolveLeg(ctx, command.leg), commandId: command.commandId });
       return { skipped: false };
