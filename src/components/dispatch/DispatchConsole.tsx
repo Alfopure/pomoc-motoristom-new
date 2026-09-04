@@ -11,12 +11,16 @@ import {
   Headphones,
   LayoutDashboard,
   Loader2,
+  LogOut,
   Menu,
   PhoneOff,
+  Pin,
+  PinOff,
   Plus,
   Settings2,
   Table2,
   Truck,
+  UserRound,
   X,
 } from "lucide-react";
 import { AttendanceModule } from "./AttendanceModule";
@@ -40,6 +44,16 @@ import { PhoneBar } from "./PhoneBar";
 import { phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
 import { TELEPHONY_STALE_MESSAGE, useTelephonyConsole } from "./useTelephonyConsole";
 import { TaskPanel, type TaskCreateInput, type TaskDeleteInput, type TaskUpdateInput } from "./TaskPanel";
+import {
+  DEFAULT_PINNED_NAVIGATION_VIEWS,
+  MAX_PINNED_NAVIGATION_VIEWS,
+  isPinnableNavigationView,
+  navigationPreferenceStorageKey,
+  parsePinnedNavigationViews,
+  togglePinnedNavigationView,
+  type PinnableNavigationView,
+} from "./navigation-preferences";
+import { signOutCurrentSession } from "@/components/auth/sign-out";
 import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
 import { formatNotificationReminderTime, isNotificationForProfile, isNotificationReady, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
@@ -55,10 +69,13 @@ import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 import type { TelephonyAvailabilityAction } from "@/lib/telephony/presence";
 
-type View = "dispatch" | "tasks" | "cases" | "call-center" | "attendance" | "fleet" | "reports" | "settings";
+type View = "dispatch" | PinnableNavigationView;
+
+type NavigationGroup = "daily" | "operations" | "management";
 
 type NavigationItem = {
   badgeCount?: number;
+  group?: NavigationGroup;
   icon: LucideIcon;
   label: string;
   shortLabel: string;
@@ -195,11 +212,13 @@ const sourceLabels: Record<NonNullable<DispatchCase["sourceType"]>, string> = {
 export function DispatchConsole({
   initialData,
   viewerDisplayName,
+  viewerEmail,
   viewerProfileId,
   viewerRole,
 }: {
   initialData: DispatchData;
   viewerDisplayName?: string;
+  viewerEmail?: string;
   viewerOrganizationId?: string;
   viewerProfileId?: string;
   /** The signed-in profile's role; only supervision is gated on it in the console. */
@@ -234,6 +253,11 @@ export function DispatchConsole({
     users[0]?.name ||
     "Prihlásený používateľ";
   const [activeView, setActiveView] = useState<View>("dispatch");
+  const [pinnedNavigationViews, setPinnedNavigationViews] = useState<PinnableNavigationView[]>([
+    ...DEFAULT_PINNED_NAVIGATION_VIEWS,
+  ]);
+  const [navigationPinNotice, setNavigationPinNotice] = useState<string | null>(null);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   const [activeCaseId, setActiveCaseId] = useState(dispatchCases.find(isActiveDispatchCase)?.id ?? "");
   const [workspace, setWorkspace] = useState<DispatchWorkspaceState>({ kind: "cockpit", mode: "split" });
   const [newCaseCall, setNewCaseCall] = useState(incomingCall);
@@ -279,10 +303,36 @@ export function DispatchConsole({
   } | null>(null);
   const [dashboardColumns, setDashboardColumns] = useState<DashboardColumnWidths>(DEFAULT_DASHBOARD_COLUMNS);
   const dashboardColumnStorageKey = `motorist:dashboard-columns:v1:${viewerProfileId ?? "local-browser"}`;
+  const navigationStorageKey = navigationPreferenceStorageKey(viewerProfileId);
 
   useEffect(() => {
     consoleRef.current?.setAttribute("data-hydrated", "true");
   }, []);
+
+  useEffect(() => {
+    let frameId: number | undefined;
+
+    const applyStoredPreference = (raw: string | null) => {
+      const parsed = parsePinnedNavigationViews(raw);
+      frameId = window.requestAnimationFrame(() => setPinnedNavigationViews(parsed));
+    };
+
+    try {
+      applyStoredPreference(window.localStorage.getItem(navigationStorageKey));
+    } catch {
+      // Browser storage is only an enhancement; the practical defaults remain usable.
+    }
+
+    const syncAcrossTabs = (event: StorageEvent) => {
+      if (event.key === navigationStorageKey) applyStoredPreference(event.newValue);
+    };
+    window.addEventListener("storage", syncAcrossTabs);
+
+    return () => {
+      if (frameId !== undefined) window.cancelAnimationFrame(frameId);
+      window.removeEventListener("storage", syncAcrossTabs);
+    };
+  }, [navigationStorageKey]);
 
   useEffect(() => {
     let frameId: number | undefined;
@@ -572,17 +622,39 @@ export function DispatchConsole({
 
   const navItems: NavigationItem[] = [
     { icon: LayoutDashboard, label: "Nástenka", shortLabel: "Nástenka", view: "dispatch" },
-    { badgeCount: taskAttentionCount, icon: BellRing, label: "Úlohy", shortLabel: "Úlohy", view: "tasks" },
-    { icon: Table2, label: "Prípady", shortLabel: "Prípady", view: "cases" },
-    { icon: Headphones, label: "Ústredňa", shortLabel: "Ústredňa", view: "call-center" },
-    { icon: CalendarDays, label: "Dochádzka", shortLabel: "Doch.", view: "attendance" },
-    { icon: Truck, label: "Flotila", shortLabel: "Flotila", view: "fleet" },
-    { icon: BarChart3, label: "Reporty", shortLabel: "Reporty", view: "reports" },
-    { icon: Settings2, label: "Nastavenia", shortLabel: "Nastav.", view: "settings" },
+    { badgeCount: taskAttentionCount, group: "daily", icon: BellRing, label: "Úlohy", shortLabel: "Úlohy", view: "tasks" },
+    { group: "daily", icon: Table2, label: "Prípady", shortLabel: "Prípady", view: "cases" },
+    { group: "daily", icon: Headphones, label: "Ústredňa", shortLabel: "Ústredňa", view: "call-center" },
+    { group: "operations", icon: CalendarDays, label: "Dochádzka", shortLabel: "Doch.", view: "attendance" },
+    { group: "operations", icon: Truck, label: "Flotila", shortLabel: "Flotila", view: "fleet" },
+    { group: "management", icon: BarChart3, label: "Reporty", shortLabel: "Reporty", view: "reports" },
+    { group: "management", icon: Settings2, label: "Nastavenia", shortLabel: "Nastav.", view: "settings" },
   ];
   const dashboardNavItem = navItems.find((item) => item.view === "dispatch")!;
-  const secondaryNavItems = navItems.filter((item) => item.view !== "dispatch");
+  const secondaryNavItems = navItems.filter(
+    (item): item is NavigationItem & { view: PinnableNavigationView } => isPinnableNavigationView(item.view),
+  );
+  const pinnedNavItems = pinnedNavigationViews
+    .map((view) => secondaryNavItems.find((item) => item.view === view))
+    .filter((item): item is NavigationItem & { view: PinnableNavigationView } => Boolean(item));
   const secondaryBadgeCount = secondaryNavItems.reduce((total, item) => total + (item.badgeCount ?? 0), 0);
+
+  function toggleNavigationPin(view: PinnableNavigationView) {
+    const result = togglePinnedNavigationView(pinnedNavigationViews, view);
+
+    if (result.limitReached) {
+      setNavigationPinNotice(`V hornej lište môžu byť najviac ${MAX_PINNED_NAVIGATION_VIEWS} skratky. Najprv jednu odopni.`);
+      return;
+    }
+
+    setPinnedNavigationViews(result.views);
+    setNavigationPinNotice(null);
+    try {
+      window.localStorage.setItem(navigationStorageKey, JSON.stringify(result.views));
+    } catch {
+      // The shortcut still works for this session if storage is unavailable.
+    }
+  }
 
   // Stable so it does not invalidate the call-centre effects that depend on it;
   // as an inline arrow it was a new function on every render.
@@ -1086,6 +1158,25 @@ export function DispatchConsole({
     requestNavigation(() => setActiveView(view));
   }
 
+  async function signOut() {
+    if (isSigningOut) return;
+
+    setIsSigningOut(true);
+    setMutationNotice(null);
+
+    try {
+      await signOutCurrentSession();
+    } catch {
+      setIsSigningOut(false);
+      setMutationNotice("Odhlásenie sa nepodarilo. Skontroluj pripojenie a skús to znova.");
+    }
+  }
+
+  function requestSignOut() {
+    if (isSigningOut) return;
+    requestNavigation(() => void signOut());
+  }
+
   function startNewCase(call?: DispatchCall) {
     requestNavigation(() => startNewCaseNow(call));
   }
@@ -1426,12 +1517,13 @@ export function DispatchConsole({
     >
       <div className="relative z-50 shrink-0" ref={topBarsRef}>
       <header className="flex min-h-14 items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-950 px-3 py-2 text-white sm:px-4 sm:py-0">
-        <div className="flex min-w-0 shrink items-center gap-3">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#FCD703] font-black text-zinc-950">PM</div>
-          <span data-testid="signed-in-user-name" className="min-w-0 max-w-28 truncate text-sm font-semibold sm:max-w-24 md:max-w-36 lg:max-w-48" title={signedInName}>
-            {signedInName}
-          </span>
-        </div>
+        <AccountMenu
+          displayName={signedInName}
+          email={viewerEmail}
+          role={viewerRole}
+          signingOut={isSigningOut}
+          onSignOut={requestSignOut}
+        />
         <nav className="hidden min-w-0 flex-1 items-center justify-center gap-1 sm:flex" aria-label="Hlavná navigácia">
           <NavButton
             active={activeView === dashboardNavItem.view}
@@ -1440,11 +1532,27 @@ export function DispatchConsole({
             badgeCount={dashboardNavItem.badgeCount}
             onClick={() => switchView(dashboardNavItem.view)}
           />
+          <div className="hidden items-center gap-1 xl:flex" aria-label="Pripnuté obrazovky">
+            {pinnedNavItems.map((item) => (
+              <NavButton
+                key={item.view}
+                active={activeView === item.view}
+                label={item.label}
+                icon={item.icon}
+                badgeCount={item.badgeCount}
+                onClick={() => switchView(item.view)}
+                responsiveShortcut
+              />
+            ))}
+          </div>
           <NavigationMenu
             activeView={activeView}
             badgeCount={secondaryBadgeCount}
             items={secondaryNavItems}
+            pinNotice={navigationPinNotice}
+            pinnedViews={pinnedNavigationViews}
             onSelect={switchView}
+            onTogglePin={toggleNavigationPin}
             variant="header"
           />
         </nav>
@@ -1856,7 +1964,10 @@ export function DispatchConsole({
             activeView={activeView}
             badgeCount={secondaryBadgeCount}
             items={secondaryNavItems}
+            pinNotice={navigationPinNotice}
+            pinnedViews={pinnedNavigationViews}
             onSelect={switchView}
+            onTogglePin={toggleNavigationPin}
             variant="mobile"
           />
         </div>
@@ -1872,6 +1983,122 @@ export function DispatchConsole({
           onDiscard={discardAndLeave}
           onSave={() => void saveAndLeave()}
         />
+      )}
+    </div>
+  );
+}
+
+const accountRoleLabels: Record<AppRole, string> = {
+  admin: "Administrátor",
+  dispatcher: "Dispečer",
+  manager: "Manažér",
+  senior_dispatcher: "Senior dispečer",
+};
+
+function AccountMenu({
+  displayName,
+  email,
+  onSignOut,
+  role,
+  signingOut,
+}: {
+  displayName: string;
+  email?: string;
+  onSignOut: () => void;
+  role?: AppRole;
+  signingOut: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function closeOnOutsidePointer(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  function handleSignOut() {
+    setOpen(false);
+    onSignOut();
+  }
+
+  return (
+    <div ref={rootRef} className="relative min-w-0 shrink">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label={`Účet ${displayName}`}
+        title="Účet a odhlásenie"
+        onClick={() => setOpen((current) => !current)}
+        disabled={signingOut}
+        className="group flex h-10 min-w-0 items-center gap-2 rounded-lg px-1.5 text-left transition hover:bg-white/10 disabled:cursor-wait sm:gap-2.5"
+      >
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-sm font-black text-zinc-950">PM</span>
+        <span
+          data-testid="signed-in-user-name"
+          className="min-w-0 max-w-28 truncate text-sm font-semibold sm:max-w-24 md:max-w-36 lg:max-w-48"
+        >
+          {displayName}
+        </span>
+        {signingOut ? (
+          <Loader2 size={14} className="shrink-0 animate-spin text-zinc-300" aria-label="Odhlasujem" />
+        ) : (
+          <ChevronDown
+            size={14}
+            className={`shrink-0 text-zinc-400 transition-transform group-hover:text-white ${open ? "rotate-180" : ""}`}
+            aria-hidden="true"
+          />
+        )}
+      </button>
+
+      {open && (
+        <div
+          role="dialog"
+          aria-label="Používateľský účet"
+          className="absolute left-0 top-[calc(100%+0.55rem)] z-[2147483500] w-[min(19rem,calc(100vw-1rem))] overflow-hidden rounded-xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl"
+        >
+          <div className="flex items-start gap-3 p-3.5">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-600">
+              <UserRound size={19} aria-hidden="true" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-semibold text-zinc-950">{displayName}</span>
+              {email ? <span className="mt-0.5 block truncate text-xs text-zinc-500">{email}</span> : null}
+              {role ? (
+                <span className="mt-2 inline-flex rounded-full bg-zinc-100 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.08em] text-zinc-600">
+                  {accountRoleLabels[role]}
+                </span>
+              ) : null}
+            </span>
+          </div>
+          <div className="border-t border-zinc-200 p-2">
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-red-700 transition hover:bg-red-50 hover:text-red-800"
+            >
+              <LogOut size={16} className="shrink-0" aria-hidden="true" />
+              <span className="min-w-0">
+                <span className="block">Odhlásiť sa</span>
+                <span className="mt-0.5 block text-[11px] font-normal text-zinc-500">Len z tohto zariadenia</span>
+              </span>
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1907,19 +2134,31 @@ function NavigationMenu({
   activeView,
   badgeCount,
   items,
+  pinNotice,
+  pinnedViews,
   onSelect,
+  onTogglePin,
   variant,
 }: {
   activeView: View;
   badgeCount: number;
-  items: NavigationItem[];
+  items: Array<NavigationItem & { view: PinnableNavigationView }>;
+  pinNotice: string | null;
+  pinnedViews: PinnableNavigationView[];
   onSelect: (view: View) => void;
+  onTogglePin: (view: PinnableNavigationView) => void;
   variant: "header" | "mobile";
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const hasActiveItem = items.some((item) => item.view === activeView);
   const hasBadge = badgeCount > 0;
+  const activeItemIsPinned = isPinnableNavigationView(activeView) && pinnedViews.includes(activeView);
+  const pinnedItems = pinnedViews
+    .map((view) => items.find((item) => item.view === view))
+    .filter((item): item is NavigationItem & { view: PinnableNavigationView } => Boolean(item));
+  const unpinnedItems = items.filter((item) => !pinnedViews.includes(item.view));
+  const unpinnedBadgeCount = unpinnedItems.reduce((total, item) => total + (item.badgeCount ?? 0), 0);
 
   useEffect(() => {
     if (!open) return;
@@ -1946,6 +2185,12 @@ function NavigationMenu({
   }
 
   const mobile = variant === "mobile";
+  const menuHighlighted = open || (hasActiveItem && !activeItemIsPinned);
+  const headerTriggerStyle = menuHighlighted
+    ? "bg-white text-zinc-950"
+    : activeItemIsPinned
+      ? "bg-white text-zinc-950 xl:bg-transparent xl:text-zinc-300 xl:hover:bg-zinc-800 xl:hover:text-white"
+      : "text-zinc-300 hover:bg-zinc-800 hover:text-white";
 
   return (
     <div ref={rootRef} className={`relative min-w-0 ${mobile ? "w-full" : "shrink-0"}`}>
@@ -1954,55 +2199,159 @@ function NavigationMenu({
         onClick={() => setOpen((current) => !current)}
         aria-label="Menu"
         aria-expanded={open}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         className={
           mobile
             ? `relative flex h-14 w-full flex-col items-center justify-center gap-1 rounded-md px-1 text-[10px] font-semibold transition ${hasActiveItem || open ? "bg-zinc-950 text-white" : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950"}`
-            : `relative inline-flex h-9 shrink-0 items-center gap-2 rounded-md px-2.5 text-xs font-semibold transition sm:px-3 sm:text-sm ${hasActiveItem || open ? "bg-white text-zinc-950" : "text-zinc-300 hover:bg-zinc-800 hover:text-white"}`
+            : `relative inline-flex h-9 shrink-0 items-center gap-2 rounded-md px-2.5 text-xs font-semibold transition sm:px-3 sm:text-sm ${headerTriggerStyle}`
         }
       >
         <Menu size={mobile ? 19 : 16} strokeWidth={mobile ? 2.2 : 2} aria-hidden="true" />
         <span>Menu</span>
         {!mobile && <ChevronDown size={14} className={`transition-transform ${open ? "rotate-180" : ""}`} aria-hidden="true" />}
         {hasBadge && (
-          <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none ${mobile ? "absolute right-[calc(50%-28px)] top-1 bg-[#FCD703] text-zinc-950" : hasActiveItem || open ? "bg-zinc-950 text-white" : "bg-[#FCD703] text-zinc-950"}`}>
+          <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none ${mobile ? "absolute right-[calc(50%-28px)] top-1 bg-[#FCD703] text-zinc-950" : `${menuHighlighted || activeItemIsPinned ? "bg-zinc-950 text-white" : "bg-[#FCD703] text-zinc-950"} xl:hidden`}`}>
             {formatBadgeCount(badgeCount)}
+          </span>
+        )}
+        {!mobile && unpinnedBadgeCount > 0 && (
+          <span className={`hidden rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none xl:inline-flex ${menuHighlighted ? "bg-zinc-950 text-white" : "bg-[#FCD703] text-zinc-950"}`}>
+            {formatBadgeCount(unpinnedBadgeCount)}
           </span>
         )}
       </button>
 
       {open && (
         <div
-          role="menu"
-          aria-label="Ďalšie sekcie"
-          className={`absolute z-[2147483500] w-[min(17rem,calc(100vw-1rem))] rounded-xl border border-zinc-200 bg-white p-2 text-zinc-950 shadow-2xl ${mobile ? "bottom-[calc(100%+0.65rem)] right-0" : "left-0 top-[calc(100%+0.55rem)]"}`}
+          role="dialog"
+          aria-label="Obrazovky aplikácie"
+          className={`absolute z-[2147483500] max-h-[min(34rem,calc(100dvh-6rem))] w-[min(26rem,calc(100vw-1rem))] overflow-y-auto rounded-xl border border-zinc-200 bg-white p-3 text-zinc-950 shadow-2xl ${mobile ? "bottom-[calc(100%+0.65rem)] right-0" : "left-0 top-[calc(100%+0.55rem)]"}`}
         >
-          {items.map((item) => {
-            const active = item.view === activeView;
-            const ItemIcon = item.icon;
-            const itemHasBadge = typeof item.badgeCount === "number" && item.badgeCount > 0;
+          <div className="flex items-start justify-between gap-3 px-1 pb-2.5">
+            <div>
+              <p className="text-sm font-semibold text-zinc-950">Obrazovky</p>
+              <p className="mt-0.5 text-[11px] leading-4 text-zinc-500">Pripni si najpoužívanejšie do hornej lišty.</p>
+            </div>
+            <span className="shrink-0 rounded-full bg-zinc-100 px-2 py-1 text-[10px] font-bold text-zinc-600">
+              {pinnedItems.length} z {MAX_PINNED_NAVIGATION_VIEWS} skratiek
+            </span>
+          </div>
+
+          {pinNotice ? (
+            <p role="status" className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] font-medium leading-4 text-amber-900">
+              {pinNotice}
+            </p>
+          ) : null}
+
+          <section aria-labelledby={`${variant}-pinned-navigation-title`}>
+            <p id={`${variant}-pinned-navigation-title`} className="px-1 text-[10px] font-bold uppercase tracking-[0.12em] text-zinc-500">
+              Pripnuté
+            </p>
+            {pinnedItems.length > 0 ? (
+              <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                {pinnedItems.map((item) => (
+                  <NavigationMenuItem
+                    key={item.view}
+                    active={item.view === activeView}
+                    item={item}
+                    pinned
+                    pinDisabled={false}
+                    onSelect={select}
+                    onTogglePin={onTogglePin}
+                  />
+                ))}
+              </div>
+            ) : (
+              <p className="mt-1.5 rounded-lg border border-dashed border-zinc-200 px-3 py-2 text-xs text-zinc-500">
+                Zatiaľ nič. Pripni položku ikonou špendlíka.
+              </p>
+            )}
+          </section>
+
+          <div className="my-3 border-t border-zinc-200" />
+
+          {([
+            ["daily", "Každodenná práca"],
+            ["operations", "Prevádzka"],
+            ["management", "Prehľady a správa"],
+          ] as Array<[NavigationGroup, string]>).map(([group, label]) => {
+            const groupItems = unpinnedItems.filter((item) => item.group === group);
+            if (groupItems.length === 0) return null;
 
             return (
-              <button
-                key={item.view}
-                type="button"
-                role="menuitem"
-                aria-current={active ? "page" : undefined}
-                onClick={() => select(item.view)}
-                className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm font-semibold transition ${active ? "bg-zinc-950 text-white" : "text-zinc-700 hover:bg-zinc-100 hover:text-zinc-950"}`}
-              >
-                <ItemIcon size={16} aria-hidden="true" />
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                {itemHasBadge && (
-                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none ${active ? "bg-[#FCD703] text-zinc-950" : "bg-zinc-950 text-white"}`}>
-                    {formatBadgeCount(item.badgeCount ?? 0)}
-                  </span>
-                )}
-              </button>
+              <section key={group} className="mt-2 first:mt-0" aria-labelledby={`${variant}-${group}-navigation-title`}>
+                <p id={`${variant}-${group}-navigation-title`} className="px-1 text-[10px] font-bold uppercase tracking-[0.12em] text-zinc-500">
+                  {label}
+                </p>
+                <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                  {groupItems.map((item) => (
+                    <NavigationMenuItem
+                      key={item.view}
+                      active={item.view === activeView}
+                      item={item}
+                      pinned={false}
+                      pinDisabled={pinnedItems.length >= MAX_PINNED_NAVIGATION_VIEWS}
+                      onSelect={select}
+                      onTogglePin={onTogglePin}
+                    />
+                  ))}
+                </div>
+              </section>
             );
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+function NavigationMenuItem({
+  active,
+  item,
+  onSelect,
+  onTogglePin,
+  pinDisabled,
+  pinned,
+}: {
+  active: boolean;
+  item: NavigationItem & { view: PinnableNavigationView };
+  onSelect: (view: PinnableNavigationView) => void;
+  onTogglePin: (view: PinnableNavigationView) => void;
+  pinDisabled: boolean;
+  pinned: boolean;
+}) {
+  const ItemIcon = item.icon;
+  const PinIcon = pinned ? PinOff : Pin;
+  const itemHasBadge = typeof item.badgeCount === "number" && item.badgeCount > 0;
+  const pinAction = pinned ? "Odopnúť" : "Pripnúť";
+
+  return (
+    <div className={`group relative min-w-0 overflow-hidden rounded-lg border transition ${active ? "border-zinc-950 bg-zinc-950" : "border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50"}`}>
+      <button
+        type="button"
+        aria-current={active ? "page" : undefined}
+        onClick={() => onSelect(item.view)}
+        className={`flex min-h-11 w-full items-center gap-2 px-2.5 py-2 pr-10 text-left text-xs font-semibold transition ${active ? "text-white" : "text-zinc-700 group-hover:text-zinc-950"}`}
+      >
+        <ItemIcon size={16} className="shrink-0" aria-hidden="true" />
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+        {itemHasBadge ? (
+          <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none ${active ? "bg-[#FCD703] text-zinc-950" : "bg-zinc-950 text-white"}`}>
+            {formatBadgeCount(item.badgeCount ?? 0)}
+          </span>
+        ) : null}
+      </button>
+      <button
+        type="button"
+        aria-label={pinDisabled ? `Limit skratiek je plný. Najprv jednu odopni, potom môžeš pripnúť ${item.label}` : `${pinAction} ${item.label}`}
+        aria-pressed={pinned}
+        data-testid={`navigation-pin-${item.view}`}
+        title={pinDisabled ? `Najprv odopni jednu z ${MAX_PINNED_NAVIGATION_VIEWS} skratiek` : `${pinAction} ${item.label.toLocaleLowerCase("sk")}`}
+        onClick={() => onTogglePin(item.view)}
+        className={`absolute right-1.5 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md transition ${active ? "text-zinc-300 hover:bg-white/15 hover:text-[#FCD703]" : "text-zinc-400 hover:bg-zinc-200 hover:text-zinc-950"} ${pinDisabled ? "opacity-50" : ""}`}
+      >
+        <PinIcon size={14} aria-hidden="true" />
+      </button>
     </div>
   );
 }
@@ -2014,6 +2363,7 @@ function NavButton({
   icon: Icon,
   label,
   onClick,
+  responsiveShortcut = false,
 }: {
   active: boolean;
   badgeCount?: number;
@@ -2021,21 +2371,24 @@ function NavButton({
   icon: LucideIcon;
   label: string;
   onClick: () => void;
+  responsiveShortcut?: boolean;
 }) {
   const hasBadge = typeof badgeCount === "number" && badgeCount > 0;
 
   return (
     <button
       type="button"
+      aria-label={label}
       aria-current={active ? "page" : undefined}
       onClick={onClick}
       disabled={disabled}
-      className={`relative inline-flex h-9 shrink-0 items-center gap-2 rounded-md px-2.5 text-xs font-semibold transition sm:px-3 sm:text-sm ${
+      title={responsiveShortcut ? label : undefined}
+      className={`relative inline-flex h-9 shrink-0 items-center gap-2 rounded-md text-xs font-semibold transition sm:text-sm ${responsiveShortcut ? "px-2 2xl:px-3" : "px-2.5 sm:px-3"} ${
         active ? "bg-white text-zinc-950" : "text-zinc-300 hover:bg-zinc-800 hover:text-white"
       } ${disabled ? "cursor-wait opacity-50" : ""}`}
     >
-      <Icon size={16} />
-      <span>{label}</span>
+      <Icon size={16} aria-hidden="true" />
+      <span className={responsiveShortcut ? "hidden 2xl:inline" : undefined}>{label}</span>
       {hasBadge && (
         <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none ${active ? "bg-zinc-950 text-white" : "bg-[#FCD703] text-zinc-950"}`}>
           {formatBadgeCount(badgeCount)}
