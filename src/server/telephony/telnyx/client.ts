@@ -258,6 +258,9 @@ export type SendMessageParams = { to: string; text: string; from?: string; messa
 
 export type SendMessageResult = { id: string; status: string | null; raw: Record<string, unknown> };
 
+/** `role` on `POST /calls/{id}/actions/switch_supervisor_role` and on dial. */
+export type SupervisorRole = "barge" | "whisper" | "monitor";
+
 /**
  * `GET /v2/calls/{call_control_id}`. Telnyx answers 404 for a leg it has never
  * heard of and `is_alive: false` for one that ended, so the reconcile job
@@ -290,6 +293,7 @@ export type TelnyxClient = {
   createConference(params: CreateConferenceParams): Promise<ConferenceResult>;
   conferenceAction(conferenceId: string, action: ConferenceAction, body: Record<string, unknown> & { commandId?: string }): Promise<void>;
   retrieveCall(callControlId: string): Promise<TelnyxCallStatus>;
+  switchSupervisorRole(params: { callControlId: string; role: SupervisorRole; commandId: string }): Promise<void>;
   listPhoneNumbers(params?: { pageSize?: number; phoneNumber?: string }): Promise<TelnyxPhoneNumber[]>;
   createTelephonyCredential(params: CreateTelephonyCredentialParams): Promise<TelephonyCredential>;
   /** Revokes a SIP identity for good: the credential can no longer register or mint a token. */
@@ -705,12 +709,24 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         return { callControlId, known: true, alive: raw.is_alive === true, callSessionId: str(raw.call_session_id), raw };
       } catch (error) {
         // A leg Telnyx has forgotten is exactly as dead as one it reports as
-        // not alive; anything else (auth, rate limit, outage) must surface.
-        if (error instanceof TelnyxCommandError && error.status === 404) {
+        // not alive. The published spec documents 200/422 for this endpoint (no
+        // 404), and 422 is not transient, so both mean the same thing: Telnyx
+        // will not tell us this leg is alive. Anything else — auth, rate limit,
+        // outage — must surface, because retrying is the right answer there.
+        if (error instanceof TelnyxCommandError && (error.status === 404 || error.status === 422)) {
           return { callControlId, known: false, alive: false, callSessionId: null, raw: null };
         }
         throw error;
       }
+    },
+    async switchSupervisorRole(params) {
+      // `POST /calls/{id}/actions/switch_supervisor_role` — the documented way
+      // to change a supervisor's mode on a bridged call. The alternative (drop
+      // the leg and dial a new one with a different `supervisor_role`) makes the
+      // replaced leg's `call.hangup` indistinguishable from the end of
+      // supervision, which is exactly the bug this replaced.
+      assertCallsAllowed();
+      await callAction(params.callControlId, "switch_supervisor_role", params.commandId, { role: params.role });
     },
     async listPhoneNumbers(params = {}) {
       const response = await request<unknown>("GET", "/phone_numbers", {

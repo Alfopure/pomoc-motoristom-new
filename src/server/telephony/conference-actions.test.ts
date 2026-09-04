@@ -362,23 +362,73 @@ describe("superviseCall", () => {
     void whispers;
   });
 
-  it("replaces the supervisor leg when the mode changes outside a conference", async () => {
+  it("switches the mode on the live leg outside a conference, without touching it", async () => {
+    const h = createTelephonyHarness();
+    giveSupervisorDevice(h);
+    h.setPresence(PROFILES.o4, { status: "available", current_session_id: null });
+    const call = await talkingWith(h);
+    await superviseCall(actionDeps(h), manager, call.sessionId, "monitor");
+    const leg = h.legFor(call.sessionId, PROFILES.o4)!;
+    await h.legEvent(String(leg.telnyx_call_control_id), "call.answered");
+    expect(h.presence(PROFILES.o4)).toMatchObject({ status: "on_call" });
+
+    // Telnyx switches the role of a supervisor on a bridged call in place.
+    // Replacing the leg would make its hangup look like the end of supervision.
+    await superviseCall(actionDeps(h), manager, call.sessionId, "whisper");
+    expect(h.telnyx.of("switchSupervisorRole").at(-1)!.params).toMatchObject({ callControlId: leg.telnyx_call_control_id, role: "whisper" });
+    expect(h.telnyx.of("dial").filter((command) => command.params.to === SUPERVISOR_SIP)).toHaveLength(1);
+    expect(h.telnyx.of("hangup").some((command) => command.params.callControlId === leg.telnyx_call_control_id)).toBe(false);
+    expect(h.legs(call.sessionId).filter((row) => row.role === "supervisor" && !row.ended_at)).toHaveLength(1);
+
+    // The supervised call and the manager's own bookkeeping are untouched.
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", conference_id: null, answered_by_profile_id: PROFILES.o1 });
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: { [PROFILES.o4]: { mode: "whisper" } } });
+    expect(h.legFor(call.sessionId, PROFILES.o4)!.metadata).toMatchObject({ supervisor_mode: "whisper" });
+    expect(h.presence(PROFILES.o4)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
+    expect(h.rows("motorist_audit_log").map((row) => row.action)).toEqual(["telephony.supervise.start", "telephony.supervise.switch"]);
+  });
+
+  it("survives switching modes twice in a row", async () => {
+    const h = createTelephonyHarness();
+    giveSupervisorDevice(h);
+    h.setPresence(PROFILES.o4, { status: "available", current_session_id: null });
+    const call = await talkingWith(h);
+    await superviseCall(actionDeps(h), manager, call.sessionId, "monitor");
+    const leg = h.legFor(call.sessionId, PROFILES.o4)!;
+    await h.legEvent(String(leg.telnyx_call_control_id), "call.answered");
+
+    await superviseCall(actionDeps(h), manager, call.sessionId, "whisper");
+    await superviseCall(actionDeps(h), manager, call.sessionId, "barge");
+    // One leg throughout: no churn means no window in which a second switch can
+    // target a leg that is already gone.
+    expect(h.legs(call.sessionId).filter((row) => row.role === "supervisor")).toHaveLength(1);
+    expect(h.telnyx.of("switchSupervisorRole").map((command) => command.params.role)).toEqual(["whisper", "barge"]);
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: { [PROFILES.o4]: { mode: "barge" } } });
+
+    // Asking for the mode it already has is a no-op, not another command.
+    await superviseCall(actionDeps(h), manager, call.sessionId, "barge");
+    expect(h.telnyx.of("switchSupervisorRole")).toHaveLength(2);
+  });
+
+  it("keeps the applied mode when Telnyx refuses the switch, and lets the manager retry", async () => {
     const h = createTelephonyHarness();
     giveSupervisorDevice(h);
     const call = await talkingWith(h);
     await superviseCall(actionDeps(h), manager, call.sessionId, "monitor");
-    const first = h.legFor(call.sessionId, PROFILES.o4)!;
-    await h.legEvent(String(first.telnyx_call_control_id), "call.answered");
+    const leg = h.legFor(call.sessionId, PROFILES.o4)!;
+    await h.legEvent(String(leg.telnyx_call_control_id), "call.answered");
+    h.telnyx.failNext("switchSupervisorRole", new TelnyxCommandError({ code: "invalid_supervisor_role", status: 422, detail: "no" }));
 
-    // The supervisor role is fixed at dial time when there is no conference, so
-    // a switch drops the old leg and attaches a fresh one.
-    await superviseCall(actionDeps(h), manager, call.sessionId, "whisper");
-    expect(h.telnyx.of("hangup").at(-1)!.params).toMatchObject({ callControlId: first.telnyx_call_control_id });
-    const redial = h.telnyx.of("dial").filter((command) => command.params.to === SUPERVISOR_SIP).at(-1)!.params;
-    expect(redial).toMatchObject({ superviseCallControlId: call.operatorLeg, supervisorRole: "whisper" });
-    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: { [PROFILES.o4]: { mode: "whisper" } } });
-    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", conference_id: null });
-    expect(h.rows("motorist_audit_log").map((row) => row.action)).toEqual(["telephony.supervise.start", "telephony.supervise.switch"]);
+    expect(await fail(superviseCall(actionDeps(h), manager, call.sessionId, "barge"))).toMatchObject({ status: 502 });
+    // The session must not claim a mode Telnyx never applied — otherwise the
+    // retry below would be swallowed as "unchanged".
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: { [PROFILES.o4]: { mode: "monitor" } } });
+    expect(h.legFor(call.sessionId, PROFILES.o4)!.metadata).toMatchObject({ supervisor_mode: "monitor" });
+
+    const retry = await superviseCall(actionDeps(h), manager, call.sessionId, "barge");
+    expect(retry.state).toBe("talking");
+    expect(h.telnyx.of("switchSupervisorRole").at(-1)!.params).toMatchObject({ role: "barge" });
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: { [PROFILES.o4]: { mode: "barge" } } });
   });
 
   it("moves an attached supervisor into the conference when the call is promoted", async () => {
@@ -576,6 +626,37 @@ describe("supervision when the call leaves its conference", () => {
     expect(h.presence(PROFILES.o4)).toMatchObject({ status: "on_call" });
     return { ...call, supervisorLeg: String(supervisorLeg.telnyx_call_control_id) };
   }
+
+  it("does not end a live supervision when a second leg of the same manager drops", async () => {
+    const h = createTelephonyHarness();
+    const call = await supervised(h);
+    const leg = h.legFor(call.sessionId, PROFILES.o4)!;
+    // A leftover leg: a duplicate dial, or one replaced by an older build. Its
+    // hangup must not be read as "the manager stopped supervising".
+    h.db.seed("motorist_call_legs", [{ ...leg, id: "00000000-0000-4000-8000-000000007701", telnyx_call_control_id: "cc-stale", telnyx_call_leg_id: "leg-cc-stale", initiated_at: new Date(h.now().getTime() - 5_000).toISOString() }]);
+
+    await h.legEvent("cc-stale", "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: { [PROFILES.o4]: { mode: "whisper" } } });
+    expect(h.presence(PROFILES.o4)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
+
+    // The last leg does end it.
+    await h.legEvent(String(leg.telnyx_call_control_id), "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: null });
+    expect(h.presence(PROFILES.o4).status).toBe("available");
+  });
+
+  it("stops every leg of a supervisor, not just the first", async () => {
+    const h = createTelephonyHarness();
+    const call = await supervised(h);
+    const leg = h.legFor(call.sessionId, PROFILES.o4)!;
+    h.db.seed("motorist_call_legs", [{ ...leg, id: "00000000-0000-4000-8000-000000007702", telnyx_call_control_id: "cc-extra", telnyx_call_leg_id: "leg-cc-extra", initiated_at: new Date(h.now().getTime() + 5_000).toISOString() }]);
+
+    await stopSupervisingCall(actionDeps(h), manager, call.sessionId);
+    const hungUp = h.telnyx.of("hangup").map((command) => command.params.callControlId);
+    expect(hungUp).toContain(String(leg.telnyx_call_control_id));
+    expect(hungUp).toContain("cc-extra");
+    expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: null });
+  });
 
   it("hangs the supervisor up when the operator parks the call", async () => {
     const h = createTelephonyHarness();

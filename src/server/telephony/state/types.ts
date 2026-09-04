@@ -303,6 +303,12 @@ export type Command = CommandBase &
   | { kind: "conference_unmute"; commandId: string; legs: LegRef[] }
   /** `POST /conferences/{id}/actions/update`: switches a participant's supervisor role live. */
   | { kind: "conference_update"; commandId: string; leg: LegRef; supervisorRole: SupervisorMode | "none"; whisper?: LegRef[] }
+  /**
+   * `POST /calls/{id}/actions/switch_supervisor_role`: changes the mode of a
+   * supervisor attached to a *bridged* call, without touching the leg. The
+   * conference equivalent is `conference_update`.
+   */
+  | { kind: "supervisor_role_switch"; commandId: string; leg: LegRef; supervisorRole: SupervisorMode }
   | RingFanout
   );
 
