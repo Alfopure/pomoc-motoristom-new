@@ -131,10 +131,9 @@ export function UserAccessSettings({ onDataChange, onNotice, users, viewerRole }
   }
 
   /**
-   * Deletion is irreversible and takes the login with it, so it asks twice: the
-   * first click arms the row, the second one runs. That is the same amount of
-   * friction as a modal without adding a dialog this settings screen does not
-   * otherwise have.
+   * Deletion is irreversible and takes the identity and login with it. Work and
+   * attendance history are retained, so the action still asks twice: the first
+   * click arms the row, the second one runs.
    */
   async function deleteUser(user: AccessUser) {
     if (confirmDelete !== user.id) {
