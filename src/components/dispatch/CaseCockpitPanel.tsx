@@ -8,6 +8,8 @@ import {
   ChevronDown,
   ClipboardList,
   CreditCard,
+  Headphones,
+  Loader2,
   Mail,
   MapPin,
   Maximize2,
@@ -16,6 +18,7 @@ import {
   Paperclip,
   Phone,
   Route,
+  Smartphone,
   UserRound,
   Wrench,
 } from "lucide-react";
@@ -112,6 +115,7 @@ export function CaseCockpitPanel({
   viewerProfileId,
 }: CaseCockpitPanelProps) {
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
+  const [isDialingFromHeader, setIsDialingFromHeader] = useState(false);
   const owner = operators.find((operator) => operator.id === caseItem.ownerId)?.name ?? caseItem.ownerName ?? "Nepriradené";
   const selectedAsset = caseItem.selectedAssetId ? assets.find((asset) => asset.id === caseItem.selectedAssetId) : undefined;
   const asset = selectedAsset ?? model.nearestAsset?.asset;
@@ -181,6 +185,47 @@ export function CaseCockpitPanel({
     ? `${model.routePlan.totalOperationalKm} km · ${model.routePlan.totalEta} min`
     : "Trasa sa vypočíta po doplnení polohy";
 
+  async function callFromWebPhone() {
+    if (!contactPhone || !onDial || isDialingFromHeader) return;
+
+    setIsDialingFromHeader(true);
+    try {
+      await onDial(contactPhone, caseItem.id);
+    } catch {
+      // The shared telephony controller presents the provider error in the
+      // header status menu. Avoid an unhandled rejection in this compact action.
+    } finally {
+      setIsDialingFromHeader(false);
+    }
+  }
+
+  const callActions = (
+    <div className="flex shrink-0 items-center gap-1" role="group" aria-label="Možnosti volania">
+      <QuickAction
+        busy={isDialingFromHeader}
+        compact={mode === "collapsed"}
+        disabled={!contactPhone || !onDial || isDialingFromHeader}
+        icon={Headphones}
+        label="Volať cez web"
+        onClick={() => void callFromWebPhone()}
+        title={
+          !contactPhone
+            ? "Najprv doplňte telefónne číslo"
+            : onDial
+              ? "Volať cez webový telefón"
+              : "Webový telefón nie je nakonfigurovaný"
+        }
+      />
+      <QuickAction
+        compact={mode === "collapsed"}
+        href={contactPhone ? `tel:${cleanPhone(contactPhone)}` : undefined}
+        icon={Smartphone}
+        label="Volať cez mobil"
+        title={contactPhone ? "Volať cez mobilný telefón" : "Najprv doplňte telefónne číslo"}
+      />
+    </div>
+  );
+
   if (mode === "collapsed") {
     return (
       <>
@@ -197,7 +242,7 @@ export function CaseCockpitPanel({
             </div>
             <div className="mt-1 truncate text-xs font-medium text-zinc-600">{caseItem.nextStep}</div>
           </div>
-          <QuickAction href={contactPhone ? `tel:${cleanPhone(contactPhone)}` : undefined} icon={Phone} label="Volať" compact />
+          {callActions}
           <QuickAction onClick={() => setSmsComposerOpen(true)} icon={MessageSquareText} label="SMS" compact tone="yellow" />
           <button
             type="button"
@@ -236,8 +281,8 @@ export function CaseCockpitPanel({
               <span>Update {formatTime(caseItem.updatedAt)}</span>
             </div>
           </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-            <QuickAction href={contactPhone ? `tel:${cleanPhone(contactPhone)}` : undefined} icon={Phone} label="Volať" />
+          <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:shrink-0">
+            {callActions}
             <QuickAction onClick={() => setSmsComposerOpen(true)} icon={MessageSquareText} label="SMS" tone="yellow" />
             {contactEmail && <QuickAction href={`mailto:${contactEmail}`} icon={Mail} label="Email" />}
             <button
@@ -522,18 +567,24 @@ function InfoBlock({ children, className = "", icon: Icon, title }: { children: 
 }
 
 function QuickAction({
+  busy = false,
   compact = false,
+  disabled = false,
   href,
   icon: Icon,
   label,
   onClick,
+  title,
   tone = "neutral",
 }: {
+  busy?: boolean;
   compact?: boolean;
+  disabled?: boolean;
   href?: string;
   icon: LucideIcon;
   label: string;
   onClick?: () => void;
+  title?: string;
   tone?: "neutral" | "yellow";
 }) {
   const className =
@@ -543,8 +594,15 @@ function QuickAction({
 
   if (onClick) {
     return (
-      <button type="button" onClick={onClick} className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold ${className}`}>
-        <Icon size={compact ? 15 : 14} />
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        aria-label={label}
+        title={title ?? label}
+        className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+      >
+        {busy ? <Loader2 size={compact ? 15 : 14} className="motion-safe:animate-spin" aria-hidden="true" /> : <Icon size={compact ? 15 : 14} aria-hidden="true" />}
         {!compact && <span className="max-w-[120px] truncate">{label}</span>}
       </button>
     );
@@ -555,17 +613,19 @@ function QuickAction({
       <button
         type="button"
         disabled
+        aria-label={label}
+        title={title ?? label}
         className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold opacity-50 ${className}`}
       >
-        <Icon size={compact ? 15 : 14} />
+        <Icon size={compact ? 15 : 14} aria-hidden="true" />
         {!compact && <span className="max-w-[120px] truncate">{label}</span>}
       </button>
     );
   }
 
   return (
-    <a href={href} className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold ${className}`}>
-      <Icon size={compact ? 15 : 14} />
+    <a href={href} aria-label={label} title={title ?? label} className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold ${className}`}>
+      <Icon size={compact ? 15 : 14} aria-hidden="true" />
       {!compact && <span className="max-w-[120px] truncate">{label}</span>}
     </a>
   );
