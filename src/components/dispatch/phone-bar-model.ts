@@ -207,10 +207,9 @@ export function phoneBarStateLabel(call: PhoneBarCall): PhoneBarStateLabel {
 /**
  * Whether the bar is worth rendering at all.
  *
- * Without a configured provider the console keeps its existing
- * "Telefónia nie je nakonfigurovaná" notice and the bar stays out of the way;
- * an idle, stopped phone with nothing happening is equally not worth a strip
- * across the top of every view.
+ * Registration and availability now live in the compact header menu. The
+ * full-width bar is reserved for a call, an offer or the waiting room, so an
+ * idle registered phone does not consume a second header row.
  */
 export function phoneBarVisible(input: {
   status: WebphoneStatus;
@@ -219,8 +218,7 @@ export function phoneBarVisible(input: {
   hasWaiting: boolean;
 }): boolean {
   if (input.status === "not_configured") return false;
-  if (input.hasCall || input.hasOffer || input.hasWaiting) return true;
-  return input.status !== "idle";
+  return input.hasCall || input.hasOffer || input.hasWaiting;
 }
 
 /**

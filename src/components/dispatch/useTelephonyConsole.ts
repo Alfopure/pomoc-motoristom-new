@@ -28,8 +28,10 @@ import { TelnyxWebphone, type WebphoneSnapshot } from "@/lib/telephony/telnyx-we
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "@/lib/telephony/webphone-model";
 
 import type { TransferRequest } from "./CallTransferPicker";
-import type { PhonePauseReason, PhonePresenceAction } from "./PhoneBar";
 import { partyBusyKey, PHONE_ACTION_ERRORS, type PhoneCallAction, type PhonePartyAction } from "./phone-bar-model";
+
+export type PhonePauseReason = { id: string; code: string; label: string };
+export type PhonePresenceAction = { status: "available" | "paused" | "offline"; pauseReasonId?: string };
 
 /**
  * All telephony wiring of the dispatch console in one place: the browser
