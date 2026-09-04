@@ -51,6 +51,12 @@ input {
   user-select: none;
 }
 
+[data-testid="dispatch-console"] main[data-resizing="true"],
+[data-testid="dispatch-console"] main[data-resizing="true"] * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
 @media (min-width: 1024px) {
   .dispatch-workspace-shell[data-workspace-mode="split"] {
     grid-template-rows: var(--dispatch-desktop-grid-rows, minmax(260px, 66fr) minmax(96px, 34fr));

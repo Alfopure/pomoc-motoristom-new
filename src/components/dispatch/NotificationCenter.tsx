@@ -97,10 +97,10 @@ export function NotificationCenter({
 
   return (
     <section className="min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm" aria-labelledby="notification-center-heading">
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-100 px-3 py-3">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-100 px-2.5 py-2.5">
         <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-zinc-950">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-yellow-100 text-zinc-950">
-            <BellRing size={16} />
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-yellow-100 text-zinc-950">
+            <BellRing size={14} />
           </span>
           <h3 id="notification-center-heading" className="truncate">Upozornenia</h3>
           <span className="rounded-full bg-zinc-950 px-2 py-0.5 text-xs font-semibold text-white" aria-label={`${unreadCount} neprečítaných upozornení`}>
@@ -121,7 +121,7 @@ export function NotificationCenter({
         )}
       </div>
 
-      <div className="grid min-w-0 gap-2 border-b border-zinc-100 bg-zinc-50/70 p-3">
+      <div className="grid min-w-0 gap-1.5 border-b border-zinc-100 bg-zinc-50/70 p-2">
         <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="Komu patria upozornenia">
           {([
             { id: "mine", label: "Moje", count: personalNotifications.length, icon: UserRound },
@@ -134,7 +134,7 @@ export function NotificationCenter({
                 type="button"
                 onClick={() => chooseAudience(item.id)}
                 aria-pressed={audience === item.id}
-                className={`flex min-h-9 min-w-0 items-center justify-between gap-2 rounded-md border px-2.5 text-xs font-semibold transition ${
+                className={`flex min-h-8 min-w-0 items-center justify-between gap-2 rounded-md border px-2 text-[11px] font-semibold transition ${
                   audience === item.id
                     ? "border-yellow-400 bg-yellow-100 text-zinc-950"
                     : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
@@ -156,7 +156,7 @@ export function NotificationCenter({
               type="button"
               onClick={() => chooseState(item.id)}
               aria-pressed={stateFilter === item.id}
-              className={`flex min-h-9 min-w-0 items-center justify-between gap-2 rounded-md border px-2.5 text-xs font-semibold transition ${
+              className={`flex min-h-8 min-w-0 items-center justify-between gap-2 rounded-md border px-2 text-[11px] font-semibold transition ${
                 stateFilter === item.id
                   ? "border-zinc-950 bg-zinc-950 text-white"
                   : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
@@ -177,7 +177,7 @@ export function NotificationCenter({
               setSeverityFilter(event.target.value as NotificationSeverityFilter);
               setPage(1);
             }}
-            className="h-9 min-w-0 rounded-md border border-zinc-200 bg-white px-2 pr-8 text-xs font-semibold text-zinc-800 outline-none ring-yellow-300 focus:ring-2"
+            className="h-8 min-w-0 rounded-md border border-zinc-200 bg-white px-2 pr-8 text-[11px] font-semibold text-zinc-800 outline-none ring-yellow-300 focus:ring-2"
           >
             <option value="all">Všetky</option>
             <option value="urgent">Urgentné</option>
@@ -187,7 +187,7 @@ export function NotificationCenter({
         </label>
       </div>
 
-      <div className="grid min-w-0 gap-2 p-3">
+      <div className="grid min-w-0 gap-1.5 p-2">
         {visibleNotifications.length > 0 ? (
           visibleNotifications.map((notification) => {
             const caseId = notification.caseId;
@@ -202,7 +202,7 @@ export function NotificationCenter({
             return (
               <article
                 key={notification.id}
-                className={`min-w-0 rounded-lg border p-3 ${isNotificationUnread(notification) ? "border-yellow-200 bg-yellow-50" : "border-zinc-200 bg-zinc-50"}`}
+                className={`min-w-0 rounded-md border p-2 ${isNotificationUnread(notification) ? "border-yellow-200 bg-yellow-50" : "border-zinc-200 bg-zinc-50"}`}
               >
                 <button
                   type="button"
@@ -216,10 +216,10 @@ export function NotificationCenter({
                       {notificationSeverityLabels[notification.severity]}
                     </span>
                   </div>
-                  {notification.body && <p className="mt-1 line-clamp-2 text-xs leading-5 text-zinc-600">{notification.body}</p>}
+                  {notification.body && <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-zinc-600">{notification.body}</p>}
                 </button>
 
-                <div className="mt-2 flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-black/5 pt-2">
+                <div className="mt-1.5 flex min-w-0 flex-wrap items-center justify-between gap-1.5 border-t border-black/5 pt-1.5">
                   <span className="min-w-0 truncate text-[11px] font-medium text-zinc-500">
                     {audience === "all" ? `${recipientLabel} · ` : ""}{caseItem?.caseNumber ?? "Bez prípadu"} · {formatTime(notification.createdAt)}
                   </span>

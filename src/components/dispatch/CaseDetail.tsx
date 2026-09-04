@@ -802,7 +802,7 @@ export function CaseDetail({
                 <h4 className="text-base font-semibold text-zinc-950">Pridať novú úlohu</h4>
                 <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
                   Názov úlohy
-                  <input value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base! font-medium text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
+                  <textarea value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" rows={3} className="min-h-24 w-full min-w-0 resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 text-base! font-medium leading-6 text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
                 </label>
                 <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Rýchle nastavenie termínu">
                   {taskDuePresets.map((preset) => (
@@ -1021,7 +1021,7 @@ export function CaseDetail({
                   <div className="mt-3 grid min-w-0 gap-3">
                     <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
                       Názov úlohy
-                      <input value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base! font-medium text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
+                      <textarea value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" rows={3} className="min-h-24 w-full min-w-0 resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 text-base! font-medium leading-6 text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
                     </label>
                     <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
                       Termín

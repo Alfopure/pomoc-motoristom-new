@@ -365,6 +365,53 @@ test("dashboard phone validates a missing number before dialing", async ({ page 
   await expect(page.getByRole("alert").filter({ hasText: "Zadajte platné telefónne číslo" })).toBeVisible();
 });
 
+test("dashboard side columns resize horizontally and keep the preference", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: viewportHeight });
+  await openDashboard(page);
+
+  const leftResize = page.getByRole("separator", { name: "Zmeniť šírku stĺpca prípadov", exact: true });
+  const rightResize = page.getByRole("separator", { name: "Zmeniť šírku stĺpca úloh a upozornení", exact: true });
+  await expect(leftResize).toBeVisible();
+  await expect(rightResize).toBeVisible();
+
+  const leftBox = await leftResize.boundingBox();
+  expect(leftBox).not.toBeNull();
+  await page.mouse.move(leftBox!.x + leftBox!.width / 2, leftBox!.y + 120);
+  await page.mouse.down();
+  await page.mouse.move(leftBox!.x + leftBox!.width / 2 + 40, leftBox!.y + 120, { steps: 4 });
+  await page.mouse.up();
+  await expect(leftResize).toHaveAttribute("aria-valuenow", "370");
+
+  const rightBox = await rightResize.boundingBox();
+  expect(rightBox).not.toBeNull();
+  await page.mouse.move(rightBox!.x + rightBox!.width / 2, rightBox!.y + 120);
+  await page.mouse.down();
+  await page.mouse.move(rightBox!.x + rightBox!.width / 2 - 30, rightBox!.y + 120, { steps: 3 });
+  await page.mouse.up();
+  await expect(rightResize).toHaveAttribute("aria-valuenow", "360");
+  await expectNoDocumentOverflow(page, "resized dashboard columns");
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("dispatch-console")).toHaveAttribute("data-hydrated", "true", { timeout: 30_000 });
+  await expect(leftResize).toHaveAttribute("aria-valuenow", "370");
+  await expect(rightResize).toHaveAttribute("aria-valuenow", "360");
+
+  await leftResize.dblclick();
+  await rightResize.dblclick();
+  await expect(leftResize).toHaveAttribute("aria-valuenow", "330");
+  await expect(rightResize).toHaveAttribute("aria-valuenow", "330");
+
+  await page.setViewportSize({ width: 1024, height: viewportHeight });
+  await expect(leftResize).toBeVisible();
+  await expect(rightResize).toBeHidden();
+  await expectNoDocumentOverflow(page, "dashboard columns at 1024px");
+
+  await page.setViewportSize({ width: 768, height: viewportHeight });
+  await expect(leftResize).toBeHidden();
+  await expect(rightResize).toBeHidden();
+  await expectNoDocumentOverflow(page, "dashboard columns at 768px");
+});
+
 test("task sidebar stays focused and the full task filters work together", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: viewportHeight });
   await openDashboard(page);
@@ -384,7 +431,10 @@ test("task sidebar stays focused and the full task filters work together", async
 
   await navigation.getByRole("menuitem", { name: /Úlohy/ }).click();
   await expect(page.getByRole("heading", { name: "Nová úloha", exact: true })).toBeVisible();
-  await expect(page.getByLabel("Názov úlohy", { exact: true })).toBeVisible();
+  const taskTitleInput = page.getByLabel("Názov úlohy", { exact: true });
+  await expect(taskTitleInput).toBeVisible();
+  expect(await taskTitleInput.evaluate((element) => element.tagName)).toBe("TEXTAREA");
+  await expect(taskTitleInput).toHaveAttribute("rows", "3");
   await expect(page.getByLabel("Termín", { exact: true })).toBeVisible();
 
   const operatorFilter = page.getByRole("combobox", { name: /Operátor/ });
@@ -407,6 +457,24 @@ test("task sidebar stays focused and the full task filters work together", async
   await expect(page.getByText("Nová", { exact: true })).toBeVisible();
   await expect(operatorFilter).toHaveValue("all");
   await expectNoDocumentOverflow(page, "task workspace");
+});
+
+test("dashboard tasks can be edited inline with a multiline title", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: viewportHeight });
+  await openDashboard(page);
+
+  const sidebar = page.getByTestId("dashboard-task-panel-shell");
+  await sidebar.getByRole("button", { name: "Upraviť", exact: true }).first().click();
+
+  const titleEditor = sidebar.getByRole("textbox", { name: /^Názov úlohy / }).first();
+  await expect(titleEditor).toBeVisible();
+  expect(await titleEditor.evaluate((element) => element.tagName)).toBe("TEXTAREA");
+  await expect(titleEditor).toHaveAttribute("rows", "3");
+  await titleEditor.fill("Upravená úloha\ns dlhším detailom");
+  await sidebar.getByRole("button", { name: "Uložiť", exact: true }).click();
+
+  await expect(sidebar.getByText(/Upravená úloha\s+s dlhším detailom/)).toBeVisible();
+  await expectNoElementOverflow(sidebar, "inline task editor");
 });
 
 test("dispatch case sidebar searches case numbers and exposes operational sorting details", async ({ page }) => {
@@ -494,12 +562,16 @@ test("case directory keeps its context and creates a task for the selected perso
   await page.setViewportSize({ width: 1440, height: viewportHeight });
   await openDashboard(page);
 
-  const casesNavigation = page.getByRole("button", { name: "Prípady", exact: true }).first();
+  const navigation = page.getByRole("navigation", { name: "Hlavná navigácia" });
+  await navigation.getByRole("button", { name: "Menu", exact: true }).click();
+  const casesNavigation = navigation.getByRole("menuitem", { name: "Prípady", exact: true });
   await casesNavigation.click();
   await page.locator("tbody tr").first().click();
 
-  await expect(casesNavigation).toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("case-edit-form-main")).toBeVisible();
+  await navigation.getByRole("button", { name: "Menu", exact: true }).click();
+  await expect(navigation.getByRole("menuitem", { name: "Prípady", exact: true })).toHaveAttribute("aria-current", "page");
+  await navigation.getByRole("button", { name: "Menu", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Úlohy prípadu", exact: true })).toBeVisible();
   await page.getByLabel("Názov novej úlohy").fill("Overiť klienta");
   await page.getByLabel("Zodpovedná osoba").last().selectOption(mockOperators[1].id);
