@@ -20,6 +20,7 @@ import {
   emptyTransition,
   ignoredResult,
   isOpenLeg,
+  isSupervisorMode,
   isTerminalAttemptResult,
   mergeMeta,
   readMeta,
@@ -434,6 +435,12 @@ function detachSupervisors(b: TransitionBuilder, reason: string): void {
     b.cmd(hangupCmd(b, leg, `supervise_${reason}`));
     if (leg.profile_id) b.patchMeta({ supervise: withoutSupervisor(b, leg.profile_id) });
   }
+}
+
+/** The supervisor mode Telnyx actually has for this leg, as recorded when it was applied. */
+function legMetaMode(leg: LegRow): SupervisorMode | null {
+  const raw = (leg.metadata as { supervisor_mode?: unknown } | null)?.supervisor_mode;
+  return isSupervisorMode(raw) ? raw : null;
 }
 
 /** Merges into a leg's `metadata` instead of replacing it (mute flag, supervisor mode). */
@@ -1306,12 +1313,19 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
   // 0. A supervisor's leg: supervision is invisible to the call, so its end
   // changes nothing except the supervisor's own bookkeeping.
   if (leg.role === "supervisor") {
-    if (leg.profile_id) {
+    // Only the *last* leg of a supervisor ends their supervision. Anything else
+    // (a leg replaced by an earlier build, a duplicate dial, a retry) would
+    // otherwise close a supervision that is still running and hand the manager
+    // back to the ring plan while they are listening to somebody's call.
+    const stillSupervising = b
+      .openLegs()
+      .some((other) => other.role === "supervisor" && other.profile_id === leg.profile_id && other.telnyx_call_control_id !== leg.telnyx_call_control_id);
+    if (leg.profile_id && !stillSupervising) {
       b.patchMeta({ supervise: withoutSupervisor(b, leg.profile_id) });
       b.presenceChange({ profileId: leg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, onlyIfStatus: ["on_call", "ringing"], reason: "supervision ended" });
     }
     finishIfQuiet(b, at);
-    return b.note("supervisor left").result();
+    return b.note(stillSupervising ? "one supervisor leg of several left" : "supervisor left").result();
   }
 
   // 1. An offer that ended without being answered.
@@ -2097,12 +2111,30 @@ function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): 
   const previous = entries[supervisor.profileId] ?? null;
 
   if (existing && !b.session.conference_id) {
-    // Outside a conference the supervisor role is fixed at dial time, so a mode
-    // switch replaces the leg: drop the old one and attach a fresh one. The
-    // supervised call is untouched either way.
+    // Telnyx switches the role of a supervisor attached to a bridged call in
+    // place. Replacing the leg instead would make its `call.hangup`
+    // indistinguishable from the end of supervision: the session would forget
+    // the supervision, release the manager's presence back to `available` (so
+    // the ring plan offers them a call mid-whisper) and re-stamp the new leg as
+    // `monitor` — a barging manager shown to everyone as merely listening.
     if (!existing.answered_at) throw new CallActionRejected("Dozor sa práve pripája.", 409);
-    if (previous?.mode === supervisor.mode) return b.note("supervisor mode unchanged").result();
-    b.cmd(hangupCmd(b, existing, "supervise_mode_switch", false));
+    // The live leg is the truth about the applied role; `metadata.supervise`
+    // can be stale if a previous switch failed, and reading it here would make
+    // the retry a silent no-op.
+    const liveMode = legMetaMode(existing) ?? previous?.mode ?? null;
+    if (liveMode === supervisor.mode) return b.note("supervisor mode unchanged").result();
+    const switchId = b.cmdId(existing.telnyx_call_control_id, `supervise:switch:${supervisor.mode}`);
+    b.cmd({ kind: "supervisor_role_switch", commandId: switchId, leg: ref(existing), supervisorRole: supervisor.mode });
+    entries[supervisor.profileId] = { mode: supervisor.mode, at: b.nowIso, by: previous?.by ?? supervisor.profileId };
+    b.patchMeta({ supervise: entries });
+    b.leg(existing.telnyx_call_control_id, { metadata: legMetaPatch(existing, { supervisor_mode: supervisor.mode }) });
+    const failedSwitch = b.fork();
+    // Telnyx refused the switch: the leg keeps the role it already had, so the
+    // session must not claim the new one.
+    if (previous) failedSwitch.patchMeta({ supervise: { ...entries, [supervisor.profileId]: previous } });
+    if (liveMode) failedSwitch.leg(existing.telnyx_call_control_id, { metadata: legMetaPatch(existing, { supervisor_mode: liveMode }) });
+    b.compensate(switchId, "supervisor role switch refused → previous mode kept", [], failedSwitch.transition());
+    return b.note(`supervisor mode → ${supervisor.mode}`).result();
   } else if (existing) {
     if (!existing.answered_at) throw new CallActionRejected("Dozor sa práve pripája.", 409);
     const commandId = b.cmdId(existing.telnyx_call_control_id, `conference:update:${supervisor.mode}`);
@@ -2155,14 +2187,19 @@ function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): 
 
 function appStopSupervise(b: TransitionBuilder, event: AppEvent): ReduceResult {
   const profileId = event.supervisor?.profileId ?? event.actorProfileId;
-  const leg = profileId ? openSupervisorLegs(b).find((candidate) => candidate.profile_id === profileId) : undefined;
-  if (!leg || !profileId) throw new CallActionRejected("Dozor neprebieha.", 409);
-  if (b.session.conference_id) {
-    b.cmd({ kind: "conference_leave", commandId: b.cmdId(leg.telnyx_call_control_id, "conference:leave:supervise"), leg: ref(leg), bestEffort: true });
+  // Every open leg of this supervisor, not just the first: a leg left behind is
+  // billed, may still be audible to the caller, and the console has no second
+  // button to reach it with.
+  const legs = profileId ? openSupervisorLegs(b).filter((candidate) => candidate.profile_id === profileId) : [];
+  if (legs.length === 0 || !profileId) throw new CallActionRejected("Dozor neprebieha.", 409);
+  for (const leg of legs) {
+    if (b.session.conference_id) {
+      b.cmd({ kind: "conference_leave", commandId: b.cmdId(leg.telnyx_call_control_id, "conference:leave:supervise"), leg: ref(leg), bestEffort: true });
+    }
+    b.cmd(hangupCmd(b, leg, "supervise_stopped", legs.length > 1));
   }
-  b.cmd(hangupCmd(b, leg, "supervise_stopped", false));
   b.patchMeta({ supervise: withoutSupervisor(b, profileId) });
-  return b.note(`supervision stopped by ${profileId}`).result();
+  return b.note(`supervision stopped by ${profileId}${legs.length > 1 ? ` (${legs.length} legs)` : ""}`).result();
 }
 
 function appHangup(b: TransitionBuilder, customer: LegRow | null, event: AppEvent): ReduceResult {

@@ -132,6 +132,9 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       const verdict = callStatuses.get(callControlId);
       return { callControlId, known: verdict?.known ?? true, alive: verdict?.alive ?? true, callSessionId: null, raw: verdict ? {} : null };
     },
+    async switchSupervisorRole(params) {
+      record("switchSupervisorRole", { ...params });
+    },
     async listPhoneNumbers(params = {}) {
       record("listPhoneNumbers", params);
       return [];
