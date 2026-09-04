@@ -618,7 +618,7 @@ export function TaskPanel({
                     <div
                       key={task.id}
                       data-testid={`task-card-${variant}`}
-                      className={`min-w-0 overflow-hidden rounded-md border text-left transition ${variant === "page" ? "p-3" : "px-2 py-1.5"} ${
+                      className={`min-w-0 overflow-hidden rounded-md border text-left transition ${variant === "page" ? "p-3" : "dashboard-sidebar-task-card px-2 py-1.5"} ${
                         recentlyCreated
                           ? "border-yellow-400 bg-yellow-50 ring-2 ring-yellow-200"
                           : requiresAttention
@@ -630,18 +630,22 @@ export function TaskPanel({
                               : "border-zinc-200 bg-zinc-50 hover:bg-white"
                       }`}
                     >
-                      <div className={`flex items-start justify-between ${variant === "page" ? "gap-2" : "gap-1.5"}`}>
+                      <div
+                        className={variant === "sidebar" ? "dashboard-sidebar-task-card-layout" : undefined}
+                        data-editing={variant === "sidebar" ? Boolean(taskEditDraft) : undefined}
+                      >
+                      <div className={`dashboard-task-card-header flex items-start justify-between ${variant === "page" ? "gap-2" : "gap-1.5"}`}>
                         <button type="button" onClick={() => onOpenTask(task.id, task.caseId)} className="min-w-0 flex-1 text-left">
                           <span className={`${variant === "page" ? "text-sm" : "text-[11px] leading-4"} line-clamp-2 font-semibold text-zinc-950`}>{task.title}</span>
                         </button>
                         <span className={`flex shrink-0 items-center ${variant === "page" ? "gap-1.5" : "gap-1"}`}>
-                          {requiresAttention && (
+                          {variant === "page" && requiresAttention && (
                             <span className="inline-flex size-5 items-center justify-center rounded-full bg-[#FCD703] text-zinc-950 shadow-sm motion-safe:animate-pulse" title="Nová pridelená úloha">
                               <CircleAlert size={12} aria-label="Nová pridelená úloha" />
                             </span>
                           )}
-                          {recentlyCreated && <span className="rounded-full bg-zinc-950 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">Nová</span>}
-                          <span className="rounded-full bg-yellow-100 px-1.5 py-0.5 text-[9px] font-semibold leading-4 text-zinc-900">{task.caseNumber}</span>
+                          {variant === "page" && recentlyCreated && <span className="rounded-full bg-zinc-950 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">Nová</span>}
+                          {variant === "page" && <span className="rounded-full bg-yellow-100 px-1.5 py-0.5 text-[9px] font-semibold leading-4 text-zinc-900">{task.caseNumber}</span>}
                           {onDeleteTask && (
                             <button
                               type="button"
@@ -660,7 +664,13 @@ export function TaskPanel({
                         </span>
                       </div>
                       {variant === "sidebar" ? (
-                        <button type="button" onClick={() => onOpenTask(task.id, task.caseId)} className="mt-1 flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-left">
+                        <button type="button" onClick={() => onOpenTask(task.id, task.caseId)} className="dashboard-task-card-meta mt-1 flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-left">
+                          {requiresAttention && (
+                            <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-[#FCD703] text-zinc-950 shadow-sm motion-safe:animate-pulse" title="Nová pridelená úloha">
+                              <CircleAlert size={12} aria-label="Nová pridelená úloha" />
+                            </span>
+                          )}
+                          {recentlyCreated && <span className="rounded-full bg-zinc-950 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-4 tracking-wide text-white">Nová</span>}
                           <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold leading-4 ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
                           <span className={`inline-flex min-w-0 items-center gap-1 text-[10px] font-medium leading-4 ${overdue ? "text-red-700" : "text-zinc-600"}`}>
                             <Clock3 size={11} className="shrink-0" />
@@ -670,6 +680,7 @@ export function TaskPanel({
                             <UserRound size={11} className="shrink-0" />
                             <span className="truncate">{assignee}</span>
                           </span>
+                          <span className="rounded-full bg-yellow-100 px-1.5 py-0.5 text-[9px] font-semibold leading-4 text-zinc-900">{task.caseNumber}</span>
                         </button>
                       ) : (
                         <button type="button" onClick={() => onOpenTask(task.id, task.caseId)} className="block w-full text-left">
@@ -687,7 +698,7 @@ export function TaskPanel({
                         </button>
                       )}
                       {canMutateTasks && (
-                        <div className={`${variant === "page" ? "mt-3 pt-3" : "mt-1.5 pt-1.5"} border-t border-white/70`}>
+                        <div className={`${variant === "page" ? "mt-3 pt-3" : `mt-1.5 pt-1.5 ${taskEditDraft ? "dashboard-task-card-editor" : "dashboard-task-card-actions"}`} border-t border-white/70`}>
                           {taskEditDraft ? (
                             <div className="grid gap-2">
                               <textarea
@@ -807,6 +818,7 @@ export function TaskPanel({
                           )}
                         </div>
                       )}
+                      </div>
                     </div>
                   );
                 })}
