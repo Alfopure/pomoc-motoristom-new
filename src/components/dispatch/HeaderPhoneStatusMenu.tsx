@@ -8,15 +8,15 @@ import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
 import { presenceLabel } from "./my-phone-model";
 import { phoneTakeoverAvailable } from "./phone-bar-model";
-import type { PhonePauseReason, PhonePresenceAction } from "./useTelephonyConsole";
+import type { PhonePresenceAction } from "./useTelephonyConsole";
 
 type HeaderPhoneStatusMenuProps = {
   busy: boolean;
   onChange: (action: PhonePresenceAction) => void;
+  onRequestPause: () => void;
   onDismissNotice: () => void;
   onTakeover: () => void;
   notice: string | null;
-  pauseReasons: PhonePauseReason[];
   phone: WebphoneSnapshot;
   status: string | null;
 };
@@ -44,10 +44,10 @@ function presenceTone(status: string | null): keyof typeof TRIGGER_TONES {
 export function HeaderPhoneStatusMenu({
   busy,
   onChange,
+  onRequestPause,
   onDismissNotice,
   onTakeover,
   notice,
-  pauseReasons,
   phone,
   status,
 }: HeaderPhoneStatusMenuProps) {
@@ -155,19 +155,16 @@ export function HeaderPhoneStatusMenu({
           <div className="p-2">
             <p className="px-2 pb-1.5 pt-0.5 text-[10px] font-bold uppercase tracking-wide text-zinc-400">Dostupnosť pre hovory</p>
             <StatusOption active={status === "available"} disabled={busy} icon={PhoneCall} label="Dostupný" onClick={() => changePresence({ status: "available" })} />
-            {pauseReasons.map((reason) => (
-              <StatusOption
-                key={reason.id}
-                active={false}
-                disabled={busy}
-                icon={Pause}
-                label={`Pauza · ${reason.label}`}
-                onClick={() => changePresence({ status: "paused", pauseReasonId: reason.id })}
-              />
-            ))}
-            {pauseReasons.length === 0 && (
-              <StatusOption active={status === "paused"} disabled={busy} icon={Pause} label="Pauza" onClick={() => changePresence({ status: "paused" })} />
-            )}
+            <StatusOption
+              active={status === "paused"}
+              disabled={busy}
+              icon={Pause}
+              label="Pauza alebo presmerovanie"
+              onClick={() => {
+                setOpen(false);
+                onRequestPause();
+              }}
+            />
             <StatusOption
               active={status === "offline" || !status}
               disabled={busy}

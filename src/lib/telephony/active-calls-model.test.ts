@@ -284,7 +284,9 @@ describe("PhoneBar model", () => {
     const other = call({ sessionId: "sess-3", answeredByProfileId: COLLEAGUE, mine: false });
     const waiting = call({ sessionId: "sess-4", state: "parked", answeredByProfileId: null, mine: false });
 
-    const model = buildPhoneBarModel(payload({ calls: [mine, offer, other, waiting], waiting: [waiting] }));
+    const model = buildPhoneBarModel(payload({ calls: [mine, offer, other, waiting], waiting: [waiting] }), {
+      operatorName: (profileId) => profileId === ME ? "Ja" : profileId === COLLEAGUE ? "Peter" : undefined,
+    });
 
     expect(model.active?.sessionId).toBe("sess-1");
     expect(model.active?.lineLabel).toBe("Allianz Assistance");
@@ -294,6 +296,10 @@ describe("PhoneBar model", () => {
     expect(model.waiting.map((entry) => entry.sessionId)).toEqual(["sess-4"]);
     expect(model.otherActiveCount).toBe(1);
     expect(model.ownPresenceStatus).toBe("on_call");
+    expect(model.teamCalls.map((entry) => entry.sessionId)).toEqual(["sess-2", "sess-4", "sess-1", "sess-3"]);
+    expect(model.teamCalls).toHaveLength(4);
+    expect(model.teamCalls[0]).toMatchObject({ offeredToMe: true, offeredOperatorNames: ["Ja", "Peter"] });
+    expect(model.teamCalls[3]).toMatchObject({ operatorProfileId: COLLEAGUE, operatorName: "Peter" });
   });
 
   it("does not treat a parked call of mine as the active call", () => {

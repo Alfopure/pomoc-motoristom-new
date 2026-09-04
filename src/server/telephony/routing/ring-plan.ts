@@ -1,6 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
+import { isDestinationAllowed } from "@/lib/telephony/destinations";
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import type { PauseRoutingMode } from "@/lib/telephony/operator-settings";
 
 import {
   MAX_CONCURRENT_LEGS,
@@ -52,6 +55,58 @@ export function memberKey(member: { profileId: string | null; externalNumber: st
   return member.profileId ? `profile:${member.profileId}` : `number:${member.externalNumber ?? ""}`;
 }
 
+export type PausedOperatorRouting = {
+  profileId: string;
+  mode: PauseRoutingMode;
+  defaultMobileNumber: string | null;
+  forwardProfileId: string | null;
+  forwardNumber: string | null;
+};
+
+/**
+ * Replaces a paused operator's slot with the fallback they selected. The
+ * original position and ring time stay intact, preserving both `ordered` and
+ * `all` ring-group semantics. Invalid or newly disallowed settings deliberately
+ * fall back to the original paused member, which eligibility will skip.
+ */
+export function applyPausedOperatorRouting(
+  members: readonly FrozenRingMember[],
+  input: {
+    pausedProfileIds: ReadonlySet<string>;
+    routing: readonly PausedOperatorRouting[];
+    destinationAllowlist: readonly string[];
+  },
+): FrozenRingMember[] {
+  const routingByProfile = new Map(input.routing.map((row) => [row.profileId, row]));
+  const resolved: FrozenRingMember[] = [];
+  const seen = new Set<string>();
+
+  for (const member of members) {
+    let next = member;
+    if (member.kind === "operator" && member.profileId && input.pausedProfileIds.has(member.profileId)) {
+      const route = routingByProfile.get(member.profileId);
+      const rawNumber = route?.mode === "default_mobile"
+        ? route.defaultMobileNumber
+        : route?.mode === "external_number"
+          ? route.forwardNumber
+          : null;
+      const number = normalizeE164(rawNumber);
+
+      if (route?.mode === "operator" && route.forwardProfileId && route.forwardProfileId !== member.profileId) {
+        next = { ...member, kind: "operator", profileId: route.forwardProfileId, externalNumber: null, memberId: null };
+      } else if (number && isDestinationAllowed(number, input.destinationAllowlist)) {
+        next = { ...member, kind: "external_number", profileId: null, externalNumber: number, memberId: null };
+      }
+    }
+
+    const key = memberKey(next);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    resolved.push(next);
+  }
+  return resolved;
+}
+
 export async function materialiseRingPlan(
   admin: AdminClient,
   input: { organizationId: string; ringPlanId: string; now?: Date },
@@ -88,13 +143,48 @@ export async function materialiseRingPlan(
   if (groups.error) throw new Error(`ring groups load failed: ${groups.error.message}`);
   if (members.error) throw new Error(`ring group members load failed: ${members.error.message}`);
 
+  const operatorMemberIds = [...new Set((members.data ?? []).map((member) => member.profile_id).filter((id): id is string => Boolean(id)))];
+  const [paused, operatorRouting, telephonySettings] = operatorMemberIds.length > 0
+    ? await Promise.all([
+        admin
+          .from("motorist_operator_presence")
+          .select("profile_id, status")
+          .eq("organization_id", input.organizationId)
+          .in("profile_id", operatorMemberIds)
+          .eq("status", "paused"),
+        admin
+          .from("motorist_operator_telephony_settings")
+          .select("profile_id, default_mobile_number, pause_routing_mode, pause_forward_profile_id, pause_forward_number")
+          .eq("organization_id", input.organizationId)
+          .in("profile_id", operatorMemberIds),
+        admin.from("motorist_telephony_settings").select("destination_allowlist").eq("organization_id", input.organizationId).maybeSingle(),
+      ])
+    : [
+        { data: [], error: null },
+        { data: [], error: null },
+        { data: null, error: null },
+      ];
+  if (paused.error) throw new Error(`paused operator load failed: ${paused.error.message}`);
+  if (operatorRouting.error) throw new Error(`pause routing load failed: ${operatorRouting.error.message}`);
+  if (telephonySettings.error) throw new Error(`telephony settings load failed: ${telephonySettings.error.message}`);
+
+  const pausedProfileIds = new Set((paused.data ?? []).map((row) => row.profile_id));
+  const pausedRouting: PausedOperatorRouting[] = (operatorRouting.data ?? []).map((row) => ({
+    profileId: row.profile_id,
+    mode: row.pause_routing_mode,
+    defaultMobileNumber: row.default_mobile_number,
+    forwardProfileId: row.pause_forward_profile_id,
+    forwardNumber: row.pause_forward_number,
+  }));
+  const destinationAllowlist = telephonySettings.data?.destination_allowlist ?? ["SK", "CZ"];
+
   const groupById = new Map((groups.data ?? []).map((group) => [group.id, group]));
   const frozenSteps: FrozenRingStep[] = [];
   for (const step of stepRows) {
     const group = groupById.get(step.ring_group_id);
     if (!group || !group.active) continue;
     const timeoutSecs = clampRingSecs(step.timeout_secs, DEFAULT_STEP_TIMEOUT_SECS);
-    const stepMembers: FrozenRingMember[] = (members.data ?? [])
+    const configuredMembers: FrozenRingMember[] = (members.data ?? [])
       .filter((member) => member.ring_group_id === group.id)
       .map((member) => ({
         kind: member.member_kind,
@@ -106,6 +196,7 @@ export async function materialiseRingPlan(
       }))
       .filter((member) => (member.kind === "operator" ? Boolean(member.profileId) : Boolean(member.externalNumber)))
       .sort((left, right) => left.position - right.position);
+    const stepMembers = applyPausedOperatorRouting(configuredMembers, { pausedProfileIds, routing: pausedRouting, destinationAllowlist });
     frozenSteps.push({
       index: frozenSteps.length,
       groupId: group.id,

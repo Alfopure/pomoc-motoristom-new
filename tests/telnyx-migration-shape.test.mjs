@@ -22,6 +22,10 @@ const phase3Migration = readFileSync(
   new URL("../supabase/migrations/20260919100000_telnyx_phase3_fixes.sql", import.meta.url),
   "utf8",
 );
+const pauseRoutingMigration = readFileSync(
+  new URL("../supabase/migrations/20260923100000_operator_pause_routing.sql", import.meta.url),
+  "utf8",
+);
 const seed = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
 const seedScript = readFileSync(new URL("../scripts/seed-demo-data.mjs", import.meta.url), "utf8");
 
@@ -167,6 +171,16 @@ test("carries the CHECK constraints and uniqueness rules from the design", () =>
   assert.match(migration, /create unique index if not exists ring_attempts_session_step_external_idx\n\s+on public\.motorist_ring_attempts \(session_id, step_index, external_number\)/);
   assert.match(migration, /create index if not exists call_sessions_active_idx\n\s+on public\.motorist_call_sessions \(organization_id, state\)\n\s+where state not in \('ended', 'failed'\)/);
   assert.match(migration, /create index if not exists telnyx_webhook_events_session_idx\n\s+on public\.motorist_telnyx_webhook_events \(call_session_id, received_at\)\n\s+where call_session_id is not null/);
+});
+
+test("adds constrained operator pause-routing destinations", () => {
+  for (const column of ["default_mobile_number", "pause_routing_mode", "pause_forward_profile_id", "pause_forward_number"]) {
+    assert.match(pauseRoutingMigration, new RegExp(`add column if not exists ${column} `), column);
+  }
+  assert.match(pauseRoutingMigration, /pause_routing_mode in \('none', 'default_mobile', 'external_number', 'operator'\)/);
+  assert.match(pauseRoutingMigration, /pause_forward_profile_id uuid references public\.motorist_profiles\(id\) on delete set null/);
+  assert.match(pauseRoutingMigration, /default_mobile_number ~ '\^\[\+\]\[1-9\]\[0-9\]\{6,14\}\$'/);
+  assert.match(pauseRoutingMigration, /pause_forward_number ~ '\^\[\+\]\[1-9\]\[0-9\]\{6,14\}\$'/);
 });
 
 test("registers updated_at triggers for every table with an updated_at column", () => {

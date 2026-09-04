@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { AttendanceModule } from "./AttendanceModule";
 import { CallCenterModule } from "./CallCenterModule";
-import { CallQueuePanel } from "./CallQueuePanel";
+import { HeaderLiveCallsMenu } from "./LiveCallOverview";
 import { CaseDirectory } from "./CaseDirectory";
 import { CaseList, type CaseFilters } from "./CaseList";
 import { DashboardPhone } from "./DashboardPhone";
@@ -35,6 +35,7 @@ import { ReportDashboard } from "./ReportDashboard";
 import { HeaderNotificationMenu } from "./HeaderNotificationMenu";
 import { HeaderPhoneStatusMenu } from "./HeaderPhoneStatusMenu";
 import { NotificationToastStack } from "./NotificationToastStack";
+import { PauseRoutingDialog } from "./PauseRoutingDialog";
 import { PhoneBar } from "./PhoneBar";
 import { phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
 import { TELEPHONY_STALE_MESSAGE, useTelephonyConsole } from "./useTelephonyConsole";
@@ -240,6 +241,7 @@ export function DispatchConsole({
   const [isAssigning, setIsAssigning] = useState(false);
   const [isSendingCaseSms, setIsSendingCaseSms] = useState(false);
   const [mutationNotice, setMutationNotice] = useState<string | null>(null);
+  const [pauseRoutingOpen, setPauseRoutingOpen] = useState(false);
   const [dismissedWarning, setDismissedWarning] = useState<string | null>(null);
   const [centerView, setCenterView] = useState<CenterView>("map");
   const [caseSearch, setCaseSearch] = useState("");
@@ -431,23 +433,13 @@ export function DispatchConsole({
         setMutationNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
         return;
       }
+      if (action === "pause") {
+        setPauseRoutingOpen(true);
+        return;
+      }
       telephony.availabilityAction(action);
     },
     [telephony, telephonyConfigured],
-  );
-  // The waiting room ticks from the snapshot's own timestamp: it is the clock
-  // every duration in that snapshot was computed against.
-  const waitingRoomNow = useMemo(() => {
-    const parsed = Date.parse(telephony.snapshot.checkedAt);
-    return Number.isFinite(parsed) ? parsed : 0;
-  }, [telephony.snapshot.checkedAt]);
-  const waitingPickupState = useCallback(
-    () => ({
-      disabled: telephony.busyAction !== null || Boolean(telephony.phoneBar.active),
-      label: telephony.busyAction === "pickup" ? "Preberám…" : "Prevziať hovor",
-      ...(telephony.phoneBar.active ? { reason: "Najprv ukončite alebo odložte prebiehajúci hovor." } : {}),
-    }),
-    [telephony.busyAction, telephony.phoneBar.active],
   );
   const visibleCallCenterCalls = useMemo(
     () => (telephonyConfigured ? mergeCallCenterCalls(telephony.liveCalls, callCenterCalls) : callCenterCalls),
@@ -1461,10 +1453,10 @@ export function DispatchConsole({
             <HeaderPhoneStatusMenu
               busy={telephony.presenceBusy}
               onChange={telephony.changePresence}
+              onRequestPause={() => setPauseRoutingOpen(true)}
               onDismissNotice={telephony.dismissNotice}
               onTakeover={telephony.takeoverPhone}
               notice={telephony.notice}
-              pauseReasons={telephony.pauseReasons}
               phone={telephony.phone}
               status={telephony.phoneBar.ownPresenceStatus}
             />
@@ -1488,13 +1480,18 @@ export function DispatchConsole({
             </div>
           ) : null}
           {telephonyConfigured ? (
-            <div className="hidden xl:block">
-              <CallQueuePanel
-                calls={telephony.waitingCalls}
-                now={waitingRoomNow}
-                onPickup={(call) => runPhoneCallAction("pickup", call.providerSessionId ?? call.id)}
-                pickupState={waitingPickupState}
-                variant="header"
+            <div>
+              <HeaderLiveCallsMenu
+                model={telephony.phoneBar}
+                presences={operatorPresences}
+                canManageCalls={viewerCanSupervise}
+                busyAction={telephony.busyAction}
+                browserOfferRinging={telephony.phone.call?.ringing ?? false}
+                onAnswer={telephony.answer}
+                onRejectOffer={telephony.hangupBrowser}
+                onCallAction={(action, sessionId) => void runPhoneCallAction(action, sessionId)}
+                onSupervise={(sessionId, mode) => void telephony.supervise(sessionId, mode)}
+                onStopSupervise={(sessionId) => void telephony.stopSupervise(sessionId)}
               />
             </div>
           ) : null}
@@ -1514,7 +1511,6 @@ export function DispatchConsole({
           status: telephony.phone.status,
           hasCall: Boolean(telephony.phoneBar.active),
           hasOffer: telephony.phoneBar.offers.length > 0,
-          hasWaiting: telephony.phoneBar.waiting.length > 0,
         }) && (
           <PhoneBar
             model={telephony.phoneBar}
@@ -1776,10 +1772,14 @@ export function DispatchConsole({
           activeSnapshot={telephonyConfigured ? telephony.phoneBar : undefined}
           busyCallAction={telephony.busyAction}
           calls={visibleCallCenterCalls}
-          onCallAction={runPhoneCallAction}
+          onCallAction={(action, sessionId) => void runPhoneCallAction(action, sessionId)}
+          onAnswer={telephony.answer}
+          onRejectOffer={telephony.hangupBrowser}
+          canManageCalls={viewerCanSupervise}
+          onSupervise={(sessionId, mode) => void telephony.supervise(sessionId, mode)}
+          onStopSupervise={(sessionId) => void telephony.stopSupervise(sessionId)}
           phone={telephony.phone}
           telephonyConfigured={telephonyConfigured}
-          waitingCalls={telephony.waitingCalls}
           cases={dispatchCases}
           currentOperatorId={viewerProfileId}
           dataSource={source}
@@ -1789,6 +1789,7 @@ export function DispatchConsole({
           operatorPresences={operatorPresences}
           operators={effectiveOperators}
           onNewCase={startNewCaseFromCall}
+          onNewCaseFromLiveCall={startNewCaseFromPhoneBar}
           onOpenCase={openCase}
           onAvailabilityAction={onQueueAvailabilityAction}
           onCallbackCall={telephony.callBackRequest}
@@ -1828,6 +1829,17 @@ export function DispatchConsole({
         onOpenCase={openCase}
         onOpenTask={openTask}
         onSnooze={snoozeNotificationFromPanel}
+      />
+
+      <PauseRoutingDialog
+        open={pauseRoutingOpen}
+        profileId={viewerProfileId}
+        operators={effectiveOperators}
+        presences={operatorPresences}
+        pauseReasons={telephony.pauseReasons}
+        busy={telephony.presenceBusy}
+        onClose={() => setPauseRoutingOpen(false)}
+        onActivate={({ pauseReasonId }) => telephony.changePresence({ status: "paused", pauseReasonId })}
       />
 
       <nav className="fixed inset-x-0 bottom-0 z-[2147483000] border-t border-zinc-200 bg-white/95 px-2 pt-1.5 pb-[calc(8px+env(safe-area-inset-bottom))] shadow-[0_-10px_30px_rgba(24,24,27,0.12)] backdrop-blur sm:hidden" aria-label="Mobilná navigácia">

@@ -22,6 +22,7 @@ import { ConfigRequestError, loadRoutingConfig, saveOperatorSettings, type Routi
 import {
   describeDevice,
   describeLineOption,
+  describePauseRouting,
   activeLines,
   findOperator,
   operatorDraft,
@@ -37,7 +38,6 @@ import {
   canEndWrapUp,
   checkTestCallNumber,
   confirmTestCall,
-  describePauseReason,
   describePresence,
   describeWrapUp,
   presenceLabel,
@@ -46,6 +46,7 @@ import {
   type MyPresence,
   type MyPresenceResponse,
 } from "./my-phone-model";
+import { PauseRoutingDialog } from "./PauseRoutingDialog";
 
 /**
  * "Môj telefón" (plan "Fáza 3"): the operator's own view of the telephony
@@ -85,6 +86,7 @@ export function MyPhonePanel({
   const [profileId, setProfileId] = useState<string | null>(null);
   const [presence, setPresence] = useState<MyPresence | null>(null);
   const [presenceBusy, setPresenceBusy] = useState(false);
+  const [pauseDialogOpen, setPauseDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
@@ -119,7 +121,7 @@ export function MyPhonePanel({
     return () => controller.abort();
   }, [reloadToken]);
 
-  const changePresence = useCallback(async (body: Record<string, unknown>, url = "/api/telephony/presence") => {
+  const changePresence = useCallback(async (body: Record<string, unknown>, url = "/api/telephony/presence"): Promise<boolean> => {
     setPresenceBusy(true);
     setError(null);
     setNotice(null);
@@ -133,16 +135,18 @@ export function MyPhonePanel({
       });
       if (result.status === 503) {
         setError(TELEPHONY_NOT_CONFIGURED_MESSAGE);
-        return;
+        return false;
       }
       if (!result.ok) {
         setError(result.body?.error ?? "Stav sa nepodarilo uložiť.");
-        return;
+        return false;
       }
       if (result.body?.own) setPresence(result.body.own);
       else setReloadToken((current) => current + 1);
+      return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Stav sa nepodarilo uložiť.");
+      return false;
     } finally {
       setPresenceBusy(false);
     }
@@ -273,7 +277,13 @@ export function MyPhonePanel({
   // --- render ----------------------------------------------------------------
 
   const device = operator && clock ? describeDevice(operator, clock) : null;
-  const issues = draft ? validateOperatorDraft(draft, { lines: document.lines }) : [];
+  const issues = draft
+    ? validateOperatorDraft(draft, {
+        lines: document.lines,
+        operators: document.operators,
+        destinationAllowlist: document.limits?.destinationAllowlist ?? null,
+      })
+    : [];
   const dirty = Boolean(draft && operator && operatorDirty(draft, operator));
 
   return (
@@ -311,30 +321,15 @@ export function MyPhonePanel({
               Som dostupný
             </button>
 
-            {reasons.map((reason) => (
-              <button
-                key={reason.id}
-                type="button"
-                disabled={presenceBusy || !changeAllowed}
-                onClick={() => void changePresence({ status: "paused", pauseReasonId: reason.id })}
-                className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
-              >
-                <Coffee size={15} aria-hidden="true" />
-                {describePauseReason(reason)}
-              </button>
-            ))}
-
-            {reasons.length === 0 && (
-              <button
-                type="button"
-                disabled={presenceBusy || !changeAllowed}
-                onClick={() => void changePresence({ status: "paused" })}
-                className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
-              >
-                <Coffee size={15} aria-hidden="true" />
-                Pauza
-              </button>
-            )}
+            <button
+              type="button"
+              disabled={presenceBusy || !changeAllowed}
+              onClick={() => setPauseDialogOpen(true)}
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
+            >
+              <Coffee size={15} aria-hidden="true" />
+              Pauza alebo presmerovanie
+            </button>
 
             <button
               type="button"
@@ -488,9 +483,22 @@ export function MyPhonePanel({
                   onChange={(event) => setDraft({ ...draft, wrapUpSeconds: Number(event.target.value) })}
                 />
               </SettingsField>
+
+              <SettingsField label="Môj mobil" hint="Pri pauze ho vyberieš jedným kliknutím ako náhradné zariadenie.">
+                <input
+                  className={settingsInputClass}
+                  disabled={settingsBusy}
+                  type="tel"
+                  inputMode="tel"
+                  value={draft.defaultMobileNumber ?? ""}
+                  placeholder="+421 900 000 000"
+                  onChange={(event) => setDraft({ ...draft, defaultMobileNumber: event.target.value || null })}
+                />
+              </SettingsField>
             </div>
 
             <SettingsIssueList issues={issues} />
+            <p className="mt-2 text-xs font-medium text-zinc-600">{describePauseRouting(draft, document.operators)}</p>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
@@ -507,6 +515,16 @@ export function MyPhonePanel({
           </div>
         )}
       </div>
+
+      <PauseRoutingDialog
+        open={pauseDialogOpen}
+        profileId={profileId}
+        operators={document.operators.map((item) => ({ id: item.profileId, name: item.displayName, extension: "", status: "offline" }))}
+        pauseReasons={reasons.map((reason) => ({ id: reason.id, code: reason.code, label: reason.label }))}
+        busy={presenceBusy}
+        onClose={() => setPauseDialogOpen(false)}
+        onActivate={({ pauseReasonId }) => changePresence({ status: "paused", pauseReasonId })}
+      />
     </section>
   );
 }

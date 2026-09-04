@@ -4,6 +4,7 @@ import { createTelephonyHarness, GROUPS, NUMBERS, ORG, PLAN_ID, PROFILES } from 
 
 import type { FrozenRingStep } from "../state/types";
 import {
+  applyPausedOperatorRouting,
   advanceRingStep,
   clampRingSecs,
   findOverdueSessions,
@@ -85,6 +86,62 @@ describe("materialiseRingPlan", () => {
     expect(plan?.steps).toHaveLength(1);
     h.db.update("motorist_ring_plans", { active: false }, (row) => row.id === PLAN_ID);
     expect(await materialiseRingPlan(h.admin, { organizationId: ORG, ringPlanId: PLAN_ID })).toBeNull();
+  });
+
+  it("freezes a paused operator's saved mobile in place of the browser device", async () => {
+    const h = createTelephonyHarness();
+    h.setPresence(PROFILES.o1, { status: "paused" });
+    h.db.update(
+      "motorist_operator_telephony_settings",
+      { default_mobile_number: "+421911222333", pause_routing_mode: "default_mobile" },
+      (row) => row.profile_id === PROFILES.o1,
+    );
+
+    const plan = await materialiseRingPlan(h.admin, { organizationId: ORG, ringPlanId: PLAN_ID, now: NOW });
+
+    expect(plan?.steps[0].members[0]).toMatchObject({
+      kind: "external_number",
+      profileId: null,
+      externalNumber: "+421911222333",
+      position: 0,
+      memberId: null,
+    });
+    expect(planRingStep(plan!.steps[0], input({
+      presence: presence.map((row) => row.profileId === PROFILES.o1 ? { ...row, status: "paused" as const } : row),
+    })).attempts).toContainEqual(expect.objectContaining({
+      memberKind: "external_number",
+      externalNumber: "+421911222333",
+    }));
+  });
+});
+
+describe("applyPausedOperatorRouting", () => {
+  it("keeps ordering, resolves all supported fallbacks and deduplicates a substitute already in the group", () => {
+    const resolved = applyPausedOperatorRouting(stepAll.members, {
+      pausedProfileIds: new Set([PROFILES.o1, PROFILES.o2]),
+      destinationAllowlist: ["SK"],
+      routing: [
+        { profileId: PROFILES.o1, mode: "default_mobile", defaultMobileNumber: "+421911222333", forwardProfileId: null, forwardNumber: null },
+        { profileId: PROFILES.o2, mode: "operator", defaultMobileNumber: null, forwardProfileId: PROFILES.o5, forwardNumber: null },
+      ],
+    });
+
+    expect(resolved.map((member) => [member.kind, member.profileId ?? member.externalNumber, member.position])).toEqual([
+      ["external_number", "+421911222333", 0],
+      ["operator", PROFILES.o5, 1],
+      ["operator", PROFILES.o3, 3],
+    ]);
+    expect(resolved.slice(0, 2).every((member) => member.memberId === null)).toBe(true);
+  });
+
+  it("never dials an invalid or newly disallowed stored number", () => {
+    const member = stepAll.members[0];
+    const resolved = applyPausedOperatorRouting([member], {
+      pausedProfileIds: new Set([PROFILES.o1]),
+      destinationAllowlist: ["SK"],
+      routing: [{ profileId: PROFILES.o1, mode: "external_number", defaultMobileNumber: null, forwardProfileId: null, forwardNumber: "+420720123456" }],
+    });
+    expect(resolved).toEqual([member]);
   });
 });
 

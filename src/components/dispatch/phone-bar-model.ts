@@ -208,17 +208,17 @@ export function phoneBarStateLabel(call: PhoneBarCall): PhoneBarStateLabel {
  * Whether the bar is worth rendering at all.
  *
  * Registration and availability now live in the compact header menu. The
- * full-width bar is reserved for a call, an offer or the waiting room, so an
- * idle registered phone does not consume a second header row.
+ * full-width bar is reserved for this operator's call or offer. Organisation-
+ * wide waiting and colleague calls live in the compact header overview, so
+ * they do not consume a second header row on every screen.
  */
 export function phoneBarVisible(input: {
   status: WebphoneStatus;
   hasCall: boolean;
   hasOffer: boolean;
-  hasWaiting: boolean;
 }): boolean {
   if (input.status === "not_configured") return false;
-  return input.hasCall || input.hasOffer || input.hasWaiting;
+  return input.hasCall || input.hasOffer;
 }
 
 /**
