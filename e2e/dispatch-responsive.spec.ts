@@ -35,7 +35,9 @@ for (const width of viewportWidths) {
     await page.setViewportSize({ width, height: viewportHeight });
     await openDashboard(page);
 
-    await expect(page.getByText("Linka pomoci motoristom", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("signed-in-user-name")).toBeVisible();
+    await expect(page.getByText("Linka pomoci motoristom", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Nástenka", exact: true })).toBeVisible();
     await expect(page.getByRole("combobox", { name: "Telefónne číslo alebo meno kontaktu" })).toBeVisible();
     await expectNoDocumentOverflow(page, `dashboard at ${width}px`);
     if (width >= 1280) {
@@ -259,12 +261,15 @@ test("leaving a new case uses the in-app save-or-discard dialog", async ({ page 
   await openNewCase(page);
   await page.getByLabel("Interná poznámka dispečera", { exact: true }).fill("Rozpracovaný telefonát");
 
-  const tasksNavigation = page.getByRole("navigation", { name: "Hlavná navigácia" }).getByRole("button", { name: /Úlohy/ });
+  const mainNavigation = page.getByRole("navigation", { name: "Hlavná navigácia" });
+  await mainNavigation.getByRole("button", { name: "Menu", exact: true }).click();
+  const tasksNavigation = mainNavigation.getByRole("menuitem", { name: /Úlohy/ });
   await tasksNavigation.click();
   await expect(page.getByRole("dialog")).toContainText("Rozpracovaný prípad nie je uložený");
   await page.getByRole("button", { name: "Zostať vo formulári", exact: true }).first().click();
   await expect(page.getByLabel("Interná poznámka dispečera", { exact: true })).toHaveValue("Rozpracovaný telefonát");
 
+  await mainNavigation.getByRole("button", { name: "Menu", exact: true }).click();
   await tasksNavigation.click();
   await page.getByRole("button", { name: "Odísť bez uloženia", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Úlohy", exact: true })).toBeVisible();
@@ -357,10 +362,11 @@ test("task sidebar stays focused and the full task filters work together", async
   await expect(sidebarFilters.getByRole("button")).toHaveCount(2);
   await expect(sidebarFilters.getByRole("button", { name: /Moje/ })).toBeVisible();
   await expect(sidebarFilters.getByRole("button", { name: /Všetky/ })).toHaveAttribute("aria-pressed", "true");
-  await expect(navigation.getByRole("button").filter({ hasText: "Ústredňa" })).toBeVisible();
+  await navigation.getByRole("button", { name: "Menu", exact: true }).click();
+  await expect(navigation.getByRole("menuitem", { name: "Ústredňa", exact: true })).toBeVisible();
   await expectNoElementOverflow(sidebar, "dashboard task sidebar");
 
-  await navigation.getByRole("button").filter({ hasText: "Úlohy" }).click();
+  await navigation.getByRole("menuitem", { name: /Úlohy/ }).click();
   await expect(page.getByRole("heading", { name: "Nová úloha", exact: true })).toBeVisible();
   await expect(page.getByLabel("Názov úlohy", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Termín", { exact: true })).toBeVisible();
@@ -373,7 +379,7 @@ test("task sidebar stays focused and the full task filters work together", async
 
   const createTaskForm = page.locator('section[aria-labelledby="new-task-heading"]');
   const formHeightBeforeFilter = await createTaskForm.evaluate((element) => element.getBoundingClientRect().height);
-  await page.getByRole("button", { name: /Vybavené/ }).click();
+  await page.getByRole("group", { name: "Stav úlohy" }).getByRole("button", { name: /Vybavené/ }).click();
   const formHeightAfterFilter = await createTaskForm.evaluate((element) => element.getBoundingClientRect().height);
   expect(Math.abs(formHeightAfterFilter - formHeightBeforeFilter)).toBeLessThanOrEqual(1);
 
@@ -667,7 +673,9 @@ test("pending autosave keeps navigation available and explains the safe choices"
   await expect(page.getByRole("button", { name: "Zavrieť editáciu", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Späť", exact: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Zbaliť workspace", exact: true })).toHaveCount(0);
-  const tasksNavigation = page.getByRole("navigation", { name: "Hlavná navigácia" }).getByRole("button", { name: /Úlohy/ });
+  const mainNavigation = page.getByRole("navigation", { name: "Hlavná navigácia" });
+  await mainNavigation.getByRole("button", { name: "Menu", exact: true }).click();
+  const tasksNavigation = mainNavigation.getByRole("menuitem", { name: /Úlohy/ });
   await expect(tasksNavigation).toBeEnabled();
   await expect(page.getByRole("button", { name: "Nový prípad", exact: true })).toBeEnabled();
   await expect(plate).toBeEnabled();
@@ -857,7 +865,7 @@ async function openDashboard(page: Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
 
   const loginHeading = page.getByRole("heading", { name: "Prihlásenie", exact: true });
-  const dashboardHeading = page.getByText("Linka pomoci motoristom", { exact: true });
+  const dashboardHeading = page.getByTestId("dispatch-console");
 
   await expect(loginHeading.or(dashboardHeading)).toBeVisible({ timeout: 30_000 });
 
@@ -919,7 +927,16 @@ async function openNewCase(page: Page) {
     }
   }
 
-  const casesTab = page.getByRole("button", { name: "Prípady", exact: true });
+  const menuButtons = page.getByRole("button", { name: "Menu", exact: true });
+  for (let index = 0; index < (await menuButtons.count()); index += 1) {
+    const button = menuButtons.nth(index);
+    if (await button.isVisible()) {
+      await button.click();
+      break;
+    }
+  }
+
+  const casesTab = page.getByRole("menuitem", { name: "Prípady", exact: true });
   await expect(casesTab).toBeVisible();
   await casesTab.click();
 

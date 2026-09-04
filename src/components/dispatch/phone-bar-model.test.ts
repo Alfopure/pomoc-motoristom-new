@@ -123,7 +123,8 @@ describe("presentation helpers", () => {
     expect(phoneBarVisible({ status: "not_configured", hasCall: true, hasOffer: true, hasWaiting: true })).toBe(false);
     expect(phoneBarVisible({ status: "idle", hasCall: false, hasOffer: false, hasWaiting: false })).toBe(false);
     expect(phoneBarVisible({ status: "idle", hasCall: false, hasOffer: false, hasWaiting: true })).toBe(true);
-    expect(phoneBarVisible({ status: "registered", hasCall: false, hasOffer: false, hasWaiting: false })).toBe(true);
+    expect(phoneBarVisible({ status: "registered", hasCall: false, hasOffer: false, hasWaiting: false })).toBe(false);
+    expect(phoneBarVisible({ status: "registered", hasCall: true, hasOffer: false, hasWaiting: false })).toBe(true);
   });
 
   it("offers the takeover only for the two terminal registration statuses", () => {

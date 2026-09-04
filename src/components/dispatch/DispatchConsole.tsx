@@ -6,9 +6,11 @@ import {
   BarChart3,
   BellRing,
   CalendarDays,
+  ChevronDown,
   Headphones,
   LayoutDashboard,
   Loader2,
+  Menu,
   PhoneOff,
   Plus,
   Settings2,
@@ -30,6 +32,7 @@ import { MapWorkspace, type CenterView, type WorkspaceKind, type WorkspaceMode }
 import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { ReportDashboard } from "./ReportDashboard";
 import { HeaderNotificationMenu } from "./HeaderNotificationMenu";
+import { HeaderPhoneStatusMenu } from "./HeaderPhoneStatusMenu";
 import { NotificationToastStack } from "./NotificationToastStack";
 import { PhoneBar } from "./PhoneBar";
 import { phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
@@ -51,6 +54,14 @@ import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@
 import type { TelephonyAvailabilityAction } from "@/lib/telephony/presence";
 
 type View = "dispatch" | "tasks" | "cases" | "call-center" | "attendance" | "fleet" | "reports" | "settings";
+
+type NavigationItem = {
+  badgeCount?: number;
+  icon: LucideIcon;
+  label: string;
+  shortLabel: string;
+  view: View;
+};
 
 type DispatchWorkspaceState = {
   kind: WorkspaceKind;
@@ -122,10 +133,12 @@ const sourceLabels: Record<NonNullable<DispatchCase["sourceType"]>, string> = {
 
 export function DispatchConsole({
   initialData,
+  viewerDisplayName,
   viewerProfileId,
   viewerRole,
 }: {
   initialData: DispatchData;
+  viewerDisplayName?: string;
   viewerOrganizationId?: string;
   viewerProfileId?: string;
   /** The signed-in profile's role; only supervision is gated on it in the console. */
@@ -152,7 +165,12 @@ export function DispatchConsole({
     users,
     warning,
   } = dispatchData;
-  const dataSourceLabel = source === "supabase" ? "Supabase live" : "Mock fallback";
+  const signedInName =
+    viewerDisplayName?.trim() ||
+    users.find((user) => user.id === viewerProfileId)?.name ||
+    operators.find((operator) => operator.id === viewerProfileId)?.name ||
+    users[0]?.name ||
+    "Prihlásený používateľ";
   const [activeView, setActiveView] = useState<View>("dispatch");
   const [activeCaseId, setActiveCaseId] = useState(dispatchCases.find(isActiveDispatchCase)?.id ?? "");
   const [workspace, setWorkspace] = useState<DispatchWorkspaceState>({ kind: "cockpit", mode: "split" });
@@ -382,8 +400,8 @@ export function DispatchConsole({
     };
   }, [refreshCallHistory]);
 
-  const navItems: Array<{ badgeCount?: number; icon: LucideIcon; label: string; shortLabel: string; view: View }> = [
-    { icon: LayoutDashboard, label: "Dispečing", shortLabel: "Dispeč.", view: "dispatch" },
+  const navItems: NavigationItem[] = [
+    { icon: LayoutDashboard, label: "Nástenka", shortLabel: "Nástenka", view: "dispatch" },
     { badgeCount: taskAttentionCount, icon: BellRing, label: "Úlohy", shortLabel: "Úlohy", view: "tasks" },
     { icon: Table2, label: "Prípady", shortLabel: "Prípady", view: "cases" },
     { icon: Headphones, label: "Ústredňa", shortLabel: "Ústredňa", view: "call-center" },
@@ -392,6 +410,9 @@ export function DispatchConsole({
     { icon: BarChart3, label: "Reporty", shortLabel: "Reporty", view: "reports" },
     { icon: Settings2, label: "Nastavenia", shortLabel: "Nastav.", view: "settings" },
   ];
+  const dashboardNavItem = navItems.find((item) => item.view === "dispatch")!;
+  const secondaryNavItems = navItems.filter((item) => item.view !== "dispatch");
+  const secondaryBadgeCount = secondaryNavItems.reduce((total, item) => total + (item.badgeCount ?? 0), 0);
 
   // Stable so it does not invalidate the call-centre effects that depend on it;
   // as an inline arrow it was a new function on every render.
@@ -1181,26 +1202,45 @@ export function DispatchConsole({
     >
       <div className="relative z-50 shrink-0" ref={topBarsRef}>
       <header className="flex min-h-14 items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-950 px-3 py-2 text-white sm:px-4 sm:py-0">
-        <div className="flex min-w-0 shrink-0 items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-[#FCD703] font-black text-zinc-950">PM</div>
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">Linka pomoci motoristom</div>
-            <div className="truncate text-xs text-zinc-400">Dispečing · pilotný deň · {dataSourceLabel}</div>
-          </div>
+        <div className="flex min-w-0 shrink items-center gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#FCD703] font-black text-zinc-950">PM</div>
+          <span data-testid="signed-in-user-name" className="min-w-0 max-w-28 truncate text-sm font-semibold sm:max-w-24 md:max-w-36 lg:max-w-48" title={signedInName}>
+            {signedInName}
+          </span>
         </div>
-        <nav className="hidden min-w-0 items-center gap-1 sm:mt-0 sm:flex sm:overflow-x-auto sm:pb-0" aria-label="Hlavná navigácia">
-          {navItems.map((item) => (
-            <NavButton
-              key={item.view}
-              active={activeView === item.view}
-              label={item.label}
-              icon={item.icon}
-              badgeCount={item.badgeCount}
-              onClick={() => switchView(item.view)}
-            />
-          ))}
+        <nav className="hidden min-w-0 flex-1 items-center justify-center gap-1 sm:flex" aria-label="Hlavná navigácia">
+          <NavButton
+            active={activeView === dashboardNavItem.view}
+            label={dashboardNavItem.label}
+            icon={dashboardNavItem.icon}
+            badgeCount={dashboardNavItem.badgeCount}
+            onClick={() => switchView(dashboardNavItem.view)}
+          />
+          <NavigationMenu
+            activeView={activeView}
+            badgeCount={secondaryBadgeCount}
+            items={secondaryNavItems}
+            onSelect={switchView}
+            variant="header"
+          />
         </nav>
         <div className="flex shrink-0 items-center gap-2">
+          {telephonyConfigured ? (
+            <HeaderPhoneStatusMenu
+              busy={telephony.presenceBusy}
+              onChange={telephony.changePresence}
+              onDismissNotice={telephony.dismissNotice}
+              onTakeover={telephony.takeoverPhone}
+              notice={telephony.notice}
+              pauseReasons={telephony.pauseReasons}
+              phone={telephony.phone}
+              status={telephony.phoneBar.ownPresenceStatus}
+            />
+          ) : (
+            <div className="hidden lg:block">
+              <TelephonyNotConfiguredPill />
+            </div>
+          )}
           <HeaderNotificationMenu
             cases={dispatchCases}
             notifications={viewerNotifications}
@@ -1209,12 +1249,12 @@ export function DispatchConsole({
             onOpenTask={openTask}
           />
           {telephonyConfigured && telephony.stale ? (
-            <div className="hidden sm:block">
+            <div className="hidden xl:block">
               <TelephonyStalePill />
             </div>
           ) : null}
           {telephonyConfigured ? (
-            <div className="hidden sm:block">
+            <div className="hidden xl:block">
               <CallQueuePanel
                 calls={telephony.waitingCalls}
                 now={waitingRoomNow}
@@ -1223,15 +1263,11 @@ export function DispatchConsole({
                 variant="header"
               />
             </div>
-          ) : (
-            <div className="hidden sm:block">
-              <TelephonyNotConfiguredPill />
-            </div>
-          )}
+          ) : null}
           <button
             type="button"
             onClick={() => startNewCase()}
-            className="hidden h-9 shrink-0 items-center gap-2 rounded-md bg-[#FCD703] px-3 text-sm font-semibold text-zinc-950 shadow-sm transition hover:bg-yellow-300 disabled:cursor-wait disabled:bg-zinc-700 disabled:text-zinc-400 sm:inline-flex"
+            className="hidden h-9 shrink-0 items-center gap-2 rounded-md bg-[#FCD703] px-3 text-sm font-semibold text-zinc-950 shadow-sm transition hover:bg-yellow-300 disabled:cursor-wait disabled:bg-zinc-700 disabled:text-zinc-400 md:inline-flex"
           >
             <Plus size={16} />
             Nový prípad
@@ -1250,12 +1286,9 @@ export function DispatchConsole({
             model={telephony.phoneBar}
             phone={telephony.phone}
             degradedSessionIds={telephony.degradedSessionIds}
-            pauseReasons={telephony.pauseReasons}
-            presenceBusy={telephony.presenceBusy}
             busyAction={telephony.busyAction}
             notice={telephony.notice}
             onDismissNotice={telephony.dismissNotice}
-            onPresenceChange={telephony.changePresence}
             onCallAction={runPhoneCallAction}
             onPartyAction={(action, sessionId, legId) => void telephony.partyAction(action, sessionId, legId)}
             canSupervise={viewerCanSupervise}
@@ -1269,7 +1302,6 @@ export function DispatchConsole({
             onLinkCase={(call) => void linkPhoneCallToCase(call)}
             onOpenCase={openCase}
             onUnlockAudio={telephony.unlockAudio}
-            onTakeover={telephony.takeoverPhone}
           />
         )}
 
@@ -1514,18 +1546,22 @@ export function DispatchConsole({
       />
 
       <nav className="fixed inset-x-0 bottom-0 z-[2147483000] border-t border-zinc-200 bg-white/95 px-2 pt-1.5 pb-[calc(8px+env(safe-area-inset-bottom))] shadow-[0_-10px_30px_rgba(24,24,27,0.12)] backdrop-blur sm:hidden" aria-label="Mobilná navigácia">
-        <div className="flex gap-1 overflow-x-auto">
-          {navItems.map((item) => (
-            <MobileTabButton
-              key={item.view}
-              active={activeView === item.view}
-              badgeCount={item.badgeCount}
-              icon={item.icon}
-              label={item.label}
-              shortLabel={item.shortLabel}
-              onClick={() => switchView(item.view)}
-            />
-          ))}
+        <div className="grid grid-cols-2 gap-1">
+          <MobileTabButton
+            active={activeView === dashboardNavItem.view}
+            badgeCount={dashboardNavItem.badgeCount}
+            icon={dashboardNavItem.icon}
+            label={dashboardNavItem.label}
+            shortLabel={dashboardNavItem.shortLabel}
+            onClick={() => switchView(dashboardNavItem.view)}
+          />
+          <NavigationMenu
+            activeView={activeView}
+            badgeCount={secondaryBadgeCount}
+            items={secondaryNavItems}
+            onSelect={switchView}
+            variant="mobile"
+          />
         </div>
       </nav>
 
@@ -1567,6 +1603,110 @@ function TelephonyStalePill() {
       <PhoneOff size={14} className="shrink-0" aria-hidden="true" />
       <span>{TELEPHONY_STALE_MESSAGE}</span>
     </span>
+  );
+}
+
+function NavigationMenu({
+  activeView,
+  badgeCount,
+  items,
+  onSelect,
+  variant,
+}: {
+  activeView: View;
+  badgeCount: number;
+  items: NavigationItem[];
+  onSelect: (view: View) => void;
+  variant: "header" | "mobile";
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const hasActiveItem = items.some((item) => item.view === activeView);
+  const hasBadge = badgeCount > 0;
+
+  useEffect(() => {
+    if (!open) return;
+
+    function closeOnOutsidePointer(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  function select(view: View) {
+    setOpen(false);
+    onSelect(view);
+  }
+
+  const mobile = variant === "mobile";
+
+  return (
+    <div ref={rootRef} className={`relative min-w-0 ${mobile ? "w-full" : "shrink-0"}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-label="Menu"
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className={
+          mobile
+            ? `relative flex h-14 w-full flex-col items-center justify-center gap-1 rounded-md px-1 text-[10px] font-semibold transition ${hasActiveItem || open ? "bg-zinc-950 text-white" : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950"}`
+            : `relative inline-flex h-9 shrink-0 items-center gap-2 rounded-md px-2.5 text-xs font-semibold transition sm:px-3 sm:text-sm ${hasActiveItem || open ? "bg-white text-zinc-950" : "text-zinc-300 hover:bg-zinc-800 hover:text-white"}`
+        }
+      >
+        <Menu size={mobile ? 19 : 16} strokeWidth={mobile ? 2.2 : 2} aria-hidden="true" />
+        <span>Menu</span>
+        {!mobile && <ChevronDown size={14} className={`transition-transform ${open ? "rotate-180" : ""}`} aria-hidden="true" />}
+        {hasBadge && (
+          <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none ${mobile ? "absolute right-[calc(50%-28px)] top-1 bg-[#FCD703] text-zinc-950" : hasActiveItem || open ? "bg-zinc-950 text-white" : "bg-[#FCD703] text-zinc-950"}`}>
+            {formatBadgeCount(badgeCount)}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          aria-label="Ďalšie sekcie"
+          className={`absolute z-[2147483500] w-[min(17rem,calc(100vw-1rem))] rounded-xl border border-zinc-200 bg-white p-2 text-zinc-950 shadow-2xl ${mobile ? "bottom-[calc(100%+0.65rem)] right-0" : "left-0 top-[calc(100%+0.55rem)]"}`}
+        >
+          {items.map((item) => {
+            const active = item.view === activeView;
+            const ItemIcon = item.icon;
+            const itemHasBadge = typeof item.badgeCount === "number" && item.badgeCount > 0;
+
+            return (
+              <button
+                key={item.view}
+                type="button"
+                role="menuitem"
+                aria-current={active ? "page" : undefined}
+                onClick={() => select(item.view)}
+                className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm font-semibold transition ${active ? "bg-zinc-950 text-white" : "text-zinc-700 hover:bg-zinc-100 hover:text-zinc-950"}`}
+              >
+                <ItemIcon size={16} aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                {itemHasBadge && (
+                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none ${active ? "bg-[#FCD703] text-zinc-950" : "bg-zinc-950 text-white"}`}>
+                    {formatBadgeCount(item.badgeCount ?? 0)}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1634,7 +1774,7 @@ function MobileTabButton({
       aria-current={active ? "page" : undefined}
       onClick={onClick}
       disabled={disabled}
-      className={`relative flex h-14 w-[74px] shrink-0 flex-col items-center justify-center gap-1 rounded-md px-1 text-[10px] font-semibold transition ${
+      className={`relative flex h-14 w-full min-w-0 flex-col items-center justify-center gap-1 rounded-md px-1 text-[10px] font-semibold transition ${
         active ? "bg-zinc-950 text-white" : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950"
       } ${disabled ? "cursor-wait opacity-50" : ""}`}
     >

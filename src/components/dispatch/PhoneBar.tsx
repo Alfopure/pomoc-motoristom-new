@@ -26,17 +26,12 @@ import {
   Users,
 } from "lucide-react";
 
-import type { OperatorPresenceStatus } from "@/lib/supabase/database.types";
 import type { CallParticipant, PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import { SUPERVISOR_MODE_HINTS, SUPERVISOR_MODE_LABELS, SUPERVISOR_MODE_ORDER, type SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
 import { CallTransferPicker, type TransferPickerMode, type TransferRequest } from "./CallTransferPicker";
-import { EmergencyNotice } from "./EmergencyNotice";
-// The status vocabulary is shared with "Môj telefón" so both surfaces name the
-// same state the same way.
-import { presenceLabel } from "./my-phone-model";
 import {
   callElapsedSeconds,
   DTMF_KEYS,
@@ -44,26 +39,19 @@ import {
   partyBusyKey,
   phoneBarCapabilities,
   phoneBarStateLabel,
-  phoneTakeoverAvailable,
   PHONE_ACTION_LABELS,
   type PhoneCallAction,
   type PhonePartyAction,
 } from "./phone-bar-model";
-
-export type PhonePauseReason = { id: string; code: string; label: string };
-export type PhonePresenceAction = { status: "available" | "paused" | "offline"; pauseReasonId?: string };
 
 export type PhoneBarProps = {
   model: PhoneBarModel;
   phone: WebphoneSnapshot;
   /** Sessions whose conference promotion failed: advanced actions are refused. */
   degradedSessionIds: ReadonlySet<string>;
-  pauseReasons: PhonePauseReason[];
-  presenceBusy: boolean;
   busyAction: string | null;
   notice: string | null;
   onDismissNotice: () => void;
-  onPresenceChange: (action: PhonePresenceAction) => void;
   onCallAction: (action: PhoneCallAction, sessionId: string, target?: TransferRequest) => void;
   /** Mute / unmute / disconnect one added participant of the conference. */
   onPartyAction: (action: PhonePartyAction, sessionId: string, legId: string) => void;
@@ -79,15 +67,6 @@ export type PhoneBarProps = {
   onLinkCase: (call: PhoneBarCall) => void;
   onOpenCase: (caseId: string) => void;
   onUnlockAudio: () => void;
-  /** Re-mints the browser phone's credential from this tab (409 recovery). */
-  onTakeover: () => void;
-};
-
-const REGISTRATION_TONES: Record<"ok" | "warn" | "error" | "neutral", string> = {
-  ok: "border-emerald-400/50 bg-emerald-500/15 text-emerald-100",
-  warn: "border-amber-400/50 bg-amber-500/15 text-amber-100",
-  error: "border-red-400/50 bg-red-500/15 text-red-100",
-  neutral: "border-white/15 bg-white/10 text-zinc-200",
 };
 
 const STATE_TONES: Record<"live" | "hold" | "ring" | "wait", string> = {
@@ -170,14 +149,6 @@ export function PhoneBar(props: PhoneBarProps) {
       data-testid="phone-bar"
       className="relative z-40 flex min-h-12 flex-wrap items-center gap-2 border-b border-zinc-800 bg-zinc-900 px-3 py-1.5 text-white sm:px-4"
     >
-      <RegistrationChip phone={phone} onTakeover={props.onTakeover} />
-      <PresenceSelector
-        status={model.ownPresenceStatus}
-        pauseReasons={props.pauseReasons}
-        busy={props.presenceBusy}
-        onChange={props.onPresenceChange}
-      />
-
       {focus ? (
         <CallSummary call={focus} degraded={degraded} now={now} onOpenCase={props.onOpenCase} />
       ) : (
@@ -285,8 +256,6 @@ export function PhoneBar(props: PhoneBarProps) {
           />
         )}
       </div>
-
-      <EmergencyNotice />
 
       {model.offers.length > 1 && (
         <span className="rounded-md border border-yellow-300/40 bg-yellow-300/15 px-2 py-1 text-[11px] font-bold text-yellow-100">
@@ -718,110 +687,6 @@ function CallSummary({
         </span>
       )}
     </div>
-  );
-}
-
-function RegistrationChip({ phone, onTakeover }: { phone: WebphoneSnapshot; onTakeover: () => void }) {
-  // `failed` (the server refused: another tab is on a call) and `superseded`
-  // (a newer tab took the credential) are terminal: nothing retries on its own,
-  // so this button is the only way back without reloading the page.
-  const canTakeover = phoneTakeoverAvailable(phone.status);
-  return (
-    <span className="inline-flex shrink-0 items-center gap-1.5">
-      <span
-        data-testid="phone-registration"
-        className={`inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-[11px] font-bold ${REGISTRATION_TONES[phone.registration.tone]}`}
-        title={phone.registration.detail}
-      >
-        {phone.registration.tone === "ok" ? <Phone size={12} aria-hidden="true" /> : <PhoneOff size={12} aria-hidden="true" />}
-        {phone.registration.label}
-      </span>
-      {canTakeover && (
-        <button
-          type="button"
-          data-testid="phone-takeover"
-          onClick={onTakeover}
-          title="Prevziať telefón do tohto okna"
-          className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-white/25 bg-white/10 px-2 text-[11px] font-bold text-white hover:bg-white/20"
-        >
-          <PhoneCall size={12} aria-hidden="true" />
-          Prevziať telefón
-        </button>
-      )}
-    </span>
-  );
-}
-
-function PresenceSelector({
-  busy,
-  onChange,
-  pauseReasons,
-  status,
-}: {
-  busy: boolean;
-  onChange: (action: PhonePresenceAction) => void;
-  pauseReasons: PhonePauseReason[];
-  status: string | null;
-}) {
-  const label = presenceLabel(status as OperatorPresenceStatus | null);
-  const tone = status === "available" ? "ok" : status === "paused" || status === "after_call_work" ? "warn" : status === "offline" || !status ? "neutral" : "warn";
-
-  return (
-    <details className="group relative shrink-0">
-      <summary
-        className={`flex h-7 cursor-pointer list-none items-center gap-1.5 rounded-md border px-2 text-[11px] font-bold outline-none [&::-webkit-details-marker]:hidden ${REGISTRATION_TONES[tone as keyof typeof REGISTRATION_TONES]}`}
-        title="Zmeniť dostupnosť"
-      >
-        {busy ? <Loader2 size={12} className="motion-safe:animate-spin" aria-hidden="true" /> : <PhoneIncoming size={12} aria-hidden="true" />}
-        {label}
-      </summary>
-      <div className="absolute left-0 top-[calc(100%+6px)] z-50 w-56 rounded-xl border border-zinc-200 bg-white p-2 text-zinc-950 shadow-2xl">
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => onChange({ status: "available" })}
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-semibold hover:bg-zinc-100 disabled:text-zinc-400"
-        >
-          <PhoneCall size={13} aria-hidden="true" />
-          Dostupný
-        </button>
-        {pauseReasons.map((reason) => (
-          <button
-            key={reason.id}
-            type="button"
-            disabled={busy}
-            onClick={() => onChange({ status: "paused", pauseReasonId: reason.id })}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-semibold hover:bg-zinc-100 disabled:text-zinc-400"
-          >
-            <Pause size={13} aria-hidden="true" />
-            Pauza · {reason.label}
-          </button>
-        ))}
-        {pauseReasons.length === 0 && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => onChange({ status: "paused" })}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-semibold hover:bg-zinc-100 disabled:text-zinc-400"
-          >
-            <Pause size={13} aria-hidden="true" />
-            Pauza
-          </button>
-        )}
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => onChange({ status: "offline" })}
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-semibold hover:bg-zinc-100 disabled:text-zinc-400"
-        >
-          <PhoneOff size={13} aria-hidden="true" />
-          Odhlásiť z telefónie
-        </button>
-        <p className="mt-1 border-t border-zinc-200 pt-1.5 text-[11px] font-medium leading-4 text-zinc-500">
-          Stav sa nedá zmeniť počas hovoru.
-        </p>
-      </div>
-    </details>
   );
 }
 
