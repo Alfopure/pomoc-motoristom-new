@@ -186,7 +186,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
 
   // users
   users: { class: "session", role: ["manager", "admin"] },
-  "users/[id]": { class: "session", role: ["manager", "admin"] },
+  "users/[id]": { class: "session", role: ["manager", "admin"], note: "PATCH (úprava, deaktivácia) manager/admin; DELETE (trvalé vymazanie účtu vrátane Auth používateľa a Telnyx credentialu) len admin." },
   "users/[id]/access/reset-password": { class: "session", role: ["manager", "admin"] },
   "users/[id]/access/send": { class: "session", role: ["manager", "admin"] },
 };

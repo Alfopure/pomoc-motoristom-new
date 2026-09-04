@@ -4,7 +4,7 @@ import type { User } from "@supabase/supabase-js";
 import type { AccessStatus, AppRole } from "@/domain/types";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import type { Database } from "@/lib/supabase/database.types";
+import type { Database, Json } from "@/lib/supabase/database.types";
 import { buildAppUrl, escapeHtml, requestOrigin, sendEmail, type EmailDeliveryResult } from "./email-delivery";
 import { canAssignRole, canManageTargetRole, isAppRole } from "./access-policy";
 import { type MotoristActor, resolveDefaultOrganizationId } from "./api-auth";
@@ -181,6 +181,116 @@ export async function updateAccessUser(actor: MotoristActor, profileId: string, 
   }
 
   return data;
+}
+
+/**
+ * Deletes a user for good: the profile row, their Supabase Auth account and
+ * their Telnyx credential.
+ *
+ * Deactivation keeps the person and bans their login; deletion removes them.
+ * The database is built for it — every foreign key that points at
+ * `motorist_profiles` either cascades (the rows that only describe *them*:
+ * devices, presence, ring-group membership, attendance, favourites) or nulls
+ * (the rows that describe *work*: cases, calls, tasks, audit). So the centre's
+ * history survives a departure and only stops naming the person, which is also
+ * what a deletion request under GDPR asks for.
+ *
+ * Three things must happen outside the row, and in this order:
+ *   1. refuse while they are on a live call — deleting mid-call would cut it,
+ *   2. delete the Telnyx credential, or a browser still holding a JWT could
+ *      keep its SIP registration and be offered calls after the account is gone,
+ *   3. delete the Auth user, so the login stops existing rather than merely
+ *      losing its profile.
+ * The audit row is written first, because `motorist_audit_log.actor_profile_id`
+ * survives but the target's name would not.
+ */
+export async function deleteAccessUser(actor: MotoristActor, profileId: string) {
+  const supabase = createSupabaseAdminClient();
+  const profile = await getManagedProfile(actor, profileId);
+
+  if (profile.id === actor.profileId) {
+    throw new MutationError("Vlastný účet vymazať nemôžeš.", 400);
+  }
+  if (!canManageTargetRole(actor.role, profile.role)) {
+    throw new MutationError("Tento profil nemôžeš vymazať.", 403);
+  }
+  // Deleting the last admin is the same lockout as deactivating them.
+  await assertNotLastAdminLoss(profile, { role: profile.role, active: false });
+
+  const live = await supabase
+    .from("motorist_call_legs")
+    .select("id")
+    .eq("profile_id", profile.id)
+    .is("ended_at", null)
+    .limit(1);
+  if (live.error) {
+    throw new MutationError("Stav hovorov používateľa sa nepodarilo overiť.", 500);
+  }
+  if ((live.data ?? []).length > 0) {
+    throw new MutationError("Používateľ je práve v hovore. Skús to znova, keď hovor skončí.", 409);
+  }
+
+  await supabase.from("motorist_audit_log").insert({
+    organization_id: profile.organization_id,
+    actor_profile_id: actor.profileId,
+    action: "access.user.delete",
+    entity_type: "profile",
+    entity_id: profile.id,
+    before_payload: {
+      display_name: profile.display_name,
+      email: profile.email,
+      role: profile.role,
+      access_status: profile.access_status,
+    } as unknown as Json,
+    after_payload: null,
+  });
+
+  await deleteOperatorCredential(supabase, profile);
+
+  if (profile.user_id) {
+    const { error } = await supabase.auth.admin.deleteUser(profile.user_id);
+    // "not found" means somebody removed it already; anything else must stop us
+    // before the profile row disappears and the login is left behind.
+    if (error && !/not.?found/i.test(error.message)) {
+      throw new MutationError(`Auth účet sa nepodarilo vymazať: ${error.message}`, 500);
+    }
+  }
+
+  const { error } = await supabase.from("motorist_profiles").delete().eq("id", profile.id);
+  if (error) {
+    throw new MutationError("Používateľa sa nepodarilo vymazať.", 500);
+  }
+
+  return { deletedProfileId: profile.id };
+}
+
+/**
+ * Removes the operator's Telnyx credential before the device row cascades away.
+ * Best effort by design: telephony may not be configured at all, and a
+ * credential Telnyx has already forgotten must not block the deletion — the
+ * device row is going anyway, so nothing can mint a new token for it.
+ */
+async function deleteOperatorCredential(supabase: ReturnType<typeof createSupabaseAdminClient>, profile: ProfileRow) {
+  const device = await supabase
+    .from("motorist_operator_devices")
+    .select("telnyx_credential_id")
+    .eq("profile_id", profile.id)
+    .not("telnyx_credential_id", "is", null)
+    .limit(1)
+    .maybeSingle();
+  const credentialId = device.data?.telnyx_credential_id;
+  if (!credentialId) return;
+
+  try {
+    const { getTelnyxConfig } = await import("@/server/telephony/telnyx/env");
+    const config = getTelnyxConfig();
+    if (!config.configured) return;
+    const { createTelnyxClient } = await import("@/server/telephony/telnyx/client");
+    const client = createTelnyxClient({ config, liveGate: { callsEnabled: true, smsEnabled: false } });
+    await client.deleteTelephonyCredential(credentialId);
+  } catch (error) {
+    console.error("Telnyx credential deletion during account removal failed:", error);
+  }
 }
 
 export async function sendAccessLink(actor: MotoristActor, profileId: string, purpose: "invite" | "reset_password", request?: Request) {

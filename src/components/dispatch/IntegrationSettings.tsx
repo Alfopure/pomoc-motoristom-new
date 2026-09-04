@@ -18,7 +18,7 @@ import {
 import type { PlaceSelectionInput } from "@/data/case-inputs";
 import type { DispatchData } from "@/data/dispatch-types";
 import { partnerDirectoryKindLabels } from "@/domain/case-card";
-import type { AccessUser, Branch, PartnerDirectoryEntry, PartnerDirectoryKind } from "@/domain/types";
+import type { AccessUser, AppRole, Branch, PartnerDirectoryEntry, PartnerDirectoryKind } from "@/domain/types";
 import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { useReplacementVehicleAvailability } from "./useReplacementVehicleAvailability";
 import type { MyPhoneTestCall } from "./MyPhonePanel";
@@ -36,6 +36,8 @@ type IntegrationSettingsProps = {
    * the browser phone answers its own leg exactly like for any other dial.
    */
   onTestCall?: MyPhoneTestCall;
+  /** Deleting a user is admin-only; the button is hidden for everyone else. */
+  viewerRole?: AppRole;
 };
 
 type ApiMutationResponse = {
@@ -58,6 +60,7 @@ export function IntegrationSettings({
   onTestCall,
   partnerDirectory,
   users,
+  viewerRole,
 }: IntegrationSettingsProps) {
   const [activeSection, setActiveSection] = useState<SettingsSection>("users");
   const [message, setMessage] = useState<string | null>(null);
@@ -95,7 +98,7 @@ export function IntegrationSettings({
         {message && <div role="status" aria-live="polite" className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900">{message}</div>}
 
         {activeSection === "users" && (
-          <UserAccessSettings users={users} onDataChange={onDataChange} onNotice={setMessage} />
+          <UserAccessSettings users={users} onDataChange={onDataChange} onNotice={setMessage} viewerRole={viewerRole} />
         )}
 
         {activeSection === "telephony" && <TelephonyConfigPanel onTestCall={onTestCall} />}
