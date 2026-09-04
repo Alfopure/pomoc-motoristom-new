@@ -4,7 +4,10 @@ import { useState } from "react";
 import { Archive, BellRing, Check, ChevronLeft, ChevronRight, Inbox, Loader2, RefreshCw, RotateCcw, UserRound, UsersRound } from "lucide-react";
 import {
   compareNotifications,
+  formatNotificationReminderTime,
   isNotificationForProfile,
+  isNotificationReady,
+  isNotificationSnoozed,
   isNotificationUnread,
   notificationSeverityLabels,
   notificationSeverityTone,
@@ -17,8 +20,9 @@ import type {
   Operator,
 } from "@/domain/types";
 import { formatTime } from "@/lib/dispatch-calculations";
+import { NotificationSnoozeButton } from "./NotificationSnoozeButton";
 
-type NotificationStateFilter = "pending" | "past";
+type NotificationStateFilter = "pending" | "snoozed" | "past";
 type NotificationSeverityFilter = "all" | NotificationSeverity;
 type NotificationAudience = "mine" | "all";
 
@@ -29,11 +33,13 @@ type NotificationCenterProps = {
   limit?: number;
   markingNotificationId?: string | null;
   notifications: DispatchNotification[];
+  now: number;
   operators: Operator[];
   refreshEnabled?: boolean;
   onMarkRead: (notificationId: string) => void;
   onOpenTask: (taskId: string, caseId: string) => void;
   onRefresh?: () => void;
+  onSnooze?: (notificationId: string, snoozedUntil: string) => boolean | Promise<boolean>;
   onUpdateStatus?: (notificationId: string, status: NotificationStatus) => Promise<void> | void;
   viewerProfileId?: string;
 };
@@ -45,11 +51,13 @@ export function NotificationCenter({
   limit = 5,
   markingNotificationId,
   notifications,
+  now,
   operators,
   refreshEnabled,
   onMarkRead,
   onOpenTask,
   onRefresh,
+  onSnooze,
   onUpdateStatus,
   viewerProfileId,
 }: NotificationCenterProps) {
@@ -65,10 +73,15 @@ export function NotificationCenter({
   const personalNotifications = allAvailableNotifications.filter((notification) =>
     isNotificationForProfile(notification, viewerProfileId));
   const availableNotifications = audience === "mine" ? personalNotifications : allAvailableNotifications;
-  const unreadCount = availableNotifications.filter(isNotificationUnread).length;
-  const pastCount = availableNotifications.length - unreadCount;
+  const unreadCount = availableNotifications.filter((notification) => isNotificationReady(notification, now)).length;
+  const snoozedCount = availableNotifications.filter((notification) => isNotificationSnoozed(notification, now)).length;
+  const pastCount = availableNotifications.filter((notification) => !isNotificationUnread(notification)).length;
   const filteredNotifications = availableNotifications.filter((notification) => {
-    const stateMatches = stateFilter === "pending" ? isNotificationUnread(notification) : !isNotificationUnread(notification);
+    const stateMatches = stateFilter === "pending"
+      ? isNotificationReady(notification, now)
+      : stateFilter === "snoozed"
+        ? isNotificationSnoozed(notification, now)
+        : !isNotificationUnread(notification);
     const severityMatches = severityFilter === "all" || notification.severity === severityFilter;
     return stateMatches && severityMatches;
   });
@@ -146,9 +159,10 @@ export function NotificationCenter({
             );
           })}
         </div>
-        <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="Stav upozornení">
+        <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="Stav upozornení">
           {([
             { id: "pending", label: "Na vybavenie", count: unreadCount },
+            { id: "snoozed", label: "Odložené", count: snoozedCount },
             { id: "past", label: "Vybavené", count: pastCount },
           ] as const).map((item) => (
             <button
@@ -195,6 +209,7 @@ export function NotificationCenter({
             const canOpenTask = Boolean(notification.taskId && caseId);
             const busy = markingNotificationId === notification.id;
             const isMine = isNotificationForProfile(notification, viewerProfileId);
+            const snoozed = isNotificationSnoozed(notification, now);
             const recipientLabel = notification.recipientProfileId
               ? operatorsById.get(notification.recipientProfileId) ?? "Iný používateľ"
               : "Tímové upozornenie";
@@ -202,7 +217,7 @@ export function NotificationCenter({
             return (
               <article
                 key={notification.id}
-                className={`min-w-0 rounded-md border p-2 ${isNotificationUnread(notification) ? "border-yellow-200 bg-yellow-50" : "border-zinc-200 bg-zinc-50"}`}
+                className={`min-w-0 rounded-md border p-2 ${snoozed ? "border-sky-200 bg-sky-50" : isNotificationUnread(notification) ? "border-yellow-200 bg-yellow-50" : "border-zinc-200 bg-zinc-50"}`}
               >
                 <button
                   type="button"
@@ -221,9 +236,18 @@ export function NotificationCenter({
 
                 <div className="mt-1.5 flex min-w-0 flex-wrap items-center justify-between gap-1.5 border-t border-black/5 pt-1.5">
                   <span className="min-w-0 truncate text-[11px] font-medium text-zinc-500">
-                    {audience === "all" ? `${recipientLabel} · ` : ""}{caseItem?.caseNumber ?? "Bez prípadu"} · {formatTime(notification.createdAt)}
+                    {snoozed ? `Pripomenie ${formatNotificationReminderTime(notification.snoozedUntil!)} · ` : ""}{audience === "all" ? `${recipientLabel} · ` : ""}{caseItem?.caseNumber ?? "Bez prípadu"} · {formatTime(notification.createdAt)}
                   </span>
                   <div className="flex shrink-0 items-center gap-1.5">
+                    {isMine && isNotificationUnread(notification) && onSnooze && (
+                      <NotificationSnoozeButton
+                        disabled={busy}
+                        notificationId={notification.id}
+                        notificationTitle={notification.title}
+                        onSnooze={onSnooze}
+                        variant="icon"
+                      />
+                    )}
                     {isMine && (
                       isNotificationUnread(notification) ? (
                         <button
@@ -268,8 +292,8 @@ export function NotificationCenter({
           <div className="rounded-md border border-dashed border-zinc-200 bg-zinc-50 px-3 py-6 text-center text-sm font-medium text-zinc-500">
             <Inbox size={20} className="mx-auto mb-2 text-zinc-400" />
             {audience === "mine"
-              ? stateFilter === "pending" ? "Nemáš žiadne upozornenia na vybavenie." : "Nemáš žiadne vybavené upozornenia."
-              : stateFilter === "pending" ? "Žiadne upozornenia na vybavenie." : "Žiadne vybavené upozornenia."}
+              ? stateFilter === "pending" ? "Nemáš žiadne upozornenia na vybavenie." : stateFilter === "snoozed" ? "Nemáš žiadne odložené upozornenia." : "Nemáš žiadne vybavené upozornenia."
+              : stateFilter === "pending" ? "Žiadne upozornenia na vybavenie." : stateFilter === "snoozed" ? "Žiadne odložené upozornenia." : "Žiadne vybavené upozornenia."}
           </div>
         )}
 

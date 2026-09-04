@@ -1207,6 +1207,8 @@ function mapCase({
 }
 
 function mapNotification(row: NotificationRow): DispatchNotification {
+  const payload = jsonRecord(row.payload);
+
   return {
     id: row.id,
     caseId: row.case_id ?? undefined,
@@ -1221,6 +1223,7 @@ function mapNotification(row: NotificationRow): DispatchNotification {
     status: row.status,
     deliveryStatus: row.delivery_status,
     dedupeKey: row.dedupe_key,
+    snoozedUntil: stringValue(payload.snoozed_until),
     readAt: row.read_at ?? undefined,
     archivedAt: row.archived_at ?? undefined,
     createdAt: row.created_at,

@@ -6,6 +6,8 @@ import {
   buildReminderDedupeKey,
   compareNotifications,
   isNotificationForProfile,
+  isNotificationReady,
+  isNotificationSnoozed,
   isNotificationUnread,
   notificationKindForTask,
   notificationSeverityForTask,
@@ -84,5 +86,16 @@ describe("notification domain rules", () => {
     expect(isNotificationForProfile(notification({ recipientProfileId: "operator-2", visibility: "private" }), "operator-1")).toBe(false);
     expect(isNotificationForProfile(notification({ recipientProfileId: undefined, visibility: "team" }), "operator-1")).toBe(false);
     expect(isNotificationForProfile(notification({ recipientProfileId: "operator-1", visibility: "private" }), undefined)).toBe(false);
+  });
+
+  it("keeps a snoozed unread notification inactive until its selected time", () => {
+    const snoozed = notification({ snoozedUntil: "2026-06-08T10:30:00.000Z" });
+
+    expect(isNotificationUnread(snoozed)).toBe(true);
+    expect(isNotificationSnoozed(snoozed, now)).toBe(true);
+    expect(isNotificationReady(snoozed, now)).toBe(false);
+    expect(isNotificationSnoozed(snoozed, new Date("2026-06-08T10:30:00.000Z"))).toBe(false);
+    expect(isNotificationReady(snoozed, new Date("2026-06-08T10:30:00.000Z"))).toBe(true);
+    expect(isNotificationSnoozed({ ...snoozed, status: "read" }, now)).toBe(false);
   });
 });
