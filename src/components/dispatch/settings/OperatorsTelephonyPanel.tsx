@@ -26,6 +26,7 @@ import {
   describeDevice,
   describeLineOption,
   describeOutboundLine,
+  describePauseRouting,
   findOperator,
   operatorDirty,
   operatorDraftsFromDocument,
@@ -77,7 +78,10 @@ export function OperatorsTelephonyPanel({
   // withheld rather than computed against epoch zero.
   const clock = useMinuteClock();
 
-  const context = useMemo<OperatorValidationContext>(() => ({ lines: document.lines }), [document.lines]);
+  const context = useMemo<OperatorValidationContext>(
+    () => ({ lines: document.lines, operators: document.operators, destinationAllowlist: document.limits?.destinationAllowlist ?? null }),
+    [document.limits?.destinationAllowlist, document.lines, document.operators],
+  );
   const lineOptions = useMemo(() => activeLines(document.lines), [document.lines]);
 
   function begin(profileId: string) {
@@ -237,6 +241,18 @@ export function OperatorsTelephonyPanel({
                   />
                 </SettingsField>
 
+                <SettingsField label="Predvolený mobil" hint="Ponúkne sa pri pauze ako rýchle presmerovanie hovorov.">
+                  <input
+                    className={settingsInputClass}
+                    disabled={!canEdit || busy}
+                    type="tel"
+                    inputMode="tel"
+                    value={draft.defaultMobileNumber ?? ""}
+                    placeholder="+421 900 000 000"
+                    onChange={(event) => setDrafts((current) => updateOperator(current, draft.profileId, { defaultMobileNumber: event.target.value || null }))}
+                  />
+                </SettingsField>
+
                 <SettingsField label="Hlasitosť zvonenia (%)" hint="Uloží sa do profilu; telefón ju zatiaľ nepoužíva.">
                   <input
                     className={settingsInputClass}
@@ -266,6 +282,7 @@ export function OperatorsTelephonyPanel({
 
               <p className="mt-2 text-xs text-zinc-600">{describeOutboundLine(draft, document.lines)}</p>
               <p className="mt-1 text-xs text-zinc-600">{describeCallHandling(draft)}</p>
+              <p className="mt-1 text-xs font-medium text-zinc-600">{describePauseRouting(draft, document.operators)}</p>
               <p className="mt-1 text-xs text-zinc-500">{AUTO_ANSWER_PENDING_NOTE}</p>
               <p className="mt-1 text-xs text-zinc-500">{RING_VOLUME_PENDING_NOTE}</p>
               {device && <p className="mt-1 text-xs text-zinc-600">{device.detail}</p>}

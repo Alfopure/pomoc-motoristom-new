@@ -348,6 +348,10 @@ describe("validateBusinessHours / validatePauseReasons / patches", () => {
     expect(codes(validateOperatorSettingsPatch({ wrapUpSeconds: 601 }, context()))).toContain("wrap_up_invalid");
     expect(codes(validateOperatorSettingsPatch({ ringDeviceVolume: 101 }, context()))).toContain("volume_invalid");
     expect(codes(validateOperatorSettingsPatch({ defaultFromLineId: FOREIGN }, context()))).toContain("line_foreign");
+    expect(codes(validateOperatorSettingsPatch({ pauseRoutingMode: "broken" as never }, context()))).toContain("pause_routing_invalid");
+    expect(codes(validateOperatorSettingsPatch({ defaultMobileNumber: "+12025550123" }, context()))).toContain("destination_not_allowed");
+    expect(codes(validateOperatorSettingsPatch({ pauseForwardProfileId: FOREIGN }, context()))).toContain("pause_operator_foreign");
+    expect(validateOperatorSettingsPatch({ defaultMobileNumber: "+421 911 222 333", pauseRoutingMode: "default_mobile" }, context())).toEqual([]);
     expect(validateOperatorSettingsPatch({ defaultFromLineId: LINES.neutral, wrapUpSeconds: 20 }, context())).toEqual([]);
   });
 });
@@ -737,9 +741,41 @@ describe("line, settings and operator patches", () => {
       patch: { wrapUpSeconds: 45, autoAnswerOutbound: false, defaultFromLineId: LINES.allianz },
     });
 
-    expect(settings).toEqual({ defaultFromLineId: LINES.allianz, wrapUpSeconds: 45, autoAnswerOutbound: false, ringDeviceVolume: 80 });
+    expect(settings).toEqual({
+      defaultFromLineId: LINES.allianz,
+      wrapUpSeconds: 45,
+      autoAnswerOutbound: false,
+      ringDeviceVolume: 80,
+      defaultMobileNumber: null,
+      pauseRoutingMode: "none",
+      pauseForwardProfileId: null,
+      pauseForwardNumber: null,
+    });
     expect(harness.rows("motorist_operator_telephony_settings")).toHaveLength(1);
     expect(auditRows(harness)[0]).toMatchObject({ action: "telephony.operator_settings.update", entity_id: PROFILES.o1 });
+  });
+
+  it("normalises and persists a working pause route, and refuses self-substitution", async () => {
+    const { harness, deps } = harnessDeps();
+    const settings = await updateOperatorTelephonySettings(deps, {
+      organizationId: ORG,
+      actor: ACTOR,
+      profileId: PROFILES.o1,
+      patch: { defaultMobileNumber: "+421 911 222 333", pauseRoutingMode: "default_mobile" },
+    });
+
+    expect(settings).toMatchObject({ defaultMobileNumber: "+421911222333", pauseRoutingMode: "default_mobile" });
+    expect(harness.db.find("motorist_operator_telephony_settings", (row) => row.profile_id === PROFILES.o1)).toMatchObject({
+      default_mobile_number: "+421911222333",
+      pause_routing_mode: "default_mobile",
+    });
+
+    await expect(updateOperatorTelephonySettings(deps, {
+      organizationId: ORG,
+      actor: ACTOR,
+      profileId: PROFILES.o1,
+      patch: { pauseRoutingMode: "operator", pauseForwardProfileId: PROFILES.o1 },
+    })).rejects.toMatchObject({ status: 400, code: "config_invalid" });
   });
 
   it("refuses settings for an operator of another organisation", async () => {

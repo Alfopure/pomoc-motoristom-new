@@ -85,7 +85,7 @@ export type TelephonyConsole = {
   /** Manager/admin: monitor, whisper into or barge a colleague's live call. */
   supervise: (sessionId: string, mode: SupervisorMode) => Promise<void>;
   stopSupervise: (sessionId: string) => Promise<void>;
-  changePresence: (action: PhonePresenceAction) => void;
+  changePresence: (action: PhonePresenceAction) => Promise<boolean>;
   availabilityAction: (action: TelephonyAvailabilityAction) => void;
   answer: () => void;
   /** Explicit confirmation after a 409: take the phone over from another tab. */
@@ -287,39 +287,39 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   }, [configured, enabled]);
 
   const changePresence = useCallback(
-    (action: PhonePresenceAction) => {
-      if (presenceBusy) return;
+    async (action: PhonePresenceAction): Promise<boolean> => {
+      if (presenceBusy) return false;
       setPresenceBusy(true);
       setNotice(null);
-      void (async () => {
-        try {
-          const result = await telephonyJson<{ error?: string }>("/api/telephony/presence", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ status: action.status, pauseReasonId: action.pauseReasonId }),
-            label: "zmena dostupnosti",
-            timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
-          });
-          if (result.status === 503) {
-            setConfigured(false);
-            setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
-            return;
-          }
-          if (!result.ok) throw new Error(result.body?.error ?? "Stav sa nepodarilo uložiť.");
-          refreshRef.current?.();
-        } catch (error) {
-          setNotice(error instanceof Error ? error.message : "Stav sa nepodarilo uložiť.");
-        } finally {
-          setPresenceBusy(false);
+      try {
+        const result = await telephonyJson<{ error?: string }>("/api/telephony/presence", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: action.status, pauseReasonId: action.pauseReasonId }),
+          label: "zmena dostupnosti",
+          timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
+        });
+        if (result.status === 503) {
+          setConfigured(false);
+          setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+          return false;
         }
-      })();
+        if (!result.ok) throw new Error(result.body?.error ?? "Stav sa nepodarilo uložiť.");
+        refreshRef.current?.();
+        return true;
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : "Stav sa nepodarilo uložiť.");
+        return false;
+      } finally {
+        setPresenceBusy(false);
+      }
     },
     [presenceBusy],
   );
 
   const availabilityAction = useCallback(
     (action: TelephonyAvailabilityAction) => {
-      changePresence({ status: action === "pause" ? "paused" : action });
+      void changePresence({ status: action === "pause" ? "paused" : action });
     },
     [changePresence],
   );

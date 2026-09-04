@@ -1133,6 +1133,10 @@ export type Database = {
         wrap_up_seconds: number;
         auto_answer_outbound: boolean;
         ring_device_volume: number;
+        default_mobile_number: string | null;
+        pause_routing_mode: "none" | "default_mobile" | "external_number" | "operator";
+        pause_forward_profile_id: string | null;
+        pause_forward_number: string | null;
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;

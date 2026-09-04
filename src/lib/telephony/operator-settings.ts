@@ -9,11 +9,23 @@
  * precedent as `device-liveness.ts`.
  */
 
+export const PAUSE_ROUTING_MODES = ["none", "default_mobile", "external_number", "operator"] as const;
+
+export type PauseRoutingMode = (typeof PAUSE_ROUTING_MODES)[number];
+
 export type OperatorTelephonySettings = {
   defaultFromLineId: string | null;
   wrapUpSeconds: number;
   autoAnswerOutbound: boolean;
   ringDeviceVolume: number;
+  /** Number offered as the one-click "my mobile" destination while pausing. */
+  defaultMobileNumber: string | null;
+  /** Last pause-routing choice. It is consulted only while presence is `paused`. */
+  pauseRoutingMode: PauseRoutingMode;
+  /** Substitute operator for `pauseRoutingMode === "operator"`. */
+  pauseForwardProfileId: string | null;
+  /** Ad-hoc PSTN destination for `pauseRoutingMode === "external_number"`. */
+  pauseForwardNumber: string | null;
 };
 
 /** Mirrors the CHECK constraint `wrap_up_seconds between 0 and 600`. */
@@ -27,4 +39,8 @@ export const DEFAULT_OPERATOR_SETTINGS: OperatorTelephonySettings = {
   wrapUpSeconds: 30,
   autoAnswerOutbound: true,
   ringDeviceVolume: 80,
+  defaultMobileNumber: null,
+  pauseRoutingMode: "none",
+  pauseForwardProfileId: null,
+  pauseForwardNumber: null,
 };

@@ -20,12 +20,12 @@ import {
   PhoneForwarded,
   PhoneIncoming,
   PhoneMissed,
-  PhoneOff,
   PhoneOutgoing,
   Plus,
   Search,
   Star,
   UserRound,
+  Users,
   X,
 } from "lucide-react";
 import type { CallCenterCall, CallOutcome, DispatchData } from "@/data/dispatch-types";
@@ -34,8 +34,8 @@ import { MOTORIST_TIME_ZONE } from "@/domain/time";
 import { callStatusLabels } from "@/domain/statuses";
 import { CallbackQueuePanel } from "./CallbackQueuePanel";
 import { CallDetailDrawer } from "./CallDetailDrawer";
-import { CallQueuePanel } from "./CallQueuePanel";
-import { callElapsedSeconds, formatCallTimer, phoneBarStateLabel, type PhoneCallAction } from "./phone-bar-model";
+import { LiveCallsWorkspace, liveCallOverviewCounts } from "./LiveCallOverview";
+import type { PhoneCallAction } from "./phone-bar-model";
 import type {
   TelephonyDirectoryContact,
   TelephonyDirectoryResponse,
@@ -43,7 +43,7 @@ import type {
   TelephonyFavoriteMutationResponse,
   TelephonyFavoritesResponse,
 } from "@/lib/telephony/directory";
-import type { PhoneBarModel, WaitingRoomRow } from "@/lib/telephony/active-calls-model";
+import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import type {
@@ -53,17 +53,21 @@ import type {
 } from "@/lib/telephony/presence";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
+import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 
 type CallCenterModuleProps = {
   /** Live telephony surface; `undefined` while no provider is configured. */
   activeSnapshot?: PhoneBarModel;
-  /** Waiting room rows (`CallCenterCall` plus who parked the caller). */
-  waitingCalls?: WaitingRoomRow[];
   telephonyConfigured?: boolean;
   /** Browser-phone registration, shown next to the operator's own status. */
   phone?: WebphoneSnapshot;
   busyCallAction?: string | null;
-  onCallAction?: (action: PhoneCallAction, sessionId: string) => void;
+  onCallAction: (action: PhoneCallAction, sessionId: string) => void;
+  onAnswer: () => void;
+  onRejectOffer: () => void;
+  canManageCalls: boolean;
+  onSupervise: (sessionId: string, mode: SupervisorMode) => void;
+  onStopSupervise: (sessionId: string) => void;
   calls: CallCenterCall[];
   cases: DispatchCase[];
   dataSource: DispatchData["source"];
@@ -74,6 +78,7 @@ type CallCenterModuleProps = {
   onDataChange: (data: DispatchData) => void;
   onDial: (phone: string, caseId?: string) => Promise<void>;
   onNewCase: (call?: CallCenterCall) => void;
+  onNewCaseFromLiveCall: (call: PhoneBarCall) => void;
   onOpenCase: (caseId: string) => void;
   onAvailabilityAction: (action: TelephonyAvailabilityAction) => void;
   /** Console-owned outbound path for the callback queue (arms the browser phone). */
@@ -148,11 +153,15 @@ export function customerNumberForCall(call: Pick<CallCenterCall, "calledNumber" 
 
 export function CallCenterModule({
   activeSnapshot,
-  waitingCalls = [],
   telephonyConfigured = false,
   phone,
   busyCallAction = null,
   onCallAction,
+  onAnswer,
+  onRejectOffer,
+  canManageCalls,
+  onSupervise,
+  onStopSupervise,
   calls,
   cases,
   dataSource,
@@ -162,6 +171,7 @@ export function CallCenterModule({
   onDataChange,
   onDial,
   onNewCase,
+  onNewCaseFromLiveCall,
   onOpenCase,
   onAvailabilityAction,
   onCallbackCall,
@@ -175,20 +185,12 @@ export function CallCenterModule({
   // Status is the authoritative lifecycle marker. Without a provider nothing
   // is live, but a stale row must still not be mistaken for history.
   const partitionedCalls = useMemo(() => partitionLiveCalls(calls), [calls]);
-  // Durations are measured against the snapshot the rows came from, so the list
-  // stays consistent with the data instead of drifting between renders.
-  const waitingRoomNow = useMemo(() => {
-    const parsed = Date.parse(activeSnapshot?.checkedAt ?? "");
-    return Number.isFinite(parsed) ? parsed : 0;
-  }, [activeSnapshot?.checkedAt]);
-  const activeCalls = partitionedCalls.active;
   const storedCalls = useMemo(
     () => (dataSource === "supabase" ? partitionedCalls.completed : []),
     [dataSource, partitionedCalls],
   );
   const missedCalls = storedCalls.filter((call) => ["missed", "abandoned_queue", "failed"].includes(call.status) || call.outcome === "callback");
   const filteredHistoryCalls = filterHistoryCalls(storedCalls, historyFilter);
-  const primaryQueueWait = activeCalls.filter((call) => call.status === "incoming" || call.status === "ringing_agent").length;
   const currentPresence = currentOperatorId
     ? operatorPresences.find((presence) => presence.profileId === currentOperatorId)
     : undefined;
@@ -326,46 +328,45 @@ export function CallCenterModule({
   }
 
   return (
-    <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-zinc-50 p-3 sm:p-4 xl:flex xl:flex-col xl:overflow-y-hidden">
-      <OperatorAvailabilityPanel
+    <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-zinc-50 p-3 sm:p-4">
+      <CallCenterCommandDeck
+        activeSnapshot={activeSnapshot}
+        busy={phoneScopeBusy(busyAction)}
         configured={telephonyConfigured}
         phone={phone}
         currentOperatorName={currentPresence?.operatorName ?? currentOperator?.name}
         myPresence={currentPresence}
+        metrics={metrics}
+        missedCount={missedCalls.length}
+        operatorPresences={operatorPresences}
         onAction={onAvailabilityAction}
+        onDial={(phoneNumber) => startQuickCall({ id: "manual", detail: phoneNumber, label: phoneNumber, phone: phoneNumber, type: "contact" })}
       />
 
       {telephonyConfigured && activeSnapshot && (
-        <LiveCallsPanel
+        <div className="mb-3">
+        <LiveCallsWorkspace
           busyAction={busyCallAction}
           model={activeSnapshot}
-          onAction={onCallAction}
-          onNewCase={onNewCase}
+          presences={operatorPresences}
+          canManageCalls={canManageCalls}
+          browserOfferRinging={phone?.call?.ringing ?? false}
+          onAnswer={onAnswer}
+          onRejectOffer={onRejectOffer}
+          onCallAction={onCallAction}
+          onSupervise={onSupervise}
+          onStopSupervise={onStopSupervise}
+          onNewCase={onNewCaseFromLiveCall}
           onOpenCase={onOpenCase}
         />
-      )}
-
-      {telephonyConfigured && (
-        <div className="mb-4 overflow-hidden rounded-md border border-amber-200">
-          <CallQueuePanel
-            calls={waitingCalls}
-            now={waitingRoomNow}
-            onPickup={(call) => onCallAction?.("pickup", call.providerSessionId ?? call.id)}
-            pickupState={() => ({
-              disabled: busyCallAction !== null || Boolean(activeSnapshot?.active),
-              label: busyCallAction === "pickup" ? "Preberám…" : "Prevziať hovor",
-              ...(activeSnapshot?.active ? { reason: "Najprv ukončite alebo odložte prebiehajúci hovor." } : {}),
-            })}
-            variant="embedded"
-          />
         </div>
       )}
 
       {actionNotice && <div className="mb-3 shrink-0 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900">{actionNotice}</div>}
 
-      <div className="xl:min-h-0 xl:flex-1">
-        <div className="grid min-w-0 max-w-full gap-4 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(240px,280px)_minmax(0,1fr)_minmax(280px,320px)] 2xl:grid-cols-[minmax(280px,320px)_minmax(0,1fr)_minmax(300px,340px)]">
-          <aside className="grid min-w-0 max-w-full content-start gap-4 overflow-hidden xl:flex xl:h-full xl:min-h-0 xl:flex-col [&>*]:min-w-0">
+      <div>
+        <div className="grid min-w-0 max-w-full gap-3 xl:grid-cols-[minmax(240px,290px)_minmax(0,1fr)_minmax(270px,320px)] 2xl:grid-cols-[minmax(270px,320px)_minmax(0,1fr)_minmax(290px,340px)]">
+          <aside className="grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0">
             <PhonebookPanel
               busyAction={busyAction}
               onQuickCall={(entry) => void startQuickCall(entry)}
@@ -386,16 +387,7 @@ export function CallCenterModule({
             totalCalls={storedCalls.length}
           />
 
-          <aside className="grid min-w-0 max-w-full content-start gap-4 overflow-hidden xl:h-full xl:min-h-0 xl:grid-cols-1 xl:overflow-y-auto xl:overscroll-contain [&>*]:min-w-0">
-            <CallCommandPanel
-              activeCount={activeCalls.length}
-              busy={phoneScopeBusy(busyAction)}
-              configured={telephonyConfigured}
-              metrics={metrics}
-              missedCount={missedCalls.length}
-              onDial={(phone) => startQuickCall({ id: "manual", detail: phone, label: phone, phone, type: "contact" })}
-              primaryQueueWait={primaryQueueWait}
-            />
+          <aside className="grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0">
             <CallbackQueuePanel
               configured={telephonyConfigured}
               onCallBack={onCallbackCall}
@@ -418,286 +410,116 @@ export function CallCenterModule({
   );
 }
 
-/**
- * Dialer. Every control is disabled until a telephony provider is configured;
- * the panel keeps its place in the layout either way, so the module reads the
- * same in both modes.
- */
-function CallCommandPanel({
-  activeCount,
+/** Compact command deck: personal state, outbound call and team coverage. */
+function CallCenterCommandDeck({
+  activeSnapshot,
   busy,
   configured,
+  currentOperatorName,
   metrics,
   missedCount,
-  onDial,
-  primaryQueueWait,
-}: {
-  activeCount: number;
-  busy: boolean;
-  configured: boolean;
-  metrics: DispatchMetrics;
-  missedCount: number;
-  /** Resolves true when the dial was accepted; the number is kept on failure. */
-  onDial: (phone: string) => Promise<boolean>;
-  primaryQueueWait: number;
-}) {
-  const [toNumber, setToNumber] = useState("");
-
-  return (
-    <section className="rounded-md border border-zinc-200 bg-white" aria-label="Odchádzajúci hovor">
-      <div className="border-b border-zinc-200 p-3">
-        <div className="flex min-w-0 items-start gap-2">
-          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${configured ? "bg-emerald-100 text-emerald-700" : "bg-zinc-100 text-zinc-600"}`}>
-            {configured ? <PhoneOutgoing size={18} aria-hidden="true" /> : <PhoneOff size={18} aria-hidden="true" />}
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-sm font-semibold text-zinc-950">Odchádzajúci hovor</span>
-              <StatusBadge label={configured ? "pripravené" : "nenakonfigurované"} tone={configured ? "ok" : "neutral"} />
-            </div>
-            <div className="mt-1 text-xs font-medium leading-5 text-zinc-600">
-              {configured
-                ? "Hovor sa najprv spojí s tvojím telefónom v prehliadači, potom sa vytočí zákazník."
-                : `${TELEPHONY_NOT_CONFIGURED_MESSAGE} Volať bude možné po zapojení telefónneho poskytovateľa.`}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <form
-        className="grid gap-3 p-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!configured || busy || !toNumber.trim()) return;
-          // The dial can be refused (kill switch, allowlist, offline phone):
-          // keep the number so the operator can retry, and never float the
-          // promise (the parent handler renders the reason).
-          void onDial(toNumber.trim())
-            .then((accepted) => {
-              if (accepted) setToNumber("");
-            })
-            .catch(() => setToNumber(toNumber.trim()));
-        }}
-      >
-        <div className="grid min-w-0 gap-2">
-          <input
-            type="tel"
-            inputMode="tel"
-            autoComplete="off"
-            value={toNumber}
-            onChange={(event) => setToNumber(event.target.value)}
-            placeholder="+421 900 000 000"
-            aria-label="Číslo"
-            disabled={!configured}
-            className="h-11 min-w-0 rounded-md border border-zinc-200 bg-white px-3 text-sm outline-none ring-yellow-300 transition focus:ring-2 disabled:bg-zinc-50 disabled:text-zinc-400"
-          />
-          <div>
-            <button
-              type="submit"
-              disabled={!configured || busy || toNumber.trim().length === 0}
-              title={configured ? undefined : TELEPHONY_NOT_CONFIGURED_MESSAGE}
-              className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white hover:bg-zinc-800 disabled:bg-zinc-300 disabled:text-zinc-600"
-            >
-              {busy ? <Loader2 size={15} className="motion-safe:animate-spin" aria-hidden="true" /> : <PhoneOutgoing size={15} />}
-              Volať
-            </button>
-          </div>
-          {!configured && (
-            <div role="status" aria-live="polite" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-950">
-              {TELEPHONY_NOT_CONFIGURED_MESSAGE}
-            </div>
-          )}
-        </div>
-
-        <div className="grid grid-cols-2 gap-1.5">
-          <CommandMetric icon={PhoneIncoming} label="Prebieha" value={configured ? String(activeCount) : "—"} tone={configured ? (activeCount > 0 ? "warn" : "ok") : "neutral"} />
-          <CommandMetric icon={Clock3} label="Čaká" value={configured ? String(primaryQueueWait) : "—"} tone={configured ? (primaryQueueWait > 0 ? "warn" : "ok") : "neutral"} />
-          <CommandMetric icon={PhoneMissed} label="Spätné" value={String(missedCount)} tone={missedCount > 0 ? "warn" : "ok"} />
-          <CommandMetric icon={CheckCircle2} label="Úspešnosť" value={`${metrics.answerRate}%`} tone="neutral" />
-        </div>
-      </form>
-    </section>
-  );
-}
-
-/**
- * Live calls of the whole team (design §2.4): what is ringing, who is on which
- * line and how long. The operator's own call is controlled from the top call
- * bar; here every row can at least be opened, turned into a case, or — for the
- * operator who owns it — hung up.
- */
-function LiveCallsPanel({
-  busyAction,
-  model,
-  onAction,
-  onNewCase,
-  onOpenCase,
-}: {
-  busyAction: string | null;
-  model: PhoneBarModel;
-  onAction?: (action: PhoneCallAction, sessionId: string) => void;
-  onNewCase: (call?: CallCenterCall) => void;
-  onOpenCase: (caseId: string) => void;
-}) {
-  const rows = [...(model.active ? [model.active] : []), ...model.offers];
-  const now = useMemo(() => {
-    const parsed = Date.parse(model.checkedAt);
-    return Number.isFinite(parsed) ? parsed : 0;
-  }, [model.checkedAt]);
-
-  return (
-    <section className="mb-4 shrink-0 rounded-md border border-zinc-200 bg-white" aria-label="Prebiehajúce hovory">
-      <div className="flex items-center justify-between gap-2 border-b border-zinc-200 p-3">
-        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950">
-          <PhoneCall size={17} aria-hidden="true" />
-          Moje hovory
-        </div>
-        {model.otherActiveCount > 0 && <StatusBadge label={`Kolegovia: ${model.otherActiveCount}`} tone="neutral" />}
-      </div>
-      <div className="grid gap-2 p-3">
-        {rows.length === 0 && (
-          <EmptyState icon={PhoneCall} title="Žiadny prebiehajúci hovor" body="Prichádzajúci hovor sa zobrazí tu aj v hornej lište." compact />
-        )}
-        {rows.map((row) => {
-          const state = phoneBarStateLabel(row);
-          return (
-            <div key={row.sessionId} className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border border-zinc-200 px-3 py-2">
-              <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] font-bold text-zinc-700">{state.label}</span>
-              <span className="shrink-0 rounded border border-zinc-200 px-1.5 py-0.5 text-[11px] font-semibold text-zinc-600">{row.lineLabel}</span>
-              <span className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-950">
-                {row.callerName ? `${row.callerName} · ${formatPhoneNumberForDisplay(row.number)}` : formatPhoneNumberForDisplay(row.number) || row.number}
-              </span>
-              <span className="shrink-0 font-mono text-xs font-semibold tabular-nums text-zinc-600">{formatCallTimer(callElapsedSeconds(row, now))}</span>
-              {row.caseId ? (
-                <button type="button" onClick={() => onOpenCase(row.caseId as string)} className="shrink-0 rounded-md bg-[#FCD703] px-2 py-1 text-[11px] font-bold text-zinc-950">
-                  Otvoriť prípad
-                </button>
-              ) : (
-                <button type="button" onClick={() => onNewCase()} className="shrink-0 rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-bold text-zinc-800 hover:bg-zinc-50">
-                  Nový prípad
-                </button>
-              )}
-              {row.kind === "active" && onAction && (
-                <button
-                  type="button"
-                  disabled={busyAction !== null}
-                  onClick={() => onAction("hangup", row.sessionId)}
-                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-red-600 px-2 py-1 text-[11px] font-bold text-white hover:bg-red-500 disabled:bg-zinc-300 disabled:text-zinc-600"
-                >
-                  <PhoneOff size={12} aria-hidden="true" />
-                  Zavesiť
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function OperatorAvailabilityPanel({
-  configured,
-  currentOperatorName,
   myPresence,
   onAction,
+  onDial,
+  operatorPresences,
   phone,
 }: {
+  activeSnapshot?: PhoneBarModel;
+  busy: boolean;
   configured: boolean;
   currentOperatorName?: string;
+  metrics: DispatchMetrics;
+  missedCount: number;
   myPresence?: TelephonyOperatorPresence;
   onAction: (action: TelephonyAvailabilityAction) => void;
+  onDial: (phone: string) => Promise<boolean>;
+  operatorPresences: TelephonyOperatorPresence[];
   phone?: WebphoneSnapshot;
 }) {
+  const [toNumber, setToNumber] = useState("");
   const state: TelephonyOperatorPresenceState = myPresence?.state ?? "unassigned";
-  // Presence cannot be changed without a provider, and not while a call is up
-  // (the server refuses it with 409); the buttons stay visible either way so
-  // the layout is stable.
   const controlsEnabled = configured && state !== "ringing" && state !== "on_call";
-  const workingState = state === "ringing" || state === "on_call";
+  const counts = activeSnapshot
+    ? liveCallOverviewCounts(activeSnapshot, operatorPresences)
+    : { total: 0, ringing: 0, waiting: 0, active: 0, onlineOperators: 0, pausedOperators: 0, callingOperators: 0 };
   const stateSurface = state === "available"
-    ? "border-emerald-300 bg-emerald-50 text-emerald-800"
-    : workingState || state === "paused" || state === "unassigned"
-      ? "border-amber-300 bg-amber-50 text-amber-800"
-      : "border-red-300 bg-red-50 text-red-800";
+    ? "bg-emerald-100 text-emerald-700"
+    : state === "on_call" || state === "ringing"
+      ? "bg-sky-100 text-sky-700"
+      : state === "paused"
+        ? "bg-amber-100 text-amber-800"
+        : "bg-zinc-100 text-zinc-500";
+
+  function submitCall(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const number = toNumber.trim();
+    if (!configured || busy || !number) return;
+    void onDial(number).then((accepted) => {
+      if (accepted) setToNumber("");
+    });
+  }
 
   return (
-    <section className="mb-4 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-white" aria-label="Môj stav operátora">
-      <div className="grid gap-4 p-3 sm:p-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,auto)] xl:items-center">
-        <div className="flex min-w-0 items-start gap-3">
-          <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border ${stateSurface}`}>
-            {state === "available"
-              ? <CheckCircle2 size={20} aria-hidden="true" />
-              : state === "paused"
-                ? <Pause size={19} aria-hidden="true" />
-                : state === "ringing"
-                  ? <PhoneIncoming size={19} aria-hidden="true" />
-                  : state === "on_call"
-                    ? <PhoneCall size={19} aria-hidden="true" />
-                    : state === "unassigned" || state === "offline"
-                      ? <LogOut size={18} aria-hidden="true" />
-                      : <AlertTriangle size={18} aria-hidden="true" />}
-            <span className="sr-only">{presenceStateLabel[state]}</span>
-          </div>
-          <div className="min-w-0">
-            <h1 className="truncate text-base font-semibold text-zinc-950">{currentOperatorName ?? "Prihlásený operátor"}</h1>
-            <div className="mt-1 text-sm font-medium text-zinc-700">{myPresence?.detail ?? TELEPHONY_NOT_CONFIGURED_MESSAGE}</div>
-          </div>
-        </div>
-
-        <div className="min-w-0">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Môj pracovný stav</span>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {configured && phone && (
-                <StatusBadge
-                  label={`Telefón: ${phone.registration.label}`}
-                  tone={phone.registration.tone === "ok" ? "ok" : phone.registration.tone === "error" ? "warn" : "neutral"}
-                />
-              )}
-              <StatusBadge
-                label={configured ? presenceStateLabel[state] : "Telefónia nenakonfigurovaná"}
-                tone={configured ? (state === "available" ? "ok" : "warn") : "neutral"}
-              />
+    <section className="mb-3 overflow-hidden rounded-lg border border-zinc-200 bg-white" aria-label="Ovládanie ústredne">
+      <div className="grid min-w-0 divide-y divide-zinc-200 lg:grid-cols-[minmax(17rem,0.9fr)_minmax(24rem,1.35fr)_minmax(18rem,1fr)] lg:divide-x lg:divide-y-0">
+        <div className="flex min-w-0 items-center gap-3 p-3">
+          <span className={`flex size-10 shrink-0 items-center justify-center rounded-full ${stateSurface}`}>
+            {state === "available" ? <CheckCircle2 size={18} /> : state === "paused" ? <Pause size={17} /> : state === "ringing" ? <PhoneIncoming size={17} /> : state === "on_call" ? <PhoneCall size={17} /> : <LogOut size={16} />}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <h1 className="truncate text-sm font-bold text-zinc-950">{currentOperatorName ?? "Prihlásený operátor"}</h1>
+              <StatusBadge label={configured ? presenceStateLabel[state] : "Mimo prevádzky"} tone={state === "available" ? "ok" : state === "offline" ? "neutral" : "warn"} />
+            </div>
+            <p className="mt-0.5 truncate text-[11px] text-zinc-500" title={myPresence?.detail}>{myPresence?.detail ?? TELEPHONY_NOT_CONFIGURED_MESSAGE}</p>
+            <div className="mt-2 grid grid-cols-3 gap-1 rounded-md bg-zinc-100 p-1">
+              <AvailabilityButton active={configured && state === "available"} disabled={!controlsEnabled} icon={Check} label="Dostupný" pending={false} onClick={() => onAction("available")} />
+              <AvailabilityButton active={configured && state === "paused"} disabled={!controlsEnabled} icon={Pause} label="Pauza" pending={false} onClick={() => onAction("pause")} />
+              <AvailabilityButton active={configured && state === "offline"} disabled={!controlsEnabled} icon={LogOut} label="Mimo radu" pending={false} onClick={() => onAction("offline")} />
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-1 rounded-md bg-zinc-100 p-1">
-            <AvailabilityButton
-              active={configured && state === "available"}
-              disabled={!controlsEnabled}
-              icon={Check}
-              label="Dostupný"
-              pending={false}
-              onClick={() => onAction("available")}
-            />
-            <AvailabilityButton
-              active={configured && myPresence?.paused === true}
-              disabled={!controlsEnabled}
-              icon={Pause}
-              label="Pauza"
-              pending={false}
-              onClick={() => onAction("pause")}
-            />
-            <AvailabilityButton
-              active={configured && state === "offline"}
-              disabled={!controlsEnabled}
-              icon={LogOut}
-              label="Mimo radu"
-              pending={false}
-              onClick={() => onAction("offline")}
-            />
-          </div>
         </div>
-      </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-amber-200 bg-amber-50 px-3 py-2.5 text-xs font-semibold text-amber-900 sm:px-4">
-        <div className="flex min-w-0 flex-1 items-start gap-2">
-          <AlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
-          <span>
-            {configured
-              ? "Hovory zvonia len v tomto okne prehliadača. Otvorenie ďalšieho okna odhlási toto."
-              : `${TELEPHONY_NOT_CONFIGURED_MESSAGE} Dostupnosť a prichádzajúce hovory budú fungovať po zapojení telefónneho poskytovateľa.`}
+        <form className="flex min-w-0 items-center gap-2 p-3" onSubmit={submitCall}>
+          <span className={`flex size-9 shrink-0 items-center justify-center rounded-md ${configured ? "bg-zinc-950 text-yellow-300" : "bg-zinc-100 text-zinc-400"}`}>
+            <PhoneOutgoing size={17} aria-hidden="true" />
           </span>
+          <label className="min-w-0 flex-1">
+            <span className="sr-only">Číslo pre nový odchádzajúci hovor</span>
+            <input type="tel" inputMode="tel" autoComplete="off" value={toNumber} onChange={(event) => setToNumber(event.target.value)} placeholder="Telefónne číslo…" disabled={!configured} className="h-10 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-yellow-300 disabled:bg-zinc-50 disabled:text-zinc-400" />
+          </label>
+          <button type="submit" disabled={!configured || busy || !toNumber.trim()} className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md bg-zinc-950 px-3 text-xs font-bold text-white hover:bg-zinc-800 disabled:bg-zinc-300 disabled:text-zinc-600">
+            {busy ? <Loader2 size={14} className="animate-spin" /> : <PhoneOutgoing size={14} />}
+            Volať
+          </button>
+        </form>
+
+        <div className="min-w-0 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-bold text-zinc-800"><Users size={15} className="text-zinc-500" /> Operátori</div>
+            {phone && <StatusBadge label={phone.registration.label} tone={phone.registration.tone === "ok" ? "ok" : phone.registration.tone === "error" ? "warn" : "neutral"} />}
+          </div>
+          <div className="mt-2 grid grid-cols-4 gap-1.5">
+            <CommandMetric icon={Users} label="Online" value={configured ? String(counts.onlineOperators) : "—"} tone={counts.onlineOperators > 0 ? "ok" : "bad"} />
+            <CommandMetric icon={PhoneCall} label="Volajú" value={configured ? String(counts.callingOperators) : "—"} tone={counts.callingOperators > 0 ? "warn" : "neutral"} />
+            <CommandMetric icon={Pause} label="Pauza" value={configured ? String(counts.pausedOperators) : "—"} tone={counts.pausedOperators > 0 ? "warn" : "neutral"} />
+            <CommandMetric icon={CheckCircle2} label="Úspešnosť" value={`${metrics.answerRate}%`} tone="neutral" />
+          </div>
+          <details className="group mt-2">
+            <summary className="flex cursor-pointer list-none items-center justify-between text-[11px] font-semibold text-zinc-500 [&::-webkit-details-marker]:hidden">
+              <span>{missedCount > 0 ? `${missedCount} čaká na spätné volanie` : "Detail stavu tímu"}</span>
+              <ChevronDown size={13} className="transition group-open:rotate-180" />
+            </summary>
+            <div className="mt-2 flex max-h-28 flex-wrap gap-1 overflow-y-auto">
+              {operatorPresences.map((presence) => (
+                <span key={presence.profileId} title={presence.detail} className="inline-flex max-w-full items-center gap-1 rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-[10px] font-semibold text-zinc-700">
+                  <span className={`size-1.5 shrink-0 rounded-full ${presence.state === "available" ? "bg-emerald-500" : presence.state === "on_call" || presence.state === "ringing" ? "bg-sky-500" : presence.state === "paused" ? "bg-amber-500" : "bg-zinc-400"}`} />
+                  <span className="truncate">{presence.operatorName}</span>
+                  <span className="text-zinc-400">{presenceStateLabel[presence.state]}</span>
+                </span>
+              ))}
+            </div>
+          </details>
         </div>
       </div>
     </section>

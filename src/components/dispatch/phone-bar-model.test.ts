@@ -36,6 +36,11 @@ function call(overrides: Partial<PhoneBarCall> = {}): PhoneBarCall {
     consulting: false,
     conference: false,
     mine: true,
+    operatorProfileId: "operator-1",
+    operatorName: "Operátor",
+    offeredProfileIds: [],
+    offeredOperatorNames: [],
+    offeredToMe: false,
     ...overrides,
   };
 }
@@ -120,11 +125,10 @@ describe("presentation helpers", () => {
   });
 
   it("hides the bar without a provider and shows it whenever something is happening", () => {
-    expect(phoneBarVisible({ status: "not_configured", hasCall: true, hasOffer: true, hasWaiting: true })).toBe(false);
-    expect(phoneBarVisible({ status: "idle", hasCall: false, hasOffer: false, hasWaiting: false })).toBe(false);
-    expect(phoneBarVisible({ status: "idle", hasCall: false, hasOffer: false, hasWaiting: true })).toBe(true);
-    expect(phoneBarVisible({ status: "registered", hasCall: false, hasOffer: false, hasWaiting: false })).toBe(false);
-    expect(phoneBarVisible({ status: "registered", hasCall: true, hasOffer: false, hasWaiting: false })).toBe(true);
+    expect(phoneBarVisible({ status: "not_configured", hasCall: true, hasOffer: true })).toBe(false);
+    expect(phoneBarVisible({ status: "idle", hasCall: false, hasOffer: false })).toBe(false);
+    expect(phoneBarVisible({ status: "registered", hasCall: false, hasOffer: false })).toBe(false);
+    expect(phoneBarVisible({ status: "registered", hasCall: true, hasOffer: false })).toBe(true);
   });
 
   it("offers the takeover only for the two terminal registration statuses", () => {
