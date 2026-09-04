@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { User } from "@supabase/supabase-js";
+import { DELETED_ACCESS_PROFILE_NAME, isDeletedAccessProfile } from "@/domain/access-profile";
 import type { AccessStatus, AppRole } from "@/domain/types";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -183,28 +184,59 @@ export async function updateAccessUser(actor: MotoristActor, profileId: string, 
   return data;
 }
 
+export type DeleteAccessUserResult = {
+  /** `deleted` = the row is gone; `anonymised` = the row stayed as a tombstone so history survives. */
+  mode: "deleted" | "anonymised";
+  profileId: string;
+  displayName: string;
+  removedFromRingGroups: number;
+  /** Set when the profile was handled but the Auth login could not be removed. */
+  authWarning: string | null;
+};
+
+const PROFILE_HISTORY_TABLES = [
+  "motorist_attendance_employee_settings",
+  "motorist_attendance_sessions",
+  "motorist_attendance_shifts",
+  "motorist_attendance_time_off_balances",
+  "motorist_attendance_unavailability_requests",
+  "motorist_operator_statuses",
+  "motorist_ring_attempts",
+] as const;
+
 /**
- * Deletes a user for good: the profile row, their Supabase Auth account and
- * their Telnyx credential.
+ * Removes a user: their login, their phone and their identity.
  *
- * Deactivation keeps the person and bans their login; deletion removes them.
- * The database is built for it — every foreign key that points at
- * `motorist_profiles` either cascades (the rows that only describe *them*:
- * devices, presence, ring-group membership, attendance, favourites) or nulls
- * (the rows that describe *work*: cases, calls, tasks, audit). So the centre's
- * history survives a departure and only stops naming the person, which is also
- * what a deletion request under GDPR asks for.
+ * Deactivation keeps the person and bans their login. This is the other thing —
+ * but "delete the row" is not automatically the right implementation, because
+ * of what hangs off it. Of the 38 foreign keys pointing at `motorist_profiles`,
+ * 26 null out (cases, calls, tasks, audit — the work survives, anonymised) but
+ * 12 cascade, and five of those are the attendance module: the roster, the
+ * clocked start/end of every shift they ever worked and their vacation ledger.
+ * `profile_id` is NOT NULL in all five, so those rows cannot be detached — a
+ * hard delete destroys the employer's record of hours worked. Two more cascades
+ * (`motorist_ring_attempts`, `motorist_operator_statuses`) would punch holes in
+ * *other people's* call histories and silently shrink yesterday's reports,
+ * which read the status timeline.
  *
- * Three things must happen outside the row, and in this order:
- *   1. refuse while they are on a live call — deleting mid-call would cut it,
- *   2. delete the Telnyx credential, or a browser still holding a JWT could
- *      keep its SIP registration and be offered calls after the account is gone,
- *   3. delete the Auth user, so the login stops existing rather than merely
- *      losing its profile.
- * The audit row is written first, because `motorist_audit_log.actor_profile_id`
- * survives but the target's name would not.
+ * So the mode depends on whether there is anything to lose:
+ *   - nothing recorded (a demo profile, a mistyped account, someone who never
+ *     started) → the row really is deleted,
+ *   - anything recorded → the row stays as a tombstone with the identity
+ *     stripped from the profile: no name, no e-mail, no login, no access. The
+ *     operational records and deletion audit remain available for retention.
+ *
+ * Either way the access itself is removed for real: every Telnyx credential
+ * (there is one per environment, so more than one row), the device rows, the
+ * live presence, membership of every ring group — otherwise a browser holding a
+ * JWT keeps its SIP registration, or an inbound call keeps ringing a ghost.
+ *
+ * Order matters. We first snapshot external credentials, then handle the
+ * profile, and delete Auth last. If Auth deletion fails, its user id no longer
+ * resolves to a profile and the app refuses the login. That is a safer half-way
+ * state than an apparently active profile whose login has already disappeared.
  */
-export async function deleteAccessUser(actor: MotoristActor, profileId: string) {
+export async function deleteAccessUser(actor: MotoristActor, profileId: string): Promise<DeleteAccessUserResult> {
   const supabase = createSupabaseAdminClient();
   const profile = await getManagedProfile(actor, profileId);
 
@@ -214,15 +246,11 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string) 
   if (!canManageTargetRole(actor.role, profile.role)) {
     throw new MutationError("Tento profil nemôžeš vymazať.", 403);
   }
-  // Deleting the last admin is the same lockout as deactivating them.
+  // Mirrors the `motorist_profiles_prevent_last_admin_loss` trigger, so the
+  // refusal is a clean 400 instead of a database exception.
   await assertNotLastAdminLoss(profile, { role: profile.role, active: false });
 
-  const live = await supabase
-    .from("motorist_call_legs")
-    .select("id")
-    .eq("profile_id", profile.id)
-    .is("ended_at", null)
-    .limit(1);
+  const live = await supabase.from("motorist_call_legs").select("id").eq("profile_id", profile.id).is("ended_at", null).limit(1);
   if (live.error) {
     throw new MutationError("Stav hovorov používateľa sa nepodarilo overiť.", 500);
   }
@@ -230,7 +258,11 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string) 
     throw new MutationError("Používateľ je práve v hovore. Skús to znova, keď hovor skončí.", 409);
   }
 
-  await supabase.from("motorist_audit_log").insert({
+  const keepHistory = await hasRecordedHistory(supabase, profile);
+  const mode: DeleteAccessUserResult["mode"] = keepHistory ? "anonymised" : "deleted";
+
+  const accessSnapshot = await loadOperatorAccessSnapshot(supabase, profile);
+  const audit = await supabase.from("motorist_audit_log").insert({
     organization_id: profile.organization_id,
     actor_profile_id: actor.profileId,
     action: "access.user.delete",
@@ -242,54 +274,145 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string) 
       role: profile.role,
       access_status: profile.access_status,
     } as unknown as Json,
-    after_payload: null,
+    after_payload: { mode } as unknown as Json,
   });
+  if (audit.error) {
+    throw new MutationError("Výmaz používateľa sa nepodarilo zapísať do auditu.", 500);
+  }
 
-  await deleteOperatorCredential(supabase, profile);
-
-  if (profile.user_id) {
-    const { error } = await supabase.auth.admin.deleteUser(profile.user_id);
-    // "not found" means somebody removed it already; anything else must stop us
-    // before the profile row disappears and the login is left behind.
-    if (error && !/not.?found/i.test(error.message)) {
-      throw new MutationError(`Auth účet sa nepodarilo vymazať: ${error.message}`, 500);
+  if (mode === "deleted") {
+    const { error } = await supabase.from("motorist_profiles").delete().eq("id", profile.id);
+    if (error) {
+      // The last-admin trigger speaks Slovak; do not bury it under a generic message.
+      throw new MutationError(`Používateľa sa nepodarilo vymazať: ${error.message}`, 500);
+    }
+  } else {
+    const { error } = await supabase
+      .from("motorist_profiles")
+      .update({
+        display_name: DELETED_ACCESS_PROFILE_NAME,
+        email: null,
+        phone_extension: null,
+        user_id: null,
+        active: false,
+        access_status: "disabled",
+        access_disabled_at: new Date().toISOString(),
+        access_disabled_by: actor.profileId,
+      })
+      .eq("id", profile.id);
+    if (error) {
+      throw new MutationError(`Používateľa sa nepodarilo anonymizovať: ${error.message}`, 500);
     }
   }
 
-  const { error } = await supabase.from("motorist_profiles").delete().eq("id", profile.id);
-  if (error) {
-    throw new MutationError("Používateľa sa nepodarilo vymazať.", 500);
+  await revokeOperatorAccess(supabase, profile, accessSnapshot.credentialIds);
+
+  let authWarning: string | null = null;
+  if (profile.user_id) {
+    const { error } = await supabase.auth.admin.deleteUser(profile.user_id);
+    if (error && !/not.?found/i.test(error.message)) {
+      // The profile is already gone or anonymised, so nobody can get in with
+      // this login any more — but say it out loud, it needs cleaning up by hand.
+      console.error("Auth user deletion during account removal failed:", error);
+      authWarning = `Prihlásenie v Supabase Auth sa nepodarilo zmazať (${error.message}). Účet do aplikácie už nepustí, ale over to ručne.`;
+    }
   }
 
-  return { deletedProfileId: profile.id };
+  return {
+    mode,
+    profileId: profile.id,
+    displayName: profile.display_name,
+    removedFromRingGroups: accessSnapshot.ringGroupMembershipCount,
+    authWarning,
+  };
 }
 
 /**
- * Removes the operator's Telnyx credential before the device row cascades away.
- * Best effort by design: telephony may not be configured at all, and a
- * credential Telnyx has already forgotten must not block the deletion — the
- * device row is going anyway, so nothing can mint a new token for it.
+ * Has this person left anything behind that the centre needs?
+ *
+ * Attendance (settings, hours worked and vacation), their presence timeline
+ * (the reports read it) and their ring attempts (rows inside other people's
+ * calls) are the records a hard delete would destroy rather than anonymise.
  */
-async function deleteOperatorCredential(supabase: ReturnType<typeof createSupabaseAdminClient>, profile: ProfileRow) {
-  const device = await supabase
-    .from("motorist_operator_devices")
-    .select("telnyx_credential_id")
-    .eq("profile_id", profile.id)
-    .not("telnyx_credential_id", "is", null)
-    .limit(1)
-    .maybeSingle();
-  const credentialId = device.data?.telnyx_credential_id;
-  if (!credentialId) return;
+async function hasRecordedHistory(supabase: ReturnType<typeof createSupabaseAdminClient>, profile: ProfileRow): Promise<boolean> {
+  for (const table of PROFILE_HISTORY_TABLES) {
+    const { count, error } = await supabase
+      .from(table)
+      .select("id", { count: "exact", head: true })
+      .eq("profile_id", profile.id)
+      .limit(1);
+    if (error) {
+      // Unable to tell → assume there is history. Keeping a tombstone is
+      // recoverable; deleting a timesheet is not.
+      return true;
+    }
+    if ((count ?? 0) > 0) return true;
+  }
+  return false;
+}
 
-  try {
-    const { getTelnyxConfig } = await import("@/server/telephony/telnyx/env");
-    const config = getTelnyxConfig();
-    if (!config.configured) return;
-    const { createTelnyxClient } = await import("@/server/telephony/telnyx/client");
-    const client = createTelnyxClient({ config, liveGate: { callsEnabled: true, smsEnabled: false } });
-    await client.deleteTelephonyCredential(credentialId);
-  } catch (error) {
-    console.error("Telnyx credential deletion during account removal failed:", error);
+/**
+ * Captures external credentials before a hard delete cascades the local device
+ * rows. It also validates that the cleanup scope is readable before we make an
+ * irreversible change.
+ */
+async function loadOperatorAccessSnapshot(supabase: ReturnType<typeof createSupabaseAdminClient>, profile: ProfileRow) {
+  const devices = await supabase.from("motorist_operator_devices").select("id, telnyx_credential_id").eq("profile_id", profile.id);
+  if (devices.error) {
+    throw new MutationError("Telefónne prístupy používateľa sa nepodarilo načítať.", 500);
+  }
+
+  const memberships = await supabase.from("motorist_ring_group_members").select("id").eq("profile_id", profile.id);
+  if (memberships.error) {
+    throw new MutationError("Skupiny zvonenia používateľa sa nepodarilo načítať.", 500);
+  }
+
+  const credentialIds = (devices.data ?? []).map((row) => row.telnyx_credential_id).filter((id): id is string => Boolean(id));
+
+  return { credentialIds, ringGroupMembershipCount: (memberships.data ?? []).length };
+}
+
+/**
+ * Takes away everything that could still ring, register or answer. The profile
+ * has already been removed or disabled, so a cleanup outage cannot leave a
+ * usable application login behind.
+ */
+async function revokeOperatorAccess(
+  supabase: ReturnType<typeof createSupabaseAdminClient>,
+  profile: ProfileRow,
+  credentialIds: string[],
+) {
+
+  if (credentialIds.length > 0) {
+    try {
+      const { getTelnyxConfig } = await import("@/server/telephony/telnyx/env");
+      const config = getTelnyxConfig();
+      if (config.configured) {
+        const { createTelnyxClient } = await import("@/server/telephony/telnyx/client");
+        const client = createTelnyxClient({ config, liveGate: { callsEnabled: true, smsEnabled: false } });
+        for (const credentialId of credentialIds) {
+          // Best effort per credential: one Telnyx already forgot must not stop
+          // the others, and the device rows go regardless.
+          await client.deleteTelephonyCredential(credentialId).catch((error: unknown) => {
+            console.error("Telnyx credential deletion during account removal failed:", error);
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Telnyx cleanup during account removal failed:", error);
+    }
+  }
+
+  const cleanupResults = await Promise.all([
+    supabase.from("motorist_operator_devices").delete().eq("profile_id", profile.id),
+    supabase.from("motorist_operator_presence").delete().eq("profile_id", profile.id),
+    supabase.from("motorist_ring_group_members").delete().eq("profile_id", profile.id),
+  ]);
+
+  for (const cleanup of cleanupResults) {
+    if (cleanup.error) {
+      console.error("Local phone cleanup during account removal failed:", cleanup.error);
+    }
   }
 }
 
@@ -462,7 +585,7 @@ async function getManagedProfile(actor: MotoristActor, profileId: string) {
     throw new MutationError("Používateľa sa nepodarilo načítať.", 500);
   }
 
-  if (!data) {
+  if (!data || isDeletedAccessProfile(data)) {
     throw new MutationError("Používateľ neexistuje.", 404);
   }
 
