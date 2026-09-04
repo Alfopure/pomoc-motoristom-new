@@ -1,5 +1,6 @@
 import "server-only";
 
+import { isDeletedAccessProfile } from "@/domain/access-profile";
 
 import type {
   AccessComplication,
@@ -373,7 +374,7 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
   const latestStatusByProfile = latestOperatorStatuses(statusesResult.data ?? []);
   const profiles = profilesResult.data ?? [];
   const operators = profiles.map((profile) => mapOperator(profile, latestStatusByProfile.get(profile.id)));
-  const accessProfiles = accessProfilesResult.data ?? [];
+  const accessProfiles = (accessProfilesResult.data ?? []).filter((profile) => !isDeletedAccessProfile(profile));
   const authUsersById = await loadAuthUsersById(
     supabase,
     accessProfiles.map((profile) => profile.user_id).filter((userId): userId is string => Boolean(userId)),

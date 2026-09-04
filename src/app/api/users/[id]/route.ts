@@ -21,7 +21,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 }
 
 /**
- * Deletes the user for good (profile row, Auth account, Telnyx credential).
+ * Deletes the user's identity, Auth account and Telnyx credentials. Profiles
+ * with operational history become hidden, anonymised tombstones so attendance
+ * and historical call reports survive.
  *
  * Admin only — deactivation is the reversible action managers get, deletion is
  * not reversible and takes the login with it.
@@ -31,10 +33,15 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
     assertSameOriginRequest(request);
     const actor = await requireDefaultMotoristActor(["admin"]);
     const { id } = await params;
-    await deleteAccessUser(actor, id);
+    const result = await deleteAccessUser(actor, id);
     const dispatchData = await loadDispatchData();
+    const completion =
+      result.mode === "anonymised"
+        ? `Účet ${result.displayName} bol vymazaný. Pracovná história zostala zachovaná bez aktívneho používateľského účtu.`
+        : `Účet ${result.displayName} bol vymazaný.`;
+    const notice = result.authWarning ? `${completion} ${result.authWarning}` : completion;
 
-    return Response.json({ dispatchData });
+    return Response.json({ dispatchData, notice });
   } catch (error) {
     if (error instanceof MutationError) {
       return Response.json({ error: error.message }, { status: error.status });
