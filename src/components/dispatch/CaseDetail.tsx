@@ -798,27 +798,39 @@ export function CaseDetail({
                 )}
               </div>
 
-              <div className="grid min-w-0 content-start gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-3">
-                <h4 className="text-sm font-semibold text-zinc-950">Pridať novú úlohu</h4>
-                <input value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" className="h-9 min-w-0 rounded-md border border-zinc-200 bg-white px-2.5 text-sm outline-none ring-yellow-300 transition focus:ring-2" aria-label="Názov novej úlohy" />
+              <div className="grid min-w-0 content-start gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 sm:p-4">
+                <h4 className="text-base font-semibold text-zinc-950">Pridať novú úlohu</h4>
+                <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
+                  Názov úlohy
+                  <input value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base! font-medium text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
+                </label>
                 <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Rýchle nastavenie termínu">
                   {taskDuePresets.map((preset) => (
-                    <button key={preset.minutes} type="button" onClick={() => setTaskDueAt(dateTimeLocalInMinutes(preset.minutes))} className="h-7 rounded-md border border-zinc-200 bg-white px-2 hover:bg-zinc-100"><span className="text-[11px] font-semibold text-zinc-700">{preset.label}</span></button>
+                    <button key={preset.minutes} type="button" onClick={() => setTaskDueAt(dateTimeLocalInMinutes(preset.minutes))} className="h-9 rounded-md border border-zinc-300 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">{preset.label}</button>
                   ))}
                 </div>
-                <div className="grid min-w-0 gap-2 sm:grid-cols-2">
-                  <input type="datetime-local" value={taskDueAt} onChange={(event) => setTaskDueAt(event.target.value)} className="h-9 min-w-0 rounded-md border border-zinc-200 bg-white px-2 text-xs font-medium outline-none ring-yellow-300 transition focus:ring-2" aria-label="Termín úlohy" />
-                  <select value={taskAssignee} onChange={(event) => setTaskAssignee(event.target.value)} className="h-9 min-w-0 rounded-md border border-zinc-200 bg-white px-2 text-xs font-medium outline-none ring-yellow-300 transition focus:ring-2" aria-label="Zodpovedná osoba">
-                    <option value="unassigned">Nepriradené</option>
-                    {operators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}
-                    {taskAssignee !== "unassigned" && !operators.some((operator) => operator.id === taskAssignee) && <option value={taskAssignee}>{taskAssignee === viewerProfileId ? "Ja (prihlásený)" : caseItem.ownerName ?? "Aktuálne priradená osoba"}</option>}
-                  </select>
-                  <select value={taskPriority} onChange={(event) => setTaskPriority(event.target.value as CasePriority)} className="h-9 min-w-0 rounded-md border border-zinc-200 bg-white px-2 text-xs font-medium outline-none ring-yellow-300 transition focus:ring-2" aria-label="Priorita úlohy">
-                    {taskPriorityOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                  </select>
+                <div className="grid min-w-0 gap-3">
+                  <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
+                    Termín
+                    <input type="datetime-local" value={taskDueAt} onChange={(event) => setTaskDueAt(event.target.value)} className="h-11 w-full min-w-0 max-w-full overflow-hidden rounded-md border border-zinc-300 bg-white px-3 text-base! font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Termín úlohy" />
+                  </label>
+                  <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
+                    Zodpovedná osoba
+                    <select value={taskAssignee} onChange={(event) => setTaskAssignee(event.target.value)} className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Zodpovedná osoba">
+                      <option value="unassigned">Nepriradené</option>
+                      {operators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}
+                      {taskAssignee !== "unassigned" && !operators.some((operator) => operator.id === taskAssignee) && <option value={taskAssignee}>{taskAssignee === viewerProfileId ? "Ja (prihlásený)" : caseItem.ownerName ?? "Aktuálne priradená osoba"}</option>}
+                    </select>
+                  </label>
+                  <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
+                    Priorita
+                    <select value={taskPriority} onChange={(event) => setTaskPriority(event.target.value as CasePriority)} className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Priorita úlohy">
+                      {taskPriorityOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </select>
+                  </label>
                 </div>
-                <label className="inline-flex items-center gap-2 text-xs font-semibold text-zinc-700"><input type="checkbox" checked={sendTaskReminderEmail} onChange={(event) => setSendTaskReminderEmail(event.target.checked)} className="size-4 rounded border-zinc-300 text-zinc-950" />Email zodpovednej osobe</label>
-                <button type="button" onClick={() => void createTask()} disabled={isRunningAction} className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-wait disabled:bg-zinc-300 disabled:text-zinc-600">{isRunningAction ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}Pridať úlohu</button>
+                <label className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-zinc-700"><input type="checkbox" checked={sendTaskReminderEmail} onChange={(event) => setSendTaskReminderEmail(event.target.checked)} className="size-4 shrink-0 rounded border-zinc-300 text-zinc-950" />Email zodpovednej osobe</label>
+                <button type="button" onClick={() => void createTask()} disabled={isRunningAction} className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-wait disabled:bg-zinc-300 disabled:text-zinc-600">{isRunningAction ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}Pridať úlohu</button>
               </div>
             </div>
           </section>
@@ -1003,22 +1015,34 @@ export function CaseDetail({
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-1.5" role="group" aria-label="Rýchle nastavenie termínu">
                     {taskDuePresets.map((preset) => (
-                      <button key={preset.minutes} type="button" onClick={() => setTaskDueAt(dateTimeLocalInMinutes(preset.minutes))} className="h-7 rounded-md border border-zinc-200 bg-white px-2 hover:bg-zinc-100"><span className="text-[11px] font-semibold text-zinc-700">{preset.label}</span></button>
+                      <button key={preset.minutes} type="button" onClick={() => setTaskDueAt(dateTimeLocalInMinutes(preset.minutes))} className="h-9 rounded-md border border-zinc-300 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">{preset.label}</button>
                     ))}
                   </div>
-                  <div className="mt-2 grid min-w-0 gap-2 sm:grid-cols-2">
-                    <input value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" className="h-9 min-w-0 rounded-md border border-zinc-200 bg-white px-2.5 text-sm outline-none ring-yellow-300 transition focus:ring-2" />
-                    <input type="datetime-local" value={taskDueAt} onChange={(event) => setTaskDueAt(event.target.value)} className="h-9 min-w-0 rounded-md border border-zinc-200 bg-white px-2 text-xs font-medium outline-none ring-yellow-300 transition focus:ring-2" aria-label="Termín úlohy" />
-                    <select value={taskPriority} onChange={(event) => setTaskPriority(event.target.value as CasePriority)} className="h-9 min-w-0 rounded-md border border-zinc-200 bg-white px-2 text-xs font-medium outline-none ring-yellow-300 transition focus:ring-2" aria-label="Priorita úlohy">
-                      {taskPriorityOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                    </select>
-                    <select value={taskAssignee} onChange={(event) => setTaskAssignee(event.target.value)} className="h-9 min-w-0 rounded-md border border-zinc-200 bg-white px-2 text-xs font-medium outline-none ring-yellow-300 transition focus:ring-2" aria-label="Zodpovedná osoba">
-                      <option value="unassigned">Nepriradené</option>
-                      {operators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}
-                      {taskAssignee !== "unassigned" && !operators.some((operator) => operator.id === taskAssignee) && <option value={taskAssignee}>{taskAssignee === viewerProfileId ? "Ja (prihlásený)" : caseItem.ownerName ?? "Aktuálne priradená osoba"}</option>}
-                    </select>
-                    <label className="inline-flex items-center gap-2 text-xs font-semibold text-zinc-700"><input type="checkbox" checked={sendTaskReminderEmail} onChange={(event) => setSendTaskReminderEmail(event.target.checked)} className="size-4 rounded border-zinc-300 text-zinc-950" />Email operátorovi</label>
-                    <button type="button" onClick={() => void createTask()} className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white hover:bg-zinc-800"><Plus size={15} />Pridať úlohu</button>
+                  <div className="mt-3 grid min-w-0 gap-3">
+                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
+                      Názov úlohy
+                      <input value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base! font-medium text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
+                    </label>
+                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
+                      Termín
+                      <input type="datetime-local" value={taskDueAt} onChange={(event) => setTaskDueAt(event.target.value)} className="h-11 w-full min-w-0 max-w-full overflow-hidden rounded-md border border-zinc-300 bg-white px-3 text-base! font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Termín úlohy" />
+                    </label>
+                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
+                      Priorita
+                      <select value={taskPriority} onChange={(event) => setTaskPriority(event.target.value as CasePriority)} className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Priorita úlohy">
+                        {taskPriorityOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                      </select>
+                    </label>
+                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
+                      Zodpovedná osoba
+                      <select value={taskAssignee} onChange={(event) => setTaskAssignee(event.target.value)} className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Zodpovedná osoba">
+                        <option value="unassigned">Nepriradené</option>
+                        {operators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}
+                        {taskAssignee !== "unassigned" && !operators.some((operator) => operator.id === taskAssignee) && <option value={taskAssignee}>{taskAssignee === viewerProfileId ? "Ja (prihlásený)" : caseItem.ownerName ?? "Aktuálne priradená osoba"}</option>}
+                      </select>
+                    </label>
+                    <label className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-zinc-700"><input type="checkbox" checked={sendTaskReminderEmail} onChange={(event) => setSendTaskReminderEmail(event.target.checked)} className="size-4 shrink-0 rounded border-zinc-300 text-zinc-950" />Email operátorovi</label>
+                    <button type="button" onClick={() => void createTask()} className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800"><Plus size={15} />Pridať úlohu</button>
                   </div>
                 </div>
 

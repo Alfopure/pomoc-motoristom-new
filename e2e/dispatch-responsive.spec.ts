@@ -513,6 +513,27 @@ test("case directory keeps its context and creates a task for the selected perso
   });
 });
 
+test("task inputs stay readable in a narrow case detail", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: viewportHeight });
+  await openCaseEdit(page);
+
+  const taskForm = page.getByRole("heading", { name: "Pridať novú úlohu", exact: true }).locator("..");
+  const titleInput = taskForm.getByLabel("Názov novej úlohy", { exact: true });
+  const dueAtInput = taskForm.getByLabel("Termín úlohy", { exact: true });
+
+  await expect(titleInput).toBeVisible();
+  await expect(dueAtInput).toBeVisible();
+  await expect(dueAtInput).toHaveCSS("font-size", "16px");
+
+  const titleBox = await titleInput.boundingBox();
+  const dueAtBox = await dueAtInput.boundingBox();
+  expect(titleBox).not.toBeNull();
+  expect(dueAtBox).not.toBeNull();
+  expect(dueAtBox!.width).toBeGreaterThan(250);
+  expect(Math.abs(dueAtBox!.width - titleBox!.width)).toBeLessThanOrEqual(1);
+  await expectNoElementOverflow(taskForm, "task form at 1024px");
+});
+
 test("quick dial shows favorite contacts in pages of five", async ({ page }) => {
   const favorites = Array.from({ length: 6 }, (_, index) => ({
     id: `favorite-${index + 1}`,
