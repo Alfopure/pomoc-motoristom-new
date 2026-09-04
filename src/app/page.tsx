@@ -18,6 +18,7 @@ export default async function Home() {
     <DispatchConsole
       initialData={dispatchData}
       viewerDisplayName={authState.profile?.displayName}
+      viewerEmail={authState.profile?.email}
       viewerOrganizationId={authState.profile?.organizationId}
       viewerProfileId={authState.profile?.profileId}
       viewerRole={authState.profile?.role}
