@@ -1,7 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const runTelephonyCronJobs = vi.fn();
-const createTelephonyDeps = vi.fn(async () => ({ marker: "deps" }));
+const createTelephonyDeps = vi.fn(async () => ({ marker: "deps", organizationId: "org-1" }));
+const materializeDueTaskReminders = vi.fn(async () => ({ materialized: 0, skipped: 0 }));
+let jobControl: { enabled: boolean } | null = { enabled: true };
+
+vi.mock("@/lib/supabase/admin", () => ({
+  createSupabaseAdminClient: () => ({
+    from: () => ({
+      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: jobControl, error: null }) }) }),
+    }),
+  }),
+}));
+
+vi.mock("@/server/task-notifications", () => ({
+  materializeDueTaskReminders: (...args: unknown[]) => materializeDueTaskReminders(...(args as [])),
+}));
 
 vi.mock("@/server/telephony/cron-jobs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/server/telephony/cron-jobs")>();
@@ -39,6 +53,8 @@ describe("GET /api/telephony/cron", () => {
     process.env.CRON_SECRET = SECRET;
     runTelephonyCronJobs.mockReset().mockResolvedValue(SUMMARY);
     createTelephonyDeps.mockClear();
+    materializeDueTaskReminders.mockClear().mockResolvedValue({ materialized: 0, skipped: 0 });
+    jobControl = { enabled: true };
   });
 
   afterEach(() => {
@@ -67,9 +83,40 @@ describe("GET /api/telephony/cron", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    await expect(response.json()).resolves.toEqual(SUMMARY);
+    // The telephony summary plus the reminder job this deployment has nowhere
+    // else to run (no worker, one allowed cron).
+    await expect(response.json()).resolves.toEqual({
+      ...SUMMARY,
+      jobs: [...SUMMARY.jobs, { job: "notifications.materialize", status: "ok", detail: { materialized: 0, skipped: 0 } }],
+    });
     expect(createTelephonyDeps).toHaveBeenCalledWith({ sweepAfterEvent: false });
-    expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps" });
+    expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps", organizationId: "org-1" });
+    expect(materializeDueTaskReminders).toHaveBeenCalledTimes(1);
+  });
+
+  it("materialises due reminders, and honours the job control switch", async () => {
+    materializeDueTaskReminders.mockResolvedValue({ materialized: 3, skipped: 1 });
+    const ran = await (await GET(cronRequest(SECRET))).json();
+    expect(ran.jobs.at(-1)).toEqual({ job: "notifications.materialize", status: "ok", detail: { materialized: 3, skipped: 1 } });
+
+    jobControl = { enabled: false };
+    materializeDueTaskReminders.mockClear();
+    const off = await (await GET(cronRequest(SECRET))).json();
+    expect(off.jobs.at(-1)).toEqual({ job: "notifications.materialize", status: "disabled", detail: { reason: "job_control_disabled" } });
+    expect(materializeDueTaskReminders).not.toHaveBeenCalled();
+  });
+
+  it("degrades the tick when reminders fail, without losing the telephony summary", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    materializeDueTaskReminders.mockRejectedValue(new Error("reminders down"));
+
+    const response = await GET(cronRequest(SECRET));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe("degraded");
+    expect(body.jobs.at(-1)).toMatchObject({ job: "notifications.materialize", status: "failed", error: "reminders down" });
+    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 1);
+    consoleError.mockRestore();
   });
 
   it("still answers 200 with a degraded summary when a job failed", async () => {
