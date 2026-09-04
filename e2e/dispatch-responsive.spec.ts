@@ -425,6 +425,18 @@ test("task sidebar stays focused and the full task filters work together", async
   await expect(sidebarFilters.getByRole("button")).toHaveCount(2);
   await expect(sidebarFilters.getByRole("button", { name: /Moje/ })).toBeVisible();
   await expect(sidebarFilters.getByRole("button", { name: /Všetky/ })).toHaveAttribute("aria-pressed", "true");
+  const sidebarTaskHeights = await sidebar.getByTestId("task-card-sidebar").evaluateAll((cards) =>
+    cards.map((card) => Math.round(card.getBoundingClientRect().height)),
+  );
+  expect(sidebarTaskHeights.length).toBeGreaterThan(0);
+  expect(Math.max(...sidebarTaskHeights)).toBeLessThanOrEqual(120);
+
+  const activeCaseHeights = await page.locator("[data-case-number]").evaluateAll((cards) =>
+    cards.map((card) => Math.round(card.getBoundingClientRect().height)),
+  );
+  expect(activeCaseHeights.length).toBeGreaterThan(0);
+  expect(Math.max(...activeCaseHeights)).toBeLessThanOrEqual(100);
+
   await navigation.getByRole("button", { name: "Menu", exact: true }).click();
   await expect(navigation.getByRole("menuitem", { name: "Ústredňa", exact: true })).toBeVisible();
   await expectNoElementOverflow(sidebar, "dashboard task sidebar");
