@@ -110,22 +110,22 @@ export function CaseList({
   }
 
   return (
-    <aside data-testid="dispatch-case-list" className="flex max-h-[38dvh] min-h-[220px] flex-col border-b border-zinc-200 bg-white lg:max-h-none lg:min-h-0 lg:w-[320px] lg:border-b-0 lg:border-r xl:w-[330px]">
-      <div className="border-b border-zinc-200 p-2.5">
-        <div className="mb-3 flex items-center gap-2">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#FCD703] text-zinc-950">
-            <FileText size={16} strokeWidth={2.4} />
+    <aside data-testid="dispatch-case-list" className="flex max-h-[38dvh] min-h-[220px] flex-col border-b border-zinc-200 bg-white lg:max-h-none lg:min-h-0 lg:w-full lg:border-b-0 lg:border-r">
+      <div className="border-b border-zinc-200 p-2">
+        <div className="mb-2 flex items-center gap-2">
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-zinc-950">
+            <FileText size={14} strokeWidth={2.4} />
           </span>
           <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold tracking-tight text-zinc-950">Aktívne prípady</h2>
-            <p className="text-xs font-medium text-zinc-500">
+            <h2 className="truncate text-sm font-semibold tracking-tight text-zinc-950">Aktívne prípady</h2>
+            <p className="text-[11px] font-medium text-zinc-500">
               {cases.length} z {totalCases}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <label className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500">
-            <Search size={16} />
+          <label className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-sm text-zinc-500">
+            <Search size={14} />
             <input
               value={search}
               onChange={(event) => onSearchChange(event.target.value)}
@@ -137,14 +137,14 @@ export function CaseList({
           <button
             type="button"
             onClick={() => setFilterOpen((current) => !current)}
-            className={`relative inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md border text-zinc-600 hover:bg-zinc-50 ${
+            className={`relative inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border text-zinc-600 hover:bg-zinc-50 ${
               activeFilterCount > 0 || filterOpen ? "border-yellow-300 bg-yellow-50 text-zinc-950" : "border-zinc-200"
             }`}
             aria-expanded={filterOpen}
             aria-label="Filtre"
             title="Filtre"
           >
-            <Filter size={16} />
+            <Filter size={15} />
             {activeFilterCount > 0 && (
               <span className="absolute -right-1.5 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-zinc-950 px-1 text-[10px] font-semibold text-white">
                 {activeFilterCount}
@@ -154,16 +154,16 @@ export function CaseList({
           <button
             type="button"
             onClick={onToggleCenterView}
-            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
             aria-label={toggleLabel}
             title={toggleLabel}
           >
-            <ToggleIcon size={17} />
+            <ToggleIcon size={15} />
           </button>
         </div>
         <label className="mt-2 grid min-w-0 grid-cols-[34px_auto_minmax(0,1fr)] items-center overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 text-xs font-semibold text-zinc-600 shadow-sm">
-          <span className="grid h-10 place-items-center border-r border-yellow-300 bg-[#FCD703] text-zinc-950">
-            <ArrowUpDown size={15} aria-hidden="true" />
+          <span className="grid h-9 place-items-center border-r border-yellow-300 bg-[#FCD703] text-zinc-950">
+            <ArrowUpDown size={14} aria-hidden="true" />
           </span>
           <span className="shrink-0 px-2">Poradie</span>
           <span className="min-w-0 py-1 pr-1">
@@ -171,7 +171,7 @@ export function CaseList({
               aria-label="Zoradiť prípady"
               value={sidebarSortKey}
               onChange={(event) => changeSort(event.target.value as SidebarSortKey)}
-              className="h-8 w-full min-w-0 rounded-md border border-zinc-200 bg-white pl-2 pr-7 text-xs font-semibold text-zinc-900 outline-none transition hover:border-zinc-300 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-200"
+              className="h-7 w-full min-w-0 rounded-md border border-zinc-200 bg-white pl-2 pr-7 text-[11px] font-semibold text-zinc-900 outline-none transition hover:border-zinc-300 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-200"
             >
               {sidebarSortKey === "" && <option value="" disabled>Iné zoradenie</option>}
               {sidebarSortOptions.map((option) => (
@@ -237,17 +237,17 @@ export function CaseList({
                 data-case-number={caseItem.caseNumber}
                 data-case-priority={caseItem.priority}
                 data-open-task-count={openTaskCount}
-                className={`border-b border-zinc-100 px-2.5 py-1.5 transition ${
+                className={`border-b border-zinc-100 px-2 py-1 transition ${
                   active ? "bg-yellow-50 ring-1 ring-inset ring-yellow-300" : "bg-white hover:bg-zinc-50"
                 }`}
               >
-                <div className="flex items-start justify-between gap-2">
+                <div className="flex items-start justify-between gap-1.5">
                   <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1">
                       {/* Text musí ostať v <span>: globals.css má nezaradené `button { font: inherit }`,
                           ktoré prebíja Tailwind text-* utility priamo na <button>. */}
                       <button type="button" onClick={() => onSelect(caseItem.id)} className="min-w-0 text-left">
-                        <span className="block truncate text-[13px] font-semibold leading-5 text-zinc-950">{caseItem.caseNumber}</span>
+                        <span className="block truncate text-xs font-semibold leading-4 text-zinc-950">{caseItem.caseNumber}</span>
                       </button>
                       {/* Pilulka priority ostáva rovnaký span ako inde; select je neviditeľne
                           položený navrchu, takže zarovnanie sedí a dropdown je natívny. */}
@@ -283,7 +283,7 @@ export function CaseList({
                       </span>
                     </div>
                     <button type="button" onClick={() => onSelect(caseItem.id)} className="block w-full text-left">
-                      <span className="block truncate text-[11px] font-medium leading-4 text-zinc-700">{caseItem.caseType || "Bez typu zásahu"}</span>
+                      <span className="block truncate text-[10px] font-medium leading-3.5 text-zinc-700">{caseItem.caseType || "Bez typu zásahu"}</span>
                     </button>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
@@ -293,32 +293,32 @@ export function CaseList({
                     <button
                       type="button"
                       onClick={() => onOpenDetails(caseItem.id)}
-                      className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100"
                       aria-label={`Detail prípadu ${caseItem.caseNumber}`}
                       title="Detail"
                     >
-                      <FileText size={14} />
+                      <FileText size={12} />
                     </button>
                   </div>
                 </div>
 
-                <button type="button" onClick={() => onSelect(caseItem.id)} className="mt-1 grid w-full gap-0.5 text-left text-[11px] leading-4 text-zinc-600">
+                <button type="button" onClick={() => onSelect(caseItem.id)} className="mt-0.5 grid w-full gap-0 text-left text-[10px] leading-3.5 text-zinc-600">
                   <span className="inline-flex min-w-0 items-center gap-2">
-                    <CarFront size={12} className="shrink-0 text-zinc-400" />
+                    <CarFront size={11} className="shrink-0 text-zinc-400" />
                     <span className="truncate">{[caseItem.vehicle.licensePlate, caseItem.vehicle.make, caseItem.vehicle.model].filter(Boolean).join(" · ") || "Vozidlo nezadané"}</span>
                   </span>
                   <span className="inline-flex min-w-0 items-center gap-2">
-                    <MapPin size={12} className="shrink-0 text-zinc-400" />
+                    <MapPin size={11} className="shrink-0 text-zinc-400" />
                     <span className="truncate">{caseItem.pickup?.address || "Poloha nezadaná"}</span>
                   </span>
                   {assistanceServiceName && (
                     <span className="inline-flex min-w-0 items-center gap-2 text-amber-800">
-                      <Building2 size={12} className="shrink-0 text-amber-600" />
+                      <Building2 size={11} className="shrink-0 text-amber-600" />
                       <span className="truncate" title={`Asistenčná služba: ${assistanceServiceName}`}>Asistenčná služba: {assistanceServiceName}</span>
                     </span>
                   )}
                   <span className="inline-flex min-w-0 items-center gap-2">
-                    <Clock3 size={12} className="shrink-0 text-zinc-400" />
+                    <Clock3 size={11} className="shrink-0 text-zinc-400" />
                     <span className="truncate" title={`Založené ${formatDateTime(caseItem.createdAt)} · posledná úprava ${formatTime(caseItem.updatedAt)}`}>
                       Založené {formatDateTime(caseItem.createdAt)} · {ownerName(caseItem.ownerId)}
                     </span>

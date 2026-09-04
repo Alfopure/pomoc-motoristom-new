@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   BarChart3,
@@ -87,6 +88,20 @@ const defaultCaseFilters: CaseFilters = {
   status: "all",
 };
 
+type DashboardColumnSide = "left" | "right";
+
+type DashboardColumnWidths = {
+  left: number;
+  right: number;
+};
+
+const DEFAULT_DASHBOARD_COLUMNS: DashboardColumnWidths = { left: 330, right: 330 };
+const DASHBOARD_LEFT_MIN = 260;
+const DASHBOARD_LEFT_MAX = 480;
+const DASHBOARD_RIGHT_MIN = 280;
+const DASHBOARD_RIGHT_MAX = 480;
+const DASHBOARD_CENTER_MIN = 480;
+
 const priorityRank: Record<DispatchCase["priority"], number> = {
   urgent: 0,
   high: 1,
@@ -121,6 +136,51 @@ const terminalCaseStatuses = new Set<DispatchCase["status"]>([
 
 function isActiveDispatchCase(caseItem: DispatchCase) {
   return !terminalCaseStatuses.has(caseItem.status);
+}
+
+function clampNumber(value: unknown, minimum: number, maximum: number, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(maximum, Math.max(minimum, value))
+    : fallback;
+}
+
+function fitDashboardColumns(columns: DashboardColumnWidths, gridWidth: number, rightVisible: boolean): DashboardColumnWidths {
+  let left = clampNumber(columns.left, DASHBOARD_LEFT_MIN, DASHBOARD_LEFT_MAX, DEFAULT_DASHBOARD_COLUMNS.left);
+  let right = clampNumber(columns.right, DASHBOARD_RIGHT_MIN, DASHBOARD_RIGHT_MAX, DEFAULT_DASHBOARD_COLUMNS.right);
+
+  if (!rightVisible) {
+    left = Math.min(left, Math.max(DASHBOARD_LEFT_MIN, gridWidth - DASHBOARD_CENTER_MIN));
+    return { left, right };
+  }
+
+  const availableForRails = Math.max(
+    DASHBOARD_LEFT_MIN + DASHBOARD_RIGHT_MIN,
+    gridWidth - DASHBOARD_CENTER_MIN,
+  );
+  let overflow = Math.max(0, left + right - availableForRails);
+  const rightReduction = Math.min(overflow, right - DASHBOARD_RIGHT_MIN);
+  right -= rightReduction;
+  overflow -= rightReduction;
+  left -= Math.min(overflow, left - DASHBOARD_LEFT_MIN);
+
+  return { left, right };
+}
+
+function resizeDashboardColumn(
+  columns: DashboardColumnWidths,
+  side: DashboardColumnSide,
+  requestedWidth: number,
+  gridWidth: number,
+  rightVisible: boolean,
+): DashboardColumnWidths {
+  const fitted = fitDashboardColumns(columns, gridWidth, rightVisible);
+  const minimum = side === "left" ? DASHBOARD_LEFT_MIN : DASHBOARD_RIGHT_MIN;
+  const hardMaximum = side === "left" ? DASHBOARD_LEFT_MAX : DASHBOARD_RIGHT_MAX;
+  const otherWidth = side === "left" ? (rightVisible ? fitted.right : 0) : fitted.left;
+  const viewportMaximum = Math.max(minimum, gridWidth - DASHBOARD_CENTER_MIN - otherWidth);
+  const width = clampNumber(requestedWidth, minimum, Math.min(hardMaximum, viewportMaximum), fitted[side]);
+
+  return { ...fitted, [side]: width };
 }
 
 const sourceLabels: Record<NonNullable<DispatchCase["sourceType"]>, string> = {
@@ -205,10 +265,126 @@ export function DispatchConsole({
   const locationUpdateCursorRef = useRef(new Date(Date.now() - 30_000).toISOString());
   const locationUpdatePollInFlight = useRef(false);
   const callHistoryRefreshInFlight = useRef(false);
+  const dashboardGridRef = useRef<HTMLElement | null>(null);
+  const dashboardColumnsRef = useRef<DashboardColumnWidths>(DEFAULT_DASHBOARD_COLUMNS);
+  const dashboardResizeRef = useRef<{
+    pointerId: number;
+    side: DashboardColumnSide;
+    startWidth: number;
+    startX: number;
+  } | null>(null);
+  const [dashboardColumns, setDashboardColumns] = useState<DashboardColumnWidths>(DEFAULT_DASHBOARD_COLUMNS);
+  const dashboardColumnStorageKey = `motorist:dashboard-columns:v1:${viewerProfileId ?? "local-browser"}`;
 
   useEffect(() => {
     consoleRef.current?.setAttribute("data-hydrated", "true");
   }, []);
+
+  useEffect(() => {
+    let frameId: number | undefined;
+
+    try {
+      const stored = window.localStorage.getItem(dashboardColumnStorageKey);
+      if (!stored) return;
+      const parsed = JSON.parse(stored) as Partial<DashboardColumnWidths>;
+      const next = {
+        left: clampNumber(parsed.left, DASHBOARD_LEFT_MIN, DASHBOARD_LEFT_MAX, DEFAULT_DASHBOARD_COLUMNS.left),
+        right: clampNumber(parsed.right, DASHBOARD_RIGHT_MIN, DASHBOARD_RIGHT_MAX, DEFAULT_DASHBOARD_COLUMNS.right),
+      };
+      frameId = window.requestAnimationFrame(() => {
+        dashboardColumnsRef.current = next;
+        setDashboardColumns(next);
+      });
+    } catch {
+      // A malformed local preference must never prevent the dashboard from opening.
+    }
+
+    return () => {
+      if (frameId !== undefined) window.cancelAnimationFrame(frameId);
+    };
+  }, [dashboardColumnStorageKey]);
+
+  useEffect(() => {
+    const clampColumnsToViewport = () => {
+      const gridWidth = dashboardGridRef.current?.clientWidth;
+      if (!gridWidth) return;
+
+      setDashboardColumns((current) => {
+        const rightVisible = window.matchMedia("(min-width: 1280px)").matches;
+        const next = fitDashboardColumns(current, gridWidth, rightVisible);
+        dashboardColumnsRef.current = next;
+        return next.left === current.left && next.right === current.right ? current : next;
+      });
+    };
+
+    clampColumnsToViewport();
+    window.addEventListener("resize", clampColumnsToViewport);
+    return () => window.removeEventListener("resize", clampColumnsToViewport);
+  }, []);
+
+  function updateDashboardColumn(side: DashboardColumnSide, requestedWidth: number, persist = false) {
+    const gridWidth = dashboardGridRef.current?.clientWidth ?? window.innerWidth;
+    const rightVisible = window.matchMedia("(min-width: 1280px)").matches;
+    const current = dashboardColumnsRef.current;
+    const next = resizeDashboardColumn(current, side, requestedWidth, gridWidth, rightVisible);
+
+    dashboardColumnsRef.current = next;
+    setDashboardColumns(next);
+    if (persist) {
+      persistDashboardColumns(next);
+    }
+  }
+
+  function persistDashboardColumns(columns: DashboardColumnWidths) {
+    try {
+      window.localStorage.setItem(dashboardColumnStorageKey, JSON.stringify(columns));
+    } catch {
+      // Resizing remains available even when the browser blocks local storage.
+    }
+  }
+
+  function beginDashboardColumnResize(side: DashboardColumnSide, event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dashboardResizeRef.current = {
+      pointerId: event.pointerId,
+      side,
+      startWidth: dashboardColumnsRef.current[side],
+      startX: event.clientX,
+    };
+    dashboardGridRef.current?.setAttribute("data-resizing", "true");
+  }
+
+  function moveDashboardColumnResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    const resize = dashboardResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+
+    const pointerDelta = event.clientX - resize.startX;
+    const widthDelta = resize.side === "left" ? pointerDelta : -pointerDelta;
+    updateDashboardColumn(resize.side, resize.startWidth + widthDelta);
+  }
+
+  function finishDashboardColumnResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    const resize = dashboardResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+
+    dashboardResizeRef.current = null;
+    dashboardGridRef.current?.removeAttribute("data-resizing");
+    persistDashboardColumns(dashboardColumnsRef.current);
+  }
+
+  function handleDashboardColumnKeyDown(side: DashboardColumnSide, event: ReactKeyboardEvent<HTMLButtonElement>) {
+    const direction = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
+    if (!direction) return;
+
+    event.preventDefault();
+    const delta = side === "left" ? direction * 10 : direction * -10;
+    updateDashboardColumn(side, dashboardColumnsRef.current[side] + delta, true);
+  }
+
+  function resetDashboardColumn(side: DashboardColumnSide) {
+    updateDashboardColumn(side, DEFAULT_DASHBOARD_COLUMNS[side], true);
+  }
 
   useEffect(() => {
     const topBars = topBarsRef.current;
@@ -1374,8 +1550,51 @@ export function DispatchConsole({
 
       {activeView === "dispatch" && (
         <main
-          className="relative z-0 isolate grid h-full min-h-0 min-w-0 flex-1 grid-cols-1 overflow-x-hidden overflow-y-auto lg:h-auto lg:grid-rows-[auto_minmax(0,1fr)] lg:overflow-hidden lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-rows-[minmax(0,1fr)] xl:grid-cols-[330px_minmax(0,1fr)_330px] 2xl:grid-cols-[340px_minmax(0,1fr)_330px]"
+          ref={dashboardGridRef}
+          style={{
+            "--dashboard-left-width": `${dashboardColumns.left}px`,
+            "--dashboard-right-width": `${dashboardColumns.right}px`,
+          } as CSSProperties}
+          className="relative z-0 isolate grid h-full min-h-0 min-w-0 flex-1 grid-cols-1 overflow-x-hidden overflow-y-auto lg:h-auto lg:grid-rows-[auto_minmax(0,1fr)] lg:overflow-hidden lg:grid-cols-[var(--dashboard-left-width)_minmax(0,1fr)] xl:grid-rows-[minmax(0,1fr)] xl:grid-cols-[var(--dashboard-left-width)_minmax(0,1fr)_var(--dashboard-right-width)]"
         >
+          <button
+            type="button"
+            role="separator"
+            aria-label="Zmeniť šírku stĺpca prípadov"
+            aria-orientation="vertical"
+            aria-valuemin={DASHBOARD_LEFT_MIN}
+            aria-valuemax={DASHBOARD_LEFT_MAX}
+            aria-valuenow={Math.round(dashboardColumns.left)}
+            title="Potiahnutím zmeňte šírku stĺpca prípadov, dvojklik obnoví pôvodnú šírku"
+            onDoubleClick={() => resetDashboardColumn("left")}
+            onKeyDown={(event) => handleDashboardColumnKeyDown("left", event)}
+            onPointerDown={(event) => beginDashboardColumnResize("left", event)}
+            onPointerMove={moveDashboardColumnResize}
+            onPointerUp={finishDashboardColumnResize}
+            onPointerCancel={finishDashboardColumnResize}
+            className="group absolute bottom-0 left-[var(--dashboard-left-width)] top-0 z-30 hidden w-3 -translate-x-1/2 touch-none cursor-col-resize items-center justify-center outline-none lg:flex"
+          >
+            <span aria-hidden="true" className="h-14 w-1 rounded-full bg-zinc-300 shadow-sm transition group-hover:bg-yellow-400 group-focus-visible:bg-yellow-400" />
+          </button>
+          <button
+            type="button"
+            role="separator"
+            aria-label="Zmeniť šírku stĺpca úloh a upozornení"
+            aria-orientation="vertical"
+            aria-valuemin={DASHBOARD_RIGHT_MIN}
+            aria-valuemax={DASHBOARD_RIGHT_MAX}
+            aria-valuenow={Math.round(dashboardColumns.right)}
+            title="Potiahnutím zmeňte šírku stĺpca úloh, dvojklik obnoví pôvodnú šírku"
+            onDoubleClick={() => resetDashboardColumn("right")}
+            onKeyDown={(event) => handleDashboardColumnKeyDown("right", event)}
+            onPointerDown={(event) => beginDashboardColumnResize("right", event)}
+            onPointerMove={moveDashboardColumnResize}
+            onPointerUp={finishDashboardColumnResize}
+            onPointerCancel={finishDashboardColumnResize}
+            className="group absolute bottom-0 right-[var(--dashboard-right-width)] top-0 z-30 hidden w-3 translate-x-1/2 touch-none cursor-col-resize items-center justify-center outline-none xl:flex"
+          >
+            <span aria-hidden="true" className="h-14 w-1 rounded-full bg-zinc-300 shadow-sm transition group-hover:bg-yellow-400 group-focus-visible:bg-yellow-400" />
+          </button>
           <div className="min-w-0 p-2 lg:col-span-2 xl:hidden">
             <DashboardPhone caseContext={dashboardSmsCaseContext} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
           </div>
