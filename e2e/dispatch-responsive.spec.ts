@@ -76,6 +76,22 @@ for (const width of viewportWidths) {
   });
 }
 
+test("case header offers separate web and mobile call actions", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: viewportHeight });
+  await openDashboard(page);
+  await page.getByRole("button", { name: mockDispatchCases[0].caseNumber, exact: true }).click();
+
+  const callActions = page.getByRole("group", { name: "Možnosti volania", exact: true });
+  await expect(callActions).toBeVisible();
+  await expect(callActions.getByRole("button", { name: "Volať cez web", exact: true })).toBeVisible();
+  await expect(callActions.getByRole("link", { name: "Volať cez mobil", exact: true })).toHaveAttribute("href", /^tel:\+?\d/);
+
+  await page.setViewportSize({ width: 390, height: viewportHeight });
+  await expect(callActions).toBeVisible();
+  await expect(callActions.locator("xpath=..").getByRole("button", { name: "SMS", exact: true })).toBeVisible();
+  await expectNoDocumentOverflow(page, "case call actions at 390px");
+});
+
 test("replacement vehicle details stay in place while the explicit choice changes", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: viewportHeight });
   await openDashboard(page);
