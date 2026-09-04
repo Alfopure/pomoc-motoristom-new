@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bell, Check, ChevronRight, Inbox } from "lucide-react";
-import { compareNotifications, isNotificationUnread, notificationSeverityTone } from "@/domain/notifications";
+import { AlarmClock, Bell, Check, ChevronRight, Inbox } from "lucide-react";
+import { compareNotifications, formatNotificationReminderTime, isNotificationReady, isNotificationSnoozed, isNotificationUnread, notificationSeverityTone } from "@/domain/notifications";
 import type { DispatchCase, DispatchNotification } from "@/domain/types";
 import { formatTime } from "@/lib/dispatch-calculations";
+import { NotificationSnoozeButton } from "./NotificationSnoozeButton";
 
 type HeaderNotificationMenuProps = {
   cases: DispatchCase[];
@@ -12,6 +13,8 @@ type HeaderNotificationMenuProps = {
   onMarkRead: (notificationId: string) => void;
   onOpenCase: (caseId: string) => void;
   onOpenTask: (taskId: string, caseId: string) => void;
+  onSnooze: (notificationId: string, snoozedUntil: string) => boolean | Promise<boolean>;
+  now: number;
 };
 
 const HISTORY_LIMIT = 12;
@@ -22,6 +25,8 @@ export function HeaderNotificationMenu({
   onMarkRead,
   onOpenCase,
   onOpenTask,
+  onSnooze,
+  now,
 }: HeaderNotificationMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -30,7 +35,7 @@ export function HeaderNotificationMenu({
     [notifications],
   );
   const visibleNotifications = sortedNotifications.slice(0, HISTORY_LIMIT);
-  const unreadCount = sortedNotifications.filter(isNotificationUnread).length;
+  const unreadCount = sortedNotifications.filter((notification) => isNotificationReady(notification, now)).length;
   const casesById = useMemo(() => new Map(cases.map((caseItem) => [caseItem.id, caseItem.caseNumber])), [cases]);
 
   useEffect(() => {
@@ -103,34 +108,47 @@ export function HeaderNotificationMenu({
           <div className="max-h-[min(460px,70vh)] divide-y divide-zinc-100 overflow-y-auto overscroll-contain">
             {visibleNotifications.length > 0 ? visibleNotifications.map((notification) => {
               const unread = isNotificationUnread(notification);
+              const snoozed = isNotificationSnoozed(notification, now);
               const hasTarget = Boolean(notification.caseId);
               const caseNumber = notification.caseId ? casesById.get(notification.caseId) : undefined;
 
               return (
-                <button
-                  key={notification.id}
-                  type="button"
-                  onClick={() => openNotification(notification)}
-                  className={`grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 px-3.5 py-3 text-left transition hover:bg-zinc-50 ${unread ? "bg-yellow-50/70" : "bg-white"}`}
-                >
-                  <span className={`mt-1 size-2.5 rounded-full ${unread ? "bg-[#F4C900] ring-4 ring-yellow-100" : "bg-zinc-200"}`} aria-hidden="true" />
-                  <span className="min-w-0">
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span className={`line-clamp-2 min-w-0 flex-1 text-sm leading-5 ${unread ? "font-bold text-zinc-950" : "font-semibold text-zinc-700"}`}>{notification.title}</span>
-                      <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 ${notificationSeverityTone[notification.severity]}`}>
-                        {notification.severity === "urgent" ? "Urgentné" : notification.severity === "warning" ? "Pozor" : "Info"}
+                <article key={notification.id} className={`relative ${snoozed ? "bg-sky-50/70" : unread ? "bg-yellow-50/70" : "bg-white"}`}>
+                  <button
+                    type="button"
+                    onClick={() => openNotification(notification)}
+                    className="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 px-3.5 py-3 pr-12 text-left transition hover:bg-zinc-50/80"
+                  >
+                    <span className={`mt-1 size-2.5 rounded-full ${snoozed ? "bg-sky-500 ring-4 ring-sky-100" : unread ? "bg-[#F4C900] ring-4 ring-yellow-100" : "bg-zinc-200"}`} aria-hidden="true" />
+                    <span className="min-w-0">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className={`line-clamp-2 min-w-0 flex-1 text-sm leading-5 ${unread ? "font-bold text-zinc-950" : "font-semibold text-zinc-700"}`}>{notification.title}</span>
+                        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 ${notificationSeverityTone[notification.severity]}`}>
+                          {notification.severity === "urgent" ? "Urgentné" : notification.severity === "warning" ? "Pozor" : "Info"}
+                        </span>
+                      </span>
+                      {notification.body && <span className="mt-0.5 line-clamp-2 text-xs leading-4 text-zinc-500">{notification.body}</span>}
+                      <span className={`mt-1.5 flex items-center gap-1.5 text-[11px] font-medium ${snoozed ? "text-sky-700" : "text-zinc-400"}`}>
+                        {snoozed && <><AlarmClock size={11} /><span>Pripomenie {formatNotificationReminderTime(notification.snoozedUntil!)}</span><span aria-hidden="true">·</span></>}
+                        {caseNumber && <span>{caseNumber}</span>}
+                        {caseNumber && <span aria-hidden="true">·</span>}
+                        <span>{formatTime(notification.createdAt)}</span>
+                        {!unread && <><span aria-hidden="true">·</span><Check size={11} /><span>Vybavené</span></>}
                       </span>
                     </span>
-                    {notification.body && <span className="mt-0.5 line-clamp-2 text-xs leading-4 text-zinc-500">{notification.body}</span>}
-                    <span className="mt-1.5 flex items-center gap-1.5 text-[11px] font-medium text-zinc-400">
-                      {caseNumber && <span>{caseNumber}</span>}
-                      {caseNumber && <span aria-hidden="true">·</span>}
-                      <span>{formatTime(notification.createdAt)}</span>
-                      {!unread && <><span aria-hidden="true">·</span><Check size={11} /><span>Vybavené</span></>}
-                    </span>
-                  </span>
-                  {hasTarget ? <ChevronRight size={15} className="mt-1 text-zinc-400" aria-hidden="true" /> : <span />}
-                </button>
+                    {hasTarget ? <ChevronRight size={15} className="mt-1 text-zinc-400" aria-hidden="true" /> : <span />}
+                  </button>
+                  {unread && (
+                    <div className="absolute bottom-2 right-2">
+                      <NotificationSnoozeButton
+                        notificationId={notification.id}
+                        notificationTitle={notification.title}
+                        onSnooze={onSnooze}
+                        variant="icon"
+                      />
+                    </div>
+                  )}
+                </article>
               );
             }) : (
               <div className="px-4 py-10 text-center text-sm font-medium text-zinc-500">
