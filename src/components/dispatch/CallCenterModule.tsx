@@ -35,7 +35,6 @@ import { callStatusLabels } from "@/domain/statuses";
 import { CallbackQueuePanel } from "./CallbackQueuePanel";
 import { CallDetailDrawer } from "./CallDetailDrawer";
 import { CallQueuePanel } from "./CallQueuePanel";
-import { EmergencyNotice } from "./EmergencyNotice";
 import { callElapsedSeconds, formatCallTimer, phoneBarStateLabel, type PhoneCallAction } from "./phone-bar-model";
 import type {
   TelephonyDirectoryContact,
@@ -503,9 +502,7 @@ function CallCommandPanel({
               Volať
             </button>
           </div>
-          {configured ? (
-            <EmergencyNotice variant="inline" />
-          ) : (
+          {!configured && (
             <div role="status" aria-live="polite" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-950">
               {TELEPHONY_NOT_CONFIGURED_MESSAGE}
             </div>
