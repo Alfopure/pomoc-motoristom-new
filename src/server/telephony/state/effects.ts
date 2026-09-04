@@ -8,7 +8,7 @@ import { addTelephonyUsage } from "../usage";
 import { advanceRingStep } from "../routing/ring-plan";
 import { reserveOperator } from "../routing/reservation";
 import { encodeClientState } from "../telnyx/client-state";
-import { TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
+import { isCallGoneError, TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
 import {
   DEFAULT_TTS_VOICE,
   LEG_TIME_LIMIT_SECS,
@@ -85,7 +85,8 @@ export type ApplyResult = {
   commands: CommandOutcome[];
   compensations: string[];
   failed: boolean;
-  failure: { command: string; error: string } | null;
+  /** `callGone`: Telnyx refused because the leg had already ended — a race with the caller, not a fault. */
+  failure: { command: string; error: string; callGone: boolean } | null;
   notes: string[];
 };
 
@@ -865,8 +866,17 @@ export async function applyReduceResult(
         deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, command: command.kind, error: message, bestEffort: true });
         continue;
       }
-      failure = { command: key, error: message };
-      await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error, context: { sessionId: session.id, command: command.kind, key } });
+      failure = { command: key, error: message, callGone: isCallGoneError(error) };
+      if (failure.callGone) {
+        // The far end hung up a moment before the operator pressed the button.
+        // Nothing is broken: the `call.hangup` webhook is already on its way (and
+        // the reconcile job is the backstop if it is lost), so this must not open
+        // an incident — that would mail an alert and turn the health surface red
+        // every time a caller hangs up at the wrong moment.
+        deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, command: command.kind, error: message, callGone: true });
+      } else {
+        await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error, context: { sessionId: session.id, command: command.kind, key } });
+      }
       for (const compensation of compensations.filter((candidate) => candidate.forCommand === key)) {
         compensated.push(compensation.description);
         for (const extra of compensation.commands) {

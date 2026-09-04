@@ -658,6 +658,22 @@ describe("supervision when the call leaves its conference", () => {
     expect(h.session(call.sessionId).metadata).toMatchObject({ supervise: null });
   });
 
+  it("says the call ended, and raises no incident, when the caller hangs up a second before the button", async () => {
+    const h = createTelephonyHarness();
+    const call = await talkingWith(h);
+    // Telnyx 90018: the leg is gone. In production this is the caller hanging up
+    // in the second before the `call.hangup` webhook arrives — the app still
+    // believes the call is live and the operator presses park, hold or transfer.
+    h.telnyx.failAlways("gather", new TelnyxCommandError({ code: "90018", status: 422, detail: "This call is no longer active and can't receive commands." }));
+
+    const error = await fail(parkCall(actionDeps(h), o1, call.sessionId));
+    expect(error).toMatchObject({ status: 409, code: "call_gone" });
+    expect(String((error as { message: string }).message)).toBe("Hovor už medzitým skončil.");
+    // No incident, so no alert e-mail and no red health surface: an ordinary end
+    // of a call is not a fault of the exchange.
+    expect(h.rows("motorist_job_incidents")).toHaveLength(0);
+  });
+
   it("hangs the supervisor up when the operator parks the call", async () => {
     const h = createTelephonyHarness();
     const call = await supervised(h);

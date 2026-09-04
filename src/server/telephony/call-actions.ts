@@ -432,6 +432,12 @@ async function runAction(deps: CallActionDeps, session: SessionRow, event: AppEv
   if (run.outcome === "ignored") return { sessionId: session.id, state: run.session.state, commands: [], ignored: run.reason };
   const commands = run.commands.map((command) => ({ kind: command.kind, ok: command.ok, error: command.error }));
   if (run.apply.failed) {
+    // The caller hung up in the second before the button was pressed. That is an
+    // ordinary end of a call, so the operator gets a plain sentence and a 409,
+    // not a provider error code and a 502.
+    if (run.apply.failure?.callGone) {
+      throw new CallActionError("Hovor už medzitým skončil.", 409, "call_gone");
+    }
     throw new CallActionError(`${failureMessage} (${run.apply.failure?.error ?? "neznáma chyba"})`, 502, "command_failed");
   }
   return { sessionId: session.id, state: run.session.state, commands, ignored: null, operatorLegCallControlId: dialedLegCallControlId(run.commands) };

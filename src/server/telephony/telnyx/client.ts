@@ -65,6 +65,30 @@ export class TelnyxCommandError extends Error {
   }
 }
 
+/**
+ * Telnyx codes for "that leg no longer exists".
+ *
+ * `90018` is the one an operator actually triggers: they press hold, park or
+ * transfer in the second between the caller hanging up and the `call.hangup`
+ * webhook arriving, so the app still believes the call is live. It is a race,
+ * not a fault — see `isCallGoneError`.
+ */
+export const TELNYX_CALL_GONE_CODES = new Set(["90018", "90003"]);
+
+/**
+ * True when Telnyx refused a command because the call is over.
+ *
+ * Deliberately not `retryable`: retrying cannot bring the leg back. The caller
+ * should tell the operator the call ended and let the session close normally,
+ * instead of reporting a system failure and opening an incident.
+ */
+export function isCallGoneError(error: unknown): error is TelnyxCommandError {
+  if (!(error instanceof TelnyxCommandError)) return false;
+  if (TELNYX_CALL_GONE_CODES.has(String(error.code))) return true;
+  // Some responses carry the reason only in prose.
+  return /no longer active|call (has )?(already )?ended|does not exist/i.test(`${error.detail ?? ""} ${error.title ?? ""} ${error.message}`);
+}
+
 export class TelnyxLiveCallsDisabledError extends TelnyxCommandError {
   constructor() {
     super({ code: "live_calls_disabled", status: 423, message: LIVE_CALLS_DISABLED_MESSAGE });
