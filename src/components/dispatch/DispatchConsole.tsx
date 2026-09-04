@@ -1502,6 +1502,7 @@ export function DispatchConsole({
           users={users}
           onDataChange={setDispatchData}
           onTestCall={telephonyConfigured ? testCall : undefined}
+          viewerRole={viewerRole}
         />
       )}
 

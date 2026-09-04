@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { KeyRound, Mail, Power, RefreshCw, Save, UserPlus, Users } from "lucide-react";
+import { KeyRound, Mail, Power, RefreshCw, Save, Trash2, UserPlus, Users } from "lucide-react";
 import type { DispatchData } from "@/data/dispatch-types";
 import type { AccessStatus, AccessUser, AppRole } from "@/domain/types";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
@@ -11,6 +11,8 @@ type UserAccessSettingsProps = {
   users: AccessUser[];
   onDataChange: (dispatchData: DispatchData) => void;
   onNotice: (message: string) => void;
+  /** Deletion is admin-only (the route refuses everyone else); the button follows. */
+  viewerRole?: AppRole;
 };
 
 type UserDraft = {
@@ -46,7 +48,7 @@ const accessStatusClass: Record<AccessStatus, string> = {
   disabled: "bg-red-100 text-red-800",
 };
 
-export function UserAccessSettings({ onDataChange, onNotice, users }: UserAccessSettingsProps) {
+export function UserAccessSettings({ onDataChange, onNotice, users, viewerRole }: UserAccessSettingsProps) {
   const [drafts, setDrafts] = useState<Record<string, UserDraft>>({});
   const [newUser, setNewUser] = useState<UserDraft>({ displayName: "", email: "", role: "dispatcher" });
   const [sendInvite, setSendInvite] = useState(true);
@@ -54,6 +56,8 @@ export function UserAccessSettings({ onDataChange, onNotice, users }: UserAccess
   const [error, setError] = useState<string | null>(null);
   const [newPassword, setNewPassword] = useState("");
   const [newPasswordAgain, setNewPasswordAgain] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const canDelete = viewerRole === "admin";
   const sortedUsers = useMemo(() => [...users].sort((left, right) => left.name.localeCompare(right.name, "sk")), [users]);
 
   async function createUser() {
@@ -124,6 +128,21 @@ export function UserAccessSettings({ onDataChange, onNotice, users }: UserAccess
       method: "PATCH",
       body: { active },
     });
+  }
+
+  /**
+   * Deletion is irreversible and takes the login with it, so it asks twice: the
+   * first click arms the row, the second one runs. That is the same amount of
+   * friction as a modal without adding a dialog this settings screen does not
+   * otherwise have.
+   */
+  async function deleteUser(user: AccessUser) {
+    if (confirmDelete !== user.id) {
+      setConfirmDelete(user.id);
+      return;
+    }
+    setConfirmDelete(null);
+    await runUserAction(user, "delete", `/api/users/${user.id}`, `Účet ${user.name} bol vymazaný.`, { method: "DELETE" });
   }
 
   async function runUserAction(user: AccessUser, action: string, url: string, fallbackNotice: string, options: { method: string; body?: Record<string, unknown> } = { method: "POST" }) {
@@ -309,6 +328,15 @@ export function UserAccessSettings({ onDataChange, onNotice, users }: UserAccess
                       disabled={pendingAction === `disable-${user.id}` || pendingAction === `reactivate-${user.id}`}
                       onClick={() => void setUserActive(user, user.accessStatus === "disabled" || !user.active)}
                     />
+                    {canDelete ? (
+                      <UserActionButton
+                        icon={Trash2}
+                        label={confirmDelete === user.id ? "Naozaj vymazať?" : "Vymazať účet"}
+                        danger
+                        disabled={pendingAction === `delete-${user.id}`}
+                        onClick={() => void deleteUser(user)}
+                      />
+                    ) : null}
                     <span className="flex items-center text-xs font-medium text-zinc-500">
                       Pozvánka {formatDateTime(user.inviteLastSentAt)} · heslo {formatDateTime(user.passwordSetAt)}
                     </span>
@@ -356,13 +384,15 @@ function InlineRoleSelect({ onChange, value }: { onChange: (value: AppRole) => v
   );
 }
 
-function UserActionButton({ disabled, icon: Icon, label, onClick }: { disabled: boolean; icon: typeof Mail; label: string; onClick: () => void }) {
+function UserActionButton({ danger, disabled, icon: Icon, label, onClick }: { danger?: boolean; disabled: boolean; icon: typeof Mail; label: string; onClick: () => void }) {
   return (
     <button
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-xs font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+      className={`inline-flex h-9 items-center justify-center gap-2 rounded-md border px-3 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${
+        danger ? "border-red-200 bg-white text-red-700 hover:bg-red-50" : "border-zinc-200 bg-white text-zinc-800 hover:bg-zinc-100"
+      }`}
     >
       <Icon size={14} />
       {label}
