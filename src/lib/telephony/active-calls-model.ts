@@ -223,6 +223,13 @@ export type PhoneBarCall = {
   conference: boolean;
   /** True when this operator owns the call rather than merely watching it. */
   mine: boolean;
+  /** The operator that currently owns the connected call, if any. */
+  operatorProfileId: string | null;
+  operatorName: string | null;
+  /** Operators whose devices are ringing before one of them answers. */
+  offeredProfileIds: string[];
+  offeredOperatorNames: string[];
+  offeredToMe: boolean;
   /** Everyone on the call right now: caller, operator, added parties, supervisors. */
   participants: CallParticipant[];
 };
@@ -302,6 +309,8 @@ export type PhoneBarModel = {
   otherActiveCount: number;
   /** Live calls of other operators that still have an operator on them — the supervision targets of a manager. */
   others: PhoneBarCall[];
+  /** Every non-terminal organisation call, once each, for shared live overviews. */
+  teamCalls: PhoneBarCall[];
   /** The call this operator is supervising right now (their own supervisor leg is up). */
   supervising: { sessionId: string; mode: string | null; pending: boolean } | null;
   presence: TelephonyPresenceSnapshot;
@@ -331,8 +340,25 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
     consulting: call.state === "consulting",
     conference: call.state === "conference",
     mine: call.answeredByProfileId === actorProfileId,
+    operatorProfileId: call.answeredByProfileId,
+    operatorName: call.answeredByProfileId ? options.operatorName?.(call.answeredByProfileId) ?? null : null,
+    offeredProfileIds: [...call.offeredProfileIds],
+    offeredOperatorNames: call.offeredProfileIds.map((profileId) => options.operatorName?.(profileId)).filter((name): name is string => Boolean(name)),
+    offeredToMe: call.offeredProfileIds.includes(actorProfileId),
     participants: callParticipants(call, { actorProfileId, operatorName: options.operatorName }),
   };
+}
+
+function teamCallKind(call: ActiveCallPayload): PhoneBarCallKind {
+  if (WAITING_STATES.has(call.state)) return "waiting";
+  if (isTalkingState(call.state)) return "active";
+  return "offer";
+}
+
+function teamCallPriority(call: PhoneBarCall): number {
+  if (call.kind === "offer") return 0;
+  if (call.kind === "waiting") return 1;
+  return 2;
 }
 
 /**
@@ -363,6 +389,11 @@ export function buildPhoneBarModel(payload: ActiveCallsPayload, options: PhoneBa
     call.legs.some((leg) => leg.role === "supervisor" && leg.profileId === actorProfileId),
   );
   const supervisorLeg = supervisedCall?.legs.find((leg) => leg.role === "supervisor" && leg.profileId === actorProfileId) ?? null;
+  const teamBySession = new Map<string, ActiveCallPayload>();
+  for (const call of [...payload.calls, ...payload.waiting]) teamBySession.set(call.sessionId, call);
+  const teamCalls = [...teamBySession.values()]
+    .map((call) => toPhoneBarCall(call, teamCallKind(call), actorProfileId, options))
+    .sort((left, right) => teamCallPriority(left) - teamCallPriority(right) || Date.parse(left.timerSince) - Date.parse(right.timerSince));
 
   return {
     checkedAt: payload.checkedAt,
@@ -372,6 +403,7 @@ export function buildPhoneBarModel(payload: ActiveCallsPayload, options: PhoneBa
     waiting: waiting.map((call) => toPhoneBarCall(call, "waiting", actorProfileId, options)),
     otherActiveCount: others.length,
     others: supervisable.map((call) => toPhoneBarCall(call, "active", actorProfileId, options)),
+    teamCalls,
     supervising:
       supervisedCall && supervisorLeg
         ? { sessionId: supervisedCall.sessionId, mode: supervisorLeg.supervisorMode, pending: !supervisorLeg.answeredAt }

@@ -201,7 +201,18 @@ export function createTelephonyHarness(options: HarnessOptions = {}): TelephonyH
       metadata: {},
     })),
   );
-  db.seed("motorist_operator_telephony_settings", [{ organization_id: ORG, profile_id: PROFILES.o1, default_from_line_id: LINES.allianz, wrap_up_seconds: 30, auto_answer_outbound: true, ring_device_volume: 80 }]);
+  db.seed("motorist_operator_telephony_settings", [{
+    organization_id: ORG,
+    profile_id: PROFILES.o1,
+    default_from_line_id: LINES.allianz,
+    wrap_up_seconds: 30,
+    auto_answer_outbound: true,
+    ring_device_volume: 80,
+    default_mobile_number: null,
+    pause_routing_mode: "none",
+    pause_forward_profile_id: null,
+    pause_forward_number: null,
+  }]);
   db.seed("motorist_job_controls", [
     { job_name: "telephony.telnyx.webhook", enabled: false },
     { job_name: "telephony.telnyx.commands", enabled: false },

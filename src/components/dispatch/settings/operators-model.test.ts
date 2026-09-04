@@ -55,7 +55,16 @@ function operator(overrides: Partial<OperatorDoc> = {}): OperatorDoc {
     displayName: "Jana Nováková",
     role: "dispatcher",
     active: true,
-    settings: { defaultFromLineId: "line-1", wrapUpSeconds: 30, autoAnswerOutbound: true, ringDeviceVolume: 80 },
+    settings: {
+      defaultFromLineId: "line-1",
+      wrapUpSeconds: 30,
+      autoAnswerOutbound: true,
+      ringDeviceVolume: 80,
+      defaultMobileNumber: null,
+      pauseRoutingMode: "none",
+      pauseForwardProfileId: null,
+      pauseForwardNumber: null,
+    },
     device: {
       environment: "production",
       credentialId: "cred-1",
@@ -287,7 +296,16 @@ describe("honesty of the panel's wording", () => {
     const configImports = [...source.matchAll(/^import (type )?\{[\s\S]*?\} from "@\/server\/telephony\/config-service";$/gm)];
     expect(configImports).toHaveLength(1);
     expect(configImports[0][1]).toBe("type ");
-    expect(DEFAULT_OPERATOR_SETTINGS).toEqual({ defaultFromLineId: null, wrapUpSeconds: 30, autoAnswerOutbound: true, ringDeviceVolume: 80 });
+    expect(DEFAULT_OPERATOR_SETTINGS).toEqual({
+      defaultFromLineId: null,
+      wrapUpSeconds: 30,
+      autoAnswerOutbound: true,
+      ringDeviceVolume: 80,
+      defaultMobileNumber: null,
+      pauseRoutingMode: "none",
+      pauseForwardProfileId: null,
+      pauseForwardNumber: null,
+    });
   });
 
   it("says that the ring volume is stored but not used yet", () => {

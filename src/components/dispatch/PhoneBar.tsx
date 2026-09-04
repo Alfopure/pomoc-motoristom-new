@@ -249,10 +249,10 @@ export function PhoneBar(props: PhoneBarProps) {
           <BarButton
             tone="danger"
             icon={PhoneOff}
-            label={PHONE_ACTION_LABELS.hangup}
+            label={focus?.kind === "offer" ? "Odmietnuť" : PHONE_ACTION_LABELS.hangup}
             busy={props.busyAction === "hangup"}
             disabled={busy && props.busyAction !== "hangup"}
-            onClick={() => (focus ? runAction("hangup") : props.onHangupBrowser())}
+            onClick={() => (focus?.kind === "offer" ? props.onHangupBrowser() : focus ? runAction("hangup") : props.onHangupBrowser())}
           />
         )}
       </div>

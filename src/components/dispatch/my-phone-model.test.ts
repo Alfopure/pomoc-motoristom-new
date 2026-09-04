@@ -55,7 +55,16 @@ function operator(overrides: Partial<OperatorDoc> = {}): OperatorDoc {
     displayName: "Jana",
     role: "dispatcher",
     active: true,
-    settings: { defaultFromLineId: "line-1", wrapUpSeconds: 30, autoAnswerOutbound: true, ringDeviceVolume: 80 },
+    settings: {
+      defaultFromLineId: "line-1",
+      wrapUpSeconds: 30,
+      autoAnswerOutbound: true,
+      ringDeviceVolume: 80,
+      defaultMobileNumber: null,
+      pauseRoutingMode: "none",
+      pauseForwardProfileId: null,
+      pauseForwardNumber: null,
+    },
     device: null,
     ...overrides,
   };

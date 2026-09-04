@@ -7,7 +7,14 @@ import type { Database, Json } from "@/lib/supabase/database.types";
 
 import { COUNTRY_DIAL_PREFIXES, isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
-import { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS } from "@/lib/telephony/operator-settings";
+import {
+  DEFAULT_OPERATOR_SETTINGS,
+  MAX_RING_DEVICE_VOLUME,
+  MAX_WRAP_UP_SECONDS,
+  PAUSE_ROUTING_MODES,
+  type OperatorTelephonySettings,
+  type PauseRoutingMode,
+} from "@/lib/telephony/operator-settings";
 import { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "./routing/ivr";
 import type { TelephonyEnvironment } from "./state/types";
 
@@ -225,6 +232,10 @@ export type OperatorSettingsPatchInput = {
   wrapUpSeconds?: number;
   autoAnswerOutbound?: boolean;
   ringDeviceVolume?: number;
+  defaultMobileNumber?: string | null;
+  pauseRoutingMode?: PauseRoutingMode;
+  pauseForwardProfileId?: string | null;
+  pauseForwardNumber?: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -313,7 +324,7 @@ export type OperatorDoc = {
   displayName: string;
   role: AppRole;
   active: boolean;
-  settings: { defaultFromLineId: string | null; wrapUpSeconds: number; autoAnswerOutbound: boolean; ringDeviceVolume: number } | null;
+  settings: OperatorTelephonySettings | null;
   device: { environment: TelephonyEnvironment; credentialId: string | null; sipUsername: string | null; registrationState: string; deviceSeenAt: string | null } | null;
 };
 
@@ -677,6 +688,10 @@ export function parseOperatorSettingsPatch(value: unknown): OperatorSettingsPatc
   if ("wrapUpSeconds" in row) patch.wrapUpSeconds = readInteger(row.wrapUpSeconds) ?? Number.NaN;
   if ("autoAnswerOutbound" in row) patch.autoAnswerOutbound = readFlag(row, "autoAnswerOutbound", true, "", issues);
   if ("ringDeviceVolume" in row) patch.ringDeviceVolume = readInteger(row.ringDeviceVolume) ?? Number.NaN;
+  if ("defaultMobileNumber" in row) patch.defaultMobileNumber = readText(row.defaultMobileNumber);
+  if ("pauseRoutingMode" in row) patch.pauseRoutingMode = (readText(row.pauseRoutingMode) ?? "") as PauseRoutingMode;
+  if ("pauseForwardProfileId" in row) patch.pauseForwardProfileId = readOptionalId(row, "pauseForwardProfileId", "", issues);
+  if ("pauseForwardNumber" in row) patch.pauseForwardNumber = readText(row.pauseForwardNumber);
   assertValid(issues);
   return patch;
 }
@@ -1225,6 +1240,46 @@ export function validateOperatorSettingsPatch(patch: OperatorSettingsPatchInput,
   if (patch.defaultFromLineId !== undefined && patch.defaultFromLineId !== null && !context.lineIds.has(patch.defaultFromLineId)) {
     issues.push(issue("defaultFromLineId", "line_foreign", "Linka nepatrí do tejto organizácie."));
   }
+  if (patch.pauseRoutingMode !== undefined && !PAUSE_ROUTING_MODES.includes(patch.pauseRoutingMode)) {
+    issues.push(issue("pauseRoutingMode", "pause_routing_invalid", "Neplatný spôsob zastupovania počas pauzy."));
+  }
+  if (patch.pauseForwardProfileId !== undefined && patch.pauseForwardProfileId !== null && !context.profileIds.has(patch.pauseForwardProfileId)) {
+    issues.push(issue("pauseForwardProfileId", "pause_operator_foreign", "Zastupujúci operátor nepatrí do tejto organizácie."));
+  }
+  for (const [path, raw] of [
+    ["defaultMobileNumber", patch.defaultMobileNumber],
+    ["pauseForwardNumber", patch.pauseForwardNumber],
+  ] as const) {
+    if (raw === undefined || raw === null) continue;
+    const normalized = normalizeE164(raw);
+    if (!normalized) issues.push(issue(path, "phone_invalid", "Telefónne číslo musí byť platné medzinárodné číslo."));
+    else if (!isDestinationAllowed(normalized, context.destinationAllowlist)) {
+      issues.push(issue(path, "destination_not_allowed", `Číslo ${normalized} nie je v povolených cieľoch organizácie.`));
+    }
+  }
+  return issues;
+}
+
+/** Cross-field validation after a settings patch has been merged with the stored row. */
+export function validateOperatorSettingsDocument(
+  settings: OperatorTelephonySettings,
+  context: ValidationContext,
+  profileId: string,
+): ValidationIssue[] {
+  const issues = validateOperatorSettingsPatch(settings, context);
+  if (settings.pauseRoutingMode === "default_mobile" && !settings.defaultMobileNumber) {
+    issues.push(issue("defaultMobileNumber", "default_mobile_required", "Pre presmerovanie na vlastný mobil najprv zadaj mobilné číslo."));
+  }
+  if (settings.pauseRoutingMode === "external_number" && !settings.pauseForwardNumber) {
+    issues.push(issue("pauseForwardNumber", "pause_number_required", "Pre presmerovanie zadaj externé telefónne číslo."));
+  }
+  if (settings.pauseRoutingMode === "operator") {
+    if (!settings.pauseForwardProfileId) {
+      issues.push(issue("pauseForwardProfileId", "pause_operator_required", "Vyber zastupujúceho operátora."));
+    } else if (settings.pauseForwardProfileId === profileId) {
+      issues.push(issue("pauseForwardProfileId", "pause_operator_self", "Ako zástupcu nie je možné vybrať seba."));
+    }
+  }
   return issues;
 }
 
@@ -1432,6 +1487,10 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
                 wrapUpSeconds: operatorSetting.wrap_up_seconds,
                 autoAnswerOutbound: operatorSetting.auto_answer_outbound,
                 ringDeviceVolume: operatorSetting.ring_device_volume,
+                defaultMobileNumber: operatorSetting.default_mobile_number ?? null,
+                pauseRoutingMode: operatorSetting.pause_routing_mode ?? "none",
+                pauseForwardProfileId: operatorSetting.pause_forward_profile_id ?? null,
+                pauseForwardNumber: operatorSetting.pause_forward_number ?? null,
               }
             : null,
           device: device
@@ -1889,13 +1948,13 @@ function pick(line: LineDoc, columns: string[]): Record<string, unknown> {
 
 /**
  * Numbers already stored in the routing document that the given allowlist would
- * reject: external ring-group members and `external_number` plan fallbacks.
+ * reject: external ring-group members, plan fallbacks and an operator's active
+ * pause-routing preference.
  *
- * The allowlist is *not* consulted by the ring engine — `planRingStep` and
- * `applyFallback` dial what the configuration says — so narrowing it while such
- * a number is still stored would keep dialling (and billing) it while the admin
- * believes it can no longer happen. Narrowing is therefore refused until the
- * stored numbers are removed.
+ * Stored group members and plan fallbacks are dialled from their frozen
+ * configuration. Pause destinations are rechecked while materialising a new
+ * call, but refusing a narrower allowlist here also keeps the saved document
+ * honest and prevents a route from silently becoming inert.
  */
 export function destinationsOutsideAllowlist(document: RoutingDocument, allowlist: readonly string[]): Array<{ where: string; number: string }> {
   const offenders: Array<{ where: string; number: string }> = [];
@@ -1910,6 +1969,18 @@ export function destinationsOutsideAllowlist(document: RoutingDocument, allowlis
     if (plan.fallbackKind !== "external_number") continue;
     const normalized = normalizeE164(plan.fallbackNumber);
     if (normalized && !isDestinationAllowed(normalized, allowlist)) offenders.push({ where: `plán „${plan.name}"`, number: normalized });
+  }
+  for (const operator of document.operators) {
+    const settings = operator.settings;
+    const raw = settings?.pauseRoutingMode === "default_mobile"
+      ? settings.defaultMobileNumber
+      : settings?.pauseRoutingMode === "external_number"
+        ? settings.pauseForwardNumber
+        : null;
+    const normalized = normalizeE164(raw);
+    if (normalized && !isDestinationAllowed(normalized, allowlist)) {
+      offenders.push({ where: `pauza operátora „${operator.displayName}"`, number: normalized });
+    }
   }
   return offenders;
 }
@@ -2014,7 +2085,23 @@ export async function updateOperatorTelephonySettings(
     wrapUpSeconds: input.patch.wrapUpSeconds ?? current.wrapUpSeconds,
     autoAnswerOutbound: input.patch.autoAnswerOutbound ?? current.autoAnswerOutbound,
     ringDeviceVolume: input.patch.ringDeviceVolume ?? current.ringDeviceVolume,
+    defaultMobileNumber:
+      input.patch.defaultMobileNumber !== undefined
+        ? input.patch.defaultMobileNumber === null
+          ? null
+          : normalizeE164(input.patch.defaultMobileNumber) ?? input.patch.defaultMobileNumber
+        : current.defaultMobileNumber,
+    pauseRoutingMode: input.patch.pauseRoutingMode ?? current.pauseRoutingMode,
+    pauseForwardProfileId:
+      input.patch.pauseForwardProfileId !== undefined ? input.patch.pauseForwardProfileId : current.pauseForwardProfileId,
+    pauseForwardNumber:
+      input.patch.pauseForwardNumber !== undefined
+        ? input.patch.pauseForwardNumber === null
+          ? null
+          : normalizeE164(input.patch.pauseForwardNumber) ?? input.patch.pauseForwardNumber
+        : current.pauseForwardNumber,
   };
+  assertValid(validateOperatorSettingsDocument(next, contextFromDocument(document), input.profileId));
 
   const { error } = await deps.admin.from("motorist_operator_telephony_settings").upsert(
     {
@@ -2024,6 +2111,10 @@ export async function updateOperatorTelephonySettings(
       wrap_up_seconds: next.wrapUpSeconds,
       auto_answer_outbound: next.autoAnswerOutbound,
       ring_device_volume: next.ringDeviceVolume,
+      default_mobile_number: next.defaultMobileNumber,
+      pause_routing_mode: next.pauseRoutingMode,
+      pause_forward_profile_id: next.pauseForwardProfileId,
+      pause_forward_number: next.pauseForwardNumber,
     },
     { onConflict: "profile_id" },
   );

@@ -15,7 +15,9 @@
 
 import type { AppRole } from "@/domain/types";
 import { DEVICE_LIVENESS_WINDOW_MS, isDeviceLive } from "@/lib/telephony/device-liveness";
-import { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS } from "@/lib/telephony/operator-settings";
+import { isDestinationAllowed } from "@/lib/telephony/destinations";
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS, type PauseRoutingMode } from "@/lib/telephony/operator-settings";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { LineDoc, OperatorDoc, OperatorSettingsPatchInput, ValidationIssue } from "@/server/telephony/config-service";
 
@@ -35,6 +37,10 @@ export type OperatorDraft = {
   wrapUpSeconds: number;
   autoAnswerOutbound: boolean;
   ringDeviceVolume: number;
+  defaultMobileNumber: string | null;
+  pauseRoutingMode: PauseRoutingMode;
+  pauseForwardProfileId: string | null;
+  pauseForwardNumber: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -52,6 +58,10 @@ export function operatorDraft(operator: OperatorDoc): OperatorDraft {
     wrapUpSeconds: settings.wrapUpSeconds,
     autoAnswerOutbound: settings.autoAnswerOutbound,
     ringDeviceVolume: settings.ringDeviceVolume,
+    defaultMobileNumber: settings.defaultMobileNumber,
+    pauseRoutingMode: settings.pauseRoutingMode,
+    pauseForwardProfileId: settings.pauseForwardProfileId,
+    pauseForwardNumber: settings.pauseForwardNumber,
   };
 }
 
@@ -91,6 +101,10 @@ export function operatorPatch(draft: OperatorDraft, original: OperatorDoc): Oper
   if (draft.wrapUpSeconds !== current.wrapUpSeconds) patch.wrapUpSeconds = draft.wrapUpSeconds;
   if (draft.autoAnswerOutbound !== current.autoAnswerOutbound) patch.autoAnswerOutbound = draft.autoAnswerOutbound;
   if (draft.ringDeviceVolume !== current.ringDeviceVolume) patch.ringDeviceVolume = draft.ringDeviceVolume;
+  if (draft.defaultMobileNumber !== current.defaultMobileNumber) patch.defaultMobileNumber = draft.defaultMobileNumber;
+  if (draft.pauseRoutingMode !== current.pauseRoutingMode) patch.pauseRoutingMode = draft.pauseRoutingMode;
+  if (draft.pauseForwardProfileId !== current.pauseForwardProfileId) patch.pauseForwardProfileId = draft.pauseForwardProfileId;
+  if (draft.pauseForwardNumber !== current.pauseForwardNumber) patch.pauseForwardNumber = draft.pauseForwardNumber;
   return patch;
 }
 
@@ -115,7 +129,11 @@ function issue(path: string, code: string, message: string): ValidationIssue {
   return { path, code, message };
 }
 
-export type OperatorValidationContext = { lines: readonly LineDoc[] };
+export type OperatorValidationContext = {
+  lines: readonly LineDoc[];
+  operators?: readonly OperatorDoc[];
+  destinationAllowlist?: readonly string[] | null;
+};
 
 /** Local mirror of `validateOperatorSettingsPatch`; the path is the profile id. */
 export function validateOperatorDraft(draft: OperatorDraft, context: OperatorValidationContext): ValidationIssue[] {
@@ -128,6 +146,29 @@ export function validateOperatorDraft(draft: OperatorDraft, context: OperatorVal
   }
   if (draft.defaultFromLineId && !context.lines.some((line) => line.id === draft.defaultFromLineId)) {
     issues.push(issue(draft.profileId, "line_foreign", "Linka nepatrí do tejto organizácie."));
+  }
+  for (const [path, value] of [
+    ["defaultMobileNumber", draft.defaultMobileNumber],
+    ["pauseForwardNumber", draft.pauseForwardNumber],
+  ] as const) {
+    if (!value) continue;
+    const normalized = normalizeE164(value);
+    if (!normalized) issues.push(issue(`${draft.profileId}.${path}`, "phone_invalid", "Zadaj platné telefónne číslo vrátane predvoľby."));
+    else if (context.destinationAllowlist && !isDestinationAllowed(normalized, context.destinationAllowlist)) {
+      issues.push(issue(`${draft.profileId}.${path}`, "destination_not_allowed", "Číslo nie je v povolených cieľoch organizácie."));
+    }
+  }
+  if (draft.pauseRoutingMode === "default_mobile" && !draft.defaultMobileNumber) {
+    issues.push(issue(`${draft.profileId}.defaultMobileNumber`, "default_mobile_required", "Vlastný mobil potrebuje uložené číslo."));
+  }
+  if (draft.pauseRoutingMode === "external_number" && !draft.pauseForwardNumber) {
+    issues.push(issue(`${draft.profileId}.pauseForwardNumber`, "pause_number_required", "Presmerovanie potrebuje externé číslo."));
+  }
+  if (draft.pauseRoutingMode === "operator") {
+    const substitute = context.operators?.find((operator) => operator.profileId === draft.pauseForwardProfileId);
+    if (!draft.pauseForwardProfileId || draft.pauseForwardProfileId === draft.profileId || (context.operators && !substitute)) {
+      issues.push(issue(`${draft.profileId}.pauseForwardProfileId`, "pause_operator_invalid", "Vyber iného aktívneho operátora ako zástupcu."));
+    }
   }
   return issues;
 }
@@ -266,6 +307,26 @@ export function describeCallHandling(draft: OperatorDraft): string {
     ? "pri odchádzajúcom hovore sa jeho telefón ohlási sám"
     : "pri odchádzajúcom hovore si má vlastnú vetvu prijať sám";
   return `${wrap}; ${answer}.`;
+}
+
+export function describePauseRouting(draft: OperatorDraft, operators: readonly OperatorDoc[]): string {
+  if (draft.pauseRoutingMode === "default_mobile") {
+    return draft.defaultMobileNumber
+      ? `Počas pauzy jeho pozíciu nahradí mobil ${formatPhoneNumberForDisplay(draft.defaultMobileNumber)}.`
+      : "Presmerovanie na vlastný mobil nemá zadané číslo.";
+  }
+  if (draft.pauseRoutingMode === "external_number") {
+    return draft.pauseForwardNumber
+      ? `Počas pauzy jeho pozíciu nahradí externé číslo ${formatPhoneNumberForDisplay(draft.pauseForwardNumber)}.`
+      : "Presmerovanie na externý telefón nemá zadané číslo.";
+  }
+  if (draft.pauseRoutingMode === "operator") {
+    const substitute = operators.find((operator) => operator.profileId === draft.pauseForwardProfileId);
+    return substitute
+      ? `Počas pauzy ho v skupine zastupuje ${substitute.displayName}.`
+      : "Zastupovanie nemá vybraného aktívneho operátora.";
+  }
+  return "Počas bežnej pauzy plán zvonenia pokračuje ďalším členom skupiny.";
 }
 
 /**

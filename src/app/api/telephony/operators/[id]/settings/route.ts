@@ -7,9 +7,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Per-operator telephony settings (default outbound line, wrap-up seconds,
- * auto-answer, ring volume). An operator may change their own; a manager or
- * admin may change anyone's.
+ * Per-operator telephony settings (default outbound line/mobile, wrap-up,
+ * auto-answer, ring volume and the fallback used while paused). An operator
+ * may change their own; a manager or admin may change anyone's.
  */
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
