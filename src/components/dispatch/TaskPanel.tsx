@@ -198,7 +198,7 @@ export function TaskPanel({
     variant === "page"
       ? "min-h-[520px] min-w-0 rounded-md border border-zinc-200 bg-white shadow-sm"
       : "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-white";
-  const bodyClassName = variant === "page" ? "min-w-0 p-3 sm:p-4" : "min-h-0 flex-1 overflow-auto p-2";
+  const bodyClassName = variant === "page" ? "min-w-0 p-3 sm:p-4" : "min-h-0 flex-1 overflow-auto p-1.5";
   const canMutateTasks = Boolean(onUpdateTask);
 
   async function runTaskAction(actionId: string, action: () => Promise<void> | void) {
@@ -375,8 +375,8 @@ export function TaskPanel({
       </header>}
 
       <div className={`${bodyClassName} max-w-full overflow-x-hidden`}>
-        <div className={variant === "page" ? "grid min-w-0 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_320px]" : "grid gap-3"}>
-          <div className="grid min-w-0 content-start gap-3">
+        <div className={variant === "page" ? "grid min-w-0 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_320px]" : "grid gap-2"}>
+          <div className={`grid min-w-0 content-start ${variant === "page" ? "gap-3" : "gap-2"}`}>
             {variant === "page" && onCreateTask && (
               <section className="grid min-w-0 content-start gap-4 overflow-hidden rounded-xl border border-yellow-300 bg-yellow-50/70 p-3 shadow-sm sm:p-4" aria-labelledby="new-task-heading">
                 <div className="flex items-center gap-3 border-b border-yellow-200 pb-3">
@@ -491,7 +491,7 @@ export function TaskPanel({
               </section>
             )}
 
-            <section ref={taskListRef} className={variant === "page" ? "min-w-0 scroll-mt-3 rounded-lg border border-zinc-200 bg-white p-4" : "grid gap-3"} aria-labelledby={`task-list-heading-${variant}`}>
+            <section ref={taskListRef} className={variant === "page" ? "min-w-0 scroll-mt-3 rounded-lg border border-zinc-200 bg-white p-4" : "grid gap-2"} aria-labelledby={`task-list-heading-${variant}`}>
               {variant === "sidebar" && <h3 id="task-list-heading-sidebar" className="sr-only">Zoznam úloh</h3>}
               {variant === "page" && (
                 <div className="mb-3">
@@ -499,7 +499,7 @@ export function TaskPanel({
                   <p className="mt-1 text-xs leading-5 text-zinc-500">Vyberte stav a podľa potreby zúžte výsledky na operátora.</p>
                 </div>
               )}
-              <div className={`grid min-w-0 rounded-md border border-zinc-200 bg-zinc-50 ${variant === "page" ? "mb-4 gap-3 p-3" : "gap-2 p-2"}`}>
+              <div className={`grid min-w-0 rounded-md border border-zinc-200 bg-zinc-50 ${variant === "page" ? "mb-4 gap-3 p-3" : "gap-1.5 p-1.5"}`}>
                 {variant === "page" ? (
                   <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(12rem,16rem)] xl:items-end">
                     <fieldset className="min-w-0 flex-1">
@@ -555,7 +555,7 @@ export function TaskPanel({
                       }}
                       disabled={!viewerProfileId}
                       aria-pressed={effectiveSidebarAudience === "mine"}
-                      className={`flex min-h-9 min-w-0 items-center justify-between gap-1.5 rounded-md border px-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                      className={`flex min-h-8 min-w-0 items-center justify-between gap-1 rounded-md border px-1.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
                         effectiveSidebarAudience === "mine" ? "border-zinc-950 bg-zinc-950 text-white" : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
                       }`}
                     >
@@ -571,7 +571,7 @@ export function TaskPanel({
                         setTaskPage(1);
                       }}
                       aria-pressed={effectiveSidebarAudience === "all"}
-                      className={`flex min-h-9 min-w-0 items-center justify-between gap-1.5 rounded-md border px-2 text-xs font-semibold transition ${
+                      className={`flex min-h-8 min-w-0 items-center justify-between gap-1 rounded-md border px-1.5 text-[11px] font-semibold transition ${
                         effectiveSidebarAudience === "all" ? "border-zinc-950 bg-zinc-950 text-white" : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
                       }`}
                     >
@@ -593,18 +593,18 @@ export function TaskPanel({
                   </button>
                 </div>
               )}
-              <div className={variant === "page" ? "grid gap-4" : "grid gap-2.5"}>
+              <div className={variant === "page" ? "grid gap-4" : "grid gap-2"}>
               {visibleTasks.length > 0 ? (
                 taskGroups.map((group) => (
-                  <section key={group.id} className={variant === "page" ? "grid gap-2" : "grid gap-1.5"} aria-labelledby={`task-group-${variant}-${group.id}`}>
-                    <div className={`flex items-start justify-between gap-3 border-b border-zinc-200 ${variant === "page" ? "pb-2" : "pb-1.5"}`}>
+                  <section key={group.id} className={variant === "page" ? "grid gap-2" : "grid gap-1"} aria-labelledby={`task-group-${variant}-${group.id}`}>
+                    <div className={`flex items-start justify-between gap-3 border-b border-zinc-200 ${variant === "page" ? "pb-2" : "pb-1"}`}>
                       <div>
-                        <h4 id={`task-group-${variant}-${group.id}`} className={`text-xs font-semibold uppercase tracking-wide ${group.headingClassName}`}>{group.label}</h4>
+                        <h4 id={`task-group-${variant}-${group.id}`} className={`${variant === "page" ? "text-xs" : "text-[11px]"} font-semibold uppercase tracking-wide ${group.headingClassName}`}>{group.label}</h4>
                         {variant === "page" && <p className="mt-0.5 text-[11px] leading-4 text-zinc-500">{group.description}</p>}
                       </div>
-                      <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-semibold text-zinc-700">{group.tasks.length}</span>
+                      <span className={`rounded-full bg-zinc-100 px-1.5 py-0.5 font-semibold text-zinc-700 ${variant === "page" ? "text-xs" : "text-[10px]"}`}>{group.tasks.length}</span>
                     </div>
-                              <div className="grid min-w-0 gap-2">
+                              <div className={`grid min-w-0 ${variant === "page" ? "gap-2" : "gap-1.5"}`}>
                     {group.tasks.map((task) => {
                   const active = activeTaskId === task.id;
                   const overdue = isTaskOverdue(task, now);
@@ -617,11 +617,12 @@ export function TaskPanel({
                   return (
                     <div
                       key={task.id}
-                      className={`min-w-0 overflow-hidden rounded-md border text-left transition ${variant === "page" ? "p-3" : "p-2"} ${
+                      data-testid={`task-card-${variant}`}
+                      className={`min-w-0 overflow-hidden rounded-md border text-left transition ${variant === "page" ? "p-3" : "px-2 py-1.5"} ${
                         recentlyCreated
                           ? "border-yellow-400 bg-yellow-50 ring-2 ring-yellow-200"
                           : requiresAttention
-                            ? "border-yellow-400 bg-yellow-50 ring-2 ring-yellow-200"
+                            ? "border-yellow-400 bg-yellow-50 ring-1 ring-yellow-200"
                           : active
                             ? "border-yellow-300 bg-yellow-50 ring-1 ring-yellow-300"
                             : overdue
@@ -629,18 +630,18 @@ export function TaskPanel({
                               : "border-zinc-200 bg-zinc-50 hover:bg-white"
                       }`}
                     >
-                      <div className="flex items-start justify-between gap-2">
+                      <div className={`flex items-start justify-between ${variant === "page" ? "gap-2" : "gap-1.5"}`}>
                         <button type="button" onClick={() => onOpenTask(task.id, task.caseId)} className="min-w-0 flex-1 text-left">
-                          <span className={`${variant === "page" ? "text-sm" : "text-xs"} line-clamp-2 font-semibold text-zinc-950`}>{task.title}</span>
+                          <span className={`${variant === "page" ? "text-sm" : "text-[11px] leading-4"} line-clamp-2 font-semibold text-zinc-950`}>{task.title}</span>
                         </button>
-                        <span className="flex shrink-0 items-center gap-1.5">
+                        <span className={`flex shrink-0 items-center ${variant === "page" ? "gap-1.5" : "gap-1"}`}>
                           {requiresAttention && (
-                            <span className="inline-flex size-6 items-center justify-center rounded-full bg-[#FCD703] text-zinc-950 shadow-sm motion-safe:animate-pulse" title="Nová pridelená úloha">
-                              <CircleAlert size={15} aria-label="Nová pridelená úloha" />
+                            <span className="inline-flex size-5 items-center justify-center rounded-full bg-[#FCD703] text-zinc-950 shadow-sm motion-safe:animate-pulse" title="Nová pridelená úloha">
+                              <CircleAlert size={12} aria-label="Nová pridelená úloha" />
                             </span>
                           )}
                           {recentlyCreated && <span className="rounded-full bg-zinc-950 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">Nová</span>}
-                          <span className="rounded-full bg-yellow-100 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-900">{task.caseNumber}</span>
+                          <span className="rounded-full bg-yellow-100 px-1.5 py-0.5 text-[9px] font-semibold leading-4 text-zinc-900">{task.caseNumber}</span>
                           {onDeleteTask && (
                             <button
                               type="button"
@@ -649,30 +650,44 @@ export function TaskPanel({
                                 setPendingDeleteTask(task);
                               }}
                               disabled={pendingTaskAction !== null}
-                              className="inline-flex size-7 items-center justify-center rounded-md border border-red-200 bg-white text-red-600 transition hover:bg-red-50 disabled:cursor-wait disabled:text-red-300"
+                              className={`inline-flex items-center justify-center rounded-md border border-red-200 bg-white text-red-600 transition hover:bg-red-50 disabled:cursor-wait disabled:text-red-300 ${variant === "page" ? "size-7" : "size-6"}`}
                               aria-label={`Vymazať úlohu ${task.title}`}
                               title="Vymazať úlohu"
                             >
-                              {pendingTaskAction === `delete:${task.id}` ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                              {pendingTaskAction === `delete:${task.id}` ? <Loader2 size={variant === "page" ? 14 : 12} className="animate-spin" /> : <Trash2 size={variant === "page" ? 14 : 12} />}
                             </button>
                           )}
                         </span>
                       </div>
-                      <button type="button" onClick={() => onOpenTask(task.id, task.caseId)} className="block w-full text-left">
-                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                          <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
-                        </div>
-                        <div className={`mt-1.5 flex items-center gap-1.5 text-[11px] font-medium ${overdue ? "text-red-700" : "text-zinc-600"}`}>
-                          <Clock3 size={12} />
-                          {taskStatusLabel(task, now)} · {formatTime(task.dueAt)}
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-zinc-500">
-                          <UserRound size={12} />
-                          {assignee}
-                        </div>
-                      </button>
+                      {variant === "sidebar" ? (
+                        <button type="button" onClick={() => onOpenTask(task.id, task.caseId)} className="mt-1 flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-left">
+                          <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold leading-4 ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
+                          <span className={`inline-flex min-w-0 items-center gap-1 text-[10px] font-medium leading-4 ${overdue ? "text-red-700" : "text-zinc-600"}`}>
+                            <Clock3 size={11} className="shrink-0" />
+                            <span className="truncate">{taskStatusLabel(task, now)} · {formatTime(task.dueAt)}</span>
+                          </span>
+                          <span className="inline-flex min-w-0 items-center gap-1 text-[10px] leading-4 text-zinc-500">
+                            <UserRound size={11} className="shrink-0" />
+                            <span className="truncate">{assignee}</span>
+                          </span>
+                        </button>
+                      ) : (
+                        <button type="button" onClick={() => onOpenTask(task.id, task.caseId)} className="block w-full text-left">
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                            <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
+                          </div>
+                          <div className={`mt-1.5 flex items-center gap-1.5 text-[11px] font-medium ${overdue ? "text-red-700" : "text-zinc-600"}`}>
+                            <Clock3 size={12} />
+                            {taskStatusLabel(task, now)} · {formatTime(task.dueAt)}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-zinc-500">
+                            <UserRound size={12} />
+                            {assignee}
+                          </div>
+                        </button>
+                      )}
                       {canMutateTasks && (
-                        <div className={`${variant === "page" ? "mt-3 pt-3" : "mt-2 pt-2"} border-t border-white/70`}>
+                        <div className={`${variant === "page" ? "mt-3 pt-3" : "mt-1.5 pt-1.5"} border-t border-white/70`}>
                           {taskEditDraft ? (
                             <div className="grid gap-2">
                               <textarea
@@ -761,26 +776,30 @@ export function TaskPanel({
                               </div>
                             </div>
                           ) : (
-                            <div className="flex flex-wrap justify-end gap-2">
+                            <div className={`flex flex-wrap justify-end ${variant === "page" ? "gap-2" : "gap-1"}`}>
                               {onUpdateTask && (
                                 <>
                                   <button
                                     type="button"
                                     onClick={() => void toggleTaskStatus(task)}
                                     disabled={pendingTaskAction !== null}
-                                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 disabled:cursor-wait disabled:text-zinc-400"
+                                    className={`inline-flex items-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:cursor-wait disabled:text-zinc-400 ${variant === "page" ? "h-8 px-2.5" : "h-7 px-2"}`}
                                   >
-                                    {taskActionBusy && pendingTaskAction?.startsWith("update:") ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
-                                    {task.status === "done" ? "Otvoriť" : "Vybaviť"}
+                                    <span className={`inline-flex items-center font-semibold ${variant === "page" ? "gap-1.5 text-xs" : "gap-1 text-[11px]"}`}>
+                                      {taskActionBusy && pendingTaskAction?.startsWith("update:") ? <Loader2 size={variant === "page" ? 13 : 12} className="animate-spin" /> : <CheckCircle2 size={variant === "page" ? 13 : 12} />}
+                                      {task.status === "done" ? "Otvoriť" : "Vybaviť"}
+                                    </span>
                                   </button>
                                   <button
                                     type="button"
                                     onClick={() => startTaskEdit(task)}
                                     disabled={pendingTaskAction !== null}
-                                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 disabled:cursor-wait disabled:text-zinc-400"
+                                    className={`inline-flex items-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:cursor-wait disabled:text-zinc-400 ${variant === "page" ? "h-8 px-2.5" : "h-7 px-2"}`}
                                   >
-                                    <Edit3 size={13} />
-                                    Upraviť
+                                    <span className={`inline-flex items-center font-semibold ${variant === "page" ? "gap-1.5 text-xs" : "gap-1 text-[11px]"}`}>
+                                      <Edit3 size={variant === "page" ? 13 : 12} />
+                                      Upraviť
+                                    </span>
                                   </button>
                                 </>
                               )}
