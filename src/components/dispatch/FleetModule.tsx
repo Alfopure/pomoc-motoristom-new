@@ -1,5 +1,8 @@
 "use client";
 
+import { VehicleLookupControl } from "./VehicleLookupControl";
+import type { VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
+
 import { useMemo, useState, type ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import { AlertTriangle, CalendarDays, Car, CheckCircle2, Clock3, Download, FileWarning, Link2, Plus, RadioTower, RefreshCw, Save, Search, Truck } from "lucide-react";
@@ -67,6 +70,7 @@ type ApiMutationResponse = {
 };
 
 type FleetDraft = {
+  vehicleLookup?: VehicleLookupSnapshot | null;
   id?: string;
   kind: FleetAssetKind;
   label: string;
@@ -386,8 +390,15 @@ export function FleetModule({
             <div className="grid gap-3 sm:grid-cols-2">
               <TextField label="Značka" value={draft.make} onChange={(value) => setDraft((current) => ({ ...current, make: value }))} />
               <TextField label="Model" value={draft.model} onChange={(value) => setDraft((current) => ({ ...current, model: value }))} />
-              <TextField label="EČV" value={draft.licensePlate} onChange={(value) => setDraft((current) => ({ ...current, licensePlate: value }))} />
-              <TextField label="VIN" value={draft.vin} onChange={(value) => setDraft((current) => ({ ...current, vin: value }))} />
+              <VehicleLookupControl contextKey={draft.id ?? "new-fleet"} plate={draft.licensePlate} vin={draft.vin} snapshot={draft.vehicleLookup} onPlateChange={(value) => setDraft((current) => ({ ...current, licensePlate: value }))} onVinChange={(value) => setDraft((current) => ({ ...current, vin: value }))} values={{ make: draft.make, model: draft.model, technicalInspectionValidUntil: draft.technicalInspectionValidUntil, emissionInspectionValidUntil: draft.emissionInspectionValidUntil }} onApply={(patch, snapshot) => setDraft((current) => ({
+                ...current, vehicleLookup: snapshot,
+                ...(patch.plate !== undefined ? { licensePlate: patch.plate } : {}),
+                ...(patch.vin !== undefined ? { vin: patch.vin } : {}),
+                ...(patch.make !== undefined ? { make: patch.make } : {}),
+                ...(patch.model !== undefined ? { model: patch.model } : {}),
+                ...(patch.technicalInspectionValidUntil !== undefined ? { technicalInspectionValidUntil: patch.technicalInspectionValidUntil } : {}),
+                ...(patch.emissionInspectionValidUntil !== undefined ? { emissionInspectionValidUntil: patch.emissionInspectionValidUntil } : {}),
+              }))} />
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <SelectField
@@ -992,6 +1003,7 @@ function assetToDraft(asset: FleetAsset | undefined, defaultBranchId: string | u
     model: asset.model ?? "",
     licensePlate: asset.licensePlate === "-" ? "" : asset.licensePlate,
     vin: asset.vin ?? "",
+    vehicleLookup: asset.vehicleLookup,
     status: asset.internalStatus ?? asset.status,
     category: asset.category ?? "",
     weightKg: asset.weightKg ? String(asset.weightKg) : "",
@@ -1054,6 +1066,7 @@ function draftToPayload(draft: FleetDraft): CreateFleetAssetInput | UpdateFleetA
     model: draft.model || undefined,
     licensePlate: draft.licensePlate,
     vin: draft.vin || undefined,
+    vehicleLookup: draft.vehicleLookup,
     status: draft.status,
     category: draft.category || undefined,
     weightKg: draft.weightKg ? Number(draft.weightKg) : undefined,

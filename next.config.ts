@@ -6,6 +6,8 @@ const nextConfig: NextConfig = {
   deploymentId: deploymentVersion,
   generateBuildId: async () => deploymentVersion || "local",
   poweredByHeader: false,
+  serverExternalPackages: ["@sparticuz/chromium", "playwright-core"],
+  outputFileTracingIncludes: { "/api/vehicles/lookup": ["./node_modules/@sparticuz/chromium/bin/**/*"] },
   headers: async () => [
     {
       source: "/:path*",

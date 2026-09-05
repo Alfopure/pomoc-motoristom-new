@@ -40,6 +40,7 @@ export type PlaceSelectionInput = {
 };
 
 export type CreateCaseInput = {
+  vehicleLookup?: import("@/lib/vehicle-lookup").VehicleLookupSnapshot | null;
   contactName?: string;
   contactPhone?: string;
   contactEmail?: string;
@@ -215,6 +216,7 @@ export type CreateBranchInput = {
 };
 
 export type CreateFleetAssetInput = {
+  vehicleLookup?: import("@/lib/vehicle-lookup").VehicleLookupSnapshot | null;
   kind: FleetAssetKind;
   label: string;
   make?: string;
