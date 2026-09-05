@@ -173,8 +173,8 @@ export class SwhouseClient {
   }
 
   /** GET /rest/carOccupancy/getCarsOccupancy — len voľné vozidlá (s in-memory cache + single-flight). */
-  async getCarsOccupancy(): Promise<SwhouseResponse<SwhouseCarOccupancyRaw[]>> {
-    if (occupancyCache && Date.now() < occupancyCache.expiresAt) {
+  async getCarsOccupancy(options?: { fresh?: boolean }): Promise<SwhouseResponse<SwhouseCarOccupancyRaw[]>> {
+    if (!options?.fresh && occupancyCache && Date.now() < occupancyCache.expiresAt) {
       return { path: "/carOccupancy/getCarsOccupancy", status: 200, ok: true, data: occupancyCache.data, error: null };
     }
     if (occupancyInFlight) {
@@ -200,8 +200,8 @@ export class SwhouseClient {
    * doplnený SWHouse pre synchronizáciu; generický /car/getCars obsahuje aj
    * zákaznícke autá a neposkytuje pobočku.
    */
-  async getCarsOccupancyAll(): Promise<SwhouseResponse<SwhouseCarOccupancyRaw[]>> {
-    if (allOccupancyCache && Date.now() < allOccupancyCache.expiresAt) {
+  async getCarsOccupancyAll(options?: { fresh?: boolean }): Promise<SwhouseResponse<SwhouseCarOccupancyRaw[]>> {
+    if (!options?.fresh && allOccupancyCache && Date.now() < allOccupancyCache.expiresAt) {
       return {
         path: "/carOccupancy/getCarsOccupancyAll",
         status: 200,

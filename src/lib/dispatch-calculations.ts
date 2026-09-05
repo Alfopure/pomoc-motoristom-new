@@ -76,6 +76,8 @@ export function findNearestAsset(caseItem: DispatchCase, assets: FleetAsset[]) {
 
   const eligibleFallback = assets.filter(
     (asset) =>
+      asset.positionKnown !== false &&
+      asset.availabilityVerified !== false &&
       asset.status !== "service" &&
       asset.status !== "offline" &&
       (asset.kind !== "replacement_car" || asset.occupancy !== "occupied"),
@@ -109,7 +111,7 @@ export function recommendAssetForCase(
   }
 
   const candidates = (kind ? assets.filter((asset) => asset.kind === kind) : assets).filter(
-    (asset) => asset.kind !== "replacement_car" || asset.occupancy !== "occupied",
+    (asset) => asset.positionKnown !== false && asset.availabilityVerified !== false && (asset.kind !== "replacement_car" || asset.occupancy !== "occupied"),
   );
 
   return candidates
@@ -430,7 +432,7 @@ export type DispatchRoutePlan = {
 };
 
 export function calculateRoutePlan(caseItem: DispatchCase, branch: Branch, asset: FleetAsset): DispatchRoutePlan | null {
-  if (!caseItem.pickup) {
+  if (!caseItem.pickup || asset.positionKnown === false) {
     return null;
   }
 

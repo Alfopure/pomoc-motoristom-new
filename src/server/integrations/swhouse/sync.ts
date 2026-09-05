@@ -8,7 +8,7 @@ import { findStaleBranchTargets } from "./branch-mapping";
 import { getCodelistMaps } from "./codelists";
 import { swhouseConfigFromEnv, type SwhouseConfig } from "./config";
 import { normalizeFleet, normalizePlateForPairing } from "./replacement-vehicles";
-import type { SwhouseReplacementVehicle } from "./types";
+import type { SwhouseCarOccupancyRaw, SwhouseReplacementVehicle } from "./types";
 
 /**
  * Fáza 2: SWHouse ako zdroj pravdy rosteru náhradnej flotily.
@@ -30,7 +30,7 @@ type OrganizationRow = Tables["motorist_organizations"]["Row"];
 type FleetAssetRow = Tables["motorist_fleet_assets"]["Row"];
 type FleetAssetLinkInsert = Tables["motorist_fleet_asset_links"]["Insert"];
 type FleetAssetInsert = Tables["motorist_fleet_assets"]["Insert"];
-type AssetLite = Pick<FleetAssetRow, "id" | "license_plate" | "vin" | "metadata">;
+type AssetLite = Pick<FleetAssetRow, "id" | "license_plate" | "vin" | "metadata" | "make" | "model" | "branch_id">;
 
 export type SwhouseFleetSyncResult = {
   provider: "client_vehicle_db";
@@ -54,6 +54,7 @@ export async function syncSwhouseFleet(options?: {
   dryRun?: boolean;
   client?: SwhouseClient;
   config?: SwhouseConfig;
+  allCars?: SwhouseCarOccupancyRaw[];
 }): Promise<SwhouseFleetSyncResult> {
   const dryRun = options?.dryRun ?? false;
   const base: SwhouseFleetSyncResult = {
@@ -83,7 +84,9 @@ export async function syncSwhouseFleet(options?: {
   const client = options?.client ?? new SwhouseClient(config);
 
   // 1) Načítaj produkčný autoritatívny roster + číselníky.
-  const allOccupancy = await client.getCarsOccupancyAll();
+  const allOccupancy = options?.allCars
+    ? { ok: true, status: 200, data: options.allCars }
+    : await client.getCarsOccupancyAll({ fresh: true });
   if (!allOccupancy.ok || !Array.isArray(allOccupancy.data)) {
     return {
       ...base,
@@ -173,6 +176,26 @@ export async function syncSwhouseFleet(options?: {
   const linkedAssetIds = new Set(confirmedLinks.map((link) => link.fleet_asset_id));
 
   const assets = await loadReplacementAssets(supabase, organization.id);
+  if (!dryRun) {
+    const assetById = new Map(assets.map((asset) => [asset.id, asset]));
+    const assetIdByRecord = new Map(confirmedLinks.map((link) => [link.external_vehicle_record_id, link.fleet_asset_id]));
+    const changes = fleet.flatMap((vehicle) => {
+      const record = recordByCarId.get(String(vehicle.carId));
+      const assetId = record ? assetIdByRecord.get(record.id) : null;
+      const asset = assetId ? assetById.get(assetId) : undefined;
+      if (!asset) return [];
+      const next = { license_plate: vehicle.ecv || asset.license_plate, vin: vehicle.vin || asset.vin,
+        make: vehicle.make ?? asset.make, model: vehicle.model || asset.model, branch_id: vehicle.branchInternalId ?? asset.branch_id };
+      if (Object.entries(next).every(([key, value]) => asset[key as keyof typeof next] === value)) return [];
+      return [{ id: asset.id, next }];
+    });
+    for (let offset = 0; offset < changes.length; offset += 4) {
+      await Promise.all(changes.slice(offset, offset + 4).map(async ({ id, next }) => {
+        await throwOnResult(await supabase.from("motorist_fleet_assets").update(next).eq("organization_id", organization.id).eq("id", id));
+        Object.assign(assetById.get(id)!, next);
+      }));
+    }
+  }
   const ghostAssets = assets.filter((asset) => !linkedAssetIds.has(asset.id));
   base.ghostCount = ghostAssets.length;
 
@@ -328,6 +351,11 @@ async function upsertExternalRecords(
   if (fleet.length === 0) {
     return;
   }
+  const previous = await supabase.from("motorist_external_vehicle_records")
+    .select("source_vehicle_id,latest_payload_snapshot")
+    .eq("organization_id", organizationId).eq("source_provider", SOURCE_PROVIDER);
+  await throwOnResult(previous);
+  const previousById = new Map((previous.data ?? []).map((row) => [row.source_vehicle_id, row.latest_payload_snapshot]));
   const rows = fleet.map((vehicle) => ({
     organization_id: organizationId,
     source_provider: SOURCE_PROVIDER,
@@ -341,12 +369,16 @@ async function upsertExternalRecords(
     source_active: true,
     source_deleted_at: null,
     latest_payload_snapshot: toJson({
+      ...payloadRecord(previousById.get(String(vehicle.carId))),
       carId: vehicle.carId,
       ecv: vehicle.ecv,
       vin: vehicle.vin,
       ownerType: vehicle.ownerType,
       swhouseBranchId: vehicle.swhouseBranchId,
       swhouseBranchName: vehicle.swhouseBranchName,
+      color: vehicle.color,
+      rentTo: vehicle.rentTo,
+      details: vehicle.details ?? {},
       sourceEndpoint: "carOccupancy/getCarsOccupancyAll",
     }),
     last_seen_at: now,
@@ -356,6 +388,10 @@ async function upsertExternalRecords(
     .from("motorist_external_vehicle_records")
     .upsert(rows, { onConflict: "organization_id,source_provider,source_vehicle_id" });
   await throwOnResult(result);
+}
+
+function payloadRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 type FleetRecordIdentity = {
@@ -507,7 +543,7 @@ export function validateAuthoritativeFleetTransition(
 async function loadReplacementAssets(supabase: AdminClient, organizationId: string) {
   const result = await supabase
     .from("motorist_fleet_assets")
-    .select("id,license_plate,vin,metadata")
+    .select("id,license_plate,vin,metadata,make,model,branch_id")
     .eq("organization_id", organizationId)
     .eq("kind", "replacement_car");
   await throwOnResult(result);

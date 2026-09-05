@@ -10,6 +10,6 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    exclude: ["tests/**/*.test.mjs", "e2e/**", "node_modules/**", ".next/**"],
+    exclude: ["tests/**/*.test.mjs", "e2e/**", ".context/**", "**/node_modules/**", "**/.next/**"],
   },
 });

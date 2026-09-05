@@ -117,9 +117,9 @@ export class CommanderClient {
       endpoint,
       path,
       status: response.status,
-      ok: response.ok,
+      ok: response.ok && data !== null,
       data: response.ok ? data : null,
-      error: response.ok ? null : errorMessageFromPayload(data, text),
+      error: response.ok ? data === null ? "Commander returned invalid JSON." : null : errorMessageFromPayload(data, text),
       rateLimit: rateLimitFromHeaders(response.headers),
       headersSafe: safeHeaders(response.headers),
     };
