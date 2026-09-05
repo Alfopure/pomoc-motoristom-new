@@ -6,6 +6,21 @@ const vin = "WVWZZZ1JZXW000001";
 const result: VehicleLookupResult = { version: 1, id: "test", query: { kind: "vin", value: vin, country: "SK", checkedForDate: "2026-09-05" }, fetchedAt: "2026-09-05T08:00:00Z", sources: [{ source: "vpic", status: "found", url: "https://vpic.nhtsa.dot.gov/api/", fetchedAt: "2026-09-05T08:00:00Z", facts: { make: { value: "TESLA", quality: "partial" } }, warnings: [] }] };
 afterEach(() => vi.unstubAllEnvs());
 describe("durable signed vehicle observations", () => {
+  it("reads previous signatures during controlled rotation but signs new results with the new key", () => {
+    vi.stubEnv("VEHICLE_LOOKUP_SIGNING_KEY", "previous-test-key");
+    const old = sealVehicleLookup(result, "org-a");
+    vi.stubEnv("VEHICLE_LOOKUP_SIGNING_KEY", "new-test-key");
+    expect(readVerifiedVehicleLookup(old, "org-a", { vin })).toBeUndefined();
+    vi.stubEnv("VEHICLE_LOOKUP_PREVIOUS_SIGNING_KEY", "previous-test-key");
+    expect(readVerifiedVehicleLookup(old, "org-a", { vin })).toEqual(old);
+    expect(readVerifiedVehicleLookup(old, "org-b", { vin })).toBeUndefined();
+    const current = sealVehicleLookup(result, "org-a");
+    expect(current.proof).not.toBe(old.proof);
+    expect(verifyVehicleLookup(current, "org-a", { vin }, "new-test-key")).toEqual(current);
+    expect(() => verifyVehicleLookup(old, "org-a", { vin }, "new-test-key")).toThrow();
+    vi.stubEnv("VEHICLE_LOOKUP_PREVIOUS_SIGNING_KEY", "");
+    expect(readVerifiedVehicleLookup(old, "org-a", { vin })).toBeUndefined();
+  });
   it("survives JSONB key reordering and cache expiry without changing fetched time", () => {
     vi.stubEnv("VEHICLE_LOOKUP_SIGNING_KEY", "test-only-signing-key");
     const snapshot = sealVehicleLookup(result, "org-a");
