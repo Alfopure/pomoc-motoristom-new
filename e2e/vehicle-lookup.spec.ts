@@ -177,7 +177,7 @@ test("existing case proposal never autosaves; accepted snapshot survives save an
   const originalMake = await form.getByLabel("Značka", { exact: true }).inputValue();
   await form.getByLabel("Model", { exact: true }).fill("");
   await expect.poll(() => api.writes.length).toBe(1);
-  await expect(page.getByTestId("case-autosave-status")).toContainText(/Uložené automaticky|Všetky zmeny sú uložené\./);
+  await expect(page.getByTestId("case-autosave-status")).toContainText("Uložené automaticky");
   api.writes.length = 0;
   await form.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
   await expect(form.getByRole("button", { name: acceptName })).toBeVisible();
@@ -190,14 +190,14 @@ test("existing case proposal never autosaves; accepted snapshot survives save an
   await form.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
   await form.getByRole("button", { name: acceptName }).click();
   await expect.poll(() => api.writes.length).toBe(1);
-  await expect(page.getByTestId("case-autosave-status")).toContainText(/Uložené automaticky|Všetky zmeny sú uložené\./);
+  await expect(page.getByTestId("case-autosave-status")).toContainText("Uložené automaticky");
   expect(api.writes[0].body).toMatchObject({ vehicleMake: originalMake, vehicleModel: "Fixture model" });
   const savedSnapshot = api.writes[0].body.vehicleLookup;
   expect(savedSnapshot).toBeTruthy();
   await form.getByLabel("Farba", { exact: true }).fill("Ručne zmenená farba");
   await expect.poll(() => api.writes.length).toBe(2);
   expect(api.writes[1].body.vehicleLookup).toEqual(savedSnapshot);
-  await expect(page.getByTestId("case-autosave-status")).toContainText(/Uložené automaticky|Všetky zmeny sú uložené\./);
+  await expect(page.getByTestId("case-autosave-status")).toContainText("Uložené automaticky");
   await navigate(page, /^Flotila/);
   await navigate(page, /^Prípady/);
   // Returning to cases remounts the previously open card from the mocked save response.

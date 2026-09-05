@@ -66,4 +66,6 @@ where (organization_id, query_hash) in (
 
 CI používa syntetické identifikátory a lokálne HTML fixtures, bez kontaktovania externých zdrojov. Relevantné sú Vitest provider/snapshot/service/route testy, API auth/CSRF testy a `e2e/vehicle-lookup.spec.ts`. `tests/vehicle-lookup-db.sql` overuje izoláciu, rezervácie, expiráciu, starého vlastníka, circuit a limity v transakcii s rollbackom na kópii databázy.
 
+Lokálny server pre tento E2E súbor spustiť s `SUPABASE_URL=` a `NEXT_PUBLIC_SUPABASE_URL=` explicitne prázdnymi a s `MOTORIST_DEV_AUTH_BYPASS=true`. Tým počiatočné serverové vykreslenie použije rovnaké syntetické vozidlá ako browser API fixtures. Samotné zachytenie `/api/**` v prehliadači neizoluje serverové načítanie stránky. Toto nastavenie patrí iba lokálnemu testu, nikdy Preview alebo produkcii.
+
 Po READY Preview musí nasledovať prihlásený živý lookup z Vercel na schválenom referenčnom vozidle, nie iba lokálny Chrome alebo build. Skontrolovať reálne VIN a stav každého zdroja, PZP dátum, cache, 401 bez session a 403 s cudzím Origin. Zopakovať kontrolu na overenom dev a produkčnom SHA. Dočasný testovací účet musí byť po skúške odstránený; test nesmie odosielať e-maily ani vytvárať produkčné zásahy.
