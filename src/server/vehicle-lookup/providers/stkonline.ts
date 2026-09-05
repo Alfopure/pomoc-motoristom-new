@@ -36,7 +36,7 @@ export function parseStkOnline(html: string, query: VehicleQuery, fetchedAt: str
   result.facts.vin = { value: vin, quality: "reported" };
   if (plate) result.facts.plate = { value: plate, quality: "reported" };
   result.status = "found";
-  result.warnings.push("Údaje STKonline môžu mať oneskorenú aktualizáciu. Dátumy kontrol sú údajom tohto zdroja.");
+  result.warnings.push("STKonline uvádza aktualizáciu TK/EK raz za tri mesiace. Novú kontrolu alebo zmenu termínu overte podľa protokolu; čas získania nie je časom aktualizácie evidencie.");
   const inspections: Record<string, string> = {};
   $("#stk span.label").each((_, element) => {
     const target = $(element).next();

@@ -5,6 +5,9 @@ export type VehicleField = "plate" | "vin" | "make" | "model" | "color" | "fuel"
 export type VehicleFact = { value: string; quality: "reported" | "decoded" | "partial" };
 export type VehicleFacts = Partial<Record<VehicleField, VehicleFact>>;
 export type VehicleIdentity = { plate?: string; vin?: string; country?: string };
+export type VehicleReport = { url: string; title: string; identity?: VehicleIdentity };
+export type VehicleFieldChoices = Partial<Record<VehicleField, VehicleSource>>;
+export type VehicleFactOption = { source: VehicleSource; fact: VehicleFact };
 export type VehicleQuery = { kind: "plate" | "vin"; value: string; country: "SK"; checkedForDate: string };
 export type VehicleLookupInput = { kind: "plate" | "vin"; value: string; country: "SK"; knownIdentity?: VehicleIdentity };
 export type VehicleSourceResult = {
@@ -15,7 +18,7 @@ export type VehicleSourceResult = {
   facts: VehicleFacts;
   warnings: string[];
   candidates?: VehicleIdentity[];
-  reports?: { url: string; title: string }[];
+  reports?: VehicleReport[];
 };
 export type VehicleLookupResult = {
   version: 1;
@@ -99,9 +102,52 @@ export function preferredVehicleFacts(result: VehicleLookupResult, includePartia
   return facts;
 }
 
-export function emptyVehicleFieldPatch(result: VehicleLookupResult, current: VehicleFormValues, includePartial = false): VehicleFormValues {
+function comparableFact(field: VehicleField, value: string) {
+  const normalized = value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/\s+/g, " ").trim();
+  if (field === "fuel") {
+    if (["ELEKTRINA", "ELECTRIC", "ELECTRICITY"].includes(normalized)) return "ELECTRIC";
+    if (["NAFTA", "DIESEL"].includes(normalized)) return "DIESEL";
+    if (["BENZIN", "GASOLINE", "PETROL"].includes(normalized)) return "PETROL";
+  }
+  return normalized;
+}
+
+/** A source priority must not silently settle a substantive disagreement. */
+export function vehicleFactConflicts(result: VehicleLookupResult, includePartial = false): Partial<Record<VehicleField, VehicleFactOption[]>> {
+  const options: Partial<Record<VehicleField, VehicleFactOption[]>> = {};
+  for (const source of result.sources) {
+    if (source.status !== "found" || source.source === "haka") continue;
+    for (const [field, fact] of Object.entries(source.facts) as [VehicleField, VehicleFact][]) {
+      if (field === "vin" || field === "plate" || (!includePartial && fact.quality === "partial")) continue;
+      (options[field] ??= []).push({ source: source.source, fact });
+    }
+  }
+  return Object.fromEntries(Object.entries(options).filter(([field, values]) => new Set(values.map(({ fact }) => comparableFact(field as VehicleField, fact.value))).size > 1));
+}
+
+/** Classify community reports independently of the vehicle facts being filled. */
+export function hakaReportMatch(report: VehicleReport, result: VehicleLookupResult, identity: VehicleIdentity): "vin" | "plate" | "conflict" | "unverified" {
+  const expected = (field: "vin" | "plate") => new Set([
+    identity[field], result.query.kind === field ? result.query.value : undefined,
+    ...result.sources.filter(source => source.status === "found" && source.source !== "haka").map(source => source.facts[field]?.value),
+  ].filter((value): value is string => Boolean(value)).map(normalizeVehicleIdentifier));
+  const vins = expected("vin");
+  const reportVin = normalizeVehicleIdentifier(report.identity?.vin ?? "");
+  if (reportVin && vins.size) return vins.size === 1 && vins.has(reportVin) ? "vin" : "conflict";
+  const plates = expected("plate");
+  const reportPlate = normalizeVehicleIdentifier(report.identity?.plate ?? "");
+  if (reportPlate && plates.size) return plates.size === 1 && plates.has(reportPlate) ? "plate" : "conflict";
+  return "unverified";
+}
+
+export function emptyVehicleFieldPatch(result: VehicleLookupResult, current: VehicleFormValues, includePartial = false, choices: VehicleFieldChoices = {}): VehicleFormValues {
   if (lookupIdentityConflict(result, { vin: current.vin, plate: current.plate })) return {};
   const facts = preferredVehicleFacts(result, includePartial);
+  for (const [field, options] of Object.entries(vehicleFactConflicts(result, includePartial)) as [VehicleField, VehicleFactOption[]][]) {
+    const chosen = options.find(option => option.source === choices[field]);
+    if (chosen) facts[field] = chosen.fact;
+    else delete facts[field];
+  }
   return Object.fromEntries(Object.entries(current).filter(([key, value]) => !value?.trim() && facts[key as VehicleField]).map(([key]) => [key, facts[key as VehicleField]!.value]));
 }
 
@@ -128,7 +174,11 @@ export function readVehicleLookupSnapshot(value: unknown): VehicleLookupSnapshot
       const url = new URL(source.url);
       if (url.protocol !== "https:" || !allowedHosts.has(url.hostname) || !vehicleSourceLabels[source.source] || !source.facts || !Array.isArray(source.warnings)) return undefined;
       for (const [field, fact] of Object.entries(source.facts)) if (!(field in vehicleFieldLabels) || typeof fact.value !== "string" || fact.value.length > 180) return undefined;
-      for (const report of source.reports ?? []) if (!/^https:\/\/www\.hakasystem\.eu\/kradeze-automobilov\/prispevok\/\d+$/.test(report.url)) return undefined;
+      for (const report of source.reports ?? []) {
+        if (!/^https:\/\/www\.hakasystem\.eu\/kradeze-automobilov\/prispevok\/\d+$/.test(report.url)) return undefined;
+        if (report.identity?.vin && !isVin(report.identity.vin)) return undefined;
+        if (report.identity?.plate && !isSlovakPlate(report.identity.plate)) return undefined;
+      }
     }
   } catch { return undefined; }
   return snapshot;

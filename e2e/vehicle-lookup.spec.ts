@@ -320,3 +320,64 @@ test("challenge and unavailable sources do not imply missing insurance or block 
   await expect.poll(() => api.writes.length).toBe(1);
   expect(api.writes[0].body.vehicleLookup).toBeNull();
 });
+
+test("shows source conflicts, accepts an explicit choice and flags a HAKA VIN mismatch", async ({ page }) => {
+  await sandboxApi(page, async input => {
+    const response = lookupResponse(input);
+    response.snapshot.result.sources[0].facts.make = { value: "ŠKODA", quality: "reported" };
+    response.snapshot.result.sources[1].facts.make = { value: "VOLKSWAGEN", quality: "reported" };
+    response.snapshot.result.sources.push({ source: "haka", status: "found", url: "https://www.hakasystem.eu/", fetchedAt: response.snapshot.result.fetchedAt, warnings: [], facts: {}, reports: [
+      { url: "https://www.hakasystem.eu/kradeze-automobilov/prispevok/123", title: "Hlásenie vozidla v HAKA", identity: { plate: plateA, vin: "WVWZZZ1JZXW000002" } },
+    ] });
+    return response;
+  });
+  await openDashboard(page); await openNewCase(page);
+  const control = page.getByTestId("vehicle-lookup");
+  await control.getByLabel("EČV", { exact: true }).fill(plateA);
+  await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
+  await expect(control.getByText("Značka · rozdielne údaje zdrojov")).toBeVisible();
+  await expect(control.getByRole("alert")).toContainText("Identita hlásenia nesúhlasí");
+  await expect(control).toContainText("raz za tri mesiace");
+  await expect(control.getByLabel("Značka: vyberte zdroj")).toHaveValue("");
+  await control.getByLabel("Značka: vyberte zdroj").selectOption("stkonline");
+  await control.getByRole("button", { name: acceptName }).click();
+  await expect(page.getByLabel("Značka", { exact: true })).toHaveValue("VOLKSWAGEN");
+  await expect(control.getByLabel("VIN", { exact: true })).toHaveValue(syntheticVin);
+  await expect(control.getByRole("alert")).toContainText("Identita hlásenia nesúhlasí");
+});
+
+test("automatically retries a busy lookup without a second click", async ({ page }) => {
+  const api = await sandboxApi(page);
+  let attempts = 0;
+  await page.route("**/api/vehicles/lookup", async route => {
+    if (++attempts === 1) await route.fulfill({ status: 409, headers: { "Retry-After": "1" }, json: { error: "Busy" } });
+    else await route.fallback();
+  });
+  await openDashboard(page); await openNewCase(page);
+  const control = page.getByTestId("vehicle-lookup");
+  await control.getByLabel("EČV", { exact: true }).fill(plateA);
+  await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
+  await expect(control.getByRole("status")).toContainText("Automaticky skúsim znova");
+  await expect(control.getByRole("button", { name: acceptName })).toBeEnabled();
+  expect(attempts).toBe(2);
+  expect(api.lookupInputs).toHaveLength(1);
+});
+
+test("changing EČV cancels the scheduled retry", async ({ page }) => {
+  await sandboxApi(page);
+  let attempts = 0;
+  await page.route("**/api/vehicles/lookup", async route => {
+    attempts += 1;
+    await route.fulfill({ status: 409, headers: { "Retry-After": "2" }, json: { error: "Busy" } });
+  });
+  await openDashboard(page); await openNewCase(page);
+  const control = page.getByTestId("vehicle-lookup");
+  await control.getByLabel("EČV", { exact: true }).fill(plateA);
+  await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
+  await expect(control.getByRole("status")).toContainText("Automaticky skúsim znova");
+  await control.getByLabel("EČV", { exact: true }).fill(plateB);
+  await page.waitForTimeout(2200); // Beyond the server-directed retry delay.
+  expect(attempts).toBe(1);
+  await expect(control.getByRole("button", { name: acceptName })).toHaveCount(0);
+  await expect(control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true })).toBeEnabled();
+});

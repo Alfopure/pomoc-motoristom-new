@@ -1333,16 +1333,18 @@ export async function updateFleetAsset(id: string, input: UpdateFleetAssetInput)
       : input.location
         ? (await createLocation(supabase, organization.id, input.location, input.label ?? existing.label)).id
         : existing.current_location_id;
+  const metadataChanges = {
+    ...(input.vehicleLookup !== undefined ? { vehicleLookup: input.vehicleLookup as unknown as Json } : {}),
+    ...(input.status && objectJson(existing.metadata).availabilityUnverified === true ? { availabilityUnverified: false } : {}),
+  };
   const payload = {
     ...(input.kind ? { kind: input.kind } : {}),
     ...(input.label ? { label: input.label.trim() } : {}),
     ...fleetAssetWritePayload(input),
     ...(branch ? { branch_id: branch.id } : {}),
-    ...(input.vehicleLookup !== undefined ? { metadata: mergeJson(existing.metadata, { vehicleLookup: input.vehicleLookup as unknown as Json }) } : {}),
+    ...(Object.keys(metadataChanges).length ? { metadata: mergeJson(existing.metadata, metadataChanges) } : {}),
     current_location_id: currentLocationId,
     ...(input.location ? { location_source: "manual" } : {}),
-    ...(input.status && objectJson(existing.metadata).availabilityUnverified === true
-      ? { metadata: { ...objectJson(existing.metadata), availabilityUnverified: false } } : {}),
   };
   const asset = await insertSingle<FleetAssetRow>(
     supabase
