@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ExternalLink, LoaderCircle, Search, X } from "lucide-react";
 import { TextField } from "./case-form-fields";
 import { normalizeLicensePlateInput, normalizeVinInput } from "./case-form-shared";
@@ -31,15 +31,16 @@ export function VehicleLookupControl(props: Props) {
   const [expanded, setExpanded] = useState(false);
   const request = useRef<AbortController | null>(null);
   const identity = `${props.contextKey}:${normalizeVehicleIdentifier(props.plate)}:${normalizeVehicleIdentifier(props.vin)}`;
+  const [stateIdentity, setStateIdentity] = useState(identity);
   const currentIdentity = useRef(identity);
-  currentIdentity.current = identity;
   const currentProps = useRef(props);
-  currentProps.current = props;
-  useEffect(() => {
-    request.current?.abort();
+  useLayoutEffect(() => { currentIdentity.current = identity; currentProps.current = props; }, [identity, props]);
+  // Reset only state tied to the changed vehicle; keep the input DOM and focus.
+  if (stateIdentity !== identity) {
+    setStateIdentity(identity);
     setProposal(null); setLoading(false); setError(null); setIncludePartial(false);
-    return () => { request.current?.abort(); };
-  }, [identity]);
+  }
+  useEffect(() => () => { request.current?.abort(); request.current = null; }, [identity]);
 
   async function lookup(kind: "plate" | "vin") {
     request.current?.abort();
@@ -97,7 +98,10 @@ export function VehicleLookupControl(props: Props) {
           <p className="mt-1 text-xs text-zinc-600">PZP ku dňu {snapshot.result.query.checkedForDate}. {proposal?.cached ? "Nedávno získaný výsledok (najviac 15 minút)." : "Pri staršom zásahu nejde o overenie ku dňu incidentu."}</p>
           {conflict && <p role="alert" className="mt-2 rounded bg-amber-100 p-2 text-xs text-amber-950">{conflict}</p>}
           <dl className="mt-3 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-2">
-            {(Object.entries(facts) as [VehicleField, { value: string; quality: string }][]).map(([field, fact]) => <div key={field} className="flex min-w-0 justify-between gap-3 border-b border-zinc-200 py-1"><dt className="text-zinc-600">{vehicleFieldLabels[field]}{fact.quality === "partial" ? " · návrh" : ""}</dt><dd className="break-all text-right font-medium">{fact.value}</dd></div>)}
+            {(Object.entries(facts) as [VehicleField, { value: string; quality: string }][]).map(([field, fact]) => {
+              const source = snapshot.result.sources.find((candidate) => candidate.status === "found" && candidate.facts[field] === fact);
+              return <div key={field} className="flex min-w-0 justify-between gap-3 border-b border-zinc-200 py-1"><dt className="text-zinc-600">{vehicleFieldLabels[field]}{fact.quality === "partial" ? " · návrh" : ""}{source && <span className="block text-[10px] text-zinc-500">{vehicleSourceLabels[source.source]}</span>}</dt><dd className="break-all text-right font-medium">{fact.value}</dd></div>;
+            })}
           </dl>
           <div className="mt-3 space-y-2">
             {snapshot.result.sources.map((source) => <div key={source.source} className="text-xs"><a href={source.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold underline">{vehicleSourceLabels[source.source]} <ExternalLink size={11} /></a><span className="ml-2 text-zinc-600">{statusLabel[source.status]}</span>{source.warnings.map((warning) => <p key={warning} className="mt-0.5 text-zinc-600">{warning}</p>)}{source.reports?.map((report) => <a key={report.url} href={report.url} target="_blank" rel="noreferrer" className="mt-1 block font-semibold text-amber-900 underline">{report.title}</a>)}</div>)}

@@ -7,7 +7,13 @@ const nextConfig: NextConfig = {
   generateBuildId: async () => deploymentVersion || "local",
   poweredByHeader: false,
   serverExternalPackages: ["@sparticuz/chromium", "playwright-core"],
-  outputFileTracingIncludes: { "/api/vehicles/lookup": ["./node_modules/@sparticuz/chromium/bin/**/*"] },
+  outputFileTracingIncludes: {
+    "/api/vehicles/lookup": [
+      "./node_modules/@sparticuz/chromium/bin/**/*",
+      // Playwright loads runtime JSON/assets dynamically; Next cannot trace all of them.
+      "./node_modules/playwright-core/**/*",
+    ],
+  },
   headers: async () => [
     {
       source: "/:path*",

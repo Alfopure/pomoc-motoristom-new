@@ -1,7 +1,6 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { lookupIdentityConflict, preferredVehicleFacts, type VehicleLookupResult, type VehicleQuery, type VehicleSource, type VehicleSourceResult } from "@/lib/vehicle-lookup";
-import { lookupSkp } from "./providers/skp-browser";
 import { SKP_URL } from "./providers/skp";
 import { parseStkOnline, stkOnlineUrl } from "./providers/stkonline";
 import { hakaUrl, parseHaka } from "./providers/haka";
@@ -22,7 +21,7 @@ export async function executeVehicleLookup(query: VehicleQuery, enabled: LookupP
   if (Date.now() >= deadline) throw new Error("lookup_deadline");
   const httpTimeout = Math.max(1, Math.min(9_000, deadline - Date.now()));
   const sources = await Promise.all([
-    sourceResult("skp", SKP_URL, enabled.skp, () => lookupSkp(query, deadline)),
+    sourceResult("skp", SKP_URL, enabled.skp, async () => (await import("./providers/skp-browser")).lookupSkp(query, deadline)),
     sourceResult("stkonline", stkOnlineUrl(query), enabled.stkonline, async () => parseStkOnline(await providerText(stkOnlineUrl(query), { headers: STK_HEADERS, timeoutMs: httpTimeout }), query, new Date().toISOString())),
     sourceResult("haka", hakaUrl(query), enabled.haka, async () => parseHaka(await providerText(hakaUrl(query), { timeoutMs: httpTimeout }), query, new Date().toISOString())),
   ]);
