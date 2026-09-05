@@ -1,5 +1,5 @@
 import { load } from "cheerio";
-import { normalizeVehicleIdentifier, type VehicleQuery, type VehicleSourceResult } from "@/lib/vehicle-lookup";
+import { isSlovakPlate, normalizeVehicleIdentifier, type VehicleQuery, type VehicleSourceResult } from "@/lib/vehicle-lookup";
 
 export function hakaUrl(query: VehicleQuery) { return `https://www.hakasystem.eu/kradeze-automobilov?keyword=${encodeURIComponent(query.value)}`; }
 export function parseHaka(html: string, query: VehicleQuery, fetchedAt: string): VehicleSourceResult {
@@ -18,7 +18,11 @@ export function parseHaka(html: string, query: VehicleQuery, fetchedAt: string):
     const identifier = query.kind === "vin" ? vin : plate;
     if (identifier && normalizeVehicleIdentifier(identifier) === query.value) {
       // Do not copy free-form report text, people, phone numbers or contact details.
-      result.reports!.push({ url: `https://www.hakasystem.eu${path}`, title: "Hlásenie vozidla v HAKA" });
+      const normalizedPlate = plate ? normalizeVehicleIdentifier(plate) : undefined;
+      result.reports!.push({
+        url: `https://www.hakasystem.eu${path}`, title: "Hlásenie vozidla v HAKA",
+        identity: { ...(vin ? { vin: normalizeVehicleIdentifier(vin) } : {}), ...(normalizedPlate && isSlovakPlate(normalizedPlate) ? { plate: normalizedPlate } : {}) },
+      });
     } else unverifiedArticles = true;
   });
   result.status = result.reports!.length ? "found" : unverifiedArticles ? "unavailable" : "not_found";

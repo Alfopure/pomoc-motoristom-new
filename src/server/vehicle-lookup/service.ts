@@ -18,7 +18,7 @@ export async function lookupVehicle(query: VehicleQuery, actor: MotoristActor): 
     auth: { persistSession: false, autoRefreshToken: false },
     global: { fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.any([AbortSignal.timeout(5_000), ...(init?.signal ? [init.signal] : [])]) }) },
   });
-  const queryHash = createHash("sha256").update(JSON.stringify([query.kind, query.value, query.country, query.checkedForDate, 1])).digest("hex");
+  const queryHash = createHash("sha256").update(JSON.stringify([query.kind, query.value, query.country, query.checkedForDate, 2])).digest("hex");
   const { data, error } = await admin.rpc("motorist_vehicle_lookup_claim", { p_organization_id: actor.organizationId, p_profile_id: actor.profileId, p_query_hash: queryHash });
   if (error || !data) throw new VehicleLookupError("Dohľadávanie je dočasne nedostupné. Údaje môžete vyplniť ručne.");
   const claim = data as unknown as Claim;
