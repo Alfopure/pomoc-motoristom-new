@@ -11,7 +11,8 @@ const nextConfig: NextConfig = {
     "/api/vehicles/lookup": [
       "./node_modules/@sparticuz/chromium/bin/**/*",
       // Playwright loads runtime JSON/assets dynamically; Next cannot trace all of them.
-      "./node_modules/playwright-core/**/*",
+      "./node_modules/playwright-core/browsers.json",
+      "./node_modules/playwright-core/lib/**/*",
     ],
   },
   headers: async () => [
