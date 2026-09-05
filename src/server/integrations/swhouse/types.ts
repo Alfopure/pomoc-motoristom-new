@@ -38,6 +38,10 @@ export type SwhouseCarOccupancyRaw = {
   price2?: number;
   price3?: number;
   price4?: number;
+  insuranceValidUntil?: string | null;
+  lastCarService?: string | null;
+  insuranceDeductiblePercentage?: number | null;
+  insuranceDeductibleAmount?: number | null;
   lasFilialId: number | null;
   lastUserId?: number | null;
   rentId: number | null;
@@ -60,6 +64,7 @@ export type SwhouseCarRaw = {
   colorId?: number | null;
   /** Legacy schema advertises this field, but the current production getCars payload omits it. */
   lasFilialId?: number | null;
+  rentTo?: string | null;
 };
 
 /**
@@ -102,6 +107,8 @@ export type SwhouseReplacementVehicle = {
   /** Namapované na naše motorist_branches.id cez SWHOUSE_BRANCH_MAP, alebo null (nepriradené). */
   branchInternalId: string | null;
   rentTo: string | null;
+  /** Vehicle endpoint only: never store login responses or authentication headers here. */
+  details?: Record<string, string | number | boolean | null>;
 };
 
 export type SwhouseAvailability = {

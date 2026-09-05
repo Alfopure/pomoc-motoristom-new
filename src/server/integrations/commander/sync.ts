@@ -1,4 +1,5 @@
 import "server-only";
+import { vinFromRegistration } from "@/lib/fleet-pairing";
 
 import { createHash } from "node:crypto";
 
@@ -889,7 +890,7 @@ function parseVehicle(value: unknown): ParsedVehicle | null {
   return {
     sourceVehicleId,
     normalizedLicensePlate: normalizeLicensePlate(raw.vehicleRegistrationPlate),
-    normalizedVin: normalizeVin(raw.vehicleVIN),
+    normalizedVin: normalizeVin(raw.vehicleVIN) ?? vinFromRegistration(raw.vehicleRegistrationPlate),
     label: stringValue(raw.vehicleName) ?? stringValue(raw.vehicleRegistrationPlate),
     make: stringValue(raw.vehicleManufacturer) ?? stringValue(raw.vehicleMake),
     model: stringValue(raw.vehicleModel),
@@ -911,7 +912,7 @@ function parsePosition(value: unknown): ParsedPosition | null {
   const lat = numberValue(raw.gpsLat);
   const lng = numberValue(raw.gpsLon);
 
-  if (!sourceVehicleId || !gpsTime || !validLat(lat) || !validLng(lng)) {
+  if (!sourceVehicleId || !gpsTime || !validLat(lat) || !validLng(lng) || (lat === 0 && lng === 0) || Date.parse(gpsTime) > Date.now() + 60_000) {
     return null;
   }
 

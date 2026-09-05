@@ -60,7 +60,7 @@ export function createDispatchMapModel(
   const nearestBranch = findNearestBranch(caseItem, branches);
   const selectedAsset = caseItem.selectedAssetId ? assets.find((asset) => asset.id === caseItem.selectedAssetId) : undefined;
   const nearestAsset = selectedAsset
-    ? { asset: selectedAsset, distance: distanceKm(pickup, selectedAsset.point) }
+    ? selectedAsset.positionKnown === false ? undefined : { asset: selectedAsset, distance: distanceKm(pickup, selectedAsset.point) }
     : findNearestAsset(caseItem, assets);
   const routePlan = nearestBranch
     ? nearestAsset
@@ -111,7 +111,7 @@ export function createDispatchMapModel(
         point: branch.point,
         kind: "branch" as const,
       })),
-      ...assets.map((asset) => ({
+      ...assets.filter((asset) => asset.positionKnown !== false).map((asset) => ({
         id: asset.id,
         label: asset.label,
         point: asset.point,

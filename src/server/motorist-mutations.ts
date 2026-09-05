@@ -1,4 +1,5 @@
 import "server-only";
+import { matchFleetIdentities } from "@/lib/fleet-pairing";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
@@ -1332,6 +1333,8 @@ export async function updateFleetAsset(id: string, input: UpdateFleetAssetInput)
     ...(branch ? { branch_id: branch.id } : {}),
     current_location_id: currentLocationId,
     ...(input.location ? { location_source: "manual" } : {}),
+    ...(input.status && objectJson(existing.metadata).availabilityUnverified === true
+      ? { metadata: { ...objectJson(existing.metadata), availabilityUnverified: false } } : {}),
   };
   const asset = await insertSingle<FleetAssetRow>(
     supabase
@@ -1483,7 +1486,7 @@ export async function autoConfirmCommanderLinks(): Promise<{ autoPaired: number 
 
   const recordsResult = await supabase
     .from("motorist_external_vehicle_records")
-    .select("id,source_vehicle_id,normalized_license_plate,normalized_vin")
+    .select("*")
     .eq("organization_id", organization.id)
     .eq("source_provider", "commander")
     .eq("source_active", true);
@@ -1492,7 +1495,7 @@ export async function autoConfirmCommanderLinks(): Promise<{ autoPaired: number 
 
   const assetsResult = await supabase
     .from("motorist_fleet_assets")
-    .select("id,license_plate,vin")
+    .select("*")
     .eq("organization_id", organization.id)
     .eq("kind", "replacement_car");
   await throwOnResult(assetsResult);
@@ -1509,43 +1512,32 @@ export async function autoConfirmCommanderLinks(): Promise<{ autoPaired: number 
 
   const commanderLinksResult = await supabase
     .from("motorist_fleet_asset_links")
-    .select("external_vehicle_record_id,fleet_asset_id")
+    .select("external_vehicle_record_id,fleet_asset_id,link_status,match_method")
     .eq("organization_id", organization.id)
-    .eq("source_provider", "commander")
-    .eq("link_status", "confirmed");
+    .eq("source_provider", "commander");
   await throwOnResult(commanderLinksResult);
-  const commanderAssetByRecord = new Map((commanderLinksResult.data ?? []).map((link) => [link.external_vehicle_record_id, link.fleet_asset_id]));
-  const commanderLinkedAssetIds = new Set((commanderLinksResult.data ?? []).map((link) => link.fleet_asset_id).filter((id): id is string => Boolean(id)));
+  const confirmed = (commanderLinksResult.data ?? []).filter((link) => link.link_status === "confirmed");
+  const manuallyRejected = new Set((commanderLinksResult.data ?? []).filter((link) => link.link_status === "rejected" && link.match_method === "manual").map((link) => link.external_vehicle_record_id));
+  const commanderAssetByRecord = new Map(confirmed.map((link) => [link.external_vehicle_record_id, link.fleet_asset_id]));
+  const commanderLinkedAssetIds = new Set(confirmed.map((link) => link.fleet_asset_id).filter((id): id is string => Boolean(id)));
 
   // Kandidáti = SWHouse autá (zdroj pravdy) bez Commander napojenia. Jednoznačná ŠPZ/VIN mapa (nejednoznačné vynechá).
-  const candidates = assets.filter((asset) => swhouseAssetIds.has(asset.id) && !commanderLinkedAssetIds.has(asset.id));
-  const byPlate = uniqueMatchMap(candidates, (asset) => normalizePairingKey(asset.license_plate));
-  const byVin = uniqueMatchMap(candidates, (asset) => normalizePairingKey(asset.vin));
-
+  const matches = matchFleetIdentities(
+    records.map((record) => ({ id: record.id, plate: record.normalized_license_plate, vin: record.normalized_vin })),
+    assets.filter((asset) => swhouseAssetIds.has(asset.id)).map((asset) => ({ id: asset.id, plate: asset.license_plate, vin: asset.vin })),
+  ).filter((match) => !commanderAssetByRecord.has(match.sourceId) && !commanderLinkedAssetIds.has(match.targetId) && !manuallyRejected.has(match.sourceId));
+  // Bounded concurrency for the initial fleet import. Never replace confirmed links or delete assets automatically.
   let autoPaired = 0;
-  for (const record of records) {
-    const currentAssetId = commanderAssetByRecord.get(record.id) ?? null;
-    const target =
-      (record.normalized_vin ? byVin.get(record.normalized_vin) : undefined) ??
-      (record.normalized_license_plate ? byPlate.get(record.normalized_license_plate) : undefined) ??
-      null;
-    if (!target || target.id === currentAssetId) {
-      continue;
-    }
-
-    const targetAsset = await getFleetAsset(supabase, organization.id, target.id);
-    const externalRecord = await getCommanderExternalVehicle(supabase, organization.id, record.id);
-    await upsertCommanderLink(supabase, organization.id, actorId, externalRecord, targetAsset);
-    autoPaired += 1;
-
-    byPlate.delete(normalizePairingKey(target.license_plate));
-    byVin.delete(normalizePairingKey(target.vin));
-
-    if (currentAssetId && !swhouseAssetIds.has(currentAssetId)) {
-      await tryDeleteGhostAsset(supabase, organization.id, actorId, currentAssetId);
-    }
+  for (let offset = 0; offset < matches.length; offset += 4) {
+    const results = await Promise.allSettled(matches.slice(offset, offset + 4).map(async (match) => {
+      const record = records.find((record) => record.id === match.sourceId)!;
+      const asset = assets.find((asset) => asset.id === match.targetId)!;
+      await upsertCommanderLink(supabase, organization.id, actorId, record, asset, match.method);
+    }));
+    autoPaired += results.filter((result) => result.status === "fulfilled").length;
+    const failed = results.find((result) => result.status === "rejected" && !(result.reason instanceof MutationError && result.reason.status === 409));
+    if (failed?.status === "rejected") throw failed.reason;
   }
-
   return { autoPaired };
 }
 
@@ -1652,30 +1644,6 @@ async function deleteGhostAssetRow(supabase: AdminClient, organizationId: string
     license_plate: asset.license_plate,
     source_system: asset.source_system,
   });
-}
-
-/** Uppercase + len A-Z0-9 (rovnaké ako Commander/SWHouse normalizácia). */
-function normalizePairingKey(value: string | null | undefined): string {
-  return (value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
-
-/** Map key→item len pre jednoznačné kľúče (duplicitné/prázdne vynechá). */
-function uniqueMatchMap<T>(items: T[], keyFn: (item: T) => string): Map<string, T> {
-  const counts = new Map<string, number>();
-  for (const item of items) {
-    const key = keyFn(item);
-    if (key) {
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-  }
-  const map = new Map<string, T>();
-  for (const item of items) {
-    const key = keyFn(item);
-    if (key && counts.get(key) === 1) {
-      map.set(key, item);
-    }
-  }
-  return map;
 }
 
 export async function importCommanderVehicle(input: { externalVehicleRecordId: string; branchId: string }) {
@@ -2805,6 +2773,7 @@ async function upsertCommanderLink(
   actorId: string | null,
   externalRecord: ExternalVehicleRecordRow,
   asset: FleetAssetRow,
+  matchMethod: FleetAssetLinkRow["match_method"] = "manual",
 ): Promise<FleetAssetLinkRow> {
   const now = new Date().toISOString();
   const linksResult = await supabase
@@ -2815,6 +2784,11 @@ async function upsertCommanderLink(
   await throwOnResult(linksResult);
 
   const links = linksResult.data ?? [];
+  if (matchMethod !== "manual" && links.some((link) =>
+    (link.link_status === "confirmed" && (link.external_vehicle_record_id === externalRecord.id || link.fleet_asset_id === asset.id)) ||
+    (link.link_status === "rejected" && link.match_method === "manual" && link.external_vehicle_record_id === externalRecord.id))) {
+    throw new MutationError("Vozidlo bolo medzičasom ručne spárované alebo odmietnuté; automatika ho nemení.", 409);
+  }
   const staleLinks = links.filter(
     (link) =>
       link.link_status !== "rejected" &&
@@ -2848,14 +2822,14 @@ async function upsertCommanderLink(
     external_vehicle_record_id: externalRecord.id,
     source_provider: "commander" as const,
     link_status: "confirmed" as const,
-    match_method: "manual" as const,
-    match_confidence: 1,
+    match_method: matchMethod,
+    match_confidence: matchMethod === "license_plate" ? 0.95 : 1,
     confirmed_at: now,
     confirmed_by: actorId,
     rejected_at: null,
     rejected_by: null,
     metadata: {
-      source: "fleet_gps_connections",
+      source: matchMethod === "manual" ? "fleet_gps_connections" : "fleet_auto_pairing",
       source_vehicle_id: externalRecord.source_vehicle_id,
       fleet_asset_label: asset.label,
     },

@@ -1,4 +1,5 @@
 import "server-only";
+import { fleetTelemetryDetails, isFreshFleetTimestamp, validFleetPoint } from "@/lib/fleet-observation";
 
 import { isDeletedAccessProfile } from "@/domain/access-profile";
 
@@ -360,15 +361,19 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
   // Potvrdené SWHouse (client_vehicle_db) linky → ktoré autá sú zo zdroja pravdy vs „duchovia".
   const swhouseLinksResult = await supabase
     .from("motorist_fleet_asset_links")
-    .select("fleet_asset_id")
+    .select("fleet_asset_id,external_vehicle_record_id")
     .eq("organization_id", organizationId)
     .eq("source_provider", "client_vehicle_db")
     .eq("link_status", "confirmed");
   const swhouseLinkedAssetIds = new Set((swhouseLinksResult.data ?? []).map((link) => link.fleet_asset_id));
+  const swhouseRecords = await supabase.from("motorist_external_vehicle_records").select("id,source_vehicle_id,latest_payload_snapshot")
+    .eq("organization_id", organizationId).eq("source_provider", "client_vehicle_db").eq("source_active", true);
+  const swhouseByRecordId = new Map((swhouseRecords.data ?? []).map((record) => [record.id, record]));
+  const swhouseByAssetId = new Map((swhouseLinksResult.data ?? []).map((link) => [link.fleet_asset_id, swhouseByRecordId.get(link.external_vehicle_record_id)]));
   // T2: SWHouse je jediný zdroj pravdy o obsadenosti — najnovší snapshot čítame RAZ a odvodíme per-asset occupancy.
   const occupancySnapshot = await loadLatestOccupancySnapshot(supabase, organizationId);
   const fleetAssets = (fleetAssetsResult.data ?? []).map((asset) =>
-    mapFleetAsset(asset, locationById, branches, commanderPositionByFleetAssetId.get(asset.id), swhouseLinkedAssetIds.has(asset.id), occupancySnapshot),
+    mapFleetAsset(asset, locationById, branches, commanderPositionByFleetAssetId.get(asset.id), swhouseLinkedAssetIds.has(asset.id), occupancySnapshot, swhouseByAssetId.get(asset.id)),
   );
 
   const latestStatusByProfile = latestOperatorStatuses(statusesResult.data ?? []);
@@ -893,21 +898,26 @@ function mapFleetAsset(
   commanderPosition?: FleetCurrentPositionRow,
   swhouseLinked = false,
   occupancySnapshot: OccupancySnapshot | null = null,
+  swhouseRecord?: Pick<ExternalVehicleRecordRow, "source_vehicle_id" | "latest_payload_snapshot">,
 ): FleetAsset {
-  const branch = branches.find((candidate) => candidate.id === asset.branch_id) ?? branches[0];
+  const branch = branches.find((candidate) => candidate.id === asset.branch_id);
   const location = asset.current_location_id ? locations.get(asset.current_location_id) : undefined;
   const metadata = jsonRecord(asset.metadata);
   const gpsMetadata = jsonRecord(metadata.gps);
   const locationSource = asset.location_source ?? stringValue(gpsMetadata.source) ?? asset.source_system ?? undefined;
-  const commanderGps = commanderPosition && asset.kind === "replacement_car" ? gpsFromCommanderPosition(commanderPosition) : undefined;
+  const commanderGps = commanderPosition && asset.kind === "replacement_car" && validFleetPoint({ lat: Number(commanderPosition.lat), lng: Number(commanderPosition.lng) }) ? gpsFromCommanderPosition(commanderPosition) : undefined;
   const commanderPoint = commanderPosition && commanderGps ? { lat: Number(commanderPosition.lat), lng: Number(commanderPosition.lng) } : undefined;
-  const assetGps = locationSource
+  const measuredLocation = location && validFleetPoint({ lat: Number(location.lat), lng: Number(location.lng) }) && location.lat !== null && location.lng !== null
+    && locationSource !== "seed" && locationSource !== "client_vehicle_db";
+  const assetGps = measuredLocation && locationSource && !["client_vehicle_db", "seed"].includes(locationSource)
     ? {
         source: locationSource,
         externalId: asset.external_id ?? stringValue(gpsMetadata.externalId) ?? stringValue(gpsMetadata.external_id),
         positionTime: asset.last_seen_at ?? stringValue(gpsMetadata.positionTime) ?? stringValue(gpsMetadata.position_time),
         syncedAt: stringValue(gpsMetadata.syncedAt) ?? stringValue(gpsMetadata.synced_at),
         speedKph: numberValue(gpsMetadata.speedKph) ?? numberValue(gpsMetadata.speed_kph),
+        odometerKm: numberValue(gpsMetadata.odometerKm),
+        details: fleetTelemetryDetails(gpsMetadata.details),
         stale: isFleetGpsStale(asset.last_seen_at),
         staleAfterMinutes: numberValue(gpsMetadata.staleAfterMinutes) ?? 10,
       }
@@ -916,7 +926,14 @@ function mapFleetAsset(
 
   // T2: overená obsadenosť zo SWHouse snapshotu (len náhradné vozidlá). `occupied` prepisuje status na "rented",
   // takže availabilityScore / recommend / nearest / mapa rešpektujú obsadenosť bez ďalšej zmeny.
-  const occupancy = toFleetAssetKind(asset.kind) === "replacement_car" ? deriveReplacementOccupancy(occupancySnapshot, asset.license_plate) : undefined;
+  const sourcePayload = jsonRecord(swhouseRecord?.latest_payload_snapshot);
+  const observation = jsonRecord(sourcePayload.occupancy);
+  const details = Object.fromEntries(Object.entries(jsonRecord(sourcePayload.details)).filter(([, value]) => value === null || ["string", "number", "boolean"].includes(typeof value))) as NonNullable<FleetAsset["swhouse"]>["details"];
+  const occupancy = toFleetAssetKind(asset.kind) === "replacement_car"
+    ? swhouseLinked ? deriveReplacementOccupancy(occupancySnapshot, asset.license_plate) : "unverified"
+    : undefined;
+  // A partially written observation must never be presented as belonging to the last committed snapshot.
+  const committedObservation = Date.parse(String(observation.checkedAt ?? "")) === Date.parse(occupancySnapshot?.capturedAt ?? "");
   const status = occupancy === "occupied" ? "rented" : asset.status;
 
   return {
@@ -930,8 +947,9 @@ function mapFleetAsset(
     status,
     category: asset.category ?? undefined,
     weightKg: asset.weight_kg ?? undefined,
-    branchId: branch.id,
-    point: commanderPoint ?? pointFromLocation(location, branch.point),
+    branchId: branch?.id ?? "",
+    point: commanderPoint ?? pointFromLocation(location, { lat: 0, lng: 0 }),
+    positionKnown: !!commanderPoint || !!measuredLocation,
     lastSeen: gps?.positionTime ?? asset.last_seen_at ?? asset.updated_at,
     notes: asset.notes ?? undefined,
     insuranceValidUntil: asset.insurance_valid_until ?? undefined,
@@ -949,7 +967,19 @@ function mapFleetAsset(
     towCategory: asset.tow_category ?? undefined,
     capabilities: asset.capabilities ?? [],
     swhouseLinked,
+    internalStatus: asset.status,
+    availabilityVerified: metadata.availabilityUnverified === true ? false : undefined,
     occupancy,
+    swhouse: swhouseRecord ? {
+      carId: swhouseRecord.source_vehicle_id,
+      branchName: stringValue(sourcePayload.swhouseBranchName),
+      color: stringValue(sourcePayload.color),
+      ownerType: stringValue(sourcePayload.ownerType),
+      rentTo: stringValue(sourcePayload.rentTo),
+      checkedAt: occupancySnapshot?.capturedAt,
+      observedSince: committedObservation ? stringValue(observation.observedSince) : undefined,
+      details,
+    } : undefined,
     gps,
   };
 }
@@ -1084,23 +1114,16 @@ function gpsFromCommanderPosition(position: FleetCurrentPositionRow): FleetAsset
     syncedAt: position.received_at,
     speedKph: numberValue(position.speed_kmh),
     headingDegrees: numberValue(position.heading_degrees),
+    ignitionOn: position.ignition_on ?? undefined,
+    odometerKm: position.odometer_m != null ? position.odometer_m / 1000 : undefined,
+    details: fleetTelemetryDetails(position.latest_payload_snapshot),
     stale: isFleetGpsStale(position.gps_time),
     staleAfterMinutes: GPS_STALE_AFTER_MINUTES,
   };
 }
 
 function isFleetGpsStale(lastSeenAt: string | null) {
-  if (!lastSeenAt) {
-    return true;
-  }
-
-  const timestamp = Date.parse(lastSeenAt);
-
-  if (!Number.isFinite(timestamp)) {
-    return true;
-  }
-
-  return Date.now() - timestamp > 10 * 60 * 1000;
+  return !isFreshFleetTimestamp(lastSeenAt);
 }
 
 function mapCase({

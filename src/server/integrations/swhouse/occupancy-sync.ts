@@ -1,18 +1,18 @@
 import "server-only";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import type { Database } from "@/lib/supabase/database.types";
+import type { Database, Json } from "@/lib/supabase/database.types";
+import { nextOccupancyObservation } from "@/lib/fleet-observation";
 
 import { SwhouseClient } from "./client";
 import { swhouseConfigFromEnv, type SwhouseConfig } from "./config";
-import { normalizePlateForPairing } from "./replacement-vehicles";
+import { normalizePlateForPairing, vehicleDetails } from "./replacement-vehicles";
+import { computeLiveOccupancy } from "./live-occupancy";
 import type { SwhouseCarOccupancyRaw, SwhouseFleetOccupancy } from "./types";
 
 /**
- * T2 — occupancy sync (samostatný ~5-min job, ODDELENÝ od hodinového rosteru).
- * Lacný payload: getCarsOccupancy (len voľné autá) + DB roster (client_vehicle_db) na určenie flotily.
- * occupiedPlates = roster (ownerType 3/4) mínus 5-min voľné; zapíše point-in-time snapshot.
- * Reusuje motorist_fleet_sync_runs + last_success_at pre observabilitu (vzor commander sync).
+ * One live cycle: authoritative roster + free cars, joined by carId.
+ * On any inconsistent/failed read preserve the last valid snapshot; it ages to stale.
  */
 
 const ROSTER_PROVIDER = "client_vehicle_db" as const;
@@ -63,6 +63,7 @@ export function computeOccupancyFromRoster(
 export async function syncSwhouseOccupancy(options?: {
   client?: SwhouseClient;
   config?: SwhouseConfig;
+  snapshot?: { allCars: SwhouseCarOccupancyRaw[]; freeCars: SwhouseCarOccupancyRaw[]; capturedAt: string };
 }): Promise<SwhouseOccupancySyncResult> {
   const base: SwhouseOccupancySyncResult = {
     provider: ROSTER_PROVIDER,
@@ -89,22 +90,45 @@ export async function syncSwhouseOccupancy(options?: {
   base.syncRunId = syncRunId;
 
   try {
-    const occupancy = await client.getCarsOccupancy();
-    if (!occupancy.ok || !Array.isArray(occupancy.data)) {
-      throw new Error(`SWHouse getCarsOccupancy zlyhal (HTTP ${occupancy.status}).`);
+    let snapshot = options?.snapshot;
+    if (!snapshot) {
+      const [all, free] = await Promise.all([client.getCarsOccupancyAll({ fresh: true }), client.getCarsOccupancy({ fresh: true })]);
+      if (!all.ok || !free.ok || !Array.isArray(all.data) || !Array.isArray(free.data)) {
+        throw new Error("SWHouse živý roster alebo obsadenosť sú nedostupné; posledný stav zostáva zachovaný.");
+      }
+      snapshot = { allCars: all.data, freeCars: free.data, capturedAt: new Date().toISOString() };
     }
-
-    const rosterPlates = await loadRosterPlates(supabase, organization.id);
-    if (rosterPlates.length === 0) {
-      throw new Error("SWHouse roster je prázdny; occupancy snapshot sa nedá bezpečne odvodiť.");
-    }
-    const paired = computeOccupancyFromRoster(occupancy.data, rosterPlates, config.fleetOwnerTypeIds);
-
-    base.rosterCount = rosterPlates.length;
+    const paired = computeLiveOccupancy(snapshot.allCars, snapshot.freeCars, config.fleetOwnerTypeIds);
+    base.rosterCount = paired.fleet.length;
     base.freeCount = paired.freePlates.length;
     base.occupiedCount = paired.occupiedPlates.length;
 
-    const captured = new Date().toISOString();
+    const captured = snapshot.capturedAt;
+    const previous = await supabase.from("motorist_external_vehicle_records")
+      .select("id,source_vehicle_id,latest_payload_snapshot")
+      .eq("organization_id", organization.id).eq("source_provider", ROSTER_PROVIDER).eq("source_active", true);
+    await throwOnResult(previous);
+    const carById = new Map(paired.fleet.map((car) => [String(car.carId), car]));
+    const observations = (previous.data ?? []).flatMap((record) => {
+      const state = paired.states.get(record.source_vehicle_id);
+      const car = carById.get(record.source_vehicle_id);
+      if (!state || !car) return [];
+      const payload = record.latest_payload_snapshot && typeof record.latest_payload_snapshot === "object" && !Array.isArray(record.latest_payload_snapshot)
+        ? record.latest_payload_snapshot : {};
+      return [{
+        id: record.id, organization_id: organization.id, source_provider: ROSTER_PROVIDER,
+        source_vehicle_id: record.source_vehicle_id,
+        latest_payload_snapshot: {
+          ...payload, rentTo: car.rentTo, details: vehicleDetails(car),
+          occupancy: nextOccupancyObservation(payload.occupancy, state, captured),
+        } as Json,
+      }];
+    });
+    if (observations.length !== paired.fleet.length) {
+      throw new Error("Najprv je potrebné úspešne obnoviť celý SWHouse roster; obsadenosť sa neprepísala.");
+    }
+    await throwOnResult(await supabase.from("motorist_external_vehicle_records")
+      .upsert(observations, { onConflict: "organization_id,source_provider,source_vehicle_id" }));
     const insert = await supabase.from("motorist_fleet_replacement_occupancy").upsert(
       {
         organization_id: organization.id,
@@ -126,25 +150,6 @@ export async function syncSwhouseOccupancy(options?: {
     await updateIntegrationStatus(supabase, organization.id, config.baseUrl, "failed", message);
     return { ...base, status: "failed", error: message };
   }
-}
-
-/** Normalizované ŠPZ celej SWHouse flotily z DB rosteru (client_vehicle_db, aktívne záznamy). */
-async function loadRosterPlates(supabase: AdminClient, organizationId: string): Promise<string[]> {
-  const result = await supabase
-    .from("motorist_external_vehicle_records")
-    .select("normalized_license_plate")
-    .eq("organization_id", organizationId)
-    .eq("source_provider", ROSTER_PROVIDER)
-    .eq("source_active", true);
-  await throwOnResult(result);
-  const plates: string[] = [];
-  for (const record of result.data ?? []) {
-    const plate = normalizePlateForPairing(record.normalized_license_plate);
-    if (plate) {
-      plates.push(plate);
-    }
-  }
-  return plates;
 }
 
 async function createSyncRun(supabase: AdminClient, organizationId: string): Promise<string> {

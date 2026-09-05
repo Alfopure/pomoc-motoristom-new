@@ -1,5 +1,5 @@
 import type { Branch, FleetAsset } from "@/domain/types";
-import { driverStatusLabel, gpsStatusText, occupancyText, statusLabel, statusTone } from "@/lib/fleet-presentation";
+import { driverStatusLabel, gpsStatusText, occupancyText, fleetAvailability, fleetDateTime } from "@/lib/fleet-presentation";
 
 // Obsah pre google.maps.InfoWindow sa skladá mimo Reactu, preto sa bublina
 // stavia cez DOM API (textContent chráni pred vložením HTML z dát).
@@ -9,7 +9,7 @@ export function createFleetBubbleHeader(asset: FleetAsset) {
   header.className = "flex min-w-0 items-baseline gap-2";
 
   const name = document.createElement("span");
-  name.className = "truncate text-sm font-semibold text-zinc-950";
+  name.className = "min-w-0 break-words text-sm font-semibold text-zinc-950";
   name.textContent = [asset.make, asset.model].filter(Boolean).join(" ") || asset.label;
   header.append(name);
 
@@ -25,25 +25,31 @@ export function createFleetBubbleHeader(asset: FleetAsset) {
 
 export function createFleetBubbleContent(asset: FleetAsset, branch?: Branch) {
   const root = document.createElement("div");
-  root.className = "grid w-56 max-w-full gap-1.5 pt-1 text-xs text-zinc-600";
+  root.className = "grid w-72 max-w-full gap-2 pt-1 text-xs text-zinc-600";
 
   const statusRow = document.createElement("div");
   statusRow.className = "flex min-w-0 flex-wrap items-center gap-1.5";
 
   const status = document.createElement("span");
-  status.className = `shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${statusTone[asset.status]}`;
-  status.textContent = statusLabel[asset.status];
+  const availability = fleetAvailability(asset);
+  status.className = `shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${availability.tone}`;
+  status.textContent = availability.label;
   statusRow.append(status);
 
   const occupancy = occupancyText(asset);
-  if (occupancy && occupancy !== statusLabel[asset.status]) {
+  if (!asset.swhouse && occupancy && occupancy !== availability.label) {
     const occupancyEl = document.createElement("span");
-    occupancyEl.className = "min-w-0 truncate font-medium text-zinc-500";
+    occupancyEl.className = "min-w-0 font-medium text-zinc-500";
     occupancyEl.textContent = occupancy;
     statusRow.append(occupancyEl);
   }
 
   root.append(statusRow);
+  if (asset.swhouse) {
+    root.append(bubbleLine("Stav overený", `Software House · ${fleetDateTime(asset.swhouse.checkedAt)}`));
+    if (asset.swhouse.observedSince) root.append(bubbleLine("Pozorované od", fleetDateTime(asset.swhouse.observedSince)));
+    if (asset.swhouse.rentTo) root.append(bubbleLine(asset.occupancy === "occupied" ? "Prenájom do" : "Posledný prenájom do", fleetDateTime(asset.swhouse.rentTo)));
+  }
 
   const gpsClass = !asset.gps ? "text-zinc-600" : asset.gps.stale ? "text-amber-700" : "text-emerald-700";
   root.append(bubbleLine("GPS", gpsStatusText(asset), gpsClass));
@@ -59,7 +65,8 @@ export function createFleetBubbleContent(asset: FleetAsset, branch?: Branch) {
     : "Bez posádky";
   root.append(bubbleLine("Vodič", driverText));
 
-  root.append(bubbleLine("Pobočka", branch?.name ?? "Bez pobočky"));
+  root.append(bubbleLine("Pobočka", asset.swhouse?.branchName ?? branch?.name ?? "Nepriradená"));
+  if (asset.gps?.ignitionOn !== undefined) root.append(bubbleLine("Zapaľovanie", asset.gps.ignitionOn ? "Zapnuté" : "Vypnuté"));
 
   return root;
 }
@@ -73,7 +80,7 @@ function bubbleLine(label: string, value: string, valueClass = "text-zinc-900") 
   labelEl.textContent = label;
 
   const valueEl = document.createElement("span");
-  valueEl.className = `min-w-0 truncate text-right font-semibold ${valueClass}`;
+  valueEl.className = `min-w-0 break-words text-right font-semibold ${valueClass}`;
   valueEl.textContent = value;
 
   line.append(labelEl, valueEl);

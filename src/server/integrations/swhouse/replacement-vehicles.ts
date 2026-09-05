@@ -45,6 +45,7 @@ export function normalizeOccupancy(
       swhouseBranchName: car.lasFilialId != null ? maps.branches.get(car.lasFilialId) ?? null : null,
       branchInternalId: mapSwhouseBranch(branchMap, car.lasFilialId ?? null),
       rentTo: car.rentTo ?? null,
+      details: vehicleDetails(car),
     });
   }
   return vehicles;
@@ -79,8 +80,21 @@ export function normalizeFleetCar(
     swhouseBranchId: car.lasFilialId ?? null,
     swhouseBranchName: car.lasFilialId != null ? maps.branches.get(car.lasFilialId) ?? null : null,
     branchInternalId: mapSwhouseBranch(branchMap, car.lasFilialId ?? null),
-    rentTo: null,
+    rentTo: car.rentTo ?? null,
+    details: vehicleDetails(car),
   };
+}
+
+export function vehicleDetails(car: SwhouseCarRaw): Record<string, string | number | boolean | null> {
+  const raw = car as unknown as Record<string, unknown>;
+  const fields = ["carId", "ecv", "vin", "model", "manufacturerId", "colorId", "typeId", "ownerTypeId", "cotp",
+    "lasFilialId", "lastUserId", "rentId", "assistanceRentId", "rentTo", "price1", "price2", "price3", "price4",
+    "insuranceValidUntil", "lastCarService", "insuranceDeductiblePercentage", "insuranceDeductibleAmount"];
+  return Object.fromEntries(fields.flatMap((key) => {
+    const value = raw[key];
+    return value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number"
+      ? [[key, value]] : [];
+  }));
 }
 
 /**

@@ -476,6 +476,8 @@ export type FleetAsset = {
   branchId: string;
   point: GeoPoint;
   lastSeen: string;
+  /** false = no measured/manual vehicle location; never plot a branch fallback as GPS. */
+  positionKnown?: boolean;
   gps?: {
     source: FleetLocationSource | string;
     externalId?: string;
@@ -483,6 +485,9 @@ export type FleetAsset = {
     syncedAt?: string;
     speedKph?: number;
     headingDegrees?: number;
+    ignitionOn?: boolean;
+    odometerKm?: number;
+    details?: Record<string, string | number | boolean | null>;
     stale: boolean;
     staleAfterMinutes: number;
   };
@@ -503,8 +508,22 @@ export type FleetAsset = {
   capabilities: TowCapability[];
   /** true = auto má potvrdený link na SWHouse (client_vehicle_db) = je zo zdroja pravdy. false = „duch" (len Commander). */
   swhouseLinked?: boolean;
+  /** Local dispatch status is separate from the SWHouse occupancy overlay. */
+  internalStatus?: FleetAssetStatus;
+  availabilityVerified?: boolean;
   /** Overená SWHouse obsadenosť z posledného occupancy snapshotu (len pre náhradné vozidlá). */
   occupancy?: FleetAssetOccupancy;
+  swhouse?: {
+    carId: string;
+    branchName?: string;
+    color?: string;
+    ownerType?: string;
+    rentTo?: string;
+    checkedAt?: string;
+    /** First uninterrupted observation, NOT the actual start of a rental. */
+    observedSince?: string;
+    details: Record<string, string | number | boolean | null>;
+  };
 };
 
 export type PriceRule = {
