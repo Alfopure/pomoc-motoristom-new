@@ -1,5 +1,8 @@
 "use client";
 
+import { VehicleLookupControl } from "./VehicleLookupControl";
+import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
+
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
@@ -95,9 +98,7 @@ import {
   getEmailValidationError,
   incidentTypes,
   jobTypes,
-  normalizeLicensePlateInput,
   normalizeVehicleConditionFlags,
-  normalizeVinInput,
   paymentMethods,
   paymentStatuses,
   placeTypes,
@@ -1284,6 +1285,7 @@ function EditCaseForm({
   const [customerNote, setCustomerNote] = useState(caseItem.customerDetails.note ?? "");
   const [licensePlate, setLicensePlate] = useState(caseItem.vehicle.licensePlate);
   const [vin, setVin] = useState(caseItem.vehicle.vin ?? "");
+  const [vehicleLookup, setVehicleLookup] = useState<VehicleLookupSnapshot | null>(caseItem.vehicle.vehicleLookup ?? null);
   const [vehicleMake, setVehicleMake] = useState(caseItem.vehicle.make);
   const [vehicleModel, setVehicleModel] = useState(caseItem.vehicle.model);
   const [vehicleCategory, setVehicleCategory] = useState(caseItem.vehicle.category);
@@ -1454,6 +1456,7 @@ function EditCaseForm({
     customerNote,
     licensePlate,
     vin,
+    vehicleLookup,
     vehicleMake,
     vehicleModel,
     vehicleCategory,
@@ -1652,7 +1655,7 @@ function EditCaseForm({
       return;
     }
 
-    const vehicle = commanderVehicles.find((candidate) => normalizePlate(candidate.licensePlate ?? "") === normalizedPlate);
+    const vehicle = resolveInternalVehicle(commanderVehicles, licensePlate, vin);
     if (!vehicle) {
       return;
     }
@@ -2050,8 +2053,14 @@ function EditCaseForm({
           </p>
         )}
         <div className="grid gap-3 md:grid-cols-3">
-          <TextField label="EČV" value={licensePlate} onChange={setLicensePlate} onBlur={prefillFromCommander} error={fieldErrors.licensePlate} transformValue={normalizeLicensePlateInput} required={!replacementOnly} />
-          <TextField label="VIN" value={vin} onChange={setVin} error={fieldErrors.vin} transformValue={normalizeVinInput} />
+          <VehicleLookupControl contextKey={caseItem.id} plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor }} onApply={(patch, snapshot) => {
+            setVehicleLookup(snapshot);
+            if (patch.plate !== undefined) setLicensePlate(patch.plate);
+            if (patch.vin !== undefined) setVin(patch.vin);
+            if (patch.make !== undefined) setVehicleMake(patch.make);
+            if (patch.model !== undefined) setVehicleModel(patch.model);
+            if (patch.color !== undefined) setVehicleColor(patch.color);
+          }} />
           <TextField label="Značka" value={vehicleMake} onChange={setVehicleMake} />
           <TextField label="Model" value={vehicleModel} onChange={setVehicleModel} />
           <TextField label="Rok výroby" value={productionYear} onChange={setProductionYear} error={fieldErrors.productionYear} type="number" inputMode="numeric" min={1950} max={new Date().getFullYear() + 1} step={1} transformValue={(value) => digitsOnly(value, 4)} />

@@ -1,5 +1,8 @@
 "use client";
 
+import { VehicleLookupControl } from "./VehicleLookupControl";
+import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronUp, FileUp, GripVertical, Loader2, Plus, Save, Star, Trash2, X } from "lucide-react";
 import type { CaseContactInput, CreateCaseInput, PlaceSelectionInput } from "@/data/case-inputs";
@@ -56,9 +59,7 @@ import {
   getEmailValidationError,
   incidentTypes,
   jobTypes,
-  normalizeLicensePlateInput,
   normalizeVehicleConditionFlags,
-  normalizeVinInput,
   paymentMethods,
   paymentStatuses,
   placeTypes,
@@ -158,6 +159,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   const [customerNote, setCustomerNote] = useState("");
   const [licensePlate, setLicensePlate] = useState("");
   const [vin, setVin] = useState("");
+  const [vehicleLookup, setVehicleLookup] = useState<VehicleLookupSnapshot | null>(null);
   const [vehicleMake, setVehicleMake] = useState("");
   const [vehicleModel, setVehicleModel] = useState("");
   const [productionYear, setProductionYear] = useState("");
@@ -352,7 +354,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   function prefillFromCommander() {
     const normalizedPlate = normalizePlate(licensePlate);
     if (!normalizedPlate) return;
-    const vehicle = commanderVehicles.find((candidate) => normalizePlate(candidate.licensePlate ?? "") === normalizedPlate);
+    const vehicle = resolveInternalVehicle(commanderVehicles, licensePlate, vin);
     if (!vehicle) return;
 
     if (!vehicleMake.trim() && vehicle.make) setVehicleMake(vehicle.make);
@@ -496,6 +498,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
       customerNote,
       licensePlate,
       vin,
+      vehicleLookup,
       vehicleMake: vehicleMake.trim() || undefined,
       vehicleModel: vehicleModel.trim() || undefined,
       vehicleCategory: vehicleCategory.trim() || undefined,
@@ -612,6 +615,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   function resetTransientFields() {
     setLicensePlate("");
     setVin("");
+    setVehicleLookup(null);
     setVehicleMake("");
     setVehicleModel("");
     setVehicleColor("");
@@ -848,8 +852,14 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
               </p>
             )}
             <div className="grid gap-3 md:grid-cols-3">
-              <TextField label="EČV" required={!replacementOnly} value={licensePlate} onChange={setLicensePlate} onBlur={prefillFromCommander} error={fieldErrors.licensePlate} transformValue={normalizeLicensePlateInput} />
-              <TextField label="VIN" value={vin} onChange={setVin} error={fieldErrors.vin} reserveErrorSpace transformValue={normalizeVinInput} />
+              <VehicleLookupControl contextKey="new-case" plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor }} onApply={(patch, snapshot) => {
+                markDirty(); setVehicleLookup(snapshot);
+                if (patch.plate !== undefined) setLicensePlate(patch.plate);
+                if (patch.vin !== undefined) setVin(patch.vin);
+                if (patch.make !== undefined) setVehicleMake(patch.make);
+                if (patch.model !== undefined) setVehicleModel(patch.model);
+                if (patch.color !== undefined) setVehicleColor(patch.color);
+              }} />
               <TextField label="Značka" value={vehicleMake} onChange={setVehicleMake} />
               <TextField label="Model" value={vehicleModel} onChange={setVehicleModel} />
               <TextField

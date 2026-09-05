@@ -1,6 +1,8 @@
 import "server-only";
 import { matchFleetIdentities } from "@/lib/fleet-pairing";
 
+import { lookupSnapshotForSave } from "@/server/vehicle-lookup/snapshot";
+
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
   CreateAttendanceRequestInput,
@@ -104,6 +106,7 @@ export async function createCase(input: CreateCaseInput, ownerProfileId?: string
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
   const organizationId = organization.id;
+  input = withVerifiedVehicleLookup(input, organizationId);
   const ownerId = ownerProfileId
     ? (await getProfile(supabase, organizationId, ownerProfileId)).id
     : await resolveDefaultOwnerId(supabase, organizationId);
@@ -189,6 +192,8 @@ export async function updateCase(caseId: string, input: UpdateCaseInput, actorPr
   const actorId = nonEmpty(actorProfileId) ? (await getProfile(supabase, organizationId, actorProfileId)).id : ownerId;
   const contact = existing.contact_id ? await getContact(supabase, organizationId, existing.contact_id) : null;
   const vehicle = existing.vehicle_id ? await getVehicle(supabase, organizationId, existing.vehicle_id) : null;
+
+  input = withVerifiedVehicleLookup(input, organizationId, { identity: { plate: vehicle?.license_plate ?? undefined, vin: vehicle?.vin ?? undefined }, snapshot: objectJson(existing.vehicle_details).vehicleLookup });
 
   const contactId = await upsertCaseContact(supabase, organizationId, contact, input);
   const vehicleId = await upsertCaseVehicle(supabase, organizationId, vehicle, input);
@@ -1282,6 +1287,7 @@ export async function createFleetAsset(input: CreateFleetAssetInput) {
 
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
+  input = withVerifiedVehicleLookup(input, organization.id);
   const branch = await getBranch(supabase, organization.id, input.branchId);
   const currentLocationId = input.location
     ? (await createLocation(supabase, organization.id, input.location, input.label)).id
@@ -1297,7 +1303,7 @@ export async function createFleetAsset(input: CreateFleetAssetInput) {
         branch_id: branch.id,
         current_location_id: currentLocationId,
         location_source: input.location ? "manual" : "settings_form",
-        metadata: { source: "settings_form" },
+        metadata: { source: "settings_form", ...(input.vehicleLookup !== undefined ? { vehicleLookup: input.vehicleLookup as unknown as Json } : {}) },
       })
       .select("*")
       .single(),
@@ -1319,6 +1325,7 @@ export async function updateFleetAsset(id: string, input: UpdateFleetAssetInput)
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
   const existing = await getFleetAsset(supabase, organization.id, id);
+  input = withVerifiedVehicleLookup(input, organization.id, { identity: { plate: existing.license_plate ?? undefined, vin: existing.vin ?? undefined }, snapshot: objectJson(existing.metadata).vehicleLookup });
   const branch = input.branchId ? await getBranch(supabase, organization.id, input.branchId) : null;
   const currentLocationId =
     input.location === null
@@ -1331,6 +1338,7 @@ export async function updateFleetAsset(id: string, input: UpdateFleetAssetInput)
     ...(input.label ? { label: input.label.trim() } : {}),
     ...fleetAssetWritePayload(input),
     ...(branch ? { branch_id: branch.id } : {}),
+    ...(input.vehicleLookup !== undefined ? { metadata: mergeJson(existing.metadata, { vehicleLookup: input.vehicleLookup as unknown as Json }) } : {}),
     current_location_id: currentLocationId,
     ...(input.location ? { location_source: "manual" } : {}),
     ...(input.status && objectJson(existing.metadata).availabilityUnverified === true
@@ -3522,10 +3530,18 @@ function customerDetailsPayload(input: CreateCaseInput | UpdateCaseInput): Json 
   };
 }
 
+function withVerifiedVehicleLookup<T extends Parameters<typeof lookupSnapshotForSave>[0]>(input: T, organizationId: string, existing?: Parameters<typeof lookupSnapshotForSave>[2]): T {
+  try {
+    const vehicleLookup = lookupSnapshotForSave(input, organizationId, existing);
+    return vehicleLookup === undefined ? input : { ...input, vehicleLookup };
+  } catch (error) { throw new MutationError((error as Error).message, 400); }
+}
+
 function vehicleDetailsPayload(input: CreateCaseInput | UpdateCaseInput, options: { includeJobTypes?: boolean } = { includeJobTypes: true }): Json {
   const flags = normalizeVehicleFlags(input.vehicleConditionFlags, input.vehicleDriveable);
 
   return {
+    ...(input.vehicleLookup !== undefined ? { vehicleLookup: input.vehicleLookup as unknown as Json } : {}),
     ...(options.includeJobTypes === false || input.jobTypes === undefined ? {} : { jobTypes: jobTypesForInput(input) }),
     ...(input.vehicleType !== undefined ? { vehicleType: input.vehicleType } : {}),
     ...(input.productionYear !== undefined ? { productionYear: cleanNumber(input.productionYear) } : {}),
@@ -3786,7 +3802,7 @@ function caseUpdatePayload(
     ])
       ? { customer_details: mergeJson(existing.customer_details, customerDetailsPayload(input)) }
       : {}),
-    ...(hasAny(input, ["jobTypes", "vehicleType", "productionYear", "vehicleColor", "driveType", "vehicleConditionFlags", "vehicleDriveable", "vehicleNote"])
+    ...(hasAny(input, ["vehicleLookup", "jobTypes", "vehicleType", "productionYear", "vehicleColor", "driveType", "vehicleConditionFlags", "vehicleDriveable", "vehicleNote"])
       ? { vehicle_details: mergeJson(existing.vehicle_details, vehicleDetailsPayload(input, { includeJobTypes: "jobTypes" in input })) }
       : {}),
     ...(hasAny(input, ["incidentType", "incidentDescription", "vehicleIssue", "participantsCount", "passengersCount", "damages", "damageAreas", "damageNote"])

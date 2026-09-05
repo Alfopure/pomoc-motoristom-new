@@ -30,6 +30,7 @@ export type RouteAuthEntry = {
 };
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
+  "vehicles/lookup": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   // ── public (6) ──────────────────────────────────────────────────────────
   "auth/forgot-password": { class: "public" },
   "health/live": { class: "public", note: "Sanitized infrastructure liveness probe." },

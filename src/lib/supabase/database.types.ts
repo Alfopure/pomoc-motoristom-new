@@ -1254,6 +1254,14 @@ export type Database = {
       }>;
     };
     Functions: {
+      motorist_vehicle_lookup_claim: {
+        Args: { p_organization_id: string; p_profile_id: string; p_query_hash: string };
+        Returns: Json;
+      };
+      motorist_vehicle_lookup_finish: {
+        Args: { p_organization_id: string; p_token: string; p_query_hash: string; p_result: Json; p_success: boolean; p_skp_failed: boolean | null };
+        Returns: boolean;
+      };
       motorist_enqueue_job_run: {
         Args: {
           p_run_id: string;
