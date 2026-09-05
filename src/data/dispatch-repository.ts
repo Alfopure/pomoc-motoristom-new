@@ -1,6 +1,8 @@
 import "server-only";
 import { fleetTelemetryDetails, isFreshFleetTimestamp, validFleetPoint } from "@/lib/fleet-observation";
 
+import { readVerifiedVehicleLookup } from "@/server/vehicle-lookup/snapshot";
+
 import { isDeletedAccessProfile } from "@/domain/access-profile";
 
 import type {
@@ -944,6 +946,7 @@ function mapFleetAsset(
     model: asset.model ?? undefined,
     licensePlate: asset.license_plate ?? "-",
     vin: asset.vin ?? undefined,
+    vehicleLookup: readVerifiedVehicleLookup(metadata.vehicleLookup, asset.organization_id, { plate: asset.license_plate ?? "", vin: asset.vin ?? "" }),
     status,
     category: asset.category ?? undefined,
     weightKg: asset.weight_kg ?? undefined,
@@ -1153,7 +1156,7 @@ function mapCase({
   const destination = mapLocation(caseRow.destination_location_id ? locationById.get(caseRow.destination_location_id) : undefined, "destination");
   const customerLocationRow = customerLocationSubmission?.location_id ? locationById.get(customerLocationSubmission.location_id) : undefined;
   const owner = caseRow.owner_id ? profilesById.get(caseRow.owner_id) : undefined;
-  const mappedVehicle = mapVehicle(vehicle, vehicleDetails);
+  const mappedVehicle = mapVehicle(vehicle, vehicleDetails, caseRow.organization_id);
   const mappedIncidentDetails = mapIncidentDetails(caseRow.incident_details);
   const canonicalProblem = canonicalCaseProblemDescription(mappedVehicle.issue, mappedIncidentDetails.description);
   mappedVehicle.issue = canonicalProblem ?? "";
@@ -1269,7 +1272,7 @@ function mapContact(contact?: ContactRow): Contact {
   };
 }
 
-function mapVehicle(vehicle: VehicleRow | undefined, vehicleDetails: JsonRecord = {}): Vehicle {
+function mapVehicle(vehicle: VehicleRow | undefined, vehicleDetails: JsonRecord = {}, organizationId = ""): Vehicle {
   const conditionFlags = stringArray(vehicleDetails.conditionFlags).filter(isVehicleConditionFlag);
   const vehicleNote = stringValue(vehicleDetails.note);
 
@@ -1302,6 +1305,7 @@ function mapVehicle(vehicle: VehicleRow | undefined, vehicleDetails: JsonRecord 
     make: vehicle.make ?? "",
     model: vehicle.model ?? "",
     productionYear: vehicle.production_year ?? numberValue(vehicleDetails.productionYear),
+    vehicleLookup: readVerifiedVehicleLookup(vehicleDetails.vehicleLookup, organizationId, { plate: vehicle.license_plate ?? "", vin: vehicle.vin ?? "" }),
     color: vehicle.color ?? stringValue(vehicleDetails.color),
     category: vehicle.category ?? "",
     vehicleType: stringValue(vehicleDetails.vehicleType) as ClientVehicleType | undefined,
