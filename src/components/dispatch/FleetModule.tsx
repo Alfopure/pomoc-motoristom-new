@@ -2,9 +2,11 @@
 
 import { useMemo, useState, type ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
-import { AlertTriangle, Ban, CalendarDays, Car, CheckCircle2, Clock3, FileWarning, Link2, Plus, RadioTower, RefreshCw, Save, Search, Truck } from "lucide-react";
+import { AlertTriangle, CalendarDays, Car, CheckCircle2, Clock3, Download, FileWarning, Link2, Plus, RadioTower, RefreshCw, Save, Search, Truck } from "lucide-react";
+import { fleetReconciliationCsv } from "@/lib/fleet-reconciliation";
 import type { CreateFleetAssetInput, UpdateFleetAssetInput } from "@/data/case-inputs";
-import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
+import type { CommanderVehicleConnection, DispatchData, FleetProviderVehicle, IntegrationConnection } from "@/data/dispatch-types";
+import { FleetSourceDetails, FleetSourceHealth } from "./FleetSourceDetails";
 import type {
   Branch,
   DispatchCase,
@@ -19,15 +21,16 @@ import type {
 } from "@/domain/types";
 import {
   BrandBadge,
-  StatusPill,
+  FleetAvailabilityPill,
+  fleetDateTime,
   capabilityLabel,
   categoryLabel,
   driverStatusLabel,
   driverStatusTone,
   gpsStatusText,
+  gpsSourceLabel,
   gpsTone,
   matchesSearch,
-  occupancyText,
   relativeTime,
   statusLabel,
   statusOptions,
@@ -49,6 +52,11 @@ type FleetModuleProps = {
   commanderLatestRunAt?: string;
   commanderLatestStatus?: "running" | "success" | "partial" | "failed";
   commanderVehicles: CommanderVehicleConnection[];
+  integrations?: IntegrationConnection[];
+  webdispecinkVehicles?: FleetProviderVehicle[];
+  onRefresh?: () => Promise<void>;
+  refreshing?: boolean;
+  refreshMessage?: string | null;
   onDataChange: (dispatchData: DispatchData) => void;
 };
 
@@ -101,6 +109,11 @@ export function FleetModule({
   commanderLatestRunAt,
   commanderLatestStatus,
   commanderVehicles,
+  integrations = [],
+  webdispecinkVehicles = [],
+  onRefresh,
+  refreshing = false,
+  refreshMessage,
   onDataChange,
 }: FleetModuleProps) {
   const [mode, setMode] = useState<FleetMode>("replacement");
@@ -108,8 +121,9 @@ export function FleetModule({
   const [branchFilter, setBranchFilter] = useState<FilterValue>("all");
   const [statusFilter, setStatusFilter] = useState<FilterValue>("all");
   const [categoryFilter, setCategoryFilter] = useState<FilterValue>("all");
-  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(assets[0]?.id ?? null);
-  const [draft, setDraft] = useState<FleetDraft>(() => assetToDraft(assets[0], branches[0]?.id, "replacement"));
+  const firstReplacement = assets.find((asset) => asset.kind === "replacement_car");
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(firstReplacement?.id ?? null);
+  const [draft, setDraft] = useState<FleetDraft>(() => assetToDraft(firstReplacement, branches[0]?.id, "replacement"));
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -122,22 +136,21 @@ export function FleetModule({
     () =>
       assets
         .filter((asset) => asset.kind === visibleKind)
-        .filter((asset) => branchFilter === "all" || asset.branchId === branchFilter)
-        .filter((asset) => statusFilter === "all" || asset.status === statusFilter)
+        .filter((asset) => branchFilter === "all" || (asset.swhouse?.branchName ? `swh:${asset.swhouse.branchName}` : asset.branchId) === branchFilter)
+        .filter((asset) => statusFilter === "all" || (asset.kind === "replacement_car" ? asset.occupancy === statusFilter : asset.status === statusFilter))
         .filter((asset) => categoryFilter === "all" || asset.category === categoryFilter)
         .filter((asset) => matchesSearch(asset, search))
         .sort((left, right) => statusRank(left.status) - statusRank(right.status) || left.label.localeCompare(right.label, "sk")),
     [assets, branchFilter, categoryFilter, search, statusFilter, visibleKind],
   );
-  const selectedAsset = assets.find((asset) => asset.id === selectedAssetId) ?? filteredAssets[0] ?? null;
-  const caseNumberById = new Map(cases.map((caseItem) => [caseItem.id, caseItem.caseNumber]));
+  const selectedAsset = assets.find((asset) => asset.id === selectedAssetId) ?? null;
   const replacementUnverified = assets.filter(
     (asset) => asset.kind === "replacement_car" && (asset.occupancy === "unverified" || asset.occupancy === "stale"),
   ).length;
   const replacementAvailable = assets.filter(
-    (asset) => asset.kind === "replacement_car" && asset.status === "available" && asset.occupancy === "free",
+    (asset) => asset.kind === "replacement_car" && asset.occupancy === "free",
   ).length;
-  const replacementOccupied = assets.filter((asset) => asset.kind === "replacement_car" && ["reserved", "rented", "assigned"].includes(asset.status)).length;
+  const replacementOccupied = assets.filter((asset) => asset.kind === "replacement_car" && asset.occupancy === "occupied").length;
   const towAvailable = assets.filter((asset) => asset.kind === "tow_truck" && asset.status === "available").length;
   const docsAttention = assets.filter(hasDocumentAttention).length;
   const gpsOverview = useMemo(() => fleetGpsOverview(assets), [assets]);
@@ -212,20 +225,26 @@ export function FleetModule({
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-zinc-950">Flotila</h1>
-          <p className="text-sm text-zinc-600">Dostupnosť náhradných vozidiel a odťahoviek pre denný dispečing.</p>
+          <p className="text-xs text-zinc-600">Software House určuje flotilu a obsadenosť. GPS sa overuje samostatne.</p>
           <GpsSyncIndicator freshness={gpsSyncFreshness} />
         </div>
+        <div className="flex flex-wrap gap-2">
+        {onRefresh && <button type="button" onClick={() => void onRefresh()} disabled={refreshing} className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 text-xs font-semibold disabled:opacity-50"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{refreshing ? "Obnovujem…" : "Obnoviť všetky zdroje"}</button>}
         {mode !== "gps" && (
           <button
             type="button"
             onClick={startNewAsset}
-            className="inline-flex h-10 items-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800"
+            className="inline-flex h-9 items-center gap-2 rounded-md bg-zinc-950 px-3 text-xs font-semibold text-white hover:bg-zinc-800"
           >
             <Plus size={16} />
             Nové vozidlo
           </button>
         )}
+        </div>
       </div>
+
+      <FleetSourceHealth assets={assets} commander={commanderVehicles} webdispecink={webdispecinkVehicles} integrations={integrations} />
+      {refreshMessage && <p role="status" className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900">{refreshMessage}</p>}
 
       <div className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-3 xl:grid-cols-5">
         <Kpi icon={Car} label="Voľné náhradné" value={String(replacementAvailable)} />
@@ -242,7 +261,7 @@ export function FleetModule({
         </div>
       )}
 
-      <GpsHealthPanel overview={gpsOverview} />
+      {mode === "tow" && <GpsHealthPanel overview={gpsOverview} />}
 
       {mode === "gps" ? (
         <GpsConnectionsPanel
@@ -255,7 +274,7 @@ export function FleetModule({
           onSwitchMode={switchMode}
         />
       ) : (
-      <div className="grid gap-4 xl:min-h-[620px] xl:grid-cols-[minmax(0,1fr)_420px]">
+      <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_340px]">
         <section className="min-w-0 rounded-md border border-zinc-200 bg-white">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 p-3">
             <div className="inline-flex w-full overflow-x-auto rounded-md bg-zinc-100 p-1 sm:w-auto">
@@ -263,7 +282,7 @@ export function FleetModule({
               <ModeButton active={mode === "tow"} icon={Truck} label="Odťahovky" onClick={() => switchMode("tow")} />
               <ModeButton active={false} icon={RadioTower} label={`Párovanie vozidiel${commanderUnpaired ? ` (${commanderUnpaired})` : ""}`} onClick={() => switchMode("gps")} />
             </div>
-            <div className="grid w-full gap-2 lg:w-auto lg:grid-cols-[220px_170px_150px_180px]">
+            <div className="grid w-full gap-2 sm:grid-cols-2 lg:grid-cols-4">
               <label className="relative">
                 <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
                 <input
@@ -273,8 +292,8 @@ export function FleetModule({
                   className="h-9 w-full rounded-md border border-zinc-200 pl-9 pr-3 text-sm outline-none ring-yellow-300 transition focus:ring-2"
                 />
               </label>
-              <CompactSelect value={branchFilter} onChange={setBranchFilter} options={[["all", "Všetky pobočky"], ...branches.map((branch) => [branch.id, branch.name] as const)]} />
-              <CompactSelect value={statusFilter} onChange={setStatusFilter} options={[["all", "Všetky stavy"], ...statusOptions.map((status) => [status, statusLabel[status]] as const)]} />
+              <CompactSelect value={branchFilter} onChange={setBranchFilter} options={[["all", "Všetky pobočky"], ...Array.from(new Set(assets.filter((asset) => asset.kind === visibleKind).map((asset) => asset.swhouse?.branchName).filter((name): name is string => !!name))).sort().map((name) => [`swh:${name}`, name] as const), ...branches.map((branch) => [branch.id, branch.name] as const)]} />
+              <CompactSelect value={statusFilter} onChange={setStatusFilter} options={[["all", "Všetky stavy"], ...(mode === "replacement" ? [["free", "Voľné"], ["occupied", "Obsadené"], ["stale", "Neaktuálny stav"], ["unverified", "Neoverené"]] as const : statusOptions.map((status) => [status, statusLabel[status]] as const))]} />
               <CompactSelect
                 value={categoryFilter}
                 onChange={setCategoryFilter}
@@ -283,15 +302,14 @@ export function FleetModule({
             </div>
           </div>
 
-          <div className="overflow-auto">
+          <div className="max-h-[calc(100dvh-390px)] min-h-[240px] overflow-auto">
             <table className="min-w-full border-separate border-spacing-0 text-left text-sm">
               <thead className="sticky top-0 bg-zinc-50 text-xs font-semibold uppercase tracking-normal text-zinc-500">
                 <tr>
                   <th className="border-b border-zinc-200 px-3 py-2">Vozidlo</th>
                   <th className="border-b border-zinc-200 px-3 py-2">Stav</th>
                   <th className="border-b border-zinc-200 px-3 py-2">Pobočka</th>
-                  <th className="border-b border-zinc-200 px-3 py-2">Posádka</th>
-                  <th className="border-b border-zinc-200 px-3 py-2">Obsadenie</th>
+                  {mode === "tow" && <th className="border-b border-zinc-200 px-3 py-2">Posádka</th>}
                   <th className="border-b border-zinc-200 px-3 py-2">Poloha</th>
                   <th className="border-b border-zinc-200 px-3 py-2">Doklady</th>
                 </tr>
@@ -303,43 +321,25 @@ export function FleetModule({
                     onClick={() => selectAsset(asset)}
                     className={`cursor-pointer transition ${asset.id === selectedAssetId ? "bg-yellow-50" : "hover:bg-zinc-50"}`}
                   >
-                    <td className="border-b border-zinc-100 px-3 py-3">
-                      <div className="flex min-w-[260px] items-center gap-3">
+                    <td className="border-b border-zinc-100 px-3 py-2">
+                      <div className="flex min-w-[180px] items-center gap-2">
                         <BrandBadge make={asset.make} />
                         <div className="min-w-0">
-                          <div className="truncate font-semibold text-zinc-950">{asset.label}</div>
+                          <button type="button" onClick={() => selectAsset(asset)} className="text-left text-xs font-semibold text-zinc-950 hover:underline">{[asset.make, asset.model].filter(Boolean).join(" ") || asset.label}</button>
                           <div className="truncate text-xs text-zinc-500">
-                            {[asset.make, asset.model, asset.licensePlate].filter(Boolean).join(" · ")}
+                            {asset.licensePlate}
                           </div>
                         </div>
                       </div>
                     </td>
                     <td className="border-b border-zinc-100 px-3 py-3">
-                      {asset.occupancy === "unverified" ? (
-                        <span className="inline-flex rounded-full bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800" title="SWHouse toto auto pod danou ŠPZ nepozná — stav nie je overený">
-                          Neoverené
-                        </span>
-                      ) : asset.occupancy === "stale" ? (
-                        <span className="inline-flex rounded-full bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800" title="SWHouse snapshot je starší ako 10 minút">
-                          Neaktuálne
-                        </span>
-                      ) : (
-                        <StatusPill status={asset.status} />
-                      )}
+                      <FleetAvailabilityPill asset={asset} />
+                      {asset.swhouse?.observedSince && <div className="mt-1 whitespace-nowrap text-[10px] text-zinc-500" title="Prvé súvislé pozorovanie, nie začiatok prenájmu">Pozorované {fleetDateTime(asset.swhouse.observedSince)}</div>}
                     </td>
-                    <td className="border-b border-zinc-100 px-3 py-3 text-xs text-zinc-600">{branchName(asset.branchId, branches)}</td>
-                    <td className="border-b border-zinc-100 px-3 py-3 text-xs text-zinc-600">
+                    <td className="border-b border-zinc-100 px-3 py-2 text-xs text-zinc-600">{asset.swhouse?.branchName ?? branchName(asset.branchId, branches)}</td>
+                    {mode === "tow" && <td className="border-b border-zinc-100 px-3 py-2 text-xs text-zinc-600">
                       <DriverSummary asset={asset} />
-                    </td>
-                    <td className="border-b border-zinc-100 px-3 py-3 text-xs text-zinc-600">
-                      {asset.occupancy === "occupied"
-                        ? "Prenajaté · SWHouse"
-                        : asset.occupancy === "unverified"
-                          ? "Mimo SWHouse"
-                          : asset.occupancy === "stale"
-                            ? "SWHouse dáta neaktuálne"
-                          : occupancyText(asset, caseNumberById)}
-                    </td>
+                    </td>}
                     <td className="border-b border-zinc-100 px-3 py-3">
                       <GpsSummary asset={asset} />
                     </td>
@@ -369,10 +369,13 @@ export function FleetModule({
                 <p className="truncate text-xs text-zinc-500">{selectedAsset ? detailSubtitle(selectedAsset, branches) : "Vyplň základné údaje a ulož vozidlo."}</p>
               </div>
             </div>
-            {selectedAsset && <StatusPill status={selectedAsset.status} />}
           </div>
 
           {message && <div className="mb-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-900">{message}</div>}
+
+          {selectedAsset && <FleetSourceDetails asset={selectedAsset} />}
+          <details key={draft.id ?? "new"} open={!draft.id}>
+          <summary className="mb-3 cursor-pointer text-xs font-semibold text-zinc-600">{draft.id ? "Upraviť interné údaje vozidla" : "Základné údaje"}</summary>
 
           <div className="grid gap-3">
             <div className="grid gap-3 sm:grid-cols-2">
@@ -495,6 +498,7 @@ export function FleetModule({
               {draft.id ? "Uložiť zmeny" : "Uložiť vozidlo"}
             </button>
           </div>
+          </details>
         </aside>
       </div>
       )}
@@ -600,13 +604,14 @@ function GpsConnectionsPanel({
   }, [commanderVehicles]);
 
   const swhouseCars = useMemo(() => assets.filter((asset) => asset.kind === "replacement_car" && asset.swhouseLinked), [assets]);
-  const ghostCars = useMemo(() => assets.filter((asset) => asset.kind === "replacement_car" && !asset.swhouseLinked), [assets]);
-  const ghostSources = useMemo(() => ghostCars.filter((ghost) => commanderByAssetId.has(ghost.id)), [ghostCars, commanderByAssetId]);
+  const ghostSources = useMemo(() => commanderVehicles.filter((vehicle) => vehicle.sourceActive &&
+    !(vehicle.link?.status === "confirmed" && swhouseCars.some((asset) => asset.id === vehicle.link?.fleetAssetId))), [commanderVehicles, swhouseCars]);
   const missing = useMemo(() => swhouseCars.filter((asset) => !commanderByAssetId.has(asset.id)), [swhouseCars, commanderByAssetId]);
-  const withPosition = swhouseCars.length - missing.length;
+  const withPosition = swhouseCars.filter((asset) => commanderByAssetId.get(asset.id)?.position).length;
+  const pairedWithoutGps = swhouseCars.filter((asset) => commanderByAssetId.has(asset.id) && !commanderByAssetId.get(asset.id)?.position);
 
-  function sourcesFor(target: FleetAsset) {
-    return [...ghostSources].sort((left, right) => matchScore(right, target) - matchScore(left, target) || left.label.localeCompare(right.label, "sk"));
+  function sourcesFor() {
+    return [...ghostSources].sort((left, right) => (left.licensePlate ?? left.label ?? "").localeCompare(right.licensePlate ?? right.label ?? "", "sk"));
   }
 
   async function callAndApply(body: unknown, successText: string) {
@@ -641,7 +646,7 @@ function GpsConnectionsPanel({
       const data = (await response.json()) as {
         dispatchData?: DispatchData;
         error?: string;
-        summary?: { autoPaired: number; warnings: string[] };
+        summary?: { autoPaired: number; warnings: string[]; skipped?: boolean };
       };
       if (!response.ok || !data.dispatchData) {
         throw new Error(data.error ?? "Obnovenie zlyhalo.");
@@ -649,7 +654,7 @@ function GpsConnectionsPanel({
       onDataChange(data.dispatchData);
       const autoPaired = data.summary?.autoPaired ?? 0;
       const warnings = data.summary?.warnings?.length ? ` ${data.summary.warnings.join(" ")}` : "";
-      onMessage(`Aktualizované. Automaticky spárované: ${autoPaired}.${warnings}`);
+      onMessage(data.summary?.skipped ? "Zobrazené posledné uložené údaje. Spoločná obnova už beží alebo prebehla pred chvíľou." : `Aktualizované. Automaticky spárované: ${autoPaired}.${warnings}`);
     } catch (error) {
       onMessage(error instanceof Error ? error.message : "Obnovenie zlyhalo.");
     } finally {
@@ -658,8 +663,7 @@ function GpsConnectionsPanel({
   }
 
   function assign(target: FleetAsset, sourceGhostId: string) {
-    const source = ghostSources.find((ghost) => ghost.id === sourceGhostId);
-    const record = source ? commanderByAssetId.get(source.id) : undefined;
+    const record = ghostSources.find((source) => source.id === sourceGhostId);
     if (!record) {
       onMessage("Vyber vozidlo z Commandera.");
       return;
@@ -667,8 +671,11 @@ function GpsConnectionsPanel({
     void callAndApply({ action: "assign", commanderRecordId: record.id, swhouseAssetId: target.id }, "Vozidlo spárované, poloha presunutá.");
   }
 
-  function markSold(asset: FleetAsset) {
-    void callAndApply({ action: "markSold", assetId: asset.id }, "Vozidlo označené ako predané.");
+  function downloadReconciliation() {
+    const url = URL.createObjectURL(new Blob(["\uFEFF", fleetReconciliationCsv(assets, commanderVehicles)], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url; link.download = `kontrola-flotily-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click(); URL.revokeObjectURL(url);
   }
 
   return (
@@ -693,22 +700,24 @@ function GpsConnectionsPanel({
       <div className="grid grid-cols-2 gap-2 border-b border-zinc-200 p-3 sm:grid-cols-4">
         <SummaryChip label="Vozidlá zo SWHouse" value={swhouseCars.length} />
         <SummaryChip label="S polohou" value={withPosition} />
-        <SummaryChip label="Bez polohy" value={missing.length} tone={missing.length > 0 ? "warn" : "default"} />
-        <SummaryChip label="Mimo SWHouse" value={ghostCars.length} tone={ghostCars.length > 0 ? "warn" : "default"} />
+        <SummaryChip label="Bez napárovania" value={missing.length} tone={missing.length > 0 ? "warn" : "default"} />
+        <SummaryChip label="Commander bez zhody" value={ghostSources.length} tone={ghostSources.length > 0 ? "warn" : "default"} />
       </div>
 
       {message && <div className="border-b border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-900">{message}</div>}
 
       <div className="grid gap-4 p-3">
-        <ConnectionSection title="Vozidlá bez polohy" subtitle="Tieto autá sú v systéme, ale nemajú živú polohu. Priraď k nim vozidlo z Commandera.">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-600"><p>Automatika používa iba jednoznačnú ŠPZ/VIN. Nezhoda neznamená predané vozidlo.</p><button type="button" onClick={downloadReconciliation} className="inline-flex items-center gap-2 rounded-md border border-zinc-300 px-3 py-2 font-semibold"><Download size={14} />Stiahnuť kontrolu CSV</button></div>
+        <ConnectionSection title="Software House bez napárovania" subtitle="Tieto autá patria do produkčnej flotily, ale nemajú potvrdený Commander záznam. Nejasné zhody treba skontrolovať ručne.">
           {missing.length > 0 ? (
             missing.map((car) => (
-              <div key={car.id} className="border-b border-zinc-100 px-3 py-3 last:border-b-0">
+              <div key={car.id} className="border-b border-zinc-100 px-3 py-2 last:border-b-0">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold text-zinc-950">{[car.make, car.model].filter(Boolean).join(" ") || car.label}</div>
-                    <div className="truncate text-xs text-zinc-500">{car.licensePlate}</div>
+                    <div className="text-xs text-zinc-500">{car.licensePlate} · VIN {car.vin ?? "—"}</div>
                   </div>
+                  <FleetAvailabilityPill asset={car} />
                   <button
                     type="button"
                     onClick={() => {
@@ -730,9 +739,9 @@ function GpsConnectionsPanel({
                       className="h-10 w-full rounded-md border border-zinc-200 bg-white px-3 text-sm font-medium outline-none ring-yellow-300 transition focus:ring-2"
                     >
                       <option value="">Vyber vozidlo z Commandera…</option>
-                      {sourcesFor(car).map((source) => (
+                      {sourcesFor().map((source) => (
                         <option key={source.id} value={source.id}>
-                          {[source.licensePlate, source.make, source.model].filter(Boolean).join(" · ")}
+                          {[source.licensePlate, source.label, source.vin].filter(Boolean).join(" · ")}
                         </option>
                       ))}
                     </select>
@@ -749,37 +758,30 @@ function GpsConnectionsPanel({
               </div>
             ))
           ) : (
-            <EmptyConnectionState text="Všetky vozidlá zo SWHouse majú polohu. Netreba nič priraďovať." />
+            <EmptyConnectionState text="Všetky vozidlá zo Software House sú napárované. Dostupnosť GPS sa kontroluje samostatne." />
           )}
         </ConnectionSection>
 
-        <ConnectionSection title="Z Commandera, mimo SWHouse" subtitle="SWHouse tieto ŠPZ nepozná (prepis značky alebo predané auto). Priraď ich vyššie k správnemu autu, alebo označ ako predané.">
-          {ghostCars.length > 0 ? (
-            ghostCars.map((car) => {
-              const commander = commanderByAssetId.get(car.id);
+        {pairedWithoutGps.length > 0 && <ConnectionSection title="Napárované, zatiaľ bez GPS" subtitle="Identita súhlasí, ale Commander pre tieto vozidlá nevrátil platnú polohu. Napárovanie sa nemení.">
+          {pairedWithoutGps.map((car) => <div key={car.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-3 py-2 text-xs"><span>{car.licensePlate} · {car.label}</span><FleetAvailabilityPill asset={car} /></div>)}
+        </ConnectionSection>}
+        <ConnectionSection title="Commander bez zhody so Software House" subtitle="Vrátane záznamov, ktoré ešte nikdy neboli importované. Overte VIN alebo opravte ŠPZ v zdrojovom systéme; automaticky ich nevyraďujeme.">
+          {ghostSources.length > 0 ? (
+            ghostSources.map((car) => {
               return (
-                <div key={car.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-3 py-3 last:border-b-0">
+                <div key={car.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-3 py-2 last:border-b-0">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold text-zinc-950">{[car.make, car.model].filter(Boolean).join(" ") || car.label}</div>
-                    <div className="truncate text-xs text-zinc-500">{car.licensePlate}</div>
+                    <div className="text-xs text-zinc-500">{car.licensePlate ?? "Bez ŠPZ"} · ID {car.sourceVehicleId}{car.vin ? ` · VIN ${car.vin}` : ""}</div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                    <PolohaPill stale={commander?.position ? commander.position.stale : null} />
-                    <button
-                      type="button"
-                      onClick={() => markSold(car)}
-                      disabled={busy}
-                      className="inline-flex h-9 items-center gap-2 rounded-md border border-red-200 bg-red-50 px-3 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <Ban size={15} />
-                      Označiť ako predané
-                    </button>
+                    <PolohaPill stale={car.position ? car.position.stale : null} />
                   </div>
                 </div>
               );
             })
           ) : (
-            <EmptyConnectionState text="Žiadne vozidlá mimo SWHouse. Všetko je spárované." />
+            <EmptyConnectionState text="Všetky aktívne Commander záznamy majú potvrdenú zhodu so Software House." />
           )}
         </ConnectionSection>
       </div>
@@ -798,21 +800,6 @@ function PolohaPill({ stale }: { stale: boolean | null }) {
   );
 }
 
-function matchScore(ghost: FleetAsset, target: FleetAsset) {
-  let score = 0;
-  const ghostPlate = pairingPlate(ghost.licensePlate);
-  if (ghostPlate && ghostPlate === pairingPlate(target.licensePlate)) {
-    score += 100;
-  }
-  if (ghost.make && target.make && ghost.make.toLowerCase() === target.make.toLowerCase()) {
-    score += 20;
-  }
-  if (ghost.model && target.model && ghost.model.toLowerCase() === target.model.toLowerCase()) {
-    score += 20;
-  }
-  return score;
-}
-
 function SummaryChip({ label, tone = "default", value }: { label: string; tone?: "default" | "warn"; value: number }) {
   return (
     <div className={`rounded-md px-3 py-2 ring-1 ${tone === "warn" ? "bg-amber-50 text-amber-800 ring-amber-200" : "bg-white text-zinc-700 ring-zinc-200"}`}>
@@ -829,7 +816,7 @@ function ConnectionSection({ children, subtitle, title }: { children: ReactNode;
         <h2 className="text-sm font-semibold text-zinc-950">{title}</h2>
         <p className="text-xs text-zinc-500">{subtitle}</p>
       </div>
-      <div>{children}</div>
+      <div className="max-h-[480px] overflow-auto">{children}</div>
     </section>
   );
 }
@@ -837,13 +824,6 @@ function ConnectionSection({ children, subtitle, title }: { children: ReactNode;
 function EmptyConnectionState({ text }: { text: string }) {
   return <div className="px-3 py-8 text-center text-sm font-medium text-zinc-500">{text}</div>;
 }
-
-/** Normalizácia ŠPZ na párovanie so SWHouse ECV: uppercase, len A-Z0-9. */
-function pairingPlate(value: string | undefined) {
-  const normalized = value?.toUpperCase().replace(/[^A-Z0-9]/g, "");
-  return normalized || undefined;
-}
-
 
 function ModeButton({ active, icon: Icon, label, onClick }: { active: boolean; icon: LucideIcon; label: string; onClick: () => void }) {
   return (
@@ -903,10 +883,14 @@ function DriverSummary({ asset }: { asset: FleetAsset }) {
 
 function GpsSummary({ asset }: { asset: FleetAsset }) {
   return (
-    <span className={`inline-flex max-w-[210px] items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold ${gpsTone(asset)}`}>
-      <RadioTower size={12} className="shrink-0" />
-      <span className="truncate">{gpsStatusText(asset)}</span>
-    </span>
+    <div className="min-w-[130px] text-xs" title={gpsStatusText(asset)}>
+      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${gpsTone(asset)}`}>
+        <RadioTower size={11} className="shrink-0" />
+        {asset.gps ? gpsSourceLabel(asset.gps.source) : asset.positionKnown === false ? "Bez GPS" : "Manuálna poloha"}
+        {asset.gps?.stale ? " · staršia" : ""}
+      </span>
+      {asset.gps?.positionTime && <div className="mt-1 whitespace-nowrap text-[11px] text-zinc-500">{relativeTime(asset.gps.positionTime)}{asset.gps.speedKph !== undefined ? ` · ${Math.round(asset.gps.speedKph)} km/h` : ""}</div>}
+    </div>
   );
 }
 
@@ -1008,7 +992,7 @@ function assetToDraft(asset: FleetAsset | undefined, defaultBranchId: string | u
     model: asset.model ?? "",
     licensePlate: asset.licensePlate === "-" ? "" : asset.licensePlate,
     vin: asset.vin ?? "",
-    status: asset.status,
+    status: asset.internalStatus ?? asset.status,
     category: asset.category ?? "",
     weightKg: asset.weightKg ? String(asset.weightKg) : "",
     branchId: asset.branchId,
@@ -1102,7 +1086,7 @@ function branchName(branchId: string, branches: Branch[]) {
 }
 
 function detailSubtitle(asset: FleetAsset, branches: Branch[]) {
-  return `${asset.licensePlate} · ${branchName(asset.branchId, branches)} · ${gpsStatusText(asset)}`;
+  return `${asset.licensePlate} · ${asset.swhouse?.branchName ?? branchName(asset.branchId, branches)}`;
 }
 
 function hasDocumentAttention(asset: FleetAsset) {

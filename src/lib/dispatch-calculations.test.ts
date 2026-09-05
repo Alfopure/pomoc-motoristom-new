@@ -50,6 +50,15 @@ describe("recommendAssetForCase — SWHouse obsadenosť (rented) penalizuje výb
     expect(model.routePlan?.segments.some((segment) => segment.id === "asset-to-pickup")).toBe(false);
   });
 
+  it("never plots an unknown vehicle position or routes from its placeholder, including an explicit assignment", () => {
+    const unknown: FleetAsset = { ...baseCar, id: "unknown", occupancy: "free", status: "available", positionKnown: false, point: { lat: 0, lng: 0 } };
+    expect(findNearestAsset(caseItem, [unknown])).toBeUndefined();
+    const model = createDispatchMapModel({ ...caseItem, selectedAssetId: unknown.id }, branches, [unknown], priceRules[0]);
+    expect(model.nearestAsset).toBeUndefined();
+    expect(model.markers.some((marker) => marker.id === unknown.id)).toBe(false);
+    expect(model.routePlan?.segments.some((segment) => segment.id === "asset-to-pickup")).toBe(false);
+  });
+
   it("neoverené alebo staré dáta neporazia overene voľné auto", () => {
     const verified: FleetAsset = { ...baseCar, id: "verified", status: "available", occupancy: "free", point: { ...pickup, lat: pickup.lat + 0.1 } };
     const stale: FleetAsset = { ...baseCar, id: "stale", status: "available", occupancy: "stale", point: pickup };

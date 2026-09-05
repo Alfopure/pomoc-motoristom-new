@@ -58,6 +58,28 @@ export function StatusPill({ status }: { status: FleetAssetStatus }) {
   return <span className={`rounded-full px-2 py-1 text-xs font-semibold ${statusTone[status]}`}>{statusLabel[status]}</span>;
 }
 
+export function fleetAvailability(asset: FleetAsset) {
+  if (asset.availabilityVerified === false) return { label: "Stav neoverený", tone: "bg-amber-50 text-amber-800 ring-1 ring-amber-200" };
+  if (asset.kind === "replacement_car" && asset.occupancy) {
+    const labels = { free: "Voľné", occupied: "Obsadené", stale: "Stav neaktuálny", unverified: "Stav neoverený" };
+    return {
+      label: labels[asset.occupancy],
+      tone: asset.occupancy === "free" ? statusTone.available : asset.occupancy === "occupied" ? statusTone.rented : "bg-amber-50 text-amber-800 ring-1 ring-amber-200",
+    };
+  }
+  return { label: statusLabel[asset.status], tone: statusTone[asset.status] };
+}
+
+export function FleetAvailabilityPill({ asset }: { asset: FleetAsset }) {
+  const state = fleetAvailability(asset);
+  return <span className={`inline-flex whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold ${state.tone}`}>{state.label}</span>;
+}
+
+export function fleetDateTime(value: string | undefined) {
+  if (!value || !Number.isFinite(Date.parse(value))) return "—";
+  return new Intl.DateTimeFormat("sk-SK", { dateStyle: "short", timeStyle: "short", timeZone: MOTORIST_TIME_ZONE }).format(new Date(value));
+}
+
 export function matchesSearch(asset: FleetAsset, search: string) {
   const needle = search.trim().toLowerCase();
   if (!needle) {
@@ -68,6 +90,12 @@ export function matchesSearch(asset: FleetAsset, search: string) {
 }
 
 export function occupancyText(asset: FleetAsset, caseNumberById?: Map<string, string>) {
+  if (asset.availabilityVerified === false) return "Stav neoverený · GPS neposkytuje obsadenosť";
+  if (asset.kind === "replacement_car" && asset.occupancy) {
+    return asset.swhouse?.observedSince && (asset.occupancy === "free" || asset.occupancy === "occupied")
+      ? `${fleetAvailability(asset).label} · pozorované od ${fleetDateTime(asset.swhouse.observedSince)}`
+      : fleetAvailability(asset).label;
+  }
   if (asset.status === "available" && !asset.occupiedFrom && !asset.occupiedUntil) {
     return "Voľné";
   }
@@ -79,6 +107,7 @@ export function occupancyText(asset: FleetAsset, caseNumberById?: Map<string, st
 }
 
 export function gpsStatusText(asset: FleetAsset) {
+  if (asset.positionKnown === false) return "Bez overenej polohy";
   if (!asset.gps) {
     return "Manuálna poloha";
   }
@@ -86,7 +115,7 @@ export function gpsStatusText(asset: FleetAsset) {
   const positionText = asset.gps.positionTime ? relativeTime(asset.gps.positionTime) : "bez času";
   const speedText = typeof asset.gps.speedKph === "number" ? ` · ${Math.round(asset.gps.speedKph)} km/h` : "";
 
-  return `${gpsSourceLabel(asset.gps.source)} · ${positionText}${speedText}`;
+  return `${gpsSourceLabel(asset.gps.source)} · ${asset.gps.stale ? "staršia poloha · " : ""}${positionText}${speedText}`;
 }
 
 export function gpsTone(asset: FleetAsset) {

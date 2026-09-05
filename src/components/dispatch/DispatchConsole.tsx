@@ -31,6 +31,7 @@ import { CaseList, type CaseFilters } from "./CaseList";
 import { DashboardPhone } from "./DashboardPhone";
 import type { CaseSortState } from "./CaseTable";
 import { FleetModule } from "./FleetModule";
+import { mergeFleetData, useFleetRefresh } from "./useFleetRefresh";
 import { ExpandedCasePanel } from "./ExpandedCasePanel";
 import { IntegrationSettings } from "./IntegrationSettings";
 import { MapWorkspace, type CenterView, type WorkspaceKind, type WorkspaceMode } from "./MapWorkspace";
@@ -253,6 +254,7 @@ export function DispatchConsole({
     users[0]?.name ||
     "Prihlásený používateľ";
   const [activeView, setActiveView] = useState<View>("dispatch");
+  const fleetRefresh = useFleetRefresh(source === "supabase" && ["dispatch", "fleet", "cases"].includes(activeView), setDispatchData);
   const [pinnedNavigationViews, setPinnedNavigationViews] = useState<PinnableNavigationView[]>([
     ...DEFAULT_PINNED_NAVIGATION_VIEWS,
   ]);
@@ -1916,7 +1918,12 @@ export function DispatchConsole({
           commanderLatestRunAt={commanderGpsLatestRunAt}
           commanderLatestStatus={commanderGpsLatestStatus}
           commanderVehicles={commanderVehicles}
-          onDataChange={setDispatchData}
+          integrations={dispatchData.integrations}
+          webdispecinkVehicles={dispatchData.fleetProviderVehicles}
+          onRefresh={fleetRefresh.refresh}
+          refreshing={fleetRefresh.refreshing}
+          refreshMessage={fleetRefresh.refreshMessage}
+          onDataChange={(incoming) => setDispatchData((current) => mergeFleetData(current, incoming))}
         />
       )}
       {activeView === "settings" && (

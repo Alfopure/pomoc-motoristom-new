@@ -30,7 +30,7 @@ export function isOccupancySnapshotStale(
   if (!Number.isFinite(captured)) {
     return true;
   }
-  return now - captured > staleAfterMinutes * 60_000;
+  return captured > now + 60_000 || now - captured > staleAfterMinutes * 60_000;
 }
 
 /**

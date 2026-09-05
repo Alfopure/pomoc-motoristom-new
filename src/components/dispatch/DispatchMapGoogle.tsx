@@ -1307,6 +1307,7 @@ function isFleetAssetVisible(
   routeVisible: boolean,
   nearestAssetId: string,
 ) {
+  if (asset.positionKnown === false) return false;
   if (routeVisible && asset.id === nearestAssetId) {
     return false;
   }

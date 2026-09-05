@@ -1,4 +1,5 @@
 import "server-only";
+import { acceptFleetPosition, fleetTelemetryDetails } from "@/lib/fleet-observation";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
@@ -31,7 +32,7 @@ type ProviderVehicleActionInput =
     }
   | {
       action: "import";
-      branchId: string;
+      branchId?: string;
       kind?: "tow_truck" | "replacement_car";
     };
 
@@ -66,10 +67,15 @@ export async function syncWebdispecinkFleet(input: WebdispecinkSyncInput = {}): 
     const client = createWebdispecinkClient(config);
     await client.login();
 
-    const [cars, positions] = await Promise.all([
+    const [cars, receivedPositions] = await Promise.all([
       mode === "catalog" || mode === "full" ? client.listCars() : Promise.resolve([]),
       mode === "positions" || mode === "full" ? client.listPositions() : Promise.resolve([]),
     ]);
+    const previousVehicles = await loadProviderVehicles(supabase, organizationId);
+    const previousById = new Map(previousVehicles.map((vehicle) => [vehicle.external_id, vehicle]));
+    // A missing timestamp, invalid point, future fix or out-of-order response cannot replace last known GPS.
+    const positions = receivedPositions.filter((position) => acceptFleetPosition(position.point, position.positionTime,
+      previousById.get(position.externalId)?.latest_position_at));
 
     if (cars.length > 0) {
       await upsertCatalogVehicles(supabase, organizationId, cars, syncedAt);
@@ -132,7 +138,8 @@ export async function updateWebdispecinkProviderVehicle(vehicleId: string, input
     return { vehicleId: vehicle.id, assetId: asset.id };
   }
 
-  const branch = await getBranch(supabase, organizationId, input.branchId);
+  if (vehicle.linked_asset_id) return { vehicleId: vehicle.id, assetId: vehicle.linked_asset_id };
+  const branch = input.branchId ? await getBranch(supabase, organizationId, input.branchId) : null;
   const asset = await importProviderVehicle(supabase, organizationId, vehicle, branch, input.kind ?? "tow_truck");
   return { vehicleId: vehicle.id, assetId: asset.id };
 }
@@ -284,8 +291,12 @@ async function updateFleetAssetPositions(
       continue;
     }
 
+    if (!acceptFleetPosition(position.point, position.positionTime, asset.location_source === PROVIDER ? asset.last_seen_at : null)) {
+      missingPointCount += 1;
+      continue;
+    }
     const location = await upsertLiveLocation(supabase, organizationId, providerVehicle, asset, position, syncedAt);
-    const lastSeenAt = position.positionTime ?? position.localPositionTime ?? syncedAt;
+    const lastSeenAt = position.positionTime!;
     const metadata = mergeFleetAssetGpsMetadata(asset.metadata, providerVehicle, position, syncedAt);
     const { error } = await supabase
       .from("motorist_fleet_assets")
@@ -331,7 +342,7 @@ async function linkProviderVehicleToAsset(
   let locationId = vehicle.latest_location_id;
   let lastSeenAt = vehicle.latest_position_at;
 
-  if (latestPosition?.point) {
+  if (latestPosition?.point && acceptFleetPosition(latestPosition.point, latestPosition.positionTime, asset.location_source === PROVIDER ? asset.last_seen_at : null)) {
     const location = await upsertLiveLocation(supabase, organizationId, vehicle, asset, latestPosition, syncedAt);
     locationId = location.id;
     lastSeenAt = latestPosition.positionTime ?? latestPosition.localPositionTime ?? syncedAt;
@@ -373,13 +384,13 @@ async function importProviderVehicle(
   supabase: AdminClient,
   organizationId: string,
   vehicle: FleetProviderVehicleRow,
-  branch: BranchRow,
+  branch: BranchRow | null,
   kind: "tow_truck" | "replacement_car",
 ) {
   const syncedAt = new Date().toISOString();
   const latestPosition = positionFromProviderVehicle(vehicle);
   const label = providerVehicleAssetLabel(vehicle);
-  const locationId = vehicle.latest_location_id ?? branch.location_id;
+  const locationId = vehicle.latest_location_id;
   const { data, error } = await supabase
     .from("motorist_fleet_assets")
     .insert({
@@ -387,17 +398,18 @@ async function importProviderVehicle(
       kind,
       label,
       license_plate: vehicle.license_plate,
-      status: "available",
+      status: "offline",
       category: kind === "tow_truck" ? "personal_tow" : "wagon",
-      branch_id: branch.id,
+      branch_id: branch?.id ?? null,
       current_location_id: locationId,
-      last_seen_at: vehicle.latest_position_at ?? syncedAt,
+      last_seen_at: vehicle.latest_position_at,
       source_system: PROVIDER,
       external_id: vehicle.external_id,
       location_source: vehicle.latest_location_id ? PROVIDER : "manual",
       metadata: {
         source: PROVIDER,
         importedFromProviderVehicleId: vehicle.id,
+        availabilityUnverified: true,
         gps: {
           source: PROVIDER,
           externalId: vehicle.external_id,
@@ -705,7 +717,7 @@ function positionFromProviderVehicle(vehicle: FleetProviderVehicleRow): Webdispe
   const lat = numberValue(raw.latitude) ?? numberValue(raw.Zs);
   const lng = numberValue(raw.longitude) ?? numberValue(raw.Zd);
 
-  if (typeof lat !== "number" || typeof lng !== "number") {
+  if (typeof lat !== "number" || typeof lng !== "number" || !acceptFleetPosition({ lat, lng }, vehicle.latest_position_at ?? undefined)) {
     return null;
   }
 
@@ -741,6 +753,7 @@ function mergeFleetAssetGpsMetadata(
       speedKph: position.speedKph,
       odometerKm: position.odometerKm,
       staleAfterMinutes: DEFAULT_STALE_AFTER_MINUTES,
+      details: fleetTelemetryDetails(position.raw),
     },
   };
 }
