@@ -35,7 +35,8 @@ describe("processTelnyxEvent", () => {
     // A stale claim (older than 30 s) is taken over and processed.
     h.advance(31_000);
     expect(await h.process(busy)).toMatchObject({ status: 200, outcome: "processed", claim: { outcome: "claimed", attempts: 2 } });
-    expect(h.session(String(h.rows("motorist_call_sessions")[0].id)).state).toBe("ringing");
+    expect(h.session(String(h.rows("motorist_call_sessions")[0].id)).state).toBe("greeting");
+    expect(h.telnyx.of("dial")).toHaveLength(0);
   });
 
   it("acknowledges events for unknown sessions and records them without a call", async () => {
@@ -54,7 +55,7 @@ describe("processTelnyxEvent", () => {
     expect(h.rows("motorist_call_events").at(-1)).toMatchObject({ event_type: "call.cost", handled_status: "processed" });
 
     h.db.failNext("motorist_call_events", "insert", "disk full");
-    const failed = await h.legEvent(call.callControlId, "call.speak.ended", {});
+    const failed = await h.legEvent(call.callControlId, "call.speak.started", {});
     expect(failed).toMatchObject({ status: 500, outcome: "failed" });
     expect(h.rows("motorist_telnyx_webhook_events").at(-1)).toMatchObject({ status: "failed", error: expect.stringContaining("disk full") });
     expect(h.rows("motorist_job_incidents")).toEqual([expect.objectContaining({ job_name: "telephony.telnyx.webhook" })]);

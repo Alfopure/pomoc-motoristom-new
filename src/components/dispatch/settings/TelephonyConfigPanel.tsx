@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CalendarClock, Coffee, Hash, ListOrdered, ListTree, Loader2, PhoneCall, RefreshCw, ShieldAlert, Smartphone, Users, UserCog } from "lucide-react";
+import { AudioLines, CalendarClock, Coffee, Hash, ListOrdered, ListTree, Loader2, PhoneCall, RefreshCw, ShieldAlert, Smartphone, Users, UserCog } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import type { TelephonySettingsDoc } from "@/server/telephony/config-service";
 
 import { MyPhonePanel, type MyPhoneTestCall } from "../MyPhonePanel";
+import { AnnouncementsPanel } from "./AnnouncementsPanel";
 import { BusinessHoursEditor } from "./BusinessHoursEditor";
 import { IvrMenuEditor } from "./IvrMenuEditor";
 import { NumbersPanel } from "./NumbersPanel";
@@ -26,7 +27,7 @@ import { TelephonySettingsPanel } from "./TelephonySettingsPanel";
  * back so the neighbouring screens see the new world without a reload.
  */
 
-type TelephonyConfigTab = "phone" | "groups" | "plans" | "ivr" | "hours" | "pauses" | "numbers" | "operators" | "settings";
+type TelephonyConfigTab = "phone" | "groups" | "plans" | "ivr" | "announcements" | "hours" | "pauses" | "numbers" | "operators" | "settings";
 
 const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; adminOnly?: boolean; managerOnly?: boolean }> = [
   // "Môj telefón" is first and open to every operator; everything after it is
@@ -35,6 +36,7 @@ const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; 
   { icon: Users, label: "Skupiny", value: "groups" },
   { icon: ListOrdered, label: "Plány zvonenia", value: "plans" },
   { icon: ListTree, label: "IVR menu", value: "ivr" },
+  { icon: AudioLines, label: "Hlášky a jazyk", value: "announcements" },
   { icon: CalendarClock, label: "Otváracie hodiny", value: "hours" },
   { icon: Coffee, label: "Dôvody pauzy", value: "pauses" },
   { icon: Hash, label: "Čísla", value: "numbers" },
@@ -44,6 +46,7 @@ const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; 
 
 export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestCall } = {}) {
   const [tab, setTab] = useState<TelephonyConfigTab>("phone");
+  const [announcementsOpened, setAnnouncementsOpened] = useState(false);
   const [state, setState] = useState<RoutingConfigResponse | null>(null);
   // Bumped on every fresh document so the editors re-key and drop their drafts
   // instead of synchronising them from an effect.
@@ -133,7 +136,10 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
             <button
               key={value}
               type="button"
-              onClick={() => setTab(value)}
+              onClick={() => {
+                if (value === "announcements") setAnnouncementsOpened(true);
+                setTab(value);
+              }}
               aria-current={active ? "page" : undefined}
               className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-semibold transition-colors ${
                 active ? "border-yellow-400 bg-[#FCD703] text-zinc-950" : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100"
@@ -150,6 +156,11 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
       {tab === "groups" && <RingGroupsEditor key={`groups-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "plans" && <RingPlanEditor key={`plans-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "ivr" && <IvrMenuEditor key={`ivr-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
+      {announcementsOpened && (
+        <div hidden={tab !== "announcements"}>
+          <AnnouncementsPanel active={tab === "announcements"} />
+        </div>
+      )}
       {tab === "hours" && <BusinessHoursEditor key={`hours-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "pauses" && <PauseReasonsEditor key={`pauses-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "numbers" && <NumbersPanel key={`numbers-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
