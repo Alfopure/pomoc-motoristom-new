@@ -1673,8 +1673,8 @@ export function DispatchConsole({
     <div
       className={`dispatch-app-shell isolate flex flex-col bg-zinc-100 text-zinc-950 ${
         activeView === "settings" || activeView === "reports"
-          ? "min-h-dvh overflow-visible pb-[calc(68px+env(safe-area-inset-bottom))] sm:pb-0"
-          : "h-svh overflow-hidden pb-[calc(68px+env(safe-area-inset-bottom))] sm:h-auto sm:min-h-dvh sm:overflow-visible sm:pb-0 lg:h-dvh lg:min-h-[720px]"
+          ? "min-h-dvh overflow-visible"
+          : "h-svh overflow-hidden sm:h-auto sm:min-h-dvh sm:overflow-visible lg:h-dvh lg:min-h-[720px]"
       }`}
       data-hydrated="false"
       data-testid="dispatch-console"
@@ -2176,7 +2176,7 @@ export function DispatchConsole({
         onActivate={({ pauseReasonId }) => telephony.changePresence({ status: "paused", pauseReasonId })}
       />
 
-      <nav className="dispatch-mobile-nav fixed inset-x-0 bottom-0 z-[2147483000] border-t border-zinc-200 bg-white/95 px-2 pt-1.5 pb-[calc(8px+env(safe-area-inset-bottom))] shadow-[0_-4px_20px_rgba(24,24,27,0.06)] backdrop-blur lg:hidden" aria-label="Mobilná navigácia">
+      <nav className="dispatch-mobile-nav z-[2147483000] border-t border-zinc-200 bg-white/95 px-2 shadow-[0_-4px_20px_rgba(24,24,27,0.06)] backdrop-blur lg:hidden" aria-label="Mobilná navigácia">
         <div className="mx-auto grid max-w-xl grid-cols-4 gap-1">
           <MobileTabButton
             active={activeView === "cases" || activeView === "dispatch" && !focusedTaskId && (mobilePane === "cases" || workspace.kind !== "cockpit" || workspace.mode === "expanded")}
