@@ -40,3 +40,13 @@ Prihlásená konzola si teraz uchová verziu načítaného dokumentu. Pri štart
 Pri rozdiele sa zobrazí krátka ponuka „Nová verzia je pripravená — Obnoviť“. Ručné „Obnoviť aplikáciu“ je dostupné aj v účte. Obnovenie rešpektuje uloženie alebo zahodenie rozpracovaného prípadu a je blokované počas hovoru, ponuky hovoru, supervízie, pripájania a telefónnych operácií. Stav hovoru sa kontroluje znovu po dialógu ukladania. Aktualizácia nevymazáva cache, prihlásenie ani push odber a nikdy sama nereštartuje dokument.
 
 Už otvorená verzia bez tejto kontroly potrebuje jedno obnovenie po uložení práce a skončení hovoru. Na fyzickom zariadení treba overiť aj adresu, z ktorej bola PWA nainštalovaná; browser simulácia nepotvrdzuje konkrétny stav používateľovho telefónu.
+
+## Spodný okraj mobilnej PWA
+
+Mobilná navigácia tvorí posledný nezmenšujúci sa riadok flex layoutu aplikácie. Obsah nad ňou sa posúva samostatne; kontajner už nepotrebuje rezervné spodné odsadenie pre pevnú lištu. Základná výška je 52 CSS px: tlačidlo 44 px, horný odstup 3 px, spodný 4 px a okraj 1 px. Popisy majú 11 px. Ide o naše kompaktné rozmery odvodené z odporúčaní pre ovládanie, nie o univerzálnu výšku natívnej navigácie. [Apple — tlačidlá](https://developer.apple.com/design/human-interface-guidelines/buttons/), [Apple — prístupnosť](https://developer.apple.com/design/human-interface-guidelines/accessibility/).
+
+K výške lišty sa pridáva skutočný `env(safe-area-inset-bottom, 0px)` iba v jej vlastnom riadku. Pri insete 34 px má spolu 86 px; pri nulovom 52 px. Hodnota nie je pevne obmedzená na 34 px. Na šírku sa rešpektujú bočné výrezy bez dvojitého započítania odsadenia kontajnera. [WebKit — bezpečné oblasti](https://webkit.org/blog/7929/designing-websites-for-iphone-x/).
+
+PWA používa nepriesvitný čierny stavový riadok namiesto `black-translucent`. Kombinácia priesvitného režimu s `viewport-fit=cover` má zdokumentované problémy s polohou dolného okraja; flex riadok zároveň odstraňuje samostatné ukotvenie navigácie cez `position: fixed`. [Apple — metadata](https://developer.apple.com/library/archive/documentation/AppleApplications/Reference/SafariHTMLRef/Articles/MetaTags.html), [WebKit 236445](https://bugs.webkit.org/show_bug.cgi?id=236445#c9).
+
+Kontrolujeme aj nenulové bezpečné okraje, otočenie displeja, dostupnosť posledného ovládania po posunutí a zarovnanie detailu prípadu s navigáciou. Emulácia overuje layout, nie konkrétne správanie systémovej oblasti fyzického iPhonu; [novší problém WebKitu s PWA viewportom](https://bugs.webkit.org/show_bug.cgi?id=301994) zostáva otvorený.

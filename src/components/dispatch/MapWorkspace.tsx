@@ -117,7 +117,7 @@ export function MapWorkspace({
   const upperAreaClassName = `dispatch-workspace-upper h-full min-h-0 overflow-hidden ${showWorkspacePanel && workspaceMode === "split" ? "lg:h-auto lg:min-h-[340px]" : ""}`;
   // Mobile CSS displays either the full map or the full case, never a partial sheet.
   const panelClassName = workspaceMode === "expanded"
-    ? "dispatch-workspace-panel fixed inset-x-0 top-[var(--dispatch-fixed-top,53px)] bottom-[calc(var(--dispatch-mobile-nav-height,56px)+env(safe-area-inset-bottom))] z-[2147482500] px-1 lg:absolute lg:inset-0 lg:z-20 lg:h-full lg:px-0"
+    ? "dispatch-workspace-panel absolute inset-0 z-[2147482500] lg:z-20 lg:h-full"
     : workspaceMode === "collapsed"
       ? "dispatch-workspace-panel hidden lg:absolute lg:inset-x-0 lg:bottom-0 lg:z-20 lg:block lg:h-16"
       : "dispatch-workspace-panel hidden lg:relative lg:block lg:h-full";
