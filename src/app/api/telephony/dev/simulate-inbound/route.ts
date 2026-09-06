@@ -11,13 +11,14 @@ import {
 } from "@/server/telephony/runtime";
 import { buildTelnyxEnvelope } from "@/server/telephony/state/events";
 import { processTelnyxEvent, type ProcessorResult } from "@/server/telephony/telnyx/event-processor";
+import { encodeClientState } from "@/server/telephony/telnyx/client-state";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 /**
- * Developer tool: pushes a synthetic inbound `call.initiated` (+ `call.answered`)
+ * Developer tool: pushes a synthetic inbound initiation, answer and completed introduction
  * through the real webhook processor, so ring plans, business hours and the IVR
  * can be exercised before the DID is approved (design §4 Phase 2, D-2).
  *
@@ -36,7 +37,7 @@ export async function POST(request: Request) {
     const notConfigured = telephonyConfiguredOrResponse();
     if (notConfigured) return notConfigured;
 
-    const body = await readJsonBody<{ from?: unknown; to?: unknown; callControlId?: unknown; callSessionId?: unknown; answer?: unknown }>(request);
+    const body = await readJsonBody<{ from?: unknown; to?: unknown; callControlId?: unknown; callSessionId?: unknown; answer?: unknown; completeGreeting?: unknown }>(request);
     const to = readString(body.to);
     if (!to) {
       return Response.json({ error: "Chýba volané číslo (to)." }, { status: 400 });
@@ -69,7 +70,15 @@ export async function POST(request: Request) {
 
     const results: ProcessorResult[] = [await send("call.initiated", { state: "parked" })];
     if (body.answer !== false) {
-      results.push(await send("call.answered", { state: "answered" }));
+      const answered = await send("call.answered", { state: "answered" });
+      results.push(answered);
+      const introduction = answered.commands.find((command) => command.kind === "playback_start" && command.ok && !command.skipped);
+      if (body.completeGreeting !== false && answered.outcome === "processed" && answered.sessionId && introduction) {
+        results.push(await send(introduction.detail?.tts ? "call.speak.ended" : "call.playback.ended", {
+          status: "completed",
+          client_state: encodeClientState({ sid: answered.sessionId, role: "customer", intent: "greeting" }),
+        }));
+      }
     }
 
     return Response.json({

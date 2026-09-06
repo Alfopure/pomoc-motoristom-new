@@ -58,8 +58,8 @@ export type TelephonyHarness = FakeSupabase & {
   process(envelope: unknown): Promise<ProcessorResult>;
   /** Sends a Telnyx event for a known leg (client_state taken from the leg row). */
   legEvent(callControlId: string, type: string, extra?: Record<string, unknown>, id?: string): Promise<ProcessorResult>;
-  /** Runs `call.initiated` + `call.answered` for a customer leg on `to`. */
-  inbound(input?: { from?: string; to?: string; callControlId?: string; telnyxSessionId?: string; answer?: boolean }): Promise<{ callControlId: string; sessionId: string; telnyxSessionId: string; results: ProcessorResult[] }>;
+  /** Answers an inbound call and completes its introduction; opt out to inspect that stage. */
+  inbound(input?: { from?: string; to?: string; callControlId?: string; telnyxSessionId?: string; answer?: boolean; completeGreeting?: boolean }): Promise<{ callControlId: string; sessionId: string; telnyxSessionId: string; results: ProcessorResult[] }>;
   session(sessionId: string): FakeRow;
   legs(sessionId: string): FakeRow[];
   legFor(sessionId: string, profileId: string): FakeRow | null;
@@ -299,6 +299,10 @@ export function createTelephonyHarness(options: HarnessOptions = {}): TelephonyH
       const sessionId = String(leg.session_id);
       if (input.answer !== false) {
         results.push(await harness.legEvent(callControlId, "call.answered", { direction: "incoming", state: "answered" }));
+        if (input.completeGreeting !== false && harness.session(sessionId).state === "greeting") {
+          const prompt = [...telnyx.calls].reverse().find((entry) => (entry.method === "playbackStart" || entry.method === "speak") && entry.params.callControlId === callControlId);
+          if (prompt) results.push(await harness.legEvent(callControlId, prompt.method === "speak" ? "call.speak.ended" : "call.playback.ended", { status: "completed", client_state: prompt.params.clientState }));
+        }
       }
       return { callControlId, sessionId, telnyxSessionId, results };
     },
