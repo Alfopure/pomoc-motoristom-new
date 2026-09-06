@@ -39,6 +39,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // Telnyx webhooky: autentifikáciou je Ed25519 podpis (`telnyx-signature-ed25519` + `telnyx-timestamp`,
   // tolerancia 300 s) overený PRED akoukoľvek prácou; neplatný podpis → 400, cudzí `connection_id` → 200 ignored.
   "telephony/telnyx/webhook": { class: "public", note: "Telnyx Call Control webhook; Ed25519 signature verification namiesto session." },
+  "telephony/webhooks/scribe": { class: "public", note: "ElevenLabs HMAC signature and five-minute replay window, verified before database access." },
   "sms/telnyx/webhook": { class: "public", note: "Telnyx messaging delivery-status webhook; Ed25519 signature verification." },
 
   // ── bearer (4) — zdieľané tajomstvo (cron/stroj) ────────────────────────
@@ -176,7 +177,15 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "telephony/webphone/token": { class: "session", note: "Vydáva krátkodobý Telnyx WebRTC token a rotuje device_session_id." },
   "telephony/calls/[id]/link-case": { class: "session" },
   "telephony/calls/[id]/outcome": { class: "session" },
-  "telephony/calls/[id]/transcript": { class: "session", role: ["senior_dispatcher", "manager", "admin"] },
+  "telephony/calls/[id]/transcript": { class: "session", note: "GET requires archive permission; PATCH also requires quality-review permission and source revision." },
+  "telephony/calls/[id]/recording-detail": { class: "session", note: "Archive permission or own approved feedback; DELETE manager/admin with source revision." },
+  "telephony/calls/[id]/recordings/[recordingId]/audio": { class: "session", note: "Manager/admin or explicit senior archive grant; per-request source restriction and organization checks." },
+  "telephony/calls/[id]/recording-control": { class: "session", note: "Current participant or manager/admin; same-origin and session control authorization." },
+  "telephony/calls/[id]/recording-retry": { class: "session", role: ["manager", "admin"] },
+  "telephony/calls/[id]/quality/review": { class: "session", note: "Manager/admin or senior with explicit archive and quality-review grants." },
+  "telephony/calls/[id]/quality/appeal": { class: "session", note: "Only own current approved review." },
+  "telephony/config/recording-policy": { class: "session", note: "GET member; PUT manager/admin with policy version and explicit scope confirmation." },
+  "telephony/quality/dashboard": { class: "session", note: "Manager/admin or senior with explicit archive and quality-review grants." },
   "telephony/calls/history": { class: "session" },
   "telephony/calls/match": { class: "session" },
   "telephony/directory": { class: "session" },

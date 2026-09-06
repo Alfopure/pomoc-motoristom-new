@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { CASE_ID, createTelephonyHarness, LINES, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import type { FakeRow } from "@/test/fake-supabase";
+import { completeCallAnnouncements } from "@/test/complete-call-announcements";
 
 import { CallActionError, createRateLimiter, parkCall, type CallActionDeps, type CallActor } from "./call-actions";
 import {
@@ -340,6 +341,8 @@ describe("park limit", () => {
     const call = await talkingWith(h);
 
     await parkCall(actionDeps(h), o1, call.sessionId);
+    expect(h.session(call.sessionId).state).toBe("talking");
+    await completeCallAnnouncements(h, call.sessionId);
     const parked = h.session(call.sessionId);
     expect(parked).toMatchObject({ state: "parked", answered_by_profile_id: null });
     // Who parked the caller and the limit they arrived with are both on the
@@ -371,6 +374,7 @@ describe("park limit", () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
     await parkCall(actionDeps(h), o1, call.sessionId);
+    await completeCallAnnouncements(h, call.sessionId);
 
     // An admin lowers the waiting-room limit while the caller is parked: a
     // configuration change must not disturb a call in progress.
@@ -391,6 +395,7 @@ describe("park limit", () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
     await parkCall(actionDeps(h), o1, call.sessionId);
+    await completeCallAnnouncements(h, call.sessionId);
 
     const tick = h.telnyx.of("gather").at(-1)!;
     h.advance(31 * 60_000);

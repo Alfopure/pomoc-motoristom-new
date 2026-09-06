@@ -8,6 +8,7 @@ import { decideIvr, describeIvrDecision, ivrGatherSpec, type IvrGatherOutcome } 
 import { memberKey, planRingStep, stepDeadline, toEligibilityDevices, toEligibilityPresence, type RingStepPlanResult } from "../routing/ring-plan";
 import type { TelnyxClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
+import { reduceRecording } from "./recording";
 import {
   ACTIVE_SESSION_STATES,
   CALLBACK_OFFER_TIMEOUT_MS,
@@ -459,6 +460,10 @@ function twoPartyState(b: TransitionBuilder): CallSessionState {
 // ---------------------------------------------------------------------------
 
 export function reduce(session: SessionRow, legs: LegRow[], attempts: AttemptRow[], event: SessionEvent, context: RoutingContext): ReduceResult {
+  return reduceRecording(session, legs, attempts, event, context, reduceCore, (message) => { throw new CallActionRejected(message, 409); });
+}
+
+function reduceCore(session: SessionRow, legs: LegRow[], attempts: AttemptRow[], event: SessionEvent, context: RoutingContext): ReduceResult {
   const b = new TransitionBuilder(session, legs, attempts, event, context);
   if (event.kind === "app") return reduceApp(b, event);
   return reduceTelnyx(b, event);
@@ -932,6 +937,11 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
 /** Outbound/internal: the far end answered → the bridge command placed at dial time completes. */
 function onFarEndAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
   if (b.session.state !== "ringing") return b.note("far end answered outside ringing").result();
+  if (b.meta.outbound_audio_gate && !opts.alreadyBridged) {
+    const operator = b.answeringLeg();
+    if (!operator || b.legEnded(operator)) return b.note("outbound operator no longer available").result();
+    b.cmd({ kind: "bridge", commandId: b.cmdId(leg.telnyx_call_control_id, "bridge:outbound:announced"), leg: ref(leg), target: ref(operator), parkAfterUnbridge: "self" });
+  }
   b.setState("talking").patchSession({ answered_at: b.session.answered_at ?? opts.at });
   b.call.status = "answered";
   b.call.answered_at = b.session.answered_at ?? opts.at;
@@ -994,13 +1004,14 @@ function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): Re
     };
   }
   b.cmd(dial);
-  b.cmd({
+  if (intent !== "outbound") b.cmd({
     kind: "bridge",
     commandId: b.cmdId(leg.telnyx_call_control_id, "bridge:own"),
     leg: ref(leg),
     target: { fromDial: dial.commandId },
     playRingtone: true,
   });
+  if (intent === "outbound") b.patchMeta({ outbound_audio_gate: true, announcements: meta.announcements ?? b.ctx.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata) });
   b.setState("ringing").patchMeta({ ring: { ...(meta.ring ?? {}), mode: intent === "outbound" ? "outbound" : "internal", active_step: null } });
   const failed = b.fork();
   failed.setState("failed").patchSession({ ended_at: b.nowIso });
@@ -1935,6 +1946,7 @@ function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): Red
 
 function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: TransferTarget, actor: string | null): void {
   const operator = b.answeringLeg();
+  const announcedTransfer = b.meta.recording?.policy.enabled && b.meta.recording.policy.transferVerified && b.ctx.recordingPolicy?.enabled && b.ctx.recordingPolicy.transferVerified && b.meta.recording.suppressionReason !== "objection";
   // A caller transferred straight out of the waiting room must not carry the
   // music loop into the transfer.
   stopMoh(b, customer);
@@ -1948,10 +1960,16 @@ function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: T
   detachSupervisors(b, "transfer");
   const targetClientState: TelnyxClientState =
     target.kind === "operator"
-      ? { sid: b.session.id, role: "operator", operatorId: target.profileId, intent: "transfer" }
-      : { sid: b.session.id, role: "external", intent: "transfer" };
+      ? { sid: b.session.id, role: "operator", operatorId: target.profileId, intent: announcedTransfer ? "transfer_recorded" : "transfer" }
+      : { sid: b.session.id, role: "external", intent: announcedTransfer ? "transfer_recorded" : "transfer" };
   const transferId = b.cmdId(customer.telnyx_call_control_id, "transfer");
-  b.cmd({
+  if (announcedTransfer) {
+    b.cmd({ kind: "dial", commandId: transferId, to: target.kind === "operator" ? target.sipUri : target.number,
+      from: b.ctx.fromNumber ?? b.session.called_number ?? "", role: target.kind === "operator" ? "operator" : "external",
+      profileId: target.kind === "operator" ? target.profileId : null, externalNumber: target.kind === "number" ? target.number : null,
+      clientState: targetClientState, linkTo: customer.telnyx_call_control_id, timeoutSecs: DEFAULT_TRANSFER_TIMEOUT_SECS });
+    startMoh(b, customer);
+  } else b.cmd({
     kind: "transfer",
     commandId: transferId,
     leg: ref(customer),

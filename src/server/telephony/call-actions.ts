@@ -459,6 +459,18 @@ export async function holdCall(deps: CallActionDeps, actor: CallActor, sessionId
   return runAction(deps, session, appEvent("hold", actor, deps), "Podržanie hovoru zlyhalo. Rozšírené funkcie hovoru nie sú dostupné.");
 }
 
+/** An objection survives holds, transfers and retries for this logical call. */
+export async function stopCallRecording(deps: CallActionDeps, actor: CallActor, sessionId: string, retry = false): Promise<CallActionResult> {
+  const session = await ownedActiveSession(deps, actor, sessionId);
+  return runAction(deps, session, appEvent(retry ? "recording_retry_stop" : "recording_stop", actor, deps), "Vypnutie nahrávania nie je potvrdené. Súkromnú konzultáciu zatiaľ nezačínajte.");
+}
+
+/** Server-only policy convergence; the resolver must confirm capture is disabled. */
+export async function reconcileCallRecordingPolicy(deps: CallActionDeps, sessionId: string): Promise<SessionRunResult> {
+  const session = await loadSession(deps, sessionId);
+  return runSessionEvent(deps, session.id, { kind: "app", id: randomUUID(), type: "recording_policy_stop", actorProfileId: null, occurredAt: nowOf(deps).toISOString() });
+}
+
 export async function unholdCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
   return runAction(deps, session, appEvent("unhold", actor, deps), "Obnovenie hovoru zlyhalo.");
