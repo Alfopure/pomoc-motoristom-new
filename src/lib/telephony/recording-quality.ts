@@ -116,6 +116,7 @@ export type CallRecordingDetail = {
   gaps: Array<{ startSeconds: number; endSeconds: number; reason: string }>;
   transcript: { status: RecordingContentState; language: string | null; spans: RecordingTranscriptSpan[] };
   analysis: CallQualityAnalysis | null;
+  analysisState?: RecordingContentState;
   metrics: CallCommunicationMetrics | null;
   capabilities: { canReview: boolean; canAppeal: boolean; canCorrect: boolean; canDelete: boolean; canControl: boolean; canRetry: boolean };
 };

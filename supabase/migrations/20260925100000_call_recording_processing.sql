@@ -304,7 +304,7 @@ end $$;
 
 create or replace function public.motorist_recording_complete_import(p_job_id uuid,p_lease_token uuid,p_lease_epoch bigint,p_storage_path text,p_bytes bigint,p_sha256 text,p_mime_type text)
 returns boolean language plpgsql security definer set search_path=public,pg_temp as $$
-declare j motorist_call_processing_jobs; r motorist_call_recordings;
+declare j motorist_call_processing_jobs; r motorist_call_recordings; integrity jsonb; audio_duration numeric; provider_duration numeric; drift numeric; timing_verified boolean; timing_warning text;
 begin
  select * into j from motorist_call_processing_jobs where id=p_job_id;
  if not found then return false; end if;
@@ -315,7 +315,21 @@ begin
  if not found or r.deleted_at is not null or r.restricted_at is not null or r.expires_at<=now() or r.source_revision<>j.input_revision then return false; end if;
  if p_bytes<1 or p_bytes>(select max_recording_bytes from motorist_call_recording_policies where organization_id=j.organization_id) or p_sha256 !~ '^[0-9a-f]{64}$' or p_mime_type not in ('audio/wav','audio/mpeg') then raise exception 'Invalid imported audio'; end if;
  if p_storage_path<>j.organization_id||'/'||j.call_id||'/'||r.id||'/r'||r.source_revision||(case when p_mime_type='audio/wav' then '.wav' else '.mp3' end) then raise exception 'Invalid storage path'; end if;
- update motorist_call_recordings set status='available',storage_bucket='motorist-call-recordings',storage_path=p_storage_path,bytes=p_bytes,sha256=p_sha256,mime_type=p_mime_type,fetched_at=now() where id=r.id;
+ -- Import-derived PCM duration is independent of provider timestamps and rounded duration_seconds.
+ integrity:=coalesce(j.checkpoint->'audio_integrity','null');
+ if p_mime_type='audio/wav' and integrity->>'source'='riff_pcm_v1'
+ and jsonb_typeof(integrity->'totalBytes')='number' and (integrity->>'totalBytes')::numeric=p_bytes
+ and jsonb_typeof(integrity->'audioDurationSeconds')='number'
+ and (integrity->>'audioDurationSeconds')::numeric>0 then
+ audio_duration:=(integrity->>'audioDurationSeconds')::numeric;
+ end if;
+ if r.started_at is not null and r.ended_at is not null and r.ended_at>r.started_at then provider_duration:=extract(epoch from r.ended_at-r.started_at); end if;
+ drift:=abs(audio_duration-provider_duration);
+ timing_verified:=coalesce(audio_duration is not null and provider_duration is not null and drift<=0.100,false);
+ timing_warning:=case when audio_duration is null then 'audio_duration_unverified' when provider_duration is null then 'provider_timestamps_missing' when not timing_verified then 'audio_provider_duration_mismatch' else null end;
+ update motorist_call_recordings set status='available',storage_bucket='motorist-call-recordings',storage_path=p_storage_path,bytes=p_bytes,sha256=p_sha256,mime_type=p_mime_type,fetched_at=now(),
+ participant_manifest=r.participant_manifest||jsonb_build_object('audioDurationSeconds',audio_duration,'audioFormat',integrity->'audioFormat','timingVerified',timing_verified,'timingDriftSeconds',drift,'timingWarning',timing_warning)
+ ||case when timing_verified then '{}'::jsonb else '{"openingComplete":false,"conversationComplete":false,"closingComplete":false}'::jsonb end where id=r.id;
  update motorist_call_processing_jobs set state='complete',lease_token=null,lease_expires_at=null,checkpoint=checkpoint-'source_url',updated_at=now() where id=j.id;
  insert into motorist_call_processing_jobs(organization_id,call_id,recording_id,kind,input_revision,dedupe_key)
  values(j.organization_id,j.call_id,r.id,'asr',r.source_revision,'asr:'||r.id||':'||r.source_revision) on conflict do nothing;

@@ -375,6 +375,7 @@ export async function findOverdueSessions(admin: AdminClient, input: { organizat
     media: rows.filter((row) => {
       const meta = readMeta(row);
       return !row.ended_at && (meta.recording?.recorders.some((item) => item.observed !== "stopped") ||
+        (ms(meta.recording?.pendingAudio?.readyAt) ?? Infinity) <= input.now.getTime() ||
         (ms(meta.announcement_sequence?.deadlineAt) ?? Infinity) <= input.now.getTime() ||
         (ms(meta.recording?.barrier?.deadlineAt) ?? Infinity) <= input.now.getTime());
     }),

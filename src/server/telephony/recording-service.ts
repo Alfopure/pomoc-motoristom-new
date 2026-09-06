@@ -52,7 +52,7 @@ function rpcError(error: { code?: string } | null) {
 function recordingState(r: RecordingSourceRows["recordings"][number]): RecordingContentState {
   if (r.deleted_at || r.status === "deleted") return "deleted";
   if (r.restricted_at || r.expires_at && Date.parse(r.expires_at) <= Date.now()) return "restricted";
-  return r.status === "available" ? "ready" : r.status === "failed" ? "failed" : "processing";
+  return r.status === "available" ? jsonObject(r.participant_manifest).timingVerified === true ? "ready" : "partial" : r.status === "failed" ? "failed" : "processing";
 }
 
 export async function getCallRecordingDetail(admin: Admin, actor: MotoristActor, callId: string): Promise<CallRecordingDetail> {
@@ -76,7 +76,10 @@ export async function getCallRecordingDetail(admin: Admin, actor: MotoristActor,
       canCorrect: full && permissions.review && Boolean(call.ended_at), canDelete: full && permissions.manager && Boolean(call.ended_at) && rows.recordings.length > 0,
       canControl: Boolean(call.session_id && !call.ended_at && (owner || permissions.manager)), canRetry: false },
   };
-  if (unavailable || !full && !owner) return result;
+  if (unavailable || !full && !owner) {
+    if (!unavailable) { result.state = "restricted"; result.stateReason = "Na obsah tohto hovoru nemáš oprávnenie."; }
+    result.transcript.status = result.state; result.analysisState = result.state; return result;
+  }
   const source = buildQualitySource(rows);
   const [analyses, reviews, effective, jobs, policy] = await Promise.all([
     admin.from("motorist_call_analyses").select("*").eq("organization_id", actor.organizationId).eq("call_id", callId).is("deleted_at", null).order("created_at", { ascending: false }).limit(1),
@@ -89,8 +92,13 @@ export async function getCallRecordingDetail(admin: Admin, actor: MotoristActor,
   const states = rows.recordings.map(recordingState);
   result.state = states.length === 0 ? (policy?.recording_enabled || live.state !== "off" ? "pending" : "disabled")
     : states.every((s) => s === "ready") ? source.gaps.length ? "partial" : "ready"
-    : states.some((s) => s === "ready") ? "partial" : states.some((s) => s === "failed") ? "failed" : "processing";
+    : states.some((s) => s === "ready" || s === "partial") ? "partial" : states.some((s) => s === "failed") ? "failed" : "processing";
+  if (rows.recordings.some((r) => r.status === "available" && jsonObject(r.participant_manifest).timingVerified !== true)) result.stateReason = "Úplnosť alebo globálne časovanie zvuku nie sú overené. Prehrávanie je dostupné; záznam sa nepoužije na číselné hodnotenie operátora.";
   const analysis = analyses.data?.[0];
+  const analysisJobs = jobs.data?.filter((job) => job.kind === "analysis" && job.input_revision === call.recording_source_revision) ?? [];
+  result.analysisState = analysis && analysis.input_revision === call.recording_source_revision && ["draft", "complete"].includes(analysis.status) ? "ready"
+    : !policy?.analysis_enabled ? "disabled" : analysisJobs.some((job) => ["queued", "processing", "waiting"].includes(job.state)) ? "processing"
+    : analysisJobs.some((job) => job.state === "failed" || job.state === "submission_unknown") ? "failed" : "pending";
   if (analysis && (!analysis.expires_at || Date.parse(analysis.expires_at) > Date.now()) && analysis.status !== "deleted") {
     const stored = jsonObject(analysis.result);
     if (Array.isArray(stored.operators) && typeof stored.summary === "string") {
@@ -137,18 +145,20 @@ export async function getCallRecordingDetail(admin: Admin, actor: MotoristActor,
   }
   if (!full) {
     const approved = result.analysis?.operators.filter((o) => o.operatorId === actor.profileId && o.review?.status === "approved") ?? [];
-    result.analysis = approved.length && result.analysis ? { ...result.analysis, topic: "", reason: null, summary: "", facts: [], actions: [], nextSteps: [], warnings: [],
+    result.analysis = approved.length && result.analysis ? { ...result.analysis, topic: "", reason: null, summary: "", outcome: "unknown", facts: [], actions: [], nextSteps: [], warnings: [],
       operators: approved.map((o) => ({ ...o, criteria: [], coaching: [], score: o.review!.score, coverage: o.review!.coverage,
         eligibilityReasons: [], speechSeconds: undefined, speechShare: undefined, connectedSeconds: undefined,
         review: { ...o.review!, criteria: o.review!.criteria.map((c) => ({ ...c, evidence: [] })) } })) } : null;
     result.state = approved.length ? "ready" : "pending";
+    result.transcript.status = "disabled";
     return result;
   }
   result.metrics = communicationMetrics(source);
   result.gaps = source.gaps.map((g) => ({ startSeconds: g.start, endSeconds: g.end, reason: "Nezachytený úsek rozhovoru" }));
-  result.segments = rows.recordings.map((r, index) => ({ id: r.id, index: index + 1,
+  result.segments = rows.recordings.map((r, index) => ({ id: r.id, index,
     startSeconds: Math.max(0, ((dateMilliseconds(r.started_at) ?? (dateMilliseconds(call.started_at) ?? 0)) - (dateMilliseconds(call.started_at) ?? 0)) / 1000),
-    durationSeconds: Math.max(0, r.duration_seconds ?? ((dateMilliseconds(r.ended_at) ?? 0) - (dateMilliseconds(r.started_at) ?? 0)) / 1000),
+    durationSeconds: typeof jsonObject(r.participant_manifest).audioDurationSeconds === "number" ? Math.max(0, Number(jsonObject(r.participant_manifest).audioDurationSeconds))
+      : Math.max(0, r.duration_seconds ?? ((dateMilliseconds(r.ended_at) ?? 0) - (dateMilliseconds(r.started_at) ?? 0)) / 1000),
     state: recordingState(r), channels: jsonObject(r.participant_manifest).channelMappingVerified === true ? 2 : null,
     canPlay: r.status === "available" && Boolean(r.storage_path && r.storage_bucket), error: r.status === "failed" ? "Spracovanie zvuku zlyhalo." : null }));
   const transcripts = rows.transcripts;

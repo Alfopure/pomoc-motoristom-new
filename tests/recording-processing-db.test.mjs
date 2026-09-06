@@ -142,4 +142,20 @@ test('actual PostgreSQL recording transactions',{ skip: !enabled && 'Set RECORDI
   assert.equal(db(`SELECT count(*) FROM motorist_call_processing_jobs WHERE recording_id='${late}' AND kind='import'`),'0');
  });
 
+ await t.test('PCM duration provenance is published atomically; truncated media stays available but cannot prove a whole conversation',()=>{
+  for(const [index,audio,provider,verified] of [[0,0.04,3.875,false],[1,3.62,3.965,false],[2,3.7,3.718,true],[3,3.7,3.8,true],[4,3.7,3.801,false]]){
+   const s=id(70+index*2),c=id(71+index*2),lease=id(100+index);const end=new Date(Date.parse('2026-09-06T10:00:00Z')+provider*1000).toISOString();
+   db(`INSERT INTO motorist_call_sessions(id,organization_id) VALUES('${s}','${org}');INSERT INTO motorist_calls(id,organization_id,session_id,ended_at) VALUES('${c}','${org}','${s}',now())`);
+   const metadata={startedAt:'2026-09-06T10:00:00Z',endedAt:end,durationSeconds:Math.ceil(provider),participantManifest:{openingComplete:true,conversationComplete:true,closingComplete:true}};
+   const r=db(`SELECT motorist_recording_enqueue_saved('${org}','${c}','${s}','timing-${index}','${JSON.stringify(metadata)}')`);
+   const j=db(`SELECT id FROM motorist_call_processing_jobs WHERE recording_id='${r}' AND kind='import'`),total=Math.round(audio*192000)+44;
+   const integrity={source:'riff_pcm_v1',totalBytes:total,audioDurationSeconds:audio,audioFormat:{channels:2,sampleRate:48000,bitsPerSample:16}};
+   db(`UPDATE motorist_call_processing_jobs SET state='processing',lease_token='${lease}',lease_epoch=1,lease_expires_at=now()+interval '30 seconds',checkpoint='${JSON.stringify({audio_integrity:integrity})}' WHERE id='${j}'`);
+   assert.equal(db(`SELECT motorist_recording_complete_import('${j}','${lease}',1,'${org}/${c}/${r}/r1.wav',${total},'${'b'.repeat(64)}','audio/wav')`),'t');
+   const row=JSON.parse(db(`SELECT row_to_json(r) FROM motorist_call_recordings r WHERE id='${r}'`)),manifest=row.participant_manifest;
+   assert.equal(row.status,'available');assert.equal(manifest.audioDurationSeconds,audio);assert.equal(manifest.timingVerified,verified);assert.equal(manifest.conversationComplete,verified);assert.equal(manifest.openingComplete,verified);assert.equal(manifest.closingComplete,verified);
+   assert.equal(manifest.timingWarning,verified?null:'audio_provider_duration_mismatch');assert.equal(row.duration_seconds,Math.ceil(provider));
+  }
+ });
+
 });

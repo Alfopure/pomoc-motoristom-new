@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
 import { cancelConsult, completeTransfer, holdCall, startConsult, stopCallRecording, unholdCall, blindTransfer, addCallParty, reconcileCallRecordingPolicy } from "../call-actions";
-import { loadRoutingContext, loadSessionSnapshot, runSessionEvent } from "../session-runner";
+import { effectsDeps, loadRoutingContext, loadSessionSnapshot, runSessionEvent } from "../session-runner";
+import { applyReduceResult } from "./effects";
 import { parseTelnyxEnvelope } from "./events";
 import { TelnyxCommandError } from "../telnyx/client";
 import { recordingCommandOutcome, recordingIntent } from "./recording";
@@ -68,6 +69,37 @@ describe("recording lifecycle", () => {
     const second = await quality.inbound();
     expect(readMeta(quality.session(second.sessionId) as SessionRow).announcement_sequence?.keys).toEqual(["recordingNotice"]);
     expect(quality.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toContain("/recordingNotice.mp3");
+  });
+
+  it("does not execute a delayed bridge after a newer objection during media warmup", async () => {
+    const h = enabledHarness(); const call = await h.inbound(); await completeCallAnnouncements(h, call.sessionId);
+    h.deps.sleep = async (ms) => {
+      h.advance(ms);
+      if (ms !== 600) return;
+      const current = h.session(call.sessionId) as SessionRow, meta = readMeta(current), state = meta.recording!;
+      h.db.update("motorist_call_sessions", { version: current.version + 1, metadata: { ...meta, recording: { ...state, epoch: state.epoch + 1, suppressionReason: "objection", pendingAudio: null,
+        recorders: state.recorders.map((item) => ({ ...item, desired: "stopped", observed: "stopped" })) } } }, (row) => row.id === call.sessionId);
+    };
+    const winner = h.legFor(call.sessionId, PROFILES.o1)!;
+    await h.legEvent(String(winner.telnyx_call_control_id), "call.answered");
+    expect(h.telnyx.of("recordingStart")).toHaveLength(1);
+    expect(h.telnyx.of("bridge")).toHaveLength(0);
+    expect(summarizeSessionRecording(h.session(call.sessionId).metadata)).toEqual({ state: "stopped", suppressed: true });
+  });
+
+  it("recovers a process interrupted after recorder readiness before its durable bridge", async () => {
+    const h = enabledHarness(); const call = await h.inbound(); await completeCallAnnouncements(h, call.sessionId);
+    const winner = h.legFor(call.sessionId, PROFILES.o1)!;
+    const event = parseTelnyxEnvelope(h.envelope("call.answered", { call_control_id: winner.telnyx_call_control_id }))!;
+    const snapshot = await loadSessionSnapshot(h.deps, call.sessionId), context = await loadRoutingContext(h.deps, snapshot.session);
+    const result = reduce(snapshot.session, snapshot.legs, snapshot.attempts, event, context);
+    await applyReduceResult(effectsDeps(h.deps), { session: snapshot.session, result: { ...result, commands: result.commands.filter((command) => command.kind === "recording_start") }, event, expectedVersion: snapshot.session.version });
+    expect(h.telnyx.of("bridge")).toHaveLength(0);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.pendingAudio?.commands).toHaveLength(1);
+    await runSessionEvent(h.deps, call.sessionId, { kind: "app", id: "recover-audio", type: "sweep", actorProfileId: null, occurredAt: h.now().toISOString() });
+    expect(h.telnyx.of("recordingStart")).toHaveLength(1);
+    expect(h.telnyx.of("bridge")).toHaveLength(1);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.pendingAudio).toBeNull();
   });
 
   it("does not let duplicate greetings or early watchdogs bypass the pending privacy notice", async () => {
@@ -137,9 +169,10 @@ describe("recording lifecycle", () => {
     const h = enabledHarness();
     const start = h.telnyx.client.recordingStart.bind(h.telnyx.client);
     vi.spyOn(h.telnyx.client, "recordingStart").mockImplementation(async (params) => {
-      await start(params);
+      const result = await start(params);
       h.db.failNext("motorist_call_sessions", "update", "checkpoint down");
       h.db.failNext("motorist_call_sessions", "update", "checkpoint still down");
+      return result;
     });
     const call = await talking(h);
     expect(h.telnyx.of("bridge")).toHaveLength(1);
@@ -180,8 +213,13 @@ describe("recording lifecycle", () => {
     const h = enabledHarness(); const call = await talking(h);
     const recorder = readMeta(h.session(call.sessionId) as SessionRow).recording!.recorders[0];
     const event = parseTelnyxEnvelope(h.envelope("call.recording.saved", { call_control_id: call.callControlId,
-      recording_started_at: "2026-09-06T12:00:00.000Z", recording_ended_at: "2026-09-06T12:30:00.000Z" }))!;
+      recording_id: recorder.providerRecordingId, recording_started_at: "2026-09-06T12:00:00.000Z", recording_ended_at: "2026-09-06T12:30:00.000Z" }))!;
     event.clientState = { sid: call.sessionId, role: "customer", intent: recordingIntent(recorder.id) };
+    const foreign = { ...event, id: "foreign-recording", payload: { ...event.payload, recording_id: "not-the-requested-provider-id" } };
+    expect((await runSessionEvent(h.deps, call.sessionId, foreign)).outcome).toBe("ignored");
+    // Telnyx uses the latest call client_state on a saved event; a later
+    // announcement must not detach the exact provider recording from its call.
+    event.clientState.intent = "seq:later-prompt";
     await runSessionEvent(h.deps, call.sessionId, event);
     expect(h.telnyx.of("recordingStart")).toHaveLength(2);
     expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.recorders.map((item) => item.observed)).toEqual(["stopped", "recording"]);

@@ -92,7 +92,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     async bridge(params) {
       record("bridge", params);
     },
-    async recordingStart(params) { record("recordingStart", params); },
+    async recordingStart(params) { record("recordingStart", params); return { recordingId: nextId("recording") }; },
     async recordingStop(params) { record("recordingStop", params); },
     async transfer(params) {
       if (!liveGate.callsEnabled) throw new TelnyxLiveCallsDisabledError();

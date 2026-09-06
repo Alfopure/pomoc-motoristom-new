@@ -304,6 +304,7 @@ export function effectsDeps(deps: SessionRunnerDeps): EffectsDeps {
     environment: deps.environment,
     mediaBaseUrl: deps.config.configured ? deps.config.mediaBaseUrl : null,
     now,
+    sleep: sleepOf(deps),
     logger: deps.logger,
     wrapUpSecondsFor: async (profileId) => {
       const { data } = await deps.admin.from("motorist_operator_telephony_settings").select("wrap_up_seconds").eq("profile_id", profileId).maybeSingle();

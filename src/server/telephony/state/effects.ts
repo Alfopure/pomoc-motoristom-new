@@ -12,6 +12,7 @@ import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
 import { isCallGoneError, TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
 import { recordingCommandOutcome, recordingIntent } from "./recording";
+import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
 import {
   DEFAULT_TTS_VOICE,
@@ -63,6 +64,7 @@ export type EffectsDeps = {
   environment: TelephonyEnvironment;
   mediaBaseUrl: string | null;
   now: () => Date;
+  sleep?: (ms: number) => Promise<void>;
   logger?: (entry: Record<string, unknown>) => void;
   /** Wrap-up seconds for an operator (defaults to 30 when unknown). */
   wrapUpSecondsFor?: (profileId: string) => Promise<number>;
@@ -109,6 +111,10 @@ export class EffectsError extends Error {
     super(message);
     this.name = "EffectsError";
   }
+}
+
+class RecordingContinuationSupersededError extends EffectsError {
+  constructor() { super("recording continuation superseded; delayed audio action cancelled"); }
 }
 
 const TERMINAL_CALL_STATUSES: ReadonlySet<CallRow["status"]> = new Set<CallRow["status"]>(["missed", "abandoned_queue", "ended", "failed"]);
@@ -543,9 +549,9 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       const admission = await deps.admin.rpc("motorist_recording_admit_session", { p_organization_id: deps.organizationId, p_session_id: ctx.session.id, p_call_id: call.data.id, p_max_per_hour: 10 });
       if (admission.error || admission.data !== true) throw new EffectsError("recording_admission_denied");
       await deps.renewLease?.();
-      await telnyx.recordingStart({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, maxLength: command.maxLength,
+      const recording = await telnyx.recordingStart({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, maxLength: command.maxLength,
         clientState: encodeClientState({ sid: ctx.session.id, role: "customer", intent: recordingIntent(command.recorderId) }) });
-      return { skipped: false };
+      return { skipped: false, detail: { providerRecordingId: recording.recordingId } };
     }
     case "recording_stop":
       await deps.renewLease?.();
@@ -927,16 +933,48 @@ export async function applyReduceResult(
     const key = commandKey(command);
     try {
       if (readMeta(ctx.session).recording?.policy.enabled) await deps.renewLease?.();
+      const pending = readMeta(ctx.session).recording?.pendingAudio;
+      const pendingCommand = pending?.commands.some((item) => "commandId" in command && item.commandId === command.commandId);
+      if (pendingCommand) {
+        const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
+        const recording = fresh.data ? readMeta(fresh.data).recording : undefined;
+        if (fresh.error || !fresh.data || fresh.data.ended_at || !recording || !pending || recording.epoch !== pending.epoch || recording.suppressionReason === "objection" || !recording.pendingAudio?.commands.some((item) => "commandId" in command && item.commandId === command.commandId)) throw new RecordingContinuationSupersededError();
+      }
       const executed = await executeCommand(deps, ctx, command);
+      if (pendingCommand) {
+        try {
+          const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
+          if (fresh.error || !fresh.data) throw new EffectsError("audio checkpoint unavailable");
+          const meta = readMeta(fresh.data), recording = meta.recording;
+          if (recording && recording.pendingAudio && pending && recording.pendingAudio.epoch === pending.epoch) {
+            const remaining = recording.pendingAudio.commands.filter((item) => !("commandId" in command) || item.commandId !== command.commandId);
+            const update = emptyTransition();
+            update.session.metadata = toJson({ ...meta, recording: { ...recording, pendingAudio: remaining.length ? { ...recording.pendingAudio, commands: remaining } : null } });
+            session = await persistTransition(deps, { session: fresh.data, transition: update, expectedVersion: fresh.data.version, event: input.event });
+            ctx.session = session;
+          }
+        } catch {
+          // Keeping the command pending is safe: its provider id is stable and
+          // replayed idempotently. A successful bridge must not be compensated.
+          deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "recording_audio_checkpoint_pending" });
+        }
+      }
       if (command.kind === "recording_start" || command.kind === "recording_stop") {
         const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
         if (latest.error || !latest.data) throw new EffectsError("recording state checkpoint unavailable");
         ctx.session = latest.data;
-        const changed = recordingCommandOutcome(ctx.session, command, true, deps.now().toISOString());
+        const changed = recordingCommandOutcome(ctx.session, command, true, deps.now().toISOString(), false, false, typeof executed.detail?.providerRecordingId === "string" ? executed.detail.providerRecordingId : null);
         const update = emptyTransition();
         update.session.metadata = changed.metadata;
         session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event });
         ctx.session = session;
+        if (command.kind === "recording_start") {
+          // Persist the provider identity before the proven media-settle interval.
+          await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(RECORDING_START_SETTLE_MS);
+          const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
+          if (fresh.error || !fresh.data || fresh.data.version !== session.version || fresh.data.ended_at) throw new RecordingContinuationSupersededError();
+          try { await deps.renewLease?.(); } catch { throw new RecordingContinuationSupersededError(); }
+        }
       }
       if (["bridge", "conference_join", "conference_leave", "conference_hold", "conference_unhold", "recording_stop", "recording_start"].includes(command.kind)) {
         const provenConference = Boolean(readMeta(ctx.session).recording?.policy.conferenceVerified && ["conference_join", "conference_unhold"].includes(command.kind));
@@ -945,6 +983,13 @@ export async function applyReduceResult(
       }
       outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: executed.skipped, bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: executed.detail });
     } catch (error) {
+      if (error instanceof RecordingContinuationSupersededError) {
+        // A newer objection/hangup/topology transition owns this call now.
+        // Never issue the delayed bridge/unhold from the superseded snapshot.
+        failure = { command: key, error: error.message, callGone: false };
+        outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: false, skipped: true, bestEffort: Boolean(command.bestEffort), error: error.message, ms: deps.now().getTime() - started });
+        break;
+      }
       if (command.kind === "recording_start" || command.kind === "recording_stop") {
         try {
           const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();

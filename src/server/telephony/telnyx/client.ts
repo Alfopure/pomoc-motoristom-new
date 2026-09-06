@@ -314,7 +314,7 @@ export type TelnyxClient = {
   speak(params: SpeakParams): Promise<void>;
   playbackStart(params: PlaybackStartParams): Promise<void>;
   playbackStop(params: PlaybackStopParams): Promise<void>;
-  recordingStart(params: RecordingStartParams): Promise<void>;
+  recordingStart(params: RecordingStartParams): Promise<{ recordingId: string | null }>;
   recordingStop(params: CallLegRef): Promise<void>;
   sendDtmf(params: SendDtmfParams): Promise<void>;
   createConference(params: CreateConferenceParams): Promise<ConferenceResult>;
@@ -500,10 +500,11 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     await request<unknown>("POST", `/calls/${encodeURIComponent(callControlId)}/actions/${action}`, { body: compact(body), commandId });
   }
 
-  async function recordingAction(callControlId: string, action: "record_start" | "record_stop", commandId: string, body: Record<string, unknown>): Promise<void> {
+  async function recordingAction(callControlId: string, action: "record_start" | "record_stop", commandId: string, body: Record<string, unknown>): Promise<{ recordingId: string | null }> {
     if (!callControlId) throw new TelnyxCommandError({ code: "invalid_call_control_id", status: 400, detail: "recording call id required", commandId });
     const result = await request<unknown>("POST", `/calls/${encodeURIComponent(callControlId)}/actions/${action}`, { body: compact(body), commandId });
     if (asRecord(asRecord(result).data).result !== "ok") throw new TelnyxCommandError({ code: "recording_ack_invalid", status: 502, detail: "Recording acknowledgement is not confirmed", commandId });
+    return { recordingId: str(asRecord(asRecord(result).data).recording_id) };
   }
 
   function assertCallsAllowed(): void {
@@ -701,9 +702,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       });
     },
 
-    recordingStop(params) {
+    async recordingStop(params) {
       // Never gated by live-calls/recording switches: privacy stop must remain possible.
-      return recordingAction(params.callControlId, "record_stop", params.commandId, {});
+      await recordingAction(params.callControlId, "record_stop", params.commandId, {});
     },
 
     sendDtmf(params) {

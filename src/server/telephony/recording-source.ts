@@ -62,7 +62,8 @@ export function buildQualitySource(rows: RecordingSourceRows): QualitySource {
         && (value.role !== "operator" || interval.profile_id === value.operatorId)
         && Date.parse(interval.started_at) <= callStart + start * 1000
         && interval.ended_at !== null && Date.parse(interval.ended_at) >= callStart + end * 1000);
-      const verified = canonical && value.identityVerified === true && jsonObject(recording.participant_manifest).channelMappingVerified === true && candidates.length === 1;
+      const verified = canonical && value.identityVerified === true && jsonObject(recording.participant_manifest).channelMappingVerified === true
+        && jsonObject(recording.participant_manifest).timingVerified === true && candidates.length === 1;
       const operatorId = verified && typeof value.operatorId === "string" && rows.profiles.some((p) => p.id === value.operatorId) ? value.operatorId : null;
       const role = verified && value.role === "operator" && operatorId ? "operator" : verified && value.role === "customer" ? "customer" : "unknown";
       spans.push({ id, transcriptId: transcript.id, segmentId: recording.id,
@@ -89,7 +90,7 @@ export function buildQualitySource(rows: RecordingSourceRows): QualitySource {
   const manifests = rows.recordings.map((r) => jsonObject(r.participant_manifest));
   const complete = !invalidSource && spans.length > 0 && rows.recordings.length > 0 && callEnd !== null && gaps.length === 0 && !sourceRestricted(rows)
     && rows.recordings.every((r) => r.status === "available" && rows.transcripts.some((t) => t.recording_id === r.id && t.audio_source_revision === r.source_revision && t.status === "complete"))
-    && manifests.every((m) => m.conversationComplete === true);
+    && manifests.every((m) => m.conversationComplete === true && m.timingVerified === true);
   const ids = [...new Set(rows.intervals.filter((i) => i.role === "operator" && i.profile_id).map((i) => i.profile_id as string))];
   if (ids.length === 0 && call.operator_id) ids.push(call.operator_id);
   const audibleOperators = rows.intervals.filter((i) => i.role === "operator" && i.audible_to_customer && i.profile_id);

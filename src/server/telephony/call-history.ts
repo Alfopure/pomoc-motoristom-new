@@ -55,13 +55,19 @@ export async function loadTelephonyCallHistory(
       .order("created_at", { ascending: false }),
   ]);
 
+  // Preview shares the live database and can precede an explicitly approved migration.
+  // Missing recording schema means no badge; never retry without the privacy filters.
+  const recordingSchemaMissing = recordingsResult.error !== null
+    && ["42703", "PGRST204", "42P01", "PGRST205"].includes(recordingsResult.error.code);
+  const recordingRows = recordingSchemaMissing ? [] : recordingsResult.data ?? [];
+
   const error =
     eventsResult.error ??
     linesResult.error ??
     queuesResult.error ??
     profilesResult.error ??
     casesResult.error ??
-    recordingsResult.error;
+    (recordingSchemaMissing ? null : recordingsResult.error);
   if (error) {
     throw new Error(`Telephony call history relations could not be loaded: ${error.message}`);
   }
@@ -75,7 +81,7 @@ export async function loadTelephonyCallHistory(
   }
 
   const recordingIdByCallId = new Map<string, string>();
-  for (const recording of recordingsResult.data ?? []) {
+  for (const recording of recordingRows) {
     if (recording.call_id && !recordingIdByCallId.has(recording.call_id)) {
       recordingIdByCallId.set(recording.call_id, recording.id);
     }

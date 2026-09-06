@@ -5,6 +5,7 @@ import { isIP } from "node:net";
 import { getSupabaseServiceEnv } from "@/lib/supabase/env";
 import type { Json } from "@/lib/supabase/database.types";
 import { record, RecordingProcessingError, type RecordingJobContext, type RecordingJobOutcome } from "./recording-jobs";
+import { inspectRecordingWav } from "./recording-audio-integrity";
 import { newRecordingHash, updateRecordingHash, finishRecordingHash, type RecordingSha256State } from "./recording-storage-sha256";
 
 export const RECORDING_CHUNK_BYTES=6*1024*1024;
@@ -84,6 +85,7 @@ export async function processRecordingImport(ctx:RecordingJobContext,io: {refres
  if(chunk.total>RECORDING_CHUNK_BYTES&&(!chunk.etag||chunk.etag.startsWith('W/')))throw new RecordingProcessingError('source_identity_unverified');
  const inferred=offset===0?(chunk.bytes.toString('ascii',0,4)==='RIFF'&&chunk.bytes.toString('ascii',8,12)==='WAVE'?'audio/wav':chunk.bytes.toString('ascii',0,3)==='ID3'||chunk.bytes[0]===255&&(chunk.bytes[1]&224)===224?'audio/mpeg':null):mime;
  if(!inferred)throw new RecordingProcessingError('recording_format_invalid');
+ if(offset===0){const integrity=inferred==='audio/wav'?inspectRecordingWav(chunk.bytes,chunk.total):null;if(!await ctx.checkpoint({audio_integrity:integrity} as Json))throw new RecordingProcessingError('lease_lost');}
  if(!upload){if(!await ctx.checkpoint({upload_create_started_at:new Date().toISOString(),mime:inferred,total:chunk.total}))throw new RecordingProcessingError('lease_lost');const path=recordingStoragePath(ctx,inferred);const metadata=Object.entries({bucketName:RECORDINGS_BUCKET,objectName:path,contentType:inferred,cacheControl:'0'}).map(([k,v])=>`${k} ${Buffer.from(v).toString('base64')}`).join(',');const created=await storageRequest('/storage/v1/upload/resumable',{method:'POST',headers:{'Tus-Resumable':'1.0.0','Upload-Length':String(chunk.total),'Upload-Metadata':metadata}},ctx.signal);if(!created.ok||!created.headers.get('location')){if(created.status>=400&&created.status<500&&created.status!==408)await ctx.checkpoint({upload_create_started_at:null});throw new RecordingProcessingError('upload_create_unconfirmed',true);}upload=validTusUrl(created.headers.get('location')!,cfg.base);
   if(!await ctx.checkpoint({upload_url:upload,upload_create_started_at:null,offset:0,total:chunk.total,etag:chunk.etag,mime:inferred,hash_state:hash} as Json))throw new RecordingProcessingError('lease_lost');}
  const after=updateRecordingHash(hash,chunk.bytes);const end=offset+chunk.bytes.length;

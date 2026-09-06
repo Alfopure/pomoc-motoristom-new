@@ -7,7 +7,7 @@ function fixture():RecordingSourceRows {
  const interval=(profile_id:string|null,role:string,start:number,end:number)=>({profile_id,role,started_at:at(start),ended_at:at(end),audible_to_customer:true,verified:true,channel:role==='operator'?1:0,reason:'bridge',source_event_id:profile_id??'customer'});
  return {
   call:{id:'call',started_at:at(0),answered_at:at(0),ended_at:at(20),recording_source_revision:2},
-  recordings:[{id:'r',source_revision:1,status:'available',participant_manifest:{channelMappingVerified:true,openingComplete:true,conversationComplete:true,closingComplete:true,gaps:[]}}],
+  recordings:[{id:'r',source_revision:1,status:'available',participant_manifest:{timingVerified:true,channelMappingVerified:true,openingComplete:true,conversationComplete:true,closingComplete:true,gaps:[]}}],
   transcripts:[{id:'t',recording_id:'r',audio_source_revision:1,source_revision:3,status:'complete',language:'sk',speaker_segments:[span('a','a',1),span('b','b',11)]}],
   intervals:[interval(null,'customer',0,20),interval('a','operator',0,10),interval('b','operator',10,20)],
   profiles:[{id:'a',display_name:'A'},{id:'b',display_name:'B'}],
@@ -33,6 +33,10 @@ describe('immutable source and participant proof',()=>{
   for(const mutation of [(r:RecordingSourceRows)=>{r.transcripts[0].audio_source_revision=2;},(r:RecordingSourceRows)=>{r.transcripts[0].speaker_segments=[...(r.transcripts[0].speaker_segments as unknown[]),{id:'bad',text:'Unbounded',startSeconds:19,endSeconds:25} ] as never;}]){
    const rows=fixture();mutation(rows);expect(buildQualitySource(rows).subjects.every(s=>!s.openingComplete&&!s.conversationComplete&&!s.closingComplete)).toBe(true);
   }
+ });
+ it('measured audio timing failure blocks all role identity and completeness even if topology claims full coverage',()=>{
+  const rows=fixture();rows.recordings[0].participant_manifest={...(rows.recordings[0].participant_manifest as object),audioDurationSeconds:0.04,timingVerified:false,timingWarning:'audio_provider_duration_mismatch'};
+  const source=buildQualitySource(rows);expect(source.spans.every(s=>!s.identityVerified&&s.role==='unknown')).toBe(true);expect(source.subjects.every(s=>!s.openingComplete&&!s.conversationComplete&&!s.closingComplete)).toBe(true);
  });
  it('live objection or one restricted source disables completeness for the entire logical call',()=>{
   const rows=fixture();rows.sessionRecordingSuppressed=true;expect(buildQualitySource(rows).subjects.every(s=>!s.conversationComplete)).toBe(true);

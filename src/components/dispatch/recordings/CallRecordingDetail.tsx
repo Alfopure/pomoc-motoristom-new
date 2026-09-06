@@ -21,7 +21,11 @@ export function CallRecordingDetail({ callId }: { callId: string }) {
   const [editingTranscript, setEditingTranscript] = useState<string | null>(null);
   const detail = resource.data;
   useEffect(() => {
-    if (!detail || !["pending", "processing"].includes(detail.state)) return;
+    if (!detail || detail.access === "restricted" || ["restricted", "deleted", "disabled"].includes(detail.state)) return;
+    // own_review.state describes whether human approval exists, not whether
+    // provider work is running. Waiting for a reviewer must not poll forever.
+    const states = detail.access === "full" ? [detail.state, detail.transcript.status, detail.analysisState] : [detail.analysisState];
+    if (!states.some((state) => state === "pending" || state === "processing")) return;
     const timer = setTimeout(resource.refresh, 10_000);
     return () => clearTimeout(timer);
   }, [detail, resource.refresh]);
@@ -37,7 +41,10 @@ export function CallRecordingDetail({ callId }: { callId: string }) {
     {resource.loading && <RecordingLoading />}
     {resource.error != null && <RecordingMessage error>{recordingErrorMessage(resource.error)}</RecordingMessage>}
     {detail && <>
-      <div className="flex flex-wrap gap-2 text-xs font-medium text-zinc-600"><span className="rounded-full bg-zinc-100 px-2 py-1">Nahrávka: {CONTENT_LABELS[detail.state]}</span><span className="rounded-full bg-zinc-100 px-2 py-1">Prepis: {CONTENT_LABELS[detail.transcript.status]}</span><span className="rounded-full bg-zinc-100 px-2 py-1">Analýza: {detail.analysis ? detail.analysis.status === "stale" ? "Podklady zmenené" : detail.analysis.status === "failed" ? "Zlyhala" : "Pripravená na kontrolu" : "Zatiaľ nie je dostupná"}</span></div>
+      <div className="flex flex-wrap gap-2 text-xs font-medium text-zinc-600">
+        {detail.access === "own_review" ? <span className="rounded-full bg-zinc-100 px-2 py-1">Hodnotenie: {detail.analysis?.operators.some((operator) => operator.review?.status === "approved") ? "Skontrolované človekom" : "Čaká na kontrolu"}</span> : <><span className="rounded-full bg-zinc-100 px-2 py-1">Nahrávka: {CONTENT_LABELS[detail.state]}</span><span className="rounded-full bg-zinc-100 px-2 py-1">Prepis: {CONTENT_LABELS[detail.transcript.status]}</span></>}
+        <span className="rounded-full bg-zinc-100 px-2 py-1">Analýza: {detail.analysisState && detail.analysisState !== "ready" ? CONTENT_LABELS[detail.analysisState] : detail.access === "own_review" && detail.analysisState === "ready" ? "Spracovaná" : detail.analysis ? detail.analysis.status === "stale" ? "Podklady zmenené" : detail.analysis.status === "failed" ? "Zlyhala" : "Pripravená na kontrolu" : "Zatiaľ nie je dostupná"}</span>
+      </div>
       {detail.stateReason && <RecordingMessage>{detail.stateReason}</RecordingMessage>}
       {detail.access === "restricted" || ["restricted", "deleted", "disabled"].includes(detail.state) ? <RecordingMessage>{detail.state === "deleted" ? "Záznam bol odstránený alebo jeho platnosť skončila. Nahrávka ani odvodené údaje nie sú dostupné." : detail.state === "disabled" ? "Pre tento hovor nebol vytvorený záznam." : "Nahrávka, prepis a analýza tohto hovoru sú obmedzené."}</RecordingMessage> : <>
         {detail.access === "own_review" && <RecordingMessage>Máte prístup k svojmu hodnoteniu. Nahrávka a obsah zákazníckeho rozhovoru nie sú v tomto pohľade dostupné.</RecordingMessage>}

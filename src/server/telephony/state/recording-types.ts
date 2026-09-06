@@ -1,5 +1,8 @@
 import type { AnnouncementKey } from "@/lib/telephony/announcements";
-import type { AppEvent, SessionEvent } from "./types";
+import type { AppEvent, Command, SessionEvent } from "./types";
+
+/** Live marker probes found immediate record_start → bridge can truncate media. */
+export const RECORDING_START_SETTLE_MS = 600;
 
 /** enabled is resolved on the server from approved policy AND both provider proof gates. */
 export type RecordingRoutingPolicy = {
@@ -21,6 +24,7 @@ export type RecorderState = {
   epoch: number;
   callControlId: string;
   startCommandId: string;
+  providerRecordingId?: string | null;
   stopCommandId?: string;
   desired: "recording" | "stopped";
   observed: "starting" | "recording" | "stopping" | "stopped" | "unknown";
@@ -41,6 +45,7 @@ export type RecordingState = {
   recorders: RecorderState[];
   error: string | null;
   barrier?: { action: AppEvent | null; deadlineAt: string; epoch: number } | null;
+  pendingAudio?: { epoch: number; readyAt: string; sourceEventId: string; commands: Array<Extract<Command, { kind: "bridge" | "conference_unhold" | "conference_join" }>> } | null;
 };
 
 /** A bounded, resumable customer-only announcement. Provider completion is mandatory. */

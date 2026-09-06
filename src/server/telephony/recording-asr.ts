@@ -3,11 +3,12 @@ import { deleteScribeTranscript, ScribeAsyncError, scribeAsyncConfigured, submit
 import type { Json } from '@/lib/supabase/database.types';
 import type { RecordingTranscriptSpan } from '@/lib/telephony/recording-quality';
 import { record, reserveRecordingBudget, RecordingProcessingError, type RecordingAdmin, type RecordingJobContext, type RecordingJobOutcome, type RecordingRow } from './recording-jobs';
+import { preserveRecordingAudioProvenance } from './recording-audio-integrity';
 import { signedRecordingSource } from './recording-storage';
 
 export function verifiedMultiChannel(manifest: Json) {
   const data = record(manifest); const intervals = Array.isArray(data.intervals) ? data.intervals.map(record) : [];
-  return data.channelMappingVerified === true && data.coverage === 'verified' && data.identitySource === 'authenticated_leg_binding' && intervals.length > 0 && intervals.every(i => i.verified === true && (i.channel === 0 || i.channel === 1) && ['customer', 'operator'].includes(String(i.role)));
+  return data.timingVerified === true && record(data.audioFormat).channels === 2 && data.channelMappingVerified === true && data.coverage === 'verified' && data.identitySource === 'authenticated_leg_binding' && intervals.length > 0 && intervals.every(i => i.verified === true && (i.channel === 0 || i.channel === 1) && ['customer', 'operator'].includes(String(i.role)));
 }
 export async function processRecordingAsrJob(ctx: RecordingJobContext): Promise<RecordingJobOutcome> {
   const ids = record(ctx.job.provider_ids), checkpoint = record(ctx.job.checkpoint);
@@ -17,14 +18,17 @@ export async function processRecordingAsrJob(ctx: RecordingJobContext): Promise<
   };
   if (!scribeAsyncConfigured() || process.env.TRANSCRIPTS_ENABLED !== 'true' || !ctx.policy.transcription_enabled) return { state: 'waiting', errorCode: 'scribe_disabled' };
   const r = ctx.recording;
-  if (!r?.storage_path || r.status !== 'available' || !r.duration_seconds || r.duration_seconds > ctx.policy.max_segment_seconds) throw new RecordingProcessingError('asr_source_invalid');
+  const measuredDuration = record(r?.participant_manifest).audioDurationSeconds;
+  const durationSeconds = Math.max(r?.duration_seconds ?? 0, typeof measuredDuration === 'number' ? measuredDuration : 0);
+  if (!r?.storage_path || r.status !== 'available' || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > ctx.policy.max_segment_seconds) throw new RecordingProcessingError('asr_source_invalid');
   if (r.started_at && r.ended_at && r.session_id && typeof record(r.metadata).recorder_id === 'string') {
     const session = await ctx.admin.from('motorist_call_sessions').select('*').eq('id', r.session_id).eq('organization_id', ctx.organizationId).abortSignal(ctx.signal).maybeSingle();
     if (session.error) throw new RecordingProcessingError('participant_refresh_failed', true);
     if (record(record(session.data?.metadata).recording).suppressionReason === 'objection') return {state:'cancelled',errorCode:'recording_objection'};
     if (session.data) {
       const { loadParticipantManifest } = await import('./state/participants');
-      const manifest = await loadParticipantManifest(ctx.admin, session.data, { startedAt: r.started_at, endedAt: r.ended_at, recorderId: String(record(r.metadata).recorder_id) }, ctx.signal);
+      const topology = await loadParticipantManifest(ctx.admin, session.data, { startedAt: r.started_at, endedAt: r.ended_at, recorderId: String(record(r.metadata).recorder_id) }, ctx.signal);
+      const manifest = preserveRecordingAudioProvenance(r.participant_manifest, topology as unknown as Json);
       const updated = await ctx.admin.from('motorist_call_recordings').update({ participant_manifest: manifest as unknown as Json }).eq('id', r.id).eq('organization_id', ctx.organizationId).is('deleted_at', null).is('restricted_at', null).abortSignal(ctx.signal);
       if (updated.error) throw new RecordingProcessingError('participant_refresh_failed', true);
       r.participant_manifest = manifest as unknown as Json;
@@ -32,7 +36,7 @@ export async function processRecordingAsrJob(ctx: RecordingJobContext): Promise<
   }
   const multiChannel = verifiedMultiChannel(r.participant_manifest);
   // Conservative reserve, not an invoice: $1 per channel-hour bounds the pilot.
-  if (!await reserveRecordingBudget(ctx, Math.max(0.01, r.duration_seconds / 3600 * (multiChannel ? 2 : 1)))) return { state: 'waiting', errorCode: 'daily_budget_exceeded' };
+  if (!await reserveRecordingBudget(ctx, Math.max(0.01, durationSeconds / 3600 * (multiChannel ? 2 : 1)))) return { state: 'waiting', errorCode: 'daily_budget_exceeded' };
   const sourceUrl = await signedRecordingSource(r.storage_path, ctx.signal);
   if (!await ctx.checkpoint({ submit_started_at: new Date().toISOString(), multi_channel: multiChannel }, true)) return { state: 'cancelled', errorCode: 'lease_lost' };
   try {
@@ -55,10 +59,12 @@ export function parseScribeSpans(value: unknown, recording: RecordingRow, transc
   const offset = (start - callStart) / 1000, manifest = record(recording.participant_manifest);
   const intervals = Array.isArray(manifest.intervals) ? manifest.intervals.map(record) : [];
   const trusted = verifiedMultiChannel(recording.participant_manifest);
+  const measuredDuration = typeof manifest.audioDurationSeconds === 'number' && Number.isFinite(manifest.audioDurationSeconds) && manifest.audioDurationSeconds > 0 ? manifest.audioDurationSeconds : null;
+  const durationLimit = measuredDuration === null ? (recording.duration_seconds ?? 1800) + 1 : measuredDuration + 0.1;
   const spans: RecordingTranscriptSpan[] = [];
   for (const value of transcription.words) {
     const word = record(value); if (word.type !== 'word') continue;
-    if (typeof word.text !== 'string' || word.text.length > 2000 || typeof word.start !== 'number' || typeof word.end !== 'number' || !Number.isFinite(word.start) || !Number.isFinite(word.end) || word.start < 0 || word.end < word.start || word.end > (recording.duration_seconds ?? 1800) + 1) throw new RecordingProcessingError('scribe_word_invalid');
+    if (typeof word.text !== 'string' || word.text.length > 2000 || typeof word.start !== 'number' || typeof word.end !== 'number' || !Number.isFinite(word.start) || !Number.isFinite(word.end) || word.start < 0 || word.end < word.start || word.end > durationLimit) throw new RecordingProcessingError('scribe_word_invalid');
     const from = start + word.start * 1000, to = start + word.end * 1000;
     const matches = trusted ? intervals.filter(i => i.channel === word.channel_index && i.verified === true && i.audibleToCustomer === true && Date.parse(String(i.startedAt)) <= from && (i.endedAt == null || Date.parse(String(i.endedAt)) >= to)) : [];
     const identity = matches.length === 1 ? matches[0] : null;

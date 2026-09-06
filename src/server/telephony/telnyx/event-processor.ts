@@ -277,7 +277,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
         const endedAt = typeof payload.recording_ended_at === "string" ? payload.recording_ended_at : null;
         // Only requested, announced captures from our registry enter processing. A provider
         // recording enabled in its portal must not silently become an authorised app recording.
-        const recorder = readMeta(session).recording?.recorders.find((r) => event.clientState?.intent === recordingIntent(r.id) && r.callControlId === event.callControlId);
+        const recorder = readMeta(session).recording?.recorders.find((r) => r.callControlId === event.callControlId && (r.providerRecordingId && typeof event.payload.recording_id === "string" ? r.providerRecordingId === event.payload.recording_id : event.clientState?.intent === recordingIntent(r.id)));
         if (recorder && providerRecordingId && sourceUrl && startedAt && endedAt && Number.isFinite(Date.parse(startedAt)) && Date.parse(endedAt) >= Date.parse(startedAt)) {
           const call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", session.id).maybeSingle();
           if (call.error || !call.data) throw new Error("recording call association unavailable");

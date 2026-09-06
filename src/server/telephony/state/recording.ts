@@ -1,6 +1,7 @@
 import { announcementConfigFromMetadata, resolveAnnouncement, type AnnouncementKey } from "@/lib/telephony/announcements";
 import { commandId } from "../telnyx/command-id";
 import type { AnnouncementSequence, RecorderState, RecordingState } from "./recording-types";
+import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { emptyTransition, ignoredResult, isOpenLeg, readMeta, toJson, type AppEvent, type AttemptRow, type Command, type LegRow, type ReduceResult, type RoutingContext, type SessionEvent, type SessionRow } from "./types";
 
 type Core = (session: SessionRow, legs: LegRow[], attempts: AttemptRow[], event: SessionEvent, context: RoutingContext) => ReduceResult;
@@ -64,7 +65,7 @@ function startSequence(session: SessionRow, context: RoutingContext, callControl
 }
 
 /** Recording state is persisted BEFORE commands. A timeout always remains potentially active. */
-export function recordingCommandOutcome(session: SessionRow, command: Extract<Command, { kind: "recording_start" | "recording_stop" }>, success: boolean, at: string, callGone = false, notStarted = false): SessionRow {
+export function recordingCommandOutcome(session: SessionRow, command: Extract<Command, { kind: "recording_start" | "recording_stop" }>, success: boolean, at: string, callGone = false, notStarted = false, providerRecordingId?: string | null): SessionRow {
   const recording = readMeta(session).recording;
   if (!recording) return session;
   const item = recording.recorders.find((r) => r.id === command.recorderId && r.epoch === command.epoch);
@@ -73,9 +74,11 @@ export function recordingCommandOutcome(session: SessionRow, command: Extract<Co
   // A late start acknowledgement must not undo an objection or a newer STOP.
   if (command.kind === "recording_start" && (item.desired !== expected || recording.epoch !== command.epoch || recording.suppressionReason === "objection")) return session;
   const stopped = notStarted || command.kind === "recording_stop" && (success || callGone);
-  const updated: RecorderState = { ...item, observed: stopped ? "stopped" : success ? "recording" : "unknown", startedAt: command.kind === "recording_start" && success ? at : item.startedAt,
+  const updated: RecorderState = { ...item, ...(providerRecordingId ? { providerRecordingId } : {}), observed: stopped ? "stopped" : success ? "recording" : "unknown", startedAt: command.kind === "recording_start" && success ? at : item.startedAt,
     stoppedAt: stopped ? at : item.stoppedAt, error: notStarted ? "recording_admission_denied" : success || stopped ? null : `${command.kind}_unconfirmed` };
-  return patched(session, { recording: { ...recording, recorders: recording.recorders.map((r) => r.id === item.id ? updated : r), error: updated.error } });
+  return patched(session, { recording: { ...recording, recorders: recording.recorders.map((r) => r.id === item.id ? updated : r), error: updated.error,
+    pendingAudio: command.kind === "recording_start" && success && recording.pendingAudio?.epoch === command.epoch
+      ? { ...recording.pendingAudio, readyAt: new Date(Date.parse(at) + RECORDING_START_SETTLE_MS).toISOString() } : recording.pendingAudio } });
 }
 
 export function needsRecordingContinuation(session: SessionRow): boolean {
@@ -92,7 +95,7 @@ function stopRecorders(session: SessionRow, state: RecordingState, event: AppEve
     commands.push({ kind: "recording_stop", commandId: id, leg: { callControlId: r.callControlId }, recorderId: r.id, epoch: r.epoch });
     return { ...r, stopCommandId: id, desired: "stopped", observed: "stopping", error: null };
   });
-  const changed = patched(session, { recording: { ...state, epoch, recorders, suppressedAt: objection ? context.now.toISOString() : state.suppressedAt,
+  const changed = patched(session, { recording: { ...state, epoch, recorders, pendingAudio: null, suppressedAt: objection ? context.now.toISOString() : state.suppressedAt,
     suppressionReason: objection ? "objection" : state.suppressionReason === "objection" ? "objection" : "topology",
     barrier: { action: continuation, epoch, deadlineAt: new Date(context.now.getTime() + 5_000).toISOString() }, error: null } satisfies RecordingState });
   return metadataResult(changed, commands, [objection ? "recording objection persisted; waiting for verified stop" : "privacy action waits for all recorders to stop"]);
@@ -126,7 +129,9 @@ function startBeforeAudio(result: ReduceResult, session: SessionRow, legs: LegRo
   if (index < 0) return mergeMetadata(result, session);
   const id = commandId({ sessionId: session.id, legId: customer.telnyx_call_control_id, step: event.id, intent: `record:start:${state.epoch}` });
   const recorder: RecorderState = { id, epoch: state.epoch, callControlId: customer.telnyx_call_control_id, startCommandId: id, desired: "recording", observed: "starting", startedAt: null, stoppedAt: null, error: null };
-  const changed = patched(session, { recording: { ...state, recorders: [...state.recorders, recorder], suppressionReason: null, error: null } });
+  const pendingCommands = result.commands.slice(index).filter((command): command is Extract<Command, { kind: "bridge" | "conference_unhold" | "conference_join" }> => ["bridge", "conference_unhold", "conference_join"].includes(command.kind));
+  const changed = patched(session, { recording: { ...state, recorders: [...state.recorders, recorder], suppressionReason: null, error: null,
+    pendingAudio: pendingCommands.length ? { commands: pendingCommands, epoch: state.epoch, readyAt: new Date(context.now.getTime() + RECORDING_START_SETTLE_MS).toISOString(), sourceEventId: event.id } : null } });
   result.commands.splice(index, 0, { kind: "recording_start", commandId: id, leg: { callControlId: recorder.callControlId }, recorderId: id, epoch: recorder.epoch,
     maxLength: Math.max(30, Math.min(1800, state.policy.maxSegmentSeconds)), bestEffort: true });
   result.next.session.metadata = toJson({ ...readMeta({ metadata: result.next.session.metadata ?? session.metadata }), recording: readMeta(changed).recording });
@@ -142,7 +147,7 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
   const meta = readMeta(current);
   const sequence = meta.announcement_sequence;
   if (event.kind === "telnyx" && (event.type === "call.recording.saved" || event.type === "call.recording.error")) {
-    const recorder = state?.recorders.find((r) => recordingIntent(r.id) === event.clientState?.intent && r.callControlId === event.callControlId);
+    const recorder = state?.recorders.find((r) => r.callControlId === event.callControlId && (r.providerRecordingId && typeof event.payload.recording_id === "string" ? r.providerRecordingId === event.payload.recording_id : recordingIntent(r.id) === event.clientState?.intent));
     if (!state || !recorder) return ignoredResult("recording event has no matching recorder token");
     const endedAt = typeof event.payload.recording_ended_at === "string" && Number.isFinite(Date.parse(event.payload.recording_ended_at)) ? event.payload.recording_ended_at : null;
     const saved = event.type === "call.recording.saved" && endedAt !== null;
@@ -157,13 +162,13 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
     return rollover ? startBeforeAudio(result, updated, legs, event, context) : result;
   }
   if (event.kind === "app" && event.type === "hangup") {
-    current = patched(current, { announcement_sequence: null, recording: state ? { ...state, barrier: null } : undefined });
+    current = patched(current, { announcement_sequence: null, recording: state ? { ...state, barrier: null, pendingAudio: null } : undefined });
     return mergeMetadata(core(current, legs, attempts, event, context), current);
   }
   if (event.kind === "telnyx" && event.type === "call.hangup") {
     if (sequence?.callControlId === event.callControlId) current = patched(current, { announcement_sequence: null,
       recording: state && sequence.keys.some((key) => NOTICE_KEYS.includes(key)) ? { ...state, noticeFailed: true, error: "notice_interrupted" } : state });
-    if (event.callControlId === customer?.telnyx_call_control_id) current = patched(current, { announcement_sequence: null, recording: state ? { ...state, barrier: null,
+    if (event.callControlId === customer?.telnyx_call_control_id) current = patched(current, { announcement_sequence: null, recording: state ? { ...state, barrier: null, pendingAudio: null,
       recorders: state.recorders.map((r) => r.callControlId === event.callControlId ? { ...r, desired: "stopped", observed: "stopped", stoppedAt: event.occurredAt ?? context.now.toISOString() } : r) } : undefined });
     const result = core(current, legs, attempts, event, context);
     return result.ignored && sequence?.callControlId === event.callControlId ? metadataResult(current) : mergeMetadata(result, current);
@@ -176,6 +181,17 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
     return stopRecorders(patched(current, { announcement_sequence: null }), state, event, context, false, null);
   }
   if (event.kind === "app" && event.type === "recording_policy_stop") return ignoredResult("recording policy already converged");
+  if (state?.pendingAudio && !sequence && (event.kind === "app" && event.type === "sweep" || event.id === state.pendingAudio.sourceEventId)) {
+    const pending = state.pendingAudio;
+    const valid = pending.epoch === state.epoch && state.suppressionReason !== "objection" && !current.ended_at && customer;
+    if (!valid) return metadataResult(patched(current, { recording: { ...state, pendingAudio: null } }));
+    if (Date.parse(pending.readyAt) > context.now.getTime()) return ignoredResult("recording media readiness interval pending");
+    const commands = pending.commands.filter((command) => command.kind === "bridge"
+      ? legs.some((leg) => isOpenLeg(leg) && leg.telnyx_call_control_id === command.leg.callControlId) && legs.some((leg) => isOpenLeg(leg) && leg.telnyx_call_control_id === command.target.callControlId)
+      : command.kind === "conference_join" ? legs.some((leg) => isOpenLeg(leg) && leg.telnyx_call_control_id === command.leg.callControlId)
+      : command.legs.every((ref) => legs.some((leg) => isOpenLeg(leg) && leg.telnyx_call_control_id === ref.callControlId)));
+    return commands.length ? metadataResult(current, commands, ["retrying durable customer audio commands after media readiness"]) : metadataResult(patched(current, { recording: { ...state, pendingAudio: null } }));
+  }
   if (event.kind === "app" && event.type === "recording_continue") {
     if (!state?.barrier || !needsRecordingContinuation(current) || !customer || current.ended_at) return ignoredResult("recording barrier not confirmed");
     const action = state.barrier.action;
