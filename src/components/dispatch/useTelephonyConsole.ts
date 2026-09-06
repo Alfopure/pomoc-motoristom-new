@@ -71,6 +71,8 @@ export type TelephonyConsole = {
   pauseReasons: PhonePauseReason[];
   presenceBusy: boolean;
   busyAction: string | null;
+  /** An outbound request or its correlated browser invite is still pending. */
+  outboundPending: boolean;
   notice: string | null;
   degradedSessionIds: Set<string>;
   liveCalls: CallCenterCall[];
@@ -112,6 +114,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const [pauseReasons, setPauseReasons] = useState<PhonePauseReason[]>([]);
   const [presenceBusy, setPresenceBusy] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [outboundRequestCount, setOutboundRequestCount] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   // `calls/active` is failing while telephony itself is configured: the console
   // stays usable and shows a transient-outage notice instead of "not configured".
@@ -459,36 +462,41 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   // `lineId` is optional and only "Môj telefón" sends it: a test call has to
   // leave from the operator's own line even when the server default differs.
   const dial = useCallback(async (phoneNumber: string, caseId?: string, options?: { lineId?: string | null }) => {
+    setOutboundRequestCount((count) => count + 1);
     setNotice(null);
-    const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
-      "/api/telephony/calls",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to: phoneNumber, caseId, lineId: options?.lineId ?? undefined }),
-        label: "odchádzajúci hovor",
-        timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-      },
-    );
-    if (result.status === 503) {
-      setConfigured(false);
-      setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
-      throw new Error(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+    try {
+      const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
+        "/api/telephony/calls",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ to: phoneNumber, caseId, lineId: options?.lineId ?? undefined }),
+          label: "odchádzajúci hovor",
+          timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+        },
+      );
+      if (result.status === 503) {
+        setConfigured(false);
+        setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+        throw new Error(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+      }
+      if (!result.ok || !result.body?.sessionId) {
+        const message = result.body?.error ?? "Hovor sa nepodarilo vytočiť.";
+        setNotice(message);
+        throw new Error(message);
+      }
+      // The operator's own leg is dialled first; the browser must answer exactly
+      // that invite (matched on `telnyxCallControlId`, design §2.2).
+      if (result.body.operatorLegCallControlId) {
+        webphoneRef.current?.expectOperatorLeg({
+          callControlId: result.body.operatorLegCallControlId,
+          sessionId: result.body.sessionId,
+        });
+      }
+      refreshRef.current?.();
+    } finally {
+      setOutboundRequestCount((count) => count - 1);
     }
-    if (!result.ok || !result.body?.sessionId) {
-      const message = result.body?.error ?? "Hovor sa nepodarilo vytočiť.";
-      setNotice(message);
-      throw new Error(message);
-    }
-    // The operator's own leg is dialled first; the browser must answer exactly
-    // that invite (matched on `telnyxCallControlId`, design §2.2).
-    if (result.body.operatorLegCallControlId) {
-      webphoneRef.current?.expectOperatorLeg({
-        callControlId: result.body.operatorLegCallControlId,
-        sessionId: result.body.sessionId,
-      });
-    }
-    refreshRef.current?.();
   }, []);
 
   /**
@@ -498,34 +506,39 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
    * hook would ring the operator's tab without auto-answering it.
    */
   const callBackRequest = useCallback(async (requestId: string) => {
+    setOutboundRequestCount((count) => count + 1);
     setNotice(null);
-    const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
-      `/api/telephony/callbacks/${encodeURIComponent(requestId)}/call`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-        label: "spätné volanie",
-        timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-      },
-    );
-    if (result.status === 503) {
-      setConfigured(false);
-      setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
-      throw new Error(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+    try {
+      const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
+        `/api/telephony/callbacks/${encodeURIComponent(requestId)}/call`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+          label: "spätné volanie",
+          timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+        },
+      );
+      if (result.status === 503) {
+        setConfigured(false);
+        setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+        throw new Error(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+      }
+      if (!result.ok || !result.body?.sessionId) {
+        const message = result.body?.error ?? "Spätné volanie sa nepodarilo spustiť.";
+        setNotice(message);
+        throw new Error(message);
+      }
+      if (result.body.operatorLegCallControlId) {
+        webphoneRef.current?.expectOperatorLeg({
+          callControlId: result.body.operatorLegCallControlId,
+          sessionId: result.body.sessionId,
+        });
+      }
+      refreshRef.current?.();
+    } finally {
+      setOutboundRequestCount((count) => count - 1);
     }
-    if (!result.ok || !result.body?.sessionId) {
-      const message = result.body?.error ?? "Spätné volanie sa nepodarilo spustiť.";
-      setNotice(message);
-      throw new Error(message);
-    }
-    if (result.body.operatorLegCallControlId) {
-      webphoneRef.current?.expectOperatorLeg({
-        callControlId: result.body.operatorLegCallControlId,
-        sessionId: result.body.sessionId,
-      });
-    }
-    refreshRef.current?.();
   }, []);
 
   // --- derived ---------------------------------------------------------------
@@ -594,6 +607,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     pauseReasons,
     presenceBusy,
     busyAction,
+    outboundPending: outboundRequestCount > 0 || (phone.pendingOperatorLegs ?? 0) > 0,
     notice,
     degradedSessionIds: degraded,
     liveCalls,

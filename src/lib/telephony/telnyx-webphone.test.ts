@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { TelnyxWebphone, isAuthFailure, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
 import type { TelephonyJsonResult } from "./client-request";
+import { EXPECTED_LEG_TTL_MS } from "./webphone-model";
 
 /**
  * The controller is exercised through its injected seams only: no jsdom, no
@@ -77,7 +78,7 @@ function fakeCall(overrides: Partial<WebphoneSdkCall> = {}): WebphoneSdkCall & {
 
 type Request = { url: string; body: unknown };
 
-function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: () => TelephonyJsonResult<unknown> } = {}) {
+function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: () => TelephonyJsonResult<unknown>; now?: () => number } = {}) {
   const requests: Request[] = [];
   const timers: Array<{ id: number; handler: () => void; delayMs: number }> = [];
   let nextTimer = 1;
@@ -85,7 +86,7 @@ function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: ()
 
   const phone = new TelnyxWebphone({
     silent: true,
-    now: () => Date.parse("2026-09-03T08:00:00.000Z"),
+    now: options.now ?? (() => Date.parse("2026-09-03T08:00:00.000Z")),
     createClient: () => client,
     setTimeout: (handler, delayMs) => {
       const id = nextTimer++;
@@ -163,12 +164,70 @@ describe("TelnyxWebphone", () => {
     h.client.emit("telnyx.ready");
 
     h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+    expect(h.phone.getSnapshot()).toMatchObject({ call: null, pendingOperatorLegs: 1 });
     const call = fakeCall();
     h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
 
     expect(call.answered).toBe(true);
     expect(h.phone.getSnapshot().call?.sessionId).toBe("sess-1");
     expect(h.phone.getSnapshot().call?.active).toBe(true);
+    expect(h.phone.getSnapshot().pendingOperatorLegs).toBe(0);
+  });
+
+  it("publishes pending legs before an invite and retains other concurrent legs after one connects", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const pendingCounts: number[] = [];
+    h.phone.subscribe((snapshot) => pendingCounts.push(snapshot.pendingOperatorLegs ?? 0));
+
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+    h.phone.expectOperatorLeg({ callControlId: "cc-2", sessionId: "sess-2" });
+    expect(pendingCounts).toEqual([1, 2]);
+
+    const call = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
+    expect(h.phone.getSnapshot()).toMatchObject({ pendingOperatorLegs: 1, call: { active: true } });
+    call.hangup();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
+    expect(h.phone.getSnapshot()).toMatchObject({ pendingOperatorLegs: 1, call: null });
+  });
+
+  it("expires missing invites on their existing TTL and publishes each remaining count", async () => {
+    let now = Date.parse("2026-09-03T08:00:00.000Z");
+    const h = harness({ now: () => now });
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const pendingCounts: number[] = [];
+    h.phone.subscribe((snapshot) => pendingCounts.push(snapshot.pendingOperatorLegs ?? 0));
+
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+    now += EXPECTED_LEG_TTL_MS / 2;
+    h.phone.expectOperatorLeg({ callControlId: "cc-2", sessionId: "sess-2" });
+
+    now += EXPECTED_LEG_TTL_MS / 2;
+    h.runTimer((timer) => timer.delayMs === EXPECTED_LEG_TTL_MS / 2);
+    expect(h.phone.getSnapshot().pendingOperatorLegs).toBe(1);
+
+    now += EXPECTED_LEG_TTL_MS / 2;
+    h.runTimer((timer) => timer.delayMs === EXPECTED_LEG_TTL_MS / 2);
+    expect(h.phone.getSnapshot()).toMatchObject({ pendingOperatorLegs: 0, call: null });
+    expect(pendingCounts).toEqual([1, 2, 1, 0]);
+  });
+
+  it("clears queued legs and their expiry timer when the browser phone stops", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+    expect(h.phone.getSnapshot().pendingOperatorLegs).toBe(1);
+
+    h.phone.stop();
+
+    expect(h.phone.getSnapshot()).toMatchObject({ pendingOperatorLegs: 0, call: null, status: "idle" });
+    expect(h.timers).toHaveLength(0);
   });
 
   it("answers an invite that arrived before the dial response registered its leg", async () => {

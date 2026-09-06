@@ -22,8 +22,10 @@ import { applyStoredAudioOutput, REMOTE_AUDIO_ELEMENT_ID } from "@/lib/telephony
 import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import {
+  EXPECTED_LEG_TTL_MS,
   heartbeatRegistrationState,
   matchAutoAnswer,
+  pruneExpectedLegs,
   rememberExpectedLeg,
   reduceWebphone,
   WEBPHONE_HEARTBEAT_MS,
@@ -99,6 +101,8 @@ export type WebphoneSnapshot = {
   sipUsername: string | null;
   deviceSessionId: string | null;
   call: WebphoneCallView | null;
+  /** Dial/pickup legs accepted by the API but not yet correlated to an invite. */
+  pendingOperatorLegs?: number;
   /** Last operator-facing error from an SDK/HTTP failure. */
   message: string | null;
 };
@@ -134,6 +138,7 @@ export class TelnyxWebphone {
   private retryTimer: number | null = null;
   private refreshTimer: number | null = null;
   private heartbeatTimer: number | null = null;
+  private expectedLegTimer: number | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
   private ringtone: BrowserIncomingRingtone | null = null;
   private ringing = false;
@@ -184,6 +189,8 @@ export class TelnyxWebphone {
       window.removeEventListener("pagehide", this.boundPageHide);
     }
     this.stopHeartbeat();
+    this.clearTimer("expectedLegTimer");
+    this.expected = [];
     this.dispatch({ type: "stop" });
   }
 
@@ -197,7 +204,10 @@ export class TelnyxWebphone {
     // The invite usually arrives before `POST /api/telephony/calls` answers (the
     // route still writes leg/session rows), so the ringing call is re-evaluated
     // here instead of only at invite time.
-    this.autoAnswerCurrentCall();
+    if (!this.autoAnswerCurrentCall()) {
+      this.scheduleExpectedLegExpiry();
+      this.publish();
+    }
   }
 
   /**
@@ -305,12 +315,26 @@ export class TelnyxWebphone {
     return timer(handler, delayMs);
   }
 
-  private clearTimer(key: "retryTimer" | "refreshTimer" | "heartbeatTimer"): void {
+  private clearTimer(key: "retryTimer" | "refreshTimer" | "heartbeatTimer" | "expectedLegTimer"): void {
     const handle = this[key];
     if (handle === null) return;
     this[key] = null;
     const clear = this.options.clearTimeout ?? ((id: number) => window.clearTimeout(id));
     clear(handle);
+  }
+
+  private scheduleExpectedLegExpiry(): void {
+    this.clearTimer("expectedLegTimer");
+    const now = this.now();
+    this.expected = pruneExpectedLegs(this.expected, now);
+    if (!this.expected.length) return;
+
+    const expiresAt = Math.min(...this.expected.map((leg) => leg.at + EXPECTED_LEG_TTL_MS));
+    this.expectedLegTimer = this.schedule(() => {
+      this.expectedLegTimer = null;
+      this.scheduleExpectedLegExpiry();
+      this.publish();
+    }, Math.max(0, expiresAt - now));
   }
 
   // --- HTTP ------------------------------------------------------------------
@@ -503,6 +527,7 @@ export class TelnyxWebphone {
     );
     if (!expected) return false;
     this.expected = this.expected.filter((entry) => entry.callControlId !== expected.callControlId);
+    this.scheduleExpectedLegExpiry();
     this.callSessionId = expected.sessionId;
 
     this.stopRinging();
@@ -582,6 +607,7 @@ export class TelnyxWebphone {
       sipUsername: this.state.credentials?.sipUsername ?? null,
       deviceSessionId: this.state.credentials?.deviceSessionId ?? null,
       message: this.state.message,
+      pendingOperatorLegs: pruneExpectedLegs(this.expected, this.now()).length,
       call: call
         ? {
             id: call.id,
