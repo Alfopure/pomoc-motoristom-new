@@ -72,7 +72,7 @@ test("internal, consultation and conference invites remain answerable without a 
   expect(await page.evaluate(() => window.callPushEvents)).toEqual(["answer", "answer", "answer"]);
   await page.evaluate(() => window.callPushScenario("consulting-other-call"));
   await expect(page.getByRole("button", { name: "Prijať tento hovor" })).toHaveCount(0);
-  await expect(page.getByRole("status")).toContainText("vybavuje Jana");
+  await expect(page.getByRole("status")).toContainText("iný hovor");
   await page.evaluate(() => window.callPushScenario("taken-stale-invite"));
   await expect(page.getByRole("button", { name: "Prijať tento hovor" })).toHaveCount(0);
   await expect(page.getByRole("status")).toContainText("vybavuje Jana");

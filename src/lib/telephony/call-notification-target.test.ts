@@ -70,6 +70,8 @@ describe("call notification current state", () => {
     expect(callNotificationTarget(current)).toMatchObject({ call: targetCall, canAnswer: true, canPickup: false });
     expect(callNotificationTarget({ ...current, phone: { ...phone, call: { ...ringing, telnyxCallControlId: null, sessionId } } }).canAnswer).toBe(true);
     expect(callNotificationTarget(current).message).toContain("zvoní na tomto telefóne");
+    expect(callNotificationTarget({ ...current, phone: { ...phone, call: null } }).message).toContain("Čakám");
+    expect(callNotificationTarget({ ...current, phone: { ...phone, status: "superseded", call: null } })).toMatchObject({ canAnswer: false, canReconnect: true });
     for (const overrides of [
       { stale: true }, { busy: true }, { outboundPending: true },
       { phone: { ...phone, status: "connecting" as const, call: ringing } },

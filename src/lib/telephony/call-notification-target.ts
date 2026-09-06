@@ -50,6 +50,11 @@ export function callNotificationTarget(input: {
         : "Hovor zvoní na tomto telefóne. Prijatie potvrďte tlačidlom.",
   };
   if (matches && browser?.active) return { ...base, message: "Hovor sa pripája alebo už prebieha. Ovládanie je v hornej lište." };
+  if (call.browserIncomingCallControlIds?.length) {
+    if (browser) return { ...base, message: "Tento telefón má iný hovor. Upozornenie sa týka vyššie uvedeného volajúceho." };
+    if (!registered) return { ...base, canReconnect, message: "Pripojte telefón v tejto aplikácii. Hovor prijmete, keď tu začne zvoniť." };
+    return { ...base, message: "Čakám, kým hovor začne zvoniť na tomto telefóne. Samotné upozornenie ho neprijíma." };
+  }
   if (call.kind === "active") {
     return { ...base, message: call.mine ? "Tento hovor práve vybavujete." : call.operatorName ? `Hovor už vybavuje ${call.operatorName}.` : "Hovor už prevzal iný operátor." };
   }
