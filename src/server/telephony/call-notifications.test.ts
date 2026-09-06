@@ -1,13 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
+import { completeCallAnnouncements } from "@/test/complete-call-announcements";
 import type { CallNotificationDeps } from "./call-notifications";
 import { callPushCandidates, loadCallPushCandidates, notifyCallState } from "./call-notifications";
-import { readMeta, type AttemptRow, type LegRow, type PresenceRow, type SessionRow } from "./state/types";
+import { mergeMeta, readMeta, type AttemptRow, type LegRow, type PresenceRow, type SessionRow } from "./state/types";
 import type { Database } from "@/lib/supabase/database.types";
 import { blindTransfer, callColleague, createRateLimiter } from "./call-actions";
 
 type Harness = ReturnType<typeof createTelephonyHarness>;
 type ProfileRow = Database["public"]["Tables"]["motorist_profiles"]["Row"];
+
+afterEach(() => vi.unstubAllEnvs());
 
 function world() {
   const h = createTelephonyHarness();
@@ -18,6 +21,21 @@ function world() {
 
 function deps(h: Harness): CallNotificationDeps {
   return { admin: h.admin, organizationId: ORG, environment: "development", now: h.now, send: vi.fn(async () => ({ sent: 1, failed: 0 })) };
+}
+
+function queuedPush(h: Harness) {
+  const delivery = deps(h);
+  const pending = new Set<string>();
+  const scheduled = vi.fn((sessionId: string) => { pending.add(sessionId); });
+  h.deps.onCallTransition = scheduled;
+  return {
+    delivery, scheduled,
+    async flush() {
+      const sessions = [...pending];
+      pending.clear();
+      await Promise.all(sessions.map((sessionId) => notifyCallState(delivery, sessionId)));
+    },
+  };
 }
 
 function snapshot(h: Harness, sessionId: string): Parameters<typeof callPushCandidates>[0] {
@@ -31,9 +49,9 @@ function snapshot(h: Harness, sessionId: string): Parameters<typeof callPushCand
 
 function waiting(h: Harness, sessionId: string) {
   const session = h.session(sessionId) as unknown as SessionRow;
-  h.db.update("motorist_call_sessions", { state: "waiting", answered_by_profile_id: null, metadata: {
-    ...readMeta(session), waiting: { since: h.now().toISOString(), max_minutes: 30, reason: "ring exhausted", ticks: 0 },
-  } }, (row) => row.id === sessionId);
+  h.db.update("motorist_call_sessions", { state: "waiting", answered_by_profile_id: null, metadata: mergeMeta(session, {
+    waiting: { since: h.now().toISOString(), max_minutes: 30, reason: "ring exhausted", ticks: 0 },
+  }) }, (row) => row.id === sessionId);
   h.db.update("motorist_call_legs", { state: "ended", ended_at: h.now().toISOString() }, (row) => row.session_id === sessionId && row.role !== "customer");
   h.db.update("motorist_ring_attempts", { result: "no_answer", ended_at: h.now().toISOString() }, (row) => row.session_id === sessionId);
   h.setPresence(PROFILES.o1, { status: "available", current_session_id: null });
@@ -46,8 +64,12 @@ describe("call push audience", () => {
     const call = await callColleague({ ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) },
       { profileId: PROFILES.o1, role: "dispatcher" }, { targetProfileId: PROFILES.o2 });
     expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
-    await h.legEvent(call.operatorLegCallControlId, "call.answered");
+    const push = queuedPush(h);
+    expect((await h.legEvent(call.operatorLegCallControlId, "call.answered")).outcome).toBe("processed");
     expect((await loadCallPushCandidates(deps(h), call.sessionId)).map((row) => row.recipientProfileId)).toEqual([PROFILES.o2]);
+    expect(push.scheduled).toHaveBeenCalledWith(call.sessionId);
+    await push.flush();
+    expect(push.delivery.send).toHaveBeenCalledExactlyOnceWith(h.admin, expect.objectContaining({ sessionId: call.sessionId, recipientProfileId: PROFILES.o2, category: "incoming_call" }));
   });
 
   it("finds a blind transfer target only after Telnyx persists its incoming leg", async () => {
@@ -60,10 +82,53 @@ describe("call push audience", () => {
     await blindTransfer({ ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) },
       { profileId: PROFILES.o1, role: "dispatcher" }, call.sessionId, { profileId: PROFILES.o2 });
     expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
+    await completeCallAnnouncements(h, call.sessionId);
+    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
     const transfer = h.telnyx.of("transfer")[0].params;
-    await h.process(h.envelope("call.initiated", { call_control_id: "cc-transfer", call_leg_id: "leg-transfer", call_session_id: call.telnyxSessionId,
+    const push = queuedPush(h);
+    const result = await h.process(h.envelope("call.initiated", { call_control_id: "cc-transfer", call_leg_id: "leg-transfer", call_session_id: call.telnyxSessionId,
       client_state: transfer.targetLegClientState, direction: "outgoing", to: "sip:gencred002@sip.telnyx.com" }));
+    expect(result.outcome).toBe("processed");
     expect((await loadCallPushCandidates(deps(h), call.sessionId)).map((row) => row.recipientProfileId)).toEqual([PROFILES.o2]);
+    expect(push.scheduled).toHaveBeenCalledWith(call.sessionId);
+    await push.flush();
+    expect(push.delivery.send).toHaveBeenCalledExactlyOnceWith(h.admin, expect.objectContaining({ sessionId: call.sessionId, recipientProfileId: PROFILES.o2, category: "incoming_call" }));
+  });
+
+  it("notifies the recorded blind-transfer target after its dial, but suppresses delayed push once its answer notice starts", async () => {
+    vi.stubEnv("TELNYX_RECORDING_ENABLED", "true");
+    vi.stubEnv("TELNYX_RECORDING_CONTRACT_VERIFIED", "true");
+    vi.stubEnv("RECORDING_PROCESSING_ENABLED", "true");
+    vi.stubEnv("TELNYX_RECORDING_TRANSFER_VERIFIED", "true");
+    const h = world();
+    h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(), inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
+    const call = await h.inbound();
+    await completeCallAnnouncements(h, call.sessionId);
+    const winner = h.openLegFor(call.sessionId, PROFILES.o1)!;
+    await h.legEvent(String(winner.telnyx_call_control_id), "call.answered");
+    const loser = h.openLegFor(call.sessionId, PROFILES.o2)!;
+    await h.legEvent(String(loser.telnyx_call_control_id), "call.hangup", { hangup_cause: "originator_cancel" });
+    const push = queuedPush(h);
+    await blindTransfer(h.deps, { profileId: PROFILES.o1, role: "dispatcher" }, call.sessionId, { profileId: PROFILES.o2 });
+    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
+    await completeCallAnnouncements(h, call.sessionId);
+    const target = h.openLegFor(call.sessionId, PROFILES.o2)!;
+    expect(h.clientStateOf(String(target.telnyx_call_control_id)).intent).toBe("transfer_recorded");
+    expect(h.telnyx.of("transfer")).toHaveLength(0);
+    expect(push.scheduled).toHaveBeenCalledWith(call.sessionId);
+    await push.flush();
+    expect(push.delivery.send).toHaveBeenCalledExactlyOnceWith(h.admin, expect.objectContaining({ sessionId: call.sessionId, recipientProfileId: PROFILES.o2, category: "incoming_call" }));
+
+    vi.mocked(push.delivery.send!).mockClear();
+    push.scheduled.mockClear();
+    expect((await h.legEvent(String(target.telnyx_call_control_id), "call.answered")).outcome).toBe("processed");
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence?.continuation).toMatchObject({ kind: "telnyx", type: "call.answered", callControlId: target.telnyx_call_control_id });
+    expect(h.openLegFor(call.sessionId, PROFILES.o2)?.answered_at).toBeNull();
+    expect(push.scheduled).toHaveBeenCalledWith(call.sessionId);
+    await push.flush();
+    expect(push.delivery.send).not.toHaveBeenCalled();
+    await completeCallAnnouncements(h, call.sessionId);
+    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
   });
 
   it("targets only actual offered operators and limits expiry to the remaining ring deadline", async () => {
@@ -119,7 +184,7 @@ describe("call push audience", () => {
     const call = await h.inbound();
     waiting(h, call.sessionId);
     const input = snapshot(h, call.sessionId);
-    input.session.metadata = { ...readMeta(input.session), pickup: { by: PROFILES.o1, at: h.now().toISOString() } };
+    input.session.metadata = mergeMeta(input.session, { pickup: { by: PROFILES.o1, at: h.now().toISOString() } });
     expect(callPushCandidates(input)).toEqual([]);
     input.now = new Date(h.now().getTime() + 31_000);
     expect(callPushCandidates(input).length).toBe(2);
@@ -155,27 +220,26 @@ describe("call push audience", () => {
     expect((await loadCallPushCandidates(deps(h), call.sessionId)).map((row) => row.recipientProfileId)).toEqual([PROFILES.o2]);
   });
 
-  it.each(["internal", "transfer", "consult", "party"])("recognizes a real %s target without notifying an automatically answered own leg", async (intent) => {
+  it.each(["internal", "transfer", "transfer_recorded", "consult", "party"])("recognizes a real %s target without notifying an automatically answered own leg", async (intent) => {
     const h = world();
     const call = await h.inbound();
     const input = snapshot(h, call.sessionId);
     const target = { kind: "operator" as const, profileId: PROFILES.o1, sipUri: "sip:operator@example.test", label: "Operator" };
-    const meta = readMeta(input.session);
     const targetLeg = input.legs.find((leg) => leg.profile_id === PROFILES.o1)!;
     targetLeg.client_state = { intent, autoAnswer: false };
     if (intent === "internal") {
       input.session.direction = "internal";
-      input.session.metadata = { ...meta, internal: { by: PROFILES.o5, target_profile_id: PROFILES.o1, target_sip: target.sipUri } };
+      input.session.metadata = mergeMeta(input.session, { internal: { by: PROFILES.o5, target_profile_id: PROFILES.o1, target_sip: target.sipUri } });
       input.legs.find((leg) => leg.role === "customer")!.client_state = { intent: "internal_caller", autoAnswer: true };
-    } else if (intent === "transfer") {
-      input.session.metadata = { ...meta, transfer: { kind: "blind", target, by: PROFILES.o5, at: h.now().toISOString() } };
+    } else if (intent === "transfer" || intent === "transfer_recorded") {
+      input.session.metadata = mergeMeta(input.session, { transfer: { kind: "blind", target, by: PROFILES.o5, at: h.now().toISOString() } });
     } else if (intent === "consult") {
       input.session.state = "consulting";
-      input.session.metadata = { ...meta, consult: { target, by: PROFILES.o5, at: h.now().toISOString() } };
+      input.session.metadata = mergeMeta(input.session, { consult: { target, by: PROFILES.o5, at: h.now().toISOString() } });
       targetLeg.role = "consult";
     } else {
       input.session.state = "talking";
-      input.session.metadata = { ...meta, party_pending: { target, by: PROFILES.o5, at: h.now().toISOString() } };
+      input.session.metadata = mergeMeta(input.session, { party_pending: { target, by: PROFILES.o5, at: h.now().toISOString() } });
     }
     const other = input.legs.find((leg) => leg.profile_id === PROFILES.o2)!;
     other.client_state = { intent: "outbound", autoAnswer: true };

@@ -46,6 +46,8 @@ function timestamp(value: unknown): number | null {
 
 function intentOf(leg: LegRow): string | null {
   const value = record(leg.client_state).intent ?? record(leg.metadata).intent;
+  // Recorded blind transfers dial their target before playing its privacy notice.
+  if (value === "transfer_recorded") return "transfer";
   return typeof value === "string" ? value : null;
 }
 
@@ -96,6 +98,10 @@ export function callPushCandidates(input: {
   const candidates = new Map<string, CallPushCandidate>();
   for (const leg of legs) {
     if (!isPendingIncoming(leg) || !available.has(leg.profile_id!)) continue;
+    // Recording holds the answered event until the target's notice completes.
+    // The persisted continuation already proves this leg is no longer ringing.
+    const continuation = meta.announcement_sequence?.continuation;
+    if (continuation?.kind === "telnyx" && continuation.type === "call.answered" && continuation.callControlId === leg.telnyx_call_control_id) continue;
     const intent = intentOf(leg);
     if (intent === "internal" && (session.state !== "ringing" || meta.internal?.target_profile_id !== leg.profile_id)) continue;
     if (intent === "transfer" && (session.state !== "ringing" || meta.transfer?.target.kind !== "operator" || meta.transfer.target.profileId !== leg.profile_id)) continue;
