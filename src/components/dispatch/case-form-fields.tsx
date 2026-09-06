@@ -114,9 +114,9 @@ export function FormSection({
         onToggle={(event) => setIsOpen(event.currentTarget.open)}
       >
         <summary
-          className={`flex cursor-pointer list-none items-center justify-between gap-3 border-b border-l-4 border-l-[#FCD703] px-3 py-2.5 transition hover:brightness-[0.98] [&::-webkit-details-marker]:hidden ${headerTone}`}
+          className={`flex min-h-9 cursor-pointer list-none items-center justify-between gap-2 border-b border-l-4 border-l-[#FCD703] px-2 py-1.5 transition hover:brightness-[0.98] [&::-webkit-details-marker]:hidden lg:gap-3 lg:px-3 lg:py-2.5 ${headerTone}`}
         >
-          <span className="flex min-w-0 items-center gap-2 text-sm font-semibold text-zinc-950">
+          <span className="flex min-w-0 items-center gap-1.5 text-xs font-semibold text-zinc-950 lg:gap-2 lg:text-sm">
             {stateIcon}
             <span>{title}</span>
           </span>
@@ -125,7 +125,7 @@ export function FormSection({
             <ChevronDown size={17} className="text-zinc-500 transition-transform group-open:rotate-180" aria-hidden="true" />
           </span>
         </summary>
-        <div className="grid min-w-0 gap-3 p-3 [&>*]:min-w-0">{children}</div>
+        <div className="grid min-w-0 gap-2 p-2 lg:gap-3 lg:p-3 [&>*]:min-w-0">{children}</div>
       </details>
     );
   }
@@ -314,12 +314,14 @@ export function SelectField({
 }
 
 export function CheckboxGroup<T extends string>({
+  compact = false,
   disabled,
   items,
   labels,
   onChange,
   selected,
 }: {
+  compact?: boolean;
   disabled?: boolean;
   items: T[];
   labels: Record<T, string>;
@@ -327,13 +329,13 @@ export function CheckboxGroup<T extends string>({
   selected: T[];
 }) {
   return (
-    <div className="flex flex-wrap gap-2">
+    <div className={compact ? "grid grid-cols-2 gap-1.5 lg:flex lg:flex-wrap lg:gap-2" : "flex flex-wrap gap-2"}>
       {items.map((item) => {
         const active = selected.includes(item);
         return (
           <label
             key={item}
-            className={`inline-flex h-9 items-center gap-2 rounded-md px-3 text-xs font-semibold ring-1 ${
+            className={`inline-flex min-w-0 items-center rounded-md font-semibold ring-1 ${compact ? "min-h-8 gap-1.5 px-2 text-[11px] lg:h-9 lg:gap-2 lg:px-3 lg:text-xs" : "h-9 gap-2 px-3 text-xs"} ${
               disabled
                 ? "cursor-not-allowed bg-zinc-100 text-zinc-400 ring-zinc-200"
                 : active

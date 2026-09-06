@@ -15,6 +15,8 @@ import {
   LogOut,
   Menu,
   MapPinned,
+  Maximize2,
+  Minimize2,
   PhoneOff,
   Pin,
   PinOff,
@@ -763,10 +765,12 @@ export function DispatchConsole({
 
   function openCase(caseId: string) {
     requestNavigation(() => {
+      const caseItem = dispatchCases.find((item) => item.id === caseId);
+      const active = caseItem && isActiveDispatchCase(caseItem);
       setActiveCaseId(caseId);
       setMobilePane("workspace");
       setFocusedTaskId(undefined);
-      setWorkspace({ kind: "cockpit", mode: window.matchMedia("(max-width: 1023px)").matches ? "expanded" : "split" });
+      setWorkspace({ kind: active ? "cockpit" : "detail", mode: !active || window.matchMedia("(max-width: 1023px)").matches ? "expanded" : "split" });
       setActiveView("dispatch");
     });
   }
@@ -1234,6 +1238,7 @@ export function DispatchConsole({
 
   function showMobileMap() {
     requestNavigation(() => {
+      setActiveCaseId(activeCase?.id ?? "");
       setActiveView("dispatch");
       setMobilePane("workspace");
       setCenterView("map");
@@ -1550,6 +1555,25 @@ export function DispatchConsole({
     setWorkspace({ kind: "cockpit", mode: "expanded" });
   }
 
+  const keepCaseVisibleOnMobile = useEffectEvent(() => {
+    // Crossing a breakpoint only changes presentation. Keep the mounted editor
+    // visible, including pending edits, when the desktop split no longer exists.
+    if (activeView === "dispatch" && workspace.kind === "cockpit" && workspace.mode === "split"
+      && (mobilePane === "workspace" || hasUnsavedChanges || isCaseSaveLocked)) {
+      setMobilePane("workspace");
+      setWorkspace({ kind: "cockpit", mode: "expanded" });
+    }
+  });
+
+  useEffect(() => {
+    const mobile = window.matchMedia("(max-width: 1023px)");
+    function onBreakpointChange(event: MediaQueryListEvent) {
+      if (event.matches) keepCaseVisibleOnMobile();
+    }
+    mobile.addEventListener("change", onBreakpointChange);
+    return () => mobile.removeEventListener("change", onBreakpointChange);
+  }, []);
+
   useEffect(() => {
     const caseDirectoryDetailOpen = activeView === "cases" && workspace.kind === "detail";
     if (activeView !== "dispatch" && !caseDirectoryDetailOpen) {
@@ -1720,14 +1744,25 @@ export function DispatchConsole({
           ) : null}
           <div className="min-w-0">
             <h1 className="truncate text-lg font-bold tracking-tight">
-              {activeView === "dispatch" ? mobilePane === "cases" ? "Aktívne prípady" : workspace.kind === "new" ? "Nový prípad" : workspace.kind === "detail" || workspace.mode === "expanded" ? selectedCase?.caseNumber ?? "Detail prípadu" : "Mapa zásahov" : navItems.find((item) => item.view === activeView)?.label}
+              {activeView === "dispatch" ? mobilePane === "cases" ? "Prípady" : workspace.kind === "new" ? "Nový prípad" : workspace.kind === "detail" || workspace.mode === "expanded" ? workspaceCase?.caseNumber ?? "Detail prípadu" : "Mapa zásahov" : activeView === "cases" && workspace.kind === "detail" ? workspaceCase?.caseNumber ?? "Detail prípadu" : navItems.find((item) => item.view === activeView)?.label}
+              {activeView === "dispatch" && mobilePane === "cases" ? <span className="ml-1.5 font-medium text-zinc-500">{activeCasesTotal}</span> : null}
             </h1>
-            {activeView === "dispatch" && mobilePane === "cases" ? <p className="text-xs text-zinc-500">Otvorené: {activeCasesTotal} · Upozornenia: {taskAttentionCount}</p> : null}
           </div>
         </div>
         {activeView === "dispatch" && mobilePane === "cases" ? (
           <button type="button" onClick={() => startNewCase()} className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl bg-[#FCD703] px-3 text-sm font-semibold text-zinc-950">
             <Plus size={18} aria-hidden="true" /> Nový prípad
+          </button>
+        ) : null}
+        {selectedCase && isActiveDispatchCase(selectedCase) && workspace.kind !== "new" && (activeView === "dispatch" && mobilePane === "workspace" || activeView === "cases" && workspace.kind === "detail") ? (
+          <button
+            type="button"
+            onClick={() => workspace.mode === "expanded" ? showMobileMap() : openCase(selectedCase.id)}
+            aria-label={workspace.mode === "expanded" ? "Zobraziť mapu na celú plochu" : "Skryť mapu a zobraziť prípad"}
+            title={workspace.mode === "expanded" ? "Zobraziť mapu" : "Zobraziť prípad"}
+            className="mobile-map-toggle flex size-9 shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-700"
+          >
+            {workspace.mode === "expanded" ? <Maximize2 size={17} aria-hidden="true" /> : <Minimize2 size={17} aria-hidden="true" />}
           </button>
         ) : null}
       </div>
@@ -2188,7 +2223,7 @@ function AccountMenu({
         title="Účet a odhlásenie"
         onClick={() => setOpen((current) => !current)}
         disabled={signingOut}
-        className="group flex h-10 min-w-0 items-center gap-2 rounded-lg px-1.5 text-left transition hover:bg-white/10 disabled:cursor-wait sm:gap-2.5"
+        className="dispatch-account-trigger group flex h-10 min-w-0 items-center gap-2 rounded-lg px-1.5 text-left transition hover:bg-white/10 disabled:cursor-wait sm:gap-2.5"
       >
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-sm font-black text-zinc-950">PM</span>
         <span

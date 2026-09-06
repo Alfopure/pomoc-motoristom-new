@@ -96,10 +96,10 @@ export function CaseDirectory({
   );
 
   return (
-    <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-zinc-50 p-2 sm:p-3 max-lg:[&_button]:min-h-11">
-      <section className="mb-3 max-h-[70%] shrink-0 overflow-y-auto overscroll-contain rounded-lg border border-zinc-200 bg-white p-3 shadow-sm lg:max-h-none lg:overflow-visible lg:rounded-md">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
+    <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-zinc-50 p-1.5 lg:p-3">
+      <section className="mb-1.5 max-h-[70%] shrink-0 overflow-y-auto overscroll-contain rounded-md border border-zinc-200 bg-white p-2 lg:mb-3 lg:max-h-none lg:overflow-visible lg:p-3 lg:shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2 lg:gap-3">
+          <div className="hidden min-w-0 lg:block">
             <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-700">
               <SlidersHorizontal size={16} />
               {mode === "active" ? "Aktívne prípady" : "História prípadov"}
@@ -109,11 +109,11 @@ export function CaseDirectory({
               {activeFilterCount > 0 ? ` · ${activeFilterCount} aktívne filtre` : ""}
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex w-full items-center gap-1.5 lg:w-auto lg:flex-wrap lg:gap-2">
             <button
               type="button"
               onClick={onNewCase}
-              className="inline-flex h-9 items-center gap-2 rounded-md bg-zinc-950 px-3 text-xs font-semibold text-white shadow-sm hover:bg-zinc-800"
+              className="inline-flex h-9 items-center gap-1.5 rounded-md bg-zinc-950 px-2.5 text-xs font-semibold text-white hover:bg-zinc-800 lg:gap-2 lg:px-3 lg:shadow-sm"
             >
               <Plus size={14} />
               Nový prípad
@@ -123,7 +123,7 @@ export function CaseDirectory({
               onClick={() => setFiltersOpen((current) => !current)}
               aria-expanded={filtersOpen}
               aria-controls="directory-filters"
-              className="inline-flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 lg:hidden"
+              className="ml-auto inline-flex h-9 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-xs font-semibold text-zinc-700 lg:hidden"
             >
               <SlidersHorizontal size={16} />
               Filtre{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
@@ -131,7 +131,7 @@ export function CaseDirectory({
             <button
               type="button"
               onClick={onClearFilters}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45"
+              className={`${activeFilterCount > 0 ? "inline-flex" : "hidden"} h-9 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 lg:inline-flex lg:gap-2 lg:px-3`}
               disabled={activeFilterCount === 0}
             >
               <RotateCcw size={14} />
@@ -140,7 +140,7 @@ export function CaseDirectory({
           </div>
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-1 rounded-md bg-zinc-100 p-1 sm:w-fit sm:min-w-[320px]">
+        <div className="mt-2 grid grid-cols-2 gap-1 rounded-md bg-zinc-100 p-0.5 lg:mt-3 lg:w-fit lg:min-w-[320px] lg:p-1">
           <button
             type="button"
             onClick={() => setMode("active")}
@@ -161,15 +161,15 @@ export function CaseDirectory({
           </button>
         </div>
 
-        <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(260px,1.6fr)_repeat(5,minmax(140px,1fr))]">
-          <label className="flex min-w-0 items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500 md:col-span-2 xl:col-span-1">
+        <div className="mt-2 grid gap-2 md:grid-cols-2 lg:mt-3 xl:grid-cols-[minmax(260px,1.6fr)_repeat(5,minmax(140px,1fr))]">
+          <label className="flex min-w-0 items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm text-zinc-500 md:col-span-2 lg:px-3 lg:py-2 xl:col-span-1">
             <Search size={16} />
             <input
               value={search}
               onChange={(event) => onSearchChange(event.target.value)}
               aria-label="Hľadať prípady v adresári"
               className="min-w-0 flex-1 bg-transparent text-zinc-800 outline-none placeholder:text-zinc-400"
-              placeholder="Hľadať prípad, telefón, EČV, mesto, operátora"
+              placeholder="Prípad, telefón, EČV, mesto…"
             />
           </label>
           <div id="directory-filters" className={`${filtersOpen ? "grid" : "hidden"} min-w-0 grid-cols-2 gap-2 md:col-span-2 lg:contents`}>
@@ -204,7 +204,7 @@ export function CaseDirectory({
             options={[["all", "Všetky asistenčky"], ...assistanceServices.map((name) => [name, name] as const)]}
           />
           </div>
-          <label className="flex min-w-0 items-center gap-2 text-xs font-semibold text-zinc-600 md:col-span-2 lg:hidden">
+          <label className={`${filtersOpen ? "flex" : "hidden"} min-w-0 items-center gap-2 text-xs font-semibold text-zinc-600 md:col-span-2 lg:hidden`}>
             Poradie
             <select
               aria-label="Zoradiť adresár prípadov"

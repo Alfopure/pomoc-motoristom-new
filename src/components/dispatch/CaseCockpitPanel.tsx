@@ -207,6 +207,7 @@ export function CaseCockpitPanel({
         disabled={!contactPhone || !onDial || isDialingFromHeader}
         icon={Headphones}
         label="Volať cez web"
+        mobileLabel="Web"
         onClick={() => void callFromWebPhone()}
         title={
           !contactPhone
@@ -221,6 +222,7 @@ export function CaseCockpitPanel({
         href={contactPhone ? `tel:${cleanPhone(contactPhone)}` : undefined}
         icon={Smartphone}
         label="Volať cez mobil"
+        mobileLabel="Mobil"
         title={contactPhone ? "Volať cez mobilný telefón" : "Najprv doplňte telefónne číslo"}
       />
     </div>
@@ -262,35 +264,35 @@ export function CaseCockpitPanel({
   }
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-md border border-zinc-200 bg-white shadow-sm max-lg:[&_button]:min-h-11 max-lg:[&_a]:min-h-11">
-      <div className="sticky top-0 z-10 shrink-0 border-b border-zinc-200 bg-white/95 px-3 py-2 backdrop-blur">
-        <div className="flex flex-wrap items-center gap-2">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white lg:rounded-md lg:border lg:border-zinc-200 lg:shadow-sm">
+      <div className="shrink-0 border-b border-zinc-200 bg-white px-2 py-1.5 lg:px-3 lg:py-2">
+        <div className="flex flex-wrap items-center gap-1.5 lg:gap-2">
           <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span className="text-base font-semibold text-zinc-950">{caseItem.caseNumber}</span>
-              <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ring-1 ${caseStatusTone[caseItem.status]}`}>
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5 lg:gap-2">
+              <span className="hidden text-base font-semibold text-zinc-950 lg:inline">{caseItem.caseNumber}</span>
+              <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ring-1 lg:px-2 lg:text-xs ${caseStatusTone[caseItem.status]}`}>
                 {caseStatusLabels[caseItem.status]}
               </span>
-              <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${priorityTone[caseItem.priority]}`}>
+              <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold lg:px-2 lg:text-xs ${priorityTone[caseItem.priority]}`}>
                 {casePriorityLabels[caseItem.priority]}
               </span>
-              <span className="truncate text-sm font-semibold text-zinc-700">{customerName}</span>
+              <span className="min-w-0 truncate text-xs font-semibold text-zinc-700 lg:text-sm">{customerName}</span>
             </div>
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-zinc-600">
+            <div className="mt-1 hidden min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-zinc-600 lg:flex">
               <span>{routeSummary}</span>
               <span>{owner}</span>
               <span className="truncate">{asset ? (selectedAsset ? asset.label : `Návrh: ${asset.label}`) : "Bez dostupnej techniky"}</span>
               <span>Update {formatTime(caseItem.updatedAt)}</span>
             </div>
           </div>
-          <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:shrink-0">
+          <div className="flex w-full items-center gap-1 lg:w-auto lg:shrink-0 lg:flex-wrap lg:gap-1.5">
             {callActions}
             <QuickAction onClick={() => setSmsComposerOpen(true)} icon={MessageSquareText} label="SMS" tone="yellow" />
-            {contactEmail && <QuickAction href={`mailto:${contactEmail}`} icon={Mail} label="Email" />}
+            {contactEmail && <QuickAction href={`mailto:${contactEmail}`} icon={Mail} label="Email" mobileLabel="" />}
             <button
               type="button"
               onClick={onCollapse}
-              className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:h-9 lg:w-9"
+              className="hidden h-9 w-9 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:inline-flex"
               aria-label="Minimalizovať na spodnú lištu"
               title="Minimalizovať na spodnú lištu"
             >
@@ -300,7 +302,7 @@ export function CaseCockpitPanel({
               <button
                 type="button"
                 onClick={onExpand}
-                className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:h-9 lg:w-9"
+                className="hidden h-9 w-9 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:inline-flex"
                 aria-label="Maximalizovať kokpit"
                 title="Maximalizovať kokpit"
               >
@@ -311,7 +313,7 @@ export function CaseCockpitPanel({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain bg-zinc-50 p-2 sm:p-3">
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain bg-zinc-50 p-1.5 lg:space-y-3 lg:p-3">
         {/* P-10: kokpit je jediný pohľad prípadu. Sekcie idú v jednom toku pod sebou
             (karta → úlohy → poznámky a aktivita → prevádzkový prehľad) — bez úzkeho
             bočného pásu, ktorý text lámal a duplikoval zoznam úloh. */}
@@ -575,6 +577,7 @@ function QuickAction({
   href,
   icon: Icon,
   label,
+  mobileLabel,
   onClick,
   title,
   tone = "neutral",
@@ -585,6 +588,7 @@ function QuickAction({
   href?: string;
   icon: LucideIcon;
   label: string;
+  mobileLabel?: string;
   onClick?: () => void;
   title?: string;
   tone?: "neutral" | "yellow";
@@ -593,6 +597,12 @@ function QuickAction({
     tone === "yellow"
       ? "border-yellow-300 bg-[#FCD703] text-zinc-950 hover:bg-yellow-300"
       : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50";
+  const text = !compact && (
+    <span className={`${mobileLabel === "" ? "hidden lg:inline" : ""} max-w-[120px] truncate text-[11px] font-semibold lg:text-xs`}>
+      <span className="lg:hidden">{mobileLabel ?? label}</span>
+      <span className="hidden lg:inline">{label}</span>
+    </span>
+  );
 
   if (onClick) {
     return (
@@ -602,10 +612,10 @@ function QuickAction({
         disabled={disabled}
         aria-label={label}
         title={title ?? label}
-        className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+        className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50 lg:px-2.5 ${className}`}
       >
         {busy ? <Loader2 size={compact ? 15 : 14} className="motion-safe:animate-spin" aria-hidden="true" /> : <Icon size={compact ? 15 : 14} aria-hidden="true" />}
-        {!compact && <span className="max-w-[120px] truncate">{label}</span>}
+        {text}
       </button>
     );
   }
@@ -620,7 +630,7 @@ function QuickAction({
         className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold opacity-50 ${className}`}
       >
         <Icon size={compact ? 15 : 14} aria-hidden="true" />
-        {!compact && <span className="max-w-[120px] truncate">{label}</span>}
+        {text}
       </button>
     );
   }
@@ -628,7 +638,7 @@ function QuickAction({
   return (
     <a href={href} aria-label={label} title={title ?? label} className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold ${className}`}>
       <Icon size={compact ? 15 : 14} aria-hidden="true" />
-      {!compact && <span className="max-w-[120px] truncate">{label}</span>}
+      {text}
     </a>
   );
 }

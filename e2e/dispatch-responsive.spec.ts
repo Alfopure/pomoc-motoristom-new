@@ -902,6 +902,7 @@ test("valid edits save automatically and refresh the open card", async ({ page }
 
   await page.setViewportSize({ width: 1280, height: viewportHeight });
   await openCaseEdit(page);
+  await expect(page.getByTestId("case-autosave-status")).toHaveCount(0);
   await page.getByLabel("EČV", { exact: true }).fill("QA SAVE 42");
   await page.getByRole("button", { name: "Pojazdné", exact: true }).click();
 
@@ -916,6 +917,8 @@ test("valid edits save automatically and refresh the open card", async ({ page }
   await expect.poll(() => patchCount).toBe(2);
   await expect(page.getByTestId("case-autosave-status")).toContainText("Uložené automaticky");
   expect(submittedDriveableValues).toEqual([true, false]);
+  await expect(page.getByTestId("case-autosave-status")).toHaveCSS("position", "static");
+  await expect(page.getByTestId("case-autosave-status")).toHaveCount(0, { timeout: 3_000 });
 
   await page.getByRole("button", { name: "Späť", exact: true }).click();
   await expect(page.getByTestId("case-edit-form-main")).toBeVisible();

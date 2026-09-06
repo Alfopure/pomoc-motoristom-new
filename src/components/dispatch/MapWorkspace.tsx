@@ -59,29 +59,14 @@ const desktopRows: Record<WorkspaceMode, string> = {
   expanded: "lg:grid-rows-[minmax(0,1fr)]",
 };
 
-const mobileSheetHeights: Record<WorkspaceMode, string> = {
-  collapsed: "h-16",
-  split: "h-[var(--dispatch-mobile-panel-height)]",
-  expanded: "h-[calc(100dvh-76px-env(safe-area-inset-bottom))]",
-};
-
 const DEFAULT_DESKTOP_PANEL_PERCENT = 34;
-const DEFAULT_MOBILE_PANEL_VH = 50;
 const MIN_DESKTOP_PANEL_PERCENT = 20;
 const MAX_DESKTOP_PANEL_PERCENT = 82;
 const COLLAPSE_DESKTOP_PANEL_PERCENT = 24;
 const EXPAND_DESKTOP_PANEL_PERCENT = 78;
-const MIN_MOBILE_PANEL_VH = 34;
-const MAX_MOBILE_PANEL_VH = 88;
-const COLLAPSE_MOBILE_PANEL_VH = 36;
-const EXPAND_MOBILE_PANEL_VH = 84;
-const MOBILE_BOTTOM_NAV_OFFSET = 68;
 const WORKSPACE_SHELL_ID = "dispatch-workspace-shell";
 
-type StoredWorkspaceLayout = {
-  desktopPanelPercent?: number;
-  mobilePanelVh?: number;
-};
+type StoredWorkspaceLayout = { desktopPanelPercent?: number };
 
 export function MapWorkspace({
   activeCaseId,
@@ -122,71 +107,37 @@ export function MapWorkspace({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const layoutStorageKey = useMemo(() => `motorist:dispatch-workspace-layout:v2:${viewerProfileId ?? "local-browser"}`, [viewerProfileId]);
   const desktopPanelPercentRef = useRef(DEFAULT_DESKTOP_PANEL_PERCENT);
-  const mobilePanelVhRef = useRef(DEFAULT_MOBILE_PANEL_VH);
   const pendingAnimationFrameRef = useRef<number | null>(null);
-  const pendingDesktopPanelPercentRef = useRef(DEFAULT_DESKTOP_PANEL_PERCENT);
-  const pendingMobilePanelVhRef = useRef(DEFAULT_MOBILE_PANEL_VH);
   const lastRawDesktopPanelPercentRef = useRef(DEFAULT_DESKTOP_PANEL_PERCENT);
-  const lastRawMobilePanelVhRef = useRef(DEFAULT_MOBILE_PANEL_VH);
-  const lastResizeSurfaceRef = useRef<"desktop" | "mobile">("desktop");
   const [desktopPanelPercent, setDesktopPanelPercent] = useState(DEFAULT_DESKTOP_PANEL_PERCENT);
-  const [mobilePanelVh, setMobilePanelVh] = useState(DEFAULT_MOBILE_PANEL_VH);
   const hasCockpitCase = Boolean(caseItem && mapModel);
   const showWorkspacePanel = workspaceKind !== "cockpit" || hasCockpitCase;
   const showExpandedPanel = workspaceMode === "expanded" && workspaceKind !== "cockpit";
-  const expandedOverlay = workspaceMode === "expanded";
-  const upperAreaClassName =
-    showWorkspacePanel && workspaceMode === "split"
-      ? "h-full min-h-0 overflow-hidden lg:h-auto lg:min-h-[340px]"
-      : "h-full min-h-0 overflow-hidden";
-  const shellClassName = !showWorkspacePanel
-    ? "relative h-full min-h-0"
-    : expandedOverlay
-    ? "relative h-full min-h-0"
+  const shellClassName = `dispatch-workspace-shell relative h-full min-h-0 ${showWorkspacePanel && workspaceMode === "split" ? `lg:grid lg:gap-2 ${desktopRows[workspaceMode]}` : ""}`;
+  const upperAreaClassName = `dispatch-workspace-upper h-full min-h-0 overflow-hidden ${showWorkspacePanel && workspaceMode === "split" ? "lg:h-auto lg:min-h-[340px]" : ""}`;
+  // Mobile CSS displays either the full map or the full case, never a partial sheet.
+  const panelClassName = workspaceMode === "expanded"
+    ? "dispatch-workspace-panel fixed inset-x-0 top-[var(--dispatch-fixed-top,53px)] bottom-[calc(var(--dispatch-mobile-nav-height,56px)+env(safe-area-inset-bottom))] z-[2147482500] px-1 lg:absolute lg:inset-0 lg:z-20 lg:h-full lg:px-0"
     : workspaceMode === "collapsed"
-      ? "dispatch-workspace-shell relative h-full min-h-0"
-      : `dispatch-workspace-shell relative h-full min-h-0 lg:grid lg:gap-2 ${desktopRows[workspaceMode]}`;
-  const panelClassName = expandedOverlay
-    ? "dispatch-workspace-panel fixed inset-x-0 top-[var(--dispatch-fixed-top,53px)] bottom-[calc(var(--dispatch-mobile-nav-height,68px)+env(safe-area-inset-bottom))] z-[2147482500] px-2 lg:absolute lg:inset-0 lg:z-20 lg:h-full lg:px-0"
-    : workspaceMode === "collapsed"
-      ? `dispatch-workspace-panel fixed inset-x-0 bottom-[calc(var(--dispatch-mobile-nav-height,68px)+env(safe-area-inset-bottom))] z-[2147482500] h-16 px-2 lg:absolute lg:inset-x-0 lg:bottom-0 lg:z-20 lg:h-16 lg:px-0`
-      : `dispatch-workspace-panel fixed inset-x-0 bottom-[calc(var(--dispatch-mobile-nav-height,68px)+env(safe-area-inset-bottom))] z-[2147482500] max-h-[calc(100dvh-var(--dispatch-fixed-top,53px)-var(--dispatch-mobile-nav-height,68px)-env(safe-area-inset-bottom)-8px)] px-2 lg:relative lg:inset-auto lg:z-auto lg:h-full lg:max-h-none lg:px-0 ${mobileSheetHeights[workspaceMode]}`;
+      ? "dispatch-workspace-panel hidden lg:absolute lg:inset-x-0 lg:bottom-0 lg:z-20 lg:block lg:h-16"
+      : "dispatch-workspace-panel hidden lg:relative lg:block lg:h-full";
   const canResizeCockpit = workspaceKind === "cockpit" && hasCockpitCase;
-  const sectionClassName = "relative h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-zinc-50 p-2 sm:p-3";
-  const resizeHandleClassName =
-    workspaceMode === "expanded"
-      ? "absolute left-1/2 top-3 z-[2147482600] hidden h-7 w-20 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full border border-zinc-300 bg-white/95 text-zinc-500 shadow-md backdrop-blur hover:border-zinc-400 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#FCD703] focus:ring-offset-2 lg:flex"
-      : "absolute left-1/2 top-0 z-[2147482600] flex h-11 w-20 -translate-x-1/2 -translate-y-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full border border-zinc-300 bg-white/95 text-zinc-500 shadow-md backdrop-blur hover:border-zinc-400 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#FCD703] focus:ring-offset-2 lg:h-7";
+  const sectionClassName = "dispatch-map-workspace relative h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-zinc-50 p-1 lg:p-3";
+  const resizeHandleClassName = `absolute left-1/2 z-[2147482600] hidden h-7 w-20 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full border border-zinc-300 bg-white/95 text-zinc-500 shadow-md backdrop-blur hover:border-zinc-400 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#FCD703] focus:ring-offset-2 lg:flex ${workspaceMode === "expanded" ? "top-3" : "top-0 -translate-y-1/2"}`;
 
   useEffect(() => {
-    let nextDesktopPercent = DEFAULT_DESKTOP_PANEL_PERCENT;
-    let nextMobileVh = DEFAULT_MOBILE_PANEL_VH;
-
+    let nextPercent = DEFAULT_DESKTOP_PANEL_PERCENT;
     try {
       const raw = window.localStorage.getItem(layoutStorageKey);
-      const parsed = raw ? (JSON.parse(raw) as StoredWorkspaceLayout) : undefined;
-
-      if (typeof parsed?.desktopPanelPercent === "number") {
-        nextDesktopPercent = clamp(Math.round(parsed.desktopPanelPercent), MIN_DESKTOP_PANEL_PERCENT, MAX_DESKTOP_PANEL_PERCENT);
-      }
-
-      if (typeof parsed?.mobilePanelVh === "number") {
-        nextMobileVh = clamp(Math.round(parsed.mobilePanelVh), MIN_MOBILE_PANEL_VH, MAX_MOBILE_PANEL_VH);
+      const parsed = raw ? JSON.parse(raw) as StoredWorkspaceLayout : undefined;
+      if (typeof parsed?.desktopPanelPercent === "number" && Number.isFinite(parsed.desktopPanelPercent)) {
+        nextPercent = clamp(Math.round(parsed.desktopPanelPercent), MIN_DESKTOP_PANEL_PERCENT, MAX_DESKTOP_PANEL_PERCENT);
       }
     } catch {
-      // localStorage can be unavailable in private modes; defaults still work.
+      // Defaults remain available when local storage is blocked.
     }
-
-    desktopPanelPercentRef.current = nextDesktopPercent;
-    mobilePanelVhRef.current = nextMobileVh;
-    pendingDesktopPanelPercentRef.current = nextDesktopPercent;
-    pendingMobilePanelVhRef.current = nextMobileVh;
-    const shell = containerRef.current;
-    if (shell) {
-      shell.style.setProperty("--dispatch-desktop-grid-rows", toDesktopGridRows(nextDesktopPercent));
-      shell.style.setProperty("--dispatch-mobile-panel-height", `${Math.round(nextMobileVh)}dvh`);
-    }
-
+    desktopPanelPercentRef.current = nextPercent;
+    containerRef.current?.style.setProperty("--dispatch-desktop-grid-rows", toDesktopGridRows(nextPercent));
     return () => {
       if (pendingAnimationFrameRef.current !== null) {
         window.cancelAnimationFrame(pendingAnimationFrameRef.current);
@@ -195,33 +146,16 @@ export function MapWorkspace({
     };
   }, [layoutStorageKey]);
 
-  function updateDesktopPanelPercent(nextPercent: number, commitState = true) {
+  function applyLayout() {
+    containerRef.current?.style.setProperty("--dispatch-desktop-grid-rows", toDesktopGridRows(desktopPanelPercentRef.current));
+  }
+
+  function updateDesktopPanelPercent(nextPercent: number) {
     desktopPanelPercentRef.current = nextPercent;
-    if (commitState) {
-      setDesktopPanelPercent(nextPercent);
-    }
-    scheduleLayoutVariables(nextPercent, mobilePanelVhRef.current);
-  }
-
-  function updateMobilePanelVh(nextVh: number, commitState = true) {
-    mobilePanelVhRef.current = nextVh;
-    if (commitState) {
-      setMobilePanelVh(nextVh);
-    }
-    scheduleLayoutVariables(desktopPanelPercentRef.current, nextVh);
-  }
-
-  function scheduleLayoutVariables(nextDesktopPercent: number, nextMobileVh: number) {
-    pendingDesktopPanelPercentRef.current = nextDesktopPercent;
-    pendingMobilePanelVhRef.current = nextMobileVh;
-
-    if (pendingAnimationFrameRef.current !== null) {
-      return;
-    }
-
+    if (pendingAnimationFrameRef.current !== null) return;
     pendingAnimationFrameRef.current = window.requestAnimationFrame(() => {
       pendingAnimationFrameRef.current = null;
-      applyLayoutVariables(pendingDesktopPanelPercentRef.current, pendingMobilePanelVhRef.current);
+      applyLayout();
     });
   }
 
@@ -230,182 +164,74 @@ export function MapWorkspace({
       window.cancelAnimationFrame(pendingAnimationFrameRef.current);
       pendingAnimationFrameRef.current = null;
     }
-
-    applyLayoutVariables(desktopPanelPercentRef.current, mobilePanelVhRef.current);
+    applyLayout();
     setDesktopPanelPercent(desktopPanelPercentRef.current);
-    setMobilePanelVh(mobilePanelVhRef.current);
   }
 
-  function applyLayoutVariables(nextDesktopPercent: number, nextMobileVh: number) {
-    const shell = containerRef.current;
-    if (!shell) {
-      return;
-    }
-
-    shell.style.setProperty("--dispatch-desktop-grid-rows", toDesktopGridRows(nextDesktopPercent));
-    shell.style.setProperty("--dispatch-mobile-panel-height", `${Math.round(nextMobileVh)}dvh`);
-  }
-
-  function persistLayout(nextDesktopPercent = desktopPanelPercentRef.current, nextMobileVh = mobilePanelVhRef.current) {
+  function persistLayout(nextPercent = desktopPanelPercentRef.current) {
     try {
-      window.localStorage.setItem(
-        layoutStorageKey,
-        JSON.stringify({
-          desktopPanelPercent: Math.round(nextDesktopPercent),
-          mobilePanelVh: Math.round(nextMobileVh),
-        } satisfies StoredWorkspaceLayout),
-      );
+      window.localStorage.setItem(layoutStorageKey, JSON.stringify({ desktopPanelPercent: Math.round(nextPercent) } satisfies StoredWorkspaceLayout));
     } catch {
-      // localStorage can be unavailable in private modes; resizing must still work.
+      // Desktop resizing also works without persistence.
     }
   }
 
   function resizeFromClientY(clientY: number) {
-    const isDesktop = window.matchMedia("(min-width: 1024px)").matches;
-
-    if (isDesktop) {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect?.height) {
-        return;
-      }
-
-      const rawPercent = ((rect.bottom - clientY) / rect.height) * 100;
-      const nextPercent = clamp(rawPercent, MIN_DESKTOP_PANEL_PERCENT, MAX_DESKTOP_PANEL_PERCENT);
-      lastResizeSurfaceRef.current = "desktop";
-      lastRawDesktopPanelPercentRef.current = rawPercent;
-      updateDesktopPanelPercent(nextPercent, false);
-      return;
-    }
-
-    const rawVh = ((window.innerHeight - clientY - MOBILE_BOTTOM_NAV_OFFSET) / window.innerHeight) * 100;
-    const nextVh = clamp(rawVh, MIN_MOBILE_PANEL_VH, MAX_MOBILE_PANEL_VH);
-    lastResizeSurfaceRef.current = "mobile";
-    lastRawMobilePanelVhRef.current = rawVh;
-    updateMobilePanelVh(nextVh, false);
+    if (!window.matchMedia("(min-width: 1024px)").matches) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect?.height) return;
+    const rawPercent = ((rect.bottom - clientY) / rect.height) * 100;
+    lastRawDesktopPanelPercentRef.current = rawPercent;
+    updateDesktopPanelPercent(clamp(rawPercent, MIN_DESKTOP_PANEL_PERCENT, MAX_DESKTOP_PANEL_PERCENT));
   }
 
   function handleResizePointerDown(event: PointerEvent<HTMLButtonElement>) {
-    if (!canResizeCockpit) {
-      return;
-    }
-
+    if (!canResizeCockpit || !window.matchMedia("(min-width: 1024px)").matches) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     containerRef.current?.setAttribute("data-resizing", "true");
-
-    if (workspaceMode === "collapsed") {
-      onRestore();
-    }
-
+    if (workspaceMode === "collapsed") onRestore();
     resizeFromClientY(event.clientY);
   }
 
   function handleResizePointerMove(event: PointerEvent<HTMLButtonElement>) {
-    if (!event.currentTarget.hasPointerCapture(event.pointerId)) {
-      return;
-    }
-
-    resizeFromClientY(event.clientY);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) resizeFromClientY(event.clientY);
   }
 
   function handleResizePointerEnd(event: PointerEvent<HTMLButtonElement>) {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    event.currentTarget.releasePointerCapture(event.pointerId);
     containerRef.current?.removeAttribute("data-resizing");
     commitLayoutState();
-
-    const surface = lastResizeSurfaceRef.current;
-    const shouldCollapse =
-      surface === "desktop"
-        ? lastRawDesktopPanelPercentRef.current <= COLLAPSE_DESKTOP_PANEL_PERCENT
-        : lastRawMobilePanelVhRef.current <= COLLAPSE_MOBILE_PANEL_VH;
-    const shouldExpand =
-      surface === "desktop"
-        ? lastRawDesktopPanelPercentRef.current >= EXPAND_DESKTOP_PANEL_PERCENT
-        : lastRawMobilePanelVhRef.current >= EXPAND_MOBILE_PANEL_VH;
-
-    if (shouldCollapse) {
-      persistLayout(MIN_DESKTOP_PANEL_PERCENT, MIN_MOBILE_PANEL_VH);
+    if (lastRawDesktopPanelPercentRef.current <= COLLAPSE_DESKTOP_PANEL_PERCENT) {
+      persistLayout(MIN_DESKTOP_PANEL_PERCENT);
       onCollapse();
-      return;
-    }
-
-    if (shouldExpand) {
-      persistLayout(MAX_DESKTOP_PANEL_PERCENT, MAX_MOBILE_PANEL_VH);
+    } else if (lastRawDesktopPanelPercentRef.current >= EXPAND_DESKTOP_PANEL_PERCENT) {
+      persistLayout(MAX_DESKTOP_PANEL_PERCENT);
       onExpand();
-      return;
-    }
-
-    persistLayout();
-    if (workspaceMode === "expanded") {
-      onRestore();
+    } else {
+      persistLayout();
+      if (workspaceMode === "expanded") onRestore();
     }
   }
 
   function handleResizeKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
-    if (!canResizeCockpit) {
-      return;
-    }
-
-    const isDesktop = window.matchMedia("(min-width: 1024px)").matches;
+    if (!canResizeCockpit || !window.matchMedia("(min-width: 1024px)").matches) return;
     const step = event.shiftKey ? 8 : 4;
-    let nextDesktopPercent = desktopPanelPercent;
-    let nextMobileVh = mobilePanelVh;
-
-    if (event.key === "ArrowUp" || event.key === "PageUp") {
-      event.preventDefault();
-      if (workspaceMode === "collapsed") onRestore();
-      nextDesktopPercent = clamp(desktopPanelPercent + step, MIN_DESKTOP_PANEL_PERCENT, MAX_DESKTOP_PANEL_PERCENT);
-      nextMobileVh = clamp(mobilePanelVh + step, MIN_MOBILE_PANEL_VH, MAX_MOBILE_PANEL_VH);
-    } else if (event.key === "ArrowDown" || event.key === "PageDown") {
-      event.preventDefault();
-      if (workspaceMode === "collapsed") onRestore();
-      nextDesktopPercent = clamp(desktopPanelPercent - step, MIN_DESKTOP_PANEL_PERCENT, MAX_DESKTOP_PANEL_PERCENT);
-      nextMobileVh = clamp(mobilePanelVh - step, MIN_MOBILE_PANEL_VH, MAX_MOBILE_PANEL_VH);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      persistLayout(MIN_DESKTOP_PANEL_PERCENT, MIN_MOBILE_PANEL_VH);
-      onCollapse();
-      return;
-    } else if (event.key === "End") {
-      event.preventDefault();
-      persistLayout(MAX_DESKTOP_PANEL_PERCENT, MAX_MOBILE_PANEL_VH);
-      onExpand();
-      return;
-    } else {
-      return;
-    }
-
-    if (isDesktop) {
-      updateDesktopPanelPercent(nextDesktopPercent);
-      if (nextDesktopPercent <= COLLAPSE_DESKTOP_PANEL_PERCENT) {
-        persistLayout(MIN_DESKTOP_PANEL_PERCENT, MIN_MOBILE_PANEL_VH);
-        onCollapse();
-        return;
-      }
-      if (nextDesktopPercent >= EXPAND_DESKTOP_PANEL_PERCENT) {
-        persistLayout(MAX_DESKTOP_PANEL_PERCENT, MAX_MOBILE_PANEL_VH);
-        onExpand();
-        return;
-      }
-    } else {
-      updateMobilePanelVh(nextMobileVh);
-      if (nextMobileVh <= COLLAPSE_MOBILE_PANEL_VH) {
-        persistLayout(MIN_DESKTOP_PANEL_PERCENT, MIN_MOBILE_PANEL_VH);
-        onCollapse();
-        return;
-      }
-      if (nextMobileVh >= EXPAND_MOBILE_PANEL_VH) {
-        persistLayout(MAX_DESKTOP_PANEL_PERCENT, MAX_MOBILE_PANEL_VH);
-        onExpand();
-        return;
-      }
-    }
-    persistLayout(nextDesktopPercent, nextMobileVh);
-    if (workspaceMode === "expanded") {
-      onRestore();
-    }
+    let nextPercent = desktopPanelPercentRef.current;
+    if (event.key === "ArrowUp" || event.key === "PageUp") nextPercent += step;
+    else if (event.key === "ArrowDown" || event.key === "PageDown") nextPercent -= step;
+    else if (event.key === "Home") nextPercent = MIN_DESKTOP_PANEL_PERCENT;
+    else if (event.key === "End") nextPercent = MAX_DESKTOP_PANEL_PERCENT;
+    else return;
+    event.preventDefault();
+    nextPercent = clamp(nextPercent, MIN_DESKTOP_PANEL_PERCENT, MAX_DESKTOP_PANEL_PERCENT);
+    updateDesktopPanelPercent(nextPercent);
+    commitLayoutState();
+    persistLayout(nextPercent);
+    if (nextPercent <= COLLAPSE_DESKTOP_PANEL_PERCENT) onCollapse();
+    else if (nextPercent >= EXPAND_DESKTOP_PANEL_PERCENT) onExpand();
+    else if (workspaceMode !== "split") onRestore();
   }
 
   return (
@@ -418,7 +244,6 @@ export function MapWorkspace({
               branches={branches}
               assets={assets}
               priceRule={priceRule}
-              avoidMobileNav={workspaceMode !== "expanded"}
               workspaceMode={workspaceMode}
               onAssignAsset={onAssignAsset}
               onSendEtaSms={onSendEtaSms}
@@ -460,6 +285,7 @@ export function MapWorkspace({
               aria-valuemin={MIN_DESKTOP_PANEL_PERCENT}
               aria-valuenow={Math.round(desktopPanelPercent)}
               role="separator"
+              aria-orientation="horizontal"
               title="Potiahni hore alebo dole pre zmenu výšky"
             >
               <GripHorizontal size={18} aria-hidden="true" />

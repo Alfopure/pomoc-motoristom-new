@@ -45,6 +45,7 @@ input {
 
 @media (max-width: 1023px) {
   .dispatch-app-shell {
+    --dispatch-mobile-nav-height: 56px;
     height: 100dvh;
     min-height: 0;
     overflow: hidden;
@@ -54,17 +55,53 @@ input {
   }
 
   .dispatch-app-header {
-    padding-top: max(8px, env(safe-area-inset-top));
-    gap: 8px;
+    min-height: 44px;
+    padding: max(4px, env(safe-area-inset-top)) 8px 4px;
+    gap: 4px;
   }
 
   .dispatch-app-header > div:last-child {
     gap: 4px;
   }
 
-  .dispatch-app-header button,
+  .dispatch-app-header button[aria-haspopup="dialog"],
   .dispatch-app-header summary {
-    min-height: 44px;
+    min-height: 36px;
+    height: 36px;
+    font-size: 13px;
+  }
+
+  .dispatch-app-header [data-testid="signed-in-user-name"] {
+    font-size: 12px;
+  }
+
+  .dispatch-app-header .dispatch-account-trigger > span:first-child {
+    width: 28px;
+    height: 28px;
+    font-size: 12px;
+  }
+
+  .mobile-workspace-heading {
+    min-height: 40px;
+    padding: 2px 8px;
+    gap: 6px;
+  }
+
+  .mobile-workspace-heading h1 {
+    font-size: 14px;
+    line-height: 20px;
+  }
+
+  .mobile-workspace-heading button {
+    min-height: 36px;
+    height: 36px;
+    border-radius: 8px;
+    font-size: 12px;
+  }
+
+  .mobile-workspace-heading button[aria-label="Späť na prípady"] {
+    width: 32px;
+    border-color: transparent;
   }
 
   .dispatch-app-header > div:last-child > button:last-child {
@@ -110,15 +147,37 @@ input {
     touch-action: manipulation;
   }
 
-  .dispatch-mobile-nav button {
-    border-radius: 12px;
-    font-size: 11px;
+  .dispatch-mobile-nav {
+    height: calc(var(--dispatch-mobile-nav-height) + env(safe-area-inset-bottom));
+    padding-top: 4px;
+    padding-bottom: calc(4px + env(safe-area-inset-bottom));
   }
 
-  .dispatch-mobile-nav,
-  .dispatch-workspace-panel {
+  .dispatch-mobile-nav > div > button,
+  .dispatch-mobile-nav > div > div > button {
+    height: 46px;
+    min-height: 0;
+    gap: 3px;
+    border-radius: 9px;
+    font-size: 10px;
+  }
+
+  .dispatch-mobile-nav {
     padding-left: max(8px, env(safe-area-inset-left));
     padding-right: max(8px, env(safe-area-inset-right));
+  }
+
+  .dispatch-workspace-panel {
+    padding-left: max(4px, env(safe-area-inset-left));
+    padding-right: max(4px, env(safe-area-inset-right));
+  }
+
+  .dispatch-workspace-shell[data-workspace-mode="expanded"] > .dispatch-workspace-upper {
+    display: none;
+  }
+
+  .dispatch-workspace-shell:not([data-workspace-mode="expanded"]) > .dispatch-workspace-panel {
+    display: none;
   }
 
   .dispatch-mobile-nav button[aria-current="page"] {
@@ -143,10 +202,6 @@ input {
 .dispatch-map-expanded .leaflet-container,
 .dispatch-map-expanded .dispatch-google-map-canvas {
   min-height: 0;
-}
-
-.dispatch-workspace-panel[data-workspace-mode="split"] {
-  height: var(--dispatch-mobile-panel-height, 50dvh);
 }
 
 .dispatch-workspace-shell[data-resizing="true"],
