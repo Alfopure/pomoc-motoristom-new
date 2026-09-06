@@ -1,6 +1,7 @@
 "use client";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
+import { protectDraftBeforeUnload } from "@/lib/draft-unload";
 import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -319,9 +320,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
     onDirtyChange?.(isDirty);
     if (!isDirty) return;
 
-    const preventUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-    };
+    const preventUnload = (event: BeforeUnloadEvent) => protectDraftBeforeUnload(event);
     window.addEventListener("beforeunload", preventUnload);
     return () => window.removeEventListener("beforeunload", preventUnload);
   }, [isDirty, onDirtyChange]);

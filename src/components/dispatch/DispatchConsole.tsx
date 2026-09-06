@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -21,6 +21,7 @@ import {
   Pin,
   PinOff,
   Plus,
+  RefreshCw,
   Settings2,
   Table2,
   Truck,
@@ -60,6 +61,9 @@ import {
 } from "./navigation-preferences";
 import { signOutCurrentSession } from "@/components/auth/sign-out";
 import { PushNotificationSync } from "@/components/pwa/PushNotificationSync";
+import { useAppUpdate } from "@/components/pwa/useAppUpdate";
+import { isAppRefreshBlocked } from "@/components/pwa/app-refresh-policy";
+import { navigateAfterDraftApproval } from "@/lib/draft-unload";
 import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
 import { formatNotificationReminderTime, isNotificationForProfile, isNotificationReady, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
@@ -76,6 +80,11 @@ import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@
 import type { TelephonyAvailabilityAction } from "@/lib/telephony/presence";
 
 type View = "dispatch" | PinnableNavigationView;
+
+type NavigationOptions = {
+  beforeNavigate?: () => boolean;
+  documentNavigation?: boolean;
+};
 
 type NavigationGroup = "daily" | "operations" | "management";
 
@@ -217,12 +226,14 @@ const sourceLabels: Record<NonNullable<DispatchCase["sourceType"]>, string> = {
 
 export function DispatchConsole({
   initialData,
+  appVersion = "development",
   viewerDisplayName,
   viewerEmail,
   viewerProfileId,
   viewerRole,
 }: {
   initialData: DispatchData;
+  appVersion?: string;
   viewerDisplayName?: string;
   viewerEmail?: string;
   viewerOrganizationId?: string;
@@ -230,6 +241,7 @@ export function DispatchConsole({
   /** The signed-in profile's role; only supervision is gated on it in the console. */
   viewerRole?: AppRole;
 }) {
+  const updateAvailable = useAppUpdate(appVersion);
   const [dispatchData, setDispatchData] = useState(initialData);
   const {
     attendance,
@@ -289,6 +301,7 @@ export function DispatchConsole({
   const [leaveDialogError, setLeaveDialogError] = useState<string | null>(null);
   const [leaveAfterSave, setLeaveAfterSave] = useState(false);
   const pendingNavigationRef = useRef<(() => void) | null>(null);
+  const pendingNavigationOptionsRef = useRef<NavigationOptions>({});
   const saveCaseDraftRef = useRef<SaveCaseDraft | null>(null);
   const leaveObservedSavingRef = useRef(false);
   const consoleRef = useRef<HTMLDivElement>(null);
@@ -494,6 +507,11 @@ export function DispatchConsole({
   // enforces it again in `call-actions.ts` (a dispatcher gets 403 either way).
   const viewerCanSupervise = canSuperviseRole(viewerRole);
   const telephony = useTelephonyConsole({ enabled: isOperator, operators });
+  const appRefreshBlocked = isAppRefreshBlocked(telephony);
+  const appRefreshBlockedRef = useRef(appRefreshBlocked);
+  useLayoutEffect(() => {
+    appRefreshBlockedRef.current = appRefreshBlocked;
+  }, [appRefreshBlocked]);
   // `null` means "not answered yet"; only an explicit 503 parks the surface, so a
   // transient `calls/active` outage keeps the console (and the phone) usable.
   const telephonyConfigured = telephony.configured !== false;
@@ -689,25 +707,44 @@ export function DispatchConsole({
   }, []);
 
   const finishPendingNavigation = useCallback(() => {
+    // A call can arrive while the save/discard dialog is open. Recheck before
+    // clearing the dirty marker or closing the document's phone connection.
+    const options = pendingNavigationOptionsRef.current;
+    if (options.beforeNavigate?.() === false) {
+      setLeaveDialogSaving(false);
+      setLeaveAfterSave(false);
+      setLeaveDialogError("Aplikáciu môžeš obnoviť po skončení hovoru alebo pripájania. Rozpracované údaje zostávajú otvorené.");
+      return;
+    }
     const navigate = pendingNavigationRef.current;
     pendingNavigationRef.current = null;
+    pendingNavigationOptionsRef.current = {};
     setLeaveDialogOpen(false);
     setLeaveDialogSaving(false);
     setLeaveDialogError(null);
     setLeaveAfterSave(false);
     leaveObservedSavingRef.current = false;
-    setHasUnsavedChanges(false);
-    setIsCaseSaveLocked(false);
-    navigate?.();
+    if (options.documentNavigation) {
+      // Preserve the dirty state if a browser or another unload listener stops
+      // navigation. The document will disappear on a successful reload.
+      if (navigate) navigateAfterDraftApproval(navigate);
+    } else {
+      setHasUnsavedChanges(false);
+      setIsCaseSaveLocked(false);
+      navigate?.();
+    }
   }, []);
 
-  const requestNavigation = useCallback((navigate: () => void) => {
+  const requestNavigation = useCallback((navigate: () => void, options: NavigationOptions = {}) => {
+    if (options.beforeNavigate?.() === false) return false;
     if (!hasUnsavedChanges && !isCaseSaveLocked) {
-      navigate();
+      if (options.documentNavigation) navigateAfterDraftApproval(navigate);
+      else navigate();
       return true;
     }
 
     pendingNavigationRef.current = navigate;
+    pendingNavigationOptionsRef.current = options;
     setLeaveDialogError(null);
     setLeaveDialogOpen(true);
     return false;
@@ -715,11 +752,19 @@ export function DispatchConsole({
 
   const cancelPendingNavigation = useCallback(() => {
     pendingNavigationRef.current = null;
+    pendingNavigationOptionsRef.current = {};
     setLeaveDialogOpen(false);
     setLeaveDialogError(null);
     setLeaveAfterSave(false);
     leaveObservedSavingRef.current = false;
   }, []);
+
+  function requestAppRefresh() {
+    requestNavigation(() => window.location.reload(), {
+      beforeNavigate: () => !appRefreshBlockedRef.current,
+      documentNavigation: true,
+    });
+  }
 
   function discardAndLeave() {
     if (isCaseSaveLocked || leaveDialogSaving) return;
@@ -789,8 +834,9 @@ export function DispatchConsole({
   }
 
   function openTask(taskId: string, caseId: string, fromPush = false) {
+    const needsDocument = !dispatchCases.some((item) => item.id === caseId && item.tasks.some((task) => task.id === taskId));
     requestNavigation(() => {
-      if (!dispatchCases.some((item) => item.id === caseId && item.tasks.some((task) => task.id === taskId))) {
+      if (needsDocument) {
         window.location.assign(`/?task=${encodeURIComponent(taskId)}`);
         return;
       }
@@ -806,7 +852,7 @@ export function DispatchConsole({
       setActiveView("dispatch");
       setFocusedTaskId(taskId);
       setWorkspace({ kind: "detail", mode: "expanded" });
-    });
+    }, { documentNavigation: needsDocument });
   }
 
   const handleInitialPushOpen = useEffectEvent((rawUrl: string) => {
@@ -830,7 +876,7 @@ export function DispatchConsole({
     else if (!taskId) switchView("settings");
     // A newly assigned task might not exist in this tab's older snapshot.
     // Reload only after the normal save/discard guard has protected the draft.
-    else requestNavigation(() => window.location.assign(url.href));
+    else requestNavigation(() => window.location.assign(url.href), { documentNavigation: true });
   });
 
   useEffect(() => {
@@ -1644,6 +1690,9 @@ export function DispatchConsole({
           role={viewerRole}
           signingOut={isSigningOut}
           onSignOut={requestSignOut}
+          onRefresh={requestAppRefresh}
+          refreshBlocked={appRefreshBlocked}
+          updateAvailable={updateAvailable}
         />
         <nav className="hidden min-w-0 flex-1 items-center justify-center gap-1 lg:flex" aria-label="Hlavná navigácia">
           <NavButton
@@ -1734,6 +1783,19 @@ export function DispatchConsole({
           </button>
         </div>
       </header>
+
+      {updateAvailable && (
+        <div role="status" data-testid="app-update-notice" className="flex items-center justify-between gap-2 border-b border-yellow-200 bg-yellow-50 px-3 text-xs text-zinc-800 sm:px-4">
+          <span className="py-1.5">
+            {appRefreshBlocked
+              ? "Nová verzia je pripravená. Obnov ju po skončení hovoru alebo pripájania."
+              : "Nová verzia je pripravená."}
+          </span>
+          <button type="button" aria-label="Obnoviť aplikáciu" onClick={requestAppRefresh} disabled={appRefreshBlocked} className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-md px-2 font-semibold hover:bg-yellow-100 disabled:cursor-not-allowed disabled:opacity-50">
+            <RefreshCw size={14} aria-hidden="true" /> Obnoviť
+          </button>
+        </div>
+      )}
 
       <div className={activeView === "tasks" ? "hidden" : "mobile-workspace-heading flex min-h-16 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-4 py-2.5 lg:hidden"}>
         <div className="flex min-w-0 items-center gap-2">
@@ -2177,12 +2239,18 @@ function AccountMenu({
   displayName,
   email,
   onSignOut,
+  onRefresh,
+  refreshBlocked,
+  updateAvailable,
   role,
   signingOut,
 }: {
   displayName: string;
   email?: string;
   onSignOut: () => void;
+  onRefresh: () => void;
+  refreshBlocked: boolean;
+  updateAvailable: boolean;
   role?: AppRole;
   signingOut: boolean;
 }) {
@@ -2264,6 +2332,19 @@ function AccountMenu({
             </span>
           </div>
           <div className="border-t border-zinc-200 p-2">
+            <button
+              type="button"
+              onClick={() => { setOpen(false); onRefresh(); }}
+              aria-label="Obnoviť aplikáciu"
+              disabled={refreshBlocked || signingOut}
+              className="flex min-h-11 w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RefreshCw size={16} className="shrink-0" aria-hidden="true" />
+              <span className="min-w-0">
+                <span className="block">Obnoviť aplikáciu</span>
+                {refreshBlocked ? <span className="mt-0.5 block text-[11px] font-normal text-zinc-500">Po skončení hovoru alebo pripájania</span> : updateAvailable ? <span className="mt-0.5 block text-[11px] font-normal text-zinc-500">Nová verzia je pripravená</span> : null}
+              </span>
+            </button>
             <button
               type="button"
               onClick={handleSignOut}
