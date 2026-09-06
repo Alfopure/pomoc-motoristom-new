@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
+import type { WebphoneCallView } from "@/lib/telephony/telnyx-webphone";
 
 import {
   callElapsedSeconds,
@@ -8,6 +9,7 @@ import {
   isDtmfKey,
   partyBusyKey,
   phoneBarCapabilities,
+  phoneBarFocusedCall,
   phoneBarStateLabel,
   phoneBarVisible,
   phoneTakeoverAvailable,
@@ -99,6 +101,47 @@ describe("phone bar capabilities", () => {
     const capabilities = phoneBarCapabilities({ call: null, browserCallActive: false, browserCallRinging: true });
     expect(capabilities.answer).toBe(true);
     expect(capabilities.hangup).toBe(true);
+  });
+
+  it("keeps local media controls during a delayed server snapshot without server actions", () => {
+    const capabilities = phoneBarCapabilities({ call: null, browserCallActive: true, browserCallRinging: false });
+    expect(Object.entries(capabilities).filter(([, allowed]) => allowed).map(([action]) => action).sort())
+      .toEqual(["dtmf", "hangup", "mute"]);
+    expect(phoneBarCapabilities({ call: null, browserCallActive: false, browserCallRinging: false }))
+      .toEqual(Object.fromEntries(Object.keys(capabilities).map((action) => [action, false])));
+  });
+
+  it("keeps the answered browser call controllable while the server still shows an offer", () => {
+    const capabilities = phoneBarCapabilities({ call: call({ kind: "offer", state: "ringing" }), browserCallActive: true, browserCallRinging: false });
+    expect(capabilities).toMatchObject({ answer: false, hangup: true, mute: true, dtmf: true, hold: false, transfer: false });
+  });
+});
+
+describe("browser and server call correlation", () => {
+  const browser: WebphoneCallView = {
+    id: "browser-b", state: "ringing", direction: "inbound", number: "+421900111222", callerName: null,
+    telnyxCallControlId: "control-b", sessionId: null, muted: false, ringing: true, active: false,
+  };
+
+  it("uses the actual invite's server session even when the first active row is stale", () => {
+    const stale = call({ sessionId: "session-a" });
+    const current = call({ sessionId: "session-b", kind: "offer" });
+    expect(phoneBarFocusedCall({ active: stale, offers: [current] }, { ...browser, sessionId: "session-b" })).toBe(current);
+    expect(phoneBarFocusedCall({ active: stale, offers: [] }, { ...browser, sessionId: "session-b" })).toBeNull();
+  });
+
+  it("correlates an inbound invite by the actor's exact browser control ID", () => {
+    const stale = call({ sessionId: "session-a", browserCallControlIds: ["control-a"] });
+    const current = call({ sessionId: "session-b", kind: "offer", browserCallControlIds: ["control-b"] });
+    expect(phoneBarFocusedCall({ active: stale, offers: [current] }, browser)).toBe(current);
+    expect(phoneBarFocusedCall({ active: stale, offers: [] }, browser)).toBeNull();
+  });
+
+  it("never guesses from matching numbers or contradicts a known session ID", () => {
+    const current = call({ sessionId: "session-a", number: browser.number, browserCallControlIds: ["control-b"] });
+    expect(phoneBarFocusedCall({ active: current, offers: [] }, { ...browser, sessionId: "session-b" })).toBeNull();
+    expect(phoneBarFocusedCall({ active: current, offers: [] }, { ...browser, telnyxCallControlId: null })).toBeNull();
+    expect(phoneBarFocusedCall({ active: current, offers: [] }, null)).toBe(current);
   });
 });
 

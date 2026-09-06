@@ -65,6 +65,29 @@ describe("active calls snapshot", () => {
     expect(snapshot.presence.canManageAssignments).toBe(true);
   });
 
+  it("exposes browser call identities only for the polling actor's operator and consult legs", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    const ownLeg = h.db.rows("motorist_call_legs").find((leg) => leg.session_id === sessionId && leg.profile_id === PROFILES.o1);
+    expect(ownLeg).toBeDefined();
+
+    for (const role of ["operator", "consult", "supervisor", "customer", "external"] as const) {
+      h.db.update("motorist_call_legs", { role }, (leg) => leg.id === ownLeg!.id);
+      const snapshot = await loadActiveCalls(deps(h), { profileId: PROFILES.o1, canManageAssignments: false });
+      const legs = snapshot.calls[0].legs;
+      expect(legs.find((leg) => leg.id === ownLeg!.id)?.callControlId).toBe(
+        role === "operator" || role === "consult" ? ownLeg!.telnyx_call_control_id : null,
+      );
+      expect(legs.filter((leg) => leg.id !== ownLeg!.id).every((leg) => leg.callControlId === null)).toBe(true);
+    }
+
+    // A second operator's response gets their own ID, never the first actor's.
+    const colleague = await loadActiveCalls(deps(h), { profileId: PROFILES.o2, canManageAssignments: false });
+    const colleagueLeg = colleague.calls[0].legs.find((leg) => leg.profileId === PROFILES.o2 && leg.role === "operator");
+    expect(colleagueLeg?.callControlId).toBeTruthy();
+    expect(colleague.calls[0].legs.find((leg) => leg.id === ownLeg!.id)?.callControlId).toBeNull();
+  });
+
   it("names the operator who parked a caller and the limit they arrived with", async () => {
     // The waiting room has to be able to say who odložil the caller and how
     // long they still have before the state machine offers them a callback.

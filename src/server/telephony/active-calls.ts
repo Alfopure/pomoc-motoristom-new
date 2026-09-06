@@ -23,6 +23,8 @@ type AdminClient = SupabaseClient<Database>;
 
 export type ActiveCallLegView = {
   id: string;
+  /** Browser correlation for the polling actor's operator/consult legs only. */
+  callControlId?: string | null;
   role: LegRow["role"];
   profileId: string | null;
   state: LegRow["state"];
@@ -157,6 +159,9 @@ export async function loadActiveCalls(
     const meta = legMetaOf(leg);
     list.push({
       id: leg.id,
+      callControlId: leg.profile_id === actor.profileId && (leg.role === "operator" || leg.role === "consult")
+        ? leg.telnyx_call_control_id
+        : null,
       role: leg.role,
       profileId: leg.profile_id,
       state: leg.state,
