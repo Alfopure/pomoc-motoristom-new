@@ -1,0 +1,331 @@
+[
+  {
+    "file": "announcements-v1/sk/greeting.mp3",
+    "key": "greeting",
+    "language": "sk",
+    "text": "Pomoc motoristom. Prosím, zostaňte na linke.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 2.54,
+    "sha256": "d9a6d31261b8a678645f4fd96d982993f72caaa7b2d3ac006f2226e564bb28f7"
+  },
+  {
+    "file": "announcements-v1/sk/after-hours.mp3",
+    "key": "afterHours",
+    "language": "sk",
+    "text": "Voláte mimo otváracích hodín. Pre spätné volanie stlačte jednotku.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.73,
+    "sha256": "13ce2c90807d2112251106c7c5e015b77ee55dd4e98ffbcbb0b489dc13fcfdac"
+  },
+  {
+    "file": "announcements-v1/sk/ivr-main.mp3",
+    "key": "ivrMain",
+    "language": "sk",
+    "text": "Pre dispečing stlačte jednotku. Pre spätné volanie dvojku.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.65,
+    "sha256": "1f679f7fb8b1e54c20d8bb2677d868e216a0e9c14c14d56f54c51191cd2b1f16"
+  },
+  {
+    "file": "announcements-v1/sk/callback-offer.mp3",
+    "key": "callbackOffer",
+    "language": "sk",
+    "text": "Dispečeri práve telefonujú. Pre spätné volanie stlačte jednotku.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.39,
+    "sha256": "81438641118764dc5f8e2e7ed678a80defd325775509aa4fb30a427e100700fe"
+  },
+  {
+    "file": "announcements-v1/sk/callback-confirmed.mp3",
+    "key": "callbackConfirmed",
+    "language": "sk",
+    "text": "Ďakujeme. Vašu požiadavku máme. Ozveme sa vám čo najskôr.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.79,
+    "sha256": "9187ec264223f0c3e22f2e67dc93ac8c09e71e40fbc3514b1ed22b80a763d5af"
+  },
+  {
+    "file": "announcements-v1/sk/all-busy.mp3",
+    "key": "allBusy",
+    "language": "sk",
+    "text": "Momentálne sa nedá spojiť s dispečerom. Prosím, zavolajte neskôr.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.06,
+    "sha256": "0d81d6fa98f46e29bde9506938643e25d11777cd7ce6dac5562ae4d238697555"
+  },
+  {
+    "file": "announcements-v1/sk/invalid-input.mp3",
+    "key": "invalidInput",
+    "language": "sk",
+    "text": "Neplatná voľba. Prosím, vyberte znova.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 2.57,
+    "sha256": "083bdee5860a36ba6b753c54f599493ba6ed3e394fc389a83131d1bf6f813085"
+  },
+  {
+    "file": "announcements-v1/sk/recording-notice.mp3",
+    "key": "recordingNotice",
+    "language": "sk",
+    "text": "Hovor nahrávame na vybavenie pomoci. Záznam sprístupňujeme poskytovateľom našich služieb. Prístup k záznamu alebo námietku riešte s dispečerom.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 9.67,
+    "sha256": "35e63298c3e5a0efb0b8164af58557d3ad535f2da0ed137a2f3e2dcbe89c08d7"
+  },
+  {
+    "file": "announcements-v1/cs/greeting.mp3",
+    "key": "greeting",
+    "language": "cs",
+    "text": "Vítejte na lince Pomoc motoristom. Vyčkejte prosím na spojení.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.79,
+    "sha256": "f3824a527a0f01e20813f8d27a435a38d32b0b4bb34f235215891d2b1ab04125"
+  },
+  {
+    "file": "announcements-v1/cs/after-hours.mp3",
+    "key": "afterHours",
+    "language": "cs",
+    "text": "Voláte mimo otevírací dobu. Pro zpětné volání stiskněte jedničku.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.63,
+    "sha256": "1a4d7043e7bdce9fc6d3229b5f02a8392dde424c03539c4e27ee1d991bbe8716"
+  },
+  {
+    "file": "announcements-v1/cs/ivr-main.mp3",
+    "key": "ivrMain",
+    "language": "cs",
+    "text": "Pro dispečink stiskněte jedničku. Pro zpětné volání dvojku.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.84,
+    "sha256": "a2d1ccd6299640ad75c1cfe9dc4af9f677c69da829e8c4ed81f2007e10000b3d"
+  },
+  {
+    "file": "announcements-v1/cs/callback-offer.mp3",
+    "key": "callbackOffer",
+    "language": "cs",
+    "text": "Dispečeři právě telefonují. Pro zpětné volání stiskněte jedničku.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.54,
+    "sha256": "44aa2754504cb9c9b6a9181b082d94fb387973dd01c4ab2f27d33344c195cc11"
+  },
+  {
+    "file": "announcements-v1/cs/callback-confirmed.mp3",
+    "key": "callbackConfirmed",
+    "language": "cs",
+    "text": "Děkujeme. Váš požadavek máme. Ozveme se vám co nejdříve.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.6,
+    "sha256": "c90f545b942da10753150634b78fd1fc5f5b461f162765868ecead96d94fd51e"
+  },
+  {
+    "file": "announcements-v1/cs/all-busy.mp3",
+    "key": "allBusy",
+    "language": "cs",
+    "text": "Momentálně vás nemůžeme spojit s dispečerem. Prosím, zavolejte později.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.61,
+    "sha256": "9a1f441d3f0314e2f8b23f55e5fe3b63cdbab9e93b5dc05f208d54271e650dc6"
+  },
+  {
+    "file": "announcements-v1/cs/invalid-input.mp3",
+    "key": "invalidInput",
+    "language": "cs",
+    "text": "Tuto možnost neznáme. Zkuste to prosím znovu.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 2.9,
+    "sha256": "8e3ed8daca003d1d6391b3b3f6309ed59a97b5745324602326d993305e2ef303"
+  },
+  {
+    "file": "announcements-v1/cs/recording-notice.mp3",
+    "key": "recordingNotice",
+    "language": "cs",
+    "text": "Hovor nahráváme pro zajištění pomoci. Záznam zpřístupňujeme poskytovatelům našich služeb. Přístup k záznamu nebo námitku řešte s dispečerem.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 9.96,
+    "sha256": "22e2d29d2aa33544cb4a725560db048a39b6ba7cf0897cee7e0fc876f7390bb3"
+  },
+  {
+    "file": "announcements-v1/en/greeting.mp3",
+    "key": "greeting",
+    "language": "en",
+    "text": "Pomoc motoristom, roadside assistance. Please stay on the line.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.7,
+    "sha256": "79f171616dea0518641895250cdafe2b50ea85861252273e49ac567b06713f8c"
+  },
+  {
+    "file": "announcements-v1/en/after-hours.mp3",
+    "key": "afterHours",
+    "language": "en",
+    "text": "You are calling outside our opening hours. For a callback, press one.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.15,
+    "sha256": "fe18feb14de8eecf5116211d59fa164e7cb5b5d430b57425b2a618badea83b61"
+  },
+  {
+    "file": "announcements-v1/en/ivr-main.mp3",
+    "key": "ivrMain",
+    "language": "en",
+    "text": "For dispatch, press one. For a callback, press two.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.26,
+    "sha256": "bf949b4f7b6c37b5bf05a06cf95fed1b9bf3bbbcd310dad398daba3661f60699"
+  },
+  {
+    "file": "announcements-v1/en/callback-offer.mp3",
+    "key": "callbackOffer",
+    "language": "en",
+    "text": "Our dispatchers are on other calls. For a callback, press one.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.5,
+    "sha256": "9a68aa52135cf9d9ccc81941623f8f9afd663553580ab3b06cb3a0d013c96d90"
+  },
+  {
+    "file": "announcements-v1/en/callback-confirmed.mp3",
+    "key": "callbackConfirmed",
+    "language": "en",
+    "text": "Thank you. We have your request and will call you back as soon as possible.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.01,
+    "sha256": "c1569e4fe0b0acc2001698b722cfc5d12d757c70f8326be6bf8e67696b24c8ff"
+  },
+  {
+    "file": "announcements-v1/en/all-busy.mp3",
+    "key": "allBusy",
+    "language": "en",
+    "text": "We cannot connect you to a dispatcher right now. Please call again later.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.96,
+    "sha256": "7dd082f77e22c9db8ff553512d227729d6e2492fc57791fe17390510af23d0fc"
+  },
+  {
+    "file": "announcements-v1/en/invalid-input.mp3",
+    "key": "invalidInput",
+    "language": "en",
+    "text": "Invalid choice. Please try again.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 2.02,
+    "sha256": "49ba5e25c41e00494568c0065749d782a11afd75d1c1a777ead161888e0cca46"
+  },
+  {
+    "file": "announcements-v1/en/recording-notice.mp3",
+    "key": "recordingNotice",
+    "language": "en",
+    "text": "We record this call to arrange assistance. Recordings are shared with our service providers. Ask the dispatcher to access your recording or raise an objection.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 9.26,
+    "sha256": "3036142093b170c99feaa8e5a7f51d7f28836e8cbbffb2f08e3045eac1f11b13"
+  },
+  {
+    "file": "announcements-v1/de/greeting.mp3",
+    "key": "greeting",
+    "language": "de",
+    "text": "Pomoc motoristom, Pannenhilfe. Bitte bleiben Sie in der Leitung.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.53,
+    "sha256": "7bd22955b4ceb19e33e147b753938f7cad2d4f7fd68de37430f70fa76113f317"
+  },
+  {
+    "file": "announcements-v1/de/after-hours.mp3",
+    "key": "afterHours",
+    "language": "de",
+    "text": "Sie rufen außerhalb unserer Öffnungszeiten an. Für einen Rückruf drücken Sie die Eins.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 5.04,
+    "sha256": "da610fb25ba8e46c0079ce6f360c3b6f3bc337893d0dd772d518f2b0d3cc5393"
+  },
+  {
+    "file": "announcements-v1/de/ivr-main.mp3",
+    "key": "ivrMain",
+    "language": "de",
+    "text": "Für die Leitstelle drücken Sie die Eins. Für einen Rückruf die Zwei.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 3.86,
+    "sha256": "d6578fa45e6d6b3fcf875fec145505a940c7eb1b8cbbece860d034cb670a2041"
+  },
+  {
+    "file": "announcements-v1/de/callback-offer.mp3",
+    "key": "callbackOffer",
+    "language": "de",
+    "text": "Unsere Mitarbeiter sind im Gespräch. Für einen Rückruf drücken Sie die Eins.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.51,
+    "sha256": "6705f9579b8872b3088abb3caea161a8850d8da9d9bb188fdb73aca4147823bc"
+  },
+  {
+    "file": "announcements-v1/de/callback-confirmed.mp3",
+    "key": "callbackConfirmed",
+    "language": "de",
+    "text": "Vielen Dank. Ihre Anfrage ist eingegangen. Wir rufen Sie so bald wie möglich zurück.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.94,
+    "sha256": "49feb2618f983e6e967036e060cc11aced7904039fa12248529028c6e52c597e"
+  },
+  {
+    "file": "announcements-v1/de/all-busy.mp3",
+    "key": "allBusy",
+    "language": "de",
+    "text": "Wir können Sie gerade nicht mit der Leitstelle verbinden. Bitte rufen Sie später erneut an.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 4.94,
+    "sha256": "57f25e53a8d41d30eb25202d2f9dcf62ae3a2d14f91f887b640babb6013125fb"
+  },
+  {
+    "file": "announcements-v1/de/invalid-input.mp3",
+    "key": "invalidInput",
+    "language": "de",
+    "text": "Ungültige Auswahl. Bitte wählen Sie erneut.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 2.57,
+    "sha256": "a73856f94b76e0e715d9551aa725102e448899d1912d40965f457b69e144646f"
+  },
+  {
+    "file": "announcements-v1/de/recording-notice.mp3",
+    "key": "recordingNotice",
+    "language": "de",
+    "text": "Wir zeichnen diesen Anruf zur Organisation der Hilfe auf. Aufnahmen werden unseren Dienstleistern zugänglich gemacht. Für Zugang zur Aufnahme oder einen Widerspruch wenden Sie sich an die Leitstelle.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 12.48,
+    "sha256": "9f569f636f4d290571c7e43c7ece670611cdae93c983684bc0df9f812e66ee17"
+  },
+  {
+    "file": "announcements-v1/moh.mp3",
+    "key": "moh",
+    "language": null,
+    "text": null,
+    "model": "eleven_text_to_sound_v2",
+    "durationSeconds": 22.06,
+    "sha256": "d34fd1da0909df424915bc4d91364869e8710ae8616129897e5f44d324088e24"
+  }
+]

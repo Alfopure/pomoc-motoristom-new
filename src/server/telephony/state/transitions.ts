@@ -1,6 +1,7 @@
 import type { CallLegRole, CallLegState, CallSessionState, Json, RingAttemptResult } from "@/lib/supabase/database.types";
 
 import { evaluateBusinessHours } from "@/lib/telephony/business-hours";
+import { announcementConfigFromMetadata, resolveAnnouncement } from "@/lib/telephony/announcements";
 import { classifyRingHangup } from "../routing/eligibility";
 import { decideIvr, describeIvrDecision, ivrGatherSpec, type IvrGatherOutcome } from "../routing/ivr";
 import { memberKey, planRingStep, stepDeadline, toEligibilityDevices, toEligibilityPresence, type RingStepPlanResult } from "../routing/ring-plan";
@@ -13,11 +14,13 @@ import {
   CAPACITY_RETRY_SECS,
   CAPACITY_WAIT_MAX_MS,
   MOH_TICK_TIMEOUT_MS,
+  GREETING_TIMEOUT_MS,
   WAITING_TICK_STALE_MS,
   TALKING_STATES,
   TERMINAL_STATES,
   WAITING_STATES,
   emptyTransition,
+  announcementKeyForMedia,
   ignoredResult,
   isOpenLeg,
   isSupervisorMode,
@@ -86,9 +89,6 @@ const PARTY_INTENT = "party";
 /** `client_state.intent` of a supervisor's own leg. */
 const SUPERVISE_INTENT = "supervise";
 export const STALE_FINALISE_MS = 120_000;
-
-const CALLBACK_OFFER_TTS = "Momentálne sú všetci operátori obsadení. Ak chcete, aby sme vám zavolali späť, stlačte jednotku.";
-const AFTER_HOURS_TTS = "Voláte mimo pracovného času. Ak chcete, aby sme vám zavolali späť, stlačte jednotku.";
 
 // ---------------------------------------------------------------------------
 // Builder
@@ -372,11 +372,10 @@ function startMoh(b: TransitionBuilder, customer: LegRow): void {
   b.cmd({ kind: "playback_start", commandId, leg: ref(customer), media: { key: "moh" }, loop: "infinity", bestEffort: true });
 }
 
-function callbackOfferSpec(media: MediaRef, ttsText: string): GatherSpec {
+function callbackOfferSpec(media: MediaRef): GatherSpec {
   return {
     media,
     purpose: "callback_offer",
-    ttsText,
     validDigits: "1",
     maximumDigits: 1,
     minimumDigits: 1,
@@ -477,6 +476,7 @@ function reduceTelnyx(b: TransitionBuilder, event: TelephonyEvent): ReduceResult
     case "call.gather.ended":
       return onGatherEnded(b, event);
     case "call.playback.ended":
+    case "call.speak.ended":
       return onPlaybackEnded(b, event);
     case "call.hold":
     case "call.unhold":
@@ -651,10 +651,55 @@ function onLegAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged
   return onOfferAnswered(b, leg, opts);
 }
 
-/** Inbound customer answered by us → business hours → IVR or ring plan. */
+/** Try the ordinary introduction before routing; unavailable media must not prevent assistance. */
 function onCustomerAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
+  if (b.meta.greeting_call_gone_at) return ignoredResult("introduction customer already gone at provider");
   if (b.session.state !== "received" && b.session.state !== "greeting") return b.note("customer answered late").result();
-  b.setState("greeting");
+  b.patchMeta({ announcements: b.meta.announcements ?? b.ctx.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata) });
+  startGreeting(b, leg);
+  return b.result();
+}
+
+function startGreeting(b: TransitionBuilder, leg: LegRow, forceSpeech = false): void {
+  const config = b.meta.announcements ?? b.ctx.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata);
+  // Defaults finish in a few seconds; a longer custom text gets enough time
+  // to finish even with a slower voice and provider/network overhead.
+  const text = resolveAnnouncement(config, "greeting").text;
+  const spokenSeconds = Math.max(text.length / 10, text.trim().split(/\s+/).length / 1.5);
+  const timeout = Math.min(300_000, Math.max(GREETING_TIMEOUT_MS, Math.ceil(spokenSeconds) * 1000 + 15_000));
+  b.setState("greeting").patchMeta({ greeting: { started_at: b.nowIso, deadline_at: new Date(b.ctx.now.getTime() + timeout).toISOString(), speech_retry: forceSpeech } });
+  const id = b.cmdId(leg.telnyx_call_control_id, forceSpeech ? "greeting:speech" : "greeting:audio");
+  b.cmd({ kind: "playback_start", commandId: id, leg: ref(leg), media: { key: "greeting" }, clientState: customerState(b.session.id, forceSpeech ? "greeting_retry" : "greeting"), forceSpeech });
+  const failed = b.fork();
+  failed.patchMeta({ announcements: b.meta.announcements, greeting: b.meta.greeting });
+  failGreeting(failed, leg);
+  b.compensate(id, "introduction unavailable → continue normal inbound routing", failed.commands, failed.transition());
+  b.note(forceSpeech ? "introduction retried with speech" : "playing complete introduction before routing");
+}
+
+function failGreeting(b: TransitionBuilder, leg: LegRow): void {
+  const greeting = b.meta.greeting;
+  if (b.session.direction !== "inbound" || !isCustomer(leg) || b.legEnded(leg) || b.session.ended_at || b.meta.hangup || b.meta.greeting_call_gone_at || !["received", "greeting"].includes(b.state)) {
+    b.note("introduction failed after the customer left or routing advanced");
+    return;
+  }
+  if (greeting?.closing) {
+    // Sessions already closing under an older deployment must not be revived
+    // after their hangup command was accepted or its result became unknown.
+    b.patchMeta({ greeting: { ...greeting, deadline_at: new Date(b.ctx.now.getTime() + 30_000).toISOString() } });
+    b.cmd(hangupCmd(b, leg, "greeting_failed"));
+    b.note("retrying previously requested introduction hangup");
+    return;
+  }
+  // This is only the ordinary welcome, not a recording/privacy notice. Keep
+  // its failure visible without claiming it played or creating a missed call.
+  b.patchMeta({ greeting_unavailable: { at: b.nowIso } });
+  routeInboundCustomer(b, leg);
+  b.note("ordinary introduction unavailable → normal inbound routing");
+}
+
+/** Introduction completed or unavailable → business hours → IVR or ring plan. */
+function routeInboundCustomer(b: TransitionBuilder, leg: LegRow): ReduceResult {
   const hours = evaluateBusinessHours(b.ctx.businessHours, b.ctx.now);
   if (!hours.open) {
     startAfterHours(b, leg, hours.reason);
@@ -670,7 +715,7 @@ function onCustomerAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
 
 function startAfterHours(b: TransitionBuilder, leg: LegRow, reason: string): void {
   b.setState("after_hours").patchMeta({ after_hours: { reason, at: b.nowIso } });
-  b.cmd(gatherCmd(b, leg, callbackOfferSpec({ key: "afterHours" }, AFTER_HOURS_TTS)));
+  b.cmd(gatherCmd(b, leg, callbackOfferSpec({ key: "afterHours" })));
   b.note(`closed (${reason}) → after-hours callback offer`);
 }
 
@@ -694,10 +739,7 @@ function startRingPlan(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
   }
   b.patchMeta({ ring: { ...(b.meta.ring ?? {}), plan, mode: "plan", exhausted: false, fallback: null } });
   b.patchSession({ ring_plan_id: plan.planId });
-  if (b.ctx.mediaAvailable) {
-    b.cmd({ kind: "playback_start", commandId: b.cmdId(customer.telnyx_call_control_id, "playback:greeting"), leg: ref(customer), media: { key: "greeting" }, bestEffort: true });
-    startMoh(b, customer);
-  }
+  startMoh(b, customer);
   const started = ringFromStep(b, customer, plan, 0);
   if (!started) applyFallback(b, customer, plan);
 }
@@ -843,11 +885,7 @@ function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
     b.call.status = "missed";
     b.call.end_reason = "all_busy";
     b.callback({ source: "missed", callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id) });
-    if (b.ctx.mediaAvailable) {
-      b.cmd({ kind: "playback_start", commandId: b.cmdId(customer.telnyx_call_control_id, "playback:all_busy"), leg: ref(customer), media: { key: "allBusy" } });
-    } else {
-      b.cmd(hangupCmd(b, customer, "all_busy", false));
-    }
+    b.cmd({ kind: "playback_start", commandId: b.cmdId(customer.telnyx_call_control_id, "playback:all_busy"), leg: ref(customer), media: { key: "allBusy" } });
     b.note("fallback: all-busy message");
     return;
   }
@@ -872,7 +910,7 @@ function offerCallback(b: TransitionBuilder, customer: LegRow, media: MediaRef, 
   // The prompt must not compete with the waiting-room loop.
   stopMoh(b, customer);
   b.setState("callback_offered").patchMeta({ callback: { source, confirmed: false } });
-  b.cmd(gatherCmd(b, customer, callbackOfferSpec(media, CALLBACK_OFFER_TTS)));
+  b.cmd(gatherCmd(b, customer, callbackOfferSpec(media)));
   b.note(`callback offer (${source})`);
 }
 
@@ -1209,7 +1247,13 @@ function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEve
   }
   cancelOpenAttempts(b, at, "customer left");
 
-  if (state === "ringing" && meta.ring?.mode === "plan") {
+  if (state === "greeting" && meta.greeting?.closing) {
+    b.setState("failed").patchSession({ ended_at: at });
+    b.call.status = "failed";
+    b.call.end_reason = "greeting_failed";
+    b.call.ended_at = at;
+    return b.note("failed introduction: customer hangup confirmed").result();
+  } else if (state === "ringing" && meta.ring?.mode === "plan") {
     b.setState("missed");
     b.call.status = "missed";
     b.call.end_reason = cause;
@@ -1583,7 +1627,7 @@ function closeWithIvrMessage(b: TransitionBuilder, leg: LegRow, prompt: MediaRef
   b.setState("missed").patchSession({ ended_at: null });
   b.call.status = "missed";
   b.call.end_reason = "ivr_message";
-  if (prompt && b.ctx.mediaAvailable) {
+  if (prompt && (b.ctx.mediaAvailable || announcementKeyForMedia(prompt) || ("file" in prompt && /^https?:\/\//i.test(prompt.file)))) {
     b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:ivr_message"), leg: ref(leg), media: prompt });
     return;
   }
@@ -1610,7 +1654,7 @@ function confirmCallback(
 ): void {
   b.setState("callback_offered").patchMeta({ callback: { requested_at: b.nowIso, source, confirmed: true } });
   b.callback({ source, callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id) });
-  if (b.ctx.mediaAvailable) {
+  if (!prompt || b.ctx.mediaAvailable || announcementKeyForMedia(prompt) || ("file" in prompt && /^https?:\/\//i.test(prompt.file))) {
     b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:callback_confirmed"), leg: ref(leg), media: prompt ?? { key: "callbackConfirmed" } });
   } else {
     b.cmd(hangupCmd(b, leg, "callback_confirmed", false));
@@ -1640,6 +1684,22 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
   const leg = b.findLeg(event.callControlId);
   if (!leg || !isCustomer(leg)) return ignoredResult("playback on a non-customer leg");
   if (b.legEnded(leg)) return ignoredResult("customer leg ended");
+  if (b.session.state === "greeting") {
+    if (b.meta.greeting_call_gone_at) return ignoredResult("introduction customer already gone at provider");
+    if (b.meta.greeting?.closing) return ignoredResult("failed introduction is closing");
+    const expectedIntent = b.meta.greeting?.speech_retry ? "greeting_retry" : "greeting";
+    if (event.clientState?.intent !== expectedIntent) return ignoredResult("unrelated audio during introduction");
+    if (b.meta.greeting?.speech_retry && event.type !== "call.speak.ended") return ignoredResult("old introduction audio after speech retry");
+    if (event.status === "call_hangup") return ignoredResult("introduction interrupted by hangup");
+    if (event.status === "completed") {
+      b.patchMeta({ greeting: { ...(b.meta.greeting ?? { started_at: b.nowIso }), completed_at: event.occurredAt ?? b.nowIso } });
+      return routeInboundCustomer(b, leg);
+    }
+    if (event.type === "call.playback.ended" && !b.meta.greeting?.speech_retry) startGreeting(b, leg, true);
+    else failGreeting(b, leg);
+    return b.result();
+  }
+  if (event.clientState?.intent === "greeting" || event.clientState?.intent === "greeting_retry") return ignoredResult("introduction already finished");
   if (event.status === "call_hangup" || event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`playback ${event.status}`);
   const state = b.session.state;
   if (state === "callback_offered" && b.meta.callback?.confirmed) {
@@ -2241,6 +2301,19 @@ function onSweep(b: TransitionBuilder): ReduceResult {
   const customer = b.customerLeg();
   if (!customer || b.legEnded(customer)) return ignoredResult("sweep: no customer leg");
   const meta = b.meta;
+
+  if (state === "greeting") {
+    if (meta.greeting_call_gone_at) return ignoredResult("sweep: introduction customer already gone at provider");
+    const started = Date.parse(meta.greeting?.started_at ?? b.session.created_at);
+    const deadline = meta.greeting?.deadline_at ? Date.parse(meta.greeting.deadline_at) : started + GREETING_TIMEOUT_MS;
+    if (!Number.isNaN(deadline) && deadline >= b.ctx.now.getTime()) return ignoredResult("sweep: introduction still playing");
+    if (meta.greeting?.closing || meta.greeting?.speech_retry) failGreeting(b, customer);
+    else {
+      b.cmd({ kind: "playback_stop", commandId: b.cmdId(customer.telnyx_call_control_id, "greeting:stop"), leg: ref(customer), bestEffort: true });
+      startGreeting(b, customer, true);
+    }
+    return b.result();
+  }
 
   if (state === "ringing" && meta.ring?.mode === "plan") {
     const deadline = meta.ring.step_deadline_at ? Date.parse(meta.ring.step_deadline_at) : NaN;

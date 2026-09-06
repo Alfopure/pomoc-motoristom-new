@@ -2,7 +2,7 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { analyzeCallTranscript, isCallAnalysisConfigured, DEFAULT_QA_RUBRIC } from "@/lib/integrations/ai/call-analysis";
+import { analyzeCallTranscript, getCallAnalysisModel, isCallAnalysisConfigured, DEFAULT_QA_RUBRIC } from "@/lib/integrations/ai/call-analysis";
 import { transcribeWithScribe, ScribeError, type ScribeWord } from "@/lib/integrations/asr/scribe-client";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/database.types";
@@ -440,7 +440,9 @@ async function analyzeCompletedTranscripts(
   for (const transcript of pendingAnalysis.data ?? []) {
     try {
       const context = await loadAnalysisContext(supabase, transcript);
-      const includeQa = context.speakerConfidence >= SPEAKER_CONFIDENCE_THRESHOLD;
+      // Diarization balance and speaking order do not prove employee identity or
+      // recording completeness. The new evidence-backed QA pipeline owns scoring.
+      const includeQa = false;
       const analysis = await analyzeCallTranscript({
         transcriptText: transcript.transcript_text ?? "",
         segments: parseSegments(transcript.speaker_segments),
@@ -462,13 +464,13 @@ async function analyzeCompletedTranscripts(
             qa_gated: !includeQa,
           } as Json,
           qa_score: analysis.qa_score,
-          model: `scribe_v2+${"claude-opus-4-8"}`,
+          model: `scribe_v2+${getCallAnalysisModel()}`,
         })
         .eq("id", transcript.id);
       throwOnError(updated.error);
 
-      const call = await supabase.from("motorist_calls").update({ summary: analysis.summary }).eq("id", transcript.call_id);
-      throwOnError(call.error);
+      // AI content stays under transcript permissions. Mirroring it onto calls
+      // would expose the derived private conversation through broader call reads.
       summary.aiProcessed += 1;
     } catch (error) {
       summary.aiFailed += 1;

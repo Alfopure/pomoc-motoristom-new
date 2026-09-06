@@ -235,7 +235,7 @@ describe("hold / unhold", () => {
     const conferenceId = String(h.session(call.sessionId).conference_id);
     expect(conferenceId).toMatch(/^conf-/);
     expect(h.telnyx.of("conference:join")[0].params).toMatchObject({ conferenceId, call_control_id: call.callControlId });
-    expect(h.telnyx.of("conference:hold")[0].params).toMatchObject({ conferenceId, call_control_ids: [call.callControlId], audio_url: "https://media.test/telephony/moh.mp3" });
+    expect(h.telnyx.of("conference:hold")[0].params).toMatchObject({ conferenceId, call_control_ids: [call.callControlId], audio_url: "https://media.test/telephony/announcements-v1/moh.mp3" });
     expect(h.session(call.sessionId)).toMatchObject({ state: "held", conference_id: conferenceId });
     expect(h.session(call.sessionId).hold_started_at).toBe(h.now().toISOString());
 
@@ -266,7 +266,7 @@ describe("park / pickup", () => {
     const parked = await parkCall(actionDeps(h), o1, call.sessionId);
     expect(parked.state).toBe("parked");
     expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(call.operatorLeg);
-    expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ callControlId: call.callControlId, audioUrl: "https://media.test/telephony/moh.mp3", loop: "infinity" });
+    expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ callControlId: call.callControlId, audioUrl: "https://media.test/telephony/announcements-v1/moh.mp3", loop: "infinity" });
     expect(h.telnyx.of("gather").at(-1)?.params).toMatchObject({ callControlId: call.callControlId, timeoutMillis: 60_000 });
     expect(h.session(call.sessionId)).toMatchObject({ state: "parked", answered_by_profile_id: null });
     expect(h.presence(PROFILES.o1)).toMatchObject({ status: "after_call_work", current_session_id: null });
@@ -326,7 +326,7 @@ describe("transfers", () => {
     await h.process(h.envelope("call.initiated", { call_control_id: "cc-target", call_session_id: call.telnyxSessionId, client_state: transfer.targetLegClientState, direction: "outgoing" }));
     await h.legEvent("cc-target", "call.hangup", { hangup_cause: "timeout" });
     expect(h.session(call.sessionId).state).toBe("waiting");
-    expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ audioUrl: "https://media.test/telephony/moh.mp3", loop: "infinity" });
+    expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ audioUrl: "https://media.test/telephony/announcements-v1/moh.mp3", loop: "infinity" });
   });
 
   it("runs an attended transfer: consult, join, complete", async () => {
