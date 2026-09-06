@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Ear,
@@ -12,6 +12,7 @@ import {
   Megaphone,
   Mic,
   MicOff,
+  MoreHorizontal,
   Pause,
   PauseCircle,
   Phone,
@@ -24,6 +25,8 @@ import {
   UserPlus,
   UserX,
   Users,
+  Volume2,
+  X,
 } from "lucide-react";
 
 import type { CallParticipant, PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
@@ -33,12 +36,14 @@ import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
 import { CallTransferPicker, type TransferPickerMode, type TransferRequest } from "./CallTransferPicker";
 import { CallRecordingControls } from "./recordings/CallRecordingControls";
+import styles from "./PhoneBar.module.css";
 import {
   callElapsedSeconds,
   DTMF_KEYS,
   formatCallTimer,
   partyBusyKey,
   phoneBarCapabilities,
+  phoneBarFocusedCall,
   phoneBarStateLabel,
   PHONE_ACTION_LABELS,
   type PhoneCallAction,
@@ -67,7 +72,8 @@ export type PhoneBarProps = {
   onNewCase: (call: PhoneBarCall) => void;
   onLinkCase: (call: PhoneBarCall) => void;
   onOpenCase: (caseId: string) => void;
-  onUnlockAudio: () => void;
+  onResumeAudio?: () => void;
+  outboundPending?: boolean;
 };
 
 const STATE_TONES: Record<"live" | "hold" | "ring" | "wait", string> = {
@@ -87,6 +93,13 @@ const STATE_TONES: Record<"live" | "hold" | "ring" | "wait", string> = {
  * this file only renders them.
  */
 export function PhoneBar(props: PhoneBarProps) {
+  // A finished call must not leave its keypad or destination picker open for
+  // the next caller. Prefer the browser ID while the server catches up.
+  const callKey = props.phone.call?.id ?? props.model.active?.sessionId ?? props.model.offers[0]?.sessionId ?? "idle";
+  return <PhoneBarControls key={callKey} {...props} />;
+}
+
+function PhoneBarControls(props: PhoneBarProps) {
   const { model, phone } = props;
   const [now, setNow] = useState(() => Date.now());
   const [keypadOpen, setKeypadOpen] = useState(false);
@@ -94,11 +107,13 @@ export function PhoneBar(props: PhoneBarProps) {
   const [partiesOpen, setPartiesOpen] = useState(false);
   const [superviseOpen, setSuperviseOpen] = useState(false);
   const [dtmfLog, setDtmfLog] = useState("");
-  const unlockedRef = useRef(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const secondaryId = useId();
+  const keypadId = useId();
+  const keypadTriggerRef = useRef<HTMLButtonElement>(null);
+  const keypadCloseRef = useRef<HTMLButtonElement>(null);
 
-  const active = model.active;
-  const offer = model.offers[0] ?? null;
-  const focus = active ?? offer;
+  const focus = phoneBarFocusedCall(model, phone.call);
   const degraded = focus ? props.degradedSessionIds.has(focus.sessionId) : false;
 
   const capabilities = useMemo(
@@ -120,23 +135,24 @@ export function PhoneBar(props: PhoneBarProps) {
     return () => window.clearInterval(timer);
   }, [focus, model.waiting.length]);
 
-  // The ringtone's AudioContext and the Notification permission both need a
-  // user gesture; the first interaction anywhere in the console is a fine one.
-  const onUnlockAudio = props.onUnlockAudio;
   useEffect(() => {
-    if (unlockedRef.current) return;
-    const unlock = () => {
-      if (unlockedRef.current) return;
-      unlockedRef.current = true;
-      onUnlockAudio();
+    if (keypadOpen) keypadCloseRef.current?.focus();
+  }, [keypadOpen]);
+
+  useEffect(() => {
+    if (!keypadOpen && !moreOpen && !transferMode && !partiesOpen && !superviseOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setKeypadOpen(false);
+      setMoreOpen(false);
+      setTransferMode(null);
+      setPartiesOpen(false);
+      setSuperviseOpen(false);
+      if (keypadOpen) keypadTriggerRef.current?.focus();
     };
-    window.addEventListener("pointerdown", unlock, { once: true });
-    window.addEventListener("keydown", unlock, { once: true });
-    return () => {
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("keydown", unlock);
-    };
-  }, [onUnlockAudio]);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [keypadOpen, moreOpen, transferMode, partiesOpen, superviseOpen]);
 
   function runAction(action: PhoneCallAction) {
     if (!focus) return;
@@ -144,31 +160,45 @@ export function PhoneBar(props: PhoneBarProps) {
   }
 
   const busy = props.busyAction !== null;
+  const secondaryAvailable = capabilities.hold || capabilities.unhold || capabilities.transfer || capabilities.consult
+    || capabilities.completeTransfer || capabilities.cancelConsult || capabilities.addParty || capabilities.leaveConference
+    || capabilities.park || capabilities.newCase || capabilities.linkCase
+    || (focus?.kind === "active" && focus.participants.length > 2)
+    || (props.canSupervise && (model.others.length > 0 || Boolean(model.supervising)));
+
+  function closeKeypad() {
+    setKeypadOpen(false);
+    keypadTriggerRef.current?.focus();
+  }
+
+  function openTransfer(mode: TransferPickerMode) {
+    setTransferMode((current) => current === mode ? null : mode);
+    setMoreOpen(false);
+    setKeypadOpen(false);
+    setPartiesOpen(false);
+    setSuperviseOpen(false);
+  }
 
   return (
     <div
       data-testid="phone-bar"
-      className="relative z-40 flex min-h-12 flex-wrap items-center gap-2 border-b border-zinc-800 bg-zinc-900 px-3 py-1.5 text-white sm:px-4"
+      className="relative z-40 flex min-h-12 shrink-0 flex-wrap items-center gap-1.5 border-b border-zinc-800 bg-zinc-900 px-3 py-1.5 text-white sm:px-4 lg:gap-2"
     >
       {focus ? (
         <CallSummary call={focus} degraded={degraded} now={now} onOpenCase={props.onOpenCase} />
+      ) : phone.call ? (
+        <BrowserCallSummary call={phone.call} />
       ) : (
         <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-400">
-          {model.waiting.length > 0
+          {props.outboundPending ? "Spájam hovor…" : model.waiting.length > 0
             ? `V čakárni čaká ${model.waiting.length} ${model.waiting.length === 1 ? "hovor" : model.waiting.length < 5 ? "hovory" : "hovorov"}.`
             : "Žiadny prebiehajúci hovor."}
         </span>
       )}
 
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+      <div className="flex w-full shrink-0 flex-wrap items-center gap-1.5 lg:w-auto">
         {capabilities.answer && (
-          <BarButton tone="accept" icon={PhoneCall} label="Prijať" onClick={props.onAnswer} />
-        )}
-        {capabilities.unhold && (
-          <BarButton tone="default" icon={PlayCircle} label={PHONE_ACTION_LABELS.unhold} busy={props.busyAction === "unhold"} disabled={busy} onClick={() => runAction("unhold")} />
-        )}
-        {capabilities.hold && (
-          <BarButton tone="default" icon={PauseCircle} label={PHONE_ACTION_LABELS.hold} busy={props.busyAction === "hold"} disabled={busy} onClick={() => runAction("hold")} />
+          <BarButton tone="accept" icon={PhoneCall} label={phone.answering ? "Prijímam…" : "Prijať"} busy={phone.answering} onClick={props.onAnswer} />
         )}
         {capabilities.mute && (
           <BarButton
@@ -180,7 +210,62 @@ export function PhoneBar(props: PhoneBarProps) {
           />
         )}
         {capabilities.dtmf && (
-          <BarButton tone={keypadOpen ? "warn" : "default"} icon={Grid3x3} label="Klávesnica" onClick={() => setKeypadOpen((open) => !open)} compact />
+          <BarButton
+            tone={keypadOpen ? "warn" : "default"}
+            icon={Grid3x3}
+            label="Klávesnica"
+            buttonRef={keypadTriggerRef}
+            expanded={keypadOpen}
+            controls={keypadId}
+            onClick={() => {
+              setKeypadOpen((open) => !open);
+              setTransferMode(null);
+              setPartiesOpen(false);
+              setSuperviseOpen(false);
+              setMoreOpen(false);
+            }}
+            compact
+          />
+        )}
+        {capabilities.hangup && (
+          <BarButton
+            tone="danger"
+            icon={PhoneOff}
+            label={focus?.kind === "offer" || phone.call?.ringing ? "Odmietnuť" : PHONE_ACTION_LABELS.hangup}
+            busy={props.busyAction === "hangup"}
+            disabled={busy && props.busyAction !== "hangup"}
+            onClick={() => (focus?.kind === "offer" || phone.call?.ringing ? props.onHangupBrowser() : focus ? runAction("hangup") : props.onHangupBrowser())}
+          />
+        )}
+        {secondaryAvailable && (
+          <BarButton
+            tone={moreOpen ? "warn" : "default"}
+            icon={MoreHorizontal}
+            label="Viac"
+            expanded={moreOpen}
+            controls={secondaryId}
+            className="ml-auto lg:hidden"
+            onClick={() => {
+              setMoreOpen((open) => !open);
+              setKeypadOpen(false);
+              setTransferMode(null);
+              setPartiesOpen(false);
+              setSuperviseOpen(false);
+            }}
+          />
+        )}
+      </div>
+
+      <div id={secondaryId} className={`${styles.secondaryActions} ${moreOpen ? "flex" : "hidden"} w-full flex-wrap items-center gap-1.5 border-t border-white/15 pt-1.5 lg:flex lg:w-auto lg:border-0 lg:pt-0`}>
+        <div className="flex w-full items-center justify-between lg:hidden">
+          <span className="text-xs font-bold">Ďalšie možnosti hovoru</span>
+          <button type="button" className="inline-flex h-11 w-11 items-center justify-center rounded-md hover:bg-white/10" aria-label="Zavrieť možnosti hovoru" onClick={() => setMoreOpen(false)}><X size={18} aria-hidden="true" /></button>
+        </div>
+        {capabilities.unhold && (
+          <BarButton tone="default" icon={PlayCircle} label={PHONE_ACTION_LABELS.unhold} busy={props.busyAction === "unhold"} disabled={busy} onClick={() => runAction("unhold")} />
+        )}
+        {capabilities.hold && (
+          <BarButton tone="default" icon={PauseCircle} label={PHONE_ACTION_LABELS.hold} busy={props.busyAction === "hold"} disabled={busy} onClick={() => runAction("hold")} />
         )}
         {capabilities.transfer && (
           <BarButton
@@ -188,7 +273,7 @@ export function PhoneBar(props: PhoneBarProps) {
             icon={PhoneForwarded}
             label={PHONE_ACTION_LABELS.transfer}
             disabled={busy}
-            onClick={() => setTransferMode((mode) => (mode === "transfer" ? null : "transfer"))}
+            onClick={() => openTransfer("transfer")}
           />
         )}
         {capabilities.consult && (
@@ -197,7 +282,7 @@ export function PhoneBar(props: PhoneBarProps) {
             icon={Users}
             label={PHONE_ACTION_LABELS.consult}
             disabled={busy}
-            onClick={() => setTransferMode((mode) => (mode === "consult" ? null : "consult"))}
+            onClick={() => openTransfer("consult")}
           />
         )}
         {capabilities.completeTransfer && (
@@ -213,7 +298,7 @@ export function PhoneBar(props: PhoneBarProps) {
             label={PHONE_ACTION_LABELS["add-party"]}
             disabled={busy}
             compact
-            onClick={() => setTransferMode((mode) => (mode === "add-party" ? null : "add-party"))}
+            onClick={() => openTransfer("add-party")}
           />
         )}
         {focus?.kind === "active" && focus.participants.length > 2 && (
@@ -222,7 +307,7 @@ export function PhoneBar(props: PhoneBarProps) {
             icon={Users}
             label={`Účastníci (${focus.participants.length})`}
             compact
-            onClick={() => setPartiesOpen((open) => !open)}
+            onClick={() => { setPartiesOpen((open) => !open); setMoreOpen(false); setSuperviseOpen(false); setTransferMode(null); }}
           />
         )}
         {capabilities.leaveConference && (
@@ -234,7 +319,7 @@ export function PhoneBar(props: PhoneBarProps) {
             icon={Headphones}
             label={model.supervising ? "Dozor prebieha" : "Dozor"}
             compact={!model.supervising}
-            onClick={() => setSuperviseOpen((open) => !open)}
+            onClick={() => { setSuperviseOpen((open) => !open); setMoreOpen(false); setPartiesOpen(false); setTransferMode(null); }}
           />
         )}
         {capabilities.park && (
@@ -246,21 +331,18 @@ export function PhoneBar(props: PhoneBarProps) {
         {capabilities.linkCase && focus && (
           <BarButton tone="default" icon={Link2} label="Pripojiť ku prípadu" onClick={() => props.onLinkCase(focus)} compact />
         )}
-        {capabilities.hangup && (
-          <BarButton
-            tone="danger"
-            icon={PhoneOff}
-            label={focus?.kind === "offer" ? "Odmietnuť" : PHONE_ACTION_LABELS.hangup}
-            busy={props.busyAction === "hangup"}
-            disabled={busy && props.busyAction !== "hangup"}
-            onClick={() => (focus?.kind === "offer" ? props.onHangupBrowser() : focus ? runAction("hangup") : props.onHangupBrowser())}
-          />
-        )}
       </div>
 
-      {active?.callId && active.mine && (
+      {phone.audioBlocked && props.onResumeAudio && (
+        <button type="button" onClick={props.onResumeAudio} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-amber-300 bg-amber-400 px-3 text-xs font-bold text-amber-950 lg:min-h-8 lg:w-auto">
+          <Volume2 size={16} aria-hidden="true" />
+          Zapnúť zvuk hovoru
+        </button>
+      )}
+
+      {focus?.kind === "active" && focus.mine && focus.callId && (
         <div className="min-w-0 basis-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-zinc-900">
-          <CallRecordingControls key={active.callId} callId={active.callId} />
+          <CallRecordingControls key={focus.callId} callId={focus.callId} />
         </div>
       )}
 
@@ -270,11 +352,11 @@ export function PhoneBar(props: PhoneBarProps) {
         </span>
       )}
 
-      {model.offers.length > 0 && !active && (
+      {focus?.kind === "offer" && (
         <RingingPanel
-          answerable={phone.call?.ringing ?? false}
+          answerable={Boolean(phone.call?.ringing && !phone.answering)}
           now={now}
-          offers={model.offers}
+          offers={[focus]}
           onAnswer={props.onAnswer}
           onNewCase={props.onNewCase}
           onOpenCase={props.onOpenCase}
@@ -293,8 +375,12 @@ export function PhoneBar(props: PhoneBarProps) {
       )}
 
       {keypadOpen && capabilities.dtmf && (
-        <div className="absolute right-3 top-[calc(100%+6px)] z-50 w-52 rounded-xl border border-zinc-200 bg-white p-2 text-zinc-950 shadow-2xl">
-          <div className="mb-1.5 h-6 truncate rounded bg-zinc-100 px-2 text-sm font-mono leading-6" aria-live="polite">
+        <section id={keypadId} aria-label="Klávesnica počas hovoru" className={`${styles.popup} ${styles.keypad} z-50 w-64 rounded-xl border border-zinc-200 bg-white p-2 text-zinc-950 shadow-2xl`}>
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-xs font-bold">Klávesnica počas hovoru</h3>
+            <button ref={keypadCloseRef} type="button" onClick={closeKeypad} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md hover:bg-zinc-100" aria-label="Zavrieť klávesnicu"><X size={18} aria-hidden="true" /></button>
+          </div>
+          <div className="mb-1.5 h-6 truncate rounded bg-zinc-100 px-2 text-sm font-mono leading-6" aria-label="Odoslané číslice" aria-live="polite">
             {dtmfLog || " "}
           </div>
           <div className="grid grid-cols-3 gap-1">
@@ -306,17 +392,17 @@ export function PhoneBar(props: PhoneBarProps) {
                   props.onDtmf(key);
                   setDtmfLog((log) => (log + key).slice(-16));
                 }}
-                className="h-9 rounded-md border border-zinc-200 text-sm font-bold transition hover:bg-zinc-100"
+                className="h-12 rounded-md border border-zinc-200 text-base font-bold transition hover:bg-zinc-100 active:bg-yellow-100"
               >
                 {key}
               </button>
             ))}
           </div>
-        </div>
+        </section>
       )}
 
       {transferMode && focus && (
-        <div className="absolute right-3 top-[calc(100%+6px)] z-50">
+        <div className={`${styles.popup} z-50 w-80`}>
           <CallTransferPicker
             sessionId={focus.sessionId}
             mode={transferMode}
@@ -378,7 +464,7 @@ function RingingPanel({
     <section
       aria-label="Prichádzajúci hovor"
       data-testid="phone-bar-ringing"
-      className="absolute left-3 top-[calc(100%+6px)] z-50 w-80 max-w-[calc(100vw-24px)] rounded-xl border border-yellow-300 bg-white p-3 text-zinc-950 shadow-2xl"
+      className="absolute left-3 top-[calc(100%+6px)] z-50 hidden w-80 max-w-[calc(100vw-24px)] rounded-xl border border-yellow-300 bg-white p-3 text-zinc-950 shadow-2xl lg:block"
     >
       {offers.map((call) => (
         <div key={call.sessionId} className="border-b border-zinc-100 pb-2 last:border-0 last:pb-0 [&+&]:pt-2">
@@ -453,11 +539,11 @@ function ParticipantsPanel({
     <section
       aria-label="Účastníci hovoru"
       data-testid="phone-bar-participants"
-      className="absolute right-3 top-[calc(100%+6px)] z-50 w-80 max-w-[calc(100vw-24px)] rounded-xl border border-zinc-200 bg-white p-3 text-zinc-950 shadow-2xl"
+      className={`${styles.popup} z-50 w-80 rounded-xl border border-zinc-200 bg-white p-3 text-zinc-950 shadow-2xl`}
     >
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-sm font-bold">Účastníci hovoru</h3>
-        <button type="button" onClick={onClose} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100" aria-label="Zavrieť">
+        <button type="button" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100 lg:h-7 lg:w-7" aria-label="Zavrieť účastníkov">
           ×
         </button>
       </div>
@@ -533,7 +619,7 @@ function PartyButton({
       disabled={disabled}
       title={label}
       aria-label={label}
-      className={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition disabled:cursor-not-allowed disabled:opacity-50 ${
+      className={`inline-flex h-11 w-11 items-center justify-center rounded-md border transition disabled:cursor-not-allowed disabled:opacity-50 lg:h-7 lg:w-7 ${
         danger ? "border-red-200 text-red-700 hover:bg-red-50" : "border-zinc-200 text-zinc-700 hover:bg-zinc-100"
       }`}
     >
@@ -567,11 +653,11 @@ function SupervisePanel({
     <section
       aria-label="Dozor nad hovorom"
       data-testid="phone-bar-supervise"
-      className="absolute right-3 top-[calc(100%+6px)] z-50 w-96 max-w-[calc(100vw-24px)] rounded-xl border border-zinc-200 bg-white p-3 text-zinc-950 shadow-2xl"
+      className={`${styles.popup} z-50 w-96 rounded-xl border border-zinc-200 bg-white p-3 text-zinc-950 shadow-2xl`}
     >
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-sm font-bold">Dozor nad hovorom</h3>
-        <button type="button" onClick={onClose} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100" aria-label="Zavrieť">
+        <button type="button" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100 lg:h-7 lg:w-7" aria-label="Zavrieť dozor">
           ×
         </button>
       </div>
@@ -651,54 +737,53 @@ function CallSummary({
   const number = formatPhoneNumberForDisplay(call.number) || call.number || "Neznáme číslo";
 
   return (
-    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
-      <span className={`shrink-0 rounded-md px-2 py-0.5 text-[11px] font-bold ${STATE_TONES[state.tone]}`}>{state.label}</span>
-      <span className="shrink-0 rounded-md border border-white/15 bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-zinc-100" title="Volaná linka">
-        {call.lineLabel}
-      </span>
-      <span className="min-w-0 truncate text-sm font-bold">
+    <div className="flex min-w-0 flex-1 basis-full items-center gap-2 lg:basis-auto">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-xs font-bold leading-5 lg:text-sm" title={call.callerName ? `${call.callerName} · ${number}` : number}>
+          {call.callerName ? `${call.callerName} · ${number}` : number}
+        </p>
+        <div className="flex min-w-0 items-center gap-1.5 text-[10px] lg:text-[11px]">
+          <span className={`shrink-0 rounded px-1.5 py-0.5 font-bold ${STATE_TONES[state.tone]}`}>{state.label}</span>
+          <span className="min-w-0 truncate font-semibold text-zinc-300" title={`Volaná linka: ${call.lineLabel}`}>{call.lineLabel}</span>
+          <span className="shrink-0 font-mono font-semibold tabular-nums text-zinc-200" aria-label="Dĺžka hovoru">{elapsed}</span>
+          {call.match && call.matchCount > 1 && <span className="hidden shrink-0 text-zinc-400 lg:inline">+{call.matchCount - 1} ďalšie zhody</span>}
+          {degraded && <AlertTriangle size={14} className="shrink-0 text-amber-300" aria-label="Rozšírené funkcie nedostupné" />}
+        </div>
+      </div>
+      {(call.caseId || call.match?.caseId) && (
+        <button
+          type="button"
+          onClick={() => onOpenCase((call.caseId || call.match?.caseId) as string)}
+          className={`inline-flex min-h-11 max-w-28 shrink-0 items-center rounded-md px-2 text-[10px] font-bold lg:min-h-8 lg:text-[11px] ${call.caseId ? "bg-[#FCD703] text-zinc-950 hover:bg-yellow-300" : "border border-yellow-300/50 bg-yellow-300/15 text-yellow-100"}`}
+          title={call.caseId ? "Otvoriť priradený prípad" : "Nájdená zhoda podľa čísla"}
+        >
+          <span className="truncate">{call.match?.caseNumber ?? (call.caseId ? "Prípad" : call.match?.label)}</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+function BrowserCallSummary({ call }: { call: NonNullable<WebphoneSnapshot["call"]> }) {
+  const number = formatPhoneNumberForDisplay(call.number) || call.number || "Neznáme číslo";
+  return (
+    <div className="min-w-0 flex-1 basis-full lg:basis-auto" data-testid="phone-bar-browser-call">
+      <p className="truncate text-xs font-bold leading-5 lg:text-sm" title={call.callerName ? `${call.callerName} · ${number}` : number}>
         {call.callerName ? `${call.callerName} · ${number}` : number}
+      </p>
+      <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold ${STATE_TONES[call.ringing ? "ring" : "live"]}`}>
+        {call.ringing ? "Prichádzajúci hovor" : call.active ? "Prebieha" : "Pripájam hovor…"}
       </span>
-      {call.match && call.matchCount > 1 && (
-        <span className="shrink-0 text-[11px] font-medium text-zinc-400">+{call.matchCount - 1} ďalšie zhody</span>
-      )}
-      {call.caseId ? (
-        <button
-          type="button"
-          onClick={() => onOpenCase(call.caseId as string)}
-          className="shrink-0 rounded-md bg-[#FCD703] px-2 py-0.5 text-[11px] font-bold text-zinc-950 transition hover:bg-yellow-300"
-          title="Otvoriť priradený prípad"
-        >
-          {call.match?.caseNumber ?? "Prípad"}
-        </button>
-      ) : call.match?.caseId ? (
-        <button
-          type="button"
-          onClick={() => onOpenCase(call.match?.caseId as string)}
-          className="shrink-0 rounded-md border border-yellow-300/50 bg-yellow-300/15 px-2 py-0.5 text-[11px] font-bold text-yellow-100"
-          title="Nájdená zhoda podľa čísla"
-        >
-          {call.match.caseNumber ?? call.match.label}
-        </button>
-      ) : null}
-      <span className="shrink-0 font-mono text-xs font-semibold text-zinc-200 tabular-nums" aria-label="Dĺžka hovoru">
-        {elapsed}
-      </span>
-      {degraded && (
-        <span
-          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-amber-300/50 bg-amber-500/15 px-2 py-0.5 text-[11px] font-bold text-amber-100"
-          title="Konferenciu sa nepodarilo vytvoriť: hovor beží ďalej, ale podržanie a konzultácia nie sú dostupné."
-        >
-          <AlertTriangle size={12} aria-hidden="true" />
-          Rozšírené funkcie nedostupné
-        </span>
-      )}
     </div>
   );
 }
 
 function BarButton({
   busy = false,
+  buttonRef,
+  className = "",
+  controls,
+  expanded,
   compact = false,
   disabled = false,
   icon: Icon,
@@ -707,6 +792,10 @@ function BarButton({
   tone,
 }: {
   busy?: boolean;
+  buttonRef?: React.RefObject<HTMLButtonElement | null>;
+  className?: string;
+  controls?: string;
+  expanded?: boolean;
   compact?: boolean;
   disabled?: boolean;
   icon: typeof Phone;
@@ -723,15 +812,19 @@ function BarButton({
 
   return (
     <button
+      ref={buttonRef}
       type="button"
       onClick={onClick}
       disabled={disabled || busy}
       title={label}
       aria-label={label}
-      className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2 text-[11px] font-bold transition disabled:cursor-not-allowed disabled:opacity-50 ${tones[tone]}`}
+      aria-expanded={expanded}
+      aria-controls={controls}
+      data-compact={compact || undefined}
+      className={`inline-flex h-11 min-w-11 items-center justify-center gap-1.5 rounded-md border px-2 text-[11px] font-bold transition disabled:cursor-not-allowed disabled:opacity-50 lg:h-8 lg:min-w-0 ${tones[tone]} ${className}`}
     >
       {busy ? <Loader2 size={13} className="motion-safe:animate-spin" aria-hidden="true" /> : <Icon size={13} aria-hidden="true" />}
-      {!compact && <span className="hidden lg:inline">{label}</span>}
+      {<span className={compact ? "hidden" : undefined}>{label}</span>}
     </button>
   );
 }

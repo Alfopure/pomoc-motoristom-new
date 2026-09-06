@@ -58,7 +58,7 @@ export type WebphoneSdkCall = {
   };
   telnyxIDs: { telnyxCallControlId: string; telnyxSessionId: string; telnyxLegId: string };
   isAudioMuted: boolean;
-  answer: (params?: never) => void;
+  answer: (params?: never) => Promise<void> | void;
   hangup: () => Promise<void> | void;
   muteAudio: () => void;
   unmuteAudio: () => void;
@@ -103,6 +103,12 @@ export type WebphoneSnapshot = {
   call: WebphoneCallView | null;
   /** Dial/pickup legs accepted by the API but not yet correlated to an invite. */
   pendingOperatorLegs?: number;
+  /** Answer is negotiating media; repeated taps must not create another peer. */
+  answering?: boolean;
+  /** Remote audio was refused or paused and needs a user gesture to resume. */
+  audioBlocked?: boolean;
+  /** A call/media failure does not mean that the SIP registration was lost. */
+  callError?: string | null;
   /** Last operator-facing error from an SDK/HTTP failure. */
   message: string | null;
 };
@@ -145,12 +151,23 @@ export class TelnyxWebphone {
   private notification: Notification | null = null;
   private started = false;
   private connecting = false;
+  private clientGeneration = 0;
+  private answeringCallId: string | null = null;
+  private answeredCallId: string | null = null;
+  private callError: string | null = null;
+  private audioBlocked = false;
+  private audioAttempt = 0;
   /** Set by `takeover()`: the next mint may revoke another tab's live device. */
   private takeoverRequested = false;
   private snapshot: WebphoneSnapshot;
   private readonly options: TelnyxWebphoneOptions;
   private readonly boundVisibility = () => this.onVisibilityChange();
   private readonly boundPageHide = () => this.beaconHeartbeat({ leaving: true });
+  private readonly boundAudioReady = () => void this.playRemoteAudio();
+  private readonly boundAudioPlaying = () => this.setAudioBlocked(false);
+  private readonly boundAudioPause = () => {
+    if (this.hasRemoteMedia()) this.setAudioBlocked(true);
+  };
 
   constructor(options: TelnyxWebphoneOptions = {}) {
     this.options = options;
@@ -191,7 +208,9 @@ export class TelnyxWebphone {
     this.stopHeartbeat();
     this.clearTimer("expectedLegTimer");
     this.expected = [];
+    this.callError = null;
     this.dispatch({ type: "stop" });
+    this.disposeAudio();
   }
 
   /**
@@ -220,21 +239,25 @@ export class TelnyxWebphone {
     this.dispatch({ type: "start" });
   }
 
-  /** Unlocks the ringtone's AudioContext and asks for notification permission (needs a user gesture). */
+  /** Unlocks sound only; notification permission belongs to the explicit settings flow. */
   async unlockAudio(): Promise<void> {
     if (this.options.silent) return;
     await this.getRingtone().unlock();
-    if (typeof Notification !== "undefined" && Notification.permission === "default") {
-      await Notification.requestPermission().catch(() => undefined);
-    }
+    if (this.started && this.ringing) await this.getRingtone().start();
+  }
+
+  /** Call from a tap: both audio APIs start before awaiting, preserving the gesture. */
+  async resumeAudio(): Promise<void> {
+    await Promise.allSettled([this.unlockAudio(), this.playRemoteAudio()]);
+  }
+
+  dismissCallError(): void {
+    this.callError = null;
+    this.publish();
   }
 
   answer(): void {
-    const call = this.call;
-    if (!call) return;
-    this.stopRinging();
-    call.answer();
-    this.publish();
+    if (this.call) void this.answerCall(this.call);
   }
 
   async hangup(): Promise<void> {
@@ -428,6 +451,7 @@ export class TelnyxWebphone {
       return;
     }
     void this.sendHeartbeat();
+    void this.resumeAudio();
   }
 
   // --- SDK -------------------------------------------------------------------
@@ -437,30 +461,40 @@ export class TelnyxWebphone {
     // fresh credentials are kept for the next (re)connect instead.
     if (this.client || this.connecting) return;
     this.connecting = true;
+    const generation = ++this.clientGeneration;
     try {
       const client = await (this.options.createClient
         ? this.options.createClient(credentials)
         : this.createTelnyxClient(credentials));
+      if (!this.started || generation !== this.clientGeneration) {
+        await Promise.resolve(client.disconnect()).catch(() => undefined);
+        return;
+      }
       this.client = client;
-      client.on("telnyx.ready", (() => this.dispatch({ type: "client_ready" })) as (payload: never) => void);
-      client.on("telnyx.error", ((payload: { error?: { message?: string }; message?: string }) => {
-        const message = payload?.error?.message ?? payload?.message ?? null;
-        this.dispatch({ type: "client_error", message, authFailure: isAuthFailure(message) });
+      const current = () => this.started && this.client === client && generation === this.clientGeneration;
+      client.on("telnyx.ready", (() => {
+        if (current()) this.dispatch({ type: "client_ready" });
       }) as (payload: never) => void);
-      client.on("telnyx.socket.close", (() => this.dispatch({ type: "socket_closed" })) as (payload: never) => void);
-      client.on("telnyx.notification", ((notification: WebphoneSdkNotification) =>
-        this.onNotification(notification)) as (payload: never) => void);
+      client.on("telnyx.error", ((payload: WebphoneSdkError) => {
+        if (current()) this.onSdkError(payload);
+      }) as (payload: never) => void);
+      client.on("telnyx.socket.close", (() => {
+        if (current()) this.dispatch({ type: "socket_closed" });
+      }) as (payload: never) => void);
+      client.on("telnyx.notification", ((notification: WebphoneSdkNotification) => {
+        if (current()) this.onNotification(notification);
+      }) as (payload: never) => void);
       const element = this.getRemoteAudio();
       if (element) client.remoteElement = element;
       await client.connect();
     } catch (error) {
-      this.client = null;
+      if (!this.started || generation !== this.clientGeneration) return;
       this.dispatch({
         type: "client_error",
         message: error instanceof Error ? error.message : "Telefón sa nepodarilo pripojiť.",
       });
     } finally {
-      this.connecting = false;
+      if (generation === this.clientGeneration) this.connecting = false;
     }
   }
 
@@ -472,10 +506,32 @@ export class TelnyxWebphone {
   private async disconnectClient(): Promise<void> {
     const client = this.client;
     this.client = null;
+    this.clientGeneration += 1;
+    this.connecting = false;
     this.stopRinging();
     this.call = null;
+    this.callSessionId = null;
+    this.answeringCallId = null;
+    this.answeredCallId = null;
+    this.audioAttempt += 1;
+    this.audioBlocked = false;
     if (!client) return;
+    for (const event of ["telnyx.ready", "telnyx.error", "telnyx.socket.close", "telnyx.notification"]) client.off(event);
     await Promise.resolve(client.disconnect()).catch(() => undefined);
+  }
+
+  private onSdkError(payload: WebphoneSdkError): void {
+    const code = payload?.error?.code;
+    // These codes describe a single call. Resetting its healthy registration
+    // would also prevent the operator receiving the next incoming call.
+    if (typeof code === "number" && CALL_ERROR_CODES.has(code)) {
+      if (payload.callId && payload.callId !== this.call?.id) return;
+      this.callError = callFailureMessage(payload.error);
+      this.publish();
+      return;
+    }
+    const message = payload?.error?.message ?? payload?.message ?? null;
+    this.dispatch({ type: "client_error", message, authFailure: isAuthFailure(message) });
   }
 
   private onNotification(notification: WebphoneSdkNotification): void {
@@ -484,27 +540,43 @@ export class TelnyxWebphone {
     const state = String(call.state ?? "").toLowerCase();
 
     if (DEAD_STATES.has(state)) {
-      this.stopRinging();
       if (this.call?.id === call.id) {
+        this.stopRinging();
         this.call = null;
         this.callSessionId = null;
+        this.answeringCallId = null;
+        this.answeredCallId = null;
+        this.audioAttempt += 1;
+        this.audioBlocked = false;
       }
       this.publish();
       return;
     }
 
+    if (this.call?.id !== call.id) {
+      this.callSessionId = null;
+      this.callError = null;
+      this.answeringCallId = null;
+      this.answeredCallId = null;
+      this.audioAttempt += 1;
+      this.audioBlocked = false;
+    }
     this.call = call;
 
     if (RINGING_STATES.has(state) && String(call.direction ?? "").toLowerCase() === "inbound") {
       // Our own click-to-call / pickup leg: answer it silently, the operator
       // already asked for this call.
       if (this.autoAnswerCurrentCall()) return;
-      this.startRinging(call);
+      if (this.answeringCallId !== call.id && this.answeredCallId !== call.id) this.startRinging(call);
       this.publish();
       return;
     }
 
-    if (ACTIVE_STATES.has(state)) this.stopRinging();
+    if (ACTIVE_STATES.has(state)) {
+      this.stopRinging();
+      this.answeredCallId = null;
+      void this.playRemoteAudio();
+    }
     this.publish();
   }
 
@@ -530,10 +602,41 @@ export class TelnyxWebphone {
     this.scheduleExpectedLegExpiry();
     this.callSessionId = expected.sessionId;
 
-    this.stopRinging();
-    call.answer();
-    this.publish();
+    void this.answerCall(call);
     return true;
+  }
+
+  private async answerCall(call: WebphoneSdkCall): Promise<void> {
+    if (!this.started || this.call !== call || !RINGING_STATES.has(String(call.state).toLowerCase()) ||
+      this.answeringCallId === call.id || this.answeredCallId === call.id) return;
+    const generation = this.clientGeneration;
+    this.answeringCallId = call.id;
+    this.callError = null;
+    this.stopRinging();
+    this.publish();
+    // The answer button is also a sound-unlock gesture on mobile browsers.
+    void this.resumeAudio();
+    try {
+      const result = call.answer();
+      if (this.isCurrentCall(call, generation)) this.publish();
+      await result;
+      if (!this.isCurrentCall(call, generation)) return;
+      this.answeredCallId = RINGING_STATES.has(String(call.state).toLowerCase()) ? call.id : null;
+      void this.playRemoteAudio();
+    } catch (error) {
+      if (!this.isCurrentCall(call, generation)) return;
+      this.callError = callFailureMessage(error);
+      if (RINGING_STATES.has(String(call.state).toLowerCase())) this.startRinging(call);
+    } finally {
+      if (this.isCurrentCall(call, generation)) {
+        this.answeringCallId = null;
+        this.publish();
+      }
+    }
+  }
+
+  private isCurrentCall(call: WebphoneSdkCall, generation: number): boolean {
+    return this.started && this.call === call && generation === this.clientGeneration && !DEAD_STATES.has(String(call.state).toLowerCase());
   }
 
   // --- ringing ---------------------------------------------------------------
@@ -583,12 +686,58 @@ export class TelnyxWebphone {
     element.autoplay = true;
     element.setAttribute("playsinline", "true");
     element.style.display = "none";
+    element.addEventListener("loadedmetadata", this.boundAudioReady);
+    element.addEventListener("canplay", this.boundAudioReady);
+    element.addEventListener("playing", this.boundAudioPlaying);
+    element.addEventListener("pause", this.boundAudioPause);
     document.body.appendChild(element);
     // The operator's speaker choice belongs to this computer (localStorage), so
     // a freshly created element has to be pointed at it again.
     applyStoredAudioOutput(element);
     this.remoteAudio = element;
     return element;
+  }
+
+  private hasRemoteMedia(): boolean {
+    return Boolean(this.started && this.call && ACTIVE_STATES.has(String(this.call.state).toLowerCase()) && this.remoteAudio?.srcObject);
+  }
+
+  private async playRemoteAudio(): Promise<void> {
+    const element = this.remoteAudio;
+    if (!element || !this.hasRemoteMedia()) return;
+    const call = this.call;
+    const attempt = ++this.audioAttempt;
+    try {
+      await element.play();
+      if (this.started && this.call === call && element === this.remoteAudio && attempt === this.audioAttempt) this.setAudioBlocked(false);
+    } catch (error) {
+      if (!this.started || this.call !== call || element !== this.remoteAudio || attempt !== this.audioAttempt) return;
+      // Aborts happen normally when a call ends or the SDK swaps its stream.
+      if (error instanceof Error && error.name === "NotAllowedError") this.setAudioBlocked(true);
+    }
+  }
+
+  private setAudioBlocked(blocked: boolean): void {
+    if (this.audioBlocked === blocked) return;
+    this.audioBlocked = blocked;
+    this.publish();
+  }
+
+  private disposeAudio(): void {
+    this.audioAttempt += 1;
+    this.audioBlocked = false;
+    this.ringtone?.dispose();
+    this.ringtone = null;
+    const element = this.remoteAudio;
+    this.remoteAudio = null;
+    if (!element) return;
+    element.removeEventListener("loadedmetadata", this.boundAudioReady);
+    element.removeEventListener("canplay", this.boundAudioReady);
+    element.removeEventListener("playing", this.boundAudioPlaying);
+    element.removeEventListener("pause", this.boundAudioPause);
+    element.pause();
+    element.srcObject = null;
+    element.remove();
   }
 
   // --- snapshot --------------------------------------------------------------
@@ -607,6 +756,9 @@ export class TelnyxWebphone {
       sipUsername: this.state.credentials?.sipUsername ?? null,
       deviceSessionId: this.state.credentials?.deviceSessionId ?? null,
       message: this.state.message,
+      answering: this.answeringCallId !== null,
+      audioBlocked: this.audioBlocked,
+      callError: this.callError,
       pendingOperatorLegs: pruneExpectedLegs(this.expected, this.now()).length,
       call: call
         ? {
@@ -629,6 +781,29 @@ export class TelnyxWebphone {
     this.snapshot = this.buildSnapshot();
     for (const listener of this.listeners) listener(this.snapshot);
   }
+}
+
+type WebphoneSdkError = {
+  error?: { code?: number; name?: string; message?: string };
+  message?: string;
+  callId?: string;
+};
+
+// Verified against @telnyx/webrtc 2.27.10 SDK_ERRORS. Socket, auth and network
+// codes deliberately keep the existing registration recovery path.
+const CALL_ERROR_CODES = new Set([40001, 40002, 40003, 40004, 40005, 42001, 42002, 42003, 44001, 44002, 44003, 44004, 44005, 47001]);
+
+function callFailureMessage(error: unknown): string {
+  const detail = error && typeof error === "object" ? error as { code?: number; name?: string } : null;
+  if (detail?.code === 42001 || detail?.name === "NotAllowedError" || detail?.name === "SecurityError") {
+    return "Mikrofón je zablokovaný. Povoľte ho v nastaveniach prehliadača a skúste hovor znova.";
+  }
+  if (detail?.code === 42002 || detail?.name === "NotFoundError") return "Mikrofón sa nenašiel. Pripojte ho a skúste hovor znova.";
+  if (detail?.code === 42003 || detail?.name === "NotReadableError") return "Mikrofón sa nedá použiť. Skontrolujte, či ho nepoužíva iná aplikácia.";
+  if (detail?.code === 44001) return "Hovor sa nepodarilo podržať. Skúste akciu znova.";
+  if (detail?.code === 44003) return "Ukončenie hovoru sa nepodarilo potvrdiť. Skontrolujte stav hovoru.";
+  if (detail?.code === 47001) return "Zvukové spojenie hovoru sa prerušilo. Skontrolujte internetové pripojenie.";
+  return "Hovor sa nepodarilo spojiť. Skúste to znova; ak problém trvá, skontrolujte mikrofón a pripojenie.";
 }
 
 /** SIP/JWT rejections must re-mint rather than replay the same token. */

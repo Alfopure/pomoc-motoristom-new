@@ -81,6 +81,22 @@ describe("snapshot contract", () => {
     const asClient: ActiveCallsPayload = fromServer;
     expect(typeof asClient).toBe("object");
   });
+
+  it("correlates only the actor's operator and consult browser legs, excluding other identities", () => {
+    const model = buildPhoneBarModel(payload({ calls: [call({ legs: [
+      leg({ id: "own-operator", callControlId: "own-control" }),
+      leg({ id: "own-consult", role: "consult", callControlId: "consult-control" }),
+      leg({ id: "duplicate", callControlId: "own-control" }),
+      leg({ id: "missing" }),
+      leg({ id: "colleague", profileId: COLLEAGUE, callControlId: "colleague-control" }),
+      leg({ id: "colleague-consult", role: "consult", profileId: COLLEAGUE, callControlId: "colleague-consult-control" }),
+      leg({ id: "supervisor", role: "supervisor", callControlId: "supervisor-control" }),
+      leg({ id: "customer", role: "customer", callControlId: "customer-control" }),
+      leg({ id: "external", role: "external", callControlId: "external-control" }),
+    ] })] }));
+    expect(model.active?.browserCallControlIds).toEqual(["own-control", "consult-control"]);
+    expect(model.teamCalls[0].browserCallControlIds).toEqual(["own-control", "consult-control"]);
+  });
 });
 
 function leg(overrides: Partial<ActiveCallPayload["legs"][number]> = {}): ActiveCallPayload["legs"][number] {
