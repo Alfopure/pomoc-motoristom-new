@@ -61,7 +61,7 @@ export function QaDashboard() {
         <p className="flex items-start gap-2 border-b border-zinc-100 bg-zinc-50 px-3 py-2.5 text-xs leading-5 text-zinc-600">
           <Info size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
           <span>
-            Hovory sa nenahrávajú ani neprepisujú, preto sa kvalita nehodnotí zo záznamu. Meria sa to, čo systém skutočne eviduje: či má
+            Tento prevádzkový prehľad vychádza zo zapísaných udalostí: či má
             ukončený hovor zapísaný výsledok a či sme stihli sľúbené spätné volanie do {data.promiseMinutes} minút.
           </span>
         </p>

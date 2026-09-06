@@ -5,6 +5,7 @@ import type { BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import { ANNOUNCEMENT_DEFINITIONS, type AnnouncementConfig, type AnnouncementKey } from "@/lib/telephony/announcements";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import type { TelnyxClientState } from "../telnyx/client-state";
+import type { AnnouncementSequence, RecordingRoutingPolicy, RecordingState } from "./recording-types";
 
 /**
  * Shared types of the telephony state machine (design §2.5/§2.6).
@@ -45,7 +46,7 @@ export const MEDIA_FILES = {
   invalidInput: "invalid-input.mp3",
 } as const;
 
-export type MediaKey = keyof typeof MEDIA_FILES;
+export type MediaKey = keyof typeof MEDIA_FILES | AnnouncementKey;
 
 /** Either a well-known prompt or a file name stored on an IVR row. */
 export type MediaRef = { key: MediaKey } | { file: string };
@@ -57,7 +58,7 @@ export function announcementKeyForMedia(ref: MediaRef): AnnouncementKey | null {
 }
 
 export function mediaFileName(ref: MediaRef): string {
-  return "key" in ref ? MEDIA_FILES[ref.key] : ref.file;
+  return "key" in ref ? (MEDIA_FILES[ref.key as keyof typeof MEDIA_FILES] ?? ANNOUNCEMENT_DEFINITIONS.find((item) => item.key === ref.key)?.file ?? "") : ref.file;
 }
 
 /** Absolute prompt URL; `null` when no media base is configured. */
@@ -135,6 +136,10 @@ export type TransferTarget =
   | { kind: "number"; number: string; label: string };
 
 export type AppEventType =
+  | "recording_stop"
+  | "recording_retry_stop"
+  | "recording_policy_stop"
+  | "recording_continue"
   | "hold"
   | "unhold"
   | "park"
@@ -281,6 +286,8 @@ export type Command = CommandBase &
   | { kind: "bridge"; commandId: string; leg: LegRef; target: LegRef; parkAfterUnbridge?: "self"; playRingtone?: boolean }
   | { kind: "playback_start"; commandId: string; leg: LegRef; media: MediaRef; loop?: "infinity" | number; clientState?: TelnyxClientState; forceSpeech?: boolean }
   | { kind: "playback_stop"; commandId: string; leg: LegRef }
+  | { kind: "recording_start"; commandId: string; leg: LegRef; recorderId: string; epoch: number; maxLength: number }
+  | { kind: "recording_stop"; commandId: string; leg: LegRef; recorderId: string; epoch: number }
   | { kind: "gather"; commandId: string; leg: LegRef; spec: GatherSpec; clientState: TelnyxClientState }
   | { kind: "gather_stop"; commandId: string; leg: LegRef }
   | DialCommand
@@ -500,6 +507,7 @@ export type RoutingContext = {
   mediaAvailable: boolean;
   /** Frozen at the first answered event so edits affect future callers only. */
   announcements?: AnnouncementConfig;
+  recordingPolicy?: RecordingRoutingPolicy;
 };
 
 // --- session metadata -------------------------------------------------------
@@ -507,6 +515,8 @@ export type RoutingContext = {
 export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" | "consult";
 
 export type SessionMeta = {
+  recording?: RecordingState;
+  announcement_sequence?: AnnouncementSequence | null;
   announcements?: AnnouncementConfig;
   greeting?: { started_at: string; deadline_at?: string; speech_retry?: boolean; completed_at?: string; closing?: boolean } | null;
   match?: { top: CallerMatch | null; count: number; degraded: boolean } | null;

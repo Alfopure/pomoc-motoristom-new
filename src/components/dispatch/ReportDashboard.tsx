@@ -20,6 +20,7 @@ import {
 import type { ReportChartPoint, ReportDashboardData, ReportOperatorRow, ReportRangeKey } from "@/lib/reporting";
 
 import { QaDashboard } from "./QaDashboard";
+import { ReviewedQualityDashboard } from "./recordings/ReviewedQualityDashboard";
 import { TelephonyStatsWidgets } from "./TelephonyStatsWidgets";
 
 type ReportTab = "overview" | "calls" | "quality" | "operators" | "cases";
@@ -260,10 +261,10 @@ function OperatorsDashboard({ data }: { data: ReportDashboardData }) {
 function QualityDashboard() {
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-12">
+      <ReviewedQualityDashboard />
       <QaDashboard />
       <section className="rounded-md border border-zinc-200 bg-white p-4 text-xs leading-5 text-zinc-600 md:col-span-2 xl:col-span-12">
-        Prehľad kvality vidia služobne starší dispečeri, manažéri a administrátori. Hovory sa v tejto verzii nenahrávajú ani neprepisujú,
-        takže sa hodnotí zapísaný výsledok hovoru a dodržanie sľúbených spätných volaní.
+        Prístup ku kontrole rozhovorov sa riadi oprávneniami. Prevádzkový prehľad samostatne sleduje zapísané výsledky hovorov a dodržanie sľúbených spätných volaní.
       </section>
     </div>
   );

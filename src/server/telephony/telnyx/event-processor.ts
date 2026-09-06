@@ -10,6 +10,10 @@ import { effectsDeps, runSessionEvent, type SessionRunnerDeps } from "../session
 import { recordCallEvent, type CommandOutcome } from "../state/effects";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
 import { toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
+import { readMeta } from "../state/types";
+import { loadParticipantManifest, observeParticipants } from "../state/participants";
+import { enqueueSavedRecording } from "../recording-jobs";
+import { recordingIntent } from "../state/recording";
 import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, type WebhookClaim } from "./webhook-ledger";
 
 /**
@@ -88,6 +92,11 @@ async function findSession(admin: AdminClient, organizationId: string, event: Te
     const bySession = await admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).eq("telnyx_session_id", event.callSessionId).maybeSingle();
     if (bySession.error) throw new Error(`session lookup failed: ${bySession.error.message}`);
     if (bySession.data) return bySession.data;
+  }
+  if (event.conferenceId) {
+    const conference = await admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).eq("conference_id", event.conferenceId).maybeSingle();
+    if (conference.error) throw new Error("conference session lookup failed");
+    if (conference.data) return conference.data;
   }
   return null;
 }
@@ -222,7 +231,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
   const claim = await claimWebhookEvent(deps.admin, {
     eventId: event.id,
     eventType: event.type,
-    payload: toJson(event.payload),
+    payload: toJson(event.type.includes("recording.") ? { recording_id: event.payload.recording_id ?? null, recording_started_at: event.payload.recording_started_at ?? null,
+      recording_ended_at: event.payload.recording_ended_at ?? null, call_control_id: event.callControlId, client_state: event.rawClientState } : event.payload),
     organizationId: deps.organizationId,
     callSessionId: event.callSessionId,
     callLegId: event.callLegId,
@@ -258,12 +268,35 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     }
 
     if (eventClass === "bookkeeping") {
+      if (event.type === "call.recording.saved" || event.type === "conference.recording.saved") {
+        const payload = event.payload;
+        const urls = payload.recording_urls && typeof payload.recording_urls === "object" ? payload.recording_urls as Record<string, unknown> : {};
+        const sourceUrl = typeof urls.wav === "string" ? urls.wav : typeof urls.mp3 === "string" ? urls.mp3 : null;
+        const providerRecordingId = typeof payload.recording_id === "string" ? payload.recording_id : null;
+        const startedAt = typeof payload.recording_started_at === "string" ? payload.recording_started_at : null;
+        const endedAt = typeof payload.recording_ended_at === "string" ? payload.recording_ended_at : null;
+        // Only requested, announced captures from our registry enter processing. A provider
+        // recording enabled in its portal must not silently become an authorised app recording.
+        const recorder = readMeta(session).recording?.recorders.find((r) => r.callControlId === event.callControlId && (r.providerRecordingId && typeof event.payload.recording_id === "string" ? r.providerRecordingId === event.payload.recording_id : event.clientState?.intent === recordingIntent(r.id)));
+        if (recorder && providerRecordingId && sourceUrl && startedAt && endedAt && Number.isFinite(Date.parse(startedAt)) && Date.parse(endedAt) >= Date.parse(startedAt)) {
+          const call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", session.id).maybeSingle();
+          if (call.error || !call.data) throw new Error("recording call association unavailable");
+          await enqueueSavedRecording(deps.admin, { organizationId: deps.organizationId, callId: call.data.id, sessionId: session.id, providerRecordingId, recorderId: recorder.id,
+            providerSessionId: event.callSessionId, startedAt, endedAt, durationSeconds: Math.ceil((Date.parse(endedAt) - Date.parse(startedAt)) / 1000), sourceUrl,
+            participantManifest: await loadParticipantManifest(deps.admin, session, { startedAt, endedAt, recorderId: recorder.id }) });
+        } else if (recorder) throw new Error("recording saved payload incomplete");
+      }
+      if (event.type === "call.recording.saved" || event.type === "call.recording.error") await runSessionEvent(deps, session.id, event);
       await recordCallEvent(effects, { session, event, handledStatus: "processed", stateBefore: session.state, stateAfter: session.state, notes: ["bookkeeping"], commands: [] });
       await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
       return done({ ...identity, claim, sessionId: session.id, status: 200, outcome: "processed", notes: ["bookkeeping"] });
     }
 
     const run = await runSessionEvent(deps, session.id, event);
+    if (["call.bridged", "call.hangup", "conference.participant.joined", "conference.participant.left"].includes(event.type)) {
+      try { await observeParticipants(deps.admin, run.session, event.id, event.occurredAt ?? now().toISOString(), event.type === "call.bridged"); }
+      catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "participant_observation_failed" }); }
+    }
     if (run.outcome === "ignored") {
       await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
       logResult(deps, event, claim, session.id, "ignored", [], started, now);

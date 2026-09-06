@@ -448,7 +448,7 @@
     "durationSeconds": 12.722,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingNotice",
@@ -465,7 +465,7 @@
     "durationSeconds": 12.957,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingNotice",
@@ -482,7 +482,7 @@
     "durationSeconds": 12.147,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingNotice",
@@ -499,7 +499,7 @@
     "durationSeconds": 15.282,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "holdStart",
@@ -516,7 +516,7 @@
     "durationSeconds": 2.273,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "holdStart",
@@ -533,7 +533,7 @@
     "durationSeconds": 2.534,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "holdStart",
@@ -550,7 +550,7 @@
     "durationSeconds": 1.384,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "holdStart",
@@ -567,7 +567,7 @@
     "durationSeconds": 2.325,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "holdReminder",
@@ -653,7 +653,7 @@
     "durationSeconds": 1.698,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "resume",
@@ -670,7 +670,7 @@
     "durationSeconds": 1.489,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "resume",
@@ -687,7 +687,7 @@
     "durationSeconds": 1.28,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "resume",
@@ -704,7 +704,7 @@
     "durationSeconds": 1.698,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "transferStart",
@@ -721,7 +721,7 @@
     "durationSeconds": 2.873,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "transferStart",
@@ -738,7 +738,7 @@
     "durationSeconds": 3.161,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "transferStart",
@@ -755,7 +755,7 @@
     "durationSeconds": 3.187,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "transferStart",
@@ -772,7 +772,7 @@
     "durationSeconds": 3.474,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "transferFailed",
@@ -857,7 +857,7 @@
     "durationSeconds": 4.127,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "consultStart",
@@ -874,7 +874,7 @@
     "durationSeconds": 4.023,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "consultStart",
@@ -891,7 +891,7 @@
     "durationSeconds": 3.344,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "consultStart",
@@ -908,7 +908,7 @@
     "durationSeconds": 4.441,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "parkStart",
@@ -925,7 +925,7 @@
     "durationSeconds": 4.075,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "parkStart",
@@ -942,7 +942,7 @@
     "durationSeconds": 4.023,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "parkStart",
@@ -959,7 +959,7 @@
     "durationSeconds": 3.109,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "parkStart",
@@ -976,7 +976,7 @@
     "durationSeconds": 3.84,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "conferenceJoin",
@@ -993,7 +993,7 @@
     "durationSeconds": 2.769,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "conferenceJoin",
@@ -1010,7 +1010,7 @@
     "durationSeconds": 2.638,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "conferenceJoin",
@@ -1027,7 +1027,7 @@
     "durationSeconds": 2.351,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "conferenceJoin",
@@ -1044,7 +1044,7 @@
     "durationSeconds": 2.534,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "conferenceLeave",
@@ -1061,7 +1061,7 @@
     "durationSeconds": 2.038,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "conferenceLeave",
@@ -1078,7 +1078,7 @@
     "durationSeconds": 1.907,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "conferenceLeave",
@@ -1095,7 +1095,7 @@
     "durationSeconds": 2.22,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "conferenceLeave",
@@ -1112,7 +1112,7 @@
     "durationSeconds": 2.168,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingPaused",
@@ -1129,7 +1129,7 @@
     "durationSeconds": 2.038,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingPaused",
@@ -1146,7 +1146,7 @@
     "durationSeconds": 1.75,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingPaused",
@@ -1163,7 +1163,7 @@
     "durationSeconds": 1.149,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingPaused",
@@ -1180,7 +1180,7 @@
     "durationSeconds": 2.116,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingResumed",
@@ -1197,7 +1197,7 @@
     "durationSeconds": 1.985,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingResumed",
@@ -1214,7 +1214,7 @@
     "durationSeconds": 2.273,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingResumed",
@@ -1231,7 +1231,7 @@
     "durationSeconds": 1.698,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingResumed",
@@ -1248,7 +1248,7 @@
     "durationSeconds": 2.325,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "recordingUnavailable",
@@ -1333,7 +1333,7 @@
     "durationSeconds": 2.691,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "outboundIntro",
@@ -1350,7 +1350,7 @@
     "durationSeconds": 2.926,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "outboundIntro",
@@ -1367,7 +1367,7 @@
     "durationSeconds": 3.239,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "outboundIntro",
@@ -1384,7 +1384,7 @@
     "durationSeconds": 3.762,
     "sampleRate": 44100,
     "channels": 1,
-    "runtimeStatus": "prepared"
+    "runtimeStatus": "active"
   },
   {
     "key": "noInput",
@@ -1589,5 +1589,65 @@
     "sampleRate": 44100,
     "channels": 1,
     "runtimeStatus": "prepared"
+  },
+  {
+    "file": "announcements-v2/sk/recordingServiceNotice.mp3",
+    "key": "recordingServiceNotice",
+    "language": "sk",
+    "text": "Hovor nahrávame na vybavenie pomoci. Záznam spracúvajú naši poskytovatelia. Informácie, prístup k záznamu alebo námietku riešte s dispečerom.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 10.057,
+    "sha256": "fba5a4d35c302ffea77bda7b36918cdd21bb167b9be2b4fff157c9b3d69a25d3",
+    "assetOrigin": "call_recording_complete",
+    "bytes": 80710,
+    "sampleRate": 44100,
+    "channels": 1,
+    "runtimeStatus": "active"
+  },
+  {
+    "file": "announcements-v2/cs/recordingServiceNotice.mp3",
+    "key": "recordingServiceNotice",
+    "language": "cs",
+    "text": "Hovor nahráváme pro zajištění pomoci. Záznam zpracovávají naši poskytovatelé. Informace, přístup k záznamu nebo námitku řešte s dispečerem.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 10.266,
+    "sha256": "2ea3f29c115c300dc69d545664b9b17cb9e5b970d3960f7c2b5033030474cbd6",
+    "assetOrigin": "call_recording_complete",
+    "bytes": 82381,
+    "sampleRate": 44100,
+    "channels": 1,
+    "runtimeStatus": "active"
+  },
+  {
+    "file": "announcements-v2/en/recordingServiceNotice.mp3",
+    "key": "recordingServiceNotice",
+    "language": "en",
+    "text": "We record this call to arrange assistance. Our service providers process the recording. For information, access to the recording or to object, please speak to the dispatcher.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 10.344,
+    "sha256": "13a5ecb529d741018a7689aae32d4429b29d45007ba92855203a037aeaa209c6",
+    "assetOrigin": "call_recording_complete",
+    "bytes": 83008,
+    "sampleRate": 44100,
+    "channels": 1,
+    "runtimeStatus": "active"
+  },
+  {
+    "file": "announcements-v2/de/recordingServiceNotice.mp3",
+    "key": "recordingServiceNotice",
+    "language": "de",
+    "text": "Wir zeichnen diesen Anruf auf, um Hilfe zu organisieren. Unsere Dienstleister verarbeiten die Aufnahme. Für Informationen, Zugang zur Aufnahme oder einen Widerspruch wenden Sie sich an die Leitstelle.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "model": "eleven_multilingual_v2",
+    "durationSeconds": 12.539,
+    "sha256": "027ea9d6c90b19c46416f7aea6d1cf57f290535d6784f6542f1fdf137ff1bf10",
+    "assetOrigin": "call_recording_complete",
+    "bytes": 100563,
+    "sampleRate": 44100,
+    "channels": 1,
+    "runtimeStatus": "active"
   }
 ]
