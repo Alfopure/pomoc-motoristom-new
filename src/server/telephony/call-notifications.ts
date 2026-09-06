@@ -2,6 +2,7 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
+import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { sendCallPush } from "@/server/web-push";
 import { presenceAllowsOffer } from "./routing/eligibility";
 import { DEFAULT_ROUTING_SETTINGS, isOpenLeg, readMeta, type AttemptRow, type LegRow, type PresenceRow, type SessionRow, type TelephonyEnvironment } from "./state/types";
@@ -64,6 +65,10 @@ function isPendingIncoming(leg: LegRow): boolean {
     record(leg.client_state).autoAnswer !== true && INCOMING_INTENTS.has(intentOf(leg) ?? ""));
 }
 
+function isPickable(session: SessionRow): boolean {
+  return canPickUpCall({ state: session.state, direction: session.direction, answered: Boolean(session.answered_at), operatorProfileId: session.answered_by_profile_id });
+}
+
 /** Pure audience rule: push wakes the app; it never pretends its SIP device is registered. */
 export function callPushCandidates(input: {
   session: SessionRow;
@@ -123,19 +128,30 @@ export function callPushCandidates(input: {
     });
   }
 
-  if (session.state !== "waiting" && session.state !== "parked") return [...candidates.values()];
+  if (!isPickable(session)) return [...candidates.values()];
   if (session.answered_by_profile_id || (meta.pickup && (timestamp(meta.pickup.at) ?? now.getTime()) + PICKUP_PENDING_MS > now.getTime())) return [...candidates.values()];
-  const since = timestamp(session.parked_at ?? meta.waiting?.since);
-  if (since === null) return [...candidates.values()];
-  const maxMinutes = meta.waiting?.max_minutes;
-  const waitingDeadline = since + (typeof maxMinutes === "number" && Number.isFinite(maxMinutes) && maxMinutes > 0 ? maxMinutes : DEFAULT_ROUTING_SETTINGS.parkMaxMinutes) * 60_000;
-  const expires = Math.min(now.getTime() + CALL_PUSH_TTL_MS, waitingDeadline);
+  // The old ring plan continues while pickup connects, including external backup.
+  // Its persisted deadline bounds how long the newly available alert is useful.
+  let pickupDeadline: number;
+  if (session.state === "ringing") {
+    const ringDeadline = timestamp(meta.ring?.step_deadline_at);
+    if (ringDeadline === null) return [...candidates.values()];
+    pickupDeadline = ringDeadline;
+  } else {
+    const since = timestamp(session.parked_at ?? meta.waiting?.since);
+    if (since === null) return [...candidates.values()];
+    const maxMinutes = meta.waiting?.max_minutes;
+    pickupDeadline = since + (typeof maxMinutes === "number" && Number.isFinite(maxMinutes) && maxMinutes > 0 ? maxMinutes : DEFAULT_ROUTING_SETTINGS.parkMaxMinutes) * 60_000;
+  }
+  const expires = Math.min(now.getTime() + CALL_PUSH_TTL_MS, pickupDeadline);
   if (expires <= now.getTime()) return [...candidates.values()];
   // No device heartbeat filter: an available operator's closed PWA can receive
   // push, then register its browser phone before the existing pickup action.
   for (const profileId of planProfileIds(session)) {
     if (!available.has(profileId) || candidates.has(profileId)) continue;
     if (input.presence.some((row) => row.organization_id === input.organizationId && row.profile_id === profileId && row.status === "ringing")) continue;
+    // An existing own media leg is not another opportunity to pick the call up.
+    if (legs.some((leg) => leg.profile_id === profileId)) continue;
     // A browser is already trying to pick this call up; don't summon more people.
     if (legs.some((leg) => leg.role !== "customer" && intentOf(leg) === "pickup")) continue;
     candidates.set(profileId, {
@@ -161,7 +177,7 @@ export async function loadCallPushCandidates(deps: CallNotificationDeps, session
   const legs = legsResult.data ?? [];
   const profileIds = [...new Set([
     ...legs.filter(isPendingIncoming).map((leg) => leg.profile_id!),
-    ...((session.state === "waiting" || session.state === "parked") ? planProfileIds(session) : []),
+    ...(isPickable(session) ? planProfileIds(session) : []),
   ])];
   if (!profileIds.length) return [];
   const [profiles, presence, otherOffers, otherLegs] = await Promise.all([

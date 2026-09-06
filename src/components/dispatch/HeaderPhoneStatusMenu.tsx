@@ -62,8 +62,8 @@ export function HeaderPhoneStatusMenu({
   const rootRef = useRef<HTMLDivElement>(null);
   const availabilityLabel = presenceLabel(status as OperatorPresenceStatus | null);
   const connected = phone.registration.tone === "ok";
-  const summaryLabel = notice ? "Chyba telefónie" : connected ? `${phone.registration.label} · ${availabilityLabel}` : phone.registration.label;
-  const tone = notice ? "error" : connected ? presenceTone(status) : phone.registration.tone;
+  const summaryLabel = !connected ? phone.registration.label : notice ? "Chyba telefónie" : `${phone.registration.label} · ${availabilityLabel}`;
+  const tone = !connected ? phone.registration.tone : notice ? "error" : presenceTone(status);
   const canTakeover = phoneTakeoverAvailable(phone.status);
 
   useEffect(() => {
@@ -98,8 +98,8 @@ export function HeaderPhoneStatusMenu({
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        aria-label={notice ? `Chyba telefónie: ${notice}` : `Telefón: ${phone.registration.label}; dostupnosť: ${availabilityLabel}`}
-        title={notice ?? `${phone.registration.detail} Dostupnosť: ${availabilityLabel}.`}
+        aria-label={connected && notice ? `Chyba telefónie: ${notice}` : `Telefón: ${phone.registration.label}; dostupnosť: ${availabilityLabel}`}
+        title={connected && notice ? notice : `${phone.registration.detail} Dostupnosť: ${availabilityLabel}.`}
         className={`inline-flex h-9 items-center gap-1.5 rounded-md border px-2 text-xs font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-300 ${TRIGGER_TONES[tone]}`}
       >
         {busy ? (

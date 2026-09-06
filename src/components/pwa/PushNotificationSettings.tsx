@@ -22,7 +22,7 @@ const buttonClass = "inline-flex min-h-11 items-center justify-center gap-2 roun
 const categories: Array<{ key: PushCategory; label: string; detail: string }> = [
   { key: "taskNotificationsEnabled", label: "Úlohy a pripomienky", detail: "Pridelené úlohy a blížiace sa termíny." },
   { key: "incomingCallsEnabled", label: "Prichádzajúce hovory", detail: "Keď hovor zvoní priamo tebe." },
-  { key: "availableCallsEnabled", label: "Hovory na prevzatie", detail: "Keď je v čakárni hovor na prevzatie." },
+  { key: "availableCallsEnabled", label: "Hovory na prevzatie", detail: "Neprijaté hovory, ktoré môžeš prevziať." },
 ];
 
 export function PushNotificationSettings({ enabled = true }: { enabled?: boolean }) {

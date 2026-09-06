@@ -39,7 +39,7 @@ export function CallNotificationFocus(props: {
       <p role="status" className="mt-1 text-xs leading-5 text-zinc-700">{target.message}</p>
       <div className="mt-2 flex flex-wrap gap-2">
         {target.canAnswer && <button type="button" onClick={props.onAnswer} className="min-h-11 rounded-md bg-emerald-700 px-3 text-xs font-bold text-white">Prijať tento hovor</button>}
-        {target.canPickup && <button type="button" aria-label="Prevziať čakajúci hovor" onClick={() => props.onPickup(props.focus.sessionId)} className="min-h-11 rounded-md bg-emerald-700 px-3 text-xs font-bold text-white">Prevziať hovor</button>}
+        {target.canPickup && <button type="button" aria-label={target.call?.kind === "waiting" ? "Prevziať čakajúci hovor" : "Prevziať prichádzajúci hovor"} onClick={() => props.onPickup(props.focus.sessionId)} className="min-h-11 rounded-md bg-emerald-700 px-3 text-xs font-bold text-white">Prevziať hovor</button>}
         {target.canReconnect && <button type="button" onClick={props.onReconnect} className="min-h-11 rounded-md bg-zinc-900 px-3 text-xs font-bold text-white">Použiť tento telefón</button>}
         <button type="button" aria-label="Obnoviť stav" onClick={props.onRefresh} className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-amber-300 px-3 text-xs font-semibold text-zinc-800 hover:bg-amber-100"><RefreshCw size={14} aria-hidden="true" /> Obnoviť</button>
       </div>

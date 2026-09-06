@@ -153,6 +153,13 @@ describe("terminal states", () => {
     expect(webphoneRegistrationView(superseded.state).tone).toBe("error");
   });
 
+  it("shows a second device as another phone owner and waits for explicit takeover", () => {
+    const result = run(WEBPHONE_INITIAL_STATE, [{ type: "start" }, { type: "token_rejected", status: 409 }]);
+    expect(result.state.status).toBe("superseded");
+    expect(webphoneRegistrationView(result.state).label).toBe("Iné okno");
+    expect(reduceWebphone(result.state, { type: "client_ready" }, { now: NOW }).state.status).toBe("superseded");
+  });
+
   it("restarts from a terminal state only on an explicit start", () => {
     const dead = run(WEBPHONE_INITIAL_STATE, [{ type: "start" }, { type: "token_rejected", status: 403 }]).state;
     expect(dead.status).toBe("failed");

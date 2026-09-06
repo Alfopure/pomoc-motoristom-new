@@ -37,17 +37,15 @@ describe("operator devices", () => {
 
   it("issues a webphone token, decodes its expiry and rotates the device session", async () => {
     const h = createTelephonyHarness();
-    const first = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, userAgent: "tab-1" });
+    const first = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true, userAgent: "tab-1" });
     expect(first.sipUsername).toBe("gencred001");
     expect(first.token.split(".")).toHaveLength(3);
     expect(decodeJwtExpiry(first.token)?.toISOString()).toBe(first.expiresAt);
     const row1 = h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)!;
-    // The seeded device is registered and still sending heartbeats, so a token
-    // refresh keeps it registered — downgrading it would hide the operator from
-    // the ring engine until the next heartbeat.
-    expect(row1).toMatchObject({ device_session_id: first.deviceSessionId, registration_state: "registered", user_agent: "tab-1", last_token_issued_at: h.now().toISOString(), token_expires_at: first.expiresAt });
+    // A new window must confirm its own registration before receiving calls.
+    expect(row1).toMatchObject({ device_session_id: first.deviceSessionId, registration_state: "registering", device_seen_at: null, user_agent: "tab-1", last_token_issued_at: h.now().toISOString(), token_expires_at: first.expiresAt });
 
-    const second = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, userAgent: "tab-2" });
+    const second = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, userAgent: "tab-2", takeover: true });
     expect(second.deviceSessionId).not.toBe(first.deviceSessionId);
     const row2 = h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)!;
     expect((row2.metadata as { revoked_sessions: Array<{ id: string }> }).revoked_sessions.map((entry) => entry.id)).toEqual(["dev-1", first.deviceSessionId]);
@@ -73,13 +71,13 @@ describe("operator devices", () => {
       registrationState: "registered",
     });
     expect(live.ok).toBe(true);
-    await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
+    await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: live.ok ? live.device.device_session_id : undefined });
     expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.registration_state).toBe("registered");
   });
 
   it("refuses to revoke a live device that is on a call unless the takeover is explicit", async () => {
     const h = createTelephonyHarness();
-    const first = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
+    const first = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true });
     await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: first.deviceSessionId, registrationState: "registered" });
     h.setPresence(PROFILES.o1, { status: "on_call", current_session_id: null });
 
@@ -92,25 +90,53 @@ describe("operator devices", () => {
 
   it("lets the tab that owns the credential renew it while on a call", async () => {
     const h = createTelephonyHarness();
-    const first = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
+    const first = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true });
     await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: first.deviceSessionId, registrationState: "registered" });
     h.setPresence(PROFILES.o1, { status: "on_call", current_session_id: null });
 
     // Same tab (its own `device_session_id`): a scheduled refresh, not a takeover.
     const refreshed = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: first.deviceSessionId });
-    expect(refreshed.deviceSessionId).not.toBe(first.deviceSessionId);
+    expect(refreshed.deviceSessionId).toBe(first.deviceSessionId);
     expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.device_session_id).toBe(refreshed.deviceSessionId);
 
     // A different tab (a stale session id, or none at all) is still refused
     // once the renewed tab has registered again.
     await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: refreshed.deviceSessionId, registrationState: "registered" });
-    await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: first.deviceSessionId })).rejects.toMatchObject({ status: 409 });
+    await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "old-window" })).rejects.toMatchObject({ status: 409 });
     await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it.each(["available", "ringing", "on_call"] as const)("does not let a second window silently steal a %s phone", async (status) => {
+    const h = createTelephonyHarness();
+    h.setPresence(PROFILES.o1, { status });
+    await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 409 });
+    expect(h.telnyx.of("mintCredentialToken")).toHaveLength(0);
+    expect(await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1", registrationState: "registered" })).toMatchObject({ ok: true });
+  });
+
+  it("keeps in-flight heartbeats valid when the same window refreshes its token", async () => {
+    const h = createTelephonyHarness();
+    const token = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1" });
+    expect(token.deviceSessionId).toBe("dev-1");
+    expect(await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1", registrationState: "registered" })).toMatchObject({ ok: true });
+    expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.registration_state).toBe("registered");
+  });
+
+  it("does not let a slow token renewal overwrite a newer device session", async () => {
+    const h = createTelephonyHarness();
+    const mint = h.telnyx.client.mintCredentialToken.bind(h.telnyx.client);
+    h.telnyx.client.mintCredentialToken = async (id) => {
+      const token = await mint(id);
+      h.db.update("motorist_operator_devices", { device_session_id: "new-window", registration_state: "registering" }, (row) => row.profile_id === PROFILES.o1);
+      return token;
+    };
+    await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1" })).rejects.toMatchObject({ status: 409 });
+    expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.device_session_id).toBe("new-window");
   });
 
   it("clears the liveness stamp when a leaving tab reports itself unregistered", async () => {
     const h = createTelephonyHarness();
-    const issued = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
+    const issued = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true });
     await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: issued.deviceSessionId, registrationState: "registered" });
 
     const left = await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: issued.deviceSessionId, registrationState: "unregistered" });
@@ -120,7 +146,7 @@ describe("operator devices", () => {
 
   it("accepts heartbeats only from the current device session", async () => {
     const h = createTelephonyHarness();
-    const issued = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 });
+    const issued = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true });
     h.advance(10_000);
     const ok = await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: issued.deviceSessionId, registrationState: "registered" });
     expect(ok).toMatchObject({ ok: true, device: { device_seen_at: h.now().toISOString(), registration_state: "registered" } });

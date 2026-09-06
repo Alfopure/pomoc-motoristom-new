@@ -77,3 +77,18 @@ test("internal, consultation and conference invites remain answerable without a 
   await expect(page.getByRole("button", { name: "Prijať tento hovor" })).toHaveCount(0);
   await expect(page.getByRole("status")).toContainText("vybavuje Jana");
 });
+
+test("incoming recovery requires an explicit pickup and respects the actor's exact reservation", async ({ page }) => {
+  for (const scenario of ["incoming-recovery", "own-offer-recovery"] as const) {
+    await page.evaluate((value) => window.callPushScenario(value), scenario);
+    await expect(page.getByRole("button", { name: "Prijať tento hovor" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Prevziať prichádzajúci hovor" }).click();
+  }
+  expect(await page.evaluate(() => window.callPushEvents)).toEqual([`pickup:${sessionId}`, `pickup:${sessionId}`]);
+  for (const scenario of ["other-offer-recovery", "pending-recovery"] as const) {
+    await page.evaluate((value) => window.callPushScenario(value), scenario);
+    await expect(page.getByRole("button", { name: "Prevziať prichádzajúci hovor" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Prijať tento hovor" })).toHaveCount(0);
+  }
+  expect(await page.evaluate(() => window.callPushEvents)).toHaveLength(2);
+});

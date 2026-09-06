@@ -5,18 +5,30 @@ import type { CallNotificationDeps } from "./call-notifications";
 import { callPushCandidates, loadCallPushCandidates, notifyCallState } from "./call-notifications";
 import { mergeMeta, readMeta, type AttemptRow, type LegRow, type PresenceRow, type SessionRow } from "./state/types";
 import type { Database } from "@/lib/supabase/database.types";
-import { blindTransfer, callColleague, createRateLimiter } from "./call-actions";
+import { blindTransfer, callColleague, createRateLimiter, pickupWaitingCall } from "./call-actions";
 
 type Harness = ReturnType<typeof createTelephonyHarness>;
 type ProfileRow = Database["public"]["Tables"]["motorist_profiles"]["Row"];
 
 afterEach(() => vi.unstubAllEnvs());
 
-function world() {
-  const h = createTelephonyHarness();
+function world(options: Parameters<typeof createTelephonyHarness>[0] = {}) {
+  const h = createTelephonyHarness(options);
   // An available operator in the organization belongs to a different queue.
   h.db.delete("motorist_ring_group_members", (row) => row.profile_id === PROFILES.o5);
   return h;
+}
+
+async function ringingOnBackup(fallback = false) {
+  const h = world(fallback ? { fallbackKind: "external_number" } : {});
+  if (fallback) h.db.delete("motorist_ring_group_members", (row) => row.member_kind === "external_number");
+  h.touchDevice(PROFILES.o1, 600_000);
+  h.touchDevice(PROFILES.o2, 600_000);
+  const push = queuedPush(h);
+  const call = await h.inbound();
+  expect(h.session(call.sessionId).state).toBe("ringing");
+  expect(h.legs(call.sessionId).some((leg) => leg.role === "external" && !leg.ended_at)).toBe(true);
+  return { h, call, push };
 }
 
 function deps(h: Harness): CallNotificationDeps {
@@ -59,6 +71,79 @@ function waiting(h: Harness, sessionId: string) {
 }
 
 describe("call push audience", () => {
+  it.each([false, true])("wakes available queue members while an external backup rings (fallback=%s), within its remaining deadline", async (fallback) => {
+    const { h, call, push } = await ringingOnBackup(fallback);
+    const candidates = await loadCallPushCandidates(deps(h), call.sessionId);
+    expect(candidates.map((row) => row.recipientProfileId).sort()).toEqual([PROFILES.o1, PROFILES.o2]);
+    expect(candidates.every((row) => row.category === "available_call")).toBe(true);
+    const deadline = readMeta(h.session(call.sessionId) as SessionRow).ring?.step_deadline_at;
+    if (!deadline) throw new Error("Backup ringing must persist its deadline");
+    if (fallback) expect(readMeta(h.session(call.sessionId) as SessionRow).ring?.fallback).toBe("external_number");
+    const expiresAt = new Date(Math.min(Date.parse(deadline), h.now().getTime() + 30_000)).toISOString();
+    expect(candidates.every((row) => row.expiresAt === expiresAt)).toBe(true);
+    expect(push.scheduled).toHaveBeenCalledWith(call.sessionId);
+    await push.flush();
+    expect(push.delivery.send).toHaveBeenCalledTimes(2);
+    expect(push.delivery.send).toHaveBeenCalledWith(h.admin, expect.objectContaining({ recipientProfileId: PROFILES.o1, category: "available_call" }));
+    expect(push.delivery.send).not.toHaveBeenCalledWith(h.admin, expect.objectContaining({ recipientProfileId: PROFILES.o5 }));
+    h.advance(Date.parse(deadline) - h.now().getTime() - 1_000);
+    expect((await loadCallPushCandidates(deps(h), call.sessionId))[0].expiresAt).toBe(deadline);
+    h.advance(1_001);
+    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
+  });
+
+  it("keeps incoming priority for actual offers and suppresses available alerts during a rescue pickup", async () => {
+    const h = world();
+    h.touchDevice(PROFILES.o2, 600_000);
+    const call = await h.inbound();
+    expect((await loadCallPushCandidates(deps(h), call.sessionId)).map((row) => [row.recipientProfileId, row.category])).toEqual([
+      [PROFILES.o1, "incoming_call"], [PROFILES.o2, "available_call"],
+    ]);
+    h.touchDevice(PROFILES.o2);
+    const picked = await pickupWaitingCall(h.deps, { profileId: PROFILES.o2, role: "dispatcher" }, call.sessionId);
+    expect(picked.operatorLegCallControlId).toBeTruthy();
+    expect((await loadCallPushCandidates(deps(h), call.sessionId)).map((row) => [row.recipientProfileId, row.category])).toEqual([[PROFILES.o1, "incoming_call"]]);
+    await h.legEvent(picked.operatorLegCallControlId!, "call.answered");
+    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
+  });
+
+  it("requires a frozen audience and suppresses answered, internal and outbound ringing from available alerts", async () => {
+    const { h, call } = await ringingOnBackup();
+    const input = snapshot(h, call.sessionId);
+    for (const direction of ["internal", "outbound"] as const) {
+      input.session.direction = direction;
+      expect(callPushCandidates(input)).toEqual([]);
+    }
+    input.session.direction = "inbound";
+    input.session.answered_at = h.now().toISOString();
+    expect(callPushCandidates(input)).toEqual([]);
+    input.session.answered_at = null;
+    input.session.metadata = mergeMeta(input.session, { ring: { ...readMeta(input.session).ring, plan: undefined } });
+    expect(callPushCandidates(input)).toEqual([]);
+  });
+
+  it.each(["offline", "paused", "on_call", "ringing"])("does not advertise the ringing backup call to an operator who is %s", async (status) => {
+    const { h, call } = await ringingOnBackup();
+    h.setPresence(PROFILES.o1, { status, current_session_id: "other-session" });
+    expect((await loadCallPushCandidates(deps(h), call.sessionId)).map((row) => row.recipientProfileId)).toEqual([PROFILES.o2]);
+  });
+
+  it("excludes busy recipients and any existing own media leg while a backup rings", async () => {
+    const { h, call } = await ringingOnBackup();
+    h.db.seed("motorist_ring_attempts", [{ organization_id: ORG, profile_id: PROFILES.o1, session_id: "other-call", step_index: 1, result: "offered", ended_at: null }]);
+    h.db.seed("motorist_call_legs", [{ organization_id: ORG, profile_id: PROFILES.o2, session_id: call.sessionId, role: "supervisor", state: "answered", answered_at: h.now().toISOString(), ended_at: null }]);
+    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
+  });
+
+  it("does not advertise a ringing call with a live pickup leg even after its reservation metadata is cleared", async () => {
+    const { h, call } = await ringingOnBackup();
+    h.touchDevice(PROFILES.o1);
+    await pickupWaitingCall(h.deps, { profileId: PROFILES.o1, role: "dispatcher" }, call.sessionId);
+    const session = h.session(call.sessionId) as SessionRow;
+    h.db.update("motorist_call_sessions", { metadata: mergeMeta(session, { pickup: null }) }, (row) => row.id === call.sessionId);
+    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
+  });
+
   it("notifies the internal callee after the caller's own leg answers, without a customer leg", async () => {
     const h = world();
     const call = await callColleague({ ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) },
@@ -250,8 +335,12 @@ describe("call push audience", () => {
 });
 
 describe("call push delivery scheduling", () => {
-  it("passes the remaining shared deadline to delivery and starts no sends after it expires", async () => {
+  it.each(["incoming_call", "available_call"])("passes the shared deadline to %s delivery and starts no sends after it expires", async (category) => {
     const h = world();
+    if (category === "available_call") {
+      h.touchDevice(PROFILES.o1, 600_000);
+      h.touchDevice(PROFILES.o2, 600_000);
+    }
     const call = await h.inbound();
     const delivery = deps(h);
     let clock = h.now().getTime();
@@ -259,7 +348,7 @@ describe("call push delivery scheduling", () => {
     try {
       delivery.deadlineAt = clock + 4_000;
       expect(await notifyCallState(delivery, call.sessionId)).toEqual({ sent: 2, failed: 0 });
-      expect(delivery.send).toHaveBeenCalledWith(h.admin, expect.objectContaining({ expiresAt: new Date(delivery.deadlineAt).toISOString() }));
+      expect(delivery.send).toHaveBeenCalledWith(h.admin, expect.objectContaining({ category, expiresAt: new Date(delivery.deadlineAt).toISOString() }));
       vi.mocked(delivery.send!).mockClear();
       clock += 4_001;
       expect(await notifyCallState(delivery, call.sessionId)).toEqual({ sent: 0, failed: 0 });

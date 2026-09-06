@@ -10,7 +10,7 @@ V časti **Typy upozornení** sa nezávisle zapínajú:
 
 - **Úlohy a pripomienky** – pridelenie úlohy a jej pripomienky.
 - **Prichádzajúce hovory** – hovor práve ponúkaný tomuto operátorovi, vrátane interného volania, transferu alebo konzultácie.
-- **Hovory na prevzatie** – čakajúci alebo zaparkovaný hovor určený dostupným operátorom príslušného uloženého ring plánu.
+- **Hovory na prevzatie** – neprevzatý prichádzajúci, čakajúci alebo zaparkovaný hovor určený dostupným operátorom príslušného uloženého ring plánu. Patrí sem aj prichádzajúci hovor, ktorý práve zvoní na externej zálohe.
 
 Vypnutie kategórie nemení ostatné kategórie ani odbery na inom zariadení. Hlavný prepínač vypne všetky push na aktuálnom zariadení. Testovacie upozornenie overuje samotný odber bez ohľadu na výber kategórií.
 
@@ -28,9 +28,9 @@ Zvuk na pozadí riadi operačný systém. Aplikácia nedokáže obísť režim N
 
 ## Upozornenia na hovory
 
-Po úspešnom uložení zmeny hovoru sa cez Next.js `after()` skontroluje aktuálny stav a odošle push. Odosielanie nezdržiava odpoveď Telnyxu ani nedrží zámok hovoru. Príjemca musí byť aktívny operátor v tej istej organizácii a prostredí, dostupný bez iného hovoru či ponuky. Pri prichádzajúcom hovore sa vyžaduje skutočná neprevzatá ponuka pre daného operátora; pri čakárni členstvo v uloženom ring pláne hovoru. Bez uloženého plánu sa hromadné upozornenie neposiela.
+Po úspešnom uložení zmeny hovoru sa cez Next.js `after()` skontroluje aktuálny stav a odošle push. Odosielanie nezdržiava odpoveď Telnyxu ani nedrží zámok hovoru. Príjemca musí byť aktívny operátor v tej istej organizácii a prostredí, dostupný bez iného hovoru či ponuky. Pri prichádzajúcom hovore sa vyžaduje skutočná neprevzatá ponuka pre daného operátora; pri hovore na prevzatie členstvo v uloženom ring pláne hovoru. Bez uloženého plánu sa hromadné upozornenie neposiela. Operátor s vlastnou ponukou dostane len kategóriu prichádzajúceho hovoru, aby rovnaký hovor neposlal obe upozornenia naraz.
 
-Pre upozornenie na čakáreň sa nevyžaduje čerstvá SIP registrácia: zatvorená PWA sa môže otvoriť až po push. Prevzatie potom vyžaduje pripojený, dostupný a neobsadený telefón v aplikácii. Push sám nemení telefonické smerovanie ani neudržiava WebRTC na pozadí.
+Pre upozornenie na hovor dostupný na prevzatie sa nevyžaduje čerstvá SIP registrácia: zatvorená PWA sa môže otvoriť až po push. Prevzatie potom vyžaduje pripojený a neobsadený telefón v aplikácii bez ďalšej pripájanej vetvy. Operátor musí byť dostupný alebo mať zvoniacu ponuku práve tohto hovoru. Ak sa ponuka v tomto okne neobjaví, môže neprevzatý prichádzajúci hovor výslovne prevziať; rezervácia na serveri zaručuje jedného víťaza. Push sám nemení telefonické smerovanie ani neudržiava WebRTC na pozadí.
 
 Platnosť správy je najviac **30 sekúnd**, pri končiacej ponuke kratšia. Stav príjemcov sa pred dávkou znovu načíta. Duplicitné webhooky a routing tick neposielajú opakovane rovnakú kategóriu pre rovnaký hovor a operátora; deduplikačný záznam je súkromný a archivovaný v existujúcej tabuľke notifikácií. Nepatrí medzi neprečítané upozornenia. Nastavenie kategórie a zvuku sa kontroluje pri doručovaní na jednotlivé zariadenia.
 

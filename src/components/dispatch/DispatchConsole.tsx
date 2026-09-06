@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import { AttendanceModule } from "./AttendanceModule";
 import { CallCenterModule } from "./CallCenterModule";
-import { HeaderLiveCallsMenu, liveBrowserInviteSessionId } from "./LiveCallOverview";
+import { HeaderLiveCallsMenu } from "./LiveCallOverview";
 import { CaseDirectory } from "./CaseDirectory";
 import { CaseList, type CaseFilters } from "./CaseList";
 import { DashboardPhone } from "./DashboardPhone";
@@ -1786,8 +1786,8 @@ export function DispatchConsole({
                 presences={operatorPresences}
                 canManageCalls={viewerCanSupervise}
                 busyAction={telephony.busyAction}
-                browserOfferRinging={Boolean(telephony.phone.call?.ringing && !telephony.phone.answering && telephony.phone.status === "registered" && !telephony.stale)}
-                browserOfferSessionId={liveBrowserInviteSessionId(telephony.phoneBar, telephony.phone.call)}
+                phone={telephony.phone}
+                stale={telephony.stale}
                 onAnswer={telephony.answer}
                 onRejectOffer={telephony.hangupBrowser}
                 onCallAction={(action, sessionId) => void runPhoneCallAction(action, sessionId)}

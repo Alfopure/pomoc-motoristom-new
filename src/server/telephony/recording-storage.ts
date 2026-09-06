@@ -97,7 +97,19 @@ export async function processRecordingImport(ctx:RecordingJobContext,io: {refres
 }
 export async function deleteRecordingStorage(ctx:RecordingJobContext){
  const r=ctx.recording;if(!r)return;
- const upload=record(ctx.job.checkpoint).upload_url;if(typeof upload==='string'){const cfg=storageConfig();const res=await storageRequest(validTusUrl(upload,cfg.base),{method:'DELETE',headers:{'Tus-Resumable':'1.0.0'}},ctx.signal);if(!res.ok&&res.status!==404&&res.status!==410)throw new RecordingProcessingError('upload_cleanup_failed',true);}
+ const upload=record(ctx.job.checkpoint).upload_url;
+ // Validate before deleting anything or sending credentials. Supabase checks
+ // create permission even for TUS DELETE: an existing completed object causes
+ // 409 before termination, so remove the canonical object first.
+ const uploadUrl=typeof upload==='string'?validTusUrl(upload,storageConfig().base):null;
  const paths=[...new Set([r.storage_path,recordingStoragePath(ctx,'audio/wav'),recordingStoragePath(ctx,'audio/mpeg')].filter((p):p is string=>Boolean(p)))];
- if(paths.length){const res=await storageRequest(`/storage/v1/object/${RECORDINGS_BUCKET}`,{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({prefixes:paths})},ctx.signal);if(!res.ok&&res.status!==404)throw new RecordingProcessingError('storage_delete_failed',true);}
+ const removeObjects=async()=>{if(paths.length){const res=await storageRequest(`/storage/v1/object/${RECORDINGS_BUCKET}`,{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({prefixes:paths})},ctx.signal);await res.body?.cancel();if(!res.ok&&res.status!==404)throw new RecordingProcessingError('storage_delete_failed',true);}};
+ await removeObjects();
+ if(uploadUrl){
+  const res=await storageRequest(uploadUrl,{method:'DELETE',headers:{'Tus-Resumable':'1.0.0'}},ctx.signal);await res.body?.cancel();
+  if(!res.ok&&res.status!==404&&res.status!==410)throw new RecordingProcessingError('upload_cleanup_failed',true);
+  // A previously in-flight PATCH may have completed between the first delete
+  // and termination. Sweep the immutable canonical paths again after the ACK.
+  await removeObjects();
+ }
 }

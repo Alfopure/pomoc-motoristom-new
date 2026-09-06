@@ -38,10 +38,34 @@ describe("call notification current state", () => {
   it("offers explicit pickup only for the exact waiting session and an available empty phone", () => {
     expect(callNotificationTarget(input)).toMatchObject({ call, canPickup: true, canAnswer: false });
     for (const overrides of [
-      { busy: true }, { outboundPending: true }, { phone: { ...phone, call: ringing } },
+      { busy: true }, { outboundPending: true }, { phone: { ...phone, call: ringing } }, { phone: { ...phone, pendingOperatorLegs: 1 } },
       { model: { ...input.model, active: call } }, { model: { ...input.model, ownPresenceStatus: "paused" as const } },
       { phone: { ...phone, status: "connecting" as const } },
     ]) expect(callNotificationTarget({ ...input, ...overrides }).canPickup).toBe(false);
+  });
+
+  it("offers explicit recovery of an unowned inbound ringing call without a browser invite", () => {
+    const incoming = { ...call, kind: "offer" as const, state: "ringing" as const, offeredToMe: false };
+    const model = { ...input.model, teamCalls: [incoming] };
+    expect(callNotificationTarget({ ...input, model })).toMatchObject({ canPickup: true, canAnswer: false });
+    for (const change of [{ direction: "internal" as const }, { direction: "outbound" as const }, { answered: true }, { operatorProfileId: "colleague" }]) {
+      expect(callNotificationTarget({ ...input, model: { ...model, teamCalls: [{ ...incoming, ...change }] } }).canPickup).toBe(false);
+    }
+  });
+
+  it("recovers its own ring reservation only when the actor's presence identifies this exact offered session", () => {
+    const incoming = { ...call, kind: "offer" as const, state: "ringing" as const, offeredToMe: true };
+    const model = {
+      ...input.model, teamCalls: [incoming], ownPresenceStatus: "ringing" as const,
+      presence: { ...input.model.presence, actorProfileId: "me", presence: [{ profileId: "me", status: "ringing" as const, currentSessionId: sessionId }] },
+    };
+    expect(callNotificationTarget({ ...input, model })).toMatchObject({ canPickup: true, canAnswer: false });
+    for (const rows of [[], [{ profileId: "me", status: "ringing" as const, currentSessionId: "other-session" }], [{ profileId: "colleague", status: "ringing" as const, currentSessionId: sessionId }]]) {
+      expect(callNotificationTarget({ ...input, model: { ...model, presence: { ...model.presence, presence: rows } } }).canPickup).toBe(false);
+    }
+    expect(callNotificationTarget({ ...input, model, phone: { ...phone, pendingOperatorLegs: 1 } }).canPickup).toBe(false);
+    expect(callNotificationTarget({ ...input, model, phone: { ...phone, call: ringing } }).canPickup).toBe(false);
+    expect(callNotificationTarget({ ...input, model, stale: true }).canPickup).toBe(false);
   });
 
   it("never answers another browser call, even if the caller number is identical", () => {
@@ -73,7 +97,7 @@ describe("call notification current state", () => {
     expect(callNotificationTarget({ ...current, phone: { ...phone, call: null } }).message).toContain("Čakám");
     expect(callNotificationTarget({ ...current, phone: { ...phone, status: "superseded", call: null } })).toMatchObject({ canAnswer: false, canReconnect: true });
     for (const overrides of [
-      { stale: true }, { busy: true }, { outboundPending: true },
+      { stale: true }, { busy: true }, { outboundPending: true }, { phone: { ...phone, call: ringing, pendingOperatorLegs: 1 } },
       { phone: { ...phone, status: "connecting" as const, call: ringing } },
       { phone: { ...phone, call: { ...ringing, telnyxCallControlId: "another-leg" } } },
       { phone: { ...phone, call: { ...ringing, sessionId: "conflicting-session" } } },

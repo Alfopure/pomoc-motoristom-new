@@ -16,8 +16,8 @@ import { TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
  *   on this environment's credential connection (SIP password is never stored
  *   or shipped; the browser logs in with a short-lived JWT).
  * - `issueWebphoneToken` mints the JWT, decodes its `exp`, rotates
- *   `device_session_id` (the previous tab is revoked: its next heartbeat gets
- *   409) and records the issue time.
+ *   `device_session_id` on takeover (the previous tab's next heartbeat gets
+ *   409), preserves it on renewal and records the issue time.
  * - `touchDevice` is the heartbeat; it only accepts the current session id.
  */
 
@@ -170,28 +170,23 @@ export type WebphoneToken = {
 
 const DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
-export const TOKEN_TAKEOVER_MESSAGE = "Telefón je prihlásený v inom okne a prebieha hovor. Potvrď prevzatie.";
+export const TOKEN_TAKEOVER_MESSAGE = "Telefón je prihlásený v inom okne alebo zariadení. Ak chceš prijímať hovory tu, prevezmi telefón.";
 
 export async function issueWebphoneToken(
   deps: DeviceDeps,
   input: { organizationId: string; profileId: string; userAgent?: string | null; takeover?: boolean; deviceSessionId?: string | null },
 ): Promise<WebphoneToken> {
   if (!deps.telnyx) throw new OperatorDeviceError(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
-  // Minting rotates `device_session_id` and kills the other tab. Refuse while
-  // that tab is live and on a call unless the operator confirmed the takeover.
-  // A tab renewing its own credential (`deviceSessionId` equal to the row's
-  // current session) is never a takeover: refusing it would tear down the
-  // socket carrying the call in progress.
+  // Opening the dispatch on a second device must not silently steal incoming
+  // calls from a live phone, even between calls. Own-token renewal is allowed.
   if (!input.takeover) {
     const current = await getOperatorDevice(deps, input);
     const sameTab = Boolean(input.deviceSessionId && current?.device_session_id === input.deviceSessionId);
-    if (current && !sameTab && deviceIsLive(current, nowOf(deps))) {
-      const presence = await deps.admin.from("motorist_operator_presence").select("status").eq("profile_id", input.profileId).maybeSingle();
-      const status = presence.data?.status;
-      if (status === "on_call" || status === "ringing") throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
-    }
+    if (current && !sameTab && deviceIsLive(current, nowOf(deps))) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
   }
   const device = await ensureOperatorCredential(deps, input);
+  const sameTab = Boolean(input.deviceSessionId && device.device_session_id === input.deviceSessionId);
+  if (!input.takeover && !sameTab && deviceIsLive(device, nowOf(deps))) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
   const credentialId = device.telnyx_credential_id;
   const sipUsername = device.sip_username;
   if (!credentialId || !sipUsername) throw new OperatorDeviceError("Zariadenie nemá prihlasovacie údaje.", 500);
@@ -199,32 +194,38 @@ export async function issueWebphoneToken(
   const now = nowOf(deps);
   const token = await deps.telnyx.mintCredentialToken(credentialId);
   const expiresAt = decodeJwtExpiry(token) ?? new Date(now.getTime() + DEFAULT_TOKEN_TTL_MS);
-  const deviceSessionId = randomUUID();
+  // A heartbeat already in flight must remain valid across this tab's renewal.
+  const deviceSessionId = sameTab ? device.device_session_id! : randomUUID();
   const metadata = metadataOf(device);
   const revoked = Array.isArray(metadata.revoked_sessions) ? (metadata.revoked_sessions as unknown[]).slice(-9) : [];
-  if (device.device_session_id) revoked.push({ id: device.device_session_id, revoked_at: now.toISOString() });
+  if (!sameTab && device.device_session_id) revoked.push({ id: device.device_session_id, revoked_at: now.toISOString() });
 
   // A refresh for a phone that is already registered and still sending
   // heartbeats must not report it as registering: the ring engine skips any
   // operator who is not "registered", so downgrading here made the operator
   // invisible until the next heartbeat and inbound calls silently walked past
   // them. Only a genuinely new or stale registration starts as "registering".
-  const stillLive = deviceIsLive(device, now);
+  const stillLive = sameTab && deviceIsLive(device, now);
 
-  const updated = await deps.admin
+  let update = deps.admin
     .from("motorist_operator_devices")
     .update({
       last_token_issued_at: now.toISOString(),
       token_expires_at: expiresAt.toISOString(),
       device_session_id: deviceSessionId,
       registration_state: stillLive ? "registered" : "registering",
+      ...(!sameTab ? { device_seen_at: null } : {}),
       user_agent: input.userAgent ?? device.user_agent,
       metadata: toJson({ ...metadata, revoked_sessions: revoked }),
     })
-    .eq("id", device.id)
-    .select("id")
-    .single();
+    .eq("id", device.id);
+  // A slow token response cannot overwrite a newer takeover or revocation.
+  update = device.device_session_id === null
+    ? update.is("device_session_id", null)
+    : update.eq("device_session_id", device.device_session_id);
+  const updated = await update.select("id").maybeSingle();
   if (updated.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo aktualizovať: ${updated.error.message}`, 500);
+  if (!updated.data) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
 
   return { token, expiresAt: expiresAt.toISOString(), deviceSessionId, sipUsername, credentialId };
 }

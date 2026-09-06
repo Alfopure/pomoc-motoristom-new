@@ -4,6 +4,7 @@ import type { Call } from "@telnyx/webrtc";
 import { TelnyxWebphone, isAuthFailure, type TelnyxWebphoneOptions, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
 import type { TelephonyJsonResult } from "./client-request";
 import { EXPECTED_LEG_TTL_MS } from "./webphone-model";
+import { isDeviceLive } from "./device-liveness";
 
 /**
  * The controller is exercised through its injected seams only: no jsdom, no
@@ -79,7 +80,7 @@ function fakeCall(overrides: Partial<WebphoneSdkCall> = {}): WebphoneSdkCall & {
 
 type Request = { url: string; body: unknown };
 
-function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: () => TelephonyJsonResult<unknown>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"] } = {}) {
+function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"] } = {}) {
   const requests: Request[] = [];
   const timers: Array<{ id: number; handler: () => void; delayMs: number }> = [];
   let nextTimer = 1;
@@ -164,6 +165,25 @@ function audioDom() {
   return { audio, document };
 }
 
+function heartbeatWorkers() {
+  class FakeWorker {
+    onmessage: ((event: { data: { kind: string } }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    postMessage = vi.fn();
+    terminate = vi.fn();
+    pulse() { this.onmessage?.({ data: { kind: "pulse" } }); }
+  }
+  const workers: FakeWorker[] = [];
+  vi.stubGlobal("Worker", class {
+    constructor() {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    }
+  });
+  return workers;
+}
+
 describe("TelnyxWebphone", () => {
   it("keeps the SDK call seam compatible with its asynchronous answer API", () => {
     expectTypeOf<Call>().toMatchTypeOf<WebphoneSdkCall>();
@@ -182,6 +202,7 @@ describe("TelnyxWebphone", () => {
     expect(h.phone.getSnapshot().status).toBe("registered");
     expect(h.phone.getSnapshot().registration.label).toBe("Registrované");
     expect(h.phone.getSnapshot().sipUsername).toBe("gencred1");
+    expect(h.requests.at(-1)).toEqual({ url: "/api/telephony/devices/heartbeat", body: JSON.stringify({ deviceSessionId: "device-1", registrationState: "registered" }) });
   });
 
   it("stays in the not-configured mode when the token route answers 503", async () => {
@@ -352,6 +373,150 @@ describe("TelnyxWebphone", () => {
     expect(h.phone.getSnapshot().status).toBe("superseded");
     expect(h.client.disconnected).toBe(true);
     expect(h.phone.getSnapshot().registration.tone).toBe("error");
+  });
+
+  it("keeps a background phone routable for over two minutes without any window timer firing", async () => {
+    const { document } = audioDom();
+    const workers = heartbeatWorkers();
+    const sendBeacon = vi.fn(() => true);
+    vi.stubGlobal("navigator", { sendBeacon });
+    let now = Date.parse("2026-09-03T08:00:00.000Z");
+    let seenAt: string | null = null;
+    const h = harness({ now: () => now, heartbeat: () => {
+      seenAt = new Date(now).toISOString();
+      return { ok: true, status: 200, body: {} };
+    } });
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    expect(workers[0].postMessage).toHaveBeenCalledWith({ kind: "start", intervalMs: 30_000 });
+    expect(h.timers.some((timer) => timer.delayMs === 30_000)).toBe(false);
+
+    document.visibilityState = "hidden";
+    document.dispatchEvent(new Event("visibilitychange"));
+    const beaconBody = sendBeacon.mock.calls[0] as unknown as [string, Blob];
+    expect(JSON.parse(await beaconBody[1].text())).toEqual({ deviceSessionId: "device-1", registrationState: "registered" });
+    // Simulate Safari throttling every window timer while worker pulses arrive.
+    for (let pulse = 0; pulse < 10; pulse++) {
+      now += 30_000;
+      workers[0].pulse();
+      await flush();
+      expect(isDeviceLive({ deviceSeenAt: seenAt, registrationState: "registered" }, new Date(now))).toBe(true);
+    }
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    expect(h.client.disconnected).toBe(false);
+    // A completely suspended or dead browser must still expire normally.
+    now += 120_001;
+    expect(isDeviceLive({ deviceSeenAt: seenAt, registrationState: "registered" }, new Date(now))).toBe(false);
+
+    h.phone.stop();
+    const requests = h.requests.length;
+    workers[0].pulse();
+    expect(workers[0].terminate).toHaveBeenCalledOnce();
+    expect(h.requests).toHaveLength(requests);
+  });
+
+  it.each(["construction", "load"])("falls back to window heartbeats when worker %s fails", async (failure) => {
+    const workers = heartbeatWorkers();
+    if (failure === "construction") vi.stubGlobal("Worker", class { constructor() { throw new Error("blocked"); } });
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    if (failure === "load") {
+      const latePulse = workers[0].onmessage;
+      workers[0].onerror?.();
+      const count = h.requests.length;
+      latePulse?.({ data: { kind: "pulse" } });
+      expect(h.requests).toHaveLength(count);
+      expect(workers[0].terminate).toHaveBeenCalledOnce();
+    }
+    const count = h.requests.length;
+    h.runTimer((timer) => timer.delayMs === 30_000);
+    await flush();
+    expect(h.requests).toHaveLength(count + 1);
+    h.phone.stop();
+    expect(h.timers).toHaveLength(0);
+  });
+
+  it("reports a real page exit as unregistered even if Safari refuses the beacon, then resumes from page cache", async () => {
+    audioDom();
+    const workers = heartbeatWorkers();
+    vi.stubGlobal("navigator", { sendBeacon: () => false });
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    window.dispatchEvent(new Event("pagehide"));
+    await flush();
+    expect(JSON.parse(h.requests.at(-1)!.body as string).registrationState).toBe("unregistered");
+    expect(workers[0].terminate).toHaveBeenCalledOnce();
+
+    window.dispatchEvent(new Event("pageshow"));
+    await flush();
+    expect(workers).toHaveLength(2);
+    expect(JSON.parse(h.requests.at(-1)!.body as string).registrationState).toBe("registered");
+    expect(h.client.disconnected).toBe(false);
+    h.phone.stop();
+    const count = h.requests.length;
+    window.dispatchEvent(new Event("pageshow"));
+    window.dispatchEvent(new Event("online"));
+    expect(h.requests).toHaveLength(count);
+    expect(workers).toHaveLength(2);
+  });
+
+  it.each(["visibilitychange", "pageshow", "online"])("resumes a delayed reconnect on %s without duplicate token requests", async (event) => {
+    const { document } = audioDom();
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    h.client.emit("telnyx.socket.close");
+    const target = event === "visibilitychange" ? document : window;
+    target.dispatchEvent(new Event(event));
+    target.dispatchEvent(new Event(event));
+    await flush();
+    expect(h.requests.filter((request) => request.url.includes("/webphone/token"))).toHaveLength(2);
+    h.phone.stop();
+  });
+
+  it("does not automatically reclaim a revoked phone on resume", async () => {
+    const { document } = audioDom();
+    const h = harness({ heartbeat: () => ({ ok: false, status: 409, body: {} }) });
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    await flush();
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("online"));
+    await flush();
+    expect(h.phone.getSnapshot().status).toBe("superseded");
+    expect(h.requests.filter((request) => request.url.includes("/webphone/token"))).toHaveLength(1);
+    h.phone.stop();
+  });
+
+  it("ignores a delayed background heartbeat rejection after the session was renewed", async () => {
+    const delayed = deferred<TelephonyJsonResult<unknown>>();
+    const token = { ok: true, status: 200, body: {
+      token: "jwt", expiresAt: "2026-09-03T09:00:00.000Z", deviceSessionId: "device-1", sipUsername: "gencred1",
+    } };
+    let delayHeartbeat = true;
+    const h = harness({ token, heartbeat: () => delayHeartbeat ? delayed.promise : { ok: true, status: 200, body: {} } });
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    h.runTimer((timer) => timer.delayMs === 30_000);
+    await flush();
+    delayHeartbeat = false;
+    token.body.deviceSessionId = "device-2";
+    h.runTimer((timer) => timer.delayMs === 1_800_000);
+    await flush();
+    delayed.resolve({ ok: false, status: 409, body: {} });
+    await flush();
+    expect(h.phone.getSnapshot().deviceSessionId).toBe("device-2");
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    expect(h.client.disconnected).toBe(false);
+    h.phone.stop();
   });
 
   it("re-mints the token when the refresh timer fires", async () => {
