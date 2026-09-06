@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import type { Call } from "@telnyx/webrtc";
 
-import { TelnyxWebphone, isAuthFailure, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
+import { TelnyxWebphone, isAuthFailure, type TelnyxWebphoneOptions, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
 import type { TelephonyJsonResult } from "./client-request";
 import { EXPECTED_LEG_TTL_MS } from "./webphone-model";
 
@@ -78,7 +79,7 @@ function fakeCall(overrides: Partial<WebphoneSdkCall> = {}): WebphoneSdkCall & {
 
 type Request = { url: string; body: unknown };
 
-function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: () => TelephonyJsonResult<unknown>; now?: () => number } = {}) {
+function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: () => TelephonyJsonResult<unknown>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"] } = {}) {
   const requests: Request[] = [];
   const timers: Array<{ id: number; handler: () => void; delayMs: number }> = [];
   let nextTimer = 1;
@@ -87,7 +88,7 @@ function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: ()
   const phone = new TelnyxWebphone({
     silent: true,
     now: options.now ?? (() => Date.parse("2026-09-03T08:00:00.000Z")),
-    createClient: () => client,
+    createClient: options.createClient ?? (() => client),
     setTimeout: (handler, delayMs) => {
       const id = nextTimer++;
       timers.push({ id, handler, delayMs });
@@ -130,8 +131,44 @@ function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: ()
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+afterEach(() => vi.unstubAllGlobals());
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+/** Real EventTargets exercise listener registration/cleanup without a browser or microphone. */
+function audioDom() {
+  class FakeAudio extends EventTarget {
+    id = "";
+    autoplay = false;
+    style = { display: "" };
+    srcObject: object | null = null;
+    paused = true;
+    setAttribute = vi.fn();
+    remove = vi.fn();
+    pause = vi.fn(() => { this.paused = true; this.dispatchEvent(new Event("pause")); });
+    play = vi.fn(async () => { this.paused = false; this.dispatchEvent(new Event("playing")); });
+  }
+  const audio = new FakeAudio();
+  const document = Object.assign(new EventTarget(), {
+    visibilityState: "visible",
+    createElement: vi.fn(() => audio),
+    body: { appendChild: vi.fn() },
+  });
+  vi.stubGlobal("document", document);
+  vi.stubGlobal("window", new EventTarget());
+  return { audio, document };
+}
 
 describe("TelnyxWebphone", () => {
+  it("keeps the SDK call seam compatible with its asynchronous answer API", () => {
+    expectTypeOf<Call>().toMatchTypeOf<WebphoneSdkCall>();
+  });
+
   it("mints a token, connects and reports the registration", async () => {
     const h = harness();
     h.phone.start();
@@ -338,5 +375,194 @@ describe("TelnyxWebphone", () => {
     expect(isAuthFailure("Token expired")).toBe(true);
     expect(isAuthFailure("ICE failed")).toBe(false);
     expect(isAuthFailure(null)).toBe(false);
+  });
+
+  it("blocks duplicate manual/automatic answers while media negotiation is pending", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const answer = deferred<void>();
+    const answerSdk = vi.fn(() => answer.promise);
+    const call = fakeCall({ answer: answerSdk });
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(h.phone.getSnapshot().answering).toBe(true);
+
+    h.phone.answer();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(answerSdk).toHaveBeenCalledTimes(1);
+
+    answer.resolve();
+    await flush();
+    h.phone.answer();
+    expect(answerSdk).toHaveBeenCalledTimes(1);
+    expect(h.phone.getSnapshot().answering).toBe(false);
+    h.phone.stop();
+  });
+
+  it("catches a rejected answer, keeps registration, and allows the same ringing call to retry", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const answerSdk = vi.fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new DOMException("denied", "NotAllowedError"))
+      .mockResolvedValueOnce();
+    const call = fakeCall({ answer: answerSdk });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    h.phone.answer();
+    await flush();
+
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", answering: false, call: { ringing: true } });
+    expect(h.phone.getSnapshot().callError).toContain("Mikrofón je zablokovaný");
+    expect(h.client.disconnected).toBe(false);
+    h.phone.answer();
+    await flush();
+    expect(answerSdk).toHaveBeenCalledTimes(2);
+    expect(h.phone.getSnapshot().callError).toBeNull();
+    h.phone.stop();
+  });
+
+  it.each(["ended", "stopped"])("ignores an answer rejection after its call is %s", async (ending) => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const answer = deferred<void>();
+    const call = fakeCall({ answer: () => answer.promise });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    h.phone.answer();
+    if (ending === "stopped") h.phone.stop();
+    else {
+      call.state = "hangup";
+      h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    }
+    answer.reject(new DOMException("denied", "NotAllowedError"));
+    await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ call: null, answering: false, callError: null });
+    h.phone.stop();
+  });
+
+  it.each([42001, 42002, 42003, 40002, 44001, 47001])("keeps a healthy registration for call-specific SDK error %s", async (code) => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const call = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    h.client.emit("telnyx.error", { error: { code, message: "SDK call failure" }, callId: call.id });
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    expect(h.phone.getSnapshot().callError).toBeTruthy();
+    expect(h.client.disconnected).toBe(false);
+    call.state = "hangup";
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(h.phone.getSnapshot().callError).toBeTruthy();
+    h.phone.dismissCallError();
+    expect(h.phone.getSnapshot().callError).toBeNull();
+    h.phone.stop();
+  });
+
+  it("ignores old call errors and retains network-error recovery", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: fakeCall() });
+    h.client.emit("telnyx.error", { error: { code: 42001 }, callId: "old-call" });
+    expect(h.phone.getSnapshot().callError).toBeNull();
+    h.client.emit("telnyx.error", { error: { code: 45002, message: "Socket lost" } });
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    expect(h.client.disconnected).toBe(true);
+    h.phone.stop();
+  });
+
+  it("does not connect a delayed SDK client after stop or accept its later events", async () => {
+    const created = deferred<WebphoneSdkClient>();
+    const client = new FakeClient();
+    const h = harness({ createClient: () => created.promise });
+    h.phone.start();
+    await flush();
+    h.phone.stop();
+    created.resolve(client);
+    await flush();
+    client.emit("telnyx.ready");
+    client.emit("telnyx.notification", { type: "callUpdate", call: fakeCall() });
+    expect(client.connected).toBe(false);
+    expect(client.disconnected).toBe(true);
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "idle", call: null });
+  });
+
+  it("cleans up a client whose connect promise rejects before retrying", async () => {
+    const client = new FakeClient();
+    client.connect = vi.fn(async () => { throw new Error("socket unavailable"); });
+    const h = harness({ createClient: () => client });
+    h.phone.start();
+    await flush();
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    expect(client.disconnected).toBe(true);
+    expect(client.handlers.size).toBe(0);
+    client.emit("telnyx.ready");
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    h.phone.stop();
+  });
+
+  it("exposes blocked remote autoplay, retries from a tap and resumes on foreground without reconnecting", async () => {
+    const { audio, document } = audioDom();
+    audio.play.mockRejectedValueOnce(new DOMException("gesture required", "NotAllowedError"));
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    audio.srcObject = {};
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: fakeCall({ state: "active" }) });
+    await flush();
+    expect(h.phone.getSnapshot().audioBlocked).toBe(true);
+
+    await h.phone.resumeAudio();
+    expect(h.phone.getSnapshot().audioBlocked).toBe(false);
+    audio.pause();
+    expect(h.phone.getSnapshot().audioBlocked).toBe(true);
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flush();
+    expect(h.phone.getSnapshot().audioBlocked).toBe(false);
+    expect(audio.play).toHaveBeenCalledTimes(3);
+    expect(h.client.disconnected).toBe(false);
+    expect(h.requests.filter((request) => request.url.includes("/webphone/token"))).toHaveLength(1);
+
+    h.phone.stop();
+    const plays = audio.play.mock.calls.length;
+    audio.dispatchEvent(new Event("canplay"));
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(audio.play).toHaveBeenCalledTimes(plays);
+    expect(audio.remove).toHaveBeenCalledTimes(1);
+    expect(audio.srcObject).toBeNull();
+  });
+
+  it("waits for attached remote media and ignores a late autoplay rejection after hangup", async () => {
+    const { audio } = audioDom();
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const call = fakeCall({ state: "active" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(audio.play).not.toHaveBeenCalled();
+    const play = deferred<void>();
+    audio.play.mockImplementationOnce(() => play.promise);
+    audio.srcObject = {};
+    audio.dispatchEvent(new Event("loadedmetadata"));
+    expect(audio.play).toHaveBeenCalledTimes(1);
+    call.state = "hangup";
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    play.reject(new DOMException("gesture required", "NotAllowedError"));
+    await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ call: null, audioBlocked: false });
+    h.phone.stop();
+  });
+
+  it("does not ask for notification permission when unlocking call sound", async () => {
+    const requestPermission = vi.fn();
+    vi.stubGlobal("Notification", { permission: "default", requestPermission });
+    const phone = new TelnyxWebphone();
+    await phone.unlockAudio();
+    expect(requestPermission).not.toHaveBeenCalled();
   });
 });

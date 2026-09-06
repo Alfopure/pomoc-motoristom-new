@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Check, ChevronDown, Loader2, Pause, Phone, PhoneCall, PhoneOff, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, Loader2, Mic, Pause, Phone, PhoneCall, PhoneOff, X } from "lucide-react";
 
 import type { OperatorPresenceStatus } from "@/lib/supabase/database.types";
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
+import type { PhoneReadiness } from "@/lib/telephony/call-preflight";
 
 import { presenceLabel } from "./my-phone-model";
 import { phoneTakeoverAvailable } from "./phone-bar-model";
@@ -19,6 +20,9 @@ type HeaderPhoneStatusMenuProps = {
   notice: string | null;
   phone: WebphoneSnapshot;
   status: string | null;
+  readiness: PhoneReadiness;
+  onPreparePhone: () => Promise<boolean>;
+  outboundPending: boolean;
 };
 
 const TRIGGER_TONES = {
@@ -50,6 +54,9 @@ export function HeaderPhoneStatusMenu({
   notice,
   phone,
   status,
+  readiness,
+  onPreparePhone,
+  outboundPending,
 }: HeaderPhoneStatusMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -134,6 +141,21 @@ export function HeaderPhoneStatusMenu({
             <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 ${REGISTRATION_BADGE_TONES[phone.registration.tone]}`}>
               {phone.registration.label}
             </span>
+          </div>
+
+          <div className="border-b border-zinc-200 px-3.5 py-2.5">
+            <button
+              type="button"
+              disabled={readiness.status === "checking" || Boolean(phone.call) || outboundPending}
+              onClick={() => void onPreparePhone()}
+              className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-zinc-300 px-3 text-xs font-bold hover:bg-zinc-50 disabled:opacity-50"
+            >
+              {readiness.status === "checking" ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Mic size={16} aria-hidden="true" />}
+              {readiness.status === "checking" ? "Kontrolujem mikrofón…" : "Skontrolovať mikrofón"}
+            </button>
+            {readiness.message && <p role="status" className={`mt-1.5 text-xs leading-4 ${readiness.status === "error" ? "text-red-700" : "text-zinc-600"}`}>{readiness.message}</p>}
+            <p className="mt-1.5 text-[11px] leading-4 text-zinc-500">Kontrola je bez volania a bez nahrávania.</p>
+            <p className="mt-1.5 text-[11px] leading-4 text-zinc-500 lg:hidden">Pri webovom volaní nechajte aplikáciu otvorenú. Reproduktor a Bluetooth prepínajte v ovládaní zvuku telefónu.</p>
           </div>
 
           {canTakeover && (

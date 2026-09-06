@@ -1737,6 +1737,9 @@ export function DispatchConsole({
               notice={telephony.notice}
               phone={telephony.phone}
               status={telephony.phoneBar.ownPresenceStatus}
+              readiness={telephony.readiness}
+              onPreparePhone={telephony.preparePhone}
+              outboundPending={telephony.outboundPending}
             />
           ) : (
             <div className="hidden lg:block">
@@ -1832,8 +1835,8 @@ export function DispatchConsole({
       {telephonyConfigured &&
         phoneBarVisible({
           status: telephony.phone.status,
-          hasCall: Boolean(telephony.phoneBar.active),
-          hasOffer: telephony.phoneBar.offers.length > 0,
+          hasCall: Boolean(telephony.phoneBar.active || telephony.phone.call || telephony.outboundPending),
+          hasOffer: telephony.phoneBar.offers.length > 0 || Boolean(telephony.phone.call?.ringing),
         }) && (
           <PhoneBar
             model={telephony.phoneBar}
@@ -1854,7 +1857,8 @@ export function DispatchConsole({
             onNewCase={startNewCaseFromPhoneBar}
             onLinkCase={(call) => void linkPhoneCallToCase(call)}
             onOpenCase={openCase}
-            onUnlockAudio={telephony.unlockAudio}
+            onResumeAudio={telephony.resumeAudio}
+            outboundPending={telephony.outboundPending}
           />
         )}
 
@@ -1973,7 +1977,7 @@ export function DispatchConsole({
             <span aria-hidden="true" className="h-14 w-1 rounded-full bg-zinc-300 shadow-sm transition group-hover:bg-yellow-400 group-focus-visible:bg-yellow-400" />
           </button>
           <div className="hidden min-w-0 p-2 lg:col-span-2 lg:block xl:hidden">
-            <DashboardPhone caseContext={dashboardSmsCaseContext} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
+            <DashboardPhone caseContext={dashboardSmsCaseContext} isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
           </div>
           <div className="mobile-dispatch-cases lg:contents">
           <CaseList
@@ -2037,7 +2041,7 @@ export function DispatchConsole({
           />
           </div>
           <div className="hidden min-h-0 min-w-0 flex-col border-l border-zinc-200 bg-white xl:flex">
-            <DashboardPhone caseContext={dashboardSmsCaseContext} className="shrink-0" onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} variant="rail" />
+            <DashboardPhone caseContext={dashboardSmsCaseContext} className="shrink-0" isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} variant="rail" />
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden" data-testid="dashboard-task-panel-shell">
               <TaskPanel
                 activeTaskId={focusedTaskId}

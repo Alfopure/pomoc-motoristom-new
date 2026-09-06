@@ -6,7 +6,8 @@
  * tested in the repo's node-only Vitest setup (no jsdom, design §4 Phase 2).
  */
 
-import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
+import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
+import type { WebphoneCallView } from "@/lib/telephony/telnyx-webphone";
 import type { WebphoneStatus } from "@/lib/telephony/webphone-model";
 
 /** Server-side call actions, one per `POST /api/telephony/calls/[id]/…` route. */
@@ -101,6 +102,17 @@ const NO_CAPABILITIES: PhoneBarCapabilities = {
   linkCase: false,
 };
 
+/** Pair server actions with the actual browser leg, never a stale first row. */
+export function phoneBarFocusedCall(model: Pick<PhoneBarModel, "active" | "offers">, browserCall: WebphoneCallView | null): PhoneBarCall | null {
+  if (!browserCall) return model.active ?? model.offers[0] ?? null;
+  const candidates = [...(model.active ? [model.active] : []), ...model.offers];
+  if (browserCall.sessionId) return candidates.find((candidate) => candidate.sessionId === browserCall.sessionId) ?? null;
+  if (browserCall.telnyxCallControlId) {
+    return candidates.find((candidate) => candidate.browserCallControlIds?.includes(browserCall.telnyxCallControlId!)) ?? null;
+  }
+  return null;
+}
+
 /**
  * What the operator may do with `call` right now.
  *
@@ -118,7 +130,15 @@ export function phoneBarCapabilities(input: {
 }): PhoneBarCapabilities {
   const { call } = input;
   if (!call) {
-    return { ...NO_CAPABILITIES, answer: input.browserCallRinging, hangup: input.browserCallRinging || input.browserCallActive };
+    // The browser invite may arrive before the next server poll. Keep its
+    // local media controls usable without inventing a server session ID.
+    return {
+      ...NO_CAPABILITIES,
+      answer: input.browserCallRinging,
+      hangup: input.browserCallRinging || input.browserCallActive,
+      mute: input.browserCallActive,
+      dtmf: input.browserCallActive,
+    };
   }
 
   if (call.kind === "waiting") {
@@ -129,7 +149,9 @@ export function phoneBarCapabilities(input: {
     return {
       ...NO_CAPABILITIES,
       answer: input.browserCallRinging,
-      hangup: input.browserCallRinging,
+      hangup: input.browserCallRinging || input.browserCallActive,
+      mute: input.browserCallActive,
+      dtmf: input.browserCallActive,
       newCase: true,
       linkCase: !call.caseId,
     };
@@ -143,7 +165,7 @@ export function phoneBarCapabilities(input: {
   const conference = call.state === "conference";
   const advanced = !input.degraded;
   return {
-    answer: false,
+    answer: input.browserCallRinging,
     hangup: true,
     hold: call.state === "talking" && advanced,
     unhold: call.state === "held",
