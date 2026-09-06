@@ -351,7 +351,7 @@ export function CallCenterModule({
           model={activeSnapshot}
           presences={operatorPresences}
           canManageCalls={canManageCalls}
-          browserOfferRinging={phone?.call?.ringing ?? false}
+          phone={phone ?? null}
           onAnswer={onAnswer}
           onRejectOffer={onRejectOffer}
           onCallAction={onCallAction}

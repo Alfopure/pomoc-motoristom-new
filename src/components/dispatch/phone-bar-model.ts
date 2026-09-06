@@ -103,14 +103,16 @@ const NO_CAPABILITIES: PhoneBarCapabilities = {
 };
 
 /** Pair server actions with the actual browser leg, never a stale first row. */
+export function phoneBarCallMatchesBrowser(call: PhoneBarCall, browserCall: WebphoneCallView | null): boolean {
+  if (!browserCall) return false;
+  if (browserCall.sessionId) return call.sessionId === browserCall.sessionId;
+  return Boolean(browserCall.telnyxCallControlId && call.browserCallControlIds?.includes(browserCall.telnyxCallControlId));
+}
+
 export function phoneBarFocusedCall(model: Pick<PhoneBarModel, "active" | "offers">, browserCall: WebphoneCallView | null): PhoneBarCall | null {
   if (!browserCall) return model.active ?? model.offers[0] ?? null;
   const candidates = [...(model.active ? [model.active] : []), ...model.offers];
-  if (browserCall.sessionId) return candidates.find((candidate) => candidate.sessionId === browserCall.sessionId) ?? null;
-  if (browserCall.telnyxCallControlId) {
-    return candidates.find((candidate) => candidate.browserCallControlIds?.includes(browserCall.telnyxCallControlId!)) ?? null;
-  }
-  return null;
+  return candidates.find((candidate) => phoneBarCallMatchesBrowser(candidate, browserCall)) ?? null;
 }
 
 /**

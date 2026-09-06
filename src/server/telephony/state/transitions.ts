@@ -1,6 +1,7 @@
 import type { CallLegRole, CallLegState, CallSessionState, Json, RingAttemptResult } from "@/lib/supabase/database.types";
 
 import { evaluateBusinessHours } from "@/lib/telephony/business-hours";
+import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { announcementConfigFromMetadata, resolveAnnouncement } from "@/lib/telephony/announcements";
 import { classifyRingHangup } from "../routing/eligibility";
 import { decideIvr, describeIvrDecision, ivrGatherSpec, type IvrGatherOutcome } from "../routing/ivr";
@@ -1058,7 +1059,8 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
       b.call.ring_group_id = attempt.ring_group_id;
     }
     if (!leg.profile_id) b.patchMeta({ answered_external: leg.to_number ?? null });
-    if (intent === "pickup") b.patchMeta({ pickup: null, waiting: null });
+    b.patchMeta({ pickup: null });
+    if (intent === "pickup") b.patchMeta({ waiting: null });
     if (intent === "transfer") b.patchMeta({ transfer: b.meta.transfer ? { ...b.meta.transfer, completed_at: opts.at } : null });
     b.patchMeta({ ring: { ...(b.meta.ring ?? {}), active_step: null, step_deadline_at: null } });
 
@@ -1385,6 +1387,7 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
 
   // 1. An offer that ended without being answered.
   if (!answered) {
+    if (intent === "pickup" && meta.pickup?.by === leg.profile_id) b.patchMeta({ pickup: null });
     if (attempt && !isTerminalAttemptResult(attempt.result)) {
       b.attempt(attempt.id, { result: classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause }), ended_at: at });
     }
@@ -1756,6 +1759,7 @@ export class CallActionRejected extends Error {
   constructor(
     message: string,
     readonly status = 409,
+    readonly code?: string,
   ) {
     super(message);
     this.name = "CallActionRejected";
@@ -1764,12 +1768,12 @@ export class CallActionRejected extends Error {
 
 function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
   if (event.type === "sweep") return onSweep(b);
-  if (!ACTIVE_SESSION_STATES.has(b.session.state)) throw new CallActionRejected("Hovor už nie je aktívny.", 409);
+  if (!ACTIVE_SESSION_STATES.has(b.session.state)) throw new CallActionRejected("Hovor už nie je aktívny.", 409, "not_active");
   const customer = b.customerLeg();
   if (!customer || b.legEnded(customer)) {
     // Outbound/internal call cancelled before the far end exists: only the operator's own leg is up.
     if (event.type === "hangup" && b.openLegs().length > 0) return appHangup(b, null, event);
-    throw new CallActionRejected("Hovor už nie je aktívny.", 409);
+    throw new CallActionRejected("Hovor už nie je aktívny.", 409, "not_active");
   }
 
   switch (event.type) {
@@ -1909,12 +1913,16 @@ function appPark(b: TransitionBuilder, customer: LegRow, event: AppEvent): Reduc
 }
 
 function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): ReduceResult {
-  if (!WAITING_STATES.has(b.session.state)) throw new CallActionRejected("Hovor nie je v čakárni.", 409);
+  if (!canPickUpCall({ state: b.session.state, direction: b.session.direction, answered: Boolean(b.session.answered_at), operatorProfileId: b.session.answered_by_profile_id })) {
+    throw new CallActionRejected("Hovor už nie je možné prevziať.", 409);
+  }
   if (!event.picker) throw new CallActionRejected("Chýba telefón operátora.", 400);
   const pending = b.meta.pickup;
-  if (pending && Date.parse(pending.at) + PICKUP_STALE_MS > b.ctx.now.getTime() && pending.by !== event.picker.profileId) {
-    throw new CallActionRejected("Hovor už preberá iný operátor.", 409);
+  if ((pending && Date.parse(pending.at) + PICKUP_STALE_MS > b.ctx.now.getTime()) || b.openLegs().some((leg) => legIntent(leg) === "pickup")) {
+    throw new CallActionRejected("Prevzatie hovoru už prebieha.", 409);
   }
+  // Keep the existing ring plan running until the browser actually answers.
+  // The normal answer reservation picks one winner and cancels the other legs.
   const dial: DialCommand = {
     kind: "dial",
     commandId: b.cmdId(event.picker.profileId, "dial:pickup"),

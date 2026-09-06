@@ -1767,7 +1767,7 @@ export function DispatchConsole({
                 presences={operatorPresences}
                 canManageCalls={viewerCanSupervise}
                 busyAction={telephony.busyAction}
-                browserOfferRinging={telephony.phone.call?.ringing ?? false}
+                phone={telephony.phone}
                 onAnswer={telephony.answer}
                 onRejectOffer={telephony.hangupBrowser}
                 onCallAction={(action, sessionId) => void runPhoneCallAction(action, sessionId)}
