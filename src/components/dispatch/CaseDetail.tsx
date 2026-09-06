@@ -1364,6 +1364,11 @@ function EditCaseForm({
   const [saveSlow, setSaveSlow] = useState(false);
   const [saveAttempt, setSaveAttempt] = useState(0);
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+  useEffect(() => {
+    if (!lastSavedAt) return;
+    const timer = window.setTimeout(() => setLastSavedAt(null), 2_000);
+    return () => window.clearTimeout(timer);
+  }, [lastSavedAt]);
   const [retryToken, setRetryToken] = useState(0);
   const [refreshOnlyRevision, setRefreshOnlyRevision] = useState<number | null>(null);
   const revisionRef = useRef(0);
@@ -1518,6 +1523,7 @@ function EditCaseForm({
   const currentError = saveError?.payload === serializedDraft ? saveError.message : null;
   const displayedSavePhase: CaseSavePhase =
     savePhase === "saving" ? "saving" : currentError ? "error" : isDirty ? "waiting" : savePhase;
+  const showSaveStatus = displayedSavePhase === "saving" || displayedSavePhase === "waiting" || displayedSavePhase === "error" || Boolean(lastSavedAt);
 
   useEffect(() => {
     latestDraftRef.current = serializedDraft;
@@ -1914,9 +1920,9 @@ function EditCaseForm({
   }, [isDirty, retryToken, serializedDraft]);
 
   return (
-    <section className="grid min-w-0 gap-3 @container" aria-busy={savePhase === "saving"}>
-      <div
-        className={`flex min-h-10 flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs font-medium ${compact ? "sticky top-0 z-10 shadow-sm" : ""} ${
+    <section className="grid min-w-0 gap-2 lg:gap-3 @container" aria-busy={savePhase === "saving"}>
+      {showSaveStatus && <div
+        className={`flex flex-wrap items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-[11px] font-medium lg:min-h-10 lg:px-3 lg:py-2 lg:text-xs ${
           isDirty && validationErrors.length > 0
             ? "border-red-200 bg-red-50 text-red-800"
             : displayedSavePhase === "error"
@@ -1942,7 +1948,7 @@ function EditCaseForm({
         ) : (
           <span className="inline-flex items-center gap-1.5">
             <CheckCircle2 size={14} />
-            {lastSavedAt ? `Uložené automaticky o ${lastSavedAt.toLocaleTimeString("sk-SK")}` : "Všetky zmeny sú uložené."}
+            {lastSavedAt ? `Uložené automaticky o ${lastSavedAt.toLocaleTimeString("sk-SK")}` : "Uložené automaticky."}
           </span>
         )}
 
@@ -1958,7 +1964,7 @@ function EditCaseForm({
             </button>
           </span>
         )}
-      </div>
+      </div>}
 
       {saveSlow && (
         <div role="status" className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900">
@@ -1967,8 +1973,8 @@ function EditCaseForm({
       )}
 
       <div className="m-0 min-w-0 border-0 p-0 @container">
-        <div className="grid min-w-0 gap-4" data-testid="case-edit-form-main">
-      <p className="text-xs font-semibold text-zinc-600">
+        <div className="grid min-w-0 gap-2 lg:gap-4" data-testid="case-edit-form-main">
+      <p className="text-[10px] font-medium text-zinc-500 lg:text-xs lg:font-semibold">
         <span className="text-red-600" aria-hidden="true">*</span> Povinné údaje
       </p>
 
@@ -1979,10 +1985,10 @@ function EditCaseForm({
         collapsible={compact}
         defaultOpen={compact}
       >
-        <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_180px_180px]">
-          <div>
+        <div className="grid min-w-0 grid-cols-2 gap-2 lg:gap-3 lg:grid-cols-[minmax(0,1fr)_180px_180px]">
+          <div className="col-span-2 lg:col-span-1">
             <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Typ zákazky<RequiredMark /></span>
-            <CheckboxGroup items={jobTypes} labels={jobTypeLabels} selected={selectedJobTypes} onChange={setSelectedJobTypes} />
+            <CheckboxGroup compact items={jobTypes} labels={jobTypeLabels} selected={selectedJobTypes} onChange={setSelectedJobTypes} />
           </div>
           <SelectField label="Priorita" value={priority} onChange={(value) => setPriority(value as CasePriority)} options={(["urgent", "high", "normal", "low"] as CasePriority[]).map((item) => [item, casePriorityLabels[item]])} />
           <SelectField label="Zdroj" value={sourceType} onChange={(value) => setSourceType(value as NonNullable<DispatchCase["sourceType"]> | "")} options={[["", "Nezadaný"], ...sourceTypeOptions]} required />

@@ -102,7 +102,7 @@ async function createDirtyDraft(page: Page) {
 }
 
 async function expectOpenTask(page: Page) {
-  await expect(page.getByText("Karta prípadu PM-2026-0517", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "PM-2026-0517", exact: true })).toBeVisible();
   const task = page.locator(`#task-${taskId}`);
   await expect(task).toContainText("Zavolať klientovi o 19:00");
   await expect(task).toContainText("Otvorená úloha");

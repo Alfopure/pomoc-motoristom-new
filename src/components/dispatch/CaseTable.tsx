@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, Clock3, Columns3, Phone, UserRound } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, CarFront, ChevronRight, Clock3, Columns3, ListChecks, MapPin, Phone, UserRound } from "lucide-react";
 import type { CallCenterCall } from "@/data/dispatch-types";
 import type { Branch, DispatchCase, FleetAsset, Operator } from "@/domain/types";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
@@ -166,7 +166,7 @@ export function CaseTable({
 
   return (
     <section className={rootClassName}>
-      <div className="z-20 flex w-full min-w-0 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-500">
+      <div className="z-20 flex w-full min-w-0 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-white px-2 py-1.5 text-[11px] font-medium text-zinc-500 lg:px-3 lg:py-2 lg:text-xs lg:font-semibold">
         <span>{cases.length} z {totalCases} prípadov</span>
         <details className="relative hidden lg:block">
           <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-2 rounded-md border border-zinc-200 bg-white px-2.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 [&::-webkit-details-marker]:hidden">
@@ -189,7 +189,7 @@ export function CaseTable({
       </div>
 
       <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto lg:overflow-auto">
-        <div className="space-y-2 p-2 lg:hidden">
+        <div className="space-y-1.5 p-1.5 lg:hidden">
           {caseRows.length > 0 ? (
             caseRows.map(({ active, caller, caseItem, openTasks, ownerName }) => (
               <button
@@ -197,45 +197,35 @@ export function CaseTable({
                 type="button"
                 onClick={() => onOpenDetails(caseItem.id)}
                 aria-label={`Otvoriť prípad ${caseItem.caseNumber}`}
-                className={`block w-full min-w-0 max-w-full rounded-md border p-3 text-left transition ${
+                className={`block w-full min-w-0 max-w-full rounded-md border p-2 text-left transition ${
                   active ? "border-yellow-400 bg-yellow-50 ring-1 ring-yellow-300" : "border-zinc-200 bg-white hover:bg-zinc-50"
                 }`}
               >
-                <div className="flex min-w-0 flex-col gap-2">
-                  <div className="min-w-0">
-                    <div className="font-semibold text-zinc-950">{caseItem.caseNumber}</div>
-                    {caseItem.summary && <div className="mt-1 line-clamp-2 break-words text-xs leading-5 text-zinc-500">{caseItem.summary}</div>}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ring-1 ${caseStatusTone[caseItem.status]}`}>
+                <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-zinc-950">{caseItem.caseNumber}</span>
+                    <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ring-1 ${caseStatusTone[caseItem.status]}`}>
                       {caseStatusLabels[caseItem.status]}
                     </span>
-                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${priorityTone[caseItem.priority]}`}>
+                    <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${priorityTone[caseItem.priority]}`}>
                       {casePriorityLabels[caseItem.priority]}
                     </span>
+                    <ChevronRight size={13} className="shrink-0 text-zinc-400" aria-hidden="true" />
+                </div>
+
+                <div className="mt-1.5 grid min-w-0 gap-1 text-xs leading-4 text-zinc-700">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <CarFront size={13} className="shrink-0 text-zinc-400" aria-hidden="true" />
+                    <span className="truncate">{vehicleLabel(caseItem)} · {caller.name}</span>
+                  </div>
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <MapPin size={13} className="shrink-0 text-zinc-400" aria-hidden="true" />
+                    <span className="truncate">{caseItem.pickup?.label || caseItem.locationDetails.manualPickupAddress || "Miesto nezadané"}</span>
                   </div>
                 </div>
 
-                <dl className="mt-3 grid min-w-0 grid-cols-2 gap-x-3 gap-y-2 border-t border-zinc-100 pt-3 text-xs">
-                  <MobileDetail label="Kontakt" value={caller.name} detail={caller.phone} detailClassName="break-all" />
-                  <MobileDetail label="Vozidlo" value={vehicleLabel(caseItem)} />
-                  <MobileDetail
-                    className="col-span-2"
-                    label="Miesto zásahu"
-                    value={caseItem.pickup?.label || caseItem.locationDetails.manualPickupAddress || "Nezadané"}
-                    detail={caseItem.pickup?.address || (caseItem.locationDetails.manualPickupAddress ? "Ručne zadané bez súradníc" : undefined)}
-                  />
-                  <MobileDetail label="Operátor" value={ownerName} />
-                  <MobileDetail label="Založené" value={formatDateTime(caseItem.createdAt)} />
-                  <MobileDetail label="Upravené" value={formatDateTime(caseItem.updatedAt)} />
-                </dl>
-
-                <div className="mt-3 flex min-w-0 items-start justify-between gap-3 border-t border-zinc-100 pt-3 text-xs">
-                  <div className="min-w-0">
-                    <div className="font-semibold text-zinc-500">Ďalší krok</div>
-                    <div className="mt-1 line-clamp-2 break-words leading-5 text-zinc-800">{caseItem.nextStep || "Nezadaný"}</div>
-                  </div>
-                  <div className="shrink-0 rounded-md bg-zinc-100 px-2 py-1 font-semibold text-zinc-700">{openTasks.length} úloh</div>
+                <div className="mt-1.5 flex min-w-0 items-center justify-between gap-2 text-[10px] leading-4 text-zinc-500">
+                  <span className="min-w-0 truncate">{ownerName} · {formatDateTime(caseItem.updatedAt)}</span>
+                  <span className="inline-flex shrink-0 items-center gap-1"><ListChecks size={12} aria-hidden="true" />{openTasks.length} úloh</span>
                 </div>
               </button>
             ))
@@ -414,28 +404,6 @@ export function CaseTable({
         </table>
       </div>
     </section>
-  );
-}
-
-function MobileDetail({
-  className = "",
-  detail,
-  detailClassName = "",
-  label,
-  value,
-}: {
-  className?: string;
-  detail?: string | null;
-  detailClassName?: string;
-  label: string;
-  value?: string | null;
-}) {
-  return (
-    <div className={`min-w-0 ${className}`}>
-      <dt className="font-semibold text-zinc-500">{label}</dt>
-      <dd className="mt-0.5 break-words font-medium text-zinc-900">{value || "Nezadané"}</dd>
-      {detail && <dd className={`mt-0.5 break-words leading-5 text-zinc-500 ${detailClassName}`}>{detail}</dd>}
-    </div>
   );
 }
 

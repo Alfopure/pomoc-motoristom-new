@@ -1,0 +1,262 @@
+/* Unlayered local rules also override the global button font reset. */
+@media (max-width: 1023px) {
+  .panel {
+    font-size: 12px;
+  }
+
+  .panel button {
+    min-height: 36px;
+    min-width: 36px;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  .panel input:not([type="checkbox"]):not([type="radio"]),
+  .panel select,
+  .panel textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .page {
+    min-height: 0;
+  }
+
+  .page .header {
+    padding: 6px 10px;
+  }
+
+  .page .header > div {
+    align-items: center;
+  }
+
+  .page .header h2 {
+    font-size: 15px;
+  }
+
+  .page .headingIcon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+  }
+
+  .page .createToggle {
+    min-height: 40px;
+    gap: 4px;
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .page .body {
+    padding: 8px;
+  }
+
+  .page .createForm {
+    gap: 10px;
+    padding: 10px;
+  }
+
+  .page .createForm > div:first-child {
+    gap: 8px;
+    padding-bottom: 8px;
+  }
+
+  .page .createForm > div:first-child > span {
+    width: 28px;
+    height: 28px;
+  }
+
+  .page .createForm > div:first-child p {
+    display: none;
+  }
+
+  .page .filters {
+    margin-bottom: 10px;
+    padding: 0;
+    gap: 6px;
+    border: 0;
+    background: transparent;
+  }
+
+  .page .filterLayout {
+    grid-template-columns: minmax(0, 1fr) 36px;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .page .filterLegend {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .page .statusFilters {
+    display: flex;
+    gap: 4px;
+    padding-bottom: 0;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .page .statusFilters button {
+    gap: 4px;
+    padding: 0 7px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .page .statusFilters button > span:last-child {
+    padding: 1px 4px;
+    font-size: 10px;
+    line-height: 14px;
+  }
+
+  .page .operatorToggle {
+    display: inline-flex;
+    width: 36px;
+    height: 36px;
+  }
+
+  .page .operatorFilter {
+    grid-column: 1 / -1;
+    gap: 4px;
+    font-size: 11px;
+  }
+
+  .page .operatorFilter[data-open="false"] {
+    display: none;
+  }
+
+  .page .activeOperator {
+    display: flex;
+    grid-column: 1 / -1;
+    font-size: 11px;
+  }
+
+  .page .activeOperator button {
+    min-height: 28px;
+    min-width: 28px;
+  }
+
+  .page .taskGroups {
+    gap: 12px;
+  }
+
+  .page .taskGroup,
+  .page .taskCards {
+    gap: 6px;
+  }
+
+  .page .groupHeader {
+    align-items: center;
+    padding-bottom: 4px;
+  }
+
+  .page .groupHeader h4,
+  .page .groupHeader > span {
+    font-size: 10px;
+    line-height: 14px;
+  }
+
+  .page .groupDescription {
+    display: none;
+  }
+
+  .page .card {
+    padding: 6px 8px;
+    border-radius: 8px;
+  }
+
+  .page .cardHeader {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .page .titleButton {
+    min-width: 0;
+    min-height: 36px;
+    padding: 0;
+  }
+
+  .page .taskTitle {
+    font-size: 13px;
+    line-height: 18px;
+  }
+
+  .page .headerCaseNumber {
+    display: none;
+  }
+
+  .page .deleteButton {
+    width: 36px;
+    height: 36px;
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .page .taskMetadata {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 3px 8px;
+    min-height: 36px;
+    margin-top: 1px;
+    padding: 0;
+  }
+
+  .page .taskMetadata > div {
+    gap: 4px;
+    margin-top: 0;
+    font-size: 11px;
+    line-height: 16px;
+  }
+
+  .page .priority > span {
+    padding: 1px 6px;
+    font-size: 10px;
+    line-height: 15px;
+  }
+
+  .page .dueAt {
+    grid-column: 2 / -1;
+    white-space: nowrap;
+  }
+
+  .page .assignee {
+    grid-column: 1 / 3;
+  }
+
+  .page .mobileCaseNumber {
+    display: inline-flex;
+    grid-column: 3;
+    margin-left: auto;
+    font-size: 9px;
+    line-height: 14px;
+  }
+
+  .page .cardActions {
+    margin-top: 5px;
+    padding-top: 5px;
+  }
+
+  .page .cardActions > div {
+    gap: 5px;
+  }
+
+  .page .cardActions button {
+    padding-right: 9px;
+    padding-left: 9px;
+    font-size: 11px;
+  }
+
+  .page .cardActions button > span {
+    gap: 4px;
+    font-size: 11px;
+  }
+}

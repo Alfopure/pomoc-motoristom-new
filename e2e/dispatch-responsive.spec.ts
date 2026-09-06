@@ -902,6 +902,7 @@ test("valid edits save automatically and refresh the open card", async ({ page }
 
   await page.setViewportSize({ width: 1280, height: viewportHeight });
   await openCaseEdit(page);
+  await expect(page.getByTestId("case-autosave-status")).toHaveCount(0);
   await page.getByLabel("EČV", { exact: true }).fill("QA SAVE 42");
   await page.getByRole("button", { name: "Pojazdné", exact: true }).click();
 
@@ -916,6 +917,8 @@ test("valid edits save automatically and refresh the open card", async ({ page }
   await expect.poll(() => patchCount).toBe(2);
   await expect(page.getByTestId("case-autosave-status")).toContainText("Uložené automaticky");
   expect(submittedDriveableValues).toEqual([true, false]);
+  await expect(page.getByTestId("case-autosave-status")).toHaveCSS("position", "static");
+  await expect(page.getByTestId("case-autosave-status")).toHaveCount(0, { timeout: 3_000 });
 
   await page.getByRole("button", { name: "Späť", exact: true }).click();
   await expect(page.getByTestId("case-edit-form-main")).toBeVisible();
@@ -1282,25 +1285,24 @@ async function expectCaseFormUsesFullWidth(page: Page, context: string) {
 
 async function expectEditFormUsesFullWidth(page: Page, context: string) {
   const measurements = await page.evaluate(() => {
-    const statusElement = document.querySelector<HTMLElement>("[data-testid='case-autosave-status']");
     const mainElement = document.querySelector<HTMLElement>("[data-testid='case-edit-form-main']");
-    const editRoot = statusElement?.parentElement;
+    const editRoot = mainElement?.closest<HTMLElement>("section[aria-busy]");
 
-    if (!statusElement || !mainElement || !editRoot) {
+    if (!mainElement || !editRoot) {
       return null;
     }
 
-    const status = statusElement.getBoundingClientRect();
+    const root = editRoot.getBoundingClientRect();
     const main = mainElement.getBoundingClientRect();
 
     return {
       asideCount: editRoot.querySelectorAll("aside").length,
-      leftGap: Math.abs(status.left - main.left),
-      rightGap: Math.abs(status.right - main.right),
+      leftGap: Math.abs(root.left - main.left),
+      rightGap: Math.abs(root.right - main.right),
     };
   });
 
-  expect(measurements, `${context} must render the edit form and autosave status`).not.toBeNull();
+  expect(measurements, `${context} must render the edit form`).not.toBeNull();
   expect(measurements?.asideCount, `${context} must not render the old sidebar`).toBe(0);
   expect(measurements?.leftGap, `${context} left edges`).toBeLessThanOrEqual(1);
   expect(measurements?.rightGap, `${context} right edges`).toBeLessThanOrEqual(1);

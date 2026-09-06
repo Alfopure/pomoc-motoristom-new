@@ -11,6 +11,43 @@ test.beforeEach(async ({ page, baseURL }) => {
   }));
 });
 
+test("desktop map panel keeps keyboard resizing and its saved height", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openDashboard(page);
+  const workspace = page.locator("#dispatch-workspace-shell");
+  const separator = page.getByRole("separator", { name: "Potiahnuť a zmeniť výšku spodnej lišty" });
+  await expect(separator).toBeVisible();
+  await separator.press("ArrowUp");
+  await expect(separator).toHaveAttribute("aria-valuenow", "38");
+  await page.reload();
+  await expect(workspace).toHaveCSS("--dispatch-desktop-grid-rows", "minmax(260px, 62fr) minmax(96px, 38fr)");
+  await separator.press("End");
+  await expect(workspace).toHaveAttribute("data-workspace-mode", "expanded");
+  await separator.press("Home");
+  await expect(workspace).toHaveAttribute("data-workspace-mode", "collapsed");
+  await separator.press("ArrowUp");
+  await separator.press("ArrowUp");
+  await expect(workspace).toHaveAttribute("data-workspace-mode", "split");
+});
+
+test("a pending desktop case stays visible after crossing to mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openDashboard(page);
+  const editor = page.getByTestId("case-edit-form-main");
+  await expect(editor).toBeVisible();
+  await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
+  const plate = editor.getByLabel("EČV", { exact: true });
+  await plate.fill("MOBILE DRAFT");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator("#dispatch-workspace-shell")).toHaveAttribute("data-workspace-mode", "expanded");
+  await expect(plate).toBeVisible();
+  await expect(plate).toHaveValue("MOBILE DRAFT");
+  await page.getByRole("button", { name: "Zobraziť mapu na celú plochu" }).click();
+  await page.getByRole("button", { name: "Zostať vo formulári", exact: true }).last().click();
+  await expect(plate).toBeVisible();
+  await expect(plate).toHaveValue("MOBILE DRAFT");
+});
+
 for (const width of [360, 390, 768, 1280]) {
   test(`mobile PWA navigation and notification settings fit at ${width}px`, async ({ page }) => {
     const mobile = width < 1024;
@@ -39,7 +76,7 @@ for (const width of [360, 390, 768, 1280]) {
       await expect(page.getByTestId("dashboard-task-panel-shell")).toBeVisible();
     }
     await expectNoHorizontalOverflow(page);
-    await page.screenshot({ animations: "disabled", path: `.context/mobile-cases-${width}.png` });
+    await page.screenshot({ animations: "disabled", path: `.context/compact-cases-${width}.png` });
 
     if (mobile) {
       await cases.getByRole("button", { name: /^Otvoriť prípad / }).first().click();
@@ -47,15 +84,25 @@ for (const width of [360, 390, 768, 1280]) {
       await expect(cases).toBeHidden();
       await expect(navigation.locator('[aria-current="page"]')).toHaveAccessibleName("Prípady");
       await expectNoHorizontalOverflow(page);
-      await page.screenshot({ animations: "disabled", path: `.context/mobile-case-${width}.png` });
+      await page.screenshot({ animations: "disabled", path: `.context/compact-case-${width}.png` });
       await navigation.getByRole("button", { name: "Mapa", exact: true }).click();
       await expect(shell).toHaveAttribute("data-mobile-pane", "workspace");
       await expect(navigation.locator('[aria-current="page"]')).toHaveAccessibleName("Mapa");
       await expect(page.locator("#dispatch-workspace-shell")).toHaveAttribute("data-workspace-mode", "collapsed");
       await expect(cases).toBeHidden();
-      await expectAboveNavigation(page.getByRole("button", { name: "Maximalizovať spodnú lištu", exact: true }), navigation);
+      await expect(page.getByRole("separator", { name: "Potiahnuť a zmeniť výšku spodnej lišty" })).toBeHidden();
+      await expect(page.locator(".dispatch-workspace-panel")).toBeHidden();
+      const mapToggle = page.getByRole("button", { name: "Skryť mapu a zobraziť prípad", exact: true });
+      await expect(mapToggle).toBeVisible();
+      await mapToggle.click();
+      await expect(page.getByTestId("case-edit-form-main")).toBeVisible();
+      await expect(page.locator(".dispatch-workspace-upper")).toBeHidden();
+      await expect(navigation.locator('[aria-current="page"]')).toHaveAccessibleName("Prípady");
+      await page.getByRole("button", { name: "Zobraziť mapu na celú plochu", exact: true }).click();
+      await expect(page.locator(".dispatch-workspace-panel")).toBeHidden();
+      await expect(navigation.locator('[aria-current="page"]')).toHaveAccessibleName("Mapa");
       await expectNoHorizontalOverflow(page);
-      await page.screenshot({ animations: "disabled", path: `.context/mobile-map-${width}.png` });
+      await page.screenshot({ animations: "disabled", path: `.context/compact-map-${width}.png` });
     }
 
     await navigate(page, "Úlohy");
@@ -64,13 +111,13 @@ for (const width of [360, 390, 768, 1280]) {
     if (mobile) {
       await expect(navigation.locator('[aria-current="page"]')).toHaveAccessibleName("Úlohy");
       await expect(createForm).toBeHidden();
-      await page.screenshot({ animations: "disabled", path: `.context/mobile-tasks-${width}.png` });
+      await page.screenshot({ animations: "disabled", path: `.context/compact-tasks-${width}.png` });
       await page.getByRole("button", { name: "Nová úloha", exact: true }).click();
       await expect(createForm).toBeVisible();
       await expect(createForm.getByLabel("Názov úlohy", { exact: true })).toHaveCSS("font-size", "16px");
       await createForm.getByRole("button", { name: "Vytvoriť úlohu", exact: true }).scrollIntoViewIfNeeded();
       await expectAboveNavigation(createForm.getByRole("button", { name: "Vytvoriť úlohu", exact: true }), navigation);
-      await page.screenshot({ animations: "disabled", path: `.context/mobile-task-form-${width}.png` });
+      await page.screenshot({ animations: "disabled", path: `.context/compact-task-form-${width}.png` });
     } else {
       await expect(createForm).toBeVisible();
     }
@@ -89,7 +136,7 @@ for (const width of [360, 390, 768, 1280]) {
       await expectAboveNavigation(lastControl, navigation);
     }
     await expectNoHorizontalOverflow(page);
-    await page.screenshot({ animations: "disabled", path: `.context/mobile-settings-${width}.png` });
+    await page.screenshot({ animations: "disabled", path: `.context/compact-settings-${width}.png` });
 
     const header = page.locator("header.dispatch-app-header");
     await header.getByRole("button", { name: /^Upozornenia/ }).click();

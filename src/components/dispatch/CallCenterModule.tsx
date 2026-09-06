@@ -54,6 +54,7 @@ import type {
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
+import styles from "./CallCenterModule.module.css";
 
 type CallCenterModuleProps = {
   /** Live telephony surface; `undefined` while no provider is configured. */
@@ -328,7 +329,7 @@ export function CallCenterModule({
   }
 
   return (
-    <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-zinc-50 p-3 sm:p-4">
+    <main className={`${styles.module} min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-zinc-50 p-3 sm:p-4`}>
       <CallCenterCommandDeck
         activeSnapshot={activeSnapshot}
         busy={phoneScopeBusy(busyAction)}
@@ -365,8 +366,8 @@ export function CallCenterModule({
       {actionNotice && <div className="mb-3 shrink-0 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900">{actionNotice}</div>}
 
       <div>
-        <div className="grid min-w-0 max-w-full gap-3 xl:grid-cols-[minmax(240px,290px)_minmax(0,1fr)_minmax(270px,320px)] 2xl:grid-cols-[minmax(270px,320px)_minmax(0,1fr)_minmax(290px,340px)]">
-          <aside className="grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0">
+        <div className={`${styles.contentGrid} grid min-w-0 max-w-full gap-3 xl:grid-cols-[minmax(240px,290px)_minmax(0,1fr)_minmax(270px,320px)] 2xl:grid-cols-[minmax(270px,320px)_minmax(0,1fr)_minmax(290px,340px)]`}>
+          <aside className={`${styles.phonebookArea} grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0`}>
             <PhonebookPanel
               busyAction={busyAction}
               onQuickCall={(entry) => void startQuickCall(entry)}
@@ -387,7 +388,7 @@ export function CallCenterModule({
             totalCalls={storedCalls.length}
           />
 
-          <aside className="grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0">
+          <aside className={`${styles.callbackArea} grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0`}>
             <CallbackQueuePanel
               configured={telephonyConfigured}
               onCallBack={onCallbackCall}
@@ -460,9 +461,9 @@ function CallCenterCommandDeck({
   }
 
   return (
-    <section className="mb-3 overflow-hidden rounded-lg border border-zinc-200 bg-white" aria-label="Ovládanie ústredne">
+    <section className={`${styles.commandDeck} mb-3 overflow-hidden rounded-lg border border-zinc-200 bg-white`} aria-label="Ovládanie ústredne">
       <div className="grid min-w-0 divide-y divide-zinc-200 lg:grid-cols-[minmax(17rem,0.9fr)_minmax(24rem,1.35fr)_minmax(18rem,1fr)] lg:divide-x lg:divide-y-0">
-        <div className="flex min-w-0 items-center gap-3 p-3">
+        <div className={`${styles.operatorControls} flex min-w-0 items-center gap-3 p-3`}>
           <span className={`flex size-10 shrink-0 items-center justify-center rounded-full ${stateSurface}`}>
             {state === "available" ? <CheckCircle2 size={18} /> : state === "paused" ? <Pause size={17} /> : state === "ringing" ? <PhoneIncoming size={17} /> : state === "on_call" ? <PhoneCall size={17} /> : <LogOut size={16} />}
           </span>
@@ -480,7 +481,7 @@ function CallCenterCommandDeck({
           </div>
         </div>
 
-        <form className="flex min-w-0 items-center gap-2 p-3" onSubmit={submitCall}>
+        <form className={`${styles.dialForm} flex min-w-0 items-center gap-2 p-3`} onSubmit={submitCall}>
           <span className={`flex size-9 shrink-0 items-center justify-center rounded-md ${configured ? "bg-zinc-950 text-yellow-300" : "bg-zinc-100 text-zinc-400"}`}>
             <PhoneOutgoing size={17} aria-hidden="true" />
           </span>
@@ -494,12 +495,12 @@ function CallCenterCommandDeck({
           </button>
         </form>
 
-        <div className="min-w-0 p-3">
+        <div className={`${styles.teamOverview} min-w-0 p-3`}>
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-xs font-bold text-zinc-800"><Users size={15} className="text-zinc-500" /> Operátori</div>
             {phone && <StatusBadge label={phone.registration.label} tone={phone.registration.tone === "ok" ? "ok" : phone.registration.tone === "error" ? "warn" : "neutral"} />}
           </div>
-          <div className="mt-2 grid grid-cols-4 gap-1.5">
+          <div className={`${styles.teamMetrics} mt-2 grid grid-cols-4 gap-1.5`}>
             <CommandMetric icon={Users} label="Online" value={configured ? String(counts.onlineOperators) : "—"} tone={counts.onlineOperators > 0 ? "ok" : "bad"} />
             <CommandMetric icon={PhoneCall} label="Volajú" value={configured ? String(counts.callingOperators) : "—"} tone={counts.callingOperators > 0 ? "warn" : "neutral"} />
             <CommandMetric icon={Pause} label="Pauza" value={configured ? String(counts.pausedOperators) : "—"} tone={counts.pausedOperators > 0 ? "warn" : "neutral"} />
@@ -642,27 +643,29 @@ function HistoryPanel({
   }
 
   return (
-    <section className="min-w-0 overflow-hidden rounded-md border border-zinc-200 bg-white @container xl:flex xl:h-full xl:min-h-0 xl:flex-col">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 p-3">
+    <section data-testid="call-center-history" className={`${styles.historyPanel} min-w-0 overflow-hidden rounded-md border border-zinc-200 bg-white @container xl:flex xl:h-full xl:min-h-0 xl:flex-col`}>
+      <div className={`${styles.historyHeading} flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 p-3`}>
         <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950">
           <History size={17} />
           Prehľad hovorov
         </div>
         <span className="text-xs font-semibold text-zinc-500">{totalCalls} záznamov</span>
       </div>
-      <div className="border-b border-zinc-200 p-3">
-        <div className="flex flex-wrap gap-1">
+      <div className={`${styles.historyFilterBar} border-b border-zinc-200 p-3`}>
+        <div className={`${styles.historyFilters} flex flex-wrap gap-1`}>
           {historyFilterOptions.map((option) => (
             <button
               key={option.value}
               type="button"
               onClick={() => selectFilter(option.value)}
+              aria-label={option.label}
               aria-pressed={filter === option.value}
               className={`inline-flex h-8 shrink-0 items-center rounded-md px-2 text-xs font-semibold transition ${
                 filter === option.value ? "bg-zinc-950 text-white" : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
               }`}
             >
-              {option.label}
+              <span className={styles.desktopFilterLabel}>{option.label}</span>
+              <span className={styles.mobileFilterLabel}>{option.shortLabel ?? option.label}</span>
             </button>
           ))}
         </div>
@@ -691,7 +694,7 @@ function HistoryPanel({
               />
             ))}
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 bg-zinc-50 px-3 py-2.5">
+          <div className={`${styles.historyPagination} flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 bg-zinc-50 px-3 py-2.5`}>
             <span className="text-xs font-medium text-zinc-600">
               {firstVisibleIndex + 1}–{Math.min(firstVisibleIndex + HISTORY_PAGE_SIZE, calls.length)} z {calls.length}
             </span>
@@ -746,8 +749,14 @@ function HistoryCallRow({
   onOpenCase: (caseId: string) => void;
   onOpenDetail: (call: CallCenterCall) => void;
 }) {
+  const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
   const customerNumber = call.direction === "outbound" ? call.calledNumber : call.callerNumber;
   const customerName = call.direction === "outbound" ? undefined : call.callerName;
+  // Some linked call records use "case number · job type" as callerName.
+  // The case already has its own link below; keep the full value in details.
+  const customerSummary = call.caseNumber && customerName?.startsWith(`${call.caseNumber} · `)
+    ? customerName.slice(call.caseNumber.length + 3)
+    : customerName === call.caseNumber ? undefined : customerName;
   const employeeEndpoint = call.direction === "outbound"
     ? call.callerNumber
     : call.destinationNumber ?? call.calledNumber;
@@ -768,8 +777,55 @@ function HistoryCallRow({
   const displayedStartedAt = historyDisplayStartedAt(call);
 
   return (
-    <div className="min-w-0 hover:bg-zinc-50">
-      <div className="grid min-w-0 grid-cols-1 gap-x-3 gap-y-3 p-3 text-sm @md:grid-cols-2 @4xl:grid-cols-[100px_minmax(150px,1fr)_minmax(140px,1fr)_130px_170px] @4xl:items-center">
+    <div data-testid="call-history-row" className="min-w-0 hover:bg-zinc-50">
+      <div className={styles.mobileHistoryRow}>
+        <div className={styles.mobileMeta}>
+          <DirectionIcon size={13} aria-label={directionLabel[call.direction]} />
+          <time dateTime={displayedStartedAt} title={`${formatShortDate(displayedStartedAt)} ${formatTime(displayedStartedAt)}`}>
+            <strong>{formatTime(displayedStartedAt)}</strong><span> · {formatShortDate(displayedStartedAt)}</span>
+          </time>
+          <CallStatusPill status={call.status} />
+        </div>
+        <div className={styles.mobileIdentity}>
+          <button type="button" onClick={() => onOpenDetail(call)} className={styles.customerButton} aria-label={`Otvoriť detail hovoru ${formatPhoneNumberForDisplay(customerNumber)}`}>
+            <strong>{formatPhoneNumberForDisplay(customerNumber)}</strong>
+            {customerSummary && <span title={customerName}>{customerSummary}</span>}
+          </button>
+          <button type="button" onClick={() => onCallBack(call)} disabled={phoneScopeBusy(busyAction)} className={styles.callButton} aria-label={`Volať ${formatPhoneNumberForDisplay(customerNumber)}`}>
+            {busyAction === `${call.id}:call_back` ? <Loader2 size={13} className="animate-spin" /> : <PhoneOutgoing size={13} />}
+            Volať
+          </button>
+        </div>
+        <div className={styles.mobileContext}>
+          {call.caseId ? (
+            <button type="button" onClick={() => onOpenCase(call.caseId!)} className={styles.caseButton} title={call.caseNumber ?? "Otvoriť prípad"}>
+              <Link2 size={12} /><span>{call.caseNumber ?? "Prípad"}</span>
+            </button>
+          ) : (
+            <button type="button" onClick={() => onNewCase(call)} className={styles.caseButton}><Plus size={12} />Nový prípad</button>
+          )}
+          {call.operatorName && <span className={styles.mobileOperator} title={call.operatorName}><UserRound size={11} /><span>{call.operatorName}</span></span>}
+          <button type="button" className={styles.detailsButton} aria-expanded={mobileDetailsOpen} aria-controls={`mobile-call-details-${call.id}`} onClick={() => setMobileDetailsOpen(!mobileDetailsOpen)}>
+            Detail<ChevronDown size={12} className={mobileDetailsOpen ? "rotate-180" : undefined} />
+          </button>
+        </div>
+        {mobileDetailsOpen && (
+          <div id={`mobile-call-details-${call.id}`} className={styles.mobileDetails}>
+            <dl>
+              <dt>Smer</dt><dd>{directionLabel[call.direction]}</dd>
+              {customerName && <><dt>{customerLabel}</dt><dd>{customerName}</dd></>}
+              <dt>{operatorLabel}</dt><dd>{operatorName}</dd>
+              <dt>{call.direction === "outbound" ? "Volané z" : call.direction === "internal" ? "Volaná klapka" : "Finálny cieľ"}</dt><dd>{employeeEndpoint}</dd>
+              <dt>Linka</dt><dd>{call.lineLabel}</dd>
+              {call.receivedNumber && <><dt>Volané číslo</dt><dd>{call.receivedNumber}</dd></>}
+              {call.queueLabel && <><dt>Rad</dt><dd>{call.queueLabel}</dd></>}
+            </dl>
+            {!call.caseId && <CaseLinkControl call={call} cases={cases} disabled={busyAction === `${call.id}:link`} onLink={(caseId) => onLinkCall(call, caseId)} />}
+            <button type="button" onClick={() => onOpenDetail(call)} className={styles.detailDrawerButton}>Otvoriť celý detail hovoru<ChevronRight size={13} /></button>
+          </div>
+        )}
+      </div>
+      <div className={`${styles.desktopHistoryRow} grid min-w-0 grid-cols-1 gap-x-3 gap-y-3 p-3 text-sm @md:grid-cols-2 @4xl:grid-cols-[100px_minmax(150px,1fr)_minmax(140px,1fr)_130px_170px] @4xl:items-center`}>
         <div className="flex min-w-0 items-center justify-between gap-3 @md:col-span-2 @4xl:col-span-1 @4xl:block">
           <div className="min-w-0">
             <div className="font-semibold tabular-nums text-zinc-950">{formatTime(displayedStartedAt)}</div>
@@ -1528,11 +1584,11 @@ const directionLabel: Record<CallCenterCall["direction"], string> = {
   internal: "Interný",
 };
 
-const historyFilterOptions: Array<{ label: string; value: HistoryFilter }> = [
+const historyFilterOptions: Array<{ label: string; shortLabel?: string; value: HistoryFilter }> = [
   { label: "Všetky", value: "all" },
-  { label: "Prichádzajúce", value: "inbound" },
-  { label: "Odchádzajúce", value: "outbound" },
+  { label: "Prichádzajúce", shortLabel: "Prichádz.", value: "inbound" },
+  { label: "Odchádzajúce", shortLabel: "Odchádz.", value: "outbound" },
   { label: "Prijaté", value: "answered" },
   { label: "Zmeškané", value: "missed" },
-  { label: "Spätné volanie", value: "callback" },
+  { label: "Spätné volanie", shortLabel: "Zavolať späť", value: "callback" },
 ];
