@@ -1,0 +1,156 @@
+.mobileHistoryRow,
+.mobileFilterLabel {
+  display: none;
+}
+
+@media (max-width: 1023px) {
+  .module {
+    padding: 8px;
+    font-size: 13px;
+  }
+
+  .contentGrid { gap: 8px; }
+  .historyPanel { order: 1; }
+  .phonebookArea { order: 2; }
+  .callbackArea { order: 3; }
+
+  .desktopHistoryRow,
+  .desktopFilterLabel { display: none; }
+  .mobileFilterLabel { display: inline; }
+
+  .historyHeading {
+    gap: 8px;
+    padding: 9px 10px;
+  }
+
+  .historyHeading > div { font-size: 13px; }
+  .historyHeading > span { font-size: 11px; }
+  .historyFilterBar { padding: 6px 8px; }
+  .historyFilters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+  .historyFilters button {
+    min-height: 28px;
+    height: 28px;
+    padding: 0 8px;
+    justify-content: center;
+    font-size: 11px;
+    line-height: 1.2;
+    font-weight: 600;
+  }
+
+  .mobileHistoryRow {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+    padding: 8px 10px;
+  }
+
+  .mobileMeta {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 5px;
+    color: #71717a;
+    font-size: 11px;
+    line-height: 16px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .mobileMeta > svg { flex-shrink: 0; }
+  .mobileMeta time { flex: 1; min-width: 0; white-space: nowrap; }
+  .mobileMeta strong { color: #3f3f46; font-weight: 650; }
+  .mobileMeta > span { padding: 1px 6px; font-size: 10px; line-height: 15px; }
+  .mobileIdentity { display: flex; min-width: 0; align-items: center; gap: 8px; }
+
+  .customerButton {
+    display: grid;
+    flex: 1;
+    min-width: 0;
+    gap: 1px;
+    text-align: left;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 18px;
+  }
+
+  .customerButton strong { color: #18181b; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
+  .customerButton > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #71717a; font-size: 11px; line-height: 16px; }
+
+  .callButton {
+    display: inline-flex;
+    flex-shrink: 0;
+    min-height: 32px;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    border: 1px solid #d4d4d8;
+    border-radius: 6px;
+    background: white;
+    padding: 0 9px;
+    color: #27272a;
+    font-size: 12px;
+    line-height: 1;
+    font-weight: 600;
+  }
+
+  .callButton:disabled { color: #a1a1aa; }
+  .mobileContext { display: flex; align-items: center; min-width: 0; gap: 8px; }
+  .caseButton,
+  .detailsButton {
+    display: inline-flex;
+    min-width: 0;
+    min-height: 26px;
+    align-items: center;
+    gap: 4px;
+    color: #52525b;
+    font-size: 11px;
+    line-height: 1.2;
+    font-weight: 600;
+  }
+
+  .caseButton { max-width: 52%; }
+  .caseButton > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .caseButton > svg,
+  .mobileOperator > svg { flex-shrink: 0; }
+  .mobileOperator { display: flex; min-width: 0; align-items: center; gap: 3px; color: #71717a; font-size: 10px; }
+  .mobileOperator > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .detailsButton { flex-shrink: 0; margin-left: auto; }
+  .customerButton:focus-visible,
+  .callButton:focus-visible,
+  .caseButton:focus-visible,
+  .detailsButton:focus-visible,
+  .detailDrawerButton:focus-visible { outline: 2px solid #eab308; outline-offset: 2px; }
+
+  .mobileDetails { display: grid; min-width: 0; gap: 8px; border-top: 1px solid #e4e4e7; padding-top: 8px; }
+  .mobileDetails dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; font-size: 11px; line-height: 16px; }
+  .mobileDetails dt { color: #71717a; }
+  .mobileDetails dd { margin: 0; color: #3f3f46; overflow-wrap: anywhere; }
+  .mobileDetails select { font-size: 16px; }
+  .detailDrawerButton { display: flex; align-items: center; justify-content: space-between; min-height: 30px; color: #3f3f46; font-size: 11px; font-weight: 600; text-align: left; }
+  .historyPagination { padding: 6px 8px; }
+  .historyPagination > span,
+  .historyPagination nav > span { font-size: 11px; }
+  .historyPagination button { min-height: 30px; height: 30px; width: 30px; }
+
+  .commandDeck { margin-bottom: 8px; }
+  .operatorControls { gap: 8px; padding: 8px 10px; }
+  .operatorControls > span { width: 30px; height: 30px; }
+  .operatorControls h1 { font-size: 12px; }
+  .operatorControls button { min-height: 30px; padding: 0 6px; font-size: 11px; }
+  .operatorControls button > svg { width: 12px; height: 12px; }
+  .dialForm { gap: 6px; padding: 7px 10px; }
+  .dialForm > span { display: none; }
+  .dialForm input { height: 34px; padding: 0 8px; font-size: 16px; }
+  .dialForm button { height: 34px; padding: 0 10px; font-size: 12px; }
+  .teamOverview { padding: 7px 10px; }
+  .teamMetrics { margin-top: 5px; gap: 4px; }
+  .teamMetrics > div { display: flex; align-items: center; justify-content: space-between; gap: 3px; padding: 3px 5px; }
+  .teamMetrics > div > div:first-child { font-size: 9px; }
+  .teamMetrics > div > div:first-child > svg { display: none; }
+  .teamMetrics > div > div:last-child { margin: 0; font-size: 11px; }
+  .teamOverview details { margin-top: 4px; }
+  .teamOverview summary { min-height: 24px; font-size: 10px; }
+}
+
+@media (min-width: 480px) and (max-width: 1023px) {
+  .historyFilters { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}

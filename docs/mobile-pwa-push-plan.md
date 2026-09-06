@@ -6,6 +6,10 @@ Pôvodná mobilná nástenka skladala telefón, zoznam prípadov a mapu pod seba
 
 Nové rozloženie pod 1024 px používa štyri stále dostupné ciele: Prípady, Úlohy, Mapa, Menu. Zobrazuje jeden hlavný obsah, detail s jasným návratom a výraznú akciu Nový prípad. Desktop ponecháva súbežný prehľad prípadov, mapy a úloh. Mobilné formuláre majú čitateľné vstupy a rešpektujú bezpečnú oblasť displeja. Pokročilé filtre a tvorba úlohy sú dostupné na požiadanie.
 
+Mobilné rozhranie používa kompaktné karty, menšie nadpisy a krátke riadky metadát. Číslo prípadu je iba v jednej hlavičke, Web/Mobil/SMS majú spoločný riadok. Potvrdenie úspešného uloženia sa zobrazí na dve sekundy po uložení a neprekrýva formulár. Úlohy majú operátorský filter na požiadanie; história hovorov ukazuje základné údaje priamo a technické podrobnosti cez Detail. Editovateľné vstupy ostávajú 16 px kvôli priblíženiu pri písaní na iPhone.
+
+Mapa na mobile zaberá celú pracovnú plochu alebo je skrytá pri otvorenom prípade. Ikona v hlavičke prepína tieto dva stavy cez ochranu neuložených zmien; mobilný úchyt a čiastočne vysunutý panel sú odstránené. Desktop si zachováva meniteľnú výšku panelu. Pri zúžení desktopu zostane rozpracovaný formulár viditeľný.
+
 Inšpirácia: [Linear Mobile, január 2026](https://linear.app/changelog/2026-01-22-customize-your-navigation-in-linear-mobile) — priame vstupy do každodennej práce; [Material 3](https://m3.material.io/components/navigation-bar/guidelines) — krátka označená spodná navigácia a adaptívne rozloženie. Žlto-sivá identita aplikácie zostáva zachovaná.
 
 ## Push

@@ -58,8 +58,8 @@ export function ExpandedCasePanel({
   }
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm lg:rounded-md">
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zinc-200 bg-white px-3 py-2">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white lg:rounded-md lg:border lg:border-zinc-200 lg:shadow-sm">
+      <div className="hidden shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zinc-200 bg-white px-3 py-2 lg:flex">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950">
             {isNew ? <Plus size={16} /> : <FileText size={16} />}
@@ -95,7 +95,7 @@ export function ExpandedCasePanel({
             partnerDirectory={partnerDirectory}
           />
         ) : caseItem ? (
-          <div className="h-full min-w-0 overflow-y-auto overscroll-contain p-3 sm:p-4 max-lg:[&_button]:min-h-11" data-case-detail-scroll-region>
+          <div className="h-full min-w-0 overflow-y-auto overscroll-contain p-1.5 lg:p-4" data-case-detail-scroll-region>
             <CaseDetail
               key={caseItem.id}
               caseItem={caseItem}
