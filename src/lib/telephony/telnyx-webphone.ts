@@ -7,7 +7,8 @@
  * mint/refresh the JWT from `POST /api/telephony/webphone/token`, own the
  * `@telnyx/webrtc` client and the single active call, ring audibly and
  * visibly, keep `motorist_operator_devices.device_seen_at` warm with a 30 s
- * heartbeat (plus a `sendBeacon` when the tab is hidden or closed), and shut
+ * heartbeat driven by a browser worker (plus a `sendBeacon` when hidden or
+ * closed), and shut
  * this tab's phone down when the heartbeat comes back 409 because a newer tab
  * took the credential.
  *
@@ -144,6 +145,7 @@ export class TelnyxWebphone {
   private retryTimer: number | null = null;
   private refreshTimer: number | null = null;
   private heartbeatTimer: number | null = null;
+  private heartbeatWorker: Worker | null = null;
   private expectedLegTimer: number | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
   private ringtone: BrowserIncomingRingtone | null = null;
@@ -162,7 +164,11 @@ export class TelnyxWebphone {
   private snapshot: WebphoneSnapshot;
   private readonly options: TelnyxWebphoneOptions;
   private readonly boundVisibility = () => this.onVisibilityChange();
-  private readonly boundPageHide = () => this.beaconHeartbeat({ leaving: true });
+  private readonly boundPageHide = () => {
+    this.stopHeartbeat();
+    this.beaconHeartbeat({ leaving: true });
+  };
+  private readonly boundResume = () => this.onResume();
   private readonly boundAudioReady = () => void this.playRemoteAudio();
   private readonly boundAudioPlaying = () => this.setAudioBlocked(false);
   private readonly boundAudioPause = () => {
@@ -193,6 +199,8 @@ export class TelnyxWebphone {
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", this.boundVisibility);
       window.addEventListener("pagehide", this.boundPageHide);
+      window.addEventListener("pageshow", this.boundResume);
+      window.addEventListener("online", this.boundResume);
     }
     this.dispatch({ type: "start" });
     this.startHeartbeat();
@@ -204,6 +212,8 @@ export class TelnyxWebphone {
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", this.boundVisibility);
       window.removeEventListener("pagehide", this.boundPageHide);
+      window.removeEventListener("pageshow", this.boundResume);
+      window.removeEventListener("online", this.boundResume);
     }
     this.stopHeartbeat();
     this.clearTimer("expectedLegTimer");
@@ -296,9 +306,9 @@ export class TelnyxWebphone {
     this.state = result.state;
     this.options.logger?.({ scope: "webphone", event: event.type, status: this.state.status });
     for (const effect of result.effects) this.runEffect(effect);
-    // A new device stays unavailable to routing until its own socket is ready.
-    // Publish that readiness now instead of waiting for the 30-second timer.
-    if (this.state.status === "registered" && event.type === "client_ready") void this.sendHeartbeat();
+    // Publish registration and renewed session ids immediately. Waiting for
+    // the next timer tick can leave a resumed tab unavailable to routing.
+    if (this.state.status === "registered" && (event.type === "client_ready" || event.type === "token_issued")) void this.sendHeartbeat();
     if (changed) this.publish();
   }
 
@@ -394,8 +404,37 @@ export class TelnyxWebphone {
   }
 
   private startHeartbeat(): void {
-    this.clearTimer("heartbeatTimer");
+    this.stopHeartbeat();
+    // Safari throttles window timers in background tabs. Keep the cadence in
+    // the existing browser worker; it only sends pulses, never credentials or
+    // requests, so every heartbeat still reflects the current SDK state.
+    // Full browser/OS suspension can also suspend workers: the server's stale
+    // device cutoff remains in force and resume events refresh it immediately.
+    if (typeof Worker !== "undefined") {
+      try {
+        const worker = new Worker("/workplace-heartbeat-worker.js");
+        this.heartbeatWorker = worker;
+        worker.onmessage = (event: MessageEvent) => {
+          if (this.started && this.heartbeatWorker === worker && event.data?.kind === "pulse") void this.sendHeartbeat();
+        };
+        worker.onerror = () => {
+          if (this.heartbeatWorker !== worker) return;
+          this.stopHeartbeat();
+          if (this.started) this.startHeartbeatTimer();
+        };
+        worker.postMessage({ kind: "start", intervalMs: WEBPHONE_HEARTBEAT_MS });
+        return;
+      } catch {
+        // Worker creation/loading can be blocked by browser policy or CSP.
+        this.stopHeartbeat();
+      }
+    }
+    this.startHeartbeatTimer();
+  }
+
+  private startHeartbeatTimer(): void {
     const tick = () => {
+      if (!this.started) return;
       void this.sendHeartbeat();
       this.heartbeatTimer = this.schedule(tick, WEBPHONE_HEARTBEAT_MS);
     };
@@ -404,6 +443,12 @@ export class TelnyxWebphone {
 
   private stopHeartbeat(): void {
     this.clearTimer("heartbeatTimer");
+    if (this.heartbeatWorker) {
+      this.heartbeatWorker.onmessage = null;
+      this.heartbeatWorker.onerror = null;
+      this.heartbeatWorker.terminate();
+      this.heartbeatWorker = null;
+    }
   }
 
   private heartbeatBody(options: { leaving?: boolean } = {}): string | null {
@@ -415,20 +460,24 @@ export class TelnyxWebphone {
     return JSON.stringify({ deviceSessionId, registrationState });
   }
 
-  private async sendHeartbeat(): Promise<void> {
-    const body = this.heartbeatBody();
-    if (!body) return;
+  private async sendHeartbeat(options: { leaving?: boolean } = {}): Promise<void> {
+    const body = this.heartbeatBody(options);
+    if (!this.started || !body) return;
+    const deviceSessionId = this.state.credentials?.deviceSessionId;
     try {
       const result = await this.requestJson<{ error?: string; reason?: string }>(HEARTBEAT_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,
+        keepalive: options.leaving,
         label: "heartbeat telefónu",
         timeoutMs: TELEPHONY_TIMEOUT_MS.read,
       });
       // 409 is the server saying this tab's device session was superseded (or
       // revoked). Retrying cannot help: the newest tab owns the credential.
-      if (result.status === 409) {
+      // A background request can finish after a token renewal changed our
+      // session id. Its 409 belongs to the old session, not the current phone.
+      if (this.started && this.state.credentials?.deviceSessionId === deviceSessionId && result.status === 409) {
         this.dispatch({ type: "superseded", message: result.body?.error ?? null });
       }
     } catch {
@@ -440,11 +489,13 @@ export class TelnyxWebphone {
   private beaconHeartbeat(options: { leaving?: boolean } = {}): void {
     const body = this.heartbeatBody(options);
     if (!body) return;
-    if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") {
-      void this.sendHeartbeat();
-      return;
+    try {
+      if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function"
+        && navigator.sendBeacon(HEARTBEAT_URL, new Blob([body], { type: "application/json" }))) return;
+    } catch {
+      // A browser may refuse a beacon; preserve the leaving state in fallback.
     }
-    navigator.sendBeacon(HEARTBEAT_URL, new Blob([body], { type: "application/json" }));
+    void this.sendHeartbeat(options);
   }
 
   private onVisibilityChange(): void {
@@ -453,7 +504,20 @@ export class TelnyxWebphone {
       this.beaconHeartbeat();
       return;
     }
+    this.onResume();
+  }
+
+  private onResume(): void {
+    if (!this.started) return;
+    if (!this.heartbeatWorker && this.heartbeatTimer === null) this.startHeartbeat();
     void this.sendHeartbeat();
+    // Safari may postpone the reconnect timer until long after foregrounding.
+    // Resume only an existing retry; never take a revoked phone back over or
+    // reconnect a healthy socket carrying an active call.
+    if (this.state.status === "reconnecting" && this.retryTimer !== null) {
+      this.clearTimer("retryTimer");
+      void this.mintToken();
+    }
     void this.resumeAudio();
   }
 
