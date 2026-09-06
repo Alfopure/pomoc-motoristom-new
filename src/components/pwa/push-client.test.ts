@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { decodeApplicationServerKey, detectPushSupport, enableDevicePush, pushEnrollmentState, readNotificationSound, readPushDeviceState, rememberNotificationSound, removeUnownedBrowserPush, revokeDevicePush, syncNotificationSoundFromStorage, type PushDeviceState } from "./push-client";
+import { DEFAULT_PUSH_CATEGORIES, decodeApplicationServerKey, detectPushSupport, enableDevicePush, pushEnrollmentState, readNotificationSound, readPushDeviceState, rememberNotificationSound, removeUnownedBrowserPush, revokeDevicePush, syncNotificationSoundFromStorage, updateDevicePushCategory, type PushCategory, type PushDeviceState } from "./push-client";
 import { shouldPlayNotificationSound } from "./notification-sound";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -87,6 +87,7 @@ function browserFixture(options: { permission?: NotificationPermission; existing
   vi.stubGlobal("fetch", fetchMock);
   const state: PushDeviceState = {
     support: "supported", permission: "default", configured: true, publicKey: "BAEC", subscription: null, subscribed: false, soundEnabled: true,
+    ...DEFAULT_PUSH_CATEGORIES, callNotificationsConfigured: false,
   };
   return { subscription, subscribe, register, requestPermission, fetchMock, state };
 }
@@ -215,5 +216,56 @@ describe("notification chime policy", () => {
     expect(setItem).not.toHaveBeenCalled();
     syncNotificationSoundFromStorage("on");
     expect(readNotificationSound()).toBe(true);
+  });
+});
+
+describe("independent push categories", () => {
+  it("reads owned category preferences without making missing legacy fields look disabled", async () => {
+    const fixture = browserFixture({
+      permission: "granted", existing: { endpoint: "owned-device" } as PushSubscription,
+      serverResponse: { configured: true, publicKey: "BAEC", subscribed: true, taskNotificationsEnabled: false, incomingCallsEnabled: true, availableCallsEnabled: false, callNotificationsConfigured: true },
+    });
+    expect(await readPushDeviceState()).toMatchObject({ subscribed: true, taskNotificationsEnabled: false, incomingCallsEnabled: true, availableCallsEnabled: false, callNotificationsConfigured: true });
+    fixture.fetchMock.mockResolvedValue({ ok: true, json: async () => ({ configured: true, publicKey: "BAEC", subscribed: true }) });
+    expect(await readPushDeviceState()).toMatchObject({ ...DEFAULT_PUSH_CATEGORIES, callNotificationsConfigured: false });
+    fixture.fetchMock.mockResolvedValue({ ok: true, json: async () => ({ configured: true, publicKey: "BAEC", subscribed: false, taskNotificationsEnabled: false, incomingCallsEnabled: false, availableCallsEnabled: false }) });
+    expect(await readPushDeviceState()).toMatchObject({ ...DEFAULT_PUSH_CATEGORIES, subscribed: false });
+  });
+
+  it.each<PushCategory>(["taskNotificationsEnabled", "incomingCallsEnabled", "availableCallsEnabled"])("patches only %s and the owned endpoint", async (category) => {
+    const fixture = browserFixture();
+    await updateDevicePushCategory({ ...fixture.state, subscription: fixture.subscription, subscribed: true, callNotificationsConfigured: true }, category, false);
+    expect(fixture.fetchMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(fixture.fetchMock.mock.calls[0]![1]!.body as string)).toEqual({ endpoint: fixture.subscription.endpoint, [category]: false });
+  });
+
+  it("refuses category writes for an unowned endpoint or a legacy API", async () => {
+    const fixture = browserFixture();
+    await expect(updateDevicePushCategory({ ...fixture.state, subscription: fixture.subscription }, "incomingCallsEnabled", false)).rejects.toThrow("Najskôr zapni");
+    await expect(updateDevicePushCategory({ ...fixture.state, subscription: fixture.subscription, subscribed: true }, "taskNotificationsEnabled", false)).rejects.toThrow("Výber typov");
+    expect(fixture.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("enrolls all category choices when supported and preserves the legacy POST shape otherwise", async () => {
+    const fixture = browserFixture();
+    await enableDevicePush({ ...fixture.state, taskNotificationsEnabled: false, incomingCallsEnabled: true, availableCallsEnabled: false, callNotificationsConfigured: true });
+    expect(JSON.parse(fixture.fetchMock.mock.calls[0]![1]!.body as string)).toEqual({
+      subscription: fixture.subscription.toJSON(), soundEnabled: true, taskNotificationsEnabled: false, incomingCallsEnabled: true, availableCallsEnabled: false,
+    });
+    const legacy = browserFixture();
+    await enableDevicePush(legacy.state);
+    expect(JSON.parse(legacy.fetchMock.mock.calls[0]![1]!.body as string)).toEqual({ subscription: legacy.subscription.toJSON(), soundEnabled: true });
+  });
+
+  it("does not overwrite another tab's fresh category preferences while reusing its owned endpoint", async () => {
+    const fixture = browserFixture({
+      permission: "granted",
+      existing: { endpoint: "already-owned", toJSON: () => ({ endpoint: "already-owned" }) } as PushSubscription,
+      serverResponse: { subscribed: true, callNotificationsConfigured: true, soundEnabled: false, taskNotificationsEnabled: false, incomingCallsEnabled: false, availableCallsEnabled: true },
+    });
+    await enableDevicePush({ ...fixture.state, callNotificationsConfigured: true });
+    expect(fixture.subscribe).not.toHaveBeenCalled();
+    const post = fixture.fetchMock.mock.calls.find(([, init]) => init.method === "POST")!;
+    expect(JSON.parse(post[1].body as string)).toEqual({ subscription: { endpoint: "already-owned" }, soundEnabled: false, taskNotificationsEnabled: false, incomingCallsEnabled: false, availableCallsEnabled: true });
   });
 });

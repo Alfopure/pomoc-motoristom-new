@@ -58,6 +58,8 @@ export type SessionRunnerDeps = {
   leaseWaitMs?: number;
   leaseTtlMs?: number;
   maxConflictRetries?: number;
+  /** Registers best-effort after-response work; never performs push under the session lease. */
+  onCallTransition?: (sessionId: string) => void;
 };
 
 export const LEASE_WAIT_MS = 3_000;
@@ -380,6 +382,13 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
           error: apply.failure?.error ?? null,
         });
         await auditSupervisionEnd(deps, snapshot.session, apply.session, event, apply.compensations.length > 0);
+        if (!apply.failed && (["ringing", "waiting", "parked", "consulting", "conference"].includes(apply.session.state) || readMeta(apply.session).party_pending)) {
+          try { deps.onCallTransition?.(sessionId); }
+          catch {
+            // A notification scheduler cannot change the result of a SIP command.
+            deps.logger?.({ level: "warn", scope: "call-push", sessionId, message: "notification scheduling unavailable" });
+          }
+        }
         deps.logger?.({
           scope: "session",
           sessionId,

@@ -9,14 +9,25 @@ type AdminClient = SupabaseClient<Database>;
 type SubscriptionRow = Database["public"]["Tables"]["motorist_push_subscriptions"]["Row"];
 export type PushActor = { organizationId: string; profileId: string };
 type PushConfig = { publicKey: string; privateKey: string; subject: string };
-type PushMessage = { title: string; body: string; url: string; tag: string; notificationId?: string; taskId?: string };
-type PushResult = "sent" | "expired" | "failed";
+type PushMessage = { title: string; body: string; url: string; tag: string; notificationId?: string; taskId?: string; callSessionId?: string; callKind?: "incoming_call" | "available_call"; expiresAt?: string };
+type PushResult = "sent" | "expired" | "skipped" | "failed";
+const CALL_DELIVERY_BUDGET_MS = 5_000;
+const CALL_DELIVERY_CONCURRENCY = 10;
+const MIN_CALL_RETRY_WINDOW_MS = 500;
+const PREFERENCE_COLUMNS = {
+  taskNotificationsEnabled: "task_notifications_enabled",
+  incomingCallsEnabled: "incoming_calls_enabled",
+  availableCallsEnabled: "available_calls_enabled",
+} as const;
+type PreferenceKey = keyof typeof PREFERENCE_COLUMNS;
+type PreferencePatch = Partial<Pick<SubscriptionRow, typeof PREFERENCE_COLUMNS[PreferenceKey] | "sound_enabled">>;
+const DEFAULT_PREFERENCES = { taskNotificationsEnabled: true, incomingCallsEnabled: true, availableCallsEnabled: true };
 
 export class PushError extends Error {
   constructor(message: string, public status: number) { super(message); }
 }
 
-export async function getPushConfig(supabase: AdminClient): Promise<PushConfig | null> {
+export async function getPushConfig(supabase: AdminClient, signal?: AbortSignal): Promise<PushConfig | null> {
   const environment = {
     publicKey: process.env.VAPID_PUBLIC_KEY,
     privateKey: process.env.VAPID_PRIVATE_KEY,
@@ -28,7 +39,8 @@ export async function getPushConfig(supabase: AdminClient): Promise<PushConfig |
   try {
     // This no-argument RPC is executable only by service_role and reads exactly
     // one named Vault secret. No private values are sent to the browser or logs.
-    const result = await supabase.rpc("motorist_get_web_push_config", {});
+    const request = supabase.rpc("motorist_get_web_push_config", {});
+    const result = await (signal ? request.abortSignal(signal) : request);
     return result.error ? null : parsePushConfig(result.data);
   } catch { return null; }
 }
@@ -85,25 +97,46 @@ export function parsePushSubscription(value: unknown) {
 
 export async function getPushSubscriptionStatus(supabase: AdminClient, actor: PushActor, endpoint?: string | null) {
   const config = await getPushConfig(supabase);
-  const result = { configured: Boolean(config), publicKey: config?.publicKey ?? null, subscribed: false, soundEnabled: true };
-  if (!endpoint) return result;
+  const result = { configured: Boolean(config), publicKey: config?.publicKey ?? null, subscribed: false, soundEnabled: true, ...DEFAULT_PREFERENCES, callNotificationsConfigured: false };
+  if (!endpoint) {
+    if (config) result.callNotificationsConfigured = await pushPreferencesConfigured(supabase, actor);
+    return result;
+  }
   const subscription = await findSubscription(supabase, actor, validatePushEndpoint(endpoint));
-  if (!subscription || isExpired(subscription)) return result;
-  return { ...result, subscribed: true, soundEnabled: subscription.sound_enabled };
+  if (!subscription || isExpired(subscription)) {
+    if (config) result.callNotificationsConfigured = await pushPreferencesConfigured(supabase, actor);
+    return result;
+  }
+  return {
+    ...result, subscribed: true, soundEnabled: subscription.sound_enabled,
+    taskNotificationsEnabled: subscription.task_notifications_enabled !== false,
+    incomingCallsEnabled: subscription.incoming_calls_enabled !== false,
+    availableCallsEnabled: subscription.available_calls_enabled !== false,
+    callNotificationsConfigured: Object.values(PREFERENCE_COLUMNS).every((key) => typeof subscription[key] === "boolean"),
+  };
 }
 
-export async function savePushSubscription(supabase: AdminClient, actor: PushActor, input: unknown, soundEnabled: unknown) {
+async function pushPreferencesConfigured(supabase: AdminClient, actor: PushActor): Promise<boolean> {
+  const schema = await supabase.from("motorist_push_subscriptions")
+    .select("task_notifications_enabled,incoming_calls_enabled,available_calls_enabled")
+    .eq("organization_id", actor.organizationId).eq("profile_id", actor.profileId).limit(1);
+  if (schema.error && !missingPreferences(schema.error)) assertStorage(schema.error);
+  return !schema.error;
+}
+
+export async function savePushSubscription(supabase: AdminClient, actor: PushActor, input: unknown, soundEnabled: unknown, preferences?: unknown) {
   if (!(await getPushConfig(supabase))) throw new PushError("Push notifikácie ešte nie sú nakonfigurované.", 503);
   if (typeof soundEnabled !== "boolean") throw new PushError("Chýba nastavenie zvuku.", 400);
+  const choices = parsePreferencePatch(preferences ?? {});
   const subscription = parsePushSubscription(input);
   const update = await supabase.from("motorist_push_subscriptions")
-    .update({ ...subscription, sound_enabled: soundEnabled })
+    .update({ ...subscription, ...choices, sound_enabled: soundEnabled })
     .eq("organization_id", actor.organizationId).eq("profile_id", actor.profileId).eq("endpoint", subscription.endpoint)
     .select("id").maybeSingle();
   assertStorage(update.error);
   if (update.data) return;
   const insert = await supabase.from("motorist_push_subscriptions").insert({
-    ...subscription, organization_id: actor.organizationId, profile_id: actor.profileId, sound_enabled: soundEnabled,
+    ...subscription, ...choices, organization_id: actor.organizationId, profile_id: actor.profileId, sound_enabled: soundEnabled,
   });
   // An endpoint cannot be transferred to another account, even by a crafted request.
   if (insert.error?.code === "23505") {
@@ -122,11 +155,33 @@ export async function deletePushSubscription(supabase: AdminClient, actor: PushA
 
 export async function updatePushSound(supabase: AdminClient, actor: PushActor, endpoint: unknown, soundEnabled: unknown) {
   if (typeof soundEnabled !== "boolean") throw new PushError("Neplatné nastavenie zvuku.", 400);
-  const result = await supabase.from("motorist_push_subscriptions").update({ sound_enabled: soundEnabled })
+  return updatePushPreferences(supabase, actor, endpoint, { soundEnabled });
+}
+
+export async function updatePushPreferences(supabase: AdminClient, actor: PushActor, endpoint: unknown, input: unknown) {
+  const patch = parsePreferencePatch(input);
+  if (!Object.keys(patch).length) throw new PushError("Chýba nastavenie upozornení.", 400);
+  const result = await supabase.from("motorist_push_subscriptions").update(patch)
     .eq("organization_id", actor.organizationId).eq("profile_id", actor.profileId).eq("endpoint", validatePushEndpoint(endpoint))
     .select("id").maybeSingle();
   assertStorage(result.error);
   if (!result.data) throw new PushError("Najprv zapnite push notifikácie na tomto zariadení.", 404);
+}
+
+function parsePreferencePatch(input: unknown): PreferencePatch {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new PushError("Neplatné nastavenie upozornení.", 400);
+  const values = input as Record<string, unknown>;
+  const patch: PreferencePatch = {};
+  for (const [name, column] of Object.entries({ ...PREFERENCE_COLUMNS, soundEnabled: "sound_enabled" } as const)) {
+    if (!(name in values)) continue;
+    if (typeof values[name] !== "boolean") throw new PushError("Neplatné nastavenie upozornení.", 400);
+    patch[column] = values[name];
+  }
+  return patch;
+}
+
+function missingPreferences(error: { code?: string; message?: string }): boolean {
+  return ["42703", "PGRST204"].includes(error.code ?? "") && Object.values(PREFERENCE_COLUMNS).some((column) => error.message?.includes(column));
 }
 
 export async function sendTestPush(supabase: AdminClient, actor: PushActor, endpoint: unknown) {
@@ -143,7 +198,7 @@ export async function sendTestPush(supabase: AdminClient, actor: PushActor, endp
   assertStorage(claim.error);
   if (!claim.data) throw new PushError("Ďalšiu skúšobnú notifikáciu môžete poslať o 30 sekúnd.", 429);
   const result = await deliverPush(supabase, subscription, {
-    title: "Skúška notifikácií", body: "Push notifikácie sú zapnuté. Takto vás upozorníme na pridelenú úlohu.",
+    title: "Skúška notifikácií", body: "Push notifikácie sú zapnuté. Takto sa zobrazia upozornenia, ktoré ste si povolili.",
     url: "/", tag: `push-test-${now.getTime()}`,
   }, config);
   if (result === "expired") throw new PushError("Push odber vypršal. Vypnite a znova zapnite notifikácie.", 410);
@@ -173,7 +228,7 @@ export async function sendTaskPush(supabase: AdminClient, input: {
       notificationId: input.notificationId, taskId: input.taskId,
     };
     // Small batches bound outbound concurrency without leaving unawaited work in a serverless request.
-    const subscriptions = result.data ?? [];
+    const subscriptions = (result.data ?? []).filter((row) => row.task_notifications_enabled !== false);
     for (let offset = 0; offset < subscriptions.length; offset += 10) {
       const deliveries = await Promise.all(subscriptions.slice(offset, offset + 10).map((row) => deliverPush(supabase, row, message, config)));
       for (const delivery of deliveries) {
@@ -190,30 +245,121 @@ export async function sendTaskPush(supabase: AdminClient, input: {
   return totals;
 }
 
-async function deliverPush(supabase: AdminClient, subscription: SubscriptionRow, message: PushMessage, config: PushConfig): Promise<PushResult> {
+/** One short-lived call alert per recipient/category/session, independent of
+ * repeated webhooks and routing ticks. Claim only when a device opted in. */
+export async function sendCallPush(supabase: AdminClient, input: {
+  organizationId: string; recipientProfileId: string; sessionId: string;
+  category: "incoming_call" | "available_call"; title: string; body: string; expiresAt: string;
+}): Promise<{ sent: number; failed: number }> {
+  const totals = { sent: 0, failed: 0 };
+  const expires = Date.parse(input.expiresAt);
+  if (!Number.isFinite(expires) || expires <= Date.now()) return totals;
+  const deadlineAt = Date.now() + CALL_DELIVERY_BUDGET_MS;
+  const signal = AbortSignal.timeout(CALL_DELIVERY_BUDGET_MS);
+  const config = await getPushConfig(supabase, signal);
+  if (!config) return totals;
   try {
-    if (isExpired(subscription)) { await removeExpired(supabase, subscription); return "expired"; }
-    const endpoint = validatePushEndpoint(subscription.endpoint);
-    const send = () => webpush.sendNotification({ endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } },
-      JSON.stringify({ ...message, soundEnabled: subscription.sound_enabled }), {
-        vapidDetails: config, TTL: 60 * 60, urgency: "high", timeout: 5_000,
-        topic: createHash("sha256").update(message.tag).digest("base64url").slice(0, 32),
-      });
+    const profile = await supabase.from("motorist_profiles").select("id")
+      .eq("organization_id", input.organizationId).eq("id", input.recipientProfileId).eq("active", true).abortSignal(signal).maybeSingle();
+    assertStorage(profile.error);
+    if (!profile.data) return totals;
+    const result = await supabase.from("motorist_push_subscriptions").select("*")
+      .eq("organization_id", input.organizationId).eq("profile_id", input.recipientProfileId).abortSignal(signal);
+    assertStorage(result.error);
+    const column = input.category === "incoming_call" ? "incoming_calls_enabled" : "available_calls_enabled";
+    // Missing migration fails closed for new categories while task push remains usable.
+    const subscriptions = (result.data ?? []).filter((row) => row[column] === true && !isExpired(row));
+    if (!subscriptions.length || Date.now() >= expires) return totals;
+    const claim = await supabase.from("motorist_notifications").upsert({
+      organization_id: input.organizationId, recipient_profile_id: input.recipientProfileId,
+      case_id: null, task_id: null, visibility: "private", kind: "system", severity: "info",
+      status: "archived", archived_at: new Date().toISOString(), delivery_status: "in_app",
+      title: input.title.slice(0, 160), body: input.body.slice(0, 400),
+      dedupe_key: `call-push:${input.sessionId}:${input.recipientProfileId}:${input.category}`,
+      payload: { source: "call_push", channel: "push", session_id: input.sessionId, category: input.category, expires_at: input.expiresAt },
+    }, { onConflict: "organization_id,dedupe_key", ignoreDuplicates: true }).select("id").abortSignal(signal).maybeSingle();
+    if (claim.error?.code === "23505") return totals;
+    assertStorage(claim.error);
+    if (!claim.data) return totals;
+    const message: PushMessage = {
+      title: input.title.slice(0, 160), body: input.body.slice(0, 300),
+      url: `/?call=${encodeURIComponent(input.sessionId)}`, tag: `call-${input.sessionId}`,
+      callSessionId: input.sessionId, callKind: input.category, expiresAt: input.expiresAt,
+    };
+    // Bound concurrency and elapsed work, not the number of registered devices.
+    // Account for any remaining devices if the deadline prevents another batch.
+    for (let offset = 0; offset < subscriptions.length; offset += CALL_DELIVERY_CONCURRENCY) {
+      if (Date.now() >= deadlineAt || Date.now() >= expires) {
+        totals.failed += subscriptions.length - offset;
+        break;
+      }
+      const deliveries = await Promise.all(subscriptions.slice(offset, offset + CALL_DELIVERY_CONCURRENCY).map((row) => deliverPush(supabase, row, message, config, {
+        expiresAt: expires, deadlineAt, maxTtl: 30, timeout: 2_000, signal,
+        refresh: async () => {
+          // A device may have been deleted or opted out while the claim, a
+          // previous batch, or a provider backoff was pending. Recheck the
+          // exact owned row and use its current sound/encryption settings.
+          const current = await supabase.from("motorist_push_subscriptions").select("*")
+            .eq("organization_id", input.organizationId).eq("profile_id", input.recipientProfileId)
+            .eq("id", row.id).eq("endpoint", row.endpoint).eq(column, true).abortSignal(signal).maybeSingle();
+          assertStorage(current.error);
+          return current.data?.[column] === true ? current.data : null;
+        },
+      })));
+      for (const delivery of deliveries) {
+        if (delivery === "sent") totals.sent++;
+        if (delivery === "failed") totals.failed++;
+      }
+    }
+    if (totals.failed) console.warn("Call push delivery incomplete", { sessionId: input.sessionId, failed: totals.failed });
+  } catch {
+    console.warn("Call push delivery unavailable", { sessionId: input.sessionId });
+    totals.failed++;
+  }
+  return totals;
+}
+
+async function deliverPush(supabase: AdminClient, subscription: SubscriptionRow, message: PushMessage, config: PushConfig, options?: {
+  expiresAt: number; deadlineAt: number; maxTtl: number; timeout: number; signal: AbortSignal;
+  refresh: () => Promise<SubscriptionRow | null>;
+}): Promise<PushResult> {
+  try {
+    const send = async (): Promise<PushResult> => {
+      if (options) {
+        if (options.expiresAt <= Date.now()) return "expired";
+        if (options.deadlineAt <= Date.now()) return "failed";
+        const current = await options.refresh();
+        if (!current) return "skipped";
+        subscription = current;
+        if (options.expiresAt <= Date.now()) return "expired";
+        if (options.deadlineAt <= Date.now()) return "failed";
+      }
+      if (isExpired(subscription)) { await removeExpired(supabase, subscription, options?.signal); return "expired"; }
+      const endpoint = validatePushEndpoint(subscription.endpoint);
+      await webpush.sendNotification({ endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } },
+        JSON.stringify({ ...message, soundEnabled: subscription.sound_enabled }), {
+          vapidDetails: config,
+          TTL: options ? Math.max(0, Math.min(options.maxTtl, Math.floor((options.expiresAt - Date.now()) / 1000))) : 60 * 60,
+          urgency: "high", timeout: options ? Math.max(1, Math.min(options.timeout, options.deadlineAt - Date.now(), options.expiresAt - Date.now())) : 5_000,
+          topic: createHash("sha256").update(message.tag).digest("base64url").slice(0, 32),
+        });
+      return "sent";
+    };
     try {
-      await send();
+      return await send();
     } catch (error) {
       const delay = retryDelay(error);
       if (delay === null) throw error;
+      if (options && Math.min(options.deadlineAt, options.expiresAt) - Date.now() < delay + MIN_CALL_RETRY_WINDOW_MS) throw error;
       await new Promise((resolve) => setTimeout(resolve, delay));
       // Retry only once, using the same Web Push topic and notification tag.
-      // Providers collapse pending messages; the SW tag replaces an existing alert.
-      await send();
+      // Call retries also recheck expiry and the current device preference.
+      return await send();
     }
-    return "sent";
   } catch (error) {
     const status = error && typeof error === "object" && "statusCode" in error ? error.statusCode : null;
     if (status === 404 || status === 410) {
-      try { await removeExpired(supabase, subscription); } catch { /* No sensitive provider errors in logs. */ }
+      try { await removeExpired(supabase, subscription, options?.signal); } catch { /* No sensitive provider errors in logs. */ }
       return "expired";
     }
     return "failed";
@@ -245,9 +391,10 @@ async function findSubscription(supabase: AdminClient, actor: PushActor, endpoin
   return result.data;
 }
 
-async function removeExpired(supabase: AdminClient, subscription: SubscriptionRow) {
-  const result = await supabase.from("motorist_push_subscriptions").delete()
+async function removeExpired(supabase: AdminClient, subscription: SubscriptionRow, signal?: AbortSignal) {
+  const request = supabase.from("motorist_push_subscriptions").delete()
     .eq("organization_id", subscription.organization_id).eq("profile_id", subscription.profile_id).eq("id", subscription.id);
+  const result = await (signal ? request.abortSignal(signal) : request);
   assertStorage(result.error);
 }
 

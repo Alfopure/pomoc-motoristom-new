@@ -1,0 +1,56 @@
+import type { PhoneBarCall, PhoneBarModel } from "./active-calls-model";
+import type { WebphoneSnapshot } from "./telnyx-webphone";
+
+export type CallNotificationFocus = { sessionId: string; snapshotAtOpen: string };
+
+export type CallNotificationTarget = {
+  call: PhoneBarCall | null;
+  message: string;
+  canAnswer: boolean;
+  canPickup: boolean;
+  canReconnect: boolean;
+};
+
+/** Only current authenticated state may enable a call notification's actions. */
+export function callNotificationTarget(input: {
+  focus: CallNotificationFocus;
+  model?: PhoneBarModel;
+  phone?: WebphoneSnapshot;
+  configured: boolean;
+  stale: boolean;
+  busy: boolean;
+  outboundPending: boolean;
+}): CallNotificationTarget {
+  const empty = { call: null, canAnswer: false, canPickup: false, canReconnect: false };
+  if (!input.configured) return { ...empty, message: "Telefónia zatiaľ nie je dostupná. Skontrolujte pripojenie a obnovte stav hovoru." };
+  if (input.stale) return { ...empty, message: "Aktuálny stav hovoru sa nepodarilo načítať. Obnovte ho pred prevzatím." };
+  if (!input.model?.checkedAt || input.model.checkedAt === input.focus.snapshotAtOpen) {
+    return { ...empty, message: "Overujem aktuálny stav hovoru…" };
+  }
+  const call = input.model.teamCalls.find((candidate) => candidate.sessionId === input.focus.sessionId) ?? null;
+  if (!call) return { ...empty, message: "Hovor už nie je dostupný. Mohol sa skončiť alebo už nepatrí do vášho prehľadu." };
+  const browser = input.phone?.call;
+  const matches = Boolean(browser && (browser.sessionId
+    ? browser.sessionId === call.sessionId
+    : browser.telnyxCallControlId && call.browserCallControlIds?.includes(browser.telnyxCallControlId)));
+  const busy = input.busy || input.outboundPending || Boolean(input.phone?.answering);
+  const registered = input.phone?.status === "registered";
+  const canReconnect = !busy && !browser && ["idle", "failed", "superseded"].includes(input.phone?.status ?? "");
+  const base = { ...empty, call };
+  if (call.kind === "active") {
+    return { ...base, message: call.mine ? "Tento hovor práve vybavujete." : call.operatorName ? `Hovor už vybavuje ${call.operatorName}.` : "Hovor už prevzal iný operátor." };
+  }
+  if (matches && browser?.active) return { ...base, message: "Hovor sa pripája alebo už prebieha. Ovládanie je v hornej lište." };
+  if (call.kind === "offer") {
+    if (!call.offeredToMe) return { ...base, message: "Hovor teraz zvoní inému operátorovi. Jeho stav sa priebežne aktualizuje." };
+    if (browser && !matches) return { ...base, message: "Tento telefón má iný hovor. Upozornenie sa týka vyššie uvedeného volajúceho." };
+    if (!registered) return { ...base, canReconnect, message: "Pripojte telefón v tejto aplikácii. Hovor prijmete, keď tu začne zvoniť." };
+    return { ...base, canAnswer: Boolean(matches && browser?.ringing && !busy), message: matches && browser?.ringing
+      ? "Hovor zvoní na tomto telefóne. Prijatie potvrďte tlačidlom."
+      : "Čakám, kým hovor začne zvoniť na tomto telefóne. Samotné upozornenie ho neprijíma." };
+  }
+  if (browser || input.model.active || busy) return { ...base, message: "Hovor čaká. Najprv dokončite svoj rozpracovaný hovor." };
+  if (!registered) return { ...base, canReconnect, message: "Hovor čaká na prevzatie. Najprv pripojte telefón v tejto aplikácii." };
+  if (input.model.ownPresenceStatus !== "available") return { ...base, message: "Hovor čaká. Pre prevzatie zapnite dostupnosť v stave telefónu." };
+  return { ...base, canPickup: true, message: "Hovor stále čaká na operátora. Prevzatie potvrďte tlačidlom." };
+}

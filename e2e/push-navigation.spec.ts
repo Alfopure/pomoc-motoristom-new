@@ -1,9 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 import { isolateBrowserRequests } from "./browser-isolation";
+import { EMPTY_ACTIVE_CALLS } from "../src/lib/telephony/active-calls-model";
 
 const taskId = "task-0517-callback";
 const draftPlate = "PUSH DRAFT";
 const unavailableNotice = "Úloha už nie je dostupná. Skontroluj zoznam úloh.";
+const callSessionId = "4d821f21-cf1c-4a12-aa04-36f64c3eab96";
 
 test.describe.configure({ mode: "serial" });
 test.setTimeout(60_000);
@@ -11,6 +13,7 @@ test.use({ viewport: { width: 390, height: 900 } });
 
 test.beforeEach(async ({ page, baseURL }) => {
   await isolateBrowserRequests(page, baseURL!);
+  await page.route("**/api/telephony/calls/active", (route) => route.fulfill({ json: EMPTY_ACTIVE_CALLS }));
   await page.route("**/api/push/subscriptions*", (route) => route.fulfill({
     json: { configured: false, publicKey: null, subscribed: false, soundEnabled: true },
   }));
@@ -24,6 +27,53 @@ test("cold push link opens the matching task and consumes its query", async ({ p
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByTestId("dispatch-console")).toHaveAttribute("data-mobile-pane", "workspace");
   await expect(page.getByRole("navigation", { name: "Mobilná navigácia" }).locator('[aria-current="page"]')).toHaveAccessibleName("Úlohy");
+});
+
+test("cold call push opens the exact session in the call center without starting a call", async ({ page }) => {
+  const callWrites: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() !== "GET" && /\/api\/telephony\/(?:calls|callbacks)(?:\/|$)/.test(request.url())) callWrites.push(request.url());
+  });
+  await openApp(page, `/?call=${callSessionId}`);
+  const focus = page.getByTestId("call-notification-focus");
+  await expect(focus).toBeVisible();
+  await expect(focus).toHaveAttribute("data-session-id", callSessionId);
+  await expect(page.getByTestId("dispatch-console")).toHaveAttribute("data-active-view", "call-center");
+  await expect(page).toHaveURL(/\/$/);
+  await expect(focus.getByRole("button", { name: "Prijať tento hovor" })).toHaveCount(0);
+  await expect(focus.getByRole("button", { name: "Prevziať čakajúci hovor" })).toHaveCount(0);
+  expect(callWrites).toEqual([]);
+});
+
+test("warm call push acknowledges immediately, protects a draft, then focuses only after discard", async ({ page }) => {
+  await openApp(page);
+  await createDirtyDraft(page);
+  const acknowledged = await page.evaluate((session) => new Promise<boolean>((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = (event) => { channel.port1.close(); resolve(event.data?.handled === true); };
+    navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: { type: "PM_OPEN_CALL_NOTIFICATION", url: `/?call=${session}` }, ports: [channel.port2] }));
+  }), callSessionId);
+  expect(acknowledged).toBe(true);
+  const guard = page.getByRole("dialog", { name: "Rozpracovaný prípad nie je uložený", exact: true });
+  await expect(guard).toBeVisible();
+  await expect(page.getByTestId("call-notification-focus")).toHaveCount(0);
+  await guard.getByRole("button", { name: "Zostať vo formulári", exact: true }).last().click();
+  await expect(page.getByLabel("EČV", { exact: true })).toHaveValue(draftPlate);
+  await sendPushOpen(page, `/?call=${callSessionId}`);
+  await guard.getByRole("button", { name: "Odísť bez uloženia", exact: true }).click();
+  await expect(page.getByTestId("call-notification-focus")).toHaveAttribute("data-session-id", callSessionId);
+  await expect(page.getByTestId("dispatch-console")).toHaveAttribute("data-active-view", "call-center");
+});
+
+test("invalid and conflicting call links cannot navigate away from a draft", async ({ page }) => {
+  await openApp(page);
+  await createDirtyDraft(page);
+  for (const url of [`https://untrusted.example/?call=${callSessionId}`, "/?call=not-a-uuid", `/?call=${callSessionId}&task=${taskId}`]) {
+    await sendPushOpen(page, url);
+    await expect(page.getByLabel("EČV", { exact: true })).toHaveValue(draftPlate);
+    await expect(page.getByRole("dialog", { name: "Rozpracovaný prípad nie je uložený", exact: true })).toBeHidden();
+    await expect(page.getByTestId("call-notification-focus")).toHaveCount(0);
+  }
 });
 
 test("unknown cold push link shows a safe task list without a reload loop", async ({ page }) => {
@@ -110,6 +160,6 @@ async function expectOpenTask(page: Page) {
 
 async function sendPushOpen(page: Page, url: string) {
   await page.evaluate((target) => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", {
-    data: { type: "PM_OPEN_NOTIFICATION", url: target },
+    data: { type: new URL(target, window.location.origin).searchParams.has("call") ? "PM_OPEN_CALL_NOTIFICATION" : "PM_OPEN_NOTIFICATION", url: target },
   })), url);
 }

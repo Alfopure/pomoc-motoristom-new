@@ -34,8 +34,9 @@ import { MOTORIST_TIME_ZONE } from "@/domain/time";
 import { callStatusLabels } from "@/domain/statuses";
 import { CallbackQueuePanel } from "./CallbackQueuePanel";
 import { CallDetailDrawer } from "./CallDetailDrawer";
+import { CallNotificationFocus } from "./CallNotificationFocus";
 import { LiveCallsWorkspace, liveCallOverviewCounts } from "./LiveCallOverview";
-import type { PhoneCallAction } from "./phone-bar-model";
+import { phoneBarFocusedCall, type PhoneCallAction } from "./phone-bar-model";
 import type {
   TelephonyDirectoryContact,
   TelephonyDirectoryResponse,
@@ -45,6 +46,7 @@ import type {
 } from "@/lib/telephony/directory";
 import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
+import type { CallNotificationFocus as NotificationFocus } from "@/lib/telephony/call-notification-target";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import type {
   TelephonyAvailabilityAction,
@@ -57,6 +59,11 @@ import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import styles from "./CallCenterModule.module.css";
 
 type CallCenterModuleProps = {
+  notificationFocus?: NotificationFocus | null;
+  notificationStateStale?: boolean;
+  outboundPending?: boolean;
+  onDismissCallNotification?: () => void;
+  onReconnectPhone?: () => void;
   /** Live telephony surface; `undefined` while no provider is configured. */
   activeSnapshot?: PhoneBarModel;
   telephonyConfigured?: boolean;
@@ -153,6 +160,11 @@ export function customerNumberForCall(call: Pick<CallCenterCall, "calledNumber" 
 }
 
 export function CallCenterModule({
+  notificationFocus,
+  notificationStateStale = false,
+  outboundPending = false,
+  onDismissCallNotification,
+  onReconnectPhone,
   activeSnapshot,
   telephonyConfigured = false,
   phone,
@@ -330,6 +342,20 @@ export function CallCenterModule({
 
   return (
     <main className={`${styles.module} min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-zinc-50 p-3 sm:p-4`}>
+      {notificationFocus && <CallNotificationFocus
+        focus={notificationFocus}
+        model={activeSnapshot}
+        phone={phone}
+        configured={telephonyConfigured && Boolean(activeSnapshot?.configured)}
+        stale={notificationStateStale}
+        busy={busyCallAction !== null}
+        outboundPending={outboundPending}
+        onRefresh={onTelephonyChanged}
+        onDismiss={() => onDismissCallNotification?.()}
+        onReconnect={() => onReconnectPhone?.()}
+        onAnswer={onAnswer}
+        onPickup={(sessionId) => onCallAction("pickup", sessionId)}
+      />}
       <CallCenterCommandDeck
         activeSnapshot={activeSnapshot}
         busy={phoneScopeBusy(busyAction)}
@@ -351,7 +377,8 @@ export function CallCenterModule({
           model={activeSnapshot}
           presences={operatorPresences}
           canManageCalls={canManageCalls}
-          browserOfferRinging={phone?.call?.ringing ?? false}
+          browserOfferRinging={Boolean(phone?.call?.ringing && !phone.answering)}
+          browserOfferSessionId={phoneBarFocusedCall(activeSnapshot, phone?.call ?? null)?.sessionId ?? null}
           onAnswer={onAnswer}
           onRejectOffer={onRejectOffer}
           onCallAction={onCallAction}

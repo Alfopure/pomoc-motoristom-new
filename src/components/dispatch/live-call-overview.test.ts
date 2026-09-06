@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
 
-import { liveCallOperatorLabel, liveCallOverviewCounts } from "./LiveCallOverview";
+import { HeaderLiveCallsMenu, LiveCallsWorkspace, liveCallOperatorLabel, liveCallOverviewCounts } from "./LiveCallOverview";
 
 function call(overrides: Partial<PhoneBarCall> = {}): PhoneBarCall {
   return {
@@ -115,4 +117,34 @@ describe("liveCallOperatorLabel", () => {
     }))).toBe("Externý telefón: +421 905 111 222");
     expect(liveCallOperatorLabel(call({ kind: "offer", state: "ringing", answered: false, offeredOperatorNames: ["Lenka", "Peter"] }))).toBe("Zvoní: Lenka, Peter");
   });
+});
+
+describe("live call invite actions", () => {
+  const offers = [
+    call({ sessionId: "first-session", callerName: "Prvý volajúci", kind: "offer", state: "ringing", offeredToMe: true }),
+    call({ sessionId: "second-session", callerName: "Druhý volajúci", kind: "offer", state: "ringing", offeredToMe: true }),
+  ];
+  const common = {
+    model: { ...model(offers), offers }, presences: [], canManageCalls: false, busyAction: null, browserOfferRinging: true,
+    onAnswer() {}, onRejectOffer() {}, onCallAction() {}, onSupervise() {}, onStopSupervise() {}, onNewCase() {}, onOpenCase() {},
+  };
+  for (const component of [HeaderLiveCallsMenu, LiveCallsWorkspace]) {
+    it(`${component.name} only answers/rejects the correlated second invite`, () => {
+      const html = renderToStaticMarkup(createElement(component, { ...common, browserOfferSessionId: "second-session" }));
+      const rows = html.match(/<article\b[\s\S]*?<\/article>/g)!;
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toContain("Prvý volajúci");
+      expect(rows[0]).not.toContain("Prijať");
+      expect(rows[0]).not.toContain("Odmietnuť");
+      expect(rows[1]).toContain("Druhý volajúci");
+      expect(rows[1]).toContain("Prijať");
+      expect(rows[1]).toContain("Odmietnuť");
+    });
+
+    it(`${component.name} waits for correlation instead of guessing from an offered row`, () => {
+      const html = renderToStaticMarkup(createElement(component, { ...common, browserOfferSessionId: null }));
+      expect(html).not.toContain("Prijať");
+      expect(html).not.toContain("Odmietnuť");
+    });
+  }
 });

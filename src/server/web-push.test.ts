@@ -4,16 +4,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "@/lib/supabase/database.types";
 import {
   deletePushSubscription, getPushConfig, getPushSubscriptionStatus, parsePushSubscription,
-  savePushSubscription, sendTaskPush, sendTestPush, updatePushSound, validatePushEndpoint,
+  savePushSubscription, sendTaskPush, sendTestPush, sendCallPush, updatePushSound, updatePushPreferences, validatePushEndpoint,
 } from "./web-push";
 
 const { sendNotification } = vi.hoisted(() => ({ sendNotification: vi.fn() }));
 vi.mock("web-push", () => ({ default: { sendNotification } }));
 
-type DbResult = { data?: unknown; error?: { code?: string; message: string } | null };
+type DbResult = { data?: unknown; error?: { code?: string; message: string } | null; wait?: Promise<void>; beforeResolve?: () => void };
 function database(results: DbResult[], configResult: DbResult = { data: null }) {
   const queries: { table: string; operations: { name: string; args: unknown[] }[] }[] = [];
-  const rpc = vi.fn().mockResolvedValue({ error: null, ...configResult });
+  const rpc = vi.fn().mockImplementation(() => {
+    const request = Object.assign(Promise.resolve({ error: null, ...configResult }), { abortSignal: vi.fn() });
+    request.abortSignal.mockReturnValue(request);
+    return request;
+  });
   const db = {
     rpc,
     from(table: string) {
@@ -22,7 +26,11 @@ function database(results: DbResult[], configResult: DbResult = { data: null }) 
       const operations: { name: string; args: unknown[] }[] = [];
       queries.push({ table, operations });
       const chain = new Proxy({}, { get(_target, name: string) {
-        if (name === "then") return (resolve: (value: unknown) => unknown) => Promise.resolve({ data: null, error: null, ...result }).then(resolve);
+        if (name === "then") return async (resolve: (value: unknown) => unknown) => {
+          await result.wait;
+          result.beforeResolve?.();
+          return resolve({ data: null, error: null, ...result });
+        };
         return (...args: unknown[]) => { operations.push({ name, args }); return chain; };
       } });
       return chain;
@@ -47,6 +55,8 @@ const row = {
   sound_enabled: false, expires_at: null, last_test_at: null,
 };
 const message = { organizationId: actor.organizationId, recipientProfileId: actor.profileId, notificationId: "notification-a", taskId: "task-a", title: "Nová úloha", body: "Zavolajte klientovi" };
+const callRow = { ...row, task_notifications_enabled: true, incoming_calls_enabled: true, available_calls_enabled: true };
+const callMessage = () => ({ organizationId: actor.organizationId, recipientProfileId: actor.profileId, sessionId: "09b1967e-c23c-4db1-88de-1b08ce233ae8", category: "incoming_call" as const, title: "Prichádzajúci hovor", body: "Otvorte aplikáciu.", expiresAt: new Date(Date.now() + 25_000).toISOString() });
 
 beforeEach(() => {
   vi.stubEnv("VAPID_PUBLIC_KEY", key.getPublicKey().toString("base64url"));
@@ -54,7 +64,199 @@ beforeEach(() => {
   vi.stubEnv("VAPID_SUBJECT", "https://test.dispecing.linkapomoci.sk");
   sendNotification.mockReset().mockResolvedValue({ statusCode: 201 });
 });
-afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+describe("device notification categories", () => {
+  it("updates only the requested category and scopes it to the authenticated owner", async () => {
+    const { db, queries } = database([{ data: { id: row.id } }]);
+    await updatePushPreferences(db, actor, row.endpoint, { incomingCallsEnabled: false, profileId: "someone-else" });
+    expect(queries[0].operations).toEqual(expect.arrayContaining([
+      { name: "update", args: [{ incoming_calls_enabled: false }] },
+      { name: "eq", args: ["organization_id", actor.organizationId] },
+      { name: "eq", args: ["profile_id", actor.profileId] },
+      { name: "eq", args: ["endpoint", row.endpoint] },
+    ]));
+  });
+
+  it.each([{}, [], null, { incomingCallsEnabled: "false" }, { availableCallsEnabled: null }, { taskNotificationsEnabled: 0 }])("rejects invalid or empty settings %j", async (input) => {
+    const { db } = database([]);
+    await expect(updatePushPreferences(db, actor, row.endpoint, input)).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("returns the actual device choices and reports legacy schemas without breaking task pushes", async () => {
+    const { db } = database([{ data: { ...callRow, incoming_calls_enabled: false, task_notifications_enabled: false } }]);
+    expect(await getPushSubscriptionStatus(db, actor, row.endpoint)).toMatchObject({ subscribed: true, callNotificationsConfigured: true, incomingCallsEnabled: false, availableCallsEnabled: true, taskNotificationsEnabled: false });
+    const legacy = database([{ error: { code: "42703", message: "column task_notifications_enabled does not exist" } }]);
+    expect(await getPushSubscriptionStatus(legacy.db, actor)).toMatchObject({ configured: true, callNotificationsConfigured: false });
+  });
+
+  it.each([null, { ...callRow, expires_at: "2020-01-01T00:00:00.000Z" }])("reports category capability even when an endpoint is missing or expired", async (subscriptionRow) => {
+    const { db, queries } = database([{ data: subscriptionRow }, { data: [] }]);
+    expect(await getPushSubscriptionStatus(db, actor, row.endpoint)).toMatchObject({ subscribed: false, callNotificationsConfigured: true });
+    expect(queries[1].operations).toEqual(expect.arrayContaining([
+      { name: "eq", args: ["organization_id", actor.organizationId] }, { name: "eq", args: ["profile_id", actor.profileId] },
+    ]));
+    const legacy = database([{ data: subscriptionRow }, { error: { code: "42703", message: "column incoming_calls_enabled does not exist" } }]);
+    expect(await getPushSubscriptionStatus(legacy.db, actor, row.endpoint)).toMatchObject({ subscribed: false, callNotificationsConfigured: false });
+  });
+
+  it("task opt-out filters only that device, leaving other device subscriptions enabled", async () => {
+    const { db } = database([{ data: { id: actor.profileId } }, { data: [{ ...callRow, task_notifications_enabled: false }, { ...callRow, id: "sub-b", endpoint: "https://fcm.googleapis.com/fcm/send/second" }] }]);
+    expect(await sendTaskPush(db, message)).toEqual({ sent: 1, failed: 0 });
+    expect(sendNotification).toHaveBeenCalledOnce();
+    expect(sendNotification.mock.calls[0][0].endpoint).toContain("second");
+  });
+});
+
+describe("short-lived call push delivery", () => {
+  it("claims once before sending with a call link, short TTL, category and device sound", async () => {
+    const { db, queries } = database([{ data: { id: actor.profileId } }, { data: [callRow] }, { data: { id: "claim-a" } }, { data: callRow }]);
+    const input = callMessage();
+    expect(await sendCallPush(db, input)).toEqual({ sent: 1, failed: 0 });
+    const payload = JSON.parse(sendNotification.mock.calls[0][1]);
+    expect(payload).toMatchObject({ url: `/?call=${input.sessionId}`, tag: `call-${input.sessionId}`, callSessionId: input.sessionId, callKind: "incoming_call", expiresAt: input.expiresAt, soundEnabled: false });
+    expect(sendNotification.mock.calls[0][2]).toMatchObject({ urgency: "high", timeout: 2000 });
+    expect(sendNotification.mock.calls[0][2].TTL).toBeLessThanOrEqual(25);
+    expect(sendNotification.mock.calls[0][2].TTL).toBeGreaterThan(0);
+    const claim = queries[2].operations.find((op) => op.name === "upsert")!;
+    expect(claim.args[0]).toMatchObject({ organization_id: actor.organizationId, recipient_profile_id: actor.profileId, visibility: "private", status: "archived", dedupe_key: `call-push:${input.sessionId}:${actor.profileId}:incoming_call` });
+    expect(claim.args[1]).toEqual({ onConflict: "organization_id,dedupe_key", ignoreDuplicates: true });
+  });
+
+  it("repeated webhook/claim conflicts never send another push", async () => {
+    for (const result of [{ data: null }, { error: { code: "23505", message: "already claimed" } }]) {
+      const { db } = database([{ data: { id: actor.profileId } }, { data: [callRow] }, result]);
+      expect(await sendCallPush(db, callMessage())).toEqual({ sent: 0, failed: 0 });
+    }
+    expect(sendNotification).not.toHaveBeenCalled();
+  });
+
+  it("incoming and available-call opt-outs are independent", async () => {
+    const disabledIncoming = { ...callRow, incoming_calls_enabled: false };
+    const { db } = database([{ data: { id: actor.profileId } }, { data: [disabledIncoming] }]);
+    expect(await sendCallPush(db, callMessage())).toEqual({ sent: 0, failed: 0 });
+    const allowed = database([{ data: { id: actor.profileId } }, { data: [disabledIncoming] }, { data: { id: "claim" } }, { data: disabledIncoming }]);
+    expect(await sendCallPush(allowed.db, { ...callMessage(), category: "available_call" })).toEqual({ sent: 1, failed: 0 });
+    expect(sendNotification).toHaveBeenCalledOnce();
+  });
+
+  it("missing category columns, no subscriptions and inactive users fail closed", async () => {
+    for (const devices of [[], [row], [{ ...callRow, available_calls_enabled: false }]]) {
+      const { db } = database([{ data: { id: actor.profileId } }, { data: devices }]);
+      expect(await sendCallPush(db, { ...callMessage(), category: "available_call" })).toEqual({ sent: 0, failed: 0 });
+    }
+    expect(await sendCallPush(database([{}]).db, callMessage())).toEqual({ sent: 0, failed: 0 });
+    expect(sendNotification).not.toHaveBeenCalled();
+  });
+
+  it("does not send expired calls or retry a transient failure after the ringing window", async () => {
+    expect(await sendCallPush(database([]).db, { ...callMessage(), expiresAt: new Date(Date.now() - 1).toISOString() })).toEqual({ sent: 0, failed: 0 });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    sendNotification.mockRejectedValue({ statusCode: 503, body: "private-provider-error" });
+    const { db } = database([{ data: { id: actor.profileId } }, { data: [callRow] }, { data: { id: "claim" } }, { data: callRow }]);
+    expect(await sendCallPush(db, { ...callMessage(), expiresAt: new Date(Date.now() + 400).toISOString() })).toEqual({ sent: 0, failed: 1 });
+    expect(sendNotification).toHaveBeenCalledOnce();
+    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain("private-provider-error");
+  });
+
+  it("cleans an expired push endpoint with owner scoping", async () => {
+    sendNotification.mockRejectedValue({ statusCode: 410 });
+    const { db, queries } = database([{ data: { id: actor.profileId } }, { data: [callRow] }, { data: { id: "claim" } }, { data: callRow }, {}]);
+    expect(await sendCallPush(db, callMessage())).toEqual({ sent: 0, failed: 0 });
+    expect(sendNotification).toHaveBeenCalledOnce();
+    expect(queries[4].operations).toEqual(expect.arrayContaining([
+      { name: "eq", args: ["organization_id", actor.organizationId] },
+      { name: "eq", args: ["profile_id", actor.profileId] },
+      { name: "eq", args: ["id", row.id] },
+    ]));
+  });
+
+  it("delivers to more than ten devices with bounded concurrency instead of silently discarding the rest", async () => {
+    const devices = Array.from({ length: 23 }, (_, index) => ({ ...callRow, id: `device-${index}`, endpoint: `${row.endpoint}-${index}` }));
+    const { db } = database([{ data: { id: actor.profileId } }, { data: devices }, { data: { id: "claim" } }, ...devices.map((device) => ({ data: device }))]);
+    let active = 0;
+    let maxActive = 0;
+    sendNotification.mockImplementation(async () => {
+      active++;
+      maxActive = Math.max(active, maxActive);
+      await Promise.resolve();
+      active--;
+      return { statusCode: 201 };
+    });
+    expect(await sendCallPush(db, callMessage())).toEqual({ sent: 23, failed: 0 });
+    expect(sendNotification).toHaveBeenCalledTimes(23);
+    expect(maxActive).toBeLessThanOrEqual(10);
+    expect(new Set(sendNotification.mock.calls.map(([subscription]) => subscription.endpoint)).size).toBe(23);
+  });
+
+  it.each([null, { ...callRow, incoming_calls_enabled: false }])("honors deletion or opt-out completed while the durable claim was pending", async (current) => {
+    let release!: () => void;
+    const claimWait = new Promise<void>((resolve) => { release = resolve; });
+    const { db, queries } = database([{ data: { id: actor.profileId } }, { data: [callRow] }, { data: { id: "claim" }, wait: claimWait }, { data: current }]);
+    const pending = sendCallPush(db, callMessage());
+    await vi.waitFor(() => expect(queries).toHaveLength(3));
+    expect(sendNotification).not.toHaveBeenCalled();
+    release();
+    expect(await pending).toEqual({ sent: 0, failed: 0 });
+    expect(sendNotification).not.toHaveBeenCalled();
+    expect(queries[3].operations).toEqual(expect.arrayContaining([
+      { name: "eq", args: ["organization_id", actor.organizationId] }, { name: "eq", args: ["profile_id", actor.profileId] },
+      { name: "eq", args: ["id", row.id] }, { name: "eq", args: ["endpoint", row.endpoint] },
+      { name: "eq", args: ["incoming_calls_enabled", true] },
+    ]));
+  });
+
+  it("uses the device sound setting current at delivery, not the pre-claim snapshot", async () => {
+    const { db } = database([{ data: { id: actor.profileId } }, { data: [callRow] }, { data: { id: "claim" } }, { data: { ...callRow, sound_enabled: true } }]);
+    expect(await sendCallPush(db, callMessage())).toEqual({ sent: 1, failed: 0 });
+    expect(JSON.parse(sendNotification.mock.calls[0][1]).soundEnabled).toBe(true);
+  });
+
+  it.each([{ statusCode: 503 }, { code: "ECONNRESET" }, { statusCode: 429, headers: { "retry-after": "0.1" } }])("retries once inside the call deadline and keeps the collapse topic: %j", async (failure) => {
+    sendNotification.mockRejectedValueOnce(failure).mockResolvedValueOnce({ statusCode: 201 });
+    const { db } = database([{ data: { id: actor.profileId } }, { data: [callRow] }, { data: { id: "claim" } }, { data: callRow }, { data: callRow }]);
+    expect(await sendCallPush(db, callMessage())).toEqual({ sent: 1, failed: 0 });
+    expect(sendNotification).toHaveBeenCalledTimes(2);
+    expect(sendNotification.mock.calls[0][2].topic).toBe(sendNotification.mock.calls[1][2].topic);
+    expect(sendNotification.mock.calls[1][2].TTL).toBeLessThanOrEqual(sendNotification.mock.calls[0][2].TTL);
+  });
+
+  it("rechecks the device category after provider backoff and suppresses a disabled retry", async () => {
+    sendNotification.mockRejectedValueOnce({ statusCode: 503 });
+    const { db } = database([{ data: { id: actor.profileId } }, { data: [callRow] }, { data: { id: "claim" } }, { data: callRow }, { data: { ...callRow, incoming_calls_enabled: false } }]);
+    expect(await sendCallPush(db, callMessage())).toEqual({ sent: 0, failed: 0 });
+    expect(sendNotification).toHaveBeenCalledOnce();
+  });
+
+  it("checks expiry again after a delayed retry timer before issuing a second provider request", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-09-25T10:00:00.000Z");
+    const input = { ...callMessage(), expiresAt: new Date(Date.now() + 1_000).toISOString() };
+    sendNotification.mockRejectedValueOnce({ statusCode: 503 });
+    const { db, queries } = database([{ data: { id: actor.profileId } }, { data: [callRow] }, { data: { id: "claim" } }, { data: callRow }]);
+    const pending = sendCallPush(db, input);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendNotification).toHaveBeenCalledOnce();
+    vi.setSystemTime("2026-09-25T10:00:02.000Z");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await pending).toEqual({ sent: 0, failed: 0 });
+    expect(sendNotification).toHaveBeenCalledOnce();
+    expect(queries).toHaveLength(4);
+  });
+
+  it("counts every remaining device if the bounded delivery budget is consumed", async () => {
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const devices = Array.from({ length: 23 }, (_, index) => ({ ...callRow, id: `device-${index}`, endpoint: `${row.endpoint}-${index}` }));
+    const { db } = database([
+      { data: { id: actor.profileId } }, { data: devices },
+      { data: { id: "claim" }, beforeResolve: () => vi.mocked(Date.now).mockReturnValue(now + 5_001) },
+    ]);
+    expect(await sendCallPush(db, { ...callMessage(), expiresAt: new Date(now + 25_000).toISOString() })).toEqual({ sent: 0, failed: 23 });
+    expect(sendNotification).not.toHaveBeenCalled();
+  });
+});
 
 describe("push subscription validation", () => {
   it.each([
@@ -123,9 +325,9 @@ describe("server-only Vault configuration", () => {
 
   it("does not expose private configuration or Vault metadata in device status", async () => {
     clearVapidEnvironment();
-    const { db } = database([], { data: { ...config, unrelatedSecret: "private-metadata" } });
+    const { db } = database([{ data: [] }], { data: { ...config, unrelatedSecret: "private-metadata" } });
     const status = await getPushSubscriptionStatus(db, actor);
-    expect(status).toEqual({ configured: true, publicKey: config.publicKey, subscribed: false, soundEnabled: true });
+    expect(status).toMatchObject({ configured: true, publicKey: config.publicKey, subscribed: false, soundEnabled: true, callNotificationsConfigured: true });
     expect(JSON.stringify(status)).not.toContain(config.privateKey);
     expect(JSON.stringify(status)).not.toContain("private-metadata");
   });
@@ -135,7 +337,7 @@ describe("server-only Vault configuration", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const { db, rpc } = database([], { error: { code: "42501", message: "secret-database-detail" } });
-    expect(await getPushSubscriptionStatus(db, actor)).toEqual({ configured: false, publicKey: null, subscribed: false, soundEnabled: true });
+    expect(await getPushSubscriptionStatus(db, actor)).toMatchObject({ configured: false, publicKey: null, subscribed: false, soundEnabled: true, callNotificationsConfigured: false });
     rpc.mockRejectedValueOnce(new Error("secret-transport-detail"));
     expect(await getPushConfig(db)).toBeNull();
     expect(warn).not.toHaveBeenCalled();

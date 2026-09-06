@@ -1,4 +1,5 @@
 import "server-only";
+import { after } from "next/server";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
@@ -25,6 +26,8 @@ import type { ProcessorDeps } from "./telnyx/event-processor";
  */
 
 export type TelephonyRuntimeDeps = CallActionDeps & ProcessorDeps;
+const CALL_PUSH_SESSION_CONCURRENCY = 3;
+const CALL_PUSH_QUEUE_BUDGET_MS = 15_000;
 
 /** `production` only on the Vercel production deployment; preview/dev share the dev credential connection. */
 export function telephonyEnvironment(env: EnvRecord = process.env): TelephonyEnvironment {
@@ -58,6 +61,8 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
   const organizationId = options.organizationId ?? (await resolveDefaultOrganizationId());
   const config = options.config ?? getTelnyxConfig();
   const environment = telephonyEnvironment();
+  const pendingCallNotifications = new Set<string>();
+  let callNotificationsScheduled = false;
 
   let telnyx: TelnyxClient | null = null;
   if (config.configured) {
@@ -77,6 +82,44 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
     environment,
     sweepAfterEvent: options.sweepAfterEvent,
     logger: options.logger ?? telephonyLogger,
+    onCallTransition: (sessionId) => {
+      pendingCallNotifications.add(sessionId);
+      if (callNotificationsScheduled) return;
+      callNotificationsScheduled = true;
+      // Web Push runs after Telnyx has its response and every session lease has
+      // been released. One queue also bounds a cron/sweep backlog across calls.
+      try {
+        after(async () => {
+          const logger = options.logger ?? telephonyLogger;
+          const sessions = [...pendingCallNotifications];
+          const deadlineAt = Date.now() + CALL_PUSH_QUEUE_BUDGET_MS;
+          let cursor = 0;
+          try {
+            const { notifyCallState } = await import("./call-notifications");
+            const worker = async () => {
+              while (cursor < sessions.length && Date.now() < deadlineAt) {
+                const queuedSessionId = sessions[cursor++];
+                try {
+                  const result = await notifyCallState({ admin, organizationId, environment, deadlineAt }, queuedSessionId);
+                  if (result.failed) logger({ level: "warn", scope: "call-push", sessionId: queuedSessionId, message: "notification delivery incomplete", failed: result.failed });
+                } catch {
+                  logger({ level: "warn", scope: "call-push", sessionId: queuedSessionId, message: "notification delivery unavailable" });
+                }
+              }
+            };
+            await Promise.all(Array.from({ length: Math.min(CALL_PUSH_SESSION_CONCURRENCY, sessions.length) }, worker));
+          } catch {
+            logger({ level: "warn", scope: "call-push", message: "notification delivery unavailable" });
+          }
+          // No claim has been made for skipped sessions: their next ordinary
+          // webhook/poll sweep can retry them without losing a notification.
+          if (cursor < sessions.length) logger({ level: "warn", scope: "call-push", message: "notification queue budget reached", skipped: sessions.length - cursor });
+        });
+      } catch {
+        callNotificationsScheduled = false;
+        (options.logger ?? telephonyLogger)({ level: "warn", scope: "call-push", sessionId, message: "notification scheduling unavailable" });
+      }
+    },
     // Loaded lazily: `telephony-workflow` pulls in the whole dispatch repository,
     // which must stay off the webhook cold path until an inbound call needs a match.
     findCallerMatches: async (number: string) => {
