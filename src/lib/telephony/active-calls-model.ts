@@ -38,6 +38,8 @@ export type ActiveCallDirection = "inbound" | "outbound" | "internal";
 
 export type ActiveCallLegPayload = {
   id: string;
+  /** Present only for the polling actor's operator/consult media legs. */
+  callControlId?: string | null;
   role: "customer" | "operator" | "consult" | "supervisor" | "external";
   profileId: string | null;
   state: string;
@@ -203,6 +205,8 @@ export type PhoneBarCallKind = "active" | "offer" | "waiting";
 export type PhoneBarCall = {
   sessionId: string;
   callId: string | null;
+  /** Exact browser invite identities; never derived from a phone number. */
+  browserCallControlIds?: string[];
   kind: PhoneBarCallKind;
   state: ActiveCallSessionState;
   direction: ActiveCallDirection;
@@ -323,6 +327,11 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
   return {
     sessionId: call.sessionId,
     callId: call.callId,
+    browserCallControlIds: [...new Set(call.legs.flatMap((leg) =>
+      leg.profileId === actorProfileId && (leg.role === "operator" || leg.role === "consult") && leg.callControlId
+        ? [leg.callControlId]
+        : [],
+    ))],
     kind,
     state: call.state,
     direction: call.direction,
