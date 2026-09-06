@@ -5,6 +5,7 @@ import { buildNotificationDedupeKey, buildReminderDedupeKey, buildTaskNotificati
 import type { CaseTask } from "@/domain/types";
 import type { Database } from "@/lib/supabase/database.types";
 import { buildAppUrl, escapeHtml, sendEmail } from "./email-delivery";
+import { sendTaskPush } from "./web-push";
 
 type AdminClient = SupabaseClient<Database>;
 type Tables = Database["public"]["Tables"];
@@ -93,6 +94,8 @@ export async function createTaskAssignmentNotification(
   const taskView = mapTaskRow(input.task as CaseTaskRow);
   const caseNumber = caseResult.data?.case_number;
   const version = input.task.updated_at || input.task.created_at;
+  const title = caseNumber ? `${caseNumber}: nová pridelená úloha` : "Nová pridelená úloha";
+  const body = `${input.task.title} · termín ${formatAssignmentDue(input.task.due_at)}`;
   const result = await supabase
     .from("motorist_notifications")
     .upsert({
@@ -104,8 +107,8 @@ export async function createTaskAssignmentNotification(
       visibility: "private",
       kind: "task_due",
       severity: notificationSeverityForTask(taskView),
-      title: caseNumber ? `${caseNumber}: nová pridelená úloha` : "Nová pridelená úloha",
-      body: `${input.task.title} · termín ${formatAssignmentDue(input.task.due_at)}`,
+      title,
+      body,
       status: "unread",
       delivery_status: "in_app",
       dedupe_key: `task-assigned:${input.task.id}:${input.task.assigned_to}:${version}`,
@@ -116,6 +119,12 @@ export async function createTaskAssignmentNotification(
 
   if (isDuplicateError(result.error) || isNotificationSchemaMiss(result.error)) return null;
   throwOnSupabaseError(result);
+  if (result.data) {
+    await sendTaskPush(supabase, {
+      organizationId: input.organizationId, recipientProfileId: input.task.assigned_to,
+      notificationId: result.data.id, taskId: input.task.id, title, body,
+    });
+  }
   return result.data;
 }
 
@@ -322,6 +331,10 @@ async function createNotificationForReminder(input: {
     return { ok: true };
   }
 
+  await sendTaskPush(input.supabase, {
+    organizationId: input.organizationId, recipientProfileId: input.reminder.recipient_profile_id,
+    notificationId: notificationResult.data.id, taskId: input.task.id, title: text.title, body: text.body,
+  });
   return { ok: true };
 }
 

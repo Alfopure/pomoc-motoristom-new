@@ -1,4 +1,4 @@
-const CACHE_NAME = "pm-dispatch-shell-v4";
+const CACHE_NAME = "pm-dispatch-shell-v5";
 const APP_SHELL_PATHS = ["/offline", "/icon-192", "/icon", "/apple-icon", "/manifest.webmanifest"];
 
 self.addEventListener("install", function (event) {
@@ -58,4 +58,101 @@ async function cacheFirst(request) {
     await cache.put(request, response.clone());
   }
   return response;
+}
+
+self.addEventListener("push", function (event) {
+  // Always display a notification, including in the foreground. Silent push is
+  // not supported on Safari and can cause the browser to revoke permission.
+  event.waitUntil(showPushNotification(event));
+});
+
+async function showPushNotification(event) {
+  let payload = {};
+  try {
+    const parsed = event.data ? event.data.json() : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) payload = parsed;
+  } catch {
+    // An invalid payload still produces a safe, useful notification.
+  }
+  const options = {
+    body: typeof payload.body === "string" ? payload.body.slice(0, 300) : "V dispečingu máš nové upozornenie.",
+    icon: "/icon-192",
+    badge: "/icon-192",
+    tag: typeof payload.tag === "string" ? payload.tag.slice(0, 150) : "pm-dispatch-notification",
+    silent: payload.soundEnabled === false,
+    data: { url: safeNotificationUrl(payload.url) },
+  };
+  // The Notifications API rejects a vibration pattern with silent: true.
+  if (!options.silent) options.vibrate = [150, 70, 150];
+  const title = typeof payload.title === "string" && payload.title.trim()
+    ? payload.title.slice(0, 120)
+    : "Pomoc Motoristom";
+  await self.registration.showNotification(title, options);
+}
+
+function safeNotificationUrl(value) {
+  const fallback = new URL("/", self.location.origin);
+  try {
+    const candidate = new URL(typeof value === "string" ? value : "/", self.location.origin);
+    if (candidate.origin !== self.location.origin || candidate.pathname !== "/" || candidate.username || candidate.password) return fallback.href;
+    // Only dispatch deep links are allowed: never navigate to APIs, external
+    // pages, JavaScript URLs, login redirects or customer location links.
+    const task = candidate.searchParams.get("task");
+    if (task && /^[a-zA-Z0-9_-]{1,100}$/.test(task)) fallback.searchParams.set("task", task);
+    return fallback.href;
+  } catch {
+    return fallback.href;
+  }
+}
+
+self.addEventListener("notificationclick", function (event) {
+  event.notification.close();
+  event.waitUntil(openNotification(event.notification.data?.url));
+});
+
+async function openNotification(value) {
+  const url = safeNotificationUrl(value);
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  for (const client of windows) {
+    const current = new URL(client.url);
+    if (current.origin !== self.location.origin || current.pathname !== "/") continue;
+    try {
+      await client.focus();
+      // The application uses its existing unsaved-work guard before opening
+      // the task. A login screen or a page that has not hydrated cannot handle
+      // this message, so preserve the task URL through normal navigation there.
+      if (await requestNotificationOpen(client, url)) return;
+      if (typeof client.navigate === "function" && await client.navigate(url)) return;
+    } catch {
+      // A window may close between enumeration and navigation; try the next one.
+    }
+  }
+  await self.clients.openWindow(url);
+}
+
+function requestNotificationOpen(client, url) {
+  return new Promise(function (resolve) {
+    const channel = new MessageChannel();
+    let settled = false;
+    const timer = setTimeout(function () { finish(false); }, 1000);
+    function finish(handled) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      channel.port1.onmessage = null;
+      channel.port1.close();
+      resolve(handled);
+    }
+    channel.port1.onmessage = function (event) {
+      // The console acknowledges receipt before showing its unsaved-work
+      // dialog. Waiting for the user's decision must never trigger a reload.
+      if (event.data?.handled === true) finish(true);
+    };
+    try {
+      client.postMessage({ type: "PM_OPEN_NOTIFICATION", url }, [channel.port2]);
+    } catch {
+      channel.port2.close();
+      finish(false);
+    }
+  });
 }

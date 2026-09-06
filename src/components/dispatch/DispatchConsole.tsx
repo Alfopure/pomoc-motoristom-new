@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   BarChart3,
+  ArrowLeft,
   BellRing,
   CalendarDays,
   ChevronDown,
@@ -13,6 +14,7 @@ import {
   Loader2,
   LogOut,
   Menu,
+  MapPinned,
   PhoneOff,
   Pin,
   PinOff,
@@ -55,6 +57,7 @@ import {
   type PinnableNavigationView,
 } from "./navigation-preferences";
 import { signOutCurrentSession } from "@/components/auth/sign-out";
+import { PushNotificationSync } from "@/components/pwa/PushNotificationSync";
 import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
 import { formatNotificationReminderTime, isNotificationForProfile, isNotificationReady, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
@@ -254,6 +257,8 @@ export function DispatchConsole({
     users[0]?.name ||
     "Prihlásený používateľ";
   const [activeView, setActiveView] = useState<View>("dispatch");
+  const [mobilePane, setMobilePane] = useState<"cases" | "workspace">("cases");
+  const pushDeepLinkHandled = useRef(false);
   const fleetRefresh = useFleetRefresh(source === "supabase" && ["dispatch", "fleet", "cases"].includes(activeView), setDispatchData);
   const [pinnedNavigationViews, setPinnedNavigationViews] = useState<PinnableNavigationView[]>([
     ...DEFAULT_PINNED_NAVIGATION_VIEWS,
@@ -309,6 +314,19 @@ export function DispatchConsole({
 
   useEffect(() => {
     consoleRef.current?.setAttribute("data-hydrated", "true");
+  }, []);
+
+  useEffect(() => {
+    // Resolve only against data the signed-in viewer is allowed to load.
+    // A push link survives the login form because it keeps the current URL.
+    if (pushDeepLinkHandled.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      const url = new URL(window.location.href);
+      if (!url.searchParams.has("task")) return;
+      pushDeepLinkHandled.current = true;
+      handleInitialPushOpen(url.href);
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   useEffect(() => {
@@ -737,16 +755,18 @@ export function DispatchConsole({
   function selectCase(caseId: string) {
     return requestNavigation(() => {
       setActiveCaseId(caseId);
+      setMobilePane("workspace");
       setFocusedTaskId(undefined);
-      setWorkspace({ kind: "cockpit", mode: "split" });
+      setWorkspace({ kind: "cockpit", mode: window.matchMedia("(max-width: 1023px)").matches ? "expanded" : "split" });
     });
   }
 
   function openCase(caseId: string) {
     requestNavigation(() => {
       setActiveCaseId(caseId);
+      setMobilePane("workspace");
       setFocusedTaskId(undefined);
-      setWorkspace({ kind: "cockpit", mode: "split" });
+      setWorkspace({ kind: "cockpit", mode: window.matchMedia("(max-width: 1023px)").matches ? "expanded" : "split" });
       setActiveView("dispatch");
     });
   }
@@ -754,6 +774,7 @@ export function DispatchConsole({
   function openCaseDetail(caseId: string) {
     requestNavigation(() => {
       setActiveCaseId(caseId);
+      setMobilePane("workspace");
       setFocusedTaskId(undefined);
       returnViewRef.current = activeView;
       if (activeView !== "cases") {
@@ -763,16 +784,64 @@ export function DispatchConsole({
     });
   }
 
-  function openTask(taskId: string, caseId: string) {
+  function openTask(taskId: string, caseId: string, fromPush = false) {
     requestNavigation(() => {
+      if (!dispatchCases.some((item) => item.id === caseId && item.tasks.some((task) => task.id === taskId))) {
+        window.location.assign(`/?task=${encodeURIComponent(taskId)}`);
+        return;
+      }
       acknowledgeTaskNotifications(taskId);
-      returnViewRef.current = activeView;
+      returnViewRef.current = fromPush ? "tasks" : activeView;
+      if (fromPush) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("task");
+        window.history.replaceState(window.history.state, "", url);
+      }
       setActiveCaseId(caseId);
+      setMobilePane("workspace");
       setActiveView("dispatch");
       setFocusedTaskId(taskId);
       setWorkspace({ kind: "detail", mode: "expanded" });
     });
   }
+
+  const handleInitialPushOpen = useEffectEvent((rawUrl: string) => {
+    const taskId = new URL(rawUrl).searchParams.get("task");
+    const caseItem = taskId && dispatchCases.find((item) => item.tasks.some((task) => task.id === taskId));
+    if (taskId && caseItem) openTask(taskId, caseItem.id, true);
+    else {
+      switchView("tasks");
+      setMutationNotice("Úloha už nie je dostupná. Skontroluj zoznam úloh.");
+    }
+  });
+
+  const handlePushOpen = useEffectEvent((rawUrl: unknown) => {
+    if (typeof rawUrl !== "string") return;
+    let url: URL;
+    try { url = new URL(rawUrl, window.location.origin); } catch { return; }
+    if (url.origin !== window.location.origin || url.pathname !== "/") return;
+    const taskId = url.searchParams.get("task");
+    const caseItem = taskId && dispatchCases.find((item) => item.tasks.some((task) => task.id === taskId));
+    if (taskId && caseItem) openTask(taskId, caseItem.id, true);
+    else if (!taskId) switchView("settings");
+    // A newly assigned task might not exist in this tab's older snapshot.
+    // Reload only after the normal save/discard guard has protected the draft.
+    else requestNavigation(() => window.location.assign(url.href));
+  });
+
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === "PM_OPEN_NOTIFICATION") {
+        // Acknowledge before the save/discard dialog: the worker must not
+        // mistake time spent deciding about a draft for an unresponsive page.
+        event.ports[0]?.postMessage({ handled: true });
+        handlePushOpen(event.data.url);
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", handleMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", handleMessage);
+  }, []);
 
   function acknowledgeTaskNotifications(taskId: string) {
     const notificationIds = viewerNotifications
@@ -1157,7 +1226,29 @@ export function DispatchConsole({
   }
 
   function switchView(view: View) {
-    requestNavigation(() => setActiveView(view));
+    requestNavigation(() => {
+      setActiveView(view);
+      if (view === "dispatch") setMobilePane("cases");
+    });
+  }
+
+  function showMobileMap() {
+    requestNavigation(() => {
+      setActiveView("dispatch");
+      setMobilePane("workspace");
+      setCenterView("map");
+      setFocusedTaskId(undefined);
+      setWorkspace({ kind: "cockpit", mode: "collapsed" });
+    });
+  }
+
+  function showMobileCases() {
+    requestNavigation(() => {
+      setActiveView("dispatch");
+      setMobilePane("cases");
+      setFocusedTaskId(undefined);
+      setWorkspace({ kind: "cockpit", mode: "split" });
+    });
   }
 
   async function signOut() {
@@ -1184,6 +1275,7 @@ export function DispatchConsole({
   }
 
   function startNewCaseNow(call?: DispatchCall) {
+    setMobilePane("workspace");
     returnViewRef.current = activeView;
     // Generická nová karta (bez explicitného hovoru) štartuje čistá — nedediť
     // meno/číslo z posledného alebo mock `incomingCall`. Prefill sa deje len cez
@@ -1432,6 +1524,7 @@ export function DispatchConsole({
   function returnToCockpit() {
     requestNavigation(() => {
       setFocusedTaskId(undefined);
+      setMobilePane("cases");
       if (returnViewRef.current !== "dispatch") {
         setActiveView(returnViewRef.current);
         setWorkspace({ kind: "cockpit", mode: "split" });
@@ -1508,17 +1601,19 @@ export function DispatchConsole({
 
   return (
     <div
-      className={`isolate flex flex-col bg-zinc-100 text-zinc-950 ${
+      className={`dispatch-app-shell isolate flex flex-col bg-zinc-100 text-zinc-950 ${
         activeView === "settings" || activeView === "reports"
           ? "min-h-dvh overflow-visible pb-[calc(68px+env(safe-area-inset-bottom))] sm:pb-0"
           : "h-svh overflow-hidden pb-[calc(68px+env(safe-area-inset-bottom))] sm:h-auto sm:min-h-dvh sm:overflow-visible sm:pb-0 lg:h-dvh lg:min-h-[720px]"
       }`}
       data-hydrated="false"
       data-testid="dispatch-console"
+      data-mobile-pane={mobilePane}
+      data-active-view={activeView}
       ref={consoleRef}
     >
       <div className="relative z-50 shrink-0" ref={topBarsRef}>
-      <header className="flex min-h-14 items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-950 px-3 py-2 text-white sm:px-4 sm:py-0">
+      <header className="dispatch-app-header flex min-h-14 items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-950 px-3 py-2 text-white sm:px-4 sm:py-0">
         <AccountMenu
           displayName={signedInName}
           email={viewerEmail}
@@ -1526,7 +1621,7 @@ export function DispatchConsole({
           signingOut={isSigningOut}
           onSignOut={requestSignOut}
         />
-        <nav className="hidden min-w-0 flex-1 items-center justify-center gap-1 sm:flex" aria-label="Hlavná navigácia">
+        <nav className="hidden min-w-0 flex-1 items-center justify-center gap-1 lg:flex" aria-label="Hlavná navigácia">
           <NavButton
             active={activeView === dashboardNavItem.view}
             label={dashboardNavItem.label}
@@ -1615,6 +1710,27 @@ export function DispatchConsole({
           </button>
         </div>
       </header>
+
+      <div className={activeView === "tasks" ? "sr-only" : "mobile-workspace-heading flex min-h-16 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-4 py-2.5 lg:hidden"}>
+        <div className="flex min-w-0 items-center gap-2">
+          {(activeView === "dispatch" && mobilePane === "workspace") || (activeView === "cases" && workspace.kind === "detail") ? (
+            <button type="button" onClick={() => activeView === "cases" ? returnToCockpit() : showMobileCases()} aria-label="Späť na prípady" className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white">
+              <ArrowLeft size={20} aria-hidden="true" />
+            </button>
+          ) : null}
+          <div className="min-w-0">
+            <h1 className="truncate text-lg font-bold tracking-tight">
+              {activeView === "dispatch" ? mobilePane === "cases" ? "Aktívne prípady" : workspace.kind === "new" ? "Nový prípad" : workspace.kind === "detail" || workspace.mode === "expanded" ? selectedCase?.caseNumber ?? "Detail prípadu" : "Mapa zásahov" : navItems.find((item) => item.view === activeView)?.label}
+            </h1>
+            {activeView === "dispatch" && mobilePane === "cases" ? <p className="text-xs text-zinc-500">Otvorené: {activeCasesTotal} · Upozornenia: {taskAttentionCount}</p> : null}
+          </div>
+        </div>
+        {activeView === "dispatch" && mobilePane === "cases" ? (
+          <button type="button" onClick={() => startNewCase()} className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl bg-[#FCD703] px-3 text-sm font-semibold text-zinc-950">
+            <Plus size={18} aria-hidden="true" /> Nový prípad
+          </button>
+        ) : null}
+      </div>
 
       {telephonyConfigured &&
         phoneBarVisible({
@@ -1719,7 +1835,7 @@ export function DispatchConsole({
             "--dashboard-left-width": `${dashboardColumns.left}px`,
             "--dashboard-right-width": `${dashboardColumns.right}px`,
           } as CSSProperties}
-          className="relative z-0 isolate grid h-full min-h-0 min-w-0 flex-1 grid-cols-1 overflow-x-hidden overflow-y-auto lg:h-auto lg:grid-rows-[auto_minmax(0,1fr)] lg:overflow-hidden lg:grid-cols-[var(--dashboard-left-width)_minmax(0,1fr)] xl:grid-rows-[minmax(0,1fr)] xl:grid-cols-[var(--dashboard-left-width)_minmax(0,1fr)_var(--dashboard-right-width)]"
+          className="dispatch-dashboard relative z-0 isolate grid h-full min-h-0 min-w-0 flex-1 grid-cols-1 overflow-x-hidden overflow-y-auto lg:h-auto lg:grid-rows-[auto_minmax(0,1fr)] lg:overflow-hidden lg:grid-cols-[var(--dashboard-left-width)_minmax(0,1fr)] xl:grid-rows-[minmax(0,1fr)] xl:grid-cols-[var(--dashboard-left-width)_minmax(0,1fr)_var(--dashboard-right-width)]"
         >
           <button
             type="button"
@@ -1759,9 +1875,10 @@ export function DispatchConsole({
           >
             <span aria-hidden="true" className="h-14 w-1 rounded-full bg-zinc-300 shadow-sm transition group-hover:bg-yellow-400 group-focus-visible:bg-yellow-400" />
           </button>
-          <div className="min-w-0 p-2 lg:col-span-2 xl:hidden">
+          <div className="hidden min-w-0 p-2 lg:col-span-2 lg:block xl:hidden">
             <DashboardPhone caseContext={dashboardSmsCaseContext} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
           </div>
+          <div className="mobile-dispatch-cases lg:contents">
           <CaseList
             activeCaseId={visibleActiveCaseId}
             activeFilterCount={activeFilterCount}
@@ -1783,6 +1900,8 @@ export function DispatchConsole({
             sort={caseSort}
             totalCases={activeCasesTotal}
           />
+          </div>
+          <div className="mobile-dispatch-workspace lg:contents">
           <MapWorkspace
             activeCaseId={visibleActiveCaseId}
             assets={fleetAssets}
@@ -1819,6 +1938,7 @@ export function DispatchConsole({
             onSendLocationSms={() => void handleSendCaseSms("location_request")}
             onSortChange={setCaseSort}
           />
+          </div>
           <div className="hidden min-h-0 min-w-0 flex-col border-l border-zinc-200 bg-white xl:flex">
             <DashboardPhone caseContext={dashboardSmsCaseContext} className="shrink-0" onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} variant="rail" />
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden" data-testid="dashboard-task-panel-shell">
@@ -1934,9 +2054,11 @@ export function DispatchConsole({
           onDataChange={setDispatchData}
           onTestCall={telephonyConfigured ? testCall : undefined}
           viewerRole={viewerRole}
+          pushEnabled={source === "supabase"}
         />
       )}
 
+      <PushNotificationSync profileId={source === "supabase" ? notificationViewerProfileId : undefined} />
       <NotificationToastStack
         notifications={viewerNotifications}
         now={notificationNow}
@@ -1957,20 +2079,34 @@ export function DispatchConsole({
         onActivate={({ pauseReasonId }) => telephony.changePresence({ status: "paused", pauseReasonId })}
       />
 
-      <nav className="fixed inset-x-0 bottom-0 z-[2147483000] border-t border-zinc-200 bg-white/95 px-2 pt-1.5 pb-[calc(8px+env(safe-area-inset-bottom))] shadow-[0_-10px_30px_rgba(24,24,27,0.12)] backdrop-blur sm:hidden" aria-label="Mobilná navigácia">
-        <div className="grid grid-cols-2 gap-1">
+      <nav className="dispatch-mobile-nav fixed inset-x-0 bottom-0 z-[2147483000] border-t border-zinc-200 bg-white/95 px-2 pt-1.5 pb-[calc(8px+env(safe-area-inset-bottom))] shadow-[0_-4px_20px_rgba(24,24,27,0.06)] backdrop-blur lg:hidden" aria-label="Mobilná navigácia">
+        <div className="mx-auto grid max-w-xl grid-cols-4 gap-1">
           <MobileTabButton
-            active={activeView === dashboardNavItem.view}
-            badgeCount={dashboardNavItem.badgeCount}
-            icon={dashboardNavItem.icon}
-            label={dashboardNavItem.label}
-            shortLabel={dashboardNavItem.shortLabel}
-            onClick={() => switchView(dashboardNavItem.view)}
+            active={activeView === "cases" || activeView === "dispatch" && !focusedTaskId && (mobilePane === "cases" || workspace.kind !== "cockpit" || workspace.mode === "expanded")}
+            icon={Table2}
+            label="Prípady"
+            shortLabel="Prípady"
+            onClick={showMobileCases}
+          />
+          <MobileTabButton
+            active={activeView === "tasks" || activeView === "dispatch" && Boolean(focusedTaskId)}
+            badgeCount={taskAttentionCount}
+            icon={BellRing}
+            label="Úlohy"
+            shortLabel="Úlohy"
+            onClick={() => switchView("tasks")}
+          />
+          <MobileTabButton
+            active={activeView === "dispatch" && mobilePane === "workspace" && workspace.kind === "cockpit" && workspace.mode !== "expanded" && !focusedTaskId}
+            icon={MapPinned}
+            label="Mapa"
+            shortLabel="Mapa"
+            onClick={showMobileMap}
           />
           <NavigationMenu
             activeView={activeView}
-            badgeCount={secondaryBadgeCount}
             items={secondaryNavItems}
+            badgeCount={0}
             pinNotice={navigationPinNotice}
             pinnedViews={pinnedNavigationViews}
             onSelect={switchView}
@@ -2158,7 +2294,7 @@ function NavigationMenu({
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const hasActiveItem = items.some((item) => item.view === activeView);
+  const hasActiveItem = items.some((item) => item.view === activeView) && !(variant === "mobile" && (activeView === "tasks" || activeView === "cases"));
   const hasBadge = badgeCount > 0;
   const activeItemIsPinned = isPinnableNavigationView(activeView) && pinnedViews.includes(activeView);
   const pinnedItems = pinnedViews

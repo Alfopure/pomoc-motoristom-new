@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { buildSync } from "esbuild";
+import { fileURLToPath } from "node:url";
 
 import { validateIvrMenus, type IvrMenuDoc, type LineDoc, type RingPlanDoc, type ValidationContext } from "@/server/telephony/config-service";
 
@@ -21,6 +23,16 @@ import {
 
 const PLAN_ID = "00000000-0000-4000-8000-000000002301";
 const MENU_ID = "00000000-0000-4000-8000-000000002401";
+
+it("bundles the IVR editor model for a browser without importing server dependencies", () => {
+  expect(() => buildSync({
+    entryPoints: [fileURLToPath(new URL("./ivr-menu-model.ts", import.meta.url))],
+    bundle: true,
+    platform: "browser",
+    write: false,
+    logLevel: "silent",
+  })).not.toThrow();
+});
 
 function plan(overrides: Partial<RingPlanDoc> = {}): RingPlanDoc {
   return { id: PLAN_ID, name: "Denný", fallbackKind: "callback_prompt", fallbackNumber: null, active: true, steps: [], ...overrides };

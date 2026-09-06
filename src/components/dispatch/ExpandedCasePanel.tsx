@@ -58,12 +58,12 @@ export function ExpandedCasePanel({
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-zinc-200 bg-white shadow-sm">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm lg:rounded-md">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zinc-200 bg-white px-3 py-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950">
             {isNew ? <Plus size={16} /> : <FileText size={16} />}
-            <span>{isNew ? "Nový prípad" : `Karta prípadu ${caseItem?.caseNumber ?? ""}`}</span>
+            <span className="min-w-0 break-words">{isNew ? "Nový prípad" : `Karta prípadu ${caseItem?.caseNumber ?? ""}`}</span>
           </div>
           <div className="mt-0.5 truncate text-xs font-medium text-zinc-500">
             {isNew ? "ID prípadu sa pridelí po uložení" : `${caseItem?.caseType || "Typ nezadaný"} · ${caseItem?.contact.name || "Kontakt nezadaný"}`}
@@ -73,7 +73,7 @@ export function ExpandedCasePanel({
           <button
             type="button"
             onClick={onBackToCockpit}
-            className="inline-flex h-9 items-center gap-2 rounded-md bg-[#FCD703] px-3 text-xs font-semibold text-zinc-950 hover:bg-yellow-300"
+            className="inline-flex h-11 items-center gap-2 rounded-md bg-[#FCD703] px-3 text-sm font-semibold text-zinc-950 hover:bg-yellow-300 lg:h-9 lg:text-xs"
           >
             <ArrowLeft size={15} />
             Späť
@@ -95,7 +95,7 @@ export function ExpandedCasePanel({
             partnerDirectory={partnerDirectory}
           />
         ) : caseItem ? (
-          <div className="h-full overflow-auto p-3 sm:p-4" data-case-detail-scroll-region>
+          <div className="h-full min-w-0 overflow-y-auto overscroll-contain p-3 sm:p-4 max-lg:[&_button]:min-h-11" data-case-detail-scroll-region>
             <CaseDetail
               key={caseItem.id}
               caseItem={caseItem}

@@ -1,4 +1,6 @@
 import type { GatherSpec, IvrMenuRow, IvrOptionRow, MediaRef } from "../state/types";
+import { IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
+export { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
 
 /**
  * IVR menu engine (pure). See design §2.5 (`ivr` state) and §4 Phase 4.
@@ -20,18 +22,6 @@ import type { GatherSpec, IvrMenuRow, IvrOptionRow, MediaRef } from "../state/ty
  * times the caller hears the menu, whether they stayed silent or pressed a key
  * that is not on it.
  */
-
-/** Actions a digit can map to (`motorist_ivr_options.action`). */
-export const IVR_ACTIONS = ["ring_plan", "callback", "external_number", "waiting_room", "repeat", "hangup"] as const;
-export type IvrAction = (typeof IVR_ACTIONS)[number];
-
-/** Digits a DTMF keypad can send; the schema constrains `digit` to exactly one of them. */
-export const IVR_DIGITS = "0123456789*#";
-
-export const MIN_IVR_TRIES = 1;
-export const MAX_IVR_TRIES = 5;
-export const MIN_IVR_TIMEOUT_SECS = 1;
-export const MAX_IVR_TIMEOUT_SECS = 30;
 
 export type IvrConfig = { menu: IvrMenuRow; options: IvrOptionRow[] };
 
