@@ -23,6 +23,22 @@ input {
   font: inherit;
 }
 
+.auth-app-shell input {
+  font-size: 16px;
+  min-height: 44px;
+}
+
+.auth-app-shell button,
+.auth-app-shell a {
+  min-height: 44px;
+}
+
+.auth-app-shell a {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .dispatch-app-shell {
   --dispatch-mobile-nav-height: 72px;
 }

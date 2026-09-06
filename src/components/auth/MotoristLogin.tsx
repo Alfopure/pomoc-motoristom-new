@@ -50,7 +50,7 @@ export function MotoristLogin({ message }: { message: string }) {
   const forgotPasswordHref = email.trim() ? `/auth/forgot-password?email=${encodeURIComponent(email.trim().toLowerCase())}` : "/auth/forgot-password";
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-zinc-100 px-4 py-10 text-zinc-950">
+    <main className="auth-app-shell flex min-h-screen items-center justify-center bg-zinc-100 px-4 py-10 text-zinc-950">
       <section className="w-full max-w-sm overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-2xl shadow-zinc-950/10">
         <div className="h-2 bg-[#FCD703]" />
         <div className="p-6">
