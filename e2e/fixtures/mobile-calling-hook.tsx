@@ -15,7 +15,7 @@ const harness = {
   stoppedTracks: 0,
   grant: () => {},
   deny: () => {},
-  begin: (kind: "dial" | "callback" | "pickup" | "supervise") => { throw new Error(`Fixture is not mounted: ${kind}`); },
+  begin: (kind: "dial" | "callback" | "pickup" | "supervise"): void => { throw new Error(`Fixture is not mounted: ${kind}`); },
   prepare: () => {},
   incoming: () => emit("telnyx.notification", { type: "callUpdate", call: {
     id: "fixture-incoming", state: "ringing", direction: "inbound",
