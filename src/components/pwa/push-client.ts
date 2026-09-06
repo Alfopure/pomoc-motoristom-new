@@ -16,7 +16,19 @@ async function withPushDeviceLock<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 export type PushSupport = "supported" | "install-ios" | "insecure" | "unsupported";
-export type PushDeviceState = {
+export type PushCategoryPreferences = {
+  taskNotificationsEnabled: boolean;
+  incomingCallsEnabled: boolean;
+  availableCallsEnabled: boolean;
+};
+export type PushCategory = keyof PushCategoryPreferences;
+export const DEFAULT_PUSH_CATEGORIES: PushCategoryPreferences = {
+  taskNotificationsEnabled: true,
+  incomingCallsEnabled: true,
+  availableCallsEnabled: true,
+};
+
+export type PushDeviceState = PushCategoryPreferences & {
   support: PushSupport;
   permission: NotificationPermission;
   configured: boolean;
@@ -24,14 +36,24 @@ export type PushDeviceState = {
   subscription: PushSubscription | null;
   subscribed: boolean;
   soundEnabled: boolean;
+  callNotificationsConfigured: boolean;
 };
 
-type PushServerState = {
+type PushServerState = Partial<PushCategoryPreferences> & {
   configured: boolean;
   publicKey: string | null;
   subscribed?: boolean;
   soundEnabled?: boolean;
+  callNotificationsConfigured?: boolean;
 };
+
+function serverCategoryPreferences(server: Partial<PushCategoryPreferences>): PushCategoryPreferences {
+  return {
+    taskNotificationsEnabled: server.taskNotificationsEnabled !== false,
+    incomingCallsEnabled: server.incomingCallsEnabled !== false,
+    availableCallsEnabled: server.availableCallsEnabled !== false,
+  };
+}
 
 export function detectPushSupport(scope: {
   secure: boolean;
@@ -118,7 +140,21 @@ export async function readPushDeviceState(): Promise<PushDeviceState> {
     subscription,
     subscribed: Boolean(subscription && server.subscribed && permission === "granted"),
     soundEnabled: typeof server.soundEnabled === "boolean" && server.subscribed ? server.soundEnabled : readNotificationSound(),
+    ...serverCategoryPreferences(server.subscribed ? server : {}),
+    // An older API may still support task push. Do not offer call controls
+    // until the server explicitly confirms that those preferences can persist.
+    callNotificationsConfigured: server.callNotificationsConfigured === true,
   };
+}
+
+/** A partial patch cannot overwrite another category changed in another tab. */
+export async function updateDevicePushCategory(state: PushDeviceState, category: PushCategory, enabled: boolean): Promise<void> {
+  if (!state.subscribed || !state.subscription) throw new Error("Najskôr zapni push upozornenia na tomto zariadení.");
+  if (!state.callNotificationsConfigured) {
+    throw new Error("Výber typov upozornení ešte nie je pripravený.");
+  }
+  await withPushDeviceLock(() => pushRequest("/api/push/subscriptions", "PATCH", { endpoint: state.subscription!.endpoint, [category]: enabled }));
+  window.dispatchEvent(new Event(PUSH_SETTINGS_EVENT));
 }
 
 /** An expired session can be followed by a different operator on this browser. */
@@ -184,6 +220,9 @@ async function subscribeDevicePush(state: PushDeviceState): Promise<PushSubscrip
     await navigator.serviceWorker.register("/sw.js", { scope: "/", updateViaCache: "none" });
     const registration = await waitForServiceWorker();
     let subscription = await registration.pushManager.getSubscription();
+    let soundEnabled = state.soundEnabled;
+    let categories = serverCategoryPreferences(state);
+    let categoriesConfigured = state.callNotificationsConfigured;
     // Recheck inside the device lock: another tab may have enrolled since the
     // settings panel loaded. Never transfer another account's endpoint.
     if (subscription) {
@@ -191,6 +230,12 @@ async function subscribeDevicePush(state: PushDeviceState): Promise<PushSubscrip
       if (!owned.subscribed) {
         if (!(await subscription.unsubscribe())) throw new Error("Predošlé prihlásenie upozornení sa nepodarilo obnoviť. Skús to znova.");
         subscription = null;
+      } else {
+        // Another tab may have enrolled this endpoint after the settings read.
+        // Preserve its current preferences rather than posting stale defaults.
+        categories = serverCategoryPreferences(owned);
+        categoriesConfigured = owned.callNotificationsConfigured === true;
+        soundEnabled = owned.soundEnabled ?? soundEnabled;
       }
     }
     const created = !subscription;
@@ -199,12 +244,15 @@ async function subscribeDevicePush(state: PushDeviceState): Promise<PushSubscrip
       applicationServerKey: decodeApplicationServerKey(publicKey),
     });
     try {
-      await pushRequest("/api/push/subscriptions", "POST", { subscription: subscription.toJSON(), soundEnabled: state.soundEnabled });
+      await pushRequest("/api/push/subscriptions", "POST", {
+        subscription: subscription.toJSON(), soundEnabled,
+        ...(categoriesConfigured ? categories : {}),
+      });
     } catch (error) {
       if (created) await subscription.unsubscribe().catch(() => false);
       throw error;
     }
-    storeNotificationSound(state.soundEnabled);
+    storeNotificationSound(soundEnabled);
     return subscription;
   });
 }

@@ -23,11 +23,12 @@ function Fixture() {
   const [events, setEvents] = useState<string[]>([]);
   const record = (event: string) => setEvents((all) => [...all, event]);
   const localInvite = scenario === "offers" || scenario === "answering";
-  const incoming = localInvite ? { ...call, offeredProfileIds: ["me"], legs: [{ ...call.legs[0], id: "my-leg", role: "operator" as const, profileId: "me", callControlId: "my-invite" }] } : call;
+  const ownOffer = localInvite || scenario === "own-offer-recovery" || scenario === "other-offer-recovery";
+  const incoming = ownOffer ? { ...call, offeredProfileIds: ["me"], legs: [{ ...call.legs[0], id: "my-leg", role: "operator" as const, profileId: "me", callControlId: "my-invite" }] } : call;
   const model = buildPhoneBarModel({
     ...EMPTY_ACTIVE_CALLS, configured: true, actorProfileId: "me",
     calls: localInvite ? [{ ...incoming, sessionId: "stale-session", callerNumber: "+421900000004", legs: [] }, incoming] : [incoming],
-    presence: { actorProfileId: "me", checkedAt: "", canManageAssignments: true, devices: [], presence: [{ profileId: "me", status: localInvite ? "ringing" : "available" }] },
+    presence: { actorProfileId: "me", checkedAt: "", canManageAssignments: true, devices: [], presence: [{ profileId: "me", status: ownOffer ? "ringing" : "available", currentSessionId: scenario === "other-offer-recovery" ? "other-session" : ownOffer ? call.sessionId : null }] },
   }, { operatorName: () => "Operátor" });
   const status = scenario === "other-device" ? "superseded" : "registered";
   const phone: WebphoneSnapshot = {
@@ -41,7 +42,7 @@ function Fixture() {
   };
   return <>
     <label>Scenár <select aria-label="Scenár" value={scenario} onChange={(event) => setScenario(event.target.value)}>
-      {["backup", "offers", "answering", "other-device", "pending"].map((value) => <option key={value}>{value}</option>)}
+      {["backup", "offers", "answering", "other-device", "pending", "own-offer-recovery", "other-offer-recovery"].map((value) => <option key={value}>{value}</option>)}
     </select></label>
     <HeaderPhoneStatusMenu busy={false} onChange={() => {}} onRequestPause={() => {}} onDismissNotice={() => {}}
       onTakeover={() => record("takeover")} notice={scenario === "other-device" ? "Stará chyba hovoru" : null}

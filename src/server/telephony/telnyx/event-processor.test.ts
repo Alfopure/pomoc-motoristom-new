@@ -1,10 +1,33 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { CONNECTION_ID, createTelephonyHarness, NUMBERS, PROFILES } from "@/test/telephony-harness";
 
 import { processTelnyxEvent } from "./event-processor";
 
 describe("processTelnyxEvent", () => {
+  it("schedules call notifications only after the offered legs have been persisted", async () => {
+    const h = createTelephonyHarness();
+    const afterResponse: Array<() => void> = [];
+    h.deps.onCallTransition = vi.fn((sessionId) => {
+      expect(h.session(sessionId).state).toBe("ringing");
+      expect(h.attempts(sessionId).some((attempt) => attempt.result === "offered" && attempt.leg_id)).toBe(true);
+      afterResponse.push(() => expect(h.session(sessionId).lease_token).toBeNull());
+    });
+    const call = await h.inbound();
+    expect(call.results.every((result) => result.status === 200)).toBe(true);
+    expect(h.deps.onCallTransition).toHaveBeenCalledTimes(1);
+    afterResponse.forEach((work) => work());
+  });
+
+  it("keeps SIP processing successful when optional notification scheduling fails", async () => {
+    const h = createTelephonyHarness();
+    h.deps.onCallTransition = () => { throw new Error("push scheduling failed"); };
+    const call = await h.inbound();
+    expect(call.results.every((result) => result.status === 200 && result.outcome === "processed")).toBe(true);
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "call-push", message: "notification scheduling unavailable" }));
+  });
+
   it("rejects malformed envelopes with 400 and never touches the ledger", async () => {
     const h = createTelephonyHarness();
     expect(await h.process({ nope: true })).toMatchObject({ status: 400, outcome: "malformed" });

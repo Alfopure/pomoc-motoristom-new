@@ -116,6 +116,43 @@ function leg(overrides: Partial<ActiveCallPayload["legs"][number]> = {}): Active
   };
 }
 
+describe("pending incoming browser legs", () => {
+  it.each([
+    ["ring", "ringing"], ["internal", "ringing"], ["transfer", "ringing"], ["transfer_recorded", "ringing"],
+    ["consult", "consulting"], ["party", "conference"],
+  ] as const)("keeps an unanswered own %s leg but excludes unrelated or completed legs", (intent, state) => {
+    const incoming = leg({ callControlId: "incoming-control", intent, state: "ringing", answeredAt: null, bridgedAt: null });
+    const session = call({ state, answeredByProfileId: state === "ringing" ? null : COLLEAGUE, offeredProfileIds: intent === "ring" ? [ME] : [], legs: [
+      incoming,
+      { ...incoming, id: "duplicate" },
+      { ...incoming, id: "answered", callControlId: "answered-control", answeredAt: "2026-09-03T08:00:00Z" },
+      { ...incoming, id: "bridged", callControlId: "bridged-control", bridgedAt: "2026-09-03T08:00:00Z" },
+      { ...incoming, id: "ended", callControlId: "ended-control", state: "ended" },
+      { ...incoming, id: "failed", callControlId: "failed-control", state: "failed" },
+      { ...incoming, id: "colleague", callControlId: "colleague-control", profileId: COLLEAGUE },
+      { ...incoming, id: "supervisor", callControlId: "supervisor-control", role: "supervisor" },
+      { ...incoming, id: "outbound", callControlId: "outbound-control", intent: "outbound_operator" },
+    ] });
+    expect(buildPhoneBarModel(payload({ calls: [session] })).teamCalls[0].browserIncomingCallControlIds).toEqual(["incoming-control"]);
+  });
+
+  it("does not keep a cancelled queue offer after another operator has answered", () => {
+    const oldLeg = leg({ callControlId: "old-operator-control", intent: "ring", state: "ringing", answeredAt: null });
+    const current = buildPhoneBarModel(payload({ calls: [call({ answeredByProfileId: COLLEAGUE, state: "talking", legs: [oldLeg] })] })).teamCalls[0];
+    expect(current.browserCallControlIds).toEqual(["old-operator-control"]);
+    expect(current.browserIncomingCallControlIds).toEqual([]);
+    const cancelled = buildPhoneBarModel(payload({ calls: [call({ answeredByProfileId: null, state: "ringing", offeredProfileIds: [], legs: [oldLeg] })] })).teamCalls[0];
+    expect(cancelled.browserIncomingCallControlIds).toEqual([]);
+  });
+
+  it("does not keep a consultation invite after the session returns to talking", () => {
+    const current = buildPhoneBarModel(payload({ calls: [call({ answeredByProfileId: COLLEAGUE, state: "talking", legs: [
+      leg({ callControlId: "old-consult-control", role: "consult", intent: "consult", state: "ringing", answeredAt: null }),
+    ] })] })).teamCalls[0];
+    expect(current.browserIncomingCallControlIds).toEqual([]);
+  });
+});
+
 describe("supervision contract", () => {
   it("shares one supervisor-mode vocabulary with the server", () => {
     // The console must not import server modules at runtime; the reducer

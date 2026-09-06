@@ -40,7 +40,7 @@ export type ProcessorDeps = SessionRunnerDeps & {
   sweepBudgetMs?: number;
 };
 
-/** Inline sweep caps: the webhook route runs with `maxDuration = 10`. */
+/** Keep SIP processing fast; the larger route duration also covers after-response push. */
 export const INLINE_SWEEP_LIMIT = 2;
 export const INLINE_SWEEP_BUDGET_MS = 4_000;
 
@@ -335,8 +335,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
 
 async function maybeSweep(deps: ProcessorDeps, startedAt: number): Promise<void> {
   if (deps.sweepAfterEvent === false) return;
-  // The route budget is `maxDuration = 10`; the webhook has already spent part of
-  // it. Sweep at most a couple of sessions inline and leave the exhaustive pass
+  // Keep the original short inline budget even though the route also reserves
+  // time for after-response push. Sweep a couple of sessions and leave the exhaustive pass
   // to `/api/telephony/cron` (unbounded) and the throttled `calls/active` trigger.
   const spent = nowOf(deps)().getTime() - startedAt;
   const budgetMs = Math.max(0, (deps.sweepBudgetMs ?? INLINE_SWEEP_BUDGET_MS) - spent);

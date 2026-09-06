@@ -207,6 +207,8 @@ export type PhoneBarCall = {
   callId: string | null;
   /** Exact browser invite identities; never derived from a phone number. */
   browserCallControlIds?: string[];
+  /** Actor-owned incoming legs that this fresh snapshot still shows ringing. */
+  browserIncomingCallControlIds?: string[];
   kind: PhoneBarCallKind;
   state: ActiveCallSessionState;
   direction: ActiveCallDirection;
@@ -323,6 +325,15 @@ export type PhoneBarModel = {
 
 export type PhoneBarModelOptions = { operatorName?: OperatorNameLookup };
 
+function pendingIncomingLeg(call: ActiveCallPayload, leg: ActiveCallLegPayload, actorProfileId: string): boolean {
+  if (leg.profileId !== actorProfileId || (leg.role !== "operator" && leg.role !== "consult") ||
+    leg.answeredAt || leg.bridgedAt || !["initiated", "ringing"].includes(leg.state) || !leg.callControlId) return false;
+  if (leg.intent === "ring") return call.state === "ringing" && !call.answeredByProfileId && call.offeredProfileIds.includes(actorProfileId);
+  if (leg.intent === "internal" || leg.intent === "transfer" || leg.intent === "transfer_recorded") return call.state === "ringing";
+  if (leg.intent === "consult") return call.state === "consulting";
+  return leg.intent === "party" && ["talking", "held", "consulting", "conference"].includes(call.state);
+}
+
 function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorProfileId: string, options: PhoneBarModelOptions = {}): PhoneBarCall {
   return {
     sessionId: call.sessionId,
@@ -331,6 +342,9 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
       leg.profileId === actorProfileId && (leg.role === "operator" || leg.role === "consult") && leg.callControlId
         ? [leg.callControlId]
         : [],
+    ))],
+    browserIncomingCallControlIds: [...new Set(call.legs.flatMap((leg) =>
+      pendingIncomingLeg(call, leg, actorProfileId) ? [leg.callControlId!] : [],
     ))],
     kind,
     state: call.state,

@@ -10,6 +10,12 @@ import { PresenceServiceError } from "./presence-service";
 import { TelnyxCommandError } from "./telnyx/client";
 
 let harness: ReturnType<typeof createTelephonyHarness>;
+const notifications = vi.hoisted(() => ({ after: vi.fn(), notify: vi.fn() }));
+
+vi.mock("next/server", async (importOriginal) => ({
+  ...await importOriginal<typeof import("next/server")>(), after: notifications.after,
+}));
+vi.mock("./call-notifications", () => ({ notifyCallState: notifications.notify }));
 
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => harness.admin }));
 vi.mock("@/server/default-organization", () => ({ resolveDefaultOrganizationId: async () => ORG }));
@@ -29,6 +35,8 @@ import {
 describe("telephony runtime", () => {
   beforeEach(() => {
     harness = createTelephonyHarness();
+    notifications.after.mockReset();
+    notifications.notify.mockReset().mockResolvedValue({ sent: 0, failed: 0 });
     process.env.TELNYX_API_KEY = "KEYtest";
     process.env.TELNYX_LIVE_CALLS_ENABLED = "true";
     delete process.env.VERCEL_ENV;
@@ -75,6 +83,75 @@ describe("telephony runtime", () => {
   it("skips the organisation lookup when the caller already resolved it", async () => {
     const deps = await createTelephonyDeps({ organizationId: "org-override" });
     expect(deps.organizationId).toBe("org-override");
+  });
+
+  it("defers call push until after the response and coalesces the same session within a request", async () => {
+    const deps = await createTelephonyDeps();
+    deps.onCallTransition?.("session-1");
+    deps.onCallTransition?.("session-1");
+    expect(notifications.after).toHaveBeenCalledTimes(1);
+    expect(notifications.notify).not.toHaveBeenCalled();
+    await notifications.after.mock.calls[0][0]();
+    expect(notifications.notify).toHaveBeenCalledWith(expect.objectContaining({ admin: harness.admin, organizationId: ORG, environment: "development", deadlineAt: expect.any(Number) }), "session-1");
+  });
+
+  it("caps queued sessions at three concurrent deliveries and lets other calls continue after a failure", async () => {
+    const deps = await createTelephonyDeps({ logger: vi.fn() });
+    let active = 0;
+    let maximum = 0;
+    const pending: Array<{ resolve: () => void; reject: () => void }> = [];
+    notifications.notify.mockImplementation(() => {
+      active++;
+      maximum = Math.max(maximum, active);
+      return new Promise((resolve, reject) => pending.push({
+        resolve: () => { active--; resolve({ sent: 1, failed: 0 }); },
+        reject: () => { active--; reject(new Error("delivery failed")); },
+      }));
+    });
+    for (let index = 0; index < 7; index++) deps.onCallTransition?.(`session-${index}`);
+    expect(notifications.after).toHaveBeenCalledTimes(1);
+    const work = notifications.after.mock.calls[0][0]();
+    await vi.waitFor(() => expect(pending).toHaveLength(3));
+    pending[0].reject();
+    await vi.waitFor(() => expect(pending).toHaveLength(4));
+    pending[1].resolve();
+    pending[2].resolve();
+    pending[3].resolve();
+    await vi.waitFor(() => expect(pending).toHaveLength(7));
+    pending.slice(4).forEach((delivery) => delivery.resolve());
+    await work;
+    expect(maximum).toBe(3);
+    expect(notifications.notify).toHaveBeenCalledTimes(7);
+  });
+
+  it("stops starting queued sessions at the shared deadline without claiming skipped notifications", async () => {
+    const logger = vi.fn();
+    const deps = await createTelephonyDeps({ logger });
+    let clock = 1_000;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    notifications.notify.mockImplementation(async ({ deadlineAt }: { deadlineAt: number }) => {
+      clock = deadlineAt + 1;
+      return { sent: 0, failed: 0 };
+    });
+    try {
+      for (let index = 0; index < 5; index++) deps.onCallTransition?.(`session-${index}`);
+      await notifications.after.mock.calls[0][0]();
+      expect(notifications.notify).toHaveBeenCalledTimes(1);
+      expect(logger).toHaveBeenCalledWith({ level: "warn", scope: "call-push", message: "notification queue budget reached", skipped: 4 });
+    } finally { dateNow.mockRestore(); }
+  });
+
+  it("isolates scheduling and delivery errors from the telephony request", async () => {
+    const logger = vi.fn();
+    const deps = await createTelephonyDeps({ logger });
+    notifications.after.mockImplementationOnce(() => { throw new Error("no request context"); });
+    expect(() => deps.onCallTransition?.("session-1")).not.toThrow();
+    expect(logger).toHaveBeenCalledWith(expect.objectContaining({ scope: "call-push", message: "notification scheduling unavailable" }));
+    deps.onCallTransition?.("session-1");
+    notifications.notify.mockRejectedValueOnce(new Error("provider failure with credentials"));
+    await expect(notifications.after.mock.calls[1][0]()).resolves.toBeUndefined();
+    expect(logger).toHaveBeenCalledWith(expect.objectContaining({ scope: "call-push", message: "notification delivery unavailable" }));
+    expect(JSON.stringify(logger.mock.calls)).not.toContain("credentials");
   });
 
   it("maps every service error class onto its HTTP status", async () => {

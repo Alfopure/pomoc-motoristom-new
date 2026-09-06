@@ -74,8 +74,12 @@ async function showPushNotification(event) {
   } catch {
     // An invalid payload still produces a safe, useful notification.
   }
+  const isCall = (payload.callKind === "incoming_call" || payload.callKind === "available_call") &&
+    typeof payload.callSessionId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(payload.callSessionId);
+  const expiredCall = isCall && typeof payload.expiresAt === "string" && Date.parse(payload.expiresAt) <= Date.now();
   const options = {
-    body: typeof payload.body === "string" ? payload.body.slice(0, 300) : "V dispečingu máš nové upozornenie.",
+    body: expiredCall ? "Hovor už nemusí byť dostupný. Otvorte aplikáciu a skontrolujte jeho aktuálny stav."
+      : typeof payload.body === "string" ? payload.body.slice(0, 300) : "V dispečingu máš nové upozornenie.",
     icon: "/icon-192",
     badge: "/icon-192",
     tag: typeof payload.tag === "string" ? payload.tag.slice(0, 150) : "pm-dispatch-notification",
@@ -97,8 +101,11 @@ function safeNotificationUrl(value) {
     if (candidate.origin !== self.location.origin || candidate.pathname !== "/" || candidate.username || candidate.password) return fallback.href;
     // Only dispatch deep links are allowed: never navigate to APIs, external
     // pages, JavaScript URLs, login redirects or customer location links.
-    const task = candidate.searchParams.get("task");
-    if (task && /^[a-zA-Z0-9_-]{1,100}$/.test(task)) fallback.searchParams.set("task", task);
+    const tasks = candidate.searchParams.getAll("task");
+    const calls = candidate.searchParams.getAll("call");
+    if (tasks.length && calls.length) return fallback.href;
+    if (tasks.length === 1 && /^[a-zA-Z0-9_-]{1,100}$/.test(tasks[0])) fallback.searchParams.set("task", tasks[0]);
+    if (calls.length === 1 && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(calls[0])) fallback.searchParams.set("call", calls[0].toLowerCase());
     return fallback.href;
   } catch {
     return fallback.href;
@@ -112,6 +119,7 @@ self.addEventListener("notificationclick", function (event) {
 
 async function openNotification(value) {
   const url = safeNotificationUrl(value);
+  const isCall = new URL(url).searchParams.has("call");
   const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
   for (const client of windows) {
     const current = new URL(client.url);
@@ -122,6 +130,9 @@ async function openNotification(value) {
       // the task. A login screen or a page that has not hydrated cannot handle
       // this message, so preserve the task URL through normal navigation there.
       if (await requestNotificationOpen(client, url)) return;
+      // An older app cannot understand call links. Do not navigate its live
+      // call or draft away when the new message goes unacknowledged.
+      if (isCall) continue;
       if (typeof client.navigate === "function" && await client.navigate(url)) return;
     } catch {
       // A window may close between enumeration and navigation; try the next one.
@@ -149,7 +160,8 @@ function requestNotificationOpen(client, url) {
       if (event.data?.handled === true) finish(true);
     };
     try {
-      client.postMessage({ type: "PM_OPEN_NOTIFICATION", url }, [channel.port2]);
+      const type = new URL(url).searchParams.has("call") ? "PM_OPEN_CALL_NOTIFICATION" : "PM_OPEN_NOTIFICATION";
+      client.postMessage({ type, url }, [channel.port2]);
     } catch {
       channel.port2.close();
       finish(false);
