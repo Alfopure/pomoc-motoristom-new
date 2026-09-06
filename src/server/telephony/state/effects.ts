@@ -2,15 +2,18 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database, Json } from "@/lib/supabase/database.types";
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
+import { readAnnouncementConfig, resolveAnnouncement } from "@/lib/telephony/announcements";
 
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { addTelephonyUsage } from "../usage";
 import { advanceRingStep } from "../routing/ring-plan";
 import { reserveOperator } from "../routing/reservation";
 import { encodeClientState } from "../telnyx/client-state";
+import { commandId } from "../telnyx/command-id";
 import { isCallGoneError, TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
 import {
   DEFAULT_TTS_VOICE,
+  announcementKeyForMedia,
   LEG_TIME_LIMIT_SECS,
   callStatusForSession,
   commandKey,
@@ -27,6 +30,7 @@ import {
   type LegPatch,
   type LegRef,
   type LegRow,
+  type MediaRef,
   type PresenceChange,
   type ReduceResult,
   type RingFanout,
@@ -487,6 +491,16 @@ function isLegAlreadyGone(error: unknown): boolean {
   return error instanceof TelnyxCommandError && (error.status === 404 || error.status === 422);
 }
 
+function resolvePrompt(deps: EffectsDeps, ctx: ExecutionContext, media: MediaRef | null) {
+  const config = readAnnouncementConfig(readMeta(ctx.session).announcements);
+  const key = media ? announcementKeyForMedia(media) : null;
+  if (key) {
+    const prompt = resolveAnnouncement(config, key);
+    return { url: prompt.file ? mediaUrl(deps.mediaBaseUrl, { file: prompt.file }) : null, text: prompt.text, voice: prompt.voice };
+  }
+  return { url: media ? mediaUrl(deps.mediaBaseUrl, media) : null, text: null, voice: resolveAnnouncement(config, "ivrMain").voice };
+}
+
 async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command: Command): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   const telnyx = requireTelnyx(deps);
   switch (command.kind) {
@@ -516,17 +530,40 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       });
       return { skipped: false };
     case "playback_start": {
-      const url = mediaUrl(deps.mediaBaseUrl, command.media);
-      if (!url) return { skipped: true, detail: { reason: "no media base url" } };
-      await telnyx.playbackStart({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, audioUrl: url, loop: command.loop });
-      return { skipped: false, detail: { url } };
+      const prompt = resolvePrompt(deps, ctx, command.media);
+      const common = {
+        callControlId: resolveLeg(ctx, command.leg),
+        commandId: command.commandId,
+        // Reset the previous introduction/gather intent; Telnyx otherwise
+        // echoes it on later playback completions for the same customer leg.
+        clientState: encodeClientState(command.clientState ?? { sid: ctx.session.id, role: "customer", intent: "playback" }),
+      };
+      if (prompt.url && !command.forceSpeech) {
+        try {
+          await telnyx.playbackStart({ ...common, audioUrl: prompt.url, loop: command.loop });
+          return { skipped: false, detail: { url: prompt.url } };
+        } catch (error) {
+          if (!prompt.text || isCallGoneError(error)) throw error;
+          // A refused URL must not silently skip a spoken message. Distinct
+          // command IDs let Telnyx accept the speech fallback immediately.
+          common.commandId = commandId({ sessionId: ctx.session.id, legId: common.callControlId, step: command.commandId, intent: "speech_fallback" });
+        }
+      }
+      if (prompt.text) {
+        await telnyx.speak({ ...common, payload: prompt.text, voice: prompt.voice });
+        return { skipped: false, detail: { tts: true } };
+      }
+      return { skipped: true, detail: { reason: "no media base url" } };
     }
     case "playback_stop":
       await telnyx.playbackStop({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, stop: "all" });
       return { skipped: false };
     case "gather": {
       const leg = resolveLeg(ctx, command.leg);
-      const url = command.spec.media ? mediaUrl(deps.mediaBaseUrl, command.spec.media) : null;
+      const prompt = resolvePrompt(deps, ctx, command.spec.media);
+      const invalid = command.spec.invalidMedia ? resolvePrompt(deps, ctx, command.spec.invalidMedia) : null;
+      const url = prompt.url;
+      const text = prompt.text ?? command.spec.ttsText;
       const common = {
         callControlId: leg,
         commandId: command.commandId,
@@ -539,12 +576,15 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         interDigitTimeoutMillis: command.spec.interDigitTimeoutMillis,
         validDigits: command.spec.validDigits,
       };
-      if (url) {
-        await telnyx.gatherUsingAudio({ ...common, audioUrl: url, invalidAudioUrl: command.spec.invalidMedia ? (mediaUrl(deps.mediaBaseUrl, command.spec.invalidMedia) ?? undefined) : undefined });
+      // Managed audio menus can use their current text when an invalid-input
+      // edit has no audio yet. A custom IVR recording remains authoritative;
+      // its fallback text may describe an older menu.
+      if (url && !(prompt.text && invalid?.text && !invalid.url)) {
+        await telnyx.gatherUsingAudio({ ...common, audioUrl: url, invalidAudioUrl: invalid?.url ?? undefined });
         return { skipped: false, detail: { url, purpose: command.spec.purpose } };
       }
-      if (command.spec.ttsText) {
-        await telnyx.gatherUsingSpeak({ ...common, payload: command.spec.ttsText, voice: DEFAULT_TTS_VOICE });
+      if (text) {
+        await telnyx.gatherUsingSpeak({ ...common, payload: text, voice: prompt.voice ?? DEFAULT_TTS_VOICE, invalidPayload: invalid?.text ?? undefined });
         return { skipped: false, detail: { tts: true, purpose: command.spec.purpose } };
       }
       if (command.spec.media === null) {

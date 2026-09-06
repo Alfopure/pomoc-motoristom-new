@@ -40,9 +40,17 @@ describe("POST /api/telephony/dev/simulate-inbound", () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { sessionId: string; results: Array<{ type: string; outcome: string }> };
-    expect(body.results.map((result) => result.type)).toEqual(["call.initiated", "call.answered"]);
+    expect(body.results.map((result) => result.type)).toEqual(["call.initiated", "call.answered", "call.playback.ended"]);
     expect(body.results.every((result) => result.outcome === "processed")).toBe(true);
     expect(harness.session(body.sessionId)).toMatchObject({ state: "ringing", direction: "inbound", caller_number: NUMBERS.customer });
+  });
+
+  it("can pause the simulation during the introduction", async () => {
+    const response = await POST(request({ to: NUMBERS.allianz, completeGreeting: false }));
+    const body = await response.json() as { sessionId: string; results: Array<{ type: string }> };
+    expect(body.results.map((result) => result.type)).toEqual(["call.initiated", "call.answered"]);
+    expect(harness.session(body.sessionId).state).toBe("greeting");
+    expect(harness.telnyx.of("dial")).toHaveLength(0);
   });
 
   it("stops after call.initiated when answering is not requested", async () => {

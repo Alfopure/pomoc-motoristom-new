@@ -10,6 +10,7 @@ import {
   MAX_RING_FANOUT,
   RING_STEP_GRACE_SECS,
   WAITING_TICK_STALE_MS,
+  GREETING_TIMEOUT_MS,
   readMeta,
   type AppEvent,
   type AttemptPlan,
@@ -334,6 +335,14 @@ export function isWaitingTickStale(session: SessionRow, now: Date, staleMs: numb
   return last !== null && last + staleMs < now.getTime();
 }
 
+export function isGreetingOverdue(session: SessionRow, now: Date): boolean {
+  if (session.state !== "greeting") return false;
+  const greeting = readMeta(session).greeting;
+  const started = ms(greeting?.started_at) ?? ms(session.created_at);
+  const deadline = ms(greeting?.deadline_at) ?? (started !== null ? started + GREETING_TIMEOUT_MS : null);
+  return deadline !== null && deadline < now.getTime();
+}
+
 /** `wrap_up` / `missed` sessions untouched for two minutes (leg hangup webhooks lost). */
 export const STALE_SESSION_MS = 120_000;
 
@@ -346,17 +355,18 @@ export function isSessionStale(session: SessionRow, now: Date, staleMs: number =
 /** Upper bound on the scan itself; the stalest sessions come first. */
 export const OVERDUE_SCAN_LIMIT = 200;
 
-export async function findOverdueSessions(admin: AdminClient, input: { organizationId: string; now: Date; scanLimit?: number }): Promise<{ ringing: SessionRow[]; waiting: SessionRow[]; stale: SessionRow[] }> {
+export async function findOverdueSessions(admin: AdminClient, input: { organizationId: string; now: Date; scanLimit?: number }): Promise<{ greeting: SessionRow[]; ringing: SessionRow[]; waiting: SessionRow[]; stale: SessionRow[] }> {
   const { data, error } = await admin
     .from("motorist_call_sessions")
     .select("*")
     .eq("organization_id", input.organizationId)
-    .in("state", ["ringing", "waiting", "parked", "wrap_up", "missed"])
+    .in("state", ["greeting", "ringing", "waiting", "parked", "wrap_up", "missed"])
     .order("updated_at", { ascending: true })
     .limit(input.scanLimit ?? OVERDUE_SCAN_LIMIT);
   if (error) throw new Error(`overdue session scan failed: ${error.message}`);
   const rows = data ?? [];
   return {
+    greeting: rows.filter((row) => isGreetingOverdue(row, input.now)),
     ringing: rows.filter((row) => isRingStepOverdue(row, input.now)),
     waiting: rows.filter((row) => isWaitingTickStale(row, input.now)),
     stale: rows.filter((row) => isSessionStale(row, input.now)),
@@ -489,6 +499,7 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
   // verdict is carried into the event because it is computed here, before the
   // session lease bumps `updated_at` (see `onStaleFinalise`).
   const targets = [
+    ...overdue.greeting.map((session) => ({ session, stale: false })),
     ...overdue.ringing.map((session) => ({ session, stale: false })),
     ...overdue.waiting.map((session) => ({ session, stale: false })),
     ...overdue.stale.map((session) => ({ session, stale: true })),

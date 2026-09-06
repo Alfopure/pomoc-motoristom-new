@@ -1,16 +1,20 @@
 # Telephony prompt assets
 
-Slovak voice prompts served to Telnyx as public media (`TELNYX_MEDIA_BASE_URL`).
-Generated with a neural TTS voice (sk-SK, female) as a first version; replace with
-studio recordings when available, keeping the file names.
+Caller announcements live in `announcements-v1/{sk,cs,en,de}/`, with a manifest of
+exact copy, duration and SHA-256 checksums. All 32 spoken assets use ElevenLabs
+Multilingual v2, Sarah, stable delivery at speed 1.05, normalized to -18 LUFS,
+mono 24 kHz MP3 at 64 kb/s. The 22-second instrumental hold loop is generated with
+ElevenLabs Sound Effects v2 and normalized to -25 LUFS. It contains no speech.
 
-| File | Used for |
-|---|---|
-| greeting.mp3 | inbound greeting before ringing |
-| moh.mp3 | waiting / hold loop |
-| after-hours.mp3 | closed hours message, offers callback (press 1) |
-| ivr-main.mp3 | main menu: 1 dispatch, 2 callback |
-| callback-offer.mp3 | all busy, offers callback (press 1) |
-| callback-confirmed.mp3 | callback recorded confirmation |
-| all-busy.mp3 | fallback when nobody is available |
-| invalid-input.mp3 | invalid DTMF choice |
+The original filenames remain Slovak aliases for existing media URLs. Runtime
+uses the versioned filenames to avoid stale provider caches. Original spoken
+hold audio has been replaced by the instrumental loop.
+
+`recording-notice.mp3` is a prepared template only: the app does not start call
+recording and does not automatically play that notice. See
+`docs/operations/call-announcements.md` for privacy requirements and operation.
+
+Text changes, language selection, previews and new voice generation are in
+Settings → Telefonovanie → Hlášky a jazyk. Existing custom IVR prompts retain
+precedence. Generated variants are immutable objects in this copy's Supabase
+`motorist-telephony-prompts` bucket; bundled MP3s do not need an ElevenLabs key.

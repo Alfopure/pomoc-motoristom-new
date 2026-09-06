@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
+import { announcementConfigFromMetadata, readAnnouncementConfig } from "@/lib/telephony/announcements";
 
 import { writeCallAudit } from "./audit";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
@@ -280,6 +281,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     // (.context/telnyx-setup.md S3: +421232408700 is rejected with 10010), so the env default wins.
     fromNumber: (config.configured ? config.defaultFromNumber : null) ?? line?.phone_number ?? null,
     mediaAvailable: config.configured ? Boolean(config.mediaBaseUrl) : false,
+    announcements: meta.announcements ? readAnnouncementConfig(meta.announcements) : announcementConfigFromMetadata(line?.metadata),
   };
 }
 

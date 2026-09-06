@@ -214,7 +214,7 @@ describe("ivr through the pipeline", () => {
     expect(h.session(call.sessionId).state).toBe("ivr");
     expect((h.session(call.sessionId).metadata as { ivr: { tries: number } }).ivr.tries).toBe(2);
     const replay = h.telnyx.of("gatherUsingAudio").at(-1)!;
-    expect(replay.params).toMatchObject({ audioUrl: "https://media.test/telephony/ivr-main.mp3", invalidAudioUrl: "https://media.test/telephony/invalid-input.mp3" });
+    expect(replay.params).toMatchObject({ audioUrl: "https://media.test/telephony/announcements-v1/sk/ivr-main.mp3", invalidAudioUrl: "https://media.test/telephony/announcements-v1/sk/invalid-input.mp3" });
     expect(h.telnyx.of("gatherUsingAudio")).toHaveLength(2);
     expect(h.telnyx.of("dial")).toHaveLength(0);
 
@@ -246,7 +246,7 @@ describe("ivr through the pipeline", () => {
 
     expect(h.session(call.sessionId).state).toBe("callback_offered");
     expect(h.rows("motorist_callback_requests")).toEqual([expect.objectContaining({ source: "ivr", session_id: call.sessionId, caller_number: NUMBERS.customer })]);
-    expect(h.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/callback-offer.mp3");
+    expect(h.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v1/sk/callback-offer.mp3");
   });
 
   it("still reaches an operator when the digit's ring plan was deleted", async () => {
@@ -273,7 +273,7 @@ describe("ivr through the pipeline", () => {
 
     await press(h, call.callControlId, "1");
 
-    expect(h.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/after-hours.mp3");
+    expect(h.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v1/sk/after-hours.mp3");
     expect(h.telnyx.of("hangup")).toHaveLength(0);
 
     await h.legEvent(call.callControlId, "call.playback.ended", { status: "completed" });

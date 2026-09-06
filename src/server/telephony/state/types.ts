@@ -2,6 +2,7 @@ import type { CallerMatch } from "@/data/dispatch-types";
 import type { CallLegRole, CallSessionState, Database, Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
 import type { BusinessHoursSchedule } from "@/lib/telephony/business-hours";
+import { ANNOUNCEMENT_DEFINITIONS, type AnnouncementConfig, type AnnouncementKey } from "@/lib/telephony/announcements";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import type { TelnyxClientState } from "../telnyx/client-state";
 
@@ -34,7 +35,7 @@ export type TelephonyEnvironment = "production" | "development";
 
 /** Pre-recorded Slovak prompts shipped in `public/telephony/` (served under `TELNYX_MEDIA_BASE_URL`). */
 export const MEDIA_FILES = {
-  moh: "moh.mp3",
+  moh: "announcements-v1/moh.mp3",
   greeting: "greeting.mp3",
   afterHours: "after-hours.mp3",
   ivrMain: "ivr-main.mp3",
@@ -49,15 +50,21 @@ export type MediaKey = keyof typeof MEDIA_FILES;
 /** Either a well-known prompt or a file name stored on an IVR row. */
 export type MediaRef = { key: MediaKey } | { file: string };
 
+/** Existing IVR rows keep their shipped filenames and inherit the selected language. */
+export function announcementKeyForMedia(ref: MediaRef): AnnouncementKey | null {
+  if ("key" in ref) return ref.key === "moh" ? null : ref.key;
+  return ANNOUNCEMENT_DEFINITIONS.find((item) => item.file === ref.file || `/telephony/${item.file}` === ref.file)?.key ?? null;
+}
+
 export function mediaFileName(ref: MediaRef): string {
   return "key" in ref ? MEDIA_FILES[ref.key] : ref.file;
 }
 
 /** Absolute prompt URL; `null` when no media base is configured. */
 export function mediaUrl(base: string | null | undefined, ref: MediaRef): string | null {
-  if (!base) return null;
   const file = mediaFileName(ref);
   if (/^https?:\/\//i.test(file)) return file;
+  if (!base) return null;
   return `${base.replace(/\/+$/, "")}/${file.replace(/^\/+/, "")}`;
 }
 
@@ -272,7 +279,7 @@ export type Command = CommandBase &
   | { kind: "answer"; commandId: string; leg: LegRef; clientState: TelnyxClientState }
   | { kind: "hangup"; commandId: string; leg: LegRef; reason: string }
   | { kind: "bridge"; commandId: string; leg: LegRef; target: LegRef; parkAfterUnbridge?: "self"; playRingtone?: boolean }
-  | { kind: "playback_start"; commandId: string; leg: LegRef; media: MediaRef; loop?: "infinity" | number }
+  | { kind: "playback_start"; commandId: string; leg: LegRef; media: MediaRef; loop?: "infinity" | number; clientState?: TelnyxClientState; forceSpeech?: boolean }
   | { kind: "playback_stop"; commandId: string; leg: LegRef }
   | { kind: "gather"; commandId: string; leg: LegRef; spec: GatherSpec; clientState: TelnyxClientState }
   | { kind: "gather_stop"; commandId: string; leg: LegRef }
@@ -448,6 +455,8 @@ export const MOH_TICK_MS = MOH_TICK_TIMEOUT_MS;
 /** No tick for this long → the gather chain broke and the sweeper re-arms it. */
 export const WAITING_TICK_STALE_MS = Math.max(2 * MOH_TICK_MS, 90_000);
 export const CALLBACK_OFFER_TIMEOUT_MS = 8_000;
+/** Deadline for a short introduction when its completion webhook goes missing. */
+export const GREETING_TIMEOUT_MS = 45_000;
 export const DEFAULT_TRANSFER_TIMEOUT_SECS = 30;
 export const RING_STEP_GRACE_SECS = 5;
 /** How long a step stays armed while the org-wide leg cap blocks its dials. */
@@ -489,6 +498,8 @@ export type RoutingContext = {
   fromNumber: string | null;
   /** Whether prompt media can be served (`TELNYX_MEDIA_BASE_URL` set). */
   mediaAvailable: boolean;
+  /** Frozen at the first answered event so edits affect future callers only. */
+  announcements?: AnnouncementConfig;
 };
 
 // --- session metadata -------------------------------------------------------
@@ -496,6 +507,8 @@ export type RoutingContext = {
 export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" | "consult";
 
 export type SessionMeta = {
+  announcements?: AnnouncementConfig;
+  greeting?: { started_at: string; deadline_at?: string; speech_retry?: boolean; completed_at?: string; closing?: boolean } | null;
   match?: { top: CallerMatch | null; count: number; degraded: boolean } | null;
   ring?: {
     plan?: FrozenRingPlan | null;
