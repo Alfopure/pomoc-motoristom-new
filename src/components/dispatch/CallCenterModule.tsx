@@ -35,8 +35,8 @@ import { callStatusLabels } from "@/domain/statuses";
 import { CallbackQueuePanel } from "./CallbackQueuePanel";
 import { CallDetailDrawer } from "./CallDetailDrawer";
 import { CallNotificationFocus } from "./CallNotificationFocus";
-import { LiveCallsWorkspace, liveCallOverviewCounts } from "./LiveCallOverview";
-import { phoneBarFocusedCall, type PhoneCallAction } from "./phone-bar-model";
+import { LiveCallsWorkspace, liveBrowserInviteSessionId, liveCallOverviewCounts } from "./LiveCallOverview";
+import type { PhoneCallAction } from "./phone-bar-model";
 import type {
   TelephonyDirectoryContact,
   TelephonyDirectoryResponse,
@@ -377,8 +377,8 @@ export function CallCenterModule({
           model={activeSnapshot}
           presences={operatorPresences}
           canManageCalls={canManageCalls}
-          browserOfferRinging={Boolean(phone?.call?.ringing && !phone.answering)}
-          browserOfferSessionId={phoneBarFocusedCall(activeSnapshot, phone?.call ?? null)?.sessionId ?? null}
+          browserOfferRinging={Boolean(phone?.call?.ringing && !phone.answering && phone.status === "registered" && !notificationStateStale)}
+          browserOfferSessionId={liveBrowserInviteSessionId(activeSnapshot, phone?.call ?? null)}
           onAnswer={onAnswer}
           onRejectOffer={onRejectOffer}
           onCallAction={onCallAction}

@@ -4,8 +4,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
+import type { WebphoneCallView } from "@/lib/telephony/telnyx-webphone";
 
-import { HeaderLiveCallsMenu, LiveCallsWorkspace, liveCallOperatorLabel, liveCallOverviewCounts } from "./LiveCallOverview";
+import { HeaderLiveCallsMenu, LiveCallsWorkspace, liveBrowserInviteSessionId, liveCallOperatorLabel, liveCallOverviewCounts } from "./LiveCallOverview";
 
 function call(overrides: Partial<PhoneBarCall> = {}): PhoneBarCall {
   return {
@@ -128,6 +129,10 @@ describe("live call invite actions", () => {
     model: { ...model(offers), offers }, presences: [], canManageCalls: false, busyAction: null, browserOfferRinging: true,
     onAnswer() {}, onRejectOffer() {}, onCallAction() {}, onSupervise() {}, onStopSupervise() {}, onNewCase() {}, onOpenCase() {},
   };
+  const browser: WebphoneCallView = {
+    id: "callee-browser-leg", state: "ringing", direction: "inbound", number: offers[0].number, callerName: null,
+    telnyxCallControlId: "callee-control-id", sessionId: null, muted: false, active: false, ringing: true,
+  };
   for (const component of [HeaderLiveCallsMenu, LiveCallsWorkspace]) {
     it(`${component.name} only answers/rejects the correlated second invite`, () => {
       const html = renderToStaticMarkup(createElement(component, { ...common, browserOfferSessionId: "second-session" }));
@@ -146,5 +151,44 @@ describe("live call invite actions", () => {
       expect(html).not.toContain("Prijať");
       expect(html).not.toContain("Odmietnuť");
     });
+
+    it.each([
+      { kind: "offer", state: "ringing", direction: "internal" },
+      { kind: "active", state: "consulting", direction: "inbound" },
+      { kind: "active", state: "conference", direction: "inbound" },
+    ] as const)(`${component.name} accepts only the exact $state callee without a queue offer`, (state) => {
+      const teamCalls = [offers[0], { ...offers[1], ...state, offeredToMe: false, browserCallControlIds: ["callee-control-id"], browserIncomingCallControlIds: ["callee-control-id"] }];
+      const snapshot = model(teamCalls);
+      const session = liveBrowserInviteSessionId(snapshot, browser);
+      expect(session).toBe("second-session");
+      const html = renderToStaticMarkup(createElement(component, { ...common, model: snapshot, browserOfferSessionId: session }));
+      const rows = html.match(/<article\b[\s\S]*?<\/article>/g)!;
+      expect(rows[0]).not.toContain("Prijať");
+      expect(rows[0]).not.toContain("Odmietnuť");
+      expect(rows[1]).toContain("Prijať");
+      expect(rows[1]).toContain("Odmietnuť");
+
+      const mismatch = liveBrowserInviteSessionId(snapshot, { ...browser, sessionId: "conflicting-session" });
+      expect(mismatch).toBeNull();
+      const unmatched = renderToStaticMarkup(createElement(component, { ...common, model: snapshot, browserOfferSessionId: mismatch }));
+      expect(unmatched).not.toContain("Prijať");
+      expect(unmatched).not.toContain("Odmietnuť");
+    });
+
+    it(`${component.name} cannot answer a cancelled invite after a colleague wins the same session`, () => {
+      const snapshot = model([{ ...offers[1], kind: "active", state: "talking", offeredToMe: false, browserCallControlIds: ["callee-control-id"], browserIncomingCallControlIds: [] }]);
+      const session = liveBrowserInviteSessionId(snapshot, { ...browser, sessionId: "second-session" });
+      expect(session).toBeNull();
+      const html = renderToStaticMarkup(createElement(component, { ...common, model: snapshot, browserOfferSessionId: session }));
+      expect(html).not.toContain("Prijať");
+      expect(html).not.toContain("Odmietnuť");
+    });
   }
+
+  it("does not match a non-ringing browser call or an unknown identity", () => {
+    const snapshot = model([{ ...offers[0], browserCallControlIds: ["callee-control-id"] }]);
+    expect(liveBrowserInviteSessionId(snapshot, { ...browser, ringing: false })).toBeNull();
+    expect(liveBrowserInviteSessionId(snapshot, { ...browser, telnyxCallControlId: "unknown" })).toBeNull();
+    expect(liveBrowserInviteSessionId(snapshot, { ...browser, sessionId: "first-session", telnyxCallControlId: null })).toBe("first-session");
+  });
 });

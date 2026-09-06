@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import { AttendanceModule } from "./AttendanceModule";
 import { CallCenterModule } from "./CallCenterModule";
-import { HeaderLiveCallsMenu } from "./LiveCallOverview";
+import { HeaderLiveCallsMenu, liveBrowserInviteSessionId } from "./LiveCallOverview";
 import { CaseDirectory } from "./CaseDirectory";
 import { CaseList, type CaseFilters } from "./CaseList";
 import { DashboardPhone } from "./DashboardPhone";
@@ -47,7 +47,7 @@ import { HeaderPhoneStatusMenu } from "./HeaderPhoneStatusMenu";
 import { NotificationToastStack } from "./NotificationToastStack";
 import { PauseRoutingDialog } from "./PauseRoutingDialog";
 import { PhoneBar } from "./PhoneBar";
-import { phoneBarFocusedCall, phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
+import { phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
 import { TELEPHONY_STALE_MESSAGE, useTelephonyConsole } from "./useTelephonyConsole";
 import { TaskPanel, type TaskCreateInput, type TaskDeleteInput, type TaskUpdateInput } from "./TaskPanel";
 import {
@@ -1786,8 +1786,8 @@ export function DispatchConsole({
                 presences={operatorPresences}
                 canManageCalls={viewerCanSupervise}
                 busyAction={telephony.busyAction}
-                browserOfferRinging={Boolean(telephony.phone.call?.ringing && !telephony.phone.answering)}
-                browserOfferSessionId={phoneBarFocusedCall(telephony.phoneBar, telephony.phone.call)?.sessionId ?? null}
+                browserOfferRinging={Boolean(telephony.phone.call?.ringing && !telephony.phone.answering && telephony.phone.status === "registered" && !telephony.stale)}
+                browserOfferSessionId={liveBrowserInviteSessionId(telephony.phoneBar, telephony.phone.call)}
                 onAnswer={telephony.answer}
                 onRejectOffer={telephony.hangupBrowser}
                 onCallAction={(action, sessionId) => void runPhoneCallAction(action, sessionId)}

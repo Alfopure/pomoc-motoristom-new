@@ -59,6 +59,32 @@ describe("call notification current state", () => {
     expect(callNotificationTarget({ ...input, model, phone: { ...phone, call: { ...ringing, sessionId } } }).canAnswer).toBe(true);
   });
 
+  it.each([
+    { kind: "offer", state: "ringing", direction: "internal" },
+    { kind: "active", state: "consulting", direction: "inbound" },
+    { kind: "active", state: "conference", direction: "inbound" },
+  ] as const)("answers an exact ringing $state callee leg without a queue offer", (state) => {
+    const targetCall = { ...call, ...state, offeredToMe: false, operatorName: "Jana", browserIncomingCallControlIds: ["own-operator-leg"] };
+    const model = { ...input.model, offers: [], active: null, teamCalls: [targetCall] };
+    const current = { ...input, model, phone: { ...phone, call: ringing } };
+    expect(callNotificationTarget(current)).toMatchObject({ call: targetCall, canAnswer: true, canPickup: false });
+    expect(callNotificationTarget({ ...current, phone: { ...phone, call: { ...ringing, telnyxCallControlId: null, sessionId } } }).canAnswer).toBe(true);
+    expect(callNotificationTarget(current).message).toContain("zvoní na tomto telefóne");
+    for (const overrides of [
+      { stale: true }, { busy: true }, { outboundPending: true },
+      { phone: { ...phone, status: "connecting" as const, call: ringing } },
+      { phone: { ...phone, call: { ...ringing, telnyxCallControlId: "another-leg" } } },
+      { phone: { ...phone, call: { ...ringing, sessionId: "conflicting-session" } } },
+    ]) expect(callNotificationTarget({ ...current, ...overrides }).canAnswer).toBe(false);
+  });
+
+  it("does not let a stale matching SDK ring override a fresh colleague-won session", () => {
+    const model = { ...input.model, teamCalls: [{ ...call, kind: "active" as const, state: "talking" as const, operatorName: "Jana", browserIncomingCallControlIds: [] }] };
+    const current = callNotificationTarget({ ...input, model, phone: { ...phone, call: { ...ringing, sessionId } } });
+    expect(current).toMatchObject({ canAnswer: false, canPickup: false });
+    expect(current.message).toContain("vybavuje Jana");
+  });
+
   it("reports a taken or missing call without offering pickup or a different caller", () => {
     const taken = callNotificationTarget({ ...input, model: { ...input.model, teamCalls: [{ ...call, kind: "active", operatorName: "Jana" }] } });
     expect(taken.message).toContain("vybavuje Jana");

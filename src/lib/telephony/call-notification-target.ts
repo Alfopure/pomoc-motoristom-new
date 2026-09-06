@@ -1,4 +1,5 @@
 import type { PhoneBarCall, PhoneBarModel } from "./active-calls-model";
+import { matchesIncomingBrowserInvite } from "./browser-invite";
 import type { WebphoneSnapshot } from "./telnyx-webphone";
 
 export type CallNotificationFocus = { sessionId: string; snapshotAtOpen: string };
@@ -37,17 +38,26 @@ export function callNotificationTarget(input: {
   const registered = input.phone?.status === "registered";
   const canReconnect = !busy && !browser && ["idle", "failed", "superseded"].includes(input.phone?.status ?? "");
   const base = { ...empty, call };
+  // Internal, transfer and conference legs do not necessarily have a queue
+  // ring attempt. The exact live browser invite is the evidence that this
+  // actor can answer, even while the shared session already says "active".
+  if (matchesIncomingBrowserInvite(call, browser)) return {
+    ...base,
+    canAnswer: registered && !busy,
+    message: input.phone?.answering ? "Hovor sa prijíma…" : !registered
+      ? "Čakám na pripojenie telefónu. Potom môžete tento hovor prijať."
+      : busy ? "Počkajte na dokončenie rozpracovanej akcie telefónu."
+        : "Hovor zvoní na tomto telefóne. Prijatie potvrďte tlačidlom.",
+  };
+  if (matches && browser?.active) return { ...base, message: "Hovor sa pripája alebo už prebieha. Ovládanie je v hornej lište." };
   if (call.kind === "active") {
     return { ...base, message: call.mine ? "Tento hovor práve vybavujete." : call.operatorName ? `Hovor už vybavuje ${call.operatorName}.` : "Hovor už prevzal iný operátor." };
   }
-  if (matches && browser?.active) return { ...base, message: "Hovor sa pripája alebo už prebieha. Ovládanie je v hornej lište." };
   if (call.kind === "offer") {
     if (!call.offeredToMe) return { ...base, message: "Hovor teraz zvoní inému operátorovi. Jeho stav sa priebežne aktualizuje." };
     if (browser && !matches) return { ...base, message: "Tento telefón má iný hovor. Upozornenie sa týka vyššie uvedeného volajúceho." };
     if (!registered) return { ...base, canReconnect, message: "Pripojte telefón v tejto aplikácii. Hovor prijmete, keď tu začne zvoniť." };
-    return { ...base, canAnswer: Boolean(matches && browser?.ringing && !busy), message: matches && browser?.ringing
-      ? "Hovor zvoní na tomto telefóne. Prijatie potvrďte tlačidlom."
-      : "Čakám, kým hovor začne zvoniť na tomto telefóne. Samotné upozornenie ho neprijíma." };
+    return { ...base, message: "Čakám, kým hovor začne zvoniť na tomto telefóne. Samotné upozornenie ho neprijíma." };
   }
   if (browser || input.model.active || busy) return { ...base, message: "Hovor čaká. Najprv dokončite svoj rozpracovaný hovor." };
   if (!registered) return { ...base, canReconnect, message: "Hovor čaká na prevzatie. Najprv pripojte telefón v tejto aplikácii." };

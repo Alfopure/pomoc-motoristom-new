@@ -19,9 +19,11 @@ import {
 } from "lucide-react";
 
 import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
+import { matchesIncomingBrowserInvite } from "@/lib/telephony/browser-invite";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
+import type { WebphoneCallView } from "@/lib/telephony/telnyx-webphone";
 
 import { callElapsedSeconds, formatCallTimer, phoneBarStateLabel, type PhoneCallAction } from "./phone-bar-model";
 
@@ -36,6 +38,11 @@ export type LiveCallOverviewCounts = {
   pausedOperators: number;
   callingOperators: number;
 };
+
+/** Callee legs can ring without a queue offer or ownership of the session. */
+export function liveBrowserInviteSessionId(model: Pick<PhoneBarModel, "teamCalls">, browserCall: WebphoneCallView | null): string | null {
+  return model.teamCalls.find((call) => matchesIncomingBrowserInvite(call, browserCall))?.sessionId ?? null;
+}
 
 export function liveCallOverviewCounts(model: PhoneBarModel, presences: readonly TelephonyOperatorPresence[]): LiveCallOverviewCounts {
   return {
@@ -225,8 +232,8 @@ function LiveCallRow({
   const state = phoneBarStateLabel(call);
   const timer = formatCallTimer(callElapsedSeconds(call, now));
   const isBusy = busyAction !== null;
-  const canAnswer = call.kind === "offer" && call.offeredToMe && browserOfferRinging && browserOfferSessionId === call.sessionId;
-  const canPickup = call.kind === "waiting";
+  const canAnswer = browserOfferRinging && browserOfferSessionId === call.sessionId;
+  const canPickup = call.kind === "waiting" && !canAnswer;
   const pickupBlocked = isBusy || Boolean(model.active) || model.ownPresenceStatus !== "available";
   const supervising = model.supervising?.sessionId === call.sessionId;
   const StateIcon = call.kind === "offer" ? PhoneIncoming : call.kind === "waiting" ? Clock3 : call.direction === "outbound" ? PhoneOutgoing : PhoneCall;

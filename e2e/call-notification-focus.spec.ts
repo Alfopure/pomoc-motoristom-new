@@ -62,3 +62,18 @@ test("taken, ended and stale calls remove actions while preserving refresh", asy
   await page.getByRole("button", { name: "Obnoviť stav" }).click();
   expect(await page.evaluate(() => window.callPushEvents)).toEqual(["refresh"]);
 });
+
+test("internal, consultation and conference invites remain answerable without a queue offer", async ({ page }) => {
+  for (const scenario of ["internal", "consulting", "conference"] as const) {
+    await page.evaluate((value) => window.callPushScenario(value), scenario);
+    await expect(page.getByRole("status")).toContainText("zvoní na tomto telefóne");
+    await page.getByRole("button", { name: "Prijať tento hovor" }).click();
+  }
+  expect(await page.evaluate(() => window.callPushEvents)).toEqual(["answer", "answer", "answer"]);
+  await page.evaluate(() => window.callPushScenario("consulting-other-call"));
+  await expect(page.getByRole("button", { name: "Prijať tento hovor" })).toHaveCount(0);
+  await expect(page.getByRole("status")).toContainText("vybavuje Jana");
+  await page.evaluate(() => window.callPushScenario("taken-stale-invite"));
+  await expect(page.getByRole("button", { name: "Prijať tento hovor" })).toHaveCount(0);
+  await expect(page.getByRole("status")).toContainText("vybavuje Jana");
+});
