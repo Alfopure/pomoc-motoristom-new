@@ -63,6 +63,7 @@ import { signOutCurrentSession } from "@/components/auth/sign-out";
 import { PushNotificationSync } from "@/components/pwa/PushNotificationSync";
 import { useAppUpdate } from "@/components/pwa/useAppUpdate";
 import { isAppRefreshBlocked } from "@/components/pwa/app-refresh-policy";
+import { notificationTarget } from "@/components/pwa/notification-target";
 import { navigateAfterDraftApproval } from "@/lib/draft-unload";
 import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
 import { formatNotificationReminderTime, isNotificationForProfile, isNotificationReady, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
@@ -73,6 +74,7 @@ import { requiresTowDestination } from "@/domain/case-card";
 import { caseAssistanceServiceName } from "@/lib/dispatch-calculations";
 import { createDispatchMapModel } from "@/lib/map-adapter";
 import { mergeCallCenterCalls, type PhoneBarCall } from "@/lib/telephony/active-calls-model";
+import type { CallNotificationFocus } from "@/lib/telephony/call-notification-target";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { supportPollDelayMs } from "@/lib/telephony/poll-schedule";
 import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
@@ -293,6 +295,7 @@ export function DispatchConsole({
   const [caseFilters, setCaseFilters] = useState<CaseFilters>(defaultCaseFilters);
   const [caseSort, setCaseSort] = useState<CaseSortState>({ key: "updatedAt", direction: "desc" });
   const [focusedTaskId, setFocusedTaskId] = useState<string | undefined>(undefined);
+  const [callNotificationFocus, setCallNotificationFocus] = useState<CallNotificationFocus | null>(null);
   const [priorityChangeCaseId, setPriorityChangeCaseId] = useState<string | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isCaseSaveLocked, setIsCaseSaveLocked] = useState(false);
@@ -337,7 +340,7 @@ export function DispatchConsole({
     if (pushDeepLinkHandled.current) return;
     const frame = window.requestAnimationFrame(() => {
       const url = new URL(window.location.href);
-      if (!url.searchParams.has("task")) return;
+      if (!url.searchParams.has("task") && !url.searchParams.has("call")) return;
       pushDeepLinkHandled.current = true;
       handleInitialPushOpen(url.href);
     });
@@ -856,7 +859,10 @@ export function DispatchConsole({
   }
 
   const handleInitialPushOpen = useEffectEvent((rawUrl: string) => {
-    const taskId = new URL(rawUrl).searchParams.get("task");
+    const target = notificationTarget(rawUrl, window.location.origin);
+    if (!target || target.kind === "settings") return;
+    if (target.kind === "call") { openCallNotification(target.id); return; }
+    const taskId = target.id;
     const caseItem = taskId && dispatchCases.find((item) => item.tasks.some((task) => task.id === taskId));
     if (taskId && caseItem) openTask(taskId, caseItem.id, true);
     else {
@@ -866,23 +872,36 @@ export function DispatchConsole({
   });
 
   const handlePushOpen = useEffectEvent((rawUrl: unknown) => {
-    if (typeof rawUrl !== "string") return;
-    let url: URL;
-    try { url = new URL(rawUrl, window.location.origin); } catch { return; }
-    if (url.origin !== window.location.origin || url.pathname !== "/") return;
-    const taskId = url.searchParams.get("task");
+    const target = notificationTarget(rawUrl, window.location.origin);
+    if (!target) return;
+    if (target.kind === "call") { openCallNotification(target.id); return; }
+    const taskId = target.kind === "task" ? target.id : null;
     const caseItem = taskId && dispatchCases.find((item) => item.tasks.some((task) => task.id === taskId));
     if (taskId && caseItem) openTask(taskId, caseItem.id, true);
     else if (!taskId) switchView("settings");
     // A newly assigned task might not exist in this tab's older snapshot.
     // Reload only after the normal save/discard guard has protected the draft.
-    else requestNavigation(() => window.location.assign(url.href), { documentNavigation: true });
+    else requestNavigation(() => window.location.assign(`/?task=${encodeURIComponent(taskId)}`), { documentNavigation: true });
   });
+
+  function openCallNotification(sessionId: string) {
+    requestNavigation(() => {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("call");
+      url.searchParams.delete("task");
+      window.history.replaceState(window.history.state, "", url);
+      setFocusedTaskId(undefined);
+      setWorkspace({ kind: "cockpit", mode: "split" });
+      setCallNotificationFocus({ sessionId, snapshotAtOpen: telephony.phoneBar.checkedAt });
+      setActiveView("call-center");
+      telephony.refresh();
+    });
+  }
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
     const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === "PM_OPEN_NOTIFICATION") {
+      if (event.data?.type === "PM_OPEN_NOTIFICATION" || event.data?.type === "PM_OPEN_CALL_NOTIFICATION") {
         // Acknowledge before the save/discard dialog: the worker must not
         // mistake time spent deciding about a draft for an unresponsive page.
         event.ports[0]?.postMessage({ handled: true });
@@ -1768,6 +1787,7 @@ export function DispatchConsole({
                 canManageCalls={viewerCanSupervise}
                 busyAction={telephony.busyAction}
                 phone={telephony.phone}
+                stale={telephony.stale}
                 onAnswer={telephony.answer}
                 onRejectOffer={telephony.hangupBrowser}
                 onCallAction={(action, sessionId) => void runPhoneCallAction(action, sessionId)}
@@ -2100,6 +2120,11 @@ export function DispatchConsole({
 
       {activeView === "call-center" && (
         <CallCenterModule
+          notificationFocus={callNotificationFocus}
+          notificationStateStale={telephony.stale}
+          outboundPending={telephony.outboundPending}
+          onDismissCallNotification={() => setCallNotificationFocus(null)}
+          onReconnectPhone={telephony.takeoverPhone}
           activeSnapshot={telephonyConfigured ? telephony.phoneBar : undefined}
           busyCallAction={telephony.busyAction}
           calls={visibleCallCenterCalls}

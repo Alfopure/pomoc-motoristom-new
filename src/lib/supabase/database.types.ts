@@ -644,6 +644,9 @@ export type Database = {
         p256dh: string;
         auth: string;
         sound_enabled: boolean;
+        task_notifications_enabled: boolean;
+        incoming_calls_enabled: boolean;
+        available_calls_enabled: boolean;
         expires_at: Timestamp | null;
         last_test_at: Timestamp | null;
         created_at: Timestamp;

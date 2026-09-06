@@ -52,3 +52,12 @@ test("an outstanding browser leg blocks a second pickup", async ({ page }) => {
   await page.getByRole("combobox").selectOption("pending");
   await expect(page.getByRole("button", { name: "Pripájanie hovoru…", exact: true })).toBeDisabled();
 });
+
+test("an operator recovers only their own reserved offer when this window has no invite", async ({ page }) => {
+  await page.getByRole("combobox").selectOption("own-offer-recovery");
+  await page.getByRole("button", { name: "Prevziať", exact: true }).click();
+  await expect(page.getByRole("status", { name: "Akcie" })).toHaveText("pickup:incoming-session");
+  await page.getByRole("combobox").selectOption("other-offer-recovery");
+  await expect(page.getByRole("button", { name: "Čakám na zvonenie v tomto okne", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Prevziať", exact: true })).toHaveCount(0);
+});

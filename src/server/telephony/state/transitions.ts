@@ -227,6 +227,12 @@ class TransitionBuilder {
 
   /** The leg currently talking to the customer (operator or external). */
   answeringLeg(): LegRow | undefined {
+    // A recovered offer can leave two legs for the same operator until Telnyx
+    // confirms the old hangup. Keep the accepted leg's identity across that gap.
+    const acceptedId = this.meta.answered_leg_call_control_id;
+    const accepted = typeof acceptedId === "string" ? this.legs.find((leg) => leg.telnyx_call_control_id === acceptedId
+      && leg.profile_id === this.session.answered_by_profile_id && (leg.role === "operator" || leg.role === "external")) : undefined;
+    if (accepted) return this.legEnded(accepted) ? undefined : accepted;
     const byProfile = this.session.answered_by_profile_id
       ? this.openLegs().find((leg) => leg.profile_id === this.session.answered_by_profile_id && (leg.role === "operator" || leg.role === "external"))
       : undefined;
@@ -1038,7 +1044,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
   if (!canWin) {
     b.cmd(hangupCmd(b, leg, "late_answer", false));
     if (attempt && !isTerminalAttemptResult(attempt.result)) b.attempt(attempt.id, { result: "cancelled", ended_at: b.nowIso });
-    if (leg.profile_id) b.presenceChange({ profileId: leg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, onlyIfStatus: ["ringing", "on_call"], reason: "late answer" });
+    if (leg.profile_id && !hasOtherAcceptedLeg(b, leg)) b.presenceChange({ profileId: leg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, onlyIfStatus: ["ringing", "on_call"], reason: "late answer" });
     return b.note("late answer → hang up").result();
   }
 
@@ -1059,7 +1065,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
       b.call.ring_group_id = attempt.ring_group_id;
     }
     if (!leg.profile_id) b.patchMeta({ answered_external: leg.to_number ?? null });
-    b.patchMeta({ pickup: null });
+    b.patchMeta({ pickup: null, answered_leg_call_control_id: leg.telnyx_call_control_id });
     if (intent === "pickup") b.patchMeta({ waiting: null });
     if (intent === "transfer") b.patchMeta({ transfer: b.meta.transfer ? { ...b.meta.transfer, completed_at: opts.at } : null });
     b.patchMeta({ ring: { ...(b.meta.ring ?? {}), active_step: null, step_deadline_at: null } });
@@ -1360,12 +1366,25 @@ function finishIfQuiet(b: TransitionBuilder, at: string): void {
   b.note("all legs ended → ended");
 }
 
+function hasOtherAcceptedLeg(b: TransitionBuilder, leg: LegRow): boolean {
+  if (!leg.profile_id || (leg.role !== "operator" && leg.role !== "external")) return false;
+  const accepted = b.answeringLeg();
+  return Boolean(accepted?.answered_at && accepted.profile_id === leg.profile_id && accepted.telnyx_call_control_id !== leg.telnyx_call_control_id);
+}
+
 function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent, at: string): ReduceResult {
   const state = b.session.state;
   const meta = b.meta;
   const intent = legIntent(leg);
   const attempt = b.attemptForLeg(leg);
   const answered = Boolean(leg.answered_at);
+
+  // Late events for a replaced browser leg must not release its operator or
+  // move the customer into waiting while the recovered leg is still connected.
+  if (hasOtherAcceptedLeg(b, leg)) {
+    finishIfQuiet(b, at);
+    return b.note("superseded operator leg left; accepted leg remains connected").result();
+  }
 
   // 0. A supervisor's leg: supervision is invisible to the call, so its end
   // changes nothing except the supervisor's own bookkeeping.
@@ -1474,7 +1493,7 @@ function handOverConference(b: TransitionBuilder, operator: LegRow, remaining: L
   const next = remaining.find((leg) => leg.profile_id) ?? remaining[0];
   b.setState(remaining.length > 1 ? "conference" : twoPartyState(b));
   b.patchSession({ answered_by_profile_id: next.profile_id ?? null });
-  b.patchMeta({ previous_operator: operator.profile_id ?? null });
+  b.patchMeta({ previous_operator: operator.profile_id ?? null, answered_leg_call_control_id: next.telnyx_call_control_id });
   if (next.profile_id) {
     b.call.operator_id = next.profile_id;
     b.presenceChange({ profileId: next.profile_id, status: "on_call", sessionId: b.session.id, reason: "took over the conference" });
@@ -1513,6 +1532,7 @@ function completeTransfer(b: TransitionBuilder, customer: LegRow, consultLeg: Le
   b.setState("talking").patchSession({ answered_by_profile_id: consultLeg.profile_id ?? null, hold_started_at: null });
   b.patchMeta({
     consult: null,
+    answered_leg_call_control_id: consultLeg.telnyx_call_control_id,
     transfer: { kind: "attended", target: b.meta.consult?.target ?? { kind: "number", number: consultLeg.to_number ?? "", label: consultLeg.to_number ?? "" }, by: previousOperator, at: b.nowIso, completed_at: b.nowIso },
     previous_operator: previousOperator,
   });

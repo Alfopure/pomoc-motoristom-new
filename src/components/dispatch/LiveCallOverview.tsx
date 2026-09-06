@@ -19,13 +19,15 @@ import {
 } from "lucide-react";
 
 import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
+import { matchesIncomingBrowserInvite } from "@/lib/telephony/browser-invite";
 import { canPickUpCall } from "@/lib/telephony/call-pickup";
+import { canPickUpWithCurrentPresence } from "@/lib/telephony/call-pickup-presence";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
-import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
+import type { WebphoneCallView, WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
-import { callElapsedSeconds, formatCallTimer, phoneBarCallMatchesBrowser, phoneBarStateLabel, type PhoneCallAction } from "./phone-bar-model";
+import { callElapsedSeconds, formatCallTimer, phoneBarStateLabel, type PhoneCallAction } from "./phone-bar-model";
 
 export type LiveCallOverviewFilter = "all" | "ringing" | "waiting" | "active";
 
@@ -38,6 +40,11 @@ export type LiveCallOverviewCounts = {
   pausedOperators: number;
   callingOperators: number;
 };
+
+/** Callee legs can ring without a queue offer or ownership of the session. */
+export function liveBrowserInviteSessionId(model: Pick<PhoneBarModel, "teamCalls">, browserCall: WebphoneCallView | null): string | null {
+  return model.teamCalls.find((call) => matchesIncomingBrowserInvite(call, browserCall))?.sessionId ?? null;
+}
 
 export function liveCallOverviewCounts(model: PhoneBarModel, presences: readonly TelephonyOperatorPresence[]): LiveCallOverviewCounts {
   return {
@@ -71,6 +78,7 @@ type SharedOverviewProps = {
   canManageCalls: boolean;
   busyAction: string | null;
   phone: WebphoneSnapshot | null;
+  stale?: boolean;
   onAnswer: () => void;
   onRejectOffer: () => void;
   onCallAction: (action: PhoneCallAction, sessionId: string) => void;
@@ -87,6 +95,7 @@ export function LiveCallsWorkspace(props: WorkspaceOverviewProps) {
   const [filter, setFilter] = useState<LiveCallOverviewFilter>("all");
   const [now, setNow] = useState(() => Date.now());
   const counts = liveCallOverviewCounts(props.model, props.presences);
+  const browserInviteSessionId = liveBrowserInviteSessionId(props.model, props.phone?.call ?? null);
   const rows = useMemo(() => filterCalls(props.model.teamCalls, filter), [filter, props.model.teamCalls]);
 
   useLiveCallClock(props.model.teamCalls.length > 0, setNow);
@@ -141,6 +150,7 @@ export function LiveCallsWorkspace(props: WorkspaceOverviewProps) {
           <LiveCallRow
             key={call.sessionId}
             {...props}
+            browserInviteSessionId={browserInviteSessionId}
             call={call}
             now={now}
             compact={false}
@@ -154,6 +164,7 @@ export function LiveCallsWorkspace(props: WorkspaceOverviewProps) {
 export function HeaderLiveCallsMenu(props: SharedOverviewProps) {
   const [now, setNow] = useState(() => Date.now());
   const counts = liveCallOverviewCounts(props.model, props.presences);
+  const browserInviteSessionId = liveBrowserInviteSessionId(props.model, props.phone?.call ?? null);
   useLiveCallClock(counts.total > 0, setNow);
   const online = props.presences.filter((presence) => ["available", "ringing", "on_call"].includes(presence.state));
   const paused = props.presences.filter((presence) => presence.state === "paused");
@@ -189,7 +200,7 @@ export function HeaderLiveCallsMenu(props: SharedOverviewProps) {
           {props.model.teamCalls.length === 0 ? (
             <div className="flex items-center gap-2 px-3 py-4 text-xs font-medium text-zinc-500"><PhoneCall size={15} /> Momentálne neprebieha žiadny hovor.</div>
           ) : props.model.teamCalls.map((call) => (
-            <LiveCallRow key={call.sessionId} {...props} call={call} now={now} compact />
+            <LiveCallRow key={call.sessionId} {...props} browserInviteSessionId={browserInviteSessionId} call={call} now={now} compact />
           ))}
         </div>
 
@@ -205,6 +216,8 @@ export function HeaderLiveCallsMenu(props: SharedOverviewProps) {
 
 function LiveCallRow({
   phone,
+  stale = false,
+  browserInviteSessionId,
   busyAction,
   call,
   canManageCalls,
@@ -220,6 +233,7 @@ function LiveCallRow({
   onSupervise,
 }: SharedOverviewProps & {
   call: PhoneBarCall;
+  browserInviteSessionId: string | null;
   now: number;
   compact: boolean;
   onNewCase?: (call: PhoneBarCall) => void;
@@ -228,13 +242,15 @@ function LiveCallRow({
   const state = phoneBarStateLabel(call);
   const timer = formatCallTimer(callElapsedSeconds(call, now));
   const isBusy = busyAction !== null;
-  const canAnswer = call.kind === "offer" && Boolean(phone?.call?.ringing) && phoneBarCallMatchesBrowser(call, phone?.call ?? null);
+  const canAnswer = !stale && phone?.status === "registered" && browserInviteSessionId === call.sessionId;
   const canPickup = canPickUpCall(call) && !canAnswer;
-  const pickupBlockReason = isBusy || (phone?.pendingOperatorLegs ?? 0) > 0 ? "Pripájanie hovoru…"
+  const pickupBlockReason = stale ? "Obnovte stav hovoru"
+    : isBusy || phone?.answering || (phone?.pendingOperatorLegs ?? 0) > 0 ? "Pripájanie hovoru…"
     : model.active || phone?.call ? "Najprv dokonči hovor"
       : phone?.status !== "registered" ? "Najprv pripoj telefón"
-        : model.ownPresenceStatus !== "available" ? (call.offeredToMe ? "Čakám na zvonenie v tomto okne" : "Najprv sa nastav dostupný")
+        : !canPickUpWithCurrentPresence(model, call) ? (call.offeredToMe ? "Čakám na zvonenie v tomto okne" : "Najprv sa nastav dostupný")
           : null;
+  const answerBlocked = isBusy || Boolean(phone?.answering) || (phone?.pendingOperatorLegs ?? 0) > 0;
   const supervising = model.supervising?.sessionId === call.sessionId;
   const StateIcon = call.kind === "offer" ? PhoneIncoming : call.kind === "waiting" ? Clock3 : call.direction === "outbound" ? PhoneOutgoing : PhoneCall;
   const surface = state.tone === "ring"
@@ -276,8 +292,8 @@ function LiveCallRow({
       </div>
 
       <div className={`flex flex-wrap items-center gap-1.5 ${compact ? "pl-10" : "sm:justify-end"}`}>
-        {canAnswer && <ActionButton busy={phone?.answering} disabled={isBusy || phone?.answering} icon={PhoneCall} label="Prijať" tone="accept" onClick={onAnswer} />}
-        {canAnswer && <ActionButton disabled={isBusy || phone?.answering} icon={X} label="Odmietnuť" tone="danger-outline" onClick={onRejectOffer} />}
+        {canAnswer && <ActionButton busy={phone?.answering} disabled={answerBlocked} icon={PhoneCall} label="Prijať" tone="accept" onClick={onAnswer} />}
+        {canAnswer && <ActionButton disabled={answerBlocked} icon={X} label="Odmietnuť" tone="danger-outline" onClick={onRejectOffer} />}
         {canPickup && <ActionButton busy={busyAction === "pickup"} disabled={Boolean(pickupBlockReason)} icon={PhoneIncoming} label={pickupBlockReason ?? "Prevziať"} tone="accept" onClick={() => onCallAction("pickup", call.sessionId)} />}
         {call.kind === "active" && call.mine && <ActionButton busy={busyAction === "hangup"} disabled={isBusy && busyAction !== "hangup"} icon={PhoneOff} label="Ukončiť" tone="danger" onClick={confirmAndEnd} />}
         {call.kind === "active" && !call.mine && Boolean(call.operatorProfileId) && canManageCalls && !supervising && (

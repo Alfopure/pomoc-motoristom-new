@@ -6,7 +6,8 @@ import { runSessionEvent } from "@/server/telephony/session-runner";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 15;
+// Includes bounded call push after the response; the inline sweep budget stays unchanged.
+export const maxDuration = 30;
 
 /**
  * Console poll target (design §2.4): active sessions, their open legs, ring

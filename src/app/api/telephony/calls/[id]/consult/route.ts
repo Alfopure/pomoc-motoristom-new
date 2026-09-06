@@ -2,6 +2,7 @@ import { startConsult } from "@/server/telephony/call-actions";
 import { handleCallActionRoute, readTransferTarget } from "@/server/telephony/call-action-route";
 
 export const runtime = "nodejs";
+export const maxDuration = 30;
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   return handleCallActionRoute(request, context, {

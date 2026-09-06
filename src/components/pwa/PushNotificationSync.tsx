@@ -29,7 +29,7 @@ export function PushNotificationSync({ profileId }: { profileId?: string }) {
           if (!currentEnrollment.pending) refreshAgain = true;
           return;
         }
-        setNativePushActive(state.subscribed);
+        setNativePushActive(state.subscribed && state.taskNotificationsEnabled);
         rememberNotificationSound(state.soundEnabled);
       } catch {
         // Existing push keeps working during a temporary connectivity failure.

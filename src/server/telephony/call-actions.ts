@@ -518,6 +518,7 @@ export async function pickupWaitingCall(deps: CallActionDeps, actor: CallActor, 
   const allowed = presenceAllowsOffer(
     presence.data ? { profileId: actor.profileId, status: presence.data.status, currentSessionId: presence.data.current_session_id, wrapUpUntil: presence.data.wrap_up_until } : undefined,
     nowOf(deps),
+    session.id,
   );
   if (!allowed.eligible) throw new CallActionError("Prevziať hovor je možné len v stave dostupný.", 409, "operator_unavailable");
   const device = await requireLiveDevice(deps, actor.profileId);
