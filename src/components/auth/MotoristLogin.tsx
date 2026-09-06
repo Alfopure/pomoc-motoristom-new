@@ -103,6 +103,9 @@ export function MotoristLogin({ message }: { message: string }) {
           <Link href={forgotPasswordHref} className="mt-4 block w-full text-center text-sm font-semibold text-zinc-700 transition hover:text-zinc-950">
             Zabudnuté heslo
           </Link>
+          <Link href="/ochrana-hovorov" className="mt-5 block text-center text-xs text-zinc-500 underline underline-offset-4 hover:text-zinc-800">
+            Informácie o nahrávaní hovorov
+          </Link>
         </div>
       </section>
     </main>

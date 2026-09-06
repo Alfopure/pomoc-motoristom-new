@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parseScribeSpans, verifiedMultiChannel, processRecordingAsrJob } from './recording-asr';
+import { normalizeScribeLanguage, parseScribeSpans, verifiedMultiChannel, processRecordingAsrJob } from './recording-asr';
 import type { RecordingJobContext, RecordingRow } from './recording-jobs';
 afterEach(()=>{vi.unstubAllEnvs();vi.unstubAllGlobals();});
 const at='2026-09-06T10:00:00.000Z';
 const source={id:'recording',started_at:at,ended_at:'2026-09-06T10:00:20.000Z',duration_seconds:20,participant_manifest:{version:1,timingVerified:true,audioDurationSeconds:20,audioFormat:{channels:2},channelMappingVerified:true,identitySource:'authenticated_leg_binding',coverage:'verified',intervals:[{profileId:null,role:'customer',channel:0,verified:true,audibleToCustomer:true,startedAt:at,endedAt:'2026-09-06T10:00:20.000Z'},{profileId:'operator-1',role:'operator',channel:1,verified:true,audibleToCustomer:true,startedAt:at,endedAt:'2026-09-06T10:00:10.000Z'}]}} as unknown as RecordingRow;
 const result={words:[{type:'word',text:'Dobrý',start:1,end:1.3,channel_index:1,speaker_id:'speaker_0'},{type:'word',text:'deň.',start:1.4,end:1.8,channel_index:1,speaker_id:'speaker_0'},{type:'word',text:'Ďakujem.',start:11,end:12,channel_index:1,speaker_id:'speaker_0'}]};
 describe('ASR identity evidence',()=>{
+ it('maps provider language codes to dashboard filters without inventing an unsupported language',()=>{
+  for(const [provider,filter] of [['slk','sk'],['slo','sk'],['ces','cs'],['cze','cs'],['eng','en'],['deu','de'],['ger','de'],['SK','sk'],['fra','fra']])expect(normalizeScribeLanguage(provider)).toBe(filter);
+  for(const invalid of [null,undefined,'','unknown-language','sk<script>',123])expect(normalizeScribeLanguage(invalid)).toBe('und');
+ });
  it('uses exact authenticated channel interval and global call offset, with no role outside that interval',()=>{
   const spans=parseScribeSpans(result,source,'transcript','2026-09-06T09:59:50.000Z');
   expect(spans).toHaveLength(2);expect(spans[0]).toMatchObject({text:'Dobrý deň.',startSeconds:11,endSeconds:11.8,operatorId:'operator-1',identityVerified:true,role:'operator'});

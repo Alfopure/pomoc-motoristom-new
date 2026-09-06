@@ -8,10 +8,10 @@ export const ANNOUNCEMENT_LANGUAGES = [
 export type AnnouncementLanguage = (typeof ANNOUNCEMENT_LANGUAGES)[number]["code"];
 /** Purpose-specific fallback when the approved policy does not permit quality evaluation. */
 export const SERVICE_RECORDING_NOTICE_TEXTS: Record<AnnouncementLanguage, string> = {
-  sk: "Hovor nahrávame na vybavenie pomoci. Záznam spracúvajú naši poskytovatelia. Informácie, prístup k záznamu alebo námietku riešte s dispečerom.",
-  cs: "Hovor nahráváme pro zajištění pomoci. Záznam zpracovávají naši poskytovatelé. Informace, přístup k záznamu nebo námitku řešte s dispečerem.",
-  en: "We record this call to arrange assistance. Our service providers process the recording. For information, access to the recording or to object, please speak to the dispatcher.",
-  de: "Wir zeichnen diesen Anruf auf, um Hilfe zu organisieren. Unsere Dienstleister verarbeiten die Aufnahme. Für Informationen, Zugang zur Aufnahme oder einen Widerspruch wenden Sie sich an die Leitstelle.",
+  sk: "Alfopure hovor nahráva a automaticky spracúva na vybavenie pomoci. Informácie, prístup k záznamu alebo námietku riešte s dispečerom.",
+  cs: "Alfopure hovor nahrává a automaticky zpracovává pro zajištění pomoci. Informace, přístup k záznamu nebo námitku řešte s dispečerem.",
+  en: "Alfopure records and automatically processes this call to arrange assistance. Ask the dispatcher for information, access to the recording, or to object.",
+  de: "Alfopure zeichnet diesen Anruf auf und verarbeitet ihn automatisch, um Hilfe zu organisieren. Für Informationen, Zugang zur Aufnahme oder Widerspruch fragen Sie die Leitstelle.",
 };
 export const ANNOUNCEMENT_VOICES = [
   { id: "EXAVITQu4vr4xnSDxMaL", label: "Sarah · pokojný ženský hlas" },
@@ -85,7 +85,7 @@ export const DEFAULT_ANNOUNCEMENT_TEXTS: Record<AnnouncementLanguage, Record<Ann
     "afterHoursNoCallback": "Voláte mimo otváracích hodín. Prosím, zavolajte neskôr.",
     "callbackFailed": "Požiadavku sa nepodarilo uložiť. Prosím, zavolajte neskôr.",
     "recordingServiceNotice": SERVICE_RECORDING_NOTICE_TEXTS.sk,
-    "recordingNotice": "Hovor nahrávame a vyhodnocujeme na vybavenie pomoci a kontrolu kvality. Záznam spracúvajú naši poskytovatelia. Informácie, prístup k záznamu alebo námietku riešte s dispečerom.",
+    "recordingNotice": "Alfopure hovor nahráva a automaticky vyhodnocuje na vybavenie pomoci a kontrolu kvality. Informácie, prístup k záznamu alebo námietku riešte s dispečerom.",
     "recordingPaused": "Nahrávanie je vypnuté.",
     "recordingResumed": "Nahrávanie sa opäť zapína.",
     "recordingUnavailable": "Hovor bude pokračovať bez nahrávania."
@@ -112,7 +112,7 @@ export const DEFAULT_ANNOUNCEMENT_TEXTS: Record<AnnouncementLanguage, Record<Ann
     "afterHoursNoCallback": "Voláte mimo otevírací dobu. Prosím, zavolejte později.",
     "callbackFailed": "Požadavek se nepodařilo uložit. Prosím, zavolejte později.",
     "recordingServiceNotice": SERVICE_RECORDING_NOTICE_TEXTS.cs,
-    "recordingNotice": "Hovor nahráváme a vyhodnocujeme pro zajištění pomoci a kontrolu kvality. Záznam zpracovávají naši poskytovatelé. Informace, přístup k záznamu nebo námitku řešte s dispečerem.",
+    "recordingNotice": "Alfopure hovor nahrává a automaticky vyhodnocuje pro zajištění pomoci a kontrolu kvality. Informace, přístup k záznamu nebo námitku řešte s dispečerem.",
     "recordingPaused": "Nahrávání je vypnuté.",
     "recordingResumed": "Nahrávání se znovu zapíná.",
     "recordingUnavailable": "Hovor bude pokračovat bez nahrávání."
@@ -139,7 +139,7 @@ export const DEFAULT_ANNOUNCEMENT_TEXTS: Record<AnnouncementLanguage, Record<Ann
     "afterHoursNoCallback": "You are calling outside our opening hours. Please call again later.",
     "callbackFailed": "We could not save your callback request. Please call again later.",
     "recordingServiceNotice": SERVICE_RECORDING_NOTICE_TEXTS.en,
-    "recordingNotice": "We record and review this call to arrange assistance and check service quality. Our service providers process the recording. Ask the dispatcher for information, access to the recording, or to object.",
+    "recordingNotice": "Alfopure records and automatically reviews this call to arrange assistance and check service quality. Ask the dispatcher for information, access to the recording, or to object.",
     "recordingPaused": "Recording is off.",
     "recordingResumed": "Recording will now resume.",
     "recordingUnavailable": "The call will continue without recording."
@@ -166,7 +166,7 @@ export const DEFAULT_ANNOUNCEMENT_TEXTS: Record<AnnouncementLanguage, Record<Ann
     "afterHoursNoCallback": "Sie rufen außerhalb unserer Öffnungszeiten an. Bitte rufen Sie später erneut an.",
     "callbackFailed": "Wir konnten Ihren Rückrufwunsch nicht speichern. Bitte rufen Sie später erneut an.",
     "recordingServiceNotice": SERVICE_RECORDING_NOTICE_TEXTS.de,
-    "recordingNotice": "Wir zeichnen diesen Anruf auf und werten ihn aus, um Hilfe zu organisieren und die Qualität zu prüfen. Unsere Dienstleister verarbeiten die Aufnahme. Für Informationen, Zugang zur Aufnahme oder einen Widerspruch wenden Sie sich an die Leitstelle.",
+    "recordingNotice": "Alfopure zeichnet diesen Anruf auf und wertet ihn automatisch aus, um Hilfe zu organisieren und die Qualität zu prüfen. Für Informationen, Zugang zur Aufnahme oder Widerspruch fragen Sie die Leitstelle.",
     "recordingPaused": "Die Aufzeichnung ist ausgeschaltet.",
     "recordingResumed": "Die Aufzeichnung wird jetzt fortgesetzt.",
     "recordingUnavailable": "Das Gespräch wird ohne Aufzeichnung fortgesetzt."
