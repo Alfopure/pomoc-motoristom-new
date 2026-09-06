@@ -43,7 +43,7 @@ test("a pending desktop case stays visible after crossing to mobile", async ({ p
   await expect(plate).toBeVisible();
   await expect(plate).toHaveValue("MOBILE DRAFT");
   await page.getByRole("button", { name: "Zobraziť mapu na celú plochu" }).click();
-  await page.getByRole("button", { name: "Zostať vo formulári", exact: true }).click();
+  await page.getByRole("button", { name: "Zostať vo formulári", exact: true }).last().click();
   await expect(plate).toBeVisible();
   await expect(plate).toHaveValue("MOBILE DRAFT");
 });

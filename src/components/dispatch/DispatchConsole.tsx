@@ -1735,7 +1735,7 @@ export function DispatchConsole({
         </div>
       </header>
 
-      <div className={activeView === "tasks" ? "sr-only" : "mobile-workspace-heading flex min-h-16 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-4 py-2.5 lg:hidden"}>
+      <div className={activeView === "tasks" ? "hidden" : "mobile-workspace-heading flex min-h-16 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-4 py-2.5 lg:hidden"}>
         <div className="flex min-w-0 items-center gap-2">
           {(activeView === "dispatch" && mobilePane === "workspace") || (activeView === "cases" && workspace.kind === "detail") ? (
             <button type="button" onClick={() => activeView === "cases" ? returnToCockpit() : showMobileCases()} aria-label="Späť na prípady" className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white">
