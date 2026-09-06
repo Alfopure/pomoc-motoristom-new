@@ -29,7 +29,7 @@ before(()=>{
  CREATE TABLE motorist_call_legs(id uuid primary key,session_id uuid references motorist_call_sessions(id),organization_id uuid references motorist_organizations(id));
  CREATE TABLE motorist_calls(id uuid primary key,organization_id uuid references motorist_organizations(id),session_id uuid references motorist_call_sessions(id),started_at timestamptz default now(),ended_at timestamptz,duration_seconds integer,operator_id uuid);
  CREATE TABLE motorist_audit_log(id uuid primary key default gen_random_uuid(),organization_id uuid,actor_profile_id uuid,action text,entity_type text,entity_id uuid,source text,before_payload jsonb,after_payload jsonb);${tables}`);
- for(const file of ['20260925100000_call_recording_processing.sql','20260925101000_call_quality_services.sql']) db(readFileSync(new URL(`../supabase/migrations/${file}`,import.meta.url),'utf8'));
+ for(const file of ['20260925100000_call_recording_processing.sql','20260925101000_call_quality_services.sql','20260925102000_call_recording_sweep_scope_fix.sql']) db(readFileSync(new URL(`../supabase/migrations/${file}`,import.meta.url),'utf8'));
  db(`INSERT INTO motorist_organizations(id) VALUES('${org}'),('${otherOrg}'); INSERT INTO motorist_profiles(id,organization_id,role) VALUES('${admin}','${org}','manager'),('${operator}','${org}','dispatcher'),('${otherAdmin}','${otherOrg}','manager');
  INSERT INTO motorist_call_sessions(id,organization_id) VALUES('${session}','${org}'); INSERT INTO motorist_calls(id,organization_id,session_id,ended_at) VALUES('${call}','${org}','${session}',now());
  INSERT INTO motorist_call_recording_policies(organization_id,recording_enabled,transcription_enabled,analysis_enabled,quality_enabled,approved_at,approved_by) VALUES('${org}',true,true,true,true,now(),'${admin}');`);
@@ -40,6 +40,11 @@ test('actual PostgreSQL recording transactions',{ skip: !enabled && 'Set RECORDI
   for(const table of ['motorist_call_recordings','motorist_call_transcripts','motorist_call_processing_jobs','motorist_call_analyses','motorist_call_quality_reviews']) assert.equal(db(`SELECT has_table_privilege('authenticated','${table}','SELECT')`),'f');
   assert.equal(db(`SELECT has_function_privilege('authenticated','motorist_recording_claim_job(uuid,integer)','EXECUTE')`),'f');
   assert.throws(()=>db(`INSERT INTO motorist_call_recording_access VALUES('${org}','${otherAdmin}',true,true)`),/Invalid access scope/);
+ });
+ await t.test('retention sweep can execute with no due sources without its loop record shadowing the call alias',()=>{
+  assert.equal(db(`SELECT motorist_recording_sweep('${org}')`),'0');
+  assert.equal(db(`SELECT motorist_recording_sweep('${otherOrg}')`),'0');
+  assert.equal(db(`SELECT motorist_recording_sweep('${org}')`),'0');
  });
  await t.test('admission is global, atomic and idempotent per logical call',async()=>{
   const result=await Promise.all([dbAsync(`SELECT motorist_recording_admit_session('${org}','${session}','${call}',10)`),dbAsync(`SELECT motorist_recording_admit_session('${org}','${session}','${call}',10)`)]);
@@ -156,6 +161,16 @@ test('actual PostgreSQL recording transactions',{ skip: !enabled && 'Set RECORDI
    assert.equal(row.status,'available');assert.equal(manifest.audioDurationSeconds,audio);assert.equal(manifest.timingVerified,verified);assert.equal(manifest.conversationComplete,verified);assert.equal(manifest.openingComplete,verified);assert.equal(manifest.closingComplete,verified);
    assert.equal(manifest.timingWarning,verified?null:'audio_provider_duration_mismatch');assert.equal(row.duration_seconds,Math.ceil(provider));
   }
+ });
+
+ await t.test('retention sweep tombstones an expired source and repeated execution remains idempotent',()=>{
+  const r=db("SELECT id FROM motorist_call_recordings WHERE provider_recording_id='timing-0'");
+  db(`UPDATE motorist_call_recordings SET expires_at=now()-interval '1 second' WHERE id='${r}'`);
+  assert.equal(db(`SELECT motorist_recording_sweep('${org}')`),'1');
+  assert.equal(db(`SELECT deleted_at IS NOT NULL AND restricted_at IS NOT NULL FROM motorist_call_recordings WHERE id='${r}'`),'t');
+  assert.equal(db(`SELECT count(*) FROM motorist_call_processing_jobs WHERE recording_id='${r}' AND kind='delete' AND checkpoint->>'scope'='recording'`),'1');
+  assert.equal(db(`SELECT motorist_recording_sweep('${org}')`),'0');
+  assert.equal(db(`SELECT count(*) FROM motorist_call_processing_jobs WHERE recording_id='${r}' AND kind='delete' AND checkpoint->>'scope'='recording'`),'1');
  });
 
 });
