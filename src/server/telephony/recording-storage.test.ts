@@ -52,6 +52,53 @@ describe('resumable import protocol',()=>{
   const ctx=importContext();const fetch=vi.fn().mockResolvedValue(new Response('{}'));vi.stubGlobal('fetch',fetch);
   await deleteRecordingStorage(ctx);expect(JSON.parse(fetch.mock.calls[0][1].body).prefixes).toEqual(['org/call/recording/r1.wav','org/call/recording/r1.mp3']);
  });
+ it('removes a completed canonical object before Supabase permits TUS cleanup, then checks the canonical paths again',async()=>{
+  const ctx=importContext();ctx.job.checkpoint={upload_url:'https://isolated.supabase.co/storage/v1/upload/resumable/upload1',offset:48,total:48};ctx.recording!.storage_path='org/call/recording/r1.wav';
+  let objectExists=true;const operations:string[]=[];
+  vi.stubGlobal('fetch',vi.fn(async(url:string)=>{
+   if(String(url).includes('/upload/resumable/')){operations.push('terminate');return new Response(objectExists?'The resource already exists':'The file for this url was not found',{status:objectExists?409:404});}
+   operations.push('remove-object');objectExists=false;return new Response('[]');
+  }));
+  await expect(deleteRecordingStorage(ctx)).resolves.toBeUndefined();expect(objectExists).toBe(false);expect(operations).toEqual(['remove-object','terminate','remove-object']);
+ });
+ it('terminates an incomplete upload and removes a late PATCH result after termination acknowledgement',async()=>{
+  const ctx=importContext();ctx.job.checkpoint={upload_url:'https://isolated.supabase.co/storage/v1/upload/resumable/upload1',offset:24,total:48};
+  let objectExists=false,terminated=false;
+  vi.stubGlobal('fetch',vi.fn(async(url:string)=>{
+   if(String(url).includes('/upload/resumable/')){objectExists=true;terminated=true;return new Response(null,{status:204});}
+   objectExists=false;return new Response('[]');
+  }));
+  await expect(deleteRecordingStorage(ctx)).resolves.toBeUndefined();expect(terminated).toBe(true);expect(objectExists).toBe(false);
+ });
+ it.each([401,403,409,500])('removes canonical data but preserves an unexpected TUS %i as retryable cleanup',async(status)=>{
+  const ctx=importContext();ctx.job.checkpoint={upload_url:'https://isolated.supabase.co/storage/v1/upload/resumable/upload1'};
+  let objectExists=true,retry=false;
+  vi.stubGlobal('fetch',vi.fn(async(url:string)=>{
+   if(String(url).includes('/upload/resumable/'))return new Response(null,{status:retry?204:status});
+   objectExists=false;return new Response('[]');
+  }));
+  await expect(deleteRecordingStorage(ctx)).rejects.toMatchObject({code:'upload_cleanup_failed',retryable:true});expect(objectExists).toBe(false);expect(ctx.job.checkpoint).toHaveProperty('upload_url');
+  retry=true;await expect(deleteRecordingStorage(ctx)).resolves.toBeUndefined();
+ });
+ it('does not discard the TUS handle when canonical deletion fails',async()=>{
+  const ctx=importContext();ctx.job.checkpoint={upload_url:'https://isolated.supabase.co/storage/v1/upload/resumable/upload1'};const fetch=vi.fn().mockResolvedValue(new Response(null,{status:500}));vi.stubGlobal('fetch',fetch);
+  await expect(deleteRecordingStorage(ctx)).rejects.toMatchObject({code:'storage_delete_failed',retryable:true});expect(fetch).toHaveBeenCalledTimes(1);expect(String(fetch.mock.calls[0][0])).toContain('/object/motorist-call-recordings');
+ });
+ it('preserves uncertainty when TUS termination loses its network acknowledgement after canonical deletion',async()=>{
+  const ctx=importContext();ctx.job.checkpoint={upload_url:'https://isolated.supabase.co/storage/v1/upload/resumable/upload1'};let objectRemoved=false;
+  vi.stubGlobal('fetch',vi.fn(async(url:string)=>{if(String(url).includes('/upload/resumable/'))throw new Error('ack lost');objectRemoved=true;return new Response('[]');}));
+  await expect(deleteRecordingStorage(ctx)).rejects.toMatchObject({code:'storage_request_failed',retryable:true});expect(objectRemoved).toBe(true);expect(ctx.job.checkpoint).toHaveProperty('upload_url');
+ });
+ it('keeps cleanup retryable if the final canonical sweep fails after acknowledged TUS termination',async()=>{
+  const ctx=importContext();ctx.job.checkpoint={upload_url:'https://isolated.supabase.co/storage/v1/upload/resumable/upload1'};let removed=0;
+  vi.stubGlobal('fetch',vi.fn(async(url:string)=>{if(String(url).includes('/upload/resumable/'))return new Response(null,{status:204});removed++;return new Response(null,{status:removed===2?500:200});}));
+  await expect(deleteRecordingStorage(ctx)).rejects.toMatchObject({code:'storage_delete_failed',retryable:true});expect(removed).toBe(2);expect(ctx.job.checkpoint).toHaveProperty('upload_url');
+  await expect(deleteRecordingStorage(ctx)).resolves.toBeUndefined();expect(removed).toBe(4);
+ });
+ it('validates foreign TUS cleanup URLs before any destructive canonical request',async()=>{
+  const ctx=importContext();ctx.job.checkpoint={upload_url:'https://evil.example/storage/v1/upload/resumable/id'};const fetch=vi.fn();vi.stubGlobal('fetch',fetch);
+  await expect(deleteRecordingStorage(ctx)).rejects.toThrow('storage_upload_url_invalid');expect(fetch).not.toHaveBeenCalled();
+ });
  it('refuses a checkpoint upload URL on another origin before sending service credentials',async()=>{
   const ctx=importContext();ctx.job.checkpoint={upload_url:'https://evil.example/storage/v1/upload/resumable/id'} as Json;const fetch=vi.fn();vi.stubGlobal('fetch',fetch);
   await expect(processRecordingImport(ctx)).rejects.toThrow('storage_upload_url_invalid');expect(fetch).not.toHaveBeenCalled();
