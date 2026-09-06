@@ -32,6 +32,7 @@ import { SUPERVISOR_MODE_HINTS, SUPERVISOR_MODE_LABELS, SUPERVISOR_MODE_ORDER, t
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
 import { CallTransferPicker, type TransferPickerMode, type TransferRequest } from "./CallTransferPicker";
+import { CallRecordingControls } from "./recordings/CallRecordingControls";
 import {
   callElapsedSeconds,
   DTMF_KEYS,
@@ -256,6 +257,12 @@ export function PhoneBar(props: PhoneBarProps) {
           />
         )}
       </div>
+
+      {active?.callId && active.mine && (
+        <div className="min-w-0 basis-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-zinc-900">
+          <CallRecordingControls key={active.callId} callId={active.callId} />
+        </div>
+      )}
 
       {model.offers.length > 1 && (
         <span className="rounded-md border border-yellow-300/40 bg-yellow-300/15 px-2 py-1 text-[11px] font-bold text-yellow-100">

@@ -11,6 +11,8 @@ import { reserveOperator } from "../routing/reservation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
 import { isCallGoneError, TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
+import { recordingCommandOutcome, recordingIntent } from "./recording";
+import { observeParticipants } from "./participants";
 import {
   DEFAULT_TTS_VOICE,
   announcementKeyForMedia,
@@ -368,6 +370,8 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
     duration_seconds: answeredAt && endedAt ? seconds(answeredAt, endedAt) : current?.duration_seconds ?? null,
     ring_group_id: overrides.ring_group_id ?? current?.ring_group_id ?? null,
     summary: overrides.summary ?? current?.summary ?? null,
+    recording_status: current?.recording_status === "available" || current?.recording_status === "deleted" ? current.recording_status :
+      meta.recording?.recorders.length ? meta.recording.error ? "failed" : "pending" : current?.recording_status ?? "not_requested",
     raw_latest_payload: toJson({
       state: session.state,
       conference_id: session.conference_id,
@@ -391,7 +395,7 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
     provider: "telnyx",
     direction: session.direction,
     status,
-    recording_status: "not_requested",
+    recording_status: values.recording_status ?? "not_requested",
     transcript_status: "not_requested",
     raw_payload: toJson({ session_id: session.id }),
   });
@@ -436,7 +440,9 @@ export async function recordCallEvent(
   }
   const event = input.event;
   const target = event.kind === "app" ? safeEventTarget(event.target) : null;
-  const rawPayload = event.kind === "telnyx" ? toJson(event.payload) : toJson({ type: event.type, actor: event.actorProfileId, target });
+  const rawPayload = event.kind === "telnyx" ? toJson(event.type.includes("recording.")
+    ? { recording_id: event.payload.recording_id ?? null, recording_started_at: event.payload.recording_started_at ?? null, recording_ended_at: event.payload.recording_ended_at ?? null, channels: event.payload.channels ?? null }
+    : event.payload) : toJson({ type: event.type, actor: event.actorProfileId, target });
   const inserted = await admin.from("motorist_call_events").insert({
     organization_id: deps.organizationId,
     call_id: callId,
@@ -529,6 +535,22 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         playRingtone: command.playRingtone,
         ringtone: command.playRingtone ? "cz" : undefined,
       });
+      return { skipped: false };
+    case "recording_start": {
+      if (!readMeta(ctx.session).recording?.policy.enabled) throw new EffectsError("recording policy proof unavailable");
+      const call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id).maybeSingle();
+      if (call.error || !call.data) throw new EffectsError("recording_admission_denied");
+      const admission = await deps.admin.rpc("motorist_recording_admit_session", { p_organization_id: deps.organizationId, p_session_id: ctx.session.id, p_call_id: call.data.id, p_max_per_hour: 10 });
+      if (admission.error || admission.data !== true) throw new EffectsError("recording_admission_denied");
+      await deps.renewLease?.();
+      await telnyx.recordingStart({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, maxLength: command.maxLength,
+        clientState: encodeClientState({ sid: ctx.session.id, role: "customer", intent: recordingIntent(command.recorderId) }) });
+      return { skipped: false };
+    }
+    case "recording_stop":
+      await deps.renewLease?.();
+      try { await telnyx.recordingStop({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId }); }
+      catch (error) { if (!isCallGoneError(error)) throw error; }
       return { skipped: false };
     case "playback_start": {
       const prompt = resolvePrompt(deps, ctx, command.media);
@@ -889,6 +911,12 @@ export async function applyReduceResult(
   }
 
   let session = await persistTransition(deps, { session: input.session, transition, expectedVersion: input.expectedVersion, event: input.event });
+  if (input.event.kind === "app" && ["recording_stop", "recording_retry_stop"].includes(input.event.type) && readMeta(session).recording?.suppressionReason === "objection") {
+    const restricted = await deps.admin.rpc("motorist_recording_restrict_session", { p_organization_id: deps.organizationId, p_session_id: session.id });
+    // The persisted session suppression also gates all processing checkpoints.
+    // A database restriction retry must never delay the actual privacy STOP.
+    if (restricted.error) deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "recording_restriction_pending" });
+  }
   const ctx: ExecutionContext = { session, dialResults: new Map(), conferenceId: session.conference_id };
   const outcomes: CommandOutcome[] = [];
   const compensated: string[] = [];
@@ -898,9 +926,52 @@ export async function applyReduceResult(
     const started = deps.now().getTime();
     const key = commandKey(command);
     try {
+      if (readMeta(ctx.session).recording?.policy.enabled) await deps.renewLease?.();
       const executed = await executeCommand(deps, ctx, command);
+      if (command.kind === "recording_start" || command.kind === "recording_stop") {
+        const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
+        if (latest.error || !latest.data) throw new EffectsError("recording state checkpoint unavailable");
+        ctx.session = latest.data;
+        const changed = recordingCommandOutcome(ctx.session, command, true, deps.now().toISOString());
+        const update = emptyTransition();
+        update.session.metadata = changed.metadata;
+        session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event });
+        ctx.session = session;
+      }
+      if (["bridge", "conference_join", "conference_leave", "conference_hold", "conference_unhold", "recording_stop", "recording_start"].includes(command.kind)) {
+        const provenConference = Boolean(readMeta(ctx.session).recording?.policy.conferenceVerified && ["conference_join", "conference_unhold"].includes(command.kind));
+        try { await observeParticipants(deps.admin, ctx.session, commandKey(command), deps.now().toISOString(), provenConference); }
+        catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "participant_observation_failed" }); }
+      }
       outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: executed.skipped, bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: executed.detail });
     } catch (error) {
+      if (command.kind === "recording_start" || command.kind === "recording_stop") {
+        try {
+          const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
+          if (latest.error || !latest.data) throw new EffectsError("recording state checkpoint unavailable");
+          ctx.session = latest.data;
+          const changed = recordingCommandOutcome(ctx.session, command, false, deps.now().toISOString(), isCallGoneError(error), error instanceof EffectsError && error.message === "recording_admission_denied" || command.kind === "recording_start" && isCallGoneError(error));
+          const update = emptyTransition();
+          update.session.metadata = changed.metadata;
+          session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event });
+          ctx.session = session;
+        } catch {
+          // The already-persisted starting/stopping state remains potentially
+          // active. Failed bookkeeping must not prevent the best-effort START
+          // path from connecting assistance, or unlock a private STOP barrier.
+          deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "recording_checkpoint_pending" });
+        }
+      }
+      if (command.kind === "playback_start" && command.clientState?.intent?.startsWith("seq:") && readMeta(ctx.session).announcement_sequence) {
+        const update = emptyTransition();
+        // executeCommand has already tried locale TTS. The immediate follow-up sweep
+        // continues assistance without claiming that an unavailable privacy notice played.
+        update.session.metadata = toJson({ ...readMeta(ctx.session), announcement_sequence: isCallGoneError(error) ? null : {
+          ...readMeta(ctx.session).announcement_sequence, speechRetry: true, deadlineAt: deps.now().toISOString(),
+        } });
+        session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event });
+        ctx.session = session;
+      }
       const message = describeError(error);
       outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: false, skipped: false, bestEffort: Boolean(command.bestEffort), error: message, ms: deps.now().getTime() - started });
       if (command.bestEffort) {

@@ -48,6 +48,9 @@ export async function loadTelephonyCallHistory(
       .select("id, call_id, created_at")
       .eq("organization_id", organizationId)
       .eq("status", "available")
+      .is("deleted_at", null)
+      .is("restricted_at", null)
+      .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
       .in("call_id", callIds)
       .order("created_at", { ascending: false }),
   ]);
