@@ -30,3 +30,13 @@ Na iOS/iPadOS 16.4+ vyžaduje push aplikáciu pridanú na plochu. Zvuk v pozadí
 6. Skutočné doručenie na fyzickom telefóne a počuteľnosť zvuku vyžadujú opt-in zariadenie. Prijatie push poskytovateľom ani browser simulácia samy nepotvrdzujú, že používateľ upozornenie uvidel alebo počul.
 
 Úprava nevyžaduje nový cron, worker ani listener. Úložisko push a jeho kľúče patria iba projektu tejto kópie.
+
+## Aktualizácia otvorenej PWA
+
+Nové nasadenie samo nenahradí JavaScript a rozhranie už otvorenej PWA. Worker načítava navigačné HTML zo siete, ale pri kompaktnom vydaní sa jeho skript nezmenil; samotné `registration.update()` preto toto vydanie neodhalilo. Manifest používa relatívny štart `/`, takže inštalácia z nemennej Preview adresy navyše zostane na danej adrese.
+
+Prihlásená konzola si teraz uchová verziu načítaného dokumentu. Pri štarte, návrate do viditeľného okna, obnovení siete a každých päť minút počas používania ju porovná s necachovaným `/api/health/live`. Identifikátor pochádza z `VERCEL_DEPLOYMENT_ID`, potom explicitného `DEPLOYMENT_VERSION` alebo `VERCEL_GIT_COMMIT_SHA`. Lokálna neznáma verzia nevyvolá upozornenie. Výpadok siete nezablokuje prácu ani nespustí obnovenie.
+
+Pri rozdiele sa zobrazí krátka ponuka „Nová verzia je pripravená — Obnoviť“. Ručné „Obnoviť aplikáciu“ je dostupné aj v účte. Obnovenie rešpektuje uloženie alebo zahodenie rozpracovaného prípadu a je blokované počas hovoru, ponuky hovoru, supervízie, pripájania a telefónnych operácií. Stav hovoru sa kontroluje znovu po dialógu ukladania. Aktualizácia nevymazáva cache, prihlásenie ani push odber a nikdy sama nereštartuje dokument.
+
+Už otvorená verzia bez tejto kontroly potrebuje jedno obnovenie po uložení práce a skončení hovoru. Na fyzickom zariadení treba overiť aj adresu, z ktorej bola PWA nainštalovaná; browser simulácia nepotvrdzuje konkrétny stav používateľovho telefónu.

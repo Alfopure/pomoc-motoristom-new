@@ -3,6 +3,7 @@ import { MotoristLogin } from "@/components/auth/MotoristLogin";
 import { DispatchConsole } from "@/components/dispatch/DispatchConsole";
 import { loadDispatchData } from "@/data/dispatch-repository";
 import { getDefaultMotoristAuthState } from "@/server/api-auth";
+import { getAppVersion } from "@/server/app-version";
 
 export default async function Home() {
   await connection();
@@ -16,6 +17,7 @@ export default async function Home() {
 
   return (
     <DispatchConsole
+      appVersion={getAppVersion()}
       initialData={dispatchData}
       viewerDisplayName={authState.profile?.displayName}
       viewerEmail={authState.profile?.email}

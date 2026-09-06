@@ -23,6 +23,7 @@ export default defineConfig({
         command: "pnpm dev --hostname 127.0.0.1 --port 3000",
         env: {
           MOTORIST_DEV_AUTH_BYPASS: process.env.MOTORIST_DEV_AUTH_BYPASS ?? "true",
+          DEPLOYMENT_VERSION: process.env.DEPLOYMENT_VERSION ?? "pwa-test-a",
         },
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,

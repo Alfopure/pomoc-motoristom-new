@@ -1,12 +1,13 @@
 import { getSupabaseServiceEnv } from "@/lib/supabase/env";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { getAppVersion } from "@/server/app-version";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   const checkedAt = new Date().toISOString();
-  const version = process.env.DEPLOYMENT_VERSION?.trim() || "development";
+  const version = getAppVersion();
 
   try {
     if (!getSupabaseServiceEnv()) {
