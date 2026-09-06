@@ -69,6 +69,19 @@ describe("announcement configuration", () => {
     expect(h.db.rows("motorist_audit_log")).toMatchObject([{ actor_profile_id: ACTOR.profileId, action: "telephony.announcements.update", entity_id: LINE }]);
   });
 
+  it("saves and reloads prepared situations as announcement metadata only", async () => {
+    const h = world();
+    const config: AnnouncementConfig = { ...defaultAnnouncementConfig(), prompts: {
+      sk: { holdStart: { text: "Prosím, chvíľu počkajte." }, recordingPaused: { text: "Nahrávanie je vypnuté." } },
+      de: { transferStart: { text: "Wir verbinden Sie jetzt." } },
+    } };
+    await saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision: NOW, config });
+    const lines = await getAnnouncementLines(h.deps, ORG);
+    expect(lines[0].config).toEqual(config);
+    expect(h.db.find("motorist_telephony_lines", (row) => row.id === LINE)?.metadata).toEqual({ existingSetting: { enabled: true }, announcements: config });
+    expect(h.db.log.filter((entry) => entry.operation === "update").map((entry) => entry.table)).toEqual(["motorist_telephony_lines"]);
+  });
+
   it("rejects a stale browser revision instead of overwriting a colleague's edit", async () => {
     const h = world();
     await saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision: NOW, config: configWith() });

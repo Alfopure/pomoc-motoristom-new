@@ -3,18 +3,20 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  ANNOUNCEMENT_DEFINITIONS, ANNOUNCEMENT_LANGUAGES, ANNOUNCEMENT_VOICES,
+  ANNOUNCEMENT_CATEGORIES, ANNOUNCEMENT_DEFINITIONS, ANNOUNCEMENT_LANGUAGES, ANNOUNCEMENT_VOICES,
   DEFAULT_ANNOUNCEMENT_TEXTS, defaultAnnouncementConfig, readAnnouncementConfig, resolveAnnouncement,
 } from "./announcements";
 
 describe("caller announcement assets", () => {
   it("ships the exact configured text and intact audio in all four languages", () => {
-    const manifest = JSON.parse(readFileSync(resolve("public/telephony/announcements-v1/manifest.json"), "utf8")) as Array<{ file: string; language: string; key: string; text: string; sha256: string; durationSeconds: number }>;
-    for (const { code } of ANNOUNCEMENT_LANGUAGES) for (const { key } of ANNOUNCEMENT_DEFINITIONS) {
+    const manifest = JSON.parse(readFileSync(resolve("public/telephony/announcements-v2/manifest.json"), "utf8")) as Array<{ file: string; language: string; key: string; text: string; sha256: string; durationSeconds: number; runtimeStatus: string }>;
+    expect(manifest).toHaveLength(97);
+    for (const { code } of ANNOUNCEMENT_LANGUAGES) for (const { key, runtimeStatus } of ANNOUNCEMENT_DEFINITIONS) {
       const prompt = resolveAnnouncement(defaultAnnouncementConfig(), key, code);
       const entry = manifest.find((item) => item.key === key && item.language === code)!;
       expect(entry, `${code}/${key}`).toBeDefined();
       expect(entry.text).toBe(DEFAULT_ANNOUNCEMENT_TEXTS[code][key]);
+      expect(entry.runtimeStatus).toBe(runtimeStatus);
       expect(entry.file).toBe(prompt.file);
       expect(createHash("sha256").update(readFileSync(resolve("public/telephony", entry.file))).digest("hex")).toBe(entry.sha256);
       expect(entry.durationSeconds).toBeGreaterThan(1);
@@ -22,6 +24,25 @@ describe("caller announcement assets", () => {
     }
     const greeting = manifest.find((item) => item.key === "greeting" && item.language === "sk")!;
     expect(greeting.durationSeconds).toBeLessThan(3.5);
+    const music = manifest.find((item) => item.key === "moh")!;
+    expect(createHash("sha256").update(readFileSync(resolve("public/telephony", music.file))).digest("hex")).toBe(music.sha256);
+  });
+  it("keeps the seven runtime prompts active and every future situation explicitly prepared", () => {
+    expect(ANNOUNCEMENT_DEFINITIONS).toHaveLength(24);
+    expect(new Set(ANNOUNCEMENT_DEFINITIONS.map(({ key }) => key)).size).toBe(24);
+    expect(ANNOUNCEMENT_DEFINITIONS.filter(({ runtimeStatus }) => runtimeStatus === "active").map(({ key }) => key)).toEqual([
+      "greeting", "afterHours", "ivrMain", "callbackOffer", "callbackConfirmed", "allBusy", "invalidInput",
+    ]);
+    expect(ANNOUNCEMENT_DEFINITIONS.filter(({ runtimeStatus }) => runtimeStatus === "prepared")).toHaveLength(17);
+    expect(ANNOUNCEMENT_CATEGORIES.map(({ key }) => ANNOUNCEMENT_DEFINITIONS.filter((definition) => definition.category === key).length)).toEqual([7, 3, 6, 4, 4]);
+    expect(resolveAnnouncement(defaultAnnouncementConfig(), "greeting").file).toBe("announcements-v1/sk/greeting.mp3");
+    expect(resolveAnnouncement(defaultAnnouncementConfig(), "recordingNotice").file).toBe("announcements-v2/sk/recordingNotice.mp3");
+  });
+  it("preserves stored prepared prompts without changing the runtime status", () => {
+    const config = readAnnouncementConfig({ ...defaultAnnouncementConfig(), prompts: { de: { transferStart: { text: "Wir verbinden Sie jetzt." } }, sk: { recordingNotice: { text: "Vlastný návrh oznámenia." } } } });
+    expect(resolveAnnouncement(config, "transferStart", "de")).toMatchObject({ text: "Wir verbinden Sie jetzt.", audioUrl: null });
+    expect(resolveAnnouncement(config, "recordingNotice")).toMatchObject({ text: "Vlastný návrh oznámenia.", audioUrl: null });
+    expect(ANNOUNCEMENT_DEFINITIONS.find(({ key }) => key === "recordingNotice")?.runtimeStatus).toBe("prepared");
   });
   it("uses speech rather than stale generated audio after a voice changes", () => {
     const config = defaultAnnouncementConfig();

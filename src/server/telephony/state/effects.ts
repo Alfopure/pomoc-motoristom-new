@@ -17,6 +17,7 @@ import {
   LEG_TIME_LIMIT_SECS,
   callStatusForSession,
   commandKey,
+  emptyTransition,
   mediaUrl,
   readMeta,
   toJson,
@@ -916,6 +917,17 @@ export async function applyReduceResult(
         deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, command: command.kind, error: message, callGone: true });
       } else {
         await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error, context: { sessionId: session.id, command: command.kind, key } });
+      }
+      if (failure.callGone && command.kind === "playback_start" && "key" in command.media && command.media.key === "greeting") {
+        // The ordinary-intro fallback can start operator dials. A provider
+        // confirmation that this customer is gone must never take that path,
+        // including from a later watchdog or out-of-order completion webhook.
+        // Keep the normal hangup/reconciliation path responsible for accounting.
+        const gone = emptyTransition();
+        gone.session.metadata = toJson({ ...readMeta(session), greeting_call_gone_at: deps.now().toISOString() });
+        session = await persistTransition(deps, { session, transition: gone, expectedVersion: session.version, event: input.event });
+        ctx.session = session;
+        break;
       }
       for (const compensation of compensations.filter((candidate) => candidate.forCommand === key)) {
         compensated.push(compensation.description);

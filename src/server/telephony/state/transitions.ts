@@ -651,8 +651,9 @@ function onLegAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged
   return onOfferAnswered(b, leg, opts);
 }
 
-/** Every inbound route starts with the complete introduction, before any other audio or dial. */
+/** Try the ordinary introduction before routing; unavailable media must not prevent assistance. */
 function onCustomerAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
+  if (b.meta.greeting_call_gone_at) return ignoredResult("introduction customer already gone at provider");
   if (b.session.state !== "received" && b.session.state !== "greeting") return b.note("customer answered late").result();
   b.patchMeta({ announcements: b.meta.announcements ?? b.ctx.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata) });
   startGreeting(b, leg);
@@ -670,24 +671,34 @@ function startGreeting(b: TransitionBuilder, leg: LegRow, forceSpeech = false): 
   const id = b.cmdId(leg.telnyx_call_control_id, forceSpeech ? "greeting:speech" : "greeting:audio");
   b.cmd({ kind: "playback_start", commandId: id, leg: ref(leg), media: { key: "greeting" }, clientState: customerState(b.session.id, forceSpeech ? "greeting_retry" : "greeting"), forceSpeech });
   const failed = b.fork();
+  failed.patchMeta({ announcements: b.meta.announcements, greeting: b.meta.greeting });
   failGreeting(failed, leg);
-  b.compensate(id, "introduction unavailable → callback and close", failed.commands, failed.transition());
+  b.compensate(id, "introduction unavailable → continue normal inbound routing", failed.commands, failed.transition());
   b.note(forceSpeech ? "introduction retried with speech" : "playing complete introduction before routing");
 }
 
 function failGreeting(b: TransitionBuilder, leg: LegRow): void {
   const greeting = b.meta.greeting;
-  // A failed hangup must remain visible to the existing sweep/reconciliation.
-  // Only the customer's hangup webhook makes this session terminal.
-  b.setState("greeting").patchMeta({ greeting: { ...(greeting ?? { started_at: b.nowIso }), closing: true, deadline_at: new Date(b.ctx.now.getTime() + 30_000).toISOString() } });
-  b.call.status = "failed";
-  b.call.end_reason = "greeting_failed";
-  if (!greeting?.closing) b.callback({ source: "missed", callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id) });
-  b.cmd(hangupCmd(b, leg, "greeting_failed"));
-  b.note("introduction could not finish → callback and close");
+  if (b.session.direction !== "inbound" || !isCustomer(leg) || b.legEnded(leg) || b.session.ended_at || b.meta.hangup || b.meta.greeting_call_gone_at || !["received", "greeting"].includes(b.state)) {
+    b.note("introduction failed after the customer left or routing advanced");
+    return;
+  }
+  if (greeting?.closing) {
+    // Sessions already closing under an older deployment must not be revived
+    // after their hangup command was accepted or its result became unknown.
+    b.patchMeta({ greeting: { ...greeting, deadline_at: new Date(b.ctx.now.getTime() + 30_000).toISOString() } });
+    b.cmd(hangupCmd(b, leg, "greeting_failed"));
+    b.note("retrying previously requested introduction hangup");
+    return;
+  }
+  // This is only the ordinary welcome, not a recording/privacy notice. Keep
+  // its failure visible without claiming it played or creating a missed call.
+  b.patchMeta({ greeting_unavailable: { at: b.nowIso } });
+  routeInboundCustomer(b, leg);
+  b.note("ordinary introduction unavailable → normal inbound routing");
 }
 
-/** Introduction completed → business hours → IVR or ring plan. */
+/** Introduction completed or unavailable → business hours → IVR or ring plan. */
 function routeInboundCustomer(b: TransitionBuilder, leg: LegRow): ReduceResult {
   const hours = evaluateBusinessHours(b.ctx.businessHours, b.ctx.now);
   if (!hours.open) {
@@ -1674,6 +1685,7 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
   if (!leg || !isCustomer(leg)) return ignoredResult("playback on a non-customer leg");
   if (b.legEnded(leg)) return ignoredResult("customer leg ended");
   if (b.session.state === "greeting") {
+    if (b.meta.greeting_call_gone_at) return ignoredResult("introduction customer already gone at provider");
     if (b.meta.greeting?.closing) return ignoredResult("failed introduction is closing");
     const expectedIntent = b.meta.greeting?.speech_retry ? "greeting_retry" : "greeting";
     if (event.clientState?.intent !== expectedIntent) return ignoredResult("unrelated audio during introduction");
@@ -2291,6 +2303,7 @@ function onSweep(b: TransitionBuilder): ReduceResult {
   const meta = b.meta;
 
   if (state === "greeting") {
+    if (meta.greeting_call_gone_at) return ignoredResult("sweep: introduction customer already gone at provider");
     const started = Date.parse(meta.greeting?.started_at ?? b.session.created_at);
     const deadline = meta.greeting?.deadline_at ? Date.parse(meta.greeting.deadline_at) : started + GREETING_TIMEOUT_MS;
     if (!Number.isNaN(deadline) && deadline >= b.ctx.now.getTime()) return ignoredResult("sweep: introduction still playing");

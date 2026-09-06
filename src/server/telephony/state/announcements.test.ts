@@ -4,6 +4,7 @@ import { createTelephonyHarness, LINES, NUMBERS } from "@/test/telephony-harness
 import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { runSessionEvent } from "../session-runner";
+import { TelnyxCommandError } from "../telnyx/client";
 
 describe("inbound introduction", () => {
   it("finishes the introduction before operators ring or waiting music starts", async () => {
@@ -65,39 +66,96 @@ describe("inbound introduction", () => {
     expect(h.session(call.sessionId).state).toBe("ringing");
   });
 
-  it("leaves a callback when both audio and speech fail", async () => {
+  it("rings available operators once when both audio and speech fail", async () => {
     const h = createTelephonyHarness();
     const call = await h.inbound({ completeGreeting: false });
     const audio = h.telnyx.of("playbackStart")[0];
     await h.legEvent(call.callControlId, "call.playback.ended", { status: "failed", client_state: audio.params.clientState });
     const speech = h.telnyx.of("speak")[0];
     await h.legEvent(call.callControlId, "call.speak.ended", { status: "failed", client_state: speech.params.clientState });
-    expect(h.session(call.sessionId)).toMatchObject({ state: "greeting", ended_at: null, metadata: { greeting: { closing: true } } });
-    expect(h.telnyx.of("dial")).toHaveLength(0);
-    expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(call.callControlId);
-    expect(h.rows("motorist_callback_requests")).toHaveLength(1);
-    await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing" });
-    expect(h.session(call.sessionId).state).toBe("failed");
-    expect(h.call(call.sessionId)).toMatchObject({ status: "failed", end_reason: "greeting_failed" });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ringing", ended_at: null, metadata: { greeting_unavailable: { at: h.now().toISOString() } } });
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+    expect(h.telnyx.of("hangup")).toHaveLength(0);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+    expect(h.call(call.sessionId)?.end_reason).not.toBe("greeting_failed");
+    await h.legEvent(call.callControlId, "call.speak.ended", { status: "failed", client_state: speech.params.clientState });
+    await h.legEvent(call.callControlId, "call.speak.ended", { status: "completed", client_state: speech.params.clientState });
+    await h.legEvent(call.callControlId, "call.playback.ended", { status: "completed", client_state: audio.params.clientState });
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+    expect(h.telnyx.of("hangup")).toHaveLength(0);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
   });
 
-  it("retries a failed hangup through the existing sweep until the caller's departure is confirmed", async () => {
+  it("continues routing when the provider refuses both playback and speech commands", async () => {
+    const h = createTelephonyHarness();
+    h.telnyx.failNext("playbackStart", "media unavailable");
+    h.telnyx.failNext("speak", "speech unavailable");
+    const call = await h.inbound({ completeGreeting: false });
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+    expect(h.attempts(call.sessionId)).toHaveLength(3);
+    expect(h.session(call.sessionId)).toMatchObject({ metadata: { announcements: defaultAnnouncementConfig() } });
+    expect(h.telnyx.of("hangup")).toHaveLength(0);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+  });
+
+  it.each(["playbackStart", "speak"])("never dials after %s confirms the customer is gone", async (method) => {
+    const h = createTelephonyHarness({ mediaBaseUrl: method === "speak" ? null : "https://media.test/telephony" });
+    h.telnyx.failNext(method, new TelnyxCommandError({ code: "90018", status: 422, detail: "This call is no longer active." }));
+    const call = await h.inbound({ completeGreeting: false });
+    const media = h.telnyx.of(method)[0];
+    expect(h.session(call.sessionId)).toMatchObject({ metadata: { greeting_call_gone_at: h.now().toISOString() } });
+    expect(h.telnyx.of("dial")).toHaveLength(0);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+    expect(h.rows("motorist_job_incidents")).toHaveLength(0);
+    h.advance(91_000);
+    await runSessionEvent(h.deps, call.sessionId, { kind: "app", id: "provider-gone-sweep", type: "sweep", actorProfileId: null, occurredAt: h.now().toISOString() });
+    await h.legEvent(call.callControlId, "call.speak.ended", { status: "completed", client_state: media.params.clientState });
+    expect(h.telnyx.of("dial")).toHaveLength(0);
+    expect(h.telnyx.of(method)).toHaveLength(1);
+    await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(h.session(call.sessionId).state).toBe("ended");
+    expect(h.call(call.sessionId)).toMatchObject({ status: "missed", end_reason: "caller_hangup" });
+  });
+
+  it.each([
+    { to: NUMBERS.neutral, now: "2026-09-03T08:00:00.000Z", state: "ivr" },
+    { to: NUMBERS.allianz, now: "2026-09-03T21:00:00.000Z", state: "after_hours" },
+  ])("preserves the $state route when the ordinary introduction is unavailable", async ({ to, now, state }) => {
+    const h = createTelephonyHarness({ now, mediaBaseUrl: null });
+    const call = await h.inbound({ to, completeGreeting: false });
+    const speech = h.telnyx.of("speak")[0];
+    await h.legEvent(call.callControlId, "call.speak.ended", { status: "failed", client_state: speech.params.clientState });
+    expect(h.session(call.sessionId).state).toBe(state);
+    expect(h.telnyx.of("gatherUsingSpeak")).toHaveLength(1);
+    expect(h.telnyx.of("dial")).toHaveLength(0);
+    expect(h.telnyx.of("hangup")).toHaveLength(0);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+  });
+
+  it("never routes a customer who hung up before the failed-media webhook", async () => {
     const h = createTelephonyHarness({ mediaBaseUrl: null });
     const call = await h.inbound({ completeGreeting: false });
     const speech = h.telnyx.of("speak")[0];
-    h.telnyx.failNext("hangup", "network unavailable");
+    await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing" });
     await h.legEvent(call.callControlId, "call.speak.ended", { status: "failed", client_state: speech.params.clientState });
-    expect(h.session(call.sessionId)).toMatchObject({ state: "greeting", ended_at: null, metadata: { greeting: { closing: true } } });
-    await h.legEvent(call.callControlId, "call.speak.ended", { status: "completed", client_state: speech.params.clientState });
+    h.advance(46_000);
+    await runSessionEvent(h.deps, call.sessionId, { kind: "app", id: "ended-intro-sweep", type: "sweep", actorProfileId: null, occurredAt: h.now().toISOString() });
+    expect(h.session(call.sessionId).state).toBe("ended");
     expect(h.telnyx.of("dial")).toHaveLength(0);
+  });
+
+  it("does not revive an older session with an already requested introduction hangup", async () => {
+    const h = createTelephonyHarness({ mediaBaseUrl: null });
+    const call = await h.inbound({ completeGreeting: false });
+    const previous = h.session(call.sessionId);
+    h.db.update("motorist_call_sessions", { metadata: { ...(previous.metadata as Record<string, unknown>), greeting: { started_at: h.now().toISOString(), closing: true, deadline_at: h.now().toISOString() } } }, row => row.id === call.sessionId);
     h.advance(31_000);
-    const result = await sweepOverdueRingSteps({ admin: h.admin, organizationId: h.deps.organizationId, now: h.now, runSessionEvent: (id, event) => runSessionEvent(h.deps, id, event) });
-    expect(result.swept).toContain(call.sessionId);
-    expect(h.telnyx.of("hangup")).toHaveLength(2);
-    expect(h.rows("motorist_callback_requests")).toHaveLength(1);
+    await runSessionEvent(h.deps, call.sessionId, { kind: "app", id: "legacy-close-sweep", type: "sweep", actorProfileId: null, occurredAt: h.now().toISOString() });
+    expect(h.telnyx.of("dial")).toHaveLength(0);
+    expect(h.telnyx.of("hangup")).toHaveLength(1);
     await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing" });
     expect(h.session(call.sessionId).state).toBe("failed");
-    expect(h.call(call.sessionId)).toMatchObject({ status: "failed", end_reason: "greeting_failed" });
   });
 
   it("freezes the line language before later settings edits and localizes legacy IVR files", async () => {
@@ -180,6 +238,13 @@ describe("inbound introduction", () => {
     expect(h.session(call.sessionId).state).toBe("greeting");
     h.advance(46_000);
     await runSessionEvent(h.deps, call.sessionId, { kind: "app", id: "second-timeout", type: "sweep", actorProfileId: null, occurredAt: h.now().toISOString() });
-    expect(h.session(call.sessionId)).toMatchObject({ state: "greeting", metadata: { greeting: { closing: true } } });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ringing", metadata: { greeting_unavailable: { at: h.now().toISOString() } } });
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+    expect(h.telnyx.of("hangup")).toHaveLength(0);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+    const retrySpeech = h.telnyx.of("speak")[1];
+    await h.legEvent(call.callControlId, "call.speak.ended", { status: "completed", client_state: retrySpeech.params.clientState });
+    await runSessionEvent(h.deps, call.sessionId, { kind: "app", id: "already-routed-sweep", type: "sweep", actorProfileId: null, occurredAt: h.now().toISOString() });
+    expect(h.telnyx.of("dial")).toHaveLength(3);
   });
 });

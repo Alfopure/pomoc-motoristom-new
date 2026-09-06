@@ -63,4 +63,14 @@ describe("announcement drafts", () => {
     expect(config.language).toBe("sk");
     expect(emptyAnnouncementLanguages(config)).toEqual(["cs"]);
   });
+
+  it("retains prepared drafts and generated audio when editing another category", () => {
+    const prepared = setAnnouncementText(initial, "sk", "holdStart", expected.text);
+    const withAudio = applyGeneratedAnnouncement(prepared, "holdStart", expected, generated)!;
+    const editedGreeting = setAnnouncementText(withAudio, "cs", "greeting", "Dobrý den.");
+    expect(resolveAnnouncement(editedGreeting, "holdStart")).toMatchObject({ text: expected.text, audioUrl: generated.audioUrl });
+    expect(sameAnnouncementConfig(initial, withAudio)).toBe(false);
+    expect(sameAnnouncementConfig(initial, resetAnnouncementPrompt(withAudio, "sk", "holdStart"))).toBe(true);
+    expect(emptyAnnouncementLanguages(setAnnouncementText(editedGreeting, "de", "recordingPaused", " "))).toEqual(["de"]);
+  });
 });
