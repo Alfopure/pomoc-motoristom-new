@@ -220,6 +220,18 @@ describe("ring timing helpers", () => {
 });
 
 describe("advanceRingStep and sweep", () => {
+  it("sweeps live recording and expired media independently of the ringing state", async () => {
+    const h = createTelephonyHarness();
+    const [recording, held, irrelevant] = h.db.seed("motorist_call_sessions", [
+      { organization_id: ORG, direction: "inbound", state: "talking", metadata: { recording: { recorders: [{ observed: "recording" }] } } },
+      { organization_id: ORG, direction: "inbound", state: "held", metadata: { announcement_sequence: { deadlineAt: new Date(h.now().getTime() - 1).toISOString() } } },
+      { organization_id: ORG, direction: "inbound", state: "talking", metadata: {} },
+    ]);
+    const ran: string[] = [];
+    await sweepOverdueRingSteps({ admin: h.admin, organizationId: ORG, now: () => h.now(), runSessionEvent: async (id) => { ran.push(id); } });
+    expect(ran).toEqual([recording.id, held.id]);
+    expect(ran).not.toContain(irrelevant.id);
+  });
   it("only the first compare-and-set wins", async () => {
     const h = createTelephonyHarness();
     const [session] = h.db.seed("motorist_call_sessions", [{ organization_id: ORG, direction: "inbound", state: "ringing", current_step: 0 }]);

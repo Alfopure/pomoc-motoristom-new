@@ -52,6 +52,7 @@ describe("route-auth-registry", () => {
       // Telnyx webhooky — autentifikáciou je Ed25519 podpis, nie session.
       "sms/telnyx/webhook",
       "telephony/telnyx/webhook",
+      "telephony/webhooks/scribe",
     ].sort());
   });
 });

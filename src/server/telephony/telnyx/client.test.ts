@@ -23,6 +23,25 @@ const ENV = {
   TELNYX_SMS_LIVE_SENDS: "true",
 };
 
+describe("recording provider contract", () => {
+  it("requests bounded dual tracks without automatic transcription or silence trimming", async () => {
+    const fetch = makeFetch([jsonResponse(200, { data: { result: "ok" } }), jsonResponse(200, { data: { result: "ok" } })]);
+    const client = createTelnyxClient({ config: getTelnyxConfig(ENV), liveGate: { callsEnabled: false, smsEnabled: false }, fetch: fetch.impl });
+    await client.recordingStart({ callControlId: "customer-leg", commandId: "record-start-id", clientState: "encoded-state", maxLength: 99_999 });
+    await client.recordingStop({ callControlId: "customer-leg", commandId: "record-stop-id" });
+    expect(fetch.calls[0].url).toContain("/calls/customer-leg/actions/record_start");
+    expect(fetch.calls[0].body).toMatchObject({ format: "wav", channels: "dual", recording_track: "both", max_length: 1800, timeout_secs: 0, transcription: false, play_beep: false, command_id: "record-start-id" });
+    expect(fetch.calls[0].body).not.toHaveProperty("trim");
+    expect(fetch.calls[1].url).toContain("/actions/record_stop");
+  });
+
+  it.each([{}, { data: { result: "pending" } }])("does not treat an invalid HTTP200 body as a stopped recorder", async (body) => {
+    const fetch = makeFetch([jsonResponse(200, body)]);
+    const client = createTelnyxClient({ config: getTelnyxConfig(ENV), liveGate: { callsEnabled: true, smsEnabled: false }, fetch: fetch.impl });
+    await expect(client.recordingStop({ callControlId: "customer-leg", commandId: "stop-id" })).rejects.toMatchObject({ code: "recording_ack_invalid" });
+  });
+});
+
 type Recorded = { url: string; init: RequestInit; body: Record<string, unknown> | null };
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}) {

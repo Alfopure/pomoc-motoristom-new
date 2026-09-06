@@ -348,11 +348,14 @@ export class FakeQueryBuilder implements PromiseLike<FakeResult> {
   private headOnly = false;
   private upsertOptions: { onConflict?: string; ignoreDuplicates?: boolean } = {};
   private rpcResult: (() => Promise<unknown>) | null = null;
+  private requestSignal: AbortSignal | null = null;
 
   constructor(
     private readonly db: FakeDatabase,
     private readonly table: string,
   ) {}
+
+  abortSignal(signal: AbortSignal): this { this.requestSignal = signal; return this; }
 
   // --- verbs -------------------------------------------------------------
 
@@ -574,6 +577,7 @@ export class FakeQueryBuilder implements PromiseLike<FakeResult> {
   }
 
   private async execute(): Promise<FakeResult> {
+    if (this.requestSignal?.aborted) return { data: null, error: { message: "Request aborted", code: "ABORTED", details: null, hint: null }, count: null, status: 0, statusText: "Aborted" };
     if (this.operation === "rpc" && this.rpcResult) {
       const value = await this.rpcResult();
       if (Array.isArray(value)) return this.finish(value as FakeRow[]);
@@ -684,6 +688,17 @@ function toMs(value: unknown): number | null {
 }
 
 export function registerTelephonyRpcs(db: FakeDatabase): void {
+  db.registerRpc("motorist_recording_admit_session", (args) => {
+    const session = db.find("motorist_call_sessions", (row) => row.id === args.p_session_id && row.organization_id === args.p_organization_id);
+    const call = db.find("motorist_calls", (row) => row.id === args.p_call_id && row.session_id === args.p_session_id && row.organization_id === args.p_organization_id);
+    if (!session || !call) return false;
+    const table = "motorist_call_recording_admissions";
+    if (db.find(table, (row) => row.session_id === args.p_session_id && row.organization_id === args.p_organization_id)) return true;
+    const count = db.rows(table).filter((row) => Date.parse(String(row.created_at)) > db.now().getTime() - 3_600_000).length;
+    if (count >= Math.min(10, Number(args.p_max_per_hour ?? 10))) return false;
+    db.insert(table, { organization_id: args.p_organization_id, session_id: args.p_session_id, call_id: args.p_call_id, created_at: db.nowIso() });
+    return true;
+  });
   db.registerRpc("motorist_telnyx_claim_webhook_event", (args) => {
     const table = "motorist_telnyx_webhook_events";
     const eventId = String(args.p_event_id);
