@@ -206,11 +206,11 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
   const expandedWorkspace = workspaceMode === "expanded";
   const compactWorkspace = workspaceMode === "split" || expandedWorkspace;
   const rootClassName = expandedWorkspace
-    ? "dispatch-map-expanded relative h-full min-h-[180px] overflow-hidden rounded-md border border-zinc-200 bg-zinc-100 lg:min-h-0"
-    : "relative h-full min-h-[360px] overflow-hidden rounded-md border border-zinc-200 bg-zinc-100 sm:min-h-[420px]";
-  const canvasClassName = expandedWorkspace ? "dispatch-google-map-canvas h-full min-h-[180px] lg:min-h-0" : "dispatch-google-map-canvas h-full min-h-[360px] sm:min-h-[420px]";
+    ? "dispatch-map-expanded relative h-full min-h-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-100"
+    : "relative h-full min-h-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-100 lg:min-h-[420px]";
+  const canvasClassName = expandedWorkspace ? "dispatch-google-map-canvas h-full min-h-0" : "dispatch-google-map-canvas h-full min-h-0 lg:min-h-[420px]";
   const planPanelBottomClass = avoidMobileNav
-    ? "bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-3"
+    ? "bottom-20 lg:bottom-3"
     : "bottom-2 sm:bottom-3";
   // Keď je vpravo hore karta trasy, ľavý stĺpec overlayov jej nechá miesto.
   const desktopRouteCardVisible = !expandedWorkspace && !focusMode && mapLayers.route && Boolean(displayRoute);
@@ -864,7 +864,7 @@ function AddressAutocomplete({
 
 function MapUnavailable({ detail }: { detail?: string }) {
   return (
-    <div className="flex h-full min-h-[360px] flex-col items-center justify-center gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-6 text-center sm:min-h-[420px]">
+    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 overflow-y-auto rounded-md border border-zinc-200 bg-zinc-50 p-6 text-center lg:min-h-[420px]">
       <div className="flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 text-amber-700">
         <AlertTriangle size={22} />
       </div>

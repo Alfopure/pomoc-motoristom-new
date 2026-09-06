@@ -87,6 +87,7 @@ export function CaseDirectory({
   totalCases,
 }: CaseDirectoryProps) {
   const [mode, setMode] = useState<DirectoryMode>("active");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const activeCount = useMemo(() => cases.filter((caseItem) => !terminalStatuses.has(caseItem.status)).length, [cases]);
   const historyCount = cases.length - activeCount;
   const visibleCases = useMemo(
@@ -95,8 +96,8 @@ export function CaseDirectory({
   );
 
   return (
-    <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-zinc-50 p-2 sm:p-3">
-      <section className="mb-3 rounded-md border border-zinc-200 bg-white p-3 shadow-sm">
+    <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-zinc-50 p-2 sm:p-3 max-lg:[&_button]:min-h-11">
+      <section className="mb-3 max-h-[70%] shrink-0 overflow-y-auto overscroll-contain rounded-lg border border-zinc-200 bg-white p-3 shadow-sm lg:max-h-none lg:overflow-visible lg:rounded-md">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-700">
@@ -119,6 +120,16 @@ export function CaseDirectory({
             </button>
             <button
               type="button"
+              onClick={() => setFiltersOpen((current) => !current)}
+              aria-expanded={filtersOpen}
+              aria-controls="directory-filters"
+              className="inline-flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 lg:hidden"
+            >
+              <SlidersHorizontal size={16} />
+              Filtre{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+            </button>
+            <button
+              type="button"
               onClick={onClearFilters}
               className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45"
               disabled={activeFilterCount === 0}
@@ -133,6 +144,7 @@ export function CaseDirectory({
           <button
             type="button"
             onClick={() => setMode("active")}
+            aria-pressed={mode === "active"}
             className={`inline-flex h-9 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold ${mode === "active" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-600 hover:bg-white/70"}`}
           >
             <ListChecks size={14} />
@@ -141,6 +153,7 @@ export function CaseDirectory({
           <button
             type="button"
             onClick={() => setMode("history")}
+            aria-pressed={mode === "history"}
             className={`inline-flex h-9 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold ${mode === "history" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-600 hover:bg-white/70"}`}
           >
             <Archive size={14} />
@@ -154,10 +167,12 @@ export function CaseDirectory({
             <input
               value={search}
               onChange={(event) => onSearchChange(event.target.value)}
+              aria-label="Hľadať prípady v adresári"
               className="min-w-0 flex-1 bg-transparent text-zinc-800 outline-none placeholder:text-zinc-400"
               placeholder="Hľadať prípad, telefón, EČV, mesto, operátora"
             />
           </label>
+          <div id="directory-filters" className={`${filtersOpen ? "grid" : "hidden"} min-w-0 grid-cols-2 gap-2 md:col-span-2 lg:contents`}>
           <FilterSelect
             label="Stav"
             value={filters.status}
@@ -188,6 +203,21 @@ export function CaseDirectory({
             onChange={(value) => onFiltersChange({ ...filters, assistanceService: value })}
             options={[["all", "Všetky asistenčky"], ...assistanceServices.map((name) => [name, name] as const)]}
           />
+          </div>
+          <label className="flex min-w-0 items-center gap-2 text-xs font-semibold text-zinc-600 md:col-span-2 lg:hidden">
+            Poradie
+            <select
+              aria-label="Zoradiť adresár prípadov"
+              value={["priority", "createdAt", "updatedAt"].includes(sort.key) ? sort.key : ""}
+              onChange={(event) => onSortChange({ key: event.target.value as CaseSortState["key"], direction: event.target.value === "priority" ? "asc" : "desc" })}
+              className="h-11 min-w-0 flex-1 rounded-md border border-zinc-200 bg-white px-2 text-base text-zinc-900"
+            >
+              {!["priority", "createdAt", "updatedAt"].includes(sort.key) && <option value="" disabled>Vlastné poradie</option>}
+              <option value="priority">Priorita</option>
+              <option value="updatedAt">Naposledy upravené</option>
+              <option value="createdAt">Najnovšie prípady</option>
+            </select>
+          </label>
         </div>
       </section>
 
@@ -226,7 +256,7 @@ function FilterSelect({
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-10 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm font-medium text-zinc-800 outline-none ring-yellow-300 transition focus:ring-2"
+        className="h-11 w-full min-w-0 rounded-md border border-zinc-200 bg-white px-2 text-base font-medium text-zinc-800 outline-none ring-yellow-300 transition focus:ring-2 lg:h-10 lg:text-sm"
       >
         {options.map(([optionValue, optionLabel]) => (
           <option key={optionValue} value={optionValue}>

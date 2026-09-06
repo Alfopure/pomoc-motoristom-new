@@ -700,7 +700,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
 
   return (
     <div
-      className="h-full min-w-0 max-w-full overflow-y-auto overflow-x-hidden bg-zinc-50 p-2 sm:p-3 @container"
+      className="h-full min-h-0 min-w-0 max-w-full flex-1 overflow-y-auto overflow-x-hidden overscroll-contain bg-zinc-50 p-2 sm:p-3 max-lg:[&_button]:min-h-11 @container"
       data-testid="case-form-scroll-region"
       onChangeCapture={markDirty}
     >
@@ -1183,13 +1183,13 @@ export function NewCaseDrawer({ call, onClose, onCreated, open, partnerDirectory
   }
 
   return (
-    <div className="fixed inset-y-0 right-0 z-[2147483200] flex w-full max-w-5xl flex-col border-l border-zinc-200 bg-white shadow-2xl">
+    <div className="fixed inset-y-0 right-0 z-[2147483200] flex w-full max-w-5xl flex-col border-l border-zinc-200 bg-white pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] shadow-2xl">
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-200 px-4">
         <div className="min-w-0">
           <span className="text-sm font-semibold uppercase tracking-normal text-zinc-600">Nový prípad</span>
           <div className="text-xs font-medium text-zinc-500">ID prípadu sa pridelí po uložení</div>
         </div>
-        <button type="button" onClick={onClose} className="rounded-md border border-zinc-200 p-2 text-zinc-600 hover:bg-zinc-50" aria-label="Zavrieť nový prípad">
+        <button type="button" onClick={onClose} className="inline-flex size-11 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:size-9" aria-label="Zavrieť nový prípad">
           <X size={18} />
         </button>
       </div>

@@ -636,6 +636,19 @@ export type Database = {
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
+      motorist_push_subscriptions: Table<{
+        id: string;
+        organization_id: string;
+        profile_id: string;
+        endpoint: string;
+        p256dh: string;
+        auth: string;
+        sound_enabled: boolean;
+        expires_at: Timestamp | null;
+        last_test_at: Timestamp | null;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
       motorist_notifications: Table<{
         id: string;
         organization_id: string;
@@ -1254,6 +1267,10 @@ export type Database = {
       }>;
     };
     Functions: {
+      motorist_get_web_push_config: {
+        Args: Record<string, never>;
+        Returns: Json;
+      };
       motorist_vehicle_lookup_claim: {
         Args: { p_organization_id: string; p_profile_id: string; p_query_hash: string };
         Returns: Json;

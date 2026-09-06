@@ -23,6 +23,94 @@ input {
   font: inherit;
 }
 
+.dispatch-app-shell {
+  --dispatch-mobile-nav-height: 72px;
+}
+
+@media (max-width: 1023px) {
+  .dispatch-app-shell {
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: calc(var(--dispatch-mobile-nav-height) + env(safe-area-inset-bottom));
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .dispatch-app-header {
+    padding-top: max(8px, env(safe-area-inset-top));
+    gap: 8px;
+  }
+
+  .dispatch-app-header > div:last-child {
+    gap: 4px;
+  }
+
+  .dispatch-app-header button,
+  .dispatch-app-header summary {
+    min-height: 44px;
+  }
+
+  .dispatch-app-header > div:last-child > button:last-child {
+    display: none;
+  }
+
+  .dispatch-app-shell > main {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    padding-bottom: 16px;
+  }
+
+  .dispatch-app-shell > .dispatch-dashboard {
+    display: flex;
+    overflow: hidden;
+    padding: 0;
+  }
+
+  .mobile-dispatch-cases,
+  .mobile-dispatch-workspace {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  [data-mobile-pane="cases"] .mobile-dispatch-workspace,
+  [data-mobile-pane="workspace"] .mobile-dispatch-cases {
+    display: none;
+  }
+
+  .dispatch-app-shell input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .dispatch-app-shell select,
+  .dispatch-app-shell textarea {
+    font-size: 16px;
+    min-height: 44px;
+  }
+
+  .dispatch-app-shell button,
+  .dispatch-app-shell a {
+    touch-action: manipulation;
+  }
+
+  .dispatch-mobile-nav button {
+    border-radius: 12px;
+    font-size: 11px;
+  }
+
+  .dispatch-mobile-nav,
+  .dispatch-workspace-panel {
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(8px, env(safe-area-inset-right));
+  }
+
+  .dispatch-mobile-nav button[aria-current="page"] {
+    background: #fef7cb;
+    color: #18181b;
+  }
+}
+
 .leaflet-container {
   z-index: 0;
   min-height: 360px;

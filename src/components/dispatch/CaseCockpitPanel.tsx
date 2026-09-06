@@ -242,12 +242,14 @@ export function CaseCockpitPanel({
             </div>
             <div className="mt-1 truncate text-xs font-medium text-zinc-600">{caseItem.nextStep}</div>
           </div>
-          {callActions}
-          <QuickAction onClick={() => setSmsComposerOpen(true)} icon={MessageSquareText} label="SMS" compact tone="yellow" />
+          <div className="hidden items-center gap-2 lg:flex">
+            {callActions}
+            <QuickAction onClick={() => setSmsComposerOpen(true)} icon={MessageSquareText} label="SMS" compact tone="yellow" />
+          </div>
           <button
             type="button"
             onClick={onRestore}
-            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-zinc-950 text-white hover:bg-zinc-800"
+            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-zinc-950 text-white hover:bg-zinc-800 lg:h-9 lg:w-9"
             aria-label="Maximalizovať spodnú lištu"
             title="Maximalizovať spodnú lištu"
           >
@@ -260,8 +262,8 @@ export function CaseCockpitPanel({
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-zinc-200 bg-white shadow-sm">
-      <div className="sticky top-0 z-10 border-b border-zinc-200 bg-white/95 px-3 py-2 backdrop-blur">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-md border border-zinc-200 bg-white shadow-sm max-lg:[&_button]:min-h-11 max-lg:[&_a]:min-h-11">
+      <div className="sticky top-0 z-10 shrink-0 border-b border-zinc-200 bg-white/95 px-3 py-2 backdrop-blur">
         <div className="flex flex-wrap items-center gap-2">
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -288,7 +290,7 @@ export function CaseCockpitPanel({
             <button
               type="button"
               onClick={onCollapse}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:h-9 lg:w-9"
               aria-label="Minimalizovať na spodnú lištu"
               title="Minimalizovať na spodnú lištu"
             >
@@ -298,7 +300,7 @@ export function CaseCockpitPanel({
               <button
                 type="button"
                 onClick={onExpand}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50"
+                className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:h-9 lg:w-9"
                 aria-label="Maximalizovať kokpit"
                 title="Maximalizovať kokpit"
               >
@@ -309,7 +311,7 @@ export function CaseCockpitPanel({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-auto bg-zinc-50 p-2 sm:p-3">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain bg-zinc-50 p-2 sm:p-3">
         {/* P-10: kokpit je jediný pohľad prípadu. Sekcie idú v jednom toku pod sebou
             (karta → úlohy → poznámky a aktivita → prevádzkový prehľad) — bez úzkeho
             bočného pásu, ktorý text lámal a duplikoval zoznam úloh. */}
