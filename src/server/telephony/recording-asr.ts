@@ -6,6 +6,14 @@ import { record, reserveRecordingBudget, RecordingProcessingError, type Recordin
 import { preserveRecordingAudioProvenance } from './recording-audio-integrity';
 import { signedRecordingSource } from './recording-storage';
 
+export function normalizeScribeLanguage(value: unknown): string {
+  if (typeof value !== 'string' || !/^[a-z]{2,3}$/i.test(value)) return 'und';
+  const language = value.toLowerCase();
+  // Scribe identifies languages with ISO 639-3; application filters use 639-1.
+  const supported: Record<string, string> = { slk: 'sk', slo: 'sk', ces: 'cs', cze: 'cs', eng: 'en', deu: 'de', ger: 'de' };
+  return supported[language] ?? language;
+}
+
 export function verifiedMultiChannel(manifest: Json) {
   const data = record(manifest); const intervals = Array.isArray(data.intervals) ? data.intervals.map(record) : [];
   return data.timingVerified === true && record(data.audioFormat).channels === 2 && data.channelMappingVerified === true && data.coverage === 'verified' && data.identitySource === 'authenticated_leg_binding' && intervals.length > 0 && intervals.every(i => i.verified === true && (i.channel === 0 || i.channel === 1) && ['customer', 'operator'].includes(String(i.role)));
@@ -100,7 +108,7 @@ export async function acceptScribeWebhook(admin: RecordingAdmin, raw: string, si
   const text = typeof transcript.text === 'string' ? transcript.text : '';
   if (text.length > 300_000) throw new RecordingProcessingError('scribe_text_limit');
   const transcriptId = typeof transcript.transcription_id === 'string' ? transcript.transcription_id : typeof data.transcription_id === 'string' ? data.transcription_id : typeof record(job.provider_ids).scribe_transcript_id === 'string' ? String(record(job.provider_ids).scribe_transcript_id) : null;
-  const result = await admin.rpc('motorist_recording_accept_scribe', { p_correlation_token: token, p_request_id: data.request_id, p_transcript_text: deleted ? '' : text, p_segments: spans as unknown as Json, p_language: typeof transcript.language_code === 'string' ? transcript.language_code.slice(0, 10) : 'und', p_provider_transcript_id: transcriptId }).abortSignal(signal);
+  const result = await admin.rpc('motorist_recording_accept_scribe', { p_correlation_token: token, p_request_id: data.request_id, p_transcript_text: deleted ? '' : text, p_segments: spans as unknown as Json, p_language: normalizeScribeLanguage(transcript.language_code), p_provider_transcript_id: transcriptId }).abortSignal(signal);
   if (result.error) throw new RecordingProcessingError('scribe_persist_failed', true);
   return result.data ? 'accepted' : 'ignored';
 }
