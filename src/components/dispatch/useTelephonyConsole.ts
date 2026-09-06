@@ -427,6 +427,12 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             return;
           }
           if (!result.ok) {
+            // A hangup webhook can trail the caller by a few seconds. An action
+            // against that finished call must not poison the next call's status.
+            if (result.status === 409 && (result.body?.code === "call_gone" || result.body?.code === "not_active")) {
+              refreshRef.current?.();
+              return;
+            }
             // A refused conference promotion keeps the call up but takes hold and
             // consultation away; remember it so the bar stops offering them
             // instead of failing the same way again (design §2.1).

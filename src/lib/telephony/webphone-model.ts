@@ -100,10 +100,10 @@ export const WEBPHONE_INITIAL_STATE: WebphoneState = {
   message: null,
 };
 
-const SUPERSEDED_MESSAGE = "Telefón je prihlásený v inom okne.";
+const SUPERSEDED_MESSAGE = "Telefón je prihlásený v inom okne alebo zariadení.";
 const NOT_CONFIGURED_MESSAGE = "Telefónia nie je nakonfigurovaná.";
 const FORBIDDEN_MESSAGE = "Prihlásený účet nemá telefón dispečingu.";
-export const TAKEOVER_MESSAGE = "Telefón je prihlásený v inom okne a prebieha hovor.";
+export const TAKEOVER_MESSAGE = "Telefón je prihlásený v inom okne alebo zariadení. Ak chceš prijímať hovory tu, prevezmi telefón.";
 
 /** Terminal statuses: only an explicit `start` (a reload / new login) leaves them. */
 export function isTerminalWebphoneStatus(status: WebphoneStatus): boolean {
@@ -195,7 +195,7 @@ export function reduceWebphone(
           effects: [{ kind: "clear_timers" }, { kind: "disconnect" }],
         };
       }
-      // 409: another tab holds the credential and is ringing / on a call.
+      // 409: another live tab or device holds the credential.
       // Retrying cannot help; only an explicit takeover may proceed.
       if (event.status === 409) {
         // …unless we are already registered: this was a scheduled refresh, and
@@ -209,7 +209,7 @@ export function reduceWebphone(
           };
         }
         return {
-          state: { status: "failed", attempts: 0, credentials: null, message: event.message ?? TAKEOVER_MESSAGE },
+          state: { status: "superseded", attempts: 0, credentials: null, message: event.message ?? TAKEOVER_MESSAGE },
           effects: [{ kind: "clear_timers" }, { kind: "disconnect" }],
         };
       }

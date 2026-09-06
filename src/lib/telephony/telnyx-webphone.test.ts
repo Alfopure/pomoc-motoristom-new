@@ -182,6 +182,7 @@ describe("TelnyxWebphone", () => {
     expect(h.phone.getSnapshot().status).toBe("registered");
     expect(h.phone.getSnapshot().registration.label).toBe("Registrované");
     expect(h.phone.getSnapshot().sipUsername).toBe("gencred1");
+    expect(h.requests.at(-1)).toEqual({ url: "/api/telephony/devices/heartbeat", body: JSON.stringify({ deviceSessionId: "device-1", registrationState: "registered" }) });
   });
 
   it("stays in the not-configured mode when the token route answers 503", async () => {

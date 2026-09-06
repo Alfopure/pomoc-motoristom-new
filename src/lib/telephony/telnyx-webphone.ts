@@ -296,6 +296,9 @@ export class TelnyxWebphone {
     this.state = result.state;
     this.options.logger?.({ scope: "webphone", event: event.type, status: this.state.status });
     for (const effect of result.effects) this.runEffect(effect);
+    // A new device stays unavailable to routing until its own socket is ready.
+    // Publish that readiness now instead of waiting for the 30-second timer.
+    if (this.state.status === "registered" && event.type === "client_ready") void this.sendHeartbeat();
     if (changed) this.publish();
   }
 

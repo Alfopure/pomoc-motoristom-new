@@ -87,3 +87,21 @@ for (const kind of ["pickup", "supervise"] as const) {
     expect(await page.evaluate(() => window.phoneHarness.requests[0].url)).toContain(`/${kind}`);
   });
 }
+
+for (const code of ["call_gone", "not_active"]) {
+  test(`a ${code} hangup does not leave a false telephony error on the next incoming call`, async ({ page }) => {
+    await page.evaluate(() => window.phoneHarness.begin("hangup"));
+    await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+    await page.evaluate((errorCode) => window.phoneHarness.requests[0].resolve(Response.json({ error: "Hovor už medzitým skončil.", code: errorCode }, { status: 409 })), code);
+    await page.evaluate(() => window.phoneHarness.incoming());
+    await expect(page.locator("#state")).toHaveAttribute("data-ringing", "true");
+    await expect(page.locator("#state")).toHaveText("");
+  });
+}
+
+test("a real call-control failure remains visible", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.begin("hangup"));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ error: "Ukončenie hovoru zlyhalo.", code: "command_failed" }, { status: 502 })));
+  await expect(page.locator("#state")).toHaveText("Ukončenie hovoru zlyhalo.");
+});
