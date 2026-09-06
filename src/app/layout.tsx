@@ -19,7 +19,9 @@ export const metadata: Metadata = {
   applicationName: "Pomoc Motoristom",
   appleWebApp: {
     capable: true,
-    statusBarStyle: "black-translucent",
+    // Opaque chrome avoids the displaced bottom viewport seen in iOS PWAs
+    // using black-translucent with viewport-fit=cover (WebKit bug 236445).
+    statusBarStyle: "black",
     title: "Pomoc Motoristom",
   },
   formatDetection: {

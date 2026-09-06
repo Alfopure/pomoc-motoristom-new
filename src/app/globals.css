@@ -45,11 +45,12 @@ input {
 
 @media (max-width: 1023px) {
   .dispatch-app-shell {
-    --dispatch-mobile-nav-height: 56px;
+    --dispatch-mobile-nav-height: 52px;
     height: 100dvh;
     min-height: 0;
     overflow: hidden;
-    padding-bottom: calc(var(--dispatch-mobile-nav-height) + env(safe-area-inset-bottom));
+    /* The footer occupies its own flex row; do not reserve its height twice. */
+    padding-bottom: 0;
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
   }
@@ -148,18 +149,26 @@ input {
   }
 
   .dispatch-mobile-nav {
-    height: calc(var(--dispatch-mobile-nav-height) + env(safe-area-inset-bottom));
-    padding-top: 4px;
-    padding-bottom: calc(4px + env(safe-area-inset-bottom));
+    /* Keep content and navigation in the same viewport coordinate system.
+       iOS standalone can offset fixed bottom bars with a translucent status bar. */
+    position: relative;
+    inset: auto;
+    flex: 0 0 auto;
+    box-sizing: border-box;
+    height: calc(var(--dispatch-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+    padding-top: 3px;
+    padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px));
+    margin-left: calc(0px - env(safe-area-inset-left, 0px));
+    margin-right: calc(0px - env(safe-area-inset-right, 0px));
   }
 
   .dispatch-mobile-nav > div > button,
   .dispatch-mobile-nav > div > div > button {
-    height: 46px;
-    min-height: 0;
+    height: 44px;
+    min-height: 44px;
     gap: 3px;
     border-radius: 9px;
-    font-size: 10px;
+    font-size: 11px;
   }
 
   .dispatch-mobile-nav {
@@ -167,9 +176,8 @@ input {
     padding-right: max(8px, env(safe-area-inset-right));
   }
 
-  .dispatch-workspace-panel {
-    padding-left: max(4px, env(safe-area-inset-left));
-    padding-right: max(4px, env(safe-area-inset-right));
+  .dispatch-mobile-nav [role="dialog"] {
+    max-height: min(34rem, calc(100dvh - var(--dispatch-mobile-nav-height) - env(safe-area-inset-bottom, 0px) - max(24px, env(safe-area-inset-top, 0px))));
   }
 
   .dispatch-workspace-shell[data-workspace-mode="expanded"] > .dispatch-workspace-upper {
