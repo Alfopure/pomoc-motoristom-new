@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AppRole } from "@/domain/types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
+import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
@@ -18,7 +19,6 @@ import {
   ACTIVE_SESSION_STATES,
   LEG_TIME_LIMIT_SECS,
   TALKING_STATES,
-  WAITING_STATES,
   toJson,
   type AppEvent,
   type AppEventType,
@@ -426,7 +426,7 @@ async function runAction(deps: CallActionDeps, session: SessionRow, event: AppEv
   try {
     run = await runSessionEvent(deps, session.id, event);
   } catch (error) {
-    if (error instanceof CallActionRejected) throw new CallActionError(error.message, error.status, "rejected");
+    if (error instanceof CallActionRejected) throw new CallActionError(error.message, error.status, error.code ?? "rejected");
     throw toActionError(error, failureMessage);
   }
   if (run.outcome === "ignored") return { sessionId: session.id, state: run.session.state, commands: [], ignored: run.reason };
@@ -511,7 +511,9 @@ export async function cancelConsult(deps: CallActionDeps, actor: CallActor, sess
 export async function pickupWaitingCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   requireConfigured(deps);
   const session = await loadSession(deps, sessionId);
-  if (!WAITING_STATES.has(session.state)) throw new CallActionError("Hovor nie je v čakárni.", 409, "not_waiting");
+  if (!canPickUpCall({ state: session.state, direction: session.direction, answered: Boolean(session.answered_at), operatorProfileId: session.answered_by_profile_id })) {
+    throw new CallActionError("Hovor už nie je možné prevziať.", 409, "not_waiting");
+  }
   const presence = await deps.admin.from("motorist_operator_presence").select("*").eq("profile_id", actor.profileId).maybeSingle();
   const allowed = presenceAllowsOffer(
     presence.data ? { profileId: actor.profileId, status: presence.data.status, currentSessionId: presence.data.current_session_id, wrapUpUntil: presence.data.wrap_up_until } : undefined,

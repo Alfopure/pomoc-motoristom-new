@@ -115,4 +115,11 @@ describe("liveCallOperatorLabel", () => {
     }))).toBe("Externý telefón: +421 905 111 222");
     expect(liveCallOperatorLabel(call({ kind: "offer", state: "ringing", answered: false, offeredOperatorNames: ["Lenka", "Peter"] }))).toBe("Zvoní: Lenka, Peter");
   });
+
+  it("shows the external ringing destination after the browser offer times out", () => {
+    expect(liveCallOperatorLabel(call({ kind: "offer", state: "ringing", answered: false, participants: [{
+      legId: "backup", kind: "operator", profileId: null, name: "+421 900 000 003", detail: null,
+      answered: false, muted: false, supervisorMode: null, self: false, controllable: false,
+    }] }))).toBe("Zvoní na externom telefóne: +421 900 000 003");
+  });
 });

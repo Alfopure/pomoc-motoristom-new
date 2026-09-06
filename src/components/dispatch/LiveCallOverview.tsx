@@ -19,11 +19,13 @@ import {
 } from "lucide-react";
 
 import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
+import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
+import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
-import { callElapsedSeconds, formatCallTimer, phoneBarStateLabel, type PhoneCallAction } from "./phone-bar-model";
+import { callElapsedSeconds, formatCallTimer, phoneBarCallMatchesBrowser, phoneBarStateLabel, type PhoneCallAction } from "./phone-bar-model";
 
 export type LiveCallOverviewFilter = "all" | "ringing" | "waiting" | "active";
 
@@ -54,8 +56,12 @@ export function liveCallOperatorLabel(call: PhoneBarCall): string {
   const external = call.participants.find((participant) => participant.kind === "operator" && !participant.profileId && participant.answered);
   if (external) return `Externý telefón: ${external.name}`;
   if (call.offeredOperatorNames.length > 0) return `Zvoní: ${call.offeredOperatorNames.join(", ")}`;
+  const externalOffers = call.participants.filter((participant) => participant.kind === "operator" && !participant.profileId && !participant.answered);
+  if (externalOffers.length > 0) return `Zvoní na externom telefóne: ${externalOffers.map((participant) => participant.name).join(", ")}`;
   if (call.kind === "waiting") return "Čaká na prevzatie";
   if (call.direction === "outbound") return "Odchádzajúci hovor";
+  if (call.state === "greeting") return "Volajúci počúva úvodnú hlášku";
+  if (call.state === "ivr") return "Volajúci vyberá voľbu";
   return "Hľadá operátora";
 }
 
@@ -64,7 +70,7 @@ type SharedOverviewProps = {
   presences: TelephonyOperatorPresence[];
   canManageCalls: boolean;
   busyAction: string | null;
-  browserOfferRinging: boolean;
+  phone: WebphoneSnapshot | null;
   onAnswer: () => void;
   onRejectOffer: () => void;
   onCallAction: (action: PhoneCallAction, sessionId: string) => void;
@@ -198,7 +204,7 @@ export function HeaderLiveCallsMenu(props: SharedOverviewProps) {
 }
 
 function LiveCallRow({
-  browserOfferRinging,
+  phone,
   busyAction,
   call,
   canManageCalls,
@@ -222,9 +228,13 @@ function LiveCallRow({
   const state = phoneBarStateLabel(call);
   const timer = formatCallTimer(callElapsedSeconds(call, now));
   const isBusy = busyAction !== null;
-  const canAnswer = call.kind === "offer" && call.offeredToMe && browserOfferRinging;
-  const canPickup = call.kind === "waiting";
-  const pickupBlocked = isBusy || Boolean(model.active) || model.ownPresenceStatus !== "available";
+  const canAnswer = call.kind === "offer" && Boolean(phone?.call?.ringing) && phoneBarCallMatchesBrowser(call, phone?.call ?? null);
+  const canPickup = canPickUpCall(call) && !canAnswer;
+  const pickupBlockReason = isBusy || (phone?.pendingOperatorLegs ?? 0) > 0 ? "Pripájanie hovoru…"
+    : model.active || phone?.call ? "Najprv dokonči hovor"
+      : phone?.status !== "registered" ? "Najprv pripoj telefón"
+        : model.ownPresenceStatus !== "available" ? (call.offeredToMe ? "Čakám na zvonenie v tomto okne" : "Najprv sa nastav dostupný")
+          : null;
   const supervising = model.supervising?.sessionId === call.sessionId;
   const StateIcon = call.kind === "offer" ? PhoneIncoming : call.kind === "waiting" ? Clock3 : call.direction === "outbound" ? PhoneOutgoing : PhoneCall;
   const surface = state.tone === "ring"
@@ -266,9 +276,9 @@ function LiveCallRow({
       </div>
 
       <div className={`flex flex-wrap items-center gap-1.5 ${compact ? "pl-10" : "sm:justify-end"}`}>
-        {canAnswer && <ActionButton icon={PhoneCall} label="Prijať" tone="accept" onClick={onAnswer} />}
-        {call.kind === "offer" && call.offeredToMe && browserOfferRinging && <ActionButton icon={X} label="Odmietnuť" tone="danger-outline" onClick={onRejectOffer} />}
-        {canPickup && <ActionButton busy={busyAction === "pickup"} disabled={pickupBlocked} icon={PhoneIncoming} label={pickupBlocked ? (model.active ? "Najprv odlož hovor" : "Najprv sa nastav dostupný") : "Prevziať"} tone="accept" onClick={() => onCallAction("pickup", call.sessionId)} />}
+        {canAnswer && <ActionButton busy={phone?.answering} disabled={isBusy || phone?.answering} icon={PhoneCall} label="Prijať" tone="accept" onClick={onAnswer} />}
+        {canAnswer && <ActionButton disabled={isBusy || phone?.answering} icon={X} label="Odmietnuť" tone="danger-outline" onClick={onRejectOffer} />}
+        {canPickup && <ActionButton busy={busyAction === "pickup"} disabled={Boolean(pickupBlockReason)} icon={PhoneIncoming} label={pickupBlockReason ?? "Prevziať"} tone="accept" onClick={() => onCallAction("pickup", call.sessionId)} />}
         {call.kind === "active" && call.mine && <ActionButton busy={busyAction === "hangup"} disabled={isBusy && busyAction !== "hangup"} icon={PhoneOff} label="Ukončiť" tone="danger" onClick={confirmAndEnd} />}
         {call.kind === "active" && !call.mine && Boolean(call.operatorProfileId) && canManageCalls && !supervising && (
           <>
