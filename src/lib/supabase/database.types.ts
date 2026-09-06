@@ -750,6 +750,7 @@ export type Database = {
         raw_latest_payload: Json;
         created_at: Timestamp;
         updated_at: Timestamp;
+        recording_source_revision: number;
       }>;
       motorist_call_events: Table<{
         id: string;
@@ -768,6 +769,143 @@ export type Database = {
         received_at: Timestamp;
         created_at: Timestamp;
       }>;
+      motorist_call_recording_access: Table<{ organization_id: string; profile_id: string; audio_read: boolean; quality_review: boolean }>;
+      motorist_call_recording_admissions: Table<{ call_id: string; organization_id: string; session_id: string; created_at: Timestamp }>;
+      motorist_call_recording_policies: Table<{
+        organization_id: string;
+        revision: number;
+        recording_enabled: boolean;
+        transcription_enabled: boolean;
+        analysis_enabled: boolean;
+        quality_enabled: boolean;
+        inbound_enabled: boolean;
+        outbound_enabled: boolean;
+        audio_retention_days: number;
+        transcript_retention_days: number;
+        review_retention_days: number;
+        max_recordings_per_hour: number;
+        max_recording_bytes: number;
+        max_segment_seconds: number;
+        daily_budget_usd: number;
+        controller_name: string|null;
+        contact_email: string|null;
+        privacy_notice_url: string|null;
+        service_legal_basis: string|null;
+        quality_legal_basis: string|null;
+        approved_at: Timestamp|null;
+        approved_by: string|null;
+        config: Json;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_call_participant_intervals: Table<{
+        id: string;
+        organization_id: string;
+        call_id: string;
+        session_id: string;
+        leg_id: string|null;
+        profile_id: string|null;
+        role: string;
+        started_at: Timestamp;
+        ended_at: Timestamp|null;
+        audible_to_customer: boolean;
+        reason: string;
+        channel: number|null;
+        verified: boolean;
+        topology_epoch: number;
+        source_event_id: string;
+        created_at: Timestamp;
+      }>;
+      motorist_call_processing_jobs: Table<{
+        id: string;
+        organization_id: string;
+        call_id: string;
+        recording_id: string|null;
+        kind: "import"|"asr"|"analysis"|"delete"|"reconcile";
+        input_revision: number;
+        dedupe_key: string;
+        state: "queued"|"processing"|"waiting"|"submission_unknown"|"complete"|"failed"|"cancelled";
+        attempt: number;
+        lease_token: string|null;
+        lease_epoch: number;
+        lease_expires_at: Timestamp|null;
+        next_attempt_at: Timestamp;
+        paid_submit_started: boolean;
+        correlation_token: string;
+        provider_ids: Json;
+        checkpoint: Json;
+        result: Json;
+        error_code: string|null;
+        reserved_usd: number;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_call_processing_budget: Table<{
+        organization_id: string;
+        budget_day: string;
+        reserved_usd: number;
+      }>;
+      motorist_call_analyses: Table<{
+        id: string;
+        organization_id: string;
+        call_id: string;
+        input_revision: number;
+        input_hash: string;
+        rubric_version: string;
+        model: string;
+        status: "draft"|"complete"|"failed"|"stale"|"deleted";
+        result: Json;
+        provider_usage: Json;
+        expires_at: Timestamp|null;
+        deleted_at: Timestamp|null;
+        created_at: Timestamp;
+      }>;
+      motorist_call_quality_reviews: Table<{
+        id: string;
+        organization_id: string;
+        call_id: string;
+        analysis_id: string;
+        operator_profile_id: string;
+        rubric_cohort_id: string;
+        source_revision: number;
+        status: "approved"|"rejected"|"stale";
+        criteria: Json;
+        score: number|null;
+        coverage: number;
+        reviewer_profile_id: string;
+        note: string;
+        created_at: Timestamp;
+      }>;
+      motorist_call_effective_reviews: Table<{
+        organization_id: string;
+        call_id: string;
+        operator_profile_id: string;
+        rubric_cohort_id: string;
+        review_id: string;
+        source_revision: number;
+      }>;
+      motorist_call_review_requests: Table<{
+        id: string;
+        organization_id: string;
+        call_id: string;
+        operator_profile_id: string;
+        requester_profile_id: string;
+        review_id: string|null;
+        note: string;
+        status: "open"|"resolved";
+        created_at: Timestamp;
+      }>;
+      motorist_call_transcript_revisions: Table<{
+        id: string;
+        organization_id: string;
+        transcript_id: string;
+        source_revision: number;
+        transcript_text: string|null;
+        speaker_segments: Json;
+        edited_by: string;
+        reason: string;
+        created_at: Timestamp;
+      }>;
       motorist_call_recordings: Table<{
         id: string;
         organization_id: string;
@@ -784,6 +922,16 @@ export type Database = {
         metadata: Json;
         created_at: Timestamp;
         updated_at: Timestamp;
+        session_id: string | null;
+        source_revision: number;
+        started_at: Timestamp | null;
+        ended_at: Timestamp | null;
+        deleted_at: Timestamp | null;
+        restricted_at: Timestamp | null;
+        expires_at: Timestamp | null;
+        sha256: string | null;
+        bytes: number | null;
+        participant_manifest: Json;
       }>;
       motorist_sms_messages: Table<{
         id: string;
@@ -881,6 +1029,10 @@ export type Database = {
         model: string | null;
         created_at: Timestamp;
         updated_at: Timestamp;
+        audio_source_revision: number;
+        source_revision: number;
+        deleted_at: Timestamp | null;
+        expires_at: Timestamp | null;
       }>;
       motorist_audit_log: Table<{
         id: string;
@@ -1270,6 +1422,25 @@ export type Database = {
       }>;
     };
     Functions: {
+      motorist_recording_publish_analysis: { Args: { p_job_id: string; p_lease_token: string; p_lease_epoch: number; p_input_hash: string; p_model: string; p_rubric_version: string; p_result: Json; p_usage: Json }; Returns: string | null };
+      motorist_call_quality_dashboard: { Args: { p_organization_id: string; p_from: string; p_to: string; p_operator_id: string | null; p_language: string | null; p_status: string | null; p_page: number; p_page_size: number; p_rubric_version: string }; Returns: Json };
+      motorist_recording_delete_call: { Args: { p_organization_id: string; p_call_id: string; p_actor_id: string; p_reason: string; p_source_revision: number }; Returns: boolean };
+      motorist_recording_retry_call: { Args: { p_organization_id: string; p_call_id: string; p_actor_id: string; p_source_revision: number }; Returns: number };
+      motorist_recording_restrict_session: { Args: { p_organization_id: string; p_session_id: string }; Returns: boolean };
+      motorist_recording_sweep: { Args: { p_organization_id: string }; Returns: number };
+      motorist_recording_admit_session: { Args: { p_organization_id: string; p_session_id: string; p_call_id: string; p_max_per_hour: number }; Returns: boolean };
+      motorist_recording_policy_save: { Args: { p_organization_id: string; p_expected_revision: number; p_actor_id: string; p_approved: boolean; p_policy: Json }; Returns: number };
+      motorist_recording_enqueue_saved: { Args: { p_organization_id: string; p_call_id: string; p_session_id: string; p_provider_recording_id: string; p_metadata: Json }; Returns: string };
+      motorist_recording_claim_job: { Args: { p_organization_id: string; p_lease_seconds?: number }; Returns: Database["public"]["Tables"]["motorist_call_processing_jobs"]["Row"][] };
+      motorist_recording_checkpoint_job: { Args: { p_job_id: string; p_lease_token: string; p_lease_epoch: number; p_checkpoint: Json; p_provider_ids: Json; p_paid_submit?: boolean }; Returns: boolean };
+      motorist_recording_finish_job: { Args: { p_job_id: string; p_lease_token: string; p_lease_epoch: number; p_state: string; p_checkpoint: Json; p_provider_ids: Json; p_error_code: string|null; p_next_attempt_at: Timestamp|null }; Returns: boolean };
+      motorist_recording_reserve_budget: { Args: { p_job_id: string; p_lease_token: string; p_lease_epoch: number; p_amount: number }; Returns: boolean };
+      motorist_call_quality_approve: { Args: { p_organization_id: string; p_call_id: string; p_analysis_id: string; p_operator_profile_id: string; p_rubric_cohort_id: string; p_source_revision: number; p_expected_effective_review_id: string|null; p_criteria: Json; p_score: number|null; p_coverage: number; p_reviewer_profile_id: string; p_note: string }; Returns: string };
+      motorist_call_transcript_correct: { Args: { p_organization_id: string; p_transcript_id: string; p_expected_source_revision: number; p_transcript_text: string; p_speaker_segments: Json; p_edited_by: string; p_reason: string }; Returns: number };
+      motorist_recording_complete_import: { Args: { p_job_id: string; p_lease_token: string; p_lease_epoch: number; p_storage_path: string; p_bytes: number; p_sha256: string; p_mime_type: string }; Returns: boolean };
+      motorist_recording_bind_scribe_ack: { Args: { p_correlation_token: string; p_request_id: string; p_provider_transcript_id: string | null }; Returns: boolean };
+      motorist_recording_accept_scribe: { Args: { p_correlation_token: string; p_request_id: string; p_transcript_text: string; p_segments: Json; p_language: string | null; p_provider_transcript_id: string|null }; Returns: boolean };
+
       motorist_get_web_push_config: {
         Args: Record<string, never>;
         Returns: Json;

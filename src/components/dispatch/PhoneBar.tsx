@@ -35,6 +35,7 @@ import { SUPERVISOR_MODE_HINTS, SUPERVISOR_MODE_LABELS, SUPERVISOR_MODE_ORDER, t
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
 import { CallTransferPicker, type TransferPickerMode, type TransferRequest } from "./CallTransferPicker";
+import { CallRecordingControls } from "./recordings/CallRecordingControls";
 import styles from "./PhoneBar.module.css";
 import {
   callElapsedSeconds,
@@ -337,6 +338,12 @@ function PhoneBarControls(props: PhoneBarProps) {
           <Volume2 size={16} aria-hidden="true" />
           Zapnúť zvuk hovoru
         </button>
+      )}
+
+      {focus?.kind === "active" && focus.mine && focus.callId && (
+        <div className="min-w-0 basis-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-zinc-900">
+          <CallRecordingControls key={focus.callId} callId={focus.callId} />
+        </div>
       )}
 
       {model.offers.length > 1 && (

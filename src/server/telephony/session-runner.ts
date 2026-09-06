@@ -10,7 +10,9 @@ import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_I
 import { buildBusinessHoursSchedule, type BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import { materialiseRingPlan } from "./routing/ring-plan";
 import { applyReduceResult, recordCallEvent, SessionConflictError, type ApplyResult, type CommandOutcome, type EffectsDeps } from "./state/effects";
-import { reduce } from "./state/transitions";
+import { CallActionRejected, reduce } from "./state/transitions";
+import { needsRecordingContinuation } from "./state/recording";
+import { resolveSessionRecordingPolicy } from "./recording-policy-service";
 import {
   DEFAULT_ROUTING_SETTINGS,
   readMeta,
@@ -96,12 +98,18 @@ function sleepOf(deps: SessionRunnerDeps): (ms: number) => Promise<void> {
   return deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 }
 
+function leaseTtl(deps: SessionRunnerDeps): number {
+  // Recording/notice commands can consume two 5s provider attempts. The privacy
+  // barrier must never execute concurrently after the historical 4s lease expires.
+  return deps.leaseTtlMs ?? (process.env.TELNYX_RECORDING_ENABLED === "true" ? 15_000 : LEASE_TTL_MS);
+}
+
 export async function acquireSessionLease(deps: SessionRunnerDeps, sessionId: string, token: string): Promise<boolean> {
   const now = nowOf(deps);
   const sleep = sleepOf(deps);
   const random = deps.random ?? Math.random;
   const budget = deps.leaseWaitMs ?? LEASE_WAIT_MS;
-  const ttl = deps.leaseTtlMs ?? LEASE_TTL_MS;
+  const ttl = leaseTtl(deps);
   const started = now().getTime();
   let waited = 0;
   for (;;) {
@@ -117,10 +125,11 @@ export async function acquireSessionLease(deps: SessionRunnerDeps, sessionId: st
 }
 
 /** Re-acquires the lease with the same token (re-entrant RPC); best effort. */
-export async function renewSessionLease(deps: SessionRunnerDeps, sessionId: string, token: string): Promise<void> {
-  const { data, error } = await deps.admin.rpc("motorist_session_lease_acquire", { p_session_id: sessionId, p_token: token, p_ttl_ms: deps.leaseTtlMs ?? LEASE_TTL_MS });
+export async function renewSessionLease(deps: SessionRunnerDeps, sessionId: string, token: string, required = false): Promise<void> {
+  const { data, error } = await deps.admin.rpc("motorist_session_lease_acquire", { p_session_id: sessionId, p_token: token, p_ttl_ms: leaseTtl(deps) });
   if (error) deps.logger?.({ level: "warn", scope: "lease", sessionId, message: "renew failed", error: error.message });
   else if (data !== true) deps.logger?.({ level: "warn", scope: "lease", sessionId, message: "lease lost during effects" });
+  if (required && (error || data !== true)) throw new Error("recording session lease unavailable");
 }
 
 export async function releaseSessionLease(deps: SessionRunnerDeps, sessionId: string, token: string): Promise<void> {
@@ -284,6 +293,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     fromNumber: (config.configured ? config.defaultFromNumber : null) ?? line?.phone_number ?? null,
     mediaAvailable: config.configured ? Boolean(config.mediaBaseUrl) : false,
     announcements: meta.announcements ? readAnnouncementConfig(meta.announcements) : announcementConfigFromMetadata(line?.metadata),
+    recordingPolicy: await resolveSessionRecordingPolicy(admin, organizationId),
   };
 }
 
@@ -296,6 +306,7 @@ export function effectsDeps(deps: SessionRunnerDeps): EffectsDeps {
     environment: deps.environment,
     mediaBaseUrl: deps.config.configured ? deps.config.mediaBaseUrl : null,
     now,
+    sleep: sleepOf(deps),
     logger: deps.logger,
     wrapUpSecondsFor: async (profileId) => {
       const { data } = await deps.admin.from("motorist_operator_telephony_settings").select("wrap_up_seconds").eq("profile_id", profileId).maybeSingle();
@@ -347,13 +358,19 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
   const token = randomUUID();
   const leaseAcquired = await acquireSessionLease(deps, sessionId, token);
   if (!leaseAcquired) deps.logger?.({ level: "warn", scope: "lease", sessionId, eventId: event.id, message: "processing without lease (CAS protected)" });
-  const effects: EffectsDeps = { ...effectsDeps(deps), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token) : undefined };
   const maxRetries = deps.maxConflictRetries ?? MAX_CONFLICT_RETRIES;
 
   try {
     for (let retries = 0; ; retries += 1) {
       const snapshot = await loadSessionSnapshot(deps, sessionId);
       const context = await loadRoutingContext(deps, snapshot.session);
+      const recordingLeaseRequired = Boolean(context.recordingPolicy?.enabled || readMeta(snapshot.session).recording?.recorders.some((item) => item.observed !== "stopped"));
+      const effects: EffectsDeps = { ...effectsDeps(deps), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token, recordingLeaseRequired) : undefined };
+      if (!leaseAcquired && (context.recordingPolicy?.enabled || readMeta(snapshot.session).recording?.recorders.some((recorder) => recorder.observed !== "stopped"))) {
+        if (event.kind === "app" && event.type !== "hangup" && event.type !== "sweep") throw new CallActionRejected("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.", 503);
+        // Assistance may progress without capture; it may not start a concurrent recorder.
+        if (context.recordingPolicy) context.recordingPolicy = { ...context.recordingPolicy, enabled: false };
+      }
       const result = reduce(snapshot.session, snapshot.legs, snapshot.attempts, event, context);
 
       if (result.ignored) {
@@ -370,7 +387,21 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
       }
 
       try {
-        const apply = await applyReduceResult(effects, { session: snapshot.session, result, event, expectedVersion: snapshot.session.version });
+        let apply = await applyReduceResult(effects, { session: snapshot.session, result, event, expectedVersion: snapshot.session.version });
+        // Complete only bounded internal continuations while retaining this event's lease.
+        // These are command acknowledgements, never fabricated provider webhooks.
+        for (let continuation = 0; continuation < 2; continuation += 1) {
+          const sequence = readMeta(apply.session).announcement_sequence;
+          const stopReady = needsRecordingContinuation(apply.session);
+          const mediaFailed = sequence && Date.parse(sequence.deadlineAt) <= nowOf(deps)().getTime();
+          if ((!stopReady && !mediaFailed) || stopReady && !leaseAcquired) break;
+          const fresh = await loadSessionSnapshot(deps, sessionId);
+          const followEvent: SessionEvent = { kind: "app", type: stopReady ? "recording_continue" : "sweep", id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };
+          const follow = reduce(fresh.session, fresh.legs, fresh.attempts, followEvent, { ...context, now: nowOf(deps)() });
+          if (follow.ignored) break;
+          const nextApply = await applyReduceResult(effects, { session: fresh.session, result: follow, event: followEvent, expectedVersion: fresh.session.version });
+          apply = { ...nextApply, commands: [...apply.commands, ...nextApply.commands], notes: [...apply.notes, ...nextApply.notes] };
+        }
         await recordCallEvent(effects, {
           session: apply.session,
           event,

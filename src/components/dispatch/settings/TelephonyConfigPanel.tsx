@@ -18,6 +18,7 @@ import { RingGroupsEditor } from "./RingGroupsEditor";
 import { RingPlanEditor } from "./RingPlanEditor";
 import { SettingsNotice, SettingsSectionHeader } from "./settings-ui";
 import { TelephonySettingsPanel } from "./TelephonySettingsPanel";
+import { RecordingPolicyPanel } from "./RecordingPolicyPanel";
 
 /**
  * "Telefonovanie" section of the settings view (plan "Fáza 3").
@@ -27,7 +28,7 @@ import { TelephonySettingsPanel } from "./TelephonySettingsPanel";
  * back so the neighbouring screens see the new world without a reload.
  */
 
-type TelephonyConfigTab = "phone" | "groups" | "plans" | "ivr" | "announcements" | "hours" | "pauses" | "numbers" | "operators" | "settings";
+type TelephonyConfigTab = "phone" | "groups" | "plans" | "ivr" | "announcements" | "hours" | "pauses" | "numbers" | "operators" | "recording" | "settings";
 
 const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; adminOnly?: boolean; managerOnly?: boolean }> = [
   // "Môj telefón" is first and open to every operator; everything after it is
@@ -37,6 +38,7 @@ const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; 
   { icon: ListOrdered, label: "Plány zvonenia", value: "plans" },
   { icon: ListTree, label: "IVR menu", value: "ivr" },
   { icon: AudioLines, label: "Hlášky a jazyk", value: "announcements" },
+  { icon: AudioLines, label: "Nahrávanie a kvalita", value: "recording", managerOnly: true },
   { icon: CalendarClock, label: "Otváracie hodiny", value: "hours" },
   { icon: Coffee, label: "Dôvody pauzy", value: "pauses" },
   { icon: Hash, label: "Čísla", value: "numbers" },
@@ -161,6 +163,7 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
           <AnnouncementsPanel active={tab === "announcements"} />
         </div>
       )}
+      {tab === "recording" && state.canEdit && <RecordingPolicyPanel onOpenAnnouncements={() => { setAnnouncementsOpened(true); setTab("announcements"); }} />}
       {tab === "hours" && <BusinessHoursEditor key={`hours-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "pauses" && <PauseReasonsEditor key={`pauses-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "numbers" && <NumbersPanel key={`numbers-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}

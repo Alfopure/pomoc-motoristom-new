@@ -38,6 +38,7 @@ function authorized(request: Request): boolean {
 }
 
 export async function GET(request: Request) {
+  const cronStartedAt = Date.now();
   if (!authorized(request)) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
@@ -46,9 +47,11 @@ export async function GET(request: Request) {
     const deps = await createTelephonyDeps({ sweepAfterEvent: false });
     const summary = await runTelephonyCronJobs(deps);
     const reminders = await runReminderMaterialisation(deps.organizationId);
+    const { runRecordingProcessing } = await import("@/server/telephony/recording-processing");
+    const recordings = await runRecordingProcessing({ admin: deps.admin, organizationId: deps.organizationId, cronStartedAt });
 
     return Response.json(
-      { ...summary, status: reminders.status === "failed" ? "degraded" : summary.status, jobs: [...summary.jobs, reminders] },
+      { ...summary, status: reminders.status === "failed" || recordings.status === "failed" ? "degraded" : summary.status, jobs: [...summary.jobs, reminders, recordings] },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {

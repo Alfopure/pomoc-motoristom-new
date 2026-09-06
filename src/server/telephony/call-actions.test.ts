@@ -1,3 +1,4 @@
+import { completeAnnouncedAction, completeCallAnnouncements } from "@/test/complete-call-announcements";
 import { describe, expect, it } from "vitest";
 
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
@@ -99,11 +100,14 @@ describe("startOutboundCall", () => {
     expect(h.session(result.sessionId).state).toBe("ringing");
     const customerDial = h.telnyx.of("dial")[1].params;
     expect(customerDial).toMatchObject({ to: "+421905123456", from: NUMBERS.allianz, linkTo: own, timeoutSecs: 45 });
-    expect(h.telnyx.of("bridge")[0].params).toMatchObject({ callControlId: own, targetCallControlId: "cc-2", playRingtone: true, ringtone: "cz" });
+    expect(h.telnyx.of("bridge")).toHaveLength(0);
     const customerLeg = h.legs(result.sessionId).find((leg) => leg.role === "customer")!;
     expect(customerLeg.telnyx_call_control_id).toBe("cc-2");
 
     await h.legEvent("cc-2", "call.answered", { direction: "outgoing" });
+    expect(h.telnyx.of("bridge")).toHaveLength(0);
+    await completeCallAnnouncements(h, result.sessionId);
+    expect(h.telnyx.of("bridge")[0].params).toMatchObject({ callControlId: "cc-2", targetCallControlId: own });
     expect(h.session(result.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o1 });
     expect(h.call(result.sessionId)).toMatchObject({ status: "answered" });
 
@@ -216,10 +220,10 @@ describe("ownership", () => {
   it("lets the answering operator or a senior control the call, not another dispatcher", async () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
-    expect(await fail(holdCall(actionDeps(h), o2, call.sessionId))).toMatchObject({ status: 403, code: "forbidden" });
-    await expect(holdCall(actionDeps(h), senior, call.sessionId)).resolves.toMatchObject({ state: "held" });
-    await expect(unholdCall(actionDeps(h), o1, call.sessionId)).resolves.toMatchObject({ state: "talking" });
-    expect(await fail(holdCall(actionDeps(h), o1, "00000000-0000-4000-8000-00000000dead"))).toMatchObject({ status: 404 });
+    expect(await fail(completeAnnouncedAction(h, holdCall(actionDeps(h), o2, call.sessionId)))).toMatchObject({ status: 403, code: "forbidden" });
+    await expect(completeAnnouncedAction(h, holdCall(actionDeps(h), senior, call.sessionId))).resolves.toMatchObject({ state: "held" });
+    await expect(completeAnnouncedAction(h, unholdCall(actionDeps(h), o1, call.sessionId))).resolves.toMatchObject({ state: "talking" });
+    expect(await fail(completeAnnouncedAction(h, holdCall(actionDeps(h), o1, "00000000-0000-4000-8000-00000000dead")))).toMatchObject({ status: 404 });
   });
 });
 
@@ -227,7 +231,7 @@ describe("hold / unhold", () => {
   it("promotes to a conference lazily and holds the customer with music", async () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
-    const held = await holdCall(actionDeps(h), o1, call.sessionId);
+    const held = await completeAnnouncedAction(h, holdCall(actionDeps(h), o1, call.sessionId));
     expect(held.state).toBe("held");
     // The operator leg creates the conference (it is the leg the bridge does not
     // protect with `park_after_unbridge`); the customer joins it.
@@ -239,20 +243,20 @@ describe("hold / unhold", () => {
     expect(h.session(call.sessionId)).toMatchObject({ state: "held", conference_id: conferenceId });
     expect(h.session(call.sessionId).hold_started_at).toBe(h.now().toISOString());
 
-    await unholdCall(actionDeps(h), o1, call.sessionId);
+    await completeAnnouncedAction(h, unholdCall(actionDeps(h), o1, call.sessionId));
     expect(h.telnyx.of("conference:unhold")[0].params).toMatchObject({ call_control_ids: [call.callControlId] });
     expect(h.session(call.sessionId)).toMatchObject({ state: "talking", hold_started_at: null, conference_id: conferenceId });
     // Second hold reuses the conference.
-    await holdCall(actionDeps(h), o1, call.sessionId);
+    await completeAnnouncedAction(h, holdCall(actionDeps(h), o1, call.sessionId));
     expect(h.telnyx.of("createConference")).toHaveLength(1);
-    expect(await fail(holdCall(actionDeps(h), o1, call.sessionId))).toMatchObject({ status: 409 });
+    expect(await fail(completeAnnouncedAction(h, holdCall(actionDeps(h), o1, call.sessionId)))).toMatchObject({ status: 409 });
   });
 
   it("keeps the call bridged and reports 502 when the conference cannot be created", async () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
     h.telnyx.failNext("createConference", "conference limit");
-    const error = await fail(holdCall(actionDeps(h), o1, call.sessionId));
+    const error = await fail(completeAnnouncedAction(h, holdCall(actionDeps(h), o1, call.sessionId)));
     expect(error).toMatchObject({ status: 502, code: "command_failed" });
     expect(h.session(call.sessionId)).toMatchObject({ state: "talking", conference_id: null, hold_started_at: null });
     expect(h.telnyx.of("conference:hold")).toHaveLength(0);
@@ -263,7 +267,7 @@ describe("park / pickup", () => {
   it("parks the customer with music, releases the operator and lets a colleague pick up", async () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
-    const parked = await parkCall(actionDeps(h), o1, call.sessionId);
+    const parked = await completeAnnouncedAction(h, parkCall(actionDeps(h), o1, call.sessionId));
     expect(parked.state).toBe("parked");
     expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(call.operatorLeg);
     expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ callControlId: call.callControlId, audioUrl: "https://media.test/telephony/announcements-v1/moh.mp3", loop: "infinity" });
@@ -291,7 +295,7 @@ describe("transfers", () => {
   it("blind-transfers to a colleague and attributes the answer to them", async () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
-    const result = await blindTransfer(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o2 });
+    const result = await completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o2 }));
     expect(result.state).toBe("ringing");
     const transfer = h.telnyx.of("transfer")[0].params;
     expect(transfer).toMatchObject({ callControlId: call.callControlId, to: "sip:gencred002@sip.telnyx.com", from: NUMBERS.allianz, parkAfterUnbridge: "self", timeoutSecs: 30 });
@@ -308,19 +312,19 @@ describe("transfers", () => {
   it("validates transfer targets: unknown, self, busy colleague, disallowed number", async () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
-    expect(await fail(blindTransfer(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o1 }))).toMatchObject({ status: 400 });
-    expect(await fail(blindTransfer(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o3 }))).toMatchObject({ status: 409, code: "target_unavailable" });
-    expect(await fail(blindTransfer(actionDeps(h), o1, call.sessionId, { number: "+49 151 12345678" }))).toMatchObject({ status: 403 });
-    expect(await fail(blindTransfer(actionDeps(h), o1, call.sessionId, { number: "+49151" }))).toMatchObject({ status: 400 });
-    expect(await fail(blindTransfer(actionDeps(h), o1, call.sessionId, {}))).toMatchObject({ status: 400 });
-    await expect(blindTransfer(actionDeps(h), o1, call.sessionId, { number: "0900 000 000" })).resolves.toMatchObject({ state: "ringing" });
+    expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o1 })))).toMatchObject({ status: 400 });
+    expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o3 })))).toMatchObject({ status: 409, code: "target_unavailable" });
+    expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { number: "+49 151 12345678" })))).toMatchObject({ status: 403 });
+    expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { number: "+49151" })))).toMatchObject({ status: 400 });
+    expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, {})))).toMatchObject({ status: 400 });
+    await expect(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { number: "0900 000 000" }))).resolves.toMatchObject({ state: "ringing" });
     expect(h.telnyx.of("transfer")[0].params.to).toBe(NUMBERS.external);
   });
 
   it("moves the customer to the waiting room when the transfer target does not answer", async () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
-    const result = await blindTransfer(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o2 });
+    const result = await completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o2 }));
     expect(result.state).toBe("ringing");
     const transfer = h.telnyx.of("transfer")[0].params;
     await h.process(h.envelope("call.initiated", { call_control_id: "cc-target", call_session_id: call.telnyxSessionId, client_state: transfer.targetLegClientState, direction: "outgoing" }));
@@ -332,7 +336,7 @@ describe("transfers", () => {
   it("runs an attended transfer: consult, join, complete", async () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
-    const consult = await startConsult(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o2 });
+    const consult = await completeAnnouncedAction(h, startConsult(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o2 }));
     expect(consult.state).toBe("consulting");
     expect(h.telnyx.of("createConference")).toHaveLength(1);
     expect(h.telnyx.of("conference:hold")[0].params.call_control_ids).toEqual([call.callControlId]);
@@ -341,12 +345,12 @@ describe("transfers", () => {
     const consultLeg = h.legs(call.sessionId).find((leg) => leg.role === "consult")!;
     expect(consultLeg.profile_id).toBe(PROFILES.o2);
 
-    expect(await fail(completeTransfer(actionDeps(h), o1, call.sessionId))).toMatchObject({ status: 409 });
+    expect(await fail(completeAnnouncedAction(h, completeTransfer(actionDeps(h), o1, call.sessionId)))).toMatchObject({ status: 409 });
     await h.legEvent(String(consultLeg.telnyx_call_control_id), "call.answered");
     expect(h.telnyx.of("conference:join").at(-1)?.params.call_control_id).toBe(consultLeg.telnyx_call_control_id);
     expect(h.presence(PROFILES.o2).status).toBe("on_call");
 
-    const completed = await completeTransfer(actionDeps(h), o1, call.sessionId);
+    const completed = await completeAnnouncedAction(h, completeTransfer(actionDeps(h), o1, call.sessionId));
     expect(completed.state).toBe("talking");
     expect(h.telnyx.of("conference:unhold").at(-1)?.params.call_control_ids).toEqual([call.callControlId]);
     expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(call.operatorLeg);
@@ -359,9 +363,9 @@ describe("transfers", () => {
   it("cancels a consult and returns to the customer", async () => {
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
-    await startConsult(actionDeps(h), o1, call.sessionId, { number: "0900 000 000" });
+    await completeAnnouncedAction(h, startConsult(actionDeps(h), o1, call.sessionId, { number: "0900 000 000" }));
     const consultLeg = h.legs(call.sessionId).find((leg) => leg.role === "consult")!;
-    const cancelled = await cancelConsult(actionDeps(h), o1, call.sessionId);
+    const cancelled = await completeAnnouncedAction(h, cancelConsult(actionDeps(h), o1, call.sessionId));
     expect(cancelled.state).toBe("talking");
     expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(consultLeg.telnyx_call_control_id);
     expect(h.telnyx.of("conference:unhold").at(-1)?.params.call_control_ids).toEqual([call.callControlId]);

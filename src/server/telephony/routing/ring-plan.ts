@@ -355,12 +355,12 @@ export function isSessionStale(session: SessionRow, now: Date, staleMs: number =
 /** Upper bound on the scan itself; the stalest sessions come first. */
 export const OVERDUE_SCAN_LIMIT = 200;
 
-export async function findOverdueSessions(admin: AdminClient, input: { organizationId: string; now: Date; scanLimit?: number }): Promise<{ greeting: SessionRow[]; ringing: SessionRow[]; waiting: SessionRow[]; stale: SessionRow[] }> {
+export async function findOverdueSessions(admin: AdminClient, input: { organizationId: string; now: Date; scanLimit?: number }): Promise<{ greeting: SessionRow[]; ringing: SessionRow[]; waiting: SessionRow[]; stale: SessionRow[]; media: SessionRow[] }> {
   const { data, error } = await admin
     .from("motorist_call_sessions")
     .select("*")
     .eq("organization_id", input.organizationId)
-    .in("state", ["greeting", "ringing", "waiting", "parked", "wrap_up", "missed"])
+    .in("state", ["greeting", "ringing", "waiting", "parked", "wrap_up", "missed", "talking", "held", "consulting", "conference"])
     .order("updated_at", { ascending: true })
     .limit(input.scanLimit ?? OVERDUE_SCAN_LIMIT);
   if (error) throw new Error(`overdue session scan failed: ${error.message}`);
@@ -370,6 +370,15 @@ export async function findOverdueSessions(admin: AdminClient, input: { organizat
     ringing: rows.filter((row) => isRingStepOverdue(row, input.now)),
     waiting: rows.filter((row) => isWaitingTickStale(row, input.now)),
     stale: rows.filter((row) => isSessionStale(row, input.now)),
+    // Active capture must observe policy revocation on the existing cron, even
+    // while people are talking. Media watchdogs are independent of call state.
+    media: rows.filter((row) => {
+      const meta = readMeta(row);
+      return !row.ended_at && (meta.recording?.recorders.some((item) => item.observed !== "stopped") ||
+        (ms(meta.recording?.pendingAudio?.readyAt) ?? Infinity) <= input.now.getTime() ||
+        (ms(meta.announcement_sequence?.deadlineAt) ?? Infinity) <= input.now.getTime() ||
+        (ms(meta.recording?.barrier?.deadlineAt) ?? Infinity) <= input.now.getTime());
+    }),
   };
 }
 
@@ -498,12 +507,14 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
   // Ringing sessions first: a caller is listening to them right now. The stale
   // verdict is carried into the event because it is computed here, before the
   // session lease bumps `updated_at` (see `onStaleFinalise`).
-  const targets = [
+  const candidates = [
     ...overdue.greeting.map((session) => ({ session, stale: false })),
     ...overdue.ringing.map((session) => ({ session, stale: false })),
     ...overdue.waiting.map((session) => ({ session, stale: false })),
     ...overdue.stale.map((session) => ({ session, stale: true })),
+    ...overdue.media.map((session) => ({ session, stale: false })),
   ];
+  const targets = candidates.filter(({ session }, index) => candidates.findIndex((entry) => entry.session.id === session.id) === index);
   const result: SweepResult = { checked: targets.length, swept: [], deferred: [], errors: [] };
   const clock = deps.clock ?? (() => Date.now());
   const started = clock();
