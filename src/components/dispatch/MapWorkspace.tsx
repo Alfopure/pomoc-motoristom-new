@@ -136,36 +136,27 @@ export function MapWorkspace({
   const showExpandedPanel = workspaceMode === "expanded" && workspaceKind !== "cockpit";
   const expandedOverlay = workspaceMode === "expanded";
   const upperAreaClassName =
-    !showWorkspacePanel
-      ? "h-full min-h-[440px] overflow-hidden lg:min-h-0"
-      : workspaceMode === "expanded"
-      ? "h-full min-h-[440px] overflow-hidden lg:min-h-0"
-      : workspaceMode === "split"
-        ? "min-h-[340px] overflow-hidden"
-        : "h-full min-h-[440px] overflow-hidden lg:min-h-0";
+    showWorkspacePanel && workspaceMode === "split"
+      ? "h-full min-h-0 overflow-hidden lg:h-auto lg:min-h-[340px]"
+      : "h-full min-h-0 overflow-hidden";
   const shellClassName = !showWorkspacePanel
     ? "relative h-full min-h-0"
     : expandedOverlay
-    ? "relative lg:h-full lg:min-h-0"
+    ? "relative h-full min-h-0"
     : workspaceMode === "collapsed"
-      ? "dispatch-workspace-shell relative lg:h-full lg:min-h-0"
-      : `dispatch-workspace-shell lg:grid lg:h-full lg:min-h-0 lg:gap-2 ${desktopRows[workspaceMode]}`;
+      ? "dispatch-workspace-shell relative h-full min-h-0"
+      : `dispatch-workspace-shell relative h-full min-h-0 lg:grid lg:gap-2 ${desktopRows[workspaceMode]}`;
   const panelClassName = expandedOverlay
-    ? "dispatch-workspace-panel fixed inset-x-0 top-[var(--dispatch-fixed-top,53px)] bottom-[calc(68px+env(safe-area-inset-bottom))] z-[2147482500] px-2 sm:bottom-[calc(72px+env(safe-area-inset-bottom))] lg:absolute lg:inset-0 lg:z-20 lg:h-full lg:px-0"
+    ? "dispatch-workspace-panel fixed inset-x-0 top-[var(--dispatch-fixed-top,53px)] bottom-[calc(var(--dispatch-mobile-nav-height,68px)+env(safe-area-inset-bottom))] z-[2147482500] px-2 lg:absolute lg:inset-0 lg:z-20 lg:h-full lg:px-0"
     : workspaceMode === "collapsed"
-      ? `dispatch-workspace-panel fixed inset-x-0 bottom-[calc(68px+env(safe-area-inset-bottom))] z-[2147482500] h-16 px-2 sm:bottom-[calc(72px+env(safe-area-inset-bottom))] lg:absolute lg:inset-x-0 lg:bottom-0 lg:z-20 lg:h-16 lg:px-0`
-      : `dispatch-workspace-panel fixed inset-x-0 bottom-[calc(68px+env(safe-area-inset-bottom))] z-[2147482500] px-2 sm:bottom-[calc(72px+env(safe-area-inset-bottom))] lg:relative lg:inset-auto lg:z-auto lg:h-full lg:px-0 ${mobileSheetHeights[workspaceMode]}`;
+      ? `dispatch-workspace-panel fixed inset-x-0 bottom-[calc(var(--dispatch-mobile-nav-height,68px)+env(safe-area-inset-bottom))] z-[2147482500] h-16 px-2 lg:absolute lg:inset-x-0 lg:bottom-0 lg:z-20 lg:h-16 lg:px-0`
+      : `dispatch-workspace-panel fixed inset-x-0 bottom-[calc(var(--dispatch-mobile-nav-height,68px)+env(safe-area-inset-bottom))] z-[2147482500] max-h-[calc(100dvh-var(--dispatch-fixed-top,53px)-var(--dispatch-mobile-nav-height,68px)-env(safe-area-inset-bottom)-8px)] px-2 lg:relative lg:inset-auto lg:z-auto lg:h-full lg:max-h-none lg:px-0 ${mobileSheetHeights[workspaceMode]}`;
   const canResizeCockpit = workspaceKind === "cockpit" && hasCockpitCase;
-  const sectionClassName =
-    !showWorkspacePanel
-      ? "relative min-h-[480px] bg-zinc-50 p-2 pb-[calc(76px+env(safe-area-inset-bottom))] sm:p-3 lg:h-full lg:min-h-0 lg:overflow-hidden lg:pb-3"
-      : workspaceMode === "collapsed"
-      ? "relative min-h-[420px] bg-zinc-50 p-2 pb-[calc(76px+env(safe-area-inset-bottom))] sm:p-3 lg:h-full lg:min-h-0 lg:overflow-hidden lg:pb-3"
-      : "relative min-h-[560px] bg-zinc-50 p-2 pb-[calc(152px+env(safe-area-inset-bottom))] sm:p-3 lg:h-full lg:min-h-0 lg:overflow-hidden lg:pb-3";
+  const sectionClassName = "relative h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-zinc-50 p-2 sm:p-3";
   const resizeHandleClassName =
     workspaceMode === "expanded"
-      ? "absolute left-1/2 top-3 z-[2147482600] flex h-7 w-20 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full border border-zinc-300 bg-white/95 text-zinc-500 shadow-md backdrop-blur hover:border-zinc-400 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#FCD703] focus:ring-offset-2"
-      : "absolute left-1/2 top-0 z-[2147482600] flex h-7 w-20 -translate-x-1/2 -translate-y-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full border border-zinc-300 bg-white/95 text-zinc-500 shadow-md backdrop-blur hover:border-zinc-400 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#FCD703] focus:ring-offset-2";
+      ? "absolute left-1/2 top-3 z-[2147482600] hidden h-7 w-20 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full border border-zinc-300 bg-white/95 text-zinc-500 shadow-md backdrop-blur hover:border-zinc-400 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#FCD703] focus:ring-offset-2 lg:flex"
+      : "absolute left-1/2 top-0 z-[2147482600] flex h-11 w-20 -translate-x-1/2 -translate-y-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full border border-zinc-300 bg-white/95 text-zinc-500 shadow-md backdrop-blur hover:border-zinc-400 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#FCD703] focus:ring-offset-2 lg:h-7";
 
   useEffect(() => {
     let nextDesktopPercent = DEFAULT_DESKTOP_PANEL_PERCENT;

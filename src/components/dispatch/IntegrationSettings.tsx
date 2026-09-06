@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   Building2,
+  BellRing,
   Edit3,
   FolderDown,
   Loader2,
@@ -25,6 +26,7 @@ import type { MyPhoneTestCall } from "./MyPhonePanel";
 import { TelephonyConfigPanel } from "./settings/TelephonyConfigPanel";
 import { SettingsSectionHeader } from "./settings/settings-ui";
 import { UserAccessSettings } from "./UserAccessSettings";
+import { PushNotificationSettings } from "@/components/pwa/PushNotificationSettings";
 
 type IntegrationSettingsProps = {
   branches: Branch[];
@@ -38,6 +40,7 @@ type IntegrationSettingsProps = {
   onTestCall?: MyPhoneTestCall;
   /** Deleting a user is admin-only; the button is hidden for everyone else. */
   viewerRole?: AppRole;
+  pushEnabled?: boolean;
 };
 
 type ApiMutationResponse = {
@@ -45,9 +48,10 @@ type ApiMutationResponse = {
   error?: string;
 };
 
-type SettingsSection = "users" | "telephony" | "partners" | "branches";
+type SettingsSection = "notifications" | "users" | "telephony" | "partners" | "branches";
 
 const settingsSections: Array<{ icon: LucideIcon; label: string; shortLabel: string; value: SettingsSection }> = [
+  { icon: BellRing, label: "Upozornenia", shortLabel: "Upozornenia", value: "notifications" },
   { icon: Users, label: "Používatelia", shortLabel: "Používatelia", value: "users" },
   { icon: PhoneCall, label: "Telefonovanie", shortLabel: "Telefóny", value: "telephony" },
   { icon: Building2, label: "Firmy a asistencia", shortLabel: "Firmy", value: "partners" },
@@ -61,8 +65,9 @@ export function IntegrationSettings({
   partnerDirectory,
   users,
   viewerRole,
+  pushEnabled = true,
 }: IntegrationSettingsProps) {
-  const [activeSection, setActiveSection] = useState<SettingsSection>("users");
+  const [activeSection, setActiveSection] = useState<SettingsSection>("notifications");
   const [message, setMessage] = useState<string | null>(null);
 
   return (
@@ -70,7 +75,7 @@ export function IntegrationSettings({
       <h1 className="sr-only">Nastavenia</h1>
 
       <nav className="sticky top-0 z-30 mx-auto mb-4 max-w-7xl bg-zinc-50/95 py-2 backdrop-blur" aria-label="Sekcie nastavení">
-        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+        <div className="flex gap-2 overflow-x-auto pb-1 lg:grid lg:grid-cols-5">
           {settingsSections.map(({ icon: Icon, label, shortLabel, value }) => {
             const active = activeSection === value;
             return (
@@ -79,7 +84,7 @@ export function IntegrationSettings({
                 type="button"
                 onClick={() => setActiveSection(value)}
                 aria-current={active ? "page" : undefined}
-                className={`flex min-h-12 items-center justify-center gap-2 rounded-md border px-3 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 ${
+                className={`flex min-h-12 shrink-0 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 ${
                   active
                     ? "border-yellow-400 bg-[#FCD703] text-zinc-950 shadow-sm"
                     : "border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300 hover:bg-zinc-100"
@@ -95,6 +100,7 @@ export function IntegrationSettings({
       </nav>
 
       <div className="mx-auto max-w-7xl">
+        {activeSection === "notifications" && <PushNotificationSettings enabled={pushEnabled} />}
         {message && <div role="status" aria-live="polite" className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900">{message}</div>}
 
         {activeSection === "users" && (
@@ -588,4 +594,3 @@ function MiniRow({ detail, icon: Icon, title }: { detail: string; icon: LucideIc
     </div>
   );
 }
-

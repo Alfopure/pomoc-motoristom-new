@@ -161,14 +161,14 @@ export function CaseTable({
     workspaceMode === "expanded"
       ? "flex h-full min-h-0 w-full min-w-0 max-w-full flex-col overflow-hidden rounded-md border border-zinc-200 bg-white"
       : workspaceMode === "split"
-        ? "flex h-full min-h-[300px] w-full min-w-0 max-w-full flex-col overflow-hidden rounded-md border border-zinc-200 bg-white"
-        : "flex h-full min-h-[420px] w-full min-w-0 max-w-full flex-col overflow-hidden rounded-md border border-zinc-200 bg-white";
+        ? "flex h-full min-h-0 lg:min-h-[300px] w-full min-w-0 max-w-full flex-col overflow-hidden rounded-md border border-zinc-200 bg-white"
+        : "flex h-full min-h-0 lg:min-h-[420px] w-full min-w-0 max-w-full flex-col overflow-hidden rounded-md border border-zinc-200 bg-white";
 
   return (
     <section className={rootClassName}>
       <div className="z-20 flex w-full min-w-0 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-500">
         <span>{cases.length} z {totalCases} prípadov</span>
-        <details className="relative hidden md:block">
+        <details className="relative hidden lg:block">
           <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-2 rounded-md border border-zinc-200 bg-white px-2.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 [&::-webkit-details-marker]:hidden">
             <Columns3 size={14} />
             Stĺpce ({visibleColumns.length})
@@ -188,8 +188,8 @@ export function CaseTable({
         </details>
       </div>
 
-      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto md:overflow-auto">
-        <div className="space-y-2 p-2 md:hidden">
+      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto lg:overflow-auto">
+        <div className="space-y-2 p-2 lg:hidden">
           {caseRows.length > 0 ? (
             caseRows.map(({ active, caller, caseItem, openTasks, ownerName }) => (
               <button
@@ -245,7 +245,7 @@ export function CaseTable({
         </div>
 
         <table
-          className="hidden w-max min-w-full border-separate border-spacing-0 text-left text-sm md:table"
+          className="hidden w-max min-w-full border-separate border-spacing-0 text-left text-sm lg:table"
           style={{ minWidth: `${Math.max(860, visibleColumnCount * 160)}px` }}
         >
           <thead className="sticky top-0 z-10 bg-zinc-50 text-xs font-semibold uppercase tracking-normal text-zinc-500">

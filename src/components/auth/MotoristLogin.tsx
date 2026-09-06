@@ -40,7 +40,10 @@ export function MotoristLogin({ message }: { message: string }) {
       return;
     }
 
-    window.location.href = "/";
+    // Preserve a task notification link through sign-in, without accepting
+    // arbitrary redirect destinations from query parameters.
+    const taskId = new URL(window.location.href).searchParams.get("task");
+    window.location.href = taskId ? `/?task=${encodeURIComponent(taskId)}` : "/";
   }
 
   const isWorking = status === "working";

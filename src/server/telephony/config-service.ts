@@ -15,11 +15,11 @@ import {
   type OperatorTelephonySettings,
   type PauseRoutingMode,
 } from "@/lib/telephony/operator-settings";
-import { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "./routing/ivr";
+import { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
 import type { TelephonyEnvironment } from "./state/types";
 
 export { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS };
-export { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction };
+export { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction };
 
 /**
  * Routing configuration read model and validated replace operations
@@ -92,8 +92,6 @@ export const MAX_ROWS_PER_SECTION = 200;
 export const MAX_MEMBERS_PER_GROUP = 50;
 export const MAX_STEPS_PER_PLAN = 20;
 export const MAX_INTERVALS_PER_SCHEDULE = 100;
-/** One digit per option, and a keypad has twelve of them. */
-export const MAX_OPTIONS_PER_MENU = 12;
 export const MAX_EXCEPTIONS_PER_SCHEDULE = 200;
 export const MAX_ALLOWLIST_ENTRIES = 100;
 
@@ -114,7 +112,6 @@ const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
  * provider rejects, which the caller hears as silence.
  */
 const MEDIA_REF_PATTERN = /^(https:\/\/[^\s"']+|[A-Za-z0-9][A-Za-z0-9._/-]{0,199})$/;
-export const MAX_TTS_LENGTH = 600;
 
 const FALLBACK_KINDS = ["external_number", "waiting_room", "callback_prompt", "hangup_message"] as const;
 const STRATEGIES = ["all", "ordered"] as const;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlarmClock, Bell, Check, ChevronRight, Inbox } from "lucide-react";
+import { AlarmClock, Bell, Check, ChevronRight, Inbox, X } from "lucide-react";
 import { compareNotifications, formatNotificationReminderTime, isNotificationReady, isNotificationSnoozed, isNotificationUnread, notificationSeverityTone } from "@/domain/notifications";
 import type { DispatchCase, DispatchNotification } from "@/domain/types";
 import { formatTime } from "@/lib/dispatch-calculations";
@@ -70,14 +70,14 @@ export function HeaderNotificationMenu({
   }
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative max-lg:[&_button]:min-h-11 max-lg:[&_button]:min-w-11">
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-label={unreadCount > 0 ? `Upozornenia, ${unreadCount} nových` : "Upozornenia"}
-        className={`relative inline-flex size-9 items-center justify-center rounded-md border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-300 ${
+        className={`relative inline-flex size-11 items-center justify-center rounded-lg border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-300 lg:size-9 lg:rounded-md ${
           open ? "border-yellow-300 bg-yellow-300 text-zinc-950" : "border-zinc-700 bg-zinc-900 text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800"
         }`}
       >
@@ -93,19 +93,20 @@ export function HeaderNotificationMenu({
         <section
           role="dialog"
           aria-label="História upozornení"
-          className="absolute right-0 top-[calc(100%+0.55rem)] z-[2147483400] w-[min(390px,calc(100vw-24px))] overflow-hidden rounded-xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl"
+          className="fixed inset-x-3 top-[calc(var(--dispatch-fixed-top,60px)+8px)] z-[2147483400] flex max-h-[calc(100dvh-var(--dispatch-fixed-top,60px)-var(--dispatch-mobile-nav-height,68px)-env(safe-area-inset-bottom)-20px)] flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl lg:absolute lg:inset-x-auto lg:right-0 lg:top-[calc(100%+0.55rem)] lg:w-[390px] lg:max-h-none"
         >
-          <header className="flex items-center justify-between gap-3 border-b border-zinc-200 px-3.5 py-3">
+          <header className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-200 px-3.5 py-3">
             <div>
               <h2 className="text-sm font-bold">Upozornenia</h2>
               <p className="mt-0.5 text-xs text-zinc-500">Tvoje nové aj vybavené upozornenia</p>
             </div>
-            <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${unreadCount > 0 ? "bg-red-500 text-white" : "bg-zinc-100 text-zinc-600"}`}>
+            <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-bold ${unreadCount > 0 ? "bg-red-500 text-white" : "bg-zinc-100 text-zinc-600"}`}>
               {unreadCount} nových
             </span>
+            <button type="button" onClick={() => setOpen(false)} aria-label="Zavrieť upozornenia" className="inline-flex size-11 shrink-0 items-center justify-center rounded-lg border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:hidden"><X size={18} aria-hidden="true" /></button>
           </header>
 
-          <div className="max-h-[min(460px,70vh)] divide-y divide-zinc-100 overflow-y-auto overscroll-contain">
+          <div className="min-h-0 divide-y divide-zinc-100 overflow-y-auto overscroll-contain lg:max-h-[min(460px,70vh)]">
             {visibleNotifications.length > 0 ? visibleNotifications.map((notification) => {
               const unread = isNotificationUnread(notification);
               const snoozed = isNotificationSnoozed(notification, now);
@@ -121,14 +122,14 @@ export function HeaderNotificationMenu({
                   >
                     <span className={`mt-1 size-2.5 rounded-full ${snoozed ? "bg-sky-500 ring-4 ring-sky-100" : unread ? "bg-[#F4C900] ring-4 ring-yellow-100" : "bg-zinc-200"}`} aria-hidden="true" />
                     <span className="min-w-0">
-                      <span className="flex min-w-0 items-center gap-2">
+                      <span className="flex min-w-0 flex-wrap items-center gap-2">
                         <span className={`line-clamp-2 min-w-0 flex-1 text-sm leading-5 ${unread ? "font-bold text-zinc-950" : "font-semibold text-zinc-700"}`}>{notification.title}</span>
                         <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 ${notificationSeverityTone[notification.severity]}`}>
                           {notification.severity === "urgent" ? "Urgentné" : notification.severity === "warning" ? "Pozor" : "Info"}
                         </span>
                       </span>
                       {notification.body && <span className="mt-0.5 line-clamp-2 text-xs leading-4 text-zinc-500">{notification.body}</span>}
-                      <span className={`mt-1.5 flex items-center gap-1.5 text-[11px] font-medium ${snoozed ? "text-sky-700" : "text-zinc-400"}`}>
+                      <span className={`mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] font-medium ${snoozed ? "text-sky-700" : "text-zinc-400"}`}>
                         {snoozed && <><AlarmClock size={11} /><span>Pripomenie {formatNotificationReminderTime(notification.snoozedUntil!)}</span><span aria-hidden="true">·</span></>}
                         {caseNumber && <span>{caseNumber}</span>}
                         {caseNumber && <span aria-hidden="true">·</span>}

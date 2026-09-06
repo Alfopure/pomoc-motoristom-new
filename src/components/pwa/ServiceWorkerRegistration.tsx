@@ -51,7 +51,9 @@ export function ServiceWorkerRegistration() {
     const handleInstalled = () => {
       setInstallPrompt(null);
       setShowIosInstructions(false);
-      localStorage.removeItem(DISMISSED_AT_KEY);
+      try {
+        localStorage.removeItem(DISMISSED_AT_KEY);
+      } catch { /* Installation also works when storage is blocked. */ }
     };
 
     window.addEventListener("beforeinstallprompt", handlePrompt);
@@ -94,7 +96,7 @@ export function ServiceWorkerRegistration() {
   return (
     <aside
       aria-label="Inštalácia aplikácie"
-      className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-[100] w-[min(92vw,390px)] -translate-x-1/2 rounded-xl border border-zinc-700 bg-zinc-950 p-3 text-white shadow-2xl sm:left-auto sm:right-4 sm:translate-x-0"
+      className="fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom))] left-1/2 z-[100] w-[min(92vw,390px)] -translate-x-1/2 rounded-2xl border border-zinc-700 bg-zinc-950 p-4 text-white shadow-2xl lg:bottom-[calc(1rem+env(safe-area-inset-bottom))] lg:left-auto lg:right-4 lg:translate-x-0"
     >
       <div className="flex items-start gap-3">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#FCD703] text-sm font-black text-zinc-950">PM</div>
@@ -102,14 +104,14 @@ export function ServiceWorkerRegistration() {
           <p className="text-sm font-semibold">Pomoc Motoristom ako aplikácia</p>
           <p className="mt-0.5 text-xs leading-5 text-zinc-300">
             {showIosInstructions
-              ? "V Safari otvor Zdieľať a vyber Pridať na plochu."
+              ? "Otvor Zdieľať → Pridať na plochu. V aplikácii potom zapni upozornenia na nové úlohy."
               : "Nainštaluj si dispečing do počítača alebo telefónu."}
           </p>
           {!showIosInstructions && (
             <button
               type="button"
               onClick={() => void install()}
-              className="mt-2 inline-flex h-8 items-center rounded-md bg-[#FCD703] px-3 text-xs font-semibold text-zinc-950 transition hover:bg-yellow-300"
+              className="mt-2 inline-flex min-h-11 items-center rounded-lg bg-[#FCD703] px-3 text-xs font-semibold text-zinc-950 transition hover:bg-yellow-300"
             >
               Nainštalovať aplikáciu
             </button>
@@ -118,7 +120,7 @@ export function ServiceWorkerRegistration() {
         <button
           type="button"
           onClick={dismiss}
-          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition hover:bg-zinc-800 hover:text-white"
+          className="inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition hover:bg-zinc-800 hover:text-white"
           aria-label="Zavrieť ponuku inštalácie"
           title="Zavrieť"
         >

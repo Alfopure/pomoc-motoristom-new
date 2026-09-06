@@ -21,13 +21,15 @@ import {
   MAX_TTS_LENGTH,
   MIN_IVR_TIMEOUT_SECS,
   MIN_IVR_TRIES,
-  type IvrAction,
-  type IvrMenuDoc,
-  type IvrMenuInput,
-  type IvrOptionDoc,
-  type LineDoc,
-  type RingPlanDoc,
-  type ValidationIssue,
+} from "@/lib/telephony/ivr-settings";
+import type {
+  IvrAction,
+  IvrMenuDoc,
+  IvrMenuInput,
+  IvrOptionDoc,
+  LineDoc,
+  RingPlanDoc,
+  ValidationIssue,
 } from "@/server/telephony/config-service";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 

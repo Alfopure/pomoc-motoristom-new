@@ -5,6 +5,7 @@ import { BellRing, Check, ExternalLink, X } from "lucide-react";
 import { compareNotifications, isNotificationReady, notificationSeverityLabels } from "@/domain/notifications";
 import type { DispatchNotification } from "@/domain/types";
 import { NotificationSnoozeButton } from "./NotificationSnoozeButton";
+import { playNotificationChime } from "@/components/pwa/notification-sound";
 
 const MAX_VISIBLE_TOASTS = 3;
 
@@ -36,6 +37,7 @@ export function NotificationToastStack({ notifications, now, onMarkRead, onOpenC
 
     if (newlyArrived.length > 0) {
       setQueuedIds((current) => [...current, ...newlyArrived.filter((id) => !current.includes(id))].slice(-20));
+      playNotificationChime(newlyArrived[0]);
     }
   }, [notifications, now]);
 

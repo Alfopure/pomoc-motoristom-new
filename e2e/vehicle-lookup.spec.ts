@@ -1,10 +1,12 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { isolateBrowserRequests } from "./browser-isolation";
 import type { DispatchData } from "../src/data/dispatch-types";
 import type { VehicleFacts, VehicleLookupInput, VehicleLookupResponse } from "../src/lib/vehicle-lookup";
 import * as seed from "../src/mock/seed";
 
 test.describe.configure({ mode: "default" });
 test.setTimeout(60_000);
+test.beforeEach(async ({ page, baseURL }) => { await isolateBrowserRequests(page, baseURL!); });
 
 const plateA = "QA123AB";
 const plateB = "QB456CD";
@@ -107,7 +109,12 @@ async function openDashboard(page: Page) {
 }
 
 async function navigate(page: Page, name: RegExp) {
-  const nav = page.getByRole("navigation", { name: (page.viewportSize()?.width ?? 1280) < 640 ? "Mobilná navigácia" : "Hlavná navigácia" });
+  const mobile = (page.viewportSize()?.width ?? 1280) < 1024;
+  const nav = page.getByRole("navigation", { name: mobile ? "Mobilná navigácia" : "Hlavná navigácia" });
+  if (mobile && name.test("Úlohy")) {
+    await nav.getByRole("button", { name: "Úlohy", exact: true }).click();
+    return;
+  }
   await nav.getByRole("button", { name: "Menu", exact: true }).click();
   await nav.getByRole("dialog", { name: "Obrazovky aplikácie" }).getByRole("button", { name }).click();
 }

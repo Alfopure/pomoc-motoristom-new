@@ -111,6 +111,8 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // notifications
   "notifications/[id]": { class: "session" },
   "notifications/[id]/read": { class: "session" },
+  "push/subscriptions": { class: "session", note: "Per-device subscription management for the authenticated profile; never returns endpoint keys." },
+  "push/test": { class: "session", note: "Test push to the authenticated profile's own device; durable 30-second cooldown." },
 
   // partner-directory (správa adresára manager/admin; rýchle pridanie asistenčky pre členov organizácie)
   "partner-directory": { class: "session", role: ["manager", "admin"] },

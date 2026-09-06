@@ -23,4 +23,22 @@ describe("signOutCurrentSession", () => {
     await expect(signOutCurrentSession(client, navigate)).rejects.toBe(providerError);
     expect(navigate).not.toHaveBeenCalled();
   });
+
+  it("revokes this device's push endpoint before ending authentication", async () => {
+    const sequence: string[] = [];
+    await signOutCurrentSession(
+      { auth: { signOut: async () => { sequence.push("signout"); return { error: null }; } } },
+      () => { sequence.push("navigate"); },
+      async () => { sequence.push("disable-push"); },
+    );
+    expect(sequence).toEqual(["disable-push", "signout", "navigate"]);
+  });
+
+  it("keeps the session available to retry when push cannot be revoked on a shared device", async () => {
+    const signOut = vi.fn(async () => ({ error: null }));
+    const navigate = vi.fn();
+    await expect(signOutCurrentSession({ auth: { signOut } }, navigate, async () => { throw new Error("revocation failed"); })).rejects.toThrow("revocation failed");
+    expect(signOut).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
 });

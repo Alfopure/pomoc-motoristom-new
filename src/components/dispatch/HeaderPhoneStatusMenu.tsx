@@ -112,7 +112,7 @@ export function HeaderPhoneStatusMenu({
         <div
           role="dialog"
           aria-label="Stav telefónu a dostupnosť"
-          className="absolute right-0 top-[calc(100%+0.55rem)] z-[2147483500] w-[min(20rem,calc(100vw-1.5rem))] overflow-hidden rounded-xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl"
+          className="fixed inset-x-3 top-[calc(var(--dispatch-fixed-top,60px)+8px)] z-[2147483500] max-h-[calc(100dvh-var(--dispatch-fixed-top,60px)-var(--dispatch-mobile-nav-height,72px)-env(safe-area-inset-bottom)-20px)] overflow-y-auto rounded-xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl lg:absolute lg:inset-x-auto lg:right-0 lg:top-[calc(100%+0.55rem)] lg:max-h-[80vh] lg:w-[min(20rem,calc(100vw-1.5rem))]"
         >
           {notice && (
             <div role="alert" className="flex items-start gap-2 border-b border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-semibold leading-5 text-red-800">
