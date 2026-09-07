@@ -21,6 +21,7 @@ import {
   callStatusForSession,
   commandKey,
   emptyTransition,
+  isOpenLeg,
   mediaUrl,
   readMeta,
   toJson,
@@ -533,6 +534,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       }
       return { skipped: false, detail: { reason: command.reason } };
     case "bridge":
+      if (command.recordingConferenceName) return executeRecordedConnection(deps, ctx, command);
       await telnyx.bridge({
         callControlId: resolveLeg(ctx, command.leg),
         targetCallControlId: resolveLeg(ctx, command.target),
@@ -708,6 +710,76 @@ function requireConference(ctx: ExecutionContext): string {
   const id = ctx.conferenceId ?? ctx.session.conference_id;
   if (!id) throw new EffectsError("session has no conference");
   return id;
+}
+
+/** A partially accepted connection must never run the old bridge compensation. */
+class RecordingConnectionPendingError extends Error {
+  constructor() { super("recorded connection awaits provider confirmation; durable continuation retained"); }
+}
+
+async function executeRecordedConnection(deps: EffectsDeps, ctx: ExecutionContext, command: Extract<Command, { kind: "bridge" }>): Promise<{ skipped: false; detail: { conferenceId: string } }> {
+  const telnyx = requireTelnyx(deps), name = command.recordingConferenceName;
+  if (!deps.renewLease || name !== `rec-${ctx.session.id}-${command.commandId}`) throw new RecordingContinuationSupersededError();
+  const epoch = readMeta(ctx.session).recording?.epoch;
+  const readinessDeadline = Date.now() + 10_000;
+  const current = async () => {
+    try { await deps.renewLease?.(); } catch { throw new RecordingContinuationSupersededError(); }
+    const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
+    const recording = fresh.data ? readMeta(fresh.data).recording : undefined;
+    if (fresh.error || !fresh.data || fresh.data.ended_at || fresh.data.version !== ctx.session.version || !recording ||
+      recording.epoch !== epoch || recording.suppressionReason === "objection" ||
+      !recording.pendingAudio?.commands.some((item) => item.commandId === command.commandId)) throw new RecordingContinuationSupersededError();
+    ctx.session = fresh.data;
+    const legs = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id)
+      .in("telnyx_call_control_id", [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)]);
+    if (legs.error || legs.data?.length !== 2 || legs.data.some((leg) => !isOpenLeg(leg) || !leg.answered_at)) throw new RecordingContinuationSupersededError();
+  };
+  await current();
+  const joined = async (id: string, leg: string) => {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if (Date.now() > readinessDeadline) throw new RecordingConnectionPendingError();
+      await current();
+      const response = await telnyx.request<{ data?: Array<{ call_control_id?: string; status?: string }> }>("GET", `/conferences/${encodeURIComponent(id)}/participants`);
+      if (response?.data?.some((entry) => entry.call_control_id === leg && entry.status === "joined")) return;
+      if (attempt < 7) await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(200);
+    }
+    throw new RecordingConnectionPendingError();
+  };
+  try {
+    let id = ctx.session.conference_id;
+    if (!id) {
+      try {
+        const conference = await createOrFindConference(telnyx, command.commandId, resolveLeg(ctx, command.leg), name);
+        id = conference.id;
+      } catch {
+        // A timeout may have created the conference. Recover only this session's
+        // exact name; never assume that the former topology still exists.
+        const found = await telnyx.request<{ data?: Array<{ id?: string; name?: string }> }>("GET", "/conferences", { query: { "filter[name]": name, "page[size]": 5 } });
+        const matches = (found?.data ?? []).filter((entry) => entry.name === name && entry.id);
+        if (matches.length !== 1) throw new RecordingConnectionPendingError();
+        id = matches[0].id!;
+      }
+      await current();
+      const updated = await deps.admin.from("motorist_call_sessions").update({ conference_id: id, conference_name: name })
+        .eq("organization_id", deps.organizationId).eq("id", ctx.session.id).eq("version", ctx.session.version).is("ended_at", null).select("*").maybeSingle();
+      if (updated.error || !updated.data) throw new RecordingConnectionPendingError();
+      ctx.session = updated.data;
+    }
+    ctx.conferenceId = id;
+    await joined(id, resolveLeg(ctx, command.leg));
+    await current();
+    await telnyx.conferenceAction(id, "join", {
+      call_control_id: resolveLeg(ctx, command.target), hold: false, mute: false,
+      start_conference_on_enter: true, end_conference_on_exit: false, beep_enabled: "never",
+      commandId: commandId({ sessionId: ctx.session.id, legId: resolveLeg(ctx, command.target), step: command.commandId, intent: "recording:conference:connect" }),
+    });
+    await joined(id, resolveLeg(ctx, command.target));
+    await current();
+    return { skipped: false, detail: { conferenceId: id } };
+  } catch (error) {
+    if (error instanceof RecordingContinuationSupersededError) throw error;
+    throw new RecordingConnectionPendingError();
+  }
 }
 
 async function createOrFindConference(telnyx: TelnyxClient, commandId: string, callControlId: string, name: string): Promise<{ id: string }> {
@@ -923,7 +995,9 @@ export async function applyReduceResult(
     // A database restriction retry must never delay the actual privacy STOP.
     if (restricted.error) deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "recording_restriction_pending" });
   }
-  const ctx: ExecutionContext = { session, dialResults: new Map(), conferenceId: session.conference_id };
+  // A transition can clear the persisted conference while its effects still
+  // need to leave the old one (park / blind transfer).
+  const ctx: ExecutionContext = { session, dialResults: new Map(), conferenceId: session.conference_id ?? input.session.conference_id };
   const outcomes: CommandOutcome[] = [];
   const compensated: string[] = [];
   let failure: ApplyResult["failure"] = null;
@@ -977,13 +1051,14 @@ export async function applyReduceResult(
         }
       }
       if (["bridge", "conference_join", "conference_leave", "conference_hold", "conference_unhold", "recording_stop", "recording_start"].includes(command.kind)) {
-        const provenConference = Boolean(readMeta(ctx.session).recording?.policy.conferenceVerified && ["conference_join", "conference_unhold"].includes(command.kind));
+        const provenConference = Boolean(readMeta(ctx.session).recording?.policy.conferenceVerified &&
+          (["conference_join", "conference_unhold"].includes(command.kind) || command.kind === "bridge" && executed.detail?.conferenceId));
         try { await observeParticipants(deps.admin, ctx.session, commandKey(command), deps.now().toISOString(), provenConference); }
         catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "participant_observation_failed" }); }
       }
       outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: executed.skipped, bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: executed.detail });
     } catch (error) {
-      if (error instanceof RecordingContinuationSupersededError) {
+      if (error instanceof RecordingContinuationSupersededError || error instanceof RecordingConnectionPendingError) {
         // A newer objection/hangup/topology transition owns this call now.
         // Never issue the delayed bridge/unhold from the superseded snapshot.
         failure = { command: key, error: error.message, callGone: false };
