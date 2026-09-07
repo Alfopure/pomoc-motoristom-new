@@ -29,37 +29,23 @@ values were printed, copied into this workspace, or committed.
   This alone must not be interpreted as a complete carrier-by-carrier inbound
   guarantee or a proof that every European resource cannot receive any foreign SMS.
 
-## Selected candidate for verification
+## Current decision
 
-`+1 234 233 2974` — US local number, Kent, Ohio. An exact authenticated inventory
-query returned it as available with `sms` and `international_sms`, `best_effort=false`.
-This is a candidate for the real reply-path test, not a verified production channel.
-Availability can change until purchase.
+The user explicitly rejected a US number and instructed us to finish the work
+possible without it. The earlier US candidate is withdrawn. Its purchase question
+and associated live-test request are closed; no purchase or reservation took place.
+No replacement number is selected or authorized for purchase in this rollout.
 
-| Item | Returned USD price |
-| --- | --- |
-| Number setup | 1.00 |
-| Number monthly rental | 1.00 |
-| US SMS monthly enablement, public pricing | 0.10 |
-| Outbound SK rate deck: 4ka/O2/Orange/Telekom/other | 0.079 per segment |
-| US long-code inbound platform usage | 0.004 per segment, plus applicable carrier fees |
+The receiving backend, inbox, explicit case assignment and reply workflow are
+implemented. Incoming replies remain inactive, and the inbox states this visibly
+instead of showing only an empty message list. Outbound `PomocMotor` SMS,
+templates, delivery history and web-based location requests remain available.
 
-Number costs came from `GET /v2/available_phone_numbers`. Usage prices came from
-`GET /v2/pricing/products/messaging-outbound?filter[country_iso]=SK` and
-`GET /v2/pricing/products/sms-api?filter[country_iso]=US`. The latter lists a zero
-platform rate for international outbound in addition to the destination rate deck.
-These are returned/public prices, not a promise of the final account invoice;
-taxes, applicable carrier fees and any account-specific rate agreement still apply.
-
-A Slovak customer would be replying to a US `+1` number, with the charge determined
-by their own mobile plan. A successful API search does not prove that the exact
-sender is preserved on their handset or that the return route works on each Slovak
-mobile network. After purchase, inspect the actual messaging number's capability
-flags and complete the user-designated handset test before advertising replies.
-
-The user delegated selection of the number. A separate concrete purchase question
-and a request for a designated test mobile are pending; the attached handoff plan
-explicitly prohibited buying on an assumption or testing against customer phones.
+A future receiving number must be outside the US and support the actual reply
+path from Slovak mobile networks. European search results lacking the
+`international_sms` flag have not established such a path. Do not assume that
+this proves all non-US numbers are unsuitable. Provider capability confirmation
+and a user-designated handset test are still required before activation.
 
 References:
 
