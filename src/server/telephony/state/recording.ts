@@ -127,6 +127,15 @@ function startBeforeAudio(result: ReduceResult, session: SessionRow, legs: LegRo
     ((event.kind === "telnyx" && event.type === "call.answered" && supervisor && (supervisorMode === "monitor" || supervisorMode === "barge" && state.notifiedCallControlIds?.includes(supervisor.telnyx_call_control_id))) ||
     (event.kind === "app" && event.type === "supervise" && supervisorMode === "barge" && result.commands.some((command) => command.kind === "conference_update" || command.kind === "supervisor_role_switch")))) index = result.commands.length;
   if (index < 0) return mergeMetadata(result, session);
+  // Physical dual-channel probes found intermittent lost audio when an existing
+  // bridge was promoted. Establish the customer conference before connecting
+  // the operator, while both legs are still independent. The durable bridge
+  // continuation owns both steps and can recover a missing provider response.
+  const connection = result.commands[index];
+  if (connection?.kind === "bridge" && !connection.playRingtone && !session.conference_id &&
+    connection.leg.callControlId === customer.telnyx_call_control_id && state.policy.conferenceVerified && context.recordingPolicy?.conferenceVerified) {
+    connection.recordingConferenceName = `rec-${session.id}-${connection.commandId}`;
+  }
   const id = commandId({ sessionId: session.id, legId: customer.telnyx_call_control_id, step: event.id, intent: `record:start:${state.epoch}` });
   const recorder: RecorderState = { id, epoch: state.epoch, callControlId: customer.telnyx_call_control_id, startCommandId: id, desired: "recording", observed: "starting", startedAt: null, stoppedAt: null, error: null };
   const pendingCommands = result.commands.slice(index).filter((command): command is Extract<Command, { kind: "bridge" | "conference_unhold" | "conference_join" }> => ["bridge", "conference_unhold", "conference_join"].includes(command.kind));
