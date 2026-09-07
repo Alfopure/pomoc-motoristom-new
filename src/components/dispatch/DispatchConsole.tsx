@@ -2179,6 +2179,7 @@ export function DispatchConsole({
           users={users}
           onDataChange={setDispatchData}
           onTestCall={telephonyConfigured ? testCall : undefined}
+          onDial={telephonyConfigured ? (phone) => dialNumber(phone) : undefined}
           viewerRole={viewerRole}
           pushEnabled={source === "supabase"}
         />
