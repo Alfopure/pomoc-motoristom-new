@@ -14,6 +14,33 @@ export function normalizeScribeLanguage(value: unknown): string {
   return supported[language] ?? language;
 }
 
+export function normalizeScribeTranscription(value: unknown) {
+  const transcription = record(value);
+  if (Array.isArray(transcription.words) && transcription.transcripts === undefined) return transcription;
+  if (transcription.words !== undefined || !Array.isArray(transcription.transcripts) || transcription.transcripts.length !== 2) throw new RecordingProcessingError('scribe_words_invalid');
+  const channels = new Set<number>(), languages = new Set<string>();
+  const words: Array<Record<string, Json | undefined>> = [];
+  for (const raw of transcription.transcripts) {
+    const channel = record(raw), index = channel.channel_index;
+    if (typeof index !== 'number' || ![0, 1].includes(index) || channels.has(index)) throw new RecordingProcessingError('scribe_channel_invalid');
+    channels.add(index);
+    if (!Array.isArray(channel.words) || channel.words.length > 100_000) throw new RecordingProcessingError('scribe_words_invalid');
+    for (const rawWord of channel.words) {
+      const word = record(rawWord);
+      if (word.channel_index !== undefined && word.channel_index !== null && word.channel_index !== index) throw new RecordingProcessingError('scribe_channel_invalid');
+      if (word.type !== 'word') continue;
+      if (typeof word.text !== 'string' || word.text.length > 2000 || typeof word.start !== 'number' || typeof word.end !== 'number' || !Number.isFinite(word.start) || !Number.isFinite(word.end) || word.start < 0 || word.end < word.start) throw new RecordingProcessingError('scribe_word_invalid');
+      words.push({ ...word, channel_index: index, speaker_id: `channel_${index}` });
+      if (words.length > 100_000) throw new RecordingProcessingError('scribe_words_invalid');
+      languages.add(normalizeScribeLanguage(channel.language_code));
+    }
+  }
+  // Separate channel arrays are not a conversational timeline. Reconstruct only
+  // chronological word order; channel identity still requires our exact manifest.
+  words.sort((a, b) => Number(a.start) - Number(b.start) || Number(a.end) - Number(b.end) || Number(a.channel_index) - Number(b.channel_index));
+  return { ...transcription, words, text: words.map(word => word.text).join(' '), language_code: languages.size === 1 ? [...languages][0] : languages.size ? 'mul' : 'und', transcripts: undefined };
+}
+
 export function verifiedMultiChannel(manifest: Json) {
   const data = record(manifest); const intervals = Array.isArray(data.intervals) ? data.intervals.map(record) : [];
   return data.timingVerified === true && record(data.audioFormat).channels === 2 && data.channelMappingVerified === true && data.coverage === 'verified' && data.identitySource === 'authenticated_leg_binding' && intervals.length > 0 && intervals.every(i => i.verified === true && (i.channel === 0 || i.channel === 1) && ['customer', 'operator'].includes(String(i.role)));
@@ -60,7 +87,7 @@ export async function processRecordingAsrJob(ctx: RecordingJobContext): Promise<
   }
 }
 export function parseScribeSpans(value: unknown, recording: RecordingRow, transcriptId: string, callStartedAt: string): RecordingTranscriptSpan[] {
-  const transcription = record(value);
+  const transcription = normalizeScribeTranscription(value);
   if (!Array.isArray(transcription.words) || transcription.words.length > 100_000) throw new RecordingProcessingError('scribe_words_invalid');
   const start = Date.parse(recording.started_at ?? ''), callStart = Date.parse(callStartedAt);
   if (!Number.isFinite(start) || !Number.isFinite(callStart) || start < callStart) throw new RecordingProcessingError('recording_time_unknown');
@@ -90,7 +117,7 @@ export async function acceptScribeWebhook(admin: RecordingAdmin, raw: string, si
   if (!verifyScribeSignature(raw, signature, process.env.ELEVENLABS_SCRIBE_WEBHOOK_SECRET ?? '')) throw new RecordingProcessingError('scribe_signature_invalid');
   let payload: Record<string, Json | undefined>; try { payload = record(JSON.parse(raw)); } catch { throw new RecordingProcessingError('scribe_payload_invalid'); }
   if (payload.type !== 'speech_to_text_transcription' && payload.type !== 'speech_to_text.completed') return 'ignored';
-  const data = record(payload.data), meta = record(data.webhook_metadata), transcript = data.transcription ? record(data.transcription) : data;
+  const data = record(payload.data), meta = record(data.webhook_metadata), rawTranscription = data.transcription ? record(data.transcription) : data;
   if (typeof data.request_id !== 'string' && typeof data.requestId === 'string') data.request_id = data.requestId;
   const token = meta.correlation_token;
   if (typeof token !== 'string' || !/^[0-9a-f-]{36}$/i.test(token) || typeof data.request_id !== 'string' || data.request_id.length > 200) throw new RecordingProcessingError('scribe_correlation_invalid');
@@ -104,6 +131,7 @@ export async function acceptScribeWebhook(admin: RecordingAdmin, raw: string, si
   if (source.error || call.error) throw new RecordingProcessingError('scribe_lookup_failed', true);
   if (!source.data || !call.data?.started_at) return 'ignored';
   const deleted = source.data.deleted_at || source.data.restricted_at;
+  const transcript = deleted ? rawTranscription : normalizeScribeTranscription(rawTranscription);
   const spans = deleted ? [] : parseScribeSpans(transcript, source.data, token, call.data.started_at);
   const text = typeof transcript.text === 'string' ? transcript.text : '';
   if (text.length > 300_000) throw new RecordingProcessingError('scribe_text_limit');

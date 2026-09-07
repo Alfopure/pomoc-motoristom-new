@@ -18,7 +18,7 @@ describe('Scribe signed callbacks', () => {
   const fetch=vi.fn().mockResolvedValue(new Response('{"request_id":"request-test","transcription_id":"transcription-test"}'));vi.stubGlobal('fetch',fetch);
   expect(await submitScribeAsync({sourceUrl:'https://storage.example/private-signed',correlationToken:'correlation-test',multiChannel:true,signal:AbortSignal.timeout(1000)})).toEqual({requestId:'request-test',transcriptionId:'transcription-test'});
   const opts=fetch.mock.calls[0][1];expect(opts.cache).toBe('no-store');expect(opts.redirect).toBe('error');
-  expect(opts.body.get('webhook_id')).toBe('webhook-test');expect(opts.body.get('webhook_metadata')).toBe('{"correlation_token":"correlation-test"}');expect(opts.body.get('multichannel_output_style')).toBe('combined');expect(fetch).toHaveBeenCalledTimes(1);
+  expect(opts.body.get('webhook_id')).toBe('webhook-test');expect(opts.body.get('webhook_metadata')).toBe('{"correlation_token":"correlation-test"}');expect(opts.body.get('multichannel_output_style')).toBe('separate');expect(fetch).toHaveBeenCalledTimes(1);
  });
  it('bounds the acknowledgement stream and preserves unknown submission instead of parsing unbounded content',async()=>{
   vi.stubEnv('ELEVENLABS_API_KEY','synthetic-key');vi.stubEnv('ELEVENLABS_SCRIBE_WEBHOOK_ID','test');vi.stubEnv('ELEVENLABS_SCRIBE_WEBHOOK_SECRET',secret);
