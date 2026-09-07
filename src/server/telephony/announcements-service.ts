@@ -90,8 +90,9 @@ export function parseAnnouncementConfig(deps: ConfigDeps, organizationId: string
   if (!isRecord(value) || value.version !== 1 || !isAnnouncementLanguage(value.language) || !isAnnouncementVoice(value.voiceId) || !isRecord(value.prompts)) {
     invalid("Nastavenie hlásení je neplatné. Vyber jazyk a hlas.");
   }
-  if (Object.keys(value).some((key) => !["version", "language", "voiceId", "prompts"].includes(key))) invalid("Nastavenie hlásení obsahuje neznáme pole.");
-  const config: AnnouncementConfig = { version: 1, language: value.language, voiceId: value.voiceId, prompts: {} };
+  if (Object.keys(value).some((key) => !["version", "language", "voiceId", "recordingStatusAnnouncements", "prompts"].includes(key))) invalid("Nastavenie hlásení obsahuje neznáme pole.");
+  if (value.recordingStatusAnnouncements !== undefined && typeof value.recordingStatusAnnouncements !== "boolean") invalid("Vyberte, či sa majú prehrávať hlášky o zmenách nahrávania.");
+  const config: AnnouncementConfig = { version: 1, language: value.language, voiceId: value.voiceId, recordingStatusAnnouncements: value.recordingStatusAnnouncements === true, prompts: {} };
   for (const [language, prompts] of Object.entries(value.prompts)) {
     if (!isAnnouncementLanguage(language) || !isRecord(prompts)) invalid("Neplatný jazyk hlásenia.");
     for (const [key, prompt] of Object.entries(prompts)) {

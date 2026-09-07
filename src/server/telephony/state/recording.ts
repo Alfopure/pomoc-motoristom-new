@@ -1,4 +1,4 @@
-import { announcementConfigFromMetadata, resolveAnnouncement, type AnnouncementKey } from "@/lib/telephony/announcements";
+import { announcementConfigFromMetadata, isAnnouncementEnabled, resolveAnnouncement, type AnnouncementKey } from "@/lib/telephony/announcements";
 import { commandId } from "../telnyx/command-id";
 import type { AnnouncementSequence, RecorderState, RecordingState } from "./recording-types";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
@@ -155,6 +155,7 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
   const customer = legs.find((leg) => leg.role === "customer" && isOpenLeg(leg));
   const meta = readMeta(current);
   const sequence = meta.announcement_sequence;
+  const announcements = meta.announcements ?? context.announcements ?? announcementConfigFromMetadata(context.line?.metadata);
   if (event.kind === "telnyx" && (event.type === "call.recording.saved" || event.type === "call.recording.error")) {
     const recorder = state?.recorders.find((r) => r.callControlId === event.callControlId && (r.providerRecordingId && typeof event.payload.recording_id === "string" ? r.providerRecordingId === event.payload.recording_id : recordingIntent(r.id) === event.clientState?.intent));
     if (!state || !recorder) return ignoredResult("recording event has no matching recorder token");
@@ -206,7 +207,9 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
     const action = state.barrier.action;
     const expired = context.now.getTime() > Date.parse(state.barrier.deadlineAt);
     current = patched(current, { recording: { ...state, barrier: null, error: expired && action ? "privacy_action_expired" : null } });
-    if (!action) return startSequence(current, context, customer.telnyx_call_control_id, ["recordingPaused"], null, event.id);
+    if (!action) return isAnnouncementEnabled(announcements, "recordingPaused")
+      ? startSequence(current, context, customer.telnyx_call_control_id, ["recordingPaused"], null, event.id)
+      : metadataResult(current);
     if (expired) return metadataResult(current, [], ["privacy action expired; original conversation retained"]);
     return reduceRecording(current, legs, attempts, action, context, core, reject);
   }
@@ -250,7 +253,7 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
     if (event.kind === "app" && ACTION_PROMPTS[event.type] && session.direction !== "internal") {
       core(current, legs, attempts, event, context);
       const keys: AnnouncementKey[] = [ACTION_PROMPTS[event.type]!];
-      if (["unhold", "cancel_consult"].includes(event.type) && eligible(current, context, state) && state.policy.conferenceVerified && context.recordingPolicy?.conferenceVerified) keys.push("recordingResumed");
+      if (["unhold", "cancel_consult"].includes(event.type) && isAnnouncementEnabled(announcements, "recordingResumed") && eligible(current, context, state) && state.policy.conferenceVerified && context.recordingPolicy?.conferenceVerified) keys.push("recordingResumed");
       // A private consult participant must hear the recording notice before joining the customer.
       if (event.type === "complete_transfer" && eligible(current, context, state) && state.policy.conferenceVerified && state.policy.transferVerified) {
         const consult = legs.find((leg) => leg.role === "consult" && isOpenLeg(leg));
@@ -262,7 +265,7 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
       const supervisor = legs.find((leg) => leg.role === "supervisor" && leg.profile_id === event.supervisor?.profileId && isOpenLeg(leg));
       if (supervisor && !state.notifiedCallControlIds?.includes(supervisor.telnyx_call_control_id)) return startSequence(current, context, supervisor.telnyx_call_control_id, [noticeKey(state)], event, event.id);
     }
-    if (event.kind === "app" && event.type === "stop_supervise" && eligible(current, context, state) && state.recorders.length) {
+    if (event.kind === "app" && event.type === "stop_supervise" && isAnnouncementEnabled(announcements, "recordingResumed") && eligible(current, context, state) && state.recorders.length) {
       core(current, legs, attempts, event, context);
       return startSequence(current, context, customer.telnyx_call_control_id, ["recordingResumed"], event, event.id);
     }

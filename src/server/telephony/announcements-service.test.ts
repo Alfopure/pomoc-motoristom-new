@@ -53,6 +53,43 @@ function configWith(text = GENERATE.text): AnnouncementConfig {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("announcement configuration", () => {
+  it("retains a generated status clip through disabling and re-enabling without regeneration", async () => {
+    const h = world();
+    const text = "Záznam je vypnutý.";
+    const generated = await generateAnnouncementAudio(h.deps, { ...GENERATE, key: "recordingPaused", text });
+    let revision = NOW;
+    for (const enabled of [true, false, true]) {
+      const config = { ...defaultAnnouncementConfig(), recordingStatusAnnouncements: enabled, prompts: { sk: { recordingPaused: { text, audioUrl: generated.audioUrl, voiceId: DEFAULT_ANNOUNCEMENT_VOICE } } } };
+      const saved = await saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision, config });
+      expect(saved.config).toEqual(config);
+      revision = saved.revision;
+    }
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+    expect(h.uploaded.size).toBe(1);
+  });
+  it("persists explicit on/off status preferences with translations and leaves other lines alone", async () => {
+    const h = world();
+    const config = { ...configWith(), recordingStatusAnnouncements: true, language: "de" as const };
+    const enabled = await saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision: NOW, config });
+    expect((await getAnnouncementLines(h.deps, ORG))[0].config).toEqual(config);
+    const disabled = await saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision: enabled.revision, config: { ...config, recordingStatusAnnouncements: false } });
+    expect(disabled.config).toEqual({ ...config, recordingStatusAnnouncements: false });
+    expect(h.db.rows("motorist_telephony_lines").find(row => row.organization_id === OTHER_ORG)?.metadata).toEqual({});
+    expect(h.db.rows("motorist_audit_log")).toHaveLength(2);
+  });
+
+  it("accepts legacy clients with silent defaults and rejects controls that would disable initial notices", () => {
+    const h = world();
+    const legacy = { version: 1, language: "sk", voiceId: DEFAULT_ANNOUNCEMENT_VOICE, prompts: {} };
+    expect(parseAnnouncementConfig(h.deps, ORG, LINE, legacy).recordingStatusAnnouncements).toBe(false);
+    expect(() => parseAnnouncementConfig(h.deps, ORG, LINE, { ...legacy, recordingNotice: false })).toThrow();
+  });
+
+  it.each(["false", "true", 0, null, {}, []])("rejects malformed status preference %j", recordingStatusAnnouncements => {
+    const h = world();
+    expect(() => parseAnnouncementConfig(h.deps, ORG, LINE, { ...defaultAnnouncementConfig(), recordingStatusAnnouncements })).toThrow();
+    expect(h.db.log.filter(entry => entry.operation !== "select")).toHaveLength(0);
+  });
   it("reads only this organization's Telnyx lines without exposing unrelated metadata", async () => {
     const h = world();
     await expect(getAnnouncementLines(h.deps, ORG)).resolves.toEqual([

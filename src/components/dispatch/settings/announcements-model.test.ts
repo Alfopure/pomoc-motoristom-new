@@ -9,6 +9,16 @@ const expected = { language: "sk" as const, text: "Vitajte na našej linke.", vo
 const generated = { ...expected, audioUrl: "https://example.test/voice.mp3" };
 
 describe("announcement drafts", () => {
+  it("treats status preference changes as dirty and preserves them through text, language and generation edits", () => {
+    const enabled = { ...initial, recordingStatusAnnouncements: true };
+    expect(sameAnnouncementConfig(initial, enabled)).toBe(false);
+    expect(sameAnnouncementConfig(initial, { ...initial, recordingStatusAnnouncements: undefined })).toBe(true);
+    const draft = { ...setAnnouncementText(enabled, "sk", "greeting", expected.text), language: "de" as const };
+    const completed = applyGeneratedAnnouncement(draft, "greeting", expected, generated)!;
+    expect(completed.recordingStatusAnnouncements).toBe(true);
+    expect(resetAnnouncementPrompt(completed, "sk", "greeting").recordingStatusAnnouncements).toBe(true);
+    expect(sameAnnouncementConfig(initial, { ...initial, recordingStatusAnnouncements: false })).toBe(true);
+  });
   it("removes the previous recording when its words are edited and retains other languages", () => {
     const first = setAnnouncementText(initial, "sk", "greeting", expected.text);
     const withAudio = applyGeneratedAnnouncement(first, "greeting", expected, generated)!;
