@@ -70,6 +70,8 @@ export type AnnouncementConfig = {
   version: 1;
   language: AnnouncementLanguage;
   voiceId: string;
+  /** Legacy configurations omit this and keep mid-call recording status messages silent. */
+  recordingStatusAnnouncements?: boolean;
   prompts: Partial<Record<AnnouncementLanguage, Partial<Record<AnnouncementKey, AnnouncementPrompt>>>>;
 };
 export const DEFAULT_ANNOUNCEMENT_TEXTS: Record<AnnouncementLanguage, Record<AnnouncementKey, string>> = {
@@ -187,7 +189,11 @@ export const DEFAULT_ANNOUNCEMENT_TEXTS: Record<AnnouncementLanguage, Record<Ann
   }
 };
 export function defaultAnnouncementConfig(): AnnouncementConfig {
-  return { version: 1, language: "sk", voiceId: DEFAULT_ANNOUNCEMENT_VOICE, prompts: {} };
+  return { version: 1, language: "sk", voiceId: DEFAULT_ANNOUNCEMENT_VOICE, recordingStatusAnnouncements: false, prompts: {} };
+}
+/** Initial recording notices are always enabled; this controls only status updates. */
+export function isAnnouncementEnabled(config: AnnouncementConfig, key: AnnouncementKey): boolean {
+  return !["recordingPaused", "recordingResumed", "recordingUnavailable"].includes(key) || config.recordingStatusAnnouncements === true;
 }
 export function isAnnouncementLanguage(value: unknown): value is AnnouncementLanguage {
   return ANNOUNCEMENT_LANGUAGES.some((item) => item.code === value);
@@ -215,7 +221,7 @@ export function readAnnouncementConfig(value: unknown): AnnouncementConfig {
       };
     }
   }
-  return { version: 1, language: raw.language, voiceId: raw.voiceId!, prompts };
+  return { version: 1, language: raw.language, voiceId: raw.voiceId!, recordingStatusAnnouncements: raw.recordingStatusAnnouncements === true, prompts };
 }
 export function announcementConfigFromMetadata(metadata: unknown): AnnouncementConfig {
   return readAnnouncementConfig(metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>).announcements : null);

@@ -12,6 +12,7 @@ import type { GeneratedAnnouncement } from "./announcements-client";
 /** Compare what the caller would hear, including all retained translations. */
 export function sameAnnouncementConfig(left: AnnouncementConfig, right: AnnouncementConfig): boolean {
   if (left.language !== right.language || left.voiceId !== right.voiceId) return false;
+  if ((left.recordingStatusAnnouncements === true) !== (right.recordingStatusAnnouncements === true)) return false;
   return ANNOUNCEMENT_LANGUAGES.every(({ code }) => ANNOUNCEMENT_DEFINITIONS.every(({ key }) => {
     const a = resolveAnnouncement(left, key, code);
     const b = resolveAnnouncement(right, key, code);
