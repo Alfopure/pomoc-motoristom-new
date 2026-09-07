@@ -19,10 +19,11 @@ describe("active calls snapshot", () => {
     expect(snapshot.presence.actorProfileId).toBe(PROFILES.o1);
     expect(snapshot.presence.presence).toEqual(
       expect.arrayContaining([
-        { profileId: PROFILES.o1, status: "available", currentSessionId: null },
-        { profileId: PROFILES.o3, status: "offline", currentSessionId: null },
+        expect.objectContaining({ profileId: PROFILES.o1, status: "available", currentSessionId: null }),
+        expect.objectContaining({ profileId: PROFILES.o3, status: "offline", currentSessionId: null }),
       ]),
     );
+    expect(snapshot.ownPresence).toEqual({ status: "available", pauseReasonId: null, statusSince: h.now().toISOString() });
     expect(snapshot.presence.devices.find((device) => device.profileId === PROFILES.o1)?.registered).toBe(true);
   });
 

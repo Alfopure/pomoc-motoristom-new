@@ -69,6 +69,7 @@ function payload(overrides: Partial<ActiveCallsPayload> = {}): ActiveCallsPayloa
       devices: [{ profileId: ME, registered: true }],
       presence: [{ profileId: ME, status: "on_call", currentSessionId: "sess-1" }],
     },
+    ownPresence: { status: "on_call", pauseReasonId: null, statusSince: "2026-09-03T08:00:00.000Z" },
     ...overrides,
   };
 }

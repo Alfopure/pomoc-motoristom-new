@@ -62,6 +62,7 @@ import {
 } from "./navigation-preferences";
 import { signOutCurrentSession } from "@/components/auth/sign-out";
 import { PushNotificationSync } from "@/components/pwa/PushNotificationSync";
+import { PauseEndingNotificationSync } from "@/components/pwa/PauseEndingNotificationSync";
 import { useAppUpdate } from "@/components/pwa/useAppUpdate";
 import { isAppRefreshBlocked } from "@/components/pwa/app-refresh-policy";
 import { notificationTarget } from "@/components/pwa/notification-target";
@@ -316,6 +317,7 @@ export function DispatchConsole({
   const [lastNotificationSyncAt, setLastNotificationSyncAt] = useState<string | undefined>(undefined);
   const [notificationNow, setNotificationNow] = useState(() => Date.now());
   const notificationSyncInFlight = useRef(false);
+  const notificationSyncAgain = useRef(false);
   const locationUpdateCursorRef = useRef(new Date(Date.now() - 30_000).toISOString());
   const locationUpdatePollInFlight = useRef(false);
   const callHistoryRefreshInFlight = useRef(false);
@@ -979,6 +981,7 @@ export function DispatchConsole({
   const syncDueNotifications = useCallback(
     async (silent = true) => {
       if (source !== "supabase" || notificationSyncInFlight.current) {
+        if (source === "supabase" && notificationSyncInFlight.current) notificationSyncAgain.current = true;
         return;
       }
 
@@ -1011,6 +1014,10 @@ export function DispatchConsole({
       } finally {
         notificationSyncInFlight.current = false;
         setIsNotificationSyncing(false);
+        if (notificationSyncAgain.current) {
+          notificationSyncAgain.current = false;
+          window.setTimeout(() => void syncDueNotifications(true), 0);
+        }
       }
     },
     [source],
@@ -2207,6 +2214,14 @@ export function DispatchConsole({
       )}
 
       <PushNotificationSync profileId={source === "supabase" ? notificationViewerProfileId : undefined} />
+      <PauseEndingNotificationSync
+        enabled={source === "supabase" && telephonyConfigured}
+        pauseReasonId={telephony.snapshot.ownPresence?.pauseReasonId}
+        pauseReasons={telephony.pauseReasons}
+        status={telephony.snapshot.ownPresence?.status}
+        statusSince={telephony.snapshot.ownPresence?.statusSince}
+        onDelivered={() => void syncDueNotifications(true)}
+      />
       <NotificationToastStack
         notifications={viewerNotifications}
         now={notificationNow}

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const runTelephonyCronJobs = vi.fn();
 const createTelephonyDeps = vi.fn(async () => ({ marker: "deps", organizationId: "org-1" }));
 const materializeDueTaskReminders = vi.fn(async () => ({ materialized: 0, skipped: 0 }));
+const materializeDuePauseEndingNotifications = vi.fn(async () => ({ checked: 0, delivered: 0 }));
 let jobControl: { enabled: boolean } | null = { enabled: true };
 
 vi.mock("@/server/telephony/recording-processing", () => ({ runRecordingProcessing: vi.fn(async () => ({ job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } })) }));
@@ -17,6 +18,10 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 vi.mock("@/server/task-notifications", () => ({
   materializeDueTaskReminders: (...args: unknown[]) => materializeDueTaskReminders(...(args as [])),
+}));
+
+vi.mock("@/server/telephony/pause-ending-notifications", () => ({
+  materializeDuePauseEndingNotifications: (...args: unknown[]) => materializeDuePauseEndingNotifications(...(args as [])),
 }));
 
 vi.mock("@/server/telephony/cron-jobs", async (importOriginal) => {
@@ -56,6 +61,7 @@ describe("GET /api/telephony/cron", () => {
     runTelephonyCronJobs.mockReset().mockResolvedValue(SUMMARY);
     createTelephonyDeps.mockClear();
     materializeDueTaskReminders.mockClear().mockResolvedValue({ materialized: 0, skipped: 0 });
+    materializeDuePauseEndingNotifications.mockClear().mockResolvedValue({ checked: 0, delivered: 0 });
     jobControl = { enabled: true };
   });
 
@@ -89,22 +95,23 @@ describe("GET /api/telephony/cron", () => {
     // else to run (no worker, one allowed cron).
     await expect(response.json()).resolves.toEqual({
       ...SUMMARY,
-      jobs: [...SUMMARY.jobs, { job: "notifications.materialize", status: "ok", detail: { materialized: 0, skipped: 0 } }, { job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } }],
+      jobs: [...SUMMARY.jobs, { job: "notifications.materialize", status: "ok", detail: { materialized: 0, skipped: 0 } }, { job: "notifications.pause-ending", status: "ok", detail: { checked: 0, delivered: 0 } }, { job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } }],
     });
     expect(createTelephonyDeps).toHaveBeenCalledWith({ sweepAfterEvent: false });
     expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps", organizationId: "org-1" });
     expect(materializeDueTaskReminders).toHaveBeenCalledTimes(1);
+    expect(materializeDuePauseEndingNotifications).toHaveBeenCalledTimes(1);
   });
 
   it("materialises due reminders, and honours the job control switch", async () => {
     materializeDueTaskReminders.mockResolvedValue({ materialized: 3, skipped: 1 });
     const ran = await (await GET(cronRequest(SECRET))).json();
-    expect(ran.jobs.at(-2)).toEqual({ job: "notifications.materialize", status: "ok", detail: { materialized: 3, skipped: 1 } });
+    expect(ran.jobs.at(-3)).toEqual({ job: "notifications.materialize", status: "ok", detail: { materialized: 3, skipped: 1 } });
 
     jobControl = { enabled: false };
     materializeDueTaskReminders.mockClear();
     const off = await (await GET(cronRequest(SECRET))).json();
-    expect(off.jobs.at(-2)).toEqual({ job: "notifications.materialize", status: "disabled", detail: { reason: "job_control_disabled" } });
+    expect(off.jobs.at(-3)).toEqual({ job: "notifications.materialize", status: "disabled", detail: { reason: "job_control_disabled" } });
     expect(materializeDueTaskReminders).not.toHaveBeenCalled();
   });
 
@@ -116,8 +123,18 @@ describe("GET /api/telephony/cron", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.status).toBe("degraded");
-    expect(body.jobs.at(-2)).toMatchObject({ job: "notifications.materialize", status: "failed", error: "reminders down" });
-    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 2);
+    expect(body.jobs.at(-3)).toMatchObject({ job: "notifications.materialize", status: "failed", error: "reminders down" });
+    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 3);
+    consoleError.mockRestore();
+  });
+
+  it("degrades the tick when pause warning materialization fails", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    materializeDuePauseEndingNotifications.mockRejectedValue(new Error("pause warnings down"));
+
+    const body = await (await GET(cronRequest(SECRET))).json();
+    expect(body.status).toBe("degraded");
+    expect(body.jobs.at(-2)).toMatchObject({ job: "notifications.pause-ending", status: "failed", error: "pause warnings down" });
     consoleError.mockRestore();
   });
 

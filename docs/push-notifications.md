@@ -12,6 +12,8 @@ V časti **Typy upozornení** sa nezávisle zapínajú:
 - **Prichádzajúce hovory** – hovor práve ponúkaný tomuto operátorovi, vrátane interného volania, transferu alebo konzultácie.
 - **Hovory na prevzatie** – neprevzatý prichádzajúci, čakajúci alebo zaparkovaný hovor určený dostupným operátorom príslušného uloženého ring plánu. Patrí sem aj prichádzajúci hovor, ktorý práve zvoní na externej zálohe.
 
+Samostatný účtový prepínač **Upozornenie pred koncom pauzy** ovláda naraz notifikáciu v aplikácii aj Web Push na všetky zapnuté zariadenia. Pri zapnutí príde upozornenie presne jednu minútu pred tým, ako pauza dosiahne maximálny čas nastavený pri jej dôvode. Pauza bez nastavenej dĺžky upozornenie nevytvorí. Upozornenie pauzu automaticky neukončí; operátor sa prepína na dostupného ručne.
+
 Vypnutie kategórie nemení ostatné kategórie ani odbery na inom zariadení. Hlavný prepínač vypne všetky push na aktuálnom zariadení. Testovacie upozornenie overuje samotný odber bez ohľadu na výber kategórií.
 
 **Zvuk upozornení** ovláda požiadavku na systémový zvuk push aj zvuk v otvorenej aplikácii. **Vyskúšať zvuk** preverí zvuk v aplikácii; **Poslať testovacie upozornenie** odošle skutočný Web Push iba na aktuálne zariadenie (najviac raz za 30 sekúnd). Pri vypnutom push sa upozornenia naďalej zobrazujú v zozname úloh a v aplikácii.
@@ -22,6 +24,7 @@ Zvuk na pozadí riadi operačný systém. Aplikácia nedokáže obísť režim N
 
 - Priradenie novej otvorenej úlohy alebo zmena jej riešiteľa vytvorí súkromnú notifikáciu a odošle push aktívnemu riešiteľovi na jeho odbery.
 - Splatné pripomienky využívajú už existujúce spracovanie v jedinom povolenom päťminútovom crone. Nový scheduler ani worker sa nenasadzuje.
+- Upozornenie na koniec pauzy vytvorí otvorená konzola v presnom minútovom okne; server vždy znovu overí rovnakú aktívnu pauzu, jej dĺžku a účtový prepínač. Existujúci päťminútový cron je iba záloha pre pozastavenú konzolu a nikdy neposiela upozornenie skôr ani po plánovanom konci. Unikátny kľúč pauzy zabráni opakovaniu z viacerých kariet, zariadení alebo cron ticku.
 - Duplicitný zápis notifikácie znovu push neodošle. Krátkodobé sieťové/5xx chyby majú najviac jeden okamžitý opakovaný pokus; rovnaký collapse topic obmedzuje duplicity. 429 sa opakuje iba pri krátkom `Retry-After`. Trvalá fronta opakovaného odosielania nie je súčasťou zmeny.
 - Neplatné odbery (404/410) sa odstránia. Chyba push nezruší uloženú úlohu ani upozornenie v aplikácii. V logu zostáva iba identifikátor notifikácie a počet neúspechov, nie kľúče alebo telá odpovedí push služieb.
 - Kliknutie otvorí konkrétnu úlohu. Existujúca otvorená aplikácia rešpektuje ochranu rozpracovaných zmien; pri starej lokálnej snímke sa po vyriešení rozpracovaných zmien načíta aktuálny stav. Prihlásenie zachová odkaz na úlohu.
@@ -41,6 +44,8 @@ Kliknutie otvorí ústredňu s kartou **Hovor z upozornenia** a adresou `/?call=
 Používa sa Supabase `ifpaeegaesdmljfkdvcn` a Vercel `pomoc-motoristom-new`. Migrácie `20260906081818_web_push_subscriptions.sql` a `20260906081822_web_push_vault_config.sql` pridávajú odbery a obmedzené čítanie konfigurácie.
 
 Kategórie vyžadujú aditívnu migráciu `20260925110000_push_notification_categories.sql`: tri boolean stĺpce odberu s predvolenou hodnotou `true`. Existujúce povolené odbery tak získajú aj upozornenia na hovory; každý typ možno vypnúť osobitne. Migrácia nemení VAPID, RLS, smerovanie ani odbery. Aplikuje sa samostatne iba do tejto kópie po výslovnom súhlase podľa `AGENTS.md`. Pred jej aplikovaním zostáva staré doručovanie úloh funkčné; nové kategórie sa nezapnú a ich ovládanie je nedostupné.
+
+Účtový prepínač konca pauzy vyžaduje aditívnu migráciu `20260927100000_pause_ending_notifications.sql`, ktorá do existujúcej tabuľky účtových preferencií pridá boolean `pause_ending_enabled` s predvolenou hodnotou `true`. Nepridáva cron, worker ani listener a nemení telefonické smerovanie.
 
 Odbery nemajú priame oprávnenia pre `anon` ani `authenticated`; autentifikované API vždy odvodí profil a organizáciu zo session. RPC `motorist_get_web_push_config()` smie zavolať iba `service_role` a číta výhradne jeden šifrovaný Vault secret `motorist_web_push_vapid`. Ten obsahuje JSON `{publicKey, privateKey, subject}`. Kľúče sa negenerujú ani nemenia počas požiadaviek; verejný kľúč sa poskytuje cez autentifikovaný stav odberu. Privátny kľúč nepatrí do Git-u, verejných premenných, klienta ani logov.
 
