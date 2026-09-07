@@ -36,7 +36,7 @@ describe("inbound ring plan", () => {
     expect((session.metadata as { partner_name: string }).partner_name).toBe("Allianz Assistance");
 
     const playbacks = h.telnyx.of("playbackStart").map((entry) => entry.params.audioUrl);
-    expect(playbacks).toEqual(["https://media.test/telephony/announcements-v1/sk/greeting.mp3", "https://media.test/telephony/announcements-v1/moh.mp3"]);
+    expect(playbacks).toEqual(["https://media.test/telephony/announcements-v4/sk/greeting.mp3", "https://media.test/telephony/announcements-v1/moh.mp3"]);
 
     const dials = h.telnyx.of("dial");
     expect(dials.map((entry) => entry.params.to).sort()).toEqual(["sip:gencred001@sip.telnyx.com", "sip:gencred002@sip.telnyx.com", "sip:gencred003@sip.telnyx.com"]);
@@ -201,11 +201,11 @@ describe("inbound ring plan", () => {
     expect((session.metadata as { ring: { exhausted: boolean; fallback: string } }).ring).toMatchObject({ exhausted: true, fallback: "callback_prompt" });
     expect(h.telnyx.of("playbackStop")).toHaveLength(1);
     const gather = h.telnyx.of("gatherUsingAudio").at(-1)!;
-    expect(gather.params).toMatchObject({ callControlId: call.callControlId, audioUrl: "https://media.test/telephony/announcements-v1/sk/callback-offer.mp3", validDigits: "1", maximumTries: 1 });
+    expect(gather.params).toMatchObject({ callControlId: call.callControlId, audioUrl: "https://media.test/telephony/announcements-v4/sk/callback-offer.mp3", validDigits: "1", maximumTries: 1 });
 
     await h.legEvent(call.callControlId, "call.gather.ended", { digits: "1", status: "valid", client_state: gather.params.clientState });
     expect(h.rows("motorist_callback_requests")).toEqual([expect.objectContaining({ source: "missed", status: "open" })]);
-    expect(h.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v1/sk/callback-confirmed.mp3");
+    expect(h.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v4/sk/callback-confirmed.mp3");
     await h.legEvent(call.callControlId, "call.playback.ended", { status: "completed", client_state: h.telnyx.of("playbackStart").at(-1)?.params.clientState });
     expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(call.callControlId);
     await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "callee" });
@@ -233,7 +233,7 @@ describe("inbound ring plan", () => {
     const result = await h.legEvent(String(fallbackLeg.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
     expect(result).toMatchObject({ outcome: "processed" });
     expect(h.session(call.sessionId).state).toBe("callback_offered");
-    expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v1/sk/callback-offer.mp3");
+    expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v4/sk/callback-offer.mp3");
   });
 
   it("puts the caller into the waiting room when the plan's fallback is waiting_room", async () => {
@@ -248,7 +248,7 @@ describe("inbound ring plan", () => {
     expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ audioUrl: "https://media.test/telephony/announcements-v1/moh.mp3", loop: "infinity" });
     const tick = h.telnyx.of("gatherUsingAudio").at(-1)!;
     // DTMF interrupts the audio; the timeout starts after the music finishes.
-    expect(tick.params).toMatchObject({ timeoutMillis: 1_000, validDigits: "1", audioUrl: "https://media.test/telephony/announcements-v3/sk/queueWaiting.mp3" });
+    expect(tick.params).toMatchObject({ timeoutMillis: 1_000, validDigits: "1", audioUrl: "https://media.test/telephony/announcements-v4/sk/queueWaiting.mp3" });
     const playbacksBefore = h.telnyx.of("playbackStart").length;
 
     // Ticks re-arm without touching the music; after park_max_minutes the caller gets the callback offer.
@@ -259,7 +259,7 @@ describe("inbound ring plan", () => {
     h.advance(31 * 60_000);
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
     expect(h.session(call.sessionId).state).toBe("callback_offered");
-    expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v1/sk/callback-offer.mp3");
+    expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v4/sk/callback-offer.mp3");
     // The loop is silenced before the prompt plays.
     expect(h.telnyx.of("playbackStop").length).toBeGreaterThan(0);
   });
@@ -502,7 +502,7 @@ describe("after hours and IVR", () => {
     const call = await h.inbound({ to: NUMBERS.allianz });
     expect(h.session(call.sessionId).state).toBe("after_hours");
     const gather = h.telnyx.of("gatherUsingAudio")[0];
-    expect(gather.params).toMatchObject({ audioUrl: "https://media.test/telephony/announcements-v1/sk/after-hours.mp3", validDigits: "1" });
+    expect(gather.params).toMatchObject({ audioUrl: "https://media.test/telephony/announcements-v4/sk/after-hours.mp3", validDigits: "1" });
     expect(h.telnyx.of("dial")).toHaveLength(0);
 
     await h.legEvent(call.callControlId, "call.gather.ended", { digits: "1", status: "valid", client_state: gather.params.clientState });
@@ -527,7 +527,7 @@ describe("after hours and IVR", () => {
     const call = await h.inbound({ to: "+4210232408700", callControlId: "cc-ivr-1", telnyxSessionId: "tsess-ivr-1" });
     expect(h.session(call.sessionId)).toMatchObject({ state: "ivr", line_id: "00000000-0000-4000-8000-000000000201", called_number: NUMBERS.neutral });
     const gather = h.telnyx.of("gatherUsingAudio")[0];
-    expect(gather.params).toMatchObject({ audioUrl: "https://media.test/telephony/announcements-v1/sk/ivr-main.mp3", invalidAudioUrl: "https://media.test/telephony/announcements-v1/sk/invalid-input.mp3", validDigits: "12", maximumTries: 1, timeoutMillis: 5000 });
+    expect(gather.params).toMatchObject({ audioUrl: "https://media.test/telephony/announcements-v4/sk/ivr-main.mp3", invalidAudioUrl: "https://media.test/telephony/announcements-v4/sk/invalid-input.mp3", validDigits: "12", maximumTries: 1, timeoutMillis: 5000 });
 
     await h.legEvent(call.callControlId, "call.gather.ended", { digits: "1", status: "valid", client_state: gather.params.clientState });
     expect(h.session(call.sessionId).state).toBe("ringing");

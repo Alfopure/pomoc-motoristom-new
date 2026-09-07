@@ -10,12 +10,12 @@ import re
 import subprocess
 
 base = Path("public/telephony")
-manifest = json.loads((base / "announcements-v2/manifest.json").read_text())
+manifest = json.loads((base / "announcements-v4/manifest.json").read_text())
 ffmpeg = os.environ.get("FFMPEG", "ffmpeg")
 entries = []
 for language in ["sk", "cs", "en", "de"]:
     speech = [next(item for item in manifest if item["key"] == key and item["language"] == language) for key in ["holdReminder", "callbackOffer"]]
-    target = base / "announcements-v3" / language / "queueWaiting.mp3"
+    target = base / "announcements-v4" / language / "queueWaiting.mp3"
     target.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(base / speech[0]["file"]), "-i", str(base / speech[1]["file"]),
         "-stream_loop", "-1", "-i", str(base / "announcements-v1/moh.mp3"), "-filter_complex",
@@ -30,4 +30,4 @@ for language in ["sk", "cs", "en", "de"]:
         "durationSeconds": seconds, "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
         "assetOrigin": "composed_existing_announcements_and_music", "bytes": target.stat().st_size,
         "sampleRate": 24000, "channels": 1, "runtimeStatus": "active"})
-(base / "announcements-v3/manifest.json").write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n")
+(base / "announcements-v4/manifest.json").write_text(json.dumps([item for item in manifest if item["key"] != "queueWaiting"] + entries, ensure_ascii=False, indent=2) + "\n")

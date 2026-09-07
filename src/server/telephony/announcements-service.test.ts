@@ -142,6 +142,17 @@ describe("announcement configuration", () => {
     expect(() => parseAnnouncementConfig(h.deps, ORG, "another-line", config)).toThrow("Zvuk nezodpovedá");
     expect(() => parseAnnouncementConfig(h.deps, ORG, LINE, { ...config, prompts: { sk: { greeting: { ...prompt, audioUrl: "https://other.test/file.mp3" } } } })).toThrow("Zvuk nezodpovedá");
   });
+
+  it("still saves audio generated with the original Sarah preset before the new voice release", () => {
+    const h = world();
+    const voiceId = "EXAVITQu4vr4xnSDxMaL";
+    // Frozen pre-release descriptor, not calculated with the implementation under test.
+    const descriptor = "6efec90720860d322ed5f5c330642ce6c85410d78af4e4e481903cc67b8b0452";
+    const audioUrl = h.bucket.getPublicUrl(`${ORG}/${LINE}/sk/greeting/${descriptor}/${"a".repeat(64)}.mp3`).data.publicUrl;
+    const config: AnnouncementConfig = { ...defaultAnnouncementConfig(), voiceId, prompts: { sk: { greeting: { text: GENERATE.text, audioUrl, voiceId } } } };
+    expect(parseAnnouncementConfig(h.deps, ORG, LINE, config)).toEqual(config);
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
 });
 
 describe("ElevenLabs announcement generation", () => {
@@ -152,7 +163,7 @@ describe("ElevenLabs announcement generation", () => {
       method: "POST", headers: { "xi-api-key": "test-server-key", "Content-Type": "application/json", Accept: "audio/mpeg" }, cache: "no-store", signal: expect.any(AbortSignal),
     }));
     const body = JSON.parse(h.fetch.mock.calls[0][1]?.body as string);
-    expect(body).toMatchObject({ text: GENERATE.text, model_id: "eleven_multilingual_v2" });
+    expect(body).toMatchObject({ text: GENERATE.text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.4, speed: 1.1, use_speaker_boost: false } });
     expect(body).not.toHaveProperty("language_code");
     expect(result).toMatchObject({ text: GENERATE.text, voiceId: DEFAULT_ANNOUNCEMENT_VOICE, language: "sk" });
     expect(result.audioUrl).toMatch(new RegExp(`/${ORG}/${LINE}/sk/greeting/[a-f0-9]{64}/[a-f0-9]{64}\\.mp3$`));

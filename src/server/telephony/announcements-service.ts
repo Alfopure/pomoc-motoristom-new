@@ -6,6 +6,7 @@ import type { Database, Json } from "@/lib/supabase/database.types";
 import {
   MAX_ANNOUNCEMENT_TEXT,
   announcementConfigFromMetadata,
+  announcementVoiceSettings,
   isAnnouncementKey,
   isAnnouncementLanguage,
   isAnnouncementVoice,
@@ -21,7 +22,6 @@ export const ANNOUNCEMENT_BUCKET = "motorist-telephony-prompts";
 export const MAX_ANNOUNCEMENT_AUDIO_BYTES = 2 * 1024 * 1024;
 const GENERATION_TIMEOUT_MS = 30_000;
 const ELEVENLABS_MODEL = "eleven_multilingual_v2";
-const VOICE_SETTINGS = { stability: 0.65, similarity_boost: 0.75, style: 0, use_speaker_boost: true, speed: 1.05 };
 const LINE_COLUMNS = "id,label,phone_number,metadata,updated_at";
 type LineRow = Pick<Database["public"]["Tables"]["motorist_telephony_lines"]["Row"], "id" | "label" | "phone_number" | "metadata" | "updated_at">;
 export type AnnouncementLine = { id: string; label: string; phoneNumber: string; config: AnnouncementConfig; revision: string };
@@ -72,7 +72,7 @@ async function getLine(deps: ConfigDeps, organizationId: string, lineId: string)
 function assetPrefix(organizationId: string, input: GenerationInput): string {
   // Binding the folder to text, language and voice prevents saving an old clip
   // beside edited text. Audio content has its own immutable hash filename.
-  const descriptor = JSON.stringify([1, input.key, input.language, input.text, input.voiceId, ELEVENLABS_MODEL, VOICE_SETTINGS]);
+  const descriptor = JSON.stringify([1, input.key, input.language, input.text, input.voiceId, ELEVENLABS_MODEL, announcementVoiceSettings(input.voiceId)]);
   const hash = createHash("sha256").update(descriptor).digest("hex");
   return `${organizationId}/${input.lineId}/${input.language}/${input.key}/${hash}/`;
 }
@@ -216,7 +216,7 @@ export async function generateAnnouncementAudio(
       method: "POST",
       headers: { "xi-api-key": apiKey, "Content-Type": "application/json", Accept: "audio/mpeg" },
       // Multilingual v2 detects the language from text; its API does not support language_code.
-      body: JSON.stringify({ text: parsed.text, model_id: ELEVENLABS_MODEL, voice_settings: VOICE_SETTINGS }),
+      body: JSON.stringify({ text: parsed.text, model_id: ELEVENLABS_MODEL, voice_settings: announcementVoiceSettings(parsed.voiceId) }),
       signal: AbortSignal.timeout(GENERATION_TIMEOUT_MS),
       cache: "no-store",
     });
