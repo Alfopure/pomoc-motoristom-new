@@ -1,5 +1,7 @@
 "use client";
 
+import { MobileCallNotificationToggle } from "@/components/pwa/MobileCallNotificationToggle";
+
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, ChevronDown, Loader2, Mic, Pause, Phone, PhoneCall, PhoneOff, X } from "lucide-react";
 
@@ -134,7 +136,7 @@ export function HeaderPhoneStatusMenu({
             <span className="flex min-w-0 items-start gap-2.5">
               <Phone size={16} className="mt-0.5 shrink-0 text-zinc-500" aria-hidden="true" />
               <span className="min-w-0">
-                <span className="block text-xs font-bold text-zinc-950">Telefón v prehliadači</span>
+                <span className="block text-xs font-bold text-zinc-950">{phone.onDemand ? "Volanie v mobilnej appke" : "Telefón v prehliadači"}</span>
                 <span className="mt-0.5 block text-[11px] leading-4 text-zinc-500">{phone.registration.detail}</span>
               </span>
             </span>
@@ -158,7 +160,9 @@ export function HeaderPhoneStatusMenu({
             <p className="mt-1.5 text-[11px] leading-4 text-zinc-500 lg:hidden">Pri webovom volaní nechajte aplikáciu otvorenú. Reproduktor a Bluetooth prepínajte v ovládaní zvuku telefónu.</p>
           </div>
 
-          {canTakeover && (
+          <div className="border-b border-zinc-200 px-3.5 py-2.5"><MobileCallNotificationToggle /></div>
+
+          {canTakeover && !phone.onDemand && (
             <div className="border-b border-zinc-200 p-2">
               <button
                 type="button"
@@ -166,10 +170,10 @@ export function HeaderPhoneStatusMenu({
                   setOpen(false);
                   onTakeover();
                 }}
-                className="flex w-full items-center gap-2 rounded-md bg-zinc-950 px-2.5 py-2 text-left text-xs font-bold text-white hover:bg-zinc-800"
+                className="flex min-h-11 w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
               >
                 <PhoneCall size={14} aria-hidden="true" />
-                Prevziať telefón do tohto okna
+                Pripojiť telefón v tomto prehliadači
               </button>
             </div>
           )}

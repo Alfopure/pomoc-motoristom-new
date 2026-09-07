@@ -27,7 +27,7 @@ export async function POST(request: Request) {
     const notConfigured = telephonyConfiguredOrResponse();
     if (notConfigured) return notConfigured;
 
-    const body = await readJsonBody<{ deviceSessionId?: unknown; registrationState?: unknown }>(request);
+    const body = await readJsonBody<{ deviceKind?: unknown; deviceSessionId?: unknown; registrationState?: unknown }>(request);
     const deviceSessionId = readString(body.deviceSessionId);
     if (!deviceSessionId) {
       return Response.json({ error: "Chýba identifikátor relácie zariadenia." }, { status: 400 });
@@ -36,7 +36,7 @@ export async function POST(request: Request) {
 
     const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
     const result = await touchDevice(
-      { admin: deps.admin, telnyx: deps.telnyx, environment: deps.environment },
+      { admin: deps.admin, telnyx: deps.telnyx, environment: deps.environment, deviceKind: body.deviceKind === "mobile" ? "mobile" : "web" },
       {
         organizationId: deps.organizationId,
         profileId: actor.profileId,

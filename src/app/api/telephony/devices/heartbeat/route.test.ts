@@ -41,7 +41,7 @@ describe("POST /api/telephony/devices/heartbeat", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true, seenAt: "2026-09-03T08:00:00.000Z", registrationState: "registered" });
     expect(touchDevice).toHaveBeenCalledWith(
-      { admin: { marker: "admin" }, telnyx: null, environment: "development" },
+      { admin: { marker: "admin" }, telnyx: null, environment: "development", deviceKind: "web" },
       { organizationId: "org-1", profileId: "profile-1", deviceSessionId: "dev-1", registrationState: "registered", userAgent: "vitest" },
     );
   });

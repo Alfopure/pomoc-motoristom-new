@@ -6,7 +6,7 @@ export type PhoneReadiness = {
 };
 
 export function browserCallStartError(phone: WebphoneSnapshot | undefined): string | null {
-  if (!phone || phone.status !== "registered") return "Telefón ešte nie je pripojený. Počkajte na pripojenie alebo skontrolujte stav telefónu.";
+  if (!phone || (phone.status !== "registered" && !(phone.onDemand && phone.status === "idle"))) return "Telefón ešte nie je pripojený. Počkajte na pripojenie alebo skontrolujte stav telefónu.";
   if (phone.call || (phone.pendingOperatorLegs ?? 0) > 0) return "Najprv dokončite rozpracovaný hovor.";
   return null;
 }

@@ -84,7 +84,7 @@ async function showPushNotification(event) {
     badge: "/icon-192",
     tag: typeof payload.tag === "string" ? payload.tag.slice(0, 150) : "pm-dispatch-notification",
     silent: payload.soundEnabled === false,
-    data: { url: safeNotificationUrl(payload.url) },
+    data: { url: safeNotificationUrl(payload.url), ...(payload.mobileApp === true ? { mobileApp: true } : {}) },
   };
   // The Notifications API rejects a vibration pattern with silent: true.
   if (!options.silent) options.vibrate = [150, 70, 150];
@@ -114,13 +114,17 @@ function safeNotificationUrl(value) {
 
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();
-  event.waitUntil(openNotification(event.notification.data?.url));
+  event.waitUntil(openNotification(event.notification.data?.url, event.notification.data?.mobileApp === true));
 });
 
-async function openNotification(value) {
+async function openNotification(value, preferMobileApp = false) {
   const url = safeNotificationUrl(value);
   const isCall = new URL(url).searchParams.has("call");
   const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  if (preferMobileApp) {
+    const mobile = new Set((await Promise.all(windows.filter((client) => new URL(client.url).origin === self.location.origin).map(async (client) => await isMobileClient(client) ? client.id : null))).filter(Boolean));
+    windows.sort((a, b) => Number(mobile.has(b.id)) - Number(mobile.has(a.id)));
+  }
   for (const client of windows) {
     const current = new URL(client.url);
     if (current.origin !== self.location.origin || current.pathname !== "/") continue;
@@ -166,5 +170,23 @@ function requestNotificationOpen(client, url) {
       channel.port2.close();
       finish(false);
     }
+  });
+}
+
+
+// A Chromium PWA and a browser tab may share the same push endpoint. Prefer
+// the installed mobile client without guessing from its URL or viewport.
+function isMobileClient(client) {
+  return new Promise(function (resolve) {
+    const channel = new MessageChannel();
+    let settled = false;
+    const finish = (mobile) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); channel.port1.onmessage = null; channel.port1.close(); resolve(mobile);
+    };
+    const timer = setTimeout(() => finish(false), 250);
+    channel.port1.onmessage = (event) => finish(event.data?.mobileApp === true);
+    try { client.postMessage({ type: "PM_CLIENT_CONTEXT" }, [channel.port2]); }
+    catch { channel.port2.close(); finish(false); }
   });
 }

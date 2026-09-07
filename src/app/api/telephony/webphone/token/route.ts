@@ -22,15 +22,16 @@ export async function POST(request: Request) {
     const notConfigured = telephonyConfiguredOrResponse();
     if (notConfigured) return notConfigured;
 
-    const body = await readJsonBody<{ takeover?: unknown; deviceSessionId?: unknown }>(request).catch(() => ({}) as { takeover?: unknown; deviceSessionId?: unknown });
+    const body = await readJsonBody<{ takeover?: unknown; handoff?: unknown; deviceKind?: unknown; deviceSessionId?: unknown }>(request).catch(() => ({}) as { takeover?: unknown; handoff?: unknown; deviceKind?: unknown; deviceSessionId?: unknown });
     const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
     const token = await issueWebphoneToken(
-      { admin: deps.admin, telnyx: deps.telnyx, environment: deps.environment },
+      { admin: deps.admin, telnyx: deps.telnyx, environment: deps.environment, deviceKind: body.deviceKind === "mobile" ? "mobile" : "web" },
       {
         organizationId: deps.organizationId,
         profileId: actor.profileId,
         userAgent: request.headers.get("user-agent"),
         takeover: body?.takeover === true,
+        handoff: body?.handoff === true,
         // The tab's current session id: a renewal of its own credential is not a takeover.
         deviceSessionId: typeof body?.deviceSessionId === "string" ? body.deviceSessionId : null,
       },

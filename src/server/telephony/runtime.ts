@@ -39,6 +39,7 @@ export function isProductionDeployment(env: EnvRecord = process.env): boolean {
 }
 
 export type CreateTelephonyDepsOptions = {
+  deviceKind?: "web" | "mobile";
   /** Skips the organisation lookup when the caller already resolved it (session routes). */
   organizationId?: string;
   /** Webhook processing sweeps by default; routes that sweep themselves pass `false`. */
@@ -80,6 +81,7 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
     config,
     organizationId,
     environment,
+    deviceKind: options.deviceKind,
     sweepAfterEvent: options.sweepAfterEvent,
     logger: options.logger ?? telephonyLogger,
     onCallTransition: (sessionId) => {
