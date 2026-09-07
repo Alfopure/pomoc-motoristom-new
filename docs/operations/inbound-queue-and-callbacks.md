@@ -10,6 +10,7 @@ Prevádzkový návrh z 7. septembra 2026 pre samostatnú Telnyx kópiu, 2–3 di
 | Počas čakania | Výzva zostať na linke alebo stlačiť 1; potom minúta hudby |
 | Uvoľnenie operátora | Automatická ponuka jednému dostupnému dispečerovi; bez automatického prijatia |
 | Opakovaná ponuka | Najskôr 60 sekúnd od posledného ponúknutia tomu istému dispečerovi |
+| Zápis po skončení rozhovoru | 20 sekúnd pred ďalšou automatickou ponukou, namiesto pôvodných 5 |
 | Koniec čakárne | Posledná ponuka spätného volania; bez voľby sa hovor ukončí |
 | Spojený rozhovor | Samostatný limit jednej vetvy je 4 hodiny, takže rozhovor môže trvať aj pol hodiny |
 
@@ -34,6 +35,7 @@ V existujúcom úvodnom menu neutrálnej linky je **1 dispečing, 2 spätné vol
 - [Microsoft Teams: nastavenie fronty](https://learn.microsoft.com/en-us/microsoftteams/aa-cq-setup-call-queue) odporúča zvonenie operátora aspoň 20 sekúnd a smerovanie podľa dostupnosti. Súčasné zvonenie hlavnej skupiny je náš návrh pre tento malý tím.
 - [3CX: call queues](https://www.3cx.com/docs/manual/call-center-queues/) dokumentuje spoločné aj postupné zvonenie a používa 20 sekúnd ako predvolené zvonenie skupiny.
 - [Amazon Connect: queued callbacks](https://docs.aws.amazon.com/connect/latest/adminguide/setup-queued-cb.html) rozlišuje živú frontu od zákazníkom zvoleného spätného volania a opisuje nadviazanie spätného hovoru cez operátora.
+- [Aircall: wrap-up time](https://support.aircall.io/en-gb/articles/10375354632477) opisuje čas po hovore na doplnenie poznámok; 20 sekúnd je náš úvodný návrh pre tento tím, nie univerzálna norma.
 - [Telnyx: gather using audio](https://developers.telnyx.com/api-reference/call-commands/gather-using-audio) prijíma DTMF aj počas zvuku; časový limit vstupu začína po dohraní súboru. Preto zvuk čakárne obsahuje aj minútu hudby.
 - [Telnyx: dial](https://developers.telnyx.com/api-reference/call-commands/dial) oddeľuje čas zvonenia od maximálnej dĺžky spojenej vetvy.
 

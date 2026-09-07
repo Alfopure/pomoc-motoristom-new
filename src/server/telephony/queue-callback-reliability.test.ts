@@ -117,6 +117,23 @@ describe("thirty-minute inbound queue", () => {
     expect(h.session(second.sessionId).state).toBe("waiting");
     expect(h.presence(PROFILES.o1).current_session_id).toBe(first.sessionId);
   });
+
+  it("rejects a late answer from an expired offer while a newer offer is ringing", async () => {
+    const { h, call } = await waiting();
+    h.setPresence(PROFILES.o1, { status: "available" });
+    h.advance(5_000);
+    await sweep(h);
+    const old = h.openLegFor(call.sessionId, PROFILES.o1)!;
+    await h.legEvent(String(old.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
+    h.advance(60_000);
+    h.touchDevice(PROFILES.o1);
+    await sweep(h);
+    const current = h.openLegFor(call.sessionId, PROFILES.o1)!;
+    await h.legEvent(String(old.telnyx_call_control_id), "call.answered");
+    expect(h.telnyx.of("bridge")).toHaveLength(0);
+    await h.legEvent(String(current.telnyx_call_control_id), "call.answered");
+    expect(h.telnyx.of("bridge")).toHaveLength(1);
+  });
 });
 
 describe("callback choice from provider event through dispatcher payload", () => {
@@ -148,6 +165,17 @@ describe("callback choice from provider event through dispatcher payload", () =>
     const { h, call } = await waiting();
     await h.legEvent(call.callControlId, "call.hangup");
     expect((await queue(h)).open[0].origin).toMatchObject({ kind: "missed", digit: null, requestedAt: null });
+  });
+
+  it("does not reopen a request already resolved before the customer hangup arrives", async () => {
+    const { h, call } = await waiting();
+    await h.legEvent(call.callControlId, "call.gather.ended", { status: "valid", digits: "1", client_state: gather(h) });
+    h.db.update("motorist_callback_requests", { status: "done", resolved_at: h.now().toISOString() }, () => true);
+    await h.legEvent(call.callControlId, "call.hangup");
+    const result = await queue(h);
+    expect(result.open).toHaveLength(0);
+    expect(result.resolved).toHaveLength(1);
+    expect(result.resolved[0].origin?.kind).toBe("requested");
   });
 
   it("records the actual configured IVR digit 2, not a fabricated 1", async () => {
