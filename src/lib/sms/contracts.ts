@@ -12,6 +12,7 @@ export type SmsPrepareInput = {
   towAddress?: string;
   message?: string;
   taskId?: string | null;
+  replyToMessageId?: string | null;
 };
 export type PreparedSms = SmsActor & {
   version: 1;
@@ -30,6 +31,9 @@ export type PreparedSms = SmsActor & {
   locationLinkId: string | null;
   taskId: string | null;
   expiresAt: string;
+  replyToMessageId?: string | null;
+  repliesEnabled?: boolean;
+  repliesPendingVerification?: boolean;
 };
 export type SmsPreview = { draft: PreparedSms; proof: string };
 export type SmsCaseOption = { id: string; caseNumber: string; name: string; phone: string; validPhone: boolean };
@@ -47,6 +51,7 @@ export type SmsHistoryEntry = {
   statusDetail: string | null;
   error: string | null;
   template: string | null;
+  direction?: "inbound" | "outbound";
   location: null | {
     status: string;
     expiresAt: string;
@@ -55,4 +60,30 @@ export type SmsHistoryEntry = {
     lat?: number;
     lng?: number;
   };
+};
+
+export type SmsInboxMessage = {
+  id: string;
+  version: string;
+  from: string;
+  to: string;
+  body: string;
+  createdAt: string;
+  unread: boolean;
+  caseId: string | null;
+  caseNumber: string | null;
+  assignedProfileId: string | null;
+  assignedName: string | null;
+  canReply: boolean;
+  hasMedia: boolean;
+};
+export type SmsConversationEntry = {
+  id: string;
+  body: string;
+  direction: "inbound" | "outbound";
+  createdAt: string;
+  status: string;
+  statusDetail: string | null;
+  caseId: string | null;
+  caseNumber: string | null;
 };

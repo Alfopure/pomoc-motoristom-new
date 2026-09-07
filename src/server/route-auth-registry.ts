@@ -133,6 +133,8 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // SMS
   "sms": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   "sms/context": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "sms/inbox": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "sms/inbox/[id]": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   "sms/prepare": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   "sms/send": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
 

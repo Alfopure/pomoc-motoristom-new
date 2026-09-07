@@ -1,4 +1,4 @@
-# SMS editor and delivery
+# SMS editor, delivery and inbox
 
 The SMS entry in the dashboard opens without a case. Case actions open the same
 editor with an explicit, visible case. Templates require a saved case and its
@@ -15,7 +15,7 @@ it does not depend on the pending custom domain's DNS.
 The final text is editable. Six versioned templates cover location, case receipt,
 technician departure, delay, callback and tow destination. Departure needs an
 explicit confirmation and a manually entered current ETA. Template facts, the
-server-generated URL, callback number, non-reply notice, text length and segment
+server-generated URL, callback number, channel-specific reply notice, text length and segment
 limit are checked again on send. The editor counts GSM-7 extensions and UTF-16
 surrogate pairs. Removing diacritics is an explicit visible edit; no price is
 estimated.
@@ -67,20 +67,72 @@ The application handles its conflict error as 410 and remains compatible before
 it is applied. Until then, the existing database does not enforce atomic single
 use under concurrent submissions. No seed changes are needed.
 
-## Incoming SMS is not active
+## Receiving SMS and explicit assignment
 
-The current sender remains alphanumeric. No suitable receiving number has been
-verified through an authenticated Telnyx inventory query in this workspace; it
-has no Telnyx API credentials. No number was purchased and no live SMS was sent.
-Inbound events for the configured profile return `inbound_not_enabled` (503),
-not a false acknowledgement of storage. Do not route a receiving number to this
-endpoint until durable inbound ingestion is implemented and tested.
+`message.received` uses the existing Ed25519 verification of the original body
+and timestamp. The configured messaging profile and exact receiving number must
+match. A single insert stores the canonical E.164 endpoints, provider message ID,
+text, event and received time before returning 2xx. A 1.5-second database deadline
+leaves room for the provider's acknowledgement timeout. Failed or uncertain writes
+return a retryable response. The existing unique idempotency index deduplicates
+`telnyx:inbound:<profile>:<provider-message-id>`; a duplicate never resets assignment
+or read state. No schema migration is needed for this implementation.
 
-A later receiving rollout needs a verified number supporting replies from Slovak
-mobile networks, confirmed profile/sender configuration and pricing, durable
-inbound deduplication, unassigned conversations, explicit case assignment and a
-user-designated test phone for the complete send/reply/UI path. GPS received via
-the web link is independent of receiving SMS replies.
+Every incoming SMS begins with `case_id = null` and `status_detail = received_unread`.
+The inbox filters all/unread/unassigned messages. Its read state is shared by the
+dispatch team, with the acting profile and time recorded under `raw_payload.inbox`.
+Case and dispatcher assignment are explicit per message. A version check prevents
+a dispatcher from silently replacing a colleague's concurrent edit. Cases and
+active dispatchers are checked against the authenticated actor's organization.
+The provider event remains unchanged. Assignment never changes the case's contact
+or location. A newly created case can be selected when the SMS window is reopened.
+
+`GET /api/sms/inbox` lists 50 messages with pagination; `?summary=true` provides the
+unread count for the dashboard badge. `GET /api/sms/inbox/[id]` shows a paginated
+conversation scoped to the two exact phone numbers, organization and messaging
+profile. Messages in that conversation can belong to different cases; grouping
+does not assign them. `PATCH /api/sms/inbox/[id]` updates read state or explicit
+assignment. All endpoints use the same SMS roles, session guard and write CSRF
+check. Visible inbox data and the dashboard badge refresh every ten seconds.
+
+**Napísať odpoveď** opens the same verified editor with `replyToMessageId`. The
+recipient is the actual sender of that incoming SMS, even when the assigned case
+has another primary contact. The server verifies both endpoints, profile and
+current case assignment again before sending. Replies use the receiving number;
+they cannot silently fall back to the alphanumeric sender. An unresolved prior
+send cannot be overwritten with a new inbox reply. Assigned incoming messages also
+appear in the case's shared SMS history. Media metadata is retained, but attachment
+previews are outside this SMS rollout.
+
+## Activating a receiving number
+
+An authenticated inventory check on 2026-09-07 confirmed that all eight existing
+Slovak numbers have `features.sms = null`. The two known profiles still use
+`PomocMotor`. API access is available through this copy's Vercel configuration;
+it is no longer a blocker. See the [number selection audit](sms-number-selection.md)
+for the candidate, prices and remaining live-network uncertainty.
+
+1. Purchase only after explicit purchase authorization. Recheck availability and
+   price immediately before ordering. Do not change the existing voice lines.
+2. Confirm the purchased number's `domestic_two_way`, `international_inbound` and
+   `international_outbound` SMS capabilities, and assign it to this environment's
+   messaging profile. Existing outgoing-only traffic remains usable.
+3. Configure `TELNYX_SMS_FROM_NUMBER`, `TELNYX_SMS_ORGANIZATION_ID` and the existing
+   messaging profile/public key for this copy. With no valid binding, incoming
+   events return `inbound_not_enabled` (503). No worker or scheduler is required.
+4. Keep `TELNYX_SMS_REPLIES_VERIFIED=false`. Set `TELNYX_SMS_TEST_RECIPIENT` only to
+   the user's explicitly designated test mobile. Only that recipient uses the
+   numeric sender; other traffic retains `PomocMotor` and the non-reply notice.
+5. Follow the dev-first Preview -> dev -> main PR workflow. Test send -> handset
+   displaying the exact numeric sender -> reply -> durable row -> inbox ->
+   explicit case assignment -> reply from the same number. Confirm actual costs
+   from the resulting message records. Do not use a customer phone for testing.
+6. Enable `TELNYX_SMS_REPLIES_VERIFIED=true` only after that path is verified, and
+   clear the pilot recipient. Templates then truthfully invite replies. One number
+   belongs to only one messaging profile; when moving it from dev to production,
+   retire the dev binding and verify the production webhook and profile together.
+
+GPS received through the location-sharing web link is independent of SMS replies.
 
 Official references checked for this change:
 

@@ -5,7 +5,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import tailwindcss from "@tailwindcss/postcss";
 import { renderSmsTemplate } from "../src/lib/sms/templates";
-import type { SmsHistoryEntry, SmsPrepareInput } from "../src/lib/sms/contracts";
+import type { SmsConversationEntry, SmsHistoryEntry, SmsInboxMessage, SmsPrepareInput } from "../src/lib/sms/contracts";
 const postcss = createRequire(require.resolve("@tailwindcss/postcss"))("postcss");
 const origin = "https://sms.test";
 let script: string; let css: string;
@@ -15,7 +15,8 @@ test.beforeAll(async () => {
   css = (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css;
 });
 async function boot(page: Page, options: { global?: boolean; width?: number; abortSend?: boolean } = {}) {
-  const state = { sends: [] as Record<string, unknown>[], prepares: [] as SmsPrepareInput[], errors: [] as string[], history: [] as SmsHistoryEntry[], locationWrites: [] as unknown[], aborted: false };
+  const state = { sends: [] as Record<string, unknown>[], prepares: [] as SmsPrepareInput[], errors: [] as string[], history: [] as SmsHistoryEntry[], locationWrites: [] as unknown[], aborted: false,
+    inbox: [] as SmsInboxMessage[], conversation: [] as SmsConversationEntry[], inboxWrites: [] as Record<string, unknown>[] };
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.setViewportSize({ width: options.width ?? 1440, height: 1000 });
   await page.route("**/*", async (route) => {
@@ -29,10 +30,12 @@ async function boot(page: Page, options: { global?: boolean; width?: number; abo
     ], sender: "PomocMotor", callbackNumber: "+421905654321" } });
     if (url.pathname === "/api/sms/prepare") {
       const body = request.postDataJSON() as SmsPrepareInput; state.prepares.push(body);
+      const incoming = state.inbox.find((message) => message.id === body.replyToMessageId);
       const context = { caseNumber: body.caseId === "case-1" ? "PM-123" : "PM-456", callbackNumber: body.callbackNumber, etaMinutes: body.etaMinutes, towAddress: body.towAddress, link: `${origin}/l/${"a".repeat(43)}` };
       return route.fulfill({ json: { proof: "mock-proof", draft: { version: 1, requestId: body.requestId, caseId: body.caseId, caseNumber: body.caseId ? context.caseNumber : null,
-        recipientName: body.caseId ? "Klient jeden" : "Ručne zadaný príjemca", toNumber: body.caseId ? "+421905123456" : body.toNumber, template: body.template, templateContext: context,
-        message: body.template === "custom" ? body.message : renderSmsTemplate(body.template, context), sender: "PomocMotor" } } });
+        recipientName: incoming ? "Odosielateľ prijatej SMS" : body.caseId ? "Klient jeden" : "Ručne zadaný príjemca", toNumber: incoming?.from ?? (body.caseId ? "+421905123456" : body.toNumber), template: body.template, templateContext: context,
+        replyToMessageId: incoming?.id, repliesEnabled: Boolean(incoming),
+        message: body.template === "custom" ? body.message : renderSmsTemplate(body.template, context), sender: incoming?.to ?? "PomocMotor" } } });
     }
     if (url.pathname === "/api/sms/send") {
       state.sends.push(request.postDataJSON());
@@ -41,6 +44,28 @@ async function boot(page: Page, options: { global?: boolean; width?: number; abo
     }
     if (url.pathname === "/api/cases/case-1" && request.method() === "PATCH") { state.locationWrites.push(request.postDataJSON()); return route.fulfill({ json: { dispatchData: { source: "supabase" } } }); }
     if (url.pathname === "/api/sms") return route.fulfill({ json: { messages: state.history, hasMore: false } });
+    if (url.pathname === "/api/sms/inbox") {
+      const unreadCount = state.inbox.filter((message) => message.unread).length;
+      if (url.searchParams.get("summary") === "true") return route.fulfill({ json: { unreadCount } });
+      const filter = url.searchParams.get("filter");
+      return route.fulfill({ json: { unreadCount, hasMore: false, operators: [{ id: "dispatcher", name: "Dispečer jeden" }], messages: state.inbox.filter((message) => filter === "unread" ? message.unread : filter === "unassigned" ? !message.caseId : true) } });
+    }
+    if (url.pathname.startsWith("/api/sms/inbox/")) {
+      const message = state.inbox.find((entry) => entry.id === url.pathname.split("/").at(-1));
+      if (!message) return route.fulfill({ status: 404, json: { error: "SMS sa nenašla." } });
+      if (request.method() === "PATCH") {
+        const body = request.postDataJSON(); state.inboxWrites.push(body);
+        if (body.version && body.version !== message.version) return route.fulfill({ status: 409, json: { error: "SMS medzičasom upravil kolega. Obnovte konverzáciu." } });
+        if (body.read != null) message.unread = !body.read;
+        if (body.caseId !== undefined) { message.caseId = body.caseId; message.caseNumber = body.caseId === "case-1" ? "PM-123" : body.caseId ? "PM-456" : null; }
+        const entry = state.conversation.find((item) => item.id === message.id);
+        if (entry) { entry.caseId = message.caseId; entry.caseNumber = message.caseNumber; }
+        if (body.assignedProfileId !== undefined) { message.assignedProfileId = body.assignedProfileId; message.assignedName = body.assignedProfileId ? "Dispečer jeden" : null; }
+        message.version = String(Number(message.version) + 1);
+        return route.fulfill({ json: { smsMessageId: message.id } });
+      }
+      return route.fulfill({ json: { message, messages: state.conversation, hasMore: false } });
+    }
     if (url.pathname === "/api/telephony/directory/favorites") return route.fulfill({ json: { favorites: [] } });
     if (url.pathname === "/api/telephony/directory") return route.fulfill({ json: { contacts: [] } });
     if (request.method() === "GET") return route.fulfill({ status: 404, json: {} });
@@ -131,4 +156,53 @@ test("a later explicit location quick action opens that template without redirec
   await page.getByRole("button", { name: "Zavrieť SMS" }).click();
   await page.getByRole("button", { name: "Otvoriť SMS" }).click();
   await expect(page.getByLabel("Šablóna")).toHaveValue("location_request");
+});
+
+function incomingMessage(): SmsInboxMessage {
+  return { id: "incoming-1", version: "1", from: "+421905777777", to: "+12025550123", body: "Som pri pumpe.", createdAt: "2026-09-07T10:00:00Z",
+    caseId: null, caseNumber: null, assignedProfileId: null, assignedName: null, unread: true, canReply: true, hasMedia: false };
+}
+for (const width of [390, 1440]) test(`inbound SMS needs explicit assignment and replies to the real sender at ${width}px`, async ({ page }) => {
+  const state = await boot(page, { global: true, width });
+  state.inbox = [incomingMessage()];
+  state.conversation = [{ id: "incoming-1", body: "Som pri pumpe.", direction: "inbound", createdAt: "2026-09-07T10:00:00Z", status: "received", statusDetail: "received_unread", caseId: null, caseNumber: null }];
+  await page.getByRole("button", { name: "Prijaté SMS", exact: true }).click();
+  await page.getByRole("button", { name: /\+421905777777/ }).click();
+  await expect(page.getByLabel("Prípad prijatej SMS")).toHaveValue("");
+  expect(state.inboxWrites).toHaveLength(0);
+  await page.getByLabel("Prípad prijatej SMS").selectOption("case-1");
+  await page.getByLabel("Dispečer prijatej SMS").selectOption("dispatcher");
+  await expect(page.getByRole("button", { name: "Napísať odpoveď" })).toBeDisabled();
+  await page.getByRole("button", { name: "Uložiť priradenie tejto správy" }).click();
+  await expect(page.getByLabel("Prípad prijatej SMS")).toHaveValue("case-1");
+  await page.getByRole("button", { name: "Označiť ako prečítanú", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Označiť ako neprečítanú", exact: true })).toBeVisible();
+  expect(state.inboxWrites).toHaveLength(2);
+  expect(await page.getByRole("dialog").evaluate((node) => node.scrollWidth > node.clientWidth)).toBe(false);
+  await page.screenshot({ path: `.context/sms-browser/inbox-${width}.png` });
+  await page.getByRole("button", { name: "Napísať odpoveď" }).click();
+  await expect(page.getByText("Odpoveď na prijatú SMS od +421905777777")).toBeVisible();
+  await page.getByLabel("Text správy").fill("Pomoc je na ceste.");
+  await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
+  await expect(page.getByText("PM-123 · +421905777777", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Klient môže odpovedať na toto číslo/)).toBeVisible();
+  await page.getByRole("button", { name: "Odoslať SMS", exact: true }).click();
+  await expect(page.getByText("Odoslaná operátorovi", { exact: true })).toBeVisible();
+  expect(state.sends).toHaveLength(1);
+  expect(state.sends[0]).toMatchObject({ draft: { toNumber: "+421905777777", sender: "+12025550123", caseId: "case-1", replyToMessageId: "incoming-1" } });
+  expect(state.errors).toEqual([]);
+});
+
+test("an uncertain previous send cannot be replaced with an inbox reply", async ({ page }) => {
+  const state = await boot(page, { abortSend: true }); state.inbox = [incomingMessage()];
+  await page.getByLabel("Text správy").fill("Pôvodná SMS.");
+  await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
+  await page.getByRole("button", { name: "Odoslať SMS", exact: true }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await page.getByRole("button", { name: "Prijaté SMS", exact: true }).click();
+  await page.getByRole("button", { name: /\+421905777777/ }).click();
+  await expect(page.getByRole("button", { name: "Napísať odpoveď" })).toBeDisabled();
+  await page.getByRole("button", { name: "Editor", exact: true }).click();
+  await expect(page.getByLabel("Finálny text na odoslanie")).toHaveValue("Pôvodná SMS.");
+  await expect(page.getByRole("button", { name: "Overiť tú istú požiadavku" })).toBeVisible();
 });

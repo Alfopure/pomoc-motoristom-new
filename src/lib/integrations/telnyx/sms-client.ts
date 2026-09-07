@@ -17,14 +17,14 @@ import { isDestinationAllowed } from "@/server/telephony/call-actions";
 import { getTelnyxConfig, type EnvRecord, type TelnyxConfig } from "@/server/telephony/telnyx/env";
 import { TELNYX_MESSAGE_STATUS_MAP } from "@/server/telephony/telnyx/sms-status";
 import { addTelephonyUsage } from "@/server/telephony/usage";
+import { smsSender } from "@/server/sms-channel";
 
 /**
  * Telnyx implementation of the provider-neutral `SmsTransport`.
  *
- * `POST /v2/messages` with the alphanumeric sender (`TELNYX_SMS_ALPHA_SENDER`,
- * default `PomocMotor`) and the messaging profile from the environment. The
- * sender is send-only: Slovak alphanumeric senders cannot receive replies, so
- * there is no inbound SMS path (see `.context/telnyx-design.md` §1 non-goals).
+ * `POST /v2/messages` with the verified channel's sender and environment profile.
+ * The numeric sender is enabled after verification, or for one designated pilot
+ * recipient. Other traffic retains the alphanumeric sender.
  *
  * Two switches must both be on before a message leaves the process: the
  * environment switch `TELNYX_SMS_LIVE_SENDS` and the per-organisation row
@@ -161,7 +161,8 @@ export function createTelnyxSmsTransport(options: TelnyxSmsTransportOptions = {}
       if (!hitSmsRateLimit(organizationId, Date.now())) {
         throw new SmsWorkflowError("Príliš veľa SMS za minútu.", 429);
       }
-      const from = client.config.smsAlphaSender;
+      const from = smsSender(organizationId, input.to, options.env ?? process.env, client.config).sender;
+      if (input.from && input.from !== from) throw new SmsWorkflowError("SMS kanál sa zmenil. Pripravte nový náhľad.", 409);
       const messagingProfileId = client.config.messagingProfileId;
 
       try {
