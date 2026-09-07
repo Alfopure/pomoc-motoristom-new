@@ -257,7 +257,8 @@ describe("inbound ring plan", () => {
     expect(h.telnyx.of("gatherUsingAudio")).toHaveLength(2);
     expect(h.telnyx.of("playbackStart")).toHaveLength(playbacksBefore);
     h.advance(31 * 60_000);
-    await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
+    const currentTick = h.telnyx.of("gatherUsingAudio").at(-1)!;
+    await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: currentTick.params.clientState });
     expect(h.session(call.sessionId).state).toBe("callback_offered");
     expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v4/sk/callback-offer.mp3");
     // The loop is silenced before the prompt plays.

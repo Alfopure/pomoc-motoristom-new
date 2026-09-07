@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/database.types";
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 import { readAnnouncementConfig, resolveAnnouncement } from "@/lib/telephony/announcements";
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { addTelephonyUsage } from "../usage";
@@ -278,8 +279,13 @@ export async function appendPresenceHistory(
 
 async function createCallbackRequest(deps: EffectsDeps, session: SessionRow, plan: CallbackPlan): Promise<void> {
   const { admin } = deps;
-  const callerNumber = plan.callerNumber || session.caller_number || "";
-  if (!callerNumber) return;
+  const callerNumber = normalizeE164(plan.callerNumber || session.caller_number);
+  if (!callerNumber) {
+    // Automatic missed-call accounting can omit an unavailable number. An
+    // explicit choice must never silently skip persistence then claim success.
+    if (plan.request) throw new EffectsError("callback number unavailable");
+    return;
+  }
   const existing = await admin
     .from("motorist_callback_requests")
     .select("id, metadata")
@@ -603,6 +609,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       const invalid = command.spec.invalidMedia ? resolvePrompt(deps, ctx, command.spec.invalidMedia) : null;
       const url = prompt.url;
       const text = prompt.text ?? command.spec.ttsText;
+      let gatherId = command.clientState.gatherId;
       const common = {
         callControlId: leg,
         commandId: command.commandId,
@@ -618,13 +625,22 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       // Managed audio menus can use their current text when an invalid-input
       // edit has no audio yet. A custom IVR recording remains authoritative;
       // its fallback text may describe an older menu.
-      if (url && !(prompt.text && invalid?.text && !invalid.url)) {
-        await telnyx.gatherUsingAudio({ ...common, audioUrl: url, invalidAudioUrl: invalid?.url ?? undefined });
-        return { skipped: false, detail: { url, purpose: command.spec.purpose } };
+      if (url && !command.spec.forceSpeech && !(prompt.text && invalid?.text && !invalid.url)) {
+        try {
+          await telnyx.gatherUsingAudio({ ...common, audioUrl: url, invalidAudioUrl: invalid?.url ?? undefined });
+          return { skipped: false, detail: { url, purpose: command.spec.purpose } };
+        } catch (error) {
+          // Only managed prompts have text proven to match their recording.
+          // A custom menu with an old fallback must recover to assistance.
+          if (!prompt.text || isCallGoneError(error)) throw error;
+          common.commandId = commandId({ sessionId: ctx.session.id, legId: leg, step: command.commandId, intent: "gather_speech_fallback" });
+          gatherId = common.commandId.replaceAll("-", "").slice(0, 12);
+          common.clientState = encodeClientState({ ...command.clientState, gatherId });
+        }
       }
       if (text) {
-        await telnyx.gatherUsingSpeak({ ...common, ...(command.spec.purpose === "queue_wait" ? { timeoutMillis: 60_000 } : {}), payload: text, voice: prompt.voice ?? DEFAULT_TTS_VOICE, invalidPayload: invalid?.text ?? undefined });
-        return { skipped: false, detail: { tts: true, purpose: command.spec.purpose } };
+        await telnyx.gatherUsingSpeak({ ...common, payload: text, voice: prompt.voice ?? DEFAULT_TTS_VOICE, invalidPayload: invalid?.text ?? undefined });
+        return { skipped: false, detail: { tts: true, purpose: command.spec.purpose, gatherId } };
       }
       if (command.spec.media === null) {
         // Silent gather: the waiting-room tick, which must not interrupt the
@@ -632,7 +648,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         await telnyx.gather(common);
         return { skipped: false, detail: { silent: true, purpose: command.spec.purpose } };
       }
-      return { skipped: true, detail: { reason: "no media and no tts text", purpose: command.spec.purpose } };
+      throw new EffectsError("gather has no usable audio or text");
     }
     case "gather_stop":
       await telnyx.gatherStop({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId });
@@ -1023,6 +1039,14 @@ export async function applyReduceResult(
         if (fresh.error || !fresh.data || fresh.data.ended_at || !recording || !pending || recording.epoch !== pending.epoch || recording.suppressionReason === "objection" || !recording.pendingAudio?.commands.some((item) => "commandId" in command && item.commandId === command.commandId)) throw new RecordingContinuationSupersededError();
       }
       const executed = await executeCommand(deps, ctx, command);
+      if (command.kind === "gather" && executed.detail?.tts && readMeta(ctx.session).gather?.id === command.clientState.gatherId) {
+        const meta = readMeta(ctx.session);
+        const checkpoint = emptyTransition();
+        checkpoint.session.metadata = toJson({ ...meta, gather: { ...meta.gather, id: executed.detail.gatherId ?? meta.gather!.id, spec: { ...meta.gather!.spec, forceSpeech: true } },
+          ...(command.spec.purpose === "queue_wait" && meta.waiting?.audio_phase === "combined" ? { waiting: { ...meta.waiting, audio_phase: "prompt" } } : {}) });
+        session = await persistTransition(deps, { session: ctx.session, transition: checkpoint, expectedVersion: ctx.session.version, event: input.event });
+        ctx.session = session;
+      }
       if (pendingCommand) {
         try {
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
@@ -1101,6 +1125,16 @@ export async function applyReduceResult(
         ctx.session = session;
       }
       const message = describeError(error);
+      if (command.kind === "gather" && readMeta(ctx.session).gather?.id === command.clientState.gatherId) {
+        const meta = readMeta(ctx.session);
+        const checkpoint = emptyTransition();
+        // A failed silent music tick backs off for a minute. Prompt failure
+        // continues immediately inside the runner's bounded continuation loop.
+        const delay = command.spec.media === null && !command.spec.ttsText ? 60_000 : 0;
+        checkpoint.session.metadata = toJson({ ...meta, gather: { ...meta.gather, failed: true, call_gone: isCallGoneError(error), deadline_at: new Date(deps.now().getTime() + delay).toISOString() } });
+        session = await persistTransition(deps, { session: ctx.session, transition: checkpoint, expectedVersion: ctx.session.version, event: input.event });
+        ctx.session = session;
+      }
       outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: false, skipped: false, bestEffort: Boolean(command.bestEffort), error: message, ms: deps.now().getTime() - started });
       if (command.bestEffort) {
         deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, command: command.kind, error: message, bestEffort: true });

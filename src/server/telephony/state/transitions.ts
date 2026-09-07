@@ -3,6 +3,7 @@ import type { CallLegRole, CallLegState, CallSessionState, Json, RingAttemptResu
 import { evaluateBusinessHours } from "@/lib/telephony/business-hours";
 import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { announcementConfigFromMetadata, resolveAnnouncement } from "@/lib/telephony/announcements";
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { classifyRingHangup } from "../routing/eligibility";
 import { decideIvr, describeIvrDecision, ivrGatherSpec, type IvrGatherOutcome } from "../routing/ivr";
 import { memberKey, planRingStep, stepDeadline, toEligibilityDevices, toEligibilityPresence, type RingStepPlanResult } from "../routing/ring-plan";
@@ -29,6 +30,8 @@ import {
   isTerminalAttemptResult,
   mergeMeta,
   readMeta,
+  isGatherOverdue,
+  gatherTimeoutMs,
   telnyxSipUri,
   type AppEvent,
   type AttemptPatch,
@@ -343,12 +346,15 @@ function hangupOrphanLeg(b: TransitionBuilder, callControlId: string, role: Call
 }
 
 function gatherCmd(b: TransitionBuilder, leg: LegRow, spec: GatherSpec, intentSuffix = ""): Command {
+  const id = b.cmdId(leg.telnyx_call_control_id, `gather:${spec.purpose}${intentSuffix}`);
+  const gatherId = id.replaceAll("-", "").slice(0, 12);
+  if (spec.purpose !== "moh_tick") b.patchMeta({ gather: { id: gatherId, started_at: b.nowIso, deadline_at: new Date(b.ctx.now.getTime() + gatherTimeoutMs({ ...b.session, metadata: mergeMeta(b.session, b.meta) }, spec)).toISOString(), spec } });
   return {
     kind: "gather",
-    commandId: b.cmdId(leg.telnyx_call_control_id, `gather:${spec.purpose}${intentSuffix}`),
+    commandId: id,
     leg: ref(leg),
     spec,
-    clientState: customerState(b.session.id, spec.purpose),
+    clientState: { ...customerState(b.session.id, spec.purpose), ...(spec.purpose !== "moh_tick" ? { gatherId } : {}) },
   };
 }
 
@@ -370,9 +376,27 @@ function mohTickSpec(): GatherSpec {
   };
 }
 
-/** The audio includes the invitation and a minute of music, interruptible by 1. */
-function queueWaitSpec(): GatherSpec {
-  return { media: { key: "queueWaiting" }, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1, validDigits: "1", timeoutMillis: 1_000 };
+/** Default audio includes music; custom speech gets a separate music phase. */
+function queueWaitSpec(b: TransitionBuilder): GatherSpec {
+  return { media: { key: normalizeE164(b.session.caller_number) ? "queueWaiting" : "holdReminder" }, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1, validDigits: "1", timeoutMillis: 1_000 };
+}
+
+function startQueuePrompt(b: TransitionBuilder, leg: LegRow): void {
+  stopMoh(b, leg);
+  const config = b.meta.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata);
+  const prompt = resolveAnnouncement(config, "queueWaiting");
+  const combined = Boolean(normalizeE164(b.session.caller_number) && b.ctx.mediaAvailable && prompt.file === `announcements-v4/${config.language}/queueWaiting.mp3`);
+  if (b.meta.waiting) b.patchMeta({ waiting: { ...b.meta.waiting, audio_phase: combined ? "combined" : "prompt", music_until: null } });
+  b.cmd(gatherCmd(b, leg, queueWaitSpec(b)));
+}
+
+function startQueueMusic(b: TransitionBuilder, leg: LegRow): void {
+  const waiting = b.meta.waiting;
+  const currentEnd = waiting?.audio_phase === "music" && waiting.music_until ? Date.parse(waiting.music_until) : NaN;
+  const remaining = currentEnd > b.ctx.now.getTime() ? Math.max(1_000, Math.min(MOH_TICK_TIMEOUT_MS, currentEnd - b.ctx.now.getTime())) : MOH_TICK_TIMEOUT_MS;
+  if (waiting) b.patchMeta({ waiting: { ...waiting, audio_phase: "music", music_until: new Date(b.ctx.now.getTime() + remaining).toISOString() } });
+  if (!Number.isFinite(currentEnd)) startMoh(b, leg);
+  b.cmd(gatherCmd(b, leg, { media: null, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1, validDigits: "1", timeoutMillis: remaining, initialTimeoutMillis: remaining }));
 }
 
 /**
@@ -730,7 +754,7 @@ function routeInboundCustomer(b: TransitionBuilder, leg: LegRow): ReduceResult {
     startAfterHours(b, leg, hours.reason);
     return b.result();
   }
-  if (b.ctx.ivr && b.ctx.line?.ivr_menu_id && b.ctx.ivr.menu.id === b.ctx.line.ivr_menu_id && b.ctx.ivr.menu.active) {
+  if (normalizeE164(b.session.caller_number) && b.ctx.ivr && b.ctx.line?.ivr_menu_id && b.ctx.ivr.menu.id === b.ctx.line.ivr_menu_id && b.ctx.ivr.menu.active) {
     startIvr(b, leg, 1);
     return b.result();
   }
@@ -739,6 +763,11 @@ function routeInboundCustomer(b: TransitionBuilder, leg: LegRow): ReduceResult {
 }
 
 function startAfterHours(b: TransitionBuilder, leg: LegRow, reason: string): void {
+  if (!normalizeE164(b.session.caller_number)) {
+    closeWithIvrMessage(b, leg, { key: "afterHoursNoCallback" });
+    b.call.end_reason = "after_hours";
+    return;
+  }
   b.setState("after_hours").patchMeta({ after_hours: { reason, at: b.nowIso } });
   b.cmd(gatherCmd(b, leg, callbackOfferSpec({ key: "afterHours" })));
   b.note(`closed (${reason}) → after-hours callback offer`);
@@ -757,6 +786,7 @@ function startIvr(b: TransitionBuilder, leg: LegRow, tries: number): void {
 }
 
 function startRingPlan(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPlan | null): void {
+  b.patchMeta({ gather: null });
   if (!plan || plan.steps.length === 0) {
     b.note("no ring plan → callback offer");
     offerCallback(b, customer, { key: "callbackOffer" }, "missed");
@@ -920,7 +950,7 @@ function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
 /** True while a `playback_start` loop is running on the customer leg. */
 function mohIsPlaying(b: TransitionBuilder): boolean {
   if (!b.ctx.mediaAvailable) return false;
-  if (b.meta.queue) return false; // Queue audio belongs to its interruptible gather.
+  if (b.meta.queue) return b.meta.waiting?.audio_phase === "music";
   return (b.session.state === "ringing" && b.meta.ring?.mode === "plan") || WAITING_STATES.has(b.session.state);
 }
 
@@ -933,6 +963,16 @@ function stopMoh(b: TransitionBuilder, customer: LegRow): void {
 }
 
 function offerCallback(b: TransitionBuilder, customer: LegRow, media: MediaRef, source: SessionMeta["callback"] extends infer T ? (T extends { source?: infer S } ? NonNullable<S> : never) : never): void {
+  if (!normalizeE164(b.session.caller_number)) {
+    if (source !== "park_timeout" && b.ringPlan()) enterWaiting(b, customer, "ring_exhausted");
+    else {
+      stopMoh(b, customer);
+      closeWithIvrMessage(b, customer, { key: "allBusy" });
+      b.call.end_reason = "callback_unavailable";
+    }
+    b.note("callback unavailable: no usable caller number");
+    return;
+  }
   // The prompt must not compete with the waiting-room loop.
   stopMoh(b, customer);
   b.setState("callback_offered").patchMeta({ callback: { source, confirmed: false } });
@@ -949,14 +989,14 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
   // call in progress.
   const queued = state === "waiting" && b.session.direction === "inbound" && !b.session.answered_at && (reason === "ring_exhausted" || reason === "ivr" || Boolean(b.meta.queue));
   const previous = queued && b.meta.queue ? b.meta.waiting : null;
-  if (queued) stopMoh(b, customer);
+  if (queued && !previous) stopMoh(b, customer);
   b.setState(state).patchMeta({
     waiting: previous ?? { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso, max_minutes: b.ctx.settings.parkMaxMinutes },
     queue: queued ? { next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString() } : null,
     ring: { ...b.meta.ring, active_step: null, step_deadline_at: null },
   });
   if (queued) {
-    if (!previous) b.cmd(gatherCmd(b, customer, queueWaitSpec()));
+    if (!previous) startQueuePrompt(b, customer);
     b.note(`${state} (${reason}, automatic offers)`);
     return;
   }
@@ -1097,6 +1137,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
   const canWin =
     customer !== undefined &&
     !b.legEnded(customer) &&
+    !b.meta.gather?.call_gone &&
     ((b.session.state === "ringing" && !b.session.answered_by_profile_id) ||
       (WAITING_STATES.has(b.session.state) && intent === "pickup") ||
       (b.session.state === "ringing" && b.meta.ring?.mode !== "plan" && intent !== "ring"));
@@ -1128,7 +1169,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
     b.patchMeta({ pickup: null, answered_leg_call_control_id: leg.telnyx_call_control_id });
     rememberAcceptedDeviceLeg(b, leg);
     const wasQueued = Boolean(b.meta.queue);
-    if (intent === "pickup" || wasQueued) b.patchMeta({ waiting: null, queue: null });
+    if (intent === "pickup" || wasQueued) b.patchMeta({ waiting: null, queue: null, gather: null });
     if (intent === "transfer") b.patchMeta({ transfer: b.meta.transfer ? { ...b.meta.transfer, completed_at: opts.at } : null });
     b.patchMeta({ ring: { ...(b.meta.ring ?? {}), active_step: null, step_deadline_at: null } });
 
@@ -1669,11 +1710,14 @@ function onGatherEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceResul
   const digits = event.status === "valid" ? (event.digits ?? "") : "";
   const state = b.session.state;
 
+  if (b.meta.callback?.closing_at) return ignoredResult("callback interaction is closing");
   if (state === "callback_offered" && b.meta.callback?.confirmed && b.meta.callback.event_id === b.eventKey && b.meta.callback.digit) {
     confirmCallback(b, leg, b.meta.callback.source ?? "missed", null, b.meta.callback.digit, b.meta.callback.context);
     return b.result();
   }
   if (state === "callback_offered" && b.meta.callback?.confirmed) return ignoredResult("callback choice already recorded");
+  if (b.meta.gather?.call_gone) return ignoredResult("gather customer already gone at provider");
+  if (event.clientState?.gatherId && event.clientState.gatherId !== b.meta.gather?.id) return ignoredResult("stale gather completion");
   if (purpose === "queue_wait" && !b.meta.queue) return ignoredResult("queue gather already finished");
   if (b.meta.queue && (state === "waiting" || state === "ringing") && purpose === "queue_wait") {
     if (digits === "1") {
@@ -1683,8 +1727,8 @@ function onGatherEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceResul
     return onWaitingTick(b, leg);
   }
   if (state === "ivr" && (purpose === "ivr" || purpose === null)) return onIvrChoice(b, leg, { digits: invalid ? (event.digits ?? "") : digits, invalid });
-  if ((state === "after_hours" || state === "callback_offered") && purpose !== "moh_tick") return onCallbackChoice(b, leg, digits);
-  if (WAITING_STATES.has(state)) return onWaitingTick(b, leg);
+  if ((state === "after_hours" || state === "callback_offered") && (purpose === "callback_offer" || purpose === null)) return onCallbackChoice(b, leg, digits, invalid);
+  if (WAITING_STATES.has(state) && (purpose === "moh_tick" || purpose === null)) return onWaitingTick(b, leg);
   return ignoredResult(`gather in ${state}`);
 }
 
@@ -1746,6 +1790,7 @@ function onIvrChoice(b: TransitionBuilder, leg: LegRow, outcome: IvrGatherOutcom
  * leaving the caller in silence.
  */
 function closeWithIvrMessage(b: TransitionBuilder, leg: LegRow, prompt: MediaRef | null): void {
+  b.patchMeta({ gather: null, closing_message: true });
   // The outcome is recorded before the branch, exactly like `applyFallback`'s
   // `hangup_message`: an option with no recording used to leave the session in
   // `ivr`, so the caller's own hangup was later classified as a missed call,
@@ -1755,19 +1800,25 @@ function closeWithIvrMessage(b: TransitionBuilder, leg: LegRow, prompt: MediaRef
   b.call.status = "missed";
   b.call.end_reason = "ivr_message";
   if (prompt && (b.ctx.mediaAvailable || announcementKeyForMedia(prompt) || ("file" in prompt && /^https?:\/\//i.test(prompt.file)))) {
-    b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:ivr_message"), leg: ref(leg), media: prompt });
+    b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:ivr_message"), leg: ref(leg), media: prompt, clientState: customerState(b.session.id, "closing_message") });
     return;
   }
   b.cmd(hangupCmd(b, leg, "ivr_hangup", false));
 }
 
-function onCallbackChoice(b: TransitionBuilder, leg: LegRow, digits: string): ReduceResult {
+function onCallbackChoice(b: TransitionBuilder, leg: LegRow, digits: string, invalid = false): ReduceResult {
   const source = b.meta.callback?.source ?? (b.session.state === "after_hours" ? "after_hours" : "missed");
   if (digits === "1") {
     confirmCallback(b, leg, source);
     return b.result();
   }
-  b.patchMeta({ callback: { ...(b.meta.callback ?? {}), source, confirmed: false, declined_at: b.nowIso } });
+  if (invalid && !b.meta.callback?.input_retry) {
+    const spec = b.meta.gather?.spec ?? callbackOfferSpec({ key: b.session.state === "after_hours" ? "afterHours" : "callbackOffer" });
+    b.patchMeta({ callback: { ...b.meta.callback, source, input_retry: true } });
+    b.cmd(gatherCmd(b, leg, spec, ":invalid_retry"));
+    return b.note("invalid callback key → one retry").result();
+  }
+  b.patchMeta({ gather: null, callback: { ...(b.meta.callback ?? {}), source, confirmed: false, declined_at: b.nowIso, closing_at: b.nowIso } });
   b.cmd(hangupCmd(b, leg, "callback_declined", false));
   return b.note("callback declined → hangup").result();
 }
@@ -1781,14 +1832,23 @@ function confirmCallback(
   digit = "1",
   context: string = source,
 ): void {
-  const requestedAt = b.meta.callback?.event_id === b.eventKey ? b.meta.callback.requested_at : null;
-  const request = { kind: "requested" as const, requested_at: requestedAt ?? b.event.occurredAt ?? b.nowIso, digit, context, event_id: b.eventKey };
+  const callerNumber = normalizeE164(b.session.caller_number);
+  if (!callerNumber) {
+    b.patchMeta({ callback: { source, confirmed: false } });
+    b.note("callback choice cannot be fulfilled: no usable caller number");
+    if (b.meta.queue) onWaitingTick(b, leg);
+    else if (b.session.state === "after_hours") startAfterHours(b, leg, b.meta.after_hours?.reason ?? "closed");
+    else startRingPlan(b, leg, b.ringPlan());
+    return;
+  }
+  const previous = b.meta.callback?.confirmed ? b.meta.callback : null;
+  const request = { kind: "requested" as const, requested_at: previous?.requested_at ?? b.event.occurredAt ?? b.nowIso, digit, context, event_id: previous?.event_id ?? b.eventKey };
   stopMoh(b, leg);
   if (b.meta.queue) b.cmd({ kind: "gather_stop", commandId: b.cmdId(leg.telnyx_call_control_id, "gather_stop"), leg: ref(leg), bestEffort: true });
   cancelOpenAttempts(b, b.nowIso, "callback requested");
   for (const other of b.openLegs()) if (!isCustomer(other)) b.cmd(hangupCmd(b, other, "callback_requested"));
-  b.setState("callback_offered").patchMeta({ callback: { ...request, source, confirmed: true }, waiting: null, queue: null });
-  b.callback({ source, callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id), request });
+  b.setState("callback_offered").patchMeta({ callback: { ...request, source, confirmed: true, deadline_at: new Date(b.ctx.now.getTime() + gatherTimeoutMs(b.session, { media: prompt ?? { key: "callbackConfirmed" }, purpose: "callback_offer" })).toISOString(), confirmation_retry: previous?.confirmation_retry }, gather: null, waiting: null, queue: null });
+  b.callback({ source, callerNumber, createTask: Boolean(b.session.case_id), request });
   if (!prompt || b.ctx.mediaAvailable || announcementKeyForMedia(prompt) || ("file" in prompt && /^https?:\/\//i.test(prompt.file))) {
     b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:callback_confirmed"), leg: ref(leg), media: prompt ?? { key: "callbackConfirmed" }, clientState: customerState(b.session.id, "callback_confirmation") });
   } else {
@@ -1817,7 +1877,13 @@ function onWaitingTick(b: TransitionBuilder, leg: LegRow): ReduceResult {
     return b.result();
   }
   b.patchMeta({ waiting: { ...waiting, ticks: waiting.ticks + 1, last_tick_at: b.nowIso } });
-  b.cmd(gatherCmd(b, leg, b.meta.queue ? queueWaitSpec() : mohTickSpec()));
+  if (b.meta.queue) {
+    const phase = waiting.audio_phase;
+    const musicFinished = phase === "music" && Date.parse(waiting.music_until ?? "") <= b.ctx.now.getTime();
+    const combinedFinished = (phase === "combined" || !phase) && Date.parse(b.meta.gather?.started_at ?? "") + MOH_TICK_TIMEOUT_MS <= b.ctx.now.getTime();
+    if (musicFinished || combinedFinished) startQueuePrompt(b, leg);
+    else startQueueMusic(b, leg);
+  } else b.cmd(gatherCmd(b, leg, mohTickSpec()));
   if (b.meta.queue && b.session.state === "waiting") offerQueuedCall(b, leg);
   return b.note("MOH tick").result();
 }
@@ -1826,6 +1892,17 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
   const leg = b.findLeg(event.callControlId);
   if (!leg || !isCustomer(leg)) return ignoredResult("playback on a non-customer leg");
   if (b.legEnded(leg)) return ignoredResult("customer leg ended");
+  const gather = b.meta.gather;
+  const gathering = ["ivr", "after_hours", "callback_offered"].includes(b.session.state) || Boolean(b.meta.queue && ["waiting", "ringing"].includes(b.session.state));
+  if (gathering && gather && event.clientState?.gatherId === gather.id && !gather.call_gone &&
+    ["file_not_found", "failed", "error"].includes(event.status ?? "")) {
+    if (!gather.spec.forceSpeech && gather.spec.media && announcementKeyForMedia(gather.spec.media)) {
+      b.cmd({ kind: "gather_stop", commandId: b.cmdId(leg.telnyx_call_control_id, "gather:failed_audio_stop"), leg: ref(leg), bestEffort: true });
+      b.cmd(gatherCmd(b, leg, { ...gather.spec, forceSpeech: true }, ":speech"));
+      return b.note("gather audio failed → localized speech").result();
+    }
+    return recoverGather(b, leg);
+  }
   if (b.session.state === "greeting") {
     if (b.meta.greeting_call_gone_at) return ignoredResult("introduction customer already gone at provider");
     if (b.meta.greeting?.closing) return ignoredResult("failed introduction is closing");
@@ -1844,8 +1921,14 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
   if (event.clientState?.intent === "greeting" || event.clientState?.intent === "greeting_retry") return ignoredResult("introduction already finished");
   if (event.status === "call_hangup" || event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`playback ${event.status}`);
   const state = b.session.state;
+  if (state === "missed" && b.meta.closing_message && event.clientState?.intent === "closing_message") {
+    b.cmd(hangupCmd(b, leg, "closing_message", false));
+    return b.note("closing message finished → hangup").result();
+  }
   if (state === "callback_offered" && b.meta.callback?.confirmed) {
+    if (b.meta.callback.closing_at) return ignoredResult("callback confirmation already finished");
     if (b.meta.callback.event_id && event.clientState?.intent !== "callback_confirmation") return ignoredResult("unrelated audio after callback choice");
+    b.patchMeta({ callback: { ...b.meta.callback, closing_at: b.nowIso } });
     b.cmd(hangupCmd(b, leg, "callback_confirmed", false));
     return b.note("callback confirmation played → hangup").result();
   }
@@ -2497,10 +2580,12 @@ function onSweep(b: TransitionBuilder): ReduceResult {
   if (!customer || b.legEnded(customer)) return ignoredResult("sweep: no customer leg");
   const meta = b.meta;
 
+  if (meta.gather?.call_gone) return ignoredResult("sweep: gather customer already gone at provider");
   if (meta.queue && meta.waiting) {
     const deadline = Date.parse(meta.waiting.since) + (meta.waiting.max_minutes ?? b.ctx.settings.parkMaxMinutes) * 60_000;
     if (b.ctx.now.getTime() >= deadline) return onWaitingTick(b, customer);
   }
+  if (isGatherOverdue(b.session, b.ctx.now)) return recoverGather(b, customer);
   if (state === "greeting") {
     if (meta.greeting_call_gone_at) return ignoredResult("sweep: introduction customer already gone at provider");
     const started = Date.parse(meta.greeting?.started_at ?? b.session.created_at);
@@ -2556,6 +2641,57 @@ function onSweep(b: TransitionBuilder): ReduceResult {
   }
 
   return ignoredResult(`sweep: nothing to do in ${state}`);
+}
+
+/** Recover only the current interaction; ordinary IVR never proves a recording notice. */
+function recoverGather(b: TransitionBuilder, customer: LegRow): ReduceResult {
+  if (b.meta.gather?.call_gone || b.meta.hangup || b.session.ended_at || b.legEnded(customer)) return ignoredResult("gather recovery: caller gone");
+  const choice = b.meta.callback;
+  const retryConfirmation = Boolean(choice?.confirmed && !choice.closing_at && !choice.confirmation_retry && choice.event_id && choice.digit);
+  // A failed insert may have persisted the closing/retry marker first. Every
+  // recovery that can hang up must still save the request before its effects.
+  if (choice?.confirmed && !retryConfirmation) {
+    b.callback({ source: choice.source ?? "missed", callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id),
+      ...(choice.event_id && choice.digit && choice.requested_at ? { request: { kind: "requested", event_id: choice.event_id, digit: choice.digit, requested_at: choice.requested_at, context: choice.context ?? choice.source ?? "missed" } } : {}) });
+  }
+  if (choice?.closing_at) {
+    b.patchMeta({ callback: { ...choice, closing_at: b.nowIso } });
+    b.cmd(hangupCmd(b, customer, "callback_closing_retry"));
+    return b.note("retrying callback hangup without reviving the interaction").result();
+  }
+  if (choice?.confirmed) {
+    // The metadata can precede a failed DB insert. Re-persist the actual
+    // request before retrying its confirmation, retaining the original DTMF.
+    if (retryConfirmation) {
+      b.patchMeta({ callback: { ...choice, confirmation_retry: true } });
+      confirmCallback(b, customer, choice.source ?? "missed", null, choice.digit ?? "1", choice.context);
+      const playback = b.commands.find(c => c.kind === "playback_start" && c.clientState?.intent === "callback_confirmation");
+      if (playback?.kind === "playback_start") playback.forceSpeech = true;
+    } else {
+      b.patchMeta({ callback: { ...choice, closing_at: b.nowIso } });
+      b.cmd(hangupCmd(b, customer, "callback_confirmation_timeout"));
+    }
+    return b.note("callback confirmation watchdog").result();
+  }
+  b.cmd({ kind: "gather_stop", commandId: b.cmdId(customer.telnyx_call_control_id, "gather:recovery_stop"), leg: ref(customer), bestEffort: true });
+  b.patchMeta({ gather: null });
+  if (b.meta.queue) {
+    // Skip unavailable speech for this cycle and retain callback input/music.
+    if (b.meta.waiting) b.patchMeta({ waiting: { ...b.meta.waiting, last_tick_at: b.nowIso } });
+    startQueueMusic(b, customer);
+    return b.note("queue gather unavailable → music and callback input").result();
+  }
+  if (b.session.state === "ivr") startRingPlan(b, customer, b.ringPlan());
+  else if (b.session.state === "after_hours") {
+    closeWithIvrMessage(b, customer, { key: "afterHoursNoCallback" });
+    b.call.end_reason = "after_hours";
+  } else if (b.session.state === "callback_offered") {
+    if (choice?.source === "park_timeout" || !b.ringPlan()) {
+      closeWithIvrMessage(b, customer, { key: "allBusy" });
+      b.call.end_reason = "callback_unavailable";
+    } else enterWaiting(b, customer, "ring_exhausted");
+  }
+  return b.note("gather unavailable → bounded fallback").result();
 }
 
 /** Sweep for sessions whose customer already left but whose remaining leg webhooks never arrived. */
