@@ -16,11 +16,13 @@ import {
   Edit3,
   FileText,
   FileUp,
+  Link2,
   Loader2,
   MapPin,
   MessageSquareText,
   Navigation,
   Phone,
+  PhoneIncoming,
   Plus,
   ReceiptText,
   Star,
@@ -32,7 +34,9 @@ import {
 import type { LucideIcon } from "lucide-react";
 import type { CaseAttachmentInput, CaseContactInput, PlaceSelectionInput, UpdateCaseInput } from "@/data/case-inputs";
 import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
+import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
+import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type {
   AccessComplication,
   Branch,
@@ -137,6 +141,9 @@ type CaseDetailProps = {
   focusedTaskId?: string;
   partnerDirectory: PartnerDirectoryEntry[];
   priceRule?: PriceRule;
+  /** Live inbound calls that still need an explicit case link. */
+  callLinkCandidates?: PhoneBarCall[];
+  onLinkCall?: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
   onDataChange?: (dispatchData: DispatchData) => void;
   /** Click-to-call; absent (or refusing) while no telephony provider is wired in. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
@@ -247,6 +254,8 @@ export function CaseDetail({
   partnerDirectory,
   persistentEditing = false,
   priceRule,
+  callLinkCandidates = [],
+  onLinkCall,
   showInlineEditButton = true,
   hideNotesAndActivity = false,
   viewerProfileId,
@@ -255,6 +264,8 @@ export function CaseDetail({
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
   const [isRunningAction, setIsRunningAction] = useState(false);
   const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [linkingCallSessionId, setLinkingCallSessionId] = useState<string | null>(null);
+  const [selectedCallSessionId, setSelectedCallSessionId] = useState("");
   const [localEditing, setLocalEditing] = useState(false);
   const [taskTitle, setTaskTitle] = useState("");
   const [taskDueAt, setTaskDueAt] = useState(() => dateTimeLocalInMinutes(30));
@@ -286,6 +297,7 @@ export function CaseDetail({
     .filter((task) => !isTaskOpen(task))
     .sort((left, right) => new Date(right.completedAt ?? right.dueAt).getTime() - new Date(left.completedAt ?? left.dueAt).getTime());
   const focusedTask = focusedTaskId ? caseItem.tasks.find((task) => task.id === focusedTaskId) : undefined;
+  const selectedCall = callLinkCandidates.find((call) => call.sessionId === selectedCallSessionId) ?? callLinkCandidates[0];
   // Detail prípadu zobrazuje všetky otvorené úlohy (U-06); fokusovaná úloha ide navrch.
   const displayedTasks = focusedTask
     ? [focusedTask, ...openTasks.filter((task) => task.id !== focusedTask.id)]
@@ -655,6 +667,22 @@ export function CaseDetail({
     }
   }
 
+  async function linkSelectedCall() {
+    if (!selectedCall || !onLinkCall || linkingCallSessionId) return;
+
+    setLinkingCallSessionId(selectedCall.sessionId);
+    setNotice(null);
+    try {
+      const linked = await onLinkCall(selectedCall, caseItem.id);
+      if (linked) {
+        const number = formatPhoneNumberForDisplay(selectedCall.number) || selectedCall.number || "Neznáme číslo";
+        setNotice(`Hovor ${number} je priradený k prípadu ${caseItem.caseNumber}.`);
+      }
+    } finally {
+      setLinkingCallSessionId(null);
+    }
+  }
+
   return (
     <div className={`grid min-w-0 max-w-full overflow-x-clip ${embedded ? "gap-3" : "gap-4"}`}>
       {!embedded && <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 shadow-sm">
@@ -691,6 +719,43 @@ export function CaseDetail({
       </div>}
 
       {notice && <div role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{notice}</div>}
+
+      {onLinkCall && callLinkCandidates.length > 0 && selectedCall && (
+        <section className="rounded-lg border border-yellow-300 bg-yellow-50 p-3 shadow-sm" aria-labelledby={`case-call-link-${caseItem.id}`}>
+          <div className="flex items-start gap-3">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-zinc-950">
+              <PhoneIncoming size={17} aria-hidden="true" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h3 id={`case-call-link-${caseItem.id}`} className="text-sm font-bold text-zinc-950">Priradiť prichádzajúci hovor</h3>
+              <p className="mt-0.5 text-xs leading-5 text-zinc-600">Telefónne číslo sa s touto kartou neprepája automaticky. Vyberte hovor a potvrďte priradenie.</p>
+              <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                <select
+                  value={selectedCall.sessionId}
+                  onChange={(event) => setSelectedCallSessionId(event.target.value)}
+                  aria-label="Aktívny prichádzajúci hovor"
+                  className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-2 text-xs font-semibold text-zinc-800 outline-none ring-yellow-400 focus:ring-2"
+                >
+                  {callLinkCandidates.map((call) => {
+                    const number = formatPhoneNumberForDisplay(call.number) || call.number || "Neznáme číslo";
+                    return <option key={call.sessionId} value={call.sessionId}>{number} · {call.lineLabel}</option>;
+                  })}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => void linkSelectedCall()}
+                  disabled={!selectedCall.callId || linkingCallSessionId !== null}
+                  title={selectedCall.callId ? "Priradiť vybraný hovor k tomuto prípadu" : "Hovor sa dá priradiť po zápise do call logu"}
+                  className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-xs font-bold text-white hover:bg-zinc-800 disabled:cursor-wait disabled:bg-zinc-300 disabled:text-zinc-600"
+                >
+                  {linkingCallSessionId === selectedCall.sessionId ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Link2 size={15} aria-hidden="true" />}
+                  Priradiť k prípadu
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       {caseItem.customerSharedLocation && (
         <section className="overflow-hidden rounded-lg border border-sky-200 bg-sky-50 shadow-sm" aria-label="Doplnková GPS poloha od klienta">

@@ -164,6 +164,17 @@ export async function linkCallToCase(callId: string, caseId: string) {
       .eq("organization_id", organizationId)
       .eq("id", callId),
   );
+  if (call.session_id) {
+    // The live-call panel reads the session, while history reads the call-log
+    // row. Keep both projections aligned after an explicit dispatcher action.
+    await throwOnResult(
+      supabase
+        .from("motorist_call_sessions")
+        .update({ case_id: caseId })
+        .eq("organization_id", organizationId)
+        .eq("id", call.session_id),
+    );
+  }
   await insertSingle<CallEventRow>(
     supabase
       .from("motorist_call_events")

@@ -200,7 +200,9 @@ export async function loadActiveCalls(
       lineLabel: line?.label ?? meta.line_label ?? null,
       partnerName: line?.partner_name ?? meta.partner_name ?? null,
       caseId: session.case_id,
-      match: meta.match ?? null,
+      // Keep the field for client compatibility, but never expose a stale
+      // number-only match left on a session by an older deployment.
+      match: null,
       startedAt: session.started_at,
       answeredAt: session.answered_at,
       answeredByProfileId: session.answered_by_profile_id,

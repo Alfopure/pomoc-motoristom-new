@@ -217,7 +217,7 @@ describe("call status mapping", () => {
 });
 
 describe("call log rows", () => {
-  it("carries the line label, partner, match and timings", () => {
+  it("carries an explicit case link without exposing an automatic number match", () => {
     const row = callCenterCallFromActive(
       call({
         caseId: "case-1",
@@ -234,7 +234,7 @@ describe("call log rows", () => {
     expect(row.providerSessionId).toBe("sess-1");
     expect(row.lineLabel).toBe("Allianz Assistance");
     expect(row.queueLabel).toBe("Allianz");
-    expect(row.callerName).toBe("Ján Novák");
+    expect(row.callerName).toBeUndefined();
     expect(row.caseNumber).toBe("PM-2026-0001");
     expect(row.operatorName).toBe("Ja");
     // Wait is measured to the answer, the duration from it.

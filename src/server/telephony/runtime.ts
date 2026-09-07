@@ -122,12 +122,6 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
         (options.logger ?? telephonyLogger)({ level: "warn", scope: "call-push", sessionId, message: "notification scheduling unavailable" });
       }
     },
-    // Loaded lazily: `telephony-workflow` pulls in the whole dispatch repository,
-    // which must stay off the webhook cold path until an inbound call needs a match.
-    findCallerMatches: async (number: string) => {
-      const { findCallerMatches } = await import("@/server/telephony-workflow");
-      return findCallerMatches(number);
-    },
   };
 }
 

@@ -36,6 +36,9 @@ const IDS = {
   lineAutoklub: "00000000-0000-4000-8000-000000000203",
   lineAxa: "00000000-0000-4000-8000-000000000204",
   lineEurocross: "00000000-0000-4000-8000-000000000205",
+  lineEurop: "00000000-0000-4000-8000-000000000206",
+  lineLeasePlan: "00000000-0000-4000-8000-000000000207",
+  lineNeutralSecondary: "00000000-0000-4000-8000-000000000208",
   businessHours: "00000000-0000-4000-8000-000000002001",
   ringGroupA: "00000000-0000-4000-8000-000000002201",
   ringGroupB: "00000000-0000-4000-8000-000000002202",
@@ -44,16 +47,18 @@ const IDS = {
   telephonySettings: "00000000-0000-4000-8000-000000002601",
 };
 
-// Placeholder E.164 numbers; replace with the canonical strings from Telnyx
-// `GET /v2/phone_numbers` once the numbers are assigned to the call-control app.
-// Telnyx stores the first number as +4210232408700 (extra leading 0); the app
-// normalises inbound `to` before the lookup, so the canonical form is kept here.
+// Verified through Telnyx `GET /v2/phone_numbers`. Telnyx stores the first
+// number as +4210232408700 (extra leading 0); the app normalises inbound `to`
+// before the lookup, so the canonical form is kept here.
 const LINES = [
   { id: IDS.lineNeutral, phone_number: "+421232408700", label: "Neutrálna linka", partner_name: null, telnyx_number_id: "3040091148564563176", ivr_menu_id: IDS.ivrMain },
-  { id: IDS.lineAllianz, phone_number: "+421232408718", label: "Allianz Assistance", partner_name: "Allianz Assistance", telnyx_number_id: null, ivr_menu_id: null },
-  { id: IDS.lineAutoklub, phone_number: "+421232408732", label: "Autoklub Slovakia Assistance", partner_name: "Autoklub Slovakia Assistance", telnyx_number_id: null, ivr_menu_id: null },
-  { id: IDS.lineAxa, phone_number: "+421232408760", label: "AXA Assistance CZ", partner_name: "AXA Assistance CZ", telnyx_number_id: null, ivr_menu_id: null },
-  { id: IDS.lineEurocross, phone_number: "+421232408783", label: "Eurocross Assistance CR", partner_name: "Eurocross Assistance CR", telnyx_number_id: null, ivr_menu_id: null },
+  { id: IDS.lineAllianz, phone_number: "+421232408718", label: "Allianz Assistance", partner_name: "Allianz Assistance", telnyx_number_id: "3040142888064255967", ivr_menu_id: null },
+  { id: IDS.lineAutoklub, phone_number: "+421232408732", label: "Autoklub Slovakia Assistance s.r.o", partner_name: "Autoklub Slovakia Assistance s.r.o", telnyx_number_id: "3040142888089421792", ivr_menu_id: null },
+  { id: IDS.lineAxa, phone_number: "+421232408760", label: "AXA Assistance CZ s.r.o", partner_name: "AXA Assistance CZ s.r.o", telnyx_number_id: "3040142888089421793", ivr_menu_id: null },
+  { id: IDS.lineEurocross, phone_number: "+421232408783", label: "Eurocross Assistance Czech Republic s.r.o", partner_name: "Eurocross Assistance Czech Republic s.r.o", telnyx_number_id: "3040142888097810402", ivr_menu_id: null },
+  { id: IDS.lineEurop, phone_number: "+421232408770", label: "Europ Assistance", partner_name: "Europ Assistance", telnyx_number_id: "3043592669088449601", ivr_menu_id: null },
+  { id: IDS.lineLeasePlan, phone_number: "+421232408771", label: "LeasePlan Slovakia s.r.o", partner_name: "LeasePlan Slovakia s.r.o", telnyx_number_id: "3043592669113615426", ivr_menu_id: null },
+  { id: IDS.lineNeutralSecondary, phone_number: "+421232408774", label: "Neutrálna linka 2", partner_name: null, telnyx_number_id: "3043592669122004035", ivr_menu_id: IDS.ivrMain },
 ];
 const LINE_BY_ID = new Map(LINES.map((line) => [line.id, line]));
 

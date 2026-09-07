@@ -241,7 +241,6 @@ export function createTelephonyHarness(options: HarnessOptions = {}): TelephonyH
     logger: (entry) => logs.push(entry),
     sweepAfterEvent: options.sweepAfterEvent ?? false,
     leaseWaitMs: options.leaseWaitMs,
-    findCallerMatches: async () => ({ degraded: true, matches: [] }),
   };
 
   const harness: TelephonyHarness = {
