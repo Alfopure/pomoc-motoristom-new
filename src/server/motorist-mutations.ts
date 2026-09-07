@@ -970,7 +970,7 @@ export async function createPartnerDirectoryEntry(input: PartnerDirectoryInput, 
           phone: cleanString(input.phone),
           email: cleanString(input.email),
           active: input.active ?? true,
-          metadata: { note: cleanString(input.note) },
+          metadata: { ...objectJson(existingResult.data.metadata), note: cleanString(input.note) } as Json,
         })
         .eq("organization_id", organization.id)
         .eq("id", existingResult.data.id)
@@ -1021,7 +1021,7 @@ export async function updatePartnerDirectoryEntry(id: string, input: Partial<Par
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
   await authorizeOrganizationAccess(authorize, organization.id);
-  await getPartnerDirectoryEntry(supabase, organization.id, id);
+  const previousEntry = await getPartnerDirectoryEntry(supabase, organization.id, id);
 
   const entry = await insertSingle<PartnerDirectoryRow>(
     supabase
@@ -1033,7 +1033,7 @@ export async function updatePartnerDirectoryEntry(id: string, input: Partial<Par
         ...(input.phone !== undefined ? { phone: cleanString(input.phone) } : {}),
         ...(input.email !== undefined ? { email: cleanString(input.email) } : {}),
         ...(input.active !== undefined ? { active: input.active } : {}),
-        ...(input.note !== undefined ? { metadata: { note: cleanString(input.note) } } : {}),
+        ...(input.note !== undefined ? { metadata: { ...objectJson(previousEntry.metadata), note: cleanString(input.note) } as Json } : {}),
       })
       .eq("organization_id", organization.id)
       .eq("id", id)

@@ -85,6 +85,10 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // branches
   branches: { class: "session", role: ["manager", "admin"] },
 
+  // Shared directory: authenticated reading, manager/admin mutations checked per verb.
+  directory: { class: "session" },
+  "directory/[kind]/[id]": { class: "session", role: ["manager", "admin"] },
+
   // cases
   cases: { class: "session" },
   "cases/location-updates": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
