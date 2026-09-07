@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
-import { pickupWaitingCall, cancelConsult, completeTransfer, holdCall, startConsult, stopCallRecording, unholdCall, blindTransfer, addCallParty, reconcileCallRecordingPolicy } from "../call-actions";
+import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
+import { pickupWaitingCall, cancelConsult, completeTransfer, holdCall, startConsult, stopCallRecording, unholdCall, blindTransfer, addCallParty, reconcileCallRecordingPolicy, superviseCall, stopSupervisingCall } from "../call-actions";
 import { effectsDeps, loadRoutingContext, loadSessionSnapshot, runSessionEvent } from "../session-runner";
 import { applyReduceResult } from "./effects";
 import { parseTelnyxEnvelope } from "./events";
@@ -14,7 +15,7 @@ import { reduce } from "./transitions";
 const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
 afterEach(() => vi.unstubAllEnvs());
 
-function enabledHarness(options: { conference?: boolean; transfer?: boolean } = {}) {
+function enabledHarness(options: { conference?: boolean; transfer?: boolean; statusAnnouncements?: boolean } = {}) {
   vi.stubEnv("TELNYX_RECORDING_ENABLED", "true");
   vi.stubEnv("TELNYX_RECORDING_CONTRACT_VERIFIED", "true");
   vi.stubEnv("RECORDING_PROCESSING_ENABLED", "true");
@@ -22,6 +23,7 @@ function enabledHarness(options: { conference?: boolean; transfer?: boolean } = 
   vi.stubEnv("TELNYX_RECORDING_TRANSFER_VERIFIED", options.transfer ? "true" : "false");
   const h = createTelephonyHarness();
   h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(), inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
+  if (options.statusAnnouncements !== undefined) h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), recordingStatusAnnouncements: options.statusAnnouncements } } }, () => true);
   return h;
 }
 
@@ -35,6 +37,68 @@ async function talking(h: TelephonyHarness) {
 }
 
 describe("recording lifecycle", () => {
+  it.each([false, true])("restores a recorded call after a private whisper with status announcements=%s", async statusAnnouncements => {
+    const h = enabledHarness({ conference: true, statusAnnouncements }); const call = await talking(h);
+    const manager = { profileId: PROFILES.o4, role: "manager" as const };
+    h.db.seed("motorist_operator_devices", [{ organization_id: ORG, profile_id: manager.profileId, environment: "development", telnyx_credential_id: "test-supervisor", sip_username: "test-supervisor", credential_expires_at: null, device_seen_at: h.now().toISOString(), device_session_id: "test-supervisor-session", registration_state: "registered", metadata: {} }]);
+    await superviseCall(h.deps, manager, call.sessionId, "whisper");
+    const supervisor = h.legFor(call.sessionId, manager.profileId)!;
+    await h.legEvent(String(supervisor.telnyx_call_control_id), "call.answered");
+    expect(h.telnyx.of("recordingStop")).toHaveLength(1);
+    expect(h.telnyx.of("recordingStart")).toHaveLength(1);
+    await stopSupervisingCall(h.deps, manager, call.sessionId);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence?.keys ?? []).toEqual(statusAnnouncements ? ["recordingResumed"] : []);
+    await completeCallAnnouncements(h, call.sessionId);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence).toBeNull();
+    expect(h.session(call.sessionId).state).toBe("talking");
+    expect(h.telnyx.of("recordingStart")).toHaveLength(2);
+  });
+
+  it.each([undefined, false, true])("stops on objection with status announcements=%s while preserving the actual stop and suppression", async statusAnnouncements => {
+    const h = enabledHarness({ statusAnnouncements }); const call = await talking(h);
+    const playbackBefore = h.telnyx.of("playbackStart").length;
+    await stopCallRecording(h.deps, actor, call.sessionId);
+    expect(h.telnyx.of("recordingStop")).toHaveLength(1);
+    const metadata = readMeta(h.session(call.sessionId) as SessionRow);
+    expect(metadata.recording?.barrier).toBeNull();
+    expect(metadata.recording?.suppressionReason).toBe("objection");
+    expect(metadata.announcement_sequence?.keys ?? []).toEqual(statusAnnouncements ? ["recordingPaused"] : []);
+    expect(h.telnyx.of("playbackStart").slice(playbackBefore)).toHaveLength(statusAnnouncements ? 1 : 0);
+    await completeCallAnnouncements(h, call.sessionId);
+    expect(summarizeSessionRecording(h.session(call.sessionId).metadata)).toEqual({ state: "stopped", suppressed: true });
+    expect(h.session(call.sessionId).state).toBe("talking");
+  });
+
+  it.each([false, true])("requires a confirmed stop even when status announcements=%s", async statusAnnouncements => {
+    const h = enabledHarness({ statusAnnouncements }); const call = await talking(h);
+    const playbackBefore = h.telnyx.of("playbackStart").length;
+    h.telnyx.failAlways("recordingStop", "timeout");
+    await expect(stopCallRecording(h.deps, actor, call.sessionId)).rejects.toMatchObject({ status: 502 });
+    expect(h.telnyx.of("playbackStart")).toHaveLength(playbackBefore);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence).toBeNull();
+    expect(summarizeSessionRecording(h.session(call.sessionId).metadata).state).toBe("unknown");
+  });
+
+  it.each([false, true])("resumes held recording with status announcements=%s and no stalled continuation", async statusAnnouncements => {
+    const h = enabledHarness({ conference: true, statusAnnouncements }); const call = await talking(h);
+    await holdCall(h.deps, actor, call.sessionId); await completeCallAnnouncements(h, call.sessionId);
+    await unholdCall(h.deps, actor, call.sessionId);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence?.keys).toEqual(statusAnnouncements ? ["resume", "recordingResumed"] : ["resume"]);
+    await completeCallAnnouncements(h, call.sessionId);
+    expect(h.session(call.sessionId).state).toBe("talking");
+    expect(h.telnyx.of("recordingStart")).toHaveLength(2);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence).toBeNull();
+  });
+
+  it("keeps the preference captured at call start when the line changes mid-call", async () => {
+    const h = enabledHarness({ statusAnnouncements: false }); const call = await talking(h);
+    h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), recordingStatusAnnouncements: true } } }, () => true);
+    const playbackBefore = h.telnyx.of("playbackStart").length;
+    await stopCallRecording(h.deps, actor, call.sessionId);
+    expect(h.telnyx.of("playbackStart")).toHaveLength(playbackBefore);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcements?.recordingStatusAnnouncements).toBe(false);
+  });
+
   it("waits for the entire privacy notice and then starts capture before bridge", async () => {
     const h = enabledHarness();
     const call = await h.inbound();

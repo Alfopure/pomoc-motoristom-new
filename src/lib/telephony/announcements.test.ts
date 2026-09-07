@@ -4,10 +4,26 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   ANNOUNCEMENT_CATEGORIES, ANNOUNCEMENT_DEFINITIONS, ANNOUNCEMENT_LANGUAGES, ANNOUNCEMENT_VOICES,
-  DEFAULT_ANNOUNCEMENT_TEXTS, defaultAnnouncementConfig, readAnnouncementConfig, resolveAnnouncement,
+  DEFAULT_ANNOUNCEMENT_TEXTS, defaultAnnouncementConfig, isAnnouncementEnabled, readAnnouncementConfig, resolveAnnouncement,
 } from "./announcements";
 
 describe("caller announcement assets", () => {
+  it("silences status messages by default and for legacy storage while retaining initial notices in every language", () => {
+    const legacy = { version: 1, language: "sk", voiceId: defaultAnnouncementConfig().voiceId, prompts: {} };
+    for (const input of [null, legacy, { ...legacy, recordingStatusAnnouncements: "true" }]) {
+      const config = readAnnouncementConfig(input);
+      expect(config.recordingStatusAnnouncements).toBe(false);
+      for (const { code } of ANNOUNCEMENT_LANGUAGES) {
+        const localized = { ...config, language: code };
+        for (const key of ["recordingPaused", "recordingResumed", "recordingUnavailable"] as const) expect(isAnnouncementEnabled(localized, key)).toBe(false);
+        for (const key of ["recordingNotice", "recordingServiceNotice", "holdStart", "resume"] as const) expect(isAnnouncementEnabled(localized, key)).toBe(true);
+      }
+    }
+    const enabled = readAnnouncementConfig({ ...legacy, recordingStatusAnnouncements: true });
+    expect(isAnnouncementEnabled(enabled, "recordingPaused")).toBe(true);
+    expect(isAnnouncementEnabled(enabled, "recordingResumed")).toBe(true);
+    expect(resolveAnnouncement(enabled, "recordingNotice")).toEqual(resolveAnnouncement(defaultAnnouncementConfig(), "recordingNotice"));
+  });
   it("ships the exact configured text and intact audio in all four languages", () => {
     const manifest = JSON.parse(readFileSync(resolve("public/telephony/announcements-v4/manifest.json"), "utf8")) as Array<{ file: string; language: string; key: string; text: string; sha256: string; durationSeconds: number; runtimeStatus: string }>;
     expect(manifest).toHaveLength(105);

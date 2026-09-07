@@ -9,6 +9,7 @@ import {
   ANNOUNCEMENT_LANGUAGES,
   ANNOUNCEMENT_VOICES,
   MAX_ANNOUNCEMENT_TEXT,
+  isAnnouncementEnabled,
   resolveAnnouncement,
   estimatedAnnouncementSeconds,
   type AnnouncementConfig,
@@ -129,7 +130,7 @@ export function AnnouncementsPanel({ active = true }: { active?: boolean }) {
       setDrafts((previous) => ({ ...previous, [selectedLineId]: next }));
       setAudioErrors((previous) => ({ ...previous, [requestId]: "" }));
       const definition = ANNOUNCEMENT_DEFINITIONS.find((entry) => entry.key === key)!;
-      setNotice({ text: definition.runtimeStatus === "prepared" ? "Nahrávka je pripravená na vypočutie a uloženie. Táto situácia zatiaľ nie je zapojená do hovorov; uloženie ju nezapne." : `Nahrávka pre linku ${line.label} (${LANGUAGE_LABELS[language]}) je pripravená na vypočutie. Do hovorov ju použijete uložením zmien.`, tone: "success" });
+      setNotice({ text: definition.runtimeStatus === "prepared" ? "Nahrávka je pripravená na vypočutie a uloženie. Táto situácia zatiaľ nie je zapojená do hovorov; uloženie ju nezapne." : !isAnnouncementEnabled(next, key) ? "Nahrávka je pripravená na vypočutie a uloženie. Hláška zostáva v hovoroch vypnutá." : `Nahrávka pre linku ${line.label} (${LANGUAGE_LABELS[language]}) je pripravená na vypočutie. Do hovorov ju použijete uložením zmien.`, tone: "success" });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Nahrávku sa nepodarilo vytvoriť. Skúste to znova.");
     } finally {
@@ -199,12 +200,19 @@ export function AnnouncementsPanel({ active = true }: { active?: boolean }) {
             {!response.generationAvailable && <SettingsNotice tone="warning">Vytváranie hlasu zatiaľ nie je pripojené. Texty môžete upravovať a uložiť; používané hlášky bez nahrávky prečíta telefónny hlas.</SettingsNotice>}
 
             <div className="grid gap-3">
-              <div><h3 className="text-sm font-semibold text-zinc-900">Knižnica hlášok</h3><p className="mt-1 text-xs leading-relaxed text-zinc-500">{ANNOUNCEMENT_DEFINITIONS.length} situácií · {ANNOUNCEMENT_LANGUAGES.length} jazyky. Do hovorov je zapojených {ANNOUNCEMENT_DEFINITIONS.filter((item) => item.runtimeStatus === "active").length} hlášok; {ANNOUNCEMENT_DEFINITIONS.filter((item) => item.runtimeStatus === "prepared").length} pripravených si môžete vopred upraviť a vypočuť. Prehrávanie závisí od situácie a zapnutých funkcií.</p></div>
+              <div><h3 className="text-sm font-semibold text-zinc-900">Knižnica hlášok</h3><p className="mt-1 text-xs leading-relaxed text-zinc-500">{ANNOUNCEMENT_DEFINITIONS.length} situácií · {ANNOUNCEMENT_LANGUAGES.length} jazyky. Do hovorov je zapojených {ANNOUNCEMENT_DEFINITIONS.filter((item) => item.runtimeStatus === "active" && isAnnouncementEnabled(config, item.key)).length} hlášok; {ANNOUNCEMENT_DEFINITIONS.filter((item) => item.runtimeStatus === "prepared").length} pripravených si môžete vopred upraviť a vypočuť. Prehrávanie závisí od situácie a zapnutých funkcií.</p></div>
               <div role="group" aria-label="Kategórie hlášok" className="flex flex-wrap gap-2">
                 {ANNOUNCEMENT_CATEGORIES.map((item) => <button key={item.key} type="button" aria-pressed={category === item.key} className={`${buttonClass} ${category === item.key ? "border-yellow-400 bg-yellow-50 text-zinc-950" : ""}`} onClick={() => { panelRef.current?.querySelectorAll("audio").forEach((audio) => audio.pause()); setCategory(item.key); }}>{item.label}<span className="rounded bg-zinc-100 px-1.5 py-0.5 tabular-nums text-zinc-600">{ANNOUNCEMENT_DEFINITIONS.filter((definition) => definition.category === item.key).length}</span></button>)}
               </div>
               {category !== "active" && <SettingsNotice>Pripravené hlášky sa zatiaľ volajúcim neprehrávajú. Môžete ich upraviť, pregenerovať a uložiť; ich použitie v hovoroch tým nezapnete.</SettingsNotice>}
               {category === "recording" && <div className="flex items-start gap-2.5 rounded-md border border-zinc-200 bg-zinc-50 p-3"><ShieldCheck size={18} className="mt-0.5 shrink-0 text-zinc-500" aria-hidden="true" /><div><h3 className="text-sm font-semibold text-zinc-900">Oznámenia k nahrávaniu</h3><p className="mt-1 max-w-3xl text-xs leading-relaxed text-zinc-600">Zapnutie a aktuálnu pripravenosť nájdete v nastaveniach Nahrávanie a kvalita. Oznámenie pre vybavenie pomoci alebo aj kontrolu kvality sa vyberá podľa schválených účelov nahrávania. Obe verzie môžete upraviť; text musí zodpovedať prevádzkovateľovi a zapnutým účelom. Uloženie samotného textu nahrávanie nezapne.</p></div></div>}
+              {category === "recording" && <div className="rounded-md border border-zinc-200 bg-white p-3 sm:p-4">
+                <label className="flex min-h-11 cursor-pointer items-center justify-between gap-4">
+                  <span className="min-w-0"><span className="block text-sm font-semibold text-zinc-900">Hlášky o zmenách nahrávania</span><span id={`recording-status-hint-${line.id}`} className="mt-1 block text-xs leading-relaxed text-zinc-500">Oznámi volajúcemu vypnutie a obnovenie nahrávania. Platí pre všetky jazyky tejto linky.</span></span>
+                  <input type="checkbox" role="switch" aria-label="Hlášky o zmenách nahrávania" aria-describedby={`recording-status-hint-${line.id}`} checked={config.recordingStatusAnnouncements === true} disabled={!canEdit || saving} onChange={(event) => updateConfig({ ...config, recordingStatusAnnouncements: event.target.checked })} className="h-5 w-5 shrink-0 cursor-pointer accent-zinc-900 disabled:cursor-not-allowed" />
+                </label>
+                <p className="mt-3 border-t border-zinc-100 pt-3 text-xs leading-relaxed text-zinc-600"><strong>{config.recordingStatusAnnouncements === true ? "Zapnuté." : "Vypnuté."}</strong> Úvodný oznam o nahrávaní sa prehrá aj pri vypnutom prepínači.</p>
+              </div>}
             </div>
 
             <div className="grid min-w-0 gap-3 lg:grid-cols-2">
@@ -246,17 +254,18 @@ export function AnnouncementsPanel({ active = true }: { active?: boolean }) {
     const isGenerating = generating === promptId;
     const empty = prompt.text.trim().length === 0;
     const audioUrl = prompt.audioUrl;
+    const enabled = isAnnouncementEnabled(config, key);
     return (
       <article key={promptId} className={`min-w-0 rounded-md border border-zinc-200 bg-white p-3 sm:p-4 ${key === "greeting" ? "lg:col-span-2" : ""}`}>
         <div className="mb-3 flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-2.5">
             {index && <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-yellow-50 text-xs font-semibold text-yellow-800">{index}</span>}
-            <div><label htmlFor={fieldId} className="text-sm font-semibold text-zinc-900">{definition.label}</label><span className={`mt-1 block w-fit rounded px-1.5 py-0.5 text-[11px] font-medium ${definition.runtimeStatus === "active" ? "bg-emerald-50 text-emerald-800" : "bg-zinc-100 text-zinc-600"}`}>{definition.runtimeStatus === "active" ? "Používa sa v hovoroch" : "Pripravené · neaktívne"}</span><p id={`${fieldId}-purpose`} className="mt-1 text-xs leading-relaxed text-zinc-500">{definition.description}</p></div>
+            <div><label htmlFor={fieldId} className="text-sm font-semibold text-zinc-900">{definition.label}</label><span className={`mt-1 block w-fit rounded px-1.5 py-0.5 text-[11px] font-medium ${definition.runtimeStatus === "active" && enabled ? "bg-emerald-50 text-emerald-800" : "bg-zinc-100 text-zinc-600"}`}>{definition.runtimeStatus === "prepared" ? "Pripravené · neaktívne" : enabled ? "Používa sa v hovoroch" : "Vypnuté v hovoroch"}</span><p id={`${fieldId}-purpose`} className="mt-1 text-xs leading-relaxed text-zinc-500">{definition.description}</p></div>
           </div>
           <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-zinc-100 px-2 py-1 text-xs font-medium tabular-nums text-zinc-600"><Clock3 size={12} aria-hidden="true" />{empty ? "0 s" : `≈ ${estimatedAnnouncementSeconds(prompt.text)} s`}</span>
         </div>
         <textarea id={fieldId} lang={config.language} aria-describedby={`${fieldId}-purpose ${fieldId}-hint`} aria-invalid={empty} className="min-h-20 w-full resize-y rounded-md border border-zinc-200 bg-zinc-50/50 px-3 py-2.5 text-sm leading-relaxed text-zinc-800 outline-none ring-yellow-300 transition focus:bg-white focus:ring-2 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-500" rows={2} maxLength={MAX_ANNOUNCEMENT_TEXT} value={prompt.text} disabled={!canEdit || saving} onChange={(event) => updateText(key, event.target.value)} />
-        <div id={`${fieldId}-hint`} className="mt-1 flex items-start justify-between gap-3 text-xs"><span className={empty ? "text-red-700" : "text-zinc-500"}>{empty ? "Doplňte text hlášky." : definition.runtimeStatus === "prepared" ? "Pripravený návrh. Zatiaľ sa volajúcim neprehráva." : audioUrl ? "K textu je pripravená hlasová nahrávka." : "Bez nahrávky text počas hovoru prečíta telefónny hlas."}</span><span className="shrink-0 tabular-nums text-zinc-400">{prompt.text.length}/{MAX_ANNOUNCEMENT_TEXT}</span></div>
+        <div id={`${fieldId}-hint`} className="mt-1 flex items-start justify-between gap-3 text-xs"><span className={empty ? "text-red-700" : "text-zinc-500"}>{empty ? "Doplňte text hlášky." : definition.runtimeStatus === "prepared" ? "Pripravený návrh. Zatiaľ sa volajúcim neprehráva." : !enabled ? "Hláška je vypnutá. Text aj nahrávka zostávajú pripravené." : audioUrl ? "K textu je pripravená hlasová nahrávka." : "Bez nahrávky text počas hovoru prečíta telefónny hlas."}</span><span className="shrink-0 tabular-nums text-zinc-400">{prompt.text.length}/{MAX_ANNOUNCEMENT_TEXT}</span></div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button type="button" onClick={() => void generate(key)} disabled={!canEdit || !response?.generationAvailable || saving || Boolean(generating) || empty} className={buttonClass}><Sparkles size={14} aria-hidden="true" className={isGenerating ? "hidden" : ""} />{isGenerating && <Loader2 size={14} className="animate-spin" aria-hidden="true" />}{isGenerating ? "Vytváram nahrávku…" : audioUrl ? "Pregenerovať nahrávku" : "Vytvoriť nahrávku"}</button>
           <button type="button" onClick={() => resetPrompt(key)} disabled={!canEdit || saving} className={buttonClass} aria-label={`Obnoviť odporúčaný text: ${definition.label}`}><RotateCcw size={14} aria-hidden="true" />Odporúčaný text</button>
