@@ -108,7 +108,7 @@ export async function getPushSubscriptionStatus(supabase: AdminClient, actor: Pu
     return result;
   }
   return {
-    ...result, subscribed: true, soundEnabled: subscription.sound_enabled,
+    ...result, subscribed: true, soundEnabled: subscription.sound_enabled, clientKind: subscription.client_kind ?? "unknown",
     taskNotificationsEnabled: subscription.task_notifications_enabled !== false,
     incomingCallsEnabled: subscription.incoming_calls_enabled !== false,
     availableCallsEnabled: subscription.available_calls_enabled !== false,
@@ -129,14 +129,19 @@ export async function savePushSubscription(supabase: AdminClient, actor: PushAct
   if (typeof soundEnabled !== "boolean") throw new PushError("Chýba nastavenie zvuku.", 400);
   const choices = parsePreferencePatch(preferences ?? {});
   const subscription = parsePushSubscription(input);
+  const kind = preferences && typeof preferences === "object" ? (preferences as Record<string, unknown>).clientKind : undefined;
+  if (kind !== undefined && kind !== "web" && kind !== "mobile_app") throw new PushError("Neplatný typ aplikácie.", 400);
+  // Only an explicit installed-app registration upgrades the shared endpoint.
+  // A subsequent browser read/enrollment must never downgrade that channel.
+  const classification = kind === "mobile_app" ? { client_kind: "mobile_app" as const } : {};
   const update = await supabase.from("motorist_push_subscriptions")
-    .update({ ...subscription, ...choices, sound_enabled: soundEnabled })
+    .update({ ...subscription, ...choices, ...classification, sound_enabled: soundEnabled })
     .eq("organization_id", actor.organizationId).eq("profile_id", actor.profileId).eq("endpoint", subscription.endpoint)
     .select("id").maybeSingle();
   assertStorage(update.error);
   if (update.data) return;
   const insert = await supabase.from("motorist_push_subscriptions").insert({
-    ...subscription, ...choices, organization_id: actor.organizationId, profile_id: actor.profileId, sound_enabled: soundEnabled,
+    ...subscription, ...choices, client_kind: kind === "mobile_app" ? "mobile_app" : kind === "web" ? "web" : "unknown", organization_id: actor.organizationId, profile_id: actor.profileId, sound_enabled: soundEnabled,
   });
   // An endpoint cannot be transferred to another account, even by a crafted request.
   if (insert.error?.code === "23505") {
@@ -159,7 +164,8 @@ export async function updatePushSound(supabase: AdminClient, actor: PushActor, e
 }
 
 export async function updatePushPreferences(supabase: AdminClient, actor: PushActor, endpoint: unknown, input: unknown) {
-  const patch = parsePreferencePatch(input);
+  const patch: PreferencePatch & { client_kind?: "mobile_app" } = parsePreferencePatch(input);
+  if (input && typeof input === "object" && (input as Record<string, unknown>).clientKind === "mobile_app") patch.client_kind = "mobile_app";
   if (!Object.keys(patch).length) throw new PushError("Chýba nastavenie upozornení.", 400);
   const result = await supabase.from("motorist_push_subscriptions").update(patch)
     .eq("organization_id", actor.organizationId).eq("profile_id", actor.profileId).eq("endpoint", validatePushEndpoint(endpoint))
@@ -303,7 +309,9 @@ export async function sendCallPush(supabase: AdminClient, input: {
             .eq("organization_id", input.organizationId).eq("profile_id", input.recipientProfileId)
             .eq("id", row.id).eq("endpoint", row.endpoint).eq(column, true).abortSignal(signal).maybeSingle();
           assertStorage(current.error);
-          return current.data?.[column] === true ? current.data : null;
+          if (current.data?.[column] !== true) return null;
+          if (current.data.client_kind === "mobile_app" && !await mobileCallPushEnabled(supabase, { organizationId: input.organizationId, profileId: input.recipientProfileId }, signal)) return null;
+          return current.data;
         },
       })));
       for (const delivery of deliveries) {
@@ -337,7 +345,7 @@ async function deliverPush(supabase: AdminClient, subscription: SubscriptionRow,
       if (isExpired(subscription)) { await removeExpired(supabase, subscription, options?.signal); return "expired"; }
       const endpoint = validatePushEndpoint(subscription.endpoint);
       await webpush.sendNotification({ endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } },
-        JSON.stringify({ ...message, soundEnabled: subscription.sound_enabled }), {
+        JSON.stringify({ ...message, soundEnabled: subscription.sound_enabled, ...(subscription.client_kind === "mobile_app" ? { mobileApp: true } : {}) }), {
           vapidDetails: config,
           TTL: options ? Math.max(0, Math.min(options.maxTtl, Math.floor((options.expiresAt - Date.now()) / 1000))) : 60 * 60,
           urgency: "high", timeout: options ? Math.max(1, Math.min(options.timeout, options.deadlineAt - Date.now(), options.expiresAt - Date.now())) : 5_000,
@@ -411,4 +419,31 @@ function decodeKey(value: unknown, bytes: number) {
 
 function assertStorage(error: unknown) {
   if (error) throw new PushError("Nastavenie push notifikácií sa nepodarilo uložiť alebo načítať.", 503);
+}
+
+/** Account-level gate applies only to mobile call alerts, never tasks or desktop. */
+export async function mobileCallPushEnabled(supabase: AdminClient, actor: PushActor, signal?: AbortSignal): Promise<boolean> {
+  let query = supabase.from("motorist_call_notification_preferences").select("mobile_calls_enabled")
+    .eq("organization_id", actor.organizationId).eq("profile_id", actor.profileId);
+  if (signal) query = query.abortSignal(signal);
+  const result = await query.maybeSingle();
+  assertStorage(result.error);
+  return result.data?.mobile_calls_enabled !== false;
+}
+
+export async function getMobileCallPushSettings(supabase: AdminClient, actor: PushActor) {
+  const enabled = await mobileCallPushEnabled(supabase, actor);
+  const devices = await supabase.from("motorist_push_subscriptions").select("*")
+    .eq("organization_id", actor.organizationId).eq("profile_id", actor.profileId).eq("client_kind", "mobile_app");
+  assertStorage(devices.error);
+  return { enabled, mobileApps: (devices.data ?? []).filter((row) => !isExpired(row) && (row.incoming_calls_enabled || row.available_calls_enabled)).length };
+}
+
+export async function setMobileCallPushSettings(supabase: AdminClient, actor: PushActor, enabled: unknown) {
+  if (typeof enabled !== "boolean") throw new PushError("Neplatné nastavenie mobilných upozornení.", 400);
+  const result = await supabase.from("motorist_call_notification_preferences").upsert({
+    organization_id: actor.organizationId, profile_id: actor.profileId, mobile_calls_enabled: enabled, updated_at: new Date().toISOString(),
+  }, { onConflict: "organization_id,profile_id" });
+  assertStorage(result.error);
+  return getMobileCallPushSettings(supabase, actor);
 }

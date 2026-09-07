@@ -1,3 +1,5 @@
+import { isMobileApp } from "./phone-platform";
+
 /**
  * Bounded browser requests for telephony endpoints.
  *
@@ -93,6 +95,7 @@ export async function telephonyFetch(
       cache: "no-store",
       credentials: "same-origin",
       ...rest,
+      headers: isMobileApp() && input.startsWith("/api/telephony/") ? { ...Object.fromEntries(new Headers(rest.headers)), "x-pm-phone-kind": "mobile" } : rest.headers,
       signal: controller.signal,
     });
   } catch (error) {

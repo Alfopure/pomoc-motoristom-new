@@ -1,3 +1,5 @@
+import { isMobileApp } from "@/lib/telephony/phone-platform";
+
 export const PUSH_SETTINGS_EVENT = "pm:push-settings-changed";
 export const PUSH_SOUND_KEY = "pm:notification-sound:v1";
 let notificationSoundMemory: boolean | undefined;
@@ -29,6 +31,7 @@ export const DEFAULT_PUSH_CATEGORIES: PushCategoryPreferences = {
 };
 
 export type PushDeviceState = PushCategoryPreferences & {
+  clientKind?: string;
   support: PushSupport;
   permission: NotificationPermission;
   configured: boolean;
@@ -40,6 +43,7 @@ export type PushDeviceState = PushCategoryPreferences & {
 };
 
 type PushServerState = Partial<PushCategoryPreferences> & {
+  clientKind?: string;
   configured: boolean;
   publicKey: string | null;
   subscribed?: boolean;
@@ -134,6 +138,7 @@ export async function readPushDeviceState(): Promise<PushDeviceState> {
   const server = await pushRequest<PushServerState>(`/api/push/subscriptions${query}`);
   return {
     support,
+    clientKind: server.clientKind,
     permission,
     configured: server.configured,
     publicKey: server.publicKey,
@@ -174,6 +179,11 @@ export async function reconcilePushDeviceState(observedVersion: number, stillMou
   if (!navigator.locks?.request) return readPushDeviceState();
   return withPushDeviceLock(async () => {
     const state = await readPushDeviceState();
+    if (stillMounted() && state.subscribed && state.subscription && state.clientKind !== "mobile_app" && isMobileApp()) {
+      await pushRequest("/api/push/subscriptions", "PATCH", { endpoint: state.subscription.endpoint, clientKind: "mobile_app" });
+      state.clientKind = "mobile_app";
+      window.dispatchEvent(new Event(PUSH_SETTINGS_EVENT));
+    }
     if (stillMounted() && await removeUnownedBrowserPush(state, observedVersion)) {
       const registration = await navigator.serviceWorker.getRegistration("/");
       const notifications = await registration?.getNotifications();
@@ -245,7 +255,8 @@ async function subscribeDevicePush(state: PushDeviceState): Promise<PushSubscrip
     });
     try {
       await pushRequest("/api/push/subscriptions", "POST", {
-        subscription: subscription.toJSON(), soundEnabled,
+        subscription: subscription.toJSON(),
+        clientKind: isMobileApp() ? "mobile_app" : "web", soundEnabled,
         ...(categoriesConfigured ? categories : {}),
       });
     } catch (error) {

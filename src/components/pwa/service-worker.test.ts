@@ -10,6 +10,7 @@ afterEach(() => vi.useRealTimers());
 
 type AcknowledgementPort = { postMessage: (message: unknown) => void };
 type TestClient = {
+  id?: string;
   url: string;
   focus: () => Promise<unknown>;
   postMessage: (message: unknown, ports?: AcknowledgementPort[]) => void;
@@ -95,6 +96,15 @@ describe("service worker push delivery", () => {
 });
 
 describe("notification opening", () => {
+  it("prefers an installed mobile client when Android shares its subscription with a browser tab", async () => {
+    const client = (id: string, mobileApp: boolean) => ({ id, url: `${origin}/`, focus: vi.fn(async () => undefined), postMessage: vi.fn((message: unknown, ports?: AcknowledgementPort[]) => ports?.[0].postMessage((message as { type: string }).type === "PM_CLIENT_CONTEXT" ? { mobileApp } : { handled: true })) });
+    const web = client("web", false), mobile = client("mobile", true);
+    const fixture = workerFixture([web, mobile]);
+    await fixture.dispatch("notificationclick", { notification: { close: vi.fn(), data: { url: `/?call=${callSessionId}`, mobileApp: true } } });
+    expect(mobile.focus).toHaveBeenCalledOnce();
+    expect(web.focus).not.toHaveBeenCalled();
+    expect(fixture.openWindow).not.toHaveBeenCalled();
+  });
   it("opens the exact call through the acknowledged app without navigation or calling", async () => {
     const client = {
       url: `${origin}/`, focus: vi.fn(async () => undefined),

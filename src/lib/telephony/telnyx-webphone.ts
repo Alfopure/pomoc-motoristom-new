@@ -97,6 +97,8 @@ export type WebphoneCallView = {
 };
 
 export type WebphoneSnapshot = {
+  onDemand?: boolean;
+  sharedTab?: boolean;
   status: WebphoneStatus;
   registration: WebphoneRegistrationView;
   sipUsername: string | null;
@@ -115,6 +117,10 @@ export type WebphoneSnapshot = {
 };
 
 export type TelnyxWebphoneOptions = {
+  deviceKind?: "web" | "mobile";
+  resumeSessionId?: string | null;
+  handoff?: boolean;
+  onSession?: (id: string) => void;
   now?: () => number;
   random?: () => number;
   /** Test seam: replaces `@telnyx/webrtc`'s `new TelnyxRTC({ login_token })`. */
@@ -162,6 +168,9 @@ export class TelnyxWebphone {
   /** Set by `takeover()`: the next mint may revoke another tab's live device. */
   private takeoverRequested = false;
   private snapshot: WebphoneSnapshot;
+  private resumeSessionId: string | null = null;
+  private handoffPending = false;
+  private mintGeneration = 0;
   private readonly options: TelnyxWebphoneOptions;
   private readonly boundVisibility = () => this.onVisibilityChange();
   private readonly boundPageHide = () => {
@@ -177,6 +186,8 @@ export class TelnyxWebphone {
 
   constructor(options: TelnyxWebphoneOptions = {}) {
     this.options = options;
+    this.resumeSessionId = options.resumeSessionId ?? null;
+    this.handoffPending = options.handoff === true;
     this.snapshot = this.buildSnapshot();
   }
 
@@ -207,7 +218,9 @@ export class TelnyxWebphone {
   }
 
   stop(): void {
-    if (!this.started) return;
+    if (!this.started) { this.disposeAudio(); return; }
+    this.beaconHeartbeat({ leaving: true });
+    this.mintGeneration++;
     this.started = false;
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", this.boundVisibility);
@@ -380,6 +393,7 @@ export class TelnyxWebphone {
   }
 
   private async mintToken(): Promise<void> {
+    const generation = ++this.mintGeneration;
     const takeover = this.takeoverRequested;
     this.takeoverRequested = false;
     try {
@@ -388,17 +402,22 @@ export class TelnyxWebphone {
         headers: { "Content-Type": "application/json" },
         // The current session id makes the server treat this as a renewal of
         // our own credential rather than a takeover of another tab.
-        body: JSON.stringify({ takeover, deviceSessionId: this.state.credentials?.deviceSessionId ?? null }),
+        body: JSON.stringify({ takeover, ...(this.options.deviceKind ? { deviceKind: this.options.deviceKind } : {}), ...(this.handoffPending ? { handoff: true } : {}), deviceSessionId: this.state.credentials?.deviceSessionId ?? this.resumeSessionId }),
         label: "prihlásenie telefónu",
         timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
       });
+      if (!this.started || generation !== this.mintGeneration) return;
       if (!result.ok || !result.body?.token) {
         this.dispatch({ type: "token_rejected", status: result.status, message: result.body?.error ?? null });
         return;
       }
       const { token, expiresAt, deviceSessionId, sipUsername } = result.body;
+      this.resumeSessionId = deviceSessionId;
+      this.handoffPending = false;
+      this.options.onSession?.(deviceSessionId);
       this.dispatch({ type: "token_issued", credentials: { token, expiresAt, deviceSessionId, sipUsername } });
     } catch {
+      if (!this.started || generation !== this.mintGeneration) return;
       this.dispatch({ type: "token_rejected", status: 0, message: "Telefón sa nepodarilo prihlásiť (sieť)." });
     }
   }
@@ -457,7 +476,7 @@ export class TelnyxWebphone {
     // The tab is going away: report the phone as gone instead of refreshing
     // `device_seen_at`, which would keep the operator ringable for two minutes.
     const registrationState = options.leaving ? "unregistered" : heartbeatRegistrationState(this.state.status);
-    return JSON.stringify({ deviceSessionId, registrationState });
+    return JSON.stringify({ deviceSessionId, registrationState, ...(this.options.deviceKind ? { deviceKind: this.options.deviceKind } : {}) });
   }
 
   private async sendHeartbeat(options: { leaving?: boolean } = {}): Promise<void> {
@@ -483,6 +502,16 @@ export class TelnyxWebphone {
     } catch {
       // A missed heartbeat is not fatal: the server window is 120 s.
     }
+  }
+
+  /** Await server liveness before an explicit on-demand call request. */
+  async confirmRegistration(): Promise<void> {
+    if (this.state.status !== "registered") throw new Error("Telefón ešte nie je pripojený.");
+    const result = await this.requestJson<{ error?: string }>(HEARTBEAT_URL, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: this.heartbeatBody(),
+      label: "pripravenie telefónu", timeoutMs: TELEPHONY_TIMEOUT_MS.read,
+    });
+    if (!result.ok) throw new Error(result.body?.error ?? "Pripojenie telefónu sa nepodarilo potvrdiť.");
   }
 
   /** Fire-and-forget heartbeat that survives the tab being hidden or closed. */

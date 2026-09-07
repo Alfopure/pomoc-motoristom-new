@@ -58,7 +58,7 @@ describe("POST /api/telephony/calls/[id]/hold", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ ok: true, sessionId: "sess-1", state: "held" });
     expect(holdCall).toHaveBeenCalledWith({ marker: "deps" }, { profileId: "profile-1", role: "dispatcher", displayName: "Jana" }, "sess-1");
-    expect(createTelephonyDeps).toHaveBeenCalledWith({ organizationId: "org-1" });
+    expect(createTelephonyDeps).toHaveBeenCalledWith({ organizationId: "org-1", deviceKind: "web" });
   });
 
   it("runs the CSRF check before authentication", async () => {

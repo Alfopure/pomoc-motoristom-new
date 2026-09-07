@@ -47,6 +47,7 @@ import { commandId } from "./telnyx/command-id";
 export type CallActor = { profileId: string; role: AppRole; displayName?: string };
 
 export type CallActionDeps = SessionRunnerDeps & {
+  deviceKind?: "web" | "mobile";
   rateLimiter?: RateLimiter;
 };
 
@@ -182,7 +183,7 @@ function nowOf(deps: CallActionDeps): Date {
 }
 
 function deviceDeps(deps: CallActionDeps): DeviceDeps {
-  return { admin: deps.admin, telnyx: deps.telnyx, environment: deps.environment, now: deps.now };
+  return { admin: deps.admin, telnyx: deps.telnyx, environment: deps.environment, now: deps.now, deviceKind: deps.deviceKind };
 }
 
 async function requireLiveDevice(deps: CallActionDeps, profileId: string, message = "Telefón operátora nie je pripojený."): Promise<DeviceRow & { sipUri: string }> {
@@ -248,7 +249,7 @@ async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, tar
       nowOf(deps),
     );
     if (!allowed.eligible) throw new CallActionError("Kolega nie je dostupný.", 409, "target_unavailable");
-    const device = await requireLiveDevice(deps, target.profileId, "Kolega nemá pripojený telefón.");
+    const device = await requireLiveDevice({ ...deps, deviceKind: "web" }, target.profileId, "Kolega nemá pripojený telefón.");
     return { kind: "operator", profileId: target.profileId, sipUri: device.sipUri, label: profile.data.display_name };
   }
   if (target.number) {
@@ -510,8 +511,9 @@ export async function cancelConsult(deps: CallActionDeps, actor: CallActor, sess
 
 export async function pickupWaitingCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   requireConfigured(deps);
+  await assertLegBudget(deps);
   const session = await loadSession(deps, sessionId);
-  if (!canPickUpCall({ state: session.state, direction: session.direction, answered: Boolean(session.answered_at), operatorProfileId: session.answered_by_profile_id })) {
+  if (deps.deviceKind !== "mobile" && !canPickUpCall({ state: session.state, direction: session.direction, answered: Boolean(session.answered_at), operatorProfileId: session.answered_by_profile_id })) {
     throw new CallActionError("Hovor už nie je možné prevziať.", 409, "not_waiting");
   }
   const presence = await deps.admin.from("motorist_operator_presence").select("*").eq("profile_id", actor.profileId).maybeSingle();
@@ -522,7 +524,7 @@ export async function pickupWaitingCall(deps: CallActionDeps, actor: CallActor, 
   );
   if (!allowed.eligible) throw new CallActionError("Prevziať hovor je možné len v stave dostupný.", 409, "operator_unavailable");
   const device = await requireLiveDevice(deps, actor.profileId);
-  return runAction(deps, session, appEvent("pickup", actor, deps, { picker: { profileId: actor.profileId, sipUri: device.sipUri } }), "Prevzatie hovoru zlyhalo.");
+  return runAction(deps, session, appEvent("pickup", actor, deps, { picker: { profileId: actor.profileId, sipUri: device.sipUri, ...(deps.deviceKind === "mobile" ? { mobile: true } : {}) } }), "Prevzatie hovoru zlyhalo.");
 }
 
 // --- conference and supervision ---------------------------------------------

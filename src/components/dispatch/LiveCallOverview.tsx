@@ -243,11 +243,11 @@ function LiveCallRow({
   const timer = formatCallTimer(callElapsedSeconds(call, now));
   const isBusy = busyAction !== null;
   const canAnswer = !stale && phone?.status === "registered" && browserInviteSessionId === call.sessionId;
-  const canPickup = canPickUpCall(call) && !canAnswer;
+  const canPickup = (canPickUpCall(call) || (phone?.onDemand && Boolean(call.browserIncomingCallControlIds?.length))) && !canAnswer;
   const pickupBlockReason = stale ? "Obnovte stav hovoru"
     : isBusy || phone?.answering || (phone?.pendingOperatorLegs ?? 0) > 0 ? "Pripájanie hovoru…"
     : model.active || phone?.call ? "Najprv dokonči hovor"
-      : phone?.status !== "registered" ? "Najprv pripoj telefón"
+      : (phone?.status !== "registered" && !(phone?.onDemand && phone.status === "idle")) ? "Najprv pripoj telefón"
         : !canPickUpWithCurrentPresence(model, call) ? (call.offeredToMe ? "Čakám na zvonenie v tomto okne" : "Najprv sa nastav dostupný")
           : null;
   const answerBlocked = isBusy || Boolean(phone?.answering) || (phone?.pendingOperatorLegs ?? 0) > 0;
@@ -294,7 +294,7 @@ function LiveCallRow({
       <div className={`flex flex-wrap items-center gap-1.5 ${compact ? "pl-10" : "sm:justify-end"}`}>
         {canAnswer && <ActionButton busy={phone?.answering} disabled={answerBlocked} icon={PhoneCall} label="Prijať" tone="accept" onClick={onAnswer} />}
         {canAnswer && <ActionButton disabled={answerBlocked} icon={X} label="Odmietnuť" tone="danger-outline" onClick={onRejectOffer} />}
-        {canPickup && <ActionButton busy={busyAction === "pickup"} disabled={Boolean(pickupBlockReason)} icon={PhoneIncoming} label={pickupBlockReason ?? "Prevziať"} tone="accept" onClick={() => onCallAction("pickup", call.sessionId)} />}
+        {canPickup && <ActionButton busy={busyAction === "pickup"} disabled={Boolean(pickupBlockReason)} icon={PhoneIncoming} label={pickupBlockReason ?? (phone?.onDemand ? "Prijať v appke" : "Prevziať")} tone="accept" onClick={() => onCallAction("pickup", call.sessionId)} />}
         {call.kind === "active" && call.mine && <ActionButton busy={busyAction === "hangup"} disabled={isBusy && busyAction !== "hangup"} icon={PhoneOff} label="Ukončiť" tone="danger" onClick={confirmAndEnd} />}
         {call.kind === "active" && !call.mine && Boolean(call.operatorProfileId) && canManageCalls && !supervising && (
           <>

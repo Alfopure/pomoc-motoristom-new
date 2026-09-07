@@ -48,6 +48,7 @@ import { NotificationToastStack } from "./NotificationToastStack";
 import { PauseRoutingDialog } from "./PauseRoutingDialog";
 import { PhoneBar } from "./PhoneBar";
 import { phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
+import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { TELEPHONY_STALE_MESSAGE, useTelephonyConsole } from "./useTelephonyConsole";
 import { TaskPanel, type TaskCreateInput, type TaskDeleteInput, type TaskUpdateInput } from "./TaskPanel";
 import {
@@ -509,7 +510,7 @@ export function DispatchConsole({
   // Supervision of a colleague's live call is a manager/admin tool; the server
   // enforces it again in `call-actions.ts` (a dispatcher gets 403 either way).
   const viewerCanSupervise = canSuperviseRole(viewerRole);
-  const telephony = useTelephonyConsole({ enabled: isOperator, operators });
+  const telephony = useTelephonyConsole({ profileId: viewerProfileId ?? "", enabled: isOperator, operators });
   const appRefreshBlocked = isAppRefreshBlocked(telephony);
   const appRefreshBlockedRef = useRef(appRefreshBlocked);
   useLayoutEffect(() => {
@@ -901,6 +902,7 @@ export function DispatchConsole({
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
     const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === "PM_CLIENT_CONTEXT") { event.ports[0]?.postMessage({ mobileApp: isMobileApp() }); return; }
       if (event.data?.type === "PM_OPEN_NOTIFICATION" || event.data?.type === "PM_OPEN_CALL_NOTIFICATION") {
         // Acknowledge before the save/discard dialog: the worker must not
         // mistake time spent deciding about a draft for an unresponsive page.
