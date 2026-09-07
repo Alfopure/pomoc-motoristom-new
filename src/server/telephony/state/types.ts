@@ -2,7 +2,7 @@ import type { CallerMatch } from "@/data/dispatch-types";
 import type { CallLegRole, CallSessionState, Database, Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
 import type { BusinessHoursSchedule } from "@/lib/telephony/business-hours";
-import { ANNOUNCEMENT_DEFINITIONS, type AnnouncementConfig, type AnnouncementKey } from "@/lib/telephony/announcements";
+import { ANNOUNCEMENT_DEFINITIONS, readAnnouncementConfig, resolveAnnouncement, type AnnouncementConfig, type AnnouncementKey } from "@/lib/telephony/announcements";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import type { TelnyxClientState } from "../telnyx/client-state";
 import type { AnnouncementSequence, RecordingRoutingPolicy, RecordingState } from "./recording-types";
@@ -209,6 +209,7 @@ export type GatherSpec = {
   media: MediaRef | null;
   invalidMedia?: MediaRef | null;
   ttsText?: string | null;
+  forceSpeech?: boolean;
   validDigits?: string;
   maximumDigits?: number;
   minimumDigits?: number;
@@ -524,6 +525,8 @@ export type SessionMeta = {
   announcement_sequence?: AnnouncementSequence | null;
   announcements?: AnnouncementConfig;
   greeting?: { started_at: string; deadline_at?: string; speech_retry?: boolean; completed_at?: string; closing?: boolean } | null;
+  gather?: { id: string; started_at: string; deadline_at: string; spec: GatherSpec; failed?: boolean; call_gone?: boolean } | null;
+  closing_message?: boolean;
   match?: { top: CallerMatch | null; count: number; degraded: boolean } | null;
   ring?: {
     plan?: FrozenRingPlan | null;
@@ -540,7 +543,7 @@ export type SessionMeta = {
   internal?: { target_profile_id: string; target_sip: string; by: string } | null;
   transfer?: { kind: "blind" | "attended"; target: TransferTarget; by: string | null; at: string; completed_at?: string | null } | null;
   consult?: { target: TransferTarget; by: string | null; at: string; leg_call_control_id?: string | null; answered_at?: string | null } | null;
-  callback?: { requested_at?: string | null; source?: CallbackSource | null; confirmed?: boolean; declined_at?: string | null; digit?: string; context?: string; event_id?: string } | null;
+  callback?: { requested_at?: string | null; source?: CallbackSource | null; confirmed?: boolean; declined_at?: string | null; digit?: string; context?: string; event_id?: string; deadline_at?: string; confirmation_retry?: boolean; closing_at?: string; input_retry?: boolean } | null;
   hangup?: { by: string | null; at: string; scope: "session" } | null;
   conference?: { promoted_at: string; by: string | null } | null;
   /** A third party dialled into the conference that has not answered yet. */
@@ -552,7 +555,7 @@ export type SessionMeta = {
   after_hours?: { reason: string; at: string } | null;
   pickup?: { by: string; at: string } | null;
   /** `max_minutes` is `park_max_minutes` frozen when the caller entered the waiting room. */
-  waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null } | null;
+  waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null; audio_phase?: "combined" | "prompt" | "music"; music_until?: string | null } | null;
   /** Unanswered inbound queue only; parked/held conversations never auto-ring. */
   queue?: { next_offer_at: string } | null;
   previous_operator?: string | null;
@@ -640,4 +643,24 @@ export function callStatusForSession(session: Pick<SessionRow, "state" | "direct
     default:
       return "incoming";
   }
+}
+
+/** A conservative deadline includes the whole prompt, provider input timeout and delivery grace. */
+export function gatherTimeoutMs(session: SessionRow, spec: GatherSpec): number {
+  const key = spec.media && announcementKeyForMedia(spec.media);
+  const text = key ? resolveAnnouncement(readAnnouncementConfig(readMeta(session).announcements), key).text : spec.ttsText ?? "";
+  const spoken = Math.max(text.length / 10, text.trim().split(/\s+/).length / 1.5) * 1000;
+  const audio = spec.media ? Math.max(30_000, spoken, key === "queueWaiting" ? 75_000 : key ? 0 : 120_000) : text ? spoken : 0;
+  return Math.min(300_000, Math.max(45_000, audio + (spec.initialTimeoutMillis ?? spec.timeoutMillis ?? 5_000) + 15_000));
+}
+
+export function isGatherOverdue(session: SessionRow, now: Date): boolean {
+  if (session.ended_at || !["ivr", "after_hours", "callback_offered", "waiting", "ringing"].includes(session.state)) return false;
+  const meta = readMeta(session);
+  if (meta.gather?.call_gone) return false;
+  if (meta.callback?.closing_at) return Date.parse(meta.callback.closing_at) + 30_000 <= now.getTime();
+  const deadline = Date.parse(meta.callback?.confirmed ? meta.callback.deadline_at ?? "" : meta.gather?.deadline_at ?? "");
+  if (Number.isFinite(deadline)) return deadline <= now.getTime();
+  // A call can have entered its menu on the previous deployment.
+  return ["ivr", "after_hours", "callback_offered"].includes(session.state) && Date.parse(session.created_at) + 180_000 <= now.getTime();
 }

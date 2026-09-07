@@ -44,3 +44,17 @@ V existujúcom úvodnom menu neutrálnej linky je **1 dispečing, 2 spätné vol
 Izolované testy prechádzajú skutočným reducerom, persistenciou a API službou nad testovacou databázou/providerom: 30 minút bez vstupu, neplatná voľba, uvoľnenie operátora, návrat z pauzy, súbeh dvoch čakajúcich, opakované odmietnutie, callback počas zvonenia, oneskorená odpoveď, zlyhanie zápisu a obnova. Playwright overuje skutočný panel, filtre, tlačidlo Zavolať a uzavretú históriu. Zvuky sa skladajú z existujúcich nahrávok pomocou `scripts/build-queue-announcements.py`; manifest obsahuje kontrolné súčty.
 
 Kód prechádza Preview → PR do dev → overenie dev aliasu → PR dev do main → overenie produkcie. Až potom sa existujúci plán zmení na 20/30 sekúnd a `waiting_room`, pod kontrolou verzie konfigurácie. Nevyžaduje sa databázová migrácia. Nastavenia nahrávania, ASR a AI sa týmto postupom nemenia.
+
+## Opravy spoľahlivosti IVR a vlastných hlášok
+
+Starý názov `callback-offer.mp3` na akcii „spätné volanie“ sa pri čítaní, uložení a samotnom hovore vyhodnotí ako `callback-confirmed.mp3`. Akcia už požiadavku uložila; volajúci teda počuje „Ďakujeme, zavoláme vám späť.“ Vlastná potvrdzovacia nahrávka zostáva zachovaná. Hlásenie zdedí jazyk zmrazený pri prijatí hovoru.
+
+Bez použiteľného čísla sa neukladá spätné volanie ani neprehráva jeho potvrdenie. Počas otváracích hodín ide anonymný volajúci priamo do plánu zvonenia. V čakárni počuje poďakovanie a hudbu, bez ponuky spätného volania. Mimo otváracích hodín dostane existujúci odkaz bez tejto ponuky. Pôvodný limit čakárne platí aj pre anonymné hovory; po jeho uplynutí zaznie pravdivý záverečný odkaz. Ak číslo prestane byť použiteľné až po vstupe do menu, voľba spätného volania pokračuje do plánu zvonenia alebo existujúcej čakárne.
+
+Každý nový zber DTMF má identitu v `client_state` a termín v metadátach relácie. Staršia odpoveď s inou identitou neovplyvní aktuálne menu. Odmietnutá spravovaná nahrávka má náhradu v rovnakom jazyku cez `gather_using_speak`, s vlastným identifikátorom príkazu aj vstupu. Pri zlyhaní oboch príkazov menu pokračuje do plánu zvonenia. Pri strate webhooku stav obnoví existujúca kontrola aktívnych hovorov alebo povolený päťminútový cron. Termín zahŕňa dĺžku textu, čakanie na tlačidlo a rezervu; nejde o nový samostatný časovač. Potvrdenie poskytovateľa, že volajúci odišiel, nikdy nezačne ďalšie vytáčanie.
+
+Predvolené súbory čakárne stále obsahujú hovorenú časť aj minútu hudby. Pri vlastnom texte alebo vygenerovanom hlase sa po dohovorení spustí oddelená hudba a minútový tichý zber DTMF. Jednotka funguje počas hovorenia aj hudby. Nesprávne tlačidlo počas hudby nespustí hlášku odznova. TTS náhrada neúspešného predvoleného súboru používa rovnaký postup. Do vlastnej nahrávky sa hudba nevkladá. Pri nepripojenom zdroji hudby zostáva vstup dostupný, hudbu však nie je odkiaľ prehrať.
+
+Nesprávne tlačidlo pri samostatnej ponuke spätného volania ponuku raz zopakuje. Mlčanie ju ukončí podľa existujúceho pravidla. Potvrdenie stratenej požiadavky kontrola raz zopakuje a najprv opäť overí jej uloženie; nemení pôvodné tlačidlo, čas ani identitu žiadosti. Staršie ukončovacie príkazy sa iba zopakujú, bez oživenia ponuky.
+
+Tieto opravy nevyžadujú zmenu spoločnej databázy, nastavení poskytovateľa ani nahrávania. Overenie používa skutočný webhookový procesor a stavový automat s falošným providerom a databázou, nie reálne hovory klientov. Zvuk v reálnej telefónnej sieti treba odlíšiť od tejto automatizovanej simulácie.

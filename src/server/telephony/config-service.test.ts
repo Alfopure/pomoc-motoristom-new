@@ -619,6 +619,17 @@ describe("replaceBusinessHours and replacePauseReasons", () => {
 });
 
 describe("replaceIvrMenus", () => {
+  it.each(["callback-offer.mp3", "https://audio.test/custom-confirmation.mp3"])("normalizes only the legacy invitation when saving callback media %s", async file => {
+    const { harness, deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    const menu = before.ivrMenus[0];
+    expect(menu.options.find(option => option.action === "callback")?.promptMediaUrl).toBe("callback-confirmed.mp3");
+    await replaceIvrMenus(deps, { organizationId: ORG, actor: ACTOR, expectedVersion: before.routingVersion,
+      ivrMenus: [{ ...menu, options: menu.options.map(option => option.action === "callback" ? { ...option, promptMediaUrl: file } : option) }] });
+    const saved = harness.rows("motorist_ivr_options").find(option => option.action === "callback");
+    expect(saved?.prompt_media_url).toBe(file.startsWith("https:") ? file : "callback-confirmed.mp3");
+  });
+
   it("swaps the digit options of a menu and audits the change once", async () => {
     const { harness, deps } = harnessDeps();
     const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });

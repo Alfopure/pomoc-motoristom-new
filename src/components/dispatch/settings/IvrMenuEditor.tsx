@@ -312,7 +312,7 @@ export function IvrMenuEditor({
                               />
                             </SettingsField>
                           ) : ACTIONS_WITH_PROMPT.includes(option.action) ? (
-                            <SettingsField label="Nahrávka voľby" hint="Prehrá sa pred ukončením hovoru.">
+                            <SettingsField label="Nahrávka voľby" hint={option.action === "callback" ? "Potvrdzuje už uložené spätné volanie. Nežiadajte ďalšie stlačenie tlačidla. Prázdne pole použije spoločnú hlášku potvrdenia." : "Prehrá sa pred ukončením hovoru."}>
                               <input
                                 className={settingsInputClass}
                                 disabled={!canEdit}

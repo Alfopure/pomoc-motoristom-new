@@ -107,7 +107,7 @@ describe("ivr decisions", () => {
 
   it("maps every digit onto its action", () => {
     expect(decide("1")).toMatchObject({ kind: "ring_plan", planId: PLAN_ID, targetMissing: false });
-    expect(decide("2")).toMatchObject({ kind: "callback", prompt: { file: "callback-offer.mp3" } });
+    expect(decide("2")).toMatchObject({ kind: "callback", prompt: { file: "callback-confirmed.mp3" } });
     expect(decide("3")).toMatchObject({ kind: "external_number", number: "+421900000000" });
     expect(decide("4")).toMatchObject({ kind: "waiting_room" });
     expect(decide("6")).toMatchObject({ kind: "hangup", prompt: { file: "odkaz.mp3" } });
@@ -238,7 +238,7 @@ describe("ivr through the pipeline", () => {
     expect(h.session(call.sessionId).ring_plan_id).toBe(PLAN_ID);
   });
 
-  it("records the callback and plays the option's own confirmation for digit 2", async () => {
+  it("records the callback and replaces the legacy invitation with confirmation for digit 2", async () => {
     const h = createTelephonyHarness();
     const call = await ivrCall(h, "cc-ivr-callback");
 
@@ -246,7 +246,7 @@ describe("ivr through the pipeline", () => {
 
     expect(h.session(call.sessionId).state).toBe("callback_offered");
     expect(h.rows("motorist_callback_requests")).toEqual([expect.objectContaining({ source: "ivr", session_id: call.sessionId, caller_number: NUMBERS.customer })]);
-    expect(h.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v4/sk/callback-offer.mp3");
+    expect(h.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v4/sk/callback-confirmed.mp3");
   });
 
   it("still reaches an operator when the digit's ring plan was deleted", async () => {

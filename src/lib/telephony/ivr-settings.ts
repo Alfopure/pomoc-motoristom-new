@@ -10,3 +10,8 @@ export const MAX_IVR_TRIES = 5;
 export const MIN_IVR_TIMEOUT_SECS = 1;
 export const MAX_IVR_TIMEOUT_SECS = 30;
 export const MAX_TTS_LENGTH = 600;
+
+/** Old seeds put the invitation on a callback action, which already saves the request. */
+export function callbackConfirmationMedia(file: string | null | undefined): string | null {
+  return file === "callback-offer.mp3" || file === "/telephony/callback-offer.mp3" ? "callback-confirmed.mp3" : file || null;
+}
