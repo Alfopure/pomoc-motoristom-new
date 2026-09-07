@@ -86,6 +86,9 @@ a dispatcher from silently replacing a colleague's concurrent edit. Cases and
 active dispatchers are checked against the authenticated actor's organization.
 The provider event remains unchanged. Assignment never changes the case's contact
 or location. A newly created case can be selected when the SMS window is reopened.
+Until replies are enabled for the organization, the inbox also explains that
+incoming replies are inactive and clients should use the SMS contact telephone.
+This notice uses the same server-provided channel state as the editor.
 
 `GET /api/sms/inbox` lists 50 messages with pagination; `?summary=true` provides the
 unread count for the dashboard badge. `GET /api/sms/inbox/[id]` shows a paginated
@@ -109,8 +112,12 @@ previews are outside this SMS rollout.
 An authenticated inventory check on 2026-09-07 confirmed that all eight existing
 Slovak numbers have `features.sms = null`. The two known profiles still use
 `PomocMotor`. API access is available through this copy's Vercel configuration;
-it is no longer a blocker. See the [number selection audit](sms-number-selection.md)
-for the candidate, prices and remaining live-network uncertainty.
+it is no longer a blocker. The user rejected a US number; that proposal is closed.
+This rollout finishes the available software work with receiving replies inactive.
+See the [number selection audit](sms-number-selection.md) for the decision and
+remaining requirements for a future non-US number.
+
+The following steps apply only to a future activation with a suitable non-US number:
 
 1. Purchase only after explicit purchase authorization. Recheck availability and
    price immediately before ordering. Do not change the existing voice lines.

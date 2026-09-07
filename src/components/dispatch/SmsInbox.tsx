@@ -38,8 +38,9 @@ export function useSmsUnreadCount() {
   return count;
 }
 
-export function SmsInbox({ cases, onReply, replyDisabled, onCreateCase }: {
+export function SmsInbox({ cases, repliesEnabled, onReply, replyDisabled, onCreateCase }: {
   cases: SmsCaseOption[];
+  repliesEnabled: boolean | null;
   onReply: (message: SmsInboxMessage) => void;
   replyDisabled: boolean;
   onCreateCase?: () => void;
@@ -74,6 +75,10 @@ export function SmsInbox({ cases, onReply, replyDisabled, onCreateCase }: {
         <option value="all">Všetky prijaté</option><option value="unread">Neprečítané</option><option value="unassigned">Bez priradeného prípadu</option>
       </select>
     </div>
+    {repliesEnabled === false && <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3.5 text-sm leading-6 text-amber-950">
+      <p className="font-semibold">Príjem odpovedí SMS nie je aktívny.</p>
+      <p>Klient má použiť kontaktný telefón uvedený v SMS. Odpovede sprístupníme po overení vhodného čísla.</p>
+    </div>}
     <p className="text-xs leading-5 text-zinc-500">Nová správa začína bez prípadu. Telefónne číslo môže patriť k viacerým prípadom; priradenie vyberá dispečer.</p>
     {error && <p role="alert" className="text-sm text-red-800">{error}</p>}
     {!data && !error && <p role="status">Načítavam prijaté SMS…</p>}
