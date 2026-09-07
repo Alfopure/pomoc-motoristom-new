@@ -59,11 +59,25 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
   const [tab, setTab] = useState<"editor" | "history">("editor");
   const [historyAll, setHistoryAll] = useState(!caseId);
   const [sender, setSender] = useState("PomocMotor");
+  const [previousOpen, setPreviousOpen] = useState(open);
+  const [openingIntent, setOpeningIntent] = useState(() => JSON.stringify([caseId, initialTemplate, initialPhone]));
   const selectedCase = cases.find((entry) => entry.id === selectedCaseId);
   const caseAvailable = Boolean(selectedCaseId && (selectedCase?.validPhone || (caseId === selectedCaseId && !selectedCase)));
   const requiresCase = template !== "custom";
   const segments = smsSegments(message.trim());
   const unresolved = result?.sms?.statusDetail === "send_unconfirmed" || result?.sms?.statusDetail === "sending_to_provider";
+  // A later explicit quick action may request another template/case. Apply it
+  // only on reopening, and never discard an unresolved send or change an open draft.
+  if (open !== previousOpen) {
+    setPreviousOpen(open);
+    const intent = JSON.stringify([caseId, initialTemplate, initialPhone]);
+    if (open && intent !== openingIntent && (!attempted || (result && !unresolved))) {
+      setOpeningIntent(intent);
+      setSelectedCaseId(caseId ?? ""); setTemplate(initialTemplate); setPhone(initialPhone);
+      setPreview(null); setMessage(""); setResult(null); setAttempted(false);
+      setRequestId(crypto.randomUUID()); setDeparted(false); setEta(""); setError("");
+    }
+  }
   const locked = preparing || sending || attempted;
   let validation = "";
   if (preview) {

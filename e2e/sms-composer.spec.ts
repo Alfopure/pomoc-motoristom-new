@@ -123,3 +123,12 @@ test("delivery refresh and incident-location adoption work after closing the edi
   expect(state.locationWrites[0]).toMatchObject({ pickup: { lat: 48.1, lng: 17.1 } });
   expect(state.errors).toEqual([]);
 });
+
+test("a later explicit location quick action opens that template without redirecting an open draft", async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => (window as unknown as { changeSmsTemplate(): void }).changeSmsTemplate());
+  await expect(page.getByLabel("Šablóna")).toHaveValue("custom");
+  await page.getByRole("button", { name: "Zavrieť SMS" }).click();
+  await page.getByRole("button", { name: "Otvoriť SMS" }).click();
+  await expect(page.getByLabel("Šablóna")).toHaveValue("location_request");
+});
