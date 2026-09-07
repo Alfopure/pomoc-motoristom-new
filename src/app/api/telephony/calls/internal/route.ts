@@ -22,7 +22,7 @@ export async function POST(request: Request) {
     if (notConfigured) return notConfigured;
 
     const body = await readJsonBody<{ targetProfileId?: unknown }>(request);
-    const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
+    const deps = await createTelephonyDeps({ organizationId: actor.organizationId, deviceKind: request.headers.get("x-pm-phone-kind") === "mobile" ? "mobile" : "web" });
     const result = await callColleague(deps, toCallActor(actor), { targetProfileId: readString(body.targetProfileId) ?? "" });
 
     return Response.json({ ok: true, ...result }, { status: 201 });

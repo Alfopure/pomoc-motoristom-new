@@ -250,11 +250,11 @@ describe("independent push categories", () => {
     const fixture = browserFixture();
     await enableDevicePush({ ...fixture.state, taskNotificationsEnabled: false, incomingCallsEnabled: true, availableCallsEnabled: false, callNotificationsConfigured: true });
     expect(JSON.parse(fixture.fetchMock.mock.calls[0]![1]!.body as string)).toEqual({
-      subscription: fixture.subscription.toJSON(), soundEnabled: true, taskNotificationsEnabled: false, incomingCallsEnabled: true, availableCallsEnabled: false,
+      subscription: fixture.subscription.toJSON(), clientKind: "web", soundEnabled: true, taskNotificationsEnabled: false, incomingCallsEnabled: true, availableCallsEnabled: false,
     });
     const legacy = browserFixture();
     await enableDevicePush(legacy.state);
-    expect(JSON.parse(legacy.fetchMock.mock.calls[0]![1]!.body as string)).toEqual({ subscription: legacy.subscription.toJSON(), soundEnabled: true });
+    expect(JSON.parse(legacy.fetchMock.mock.calls[0]![1]!.body as string)).toEqual({ subscription: legacy.subscription.toJSON(), clientKind: "web", soundEnabled: true });
   });
 
   it("does not overwrite another tab's fresh category preferences while reusing its owned endpoint", async () => {
@@ -266,6 +266,6 @@ describe("independent push categories", () => {
     await enableDevicePush({ ...fixture.state, callNotificationsConfigured: true });
     expect(fixture.subscribe).not.toHaveBeenCalled();
     const post = fixture.fetchMock.mock.calls.find(([, init]) => init.method === "POST")!;
-    expect(JSON.parse(post[1].body as string)).toEqual({ subscription: { endpoint: "already-owned" }, soundEnabled: false, taskNotificationsEnabled: false, incomingCallsEnabled: false, availableCallsEnabled: true });
+    expect(JSON.parse(post[1].body as string)).toEqual({ subscription: { endpoint: "already-owned" }, clientKind: "web", soundEnabled: false, taskNotificationsEnabled: false, incomingCallsEnabled: false, availableCallsEnabled: true });
   });
 });

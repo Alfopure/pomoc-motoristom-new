@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
-import { cancelConsult, completeTransfer, holdCall, startConsult, stopCallRecording, unholdCall, blindTransfer, addCallParty, reconcileCallRecordingPolicy } from "../call-actions";
+import { pickupWaitingCall, cancelConsult, completeTransfer, holdCall, startConsult, stopCallRecording, unholdCall, blindTransfer, addCallParty, reconcileCallRecordingPolicy } from "../call-actions";
 import { effectsDeps, loadRoutingContext, loadSessionSnapshot, runSessionEvent } from "../session-runner";
 import { applyReduceResult } from "./effects";
 import { parseTelnyxEnvelope } from "./events";
@@ -320,5 +320,27 @@ describe("recording lifecycle", () => {
     const result = reduce(snapshot.session, snapshot.legs, snapshot.attempts, parseTelnyxEnvelope(raw)!, context);
     expect(result.ignored).toContain("no transition");
     expect(recordingIntent(recorder.id).length).toBeLessThanOrEqual(32);
+  });
+});
+
+
+describe("mobile answer with active recording policy", () => {
+  it.each(["mobile", "web"])("keeps the %s winner and recording intact after the other device answers late", async (winner) => {
+    const h = enabledHarness({ conference: true });
+    h.db.seed("motorist_operator_mobile_devices", [{ organization_id: ORG, profile_id: actor.profileId, environment: "development", sip_username: "mobile-operator", device_seen_at: h.now().toISOString(), registration_state: "registered" }]);
+    const call = await h.inbound(); await completeCallAnnouncements(h, call.sessionId);
+    const original = String(h.legFor(call.sessionId, actor.profileId)!.telnyx_call_control_id);
+    const mobile = await pickupWaitingCall({ ...h.deps, deviceKind: "mobile" }, actor, call.sessionId);
+    const accepted = winner === "mobile" ? mobile.operatorLegCallControlId! : original;
+    const loser = winner === "mobile" ? original : mobile.operatorLegCallControlId!;
+    await h.legEvent(accepted, "call.answered");
+    const recording = structuredClone(readMeta(h.session(call.sessionId) as SessionRow).recording);
+    const stops = h.telnyx.of("recordingStop").length;
+    await h.legEvent(loser, "call.answered"); await h.legEvent(loser, "call.hangup");
+    expect(h.session(call.sessionId).state).toBe("talking");
+    expect(readMeta(h.session(call.sessionId) as SessionRow).answered_leg_call_control_id).toBe(accepted);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).recording).toEqual(recording);
+    expect(h.telnyx.of("recordingStop")).toHaveLength(stops);
+    expect(h.telnyx.of("hangup").some((command) => command.params.callControlId === accepted)).toBe(false);
   });
 });

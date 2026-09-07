@@ -107,6 +107,7 @@ export const TABLE_DEFAULTS: Record<string, FakeRow> = {
   motorist_call_legs: { state: "initiated", client_state: {}, metadata: {}, profile_id: null, hangup_cause: null, hangup_source: null, answered_at: null, bridged_at: null, ended_at: null, telnyx_call_leg_id: null },
   motorist_ring_attempts: { result: "pending", position: 0, ring_secs: 20, leg_id: null, offered_at: null, answered_at: null, ended_at: null },
   motorist_operator_presence: { status: "offline", current_session_id: null, pause_reason_id: null, wrap_up_until: null },
+  motorist_operator_mobile_devices: { registration_state: "unregistered", metadata: {}, device_seen_at: null, device_session_id: null },
   motorist_operator_devices: { registration_state: "unregistered", metadata: {}, device_seen_at: null, device_session_id: null },
   motorist_calls: { recording_status: "not_requested", transcript_status: "not_requested", raw_payload: {}, raw_latest_payload: {} },
   motorist_callback_requests: { status: "open", metadata: {}, caller_name: null, session_id: null, line_id: null, case_id: null, claimed_by: null, claimed_at: null, due_at: null, resolved_at: null, notes: null },

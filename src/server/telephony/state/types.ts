@@ -184,7 +184,7 @@ export type AppEvent = {
   occurredAt: string;
   target?: TransferTarget;
   /** For `pickup`: the picking operator's device. */
-  picker?: { profileId: string; sipUri: string };
+  picker?: { profileId: string; sipUri: string; mobile?: boolean };
   /** For `mute_party` / `unmute_party` / `remove_party`: the participant leg the action targets. */
   party?: { callControlId: string; label: string };
   /** For `supervise`: the supervisor's own device and the mode they asked for. */
@@ -518,6 +518,8 @@ export type RoutingContext = {
 export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" | "consult";
 
 export type SessionMeta = {
+  accepted_device_legs?: Record<string, string>;
+  mobile_offers?: Record<string, { source: string; at: string }>;
   recording?: RecordingState;
   announcement_sequence?: AnnouncementSequence | null;
   announcements?: AnnouncementConfig;

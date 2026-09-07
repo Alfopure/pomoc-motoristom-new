@@ -28,6 +28,8 @@ export type DeviceDeps = {
   telnyx: TelnyxClient | null;
   environment: TelephonyEnvironment;
   now?: () => Date;
+  /** Mobile credentials are used only for explicitly requested app calls. */
+  deviceKind?: "web" | "mobile";
   /** Override the credential connection (defaults to the client's configured one). */
   credentialConnectionId?: string | null;
 };
@@ -47,6 +49,10 @@ export const CREDENTIAL_TAG = "pomoc-motoristom";
 /** Refresh the credential when it expires within this window. */
 const CREDENTIAL_RENEW_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+function deviceTable(deps: DeviceDeps) {
+  return deps.deviceKind === "mobile" ? "motorist_operator_mobile_devices" as const : "motorist_operator_devices" as const;
+}
+
 function nowOf(deps: DeviceDeps): Date {
   return (deps.now ?? (() => new Date()))();
 }
@@ -57,7 +63,7 @@ export function credentialName(environment: TelephonyEnvironment, profileId: str
 
 export async function getOperatorDevice(deps: DeviceDeps, input: { organizationId: string; profileId: string }): Promise<DeviceRow | null> {
   const { data, error } = await deps.admin
-    .from("motorist_operator_devices")
+    .from(deviceTable(deps))
     .select("*")
     .eq("organization_id", input.organizationId)
     .eq("profile_id", input.profileId)
@@ -68,7 +74,7 @@ export async function getOperatorDevice(deps: DeviceDeps, input: { organizationI
 }
 
 export async function listOperatorDevices(deps: DeviceDeps, organizationId: string): Promise<DeviceRow[]> {
-  const { data, error } = await deps.admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment);
+  const { data, error } = await deps.admin.from(deviceTable(deps)).select("*").eq("organization_id", organizationId).eq("environment", deps.environment);
   if (error) throw new OperatorDeviceError(`Zariadenia sa nepodarilo načítať: ${error.message}`, 500);
   return data ?? [];
 }
@@ -89,7 +95,7 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
   if (!deps.telnyx) throw new OperatorDeviceError(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
 
   const credential = await deps.telnyx.createTelephonyCredential({
-    name: credentialName(deps.environment, input.profileId),
+    name: credentialName(deps.environment, input.profileId) + (deps.deviceKind === "mobile" ? "-mobile" : ""),
     tag: CREDENTIAL_TAG,
     connectionId: deps.credentialConnectionId ?? undefined,
   });
@@ -109,7 +115,7 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
   // The unique key is per organisation (`operator_devices_org_profile_env_idx`):
   // a global `(profile_id, environment)` key would let an upsert with a profile
   // from another organisation rewrite that organisation's device row.
-  const upserted = await deps.admin.from("motorist_operator_devices").upsert(values, { onConflict: "organization_id,profile_id,environment" }).select("*").single();
+  const upserted = await deps.admin.from(deviceTable(deps)).upsert(values, { onConflict: "organization_id,profile_id,environment" }).select("*").single();
   if (upserted.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo uložiť: ${upserted.error.message}`, 500);
   // The superseded credential has to die at Telnyx: it can still register and
   // the JWT minted from it stays valid for up to 24 h, so keeping it would make
@@ -174,9 +180,15 @@ export const TOKEN_TAKEOVER_MESSAGE = "Telefón je prihlásený v inom okne aleb
 
 export async function issueWebphoneToken(
   deps: DeviceDeps,
-  input: { organizationId: string; profileId: string; userAgent?: string | null; takeover?: boolean; deviceSessionId?: string | null },
+  input: { organizationId: string; profileId: string; userAgent?: string | null; takeover?: boolean; handoff?: boolean; deviceSessionId?: string | null },
 ): Promise<WebphoneToken> {
   if (!deps.telnyx) throw new OperatorDeviceError(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
+  if (input.takeover) {
+    const presence = await deps.admin.from("motorist_operator_presence").select("status")
+      .eq("organization_id", input.organizationId).eq("profile_id", input.profileId).maybeSingle();
+    if (presence.error) throw new OperatorDeviceError("Stav operátora sa nepodarilo overiť.", 503);
+    if (presence.data?.status === "on_call") throw new OperatorDeviceError("Prebiehajúci hovor nemožno presunúť pripojením iného prehliadača. Najprv ho dokončite.", 409);
+  }
   // Opening the dispatch on a second device must not silently steal incoming
   // calls from a live phone, even between calls. Own-token renewal is allowed.
   if (!input.takeover) {
@@ -195,26 +207,27 @@ export async function issueWebphoneToken(
   const token = await deps.telnyx.mintCredentialToken(credentialId);
   const expiresAt = decodeJwtExpiry(token) ?? new Date(now.getTime() + DEFAULT_TOKEN_TTL_MS);
   // A heartbeat already in flight must remain valid across this tab's renewal.
-  const deviceSessionId = sameTab ? device.device_session_id! : randomUUID();
+  const renewing = sameTab && !input.handoff;
+  const deviceSessionId = renewing ? device.device_session_id! : randomUUID();
   const metadata = metadataOf(device);
   const revoked = Array.isArray(metadata.revoked_sessions) ? (metadata.revoked_sessions as unknown[]).slice(-9) : [];
-  if (!sameTab && device.device_session_id) revoked.push({ id: device.device_session_id, revoked_at: now.toISOString() });
+  if (!renewing && device.device_session_id) revoked.push({ id: device.device_session_id, revoked_at: now.toISOString() });
 
   // A refresh for a phone that is already registered and still sending
   // heartbeats must not report it as registering: the ring engine skips any
   // operator who is not "registered", so downgrading here made the operator
   // invisible until the next heartbeat and inbound calls silently walked past
   // them. Only a genuinely new or stale registration starts as "registering".
-  const stillLive = sameTab && deviceIsLive(device, now);
+  const stillLive = renewing && deviceIsLive(device, now);
 
   let update = deps.admin
-    .from("motorist_operator_devices")
+    .from(deviceTable(deps))
     .update({
       last_token_issued_at: now.toISOString(),
       token_expires_at: expiresAt.toISOString(),
       device_session_id: deviceSessionId,
       registration_state: stillLive ? "registered" : "registering",
-      ...(!sameTab ? { device_seen_at: null } : {}),
+      ...(!renewing ? { device_seen_at: null } : {}),
       user_agent: input.userAgent ?? device.user_agent,
       metadata: toJson({ ...metadata, revoked_sessions: revoked }),
     })
@@ -247,7 +260,7 @@ export async function touchDevice(
   const values: Database["public"]["Tables"]["motorist_operator_devices"]["Update"] = { device_seen_at: leaving ? null : now };
   if (input.registrationState) values.registration_state = input.registrationState;
   if (input.userAgent) values.user_agent = input.userAgent;
-  const updated = await deps.admin.from("motorist_operator_devices").update(values).eq("id", device.id).eq("device_session_id", input.deviceSessionId).select("*").maybeSingle();
+  const updated = await deps.admin.from(deviceTable(deps)).update(values).eq("id", device.id).eq("device_session_id", input.deviceSessionId).select("*").maybeSingle();
   if (updated.error) throw new OperatorDeviceError(`Heartbeat sa nepodarilo uložiť: ${updated.error.message}`, 500);
   if (!updated.data) return { ok: false, reason: "stale_session" };
   return { ok: true, device: updated.data };
@@ -256,7 +269,7 @@ export async function touchDevice(
 /** Revokes the browser session id only (the tab's next heartbeat gets 409). */
 async function revokeDeviceSession(deps: DeviceDeps, device: DeviceRow): Promise<DeviceRow> {
   const updated = await deps.admin
-    .from("motorist_operator_devices")
+    .from(deviceTable(deps))
     .update({ device_session_id: `revoked:${randomUUID()}`, registration_state: "unregistered", device_seen_at: null })
     .eq("id", device.id)
     .select("*")
@@ -284,6 +297,11 @@ export async function disconnectDevice(
   deps: DeviceDeps,
   input: { organizationId: string; profileId: string; keepCredential?: boolean },
 ): Promise<DisconnectResult | null> {
+  if (!deps.deviceKind && !input.keepCredential) {
+    const web = await disconnectDevice({ ...deps, deviceKind: "web" }, input);
+    const mobile = await disconnectDevice({ ...deps, deviceKind: "mobile" }, input);
+    return web ?? mobile;
+  }
   const device = await getOperatorDevice(deps, input);
   if (!device) return null;
   const revoked = await revokeDeviceSession(deps, device);
@@ -292,7 +310,7 @@ export async function disconnectDevice(
   const credentialId = revoked.telnyx_credential_id;
   await deleteCredentialAtProvider(deps, credentialId, "Telefón sme odhlásili, ale prihlasovacie údaje sa nepodarilo zrušiť u operátora");
   const cleared = await deps.admin
-    .from("motorist_operator_devices")
+    .from(deviceTable(deps))
     .update({
       telnyx_credential_id: null,
       sip_username: null,

@@ -224,7 +224,8 @@ class TransitionBuilder {
     const byRole = byId ?? this.legs.find((leg) => leg.role === "customer");
     if (byRole || this.session.direction !== "internal") return byRole;
     // Internal calls have no PSTN party: the far end is the colleague's leg.
-    return this.legs.find((leg) => legIntent(leg) === "internal");
+    const accepted = this.meta.internal?.target_profile_id ? this.meta.accepted_device_legs?.[this.meta.internal.target_profile_id] : null;
+    return this.legs.find((leg) => accepted ? leg.telnyx_call_control_id === accepted : legIntent(leg) === "internal");
   }
 
   /** The leg currently talking to the customer (operator or external). */
@@ -661,6 +662,11 @@ function onLegAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged
     return onFarEndAnswered(b, leg, opts);
   }
 
+  const acceptedId = leg.profile_id ? b.meta.accepted_device_legs?.[leg.profile_id] : null;
+  if (acceptedId && acceptedId !== leg.telnyx_call_control_id && b.openLegs().some((other) => other.telnyx_call_control_id === acceptedId && other.answered_at)) {
+    b.cmd(hangupCmd(b, leg, "answered_on_other_device", false));
+    return b.note("other device already answered").result();
+  }
   if (leg.role === "consult") return onConsultAnswered(b, leg);
   if (leg.role === "supervisor") return onSupervisorAnswered(b, leg);
   if (intent === PARTY_INTENT) return onAddedPartyAnswered(b, leg);
@@ -1013,6 +1019,15 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
   b.call.status = "answered";
   b.call.answered_at = b.session.answered_at ?? opts.at;
   b.call.ring_seconds = secondsBetween(b.session.started_at, opts.at);
+  if ((leg.client_state as { autoAnswer?: boolean } | null)?.autoAnswer) {
+    const caller = b.openLegs().find((other) => legIntent(other) === "internal_caller");
+    if (!caller) throw new CallActionRejected("Volajúci už nie je pripojený.", 409);
+    const bridgeId = b.cmdId(leg.telnyx_call_control_id, "bridge:mobile-internal");
+    b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(caller), target: ref(leg), parkAfterUnbridge: "self" });
+    const failed = b.fork();
+    b.compensate(bridgeId, "mobile internal connection failed", [hangupCmd(failed, leg, "mobile_bridge_failed")], failed.transition());
+  }
+  acceptDeviceLeg(b, leg);
   b.note("colleague answered → talking");
   if (leg.profile_id) b.guard = { profileId: leg.profile_id, onRejected: { next: rejected.transition(), commands: rejected.commands } };
   return b.result();
@@ -1111,6 +1126,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
     }
     if (!leg.profile_id) b.patchMeta({ answered_external: leg.to_number ?? null });
     b.patchMeta({ pickup: null, answered_leg_call_control_id: leg.telnyx_call_control_id });
+    rememberAcceptedDeviceLeg(b, leg);
     const wasQueued = Boolean(b.meta.queue);
     if (intent === "pickup" || wasQueued) b.patchMeta({ waiting: null, queue: null });
     if (intent === "transfer") b.patchMeta({ transfer: b.meta.transfer ? { ...b.meta.transfer, completed_at: opts.at } : null });
@@ -1172,6 +1188,7 @@ function onConsultAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
   const join = () => {
     b.cmd({ kind: "conference_join", commandId: b.cmdId(leg.telnyx_call_control_id, "conference:join"), leg: ref(leg) });
     b.patchMeta({ consult: b.meta.consult ? { ...b.meta.consult, leg_call_control_id: leg.telnyx_call_control_id, answered_at: b.nowIso } : null });
+    acceptDeviceLeg(b, leg);
     b.note("consult answered → joined conference");
   };
   if (leg.profile_id) {
@@ -1213,6 +1230,7 @@ function onAddedPartyAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
     const failed = b.fork();
     failed.setState(previous).patchMeta({ party_pending: null });
     b.compensate(joinId, "party could not join the conference → party leg hung up", [hangupCmd(b, leg, "party_join_failed")], failed.transition());
+    acceptDeviceLeg(b, leg);
     b.note("added party answered → joined the conference");
   };
 
@@ -1422,7 +1440,10 @@ function finishIfQuiet(b: TransitionBuilder, at: string): void {
 }
 
 function hasOtherAcceptedLeg(b: TransitionBuilder, leg: LegRow): boolean {
-  if (!leg.profile_id || (leg.role !== "operator" && leg.role !== "external")) return false;
+  if (!leg.profile_id) return false;
+  const acceptedId = b.meta.accepted_device_legs?.[leg.profile_id];
+  if (acceptedId && acceptedId !== leg.telnyx_call_control_id && b.openLegs().some((other) => other.telnyx_call_control_id === acceptedId && other.answered_at)) return true;
+  if (leg.role !== "operator" && leg.role !== "external") return false;
   const accepted = b.answeringLeg();
   return Boolean(accepted?.answered_at && accepted.profile_id === leg.profile_id && accepted.telnyx_call_control_id !== leg.telnyx_call_control_id);
 }
@@ -2020,7 +2041,47 @@ function appPark(b: TransitionBuilder, customer: LegRow, event: AppEvent): Reduc
   return b.result();
 }
 
+function rememberAcceptedDeviceLeg(b: TransitionBuilder, leg: LegRow) {
+  if (leg.profile_id) b.patchMeta({ accepted_device_legs: { ...b.meta.accepted_device_legs, [leg.profile_id]: leg.telnyx_call_control_id } });
+}
+
+function acceptDeviceLeg(b: TransitionBuilder, leg: LegRow) {
+  rememberAcceptedDeviceLeg(b, leg);
+  for (const other of b.openLegs()) {
+    if (leg.profile_id && other.profile_id === leg.profile_id && other.role === leg.role && legIntent(other) === legIntent(leg) && other.telnyx_call_control_id !== leg.telnyx_call_control_id) {
+      b.cmd(hangupCmd(b, other, "answered_on_other_device"));
+    }
+  }
+}
+
+/** Re-offer only an existing invitation owned by this actor; never join an arbitrary live call. */
+function appMobileOffer(b: TransitionBuilder, customer: LegRow, event: AppEvent): ReduceResult {
+  const picker = event.picker!;
+  const offer = b.openLegs().find((leg) => leg.profile_id === picker.profileId && !leg.answered_at
+    && ((legIntent(leg) === "internal" && b.session.state === "ringing")
+      || (leg.role === "consult" && b.session.state === "consulting" && !b.meta.consult?.answered_at)
+      || (["transfer", "transfer_recorded"].includes(legIntent(leg) ?? "") && b.session.state === "ringing" && !b.session.answered_by_profile_id)
+      || (legIntent(leg) === PARTY_INTENT && Boolean(b.meta.party_pending) && ["talking", "held", "conference"].includes(b.session.state))));
+  if (!offer || b.openLegs().some((leg) => leg.profile_id === picker.profileId && leg.answered_at)) throw new CallActionRejected("Hovor už nie je možné prijať v appke.", 409);
+  const pending = b.meta.mobile_offers?.[picker.profileId];
+  if (pending && Date.parse(pending.at) + PICKUP_STALE_MS > b.ctx.now.getTime()) throw new CallActionRejected("Prijatie v appke už prebieha.", 409);
+  const dial: DialCommand = {
+    kind: "dial", commandId: b.cmdId(picker.profileId, "dial:mobile-offer"), to: picker.sipUri,
+    from: offer.from_number ?? b.ctx.fromNumber ?? "", role: offer.role, profileId: picker.profileId, externalNumber: null,
+    clientState: { sid: b.session.id, role: offer.role, operatorId: picker.profileId, intent: legIntent(offer) === "transfer" ? "transfer_recorded" : legIntent(offer) ?? undefined, autoAnswer: true },
+    linkTo: b.session.direction === "internal" ? b.answeringLeg()?.telnyx_call_control_id ?? null : customer.telnyx_call_control_id,
+    timeoutSecs: PICKUP_TIMEOUT_SECS, autoAnswer: true,
+  };
+  b.cmd(dial);
+  b.patchMeta({ mobile_offers: { ...b.meta.mobile_offers, [picker.profileId]: { source: offer.telnyx_call_control_id, at: b.nowIso } } });
+  const failed = b.fork();
+  b.compensate(dial.commandId, "mobile offer dial failed", [], failed.transition());
+  return b.note("explicit mobile acceptance of own offer").result();
+}
+
 function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): ReduceResult {
+  if (b.ctx.activeLegCount >= b.ctx.settings.maxConcurrentLegs) throw new CallActionRejected("Kapacita hovorov je obsadená. Skúste to o chvíľu.", 409);
+  if (event.picker?.mobile && !canPickUpCall({ state: b.session.state, direction: b.session.direction, answered: Boolean(b.session.answered_at), operatorProfileId: b.session.answered_by_profile_id })) return appMobileOffer(b, customer, event);
   if (!canPickUpCall({ state: b.session.state, direction: b.session.direction, answered: Boolean(b.session.answered_at), operatorProfileId: b.session.answered_by_profile_id })) {
     throw new CallActionRejected("Hovor už nie je možné prevziať.", 409);
   }
@@ -2147,7 +2208,7 @@ function appConsult(b: TransitionBuilder, customer: LegRow, event: AppEvent): Re
 
 function appCompleteTransfer(b: TransitionBuilder, customer: LegRow, event: AppEvent): ReduceResult {
   if (b.session.state !== "consulting") throw new CallActionRejected("Hovor nie je v konzultácii.", 409);
-  const consultLeg = b.openLegs().find((leg) => leg.role === "consult");
+  const consultLeg = b.openLegs().find((leg) => leg.role === "consult" && (!b.meta.consult?.leg_call_control_id || leg.telnyx_call_control_id === b.meta.consult.leg_call_control_id));
   if (!consultLeg?.answered_at) throw new CallActionRejected("Konzultovaný hovor ešte nebol prijatý.", 409);
   const operator = b.answeringLeg();
   completeTransfer(b, customer, consultLeg, operator?.profile_id ?? event.actorProfileId, "completed");
@@ -2160,7 +2221,7 @@ function appCompleteTransfer(b: TransitionBuilder, customer: LegRow, event: AppE
 
 function appCancelConsult(b: TransitionBuilder, customer: LegRow): ReduceResult {
   if (b.session.state !== "consulting") throw new CallActionRejected("Hovor nie je v konzultácii.", 409);
-  const consultLeg = b.openLegs().find((leg) => leg.role === "consult");
+  const consultLeg = b.openLegs().find((leg) => leg.role === "consult" && (!b.meta.consult?.leg_call_control_id || leg.telnyx_call_control_id === b.meta.consult.leg_call_control_id));
   if (consultLeg) b.cmd(hangupCmd(b, consultLeg, "consult_cancelled"));
   backFromConsult(b, customer, "cancelled");
   if (consultLeg?.profile_id) b.presenceChange({ profileId: consultLeg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, reason: "consult cancelled" });

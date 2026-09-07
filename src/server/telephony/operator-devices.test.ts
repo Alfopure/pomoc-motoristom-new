@@ -75,7 +75,7 @@ describe("operator devices", () => {
     expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.registration_state).toBe("registered");
   });
 
-  it("refuses to revoke a live device that is on a call unless the takeover is explicit", async () => {
+  it("refuses to revoke a device during a live call even with explicit takeover", async () => {
     const h = createTelephonyHarness();
     const first = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true });
     await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: first.deviceSessionId, registrationState: "registered" });
@@ -84,8 +84,7 @@ describe("operator devices", () => {
     await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 409 });
     expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.device_session_id).toBe(first.deviceSessionId);
 
-    const takeover = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true });
-    expect(takeover.deviceSessionId).not.toBe(first.deviceSessionId);
+    await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true })).rejects.toMatchObject({ status: 409 });
   });
 
   it("lets the tab that owns the credential renew it while on a call", async () => {

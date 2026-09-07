@@ -28,7 +28,7 @@ export async function POST(request: Request) {
     if (notConfigured) return notConfigured;
 
     const body = await readJsonBody<OutboundBody>(request);
-    const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
+    const deps = await createTelephonyDeps({ organizationId: actor.organizationId, deviceKind: request.headers.get("x-pm-phone-kind") === "mobile" ? "mobile" : "web" });
     const result = await startOutboundCall(deps, toCallActor(actor), {
       to: readString(body.to) ?? "",
       caseId: readString(body.caseId),

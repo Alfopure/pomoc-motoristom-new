@@ -636,7 +636,14 @@ export type Database = {
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
+      motorist_call_notification_preferences: Table<{
+        organization_id: string;
+        profile_id: string;
+        mobile_calls_enabled: boolean;
+        updated_at: Timestamp;
+      }>;
       motorist_push_subscriptions: Table<{
+        client_kind?: "unknown" | "web" | "mobile_app";
         id: string;
         organization_id: string;
         profile_id: string;
@@ -1253,6 +1260,24 @@ export type Database = {
         updated_at: Timestamp;
       }>;
       motorist_operator_devices: Table<{
+        id: string;
+        organization_id: string;
+        profile_id: string;
+        environment: TelephonyEnvironment;
+        telnyx_credential_id: string | null;
+        sip_username: string | null;
+        credential_expires_at: Timestamp | null;
+        last_token_issued_at: Timestamp | null;
+        token_expires_at: Timestamp | null;
+        device_seen_at: Timestamp | null;
+        device_session_id: string | null;
+        registration_state: "unregistered" | "registering" | "registered" | "error";
+        user_agent: string | null;
+        metadata: Json;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_operator_mobile_devices: Table<{
         id: string;
         organization_id: string;
         profile_id: string;
