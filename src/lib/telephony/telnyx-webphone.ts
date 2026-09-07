@@ -218,7 +218,7 @@ export class TelnyxWebphone {
   }
 
   stop(): void {
-    if (!this.started) return;
+    if (!this.started) { this.disposeAudio(); return; }
     this.beaconHeartbeat({ leaving: true });
     this.mintGeneration++;
     this.started = false;

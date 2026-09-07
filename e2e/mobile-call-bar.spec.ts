@@ -92,7 +92,8 @@ for (const viewport of [{ width: 320, height: 568, bottom: 0 }, { width: 390, he
     await scenario(page, "active");
     const bar = page.getByTestId("phone-bar");
     const before = await bar.boundingBox();
-    expect(before!.height).toBeLessThanOrEqual(112);
+    // The released recording controls add a status row below the two call rows.
+    expect(before!.height).toBeLessThanOrEqual(160);
     await expect(bar.getByRole("button", { name: "Prepojiť", exact: true })).toBeHidden();
     await expect(bar.getByText("Allianz Assistance", { exact: true })).toBeVisible();
     await bar.getByRole("button", { name: "Viac", exact: true }).click();
