@@ -52,7 +52,7 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
 
     const params = await context.params;
     const body = await readJsonBody(request);
-    const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
+    const deps = await createTelephonyDeps({ organizationId: actor.organizationId, deviceKind: request.headers.get("x-pm-phone-kind") === "mobile" ? "mobile" : "web" });
     const result = await options.run({ deps, actor: toCallActor(actor), sessionId: params.id, params, body, request });
 
     return Response.json({ ok: true, ...(result && typeof result === "object" ? result : {}) });

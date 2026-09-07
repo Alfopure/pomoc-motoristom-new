@@ -45,13 +45,13 @@ window.fetch = async (input) => {
     return new Promise<Response>((resolve) => requests.push({ url, resolve }));
   }
   if (url === "/api/telephony/webphone/token") return Response.json({ token: "fixture-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), deviceSessionId: "fixture-device", sipUsername: "fixture" });
-  if (url === "/api/telephony/calls/active") return Response.json(EMPTY_ACTIVE_CALLS);
+  if (url === "/api/telephony/calls/active") return Response.json({ ...EMPTY_ACTIVE_CALLS, organizationId: "fixture-org" });
   if (url.includes("/presence")) return Response.json({ own: { status: "available" }, pauseReasons: [] });
   return Response.json({});
 };
 
 function Fixture() {
-  const telephony = useTelephonyConsole({ enabled: true, operators: [] });
+  const telephony = useTelephonyConsole({ enabled: true, operators: [], profileId: "00000000-0000-4000-8000-000000000101" });
   useEffect(() => {
     harness.begin = (kind) => {
       const action = kind === "dial" ? telephony.dial("+421900000001") : kind === "callback" ? telephony.callBackRequest("fixture") : kind === "pickup" || kind === "hangup" ? telephony.callAction(kind, "fixture") : telephony.supervise("fixture", "monitor");

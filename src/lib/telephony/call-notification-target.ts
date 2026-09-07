@@ -37,7 +37,7 @@ export function callNotificationTarget(input: {
     ? browser.sessionId === call.sessionId
     : browser.telnyxCallControlId && call.browserCallControlIds?.includes(browser.telnyxCallControlId)));
   const busy = input.busy || input.outboundPending || Boolean(input.phone?.answering) || (input.phone?.pendingOperatorLegs ?? 0) > 0;
-  const registered = input.phone?.status === "registered";
+  const registered = input.phone?.status === "registered" || Boolean(input.phone?.onDemand && input.phone.status === "idle");
   const canReconnect = !busy && !browser && ["idle", "failed", "superseded"].includes(input.phone?.status ?? "");
   const base = { ...empty, call };
   // Internal, transfer and conference legs do not necessarily have a queue
@@ -53,12 +53,13 @@ export function callNotificationTarget(input: {
   };
   if (matches && browser?.active) return { ...base, message: "Hovor sa pripája alebo už prebieha. Ovládanie je v hornej lište." };
   if (call.browserIncomingCallControlIds?.length && !canPickUpCall(call)) {
+    if (input.phone?.onDemand && !browser && !busy && registered && canPickUpWithCurrentPresence(input.model, { ...call, offeredToMe: true })) return { ...base, canPickup: true, message: "Pozvánka na hovor stále platí. Prijatie potvrďte v appke." };
     if (browser) return { ...base, message: "Tento telefón má iný hovor. Upozornenie sa týka vyššie uvedeného volajúceho." };
     if (!registered) return { ...base, canReconnect, message: "Pripojte telefón v tejto aplikácii. Hovor prijmete, keď tu začne zvoniť." };
     return { ...base, message: "Čakám, kým hovor začne zvoniť na tomto telefóne. Samotné upozornenie ho neprijíma." };
   }
   if (call.kind === "active") {
-    return { ...base, message: call.mine ? "Tento hovor práve vybavujete." : call.operatorName ? `Hovor už vybavuje ${call.operatorName}.` : "Hovor už prevzal iný operátor." };
+    return { ...base, message: call.mine ? "Hovor už prebieha na vašom druhom zariadení." : call.operatorName ? `Hovor už vybavuje ${call.operatorName}.` : "Hovor už prevzal iný operátor." };
   }
   if (canPickUpCall(call)) {
     if (browser && !matches) return { ...base, message: "Tento telefón má iný hovor. Upozornenie sa týka vyššie uvedeného volajúceho." };

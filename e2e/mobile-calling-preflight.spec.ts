@@ -8,7 +8,7 @@ test.beforeAll(async () => {
   const result = await build({
     entryPoints: [path.resolve("e2e/fixtures/mobile-calling-hook.tsx")], bundle: true, write: false,
     platform: "browser", format: "iife", jsx: "automatic",
-    alias: { "@telnyx/webrtc": path.resolve("e2e/fixtures/mobile-calling-sdk.ts") },
+    alias: { "@telnyx/webrtc": path.resolve("e2e/fixtures/mobile-calling-sdk.ts"), "@/lib/telephony/realtime-client": path.resolve("e2e/fixtures/mobile-calling-realtime.ts") },
     define: { "process.env.NODE_ENV": '"development"' },
   });
   script = result.outputFiles[0].text;

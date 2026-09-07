@@ -1,5 +1,7 @@
 "use client";
 
+import { MobileCallNotificationToggle } from "./MobileCallNotificationToggle";
+
 import { useCallback, useEffect, useState } from "react";
 import { Bell, BellOff, Check, LoaderCircle, Send, Smartphone, Volume2 } from "lucide-react";
 import {
@@ -188,9 +190,11 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
         <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-yellow-100 text-zinc-900"><Bell size={21} /></span>
         <div className="min-w-0 flex-1">
           <h3 id="push-settings-heading" className="text-base font-bold text-zinc-950">Upozornenia a zvuk</h3>
-          <p className="mt-1 text-sm leading-5 text-zinc-500">Úlohy a hovory aj mimo otvorenej aplikácie. Nastavenie platí pre tento telefón alebo počítač.</p>
+          <p className="mt-1 text-sm leading-5 text-zinc-500">Mobilné upozornenia spravujete pre svoj účet. Povolenia, typy a zvuk nižšie platia pre toto zariadenie.</p>
         </div>
       </div>
+
+      {enabled && <div className="mt-4 border-y border-zinc-100 py-2"><MobileCallNotificationToggle /></div>}
 
       <div className="mt-5 flex items-center justify-between gap-4 rounded-xl bg-zinc-50 p-3 sm:p-4">
         <div className="min-w-0">

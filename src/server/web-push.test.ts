@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "@/lib/supabase/database.types";
 import {
-  deletePushSubscription, getPushConfig, getPushSubscriptionStatus, parsePushSubscription,
+  getMobileCallPushSettings, setMobileCallPushSettings, deletePushSubscription, getPushConfig, getPushSubscriptionStatus, parsePushSubscription,
   savePushSubscription, sendTaskPush, sendTestPush, sendCallPush, updatePushSound, updatePushPreferences, validatePushEndpoint,
 } from "./web-push";
 
@@ -475,5 +475,44 @@ describe("task push delivery", () => {
     expect(await sendTaskPush(db, message)).toEqual({ sent: 0, failed: 0 });
     expect(await sendTaskPush(db, { ...message, recipientProfileId: null })).toEqual({ sent: 0, failed: 0 });
     expect(sendNotification).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("account mobile call alert preference", () => {
+  it("suppresses only mobile call delivery when disabled, while desktop still receives it", async () => {
+    const mobile = { ...callRow, client_kind: "mobile_app" };
+    const desktop = { ...callRow, id: "desktop", client_kind: "web", endpoint: "https://fcm.googleapis.com/fcm/send/desktop" };
+    const { db } = database([{ data: { id: actor.profileId } }, { data: [mobile, desktop] }, { data: { id: "claim" } }, { data: mobile }, { data: desktop }, { data: { mobile_calls_enabled: false } }]);
+    expect(await sendCallPush(db, callMessage())).toEqual({ sent: 1, failed: 0 });
+    expect(sendNotification).toHaveBeenCalledOnce();
+    expect(sendNotification.mock.calls[0][0].endpoint).toBe(desktop.endpoint);
+  });
+
+  it("rechecks mobile opt-out before a delayed provider retry", async () => {
+    const mobile = { ...callRow, client_kind: "mobile_app" };
+    sendNotification.mockRejectedValueOnce({ statusCode: 503, headers: { "retry-after": "0" } });
+    const { db } = database([{ data: { id: actor.profileId } }, { data: [mobile] }, { data: { id: "claim" } }, { data: mobile }, { data: { mobile_calls_enabled: true } }, { data: mobile }, { data: { mobile_calls_enabled: false } }]);
+    expect(await sendCallPush(db, callMessage())).toEqual({ sent: 0, failed: 0 });
+    expect(sendNotification).toHaveBeenCalledOnce();
+  });
+
+  it("reports only unexpired mobile apps with at least one call category enabled", async () => {
+    const { db } = database([{ data: { mobile_calls_enabled: false } }, { data: [callRow, { ...callRow, incoming_calls_enabled: false, available_calls_enabled: false }, { ...callRow, expires_at: "2020-01-01" }] }]);
+    expect(await getMobileCallPushSettings(db, actor)).toEqual({ enabled: false, mobileApps: 1 });
+  });
+
+  it("validates and scopes the account preference to the authenticated actor", async () => {
+    await expect(setMobileCallPushSettings(database([]).db, actor, "false")).rejects.toMatchObject({ status: 400 });
+    const { db, queries } = database([{}, { data: { mobile_calls_enabled: false } }, { data: [] }]);
+    await setMobileCallPushSettings(db, actor, false);
+    expect(queries[0].operations).toContainEqual({ name: "upsert", args: [expect.objectContaining({ organization_id: actor.organizationId, profile_id: actor.profileId, mobile_calls_enabled: false }), { onConflict: "organization_id,profile_id" }] });
+  });
+
+  it("keeps a shared Android endpoint's mobile classification on later web enrollment", async () => {
+    const { db, queries } = database([{ data: { id: row.id } }]);
+    await savePushSubscription(db, actor, subscription, true, { clientKind: "web" });
+    const update = queries[0].operations.find((op) => op.name === "update")!;
+    expect(update.args[0]).not.toHaveProperty("client_kind");
   });
 });

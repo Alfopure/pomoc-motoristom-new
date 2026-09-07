@@ -26,7 +26,9 @@ import {
   type TelephonyOperatorPresence,
 } from "@/lib/telephony/presence";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
-import { TelnyxWebphone, type WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
+import { type WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
+import { CoordinatedWebphone } from "@/lib/telephony/coordinated-webphone";
+import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "@/lib/telephony/webphone-model";
 
 import type { TransferRequest } from "./CallTransferPicker";
@@ -111,8 +113,8 @@ type PresenceResponse = {
   own?: { status?: string } | null;
 };
 
-export function useTelephonyConsole(input: { enabled: boolean; operators: Operator[] }): TelephonyConsole {
-  const { enabled, operators } = input;
+export function useTelephonyConsole(input: { enabled: boolean; operators: Operator[]; profileId: string }): TelephonyConsole {
+  const { enabled, operators, profileId } = input;
   const [configured, setConfigured] = useState<boolean | null>(enabled ? null : false);
   const [snapshot, setSnapshot] = useState<ActiveCallsPayload>(EMPTY_ACTIVE_CALLS);
   const [phone, setPhone] = useState<WebphoneSnapshot>(IDLE_SNAPSHOT);
@@ -128,7 +130,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   // stays usable and shows a transient-outage notice instead of "not configured".
   const [stale, setStale] = useState(false);
   const [degraded, setDegraded] = useState<Set<string>>(() => new Set());
-  const webphoneRef = useRef<TelnyxWebphone | null>(null);
+  const webphoneRef = useRef<CoordinatedWebphone | null>(null);
   const refreshRef = useRef<(() => void) | null>(null);
   // Read inside the poll loop rather than through state: a reconnect must not
   // restart the poll effect (it would fire an extra request every time).
@@ -140,8 +142,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   // --- browser phone ---------------------------------------------------------
 
   useEffect(() => {
-    if (!enabled) return;
-    const webphone = new TelnyxWebphone();
+    if (!enabled || !organizationId || !profileId) return;
+    const webphone = new CoordinatedWebphone({ scope: `${organizationId}:${profileId}`, mobile: isMobileApp() });
     webphoneRef.current = webphone;
     const unsubscribe = webphone.subscribe((next) => {
       setPhone(next);
@@ -151,19 +153,19 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     return () => {
       microphoneCheckRef.current?.abort();
       unsubscribe();
-      webphone.stop();
+      webphone.dispose();
       webphoneRef.current = null;
       setPhone(IDLE_SNAPSHOT);
     };
-  }, [enabled]);
+  }, [enabled, organizationId, profileId]);
 
   // Unlock the ringtone on an ordinary gesture while the idle phone is still
   // hidden. This never requests microphone or notification permission.
   useEffect(() => {
     if (!enabled) return;
     const unlock = () => { void webphoneRef.current?.unlockAudio().catch(() => undefined); };
-    document.addEventListener("pointerdown", unlock, { once: true });
-    document.addEventListener("keydown", unlock, { once: true });
+    document.addEventListener("pointerdown", unlock);
+    document.addEventListener("keydown", unlock);
     return () => {
       document.removeEventListener("pointerdown", unlock);
       document.removeEventListener("keydown", unlock);
@@ -199,7 +201,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     } catch { return false; }
   }, [verifyMicrophone]);
 
-  const startOutboundRequest = useCallback(async (request: (webphone: TelnyxWebphone) => Promise<void>) => {
+  const startOutboundRequest = useCallback(async (request: (webphone: CoordinatedWebphone) => Promise<void>) => {
     // A ref guards rapid taps across every dial surface before React renders.
     const webphone = webphoneRef.current;
     const error = outboundBusyRef.current ? "Volanie sa už spúšťa. Počkajte na spojenie." : browserCallStartError(webphone?.getSnapshot());
@@ -210,6 +212,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     void webphone.unlockAudio().catch(() => undefined);
     try {
       await verifyMicrophone();
+      await webphone.prepareForCall();
       // An incoming invite, takeover or unmount may arrive during permission.
       const changed = webphone !== webphoneRef.current ? "Telefón bol odpojený." : browserCallStartError(webphone.getSnapshot());
       if (changed) throw new Error(changed);
@@ -218,6 +221,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       setNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo spustiť.");
       throw error;
     } finally {
+      webphone.finishRequest();
       outboundBusyRef.current = false;
       setOutboundRequestCount((count) => count - 1);
     }
@@ -672,7 +676,16 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     refreshRef.current?.();
   }, []);
   // Stable identities: the PhoneBar registers window listeners keyed on them.
-  const answer = useCallback(() => webphoneRef.current?.answer(), []);
+  const answer = useCallback(() => {
+    const webphone = webphoneRef.current;
+    const callId = webphone?.getSnapshot().call?.id;
+    if (!webphone || !callId || microphoneCheckRef.current) return;
+    void webphone.unlockAudio().catch(() => undefined);
+    void verifyMicrophone().then(() => {
+      if (webphone !== webphoneRef.current || webphone.getSnapshot().call?.id !== callId) throw new Error("Hovor už nie je dostupný.");
+      webphone.answer();
+    }).catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo prijať."));
+  }, [verifyMicrophone]);
   const takeoverPhone = useCallback(() => webphoneRef.current?.takeover(), []);
   const hangupBrowser = useCallback(() => void webphoneRef.current?.hangup(), []);
   const toggleMute = useCallback(() => webphoneRef.current?.toggleMute(), []);

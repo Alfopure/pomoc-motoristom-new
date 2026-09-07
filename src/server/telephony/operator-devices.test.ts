@@ -75,7 +75,7 @@ describe("operator devices", () => {
     expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.registration_state).toBe("registered");
   });
 
-  it("refuses to revoke a live device that is on a call unless the takeover is explicit", async () => {
+  it("refuses to revoke a device during a live call even with explicit takeover", async () => {
     const h = createTelephonyHarness();
     const first = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true });
     await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: first.deviceSessionId, registrationState: "registered" });
@@ -84,8 +84,7 @@ describe("operator devices", () => {
     await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 409 });
     expect(h.db.find("motorist_operator_devices", (row) => row.profile_id === PROFILES.o1)?.device_session_id).toBe(first.deviceSessionId);
 
-    const takeover = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true });
-    expect(takeover.deviceSessionId).not.toBe(first.deviceSessionId);
+    await expect(issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true })).rejects.toMatchObject({ status: 409 });
   });
 
   it("lets the tab that owns the credential renew it while on a call", async () => {
@@ -210,5 +209,39 @@ describe("operator devices", () => {
     const h = createTelephonyHarness();
     h.db.failNext("motorist_operator_devices", "select", "db down");
     await expect(ensureOperatorCredential(deps(h), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toBeInstanceOf(OperatorDeviceError);
+  });
+});
+
+describe("concurrent device enrollment", () => {
+  it.each(["web", "mobile"] as const)("retains one %s credential and revokes a losing concurrent mint", async (deviceKind) => {
+    const h = createTelephonyHarness();
+    const table = deviceKind === "mobile" ? "motorist_operator_mobile_devices" : "motorist_operator_devices";
+    const [first, second] = await Promise.all([0, 1].map(() => ensureOperatorCredential(deps(h, { deviceKind }), { organizationId: ORG, profileId: PROFILES.o3 })));
+    expect(first.telnyx_credential_id).toBe(second.telnyx_credential_id);
+    expect(h.rows(table).filter((row) => row.profile_id === PROFILES.o3)).toHaveLength(1);
+    expect(h.telnyx.of("deleteTelephonyCredential")).toHaveLength(1);
+    expect(h.telnyx.of("deleteTelephonyCredential")[0].params).not.toEqual({ credentialId: first.telnyx_credential_id });
+  });
+
+  it.each(["web", "mobile"] as const)("does not overwrite a concurrent %s credential renewal", async (deviceKind) => {
+    const h = createTelephonyHarness();
+    const deviceDeps = deps(h, { deviceKind });
+    const input = { organizationId: ORG, profileId: PROFILES.o3 };
+    const original = await ensureOperatorCredential(deviceDeps, input);
+    const [first, second] = await Promise.all([0, 1].map(() => ensureOperatorCredential(deviceDeps, { ...input, force: true })));
+    expect(first.telnyx_credential_id).toBe(second.telnyx_credential_id);
+    expect(first.telnyx_credential_id).not.toBe(original.telnyx_credential_id);
+    const deleted = h.telnyx.of("deleteTelephonyCredential").map((call) => call.params.credentialId);
+    expect(deleted).toHaveLength(2);
+    expect(deleted).toContain(original.telnyx_credential_id);
+    expect(deleted).not.toContain(first.telnyx_credential_id);
+  });
+
+  it("revokes a new provider credential when the database rejects enrollment", async () => {
+    const h = createTelephonyHarness();
+    h.db.failNext("motorist_operator_mobile_devices", "insert", "db down");
+    await expect(ensureOperatorCredential(deps(h, { deviceKind: "mobile" }), { organizationId: ORG, profileId: PROFILES.o3 })).rejects.toMatchObject({ status: 500 });
+    expect(h.telnyx.of("deleteTelephonyCredential")[0].params).toEqual({ credentialId: "cred-1" });
+    expect(h.rows("motorist_operator_mobile_devices")).toHaveLength(0);
   });
 });
