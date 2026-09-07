@@ -99,7 +99,10 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
     tag: CREDENTIAL_TAG,
     connectionId: deps.credentialConnectionId ?? undefined,
   });
-  if (!credential.sipUsername) throw new OperatorDeviceError("Telnyx nevrátil SIP používateľa pre nové prihlasovacie údaje.", 502);
+  if (!credential.sipUsername) {
+    await deleteCredentialAtProvider(deps, credential.id, "Neúplné prihlasovacie údaje sa nepodarilo zrušiť u operátora");
+    throw new OperatorDeviceError("Telnyx nevrátil SIP používateľa pre nové prihlasovacie údaje.", 502);
+  }
 
   const previousCredentialId = existing?.telnyx_credential_id ?? null;
   const values = {
@@ -112,18 +115,37 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
     registration_state: "unregistered" as const,
     metadata: toJson({ ...(existing ? metadataOf(existing) : {}), credential_created_at: now.toISOString(), previous_credential_id: previousCredentialId }),
   };
-  // The unique key is per organisation (`operator_devices_org_profile_env_idx`):
-  // a global `(profile_id, environment)` key would let an upsert with a profile
-  // from another organisation rewrite that organisation's device row.
-  const upserted = await deps.admin.from(deviceTable(deps)).upsert(values, { onConflict: "organization_id,profile_id,environment" }).select("*").single();
-  if (upserted.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo uložiť: ${upserted.error.message}`, 500);
+  // Enrollment can race across requests. An upsert would overwrite the first
+  // credential and leave an untracked SIP identity active at the provider.
+  // Inserts use the org/profile/environment unique key; renewal only replaces
+  // the credential we read. A losing request revokes its own mint and reuses
+  // the winner, never the other way around.
+  let saved;
+  if (existing) {
+    let update = deps.admin.from(deviceTable(deps)).update(values).eq("id", existing.id);
+    update = previousCredentialId === null
+      ? update.is("telnyx_credential_id", null)
+      : update.eq("telnyx_credential_id", previousCredentialId);
+    saved = await update.select("*").maybeSingle();
+  } else {
+    saved = await deps.admin.from(deviceTable(deps)).insert(values).select("*").maybeSingle();
+  }
+  if (saved.error || !saved.data) {
+    await deleteCredentialAtProvider(deps, credential.id, "Nepoužité prihlasovacie údaje sa nepodarilo zrušiť u operátora");
+    if (!saved.error || saved.error.code === "23505") {
+      const winner = await getOperatorDevice(deps, input);
+      if (winner && credentialUsable(winner, now)) return winner;
+    }
+    if (saved.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo uložiť: ${saved.error.message}`, 500);
+    throw new OperatorDeviceError("Pripojenie zariadenia sa medzitým zmenilo. Skúste to znova.", 409);
+  }
   // The superseded credential has to die at Telnyx: it can still register and
   // the JWT minted from it stays valid for up to 24 h, so keeping it would make
   // "new credentials" a rename rather than a revocation.
   if (previousCredentialId && previousCredentialId !== credential.id) {
     await deleteCredentialAtProvider(deps, previousCredentialId, "Staré prihlasovacie údaje sa nepodarilo zrušiť u operátora");
   }
-  return upserted.data;
+  return saved.data;
 }
 
 /**

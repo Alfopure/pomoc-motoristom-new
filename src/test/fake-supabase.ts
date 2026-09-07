@@ -91,6 +91,7 @@ export const DEFAULT_UNIQUE_KEYS: Record<string, UniqueKeySpec[]> = {
   motorist_pause_reasons: [["id"], ["organization_id", "code"]],
   motorist_operator_presence: [["id"], ["profile_id"]],
   motorist_operator_devices: [["id"], ["organization_id", "profile_id", "environment"]],
+  motorist_operator_mobile_devices: [["id"], ["organization_id", "profile_id", "environment"]],
   motorist_operator_telephony_settings: [["id"], ["profile_id"]],
   motorist_telephony_settings: [["id"], ["organization_id"]],
   motorist_telephony_daily_usage: [["id"], ["organization_id", "day"]],
