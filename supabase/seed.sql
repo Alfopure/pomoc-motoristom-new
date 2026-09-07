@@ -68,9 +68,12 @@ insert into public.motorist_telephony_lines (id, organization_id, provider, phon
 values
   ('00000000-0000-4000-8000-000000000201', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408700', 'Neutrálna linka', true),
   ('00000000-0000-4000-8000-000000000202', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408718', 'Allianz Assistance', true),
-  ('00000000-0000-4000-8000-000000000203', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408732', 'Autoklub Slovakia Assistance', true),
-  ('00000000-0000-4000-8000-000000000204', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408760', 'AXA Assistance CZ', true),
-  ('00000000-0000-4000-8000-000000000205', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408783', 'Eurocross Assistance CR', true);
+  ('00000000-0000-4000-8000-000000000203', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408732', 'Autoklub Slovakia Assistance s.r.o', true),
+  ('00000000-0000-4000-8000-000000000204', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408760', 'AXA Assistance CZ s.r.o', true),
+  ('00000000-0000-4000-8000-000000000205', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408783', 'Eurocross Assistance Czech Republic s.r.o', true),
+  ('00000000-0000-4000-8000-000000000206', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408770', 'Europ Assistance', true),
+  ('00000000-0000-4000-8000-000000000207', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408771', 'LeasePlan Slovakia s.r.o', true),
+  ('00000000-0000-4000-8000-000000000208', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408774', 'Neutrálna linka 2', true);
 
 insert into public.motorist_attendance_shift_templates (id, organization_id, label, kind, starts_at_local, ends_at_local, planned_minutes, color, sort_order, active)
 values
@@ -487,19 +490,34 @@ values
 on conflict (id) do nothing;
 
 -- Lines: every DID follows the "Denný" plan and the shared business hours; the
--- neutral line additionally offers the IVR. telnyx_number_id comes from
--- GET /v2/phone_numbers (only the first number's id is known at seed time).
+-- neutral line additionally offers the IVR. telnyx_number_id values come from
+-- a verified GET /v2/phone_numbers inventory response.
 update public.motorist_telephony_lines
 set
   ring_plan_id = '00000000-0000-4000-8000-000000002301',
   business_hours_id = '00000000-0000-4000-8000-000000002001',
-  ivr_menu_id = case id when '00000000-0000-4000-8000-000000000201' then '00000000-0000-4000-8000-000000002401'::uuid else ivr_menu_id end,
-  telnyx_number_id = case id when '00000000-0000-4000-8000-000000000201' then '3040091148564563176' else telnyx_number_id end,
+  ivr_menu_id = case
+    when id in ('00000000-0000-4000-8000-000000000201', '00000000-0000-4000-8000-000000000208') then '00000000-0000-4000-8000-000000002401'::uuid
+    else ivr_menu_id
+  end,
+  telnyx_number_id = case id
+    when '00000000-0000-4000-8000-000000000201' then '3040091148564563176'
+    when '00000000-0000-4000-8000-000000000202' then '3040142888064255967'
+    when '00000000-0000-4000-8000-000000000203' then '3040142888089421792'
+    when '00000000-0000-4000-8000-000000000204' then '3040142888089421793'
+    when '00000000-0000-4000-8000-000000000205' then '3040142888097810402'
+    when '00000000-0000-4000-8000-000000000206' then '3043592669088449601'
+    when '00000000-0000-4000-8000-000000000207' then '3043592669113615426'
+    when '00000000-0000-4000-8000-000000000208' then '3043592669122004035'
+    else telnyx_number_id
+  end,
   partner_name = case id
     when '00000000-0000-4000-8000-000000000202' then 'Allianz Assistance'
-    when '00000000-0000-4000-8000-000000000203' then 'Autoklub Slovakia Assistance'
-    when '00000000-0000-4000-8000-000000000204' then 'AXA Assistance CZ'
-    when '00000000-0000-4000-8000-000000000205' then 'Eurocross Assistance CR'
+    when '00000000-0000-4000-8000-000000000203' then 'Autoklub Slovakia Assistance s.r.o'
+    when '00000000-0000-4000-8000-000000000204' then 'AXA Assistance CZ s.r.o'
+    when '00000000-0000-4000-8000-000000000205' then 'Eurocross Assistance Czech Republic s.r.o'
+    when '00000000-0000-4000-8000-000000000206' then 'Europ Assistance'
+    when '00000000-0000-4000-8000-000000000207' then 'LeasePlan Slovakia s.r.o'
     else partner_name
   end
 where organization_id = '00000000-0000-4000-8000-000000000001'
@@ -508,7 +526,10 @@ where organization_id = '00000000-0000-4000-8000-000000000001'
     '00000000-0000-4000-8000-000000000202',
     '00000000-0000-4000-8000-000000000203',
     '00000000-0000-4000-8000-000000000204',
-    '00000000-0000-4000-8000-000000000205'
+    '00000000-0000-4000-8000-000000000205',
+    '00000000-0000-4000-8000-000000000206',
+    '00000000-0000-4000-8000-000000000207',
+    '00000000-0000-4000-8000-000000000208'
   );
 
 insert into public.motorist_operator_presence (id, organization_id, profile_id, status, status_since)

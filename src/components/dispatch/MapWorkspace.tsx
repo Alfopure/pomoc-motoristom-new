@@ -5,6 +5,7 @@ import { GripHorizontal } from "lucide-react";
 import type { CallCenterCall, CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
 import type { DispatchMapModel } from "@/lib/map-adapter";
+import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { CaseCockpitPanel } from "./CaseCockpitPanel";
 import { CaseTable, type CaseSortState } from "./CaseTable";
 import { DispatchMap } from "./DispatchMap";
@@ -21,6 +22,7 @@ type MapWorkspaceProps = {
   branches: Branch[];
   call: DispatchCall;
   caseItem?: DispatchCase;
+  callLinkCandidates: PhoneBarCall[];
   commanderVehicles: CommanderVehicleConnection[];
   cases: DispatchCase[];
   centerView: CenterView;
@@ -42,6 +44,7 @@ type MapWorkspaceProps = {
   onDataChange: (dispatchData: DispatchData) => void;
   /** Click-to-call from the case card; absent while telephony is not configured. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
+  onLinkCall: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
   onDirtyChange: (dirty: boolean) => void;
   onSaveDraftChange: (saveDraft: SaveCaseDraft | null) => void;
   onSavingChange: (saving: boolean) => void;
@@ -74,6 +77,7 @@ export function MapWorkspace({
   branches,
   call,
   caseItem,
+  callLinkCandidates,
   commanderVehicles,
   cases,
   centerView,
@@ -85,6 +89,7 @@ export function MapWorkspace({
   onCollapse,
   onDataChange,
   onDial,
+  onLinkCall,
   onDirtyChange,
   onSaveDraftChange,
   onSavingChange,
@@ -298,6 +303,7 @@ export function MapWorkspace({
               branches={branches}
               call={call}
               caseItem={caseItem}
+              callLinkCandidates={callLinkCandidates}
               commanderVehicles={commanderVehicles}
               focusedTaskId={focusedTaskId}
               kind={workspaceKind}
@@ -305,6 +311,7 @@ export function MapWorkspace({
               onCaseCreated={onCaseCreated}
               onDataChange={onDataChange}
               onDial={onDial}
+              onLinkCall={onLinkCall}
               onDirtyChange={onDirtyChange}
               onSaveDraftChange={onSaveDraftChange}
               onSavingChange={onSavingChange}
@@ -318,6 +325,7 @@ export function MapWorkspace({
               assets={assets}
               branches={branches}
               caseItem={caseItem}
+              callLinkCandidates={callLinkCandidates}
               commanderVehicles={commanderVehicles}
               focusedTaskId={focusedTaskId}
               mode={workspaceMode}
@@ -325,6 +333,7 @@ export function MapWorkspace({
               onCollapse={onCollapse}
               onDataChange={onDataChange}
               onDial={onDial}
+              onLinkCall={onLinkCall}
               onDirtyChange={onDirtyChange}
               onExpand={onExpand}
               onRestore={onRestore}

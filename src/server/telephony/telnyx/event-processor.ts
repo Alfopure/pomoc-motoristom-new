@@ -1,6 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
@@ -133,17 +132,6 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
   const callerNumber = event.from ? (normalizeE164(event.from) ?? event.from) : null;
   const calledNumber = event.to ? (normalizeE164(event.to) ?? event.to) : null;
 
-  let match: { top: CallerMatch | null; count: number; degraded: boolean } | null = null;
-  if (callerNumber && deps.findCallerMatches) {
-    try {
-      const found = await deps.findCallerMatches(callerNumber);
-      match = { top: found.matches[0] ?? null, count: found.matches.length, degraded: found.degraded };
-    } catch (error) {
-      deps.logger?.({ level: "warn", scope: "processor", message: "caller match failed", error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  const caseId = match?.top && match.top.type === "open_case" && match.top.caseId ? match.top.caseId : null;
-
   const inserted = await admin
     .from("motorist_call_sessions")
     .insert({
@@ -155,11 +143,13 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
       current_step: 0,
       line_id: line?.id ?? null,
       ring_plan_id: line?.ring_plan_id ?? null,
-      case_id: caseId,
+      // A number can belong to several people or older cases. Inbound calls
+      // start unassigned; a dispatcher links the call explicitly.
+      case_id: null,
       caller_number: callerNumber,
       called_number: calledNumber,
       started_at: event.occurredAt ?? now.toISOString(),
-      metadata: toJson({ match, line_label: line?.label ?? null, partner_name: line?.partner_name ?? null, environment: deps.environment }),
+      metadata: toJson({ line_label: line?.label ?? null, partner_name: line?.partner_name ?? null, environment: deps.environment }),
     })
     .select("*")
     .single();

@@ -3,6 +3,7 @@
 import { ArrowLeft, FileText, Plus } from "lucide-react";
 import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
+import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { CaseDetail } from "./CaseDetail";
 import { NewCaseForm, type SaveCaseDraft } from "./NewCaseDrawer";
 
@@ -11,6 +12,7 @@ type ExpandedCasePanelProps = {
   branches: Branch[];
   call: DispatchCall;
   caseItem?: DispatchCase;
+  callLinkCandidates?: PhoneBarCall[];
   commanderVehicles: CommanderVehicleConnection[];
   focusedTaskId?: string;
   kind: "detail" | "new";
@@ -22,6 +24,7 @@ type ExpandedCasePanelProps = {
   onDataChange?: (dispatchData: DispatchData) => void;
   /** Click-to-call from the case card; absent while telephony is not configured. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
+  onLinkCall?: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
   onDirtyChange?: (dirty: boolean) => void;
   onSaveDraftChange?: (saveDraft: SaveCaseDraft | null) => void;
   onSavingChange?: (saving: boolean) => void;
@@ -33,6 +36,7 @@ export function ExpandedCasePanel({
   branches,
   call,
   caseItem,
+  callLinkCandidates,
   commanderVehicles,
   focusedTaskId,
   kind,
@@ -41,6 +45,7 @@ export function ExpandedCasePanel({
   onCaseCreated,
   onDataChange,
   onDial,
+  onLinkCall,
   onDirtyChange,
   onSaveDraftChange,
   onSavingChange,
@@ -99,6 +104,7 @@ export function ExpandedCasePanel({
             <CaseDetail
               key={caseItem.id}
               caseItem={caseItem}
+              callLinkCandidates={callLinkCandidates}
               commanderVehicles={commanderVehicles}
               branches={branches}
               assets={assets}
@@ -107,6 +113,7 @@ export function ExpandedCasePanel({
               embedded
               onDataChange={onDataChange}
               onDial={onDial}
+              onLinkCall={onLinkCall}
               onDirtyChange={handleDirtyChange}
               onSaveDraftChange={onSaveDraftChange}
               onSavingChange={handleSavingChange}

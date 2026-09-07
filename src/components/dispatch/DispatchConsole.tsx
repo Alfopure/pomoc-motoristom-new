@@ -539,6 +539,10 @@ export function DispatchConsole({
     () => (telephonyConfigured ? mergeCallCenterCalls(telephony.liveCalls, callCenterCalls) : callCenterCalls),
     [callCenterCalls, telephony.liveCalls, telephonyConfigured],
   );
+  const callLinkCandidates = useMemo(
+    () => telephony.phoneBar.teamCalls.filter((call) => call.direction === "inbound" && !call.caseId),
+    [telephony.phoneBar.teamCalls],
+  );
 
   const callsByCaseId = useMemo(() => latestCallByCaseId(visibleCallCenterCalls), [visibleCallCenterCalls]);
   const filteredCases = useMemo(() => {
@@ -1392,22 +1396,27 @@ export function DispatchConsole({
     }
   }
 
+  async function persistCallCaseLink(callId: string, caseId: string) {
+    const response = await telephonyFetch(`/api/telephony/calls/${encodeURIComponent(callId)}/link-case`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ caseId }),
+      label: "priradenie hovoru k prípadu",
+      timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
+    });
+    const result = (await response.json().catch(() => null)) as { dispatchData?: DispatchData; error?: string } | null;
+
+    if (!response.ok || !result?.dispatchData) {
+      throw new Error(result?.error ?? "Hovor sa nepodarilo priradiť k prípadu.");
+    }
+
+    setDispatchData(result.dispatchData);
+    telephony.refresh();
+  }
+
   async function linkCreatedCaseToCall(callId: string, caseId: string) {
     try {
-      const response = await telephonyFetch(`/api/telephony/calls/${encodeURIComponent(callId)}/link-case`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ caseId }),
-        label: "priradenie hovoru k prípadu",
-        timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
-      });
-      const result = (await response.json().catch(() => null)) as { dispatchData?: DispatchData; error?: string } | null;
-
-      if (!response.ok || !result?.dispatchData) {
-        throw new Error(result?.error ?? "Hovor sa nepodarilo priradiť k prípadu.");
-      }
-
-      setDispatchData(result.dispatchData);
+      await persistCallCaseLink(callId, caseId);
       setMutationNotice("Nový prípad je uložený a hovor je priradený k timeline.");
     } catch (error) {
       setMutationNotice(error instanceof Error ? `Prípad je uložený, ale hovor sa nepriradil: ${error.message}` : "Prípad je uložený, ale hovor sa nepriradil.");
@@ -1436,18 +1445,24 @@ export function DispatchConsole({
   }
 
   /** Links a live or logged call to the case the console currently shows. */
-  async function linkPhoneCallToCase(call: PhoneBarCall) {
-    const caseId = call.caseId ?? workspaceCase?.id;
+  async function linkPhoneCallToCase(call: PhoneBarCall, requestedCaseId?: string): Promise<boolean> {
+    const caseId = requestedCaseId ?? call.caseId ?? workspaceCase?.id;
     if (!call.callId) {
       setMutationNotice("Hovor sa dá priradiť až po tom, čo je zapísaný v call logu.");
-      return;
+      return false;
     }
     if (!caseId) {
       setMutationNotice("Najprv otvorte prípad, ku ktorému sa má hovor priradiť.");
-      return;
+      return false;
     }
-    await linkCreatedCaseToCall(call.callId, caseId);
-    telephony.refresh();
+    try {
+      await persistCallCaseLink(call.callId, caseId);
+      setMutationNotice("Hovor je ručne priradený k prípadu a zapísaný v timeline.");
+      return true;
+    } catch (error) {
+      setMutationNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo priradiť k prípadu.");
+      return false;
+    }
   }
 
   function startNewCaseFromPhoneBar(call: PhoneBarCall) {
@@ -1911,6 +1926,7 @@ export function DispatchConsole({
               branches={branches}
               call={newCaseCall}
               caseItem={selectedCase}
+              callLinkCandidates={callLinkCandidates}
               commanderVehicles={commanderVehicles}
               focusedTaskId={focusedTaskId}
               kind="detail"
@@ -1918,6 +1934,7 @@ export function DispatchConsole({
               onCaseCreated={handleCaseCreated}
               onDataChange={setDispatchData}
               onDial={telephonyConfigured ? dialNumber : undefined}
+              onLinkCall={linkPhoneCallToCase}
               onDirtyChange={setHasUnsavedChanges}
               onSaveDraftChange={handleSaveDraftChange}
               onSavingChange={setIsCaseSaveLocked}
@@ -2031,6 +2048,7 @@ export function DispatchConsole({
             branches={branches}
             call={newCaseCall}
             caseItem={workspaceCase}
+            callLinkCandidates={callLinkCandidates}
             commanderVehicles={commanderVehicles}
             cases={filteredActiveCases}
             centerView={centerView}
@@ -2051,6 +2069,7 @@ export function DispatchConsole({
             onCollapse={collapseWorkspace}
             onDataChange={setDispatchData}
             onDial={telephonyConfigured ? dialNumber : undefined}
+            onLinkCall={linkPhoneCallToCase}
             onDirtyChange={setHasUnsavedChanges}
             onSaveDraftChange={handleSaveDraftChange}
             onSavingChange={setIsCaseSaveLocked}
