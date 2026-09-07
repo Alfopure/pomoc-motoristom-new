@@ -1,5 +1,5 @@
 import type { GatherSpec, IvrMenuRow, IvrOptionRow, MediaRef } from "../state/types";
-import { IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
+import { callbackConfirmationMedia, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
 export { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
 
 /**
@@ -173,8 +173,10 @@ export function decideIvr(input: IvrDecisionInput): IvrDecision {
       if (!targetId || !planIds.has(targetId)) return { kind: "ring_plan", option, planId: null, targetMissing: Boolean(targetId) };
       return { kind: "ring_plan", option, planId: targetId, targetMissing: false };
     }
-    case "callback":
-      return { kind: "callback", option, prompt: promptOf(option, { key: "callbackConfirmed" }) };
+    case "callback": {
+      const file = callbackConfirmationMedia(option.prompt_media_url);
+      return { kind: "callback", option, prompt: file ? { file } : { key: "callbackConfirmed" } };
+    }
     case "external_number": {
       const number = option.target_number?.trim();
       if (!number) return { kind: "default", reason: "option_incomplete" };

@@ -390,9 +390,11 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
         // Complete only bounded internal continuations while retaining this event's lease.
         // These are command acknowledgements, never fabricated provider webhooks.
         for (let continuation = 0; continuation < 2; continuation += 1) {
-          const sequence = readMeta(apply.session).announcement_sequence;
+          const meta = readMeta(apply.session);
+          const sequence = meta.announcement_sequence;
           const stopReady = needsRecordingContinuation(apply.session);
-          const mediaFailed = sequence && Date.parse(sequence.deadlineAt) <= nowOf(deps)().getTime();
+          const mediaFailed = sequence && Date.parse(sequence.deadlineAt) <= nowOf(deps)().getTime() ||
+            meta.gather?.failed && !meta.gather.call_gone && Date.parse(meta.gather.deadline_at) <= nowOf(deps)().getTime();
           if ((!stopReady && !mediaFailed) || stopReady && !leaseAcquired) break;
           const fresh = await loadSessionSnapshot(deps, sessionId);
           const followEvent: SessionEvent = { kind: "app", type: stopReady ? "recording_continue" : "sweep", id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };

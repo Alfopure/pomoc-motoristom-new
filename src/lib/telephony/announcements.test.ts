@@ -49,9 +49,9 @@ describe("caller announcement assets", () => {
     expect(new Set(ANNOUNCEMENT_DEFINITIONS.map(({ key }) => key)).size).toBe(26);
     expect(ANNOUNCEMENT_DEFINITIONS.filter(({ runtimeStatus }) => runtimeStatus === "active").map(({ key }) => key)).toEqual([
       "greeting", "afterHours", "ivrMain", "callbackOffer", "callbackConfirmed", "allBusy", "invalidInput",
-      "holdStart", "queueWaiting", "resume", "transferStart", "consultStart", "parkStart", "conferenceJoin", "conferenceLeave", "outboundIntro", "recordingServiceNotice", "recordingNotice", "recordingPaused", "recordingResumed",
+      "holdStart", "holdReminder", "queueWaiting", "resume", "transferStart", "consultStart", "parkStart", "conferenceJoin", "conferenceLeave", "outboundIntro", "afterHoursNoCallback", "recordingServiceNotice", "recordingNotice", "recordingPaused", "recordingResumed",
     ]);
-    expect(ANNOUNCEMENT_DEFINITIONS.filter(({ runtimeStatus }) => runtimeStatus === "prepared")).toHaveLength(6);
+    expect(ANNOUNCEMENT_DEFINITIONS.filter(({ runtimeStatus }) => runtimeStatus === "prepared")).toHaveLength(4);
     expect(ANNOUNCEMENT_CATEGORIES.map(({ key }) => ANNOUNCEMENT_DEFINITIONS.filter((definition) => definition.category === key).length)).toEqual([7, 4, 6, 4, 5]);
     expect(resolveAnnouncement(defaultAnnouncementConfig(), "greeting").file).toBe("announcements-v4/sk/greeting.mp3");
     expect(resolveAnnouncement(defaultAnnouncementConfig(), "recordingNotice").file).toBe("announcements-v4/sk/recordingNotice.mp3");

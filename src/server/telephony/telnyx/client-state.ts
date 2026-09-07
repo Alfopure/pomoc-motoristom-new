@@ -16,6 +16,8 @@ export type TelnyxClientState = {
   step?: number;
   /** Short intent label (`ring`, `consult`, `callback`, `simulate`…). */
   intent?: string;
+  /** Identity of one gather, so a late completion cannot answer the next menu. */
+  gatherId?: string;
   /** The browser auto-answers the invite for this leg (outbound click-to-call). */
   autoAnswer?: boolean;
 };
@@ -32,6 +34,7 @@ type WireState = {
   o?: string;
   p?: number;
   i?: string;
+  g?: string;
   a?: 1;
 };
 
@@ -65,6 +68,7 @@ export function assertClientState(value: unknown): asserts value is TelnyxClient
   if (state.operatorId !== undefined && !isPlainId(state.operatorId)) throw new ClientStateError("client_state.operatorId is invalid");
   if (state.step !== undefined && !isStep(state.step)) throw new ClientStateError("client_state.step is invalid");
   if (state.intent !== undefined && !isIntent(state.intent)) throw new ClientStateError("client_state.intent is invalid");
+  if (state.gatherId !== undefined && (typeof state.gatherId !== "string" || !/^[a-f0-9]{12}$/.test(state.gatherId))) throw new ClientStateError("client_state.gatherId is invalid");
   if (state.autoAnswer !== undefined && typeof state.autoAnswer !== "boolean") {
     throw new ClientStateError("client_state.autoAnswer is invalid");
   }
@@ -77,6 +81,7 @@ export function encodeClientState(state: TelnyxClientState): string {
   if (state.operatorId !== undefined) wire.o = state.operatorId;
   if (state.step !== undefined) wire.p = state.step;
   if (state.intent !== undefined) wire.i = state.intent;
+  if (state.gatherId !== undefined) wire.g = state.gatherId;
   if (state.autoAnswer) wire.a = 1;
 
   const encoded = Buffer.from(JSON.stringify(wire), "utf8").toString("base64");
@@ -110,6 +115,7 @@ export function decodeClientState(value: unknown): TelnyxClientState | null {
   if (wire.o !== undefined) state.operatorId = wire.o as string;
   if (wire.p !== undefined) state.step = wire.p as number;
   if (wire.i !== undefined) state.intent = wire.i as string;
+  if (wire.g !== undefined) state.gatherId = wire.g as string;
   if (wire.a !== undefined) {
     if (wire.a !== 1 && wire.a !== true) return null;
     state.autoAnswer = true;
