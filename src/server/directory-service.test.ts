@@ -298,6 +298,9 @@ describe("directory persistence and concurrency", () => {
 });
 
 describe("legacy partner forms preserve directory metadata", () => {
+  beforeEach(() => vi.stubEnv("MOTORIST_ORGANIZATION_ID", ORG));
+  afterEach(() => vi.unstubAllEnvs());
+
   it.each(["reactivate", "update"] as const)("retains contact links through legacy %s", async operation => {
     fake.db.seed("motorist_organizations", [{ id: ORG, slug: "pomoc-motoristom", active: true }]);
     const metadata = { source: "import", directory: { contactIds: [CONTACT], website: "https://example.test" }, note: "Old note" };
