@@ -1,0 +1,58 @@
+[
+  {
+    "file": "announcements-v3/sk/queueWaiting.mp3",
+    "key": "queueWaiting",
+    "language": "sk",
+    "text": "Ďakujeme, že čakáte. Prosím, zostaňte na linke. Dispečeri práve telefonujú. Pre spätné volanie stlačte jednotku.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "durationSeconds": 67.54,
+    "sha256": "a964af26584b536359dad9857b99cb117aba334efb6b13ff445167e32937247b",
+    "assetOrigin": "composed_existing_announcements_and_music",
+    "bytes": 540524,
+    "sampleRate": 24000,
+    "channels": 1,
+    "runtimeStatus": "active"
+  },
+  {
+    "file": "announcements-v3/cs/queueWaiting.mp3",
+    "key": "queueWaiting",
+    "language": "cs",
+    "text": "Děkujeme, že čekáte. Prosím, zůstaňte na lince. Dispečeři právě telefonují. Pro zpětné volání stiskněte jedničku.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "durationSeconds": 67.87,
+    "sha256": "5ad479cc6457d9f05991ac53742b4011e9327abc45416a074602d836aead9b94",
+    "assetOrigin": "composed_existing_announcements_and_music",
+    "bytes": 543212,
+    "sampleRate": 24000,
+    "channels": 1,
+    "runtimeStatus": "active"
+  },
+  {
+    "file": "announcements-v3/en/queueWaiting.mp3",
+    "key": "queueWaiting",
+    "language": "en",
+    "text": "Thank you for waiting. Please stay on the line. Our dispatchers are on other calls. For a callback, press one.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "durationSeconds": 66.14,
+    "sha256": "d38b36bc22f6fe66aa5e5c3c6de2d10e1d7ad6dc8d0e8bfd8e054c4662a9964a",
+    "assetOrigin": "composed_existing_announcements_and_music",
+    "bytes": 529388,
+    "sampleRate": 24000,
+    "channels": 1,
+    "runtimeStatus": "active"
+  },
+  {
+    "file": "announcements-v3/de/queueWaiting.mp3",
+    "key": "queueWaiting",
+    "language": "de",
+    "text": "Vielen Dank für Ihre Geduld. Bitte bleiben Sie in der Leitung. Unsere Mitarbeiter sind im Gespräch. Für einen Rückruf drücken Sie die Eins.",
+    "voiceId": "EXAVITQu4vr4xnSDxMaL",
+    "durationSeconds": 67.94,
+    "sha256": "9a9d30795f3a7ca7b2927369ac1a0ee3e555e37a1b0943264675875af101e37a",
+    "assetOrigin": "composed_existing_announcements_and_music",
+    "bytes": 543788,
+    "sampleRate": 24000,
+    "channels": 1,
+    "runtimeStatus": "active"
+  }
+]

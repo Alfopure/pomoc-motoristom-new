@@ -91,6 +91,8 @@ const PARTY_INTENT = "party";
 /** `client_state.intent` of a supervisor's own leg. */
 const SUPERVISE_INTENT = "supervise";
 export const STALE_FINALISE_MS = 120_000;
+const QUEUE_RECHECK_MS = 5_000;
+const QUEUE_OPERATOR_RETRY_MS = 60_000;
 
 // ---------------------------------------------------------------------------
 // Builder
@@ -365,6 +367,11 @@ function mohTickSpec(): GatherSpec {
     initialTimeoutMillis: MOH_TICK_TIMEOUT_MS,
     validDigits: "0123456789#*",
   };
+}
+
+/** The audio includes the invitation and a minute of music, interruptible by 1. */
+function queueWaitSpec(): GatherSpec {
+  return { media: { key: "queueWaiting" }, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1, validDigits: "1", timeoutMillis: 1_000 };
 }
 
 /**
@@ -907,6 +914,7 @@ function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
 /** True while a `playback_start` loop is running on the customer leg. */
 function mohIsPlaying(b: TransitionBuilder): boolean {
   if (!b.ctx.mediaAvailable) return false;
+  if (b.meta.queue) return false; // Queue audio belongs to its interruptible gather.
   return (b.session.state === "ringing" && b.meta.ring?.mode === "plan") || WAITING_STATES.has(b.session.state);
 }
 
@@ -933,11 +941,48 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
   // settings row on every event, so an admin lowering `park_max_minutes` used to
   // eject callers who were already waiting — a configuration change disturbing a
   // call in progress.
-  b.setState(state).patchMeta({ waiting: { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso, max_minutes: b.ctx.settings.parkMaxMinutes } });
+  const queued = state === "waiting" && b.session.direction === "inbound" && !b.session.answered_at && (reason === "ring_exhausted" || reason === "ivr" || Boolean(b.meta.queue));
+  const previous = queued && b.meta.queue ? b.meta.waiting : null;
+  if (queued) stopMoh(b, customer);
+  b.setState(state).patchMeta({
+    waiting: previous ?? { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso, max_minutes: b.ctx.settings.parkMaxMinutes },
+    queue: queued ? { next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString() } : null,
+    ring: { ...b.meta.ring, active_step: null, step_deadline_at: null },
+  });
+  if (queued) {
+    if (!previous) b.cmd(gatherCmd(b, customer, queueWaitSpec()));
+    b.note(`${state} (${reason}, automatic offers)`);
+    return;
+  }
   // The ring plan already started the loop; restarting it would jump the audio.
   if (!musicRunning) startMoh(b, customer);
   b.cmd(gatherCmd(b, customer, mohTickSpec()));
   b.note(`${state} (${reason})`);
+}
+
+function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
+  const queue = b.meta.queue;
+  const plan = b.ringPlan();
+  if (!queue || !plan?.steps[0] || b.session.answered_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return;
+  b.patchMeta({ queue: { next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString() } });
+  // Only browser operators are retried. An external backup/mobile gets its
+  // initial attempt, never a sequence of paid redials for a half-hour queue.
+  const lastOffered = new Map<string, number>();
+  for (const attempt of b.attemptsView()) if (attempt.profile_id) {
+    lastOffered.set(attempt.profile_id, Math.max(lastOffered.get(attempt.profile_id) ?? 0, Date.parse(attempt.offered_at ?? attempt.created_at)));
+  }
+  const members = [...new Map([...(plan.queueMembers ?? []), ...plan.steps.flatMap((step) => step.members)]
+    .filter((member) => member.kind === "operator" && member.profileId)
+    .map((member) => [member.profileId, member])).values()]
+    .filter((member) => (lastOffered.get(member.profileId!) ?? 0) + QUEUE_OPERATOR_RETRY_MS <= b.ctx.now.getTime())
+    .sort((a, z) => (lastOffered.get(a.profileId!) ?? 0) - (lastOffered.get(z.profileId!) ?? 0) || a.position - z.position)
+    .map((member, position) => ({ ...member, position, ringSecs: Math.max(20, member.ringSecs) }));
+  const index = b.session.current_step;
+  const planned = planRingStep({ index, groupId: plan.steps[0].groupId, groupName: "Čakáreň", strategy: "ordered", timeoutSecs: 20, members }, {
+    sessionId: b.session.id, now: b.ctx.now, presence: toEligibilityPresence(b.ctx.presence), devices: toEligibilityDevices(b.ctx.devices),
+    openOffers: b.ctx.openOffers, attempted: new Set(), maxFanout: 1, maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, activeLegCount: b.ctx.activeLegCount,
+  });
+  if (planned.attempts.length) fanout(b, customer, index, planned, { expectedStep: index, setStep: index + 1 });
 }
 
 /** Outbound/internal: the far end answered → the bridge command placed at dial time completes. */
@@ -1066,12 +1111,13 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
     }
     if (!leg.profile_id) b.patchMeta({ answered_external: leg.to_number ?? null });
     b.patchMeta({ pickup: null, answered_leg_call_control_id: leg.telnyx_call_control_id });
-    if (intent === "pickup") b.patchMeta({ waiting: null });
+    const wasQueued = Boolean(b.meta.queue);
+    if (intent === "pickup" || wasQueued) b.patchMeta({ waiting: null, queue: null });
     if (intent === "transfer") b.patchMeta({ transfer: b.meta.transfer ? { ...b.meta.transfer, completed_at: opts.at } : null });
     b.patchMeta({ ring: { ...(b.meta.ring ?? {}), active_step: null, step_deadline_at: null } });
 
     stopMoh(b, customer);
-    if (WAITING_STATES.has(b.session.state)) {
+    if (WAITING_STATES.has(b.session.state) || wasQueued) {
       b.cmd({ kind: "gather_stop", commandId: b.cmdId(customer.telnyx_call_control_id, "gather_stop"), leg: ref(customer), bestEffort: true });
     }
     if (!opts.alreadyBridged && intent !== "transfer") {
@@ -1254,6 +1300,14 @@ function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEve
   const meta = b.meta;
   const appHangup = meta.hangup ?? null;
   const cause = appHangup ? "operator_hangup" : "caller_hangup";
+
+  // Repair a partial persistence failure even when the caller hangs up before
+  // the provider retries the original digit event.
+  const choice = meta.callback;
+  if (choice?.confirmed && choice.digit && choice.event_id && choice.requested_at) {
+    b.callback({ source: choice.source ?? "missed", callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id),
+      request: { kind: "requested", requested_at: choice.requested_at, digit: choice.digit, context: choice.context ?? choice.source ?? "missed", event_id: choice.event_id } });
+  }
 
   if (TERMINAL_STATES.has(state) || state === "wrap_up" || state === "missed") {
     finishIfQuiet(b, at);
@@ -1551,6 +1605,10 @@ function continueRinging(b: TransitionBuilder, customer: LegRow): void {
     b.note(`step ${active}: still ringing others`);
     return;
   }
+  if (b.meta.queue) {
+    enterWaiting(b, customer, "ring_exhausted");
+    return;
+  }
   if (active >= plan.steps.length) {
     // The synthetic `external_number` fallback step just ended unanswered:
     // there is no plan step to walk to, go straight to the next fallback.
@@ -1589,6 +1647,19 @@ function onGatherEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceResul
   const digits = event.status === "valid" ? (event.digits ?? "") : "";
   const state = b.session.state;
 
+  if (state === "callback_offered" && b.meta.callback?.confirmed && b.meta.callback.event_id === b.eventKey && b.meta.callback.digit) {
+    confirmCallback(b, leg, b.meta.callback.source ?? "missed", null, b.meta.callback.digit, b.meta.callback.context);
+    return b.result();
+  }
+  if (state === "callback_offered" && b.meta.callback?.confirmed) return ignoredResult("callback choice already recorded");
+  if (purpose === "queue_wait" && !b.meta.queue) return ignoredResult("queue gather already finished");
+  if (b.meta.queue && (state === "waiting" || state === "ringing") && purpose === "queue_wait") {
+    if (digits === "1") {
+      confirmCallback(b, leg, "missed", null, "1", "waiting_room");
+      return b.result();
+    }
+    return onWaitingTick(b, leg);
+  }
   if (state === "ivr" && (purpose === "ivr" || purpose === null)) return onIvrChoice(b, leg, { digits: invalid ? (event.digits ?? "") : digits, invalid });
   if ((state === "after_hours" || state === "callback_offered") && purpose !== "moh_tick") return onCallbackChoice(b, leg, digits);
   if (WAITING_STATES.has(state)) return onWaitingTick(b, leg);
@@ -1624,7 +1695,7 @@ function onIvrChoice(b: TransitionBuilder, leg: LegRow, outcome: IvrGatherOutcom
       return b.result();
     }
     case "callback":
-      confirmCallback(b, leg, "ivr", decision.prompt);
+      confirmCallback(b, leg, "ivr", decision.prompt, digits, "ivr");
       return b.result();
     case "external_number":
       blindTransferCustomer(b, leg, { kind: "number", number: decision.number, label: decision.option.label }, null);
@@ -1685,11 +1756,19 @@ function confirmCallback(
   source: "ivr" | "after_hours" | "park_timeout" | "missed" | "manual",
   /** Recording of the IVR option that asked for the callback; the shared confirmation otherwise. */
   prompt: MediaRef | null = null,
+  digit = "1",
+  context: string = source,
 ): void {
-  b.setState("callback_offered").patchMeta({ callback: { requested_at: b.nowIso, source, confirmed: true } });
-  b.callback({ source, callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id) });
+  const requestedAt = b.meta.callback?.event_id === b.eventKey ? b.meta.callback.requested_at : null;
+  const request = { kind: "requested" as const, requested_at: requestedAt ?? b.event.occurredAt ?? b.nowIso, digit, context, event_id: b.eventKey };
+  stopMoh(b, leg);
+  if (b.meta.queue) b.cmd({ kind: "gather_stop", commandId: b.cmdId(leg.telnyx_call_control_id, "gather_stop"), leg: ref(leg), bestEffort: true });
+  cancelOpenAttempts(b, b.nowIso, "callback requested");
+  for (const other of b.openLegs()) if (!isCustomer(other)) b.cmd(hangupCmd(b, other, "callback_requested"));
+  b.setState("callback_offered").patchMeta({ callback: { ...request, source, confirmed: true }, waiting: null, queue: null });
+  b.callback({ source, callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id), request });
   if (!prompt || b.ctx.mediaAvailable || announcementKeyForMedia(prompt) || ("file" in prompt && /^https?:\/\//i.test(prompt.file))) {
-    b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:callback_confirmed"), leg: ref(leg), media: prompt ?? { key: "callbackConfirmed" } });
+    b.cmd({ kind: "playback_start", commandId: b.cmdId(leg.telnyx_call_control_id, "playback:callback_confirmed"), leg: ref(leg), media: prompt ?? { key: "callbackConfirmed" }, clientState: customerState(b.session.id, "callback_confirmation") });
   } else {
     b.cmd(hangupCmd(b, leg, "callback_confirmed", false));
   }
@@ -1704,13 +1783,20 @@ function onWaitingTick(b: TransitionBuilder, leg: LegRow): ReduceResult {
   const limitMinutes = typeof waiting.max_minutes === "number" && waiting.max_minutes > 0 ? waiting.max_minutes : b.ctx.settings.parkMaxMinutes;
   const limitMs = limitMinutes * 60_000;
   if (!Number.isNaN(since) && b.ctx.now.getTime() - since >= limitMs) {
+    if (b.meta.queue) {
+      cancelOpenAttempts(b, b.nowIso, "queue timeout");
+      for (const other of b.openLegs()) if (!isCustomer(other)) b.cmd(hangupCmd(b, other, "queue_timeout"));
+      b.cmd({ kind: "gather_stop", commandId: b.cmdId(leg.telnyx_call_control_id, "gather_stop"), leg: ref(leg), bestEffort: true });
+      b.patchMeta({ queue: null });
+    }
     b.patchMeta({ waiting: { ...waiting, ticks: waiting.ticks + 1, last_tick_at: b.nowIso }, park: b.meta.park ? { ...b.meta.park, timed_out_at: b.nowIso } : null });
     offerCallback(b, leg, { key: "callbackOffer" }, "park_timeout");
     b.note("park limit reached → callback offer");
     return b.result();
   }
   b.patchMeta({ waiting: { ...waiting, ticks: waiting.ticks + 1, last_tick_at: b.nowIso } });
-  b.cmd(gatherCmd(b, leg, mohTickSpec()));
+  b.cmd(gatherCmd(b, leg, b.meta.queue ? queueWaitSpec() : mohTickSpec()));
+  if (b.meta.queue && b.session.state === "waiting") offerQueuedCall(b, leg);
   return b.note("MOH tick").result();
 }
 
@@ -1737,6 +1823,7 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
   if (event.status === "call_hangup" || event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`playback ${event.status}`);
   const state = b.session.state;
   if (state === "callback_offered" && b.meta.callback?.confirmed) {
+    if (b.meta.callback.event_id && event.clientState?.intent !== "callback_confirmation") return ignoredResult("unrelated audio after callback choice");
     b.cmd(hangupCmd(b, leg, "callback_confirmed", false));
     return b.note("callback confirmation played → hangup").result();
   }
@@ -1748,7 +1835,7 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
     b.cmd(hangupCmd(b, leg, "ivr_hangup", false));
     return b.note("IVR closing message played → hangup").result();
   }
-  if (WAITING_STATES.has(state) && b.ctx.mediaAvailable) {
+  if (WAITING_STATES.has(state) && b.ctx.mediaAvailable && !b.meta.queue) {
     // An infinite loop should never end on its own; if it did, the caller would
     // sit in silence until pickup.
     startMoh(b, leg);
@@ -2348,6 +2435,10 @@ function onSweep(b: TransitionBuilder): ReduceResult {
   if (!customer || b.legEnded(customer)) return ignoredResult("sweep: no customer leg");
   const meta = b.meta;
 
+  if (meta.queue && meta.waiting) {
+    const deadline = Date.parse(meta.waiting.since) + (meta.waiting.max_minutes ?? b.ctx.settings.parkMaxMinutes) * 60_000;
+    if (b.ctx.now.getTime() >= deadline) return onWaitingTick(b, customer);
+  }
   if (state === "greeting") {
     if (meta.greeting_call_gone_at) return ignoredResult("sweep: introduction customer already gone at provider");
     const started = Date.parse(meta.greeting?.started_at ?? b.session.created_at);
@@ -2392,7 +2483,13 @@ function onSweep(b: TransitionBuilder): ReduceResult {
 
   if (WAITING_STATES.has(state)) {
     const last = Date.parse(meta.waiting?.last_tick_at ?? meta.waiting?.since ?? b.session.parked_at ?? b.session.updated_at);
-    if (!Number.isNaN(last) && last + WAITING_TICK_STALE_MS >= b.ctx.now.getTime()) return ignoredResult("sweep: tick fresh");
+    if (!Number.isNaN(last) && last + WAITING_TICK_STALE_MS >= b.ctx.now.getTime()) {
+      if (meta.queue && b.ctx.now.getTime() >= Date.parse(meta.queue.next_offer_at)) {
+        offerQueuedCall(b, customer);
+        return b.note("sweep: queued offer rechecked").result();
+      }
+      return ignoredResult("sweep: tick fresh");
+    }
     return onWaitingTick(b, customer);
   }
 

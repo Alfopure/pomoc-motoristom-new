@@ -7,6 +7,7 @@ import { TELEPHONY_TIMEOUT_MS, telephonyJson } from "@/lib/telephony/client-requ
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import { callbackPollDelayMs } from "@/lib/telephony/poll-schedule";
+import { callbackOrigin, callbackOriginDetail, CALLBACK_ORIGIN_LABELS, type CallbackOrigin } from "@/lib/telephony/callback-origin";
 import {
   callbackPermissions,
   callbackQueueSummary,
@@ -76,6 +77,7 @@ export function CallbackQueuePanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  const [originFilter, setOriginFilter] = useState<"all" | CallbackOrigin["kind"]>("all");
   const failures = useRef(0);
   // Ageing is re-derived against the browser's own clock: the answer on screen
   // is up to a poll interval old, and a request must not look fresher than it
@@ -150,6 +152,7 @@ export function CallbackQueuePanel({
   }, [reloadToken]);
 
   const open = useMemo(() => sortCallbackQueue(queue.open), [queue.open]);
+  const visible = open.filter((request) => originFilter === "all" || originOf(request).kind === originFilter);
   const summary = useMemo(
     () => callbackQueueSummary(open, { now, actorProfileId: queue.actorProfileId }),
     [now, open, queue.actorProfileId],
@@ -222,9 +225,22 @@ export function CallbackQueuePanel({
       {summary.total > 0 && (
         <p className="border-b border-zinc-100 bg-zinc-50 px-3 py-1.5 text-[11px] font-medium text-zinc-600">
           {summary.unclaimed} voľných · {summary.mine} mojich · najdlhšie čaká {formatCallbackWait(summary.longestWaitSeconds)}
-          {" · sľub je "}
+          {" · interný termín "}
           {CALLBACK_OVERDUE_MINUTES} min
         </p>
+      )}
+
+      {open.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 border-b border-zinc-100 p-3" aria-label="Druh spätného volania">
+          {(["all", "requested", "missed", "manual", "unknown"] as const).map((kind) => {
+            const count = kind === "all" ? open.length : open.filter((request) => originOf(request).kind === kind).length;
+            if (!count && kind !== "all" && kind !== "requested" && kind !== "missed") return null;
+            return <button key={kind} type="button" aria-pressed={originFilter === kind} onClick={() => setOriginFilter(kind)}
+              className={`rounded-md border px-2 py-1 text-[11px] font-semibold ${originFilter === kind ? "border-zinc-950 bg-zinc-950 text-white" : "border-zinc-200 text-zinc-700"}`}>
+              {kind === "all" ? "Všetky" : CALLBACK_ORIGIN_LABELS[kind]} ({count})
+            </button>;
+          })}
+        </div>
       )}
 
       {notice && <p className="border-b border-blue-100 bg-blue-50 px-3 py-1.5 text-[11px] font-medium text-blue-900">{notice}</p>}
@@ -236,12 +252,12 @@ export function CallbackQueuePanel({
       )}
 
       <div className="grid gap-2 p-3">
-        {open.length === 0 ? (
+        {visible.length === 0 ? (
           <div className="rounded-md border border-dashed border-zinc-200 px-3 py-4 text-center text-xs font-medium text-zinc-500">
-            {loaded ? "Nikto nečaká na spätné volanie." : "Načítavam frontu…"}
+            {loaded ? open.length ? "V tejto skupine nie sú žiadne požiadavky." : "Nikto nečaká na spätné volanie." : "Načítavam frontu…"}
           </div>
         ) : (
-          open.map((request) => (
+          visible.map((request) => (
             <CallbackQueueRow
               key={request.id}
               busy={busy}
@@ -266,6 +282,7 @@ export function CallbackQueuePanel({
                 <span className="min-w-0 truncate">
                   {request.callerName ?? formatPhoneNumberForDisplay(request.callerNumber)}
                   {request.claimedByName ? ` · ${request.claimedByName}` : ""}
+                  <span className="block">{CALLBACK_ORIGIN_LABELS[originOf(request).kind]}{callbackOriginDetail(originOf(request)) ? ` · ${callbackOriginDetail(originOf(request))}` : ""}</span>
                 </span>
                 <span className={`shrink-0 font-semibold ${request.status === "done" ? "text-emerald-700" : "text-zinc-500"}`}>
                   {CALLBACK_STATUS_LABELS[request.status]}
@@ -284,6 +301,10 @@ const ACTION_NOTICE: Record<Exclude<CallbackAction, "call">, string> = {
   done: "Požiadavka je vybavená.",
   cancel: "Požiadavka je zrušená.",
 };
+
+function originOf(request: CallbackRequestPayload): CallbackOrigin {
+  return request.origin ?? callbackOrigin(request.source, null);
+}
 
 function CallbackQueueRow({
   busy,
@@ -304,6 +325,7 @@ function CallbackQueueRow({
   const wait = callbackWaitSeconds(request, now);
   const running = (action: CallbackAction) => busy === `${request.id}:${action}`;
   const locked = busy !== null;
+  const origin = originOf(request);
 
   return (
     <article className={`rounded-md border px-3 py-2 ${URGENCY_ROW_CLASS[urgency]}`}>
@@ -320,8 +342,11 @@ function CallbackQueueRow({
       <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-600">
         {request.callerName && <span className="truncate">{formatPhoneNumberForDisplay(request.callerNumber)}</span>}
         <span className="truncate">{request.lineLabel ?? request.partnerName ?? "Neznáma linka"}</span>
-        <span className="truncate">{CALLBACK_SOURCE_LABELS[request.source]}</span>
+        <span className="truncate">{origin.kind === "requested" && request.source === "missed" ? "Po zvonení / počas čakania" : CALLBACK_SOURCE_LABELS[request.source]}</span>
       </div>
+
+      <p className={`mt-1 text-[11px] font-semibold ${origin.kind === "requested" ? "text-blue-900" : "text-zinc-700"}`}>{CALLBACK_ORIGIN_LABELS[origin.kind]}</p>
+      {callbackOriginDetail(origin) && <p className="mt-0.5 text-[11px] text-zinc-700">{callbackOriginDetail(origin)}</p>}
 
       <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
         <span
@@ -338,7 +363,7 @@ function CallbackQueueRow({
           </span>
         )}
         {urgency === "overdue" && (
-          <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-800">Sľub prekročený</span>
+          <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-800">Po termíne</span>
         )}
       </div>
 
