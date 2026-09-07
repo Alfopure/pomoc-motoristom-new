@@ -25,6 +25,7 @@ function harness(options: { env?: Record<string, string | undefined>; smsLiveSen
   const transport = createTelnyxSmsTransport({
     admin: supabase.admin,
     config: getTelnyxConfig({ ...ENV, ...options.env }),
+    env: { ...ENV, ...options.env },
     fetch: fetchMock as unknown as typeof fetch,
   });
   return { supabase, fetchMock, transport };
@@ -84,6 +85,20 @@ describe("telnyx sms transport", () => {
     expect(failure).toBeInstanceOf(SmsWorkflowError);
     expect((failure as SmsWorkflowError).status).toBe(423);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sends the verified numeric sender and refuses a sender that changed after preview", async () => {
+    const { fetchMock, transport } = harness({ env: {
+      TELNYX_PUBLIC_KEY: "test-public-key", TELNYX_SMS_FROM_NUMBER: "+12025550123",
+      TELNYX_SMS_ORGANIZATION_ID: ORGANIZATION_ID, TELNYX_SMS_REPLIES_VERIFIED: "true",
+    } });
+    fetchMock.mockResolvedValue(jsonResponse(ACCEPTED));
+    await expect(transport.send({ to: "+421905123456", from: "PomocMotor", body: "Test", idempotencyKey: "changed", organizationId: ORGANIZATION_ID })).rejects.toMatchObject({ status: 409 });
+    expect(fetchMock).not.toHaveBeenCalled();
+    const sent = await transport.send({ to: "+421905123456", from: "+12025550123", body: "Odpoveď", idempotencyKey: "reply", organizationId: ORGANIZATION_ID });
+    expect(sent.fromSender).toBe("+12025550123");
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({ from: "+12025550123", to: "+421905123456", messaging_profile_id: "profile-1" });
   });
 
   it("refuses when the environment switch is off", async () => {

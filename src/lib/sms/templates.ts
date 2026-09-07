@@ -17,6 +17,7 @@ export type SmsTemplateContext = {
   brandName?: string;
   callbackNumber?: string;
   towAddress?: string;
+  repliesEnabled?: boolean;
 };
 
 export function isSmsTemplateKey(value: unknown): value is SmsTemplateKey {
@@ -50,7 +51,7 @@ export function renderSmsTemplate(template: SmsTemplateKey, context: SmsTemplate
       break;
     default: throw new Error("Nepodporovaná SMS šablóna.");
   }
-  return `${body} Na SMS neodpovedajte. Kontakt: ${contact}.`;
+  return `${body} ${context.repliesEnabled ? "Na SMS mozete odpovedat." : "Na SMS neodpovedajte."} Kontakt: ${contact}.`;
 }
 
 // The edited message must keep the verified facts and the server-generated link.
@@ -63,7 +64,8 @@ export function validateTemplateMessage(template: SmsTemplateKey, context: SmsTe
   for (const fact of facts) {
     if (fact && !message.includes(fact) && !message.includes(stripSmsDiacritics(fact))) throw new Error("Text musí obsahovať overené údaje šablóny. Upravte údaje a pripravte nový náhľad.");
   }
-  if (!message.includes("Na SMS neodpovedajte.")) throw new Error("Ponechajte informáciu, že na SMS sa nedá odpovedať.");
+  const notice = context.repliesEnabled ? "Na SMS mozete odpovedat." : "Na SMS neodpovedajte.";
+  if (!message.includes(notice)) throw new Error("Ponechajte pravdivú informáciu o možnosti odpovedať na SMS.");
 }
 
 export function renderLocationRequestSms(context: SmsTemplateContext) { return renderSmsTemplate("location_request", context); }

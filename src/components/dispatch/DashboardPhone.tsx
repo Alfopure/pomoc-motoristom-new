@@ -12,6 +12,7 @@ import type { DispatchData } from "@/data/dispatch-types";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { cleanPhoneInput } from "@/lib/telephony/phone";
 import { SmsComposerDialog } from "./SmsComposerDialog";
+import { useSmsUnreadCount } from "./SmsInbox";
 
 export type DashboardPhoneProps = {
   caseContext?: {
@@ -50,6 +51,8 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
   const [favoritePage, setFavoritePage] = useState(0);
   const [dialPending, setDialPending] = useState(false);
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
+  const [smsInitialTab, setSmsInitialTab] = useState<"editor" | "inbox">("editor");
+  const unreadSmsCount = useSmsUnreadCount();
   const [error, setError] = useState<string | null>(null);
   const normalizedQuery = query.trim();
   const isSearchMode = normalizedQuery.length >= 2;
@@ -302,12 +305,14 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
             aria-label="Otvoriť SMS"
             onClick={() => {
               setIsOpen(false);
+              setSmsInitialTab(unreadSmsCount > 0 ? "inbox" : "editor");
               setSmsComposerOpen(true);
             }}
             className="inline-flex h-10 min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[#FCD703] px-3 text-sm font-semibold text-zinc-950 transition hover:bg-yellow-300"
           >
             <MessageSquareText size={16} />
             <span className="hidden sm:inline">SMS</span>
+            {unreadSmsCount > 0 && <span role="status" aria-label={`${unreadSmsCount} neprečítaných SMS`} className="rounded-full bg-zinc-950 px-1.5 text-xs leading-5 text-white">{unreadSmsCount > 99 ? "99+" : unreadSmsCount}</span>}
           </button>
         </div>
 
@@ -452,6 +457,7 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
         </section>
       )}
       <SmsComposerDialog
+        initialTab={smsInitialTab}
         initialPhone={selectedContact?.phone ?? query}
         onCreateCase={onCreateCase}
         onClose={() => setSmsComposerOpen(false)}

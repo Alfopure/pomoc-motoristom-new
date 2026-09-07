@@ -3,8 +3,8 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/database.types";
 import type { SmsHistoryEntry } from "@/lib/sms/contracts";
 import { publicLocationLinkStatus } from "@/lib/sms/location-share";
-import { getTelnyxConfig, TELNYX_DEFAULT_ALPHA_SENDER } from "@/server/telephony/telnyx/env";
-import { normalizeSmsRecipient, SmsWorkflowError } from "./sms-workflow";
+import { normalizeSmsRecipient, SmsWorkflowError } from "./sms-errors";
+import { smsSender } from "./sms-channel";
 
 export async function loadSmsOptions(organizationId: string) {
   const admin = createSupabaseAdminClient();
@@ -15,7 +15,6 @@ export async function loadSmsOptions(organizationId: string) {
   ]);
   if (cases.error || contacts.error || profile.error) throw new SmsWorkflowError("Prípady a kontakty sa nepodarilo načítať.");
   const contactsById = new Map((contacts.data ?? []).map((contact) => [contact.id, contact]));
-  const config = getTelnyxConfig();
   return {
     cases: (cases.data ?? []).map((row) => {
       const contact = row.contact_id ? contactsById.get(row.contact_id) : null;
@@ -25,8 +24,7 @@ export async function loadSmsOptions(organizationId: string) {
       return { id: row.id, caseNumber: row.case_number, name: contact?.name ?? "Bez kontaktu", phone, validPhone };
     }),
     callbackNumber: profile.data?.primary_phone ?? "",
-    sender: config.configured ? config.smsAlphaSender : TELNYX_DEFAULT_ALPHA_SENDER,
-    repliesEnabled: false,
+    ...smsSender(organizationId, null),
   };
 }
 
@@ -55,10 +53,11 @@ export async function loadSmsHistory(organizationId: string, caseId: string | nu
     const submission = link ? submissions?.data?.find((submission) => submission.link_id === link.id) : null;
     return {
       id: row.id, caseId: row.case_id, caseNumber: cases?.data?.find((item) => item.id === row.case_id)?.case_number ?? str(payload.case_number),
-      recipientName: str(payload.recipient_name) ?? "Príjemca", toNumber: row.to_number,
-      author: authors?.data?.find((author) => author.id === payload.actor_profile_id)?.display_name ?? "Autor nezaznamenaný",
+      recipientName: row.direction === "inbound" ? "Prijatá od klienta" : str(payload.recipient_name) ?? "Príjemca", toNumber: row.to_number,
+      author: row.direction === "inbound" ? "Klient" : authors?.data?.find((author) => author.id === payload.actor_profile_id)?.display_name ?? "Autor nezaznamenaný",
       body: row.body, sender: row.from_sender || row.from_label || "Nezaznamenaný", createdAt: row.created_at,
       status: row.status, statusDetail: row.status_detail, error: row.error, template: row.template_key,
+      direction: row.direction,
       location: link ? { status: publicLocationLinkStatus(link.status, link.expires_at), expiresAt: link.expires_at,
         ...(submission ? { submittedAt: submission.submitted_at, accuracy: submission.accuracy_meters, lat: submission.lat, lng: submission.lng } : {}) } : null,
     };
