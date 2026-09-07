@@ -285,7 +285,7 @@ export type Command = CommandBase &
   (
   | { kind: "answer"; commandId: string; leg: LegRef; clientState: TelnyxClientState }
   | { kind: "hangup"; commandId: string; leg: LegRef; reason: string }
-  | { kind: "bridge"; commandId: string; leg: LegRef; target: LegRef; parkAfterUnbridge?: "self"; playRingtone?: boolean }
+  | { kind: "bridge"; commandId: string; leg: LegRef; target: LegRef; parkAfterUnbridge?: "self"; playRingtone?: boolean; recordingConferenceName?: string }
   | { kind: "playback_start"; commandId: string; leg: LegRef; media: MediaRef; loop?: "infinity" | number; clientState?: TelnyxClientState; forceSpeech?: boolean }
   | { kind: "playback_stop"; commandId: string; leg: LegRef }
   | { kind: "recording_start"; commandId: string; leg: LegRef; recorderId: string; epoch: number; maxLength: number }

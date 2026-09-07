@@ -52,6 +52,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   const calls: FakeTelnyxCall[] = [];
   const oneShot = new Map<string, TelnyxCommandError[]>();
   const callStatuses = new Map<string, { alive: boolean; known?: boolean }>();
+  const conferenceParticipants = new Map<string, Set<string>>();
   const always = new Map<string, TelnyxCommandError>();
   let counter = 0;
 
@@ -75,6 +76,8 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     liveGate,
     async request(method, path, requestOptions) {
       record("request", { method, path, ...(requestOptions ?? {}) });
+      const participants = /^\/conferences\/([^/]+)\/participants$/.exec(path);
+      if (method === "GET" && participants) return { data: [...(conferenceParticipants.get(decodeURIComponent(participants[1])) ?? [])].map((call_control_id) => ({ call_control_id, status: "joined" })) } as never;
       return {} as never;
     },
     async dial(params: DialParams): Promise<DialResult> {
@@ -124,10 +127,17 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     },
     async createConference(params): Promise<ConferenceResult> {
       record("createConference", params);
-      return { id: nextId("conf"), name: params.name, expiresAt: null };
+      const id = nextId("conf");
+      conferenceParticipants.set(id, new Set([params.callControlId]));
+      return { id, name: params.name, expiresAt: null };
     },
     async conferenceAction(conferenceId: string, action: ConferenceAction, body) {
       record(`conference:${action}`, { conferenceId, ...body });
+      if (action === "join" && typeof body.call_control_id === "string") {
+        const participants = conferenceParticipants.get(conferenceId) ?? new Set<string>();
+        participants.add(body.call_control_id); conferenceParticipants.set(conferenceId, participants);
+      }
+      if (action === "leave" && typeof body.call_control_id === "string") conferenceParticipants.get(conferenceId)?.delete(body.call_control_id);
     },
     async retrieveCall(callControlId: string) {
       record("retrieveCall", { callControlId });
