@@ -84,7 +84,7 @@ describe("telnyx sms delivery status", () => {
     const second = await applyTelnyxMessageStatus(fake.admin, event, { now: () => NOW });
 
     expect(first).toMatchObject({ outcome: "updated", status: "delivered" });
-    expect(second).toMatchObject({ outcome: "updated", status: "delivered", smsMessageId: "sms-1" });
+    expect(second).toMatchObject({ outcome: "ignored", status: "delivered", smsMessageId: "sms-1" });
     expect(fake.db.rows("motorist_sms_messages")).toHaveLength(1);
     expect(fake.db.find("motorist_sms_messages", (row) => row.id === "sms-1")).toMatchObject({
       status: "delivered",
@@ -99,4 +99,31 @@ describe("telnyx sms delivery status", () => {
     await expect(applyTelnyxMessageStatus(fake.admin, messageEvent({ status: "sending" }), { now: () => NOW })).resolves.toMatchObject({ outcome: "ignored", status: "sent" });
     await expect(applyTelnyxMessageStatus(fake.admin, { data: { event_type: "message.finalized", id: "x", payload: { id: "msg-1", to: [{ status: "smoked" }] } } }, { now: () => NOW })).resolves.toMatchObject({ outcome: "ignored" });
   });
+  it("preserves workflow metadata and author", async () => {
+    const metadata = { location_link_id: "link-1", location_link_expires_at: "2026-09-04T08:00:00Z", task_id: "task-1", actor_profile_id: "author-1", template_version: 1 };
+    const fake = harness({ raw_payload: metadata });
+    await applyTelnyxMessageStatus(fake.admin, messageEvent({}), { now: () => NOW });
+    expect(fake.db.rows("motorist_sms_messages")[0].raw_payload).toMatchObject({ ...metadata, provider_event: { id: "evt-1" } });
+  });
+  it("keeps unconfirmed delivery terminal against late sent events", async () => {
+    const fake = harness();
+    await applyTelnyxMessageStatus(fake.admin, messageEvent({ status: "delivery_unconfirmed" }));
+    await applyTelnyxMessageStatus(fake.admin, messageEvent({ type: "message.sent", status: "sent" }));
+    expect(fake.db.rows("motorist_sms_messages")[0]).toMatchObject({ status: "sent", status_detail: "delivery_unconfirmed" });
+  });
+  it("serializes competing receipts and prefers confirmed delivery", async () => {
+    const fake = harness({ status: "queued", status_detail: "queued", updated_at: "2026-09-03T07:00:00Z" });
+    const delivered = messageEvent({ status: "delivered" });
+    const failed = messageEvent({ status: "delivery_failed" }); failed.data.id = "evt-2";
+    await Promise.all([applyTelnyxMessageStatus(fake.admin, failed), applyTelnyxMessageStatus(fake.admin, delivered)]);
+    expect(fake.db.rows("motorist_sms_messages")[0]).toMatchObject({ status: "delivered", status_detail: "delivered" });
+  });
+  it("scopes by provider, profile, sender and recipient", async () => {
+    const fake = harness({ messaging_profile_id: "own" });
+    await expect(applyTelnyxMessageStatus(fake.admin, messageEvent({}), { messagingProfileId: "own" })).resolves.toMatchObject({ outcome: "not_applicable" });
+    const event = messageEvent({}); event.data.payload.to[0].phone_number = "+421905000000";
+    await expect(applyTelnyxMessageStatus(fake.admin, event)).resolves.toMatchObject({ outcome: "ignored" });
+    expect(fake.db.rows("motorist_sms_messages")[0].status).toBe("sent");
+  });
+
 });

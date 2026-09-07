@@ -59,6 +59,7 @@ import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { attachmentCategoryLabels } from "./case-form-shared";
 import { CaseDetail } from "./CaseDetail";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
+import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 
 type WorkspaceMode = "collapsed" | "split" | "expanded";
@@ -263,7 +264,8 @@ export function CaseCockpitPanel({
             <Maximize2 size={15} />
           </button>
         </section>
-        <SmsComposerDialog caseId={caseItem.id} caseNumber={caseItem.caseNumber} initialPhone={contactPhone} locationPhone={contactPhone} onClose={() => setSmsComposerOpen(false)} onSent={(result) => result.dispatchData && onDataChange(result.dispatchData)} open={smsComposerOpen} />
+        <CaseSmsHistory key={caseItem.id} caseId={caseItem.id} />
+      <SmsComposerDialog caseId={caseItem.id} caseNumber={caseItem.caseNumber} initialPhone={contactPhone} locationPhone={contactPhone} onClose={() => setSmsComposerOpen(false)} onSent={(result) => result.dispatchData && onDataChange(result.dispatchData)} open={smsComposerOpen} />
       </>
     );
   }
@@ -494,6 +496,7 @@ export function CaseCockpitPanel({
           </div>
         </details>
       </div>
+      <CaseSmsHistory key={caseItem.id} caseId={caseItem.id} />
       <SmsComposerDialog caseId={caseItem.id} caseNumber={caseItem.caseNumber} initialPhone={contactPhone} locationPhone={contactPhone} onClose={() => setSmsComposerOpen(false)} onSent={(result) => result.dispatchData && onDataChange(result.dispatchData)} open={smsComposerOpen} />
     </section>
   );

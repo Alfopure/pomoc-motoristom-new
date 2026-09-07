@@ -7,7 +7,8 @@ const applyTelnyxMessageStatus = vi.fn();
 
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => ({ marker: "admin" }) }));
 
-vi.mock("@/server/telephony/telnyx/sms-status", () => ({
+vi.mock("@/server/telephony/telnyx/sms-status", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/server/telephony/telnyx/sms-status")>(),
   applyTelnyxMessageStatus: (...args: unknown[]) => applyTelnyxMessageStatus(...args),
 }));
 
@@ -22,7 +23,7 @@ const SPKI_PREFIX_LENGTH = 12;
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const portalKey = (publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(SPKI_PREFIX_LENGTH).toString("base64");
 
-const ENVELOPE = { data: { event_type: "message.finalized", id: "evt-1", payload: { id: "msg-1", to: [{ status: "delivered" }] } } };
+const ENVELOPE = { data: { event_type: "message.finalized", id: "evt-1", payload: { id: "msg-1", messaging_profile_id: "profile-1", to: [{ status: "delivered" }] } } };
 
 function signedRequest(body: string, signWith = privateKey) {
   const timestamp = String(Math.floor(Date.now() / 1000));
@@ -37,11 +38,13 @@ function signedRequest(body: string, signWith = privateKey) {
 describe("POST /api/sms/telnyx/webhook", () => {
   beforeEach(() => {
     process.env.TELNYX_API_KEY = "KEYtest";
+    vi.stubEnv("TELNYX_MESSAGING_PROFILE_ID", "profile-1");
     process.env.TELNYX_PUBLIC_KEY = portalKey;
     applyTelnyxMessageStatus.mockReset();
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     delete process.env.TELNYX_API_KEY;
     delete process.env.TELNYX_PUBLIC_KEY;
   });
@@ -77,15 +80,15 @@ describe("POST /api/sms/telnyx/webhook", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ ok: true, outcome: "updated", status: "delivered" });
-    expect(applyTelnyxMessageStatus).toHaveBeenCalledWith({ marker: "admin" }, ENVELOPE);
+    expect(applyTelnyxMessageStatus).toHaveBeenCalledWith({ marker: "admin" }, ENVELOPE, { messagingProfileId: "profile-1" });
   });
 
-  it("acknowledges a status for an unknown message", async () => {
+  it("retries a receipt that beats the provider id write", async () => {
     applyTelnyxMessageStatus.mockResolvedValue({ outcome: "unknown_message", providerMessageId: "msg-x", status: "delivered", detail: null, smsMessageId: null });
     const response = await POST(signedRequest(JSON.stringify(ENVELOPE)));
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ outcome: "unknown_message" });
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({ error: "message_not_recorded_yet" });
   });
 
   it("returns 500 when the status update itself fails", async () => {
@@ -95,4 +98,17 @@ describe("POST /api/sms/telnyx/webhook", () => {
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toEqual({ error: "processing_failed" });
   });
+  it("ignores a foreign profile without touching data", async () => {
+    const envelope = structuredClone(ENVELOPE); envelope.data.payload.messaging_profile_id = "foreign";
+    const response = await POST(signedRequest(JSON.stringify(envelope)));
+    expect(response.status).toBe(200); expect(applyTelnyxMessageStatus).not.toHaveBeenCalled();
+  });
+  it("never acknowledges inbound as stored while receiving is inactive", async () => {
+    const envelope = structuredClone(ENVELOPE); envelope.data.event_type = "message.received";
+    const response = await POST(signedRequest(JSON.stringify(envelope)));
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({ error: "inbound_not_enabled" });
+    expect(applyTelnyxMessageStatus).not.toHaveBeenCalled();
+  });
+
 });

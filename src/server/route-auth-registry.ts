@@ -96,7 +96,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "cases/[id]/actions": { class: "session" },
   "cases/[id]/assign": { class: "session" },
   "cases/[id]/attachments": { class: "session" },
-  "cases/[id]/sms": { class: "session" },
+  "cases/[id]/sms": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
 
   // fleet-assets
   "fleet-assets": { class: "session", role: ["manager", "admin"] },
@@ -131,6 +131,9 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "reports/dashboard": { class: "session" },
 
   // SMS
+  "sms": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "sms/context": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "sms/prepare": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   "sms/send": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
 
   // telephony (provider-neutral routes + Telnyx call control)
