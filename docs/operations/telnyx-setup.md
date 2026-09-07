@@ -7,10 +7,15 @@ Non-secret identifiers only. The API key, SIP passwords, WebRTC tokens and any r
 | Number | API string | Number ID | Status | Line |
 |---|---|---|---|---|
 | +421 2 324 087 00 | `+4210232408700` | 3040091148564563176 | active, **inbound only** | Neutrálna linka; cannot originate (malformed E.164 record, spike S3) |
-| +421 2 324 087 18 | `+421232408718` | see `GET /v2/phone_numbers` | active | Allianz Assistance; current `TELNYX_DEFAULT_FROM_NUMBER` |
-| +421 2 324 087 32 | `+421232408732` | see `GET /v2/phone_numbers` | active | Autoklub Slovakia Assistance |
-| +421 2 324 087 60 | `+421232408760` | see `GET /v2/phone_numbers` | active | AXA Assistance CZ |
-| +421 2 324 087 83 | `+421232408783` | see `GET /v2/phone_numbers` | active | Eurocross Assistance CR |
+| +421 2 324 087 18 | `+421232408718` | 3040142888064255967 | active | Allianz Assistance; current `TELNYX_DEFAULT_FROM_NUMBER` |
+| +421 2 324 087 32 | `+421232408732` | 3040142888089421792 | active | Autoklub Slovakia Assistance s.r.o |
+| +421 2 324 087 60 | `+421232408760` | 3040142888089421793 | active | AXA Assistance CZ s.r.o |
+| +421 2 324 087 70 | `+421232408770` | 3043592669088449601 | active | Europ Assistance |
+| +421 2 324 087 71 | `+421232408771` | 3043592669113615426 | active | LeasePlan Slovakia s.r.o |
+| +421 2 324 087 74 | `+421232408774` | 3043592669122004035 | active | Neutrálna linka 2 |
+| +421 2 324 087 83 | `+421232408783` | 3040142888097810402 | active | Eurocross Assistance Czech Republic s.r.o |
+
+The requested inventory is eight DIDs: six named partner lines and two neutral lines. All eight are active and attached to the production Call Control application.
 
 The first number's API string carries an extra leading `0` (provider quirk); always normalise inbound `to` through the E.164 helper before looking up the line.
 

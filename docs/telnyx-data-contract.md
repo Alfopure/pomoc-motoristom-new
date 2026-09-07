@@ -55,7 +55,7 @@ Every DB write is an upsert on a natural key: legs on `telnyx_call_control_id`, 
 
 | State | Entered by | Actions |
 | --- | --- | --- |
-| `received` | `call.initiated` on one of our DIDs (`to` normalised first) | `answer` with `client_state {sid, role:"customer"}`; upsert session + customer leg; `findCallerMatches` → `metadata.match` |
+| `received` | `call.initiated` on one of our DIDs (`to` normalised first) | `answer` with `client_state {sid, role:"customer"}`; upsert session + customer leg without a case; linking to a case is an explicit dispatcher action |
 | `greeting` | customer `call.answered` | business-hours lookup; closed → `after_hours`; line has an IVR menu → `ivr`; otherwise ring step 0 |
 | `ivr` | `call.gather.ended` | `gather_using_audio` with the pre-recorded Slovak prompt (`gather_using_speak` only when the menu has no recording); `routing/ivr.ts` maps the digit onto its option. Telnyx's `maximum_tries` only re-plays the file on silence, so the engine counts the prompts in `metadata.ivr.tries`: an unmapped digit (or the `repeat` option) re-plays the menu while the menu's `max_tries` budget lasts, silence and an exhausted budget both route to the line's ring plan, and an option whose target plan is gone falls back to the same place |
 | `ringing` | plan advance (guarded) | MOH on the customer leg; fan-out per eligible member; `motorist_ring_attempts` rows |

@@ -55,6 +55,7 @@ import {
 import { casePriorityLabels, caseStatusLabels, caseStatusTone, priorityTone } from "@/domain/statuses";
 import { formatCurrency, formatTime } from "@/lib/dispatch-calculations";
 import type { DispatchMapModel } from "@/lib/map-adapter";
+import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { attachmentCategoryLabels } from "./case-form-shared";
 import { CaseDetail } from "./CaseDetail";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
@@ -66,6 +67,7 @@ type CaseCockpitPanelProps = {
   assets: FleetAsset[];
   branches: Branch[];
   caseItem: DispatchCase;
+  callLinkCandidates?: PhoneBarCall[];
   commanderVehicles: CommanderVehicleConnection[];
   focusedTaskId?: string;
   mode: WorkspaceMode;
@@ -77,6 +79,7 @@ type CaseCockpitPanelProps = {
   onDataChange: (dispatchData: DispatchData) => void;
   /** Click-to-call from the case card; absent while telephony is not configured. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
+  onLinkCall?: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
   onDirtyChange: (dirty: boolean) => void;
   onExpand: () => void;
   onRestore: () => void;
@@ -97,6 +100,7 @@ export function CaseCockpitPanel({
   assets,
   branches,
   caseItem,
+  callLinkCandidates,
   commanderVehicles,
   focusedTaskId,
   mode,
@@ -104,6 +108,7 @@ export function CaseCockpitPanel({
   onCollapse,
   onDataChange,
   onDial,
+  onLinkCall,
   onDirtyChange,
   onExpand,
   onRestore,
@@ -322,6 +327,7 @@ export function CaseCockpitPanel({
           assets={assets}
           branches={branches}
           caseItem={caseItem}
+          callLinkCandidates={callLinkCandidates}
           commanderVehicles={commanderVehicles}
           compactEditor
           editing
@@ -329,6 +335,7 @@ export function CaseCockpitPanel({
           focusedTaskId={focusedTaskId}
           onDataChange={onDataChange}
           onDial={onDial}
+          onLinkCall={onLinkCall}
           onDirtyChange={onDirtyChange}
           onSaveDraftChange={onSaveDraftChange}
           onSavingChange={onSavingChange}

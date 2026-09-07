@@ -170,13 +170,13 @@ describe("inbound ring plan", () => {
     expect(h.rows("motorist_callback_requests")).toHaveLength(1);
   });
 
-  it("creates a callback task as well when the caller matched an open case", async () => {
+  it("does not attach an inbound call to a case from the caller number", async () => {
     const h = createTelephonyHarness();
-    h.deps.findCallerMatches = async () => ({ degraded: false, matches: [{ id: "case:x", type: "open_case", label: "PM-2026-0001", caseId: "00000000-0000-4000-8000-000000000801", caseNumber: "PM-2026-0001", confidence: "high" }] });
     const call = await ringingInbound(h);
-    expect(h.session(call.sessionId).case_id).toBe("00000000-0000-4000-8000-000000000801");
+    expect(h.session(call.sessionId).case_id).toBeNull();
+    expect(h.session(call.sessionId).metadata).not.toHaveProperty("match");
     await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "originator_cancel" });
-    expect(h.rows("motorist_case_tasks")).toEqual([expect.objectContaining({ kind: "callback", case_id: "00000000-0000-4000-8000-000000000801", status: "open" })]);
+    expect(h.rows("motorist_case_tasks")).toEqual([]);
   });
 
   it("advances through ordered step 1 to the external member and falls back to the callback prompt", async () => {

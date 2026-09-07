@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 import { announcementConfigFromMetadata, readAnnouncementConfig } from "@/lib/telephony/announcements";
 
@@ -56,7 +55,6 @@ export type SessionRunnerDeps = {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
   logger?: (entry: Record<string, unknown>) => void;
-  findCallerMatches?: (number: string) => Promise<{ degraded: boolean; matches: CallerMatch[] }>;
   leaseWaitMs?: number;
   leaseTtlMs?: number;
   maxConflictRetries?: number;
