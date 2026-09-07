@@ -520,7 +520,7 @@ export function MyPhonePanel({
         open={pauseDialogOpen}
         profileId={profileId}
         operators={document.operators.map((item) => ({ id: item.profileId, name: item.displayName, extension: "", status: "offline" }))}
-        pauseReasons={reasons.map((reason) => ({ id: reason.id, code: reason.code, label: reason.label }))}
+        pauseReasons={reasons.map((reason) => ({ id: reason.id, code: reason.code, label: reason.label, maxMinutes: reason.maxMinutes }))}
         busy={presenceBusy}
         onClose={() => setPauseDialogOpen(false)}
         onActivate={({ pauseReasonId }) => changePresence({ status: "paused", pauseReasonId })}

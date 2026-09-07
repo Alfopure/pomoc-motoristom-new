@@ -94,6 +94,12 @@ export type ActiveCallsSnapshot = {
   calls: ActiveCallView[];
   waiting: ActiveCallView[];
   presence: TelephonyPresenceSnapshot;
+  /** Private scheduling inputs for the polling operator's own timed pause. */
+  ownPresence: {
+    status: PresenceRow["status"];
+    pauseReasonId: string | null;
+    statusSince: string;
+  } | null;
 };
 
 export type ActiveCallsDeps = {
@@ -225,6 +231,7 @@ export async function loadActiveCalls(
 
   const presenceRows = (presenceResult.data ?? []) as PresenceRow[];
   const deviceRows = (devicesResult.data ?? []) as DeviceRow[];
+  const ownPresence = presenceRows.find((row) => row.profile_id === actor.profileId);
 
   return {
     checkedAt: now.toISOString(),
@@ -234,6 +241,11 @@ export async function loadActiveCalls(
     calls,
     waiting: calls.filter((call) => WAITING_STATES.has(call.state)),
     presence: buildPresenceSnapshot({ actor, now, presence: presenceRows, devices: deviceRows }),
+    ownPresence: ownPresence ? {
+      status: ownPresence.status,
+      pauseReasonId: ownPresence.pause_reason_id,
+      statusSince: ownPresence.status_since,
+    } : null,
   };
 }
 

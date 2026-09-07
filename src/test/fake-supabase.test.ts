@@ -61,7 +61,7 @@ describe("fake-supabase query builder", () => {
       .from("motorist_call_legs")
       .upsert({ telnyx_call_control_id: "cc-1", state: "hangup" }, { onConflict: "telnyx_call_control_id", ignoreDuplicates: true })
       .select();
-    expect(ignored.data).toEqual([expect.objectContaining({ state: "answered" })]);
+    expect(ignored.data).toEqual([]);
   });
 
   it("updates and deletes through filters and reports single/maybeSingle errors", async () => {

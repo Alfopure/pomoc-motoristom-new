@@ -175,7 +175,7 @@ export function PauseRoutingDialog({
                   Dôvod pauzy
                   <select value={pauseReasonId} onChange={(event) => setPauseReasonId(event.target.value)} className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-yellow-300">
                     <option value="">Bez uvedenia dôvodu</option>
-                    {pauseReasons.map((reason) => <option key={reason.id} value={reason.id}>{reason.label}</option>)}
+                    {pauseReasons.map((reason) => <option key={reason.id} value={reason.id}>{reason.label}{reason.maxMinutes ? ` (${reason.maxMinutes} min)` : ""}</option>)}
                   </select>
                 </label>
               )}

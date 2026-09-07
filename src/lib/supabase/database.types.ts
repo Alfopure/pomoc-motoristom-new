@@ -640,6 +640,7 @@ export type Database = {
         organization_id: string;
         profile_id: string;
         mobile_calls_enabled: boolean;
+        pause_ending_enabled: boolean;
         updated_at: Timestamp;
       }>;
       motorist_push_subscriptions: Table<{

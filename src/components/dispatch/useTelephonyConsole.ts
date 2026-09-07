@@ -34,7 +34,7 @@ import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "@/lib/telephon
 import type { TransferRequest } from "./CallTransferPicker";
 import { partyBusyKey, PHONE_ACTION_ERRORS, type PhoneCallAction, type PhonePartyAction } from "./phone-bar-model";
 
-export type PhonePauseReason = { id: string; code: string; label: string };
+export type PhonePauseReason = { id: string; code: string; label: string; maxMinutes: number | null };
 export type PhonePresenceAction = { status: "available" | "paused" | "offline"; pauseReasonId?: string };
 
 /**
@@ -109,7 +109,7 @@ export type TelephonyConsole = {
 
 type PresenceResponse = {
   error?: string;
-  pauseReasons?: Array<{ id: string; code: string; label: string }>;
+  pauseReasons?: Array<{ id: string; code: string; label: string; max_minutes: number | null }>;
   own?: { status?: string } | null;
 };
 
@@ -360,7 +360,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         return;
       }
       if (result.ok && Array.isArray(result.body?.pauseReasons)) {
-        setPauseReasons(result.body.pauseReasons.map((reason) => ({ id: reason.id, code: reason.code, label: reason.label })));
+        setPauseReasons(result.body.pauseReasons.map((reason) => ({ id: reason.id, code: reason.code, label: reason.label, maxMinutes: reason.max_minutes })));
       }
     }
 

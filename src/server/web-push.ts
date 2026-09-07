@@ -251,6 +251,44 @@ export async function sendTaskPush(supabase: AdminClient, input: {
   return totals;
 }
 
+/** Push half of a saved pause-ending warning. The account preference is read
+ * again immediately before delivery so an opt-out racing the claim wins. */
+export async function sendPauseEndingPush(supabase: AdminClient, input: {
+  organizationId: string; recipientProfileId: string; notificationId: string; title: string; body: string;
+}): Promise<{ sent: number; failed: number }> {
+  const totals = { sent: 0, failed: 0 };
+  try {
+    if (!await pauseEndingNotificationEnabled(supabase, { organizationId: input.organizationId, profileId: input.recipientProfileId })) return totals;
+    const profile = await supabase.from("motorist_profiles").select("id")
+      .eq("organization_id", input.organizationId).eq("id", input.recipientProfileId).eq("active", true).maybeSingle();
+    assertStorage(profile.error);
+    if (!profile.data) return totals;
+    const result = await supabase.from("motorist_push_subscriptions").select("*")
+      .eq("organization_id", input.organizationId).eq("profile_id", input.recipientProfileId);
+    assertStorage(result.error);
+    const subscriptions = (result.data ?? []).filter((row) => !isExpired(row));
+    if (!subscriptions.length) return totals;
+    const config = await getPushConfig(supabase);
+    if (!config) return totals;
+    const message: PushMessage = {
+      title: input.title.slice(0, 160), body: input.body.slice(0, 400), url: "/",
+      tag: `pause-ending-${input.notificationId}`, notificationId: input.notificationId,
+    };
+    for (let offset = 0; offset < subscriptions.length; offset += 10) {
+      const deliveries = await Promise.all(subscriptions.slice(offset, offset + 10).map((row) => deliverPush(supabase, row, message, config)));
+      for (const delivery of deliveries) {
+        if (delivery === "sent") totals.sent += 1;
+        if (delivery === "failed") totals.failed += 1;
+      }
+    }
+    if (totals.failed) console.warn("Pause ending push delivery incomplete", { notificationId: input.notificationId, failed: totals.failed });
+  } catch {
+    console.warn("Pause ending push delivery unavailable", { notificationId: input.notificationId });
+    totals.failed += 1;
+  }
+  return totals;
+}
+
 /** One short-lived call alert per recipient/category/session, independent of
  * repeated webhooks and routing ticks. Claim only when a device opted in. */
 export async function sendCallPush(supabase: AdminClient, input: {
@@ -429,6 +467,29 @@ export async function mobileCallPushEnabled(supabase: AdminClient, actor: PushAc
   const result = await query.maybeSingle();
   assertStorage(result.error);
   return result.data?.mobile_calls_enabled !== false;
+}
+
+export async function pauseEndingNotificationEnabled(supabase: AdminClient, actor: PushActor): Promise<boolean> {
+  const result = await supabase.from("motorist_call_notification_preferences").select("pause_ending_enabled")
+    .eq("organization_id", actor.organizationId).eq("profile_id", actor.profileId).maybeSingle();
+  assertStorage(result.error);
+  return result.data?.pause_ending_enabled !== false;
+}
+
+export async function getPauseEndingNotificationPreference(supabase: AdminClient, actor: PushActor) {
+  return { enabled: await pauseEndingNotificationEnabled(supabase, actor) };
+}
+
+export async function setPauseEndingNotificationPreference(supabase: AdminClient, actor: PushActor, enabled: unknown) {
+  if (typeof enabled !== "boolean") throw new PushError("Neplatné nastavenie upozornenia na koniec pauzy.", 400);
+  const result = await supabase.from("motorist_call_notification_preferences").upsert({
+    organization_id: actor.organizationId,
+    profile_id: actor.profileId,
+    pause_ending_enabled: enabled,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "organization_id,profile_id" });
+  assertStorage(result.error);
+  return { enabled };
 }
 
 export async function getMobileCallPushSettings(supabase: AdminClient, actor: PushActor) {

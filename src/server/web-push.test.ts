@@ -3,8 +3,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "@/lib/supabase/database.types";
 import {
-  getMobileCallPushSettings, setMobileCallPushSettings, deletePushSubscription, getPushConfig, getPushSubscriptionStatus, parsePushSubscription,
-  savePushSubscription, sendTaskPush, sendTestPush, sendCallPush, updatePushSound, updatePushPreferences, validatePushEndpoint,
+  getMobileCallPushSettings, setMobileCallPushSettings, deletePushSubscription, getPauseEndingNotificationPreference, getPushConfig, getPushSubscriptionStatus, parsePushSubscription,
+  savePushSubscription, sendPauseEndingPush, sendTaskPush, sendTestPush, sendCallPush, setPauseEndingNotificationPreference, updatePushSound, updatePushPreferences, validatePushEndpoint,
 } from "./web-push";
 
 const { sendNotification } = vi.hoisted(() => ({ sendNotification: vi.fn() }));
@@ -475,6 +475,52 @@ describe("task push delivery", () => {
     expect(await sendTaskPush(db, message)).toEqual({ sent: 0, failed: 0 });
     expect(await sendTaskPush(db, { ...message, recipientProfileId: null })).toEqual({ sent: 0, failed: 0 });
     expect(sendNotification).not.toHaveBeenCalled();
+  });
+});
+
+describe("pause ending push delivery", () => {
+  it("delivers the saved warning to every active push device", async () => {
+    const second = { ...row, id: "sub-b", endpoint: "https://fcm.googleapis.com/fcm/send/pause-second", sound_enabled: true };
+    const { db } = database([
+      { data: { pause_ending_enabled: true } },
+      { data: { id: actor.profileId } },
+      { data: [row, second] },
+    ]);
+    expect(await sendPauseEndingPush(db, {
+      organizationId: actor.organizationId,
+      recipientProfileId: actor.profileId,
+      notificationId: "pause-warning-a",
+      title: "Plánovaný koniec pauzy o 1 minútu",
+      body: "Prepni sa ručne na dostupného.",
+    })).toEqual({ sent: 2, failed: 0 });
+    expect(sendNotification).toHaveBeenCalledTimes(2);
+    const payload = JSON.parse(sendNotification.mock.calls[0][1]);
+    expect(payload).toMatchObject({ url: "/", tag: "pause-ending-pause-warning-a", notificationId: "pause-warning-a", soundEnabled: false });
+  });
+
+  it("suppresses push when the account preference was disabled", async () => {
+    const { db } = database([{ data: { pause_ending_enabled: false } }]);
+    expect(await sendPauseEndingPush(db, {
+      organizationId: actor.organizationId,
+      recipientProfileId: actor.profileId,
+      notificationId: "pause-warning-a",
+      title: "Pauza",
+      body: "Koniec",
+    })).toEqual({ sent: 0, failed: 0 });
+    expect(sendNotification).not.toHaveBeenCalled();
+  });
+
+  it("defaults to enabled and validates account-scoped preference writes", async () => {
+    expect(await getPauseEndingNotificationPreference(database([{ data: null }]).db, actor)).toEqual({ enabled: true });
+    expect(await getPauseEndingNotificationPreference(database([{ data: { pause_ending_enabled: false } }]).db, actor)).toEqual({ enabled: false });
+    await expect(setPauseEndingNotificationPreference(database([]).db, actor, "false")).rejects.toMatchObject({ status: 400 });
+
+    const { db, queries } = database([{}]);
+    expect(await setPauseEndingNotificationPreference(db, actor, false)).toEqual({ enabled: false });
+    expect(queries[0].operations).toContainEqual({
+      name: "upsert",
+      args: [expect.objectContaining({ organization_id: actor.organizationId, profile_id: actor.profileId, pause_ending_enabled: false }), { onConflict: "organization_id,profile_id" }],
+    });
   });
 });
 
