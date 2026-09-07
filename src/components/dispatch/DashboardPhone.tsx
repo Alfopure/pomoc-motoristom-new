@@ -22,6 +22,7 @@ export type DashboardPhoneProps = {
   className?: string;
   disabled?: boolean;
   isDialing?: boolean;
+  onCreateCase?: () => void;
   onDataChange?: (dispatchData: DispatchData) => void;
   onDial: (phone: string, contact?: TelephonyDirectoryContact) => Promise<void> | void;
   variant?: "card" | "rail";
@@ -36,7 +37,7 @@ const CONTACT_ROLE_LABELS: Record<TelephonyDirectoryContact["role"], string> = {
 
 const FAVORITES_PER_PAGE = 5;
 
-export function DashboardPhone({ caseContext, className = "", disabled = false, isDialing = false, onDataChange, onDial, variant = "card" }: DashboardPhoneProps) {
+export function DashboardPhone({ onCreateCase, className = "", disabled = false, isDialing = false, onDataChange, onDial, variant = "card" }: DashboardPhoneProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const [selectedContact, setSelectedContact] = useState<TelephonyDirectoryContact | null>(null);
@@ -298,6 +299,7 @@ export function DashboardPhone({ caseContext, className = "", disabled = false, 
           </button>
           <button
             type="button"
+            aria-label="Otvoriť SMS"
             onClick={() => {
               setIsOpen(false);
               setSmsComposerOpen(true);
@@ -450,10 +452,8 @@ export function DashboardPhone({ caseContext, className = "", disabled = false, 
         </section>
       )}
       <SmsComposerDialog
-        caseId={caseContext?.id}
-        caseNumber={caseContext?.caseNumber}
         initialPhone={selectedContact?.phone ?? query}
-        locationPhone={caseContext?.phone}
+        onCreateCase={onCreateCase}
         onClose={() => setSmsComposerOpen(false)}
         onSent={(result) => {
           setError(null);

@@ -85,7 +85,7 @@ import {
 } from "@/domain/case-card";
 import { casePriorityLabels, caseStatusLabels, caseStatusTone } from "@/domain/statuses";
 import { isTaskOpen, isTaskOverdue, taskPriorities, taskPriorityLabels, taskPriorityTone } from "@/domain/tasks";
-import { buildSmsPreview, formatDateTime, formatTime } from "@/lib/dispatch-calculations";
+import { formatDateTime, formatTime } from "@/lib/dispatch-calculations";
 import { createDispatchMapModel } from "@/lib/map-adapter";
 import {
   attachmentCategories,
@@ -129,6 +129,8 @@ import {
 import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { LocationPicker } from "./LocationPicker";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
+import { UseCustomerLocationButton } from "./UseCustomerLocationButton";
+import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 
 type CaseDetailProps = {
@@ -262,6 +264,7 @@ export function CaseDetail({
 }: CaseDetailProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
+  const [smsTemplate, setSmsTemplate] = useState<"custom" | "location_request" | "eta_update">("custom");
   const [isRunningAction, setIsRunningAction] = useState(false);
   const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
   const [linkingCallSessionId, setLinkingCallSessionId] = useState<string | null>(null);
@@ -282,7 +285,7 @@ export function CaseDetail({
   const model = caseItem.pickup ? createDispatchMapModel(caseItem, branches, assets, priceRule) : null;
   const routePlan = model?.routePlan ?? null;
   const routeEta = routePlan?.segments.find((segment) => segment.id === "asset-to-pickup")?.eta ?? routePlan?.totalEta;
-  const sms = routeEta && routeEta > 0 ? buildSmsPreview(caseItem, routeEta) : "ETA náhľad bude dostupný po doplnení miesta zásahu a trasy.";
+  const sms = "SMS s odhadom príchodu pripravíte v editore po zadaní aktuálneho ETA a potvrdení odchodu technika.";
   const selectedAsset = caseItem.selectedAssetId ? assets.find((asset) => asset.id === caseItem.selectedAssetId) : undefined;
   const mapsUrl = caseItem.pickup
     ? `https://www.google.com/maps/search/?api=1&query=${caseItem.pickup.lat},${caseItem.pickup.lng}`
@@ -451,90 +454,14 @@ export function CaseDetail({
     }
   }
 
-  async function postLocationSms() {
-    if (isRunningAction) {
-      return;
-    }
-
-    if (!contactPhone) {
-      setNotice("SMS nie je možné odoslať, kým v karte nie je telefónne číslo.");
-      return;
-    }
-
-    const task = caseItem.tasks.find((candidate) => {
-      const title = candidate.title.toLowerCase();
-      return candidate.status === "open" && title.includes("lokaliza") && title.includes("sms");
-    });
-
-    setIsRunningAction(true);
-    setNotice(null);
-
-    try {
-      const response = await fetch(`/api/cases/${caseItem.id}/sms`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          taskId: task?.id,
-          template: "location_request",
-        }),
-      });
-      const result = (await response.json().catch(() => null)) as ApiMutationResponse | null;
-
-      if (!response.ok || !result?.dispatchData) {
-        throw new Error(result?.error ?? "SMS sa nepodarilo odoslať.");
-      }
-
-      onDataChange?.(result.dispatchData);
-      setNotice(result.sms?.reused ? "Lokalizačná SMS už bola odoslaná, znovu ju neposielam." : "Lokalizačná SMS bola odoslaná klientovi.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "SMS sa nepodarilo odoslať.");
-    } finally {
-      setIsRunningAction(false);
-    }
+  function postLocationSms() {
+    setSmsTemplate("location_request");
+    setSmsComposerOpen(true);
   }
 
-  async function postEtaSms() {
-    if (isRunningAction) {
-      return;
-    }
-
-    if (!contactPhone) {
-      setNotice("ETA SMS nie je možné odoslať, kým v karte nie je telefónne číslo.");
-      return;
-    }
-
-    if (!caseItem.pickup || !routePlan || !routeEta) {
-      setNotice("ETA nie je dostupné, kým nie je doplnené miesto zásahu a použiteľná trasa.");
-      return;
-    }
-
-    const task = caseItem.tasks.find((candidate) => candidate.status === "open" && candidate.title.toLowerCase().includes("eta"));
-
-    setIsRunningAction(true);
-    setNotice(null);
-
-    try {
-      const response = await fetch(`/api/cases/${caseItem.id}/sms`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          taskId: task?.id,
-          template: "eta_update",
-        }),
-      });
-      const result = (await response.json().catch(() => null)) as ApiMutationResponse | null;
-
-      if (!response.ok || !result?.dispatchData) {
-        throw new Error(result?.error ?? "ETA SMS sa nepodarilo odoslať.");
-      }
-
-      onDataChange?.(result.dispatchData);
-      setNotice(result.sms?.reused ? "ETA SMS už bola odoslaná, znovu ju neposielam." : "ETA SMS bola odoslaná klientovi.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "ETA SMS sa nepodarilo odoslať.");
-    } finally {
-      setIsRunningAction(false);
-    }
+  function postEtaSms() {
+    setSmsTemplate("eta_update");
+    setSmsComposerOpen(true);
   }
 
   async function runAction(action: keyof typeof actionLabels) {
@@ -775,6 +702,9 @@ export function CaseDetail({
                 </p>
               </div>
             </div>
+            <UseCustomerLocationButton caseId={caseItem.id} location={caseItem.customerSharedLocation}
+              disabled={draftDirty || isEditSaveLocked || isRunningAction} onNotice={setNotice}
+              onApplied={(data) => { onDataChange?.(data); setEditorRevision((revision) => revision + 1); }} />
             {customerLocationMapsUrl && (
               <a href={customerLocationMapsUrl} target="_blank" rel="noreferrer" className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md bg-sky-700 px-3 text-xs font-semibold text-white hover:bg-sky-800">
                 <Navigation size={15} /> Otvoriť GPS
@@ -942,7 +872,7 @@ export function CaseDetail({
             <div className="flex flex-wrap gap-2">
               <Action icon={Phone} label="Zavolať" onClick={() => void runAction("call_customer")} disabled={!contactPhone || isRunningAction} disabledReason="Najprv doplňte telefónne číslo." />
               <Action icon={MessageSquareText} label="Vyžiadať polohu SMS" onClick={() => void runAction("send_sms")} disabled={!contactPhone || isRunningAction} disabledReason="Najprv doplňte telefónne číslo." />
-              <Action icon={MessageSquareText} label="Napísať SMS" onClick={() => setSmsComposerOpen(true)} disabled={isRunningAction} />
+              <Action icon={MessageSquareText} label="Napísať SMS" onClick={() => { setSmsTemplate("custom"); setSmsComposerOpen(true); }} disabled={isRunningAction} />
             </div>
             <p className="text-xs leading-5 text-zinc-500">Žiadosť o polohu pošle pripravený bezpečný link. Prijatá GPS sa uloží ako doplnková informácia a neprepíše miesto incidentu.</p>
             {!contactPhone && <p className="text-xs font-medium text-amber-800">Volanie a žiadosť o polohu sa sprístupnia po doplnení telefónneho čísla. Vlastnú SMS môžete poslať aj na ručne zadané číslo.</p>}
@@ -1149,7 +1079,9 @@ export function CaseDetail({
       {!hideNotesAndActivity && (
         <CaseNotesAndActivity busy={isRunningAction} timeline={caseItem.timeline} onAddNote={(note) => postAction({ action: "add_note", note }, "Poznámka pridaná.")} />
       )}
+      <CaseSmsHistory key={caseItem.id} caseId={caseItem.id} />
       <SmsComposerDialog
+        initialTemplate={smsTemplate}
         caseId={caseItem.id}
         caseNumber={caseItem.caseNumber}
         initialPhone={contactPhone}
@@ -1157,7 +1089,7 @@ export function CaseDetail({
         onClose={() => setSmsComposerOpen(false)}
         onSent={(result) => {
           if (result.dispatchData) onDataChange?.(result.dispatchData);
-          setNotice("SMS bola odoslaná a zapísaná do histórie prípadu.");
+          setNotice("Výsledok SMS požiadavky nájdete v histórii SMS.");
         }}
         open={smsComposerOpen}
       />

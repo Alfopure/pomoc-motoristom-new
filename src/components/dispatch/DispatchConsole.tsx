@@ -33,6 +33,7 @@ import { CallCenterModule } from "./CallCenterModule";
 import { HeaderLiveCallsMenu } from "./LiveCallOverview";
 import { CaseDirectory } from "./CaseDirectory";
 import { CaseList, type CaseFilters } from "./CaseList";
+import { SmsComposerDialog } from "./SmsComposerDialog";
 import { DashboardPhone } from "./DashboardPhone";
 import type { CaseSortState } from "./CaseTable";
 import { FleetModule } from "./FleetModule";
@@ -288,7 +289,7 @@ export function DispatchConsole({
   const [newCaseCall, setNewCaseCall] = useState(incomingCall);
   const [callStatus, setCallStatus] = useState<CallStatus>(incomingCall.status);
   const [isAssigning, setIsAssigning] = useState(false);
-  const [isSendingCaseSms, setIsSendingCaseSms] = useState(false);
+  const [caseSmsComposer, setCaseSmsComposer] = useState<{ id: string; caseNumber: string; template: "location_request" | "eta_update"; open: boolean } | null>(null);
   const [mutationNotice, setMutationNotice] = useState<string | null>(null);
   const [pauseRoutingOpen, setPauseRoutingOpen] = useState(false);
   const [dismissedWarning, setDismissedWarning] = useState<string | null>(null);
@@ -600,13 +601,8 @@ export function DispatchConsole({
     dispatchCases.find(isActiveDispatchCase);
   const selectedCase = dispatchCases.find((caseItem) => caseItem.id === activeCaseId);
   const workspaceCase = workspace.kind === "detail" ? selectedCase ?? activeCase : activeCase;
-  const workspaceCasePrimaryContact = workspaceCase?.customerDetails.contacts?.find((contact) => contact.isPrimary) ?? workspaceCase?.customerDetails.contacts?.[0];
-  const dashboardSmsCaseContext = workspaceCase
-    ? {
-        caseNumber: workspaceCase.caseNumber,
-        id: workspaceCase.id,
-        phone: workspaceCasePrimaryContact?.phone || workspaceCase.contact.phone,
-      }
+  const dashboardSmsCaseContext = workspace.kind === "detail" && selectedCase
+    ? { caseNumber: selectedCase.caseNumber, id: selectedCase.id, phone: selectedCase.contact.phone }
     : undefined;
   const visibleActiveCaseId = activeCase?.id ?? "";
   const activePriceRule = workspaceCase?.priceRuleId
@@ -1498,51 +1494,12 @@ export function DispatchConsole({
     void telephony.callAction(action, sessionId, target);
   }
 
-  async function handleSendCaseSms(template: "location_request" | "eta_update") {
-    if (isSendingCaseSms) {
+  function handleSendCaseSms(template: "location_request" | "eta_update") {
+    if (workspace.kind === "new" || !selectedCase) {
+      setMutationNotice("Najprv výslovne vyberte a uložte prípad.");
       return;
     }
-    if (!activeCase) {
-      setMutationNotice("Najprv vyberte aktívny prípad.");
-      return;
-    }
-    if (!activeCase.contact.phone.trim()) {
-      setMutationNotice("Pred odoslaním SMS doplňte telefón zákazníka.");
-      return;
-    }
-    if (template === "eta_update" && !activeCase.pickup) {
-      setMutationNotice("Pred odoslaním ETA SMS doplňte miesto incidentu.");
-      return;
-    }
-
-    const task = activeCase.tasks.find((candidate) => {
-      const title = candidate.title.toLowerCase();
-      return candidate.status === "open" && (template === "eta_update" ? title.includes("eta") : title.includes("lokaliza") && title.includes("sms"));
-    });
-
-    setIsSendingCaseSms(true);
-    setMutationNotice(null);
-
-    try {
-      const response = await fetch(`/api/cases/${activeCase.id}/sms`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId: task?.id, template }),
-      });
-      const result = (await response.json().catch(() => null)) as { dispatchData?: DispatchData; sms?: { reused?: boolean }; error?: string } | null;
-
-      if (!response.ok || !result?.dispatchData) {
-        throw new Error(result?.error ?? "SMS sa nepodarilo odoslať.");
-      }
-
-      setDispatchData(result.dispatchData);
-      const smsLabel = template === "eta_update" ? "ETA SMS" : "Lokalizačná SMS";
-      setMutationNotice(result.sms?.reused ? `${smsLabel} už bola odoslaná, znovu ju neposielam.` : `${smsLabel} bola odoslaná klientovi.`);
-    } catch (error) {
-      setMutationNotice(error instanceof Error ? error.message : "SMS sa nepodarilo odoslať.");
-    } finally {
-      setIsSendingCaseSms(false);
-    }
+    setCaseSmsComposer({ id: selectedCase.id, caseNumber: selectedCase.caseNumber, template, open: true });
   }
 
   async function handleAssignAsset(assetId: string) {
@@ -1725,6 +1682,9 @@ export function DispatchConsole({
       data-active-view={activeView}
       ref={consoleRef}
     >
+      {caseSmsComposer && <SmsComposerDialog caseId={caseSmsComposer.id} caseNumber={caseSmsComposer.caseNumber}
+        initialTemplate={caseSmsComposer.template} open={caseSmsComposer.open} onClose={() => setCaseSmsComposer((current) => current ? { ...current, open: false } : null)}
+        onCreateCase={() => startNewCase()} onSent={(result) => { if (result.dispatchData) setDispatchData(result.dispatchData); }} />}
       <div className="relative z-50 shrink-0" ref={topBarsRef}>
       <header className="dispatch-app-header flex min-h-14 items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-950 px-3 py-2 text-white sm:px-4 sm:py-0">
         <AccountMenu
@@ -2023,7 +1983,7 @@ export function DispatchConsole({
             <span aria-hidden="true" className="h-14 w-1 rounded-full bg-zinc-300 shadow-sm transition group-hover:bg-yellow-400 group-focus-visible:bg-yellow-400" />
           </button>
           <div className="hidden min-w-0 p-2 lg:col-span-2 lg:block xl:hidden">
-            <DashboardPhone caseContext={dashboardSmsCaseContext} isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
+            <DashboardPhone onCreateCase={() => startNewCase()} caseContext={dashboardSmsCaseContext} isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
           </div>
           <div className="mobile-dispatch-cases lg:contents">
           <CaseList
@@ -2089,7 +2049,7 @@ export function DispatchConsole({
           />
           </div>
           <div className="hidden min-h-0 min-w-0 flex-col border-l border-zinc-200 bg-white xl:flex">
-            <DashboardPhone caseContext={dashboardSmsCaseContext} className="shrink-0" isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} variant="rail" />
+            <DashboardPhone onCreateCase={() => startNewCase()} caseContext={dashboardSmsCaseContext} className="shrink-0" isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} variant="rail" />
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden" data-testid="dashboard-task-panel-shell">
               <TaskPanel
                 activeTaskId={focusedTaskId}

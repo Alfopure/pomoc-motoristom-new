@@ -7,7 +7,8 @@ import ts from "typescript";
 
 const require = createRequire(import.meta.url);
 
-const templates = loadTsModule("../src/lib/sms/templates.ts", "src/lib/sms/templates.ts");
+const segments = loadTsModule("../src/lib/sms/segments.ts", "src/lib/sms/segments.ts");
+const templates = loadTsModule("../src/lib/sms/templates.ts", "src/lib/sms/templates.ts", { require: (name) => name === "./segments" ? segments : require(name) });
 const locationShare = loadTsModule("../src/lib/sms/location-share.ts", "src/lib/sms/location-share.ts", { process });
 
 test("renders location SMS with opaque link placeholder in preview", () => {
@@ -23,10 +24,11 @@ test("renders location SMS with provided secure link", () => {
     brandName: "Pomoc motoristom",
     caseNumber: "PM-20260612-0002",
     link: "https://app.example/l/opaque-token",
+    callbackNumber: "+421905123456",
   });
 
   assert.match(body, /https:\/\/app\.example\/l\/opaque-token/);
-  assert.match(body, /Na tuto SMS neodpovedajte/);
+  assert.match(body, /Na SMS neodpovedajte/);
 });
 
 test("hashes location link tokens without storing the raw token", () => {
