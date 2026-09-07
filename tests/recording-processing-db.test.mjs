@@ -29,13 +29,38 @@ before(()=>{
  CREATE TABLE motorist_call_legs(id uuid primary key,session_id uuid references motorist_call_sessions(id),organization_id uuid references motorist_organizations(id));
  CREATE TABLE motorist_calls(id uuid primary key,organization_id uuid references motorist_organizations(id),session_id uuid references motorist_call_sessions(id),started_at timestamptz default now(),ended_at timestamptz,duration_seconds integer,operator_id uuid);
  CREATE TABLE motorist_audit_log(id uuid primary key default gen_random_uuid(),organization_id uuid,actor_profile_id uuid,action text,entity_type text,entity_id uuid,source text,before_payload jsonb,after_payload jsonb);${tables}`);
- for(const file of ['20260925100000_call_recording_processing.sql','20260925101000_call_quality_services.sql','20260925102000_call_recording_sweep_scope_fix.sql']) db(readFileSync(new URL(`../supabase/migrations/${file}`,import.meta.url),'utf8'));
+ for(const file of ['20260925100000_call_recording_processing.sql','20260925101000_call_quality_services.sql','20260925102000_call_recording_sweep_scope_fix.sql','20260925103000_recording_owner_approval_provenance.sql']) db(readFileSync(new URL(`../supabase/migrations/${file}`,import.meta.url),'utf8'));
  db(`INSERT INTO motorist_organizations(id) VALUES('${org}'),('${otherOrg}'); INSERT INTO motorist_profiles(id,organization_id,role) VALUES('${admin}','${org}','manager'),('${operator}','${org}','dispatcher'),('${otherAdmin}','${otherOrg}','manager');
  INSERT INTO motorist_call_sessions(id,organization_id) VALUES('${session}','${org}'); INSERT INTO motorist_calls(id,organization_id,session_id,ended_at) VALUES('${call}','${org}','${session}',now());
  INSERT INTO motorist_call_recording_policies(organization_id,recording_enabled,transcription_enabled,analysis_enabled,quality_enabled,approved_at,approved_by) VALUES('${org}',true,true,true,true,now(),'${admin}');`);
 });
 after(()=>{ if (enabled) sql(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`); });
 test('actual PostgreSQL recording transactions',{ skip: !enabled && 'Set RECORDING_TEST_DATABASE_URL to an isolated localhost PostgreSQL fixture.' },async t=>{
+ await t.test('owner instruction is scoped to exact policy content and never impersonates an app manager',()=>{
+  db(`INSERT INTO motorist_call_recording_policies(organization_id,controller_name,contact_email,privacy_notice_url,service_legal_basis) VALUES('${otherOrg}','Synthetic controller','owner@example.test','https://example.test/privacy','Synthetic QA operational policy')`);
+  assert.throws(()=>db(`UPDATE motorist_call_recording_policies SET recording_enabled=true,approved_at=now() WHERE organization_id='${otherOrg}'`),/recording_policy_approval_required/);
+  for(const role of ['anon','authenticated']){
+   assert.equal(db(`SELECT has_table_privilege('${role}','motorist_call_recording_policies','UPDATE')`),'f');
+   assert.equal(db(`SELECT has_function_privilege('${role}','motorist_recording_policy_fingerprint(jsonb)','EXECUTE')`),'f');
+  }
+  const approval=(hash=`motorist_recording_policy_fingerprint(to_jsonb(p)||'{"recording_enabled":true}')`,contact="'owner@example.test'")=>`jsonb_build_object('owner_approval',jsonb_build_object('source','owner_instruction','reference','conductor://workspace?id=synthetic&session=owner-instruction','instruction_sha256','${'a'.repeat(64)}','contact_email',${contact},'policy_sha256',${hash}))`;
+  assert.throws(()=>db(`UPDATE motorist_call_recording_policies p SET recording_enabled=true,approved_at=now(),config=${approval("'wrong'")} WHERE organization_id='${otherOrg}'`),/recording_policy_approval_required/);
+  assert.throws(()=>db(`UPDATE motorist_call_recording_policies p SET recording_enabled=true,approved_at=now(),config=${approval(undefined,"'other@example.test'")} WHERE organization_id='${otherOrg}'`),/recording_policy_approval_required/);
+  db(`SET ROLE service_role; UPDATE motorist_call_recording_policies p SET recording_enabled=true,approved_at=now(),config=${approval()} WHERE organization_id='${otherOrg}'`);
+  assert.equal(db(`SELECT recording_enabled AND approved_at IS NOT NULL AND approved_by IS NULL FROM motorist_call_recording_policies WHERE organization_id='${otherOrg}'`),'t');
+  assert.equal(db(`SELECT count(*) FROM motorist_audit_log WHERE organization_id='${otherOrg}' AND action='recording_policy.owner_instruction' AND actor_profile_id IS NULL AND source='deployment'`),'1');
+  for(const change of ["controller_name='Different'","audio_retention_days=31","quality_enabled=true","config=config||'{\"budget_override\":true}'"]){
+   assert.throws(()=>db(`UPDATE motorist_call_recording_policies SET ${change} WHERE organization_id='${otherOrg}'`),/recording_policy_approval_required/);
+  }
+  db(`UPDATE motorist_call_recording_policies SET revision=revision+1 WHERE organization_id='${otherOrg}'`);
+  assert.equal(db(`SELECT count(*) FROM motorist_audit_log WHERE organization_id='${otherOrg}' AND action='recording_policy.owner_instruction'`),'1');
+  assert.throws(()=>db(`SELECT motorist_recording_policy_save('${otherOrg}',999,'${otherAdmin}',true,'{}')`),/Policy revision conflict/);
+  assert.throws(()=>db(`SELECT motorist_recording_policy_save('${otherOrg}',2,'${admin}',true,'{}')`),/Policy access denied/);
+  const appPolicy={recordingEnabled:true,transcriptionEnabled:false,analysisEnabled:false,qualityEnabled:false,inboundEnabled:true,outboundEnabled:true,audioRetentionDays:30,transcriptRetentionDays:30,reviewRetentionDays:90,maxRecordingsPerHour:10,maxRecordingBytes:134217728,maxSegmentSeconds:1800,controllerName:'Updated by manager',contactEmail:'owner@example.test',privacyNoticeUrl:'https://example.test/privacy',serviceLegalBasis:'Synthetic QA policy',qualityLegalBasis:''};
+  assert.equal(db(`SELECT motorist_recording_policy_save('${otherOrg}',2,'${otherAdmin}',true,'${JSON.stringify(appPolicy)}')`),'3');
+  assert.equal(db(`SELECT config ? 'owner_approval' FROM motorist_call_recording_policies WHERE organization_id='${otherOrg}'`),'f');
+  db(`UPDATE motorist_call_recording_policies SET recording_enabled=false,approved_at=null,approved_by=null WHERE organization_id='${otherOrg}'`);
+ });
  await t.test('raw sources, jobs, reviews and RPCs are service-only; access grants reject wrong organization',()=>{
   for(const table of ['motorist_call_recordings','motorist_call_transcripts','motorist_call_processing_jobs','motorist_call_analyses','motorist_call_quality_reviews']) assert.equal(db(`SELECT has_table_privilege('authenticated','${table}','SELECT')`),'f');
   assert.equal(db(`SELECT has_function_privilege('authenticated','motorist_recording_claim_job(uuid,integer)','EXECUTE')`),'f');

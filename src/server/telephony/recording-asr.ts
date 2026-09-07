@@ -82,7 +82,8 @@ export async function processRecordingAsrJob(ctx: RecordingJobContext): Promise<
     await ctx.checkpoint({}, false, { scribe_request_id: ack.requestId, ...(ack.transcriptionId ? {scribe_transcript_id:ack.transcriptionId} : {}) });
     return { state: 'waiting', providerIds: { scribe_request_id: ack.requestId, ...(ack.transcriptionId ? {scribe_transcript_id:ack.transcriptionId} : {}) }, nextAttemptAt: new Date(Date.now() + 300_000).toISOString() };
   } catch (error) {
-    if (error instanceof ScribeAsyncError) return { state: error.ambiguous ? 'submission_unknown' : 'failed', errorCode: error.code };
+    if (error instanceof ScribeAsyncError) return { state: error.ambiguous ? 'submission_unknown' : 'failed', errorCode: error.code,
+      ...(error.code === 'scribe_submission_rejected' && !error.ambiguous ? { checkpoint: { submission_rejected: true } } : {}) };
     throw error;
   }
 }
@@ -141,7 +142,12 @@ export async function acceptScribeWebhook(admin: RecordingAdmin, raw: string, si
   return result.data ? 'accepted' : 'ignored';
 }
 export async function processScribeCleanupJob(ctx: RecordingJobContext): Promise<RecordingJobOutcome> {
-  const id = record(ctx.job.provider_ids).scribe_transcript_id;
+  const ids = record(ctx.job.provider_ids), id = ids.scribe_transcript_id;
+  // A confirmed HTTP rejection created no transcript. Ambiguous submissions and
+  // acknowledged requests without a transcript ID still require reconciliation.
+  if (typeof id !== 'string' && !ids.scribe_request_id && record(ctx.job.checkpoint).submission_rejected === true) return {
+    state: 'complete', checkpoint: { provider_object_created: false, residual_retention: false },
+  };
   if (typeof id !== 'string') return { state: 'waiting', errorCode: 'scribe_retention_unconfirmed', checkpoint: { residual_retention: true } };
   await deleteScribeTranscript(id, ctx.signal);
   return { state: 'complete', checkpoint: { provider_deleted_at: new Date().toISOString(), residual_retention: false } };

@@ -1,11 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { normalizeScribeLanguage, normalizeScribeTranscription, parseScribeSpans, verifiedMultiChannel, processRecordingAsrJob } from './recording-asr';
+import { normalizeScribeLanguage, normalizeScribeTranscription, parseScribeSpans, verifiedMultiChannel, processRecordingAsrJob, processScribeCleanupJob } from './recording-asr';
 import type { RecordingJobContext, RecordingRow } from './recording-jobs';
 afterEach(()=>{vi.unstubAllEnvs();vi.unstubAllGlobals();});
 const at='2026-09-06T10:00:00.000Z';
 const source={id:'recording',started_at:at,ended_at:'2026-09-06T10:00:20.000Z',duration_seconds:20,participant_manifest:{version:1,timingVerified:true,audioDurationSeconds:20,audioFormat:{channels:2},channelMappingVerified:true,identitySource:'authenticated_leg_binding',coverage:'verified',intervals:[{profileId:null,role:'customer',channel:0,verified:true,audibleToCustomer:true,startedAt:at,endedAt:'2026-09-06T10:00:20.000Z'},{profileId:'operator-1',role:'operator',channel:1,verified:true,audibleToCustomer:true,startedAt:at,endedAt:'2026-09-06T10:00:10.000Z'}]}} as unknown as RecordingRow;
 const result={words:[{type:'word',text:'Dobrý',start:1,end:1.3,channel_index:1,speaker_id:'speaker_0'},{type:'word',text:'deň.',start:1.4,end:1.8,channel_index:1,speaker_id:'speaker_0'},{type:'word',text:'Ďakujem.',start:11,end:12,channel_index:1,speaker_id:'speaker_0'}]};
 describe('ASR identity evidence',()=>{
+ it('finishes cleanup only for a confirmed rejection without any acknowledged provider identity',async()=>{
+  const fetch=vi.fn();vi.stubGlobal('fetch',fetch);
+  const ctx=(checkpoint:object,ids:object={})=>({job:{checkpoint,provider_ids:ids}} as unknown as RecordingJobContext);
+  expect(await processScribeCleanupJob(ctx({submission_rejected:true}))).toMatchObject({state:'complete',checkpoint:{provider_object_created:false,residual_retention:false}});
+  for(const input of [ctx({}),ctx({submission_rejected:true},{scribe_request_id:'acknowledged'})])expect(await processScribeCleanupJob(input)).toMatchObject({state:'waiting',errorCode:'scribe_retention_unconfirmed'});
+  expect(fetch).not.toHaveBeenCalled();
+ });
  it('reconstructs the webhook channel arrays chronologically and preserves our authenticated identity',()=>{
   const payload={transcription_id:'provider-transcript',transcripts:[
    {channel_index:0,language_code:'slk',words:[{type:'word',text:'Pomoc.',start:3,end:4,speaker_id:'speaker_0',role:'operator'}]},
