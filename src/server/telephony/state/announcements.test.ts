@@ -164,12 +164,12 @@ describe("inbound introduction", () => {
     h.db.update("motorist_telephony_lines", { metadata: { announcements } }, (row) => row.id === LINES.neutral);
     const call = await h.inbound({ to: NUMBERS.neutral, completeGreeting: false });
     const prompt = h.telnyx.of("playbackStart")[0];
-    expect(prompt.params.audioUrl).toBe("https://media.test/telephony/announcements-v1/en/greeting.mp3");
+    expect(prompt.params.audioUrl).toBe("https://media.test/telephony/announcements-v4/en/greeting.mp3");
     h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...announcements, language: "de" } } }, (row) => row.id === LINES.neutral);
     await h.legEvent(call.callControlId, "call.playback.ended", { status: "completed", client_state: prompt.params.clientState });
     expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params).toMatchObject({
-      audioUrl: "https://media.test/telephony/announcements-v1/en/ivr-main.mp3",
-      invalidAudioUrl: "https://media.test/telephony/announcements-v1/en/invalid-input.mp3",
+      audioUrl: "https://media.test/telephony/announcements-v4/en/ivr-main.mp3",
+      invalidAudioUrl: "https://media.test/telephony/announcements-v4/en/invalid-input.mp3",
     });
   });
 
@@ -179,7 +179,7 @@ describe("inbound introduction", () => {
     h.db.update("motorist_telephony_lines", { metadata: { announcements } }, (row) => row.id === LINES.allianz);
     await h.inbound({ completeGreeting: false });
     expect(h.telnyx.of("playbackStart")).toHaveLength(0);
-    expect(h.telnyx.of("speak")[0].params).toMatchObject({ payload: "Willkommen. Bitte warten Sie kurz.", voice: "Azure.de-DE-KatjaNeural" });
+    expect(h.telnyx.of("speak")[0].params).toMatchObject({ payload: "Willkommen. Bitte warten Sie kurz.", voice: "Azure.de-DE-ConradNeural" });
   });
 
   it("allows a longer custom introduction to finish before its watchdog retries", async () => {
@@ -219,7 +219,7 @@ describe("inbound introduction", () => {
     const menu = h.telnyx.of("gatherUsingAudio").at(-1)!;
     h.db.update("motorist_ivr_options", { prompt_media_url: null }, (row) => row.digit === "2");
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "valid", digits: "2", client_state: menu.params.clientState });
-    expect(h.telnyx.of("speak").at(-1)?.params.payload).toContain("Vašu požiadavku");
+    expect(h.telnyx.of("speak").at(-1)?.params.payload).toContain("zavoláme vám späť");
     expect(h.telnyx.of("hangup")).toHaveLength(0);
     await h.legEvent(call.callControlId, "call.speak.ended", { status: "completed", client_state: h.telnyx.of("speak").at(-1)?.params.clientState });
     expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(call.callControlId);

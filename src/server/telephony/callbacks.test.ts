@@ -376,7 +376,7 @@ describe("park limit", () => {
     h.advance(31 * 60_000);
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
     expect(h.session(call.sessionId).state).toBe("callback_offered");
-    expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v1/sk/callback-offer.mp3");
+    expect(h.telnyx.of("gatherUsingAudio").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v4/sk/callback-offer.mp3");
 
     const offer = h.telnyx.of("gatherUsingAudio").at(-1)!;
     await h.legEvent(call.callControlId, "call.gather.ended", { digits: "1", status: "valid", client_state: offer.params.clientState });
