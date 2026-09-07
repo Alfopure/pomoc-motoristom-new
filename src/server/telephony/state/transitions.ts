@@ -1368,7 +1368,8 @@ function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEve
     b.call.status = requested ? "ended" : "missed";
     b.call.end_reason = requested ? "callback_requested" : appHangup ? "operator_hangup" : state === "after_hours" ? "after_hours" : cause;
     b.call.ended_at = at;
-    if (!requested && (state === "ivr" || state === "greeting" || (state === "callback_offered" && meta.callback?.source === "missed"))) {
+    if (!requested && (state === "ivr" || state === "greeting" || (state === "callback_offered" &&
+      (meta.callback?.source === "missed" || meta.callback?.source === "park_timeout" && !b.session.answered_at)))) {
       b.callback({ source: "missed", callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id) });
     }
     b.note(`customer left during ${state}`);

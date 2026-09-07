@@ -23,6 +23,16 @@ async function waiting(h = createTelephonyHarness({ fallbackKind: "waiting_room"
 function gather(h: TelephonyHarness) { return h.telnyx.of("gatherUsingAudio").at(-1)!.params.clientState; }
 
 describe("thirty-minute inbound queue", () => {
+  it("retains an unanswered caller after the final callback offer times out, without claiming they requested a callback", async () => {
+    const { h, call } = await waiting();
+    h.advance(30 * 60_000);
+    await sweep(h);
+    expect(h.session(call.sessionId).state).toBe("callback_offered");
+    await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: gather(h) });
+    await h.legEvent(call.callControlId, "call.hangup");
+    expect((await queue(h)).open[0]).toMatchObject({ source: "missed", origin: { kind: "missed", digit: null, requestedAt: null } });
+  });
+
   it("can offer an operator who returns from a pause that originally forwarded to their mobile", async () => {
     const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
     for (const id of Object.values(PROFILES)) h.setPresence(id, { status: "offline" });
