@@ -282,13 +282,21 @@ async function createCallbackRequest(deps: EffectsDeps, session: SessionRow, pla
   if (!callerNumber) return;
   const existing = await admin
     .from("motorist_callback_requests")
-    .select("id")
+    .select("id, metadata")
     .eq("session_id", session.id)
-    .in("status", ["open", "scheduled"])
     .limit(1)
     .maybeSingle();
   if (existing.error) fail("callback lookup failed", existing.error);
-  if (existing.data) return;
+  if (existing.data) {
+    // A replay or an earlier automatic missed-call row must not lose a later
+    // explicit choice, nor overwrite ownership, resolution or outbound history.
+    if (plan.request) {
+      const metadata = existing.data.metadata && typeof existing.data.metadata === "object" && !Array.isArray(existing.data.metadata) ? existing.data.metadata : {};
+      const updated = await admin.from("motorist_callback_requests").update({ metadata: toJson({ ...metadata, request: plan.request }) }).eq("id", existing.data.id);
+      if (updated.error) fail("callback evidence update failed", updated.error);
+    }
+    return;
+  }
   const now = deps.now();
   const inserted = await admin.from("motorist_callback_requests").insert({
     organization_id: session.organization_id,
@@ -301,7 +309,7 @@ async function createCallbackRequest(deps: EffectsDeps, session: SessionRow, pla
     case_id: session.case_id,
     due_at: new Date(now.getTime() + 30 * 60_000).toISOString(),
     notes: plan.notes ?? null,
-    metadata: toJson({ state: session.state, direction: session.direction }),
+    metadata: toJson({ state: session.state, direction: session.direction, ...(plan.request ? { request: plan.request } : {}) }),
   });
   if (inserted.error) fail("callback insert failed", inserted.error);
 
@@ -615,7 +623,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         return { skipped: false, detail: { url, purpose: command.spec.purpose } };
       }
       if (text) {
-        await telnyx.gatherUsingSpeak({ ...common, payload: text, voice: prompt.voice ?? DEFAULT_TTS_VOICE, invalidPayload: invalid?.text ?? undefined });
+        await telnyx.gatherUsingSpeak({ ...common, ...(command.spec.purpose === "queue_wait" ? { timeoutMillis: 60_000 } : {}), payload: text, voice: prompt.voice ?? DEFAULT_TTS_VOICE, invalidPayload: invalid?.text ?? undefined });
         return { skipped: false, detail: { tts: true, purpose: command.spec.purpose } };
       }
       if (command.spec.media === null) {

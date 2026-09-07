@@ -3,6 +3,7 @@ import "server-only";
 import type { Database } from "@/lib/supabase/database.types";
 import type { CallbackActorRole, CallbackQueuePayload, CallbackRequestPayload } from "@/lib/telephony/callback-queue";
 import { canTakeOverCallback } from "@/lib/telephony/callback-queue";
+import { callbackOrigin } from "@/lib/telephony/callback-origin";
 
 import { isUuid } from "@/lib/telephony/uuid";
 
@@ -61,7 +62,7 @@ function readLastCall(row: Pick<CallbackRow, "metadata">): { sessionId: string |
 
 export function toCallbackPayload(
   row: CallbackRow,
-  lookup: { line?: Pick<LineRow, "label" | "partner_name"> | null; claimedByName?: string | null },
+  lookup: { line?: Pick<LineRow, "label" | "partner_name"> | null; claimedByName?: string | null; sessionMetadata?: unknown },
 ): CallbackRequestPayload {
   const lastCall = readLastCall(row);
   return {
@@ -69,6 +70,7 @@ export function toCallbackPayload(
     callerNumber: row.caller_number,
     callerName: row.caller_name,
     source: row.source,
+    origin: callbackOrigin(row.source, row.metadata, lookup.sessionMetadata),
     status: row.status,
     lineId: row.line_id,
     lineLabel: lookup.line?.label ?? null,
@@ -124,22 +126,29 @@ export async function loadCallbackQueue(
   const rows = [...(openResult.data ?? []), ...(resolvedResult.data ?? [])] as CallbackRow[];
   const lineIds = [...new Set(rows.map((row) => row.line_id).filter((id): id is string => Boolean(id)))];
   const profileIds = [...new Set(rows.map((row) => row.claimed_by).filter((id): id is string => Boolean(id)))];
+  const sessionIds = [...new Set(rows.map((row) => row.session_id).filter((id): id is string => Boolean(id)))];
 
-  const [lines, profiles] = await Promise.all([
+  const [lines, profiles, sessions] = await Promise.all([
     lineIds.length
       ? admin.from("motorist_telephony_lines").select("id, label, partner_name").eq("organization_id", organizationId).in("id", lineIds)
       : Promise.resolve({ data: [] as Array<{ id: string; label: string; partner_name: string | null }>, error: null }),
     profileIds.length
       ? admin.from("motorist_profiles").select("id, display_name").eq("organization_id", organizationId).in("id", profileIds)
       : Promise.resolve({ data: [] as Array<{ id: string; display_name: string }>, error: null }),
+    sessionIds.length
+      ? admin.from("motorist_call_sessions").select("id, metadata").eq("organization_id", organizationId).in("id", sessionIds)
+      : Promise.resolve({ data: [], error: null }),
   ]);
+  if (sessions.error) throw new CallActionError(`Voľbu volajúceho sa nepodarilo overiť: ${sessions.error.message}`, 500);
   const lineById = new Map((lines.data ?? []).map((line) => [line.id, line]));
   const nameById = new Map((profiles.data ?? []).map((profile) => [profile.id, profile.display_name]));
+  const metadataById = new Map((sessions.data ?? []).map((session) => [session.id, session.metadata]));
 
   const toPayload = (row: CallbackRow) =>
     toCallbackPayload(row, {
       line: row.line_id ? lineById.get(row.line_id) ?? null : null,
       claimedByName: row.claimed_by ? nameById.get(row.claimed_by) ?? null : null,
+      sessionMetadata: row.session_id ? metadataById.get(row.session_id) : null,
     });
 
   return {
@@ -183,7 +192,11 @@ async function present(deps: CallbackQueueDeps, row: CallbackRow): Promise<Callb
   const line = row.line_id
     ? (await deps.admin.from("motorist_telephony_lines").select("label, partner_name").eq("organization_id", deps.organizationId).eq("id", row.line_id).maybeSingle()).data
     : null;
-  return toCallbackPayload(row, { line, claimedByName: await claimantName(deps, row.claimed_by) });
+  const session = row.session_id
+    ? await deps.admin.from("motorist_call_sessions").select("metadata").eq("organization_id", deps.organizationId).eq("id", row.session_id).maybeSingle()
+    : null;
+  if (session?.error) throw new CallActionError(`Voľbu volajúceho sa nepodarilo overiť: ${session.error.message}`, 500);
+  return toCallbackPayload(row, { line, claimedByName: await claimantName(deps, row.claimed_by), sessionMetadata: session?.data?.metadata });
 }
 
 function assertLive(row: CallbackRow): void {
