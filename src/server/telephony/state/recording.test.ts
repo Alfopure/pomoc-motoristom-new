@@ -136,7 +136,8 @@ describe("recording lifecycle", () => {
     const { runSessionEvent } = await import("../session-runner");
     await runSessionEvent(h.deps, call.sessionId, { kind: "app", id: "barrier-expiry", type: "sweep", actorProfileId: null, occurredAt: h.now().toISOString() });
     expect(h.session(call.sessionId).state).toBe("talking");
-    expect(h.telnyx.of("createConference")).toHaveLength(0);
+    expect(h.telnyx.of("createConference")).toHaveLength(1);
+    expect(h.telnyx.of("conference:hold")).toHaveLength(0);
     expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.barrier).toBeNull();
   });
 
@@ -160,7 +161,8 @@ describe("recording lifecycle", () => {
     expect(summarizeSessionRecording(h.session(call.sessionId).metadata).state).toBe("unknown");
     h.telnyx.failAlways("recordingStop", "timeout");
     await expect(startConsult(h.deps, actor, call.sessionId, { profileId: PROFILES.o2 })).rejects.toMatchObject({ status: 502 });
-    expect(h.telnyx.of("createConference")).toHaveLength(0);
+    expect(h.telnyx.of("createConference")).toHaveLength(1);
+    expect(h.telnyx.of("conference:hold")).toHaveLength(0);
     expect(h.session(call.sessionId).state).toBe("talking");
     expect(summarizeSessionRecording(h.session(call.sessionId).metadata).state).toBe("unknown");
   });
@@ -189,7 +191,8 @@ describe("recording lifecycle", () => {
       h.db.failNext("motorist_call_sessions", "update", "checkpoint still down");
     });
     await expect(startConsult(h.deps, actor, call.sessionId, { profileId: PROFILES.o2 })).rejects.toMatchObject({ status: 502 });
-    expect(h.telnyx.of("createConference")).toHaveLength(0);
+    expect(h.telnyx.of("createConference")).toHaveLength(1);
+    expect(h.telnyx.of("conference:hold")).toHaveLength(0);
     expect(h.session(call.sessionId).state).toBe("talking");
     expect(summarizeSessionRecording(h.session(call.sessionId).metadata).state).toBe("stopping");
   });
