@@ -1,189 +1,128 @@
+import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
+import { createFakeSupabase } from "@/test/fake-supabase";
 const adminMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: adminMock }));
+vi.mock("@/lib/supabase/env", () => ({ requireSupabaseServiceEnv: () => ({ serviceKey: "test-draft-secret" }) }));
+import { normalizeSmsRecipient, notConfiguredTransport, prepareSms, resolveSmsTransport, sendCaseSms, sendPreparedSms, SmsWorkflowError, type SmsTransport } from "./sms-workflow";
+import { applyTelnyxMessageStatus } from "./telephony/telnyx/sms-status";
+import type { SmsPrepareInput } from "@/lib/sms/contracts";
 
-vi.mock("@/lib/supabase/admin", () => ({
-  createSupabaseAdminClient: adminMock,
-}));
+const actor = { actorProfileId: "dispatcher", organizationId: "org-1" };
+function harness() {
+  const fake = createFakeSupabase({ uniqueKeys: {
+    motorist_sms_messages: [["id"], ["organization_id", "provider", "idempotency_key"]],
+    motorist_location_share_links: [["id"], ["token_hash"]],
+  } });
+  adminMock.mockReturnValue(fake.admin);
+  fake.db.seed("motorist_cases", [{ id: "case-1", organization_id: "org-1", case_number: "PM-123", contact_id: "contact-1", owner_id: "someone-else" }]);
+  fake.db.seed("motorist_contacts", [{ id: "contact-1", organization_id: "org-1", name: "Klient", phone: "0905 123 456" }]);
+  fake.db.seed("motorist_organization_profiles", [{ id: "op-1", organization_id: "org-1", brand_name: "Pomoc motoristom", primary_phone: "+421905654321" }]);
+  const send = vi.fn().mockResolvedValue({ providerMessageId: "msg-1", status: "sent", providerStatus: "sent", fromSender: "PomocMotor", messagingProfileId: "profile-1" });
+  const transport: SmsTransport = { send };
+  return { ...fake, send, transport };
+}
+async function preview(overrides: Partial<SmsPrepareInput> = {}) {
+  return prepareSms({ ...actor, requestId: randomUUID(), template: "custom", message: "Test", toNumber: "0905 123 456", publicBaseUrl: "https://sms.example", ...overrides });
+}
+beforeEach(() => { vi.stubEnv("TELNYX_API_KEY", ""); });
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
-import { normalizeSmsRecipient, notConfiguredTransport, resolveSmsTransport, sendCustomSms, SmsWorkflowError, type SmsTransport } from "./sms-workflow";
-
-type QueryCall = { method: string; args: unknown[] };
-type QueryRecorder = { calls: QueryCall[]; query: Record<string, unknown> };
-
-const CHAINED_METHODS = ["select", "insert", "update", "eq", "in", "ilike", "not", "order", "limit", "maybeSingle", "single"] as const;
-
-describe("notConfiguredTransport", () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  it("rejects with SmsWorkflowError 503 and never reaches the network", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network must stay untouched"));
-
-    const failure = await notConfiguredTransport
-      .send({ to: "+421905123456", body: "Test", idempotencyKey: "case:1:sms:location_request", organizationId: "org-1" })
-      .catch((error: unknown) => error);
-
-    expect(failure).toBeInstanceOf(SmsWorkflowError);
-    expect((failure as SmsWorkflowError).status).toBe(503);
-    expect((failure as SmsWorkflowError).message).toContain("SMS nie je nakonfigurované");
-    expect(fetchSpy).not.toHaveBeenCalled();
+describe("SMS preparation and verified recipient", () => {
+  it("prepares a global draft with no case and without a write", async () => {
+    const h = harness();
+    const p = await preview();
+    expect(p.draft).toMatchObject({ caseId: null, toNumber: "+421905123456", actorProfileId: "dispatcher" });
+    expect(h.db.rows("motorist_sms_messages")).toHaveLength(0);
+    expect(h.db.rows("motorist_location_share_links")).toHaveLength(0);
+  });
+  it("rejects missing, nonexistent and foreign cases and missing contacts", async () => {
+    const h = harness();
+    await expect(preview({ template: "location_request" })).rejects.toMatchObject({ status: 400 });
+    await expect(preview({ template: "location_request", caseId: "missing" })).rejects.toMatchObject({ status: 404 });
+    h.db.seed("motorist_cases", [{ id: "foreign", organization_id: "org-2" }]);
+    await expect(preview({ template: "location_request", caseId: "foreign" })).rejects.toMatchObject({ status: 404 });
+    h.db.seed("motorist_cases", [{ id: "no-contact", organization_id: "org-1" }]);
+    await expect(preview({ template: "location_request", caseId: "no-contact" })).rejects.toMatchObject({ status: 400 });
+  });
+  it("resolves the saved contact and freezes it in the proof", async () => {
+    const h = harness();
+    const p = await preview({ caseId: "case-1", toNumber: "+421999999999", template: "location_request" });
+    expect(p.draft.toNumber).toBe("+421905123456");
+    expect(p.draft.message).toContain(p.draft.templateContext.link);
+    expect(p.draft.locationToken).toHaveLength(43);
+    await h.admin.from("motorist_contacts").update({ phone: "+421905999999" }).eq("id", "contact-1");
+    await expect(sendPreparedSms({ ...actor, ...p, message: p.draft.message }, { transport: h.transport })).rejects.toMatchObject({ status: 409 });
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.db.rows("motorist_sms_messages")).toHaveLength(0);
+  });
+  it("rejects unknown templates and ETA inferred only from a route", async () => {
+    harness();
+    await expect(preview({ template: "unknown" as never })).rejects.toMatchObject({ status: 400 });
+    await expect(preview({ caseId: "case-1", template: "eta_update", etaMinutes: 20 })).rejects.toMatchObject({ status: 400 });
+    await expect(preview({ caseId: "case-1", template: "eta_update", etaMinutes: 20, technicianDeparted: true })).resolves.toHaveProperty("proof");
+  });
+  it("rejects altered proofs, another actor, another case and removed template facts", async () => {
+    const h = harness(); const p = await preview({ caseId: "case-1", template: "location_request" });
+    await expect(sendPreparedSms({ ...actor, ...p, draft: { ...p.draft, toNumber: "+421905999999" }, message: p.draft.message }, { transport: h.transport })).rejects.toMatchObject({ status: 403 });
+    await expect(sendPreparedSms({ ...actor, ...p, actorProfileId: "other", message: p.draft.message }, { transport: h.transport })).rejects.toMatchObject({ status: 403 });
+    await expect(sendCaseSms({ ...actor, ...p, caseId: "other-case", message: p.draft.message }, { transport: h.transport })).rejects.toMatchObject({ status: 400 });
+    await expect(sendPreparedSms({ ...actor, ...p, message: "No link" }, { transport: h.transport })).rejects.toMatchObject({ status: 400 });
+    expect(h.send).not.toHaveBeenCalled();
   });
 });
 
-describe("sendCustomSms", () => {
-  const previousApiKey = process.env.TELNYX_API_KEY;
-
-  // The "no transport configured" case must not depend on the ambient
-  // environment: a Vercel build carries TELNYX_API_KEY, a local run does not.
-  beforeEach(() => {
-    adminMock.mockReset();
-    delete process.env.TELNYX_API_KEY;
+describe("durable SMS send and retries", () => {
+  it("persists exact text, authenticated author and template version", async () => {
+    const h = harness(); const p = await preview({ caseId: "case-1", template: "location_request" });
+    const result = await sendPreparedSms({ ...actor, ...p, message: p.draft.message }, { transport: h.transport });
+    expect(result).toMatchObject({ status: "sent", reused: false });
+    const row = h.db.rows("motorist_sms_messages")[0];
+    expect(row).toMatchObject({ body: p.draft.message, to_number: p.draft.toNumber, template_key: "location_request", raw_payload: { actor_profile_id: "dispatcher", template_version: 1, location_link_id: p.draft.locationLinkId } });
+    expect(h.db.rows("motorist_location_share_links")[0]).toMatchObject({ created_by: "dispatcher", case_id: "case-1" });
+    expect(h.send).toHaveBeenCalledWith(expect.objectContaining({ body: p.draft.message, to: p.draft.toNumber }));
   });
-
-  afterEach(() => {
-    if (previousApiKey === undefined) delete process.env.TELNYX_API_KEY;
-    else process.env.TELNYX_API_KEY = previousApiKey;
+  it("reuses one global SMS across sequential and concurrent retries", async () => {
+    const h = harness(); const p = await preview(); const input = { ...actor, ...p, message: p.draft.message };
+    const results = await Promise.all([sendPreparedSms(input, { transport: h.transport }), sendPreparedSms(input, { transport: h.transport })]);
+    expect(new Set(results.map((r) => r.smsMessageId)).size).toBe(1);
+    await sendPreparedSms(input, { transport: h.transport });
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(h.db.rows("motorist_sms_messages")).toHaveLength(1);
+    expect(h.db.rows("motorist_sms_attempts")).toHaveLength(1);
+    await expect(sendPreparedSms({ ...input, message: "Different" }, { transport: h.transport })).rejects.toMatchObject({ status: 409 });
   });
-
-  it("fails closed before any Supabase access while no transport is configured", async () => {
-    const from = vi.fn();
-    adminMock.mockReturnValue({ from });
-
-    const failure = await sendCustomSms({
-      actorProfileId: "profile-1",
-      body: "Ahoj",
-      caseId: null,
-      organizationId: "org-1",
-      toNumber: "0905 123 456",
-    }).catch((error: unknown) => error);
-
-    expect(failure).toBeInstanceOf(SmsWorkflowError);
-    expect((failure as SmsWorkflowError).status).toBe(503);
-    expect((failure as SmsWorkflowError).message).toContain("SMS nie je nakonfigurované");
-    expect(adminMock).not.toHaveBeenCalled();
-    expect(from).not.toHaveBeenCalled();
+  it("preserves location metadata through a receipt and never sends the retry again", async () => {
+    const h = harness(); const p = await preview({ caseId: "case-1", template: "location_request" }); const input = { ...actor, ...p, message: p.draft.message };
+    await sendPreparedSms(input, { transport: h.transport });
+    await applyTelnyxMessageStatus(h.admin, { data: { id: "evt-1", event_type: "message.finalized", payload: { id: "msg-1", direction: "outbound", from: { phone_number: "PomocMotor" }, to: [{ phone_number: p.draft.toNumber, status: "delivered" }] } } });
+    expect((await sendPreparedSms(input, { transport: h.transport })).status).toBe("delivered");
+    expect(h.db.rows("motorist_sms_messages")[0].raw_payload).toMatchObject({ location_link_id: p.draft.locationLinkId, actor_profile_id: "dispatcher", provider_event: { id: "evt-1" } });
+    expect(h.send).toHaveBeenCalledTimes(1);
   });
-
-  it("persists provider-neutral rows, hands an E.164 recipient to the transport and mirrors the result", async () => {
-    const recorders = new Map<string, QueryRecorder[]>();
-    const from = vi.fn((table: string) => {
-      const recorder = makeQuery(table);
-      recorders.set(table, [...(recorders.get(table) ?? []), recorder]);
-      return recorder.query;
-    });
-    adminMock.mockReturnValue({ from });
-    const send = vi
-      .fn()
-      .mockResolvedValue({ providerMessageId: "msg-1", status: "sent", providerStatus: "sent", fromSender: "PomocMotor", messagingProfileId: "profile-1" });
-    const transport: SmsTransport = { send };
-
-    const result = await sendCustomSms(
-      { actorProfileId: "profile-1", body: "Ahoj", caseId: null, organizationId: "org-1", toNumber: "0905 123 456" },
-      { transport },
-    );
-
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith({
-      body: "Ahoj",
-      idempotencyKey: expect.stringMatching(/^custom-sms:profile-1:/),
-      organizationId: "org-1",
-      to: "+421905123456",
-    });
-
-    const [messageInsert, messageUpdate] = recorders.get("motorist_sms_messages") ?? [];
-    const [attemptInsert, attemptUpdate] = recorders.get("motorist_sms_attempts") ?? [];
-    expect(argOf(messageInsert, "insert")).toMatchObject({
-      provider: "telnyx_sms",
-      organization_id: "org-1",
-      to_number: "+421905123456",
-      status: "queued",
-      template_key: "custom",
-      body: "Ahoj",
-    });
-    expect(argOf(attemptInsert, "insert")).toMatchObject({ provider: "telnyx_sms", sms_message_id: "sms-1", status: "sending" });
-    expect(argOf(attemptUpdate, "update")).toMatchObject({ status: "accepted", provider_message_id: "msg-1" });
-    expect(argOf(messageUpdate, "update")).toMatchObject({
-      status: "sent",
-      status_detail: "sent",
-      provider_message_id: "msg-1",
-      from_sender: "PomocMotor",
-      messaging_profile_id: "profile-1",
-      error: null,
-    });
-    expect(result).toEqual({ providerMessageId: "msg-1", smsMessageId: "sms-1", status: "sent", statusDetail: "sent" });
+  it("never re-sends an uncertain transport outcome", async () => {
+    const h = harness(); h.send.mockRejectedValue(new Error("network timeout")); const p = await preview(); const input = { ...actor, ...p, message: p.draft.message };
+    expect(await sendPreparedSms(input, { transport: h.transport })).toMatchObject({ status: "sent", statusDetail: "send_unconfirmed" });
+    expect(await sendPreparedSms(input, { transport: h.transport })).toMatchObject({ reused: true, statusDetail: "send_unconfirmed" });
+    expect(h.send).toHaveBeenCalledTimes(1);
   });
-
-  it("marks both audit rows failed and propagates the transport error status", async () => {
-    const recorders = new Map<string, QueryRecorder[]>();
-    const from = vi.fn((table: string) => {
-      const recorder = makeQuery(table);
-      recorders.set(table, [...(recorders.get(table) ?? []), recorder]);
-      return recorder.query;
-    });
-    adminMock.mockReturnValue({ from });
-    const transport: SmsTransport = {
-      send: vi.fn().mockRejectedValue(new SmsWorkflowError("Poskytovateľ odmietol správu.", 502)),
-    };
-
-    const failure = await sendCustomSms(
-      { actorProfileId: "profile-1", body: "Ahoj", caseId: null, organizationId: "org-1", toNumber: "+421 905 123 456" },
-      { transport },
-    ).catch((error: unknown) => error);
-
-    expect(failure).toBeInstanceOf(SmsWorkflowError);
-    expect((failure as SmsWorkflowError).status).toBe(502);
-    const [, messageUpdate] = recorders.get("motorist_sms_messages") ?? [];
-    const [, attemptUpdate] = recorders.get("motorist_sms_attempts") ?? [];
-    expect(argOf(attemptUpdate, "update")).toMatchObject({ status: "failed", error: "Poskytovateľ odmietol správu." });
-    expect(argOf(messageUpdate, "update")).toMatchObject({ status: "failed", status_detail: "send_failed" });
+  it("keeps a definite rejection durable and allows a deliberate new request", async () => {
+    const h = harness(); h.send.mockRejectedValueOnce(new SmsWorkflowError("Rejected", 400)); const p = await preview({ caseId: "case-1", template: "location_request" }); const input = { ...actor, ...p, message: p.draft.message };
+    expect(await sendPreparedSms(input, { transport: h.transport })).toMatchObject({ status: "failed" });
+    expect(h.db.rows("motorist_location_share_links")[0].status).toBe("revoked");
+    await sendPreparedSms(input, { transport: h.transport });
+    const next = await preview({ caseId: "case-1", template: "location_request" });
+    await sendPreparedSms({ ...actor, ...next, message: next.draft.message }, { transport: h.transport });
+    expect(h.send).toHaveBeenCalledTimes(2);
   });
-});
-
-describe("transport preflight", () => {
-  beforeEach(() => adminMock.mockReset());
-
-  it("refuses before any audit row when the transport preflight rejects (kill switch)", async () => {
-    const from = vi.fn();
-    adminMock.mockReturnValue({ from });
-    const send = vi.fn();
-    const transport: SmsTransport = {
-      preflight: vi.fn().mockRejectedValue(new SmsWorkflowError("Odosielanie SMS je vypnuté (kill switch).", 423)),
-      send,
-    };
-
-    const failure = await sendCustomSms(
-      { actorProfileId: "profile-1", body: "Ahoj", caseId: null, organizationId: "org-1", toNumber: "0905 123 456" },
-      { transport },
-    ).catch((error: unknown) => error);
-
-    expect((failure as SmsWorkflowError).status).toBe(423);
-    expect(transport.preflight).toHaveBeenCalledWith({ organizationId: "org-1", to: "+421905123456" });
-    expect(send).not.toHaveBeenCalled();
-    expect(from).not.toHaveBeenCalled();
-  });
-});
-
-describe("resolveSmsTransport", () => {
-  const previous = process.env.TELNYX_API_KEY;
-
-  afterEach(() => {
-    if (previous === undefined) delete process.env.TELNYX_API_KEY;
-    else process.env.TELNYX_API_KEY = previous;
-  });
-
-  it("falls back to the not-configured transport without an API key", () => {
-    delete process.env.TELNYX_API_KEY;
+  it("blocks unconfigured transports and kill switches before writes", async () => {
+    const h = harness(); const p = await preview(); const input = { ...actor, ...p, message: p.draft.message };
     expect(resolveSmsTransport()).toBe(notConfiguredTransport);
-  });
-
-  it("returns the Telnyx transport once the API key is present", () => {
-    process.env.TELNYX_API_KEY = "KEYtest";
-    const transport = resolveSmsTransport();
-    expect(transport).not.toBe(notConfiguredTransport);
-    expect(typeof transport.preflight).toBe("function");
+    await expect(sendPreparedSms(input)).rejects.toMatchObject({ status: 503 });
+    await expect(sendPreparedSms(input, { transport: { send: h.send, preflight: async () => { throw new SmsWorkflowError("Disabled", 423); } } })).rejects.toMatchObject({ status: 423 });
+    expect(h.send).not.toHaveBeenCalled(); expect(h.db.rows("motorist_sms_messages")).toHaveLength(0);
   });
 });
-
 describe("normalizeSmsRecipient", () => {
   it.each([
     ["0905 123 456", "+421905123456"],
@@ -207,35 +146,3 @@ describe("normalizeSmsRecipient", () => {
     expect((failure as SmsWorkflowError).status).toBe(400);
   });
 });
-
-function makeQuery(table: string): QueryRecorder {
-  const calls: QueryCall[] = [];
-  const query: Record<string, unknown> = {};
-
-  for (const method of CHAINED_METHODS) {
-    query[method] = (...args: unknown[]) => {
-      calls.push({ method, args });
-      return query;
-    };
-  }
-
-  query.then = (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
-    Promise.resolve(resolveResult(table, calls)).then(resolve, reject);
-
-  return { calls, query };
-}
-
-function resolveResult(table: string, calls: QueryCall[]) {
-  const insert = calls.find((call) => call.method === "insert");
-
-  if (insert) {
-    const payload = insert.args[0] as Record<string, unknown>;
-    return { data: { ...payload, id: table === "motorist_sms_messages" ? "sms-1" : "attempt-1" }, error: null };
-  }
-
-  return { data: null, error: null };
-}
-
-function argOf(recorder: QueryRecorder | undefined, method: string) {
-  return recorder?.calls.find((call) => call.method === method)?.args[0];
-}

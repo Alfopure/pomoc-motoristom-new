@@ -2,7 +2,7 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { notConfiguredResponse, telephonyLogger } from "@/server/telephony/runtime";
 import { getTelnyxConfig } from "@/server/telephony/telnyx/env";
 import { verifyTelnyxRequest } from "@/server/telephony/telnyx/signature";
-import { applyTelnyxMessageStatus } from "@/server/telephony/telnyx/sms-status";
+import { applyTelnyxMessageStatus, parseTelnyxMessageEvent } from "@/server/telephony/telnyx/sms-status";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,7 +37,14 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await applyTelnyxMessageStatus(createSupabaseAdminClient(), envelope);
+    const event = parseTelnyxMessageEvent(envelope);
+    if (!config.messagingProfileId) return Response.json({ error: "messaging_profile_not_configured" }, { status: 503 });
+    if (event?.payload.messaging_profile_id !== config.messagingProfileId) return Response.json({ ok: true, outcome: "foreign_profile" });
+    // Never acknowledge inbound as stored while the reply channel is inactive.
+    if (event.type === "message.received") return Response.json({ error: "inbound_not_enabled" }, { status: 503 });
+    const result = await applyTelnyxMessageStatus(createSupabaseAdminClient(), envelope, { messagingProfileId: config.messagingProfileId });
+    // A receipt may beat the send response that stores provider_message_id.
+    if (result.outcome === "unknown_message") return Response.json({ error: "message_not_recorded_yet" }, { status: 503 });
     telephonyLogger({ scope: "sms-webhook", outcome: result.outcome, providerMessageId: result.providerMessageId, status: result.status });
     return Response.json({ ok: true, ...result });
   } catch (error) {

@@ -18,7 +18,6 @@ type Row<TableName extends keyof Tables> = Tables[TableName]["Row"];
 type CaseEventRow = Row<"motorist_case_events">;
 type LinkRow = Row<"motorist_location_share_links">;
 type LocationRow = Row<"motorist_locations">;
-type SubmissionRow = Row<"motorist_location_submissions">;
 
 export type CreateLocationShareLinkInput = {
   supabase: AdminClient;
@@ -95,7 +94,7 @@ export async function getPublicLocationLinkState(token: string) {
   const status = publicLocationLinkStatus(link.status, link.expires_at);
 
   if (status === "expired" && link.status !== "expired") {
-    await supabase.from("motorist_location_share_links").update({ status: "expired" }).eq("id", link.id);
+    await supabase.from("motorist_location_share_links").update({ status: "expired" }).eq("id", link.id).eq("status", "active").lt("expires_at", new Date().toISOString());
   }
 
   return {
@@ -116,18 +115,19 @@ export async function submitPublicLocation(token: string, payload: unknown, meta
 
   if (status !== "active") {
     if (status === "expired" && link.status !== "expired") {
-      await supabase.from("motorist_location_share_links").update({ status: "expired" }).eq("id", link.id);
+      await supabase.from("motorist_location_share_links").update({ status: "expired" }).eq("id", link.id).eq("status", "active").lt("expires_at", new Date().toISOString());
     }
 
     throw new LocationShareError("Link na odoslanie polohy uz nie je aktivny.", 410);
   }
 
-  const location = validatePublicLocationPayload(payload);
+  let location: ValidatedPublicLocation;
+  try { location = validatePublicLocationPayload(payload); }
+  catch (error) { throw new LocationShareError(error instanceof Error ? error.message : "Poloha nie je platná.", 400); }
   const submittedAt = new Date().toISOString();
   const locationRow = await createSubmittedLocation(supabase, link, location, submittedAt);
 
-  const submission = await insertSingle<SubmissionRow>(
-    supabase
+  const submissionResult = await supabase
       .from("motorist_location_submissions")
       .insert({
         organization_id: link.organization_id,
@@ -149,8 +149,16 @@ export async function submitPublicLocation(token: string, payload: unknown, meta
         },
       })
       .select("*")
-      .single(),
-  );
+      .single();
+  if (submissionResult.error?.code === "P0001" && ["location_link_inactive", "location_link_invalid"].includes(submissionResult.error.message)) {
+    // The database trigger rejected this insert, so this newly created location
+    // has no accepted submission. Do not clean up after ambiguous network errors.
+    await supabase.from("motorist_locations").delete().eq("organization_id", link.organization_id).eq("id", locationRow.id);
+    throw new LocationShareError("Link na odoslanie polohy už nie je aktívny.", 410);
+  }
+  await throwOnResult(submissionResult);
+  const submission = submissionResult.data;
+  if (!submission) throw new LocationShareError("Polohu sa nepodarilo uložiť.");
 
   await throwOnResult(
     supabase

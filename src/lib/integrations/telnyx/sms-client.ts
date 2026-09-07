@@ -173,7 +173,9 @@ export function createTelnyxSmsTransport(options: TelnyxSmsTransportOptions = {}
           idempotencyKey: input.idempotencyKey,
         });
 
-        await addTelephonyUsage(admin, { organizationId, sms: 1 });
+        // Usage accounting must not turn an accepted message into a send error.
+        try { await addTelephonyUsage(admin, { organizationId, sms: 1 }); }
+        catch { console.error("SMS usage accounting failed", { providerMessageId: message.id }); }
 
         return {
           providerMessageId: message.id,
