@@ -7,9 +7,8 @@ import type { MotoristActor } from "@/server/api-auth";
 import { resolveDefaultOrganizationId } from "@/server/default-organization";
 import { MutationError } from "@/server/mutation-error";
 
-import { CallActionError, type CallActionDeps, type CallActor } from "./call-actions";
-import { OperatorDeviceError } from "./operator-devices";
-import { PresenceServiceError } from "./presence-service";
+import type { CallActionDeps, CallActor } from "./call-actions";
+import { CallActionError, OperatorDeviceError, PresenceServiceError } from "./service-errors";
 import type { TelephonyEnvironment } from "./state/types";
 import { createTelnyxClient, resolveTelnyxLiveGate, TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
 import { getTelnyxConfig, type EnvRecord, type TelnyxConfig } from "./telnyx/env";

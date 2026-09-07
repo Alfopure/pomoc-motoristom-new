@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { registerPresenceRpcs } from "./fake-presence";
+import { registerStabilityRpcs } from "./fake-stability";
+import { telephonyStabilityEnabled } from "@/server/telephony/stability";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
@@ -452,7 +455,11 @@ export class FakeQueryBuilder implements PromiseLike<FakeResult> {
   }
 
   lte(column: string, value: unknown): this {
-    return this.addFilter(`lte(${column})`, (row) => !isNil(row[column]) && compare(row[column], value) <= 0);
+    return this.addFilter(`lte(${column})`, (row) => {
+      const [base, key] = column.split("->>");
+      const candidate = key ? (row[base] as FakeRow | null)?.[key] : row[column];
+      return !isNil(candidate) && compare(candidate, value) <= 0;
+    });
   }
 
   like(column: string, pattern: string): this {
@@ -693,6 +700,16 @@ function toMs(value: unknown): number | null {
 }
 
 export function registerTelephonyRpcs(db: FakeDatabase): void {
+  registerPresenceRpcs(db);
+  registerStabilityRpcs(db);
+  db.registerRpc("motorist_reconcile_callback_contact_v1", (args) => {
+    // Ordinary provider workflow tests have no callback obligations. Tests
+    // exercising fulfillment install their own explicit workflow adapter; the
+    // exact transaction/locking behavior is verified in local PostgreSQL.
+    const live = db.rows("motorist_callback_requests").filter(row => row.organization_id === args.p_organization_id && ["open", "scheduled"].includes(String(row.status)));
+    if (live.length) throw new Error("Callback fulfillment fixture requires an explicit reconciliation adapter");
+    return [];
+  });
   db.registerRpc("motorist_recording_admit_session", (args) => {
     const session = db.find("motorist_call_sessions", (row) => row.id === args.p_session_id && row.organization_id === args.p_organization_id);
     const call = db.find("motorist_calls", (row) => row.id === args.p_call_id && row.session_id === args.p_session_id && row.organization_id === args.p_organization_id);
@@ -777,9 +794,21 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     return true;
   });
 
-  db.registerRpc("motorist_reserve_operator", (args) => {
+  db.registerRpc("motorist_reserve_operator", async (args) => {
     const presence = db.storage("motorist_operator_presence").find((row) => row.profile_id === args.p_profile_id);
     if (!presence) return false;
+    if (telephonyStabilityEnabled() || presence.offer_token || presence.pause_return) {
+      const session = db.find("motorist_call_sessions", r => r.id === args.p_session_id && r.organization_id === presence.organization_id);
+      if (!session) return false;
+      const transition = db.rpcHandlers.get("motorist_presence_transition_v1")!;
+      const base = { p_organization_id: session.organization_id, p_profile_id: args.p_profile_id, p_session_id: args.p_session_id };
+      if (!presence.current_session_id) {
+        const dispatched = await transition({ ...base, p_action: "dispatch", p_expected_revision: presence.presence_revision ?? 0 }, db) as FakeRow;
+        if (!dispatched.applied) return false;
+      }
+      const answered = await transition({ ...base, p_action: "answer", p_expected_token: presence.offer_token }, db) as FakeRow;
+      return answered.applied === true;
+    }
     const ownSession = presence.current_session_id === args.p_session_id;
     // Re-entrant for the holder: a version CAS retry re-runs the guard.
     const eligibleStatus = ["available", "ringing", "after_call_work"].includes(String(presence.status)) || ownSession;

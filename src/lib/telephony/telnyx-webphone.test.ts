@@ -731,3 +731,59 @@ describe("TelnyxWebphone", () => {
     expect(requestPermission).not.toHaveBeenCalled();
   });
 });
+
+describe("PA-01/02/10 paused browser offer policy", () => {
+  it("withdraws only its automatic invite and never claims provider hangup completed", async () => {
+    const h = harness(); h.phone.start(); await flush();
+    const hangup = vi.fn(async () => { throw new Error("provider unavailable"); });
+    const call = fakeCall({ hangup });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(h.phone.getSnapshot().call?.ringing).toBe(true);
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: false });
+    await flush();
+    expect(hangup).toHaveBeenCalledOnce();
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "call-1", ringing: false, state: "ringing" });
+    expect(h.phone.getSnapshot().callError).toContain("ešte dokončuje");
+    h.phone.answer();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(call.answered).toBe(false);
+    expect(hangup).toHaveBeenCalledOnce();
+    h.phone.stop();
+  });
+  it("keeps an early pickup silent until the exact response arrives, ignoring unrelated auto-answer hints", async () => {
+    const h = harness(); h.phone.setIncomingOfferPolicy({ automaticAllowed: false, requestPending: true });
+    h.phone.start(); await flush();
+    const call = fakeCall({ options: { customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(call.answered).toBe(false); expect(call.hungUp).toBe(false);
+    expect(h.phone.getSnapshot().call?.ringing).toBe(false);
+    h.phone.expectOperatorLeg({ callControlId: "unrelated", sessionId: "other" });
+    expect(call.answered).toBe(false);
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "picked" });
+    await flush();
+    expect(call.answered).toBe(true); expect(call.hungUp).toBe(false);
+    expect(h.phone.getSnapshot().call?.sessionId).toBe("picked");
+    h.phone.stop();
+  });
+  it("fresh controller rejects late automatic invite while restoring exact persisted pickup", async () => {
+    const h = harness();
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: false, explicitLegs: [{ callControlId: "pickup-id", sessionId: "picked" }] });
+    h.phone.start(); await flush();
+    const automatic = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: automatic }); await flush();
+    expect(automatic.hungUp).toBe(true); expect(automatic.answered).toBe(false);
+    const pickup = fakeCall({ id: "pickup", telnyxIDs: { telnyxCallControlId: "pickup-id", telnyxSessionId: "ts", telnyxLegId: "l" } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: pickup }); await flush();
+    expect(pickup.answered).toBe(true); expect(pickup.hungUp).toBe(false);
+    h.phone.stop();
+  });
+});
+
+it("a stale available snapshot from another tab cannot undo a newer accepted pause", async () => {
+  const h = harness(); h.phone.start(); await flush();
+  h.phone.setIncomingOfferPolicy({ automaticAllowed: false, presenceRevision: 9 });
+  h.phone.setIncomingOfferPolicy({ automaticAllowed: true, presenceRevision: 8 });
+  const call = fakeCall(); h.client.emit("telnyx.notification", { type: "callUpdate", call }); await flush();
+  expect(call.hungUp).toBe(true); expect(call.answered).toBe(false); expect(h.phone.getSnapshot().call?.ringing).toBe(false);
+  h.phone.stop();
+});

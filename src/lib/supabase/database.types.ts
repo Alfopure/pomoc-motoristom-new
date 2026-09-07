@@ -1098,6 +1098,11 @@ export type Database = {
         hold_started_at: Timestamp | null;
         parked_at: Timestamp | null;
         metadata: Json;
+        presence_cancellations?: Json;
+        cancellations_next_attempt_at?: Timestamp | null;
+        presence_pickup?: Json | null;
+        pending_effects?: Json | null;
+        effects_next_attempt_at?: Timestamp | null;
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
@@ -1154,6 +1159,7 @@ export type Database = {
         updated_at: Timestamp;
       }>;
       motorist_ring_group_members: Table<{
+        owner_profile_id?: string | null;
         id: string;
         organization_id: string;
         ring_group_id: string;
@@ -1301,6 +1307,9 @@ export type Database = {
         organization_id: string;
         profile_id: string;
         status: OperatorPresenceStatus;
+        presence_revision?: number;
+        offer_token?: string | null;
+        pause_return?: Json | null;
         current_session_id: string | null;
         pause_reason_id: string | null;
         wrap_up_until: Timestamp | null;
@@ -1320,6 +1329,7 @@ export type Database = {
         updated_at: Timestamp;
       }>;
       motorist_operator_telephony_settings: Table<{
+        delivery_mode?: "web" | "personal_mobile";
         id: string;
         organization_id: string;
         profile_id: string;
@@ -1448,6 +1458,12 @@ export type Database = {
       }>;
     };
     Functions: {
+      motorist_create_callback_obligation_v1: { Args: { p_organization_id: string; p_session_id: string; p_plan: Json; p_now: string }; Returns: Json };
+      motorist_resolve_callback_v1: { Args: { p_organization_id: string; p_request_id: string; p_actor_id: string | null; p_status: string; p_proof?: Json | null; p_notes?: string | null }; Returns: Json };
+      motorist_reconcile_callback_contact_v1: { Args: { p_organization_id: string; p_session_id: string; p_proof: Json }; Returns: Json };
+      motorist_link_callback_outbound_v1: { Args: { p_organization_id: string; p_request_id: string; p_session_id: string; p_actor_id: string }; Returns: boolean };
+      motorist_schedule_callback_v1: { Args: { p_organization_id: string; p_call_id: string; p_actor_id: string; p_action_id: string; p_due_at: string }; Returns: Json };
+
       motorist_recording_publish_analysis: { Args: { p_job_id: string; p_lease_token: string; p_lease_epoch: number; p_input_hash: string; p_model: string; p_rubric_version: string; p_result: Json; p_usage: Json }; Returns: string | null };
       motorist_call_quality_dashboard: { Args: { p_organization_id: string; p_from: string; p_to: string; p_operator_id: string | null; p_language: string | null; p_status: string | null; p_page: number; p_page_size: number; p_rubric_version: string }; Returns: Json };
       motorist_recording_delete_call: { Args: { p_organization_id: string; p_call_id: string; p_actor_id: string; p_reason: string; p_source_revision: number }; Returns: boolean };
@@ -1556,6 +1572,26 @@ export type Database = {
           p_token: string;
         };
         Returns: boolean;
+      };
+      motorist_stage_transition_v1: {
+        Args: { p_organization_id: string; p_session_id: string; p_expected_version: number; p_main: Json; p_rejected: Json; p_guard: Json };
+        Returns: Json;
+      };
+      motorist_presence_transition_v1: {
+        Args: {
+          p_organization_id: string;
+          p_profile_id: string;
+          p_action: string;
+          p_session_id?: string | null;
+          p_expected_revision?: number | null;
+          p_expected_token?: string | null;
+          p_status?: string | null;
+          p_pause_reason_id?: string | null;
+          p_wrap_up_until?: string | null;
+          p_reason?: string | null;
+          p_source?: string;
+        };
+        Returns: Json;
       };
       motorist_reserve_operator: {
         Args: {

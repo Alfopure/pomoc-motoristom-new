@@ -1,16 +1,14 @@
 "use client";
 
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
-  AlertTriangle,
   BookUser,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Clock3,
   History,
   Link2,
   Loader2,
@@ -19,7 +17,6 @@ import {
   PhoneCall,
   PhoneForwarded,
   PhoneIncoming,
-  PhoneMissed,
   PhoneOutgoing,
   Plus,
   Search,
@@ -95,7 +92,6 @@ type CallCenterModuleProps = {
 };
 
 type HistoryFilter = "all" | "inbound" | "outbound" | "answered" | "missed" | "callback";
-const CALLBACK_PAGE_SIZE = 3;
 const HISTORY_PAGE_SIZE = 8;
 
 /**
@@ -202,7 +198,12 @@ export function CallCenterModule({
     () => (dataSource === "supabase" ? partitionedCalls.completed : []),
     [dataSource, partitionedCalls],
   );
-  const missedCalls = storedCalls.filter((call) => ["missed", "abandoned_queue", "failed"].includes(call.status) || call.outcome === "callback");
+  const [callbackSchedulingEnabled, setCallbackSchedulingEnabled] = useState(false);
+  const [scheduledCallId, setScheduledCallId] = useState("");
+  const [callbackRefresh, setCallbackRefresh] = useState(0);
+  const [liveCallbackCount, setLiveCallbackCount] = useState(0);
+  const callbackActions = useRef(new Map<string, string>());
+  const callbackInFlight = useRef(new Set<string>());
   const filteredHistoryCalls = filterHistoryCalls(storedCalls, historyFilter);
   const currentPresence = currentOperatorId
     ? operatorPresences.find((presence) => presence.profileId === currentOperatorId)
@@ -234,6 +235,11 @@ export function CallCenterModule({
       return;
     }
 
+    if (outcome === "callback" && callbackInFlight.current.has(call.id)) return;
+    if (outcome === "callback") {
+      callbackInFlight.current.add(call.id);
+      if (!callbackActions.current.has(call.id)) callbackActions.current.set(call.id, crypto.randomUUID());
+    }
     setBusyAction(busyKey);
     setActionNotice(null);
 
@@ -241,7 +247,7 @@ export function CallCenterModule({
       const response = await telephonyFetch(`/api/telephony/calls/${encodeURIComponent(call.id)}/outcome`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ outcome, callbackMinutes }),
+        body: JSON.stringify({ outcome, callbackMinutes, callbackActionId: callbackActions.current.get(call.id) }),
         label: "výsledok hovoru",
         timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
       });
@@ -252,10 +258,15 @@ export function CallCenterModule({
       }
 
       onDataChange(result.dispatchData);
-      setActionNotice(outcome === "callback" ? "Úloha na spätné volanie je pripravená pri priradenom prípade." : "Výsledok hovoru je uložený.");
+      if (outcome === "callback") {
+        callbackActions.current.delete(call.id);
+        setCallbackRefresh((value) => value + 1);
+      }
+      setActionNotice(outcome === "callback" ? "Spätné volanie je naplánované." : "Výsledok hovoru je uložený.");
     } catch (error) {
       setActionNotice(error instanceof Error ? error.message : "Výsledok hovoru sa nepodarilo uložiť.");
     } finally {
+      callbackInFlight.current.delete(call.id);
       setBusyAction(null);
     }
   }
@@ -364,7 +375,7 @@ export function CallCenterModule({
         currentOperatorName={currentPresence?.operatorName ?? currentOperator?.name}
         myPresence={currentPresence}
         metrics={metrics}
-        missedCount={missedCalls.length}
+        missedCount={liveCallbackCount}
         operatorPresences={operatorPresences}
         onAction={onAvailabilityAction}
         onDial={(phoneNumber) => startQuickCall({ id: "manual", detail: phoneNumber, label: phoneNumber, phone: phoneNumber, type: "contact" })}
@@ -420,15 +431,22 @@ export function CallCenterModule({
               configured={telephonyConfigured}
               onCallBack={onCallbackCall}
               onChanged={onTelephonyChanged}
+              onSchedulingEnabled={setCallbackSchedulingEnabled}
+              onLiveCount={setLiveCallbackCount}
+              refreshToken={callbackRefresh}
             />
-            <CallbackInbox
-              busyAction={busyAction}
-              calls={missedCalls}
-              onCallBack={callBack}
-              onComplete={(call) => void postCallOutcome(call, "reached")}
-              onNewCase={onNewCase}
-              onSchedule={(call) => void postCallOutcome(call, "callback", 30)}
-            />
+            {callbackSchedulingEnabled && <div className="rounded-md border border-zinc-200 bg-white p-3">
+              <label className="block text-xs font-semibold" htmlFor="schedule-callback-call">Naplánovať spätné volanie</label>
+              <select id="schedule-callback-call" value={scheduledCallId} onChange={(event) => setScheduledCallId(event.target.value)} className="my-2 w-full rounded border border-zinc-300 p-2 text-xs">
+                <option value="">Vyber hovor z histórie</option>
+                {storedCalls.filter((call) => looksLikeUuid(call.id)).slice(0, 100).map((call) => <option key={call.id} value={call.id}>{formatPhoneNumberForDisplay(customerNumberForCall(call))} · {formatTime(historyDisplayStartedAt(call))}</option>)}
+              </select>
+              <button type="button" disabled={!scheduledCallId || Boolean(busyAction)} className="rounded bg-zinc-950 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40" onClick={() => {
+                const call = storedCalls.find((item) => item.id === scheduledCallId);
+                if (call) void postCallOutcome(call, "callback", 30);
+              }}>Naplánovať o 30 minút</button>
+            </div>}
+            <p className="px-3 text-xs text-zinc-500">Staršie samostatné úlohy na spätné volanie zostávajú v prehľade úloh.</p>
           </aside>
         </div>
       </div>
@@ -554,84 +572,6 @@ function CallCenterCommandDeck({
   );
 }
 
-function CallbackInbox({
-  busyAction,
-  calls,
-  onCallBack,
-  onComplete,
-  onNewCase,
-  onSchedule,
-}: {
-  busyAction: string | null;
-  calls: CallCenterCall[];
-  onCallBack: (call: CallCenterCall) => void;
-  onComplete: (call: CallCenterCall) => void;
-  onNewCase: (call: CallCenterCall) => void;
-  onSchedule: (call: CallCenterCall) => void;
-}) {
-  const [page, setPage] = useState(1);
-  const pageCount = Math.max(1, Math.ceil(calls.length / CALLBACK_PAGE_SIZE));
-  const currentPage = Math.min(page, pageCount);
-  const firstVisibleIndex = (currentPage - 1) * CALLBACK_PAGE_SIZE;
-  const visibleCalls = calls.slice(firstVisibleIndex, firstVisibleIndex + CALLBACK_PAGE_SIZE);
-
-  return (
-    <section className="rounded-md border border-zinc-200 bg-white">
-      <div className="flex items-center justify-between gap-2 border-b border-zinc-200 p-3">
-        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950">
-          <PhoneMissed size={17} />
-          Spätné volania
-        </div>
-        {calls.length > 0 && <StatusBadge label={`${calls.length}`} tone="warn" />}
-      </div>
-      <div className="grid gap-2 p-3">
-        {calls.length > 0 ? (
-          visibleCalls.map((call) => (
-            <CallbackRow
-              key={call.id}
-              busyAction={busyAction}
-              call={call}
-              onCallBack={() => onCallBack(call)}
-              onComplete={() => onComplete(call)}
-              onNewCase={() => onNewCase(call)}
-              onSchedule={() => onSchedule(call)}
-            />
-          ))
-        ) : (
-          <EmptyState icon={CheckCircle2} title="Žiadne callbacky" body="Zmeškané a callback hovory sa zobrazia po zápise v call logu." compact />
-        )}
-      </div>
-      {calls.length > CALLBACK_PAGE_SIZE && (
-        <div className="flex items-center justify-between gap-2 border-t border-zinc-200 bg-zinc-50 px-3 py-2">
-          <span className="text-[11px] font-medium text-zinc-600">
-            {firstVisibleIndex + 1}–{Math.min(firstVisibleIndex + CALLBACK_PAGE_SIZE, calls.length)} z {calls.length}
-          </span>
-          <nav className="flex items-center gap-1" aria-label="Stránkovanie callbackov">
-            <button
-              type="button"
-              onClick={() => setPage(Math.max(1, currentPage - 1))}
-              disabled={currentPage === 1}
-              aria-label="Predchádzajúce callbacky"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-300"
-            >
-              <ChevronLeft size={14} />
-            </button>
-            <span className="min-w-12 text-center text-[11px] font-semibold text-zinc-700">{currentPage} / {pageCount}</span>
-            <button
-              type="button"
-              onClick={() => setPage(Math.min(pageCount, currentPage + 1))}
-              disabled={currentPage === pageCount}
-              aria-label="Nasledujúce callbacky"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-300"
-            >
-              <ChevronRight size={14} />
-            </button>
-          </nav>
-        </div>
-      )}
-    </section>
-  );
-}
 
 function HistoryPanel({
   busyAction,
@@ -1386,51 +1326,6 @@ function AvailabilityButton({
   );
 }
 
-function CallbackRow({
-  busyAction,
-  call,
-  onCallBack,
-  onComplete,
-  onNewCase,
-  onSchedule,
-}: {
-  busyAction: string | null;
-  call: CallCenterCall;
-  onCallBack: () => void;
-  onComplete: () => void;
-  onNewCase: () => void;
-  onSchedule: () => void;
-}) {
-  const busy = busyAction?.startsWith(`${call.id}:`);
-  const displayedStartedAt = historyDisplayStartedAt(call);
-
-  return (
-    <div className="rounded-md bg-amber-50 px-3 py-2 text-sm">
-      <div className="flex items-center gap-2 font-semibold text-zinc-950">
-        <AlertTriangle size={14} className="text-amber-700" />
-        {formatPhoneNumberForDisplay(call.callerNumber)}
-      </div>
-      <div className="mt-0.5 text-xs text-zinc-600">{formatTime(displayedStartedAt)} · čakal {call.waitSeconds}s</div>
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        <button type="button" onClick={onCallBack} disabled={busy} className="inline-flex h-8 items-center gap-1.5 rounded-md bg-zinc-950 px-2 text-xs font-semibold text-white hover:bg-zinc-800 disabled:bg-zinc-300">
-          {busyAction === `${call.id}:call_back` ? <Loader2 size={13} className="animate-spin" /> : <PhoneOutgoing size={13} />}
-          Volať späť
-        </button>
-        <button type="button" onClick={onSchedule} disabled={busy} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-amber-200 bg-white px-2 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:text-zinc-300">
-          {busyAction === `${call.id}:callback` ? <Loader2 size={13} className="animate-spin" /> : <Clock3 size={13} />}
-          Naplánovať
-        </button>
-        <button type="button" onClick={onComplete} disabled={busy} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 disabled:text-zinc-300">
-          {busyAction === `${call.id}:reached` ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
-          Vybavené
-        </button>
-        <button type="button" onClick={onNewCase} disabled={busy} className="inline-flex h-8 items-center rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 disabled:text-zinc-300">
-          Nový prípad
-        </button>
-      </div>
-    </div>
-  );
-}
 
 function StatusBadge({ label, tone }: { label: string; tone: "ok" | "warn" | "neutral" | "bad" }) {
   return <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${badgeClass[tone]}`}>{label}</span>;

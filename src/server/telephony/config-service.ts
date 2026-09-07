@@ -1,3 +1,4 @@
+import { telephonyStabilityEnabled } from "./stability";
 import { randomUUID } from "node:crypto";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -12,14 +13,18 @@ import {
   MAX_RING_DEVICE_VOLUME,
   MAX_WRAP_UP_SECONDS,
   PAUSE_ROUTING_MODES,
+  OPERATOR_DELIVERY_MODES,
+  type OperatorDeliveryMode,
   type OperatorTelephonySettings,
   type PauseRoutingMode,
 } from "@/lib/telephony/operator-settings";
 import { callbackConfirmationMedia, IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
 import type { TelephonyEnvironment } from "./state/types";
+import { ConfigServiceError, type ValidationIssue } from "./service-errors";
 
 export { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS };
 export { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction };
+export { ConfigServiceError, type ValidationIssue } from "./service-errors";
 
 /**
  * Routing configuration read model and validated replace operations
@@ -49,22 +54,6 @@ type Tables = Database["public"]["Tables"];
 export type ConfigDeps = { admin: AdminClient; now?: () => Date };
 
 export type ConfigActor = { profileId: string; role: AppRole; displayName?: string | null };
-
-export class ConfigServiceError extends Error {
-  readonly status: number;
-  readonly code: string;
-  readonly issues: ValidationIssue[];
-
-  constructor(message: string, status = 400, code = "config_invalid", issues: ValidationIssue[] = []) {
-    super(message);
-    this.name = "ConfigServiceError";
-    this.status = status;
-    this.code = code;
-    this.issues = issues;
-  }
-}
-
-export type ValidationIssue = { path: string; code: string; message: string };
 
 // ---------------------------------------------------------------------------
 // Limits (mirror the CHECK constraints of the foundation migration)
@@ -131,6 +120,7 @@ export type RingGroupMemberInput = {
   memberKind: RingMemberKind;
   profileId?: string | null;
   externalNumber?: string | null;
+  ownerProfileId?: string | null;
   position: number;
   ringSecs?: number | null;
 };
@@ -225,6 +215,7 @@ export type TelephonySettingsPatchInput = {
 };
 
 export type OperatorSettingsPatchInput = {
+  deliveryMode?: OperatorDeliveryMode;
   defaultFromLineId?: string | null;
   wrapUpSeconds?: number;
   autoAnswerOutbound?: boolean;
@@ -244,7 +235,7 @@ export type RingGroupDoc = {
   name: string;
   description: string | null;
   active: boolean;
-  members: Array<{ id: string; memberKind: RingMemberKind; profileId: string | null; externalNumber: string | null; position: number; ringSecs: number | null; lastOfferedAt: string | null; lastAnsweredAt: string | null }>;
+  members: Array<{ id: string; memberKind: RingMemberKind; profileId: string | null; externalNumber: string | null; ownerProfileId?: string | null; position: number; ringSecs: number | null; lastOfferedAt: string | null; lastAnsweredAt: string | null }>;
 };
 
 export type RingPlanDoc = {
@@ -496,6 +487,7 @@ export function parseRingGroups(value: unknown): RingGroupInput[] {
           memberKind: (kind ?? "operator") as RingMemberKind,
           profileId: readId(member.profileId),
           externalNumber: readText(member.externalNumber),
+          ...(member.ownerProfileId !== undefined ? { ownerProfileId: readId(member.ownerProfileId) } : {}),
           position: readInteger(member.position) ?? index,
           ringSecs: readInteger(member.ringSecs),
         };
@@ -685,6 +677,7 @@ export function parseOperatorSettingsPatch(value: unknown): OperatorSettingsPatc
   if ("wrapUpSeconds" in row) patch.wrapUpSeconds = readInteger(row.wrapUpSeconds) ?? Number.NaN;
   if ("autoAnswerOutbound" in row) patch.autoAnswerOutbound = readFlag(row, "autoAnswerOutbound", true, "", issues);
   if ("ringDeviceVolume" in row) patch.ringDeviceVolume = readInteger(row.ringDeviceVolume) ?? Number.NaN;
+  if ("deliveryMode" in row) patch.deliveryMode = (readText(row.deliveryMode) ?? "") as OperatorDeliveryMode;
   if ("defaultMobileNumber" in row) patch.defaultMobileNumber = readText(row.defaultMobileNumber);
   if ("pauseRoutingMode" in row) patch.pauseRoutingMode = (readText(row.pauseRoutingMode) ?? "") as PauseRoutingMode;
   if ("pauseForwardProfileId" in row) patch.pauseForwardProfileId = readOptionalId(row, "pauseForwardProfileId", "", issues);
@@ -756,6 +749,7 @@ export function groupToInput(group: RingGroupDoc): RingGroupInput {
       memberKind: member.memberKind,
       profileId: member.profileId,
       externalNumber: member.externalNumber,
+      ...(member.ownerProfileId !== undefined ? { ownerProfileId: member.ownerProfileId } : {}),
       position: member.position,
       ringSecs: member.ringSecs,
     })),
@@ -850,6 +844,7 @@ export function validateRoutingReplace(input: { groups?: RingGroupInput[]; plans
       }
 
       if (member.memberKind === "operator") {
+        if (member.ownerProfileId) issues.push(issue(memberPath, "member_shape", "Vlastník čísla patrí iba k externému telefónu."));
         if (member.externalNumber) issues.push(issue(memberPath, "member_shape", "Operátor nemôže mať externé číslo."));
         if (!member.profileId) {
           issues.push(issue(memberPath, "profile_required", "Vyber operátora."));
@@ -864,6 +859,7 @@ export function validateRoutingReplace(input: { groups?: RingGroupInput[]; plans
         return;
       }
 
+      if (member.ownerProfileId && !context.profileIds.has(member.ownerProfileId)) issues.push(issue(memberPath, "owner_foreign", "Vlastník čísla nepatrí do organizácie."));
       if (member.profileId) issues.push(issue(memberPath, "member_shape", "Externé číslo nemôže mať operátora."));
       const normalized = normalizeE164(member.externalNumber);
       if (!normalized) {
@@ -1237,6 +1233,7 @@ export function validateOperatorSettingsPatch(patch: OperatorSettingsPatchInput,
   if (patch.defaultFromLineId !== undefined && patch.defaultFromLineId !== null && !context.lineIds.has(patch.defaultFromLineId)) {
     issues.push(issue("defaultFromLineId", "line_foreign", "Linka nepatrí do tejto organizácie."));
   }
+  if (patch.deliveryMode !== undefined && !OPERATOR_DELIVERY_MODES.includes(patch.deliveryMode)) issues.push(issue("deliveryMode", "delivery_invalid", "Neplatný cieľ prijímania hovorov."));
   if (patch.pauseRoutingMode !== undefined && !PAUSE_ROUTING_MODES.includes(patch.pauseRoutingMode)) {
     issues.push(issue("pauseRoutingMode", "pause_routing_invalid", "Neplatný spôsob zastupovania počas pauzy."));
   }
@@ -1264,7 +1261,7 @@ export function validateOperatorSettingsDocument(
   profileId: string,
 ): ValidationIssue[] {
   const issues = validateOperatorSettingsPatch(settings, context);
-  if (settings.pauseRoutingMode === "default_mobile" && !settings.defaultMobileNumber) {
+  if (settings.deliveryMode === "personal_mobile" && !settings.defaultMobileNumber) {
     issues.push(issue("defaultMobileNumber", "default_mobile_required", "Pre presmerovanie na vlastný mobil najprv zadaj mobilné číslo."));
   }
   if (settings.pauseRoutingMode === "external_number" && !settings.pauseForwardNumber) {
@@ -1368,6 +1365,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
       memberKind: member.member_kind as RingMemberKind,
       profileId: member.profile_id,
       externalNumber: member.external_number,
+      ...(member.owner_profile_id !== undefined ? { ownerProfileId: member.owner_profile_id } : {}),
       position: member.position,
       ringSecs: member.ring_secs,
       lastOfferedAt: member.last_offered_at,
@@ -1485,6 +1483,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
                 autoAnswerOutbound: operatorSetting.auto_answer_outbound,
                 ringDeviceVolume: operatorSetting.ring_device_volume,
                 defaultMobileNumber: operatorSetting.default_mobile_number ?? null,
+                deliveryMode: operatorSetting.delivery_mode ?? "web",
                 pauseRoutingMode: operatorSetting.pause_routing_mode ?? "none",
                 pauseForwardProfileId: operatorSetting.pause_forward_profile_id ?? null,
                 pauseForwardNumber: operatorSetting.pause_forward_number ?? null,
@@ -1653,6 +1652,7 @@ function groupsToRpc(groups: RingGroupInput[]): Json {
       member_kind: member.memberKind,
       profile_id: member.memberKind === "operator" ? member.profileId : null,
       external_number: member.memberKind === "external_number" ? normalizeE164(member.externalNumber) : null,
+      ...(member.ownerProfileId !== undefined ? { owner_profile_id: member.ownerProfileId } : {}),
       position: member.position,
       ring_secs: member.ringSecs ?? null,
     })),
@@ -1760,6 +1760,12 @@ export async function replaceRingGroups(
   const before = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
   const context = contextFromDocument(before);
   assertValid(validateRoutingReplace({ groups: input.groups }, context));
+  if (!telephonyStabilityEnabled()) {
+    const existing = new Map(before.groups.flatMap((group) => group.members.map((member) => [member.id, member.ownerProfileId ?? null] as const)));
+    if (input.groups.some((group) => group.members.some((member) => member.ownerProfileId !== undefined && member.ownerProfileId !== (existing.get(member.id ?? "") ?? null)))) {
+      throw new ConfigServiceError("Priraďovanie osobných telefónov zatiaľ nie je zapnuté.", 409, "stability_disabled");
+    }
+  }
 
   await applyReplace(deps, input.organizationId, { groups: groupsToRpc(input.groups) } as unknown as Json, input.expectedVersion ?? null);
 
@@ -1769,7 +1775,7 @@ export async function replaceRingGroups(
     after.groups,
     (group) => group.id,
     (group) => group.name,
-    (group) => ({ name: group.name, active: group.active, members: group.members.map((member) => [member.position, member.memberKind, member.profileId ?? member.externalNumber, member.ringSecs]) }),
+    (group) => ({ name: group.name, active: group.active, members: group.members.map((member) => [member.position, member.memberKind, member.profileId ?? member.externalNumber, member.ringSecs, member.ownerProfileId ?? null]) }),
   );
   const warning = await auditReplace(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.ring_groups.replace", diff });
   return { document: after, diff, warning };
@@ -2077,7 +2083,11 @@ export async function updateOperatorTelephonySettings(
   assertValid(validateOperatorSettingsPatch(input.patch, contextFromDocument(document)));
 
   const current = operator.settings ?? DEFAULT_OPERATOR_SETTINGS;
+  if (input.patch.deliveryMode !== undefined && input.patch.deliveryMode !== (current.deliveryMode ?? "web") && !telephonyStabilityEnabled()) {
+    throw new ConfigServiceError("Prijímanie na osobnom mobile zatiaľ nie je zapnuté.", 409, "stability_disabled");
+  }
   const next: OperatorSettingsDoc = {
+    deliveryMode: input.patch.deliveryMode ?? current.deliveryMode ?? "web",
     defaultFromLineId: input.patch.defaultFromLineId !== undefined ? input.patch.defaultFromLineId : current.defaultFromLineId,
     wrapUpSeconds: input.patch.wrapUpSeconds ?? current.wrapUpSeconds,
     autoAnswerOutbound: input.patch.autoAnswerOutbound ?? current.autoAnswerOutbound,
@@ -2109,6 +2119,7 @@ export async function updateOperatorTelephonySettings(
       auto_answer_outbound: next.autoAnswerOutbound,
       ring_device_volume: next.ringDeviceVolume,
       default_mobile_number: next.defaultMobileNumber,
+      ...(telephonyStabilityEnabled() ? { delivery_mode: next.deliveryMode } : {}),
       pause_routing_mode: next.pauseRoutingMode,
       pause_forward_profile_id: next.pauseForwardProfileId,
       pause_forward_number: next.pauseForwardNumber,

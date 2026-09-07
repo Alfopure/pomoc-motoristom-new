@@ -560,6 +560,7 @@ describe("superviseCall", () => {
 
   it("leaves the supervisor available when the supervised call ends", async () => {
     const h = createTelephonyHarness();
+    h.setPresence(PROFILES.o4, { status: "available" });
     giveSupervisorDevice(h);
     const call = await talkingWith(h);
     await completeAnnouncedAction(h, superviseCall(actionDeps(h), manager, call.sessionId, "monitor"));
@@ -575,6 +576,20 @@ describe("superviseCall", () => {
     // who only listened, goes straight back into the ring plan.
     expect(h.presence(PROFILES.o1)).toMatchObject({ status: "after_call_work" });
     expect(h.presence(PROFILES.o4)).toMatchObject({ status: "available", current_session_id: null, wrap_up_until: null });
+  });
+
+  it.each(["offline", "paused"])("keeps an unreserved %s supervisor unavailable when the call ends", async status => {
+    const h = createTelephonyHarness();
+    h.setPresence(PROFILES.o4, { status });
+    giveSupervisorDevice(h);
+    const call = await talkingWith(h);
+    await completeAnnouncedAction(h, superviseCall(actionDeps(h), manager, call.sessionId, "monitor"));
+    expect(h.presence(PROFILES.o4)).toMatchObject({ status, current_session_id: null });
+    const leg = h.legFor(call.sessionId, PROFILES.o4)!;
+    await h.legEvent(String(leg.telnyx_call_control_id), "call.answered");
+    await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing" });
+    await h.legEvent(String(leg.telnyx_call_control_id), "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(h.presence(PROFILES.o4)).toMatchObject({ status, current_session_id: null, wrap_up_until: null });
   });
 
   it("counts the supervisor legs in the database, so the limit holds across instances", async () => {

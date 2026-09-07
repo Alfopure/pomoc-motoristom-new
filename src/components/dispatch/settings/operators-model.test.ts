@@ -297,6 +297,7 @@ describe("honesty of the panel's wording", () => {
     expect(configImports).toHaveLength(1);
     expect(configImports[0][1]).toBe("type ");
     expect(DEFAULT_OPERATOR_SETTINGS).toEqual({
+      deliveryMode: "web",
       defaultFromLineId: null,
       wrapUpSeconds: 30,
       autoAnswerOutbound: true,

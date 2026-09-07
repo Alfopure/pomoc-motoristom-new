@@ -26,7 +26,7 @@ import {
   type TelephonyOperatorPresence,
 } from "@/lib/telephony/presence";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
-import { type WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
+import { type IncomingOfferPolicy, type WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 import { CoordinatedWebphone } from "@/lib/telephony/coordinated-webphone";
 import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "@/lib/telephony/webphone-model";
@@ -131,6 +131,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const [stale, setStale] = useState(false);
   const [degraded, setDegraded] = useState<Set<string>>(() => new Set());
   const webphoneRef = useRef<CoordinatedWebphone | null>(null);
+  const presenceGenerationRef = useRef(0);
+  const incomingPolicyRef = useRef<IncomingOfferPolicy>({ automaticAllowed: false });
   const refreshRef = useRef<(() => void) | null>(null);
   // Read inside the poll loop rather than through state: a reconnect must not
   // restart the poll effect (it would fire an extra request every time).
@@ -145,6 +147,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     if (!enabled || !organizationId || !profileId) return;
     const webphone = new CoordinatedWebphone({ scope: `${organizationId}:${profileId}`, mobile: isMobileApp() });
     webphoneRef.current = webphone;
+    webphone.setIncomingOfferPolicy(incomingPolicyRef.current);
     const unsubscribe = webphone.subscribe((next) => {
       setPhone(next);
       if (next.status === "not_configured") setConfigured(false);
@@ -210,17 +213,20 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     setOutboundRequestCount((count) => count + 1);
     setNotice(null);
     void webphone.unlockAudio().catch(() => undefined);
+    let operatorRequestId: string | null = null;
     try {
       await verifyMicrophone();
       await webphone.prepareForCall();
       // An incoming invite, takeover or unmount may arrive during permission.
       const changed = webphone !== webphoneRef.current ? "Telefón bol odpojený." : browserCallStartError(webphone.getSnapshot());
       if (changed) throw new Error(changed);
+      operatorRequestId = await webphone.beginOperatorRequest();
       await request(webphone);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo spustiť.");
       throw error;
     } finally {
+      if (operatorRequestId) await webphone.endOperatorRequest(operatorRequestId);
       webphone.finishRequest();
       outboundBusyRef.current = false;
       setOutboundRequestCount((count) => count - 1);
@@ -249,6 +255,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       }
       inFlight = true;
       try {
+        const presenceGeneration = presenceGenerationRef.current;
         const result = await telephonyJson<ActiveCallsPayload & { error?: string }>("/api/telephony/calls/active", {
           label: "aktívne hovory",
           timeoutMs: TELEPHONY_TIMEOUT_MS.snapshot,
@@ -270,6 +277,13 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         failures = 0;
         setConfigured(true);
         setStale(false);
+        if (presenceGeneration !== presenceGenerationRef.current) { coalesced = true; return; }
+        const own = result.body.ownPresence;
+        const explicitLegs = [...result.body.calls, ...result.body.waiting].flatMap((call) => call.legs.flatMap((leg) =>
+          leg.profileId === result.body!.actorProfileId && leg.intent === "pickup" && leg.callControlId && !leg.answeredAt
+            ? [{ callControlId: leg.callControlId, sessionId: call.sessionId }] : []));
+        incomingPolicyRef.current = { presenceRevision: own?.presenceRevision, automaticAllowed: own?.automaticOffersAllowed ?? (own?.status === "available" || own?.status === "ringing"), explicitLegs };
+        webphoneRef.current?.setIncomingOfferPolicy(incomingPolicyRef.current);
         setSnapshot(result.body);
         activity = telephonyPollActivity(pollActivityInput(buildPhoneBarModel(result.body)));
       } catch {
@@ -374,7 +388,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       setPresenceBusy(true);
       setNotice(null);
       try {
-        const result = await telephonyJson<{ error?: string }>("/api/telephony/presence", {
+        const result = await telephonyJson<{ error?: string; presence?: { status: string }; own?: { status: string; presenceRevision?: number } }>("/api/telephony/presence", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ status: action.status, pauseReasonId: action.pauseReasonId }),
@@ -386,7 +400,13 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
           return false;
         }
-        if (!result.ok) throw new Error(result.body?.error ?? "Stav sa nepodarilo uložiť.");
+        if (!result.ok) { refreshRef.current?.(); throw new Error(result.body?.error ?? "Stav sa nepodarilo uložiť."); }
+        // Apply only an accepted server transition. A lost answer/pause race
+        // refreshes the authoritative on_call state instead of optimistic pause.
+        presenceGenerationRef.current += 1;
+        const confirmedStatus = result.body?.own?.status ?? action.status;
+        incomingPolicyRef.current = { ...incomingPolicyRef.current, presenceRevision: result.body?.own?.presenceRevision ?? incomingPolicyRef.current.presenceRevision, automaticAllowed: confirmedStatus === "available" };
+        webphoneRef.current?.setIncomingOfferPolicy(incomingPolicyRef.current);
         refreshRef.current?.();
         return true;
       } catch (error) {

@@ -26,6 +26,7 @@ export type TelephonyOperatorPresenceRow = {
   profileId: string;
   status: TelephonyPresenceStatus;
   currentSessionId?: string | null;
+  deliveryMode?: "web" | "personal_mobile";
 };
 
 export type TelephonyPresenceSnapshot = {
@@ -127,8 +128,8 @@ function presenceState(input: {
   if (presence.status === "offline") return "offline";
   if (presence.status === "ringing") return "ringing";
   if (presence.status === "on_call") return "on_call";
-  if (!registered) return "unregistered";
   if (presence.status === "paused" || presence.status === "after_call_work") return "paused";
+  if (!registered && presence.deliveryMode !== "personal_mobile") return "unregistered";
   return "available";
 }
 
@@ -156,7 +157,7 @@ function presenceDetail(input: {
         ? "Operátor dokončuje predchádzajúci hovor."
         : "Operátor má pauzu.";
     case "available":
-      return "Operátor je pripojený a dostupný.";
+      return presence?.deliveryMode === "personal_mobile" ? "Operátor je dostupný na osobnom mobile." : "Operátor je pripojený a dostupný.";
     default:
       return "Stav telefónie nie je známy.";
   }

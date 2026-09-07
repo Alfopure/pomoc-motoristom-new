@@ -1,3 +1,4 @@
+import { resolvePersonalRingMembers } from "./routing/ring-plan";
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -8,13 +9,20 @@ import { writeCallAudit } from "./audit";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { buildBusinessHoursSchedule, type BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import { materialiseRingPlan } from "./routing/ring-plan";
-import { applyReduceResult, recordCallEvent, SessionConflictError, type ApplyResult, type CommandOutcome, type EffectsDeps } from "./state/effects";
+import { applyReduceResult, recordCallEvent, resumePendingEffects, SessionConflictError, type ApplyResult, type CommandOutcome, type EffectsDeps } from "./state/effects";
+import { hasStabilityContract, telephonyStabilityEnabled } from "./stability";
+import { attachContactOperations, collectContactProof, readContactHistory } from "./contact-proof";
+import { readPendingEffects } from "./state/continuation";
+import { cancelRevokedOffers } from "./state/cancelled-offers";
 import { CallActionRejected, reduce } from "./state/transitions";
 import { needsRecordingContinuation } from "./state/recording";
+import { SessionLeaseLostError } from "./service-errors";
 import { resolveSessionRecordingPolicy } from "./recording-policy-service";
 import {
   DEFAULT_ROUTING_SETTINGS,
+  emptyTransition,
   readMeta,
+  toJson,
   type AttemptRow,
   type DeviceRow,
   type FrozenRingPlan,
@@ -127,7 +135,7 @@ export async function renewSessionLease(deps: SessionRunnerDeps, sessionId: stri
   const { data, error } = await deps.admin.rpc("motorist_session_lease_acquire", { p_session_id: sessionId, p_token: token, p_ttl_ms: leaseTtl(deps) });
   if (error) deps.logger?.({ level: "warn", scope: "lease", sessionId, message: "renew failed", error: error.message });
   else if (data !== true) deps.logger?.({ level: "warn", scope: "lease", sessionId, message: "lease lost during effects" });
-  if (required && (error || data !== true)) throw new Error("recording session lease unavailable");
+  if (required && (error || data !== true)) throw new SessionLeaseLostError();
 }
 
 export async function releaseSessionLease(deps: SessionRunnerDeps, sessionId: string, token: string): Promise<void> {
@@ -222,6 +230,15 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     }
     if (!ringPlan && line?.ring_plan_id) ringPlan = ringPlans[line.ring_plan_id] ?? null;
     if (ringPlan) ringPlans[ringPlan.planId] = ringPlan;
+  }
+
+  if (routing) {
+    const personal = await admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId);
+    if (personal.error) throw new Error(`personal routing load failed: ${personal.error.message}`);
+    for (const [id, plan] of Object.entries(ringPlans)) {
+      ringPlans[id] = { ...plan, steps: plan.steps.map((step) => ({ ...step, members: resolvePersonalRingMembers(step.members, personal.data ?? [], settings.raw?.destination_allowlist ?? ["SK", "CZ"]) })) };
+    }
+    if (ringPlan) ringPlan = ringPlans[ringPlan.planId] ?? ringPlan;
   }
 
   let presence: PresenceRow[] = [];
@@ -361,16 +378,42 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
 
   try {
     for (let retries = 0; ; retries += 1) {
-      const snapshot = await loadSessionSnapshot(deps, sessionId);
+      let snapshot = await loadSessionSnapshot(deps, sessionId);
       const context = await loadRoutingContext(deps, snapshot.session);
       const recordingLeaseRequired = Boolean(context.recordingPolicy?.enabled || readMeta(snapshot.session).recording?.recorders.some((item) => item.observed !== "stopped"));
-      const effects: EffectsDeps = { ...effectsDeps(deps), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token, recordingLeaseRequired) : undefined };
+      const durable = telephonyStabilityEnabled() || hasStabilityContract(snapshot.session);
+      const effects: EffectsDeps = { ...effectsDeps(deps), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token, recordingLeaseRequired || durable) : undefined };
+      if (durable && !leaseAcquired) throw new CallActionRejected("Prebieha zmena hovoru. Zopakujte akciu o chvíľu.", 503);
+      if (snapshot.session.presence_cancellations && Object.keys(snapshot.session.presence_cancellations).length) {
+        await cancelRevokedOffers(effects, snapshot.session, event.kind === "telnyx" && event.callControlId && event.clientState ? { callControlId: event.callControlId, clientState: event.clientState } : undefined);
+      }
+      if (readPendingEffects(snapshot.session).entries.length) {
+        const preemptsAudio = event.kind === "telnyx" ? event.type === "call.hangup" : !["sweep", "pickup", "recording_continue"].includes(event.type);
+        try {
+          const resumed = await resumePendingEffects(effects, snapshot.session, { databaseOnly: preemptsAudio });
+          if (resumed?.failed && !preemptsAudio) return { outcome: "applied", apply: resumed, session: resumed.session, leaseAcquired, retries, stateBefore: snapshot.session.state, commands: resumed.commands };
+        } catch (error) {
+          if (!preemptsAudio) throw error;
+          deps.logger?.({ level: "warn", scope: "effects", sessionId, code: "bookkeeping_deferred_for_teardown" });
+        }
+        snapshot = await loadSessionSnapshot(deps, sessionId);
+      }
       if (!leaseAcquired && (context.recordingPolicy?.enabled || readMeta(snapshot.session).recording?.recorders.some((recorder) => recorder.observed !== "stopped"))) {
         if (event.kind === "app" && event.type !== "hangup" && event.type !== "sweep") throw new CallActionRejected("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.", 503);
         // Assistance may progress without capture; it may not start a concurrent recorder.
         if (context.recordingPolicy) context.recordingPolicy = { ...context.recordingPolicy, enabled: false };
       }
-      const result = reduce(snapshot.session, snapshot.legs, snapshot.attempts, event, context);
+      const previousContact = JSON.stringify(readContactHistory(snapshot.session));
+      if (durable || readContactHistory(snapshot.session).operations.length) {
+        snapshot.session = { ...snapshot.session, metadata: toJson({ ...readMeta(snapshot.session), callback_contact: collectContactProof(snapshot, event) }) };
+      }
+      let result = reduce(snapshot.session, snapshot.legs, snapshot.attempts, event, context);
+      if (result.ignored && JSON.stringify(readContactHistory(snapshot.session)) !== previousContact) {
+        const next = emptyTransition();
+        next.session.metadata = snapshot.session.metadata;
+        result = { next, commands: [], compensations: [], guard: null, ignored: null };
+      }
+      attachContactOperations(snapshot, result, event, durable);
 
       if (result.ignored) {
         await recordCallEvent(effects, {
@@ -400,6 +443,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
           const followEvent: SessionEvent = { kind: "app", type: stopReady ? "recording_continue" : "sweep", id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };
           const follow = reduce(fresh.session, fresh.legs, fresh.attempts, followEvent, { ...context, now: nowOf(deps)() });
           if (follow.ignored) break;
+          attachContactOperations(fresh, follow, followEvent, durable);
           const nextApply = await applyReduceResult(effects, { session: fresh.session, result: follow, event: followEvent, expectedVersion: fresh.session.version });
           apply = { ...nextApply, commands: [...apply.commands, ...nextApply.commands], notes: [...apply.notes, ...nextApply.notes] };
         }

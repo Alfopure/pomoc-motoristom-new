@@ -1,9 +1,15 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database, OperatorPresenceStatus } from "@/lib/supabase/database.types";
+import { transitionPresence } from "./routing/reservation";
+import { telephonyStabilityEnabled } from "./stability";
+export { effectivePresenceStatus, effectivePresenceSince } from "@/lib/telephony/presence-policy";
 
 import { appendPresenceHistory } from "./state/effects";
 import type { PresenceRow } from "./state/types";
+import { PresenceServiceError } from "./service-errors";
+
+export { PresenceServiceError } from "./service-errors";
 
 /**
  * Operator presence (`motorist_operator_presence`) with history mirrored into
@@ -14,21 +20,11 @@ import type { PresenceRow } from "./state/types";
 
 type AdminClient = SupabaseClient<Database>;
 
-export type PresenceDeps = { admin: AdminClient; now?: () => Date };
+export type PresenceDeps = { admin: AdminClient; now?: () => Date; onOfferCancelled?: (sessionId: string) => Promise<void> };
 
 export type ManualPresenceStatus = Extract<OperatorPresenceStatus, "available" | "paused" | "offline">;
 
 export const MANUAL_PRESENCE_STATUSES: ReadonlySet<string> = new Set<ManualPresenceStatus>(["available", "paused", "offline"]);
-
-export class PresenceServiceError extends Error {
-  constructor(
-    message: string,
-    readonly status = 400,
-  ) {
-    super(message);
-    this.name = "PresenceServiceError";
-  }
-}
 
 function nowOf(deps: PresenceDeps): Date {
   return (deps.now ?? (() => new Date()))();
@@ -110,7 +106,17 @@ export async function setPresence(deps: PresenceDeps, input: SetPresenceInput): 
   const unchanged = current.status === input.status && (current.pause_reason_id ?? null) === pauseReasonId && !current.current_session_id;
   if (unchanged) return current;
 
-  const updated = await deps.admin
+  if (telephonyStabilityEnabled() || current.offer_token || current.pause_return) {
+    const result = await transitionPresence(deps.admin, { ...input, action: "manual", pauseReasonId,
+      expectedRevision: current.presence_revision, reason: reasonLabel, source: input.source ?? "dispatch_console" });
+    if (!result.applied || !result.presence) throw new PresenceServiceError("Stav sa medzičasom zmenil. Obnovte prezenciu.", 409);
+    if (result.cancellationSessionId && deps.onOfferCancelled) {
+      try { await deps.onOfferCancelled(result.cancellationSessionId); } catch { /* Durable cancellation remains due for cron. */ }
+    }
+    return result.presence;
+  }
+
+  let query = deps.admin
     .from("motorist_operator_presence")
     .update({
       status: input.status,
@@ -120,9 +126,14 @@ export async function setPresence(deps: PresenceDeps, input: SetPresenceInput): 
       status_since: now.toISOString(),
     })
     .eq("id", current.id)
+    .eq("status", current.status);
+  query = current.current_session_id ? query.eq("current_session_id", current.current_session_id) : query.is("current_session_id", null);
+  if (current.presence_revision !== undefined) query = query.eq("presence_revision", current.presence_revision);
+  const updated = await query
     .select("*")
-    .single();
+    .maybeSingle();
   if (updated.error) throw new PresenceServiceError(`Stav sa nepodarilo uložiť: ${updated.error.message}`, 500);
+  if (!updated.data) throw new PresenceServiceError("Stav sa medzičasom zmenil. Obnovte prezenciu.", 409);
 
   await appendPresenceHistory(deps.admin, {
     organizationId: input.organizationId,
@@ -139,6 +150,11 @@ export async function setPresence(deps: PresenceDeps, input: SetPresenceInput): 
 export async function endWrapUp(deps: PresenceDeps, input: { organizationId: string; profileId: string; source?: string }): Promise<PresenceRow> {
   const current = await ensurePresenceRow(deps, input);
   if (current.status !== "after_call_work") return current;
+  if (telephonyStabilityEnabled() || current.offer_token || current.pause_return) {
+    const result = await transitionPresence(deps.admin, { ...input, action: "end_wrap_up", expectedRevision: current.presence_revision,
+      expectedToken: current.offer_token, source: input.source ?? "dispatch_console" });
+    return result.presence ?? (await getPresence(deps, input)) ?? current;
+  }
   const now = nowOf(deps);
   const updated = await deps.admin
     .from("motorist_operator_presence")
@@ -153,10 +169,27 @@ export async function endWrapUp(deps: PresenceDeps, input: { organizationId: str
   return updated.data;
 }
 
-/** Lazily expired wrap-up: `after_call_work` past `wrap_up_until` counts as available (design §2.6). */
-export function effectivePresenceStatus(row: Pick<PresenceRow, "status" | "wrap_up_until">, now: Date): OperatorPresenceStatus {
-  if (row.status !== "after_call_work") return row.status;
-  if (!row.wrap_up_until) return "available";
-  const until = Date.parse(row.wrap_up_until);
-  return Number.isNaN(until) || until <= now.getTime() ? "available" : "after_call_work";
+/** Existing cron materializes the effective state without requiring an open console. */
+export async function sweepExpiredWrapUp(deps: PresenceDeps & { organizationId: string }, limit = 100): Promise<{ checked: number; applied: number; errors: Array<{ profileId: string; error: string }> }> {
+  const now = nowOf(deps).toISOString();
+  const due = await deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", deps.organizationId)
+    .eq("status", "after_call_work").or(`wrap_up_until.is.null,wrap_up_until.lte.${now}`).order("wrap_up_until", { nullsFirst: true }).limit(Math.max(1, Math.min(100, limit)));
+  if (due.error) throw new PresenceServiceError(`Ukončenie wrap-up sa nepodarilo načítať: ${due.error.message}`, 500);
+  let applied = 0;
+  const errors: Array<{ profileId: string; error: string }> = [];
+  for (const row of due.data ?? []) {
+    try {
+      if (row.presence_revision !== undefined || row.offer_token || row.pause_return || telephonyStabilityEnabled()) {
+        const result = await transitionPresence(deps.admin, { organizationId: deps.organizationId, profileId: row.profile_id,
+          action: "end_wrap_up", expectedRevision: row.presence_revision, expectedToken: row.offer_token, source: "cron" });
+        if (result.applied) applied += 1;
+      } else {
+        const result = await endWrapUp(deps, { organizationId: deps.organizationId, profileId: row.profile_id, source: "cron" });
+        if (result.status !== "after_call_work") applied += 1;
+      }
+    } catch (error) {
+      errors.push({ profileId: row.profile_id, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { checked: due.data?.length ?? 0, applied, errors };
 }

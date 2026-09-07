@@ -13,6 +13,7 @@ export type RecordingSourceRows = {
   intervals: Tables["motorist_call_participant_intervals"]["Row"][];
   profiles: Array<{ id: string; display_name: string }>;
   sessionRecordingSuppressed?: boolean;
+  sessionRecordingCoverageUnconfirmed?: boolean;
 };
 export const jsonObject = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 export const dateMilliseconds = (value: string | null | undefined): number | null => value && Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
@@ -33,8 +34,10 @@ export async function loadRecordingSourceRows(admin: SupabaseClient<Database>, o
   const session = results[0].data.session_id ? await admin.from("motorist_call_sessions").select("metadata")
     .eq("organization_id", organizationId).eq("id", results[0].data.session_id).abortSignal(signal).maybeSingle() : { data: null, error: null };
   if (session.error) throw new Error("recording_source_unavailable");
+  const sessionRecording = jsonObject(jsonObject(session.data?.metadata).recording);
   return { call: results[0].data, recordings: results[1].data ?? [], transcripts: results[2].data ?? [], intervals: results[3].data ?? [], profiles: results[4].data ?? [],
-    sessionRecordingSuppressed: jsonObject(jsonObject(session.data?.metadata).recording).suppressionReason === "objection" };
+    sessionRecordingSuppressed: sessionRecording.suppressionReason === "objection",
+    sessionRecordingCoverageUnconfirmed: Object.keys(jsonObject(sessionRecording.coverageUnconfirmed)).length > 0 };
 }
 
 export function buildQualitySource(rows: RecordingSourceRows): QualitySource {
@@ -89,6 +92,7 @@ export function buildQualitySource(rows: RecordingSourceRows): QualitySource {
   }), duration);
   const manifests = rows.recordings.map((r) => jsonObject(r.participant_manifest));
   const complete = !invalidSource && spans.length > 0 && rows.recordings.length > 0 && callEnd !== null && gaps.length === 0 && !sourceRestricted(rows)
+    && rows.sessionRecordingCoverageUnconfirmed !== true
     && rows.recordings.every((r) => r.status === "available" && rows.transcripts.some((t) => t.recording_id === r.id && t.audio_source_revision === r.source_revision && t.status === "complete"))
     && manifests.every((m) => m.conversationComplete === true && m.timingVerified === true);
   const ids = [...new Set(rows.intervals.filter((i) => i.role === "operator" && i.profile_id).map((i) => i.profile_id as string))];

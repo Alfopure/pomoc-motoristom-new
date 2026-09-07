@@ -5,8 +5,11 @@ import type { Database } from "@/lib/supabase/database.types";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 
 import { isDeviceLive } from "./routing/eligibility";
+import { OperatorDeviceError } from "./service-errors";
 import { telnyxSipUri, toJson, type DeviceRow, type TelephonyEnvironment } from "./state/types";
 import { TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
+
+export { OperatorDeviceError } from "./service-errors";
 
 /**
  * Operator browser-phone devices (`motorist_operator_devices`, one row per
@@ -33,16 +36,6 @@ export type DeviceDeps = {
   /** Override the credential connection (defaults to the client's configured one). */
   credentialConnectionId?: string | null;
 };
-
-export class OperatorDeviceError extends Error {
-  constructor(
-    message: string,
-    readonly status = 500,
-  ) {
-    super(message);
-    this.name = "OperatorDeviceError";
-  }
-}
 
 export const CREDENTIAL_NAME_PREFIX = "pm";
 export const CREDENTIAL_TAG = "pomoc-motoristom";

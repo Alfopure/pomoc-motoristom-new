@@ -1,10 +1,11 @@
 import { DEVICE_LIVENESS_WINDOW_MS, isDeviceLive } from "@/lib/telephony/device-liveness";
-import type { OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
+import { effectivePresenceStatus, readPauseReturn } from "@/lib/telephony/presence-policy";
+import type { Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
 /**
  * Ring eligibility (pure). See design §2.6:
  *
- * - `external_number` members are always eligible (coverage of last resort);
+ * - independent external numbers are eligible; owned personal numbers follow presence;
  * - operators need presence `available` (or `after_call_work` whose
  *   `wrap_up_until` has passed), a device heartbeat within the last 120 s and
  *   no open offer in another session;
@@ -18,13 +19,14 @@ export { DEVICE_LIVENESS_WINDOW_MS, isDeviceLive };
 
 export type EligibilityMember =
   | { kind: "operator"; profileId: string }
-  | { kind: "external_number"; externalNumber: string };
+  | { kind: "external_number"; externalNumber: string; ownerProfileId?: string | null };
 
 export type EligibilityPresence = {
   profileId: string;
   status: OperatorPresenceStatus;
   currentSessionId?: string | null;
   wrapUpUntil?: string | null;
+  pauseReturn?: Json | null;
 };
 
 export type EligibilityDevice = {
@@ -78,7 +80,8 @@ function ms(value: string | null | undefined): number | null {
 /** Whether the presence row allows a new offer right now. */
 export function presenceAllowsOffer(presence: EligibilityPresence | undefined, now: Date, sessionId?: string | null): EligibilityDecision {
   if (!presence) return { eligible: false, reason: "no_presence" };
-  switch (presence.status) {
+  if (readPauseReturn(presence.pauseReturn) && (presence.status === "ringing" || presence.status === "available")) return { eligible: false, reason: "paused" };
+  switch (effectivePresenceStatus({ status: presence.status, wrap_up_until: presence.wrapUpUntil ?? null, pause_return: presence.pauseReturn }, now)) {
     case "available":
       return { eligible: true };
     case "after_call_work": {
@@ -101,17 +104,19 @@ export function presenceAllowsOffer(presence: EligibilityPresence | undefined, n
 }
 
 export function evaluateMemberEligibility(member: EligibilityMember, input: EligibilityInput): EligibilityDecision {
-  if (member.kind === "external_number") return { eligible: true };
-
-  const presence = toMap(input.presence).get(member.profileId);
+  if (member.kind === "external_number" && !member.ownerProfileId) return { eligible: true };
+  const profileId = member.kind === "operator" ? member.profileId : member.ownerProfileId!;
+  const presence = toMap(input.presence).get(profileId);
   const presenceDecision = presenceAllowsOffer(presence, input.now, input.sessionId);
   if (!presenceDecision.eligible) return presenceDecision;
 
-  const device = toMap(input.devices).get(member.profileId);
+  if (toSet(input.openOffers).has(profileId)) return { eligible: false, reason: "open_offer" };
+  // A personal PSTN number has no SIP registration requirement.
+  if (member.kind === "external_number") return { eligible: true };
+  const device = toMap(input.devices).get(profileId);
   if (!device || !device.sipUsername) return { eligible: false, reason: "no_device" };
   if (!isDeviceLive(device, input.now, input.deviceWindowMs)) return { eligible: false, reason: "device_stale" };
 
-  if (toSet(input.openOffers).has(member.profileId)) return { eligible: false, reason: "open_offer" };
   return { eligible: true };
 }
 

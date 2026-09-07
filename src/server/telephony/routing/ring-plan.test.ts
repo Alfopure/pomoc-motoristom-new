@@ -11,6 +11,7 @@ import {
   isRingStepOverdue,
   isWaitingTickStale,
   materialiseRingPlan,
+  resolvePersonalRingMembers,
   memberKey,
   planRingStep,
   stepDeadline,
@@ -88,7 +89,7 @@ describe("materialiseRingPlan", () => {
     expect(await materialiseRingPlan(h.admin, { organizationId: ORG, ringPlanId: PLAN_ID })).toBeNull();
   });
 
-  it("freezes a paused operator's saved mobile in place of the browser device", async () => {
+  it("PA-08 retains legacy mobile settings without routing a paused operator", async () => {
     const h = createTelephonyHarness();
     h.setPresence(PROFILES.o1, { status: "paused" });
     h.db.update(
@@ -99,19 +100,10 @@ describe("materialiseRingPlan", () => {
 
     const plan = await materialiseRingPlan(h.admin, { organizationId: ORG, ringPlanId: PLAN_ID, now: NOW });
 
-    expect(plan?.steps[0].members[0]).toMatchObject({
-      kind: "external_number",
-      profileId: null,
-      externalNumber: "+421911222333",
-      position: 0,
-      memberId: null,
-    });
+    expect(plan?.steps[0].members[0]).toMatchObject({ kind: "operator", profileId: PROFILES.o1, externalNumber: null });
     expect(planRingStep(plan!.steps[0], input({
       presence: presence.map((row) => row.profileId === PROFILES.o1 ? { ...row, status: "paused" as const } : row),
-    })).attempts).toContainEqual(expect.objectContaining({
-      memberKind: "external_number",
-      externalNumber: "+421911222333",
-    }));
+    })).attempts.some((attempt) => attempt.profileId === PROFILES.o1 || attempt.externalNumber === "+421911222333")).toBe(false);
   });
 });
 
@@ -127,11 +119,12 @@ describe("applyPausedOperatorRouting", () => {
     });
 
     expect(resolved.map((member) => [member.kind, member.profileId ?? member.externalNumber, member.position])).toEqual([
-      ["external_number", "+421911222333", 0],
+      ["operator", PROFILES.o1, 0],
       ["operator", PROFILES.o5, 1],
       ["operator", PROFILES.o3, 3],
     ]);
-    expect(resolved.slice(0, 2).every((member) => member.memberId === null)).toBe(true);
+    expect(resolved[0]).toEqual(stepAll.members[0]);
+    expect(resolved[1].memberId).toBeNull();
   });
 
   it("never dials an invalid or newly disallowed stored number", () => {
@@ -343,4 +336,38 @@ describe("advanceRingStep and sweep", () => {
     expect(h.db.find("motorist_ring_attempts", (row) => row.id === fresh.id)).toMatchObject({ result: "offered" });
     expect(h.db.find("motorist_ring_attempts", (row) => row.id === leakedByAge.id)).toMatchObject({ result: "failed", ended_at: h.now().toISOString() });
   });
+});
+
+
+describe("personal PSTN ownership", () => {
+  const settings = [{ profile_id: PROFILES.o1, default_mobile_number: "+421911222333", delivery_mode: "personal_mobile" as const }];
+  it("PA-09 explicitly selected mobile keeps owner, bypasses web SIP and obeys capacity", () => {
+    const members = resolvePersonalRingMembers([stepAll.members[0]], settings, ["SK"], true);
+    expect(members[0]).toMatchObject({ kind: "external_number", profileId: PROFILES.o1, ownerProfileId: PROFILES.o1 });
+    const step = { ...stepAll, members };
+    expect(planRingStep(step, input({ ownedPstnEnabled: true, devices: [] })).attempts).toHaveLength(1);
+    expect(planRingStep(step, input({ ownedPstnEnabled: true, devices: [], openOffers: [PROFILES.o1] })).attempts).toHaveLength(0);
+    expect(planRingStep(step, input({ ownedPstnEnabled: true, activeLegCount: 10, maxConcurrentLegs: 10 })).attempts).toHaveLength(0);
+    expect(resolvePersonalRingMembers([stepAll.members[0]], settings, ["CZ"], true)[0].kind).toBe("operator");
+  });
+  it("PA-08 old frozen external numbers match personal ownership at runtime; backup stays independent", () => {
+    const members = resolvePersonalRingMembers([
+      { ...stepAll.members[0], kind: "external_number", profileId: null, externalNumber: "+421911222333" },
+      { ...stepAll.members[1], kind: "external_number", profileId: null, externalNumber: "+421911444555" },
+    ], settings, ["SK"]);
+    const planned = planRingStep({ ...stepAll, members }, input({ ownedPstnEnabled: true, devices: [], presence: [{ profileId: PROFILES.o1, status: "paused" }] }));
+    expect(planned.attempts.map((attempt) => attempt.externalNumber)).toEqual(["+421911444555"]);
+    expect(planned.skipped[0].reason).toBe("paused");
+  });
+  it("does not activate mobile delivery merely from stored legacy settings", () => {
+    expect(resolvePersonalRingMembers([stepAll.members[0]], settings, ["SK"])[0].kind).toBe("operator");
+  });
+});
+
+
+it("MG-03 blocks new owned PSTN with the creation gate off while admitting explicitly compatible recovery", () => {
+  const members = resolvePersonalRingMembers([{ ...stepAll.members[0], kind: "external_number", profileId: null, externalNumber: "+421911222333" }], [{ profile_id: PROFILES.o1, default_mobile_number: "+421911222333" }], ["SK"]);
+  const step = { ...stepAll, members };
+  expect(planRingStep(step, input({ ownedPstnEnabled: false })).attempts).toHaveLength(0);
+  expect(planRingStep(step, input({ ownedPstnEnabled: true, devices: [] })).attempts).toHaveLength(1);
 });

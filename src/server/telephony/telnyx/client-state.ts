@@ -20,6 +20,8 @@ export type TelnyxClientState = {
   gatherId?: string;
   /** The browser auto-answers the invite for this leg (outbound click-to-call). */
   autoAnswer?: boolean;
+  /** Exact revocable offer, never a general permission to answer. */
+  offerToken?: string;
 };
 
 export const CLIENT_STATE_MAX_BYTES = 200;
@@ -36,6 +38,7 @@ type WireState = {
   i?: string;
   g?: string;
   a?: 1;
+  t?: string;
 };
 
 export class ClientStateError extends Error {
@@ -69,6 +72,7 @@ export function assertClientState(value: unknown): asserts value is TelnyxClient
   if (state.step !== undefined && !isStep(state.step)) throw new ClientStateError("client_state.step is invalid");
   if (state.intent !== undefined && !isIntent(state.intent)) throw new ClientStateError("client_state.intent is invalid");
   if (state.gatherId !== undefined && (typeof state.gatherId !== "string" || !/^[a-f0-9]{12}$/.test(state.gatherId))) throw new ClientStateError("client_state.gatherId is invalid");
+  if (state.offerToken !== undefined && (typeof state.offerToken !== "string" || !/^[a-zA-Z0-9_-]{1,12}$/.test(state.offerToken))) throw new ClientStateError("client_state.offerToken is invalid");
   if (state.autoAnswer !== undefined && typeof state.autoAnswer !== "boolean") {
     throw new ClientStateError("client_state.autoAnswer is invalid");
   }
@@ -83,6 +87,7 @@ export function encodeClientState(state: TelnyxClientState): string {
   if (state.intent !== undefined) wire.i = state.intent;
   if (state.gatherId !== undefined) wire.g = state.gatherId;
   if (state.autoAnswer) wire.a = 1;
+  if (state.offerToken !== undefined) wire.t = state.offerToken;
 
   const encoded = Buffer.from(JSON.stringify(wire), "utf8").toString("base64");
   if (encoded.length > CLIENT_STATE_MAX_BYTES) {
@@ -116,6 +121,7 @@ export function decodeClientState(value: unknown): TelnyxClientState | null {
   if (wire.p !== undefined) state.step = wire.p as number;
   if (wire.i !== undefined) state.intent = wire.i as string;
   if (wire.g !== undefined) state.gatherId = wire.g as string;
+  if (wire.t !== undefined) state.offerToken = wire.t as string;
   if (wire.a !== undefined) {
     if (wire.a !== 1 && wire.a !== true) return null;
     state.autoAnswer = true;

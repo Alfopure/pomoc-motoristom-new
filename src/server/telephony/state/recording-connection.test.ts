@@ -15,7 +15,9 @@ function harness() {
 }
 async function ringing(h: TelephonyHarness) {
   const call = await h.inbound(); await completeCallAnnouncements(h, call.sessionId);
-  return { ...call, operator: String(h.legFor(call.sessionId, PROFILES.o1)!.telnyx_call_control_id) };
+  const operator = String(h.legFor(call.sessionId, PROFILES.o1)!.telnyx_call_control_id);
+  h.telnyx.physical.answered(operator);
+  return { ...call, operator };
 }
 async function sweep(h: TelephonyHarness, id: string) {
   h.advance(2000);
@@ -39,8 +41,10 @@ describe("recorded customer conference connection", () => {
   it("uses the same customer anchor for outbound calls after their privacy notice", async () => {
     const h = harness();
     const call = await startOutboundCall({ ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) }, { profileId: PROFILES.o1, role: "dispatcher" }, { to: "+421905123456" });
+    h.telnyx.physical.answered(call.operatorLegCallControlId);
     await h.legEvent(call.operatorLegCallControlId, "call.answered");
     const customer = h.legs(call.sessionId).find(x => x.role === "customer")!;
+    h.telnyx.physical.answered(String(customer.telnyx_call_control_id));
     await h.legEvent(String(customer.telnyx_call_control_id), "call.answered", { direction: "outgoing" });
     expect(h.telnyx.of("createConference")).toHaveLength(0);
     await completeCallAnnouncements(h, call.sessionId);

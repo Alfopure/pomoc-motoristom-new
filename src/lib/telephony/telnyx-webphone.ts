@@ -26,6 +26,7 @@ import {
   EXPECTED_LEG_TTL_MS,
   heartbeatRegistrationState,
   matchAutoAnswer,
+  matchExpectedLeg,
   pruneExpectedLegs,
   rememberExpectedLeg,
   reduceWebphone,
@@ -116,6 +117,8 @@ export type WebphoneSnapshot = {
   message: string | null;
 };
 
+export type IncomingOfferPolicy = { presenceRevision?: number; automaticAllowed: boolean; requestPending?: boolean; explicitLegs?: Array<{ callControlId: string; sessionId: string }> };
+
 export type TelnyxWebphoneOptions = {
   deviceKind?: "web" | "mobile";
   resumeSessionId?: string | null;
@@ -145,6 +148,8 @@ export class TelnyxWebphone {
   private client: WebphoneSdkClient | null = null;
   private call: WebphoneSdkCall | null = null;
   private expected: ExpectedOperatorLeg[] = [];
+  private incomingPolicy: IncomingOfferPolicy = { automaticAllowed: true };
+  private withdrawnInvites = new Set<string>();
   /** Our session id for the call currently on this tab's media leg, when known. */
   private callSessionId: string | null = null;
   private listeners = new Set<(snapshot: WebphoneSnapshot) => void>();
@@ -250,6 +255,38 @@ export class TelnyxWebphone {
       this.scheduleExpectedLegExpiry();
       this.publish();
     }
+  }
+
+  /** Server presence controls automatic offers; explicit legs use exact IDs. */
+  setIncomingOfferPolicy(policy: IncomingOfferPolicy): void {
+    if ((policy.presenceRevision ?? 0) < (this.incomingPolicy.presenceRevision ?? 0)) return;
+    this.incomingPolicy = policy;
+    for (const leg of policy.explicitLegs ?? []) {
+      this.expected = rememberExpectedLeg(this.expected, { ...leg, at: this.now() }, this.now());
+    }
+    if (this.call && RINGING_STATES.has(String(this.call.state).toLowerCase())) {
+      if (!this.suppressAutomaticInvite(this.call)) this.autoAnswerCurrentCall();
+    }
+    this.publish();
+  }
+
+  private suppressAutomaticInvite(call: WebphoneSdkCall): boolean {
+    if (!RINGING_STATES.has(String(call.state).toLowerCase()) || call.direction !== "inbound") return false;
+    const id = call.telnyxIDs?.telnyxCallControlId || call.id;
+    const exact = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now());
+    if (!this.withdrawnInvites.has(id) && (this.incomingPolicy.automaticAllowed || exact || this.callSessionId)) return false;
+    this.stopRinging();
+    // A pickup response may arrive after its invite. Keep it silent until its
+    // exact identity is known; an auto-answer header is never permission.
+    if (!this.withdrawnInvites.has(id) && this.incomingPolicy.requestPending) return true;
+    if (!this.withdrawnInvites.has(id)) {
+      this.withdrawnInvites.add(id);
+      void Promise.resolve().then(() => call.hangup()).catch(() => {
+        this.callError = "Pauza je uložená. Zvonenie je stíšené; zrušenie ponuky sa ešte dokončuje.";
+        this.publish();
+      });
+    }
+    return true;
   }
 
   /**
@@ -660,6 +697,7 @@ export class TelnyxWebphone {
     this.call = call;
 
     if (RINGING_STATES.has(state) && String(call.direction ?? "").toLowerCase() === "inbound") {
+      if (this.suppressAutomaticInvite(call)) { this.publish(); return; }
       // Our own click-to-call / pickup leg: answer it silently, the operator
       // already asked for this call.
       if (this.autoAnswerCurrentCall()) return;
@@ -688,7 +726,8 @@ export class TelnyxWebphone {
     const state = String(call.state ?? "").toLowerCase();
     if (!RINGING_STATES.has(state) || String(call.direction ?? "").toLowerCase() !== "inbound") return false;
 
-    const expected = matchAutoAnswer(
+    if (this.suppressAutomaticInvite(call)) return false;
+    const expected = (this.incomingPolicy.automaticAllowed ? matchAutoAnswer : matchExpectedLeg)(
       this.expected,
       { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId, customHeaders: call.options?.customHeaders },
       this.now(),
@@ -705,6 +744,7 @@ export class TelnyxWebphone {
   private async answerCall(call: WebphoneSdkCall): Promise<void> {
     if (!this.started || this.call !== call || !RINGING_STATES.has(String(call.state).toLowerCase()) ||
       this.answeringCallId === call.id || this.answeredCallId === call.id) return;
+    if (this.suppressAutomaticInvite(call)) return;
     const generation = this.clientGeneration;
     this.answeringCallId = call.id;
     this.callError = null;
@@ -866,7 +906,7 @@ export class TelnyxWebphone {
             telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId ?? null,
             sessionId,
             muted: Boolean(call.isAudioMuted),
-            ringing: RINGING_STATES.has(state),
+            ringing: RINGING_STATES.has(state) && !this.withdrawnInvites.has(call.telnyxIDs?.telnyxCallControlId || call.id) && (this.incomingPolicy.automaticAllowed || Boolean(this.callSessionId)),
             active: ACTIVE_STATES.has(state),
           }
         : null,

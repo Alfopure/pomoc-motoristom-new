@@ -23,6 +23,14 @@ function fixture() {
 }
 afterEach(()=>{vi.unstubAllGlobals();vi.unstubAllEnvs();});
 describe('recording service authorization',()=>{
+ it('keeps late-recovered recording coverage partial even when the provider file claims complete timing',async()=>{
+  const f=fixture();
+  f.db.update('motorist_call_sessions',{metadata:{recording:{recorders:[],policy:{enabled:true},coverageUnconfirmed:{since:'2026-09-06T10:00:00Z',epoch:0,audioCommandId:'audio-command'}}}},r=>r.id===session);
+  const result=await getCallRecordingDetail(f.admin,actor('manager'),call);
+  expect(result.state).toBe('partial');
+  expect(result.stateReason).toContain('Časť zvuku môže chýbať');
+  expect(result.segments[0].canPlay).toBe(true);
+ });
  it('cross-organization IDs return no source, including privileged managers',async()=>{
   const f=fixture();await expect(getCallRecordingDetail(f.admin,actor('manager',id(99)),call)).rejects.toMatchObject({status:404});
   expect(f.db.log.filter(x=>x.kind==='query'&&x.operation==='select'&&['motorist_calls','motorist_call_recordings','motorist_call_transcripts'].includes(x.table)).every(x=>x.filters?.some(s=>s==='eq(organization_id)'))).toBe(true);

@@ -31,14 +31,29 @@ export const FAKE_TELNYX_ENV = {
 
 export type FakeTelnyxCall = { method: string; params: Record<string, unknown> };
 
+export type PhysicalLeg = { id: string; to: string | null; answered: boolean; ended: boolean };
+export type PhysicalProvider = {
+  legs: Map<string, PhysicalLeg>;
+  /** Delivery of a provider answer happens before the application webhook. */
+  answered(id: string): void;
+  ended(id: string): void;
+  connected(left: string, right: string): boolean;
+  connections(): Array<[string, string]>;
+};
+
 export type FakeTelnyx = {
   client: TelnyxClient;
   calls: FakeTelnyxCall[];
+  physical: PhysicalProvider;
+  /** Provider executes the operation but its HTTP acknowledgement is lost. */
+  loseNextResponse(method: string): void;
   /** Commands of one kind (e.g. `dial`), most recent last. */
   of(method: string): FakeTelnyxCall[];
   failNext(method: string, error?: TelnyxCommandError | string): void;
   /** What `retrieveCall` reports for a leg (default: alive and known). */
   setCallStatus(callControlId: string, verdict: { alive: boolean; known?: boolean }): void;
+  /** Exact single-page provider response, independent of webhook delivery. */
+  setConferenceParticipants(conferenceId: string, rows: unknown[]): void;
   failAlways(method: string, error?: TelnyxCommandError | string): void;
   clearFailures(): void;
   reset(): void;
@@ -53,8 +68,50 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   const oneShot = new Map<string, TelnyxCommandError[]>();
   const callStatuses = new Map<string, { alive: boolean; known?: boolean }>();
   const conferenceParticipants = new Map<string, Set<string>>();
+  const conferenceParticipantSnapshots = new Map<string, unknown[]>();
+  const conferenceParticipantFlags = new Map<string, { muted: boolean; on_hold: boolean; whisper_call_control_ids: string[] }>();
   const always = new Map<string, TelnyxCommandError>();
   let counter = 0;
+  const physicalLegs = new Map<string, PhysicalLeg>();
+  const bridgePairs = new Map<string, [string, string]>();
+  const accepted = new Map<string, unknown>();
+  const lostResponses = new Map<string, number>();
+  const ensureLeg = (id: string, to: string | null = null) => {
+    if (!physicalLegs.has(id)) physicalLegs.set(id, { id, to, answered: false, ended: false });
+    return physicalLegs.get(id)!;
+  };
+  const armBridge = (left: string, right: string) => {
+    ensureLeg(left); ensureLeg(right);
+    bridgePairs.set([left, right].sort().join(":"), [left, right]);
+  };
+  const physical: PhysicalProvider = {
+    legs: physicalLegs,
+    answered(id) { ensureLeg(id).answered = true; },
+    ended(id) { ensureLeg(id).ended = true; },
+    connections() {
+      const pairs = new Map(bridgePairs);
+      for (const members of conferenceParticipants.values()) {
+        const ids = [...members];
+        for (let a = 0; a < ids.length; a++) for (let b = a + 1; b < ids.length; b++) pairs.set([ids[a], ids[b]].sort().join(":"), [ids[a], ids[b]]);
+      }
+      return [...pairs.values()].filter(([left, right]) => [left, right].every((id) => physicalLegs.get(id)?.answered && !physicalLegs.get(id)?.ended));
+    },
+    connected(left, right) { return this.connections().some(([a, b]) => a === left && b === right || a === right && b === left); },
+  };
+  function execute<T>(method: string, params: Record<string, unknown>, action: () => T): T {
+    record(method, params);
+    const commandId = params.commandId ?? params.command_id;
+    const key = typeof commandId === "string" ? `${method}:${commandId}` : null;
+    if (key && accepted.has(key)) return accepted.get(key) as T;
+    const result = action();
+    if (key) accepted.set(key, result);
+    const lost = lostResponses.get(method) ?? 0;
+    if (lost > 0) {
+      lostResponses.set(method, lost - 1);
+      throw new TelnyxCommandError({ code: "timeout", status: 504, retryable: true, detail: "Provider executed command; response lost", commandId: typeof commandId === "string" ? commandId : null });
+    }
+    return result;
+  }
 
   function toError(error: TelnyxCommandError | string | undefined, method: string): TelnyxCommandError {
     if (error instanceof TelnyxCommandError) return error;
@@ -77,29 +134,41 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     async request(method, path, requestOptions) {
       record("request", { method, path, ...(requestOptions ?? {}) });
       const participants = /^\/conferences\/([^/]+)\/participants$/.exec(path);
-      if (method === "GET" && participants) return { data: [...(conferenceParticipants.get(decodeURIComponent(participants[1])) ?? [])].map((call_control_id) => ({ call_control_id, status: "joined" })) } as never;
+      if (method === "GET" && participants) {
+        const conferenceId = decodeURIComponent(participants[1]);
+        const data = conferenceParticipantSnapshots.get(conferenceId) ?? [...(conferenceParticipants.get(conferenceId) ?? [])]
+          .filter(id => !physicalLegs.get(id)?.ended).map(call_control_id => ({ record_type: "participant", id: `participant-${call_control_id}`,
+            call_control_id, call_leg_id: `leg-${call_control_id}`, conference: { id: conferenceId },
+            status: physicalLegs.get(call_control_id)?.answered ? "joined" : "joining",
+            ...(conferenceParticipantFlags.get(`${conferenceId}:${call_control_id}`) ?? { muted: false, on_hold: false, whisper_call_control_ids: [] }) }));
+        return { data, meta: { page_number: 1, page_size: 250, total_pages: 1, total_results: data.length } } as never;
+      }
       return {} as never;
     },
     async dial(params: DialParams): Promise<DialResult> {
       if (!liveGate.callsEnabled) throw new TelnyxLiveCallsDisabledError();
-      record("dial", params as unknown as Record<string, unknown>);
-      const id = nextId("cc");
-      return { callControlId: id, callLegId: `leg-${id}`, callSessionId: params.linkTo ? `sess-of-${params.linkTo}` : `tsess-${id}`, isAlive: true };
+      return execute("dial", params as unknown as Record<string, unknown>, () => {
+        const id = nextId("cc"); ensureLeg(id, Array.isArray(params.to) ? params.to[0] : params.to);
+        if (params.bridgeOnAnswer && params.linkTo) armBridge(params.linkTo, id);
+        return { callControlId: id, callLegId: `leg-${id}`, callSessionId: params.linkTo ? `sess-of-${params.linkTo}` : `tsess-${id}`, isAlive: true };
+      });
     },
     async answer(params) {
-      record("answer", params);
+      execute("answer", params, () => physical.answered(params.callControlId));
     },
     async hangup(params) {
-      record("hangup", params);
+      execute("hangup", params, () => physical.ended(params.callControlId));
     },
     async bridge(params) {
-      record("bridge", params);
+      execute("bridge", params, () => armBridge(params.callControlId, params.targetCallControlId));
     },
-    async recordingStart(params) { record("recordingStart", params); return { recordingId: nextId("recording") }; },
+    async recordingStart(params) { return execute("recordingStart", params, () => ({ recordingId: nextId("recording") })); },
     async recordingStop(params) { record("recordingStop", params); },
     async transfer(params) {
       if (!liveGate.callsEnabled) throw new TelnyxLiveCallsDisabledError();
-      record("transfer", params);
+      execute("transfer", params, () => {
+        const target = nextId("transfer"); ensureLeg(target, params.to); armBridge(params.callControlId, target);
+      });
     },
     async gather(params) {
       record("gather", params);
@@ -126,18 +195,29 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       record("sendDtmf", params);
     },
     async createConference(params): Promise<ConferenceResult> {
-      record("createConference", params);
-      const id = nextId("conf");
-      conferenceParticipants.set(id, new Set([params.callControlId]));
-      return { id, name: params.name, expiresAt: null };
+      return execute("createConference", params, () => {
+        const id = nextId("conf"); ensureLeg(params.callControlId);
+        conferenceParticipants.set(id, new Set([params.callControlId]));
+        return { id, name: params.name, expiresAt: null };
+      });
     },
     async conferenceAction(conferenceId: string, action: ConferenceAction, body) {
-      record(`conference:${action}`, { conferenceId, ...body });
+      execute(`conference:${action}`, { conferenceId, ...body }, () => {
       if (action === "join" && typeof body.call_control_id === "string") {
         const participants = conferenceParticipants.get(conferenceId) ?? new Set<string>();
-        participants.add(body.call_control_id); conferenceParticipants.set(conferenceId, participants);
+        ensureLeg(body.call_control_id); participants.add(body.call_control_id); conferenceParticipants.set(conferenceId, participants);
+        conferenceParticipantFlags.set(`${conferenceId}:${body.call_control_id}`, { muted: body.muted === true, on_hold: body.hold === true,
+          whisper_call_control_ids: Array.isArray(body.whisper_call_control_ids) ? body.whisper_call_control_ids as string[] : [] });
       }
       if (action === "leave" && typeof body.call_control_id === "string") conferenceParticipants.get(conferenceId)?.delete(body.call_control_id);
+      if (["mute", "unmute", "hold", "unhold"].includes(action)) {
+        const ids = Array.isArray(body.call_control_ids) ? body.call_control_ids : [...(conferenceParticipants.get(conferenceId) ?? [])];
+        for (const id of ids) if (typeof id === "string") {
+          const key = `${conferenceId}:${id}`, flags = conferenceParticipantFlags.get(key) ?? { muted: false, on_hold: false, whisper_call_control_ids: [] };
+          conferenceParticipantFlags.set(key, { ...flags, ...(["mute", "unmute"].includes(action) ? { muted: action === "mute" } : { on_hold: action === "hold" }) });
+        }
+      }
+      });
     },
     async retrieveCall(callControlId: string) {
       record("retrieveCall", { callControlId });
@@ -176,12 +256,17 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   return {
     client,
     calls,
+    physical,
+    loseNextResponse(method) { lostResponses.set(method, (lostResponses.get(method) ?? 0) + 1); },
     nextId,
     of(method) {
       return calls.filter((call) => call.method === method);
     },
     setCallStatus(callControlId, verdict) {
       callStatuses.set(callControlId, verdict);
+    },
+    setConferenceParticipants(conferenceId, rows) {
+      conferenceParticipantSnapshots.set(conferenceId, structuredClone(rows));
     },
     failNext(method, error) {
       const list = oneShot.get(method) ?? [];
@@ -193,12 +278,16 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     },
     clearFailures() {
       oneShot.clear();
+      lostResponses.clear();
       always.clear();
     },
     reset() {
       calls.length = 0;
+      physicalLegs.clear(); bridgePairs.clear(); conferenceParticipants.clear(); accepted.clear();
+      conferenceParticipantSnapshots.clear(); conferenceParticipantFlags.clear();
       callStatuses.clear();
       oneShot.clear();
+      lostResponses.clear();
       always.clear();
     },
   };

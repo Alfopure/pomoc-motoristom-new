@@ -45,6 +45,10 @@ function metadataResult(session: SessionRow, commands: Command[] = [], notes: st
 function mergeMetadata(result: ReduceResult, session: SessionRow): ReduceResult {
   if (result.ignored) return result;
   result.next.session.metadata = toJson({ ...readMeta(session), ...readMeta({ metadata: result.next.session.metadata ?? session.metadata }) });
+  if (result.guard) {
+    const rejected = result.guard.onRejected.next;
+    rejected.session.metadata = toJson({ ...readMeta(session), ...readMeta({ metadata: rejected.session.metadata ?? session.metadata }) });
+  }
   return result;
 }
 
@@ -101,7 +105,8 @@ function stopRecorders(session: SessionRow, state: RecordingState, event: AppEve
   return metadataResult(changed, commands, [objection ? "recording objection persisted; waiting for verified stop" : "privacy action waits for all recorders to stop"]);
 }
 
-function startBeforeAudio(result: ReduceResult, session: SessionRow, legs: LegRow[], event: SessionEvent, context: RoutingContext): ReduceResult {
+function startBeforeAudio(result: ReduceResult, session: SessionRow, legs: LegRow[], event: SessionEvent, context: RoutingContext, resumeConversation = false): ReduceResult {
+  result = mergeMetadata(result, session);
   const state = readMeta(session).recording;
   if (!eligible(session, context, state) || !state.noticeCompletedAt || state.recorders.some(potentiallyRecording) || session.ended_at) return mergeMetadata(result, session);
   if (state.recorders.length >= 128) return mergeMetadata(result, patched(session, { recording: { ...state, error: "recording_segment_limit" } }));
@@ -121,6 +126,7 @@ function startBeforeAudio(result: ReduceResult, session: SessionRow, legs: LegRo
   }
   if (index < 0 && event.kind === "app" && event.type === "stop_supervise" && ["talking", "conference"].includes(nextState)) index = result.commands.length;
   if (index < 0 && event.kind === "telnyx" && event.type === "call.recording.saved" && ["talking", "conference"].includes(nextState)) index = result.commands.length;
+  if (index < 0 && resumeConversation && nextState === "talking" && !session.hold_started_at) index = result.commands.length;
   const supervisor = event.kind === "telnyx" ? legs.find((leg) => leg.telnyx_call_control_id === event.callControlId && leg.role === "supervisor") : undefined;
   const supervisorMode = supervisor?.profile_id ? nextMeta.supervise?.[supervisor.profile_id]?.mode : event.kind === "app" && event.type === "supervise" ? event.supervisor?.mode : undefined;
   if (index < 0 && state.policy.conferenceVerified && context.recordingPolicy?.conferenceVerified && ["talking", "conference"].includes(nextState) &&
@@ -272,7 +278,7 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
     if (event.kind === "telnyx" && event.type === "call.answered" && eligible(current, context, state)) {
       const party = legs.find((leg) => {
         const intent = (leg.client_state as { intent?: string } | null)?.intent;
-        return leg.telnyx_call_control_id === event.callControlId && ((intent === "party" && state.policy.conferenceVerified) || (intent === "transfer_recorded" && state.policy.transferVerified) ||
+        return leg.telnyx_call_control_id === event.callControlId && ((intent === "party" && state.policy.conferenceVerified) || (["transfer_recorded", "transfer_safe"].includes(intent ?? "") && state.policy.transferVerified) ||
           (leg.role === "supervisor" && state.policy.conferenceVerified && meta.supervise?.[leg.profile_id ?? ""]?.mode === "barge"));
       });
       if (party && !state.notifiedCallControlIds?.includes(party.telnyx_call_control_id)) return startSequence(current, context, party.telnyx_call_control_id, [noticeKey(state)], event, event.id);
@@ -287,5 +293,25 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
       return startSequence(current, context, customer.telnyx_call_control_id, keys, event, event.id);
     }
   }
-  return startBeforeAudio(core(current, legs, attempts, event, context), current, legs, event, context);
+  const result = core(current, legs, attempts, event, context);
+  if (event.kind === "app" && event.type === "blind_transfer" && current.state === "talking" && state?.suppressionReason === "topology") {
+    for (const compensation of result.compensations) {
+      const prerequisite = result.commands.find((command) => "commandId" in command && command.commandId === compensation.forCommand);
+      if (!compensation.next || !prerequisite || !["dial", "transfer"].includes(prerequisite.kind)) continue;
+      const restored = { ...current, ...compensation.next.session };
+      const recording = readMeta(restored).recording;
+      if (!recording) continue;
+      // The privacy barrier stopped capture while the original conversation
+      // remained audible. Rejection resumes capture without erasing that gap.
+      const withGap = patched(restored, { recording: { ...recording, coverageUnconfirmed: recording.coverageUnconfirmed ?? {
+        since: recording.recorders.at(-1)?.stoppedAt ?? context.now.toISOString(), epoch: recording.epoch, audioCommandId: compensation.forCommand,
+      } } });
+      compensation.next.session.metadata = withGap.metadata;
+      const recovery = startBeforeAudio({ next: compensation.next, commands: compensation.commands, compensations: [], guard: null, ignored: null },
+        withGap, legs, { ...event, id: `${event.id}:compensate:${compensation.forCommand}` }, context, true);
+      compensation.next = recovery.next;
+      compensation.commands = recovery.commands;
+    }
+  }
+  return startBeforeAudio(result, current, legs, event, context);
 }

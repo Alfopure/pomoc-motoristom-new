@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { runSessionEvent } from "@/server/telephony/session-runner";
+import { effectivePresenceStatus, effectivePresenceSince } from "@/lib/telephony/presence-policy";
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
 import { buildPresenceSnapshot } from "@/server/telephony/active-calls";
 import { listOperatorDevices } from "@/server/telephony/operator-devices";
@@ -34,11 +37,12 @@ async function snapshotFor(deps: TelephonyRuntimeDeps, actor: { profileId: strin
     own: own
       ? {
           profileId: own.profile_id,
-          status: own.status,
+          presenceRevision: own.presence_revision ?? 0,
+          status: effectivePresenceStatus(own, now),
           pauseReasonId: own.pause_reason_id,
           currentSessionId: own.current_session_id,
           wrapUpUntil: own.wrap_up_until,
-          statusSince: own.status_since,
+          statusSince: effectivePresenceSince(own, now),
         }
       : null,
     pauseReasons: pauseReasons.data ?? [],
@@ -75,7 +79,10 @@ export async function POST(request: Request) {
 
     const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
     await setPresence(
-      { admin: deps.admin },
+      { admin: deps.admin, now: deps.now, onOfferCancelled: async (sessionId) => {
+        await runSessionEvent(deps, sessionId, { kind: "app", type: "sweep", id: randomUUID(),
+          actorProfileId: actor.profileId, occurredAt: (deps.now?.() ?? new Date()).toISOString() });
+      } },
       {
         organizationId: deps.organizationId,
         profileId: actor.profileId,
