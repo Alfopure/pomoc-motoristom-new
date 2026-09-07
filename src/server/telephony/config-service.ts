@@ -15,7 +15,7 @@ import {
   type OperatorTelephonySettings,
   type PauseRoutingMode,
 } from "@/lib/telephony/operator-settings";
-import { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
+import { callbackConfirmationMedia, IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
 import type { TelephonyEnvironment } from "./state/types";
 
 export { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS };
@@ -1458,7 +1458,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
           targetRingPlanId: option.target_ring_plan_id,
           targetNumber: option.target_number,
           label: option.label,
-          promptMediaUrl: option.prompt_media_url,
+          promptMediaUrl: option.action === "callback" ? callbackConfirmationMedia(option.prompt_media_url) : option.prompt_media_url,
           ttsText: option.tts_text,
         })),
         ringPlanIds: [...new Set(options.map((option) => option.target_ring_plan_id).filter((id): id is string => Boolean(id)))],
@@ -1709,7 +1709,7 @@ function menusToRpc(menus: IvrMenuInput[]): Json {
       target_ring_plan_id: option.action === "ring_plan" ? option.targetRingPlanId ?? null : null,
       target_number: option.action === "external_number" ? normalizeE164(option.targetNumber) : null,
       label: option.label,
-      prompt_media_url: option.promptMediaUrl ?? null,
+      prompt_media_url: option.action === "callback" ? callbackConfirmationMedia(option.promptMediaUrl) : option.promptMediaUrl ?? null,
       tts_text: option.ttsText ?? null,
     })),
   })) as unknown as Json;

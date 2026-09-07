@@ -21,6 +21,14 @@ describe("client-state", () => {
     expect(decodeClientState(encoded)).toEqual({ sid: SID, role: "customer" });
   });
 
+  it("round-trips a gather identity within the provider budget and rejects malformed tokens", () => {
+    const state: TelnyxClientState = { sid: SID, role: "customer", intent: "callback_offer", gatherId: "012345abcdef" };
+    expect(decodeClientState(encodeClientState(state))).toEqual(state);
+    expect(encodeClientState(state).length).toBeLessThanOrEqual(CLIENT_STATE_MAX_BYTES);
+    expect(() => encodeClientState({ ...state, gatherId: "bad" })).toThrow(ClientStateError);
+    expect(decodeClientState(Buffer.from(JSON.stringify({ s: SID, r: "customer", g: 123 })).toString("base64"))).toBeNull();
+  });
+
   it("accepts url-safe base64 as sent back by some proxies", () => {
     const encoded = encodeClientState({ sid: SID, role: "consult", intent: "consult" });
     const urlSafe = encoded.replace(/\+/g, "-").replace(/\//g, "_");

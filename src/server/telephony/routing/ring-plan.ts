@@ -12,6 +12,7 @@ import {
   WAITING_TICK_STALE_MS,
   GREETING_TIMEOUT_MS,
   readMeta,
+  isGatherOverdue,
   type AppEvent,
   type AttemptPlan,
   type DeviceRow,
@@ -376,7 +377,7 @@ export async function findOverdueSessions(admin: AdminClient, input: { organizat
     .from("motorist_call_sessions")
     .select("*")
     .eq("organization_id", input.organizationId)
-    .in("state", ["greeting", "ringing", "waiting", "parked", "wrap_up", "missed", "talking", "held", "consulting", "conference"])
+    .in("state", ["greeting", "ivr", "after_hours", "callback_offered", "ringing", "waiting", "parked", "wrap_up", "missed", "talking", "held", "consulting", "conference"])
     .order("updated_at", { ascending: true })
     .limit(input.scanLimit ?? OVERDUE_SCAN_LIMIT);
   if (error) throw new Error(`overdue session scan failed: ${error.message}`);
@@ -391,7 +392,7 @@ export async function findOverdueSessions(admin: AdminClient, input: { organizat
     // while people are talking. Media watchdogs are independent of call state.
     media: rows.filter((row) => {
       const meta = readMeta(row);
-      return !row.ended_at && (meta.recording?.recorders.some((item) => item.observed !== "stopped") ||
+      return !row.ended_at && (isGatherOverdue(row, input.now) || meta.recording?.recorders.some((item) => item.observed !== "stopped") ||
         (ms(meta.recording?.pendingAudio?.readyAt) ?? Infinity) <= input.now.getTime() ||
         (ms(meta.announcement_sequence?.deadlineAt) ?? Infinity) <= input.now.getTime() ||
         (ms(meta.recording?.barrier?.deadlineAt) ?? Infinity) <= input.now.getTime());
