@@ -11,17 +11,18 @@ import { isSmsTemplateKey, renderSmsTemplate, SMS_TEMPLATE_VERSION, validateTemp
 import { smsSegments } from "@/lib/sms/segments";
 import { SMS_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { createTelnyxSmsTransport } from "@/lib/integrations/telnyx/sms-client";
-import { getTelnyxConfig, TELNYX_DEFAULT_ALPHA_SENDER } from "@/server/telephony/telnyx/env";
+import { getTelnyxConfig } from "@/server/telephony/telnyx/env";
 import { buildLocationShareUrl } from "@/server/location-share-links";
 import { signSmsDraft, verifySmsDraft } from "@/server/sms-draft-proof";
+import { normalizeSmsRecipient, SmsWorkflowError } from "./sms-errors";
+import { smsSender } from "./sms-channel";
+import { loadSmsReplyContext } from "./sms-inbox";
+export { normalizeSmsRecipient, SmsWorkflowError } from "./sms-errors";
 
 type AdminClient = SupabaseClient<Database>;
 type SmsRow = Database["public"]["Tables"]["motorist_sms_messages"]["Row"];
 export const SMS_ROLES = ["dispatcher", "senior_dispatcher", "manager", "admin"] as const;
-export class SmsWorkflowError extends Error {
-  constructor(message: string, readonly status = 500) { super(message); this.name = "SmsWorkflowError"; }
-}
-export type SmsTransportSendInput = { to: string; body: string; idempotencyKey: string; organizationId: string };
+export type SmsTransportSendInput = { to: string; from?: string; body: string; idempotencyKey: string; organizationId: string };
 export type SmsTransportSendResult = {
   providerMessageId: string | null;
   status: "queued" | "sent" | "failed";
@@ -40,33 +41,6 @@ export const notConfiguredTransport: SmsTransport = {
 export function resolveSmsTransport(): SmsTransport {
   return getTelnyxConfig().configured ? createTelnyxSmsTransport() : notConfiguredTransport;
 }
-export function normalizeSmsRecipient(value: unknown, fieldName = "Telefónne číslo") {
-  const input = String(value ?? "").trim();
-
-  if (!input) {
-    throw new SmsWorkflowError(`${fieldName}: chýba telefónne číslo.`, 400);
-  }
-
-  if (!/^\+?[\d ()/.-]{1,40}$/.test(input)) {
-    throw new SmsWorkflowError(`${fieldName}: telefónne číslo nie je platné.`, 400);
-  }
-
-  const digits = input.replace(/\D/g, "");
-  const international = digits.startsWith("00")
-    ? digits.slice(2)
-    : input.startsWith("+") || digits.startsWith("421")
-      ? digits
-      : digits.startsWith("0")
-        ? `421${digits.slice(1)}`
-        : "";
-
-  if (!/^[1-9]\d{6,14}$/.test(international)) {
-    throw new SmsWorkflowError(`${fieldName}: použite slovenské číslo alebo medzinárodný tvar s +/00.`, 400);
-  }
-
-  return `+${international}`;
-}
-
 export function validateSmsRequestId(value: unknown): asserts value is string {
   if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
     throw new SmsWorkflowError("Chýba platné ID požiadavky. Otvorte nový SMS koncept.", 400);
@@ -89,15 +63,21 @@ export async function getSmsCaseContext(admin: AdminClient, organizationId: stri
 /** Read-only preparation: even the location token is not persisted until Send. */
 export async function prepareSms(input: SmsPrepareInput & SmsActor & { publicBaseUrl: string }): Promise<SmsPreview> {
   validateSmsRequestId(input.requestId);
-  for (const value of [input.caseId, input.toNumber, input.callbackNumber, input.towAddress, input.message, input.taskId]) {
+  for (const value of [input.caseId, input.toNumber, input.callbackNumber, input.towAddress, input.message, input.taskId, input.replyToMessageId]) {
     if (value != null && typeof value !== "string") throw new SmsWorkflowError("SMS obsahuje neplatné údaje.", 400);
   }
   if (input.template !== "custom" && !isSmsTemplateKey(input.template)) throw new SmsWorkflowError("Nepodporovaná SMS šablóna.", 400);
   if (!input.actorProfileId || !input.organizationId) throw new SmsWorkflowError("Odosielateľa sa nepodarilo overiť.", 403);
   const admin = createSupabaseAdminClient();
-  const caseId = input.caseId?.trim() || null;
+  const reply = input.replyToMessageId ? await loadSmsReplyContext(admin, input.organizationId, input.replyToMessageId) : null;
+  if (reply && (input.template !== "custom" || input.taskId)) throw new SmsWorkflowError("Odpoveď pripravte ako vlastnú SMS v konverzácii.", 400);
+  if (reply && ((input.caseId && input.caseId !== reply.row.case_id)
+    || (input.toNumber && normalizeSmsRecipient(input.toNumber) !== reply.toNumber))) {
+    throw new SmsWorkflowError("Príjemca alebo prípad nezodpovedá prijatej SMS.", 409);
+  }
+  const caseId = reply ? reply.row.case_id : input.caseId?.trim() || null;
   if (!caseId && input.template !== "custom") throw new SmsWorkflowError("Najprv vyberte a uložte prípad s platným kontaktom.", 400);
-  const context = caseId ? await getSmsCaseContext(admin, input.organizationId, caseId) : null;
+  const context = caseId && !reply ? await getSmsCaseContext(admin, input.organizationId, caseId) : null;
   const profile = await admin.from("motorist_organization_profiles").select("*").eq("organization_id", input.organizationId).maybeSingle();
   if (profile.error) throw new SmsWorkflowError("Nastavenia organizácie sa nepodarilo načítať.");
   if (input.taskId) {
@@ -116,6 +96,8 @@ export async function prepareSms(input: SmsPrepareInput & SmsActor & { publicBas
     throw new SmsWorkflowError("Potvrďte, že technik skutočne vyrazil. Výpočet trasy nestačí.", 400);
   }
   const config = getTelnyxConfig();
+  const toNumber = reply?.toNumber ?? context?.toNumber ?? normalizeSmsRecipient(input.toNumber);
+  const channel = smsSender(input.organizationId, toNumber);
   const locationToken = input.template === "location_request" ? createLocationShareToken().token : null;
   const templateContext = {
     caseNumber: context?.caseRow.case_number ?? "",
@@ -124,8 +106,8 @@ export async function prepareSms(input: SmsPrepareInput & SmsActor & { publicBas
     etaMinutes: input.etaMinutes,
     towAddress: input.towAddress?.trim(),
     link: locationToken ? buildLocationShareUrl(input.publicBaseUrl, locationToken) : undefined,
+    repliesEnabled: channel.repliesEnabled,
   };
-  const toNumber = context?.toNumber ?? normalizeSmsRecipient(input.toNumber);
   let message: string;
   try {
     message = validateCustomSmsDraft({ toNumber, message: input.template === "custom" ? input.message : renderSmsTemplate(input.template, templateContext) }).message;
@@ -133,9 +115,9 @@ export async function prepareSms(input: SmsPrepareInput & SmsActor & { publicBas
   // JSON round-trip gives the proof exactly the same shape the browser receives.
   const draft: PreparedSms = JSON.parse(JSON.stringify({
     version: 1, requestId: input.requestId, organizationId: input.organizationId, actorProfileId: input.actorProfileId,
-    caseId, contactId: context?.contact.id ?? null, caseNumber: context?.caseRow.case_number ?? null,
-    recipientName: context?.contact.name ?? "Ručne zadaný príjemca", toNumber, template: input.template, templateContext, message,
-    sender: config.configured ? config.smsAlphaSender : TELNYX_DEFAULT_ALPHA_SENDER,
+    caseId, contactId: context?.contact.id ?? null, caseNumber: reply?.caseNumber ?? context?.caseRow.case_number ?? null,
+    recipientName: reply ? "Odosielateľ prijatej SMS" : context?.contact.name ?? "Ručne zadaný príjemca", toNumber, template: input.template, templateContext, message,
+    ...channel, replyToMessageId: reply?.row.id ?? null,
     messagingProfileId: config.configured ? config.messagingProfileId : null,
     locationToken, locationLinkId: locationToken ? randomUUID() : null, taskId,
     expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
@@ -163,7 +145,13 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
   // Retry consults the durable row even if the preview expired or the contact changed.
   if (existing) return reuse(existing, fingerprint);
   if (Date.parse(draft.expiresAt) <= Date.now()) throw new SmsWorkflowError("Platnosť náhľadu vypršala. Pripravte ho znovu.", 409);
-  if (draft.caseId) {
+  if (draft.replyToMessageId) {
+    const reply = await loadSmsReplyContext(admin, input.organizationId, draft.replyToMessageId);
+    if (reply.toNumber !== draft.toNumber || reply.row.to_number !== draft.sender || reply.row.case_id !== draft.caseId
+      || reply.caseNumber !== draft.caseNumber || reply.row.messaging_profile_id !== draft.messagingProfileId) {
+      throw new SmsWorkflowError("Priradenie prijatej SMS sa zmenilo. Pripravte nový náhľad.", 409);
+    }
+  } else if (draft.caseId) {
     const current = await getSmsCaseContext(admin, input.organizationId, draft.caseId);
     if (current.contact.id !== draft.contactId || current.toNumber !== draft.toNumber
       || current.caseRow.case_number !== draft.caseNumber || current.contact.name !== draft.recipientName) {
@@ -171,7 +159,9 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
     }
   }
   const config = getTelnyxConfig();
-  if (config.configured && (draft.sender !== config.smsAlphaSender || draft.messagingProfileId !== config.messagingProfileId)) {
+  const channel = smsSender(input.organizationId, draft.toNumber);
+  if (config.configured && (draft.sender !== channel.sender || draft.messagingProfileId !== config.messagingProfileId
+    || Boolean(draft.repliesEnabled) !== channel.repliesEnabled || Boolean(draft.repliesPendingVerification) !== channel.repliesPendingVerification)) {
     throw new SmsWorkflowError("SMS kanál sa zmenil. Pripravte nový náhľad.", 409);
   }
   const transport = options.transport ?? resolveSmsTransport();
@@ -188,6 +178,7 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
       template_version: SMS_TEMPLATE_VERSION, template_context: draft.templateContext as Json, source: "sms_composer",
       task_id: draft.taskId, location_link_id: draft.locationLinkId, location_link_expires_at: locationExpiresAt,
       encoding: smsSegments(body).encoding, segments: smsSegments(body).segments,
+      reply_to_message_id: draft.replyToMessageId ?? null,
     },
     idempotency_key: idempotencyKey, request_fingerprint: fingerprint, queued_at: now, next_attempt_at: null, retry_count: 0,
   }).select("*").single();
@@ -220,7 +211,7 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
   }
   let delivery: SmsTransportSendResult;
   try {
-    delivery = await transport.send({ to: draft.toNumber, body, idempotencyKey, organizationId: input.organizationId });
+    delivery = await transport.send({ to: draft.toNumber, from: draft.sender, body, idempotencyKey, organizationId: input.organizationId });
   } catch (error) {
     const uncertain = !(error instanceof SmsWorkflowError && [400, 401, 403, 404, 422, 423, 429].includes(error.status));
     await finishFailure(admin, row, error, uncertain);

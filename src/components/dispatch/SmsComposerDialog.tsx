@@ -4,12 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Info, Loader2, MessageSquareText, Send, X } from "lucide-react";
 import type { DispatchData } from "@/data/dispatch-types";
-import type { SmsCaseOption, SmsPrepareInput, SmsPreview } from "@/lib/sms/contracts";
+import type { SmsCaseOption, SmsInboxMessage, SmsPrepareInput, SmsPreview } from "@/lib/sms/contracts";
 import { MAX_CUSTOM_SMS_LENGTH, validateCustomSmsDraft } from "@/lib/sms/custom-message";
 import { smsSegments, stripSmsDiacritics } from "@/lib/sms/segments";
 import { SMS_TEMPLATES, validateTemplateMessage } from "@/lib/sms/templates";
 import { smsStatusLabel } from "@/lib/sms/status";
 import { SmsHistory } from "./SmsHistory";
+import { SmsInbox } from "./SmsInbox";
 
 export type SmsComposerResult = {
   dispatchData?: DispatchData;
@@ -21,6 +22,7 @@ type Props = {
   initialPhone?: string;
   locationPhone?: string;
   initialTemplate?: SmsPrepareInput["template"];
+  initialTab?: "editor" | "inbox";
   onCreateCase?: () => void;
   onClose: () => void;
   onSent?: (result: SmsComposerResult) => void;
@@ -35,7 +37,7 @@ export function SmsComposerDialog(props: Props) {
   return started ? <SmsComposerSession {...props} /> : null;
 }
 
-function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemplate = "custom", onCreateCase, onClose, onSent, open }: Props) {
+function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemplate = "custom", initialTab = "editor", onCreateCase, onClose, onSent, open }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const caseRef = useRef<HTMLSelectElement>(null);
   const busyRef = useRef(false);
@@ -56,7 +58,9 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<SmsComposerResult | null>(null);
-  const [tab, setTab] = useState<"editor" | "history">("editor");
+  const [tab, setTab] = useState<"editor" | "history" | "inbox">(initialTab);
+  const [reply, setReply] = useState<SmsInboxMessage | null>(null);
+  const [repliesEnabled, setRepliesEnabled] = useState(false);
   const [historyAll, setHistoryAll] = useState(!caseId);
   const [sender, setSender] = useState("PomocMotor");
   const [previousOpen, setPreviousOpen] = useState(open);
@@ -70,12 +74,14 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
   // only on reopening, and never discard an unresolved send or change an open draft.
   if (open !== previousOpen) {
     setPreviousOpen(open);
+    if (open) setTab(initialTab);
     const intent = JSON.stringify([caseId, initialTemplate, initialPhone]);
     if (open && intent !== openingIntent && (!attempted || (result && !unresolved))) {
       setOpeningIntent(intent);
       setSelectedCaseId(caseId ?? ""); setTemplate(initialTemplate); setPhone(initialPhone);
       setPreview(null); setMessage(""); setResult(null); setAttempted(false);
       setRequestId(crypto.randomUUID()); setDeparted(false); setEta(""); setError("");
+      setReply(null);
     }
   }
   const locked = preparing || sending || attempted;
@@ -88,14 +94,16 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
   }
 
   useEffect(() => {
+    if (!open) return;
     const controller = new AbortController();
     fetch("/api/sms/context", { cache: "no-store", signal: controller.signal }).then(async (response) => {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Prípady sa nepodarilo načítať.");
-      setCases(data.cases); setCallbackNumber(data.callbackNumber); setSender(data.sender); setLoaded(true);
+      setCases(data.cases); setCallbackNumber((current) => current || data.callbackNumber); setSender(data.sender); setLoaded(true);
+      setRepliesEnabled(Boolean(data.repliesEnabled));
     }).catch((error) => { if (!controller.signal.aborted) setError(error.message); });
     return () => controller.abort();
-  }, []);
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const previousOverflow = document.body.style.overflow;
@@ -114,7 +122,7 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
       const response = await fetch("/api/sms/prepare", {
         method: "POST", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(20_000),
         body: JSON.stringify({ requestId, caseId: selectedCaseId || null, toNumber: phone, template, callbackNumber,
-          etaMinutes: eta ? Number(eta) : undefined, technicianDeparted: departed, towAddress, message }),
+          etaMinutes: eta ? Number(eta) : undefined, technicianDeparted: departed, towAddress, message, replyToMessageId: reply?.id }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Náhľad sa nepodarilo pripraviť.");
@@ -156,10 +164,14 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
   return createPortal(<div className="fixed inset-0 z-[2147483640] grid place-items-center bg-zinc-950/60 p-3 text-zinc-950 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget && !sending && !preparing) onClose(); }}>
     <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="sms-title" onKeyDown={handleKeys} className="flex max-h-[92dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl outline-none">
       <div className="flex items-center gap-3 border-b border-yellow-200 bg-yellow-50 p-4"><MessageSquareText size={24} /><div className="flex-1"><h2 id="sms-title" className="text-lg font-black">SMS</h2><p className="text-xs text-zinc-600">Vlastné správy, šablóny a žiadosti o polohu</p></div><button type="button" aria-label="Zavrieť SMS" disabled={sending || preparing} onClick={onClose} className="rounded-lg p-2 hover:bg-white"><X size={20} /></button></div>
-      <div className="flex gap-2 border-b px-4 py-2"><button type="button" onClick={() => setTab("editor")} className={`${button} ${tab === "editor" ? "bg-yellow-100" : ""}`}>Editor</button><button type="button" onClick={() => setTab("history")} className={`${button} ${tab === "history" ? "bg-yellow-100" : ""}`}>História SMS</button></div>
+      <div className="flex flex-wrap gap-2 border-b px-4 py-2"><button type="button" onClick={() => setTab("editor")} className={`${button} ${tab === "editor" ? "bg-yellow-100" : ""}`}>Editor</button><button type="button" onClick={() => setTab("inbox")} className={`${button} ${tab === "inbox" ? "bg-yellow-100" : ""}`}>Prijaté SMS</button><button type="button" onClick={() => setTab("history")} className={`${button} ${tab === "history" ? "bg-yellow-100" : ""}`}>História SMS</button></div>
       <div className="overflow-y-auto p-4 sm:p-5">
-        {tab === "history" ? <div className="grid gap-4"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={historyAll || !selectedCaseId} disabled={!selectedCaseId} onChange={(event) => setHistoryAll(event.target.checked)} />Všetky SMS vrátane správ bez prípadu</label><SmsHistory key={historyAll ? "all" : selectedCaseId} caseId={historyAll ? undefined : selectedCaseId || undefined} /></div> : <form onSubmit={submit} className="grid gap-4">
-          {!preview && <>
+        {tab === "inbox" ? <SmsInbox cases={cases} replyDisabled={preparing || sending || Boolean(attempted && (!result || unresolved))}
+          onCreateCase={onCreateCase ? () => { onClose(); onCreateCase(); } : undefined}
+          onReply={(incoming) => { newMessage(); setReply(incoming); setPhone(incoming.from); setSelectedCaseId(incoming.caseId ?? ""); setTemplate("custom"); setTab("editor"); }} />
+          : tab === "history" ? <div className="grid gap-4"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={historyAll || !selectedCaseId} disabled={!selectedCaseId} onChange={(event) => setHistoryAll(event.target.checked)} />Všetky SMS vrátane správ bez prípadu</label><SmsHistory key={historyAll ? "all" : selectedCaseId} caseId={historyAll ? undefined : selectedCaseId || undefined} /></div> : <form onSubmit={submit} className="grid gap-4">
+          {reply && <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm leading-6"><strong>Odpoveď na prijatú SMS od {reply.from}</strong><p>{reply.caseNumber || "Bez prípadu"} · Z nášho čísla {reply.to}</p><p className="whitespace-pre-wrap break-words text-xs">{reply.body}</p>{!attempted && <button type="button" className="mt-2 text-xs font-semibold underline" disabled={preparing || sending} onClick={() => { newMessage(); setReply(null); setPhone(initialPhone); setSelectedCaseId(caseId ?? ""); }}>Zrušiť odpoveď a napísať inú SMS</button>}</div>}
+          {!preview && !reply && <>
           <label className="grid gap-1.5 text-sm font-semibold">Prípad
             <select ref={caseRef} aria-label="Prípad SMS" value={selectedCaseId} disabled={locked || !loaded} onChange={(event) => { setSelectedCaseId(event.target.value); editContext(); }} className={field}>
               <option value="">Bez prípadu</option>
@@ -183,11 +195,11 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
           {message && !attempted && <button type="button" disabled={preparing || sending} onClick={() => setMessage(stripSmsDiacritics(message))} className="justify-self-start text-xs font-semibold underline">Odstrániť diakritiku v zobrazenom texte</button>}
 
           {preview?.draft.template === "location_request" && <p className="rounded-lg bg-sky-50 p-3 text-xs leading-5 text-sky-950">Žiadosť je pripravená. Link platí 24 hodín od odoslania; staršie linky zostávajú platné do použitia alebo vypršania. GPS použijete ako miesto incidentu výslovne v detaile prípadu.</p>}
-          <p className="flex items-start gap-2 rounded-lg bg-zinc-50 p-3 text-xs leading-5 text-zinc-600"><Info size={16} className="mt-0.5 shrink-0" /><span>Odosielateľ <strong>{preview?.draft.sender || sender}</strong>. Príjem odpovedí SMS nie je aktívny. Na túto SMS sa nedá odpovedať; klient má použiť kontaktný telefón.</span></p>
+          <p className="flex items-start gap-2 rounded-lg bg-zinc-50 p-3 text-xs leading-5 text-zinc-600"><Info size={16} className="mt-0.5 shrink-0" /><span>Odosielateľ <strong>{preview?.draft.sender || reply?.to || sender}</strong>. {(preview?.draft.repliesEnabled ?? repliesEnabled) ? "Klient môže odpovedať na toto číslo. Odpoveď nájdete v Prijatých SMS." : preview?.draft.repliesPendingVerification || reply ? "Číselný SMS kanál sa overuje. Príjem odpovedí zatiaľ nie je potvrdený živým testom." : "Príjem odpovedí SMS nie je aktívny. Na túto SMS sa nedá odpovedať; klient má použiť kontaktný telefón."}</span></p>
           {(error || validation) && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{error || validation}</p>}
           {result?.sms && <div role="status" className="rounded-lg border border-zinc-200 p-3 text-sm leading-6"><strong>{smsStatusLabel(result.sms.status || "", result.sms.statusDetail)}</strong><p>{result.sms.reused ? "Zobrazujeme výsledok pôvodnej požiadavky. Ďalšia SMS sa neodoslala." : "Požiadavka je zapísaná v histórii."}</p>{unresolved && <p>Výsledok zatiaľ nie je potvrdený. Nevytvárajte ďalšiu SMS; overte stav tejto požiadavky.</p>}</div>}
           <div className="flex flex-wrap justify-end gap-2 border-t pt-4">
-            {!attempted && <button type="button" disabled={preparing || sending || !loaded || (requiresCase && !caseAvailable) || Boolean(selectedCaseId && selectedCase && !selectedCase.validPhone) || (template === "eta_update" && !departed)} onClick={() => void prepare()} className={button}>{preparing ? "Pripravujem…" : preview ? "Obnoviť náhľad" : "Pripraviť náhľad"}</button>}
+            {!attempted && <button type="button" disabled={preparing || sending || !loaded || (requiresCase && !caseAvailable) || Boolean(!reply && selectedCaseId && selectedCase && !selectedCase.validPhone) || (template === "eta_update" && !departed)} onClick={() => void prepare()} className={button}>{preparing ? "Pripravujem…" : preview ? "Obnoviť náhľad" : "Pripraviť náhľad"}</button>}
             {preview && (!result || unresolved) && <button type="submit" disabled={sending || preparing || Boolean(validation)} className="inline-flex items-center gap-2 rounded-lg bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40">{sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}{sending ? "Overujem a odosielam…" : attempted ? "Overiť tú istú požiadavku" : "Odoslať SMS"}</button>}
             {result && !unresolved && <button type="button" onClick={newMessage} className={button}>{template === "location_request" ? "Úmyselne vyžiadať novú polohu" : "Napísať novú SMS"}</button>}
           </div>

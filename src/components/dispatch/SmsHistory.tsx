@@ -39,7 +39,7 @@ export function SmsHistory({ caseId, active = true }: { caseId?: string; active?
     {!loading && !messages.length && !error && <p className="rounded-lg bg-zinc-50 p-4 text-sm">Zatiaľ žiadne SMS.</p>}
     {messages.map((entry) => <article key={entry.id} className="rounded-xl border border-zinc-200 bg-white p-3.5 text-sm">
       <div className="flex flex-wrap justify-between gap-2"><strong>{entry.caseNumber || "Bez prípadu"}</strong><span className={`rounded px-2 py-0.5 text-xs font-semibold ${entry.status === "failed" ? "bg-red-50 text-red-800" : entry.status === "delivered" ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-900"}`}>{smsStatusLabel(entry.status, entry.statusDetail)}</span></div>
-      <p className="mt-1 font-medium">{entry.recipientName} · {entry.toNumber}</p>
+      <p className="mt-1 font-medium">{entry.recipientName} · {entry.direction === "inbound" ? entry.sender : entry.toNumber}</p>
       <p className="mt-1 text-xs text-zinc-500">{entry.author} · {new Date(entry.createdAt).toLocaleString("sk-SK")} · Odosielateľ: {entry.sender}</p>
       <p className="my-3 whitespace-pre-wrap break-words leading-6">{entry.body}</p>
       {entry.error && <p className="text-xs text-red-800">{entry.error}</p>}
