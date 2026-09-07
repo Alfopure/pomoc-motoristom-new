@@ -93,6 +93,8 @@ export const DEFAULT_UNIQUE_KEYS: Record<string, UniqueKeySpec[]> = {
   motorist_operator_devices: [["id"], ["organization_id", "profile_id", "environment"]],
   motorist_operator_mobile_devices: [["id"], ["organization_id", "profile_id", "environment"]],
   motorist_operator_telephony_settings: [["id"], ["profile_id"]],
+  motorist_call_notification_preferences: [["organization_id", "profile_id"]],
+  motorist_notifications: [["id"], ["organization_id", "dedupe_key"]],
   motorist_telephony_settings: [["id"], ["organization_id"]],
   motorist_telephony_daily_usage: [["id"], ["organization_id", "day"]],
   motorist_telephony_lines: [["id"], ["organization_id", "phone_number"]],
@@ -295,7 +297,8 @@ export class FakeDatabase {
       }
       if (existing) {
         if (options.ignoreDuplicates) {
-          results.push(clone(existing));
+          // PostgREST's `resolution=ignore-duplicates` returns only rows that
+          // were inserted; an existing conflict is not returned by `.select()`.
           continue;
         }
         Object.assign(existing, row, { updated_at: this.nowIso() });

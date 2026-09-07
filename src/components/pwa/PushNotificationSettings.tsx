@@ -1,6 +1,7 @@
 "use client";
 
 import { MobileCallNotificationToggle } from "./MobileCallNotificationToggle";
+import { PauseEndingNotificationToggle } from "./PauseEndingNotificationToggle";
 
 import { useCallback, useEffect, useState } from "react";
 import { Bell, BellOff, Check, LoaderCircle, Send, Smartphone, Volume2 } from "lucide-react";
@@ -194,7 +195,12 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
         </div>
       </div>
 
-      {enabled && <div className="mt-4 border-y border-zinc-100 py-2"><MobileCallNotificationToggle /></div>}
+      {enabled && (
+        <div className="mt-4 grid gap-3 border-y border-zinc-100 py-3">
+          <PauseEndingNotificationToggle />
+          <div className="border-t border-zinc-100 pt-2"><MobileCallNotificationToggle /></div>
+        </div>
+      )}
 
       <div className="mt-5 flex items-center justify-between gap-4 rounded-xl bg-zinc-50 p-3 sm:p-4">
         <div className="min-w-0">

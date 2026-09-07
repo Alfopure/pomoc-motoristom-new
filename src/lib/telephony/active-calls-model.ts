@@ -92,6 +92,11 @@ export type ActiveCallsPayload = {
   calls: ActiveCallPayload[];
   waiting: ActiveCallPayload[];
   presence: TelephonyPresenceSnapshot;
+  ownPresence: {
+    status: TelephonyPresenceStatus;
+    pauseReasonId: string | null;
+    statusSince: string;
+  } | null;
 };
 
 export const EMPTY_ACTIVE_CALLS: ActiveCallsPayload = {
@@ -102,6 +107,7 @@ export const EMPTY_ACTIVE_CALLS: ActiveCallsPayload = {
   calls: [],
   waiting: [],
   presence: { actorProfileId: "", canManageAssignments: false, checkedAt: "", devices: [], presence: [] },
+  ownPresence: null,
 };
 
 const TALKING_STATES = new Set<ActiveCallSessionState>(["talking", "held", "consulting", "conference"]);

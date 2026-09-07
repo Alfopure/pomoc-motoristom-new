@@ -18,11 +18,11 @@ export const maxDuration = 60;
  * per-job summary. When telephony is not configured the jobs that need a
  * provider report `skipped` instead of failing.
  *
- * It also materialises due task reminders. That job belongs to the case module,
- * not to telephony, but this deployment runs no worker and `vercel.json` allows
- * exactly one cron — so without this a dispatcher's "call the customer at
- * 14:00" reminder would sit in `motorist_task_reminders` for ever and no
- * notification would ever appear. Five-minute granularity is fine for that.
+ * It also materialises due task reminders and acts as a strict-window fallback
+ * for pause-ending warnings. Those jobs are not telephony state transitions,
+ * but this deployment runs no worker and `vercel.json` allows exactly one cron.
+ * The open console owns the precise pause timer; cron never sends that warning
+ * before its final minute or after the planned end.
  */
 function authorized(request: Request): boolean {
   const secret = process.env.CRON_SECRET?.trim();
@@ -47,11 +47,12 @@ export async function GET(request: Request) {
     const deps = await createTelephonyDeps({ sweepAfterEvent: false });
     const summary = await runTelephonyCronJobs(deps);
     const reminders = await runReminderMaterialisation(deps.organizationId);
+    const pauseWarnings = await runPauseEndingWarningMaterialisation(deps.organizationId);
     const { runRecordingProcessing } = await import("@/server/telephony/recording-processing");
     const recordings = await runRecordingProcessing({ admin: deps.admin, organizationId: deps.organizationId, cronStartedAt });
 
     return Response.json(
-      { ...summary, status: reminders.status === "failed" || recordings.status === "failed" ? "degraded" : summary.status, jobs: [...summary.jobs, reminders, recordings] },
+      { ...summary, status: reminders.status === "failed" || pauseWarnings.status === "failed" || recordings.status === "failed" ? "degraded" : summary.status, jobs: [...summary.jobs, reminders, pauseWarnings, recordings] },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
@@ -82,6 +83,23 @@ async function runReminderMaterialisation(organizationId: string): Promise<Telep
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("Reminder materialization failed:", error);
+    return { job, status: "failed", detail: {}, error: message };
+  }
+}
+
+/** Fallback for a suspended/closed console. The service itself keeps a strict
+ * one-minute window, so this five-minute cron never sends too early or after
+ * the configured pause duration. */
+async function runPauseEndingWarningMaterialisation(organizationId: string): Promise<TelephonyCronJobResult> {
+  const job = "notifications.pause-ending";
+  try {
+    const { createSupabaseAdminClient } = await import("@/lib/supabase/admin");
+    const { materializeDuePauseEndingNotifications } = await import("@/server/telephony/pause-ending-notifications");
+    const result = await materializeDuePauseEndingNotifications(createSupabaseAdminClient(), organizationId, new Date(), 50);
+    return { job, status: "ok", detail: { ...result } };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("Pause ending notification materialization failed:", error);
     return { job, status: "failed", detail: {}, error: message };
   }
 }

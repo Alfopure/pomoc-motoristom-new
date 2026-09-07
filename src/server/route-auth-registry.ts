@@ -117,6 +117,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "notifications/[id]": { class: "session" },
   "notifications/[id]/read": { class: "session" },
   "push/mobile-calls": { class: "session", note: "Authenticated account mobile call push preference; never changes another profile." },
+  "push/pause-ending": { class: "session", note: "Authenticated account pause-ending preference and idempotent own-warning trigger." },
   "push/subscriptions": { class: "session", note: "Per-device subscription management for the authenticated profile; never returns endpoint keys." },
   "push/test": { class: "session", note: "Test push to the authenticated profile's own device; durable 30-second cooldown." },
 
