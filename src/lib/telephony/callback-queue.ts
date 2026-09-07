@@ -13,6 +13,8 @@
  * against its own clock.
  */
 
+import type { CallbackOrigin } from "./callback-origin";
+
 export type CallbackSource = "ivr" | "after_hours" | "park_timeout" | "missed" | "manual";
 export type CallbackStatus = "open" | "scheduled" | "done" | "cancelled";
 
@@ -21,6 +23,8 @@ export type CallbackRequestPayload = {
   callerNumber: string;
   callerName: string | null;
   source: CallbackSource;
+  /** Caller choice, independently of the route. Optional for older clients. */
+  origin?: CallbackOrigin;
   /** `open` = nobody took it yet, `scheduled` = claimed by an operator. */
   status: CallbackStatus;
   lineId: string | null;

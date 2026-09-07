@@ -241,7 +241,7 @@ function ParkedNote({ park }: { park: WaitingRoomPark }) {
           ? ""
           : expired
             ? " · limit vypršal, ponúkame spätné volanie"
-            : ` · spätné volanie o ${Math.ceil(limit / 60)} min`}
+            : ` · ponuka spätného volania o ${Math.ceil(limit / 60)} min`}
       </span>
     </p>
   );

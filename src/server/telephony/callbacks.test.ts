@@ -53,6 +53,28 @@ async function fail(promise: Promise<unknown>): Promise<CallActionError> {
 }
 
 describe("loadCallbackQueue", () => {
+  it("recovers legacy confirmed requests stored as missed, without inventing a digit", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const at = h.now().toISOString();
+    h.db.update("motorist_call_sessions", { metadata: { callback: { source: "missed", confirmed: true, requested_at: at } } }, (row) => row.id === call.sessionId);
+    const requested = seedRequest(h, { session_id: call.sessionId });
+    const missed = seedRequest(h);
+    const legacy = seedRequest(h, { source: "ivr" });
+    const result = await loadCallbackQueue(queueDeps(h), o1);
+    expect(result.open.find((row) => row.id === requested)?.origin).toEqual({ kind: "requested", requestedAt: at, digit: null, context: "missed", evidence: "legacy_confirmation" });
+    expect(result.open.find((row) => row.id === missed)?.origin?.kind).toBe("missed");
+    expect(result.open.find((row) => row.id === legacy)?.origin?.kind).toBe("unknown");
+    expect((await claimCallbackRequest(queueDeps(h), o1, requested)).request.origin?.kind).toBe("requested");
+  });
+
+  it("does not silently relabel confirmed callers if the session evidence lookup fails", async () => {
+    const h = createTelephonyHarness();
+    seedRequest(h, { session_id: "00000000-0000-4000-8000-000000000901" });
+    h.db.failNext("motorist_call_sessions", "select", "temporarily unavailable");
+    await expect(loadCallbackQueue(queueDeps(h), o1)).rejects.toThrow("Voľbu volajúceho sa nepodarilo overiť");
+  });
+
   it("returns the live queue oldest first with its line and claimant labels", async () => {
     const h = createTelephonyHarness();
     const older = seedRequest(h, { created_at: new Date(h.now().getTime() - 40 * 60_000).toISOString(), source: "park_timeout" });

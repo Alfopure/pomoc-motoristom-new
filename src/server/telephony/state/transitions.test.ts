@@ -206,7 +206,7 @@ describe("inbound ring plan", () => {
     await h.legEvent(call.callControlId, "call.gather.ended", { digits: "1", status: "valid", client_state: gather.params.clientState });
     expect(h.rows("motorist_callback_requests")).toEqual([expect.objectContaining({ source: "missed", status: "open" })]);
     expect(h.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toBe("https://media.test/telephony/announcements-v1/sk/callback-confirmed.mp3");
-    await h.legEvent(call.callControlId, "call.playback.ended", { status: "completed" });
+    await h.legEvent(call.callControlId, "call.playback.ended", { status: "completed", client_state: h.telnyx.of("playbackStart").at(-1)?.params.clientState });
     expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(call.callControlId);
     await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "callee" });
     expect(h.session(call.sessionId).state).toBe("ended");
@@ -244,17 +244,17 @@ describe("inbound ring plan", () => {
     await h.legEvent(String(external.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
 
     expect(h.session(call.sessionId).state).toBe("waiting");
-    // The music is one detached infinite playback; the tick is a silent gather.
+    // Queue audio combines the reminder, callback choice and a minute of music.
     expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ audioUrl: "https://media.test/telephony/announcements-v1/moh.mp3", loop: "infinity" });
-    const tick = h.telnyx.of("gather").at(-1)!;
-    // Both timeouts: Telnyx waits `initial_timeout_millis` (default 5 s) for the first digit.
-    expect(tick.params).toMatchObject({ timeoutMillis: 60_000, initialTimeoutMillis: 60_000 });
+    const tick = h.telnyx.of("gatherUsingAudio").at(-1)!;
+    // DTMF interrupts the audio; the timeout starts after the music finishes.
+    expect(tick.params).toMatchObject({ timeoutMillis: 1_000, validDigits: "1", audioUrl: "https://media.test/telephony/announcements-v3/sk/queueWaiting.mp3" });
     const playbacksBefore = h.telnyx.of("playbackStart").length;
 
     // Ticks re-arm without touching the music; after park_max_minutes the caller gets the callback offer.
     h.advance(60_000);
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
-    expect(h.telnyx.of("gather")).toHaveLength(2);
+    expect(h.telnyx.of("gatherUsingAudio")).toHaveLength(2);
     expect(h.telnyx.of("playbackStart")).toHaveLength(playbacksBefore);
     h.advance(31 * 60_000);
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
@@ -277,13 +277,13 @@ describe("inbound ring plan", () => {
     // frozen `meta.waiting.max_minutes` the next tick would eject them — a
     // configuration change disturbing a call in progress.
     h.db.update("motorist_telephony_settings", { park_max_minutes: 5 }, () => true);
-    const tick = h.telnyx.of("gather").at(-1)!;
+    const tick = h.telnyx.of("gatherUsingAudio").at(-1)!;
     h.advance(6 * 60_000);
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
     expect(h.session(call.sessionId).state).toBe("waiting");
 
     // The limit they arrived with (30 min) still ends the wait.
-    const next = h.telnyx.of("gather").at(-1)!;
+    const next = h.telnyx.of("gatherUsingAudio").at(-1)!;
     h.advance(25 * 60_000);
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: next.params.clientState });
     expect(h.session(call.sessionId).state).toBe("callback_offered");

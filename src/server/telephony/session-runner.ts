@@ -233,6 +233,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
   if (routing) {
     const profileIds = new Set<string>();
     for (const plan of Object.values(ringPlans)) for (const step of plan.steps) for (const member of step.members) if (member.profileId) profileIds.add(member.profileId);
+    for (const plan of Object.values(ringPlans)) for (const member of plan.queueMembers ?? []) if (member.profileId) profileIds.add(member.profileId);
     const ids = [...profileIds];
     const [presenceResult, devicesResult, offersResult, legsResult] = await Promise.all([
       ids.length > 0 ? admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId).in("profile_id", ids) : Promise.resolve({ data: [] as PresenceRow[], error: null }),

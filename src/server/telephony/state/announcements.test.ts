@@ -221,7 +221,7 @@ describe("inbound introduction", () => {
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "valid", digits: "2", client_state: menu.params.clientState });
     expect(h.telnyx.of("speak").at(-1)?.params.payload).toContain("Vašu požiadavku");
     expect(h.telnyx.of("hangup")).toHaveLength(0);
-    await h.legEvent(call.callControlId, "call.speak.ended", { status: "completed" });
+    await h.legEvent(call.callControlId, "call.speak.ended", { status: "completed", client_state: h.telnyx.of("speak").at(-1)?.params.clientState });
     expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(call.callControlId);
   });
 

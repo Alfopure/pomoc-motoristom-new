@@ -99,6 +99,8 @@ export type FrozenRingPlan = {
   name: string;
   fallback: { kind: "external_number" | "waiting_room" | "callback_prompt" | "hangup_message"; number: string | null };
   steps: FrozenRingStep[];
+  /** Original browser members, before pause forwarding replaces a member. */
+  queueMembers?: FrozenRingMember[];
   frozenAt: string;
 };
 
@@ -220,7 +222,7 @@ export type GatherSpec = {
   initialTimeoutMillis?: number;
   interDigitTimeoutMillis?: number;
   /** What the gather is for; echoed in `client_state.intent`. */
-  purpose: "ivr" | "callback_offer" | "moh_tick";
+  purpose: "ivr" | "callback_offer" | "moh_tick" | "queue_wait";
 };
 
 export type DialCommand = CommandBase & {
@@ -386,6 +388,7 @@ export type CallbackPlan = {
   callerNumber: string;
   createTask: boolean;
   notes?: string | null;
+  request?: { kind: "requested"; requested_at: string; digit: string; context: string; event_id: string };
 };
 
 export type Transition = {
@@ -535,7 +538,7 @@ export type SessionMeta = {
   internal?: { target_profile_id: string; target_sip: string; by: string } | null;
   transfer?: { kind: "blind" | "attended"; target: TransferTarget; by: string | null; at: string; completed_at?: string | null } | null;
   consult?: { target: TransferTarget; by: string | null; at: string; leg_call_control_id?: string | null; answered_at?: string | null } | null;
-  callback?: { requested_at?: string | null; source?: CallbackSource | null; confirmed?: boolean; declined_at?: string | null } | null;
+  callback?: { requested_at?: string | null; source?: CallbackSource | null; confirmed?: boolean; declined_at?: string | null; digit?: string; context?: string; event_id?: string } | null;
   hangup?: { by: string | null; at: string; scope: "session" } | null;
   conference?: { promoted_at: string; by: string | null } | null;
   /** A third party dialled into the conference that has not answered yet. */
@@ -548,6 +551,8 @@ export type SessionMeta = {
   pickup?: { by: string; at: string } | null;
   /** `max_minutes` is `park_max_minutes` frozen when the caller entered the waiting room. */
   waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null } | null;
+  /** Unanswered inbound queue only; parked/held conversations never auto-ring. */
+  queue?: { next_offer_at: string } | null;
   previous_operator?: string | null;
   answered_external?: string | null;
   sdk_hold?: { leg: string; at: string } | null;

@@ -181,6 +181,7 @@ export async function materialiseRingPlan(
 
   const groupById = new Map((groups.data ?? []).map((group) => [group.id, group]));
   const frozenSteps: FrozenRingStep[] = [];
+  const queueMembers: FrozenRingMember[] = [];
   for (const step of stepRows) {
     const group = groupById.get(step.ring_group_id);
     if (!group || !group.active) continue;
@@ -198,6 +199,7 @@ export async function materialiseRingPlan(
       .filter((member) => (member.kind === "operator" ? Boolean(member.profileId) : Boolean(member.externalNumber)))
       .sort((left, right) => left.position - right.position);
     const stepMembers = applyPausedOperatorRouting(configuredMembers, { pausedProfileIds, routing: pausedRouting, destinationAllowlist });
+    queueMembers.push(...configuredMembers.filter((member) => member.kind === "operator"));
     frozenSteps.push({
       index: frozenSteps.length,
       groupId: group.id,
@@ -213,6 +215,7 @@ export async function materialiseRingPlan(
     name: plan.data.name,
     fallback: { kind: plan.data.fallback_kind, number: plan.data.fallback_number ?? null },
     steps: frozenSteps,
+    queueMembers,
     frozenAt: (input.now ?? new Date()).toISOString(),
   };
 }
@@ -323,8 +326,21 @@ function ms(value: unknown): number | null {
 /** A ringing session whose step deadline (ring time + grace) has passed. */
 export function isRingStepOverdue(session: SessionRow, now: Date): boolean {
   if (session.state !== "ringing") return false;
+  if (isQueueExpired(session, now)) return true;
   const deadline = ms(readMeta(session).ring?.step_deadline_at);
   return deadline !== null && deadline < now.getTime();
+}
+
+function isQueueExpired(session: SessionRow, now: Date): boolean {
+  const meta = readMeta(session);
+  const since = ms(meta.waiting?.since);
+  return Boolean(meta.queue && since !== null && since + (meta.waiting?.max_minutes ?? 30) * 60_000 <= now.getTime());
+}
+
+export function isQueueOfferDue(session: SessionRow, now: Date): boolean {
+  if (session.state !== "waiting") return false;
+  const next = ms(readMeta(session).queue?.next_offer_at);
+  return next !== null && (next <= now.getTime() || isQueueExpired(session, now));
 }
 
 /** A waiting/parked session whose MOH tick has not re-armed for `WAITING_TICK_STALE_MS`. */
@@ -368,7 +384,8 @@ export async function findOverdueSessions(admin: AdminClient, input: { organizat
   return {
     greeting: rows.filter((row) => isGreetingOverdue(row, input.now)),
     ringing: rows.filter((row) => isRingStepOverdue(row, input.now)),
-    waiting: rows.filter((row) => isWaitingTickStale(row, input.now)),
+    waiting: rows.filter((row) => isWaitingTickStale(row, input.now) || isQueueOfferDue(row, input.now))
+      .sort((a, b) => (ms(readMeta(a).waiting?.since) ?? ms(a.started_at) ?? 0) - (ms(readMeta(b).waiting?.since) ?? ms(b.started_at) ?? 0)),
     stale: rows.filter((row) => isSessionStale(row, input.now)),
     // Active capture must observe policy revocation on the existing cron, even
     // while people are talking. Media watchdogs are independent of call state.
