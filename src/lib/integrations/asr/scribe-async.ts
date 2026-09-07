@@ -32,7 +32,8 @@ export async function submitScribeAsync(input: { sourceUrl: string; correlationT
   form.set('timestamps_granularity', 'word'); form.set('tag_audio_events', 'true');
   form.set('diarize', input.multiChannel ? 'false' : 'true');
   form.set('use_multi_channel', input.multiChannel ? 'true' : 'false');
-  if (input.multiChannel) form.set('multichannel_output_style', 'combined');
+  // Scribe currently rejects combined multichannel output with webhook delivery.
+  if (input.multiChannel) form.set('multichannel_output_style', 'separate');
   // enable_logging=false requires an account-level zero-retention entitlement.
   // No retries: a missing acknowledgement must be reconciled, never resubmitted.
   try {

@@ -1,11 +1,33 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { normalizeScribeLanguage, parseScribeSpans, verifiedMultiChannel, processRecordingAsrJob } from './recording-asr';
+import { normalizeScribeLanguage, normalizeScribeTranscription, parseScribeSpans, verifiedMultiChannel, processRecordingAsrJob } from './recording-asr';
 import type { RecordingJobContext, RecordingRow } from './recording-jobs';
 afterEach(()=>{vi.unstubAllEnvs();vi.unstubAllGlobals();});
 const at='2026-09-06T10:00:00.000Z';
 const source={id:'recording',started_at:at,ended_at:'2026-09-06T10:00:20.000Z',duration_seconds:20,participant_manifest:{version:1,timingVerified:true,audioDurationSeconds:20,audioFormat:{channels:2},channelMappingVerified:true,identitySource:'authenticated_leg_binding',coverage:'verified',intervals:[{profileId:null,role:'customer',channel:0,verified:true,audibleToCustomer:true,startedAt:at,endedAt:'2026-09-06T10:00:20.000Z'},{profileId:'operator-1',role:'operator',channel:1,verified:true,audibleToCustomer:true,startedAt:at,endedAt:'2026-09-06T10:00:10.000Z'}]}} as unknown as RecordingRow;
 const result={words:[{type:'word',text:'Dobrý',start:1,end:1.3,channel_index:1,speaker_id:'speaker_0'},{type:'word',text:'deň.',start:1.4,end:1.8,channel_index:1,speaker_id:'speaker_0'},{type:'word',text:'Ďakujem.',start:11,end:12,channel_index:1,speaker_id:'speaker_0'}]};
 describe('ASR identity evidence',()=>{
+ it('reconstructs the webhook channel arrays chronologically and preserves our authenticated identity',()=>{
+  const payload={transcription_id:'provider-transcript',transcripts:[
+   {channel_index:0,language_code:'slk',words:[{type:'word',text:'Pomoc.',start:3,end:4,speaker_id:'speaker_0',role:'operator'}]},
+   {channel_index:1,language_code:'slo',words:[{type:'word',text:'Dobrý',start:1,end:1.3,speaker_id:'speaker_0'},{type:'spacing',text:' ',start:1.3,end:1.3},{type:'word',text:'deň.',start:1.4,end:1.8,speaker_id:'speaker_0'}]},
+  ]};
+  const normalized=normalizeScribeTranscription(payload);
+  expect(normalized).toMatchObject({text:'Dobrý deň. Pomoc.',language_code:'sk',transcription_id:'provider-transcript'});
+  const spans=parseScribeSpans(payload,source,'t',at);
+  expect(spans).toHaveLength(2);expect(spans[0]).toMatchObject({text:'Dobrý deň.',role:'operator',operatorId:'operator-1',speakerLabel:'channel_1'});
+  expect(spans[1]).toMatchObject({text:'Pomoc.',role:'customer',operatorId:null,speakerLabel:'channel_0'});
+  expect(parseScribeSpans(payload,{...source,participant_manifest:{}},'t',at)).toHaveLength(2);
+ });
+ it('does not pick an arbitrary language from a multilingual or silent pair',()=>{
+  const word={type:'word',text:'Hello',start:0,end:1};
+  expect(normalizeScribeTranscription({transcripts:[{channel_index:0,language_code:'slk',words:[word]},{channel_index:1,language_code:'eng',words:[word]}]}).language_code).toBe('mul');
+  expect(normalizeScribeTranscription({transcripts:[{channel_index:0,words:[]},{channel_index:1,words:[]}]}).language_code).toBe('und');
+ });
+ it('rejects ambiguous, missing and contradictory channel data from separate output',()=>{
+  const c={channel_index:0,language_code:'slk',words:[{type:'word',text:'Text',start:0,end:1}]};
+  for(const payload of [{transcripts:[]},{transcripts:[c]},{transcripts:[c,c]},{transcripts:[c,{...c,channel_index:2}]},{words:[],transcripts:[c,{...c,channel_index:1}]},{transcripts:[c,{...c,channel_index:1,words:[{...c.words[0],channel_index:0}]}]}])expect(()=>normalizeScribeTranscription(payload)).toThrow();
+  for(const invalid of [{start:-1},{end:Infinity},{start:2,end:1},{text:123}])expect(()=>normalizeScribeTranscription({transcripts:[{...c,words:[{...c.words[0],...invalid}]},{...c,channel_index:1}]})).toThrow('scribe_word_invalid');
+ });
  it('maps provider language codes to dashboard filters without inventing an unsupported language',()=>{
   for(const [provider,filter] of [['slk','sk'],['slo','sk'],['ces','cs'],['cze','cs'],['eng','en'],['deu','de'],['ger','de'],['SK','sk'],['fra','fra']])expect(normalizeScribeLanguage(provider)).toBe(filter);
   for(const invalid of [null,undefined,'','unknown-language','sk<script>',123])expect(normalizeScribeLanguage(invalid)).toBe('und');
