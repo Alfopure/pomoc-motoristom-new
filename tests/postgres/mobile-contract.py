@@ -5,16 +5,19 @@ from pathlib import Path
 import psycopg
 from psycopg.types.json import Jsonb
 
+# Explicit hostaddr prevents inherited PGHOSTADDR from redirecting fixture writes.
+LOOPBACK_DSN = "host=127.0.0.1 hostaddr=127.0.0.1 port=55432 user=postgres connect_timeout=5"
+
 ROOT=Path(__file__).resolve().parents[2]
 ORG="00000000-0000-4000-8000-000000000001"
 OTHER="00000000-0000-4000-8000-000000000002"
 OWNER="00000000-0000-4000-8000-000000000011"
 FOREIGN="00000000-0000-4000-8000-000000000012"
 MEMBER="00000000-0000-4000-8000-000000000021"
-with psycopg.connect("host=127.0.0.1 port=55432 user=postgres dbname=postgres",autocommit=True) as c:
+with psycopg.connect(f"{LOOPBACK_DSN} dbname=postgres",autocommit=True) as c:
     c.execute("drop database if exists mobile_contract with (force)")
     c.execute("create database mobile_contract")
-with psycopg.connect("host=127.0.0.1 port=55432 user=postgres dbname=mobile_contract",autocommit=True) as c:
+with psycopg.connect(f"{LOOPBACK_DSN} dbname=mobile_contract",autocommit=True) as c:
     c.execute("""
       do $$ begin
         if not exists(select 1 from pg_roles where rolname='anon') then create role anon; end if;
