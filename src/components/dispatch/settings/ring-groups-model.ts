@@ -42,6 +42,7 @@ export type MemberDraft = {
   memberKind: RingMemberKind;
   profileId: string | null;
   externalNumber: string;
+  ownerProfileId?: string | null;
   /** Empty string = "use the step timeout". */
   ringSecs: string;
 };
@@ -82,6 +83,7 @@ export function groupDraftsFromDocument(groups: readonly RingGroupDoc[]): GroupD
         memberKind: member.memberKind,
         profileId: member.profileId,
         externalNumber: member.externalNumber ?? "",
+        ...(member.ownerProfileId !== undefined ? { ownerProfileId: member.ownerProfileId } : {}),
         ringSecs: member.ringSecs === null ? "" : String(member.ringSecs),
       })),
   }));
@@ -156,6 +158,7 @@ export function ringGroupsPayload(groups: readonly GroupDraft[]): RingGroupInput
       id: member.id,
       memberKind: member.memberKind,
       profileId: member.memberKind === "operator" ? member.profileId : null,
+      ...(member.ownerProfileId !== undefined ? { ownerProfileId: member.ownerProfileId } : {}),
       externalNumber: member.memberKind === "external_number" ? normalizeE164(member.externalNumber) ?? member.externalNumber.trim() : null,
       position: index,
       ringSecs: parseRingSecs(member.ringSecs),

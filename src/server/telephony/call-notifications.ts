@@ -48,7 +48,7 @@ function timestamp(value: unknown): number | null {
 function intentOf(leg: LegRow): string | null {
   const value = record(leg.client_state).intent ?? record(leg.metadata).intent;
   // Recorded blind transfers dial their target before playing its privacy notice.
-  if (value === "transfer_recorded") return "transfer";
+  if (value === "transfer_recorded" || value === "transfer_safe") return "transfer";
   return typeof value === "string" ? value : null;
 }
 
@@ -94,7 +94,7 @@ export function callPushCandidates(input: {
     const presence = input.presence.find((row) => row.organization_id === input.organizationId && row.profile_id === profile.id);
     if (presence?.current_session_id && presence.current_session_id !== session.id) continue;
     if (presenceAllowsOffer(presence ? {
-      profileId: profile.id, status: presence.status, currentSessionId: presence.current_session_id, wrapUpUntil: presence.wrap_up_until,
+      profileId: profile.id, status: presence.status, currentSessionId: presence.current_session_id, wrapUpUntil: presence.wrap_up_until, pauseReturn: presence.pause_return,
     } : undefined, now, session.id).eligible) available.set(profile.id, profile);
   }
 

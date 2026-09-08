@@ -45,7 +45,7 @@ window.fetch = async (input) => {
     return new Promise<Response>((resolve) => requests.push({ url, resolve }));
   }
   if (url === "/api/telephony/webphone/token") return Response.json({ token: "fixture-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), deviceSessionId: "fixture-device", sipUsername: "fixture" });
-  if (url === "/api/telephony/calls/active") return Response.json({ ...EMPTY_ACTIVE_CALLS, organizationId: "fixture-org" });
+  if (url === "/api/telephony/calls/active") return Response.json({ ...EMPTY_ACTIVE_CALLS, organizationId: "fixture-org", actorProfileId: "fixture-operator", ownPresence: { status: "available", pauseReasonId: null, statusSince: new Date().toISOString() } });
   if (url.includes("/presence")) return Response.json({ own: { status: "available" }, pauseReasons: [] });
   return Response.json({});
 };

@@ -1,6 +1,61 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database, OperatorPresenceStatus } from "@/lib/supabase/database.types";
+import { telephonyStabilityEnabled } from "../stability";
+
+type PresenceRow = Database["public"]["Tables"]["motorist_operator_presence"]["Row"];
+
+export type PresenceTransitionInput = {
+  organizationId: string;
+  profileId: string;
+  action: "acquire" | "manual" | "dispatch" | "answer" | "pickup" | "release" | "end_wrap_up";
+  sessionId?: string | null;
+  expectedRevision?: number | null;
+  expectedToken?: string | null;
+  status?: OperatorPresenceStatus;
+  pauseReasonId?: string | null;
+  wrapUpUntil?: string | null;
+  reason?: string | null;
+  source?: string;
+};
+
+export type PresenceTransitionResult = { applied: boolean; reused?: boolean; cancellationSessionId?: string | null; revision?: number; offerToken?: string | null; presence?: PresenceRow; reason?: string };
+
+/** Server-only RPC. Authorization is taken from the authenticated server actor. */
+export async function transitionPresence(admin: AdminClient, input: PresenceTransitionInput): Promise<PresenceTransitionResult> {
+  const { data, error } = await admin.rpc("motorist_presence_transition_v1", {
+    p_organization_id: input.organizationId, p_profile_id: input.profileId, p_action: input.action,
+    p_session_id: input.sessionId ?? null, p_expected_revision: input.expectedRevision ?? null,
+    p_expected_token: input.expectedToken ?? null, p_status: input.status ?? null,
+    p_pause_reason_id: input.pauseReasonId ?? null, p_wrap_up_until: input.wrapUpUntil ?? null,
+    p_reason: input.reason ?? null, p_source: input.source ?? "telephony",
+  });
+  if (error) throw new ReservationError(`presence transition failed: ${error.message}`, error);
+  if (!data || typeof data !== "object" || Array.isArray(data) || typeof data.applied !== "boolean") throw new ReservationError("Invalid presence transition result");
+  return data as PresenceTransitionResult;
+}
+
+/** Ordinary outbound/supervision acquisition; token is returned by the same transaction. */
+export async function reserveOperatorOwnership(admin: AdminClient, input: { organizationId: string; profileId: string; sessionId: string }): Promise<PresenceTransitionResult> {
+  const current = await admin.from("motorist_operator_presence").select("*").eq("organization_id", input.organizationId).eq("profile_id", input.profileId).maybeSingle();
+  if (current.error) throw new ReservationError(`reservation read failed: ${current.error.message}`, current.error);
+  if (telephonyStabilityEnabled() || current.data?.presence_revision !== undefined || current.data?.offer_token || current.data?.pause_return) {
+    return transitionPresence(admin, { ...input, action: "acquire", expectedRevision: current.data?.presence_revision });
+  }
+  return { applied: await reserveOperator(admin, { profileId: input.profileId, sessionId: input.sessionId }) };
+}
+
+export function authorizeOperatorDispatch(admin: AdminClient, input: Omit<PresenceTransitionInput, "action">): Promise<PresenceTransitionResult> {
+  return transitionPresence(admin, { ...input, action: "dispatch" });
+}
+
+export function reserveOperatorPickup(admin: AdminClient, input: Omit<PresenceTransitionInput, "action">): Promise<PresenceTransitionResult> {
+  return transitionPresence(admin, { ...input, action: "pickup" });
+}
+
+export function releaseOperatorPresence(admin: AdminClient, input: Omit<PresenceTransitionInput, "action">): Promise<PresenceTransitionResult> {
+  return transitionPresence(admin, { ...input, action: "release" });
+}
 
 /**
  * Atomic operator reservation (design §2.6): on an operator leg's
@@ -20,7 +75,10 @@ export class ReservationError extends Error {
   }
 }
 
-export async function reserveOperator(admin: AdminClient, input: { profileId: string; sessionId: string }): Promise<boolean> {
+export async function reserveOperator(admin: AdminClient, input: { profileId: string; sessionId: string; organizationId?: string; expectedToken?: string; expectedRevision?: number }): Promise<boolean> {
+  if (input.organizationId && (telephonyStabilityEnabled() || input.expectedToken)) {
+    return (await transitionPresence(admin, { ...input, organizationId: input.organizationId, action: "answer" })).applied;
+  }
   const { data, error } = await admin.rpc("motorist_reserve_operator", { p_profile_id: input.profileId, p_session_id: input.sessionId });
   if (error) throw new ReservationError(`motorist_reserve_operator failed: ${error.message}`, error);
   return data === true;
@@ -33,8 +91,17 @@ export async function reserveOperator(admin: AdminClient, input: { profileId: st
  */
 export async function releaseOperator(
   admin: AdminClient,
-  input: { profileId: string; sessionId: string; status: OperatorPresenceStatus; wrapUpUntil?: string | null; now?: Date },
+  input: { profileId: string; sessionId: string; status: OperatorPresenceStatus; wrapUpUntil?: string | null; now?: Date; organizationId?: string; expectedToken?: string; expectedRevision?: number },
 ): Promise<boolean> {
+  // Read existing ownership even with admission disabled: rollback may not drop
+  // an in-flight paused pickup's durable return context.
+  const current = await admin.from("motorist_operator_presence").select("*").eq("profile_id", input.profileId).maybeSingle();
+  if (current.error) throw new ReservationError(`release read failed: ${current.error.message}`, current.error);
+  if (current.data && (telephonyStabilityEnabled() || current.data.offer_token || current.data.pause_return)) {
+    if (current.data.offer_token && !input.expectedToken) return false;
+    return (await releaseOperatorPresence(admin, { ...input, organizationId: input.organizationId ?? current.data.organization_id,
+      expectedToken: input.expectedToken, expectedRevision: input.expectedRevision })).applied;
+  }
   const now = (input.now ?? new Date()).toISOString();
   const { data, error } = await admin
     .from("motorist_operator_presence")

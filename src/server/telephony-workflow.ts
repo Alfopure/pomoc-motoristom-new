@@ -1,5 +1,7 @@
 import "server-only";
 
+import { telephonyStabilityEnabled } from "./telephony/stability";
+
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadDispatchData } from "@/data/dispatch-repository";
 import type { CallerMatch, CallOutcome } from "@/data/dispatch-types";
@@ -224,7 +226,9 @@ export async function setCallOutcome(
     outcome: unknown;
     note?: unknown;
     callbackMinutes?: unknown;
+    callbackActionId?: unknown;
   },
+  actor?: { profileId: string; organizationId: string },
 ) {
   ensureUuid(callId, "callId");
 
@@ -237,11 +241,21 @@ export async function setCallOutcome(
   const organization = await resolveOrganization(supabase);
   const organizationId = organization.id;
   const call = await getCall(supabase, organizationId, callId);
-  const actorId = call.operator_id ?? (await resolveDefaultOwnerId(supabase, organizationId));
+  if (actor && actor.organizationId !== organizationId) throw new TelephonyWorkflowError("Hovor patrí inej organizácii.", 403);
+  const actorId = actor?.profileId ?? call.operator_id ?? (await resolveDefaultOwnerId(supabase, organizationId));
   const now = new Date().toISOString();
   const note = readString(input.note);
   const callbackMinutes = cleanCallbackMinutes(input.callbackMinutes);
   const label = outcomeLabels[input.outcome];
+  if (input.outcome === "callback" && telephonyStabilityEnabled()) {
+    if (!actor) throw new TelephonyWorkflowError("Naplánovanie vyžaduje prihláseného dispečera.", 403);
+    ensureUuid(input.callbackActionId, "callbackActionId");
+    await throwOnResult(supabase.rpc("motorist_schedule_callback_v1", {
+      p_organization_id: organizationId, p_call_id: call.id, p_actor_id: actor.profileId,
+      p_action_id: String(input.callbackActionId), p_due_at: dueInMinutes(callbackMinutes),
+    }));
+  }
+
   const latestPayload = {
     ...jsonRecord(call.raw_latest_payload),
     outcome: input.outcome,
@@ -299,7 +313,7 @@ export async function setCallOutcome(
         .single(),
     );
 
-    if (input.outcome === "callback") {
+    if (input.outcome === "callback" && !telephonyStabilityEnabled()) {
       await createCallbackTaskIfNeeded(supabase, organizationId, call, actorId, callbackMinutes);
     }
   }

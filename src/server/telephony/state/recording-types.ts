@@ -44,6 +44,8 @@ export type RecordingState = {
   suppressionReason: "objection" | "topology" | null;
   recorders: RecorderState[];
   error: string | null;
+  /** Audio was released before START was confirmed. Later acknowledgements cannot prove that earlier coverage. */
+  coverageUnconfirmed?: { since: string; epoch: number; audioCommandId: string };
   barrier?: { action: AppEvent | null; deadlineAt: string; epoch: number } | null;
   pendingAudio?: { epoch: number; readyAt: string; sourceEventId: string; commands: Array<Extract<Command, { kind: "bridge" | "conference_unhold" | "conference_join" }>> } | null;
 };

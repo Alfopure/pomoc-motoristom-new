@@ -484,7 +484,14 @@ export function MyPhonePanel({
                 />
               </SettingsField>
 
-              <SettingsField label="Môj mobil" hint="Pri pauze ho vyberieš jedným kliknutím ako náhradné zariadenie.">
+              <SettingsField label="Prijímanie hovorov" hint="Dostupnosť zapni vedome tlačidlom Dostupný. Mobilná aplikácia so SIP zostáva samostatným zariadením.">
+                <select className={settingsInputClass} disabled={settingsBusy} value={draft.deliveryMode ?? "web"} onChange={(event) => setDraft({ ...draft, deliveryMode: event.target.value as "web" | "personal_mobile" })}>
+                  <option value="web">Telefón v aplikácii</option>
+                  <option value="personal_mobile">Prijímam na osobnom mobile</option>
+                </select>
+              </SettingsField>
+
+              <SettingsField label="Môj mobil" hint="Osobné číslo na prijímanie počas práce. Uloženie nemení dostupnosť; počas pauzy nezvoní.">
                 <input
                   className={settingsInputClass}
                   disabled={settingsBusy}

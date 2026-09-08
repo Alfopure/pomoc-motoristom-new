@@ -204,7 +204,7 @@ export function RingGroupsEditor({
                               </select>
                             </SettingsField>
                           ) : (
-                            <SettingsField label="Externé číslo" hint="Napríklad mobil dispečera, zvoní aj keď je prehliadač zavretý.">
+                            <SettingsField label="Externé číslo" hint="Osobné číslo rešpektuje pauzu vlastníka. Záloha je samostatný prevádzkový telefón.">
                               <input
                                 className={settingsInputClass}
                                 disabled={!canEdit}
@@ -213,6 +213,10 @@ export function RingGroupsEditor({
                                 value={member.externalNumber}
                                 onChange={(event) => setGroups((current) => updateMember(current, group.key, member.key, { externalNumber: event.target.value }))}
                               />
+                              <select aria-label="Vlastník externého čísla" className={settingsInputClass} disabled={!canEdit} value={member.ownerProfileId ?? ""} onChange={(event) => setGroups((current) => updateMember(current, group.key, member.key, { ownerProfileId: event.target.value || null }))}>
+                                <option value="">Samostatná prevádzková záloha</option>
+                                {operators.map((operator) => <option key={operator.profileId} value={operator.profileId}>{operator.displayName} · osobný telefón</option>)}
+                              </select>
                             </SettingsField>
                           )}
 

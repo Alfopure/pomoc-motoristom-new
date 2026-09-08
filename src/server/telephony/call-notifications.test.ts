@@ -198,7 +198,7 @@ describe("call push audience", () => {
     expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
     await completeCallAnnouncements(h, call.sessionId);
     const target = h.openLegFor(call.sessionId, PROFILES.o2)!;
-    expect(h.clientStateOf(String(target.telnyx_call_control_id)).intent).toBe("transfer_recorded");
+    expect(h.clientStateOf(String(target.telnyx_call_control_id)).intent).toBe("transfer_safe");
     expect(h.telnyx.of("transfer")).toHaveLength(0);
     expect(push.scheduled).toHaveBeenCalledWith(call.sessionId);
     await push.flush();
@@ -389,6 +389,21 @@ describe("call push delivery scheduling", () => {
     const delivery = deps(h);
     h.db.failNext("motorist_operator_presence", "select", "unavailable");
     await expect(notifyCallState(delivery, call.sessionId)).rejects.toThrow("Call push audience unavailable");
+    expect(delivery.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("PA-01 and PU-06 automatic push", () => {
+  it.each(["paused", "expired-wrap-up", "pickup-ringing"])("never pushes to the last operator with %s", async (state) => {
+    const h = world(); const call = await h.inbound(); waiting(h, call.sessionId);
+    for (const profileId of Object.values(PROFILES)) h.setPresence(profileId, { status: "offline", current_session_id: null });
+    h.setPresence(PROFILES.o1, { status: state === "paused" ? "paused" : state === "pickup-ringing" ? "ringing" : "after_call_work", current_session_id: state === "pickup-ringing" ? call.sessionId : null });
+    if (state !== "paused") h.db.update("motorist_operator_presence", {
+      wrap_up_until: new Date(h.now().getTime() - 1).toISOString(),
+      pause_return: { v: 1, sessionId: call.sessionId, profileId: PROFILES.o1, pauseReasonId: null, pausedSince: h.now().toISOString(), ownerToken: "pickup-owner" },
+    }, (row) => row.profile_id === PROFILES.o1);
+    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
+    const delivery = deps(h); await notifyCallState(delivery, call.sessionId);
     expect(delivery.send).not.toHaveBeenCalled();
   });
 });

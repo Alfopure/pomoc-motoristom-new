@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, GROUPS, LINES, NUMBERS, ORG, PLAN_ID, PROFILES } from "@/test/telephony-harness";
 
@@ -753,6 +753,7 @@ describe("line, settings and operator patches", () => {
     });
 
     expect(settings).toEqual({
+      deliveryMode: "web",
       defaultFromLineId: LINES.allianz,
       wrapUpSeconds: 45,
       autoAnswerOutbound: false,
@@ -1069,4 +1070,27 @@ describe("settings, audit and operator guards", () => {
     await expect(assertOperatorNotOnCall(deps, { organizationId: ORG, profileId: PROFILES.o1, takeover: true })).resolves.toBeUndefined();
     await expect(assertOperatorNotOnCall(deps, { organizationId: ORG, profileId: PROFILES.o2 })).resolves.toBeUndefined();
   });
+});
+
+
+afterEach(() => vi.unstubAllEnvs());
+it("PA-09 explicit mobile preference keeps paused presence and preserves legacy number while creation is off", async () => {
+  const { harness, deps } = harnessDeps();
+  harness.setPresence(PROFILES.o1, { status: "paused" });
+  await updateOperatorTelephonySettings(deps, { organizationId: ORG, actor: ACTOR, profileId: PROFILES.o1, patch: { defaultMobileNumber: "+421911222333", pauseRoutingMode: "default_mobile" } });
+  await expect(updateOperatorTelephonySettings(deps, { organizationId: ORG, actor: ACTOR, profileId: PROFILES.o1, patch: { deliveryMode: "personal_mobile" } })).rejects.toMatchObject({ code: "stability_disabled" });
+  expect(harness.presence(PROFILES.o1).status).toBe("paused");
+  vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+  await updateOperatorTelephonySettings(deps, { organizationId: ORG, actor: ACTOR, profileId: PROFILES.o1, patch: { deliveryMode: "personal_mobile" } });
+  expect(harness.presence(PROFILES.o1).status).toBe("paused");
+  vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "false");
+  await updateOperatorTelephonySettings(deps, { organizationId: ORG, actor: ACTOR, profileId: PROFILES.o1, patch: { wrapUpSeconds: 60 } });
+  expect(harness.rows("motorist_operator_telephony_settings")[0]).toMatchObject({ default_mobile_number: "+421911222333", delivery_mode: "personal_mobile", wrap_up_seconds: 60 });
+});
+
+it("accepts an explicit external owner only within the organization", () => {
+  const owned = group({ members: [{ id: null, memberKind: "external_number", profileId: null, externalNumber: "+421911222333", ownerProfileId: PROFILES.o1, position: 0, ringSecs: 15 }] });
+  expect(validateRoutingReplace({ groups: [owned] }, context())).toEqual([]);
+  owned.members[0].ownerProfileId = FOREIGN;
+  expect(codes(validateRoutingReplace({ groups: [owned] }, context()))).toContain("owner_foreign");
 });

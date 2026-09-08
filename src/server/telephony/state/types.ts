@@ -78,6 +78,8 @@ export const DEFAULT_TTS_VOICE = "Azure.sk-SK-ViktoriaNeural";
 export type FrozenRingMember = {
   kind: "operator" | "external_number";
   profileId: string | null;
+  ownerProfileId?: string | null;
+  provenance?: "personal_mobile" | "configured_external";
   externalNumber: string | null;
   position: number;
   /** Resolved ring time for `ordered` steps: `max(5, member.ring_secs ?? step.timeout_secs)`. */
@@ -135,7 +137,7 @@ export type TelephonyEvent = {
 
 export type TransferTarget =
   | { kind: "operator"; profileId: string; sipUri: string; label: string }
-  | { kind: "number"; number: string; label: string };
+  | { kind: "number"; number: string; label: string; ownerProfileId?: string };
 
 export type AppEventType =
   | "recording_stop"
@@ -184,11 +186,11 @@ export type AppEvent = {
   occurredAt: string;
   target?: TransferTarget;
   /** For `pickup`: the picking operator's device. */
-  picker?: { profileId: string; sipUri: string; mobile?: boolean };
+  picker?: { profileId: string; sipUri: string; mobile?: boolean; offerToken?: string };
   /** For `mute_party` / `unmute_party` / `remove_party`: the participant leg the action targets. */
   party?: { callControlId: string; label: string };
   /** For `supervise`: the supervisor's own device and the mode they asked for. */
-  supervisor?: { profileId: string; sipUri: string; mode: SupervisorMode; label: string };
+  supervisor?: { profileId: string; sipUri: string; mode: SupervisorMode; label: string; offerToken?: string };
   /**
    * For `sweep`: the scanner already decided this session is stale. The verdict
    * is computed *before* the session lease is taken, because acquiring the lease
@@ -278,6 +280,8 @@ export type RingFanout = CommandBase & {
 };
 
 export type CommandBase = {
+  /** Immutable target once a conference command is admitted. */
+  conferenceId?: string;
   /** Log and continue on failure instead of running compensations (e.g. `playback_stop` on an idle leg). */
   bestEffort?: boolean;
 };
@@ -377,8 +381,12 @@ export type PresenceChange = {
   sessionId?: string | null;
   /** Compute `wrap_up_until` from the operator's `wrap_up_seconds` (effects). */
   startWrapUp?: boolean;
-  /** Only apply when `current_session_id` is null or equals this id. */
+  /** Only apply to this exact session owner; a cleared owner is stale. */
   onlyIfSession?: string;
+  onlyIfToken?: string;
+  onlyIfRevision?: number;
+  /** Defer ownership changes until this prerequisite command succeeds. */
+  afterCommandId?: string;
   /** Only apply when the current status is one of these. */
   onlyIfStatus?: OperatorPresenceStatus[];
   reason: string;
@@ -398,6 +406,10 @@ export type Transition = {
   attempts: AttemptPatch[];
   presence: PresenceChange[];
   callbacks: CallbackPlan[];
+  /** Provider contact proof remains actionable after the call has ended. */
+  contactProofs?: Json[];
+  /** Maintenance entries verify simultaneous provider membership without delaying call control. */
+  contactChecks?: string[];
   /** Overrides for the `motorist_calls` row (effects derives the rest from the session). */
   call: Partial<Pick<CallRow, "status" | "end_reason" | "summary" | "operator_id" | "answered_at" | "ended_at" | "ring_seconds" | "ring_group_id">>;
   /** Member rows to touch (`last_offered_at` / `last_answered_at`). */
@@ -414,6 +426,7 @@ export type Compensation = {
 
 export type ReservationGuard = {
   profileId: string;
+  offerToken?: string;
   onRejected: { next: Transition; commands: Command[] };
 };
 
@@ -519,6 +532,7 @@ export type RoutingContext = {
 export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" | "consult";
 
 export type SessionMeta = {
+  effects_v1?: { generation: number };
   accepted_device_legs?: Record<string, string>;
   mobile_offers?: Record<string, { source: string; at: string }>;
   recording?: RecordingState;

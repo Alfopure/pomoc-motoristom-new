@@ -162,3 +162,8 @@ describe("deriveTelephonyOperatorPresences", () => {
     expect(entry).toMatchObject({ state: "unassigned", checkedAt: "2026-09-02T10:00:04.000Z" });
   });
 });
+
+it("PA-01 paused stays paused with no registered browser, and personal mobile is a separate availability choice", () => {
+  expect(stateOf(snapshot({ presence: [{ profileId: "op-1", status: "paused", deliveryMode: "personal_mobile" }] }))).toMatchObject({ state: "paused", available: false, registered: false });
+  expect(stateOf(snapshot({ presence: [{ profileId: "op-1", status: "available", deliveryMode: "personal_mobile" }] }))).toMatchObject({ state: "available", available: true, registered: false });
+});

@@ -7,6 +7,7 @@ import { callbackOrigin } from "@/lib/telephony/callback-origin";
 
 import { isUuid } from "@/lib/telephony/uuid";
 
+import { telephonyStabilityEnabled } from "./stability";
 import { writeCallAudit } from "./audit";
 import { CallActionError, startOutboundCall, type CallActionDeps, type CallActor, type StartOutboundResult } from "./call-actions";
 import { toJson, type LineRow } from "./state/types";
@@ -42,6 +43,12 @@ export type CallbackQueueDeps = {
 
 function nowOf(deps: CallbackQueueDeps): Date {
   return (deps.now ?? (() => new Date()))();
+}
+
+function durableCallback(row: Pick<CallbackRow, "metadata">): boolean {
+  const metadata = readMetadata(row);
+  const call = metadata.callback_call as { version?: number } | undefined;
+  return metadata.callback_obligation_version === 1 || Array.isArray(metadata.schedule_action_ids) || call?.version === 1;
 }
 
 function readMetadata(row: Pick<CallbackRow, "metadata">): Record<string, unknown> {
@@ -152,6 +159,8 @@ export async function loadCallbackQueue(
     });
 
   return {
+    unifiedRequests: true,
+    schedulingEnabled: telephonyStabilityEnabled(),
     checkedAt: now.toISOString(),
     configured: options.configured ?? true,
     actorProfileId: actor.profileId,
@@ -293,6 +302,15 @@ export async function resolveCallbackRequest(
   const now = nowOf(deps);
   const notes = typeof input.notes === "string" && input.notes.trim() ? input.notes.trim().slice(0, 500) : null;
 
+  if (telephonyStabilityEnabled() || durableCallback(row)) {
+    const result = await deps.admin.rpc("motorist_resolve_callback_v1", {
+      p_organization_id: deps.organizationId, p_request_id: id, p_actor_id: actor.profileId,
+      p_status: input.status, p_notes: notes,
+    });
+    if (result.error) throw new CallActionError(`Uzavretie požiadavky zlyhalo: ${result.error.message}`, 409);
+    return { request: await present(deps, result.data as unknown as CallbackRow) };
+  }
+
   const query = deps.admin
     .from("motorist_callback_requests")
     .update({
@@ -349,6 +367,7 @@ async function closeCallbackTask(deps: CallbackQueueDeps, actor: CallActor, case
 export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id: string): Promise<CallbackCallResult> {
   const queueDeps: CallbackQueueDeps = { admin: deps.admin, organizationId: deps.organizationId, now: deps.now, logger: deps.logger };
   const row = await loadRequest(queueDeps, id);
+  const enhanced = telephonyStabilityEnabled() || durableCallback(row);
   assertLive(row);
   await assertClaimable(queueDeps, row, actor);
   if (row.claimed_by !== actor.profileId) await claimCallbackRequest(queueDeps, actor, id);
@@ -356,13 +375,14 @@ export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id
   const call = await startOutboundCall(deps, actor, {
     to: row.caller_number,
     caseId: row.case_id,
+    ...(enhanced ? { callbackRequestId: row.id } : {}),
     // Call back from the number the caller originally rang, so the partner line
     // they know shows on their phone. A line switched off since then would make
     // `startOutboundCall` refuse the call, so the operator's default is used.
     lineId: await activeLineId(queueDeps, row.line_id),
   });
 
-  const linked = await linkCallToRequest(deps, row, { sessionId: call.sessionId, actor });
+  const linked = enhanced || await linkCallToRequest(deps, await loadRequest(queueDeps, id), { sessionId: call.sessionId, actor });
   const fresh = await loadRequest(queueDeps, id);
   return { request: await present(queueDeps, fresh), call, linked };
 }
@@ -405,9 +425,11 @@ async function linkCallToRequest(
     .from("motorist_callback_requests")
     .update({ metadata: toJson(metadata) })
     .eq("organization_id", deps.organizationId)
-    .eq("id", row.id);
-  if (updated.error) {
-    deps.logger?.({ level: "warn", scope: "callbacks", message: "callback link failed", error: updated.error.message, requestId: row.id });
+    .eq("id", row.id)
+    .eq("updated_at", row.updated_at)
+    .select("id");
+  if (updated.error || !updated.data?.length) {
+    deps.logger?.({ level: "warn", scope: "callbacks", message: "callback link failed", error: updated.error?.message ?? "callback changed during linking", requestId: row.id });
     return false;
   }
   return true;

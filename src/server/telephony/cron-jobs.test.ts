@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 
-import { ALERT_JOB, detectStuckSessions, LEDGER_PRUNE_JOB,
+import { ALERT_JOB, detectStuckSessions, EFFECTS_RECOVERY_JOB, LEDGER_PRUNE_JOB,
   LEDGER_REPLAY_JOB, pruneWebhookLedger, RECONCILE_JOB, reconcileWithTelnyx, replayStalledWebhookEvents, runRingSweep, runTelephonyCronJobs, RING_SWEEP_JOB, STUCK_SESSION_JOB } from "./cron-jobs";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -122,7 +122,7 @@ describe("telephony cron jobs", () => {
     expect(summary.status).toBe("ok");
     expect(summary.configured).toBe(true);
     expect(summary.organizationId).toBe(ORG);
-    expect(summary.jobs.map((job) => job.job)).toEqual([RING_SWEEP_JOB, LEDGER_REPLAY_JOB, RECONCILE_JOB, STUCK_SESSION_JOB, ALERT_JOB, LEDGER_PRUNE_JOB]);
+    expect(summary.jobs.map((job) => job.job)).toEqual([RING_SWEEP_JOB, EFFECTS_RECOVERY_JOB, LEDGER_REPLAY_JOB, RECONCILE_JOB, STUCK_SESSION_JOB, ALERT_JOB, LEDGER_PRUNE_JOB]);
   });
 
   it("skips reconciliation when telephony is not configured", async () => {

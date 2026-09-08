@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Coffee, Loader2, Pause, PhoneForwarded, Smartphone, UserRoundCheck, X } from "lucide-react";
+import { Coffee, Loader2, Pause, UserRoundCheck, X } from "lucide-react";
 
 import type { Operator } from "@/domain/types";
 import { DEFAULT_OPERATOR_SETTINGS, type PauseRoutingMode } from "@/lib/telephony/operator-settings";
@@ -35,9 +35,7 @@ const MODE_OPTIONS: Array<{
   detail: string;
 }> = [
   { mode: "none", icon: Coffee, title: "Bežná pauza", detail: "Mne nič nezvoní; plán pokračuje ďalším členom." },
-  { mode: "default_mobile", icon: Smartphone, title: "Môj mobil", detail: "Moju pozíciu v skupine nahradí uložené mobilné číslo." },
   { mode: "operator", icon: UserRoundCheck, title: "Zastúpi ma kolega", detail: "Moju pozíciu prevezme vybraný dostupný operátor." },
-  { mode: "external_number", icon: PhoneForwarded, title: "Iný telefón", detail: "Hovor zazvoní na jednorazovo zadanom externom čísle." },
 ];
 
 export function PauseRoutingDialog({
@@ -73,7 +71,7 @@ export function PauseRoutingDialog({
         if (controller.signal.aborted || !response) return;
         const operator = findOperator(response.document.operators, profileId);
         const settings = operator?.settings ?? DEFAULT_OPERATOR_SETTINGS;
-        setMode(settings.pauseRoutingMode);
+        setMode(settings.pauseRoutingMode === "operator" ? "operator" : "none");
         setDefaultMobile(settings.defaultMobileNumber ?? "");
         setExternalNumber(settings.pauseForwardNumber ?? "");
         setForwardProfileId(settings.pauseForwardProfileId ?? "");
@@ -155,7 +153,7 @@ export function PauseRoutingDialog({
             </span>
             <div className="min-w-0">
               <h2 id="pause-routing-title" className="text-base font-bold text-zinc-950">Pauza a zastupovanie hovorov</h2>
-              <p className="mt-0.5 text-xs leading-5 text-zinc-600">Vyber, čo sa má stať s tvojou pozíciou v skupine počas pauzy.</p>
+              <p className="mt-0.5 text-xs leading-5 text-zinc-600">Počas pauzy ti automatické hovory nezvonia v aplikácii ani na osobnom mobile.</p>
             </div>
           </div>
           <button type="button" disabled={submitting} onClick={onClose} className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100 disabled:text-zinc-300" aria-label="Zavrieť">
@@ -166,6 +164,8 @@ export function PauseRoutingDialog({
         <div className="grid gap-4 p-4">
           {error && <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-800">{error}</div>}
 
+          {presences.filter((presence) => presence.profileId !== profileId && presence.available).length === 0 && <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-900">Po zapnutí pauzy nemusí zostať dostupný žiadny operátor. Hovory pokračujú podľa plánu do čakania alebo na prevádzkovú zálohu.</p>}
+          <p className="text-xs text-zinc-600">Prijímanie na osobnom mobile nastavíš v Môj telefón a dostupnosť zapneš samostatne.</p>
           {loading ? (
             <div className="flex min-h-40 items-center justify-center gap-2 text-sm font-medium text-zinc-500"><Loader2 size={17} className="animate-spin" /> Načítavam nastavenia…</div>
           ) : (

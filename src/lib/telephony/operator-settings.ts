@@ -13,14 +13,19 @@ export const PAUSE_ROUTING_MODES = ["none", "default_mobile", "external_number",
 
 export type PauseRoutingMode = (typeof PAUSE_ROUTING_MODES)[number];
 
+export const OPERATOR_DELIVERY_MODES = ["web", "personal_mobile"] as const;
+export type OperatorDeliveryMode = (typeof OPERATOR_DELIVERY_MODES)[number];
+
 export type OperatorTelephonySettings = {
+  /** Explicit work destination; saving it never changes presence. */
+  deliveryMode?: OperatorDeliveryMode;
   defaultFromLineId: string | null;
   wrapUpSeconds: number;
   autoAnswerOutbound: boolean;
   ringDeviceVolume: number;
-  /** Number offered as the one-click "my mobile" destination while pausing. */
+  /** Personal PSTN destination, used only while consciously available. */
   defaultMobileNumber: string | null;
-  /** Last pause-routing choice. It is consulted only while presence is `paused`. */
+  /** Legacy preference retained for compatibility; personal pause forwarding is disabled. */
   pauseRoutingMode: PauseRoutingMode;
   /** Substitute operator for `pauseRoutingMode === "operator"`. */
   pauseForwardProfileId: string | null;
@@ -35,6 +40,7 @@ export const MAX_RING_DEVICE_VOLUME = 100;
 
 /** Column defaults of `motorist_operator_telephony_settings`. */
 export const DEFAULT_OPERATOR_SETTINGS: OperatorTelephonySettings = {
+  deliveryMode: "web",
   defaultFromLineId: null,
   wrapUpSeconds: 30,
   autoAnswerOutbound: true,

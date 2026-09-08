@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { telephonyStabilityEnabled } from "../stability";
 import type { PauseRoutingMode } from "@/lib/telephony/operator-settings";
 
 import {
@@ -66,7 +67,8 @@ export type PausedOperatorRouting = {
 };
 
 /**
- * Replaces a paused operator's slot with the fallback they selected. The
+ * Allows a paused operator to nominate a colleague. Personal phone forwarding
+ * is retired: the saved number never makes a paused operator reachable. The
  * original position and ring time stay intact, preserving both `ordered` and
  * `all` ring-group semantics. Invalid or newly disallowed settings deliberately
  * fall back to the original paused member, which eligibility will skip.
@@ -87,17 +89,9 @@ export function applyPausedOperatorRouting(
     let next = member;
     if (member.kind === "operator" && member.profileId && input.pausedProfileIds.has(member.profileId)) {
       const route = routingByProfile.get(member.profileId);
-      const rawNumber = route?.mode === "default_mobile"
-        ? route.defaultMobileNumber
-        : route?.mode === "external_number"
-          ? route.forwardNumber
-          : null;
-      const number = normalizeE164(rawNumber);
-
+      // Legacy personal forwarding must never make a pause reachable.
       if (route?.mode === "operator" && route.forwardProfileId && route.forwardProfileId !== member.profileId) {
         next = { ...member, kind: "operator", profileId: route.forwardProfileId, externalNumber: null, memberId: null };
-      } else if (number && isDestinationAllowed(number, input.destinationAllowlist)) {
-        next = { ...member, kind: "external_number", profileId: null, externalNumber: number, memberId: null };
       }
     }
 
@@ -107,6 +101,25 @@ export function applyPausedOperatorRouting(
     resolved.push(next);
   }
   return resolved;
+}
+
+export type PersonalRoutingRow = { profile_id: string; default_mobile_number: string | null; delivery_mode?: "web" | "personal_mobile" };
+
+/** Re-evaluated for frozen plans too; a typed external number cannot evade pause. */
+export function resolvePersonalRingMembers(members: readonly FrozenRingMember[], rows: readonly PersonalRoutingRow[], allowlist: readonly string[], createMobile = false): FrozenRingMember[] {
+  return members.map((member) => {
+    const settings = rows.find((row) => row.profile_id === member.profileId);
+    if (createMobile && member.kind === "operator" && settings?.delivery_mode === "personal_mobile") {
+      const number = normalizeE164(settings.default_mobile_number);
+      if (number && isDestinationAllowed(number, allowlist)) return { ...member, kind: "external_number", externalNumber: number, ownerProfileId: member.profileId, provenance: "personal_mobile" };
+    }
+    if (member.kind !== "external_number") return member;
+    const number = normalizeE164(member.externalNumber);
+    const owners = rows.filter((row) => number && normalizeE164(row.default_mobile_number) === number);
+    // Ambiguous numbers are conservatively unavailable, never independent backup.
+    const owner = member.ownerProfileId ?? member.profileId ?? (owners.length === 1 ? owners[0].profile_id : owners.length > 1 ? "ambiguous-personal-number" : null);
+    return { ...member, profileId: owner, ownerProfileId: owner, provenance: owner ? "personal_mobile" : "configured_external" };
+  });
 }
 
 export async function materialiseRingPlan(
@@ -145,38 +158,19 @@ export async function materialiseRingPlan(
   if (groups.error) throw new Error(`ring groups load failed: ${groups.error.message}`);
   if (members.error) throw new Error(`ring group members load failed: ${members.error.message}`);
 
-  const operatorMemberIds = [...new Set((members.data ?? []).map((member) => member.profile_id).filter((id): id is string => Boolean(id)))];
-  const [paused, operatorRouting, telephonySettings] = operatorMemberIds.length > 0
-    ? await Promise.all([
-        admin
-          .from("motorist_operator_presence")
-          .select("profile_id, status")
-          .eq("organization_id", input.organizationId)
-          .in("profile_id", operatorMemberIds)
-          .eq("status", "paused"),
-        admin
-          .from("motorist_operator_telephony_settings")
-          .select("profile_id, default_mobile_number, pause_routing_mode, pause_forward_profile_id, pause_forward_number")
-          .eq("organization_id", input.organizationId)
-          .in("profile_id", operatorMemberIds),
-        admin.from("motorist_telephony_settings").select("destination_allowlist").eq("organization_id", input.organizationId).maybeSingle(),
-      ])
-    : [
-        { data: [], error: null },
-        { data: [], error: null },
-        { data: null, error: null },
-      ];
-  if (paused.error) throw new Error(`paused operator load failed: ${paused.error.message}`);
-  if (operatorRouting.error) throw new Error(`pause routing load failed: ${operatorRouting.error.message}`);
-  if (telephonySettings.error) throw new Error(`telephony settings load failed: ${telephonySettings.error.message}`);
-
+  // Read all personal numbers: an external member may be the same number as an
+  // operator outside this group. select(*) remains compatible with old schemas.
+  const [paused, operatorRouting, telephonySettings] = await Promise.all([
+    admin.from("motorist_operator_presence").select("*").eq("organization_id", input.organizationId).eq("status", "paused"),
+    admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", input.organizationId),
+    admin.from("motorist_telephony_settings").select("destination_allowlist").eq("organization_id", input.organizationId).maybeSingle(),
+  ]);
+  if (paused.error || operatorRouting.error || telephonySettings.error) throw new Error("operator routing load failed");
+  const routingRows = operatorRouting.data ?? [];
   const pausedProfileIds = new Set((paused.data ?? []).map((row) => row.profile_id));
-  const pausedRouting: PausedOperatorRouting[] = (operatorRouting.data ?? []).map((row) => ({
-    profileId: row.profile_id,
-    mode: row.pause_routing_mode,
-    defaultMobileNumber: row.default_mobile_number,
-    forwardProfileId: row.pause_forward_profile_id,
-    forwardNumber: row.pause_forward_number,
+  const pausedRouting: PausedOperatorRouting[] = routingRows.map((row) => ({
+    profileId: row.profile_id, mode: row.pause_routing_mode, defaultMobileNumber: row.default_mobile_number,
+    forwardProfileId: row.pause_forward_profile_id, forwardNumber: row.pause_forward_number,
   }));
   const destinationAllowlist = telephonySettings.data?.destination_allowlist ?? ["SK", "CZ"];
 
@@ -191,7 +185,8 @@ export async function materialiseRingPlan(
       .filter((member) => member.ring_group_id === group.id)
       .map((member) => ({
         kind: member.member_kind,
-        profileId: member.member_kind === "operator" ? member.profile_id : null,
+        profileId: member.member_kind === "operator" ? member.profile_id : member.owner_profile_id ?? null,
+        ownerProfileId: member.owner_profile_id ?? null,
         externalNumber: member.member_kind === "external_number" ? member.external_number : null,
         position: member.position,
         ringSecs: clampRingSecs(member.ring_secs, timeoutSecs),
@@ -199,7 +194,7 @@ export async function materialiseRingPlan(
       }))
       .filter((member) => (member.kind === "operator" ? Boolean(member.profileId) : Boolean(member.externalNumber)))
       .sort((left, right) => left.position - right.position);
-    const stepMembers = applyPausedOperatorRouting(configuredMembers, { pausedProfileIds, routing: pausedRouting, destinationAllowlist });
+    const stepMembers = resolvePersonalRingMembers(applyPausedOperatorRouting(configuredMembers, { pausedProfileIds, routing: pausedRouting, destinationAllowlist }), routingRows, destinationAllowlist, telephonyStabilityEnabled());
     queueMembers.push(...configuredMembers.filter((member) => member.kind === "operator"));
     frozenSteps.push({
       index: frozenSteps.length,
@@ -222,7 +217,7 @@ export async function materialiseRingPlan(
 }
 
 export function toEligibilityPresence(rows: PresenceRow[]): EligibilityPresence[] {
-  return rows.map((row) => ({ profileId: row.profile_id, status: row.status, currentSessionId: row.current_session_id, wrapUpUntil: row.wrap_up_until }));
+  return rows.map((row) => ({ profileId: row.profile_id, status: row.status, currentSessionId: row.current_session_id, wrapUpUntil: row.wrap_up_until, pauseReturn: row.pause_return }));
 }
 
 export function toEligibilityDevices(rows: DeviceRow[]): EligibilityDevice[] {
@@ -230,6 +225,8 @@ export function toEligibilityDevices(rows: DeviceRow[]): EligibilityDevice[] {
 }
 
 export type RingStepPlanInput = {
+  /** Existing v1 sessions may finish during rollback; new owned PSTN stays gated. */
+  ownedPstnEnabled?: boolean;
   sessionId: string;
   now: Date;
   presence: EligibilityPresence[];
@@ -242,7 +239,7 @@ export type RingStepPlanInput = {
   activeLegCount?: number;
 };
 
-export type RingStepSkip = { member: FrozenRingMember; reason: IneligibilityReason | "attempted" | "capacity" | "fanout" };
+export type RingStepSkip = { member: FrozenRingMember; reason: IneligibilityReason | "attempted" | "capacity" | "fanout" | "feature_disabled" };
 
 export type RingStepPlanResult = {
   attempts: AttemptPlan[];
@@ -263,12 +260,16 @@ export function planRingStep(step: FrozenRingStep, input: RingStepPlanInput): Ri
   const eligible: FrozenRingMember[] = [];
 
   for (const member of [...step.members].sort((left, right) => left.position - right.position)) {
+    if (member.kind === "external_number" && (member.ownerProfileId || member.profileId) && !(input.ownedPstnEnabled ?? telephonyStabilityEnabled())) {
+      skipped.push({ member, reason: "feature_disabled" });
+      continue;
+    }
     if (input.attempted.has(memberKey(member))) {
       skipped.push({ member, reason: "attempted" });
       continue;
     }
     const decision = evaluateMemberEligibility(
-      member.kind === "operator" ? { kind: "operator", profileId: member.profileId ?? "" } : { kind: "external_number", externalNumber: member.externalNumber ?? "" },
+      member.kind === "operator" ? { kind: "operator", profileId: member.profileId ?? "" } : { kind: "external_number", externalNumber: member.externalNumber ?? "", ownerProfileId: member.ownerProfileId ?? member.profileId },
       { now: input.now, presence: input.presence, devices: input.devices, openOffers: input.openOffers, sessionId: input.sessionId },
     );
     if (!decision.eligible) {

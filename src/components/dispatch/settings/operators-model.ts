@@ -37,6 +37,7 @@ export type OperatorDraft = {
   wrapUpSeconds: number;
   autoAnswerOutbound: boolean;
   ringDeviceVolume: number;
+  deliveryMode?: "web" | "personal_mobile";
   defaultMobileNumber: string | null;
   pauseRoutingMode: PauseRoutingMode;
   pauseForwardProfileId: string | null;
@@ -59,6 +60,7 @@ export function operatorDraft(operator: OperatorDoc): OperatorDraft {
     autoAnswerOutbound: settings.autoAnswerOutbound,
     ringDeviceVolume: settings.ringDeviceVolume,
     defaultMobileNumber: settings.defaultMobileNumber,
+    deliveryMode: settings.deliveryMode ?? "web",
     pauseRoutingMode: settings.pauseRoutingMode,
     pauseForwardProfileId: settings.pauseForwardProfileId,
     pauseForwardNumber: settings.pauseForwardNumber,
@@ -101,6 +103,7 @@ export function operatorPatch(draft: OperatorDraft, original: OperatorDoc): Oper
   if (draft.wrapUpSeconds !== current.wrapUpSeconds) patch.wrapUpSeconds = draft.wrapUpSeconds;
   if (draft.autoAnswerOutbound !== current.autoAnswerOutbound) patch.autoAnswerOutbound = draft.autoAnswerOutbound;
   if (draft.ringDeviceVolume !== current.ringDeviceVolume) patch.ringDeviceVolume = draft.ringDeviceVolume;
+  if ((draft.deliveryMode ?? "web") !== (current.deliveryMode ?? "web")) patch.deliveryMode = draft.deliveryMode ?? "web";
   if (draft.defaultMobileNumber !== current.defaultMobileNumber) patch.defaultMobileNumber = draft.defaultMobileNumber;
   if (draft.pauseRoutingMode !== current.pauseRoutingMode) patch.pauseRoutingMode = draft.pauseRoutingMode;
   if (draft.pauseForwardProfileId !== current.pauseForwardProfileId) patch.pauseForwardProfileId = draft.pauseForwardProfileId;
@@ -158,7 +161,7 @@ export function validateOperatorDraft(draft: OperatorDraft, context: OperatorVal
       issues.push(issue(`${draft.profileId}.${path}`, "destination_not_allowed", "Číslo nie je v povolených cieľoch organizácie."));
     }
   }
-  if (draft.pauseRoutingMode === "default_mobile" && !draft.defaultMobileNumber) {
+  if (draft.deliveryMode === "personal_mobile" && !draft.defaultMobileNumber) {
     issues.push(issue(`${draft.profileId}.defaultMobileNumber`, "default_mobile_required", "Vlastný mobil potrebuje uložené číslo."));
   }
   if (draft.pauseRoutingMode === "external_number" && !draft.pauseForwardNumber) {
@@ -310,16 +313,7 @@ export function describeCallHandling(draft: OperatorDraft): string {
 }
 
 export function describePauseRouting(draft: OperatorDraft, operators: readonly OperatorDoc[]): string {
-  if (draft.pauseRoutingMode === "default_mobile") {
-    return draft.defaultMobileNumber
-      ? `Počas pauzy jeho pozíciu nahradí mobil ${formatPhoneNumberForDisplay(draft.defaultMobileNumber)}.`
-      : "Presmerovanie na vlastný mobil nemá zadané číslo.";
-  }
-  if (draft.pauseRoutingMode === "external_number") {
-    return draft.pauseForwardNumber
-      ? `Počas pauzy jeho pozíciu nahradí externé číslo ${formatPhoneNumberForDisplay(draft.pauseForwardNumber)}.`
-      : "Presmerovanie na externý telefón nemá zadané číslo.";
-  }
+  if (draft.deliveryMode === "personal_mobile") return `Pri dostupnosti prijímam na mobile ${formatPhoneNumberForDisplay(draft.defaultMobileNumber ?? "")}. Počas pauzy osobný mobil nezvoní.`;
   if (draft.pauseRoutingMode === "operator") {
     const substitute = operators.find((operator) => operator.profileId === draft.pauseForwardProfileId);
     return substitute

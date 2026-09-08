@@ -1,5 +1,7 @@
 import { setCallOutcome, TelephonyWorkflowError } from "@/server/telephony-workflow";
-import { motoristAccessGuard } from "@/server/api-auth";
+import { motoristAccessGuard, requireDefaultMotoristActor } from "@/server/api-auth";
+import { telephonyStabilityEnabled } from "@/server/telephony/stability";
+import { TELEPHONY_ROUTE_ROLES } from "@/server/telephony/runtime";
 
 export const runtime = "nodejs";
 
@@ -7,6 +9,7 @@ type OutcomeBody = {
   outcome?: unknown;
   note?: unknown;
   callbackMinutes?: unknown;
+  callbackActionId?: unknown;
 };
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
@@ -21,11 +24,13 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       throw new TelephonyWorkflowError("Request body is required.", 400);
     }
 
+    const actor = telephonyStabilityEnabled() ? await requireDefaultMotoristActor(TELEPHONY_ROUTE_ROLES) : undefined;
     const dispatchData = await setCallOutcome(id, {
       outcome: body.outcome,
       note: body.note,
       callbackMinutes: body.callbackMinutes,
-    });
+      callbackActionId: body.callbackActionId,
+    }, actor);
 
     return Response.json({
       ok: true,

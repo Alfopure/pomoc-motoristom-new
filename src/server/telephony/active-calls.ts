@@ -1,3 +1,5 @@
+import { readPauseReturn } from "@/lib/telephony/presence-policy";
+import { telephonyStabilityEnabled } from "./stability";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { CallerMatch } from "@/data/dispatch-types";
@@ -5,7 +7,7 @@ import type { Database } from "@/lib/supabase/database.types";
 import type { TelephonyPresenceSnapshot } from "@/lib/telephony/presence";
 
 import { deviceIsLive } from "./operator-devices";
-import { effectivePresenceStatus } from "./presence-service";
+import { effectivePresenceStatus, effectivePresenceSince } from "./presence-service";
 import { ACTIVE_SESSION_STATES, readMeta, WAITING_STATES, type AttemptRow, type DeviceRow, type LegRow, type LineRow, type PresenceRow, type SessionRow } from "./state/types";
 import type { TelephonyEnvironment } from "./state/types";
 
@@ -88,6 +90,7 @@ export type ActiveCallView = {
 export type ActiveCallsSnapshot = {
   checkedAt: string;
   configured: boolean;
+  pausedPickupEnabled?: boolean;
   /** Topic key for the Realtime channel the console subscribes to (design §2.4). */
   organizationId: string;
   actorProfileId: string;
@@ -96,6 +99,8 @@ export type ActiveCallsSnapshot = {
   presence: TelephonyPresenceSnapshot;
   /** Private scheduling inputs for the polling operator's own timed pause. */
   ownPresence: {
+    automaticOffersAllowed?: boolean;
+    presenceRevision?: number;
     status: PresenceRow["status"];
     pauseReasonId: string | null;
     statusSince: string;
@@ -119,15 +124,17 @@ export async function loadActiveCalls(
   const now = (deps.now ?? (() => new Date()))();
   const { admin, organizationId } = deps;
 
-  const [sessionsResult, presenceResult, devicesResult, linesResult] = await Promise.all([
+  const [sessionsResult, presenceResult, devicesResult, linesResult, operatorSettingsResult] = await Promise.all([
     admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).in("state", ACTIVE_STATES).order("started_at", { ascending: true }),
     admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId),
     admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment),
     admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId),
+    admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId),
   ]);
   if (sessionsResult.error) throw new Error(`active sessions load failed: ${sessionsResult.error.message}`);
   if (presenceResult.error) throw new Error(`presence load failed: ${presenceResult.error.message}`);
   if (devicesResult.error) throw new Error(`devices load failed: ${devicesResult.error.message}`);
+  if (operatorSettingsResult.error) throw new Error(`operator settings load failed: ${operatorSettingsResult.error.message}`);
   if (linesResult.error) throw new Error(`lines load failed: ${linesResult.error.message}`);
 
   const sessions = (sessionsResult.data ?? []) as SessionRow[];
@@ -236,15 +243,18 @@ export async function loadActiveCalls(
   return {
     checkedAt: now.toISOString(),
     configured: deps.configured,
+    pausedPickupEnabled: telephonyStabilityEnabled(),
     organizationId,
     actorProfileId: actor.profileId,
     calls,
     waiting: calls.filter((call) => WAITING_STATES.has(call.state)),
-    presence: buildPresenceSnapshot({ actor, now, presence: presenceRows, devices: deviceRows }),
+    presence: buildPresenceSnapshot({ actor, now, presence: presenceRows, devices: deviceRows, personalMobileProfileIds: new Set((operatorSettingsResult.data ?? []).filter((row) => telephonyStabilityEnabled() && row.delivery_mode === "personal_mobile" && row.default_mobile_number).map((row) => row.profile_id)) }),
     ownPresence: ownPresence ? {
-      status: ownPresence.status,
+      presenceRevision: ownPresence.presence_revision ?? 0,
+      automaticOffersAllowed: !readPauseReturn(ownPresence.pause_return) && ["available", "ringing"].includes(effectivePresenceStatus(ownPresence, now)),
+      status: effectivePresenceStatus(ownPresence, now),
       pauseReasonId: ownPresence.pause_reason_id,
-      statusSince: ownPresence.status_since,
+      statusSince: effectivePresenceSince(ownPresence, now),
     } : null,
   };
 }
@@ -255,6 +265,7 @@ export function buildPresenceSnapshot(input: {
   now: Date;
   presence: PresenceRow[];
   devices: DeviceRow[];
+  personalMobileProfileIds?: ReadonlySet<string>;
 }): TelephonyPresenceSnapshot {
   return {
     actorProfileId: input.actor.profileId,
@@ -269,6 +280,7 @@ export function buildPresenceSnapshot(input: {
       profileId: row.profile_id,
       status: effectivePresenceStatus(row, input.now),
       currentSessionId: row.current_session_id,
+      ...(input.personalMobileProfileIds?.has(row.profile_id) ? { deliveryMode: "personal_mobile" as const } : {}),
     })),
   };
 }

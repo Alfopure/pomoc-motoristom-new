@@ -64,12 +64,18 @@ export function CallbackQueuePanel({
   configured,
   onCallBack,
   onChanged,
+  onSchedulingEnabled,
+  onLiveCount,
+  refreshToken = 0,
 }: {
   configured: boolean;
   /** Console-owned outbound path: rings the caller and arms the browser phone. */
   onCallBack?: (requestId: string) => Promise<void>;
   /** Lets the console refresh its own surfaces once a request changed. */
   onChanged?: () => void;
+  onSchedulingEnabled?: (enabled: boolean) => void;
+  onLiveCount?: (count: number) => void;
+  refreshToken?: number;
 }) {
   const [queue, setQueue] = useState<CallbackQueuePayload>(EMPTY_CALLBACK_QUEUE);
   const [loaded, setLoaded] = useState(false);
@@ -109,6 +115,8 @@ export function CallbackQueuePanel({
         return;
       }
       failures.current = 0;
+      onSchedulingEnabled?.(result.body.schedulingEnabled === true);
+      onLiveCount?.(result.body.open.length);
       setQueue(result.body);
       setError(null);
       setLoaded(true);
@@ -149,7 +157,7 @@ export function CallbackQueuePanel({
       document.removeEventListener("visibilitychange", onVisibility);
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     };
-  }, [reloadToken]);
+  }, [reloadToken, refreshToken, onSchedulingEnabled, onLiveCount]);
 
   const open = useMemo(() => sortCallbackQueue(queue.open), [queue.open]);
   const visible = open.filter((request) => originFilter === "all" || originOf(request).kind === originFilter);

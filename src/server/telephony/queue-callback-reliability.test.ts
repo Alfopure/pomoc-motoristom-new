@@ -33,14 +33,13 @@ describe("thirty-minute inbound queue", () => {
     expect((await queue(h)).open[0]).toMatchObject({ source: "missed", origin: { kind: "missed", digit: null, requestedAt: null } });
   });
 
-  it("can offer an operator who returns from a pause that originally forwarded to their mobile", async () => {
+  it("suppresses legacy mobile forwarding during pause and offers the operator once available", async () => {
     const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
     for (const id of Object.values(PROFILES)) h.setPresence(id, { status: "offline" });
     h.setPresence(PROFILES.o1, { status: "paused" });
     h.db.update("motorist_operator_telephony_settings", { pause_routing_mode: "default_mobile", default_mobile_number: "+421900000099" }, (row) => row.profile_id === PROFILES.o1);
     const call = await h.inbound({ to: NUMBERS.allianz });
-    const mobile = h.legByNumber(call.sessionId, "+421900000099")!;
-    await h.legEvent(String(mobile.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
+    expect(h.legByNumber(call.sessionId, "+421900000099")).toBeNull();
     const backup = h.legByNumber(call.sessionId, NUMBERS.external)!;
     await h.legEvent(String(backup.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
     expect(h.session(call.sessionId).state).toBe("waiting");
@@ -48,7 +47,7 @@ describe("thirty-minute inbound queue", () => {
     h.setPresence(PROFILES.o1, { status: "available" });
     await sweep(h);
     expect(h.openLegFor(call.sessionId, PROFILES.o1)).toBeTruthy();
-    expect(h.telnyx.of("dial").filter((dial) => !String(dial.params.to).startsWith("sip:"))).toHaveLength(2);
+    expect(h.telnyx.of("dial").filter((dial) => !String(dial.params.to).startsWith("sip:"))).toHaveLength(1);
   });
 
   it("keeps silence/invalid digits in the queue for 30 minutes and creates no requested callback", async () => {
