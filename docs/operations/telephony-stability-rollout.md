@@ -26,6 +26,7 @@ Aplikovanie migrácií do spoločného projektu vyžaduje osobitný výslovný p
 | `20260928110000_durable_transition_effects.sql` | Atómový zápis rozhodnutia s nedokončenými účinkami, indexovaný termín obnovy |
 | `20260928120000_callback_contact_fulfillment.sql` | Transakčné vytvorenie a vybavenie záväzku s úlohou/auditom, presná väzba, zámok spoločný s ručným plánovaním |
 | `20260928130000_personal_mobile_ownership.sql` | Vlastník osobného mobilu, spôsob doručenia a kompatibilné uloženie skupiny |
+| `20260928140000_personal_mobile_owner_index.sql` | Index vlastníka osobného mobilu pre vyhľadávanie a kontrolu referencií na profil |
 
 RPC kontrolujú organizáciu a povolenia; vykonáva ich serverová rola. Obnova vyberá ohraničené dávky cez termíny a čiastočné indexy. Chybná relácia dostane odklad ďalšieho pokusu, aby najstaršia dávka neblokovala ostatné hovory. Historický callback sa nevyhľadáva načítaním celej histórie do aplikácie.
 
@@ -53,7 +54,7 @@ Vybrané Playwright testy interceptujú všetku sieť a používajú syntetické
 ## Postup nasadenia
 
 1. Pracovná vetva vzniká z aktuálneho `dev`. Po zelených bránach overiť jej Vercel Preview s tvorbou nových tokov vypnutou a vytvoriť PR do `dev`. Preview používa spoločnú databázu, preto na ňom nespúšťať syntetické zápisy bez určených testovacích účtov.
-2. Po výslovnom pokyne aplikovať štyri preskúmané migrácie iba do tejto kópie. Overiť RPC, organizáciu, indexy a kompatibilitu aktuálnych dát. Zostaviť nemenný zoznam verzií aplikácie, ktoré vedia nové záznamy nielen čítať, ale aj dokončiť.
+2. Po výslovnom pokyne aplikovať päť preskúmaných migrácií iba do tejto kópie. Overiť RPC, organizáciu, indexy a kompatibilitu aktuálnych dát. Zostaviť nemenný zoznam verzií aplikácie, ktoré vedia nové záznamy nielen čítať, ale aj dokončiť.
 3. Pred zapnutím zabrániť vykonaniu starých nekompatibilných verzií. Zmena aliasu alebo premenných nového buildu nezablokuje staré Preview URL, staršie produkčné URL ani klienta pripnutého na starý deployment.
 4. Konkrétnou navrhnutou hranicou je projektové WAF Deny pre nepovolené hosty spolu s prahom Skew Protection na kompatibilnú verziu. Preskúmať výnimky, poradie bypass pravidiel a všetky prostredia. Testovať aj staré ID cez `?dpl=`, `x-deployment-id` a `__vdpl` na povolenom aliase. Toto nastavenie nie je súčasťou zmeny kódu a jeho účinnosť treba doložiť. [WAF pravidlá](https://vercel.com/docs/vercel-firewall/vercel-waf/rule-configuration), [Skew Protection](https://vercel.com/docs/skew-protection).
 5. Negatívny test starej verzie musí použiť inak platnú autentifikáciu alebo podpis a kontrolovať absenciu databázových/provider účinkov. Obyčajná anonymná 401 nestačí. Zahrnúť prezenciu, GET aktívnych hovorov vykonávajúci sweep, akcie, webhook/failover aj cron. Vstup a testovacie dáta musia byť bezpečné aj pri chybnej izolácii. Súčasne overiť pozitívny priechod cez kompatibilné aliasy.
