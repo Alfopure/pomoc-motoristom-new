@@ -10,6 +10,7 @@ import { memberKey, planRingStep, stepDeadline, toEligibilityDevices, toEligibil
 import type { TelnyxClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
 import { reduceRecording } from "./recording";
+import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import {
   ACTIVE_SESSION_STATES,
   CALLBACK_OFFER_TIMEOUT_MS,
@@ -198,7 +199,12 @@ class TransitionBuilder {
   }
 
   presenceChange(change: PresenceChange): this {
-    this.presence.push(change);
+    const event = this.event;
+    const eventLeg = event.kind === "telnyx" ? this.legs.find((leg) => leg.telnyx_call_control_id === event.callControlId && leg.profile_id === change.profileId) : undefined;
+    const source = eventLeg ? eventLeg.client_state as TelnyxClientState | null
+      : event.kind === "telnyx" && event.clientState?.operatorId === change.profileId ? event.clientState
+      : this.legs.find((leg) => leg.profile_id === change.profileId && (!leg.ended_at || leg.telnyx_call_control_id === this.meta.accepted_device_legs?.[change.profileId]))?.client_state as TelnyxClientState | undefined;
+    this.presence.push({ ...change, onlyIfToken: change.onlyIfToken ?? source?.offerToken });
     return this;
   }
 
@@ -833,6 +839,7 @@ function planStep(b: TransitionBuilder, plan: FrozenRingPlan, index: number): Ri
   );
   return planRingStep(step, {
     sessionId: b.session.id,
+    ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
     now: b.ctx.now,
     presence: toEligibilityPresence(b.ctx.presence),
     devices: toEligibilityDevices(b.ctx.devices),
@@ -877,20 +884,20 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
   for (const attempt of planned.attempts) {
     const key = attempt.profileId ?? attempt.externalNumber ?? "member";
     const sip = attempt.profileId ? devices.get(attempt.profileId)?.sip_username : null;
-    const to = attempt.profileId ? (sip ? telnyxSipUri(sip) : null) : attempt.externalNumber;
+    const external = attempt.memberKind === "external_number";
+    const to = external ? attempt.externalNumber : sip ? telnyxSipUri(sip) : null;
     if (!to) {
       b.note(`member ${key} has no dialable address`);
       continue;
     }
-    const clientState: TelnyxClientState = attempt.profileId
-      ? { sid: b.session.id, role: "operator", operatorId: attempt.profileId, step: stepIndex, intent: "ring" }
-      : { sid: b.session.id, role: "external", step: stepIndex, intent: "ring" };
+    const clientState: TelnyxClientState = { sid: b.session.id, role: external ? "external" : "operator",
+      ...(attempt.profileId ? { operatorId: attempt.profileId } : {}), step: stepIndex, intent: "ring" };
     dials.push({
       kind: "dial",
       commandId: b.cmdId(key, "ring", stepIndex),
       to,
       from,
-      role: attempt.profileId ? "operator" : "external",
+      role: external ? "external" : "operator",
       profileId: attempt.profileId,
       externalNumber: attempt.externalNumber,
       clientState,
@@ -1025,6 +1032,7 @@ function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
     .map((member, position) => ({ ...member, position, ringSecs: Math.max(20, member.ringSecs) }));
   const index = b.session.current_step;
   const planned = planRingStep({ index, groupId: plan.steps[0].groupId, groupName: "Čakáreň", strategy: "ordered", timeoutSecs: 20, members }, {
+    ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
     sessionId: b.session.id, now: b.ctx.now, presence: toEligibilityPresence(b.ctx.presence), devices: toEligibilityDevices(b.ctx.devices),
     openOffers: b.ctx.openOffers, attempted: new Set(), maxFanout: 1, maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, activeLegCount: b.ctx.activeLegCount,
   });
@@ -1059,7 +1067,7 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
   b.call.status = "answered";
   b.call.answered_at = b.session.answered_at ?? opts.at;
   b.call.ring_seconds = secondsBetween(b.session.started_at, opts.at);
-  if ((leg.client_state as { autoAnswer?: boolean } | null)?.autoAnswer) {
+  if (telephonyStabilityEnabled() || hasStabilityContract(b.session) || (leg.client_state as { autoAnswer?: boolean } | null)?.autoAnswer) {
     const caller = b.openLegs().find((other) => legIntent(other) === "internal_caller");
     if (!caller) throw new CallActionRejected("Volajúci už nie je pripojený.", 409);
     const bridgeId = b.cmdId(leg.telnyx_call_control_id, "bridge:mobile-internal");
@@ -1069,7 +1077,7 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
   }
   acceptDeviceLeg(b, leg);
   b.note("colleague answered → talking");
-  if (leg.profile_id) b.guard = { profileId: leg.profile_id, onRejected: { next: rejected.transition(), commands: rejected.commands } };
+  if (leg.profile_id) b.guard = { profileId: leg.profile_id, offerToken: (leg.client_state as TelnyxClientState | null)?.offerToken, onRejected: { next: rejected.transition(), commands: rejected.commands } };
   return b.result();
 }
 
@@ -1110,7 +1118,7 @@ function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): Re
     };
   }
   b.cmd(dial);
-  if (intent !== "outbound") b.cmd({
+  if (intent !== "outbound" && !telephonyStabilityEnabled() && !hasStabilityContract(b.session)) b.cmd({
     kind: "bridge",
     commandId: b.cmdId(leg.telnyx_call_control_id, "bridge:own"),
     leg: ref(leg),
@@ -1170,7 +1178,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
     rememberAcceptedDeviceLeg(b, leg);
     const wasQueued = Boolean(b.meta.queue);
     if (intent === "pickup" || wasQueued) b.patchMeta({ waiting: null, queue: null, gather: null });
-    if (intent === "transfer") b.patchMeta({ transfer: b.meta.transfer ? { ...b.meta.transfer, completed_at: opts.at } : null });
+    if (intent?.startsWith("transfer")) b.patchMeta({ transfer: b.meta.transfer ? { ...b.meta.transfer, completed_at: opts.at } : null });
     b.patchMeta({ ring: { ...(b.meta.ring ?? {}), active_step: null, step_deadline_at: null } });
 
     stopMoh(b, customer);
@@ -1213,7 +1221,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
     if (attempt) rejected.attempt(attempt.id, { result: "cancelled", ended_at: b.nowIso });
     rejected.note("reservation rejected → hang up");
     win();
-    b.guard = { profileId: leg.profile_id, onRejected: { next: rejected.transition(), commands: rejected.commands } };
+    b.guard = { profileId: leg.profile_id, offerToken: (leg.client_state as TelnyxClientState | null)?.offerToken, onRejected: { next: rejected.transition(), commands: rejected.commands } };
     return b.result();
   }
   win();
@@ -1236,7 +1244,7 @@ function onConsultAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
     const rejected = b.fork();
     rejected.cmd(hangupCmd(rejected, leg, "operator_busy", false));
     join();
-    b.guard = { profileId: leg.profile_id, onRejected: { next: rejected.transition(), commands: rejected.commands } };
+    b.guard = { profileId: leg.profile_id, offerToken: (leg.client_state as TelnyxClientState | null)?.offerToken, onRejected: { next: rejected.transition(), commands: rejected.commands } };
     return b.result();
   }
   join();
@@ -1280,7 +1288,7 @@ function onAddedPartyAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
     rejected.cmd(hangupCmd(rejected, leg, "operator_busy", false));
     rejected.patchMeta({ party_pending: null });
     join();
-    b.guard = { profileId: leg.profile_id, onRejected: { next: rejected.transition(), commands: rejected.commands } };
+    b.guard = { profileId: leg.profile_id, offerToken: (leg.client_state as TelnyxClientState | null)?.offerToken, onRejected: { next: rejected.transition(), commands: rejected.commands } };
     return b.result();
   }
   join();
@@ -1606,17 +1614,17 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
  * remaining party takes the call over, exactly as the second half of an
  * attended transfer does, but without claiming a transfer happened.
  */
-function handOverConference(b: TransitionBuilder, operator: LegRow, remaining: LegRow[], reason: string): void {
+function handOverConference(b: TransitionBuilder, operator: LegRow, remaining: LegRow[], reason: string, afterCommandId?: string): void {
   const next = remaining.find((leg) => leg.profile_id) ?? remaining[0];
   b.setState(remaining.length > 1 ? "conference" : twoPartyState(b));
   b.patchSession({ answered_by_profile_id: next.profile_id ?? null });
   b.patchMeta({ previous_operator: operator.profile_id ?? null, answered_leg_call_control_id: next.telnyx_call_control_id });
   if (next.profile_id) {
     b.call.operator_id = next.profile_id;
-    b.presenceChange({ profileId: next.profile_id, status: "on_call", sessionId: b.session.id, reason: "took over the conference" });
+    b.presenceChange({ profileId: next.profile_id, status: "on_call", sessionId: b.session.id, reason: "took over the conference", afterCommandId });
   }
   if (operator.profile_id) {
-    b.presenceChange({ profileId: operator.profile_id, status: "after_call_work", sessionId: null, startWrapUp: true, onlyIfSession: b.session.id, reason: `left the conference (${reason})` });
+    b.presenceChange({ profileId: operator.profile_id, status: "after_call_work", sessionId: null, startWrapUp: true, onlyIfSession: b.session.id, reason: `left the conference (${reason})`, afterCommandId });
   }
   b.note(`operator left the conference (${reason}) → ${next.profile_id ?? next.to_number ?? "participant"} keeps the call`);
 }
@@ -2143,7 +2151,7 @@ function appMobileOffer(b: TransitionBuilder, customer: LegRow, event: AppEvent)
   const offer = b.openLegs().find((leg) => leg.profile_id === picker.profileId && !leg.answered_at
     && ((legIntent(leg) === "internal" && b.session.state === "ringing")
       || (leg.role === "consult" && b.session.state === "consulting" && !b.meta.consult?.answered_at)
-      || (["transfer", "transfer_recorded"].includes(legIntent(leg) ?? "") && b.session.state === "ringing" && !b.session.answered_by_profile_id)
+      || (["transfer", "transfer_recorded", "transfer_safe"].includes(legIntent(leg) ?? "") && b.session.state === "ringing" && !b.session.answered_by_profile_id)
       || (legIntent(leg) === PARTY_INTENT && Boolean(b.meta.party_pending) && ["talking", "held", "conference"].includes(b.session.state))));
   if (!offer || b.openLegs().some((leg) => leg.profile_id === picker.profileId && leg.answered_at)) throw new CallActionRejected("Hovor už nie je možné prijať v appke.", 409);
   const pending = b.meta.mobile_offers?.[picker.profileId];
@@ -2171,6 +2179,7 @@ function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): Red
   if (!event.picker) throw new CallActionRejected("Chýba telefón operátora.", 400);
   const pending = b.meta.pickup;
   if ((pending && Date.parse(pending.at) + PICKUP_STALE_MS > b.ctx.now.getTime()) || b.openLegs().some((leg) => legIntent(leg) === "pickup")) {
+    if (pending?.by === event.picker.profileId && (telephonyStabilityEnabled() || hasStabilityContract(b.session))) return ignoredResult("same pickup already pending");
     throw new CallActionRejected("Prevzatie hovoru už prebieha.", 409);
   }
   // Keep the existing ring plan running until the browser actually answers.
@@ -2183,7 +2192,7 @@ function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): Red
     role: "operator",
     profileId: event.picker.profileId,
     externalNumber: null,
-    clientState: { sid: b.session.id, role: "operator", operatorId: event.picker.profileId, intent: "pickup", autoAnswer: true },
+    clientState: { sid: b.session.id, role: "operator", operatorId: event.picker.profileId, intent: "pickup", autoAnswer: true, ...(event.picker.offerToken ? { offerToken: event.picker.offerToken } : {}) },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: PICKUP_TIMEOUT_SECS,
     autoAnswer: true,
@@ -2192,6 +2201,7 @@ function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): Red
   b.patchMeta({ pickup: { by: event.picker.profileId, at: b.nowIso } });
   const failed = b.fork();
   failed.patchMeta({ pickup: null });
+  if (event.picker.offerToken) failed.presenceChange({ profileId: event.picker.profileId, status: "available", sessionId: null, onlyIfSession: b.session.id, onlyIfToken: event.picker.offerToken, reason: "pickup dial failed" });
   b.compensate(dial.commandId, "pickup dial failed", [], failed.transition());
   return b.note(`pickup by ${event.picker.profileId}`).result();
 }
@@ -2199,28 +2209,18 @@ function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): Red
 function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: TransferTarget, actor: string | null): void {
   const operator = b.answeringLeg();
   const announcedTransfer = b.meta.recording?.policy.enabled && b.meta.recording.policy.transferVerified && b.ctx.recordingPolicy?.enabled && b.ctx.recordingPolicy.transferVerified && b.meta.recording.suppressionReason !== "objection";
-  // A caller transferred straight out of the waiting room must not carry the
-  // music loop into the transfer.
-  stopMoh(b, customer);
-  if (b.session.state === "held") {
-    b.cmd({ kind: "conference_unhold", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:unhold:transfer"), legs: [ref(customer)], bestEffort: true });
-  }
-  if (b.session.conference_id) {
-    b.cmd({ kind: "conference_leave", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:leave:transfer"), leg: ref(customer), bestEffort: true });
-  }
-  // The customer is handed to the transfer target and the conference goes away.
-  detachSupervisors(b, "transfer");
+  const ownerProfileId = target.kind === "operator" ? target.profileId : target.ownerProfileId;
+  const controlledTransfer = announcedTransfer || Boolean(ownerProfileId && (telephonyStabilityEnabled() || hasStabilityContract(b.session)));
   const targetClientState: TelnyxClientState =
     target.kind === "operator"
-      ? { sid: b.session.id, role: "operator", operatorId: target.profileId, intent: announcedTransfer ? "transfer_recorded" : "transfer" }
-      : { sid: b.session.id, role: "external", intent: announcedTransfer ? "transfer_recorded" : "transfer" };
+      ? { sid: b.session.id, role: "operator", operatorId: target.profileId, intent: controlledTransfer ? "transfer_safe" : "transfer" }
+      : { sid: b.session.id, role: "external", ...(ownerProfileId ? { operatorId: ownerProfileId } : {}), intent: controlledTransfer ? "transfer_safe" : "transfer" };
   const transferId = b.cmdId(customer.telnyx_call_control_id, "transfer");
-  if (announcedTransfer) {
+  if (controlledTransfer) {
     b.cmd({ kind: "dial", commandId: transferId, to: target.kind === "operator" ? target.sipUri : target.number,
       from: b.ctx.fromNumber ?? b.session.called_number ?? "", role: target.kind === "operator" ? "operator" : "external",
-      profileId: target.kind === "operator" ? target.profileId : null, externalNumber: target.kind === "number" ? target.number : null,
+      profileId: ownerProfileId ?? null, externalNumber: target.kind === "number" ? target.number : null,
       clientState: targetClientState, linkTo: customer.telnyx_call_control_id, timeoutSecs: DEFAULT_TRANSFER_TIMEOUT_SECS });
-    startMoh(b, customer);
   } else b.cmd({
     kind: "transfer",
     commandId: transferId,
@@ -2230,6 +2230,16 @@ function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: T
     targetClientState,
     timeoutSecs: DEFAULT_TRANSFER_TIMEOUT_SECS,
   });
+  // Keep the existing conversation intact until the transfer/dial is accepted.
+  stopMoh(b, customer);
+  if (b.session.state === "held") {
+    b.cmd({ kind: "conference_unhold", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:unhold:transfer"), legs: [ref(customer)], bestEffort: true });
+  }
+  if (b.session.conference_id) {
+    b.cmd({ kind: "conference_leave", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:leave:transfer"), leg: ref(customer), bestEffort: true });
+  }
+  detachSupervisors(b, "transfer");
+  if (controlledTransfer) startMoh(b, customer);
   if (operator) b.cmd(hangupCmd(b, operator, "transferred"));
   b.setState("ringing").patchSession({ answered_by_profile_id: null, hold_started_at: null, conference_id: null, conference_name: null });
   b.patchMeta({
@@ -2238,7 +2248,7 @@ function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: T
     previous_operator: operator?.profile_id ?? null,
     conference: null,
   });
-  if (operator?.profile_id) b.presenceChange({ profileId: operator.profile_id, status: "after_call_work", sessionId: null, startWrapUp: true, onlyIfSession: b.session.id, reason: "blind transfer" });
+  if (operator?.profile_id) b.presenceChange({ profileId: operator.profile_id, status: "after_call_work", sessionId: null, startWrapUp: true, onlyIfSession: b.session.id, reason: "blind transfer", afterCommandId: transferId });
   const failed = b.fork();
   failed.patchSession({
     state: b.session.state,
@@ -2417,7 +2427,7 @@ function appLeaveConference(b: TransitionBuilder): ReduceResult {
     failed.presenceChange({ profileId: operator.profile_id, status: "on_call", sessionId: b.session.id, reason: "conference leave failed" });
     failed.call.operator_id = operator.profile_id;
   }
-  handOverConference(b, operator, remaining, "operator_left");
+  handOverConference(b, operator, remaining, "operator_left", leaveId);
   b.compensate(leaveId, "leaving the conference failed → the operator stays on the call", [], failed.transition());
   return b.result();
 }
@@ -2508,7 +2518,7 @@ function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): 
     role: "supervisor",
     profileId: supervisor.profileId,
     externalNumber: null,
-    clientState: { sid: b.session.id, role: "supervisor", operatorId: supervisor.profileId, intent: SUPERVISE_INTENT, autoAnswer: true },
+    clientState: { sid: b.session.id, role: "supervisor", operatorId: supervisor.profileId, intent: SUPERVISE_INTENT, autoAnswer: true, ...(supervisor.offerToken ? { offerToken: supervisor.offerToken } : {}) },
     linkTo: inConference ? customer.telnyx_call_control_id : null,
     timeoutSecs: SUPERVISE_TIMEOUT_SECS,
     autoAnswer: true,
@@ -2575,6 +2585,15 @@ function appHangup(b: TransitionBuilder, customer: LegRow | null, event: AppEven
 /** Timer-driven re-evaluation (cron / active-calls poll / end of webhook). */
 function onSweep(b: TransitionBuilder): ReduceResult {
   const state = b.session.state;
+  const pickup = b.session.presence_pickup as { v?: number; profileId?: string; offerToken?: string; expiresAt?: string } | null;
+  if (pickup?.v === 1 && pickup.profileId && pickup.offerToken && pickup.expiresAt && Date.parse(pickup.expiresAt) <= b.ctx.now.getTime()
+    && !(TALKING_STATES.has(state) && b.session.answered_by_profile_id === pickup.profileId)) {
+    b.patchMeta({ pickup: null });
+    b.presenceChange({ profileId: pickup.profileId, status: "available", sessionId: null, onlyIfSession: b.session.id,
+      onlyIfToken: pickup.offerToken, onlyIfStatus: ["ringing"], reason: "pickup reservation expired" });
+    for (const leg of b.openLegs()) if ((leg.client_state as TelnyxClientState | null)?.offerToken === pickup.offerToken) b.cmd(hangupCmd(b, leg, "pickup_expired"));
+    return b.note("expired unaccepted pickup released").result();
+  }
   if (state === "wrap_up" || state === "missed") return onStaleFinalise(b);
   const customer = b.customerLeg();
   if (!customer || b.legEnded(customer)) return ignoredResult("sweep: no customer leg");
@@ -2696,6 +2715,13 @@ function recoverGather(b: TransitionBuilder, customer: LegRow): ReduceResult {
 
 /** Sweep for sessions whose customer already left but whose remaining leg webhooks never arrived. */
 function onStaleFinalise(b: TransitionBuilder): ReduceResult {
+  if (b.openLegs().length === 0) {
+    // Replayed hangups can finish their leg writes after all reducers have
+    // already run. No live leg remains to justify the stale-webhook grace.
+    const endedAt = b.legs.map((leg) => leg.ended_at).filter((at): at is string => Boolean(at) && Number.isFinite(Date.parse(at!))).sort().at(-1);
+    finishIfQuiet(b, b.session.ended_at ?? endedAt ?? b.nowIso);
+    return b.result();
+  }
   // `updated_at` cannot be trusted here: the session lease is acquired before
   // the snapshot is loaded and its UPDATE fires the `updated_at` trigger, so the
   // row always looks fresh. The scanner's pre-lease verdict wins when present.

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { QUALITY_CRITERIA, type QualityCriterion } from '@/lib/telephony/recording-quality';
+import { scoreQuality } from '@/lib/telephony/quality-scoring';
 import { buildQualitySource, type RecordingSourceRows } from './recording-source';
 
 const at=(seconds:number)=>new Date(Date.parse('2026-09-06T10:00:00Z')+seconds*1000).toISOString();
@@ -41,5 +43,12 @@ describe('immutable source and participant proof',()=>{
  it('live objection or one restricted source disables completeness for the entire logical call',()=>{
   const rows=fixture();rows.sessionRecordingSuppressed=true;expect(buildQualitySource(rows).subjects.every(s=>!s.conversationComplete)).toBe(true);
   rows.sessionRecordingSuppressed=false;rows.recordings[0].restricted_at=at(21);expect(buildQualitySource(rows).subjects.every(s=>!s.conversationComplete)).toBe(true);
+ });
+ it('never restores complete coverage or a numerical quality score after audio connected before recording was confirmed',()=>{
+  const rows=fixture();rows.sessionRecordingCoverageUnconfirmed=true;
+  const source=buildQualitySource(rows);
+  expect(source.subjects.every(s=>!s.openingComplete&&!s.conversationComplete&&!s.closingComplete)).toBe(true);
+  const criteria=QUALITY_CRITERIA.map(({id})=>({id,verdict:'met',reason:'Synthetic evidence',evidence:[],absenceWindow:null,applicabilityReason:null,uncertaintyReason:null})) as QualityCriterion[];
+  expect(scoreQuality(criteria,source.subjects[0])).toMatchObject({score:null,coverage:1,reasons:expect.arrayContaining(['Relevantný rozhovor nie je zachytený celý.'])});
  });
 });

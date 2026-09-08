@@ -10,7 +10,9 @@ import { isUuid } from "@/lib/telephony/uuid";
 import { writeCallAudit } from "./audit";
 import { deviceIsLive, deviceSipUri, getOperatorDevice, type DeviceDeps } from "./operator-devices";
 import { presenceAllowsOffer } from "./routing/eligibility";
-import { releaseOperator, reserveOperator } from "./routing/reservation";
+import { releaseOperator, reserveOperatorOwnership, reserveOperatorPickup, releaseOperatorPresence, type PresenceTransitionResult } from "./routing/reservation";
+import { telephonyStabilityEnabled } from "./stability";
+import { effectivePresenceStatus } from "@/lib/telephony/presence-policy";
 import { effectsDeps, loadRoutingSettings, runSessionEvent, type SessionRunnerDeps, type SessionRunResult } from "./session-runner";
 import { isOverLegCap, loadDailyUsage } from "./usage";
 import { upsertCallRow, upsertDialedLeg, type CommandOutcome } from "./state/effects";
@@ -32,6 +34,9 @@ import {
 import { TelnyxCommandError, TelnyxLiveCallsDisabledError } from "./telnyx/client";
 import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
+import { CallActionError } from "./service-errors";
+
+export { CallActionError } from "./service-errors";
 
 /**
  * Operator-facing call actions (design §4 Phase 2 `call-actions.ts`).
@@ -50,17 +55,6 @@ export type CallActionDeps = SessionRunnerDeps & {
   deviceKind?: "web" | "mobile";
   rateLimiter?: RateLimiter;
 };
-
-export class CallActionError extends Error {
-  constructor(
-    message: string,
-    readonly status = 500,
-    readonly code?: string,
-  ) {
-    super(message);
-    this.name = "CallActionError";
-  }
-}
 
 // --- rate limit --------------------------------------------------------------
 
@@ -245,7 +239,7 @@ async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, tar
     if (!profile.data || !profile.data.active) throw new CallActionError("Kolega sa nenašiel.", 404, "target_not_found");
     const presence = await deps.admin.from("motorist_operator_presence").select("*").eq("profile_id", target.profileId).maybeSingle();
     const allowed = presenceAllowsOffer(
-      presence.data ? { profileId: target.profileId, status: presence.data.status, currentSessionId: presence.data.current_session_id, wrapUpUntil: presence.data.wrap_up_until } : undefined,
+      presence.data ? { profileId: target.profileId, status: effectivePresenceStatus(presence.data, nowOf(deps)), currentSessionId: presence.data.current_session_id, wrapUpUntil: presence.data.wrap_up_until } : undefined,
       nowOf(deps),
     );
     if (!allowed.eligible) throw new CallActionError("Kolega nie je dostupný.", 409, "target_unavailable");
@@ -257,14 +251,25 @@ async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, tar
     await assertOutboundRate(deps, actor);
     await assertLegBudget(deps);
     const number = await normalizeDestination(deps, target.number);
-    return { kind: "number", number, label: number };
+    const configured = await deps.admin.from("motorist_operator_telephony_settings").select("profile_id, default_mobile_number").eq("organization_id", deps.organizationId);
+    if (configured.error) throw new CallActionError("Vlastníka osobného čísla sa nepodarilo overiť.", 500);
+    const owners = new Set((configured.data ?? []).filter(row => normalizeE164(row.default_mobile_number ?? "") === number).map(row => row.profile_id));
+    if (owners.size > 1) throw new CallActionError("Osobné číslo má viac vlastníkov. Opravte nastavenie operátorov.", 409, "ambiguous_target_owner");
+    const ownerProfileId = [...owners][0];
+    if (ownerProfileId) {
+      if (ownerProfileId === actor.profileId) throw new CallActionError("Hovor nie je možné prepojiť na seba.", 400, "self_transfer");
+      const owner = await deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", deps.organizationId).eq("profile_id", ownerProfileId).maybeSingle();
+      if (owner.error) throw new CallActionError("Dostupnosť vlastníka čísla sa nepodarilo overiť.", 500);
+      if (!owner.data || effectivePresenceStatus(owner.data, nowOf(deps)) !== "available" || owner.data.current_session_id) throw new CallActionError("Kolega nie je dostupný.", 409, "target_unavailable");
+    }
+    return { kind: "number", number, label: number, ...(ownerProfileId ? { ownerProfileId } : {}) };
   }
   throw new CallActionError("Chýba cieľ prepojenia.", 400, "missing_target");
 }
 
 // --- outbound ----------------------------------------------------------------
 
-export type StartOutboundInput = { to: string; caseId?: string | null; lineId?: string | null };
+export type StartOutboundInput = { to: string; caseId?: string | null; lineId?: string | null; callbackRequestId?: string };
 export type StartOutboundResult = { sessionId: string; operatorLegCallControlId: string; telnyxSessionId: string | null; to: string; from: string };
 
 export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput): Promise<StartOutboundResult> {
@@ -283,11 +288,22 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
     lineId: line?.id ?? null,
     caseId: input.caseId ?? null,
     answeredBy: actor.profileId,
-    metadata: { outbound: { to, by: actor.profileId, from, case_id: input.caseId ?? null }, line_label: line?.label ?? null, partner_name: line?.partner_name ?? null },
+    metadata: { ...(input.callbackRequestId ? { callbackRequestId: input.callbackRequestId, effects_v1: { generation: 0 } } : {}), outbound: { to, by: actor.profileId, from, case_id: input.caseId ?? null }, line_label: line?.label ?? null, partner_name: line?.partner_name ?? null },
   });
 
-  const reserved = await reserveOperator(deps.admin, { profileId: actor.profileId, sessionId: session.id });
-  if (!reserved) {
+  if (input.callbackRequestId) {
+    const linked = await deps.admin.rpc("motorist_link_callback_outbound_v1", {
+      p_organization_id: deps.organizationId, p_request_id: input.callbackRequestId,
+      p_session_id: session.id, p_actor_id: actor.profileId,
+    });
+    if (linked.error || !linked.data) {
+      await markSessionFailed(deps, session, "callback_link_rejected");
+      throw new CallActionError("Požiadavka už bola vybavená alebo prebieha jej spätné volanie.", 409, "callback_link_rejected");
+    }
+  }
+
+  const reservation = await reserveOperatorOwnership(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, sessionId: session.id });
+  if (!reservation.applied) {
     await markSessionFailed(deps, session, "operator_busy");
     throw new CallActionError("Operátor nie je dostupný (prebieha iný hovor).", 409, "operator_busy");
   }
@@ -300,7 +316,7 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
     role: "operator" as const,
     profileId: actor.profileId,
     externalNumber: null,
-    clientState: { sid: session.id, role: "operator" as const, operatorId: actor.profileId, intent: "outbound", autoAnswer: true },
+    clientState: { sid: session.id, role: "operator" as const, operatorId: actor.profileId, intent: "outbound", autoAnswer: true, ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) },
     linkTo: null,
     timeoutSecs: 30,
     autoAnswer: true,
@@ -328,7 +344,7 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
     return { sessionId: session.id, operatorLegCallControlId: result.callControlId, telnyxSessionId: result.callSessionId, to, from };
   } catch (error) {
     await markSessionFailed(deps, session, error instanceof TelnyxLiveCallsDisabledError ? "live_calls_disabled" : "dial_failed");
-    await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId: session.id, status: "available", now: nowOf(deps) });
+    await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId: session.id, status: "available", now: nowOf(deps), expectedToken: reservation.offerToken ?? undefined, expectedRevision: reservation.revision });
     throw toActionError(error, "Hovor sa nepodarilo vytočiť.");
   }
 }
@@ -352,8 +368,8 @@ export async function callColleague(deps: CallActionDeps, actor: CallActor, inpu
     answeredBy: actor.profileId,
     metadata: { internal: { target_profile_id: target.profileId, target_sip: target.sipUri, by: actor.profileId }, line_label: line?.label ?? null },
   });
-  const reserved = await reserveOperator(deps.admin, { profileId: actor.profileId, sessionId: session.id });
-  if (!reserved) {
+  const reservation = await reserveOperatorOwnership(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, sessionId: session.id });
+  if (!reservation.applied) {
     await markSessionFailed(deps, session, "operator_busy");
     throw new CallActionError("Operátor nie je dostupný (prebieha iný hovor).", 409, "operator_busy");
   }
@@ -365,7 +381,7 @@ export async function callColleague(deps: CallActionDeps, actor: CallActor, inpu
     role: "operator" as const,
     profileId: actor.profileId,
     externalNumber: null,
-    clientState: { sid: session.id, role: "operator" as const, operatorId: actor.profileId, intent: "internal_caller", autoAnswer: true },
+    clientState: { sid: session.id, role: "operator" as const, operatorId: actor.profileId, intent: "internal_caller", autoAnswer: true, ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) },
     linkTo: null,
     timeoutSecs: 30,
     autoAnswer: true,
@@ -391,7 +407,7 @@ export async function callColleague(deps: CallActionDeps, actor: CallActor, inpu
     return { sessionId: session.id, operatorLegCallControlId: result.callControlId, telnyxSessionId: result.callSessionId, to: target.sipUri, from };
   } catch (error) {
     await markSessionFailed(deps, session, error instanceof TelnyxLiveCallsDisabledError ? "live_calls_disabled" : "dial_failed");
-    await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId: session.id, status: "available", now: nowOf(deps) });
+    await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId: session.id, status: "available", now: nowOf(deps), expectedToken: reservation.offerToken ?? undefined, expectedRevision: reservation.revision });
     throw toActionError(error, "Interný hovor sa nepodarilo vytočiť.");
   }
 }
@@ -438,6 +454,9 @@ async function runAction(deps: CallActionDeps, session: SessionRow, event: AppEv
     // not a provider error code and a 502.
     if (run.apply.failure?.callGone) {
       throw new CallActionError("Hovor už medzitým skončil.", 409, "call_gone");
+    }
+    if (run.apply.failure?.prerequisiteRejected) {
+      throw new CallActionError("Cieľ hovoru už nie je dostupný. Vyberte iného operátora.", 409, "target_unavailable");
     }
     throw new CallActionError(`${failureMessage} (${run.apply.failure?.error ?? "neznáma chyba"})`, 502, "command_failed");
   }
@@ -513,17 +532,46 @@ export async function pickupWaitingCall(deps: CallActionDeps, actor: CallActor, 
   requireConfigured(deps);
   await assertLegBudget(deps);
   const session = await loadSession(deps, sessionId);
-  if (deps.deviceKind !== "mobile" && !canPickUpCall({ state: session.state, direction: session.direction, answered: Boolean(session.answered_at), operatorProfileId: session.answered_by_profile_id })) {
+  const priorPickup = session.presence_pickup as { profileId?: string } | null;
+  const resumingOwnPickup = priorPickup?.profileId === actor.profileId && (!session.answered_by_profile_id || session.answered_by_profile_id === actor.profileId);
+  if (deps.deviceKind !== "mobile" && !resumingOwnPickup && !canPickUpCall({ state: session.state, direction: session.direction, answered: Boolean(session.answered_at), operatorProfileId: session.answered_by_profile_id })) {
     throw new CallActionError("Hovor už nie je možné prevziať.", 409, "not_waiting");
   }
-  const presence = await deps.admin.from("motorist_operator_presence").select("*").eq("profile_id", actor.profileId).maybeSingle();
+  const presence = await deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", session.organization_id).eq("profile_id", actor.profileId).maybeSingle();
+  if (presence.error) throw new CallActionError(`Prezenciu sa nepodarilo overiť: ${presence.error.message}`, 500);
+  const device = await requireLiveDevice(deps, actor.profileId);
+  if (telephonyStabilityEnabled() || (presence.data?.current_session_id === sessionId && (presence.data?.pause_return || presence.data?.offer_token))) {
+    const reservation = await reserveOperatorPickup(deps.admin, { organizationId: session.organization_id,
+      profileId: actor.profileId, sessionId, expectedRevision: presence.data?.presence_revision });
+    if (!reservation.applied) throw new CallActionError("Operátor alebo hovor už má inú rezerváciu.", 409, "operator_unavailable");
+    if (reservation.reused) {
+      const fresh = await loadSession(deps, sessionId);
+      const claim = fresh.presence_pickup as { profileId?: string; offerToken?: string } | null;
+      if (claim?.profileId === actor.profileId && claim.offerToken === reservation.offerToken) {
+        const legs = await deps.admin.from("motorist_call_legs").select("telnyx_call_control_id, client_state").eq("session_id", sessionId).eq("profile_id", actor.profileId).is("ended_at", null);
+        if (legs.error) throw new CallActionError("Prevzatie sa nepodarilo načítať.", 500);
+        const leg = legs.data?.find(row => {
+          const state = row.client_state as { intent?: string; offerToken?: string } | null;
+          return state?.intent === "pickup" && state.offerToken === reservation.offerToken;
+        });
+        return { sessionId, state: fresh.state, commands: [], ignored: "pickup_in_progress", operatorLegCallControlId: leg?.telnyx_call_control_id };
+      }
+    }
+    try {
+      return await runAction(deps, session, appEvent("pickup", actor, deps, { picker: { profileId: actor.profileId,
+        sipUri: device.sipUri, offerToken: reservation.offerToken ?? undefined, ...(deps.deviceKind === "mobile" ? { mobile: true } : {}) } }), "Prevzatie hovoru zlyhalo.");
+    } catch (error) {
+      // Revision + token prevent an old failed click from releasing a winner.
+      if (!reservation.reused) await releaseOperatorPresence(deps.admin, { organizationId: session.organization_id, profileId: actor.profileId,
+        sessionId, status: "available", expectedToken: reservation.offerToken, expectedRevision: reservation.revision });
+      throw error;
+    }
+  }
   const allowed = presenceAllowsOffer(
-    presence.data ? { profileId: actor.profileId, status: presence.data.status, currentSessionId: presence.data.current_session_id, wrapUpUntil: presence.data.wrap_up_until } : undefined,
-    nowOf(deps),
-    session.id,
+    presence.data ? { profileId: actor.profileId, status: effectivePresenceStatus(presence.data, nowOf(deps)), currentSessionId: presence.data.current_session_id, wrapUpUntil: presence.data.wrap_up_until } : undefined,
+    nowOf(deps), session.id,
   );
   if (!allowed.eligible) throw new CallActionError("Prevziať hovor je možné len v stave dostupný.", 409, "operator_unavailable");
-  const device = await requireLiveDevice(deps, actor.profileId);
   return runAction(deps, session, appEvent("pickup", actor, deps, { picker: { profileId: actor.profileId, sipUri: device.sipUri, ...(deps.deviceKind === "mobile" ? { mobile: true } : {}) } }), "Prevzatie hovoru zlyhalo.");
 }
 
@@ -664,12 +712,12 @@ export async function superviseCall(deps: CallActionDeps, actor: CallActor, sess
   const device = await requireLiveDevice(deps, actor.profileId, "Tvoj telefón nie je pripojený.");
 
   const already = await deps.admin.from("motorist_call_legs").select("id").eq("session_id", sessionId).eq("profile_id", actor.profileId).eq("role", "supervisor").is("ended_at", null).maybeSingle();
-  let reserved = false;
+  let reservation: PresenceTransitionResult = { applied: false };
   if (!already.data) {
     // Best effort: a paused or logged-out manager is still allowed to supervise,
     // an available one is taken out of the ring plan while they listen.
     try {
-      reserved = await reserveOperator(deps.admin, { profileId: actor.profileId, sessionId });
+      reservation = await reserveOperatorOwnership(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, sessionId });
     } catch (error) {
       deps.logger?.({ level: "warn", scope: "call-actions", message: "supervisor reservation failed", sessionId, error: error instanceof Error ? error.message : String(error) });
     }
@@ -679,7 +727,7 @@ export async function superviseCall(deps: CallActionDeps, actor: CallActor, sess
     const result = await runAction(
       deps,
       session,
-      appEvent("supervise", actor, deps, { supervisor: { profileId: actor.profileId, sipUri: device.sipUri, mode, label: actor.displayName ?? actor.profileId } }),
+      appEvent("supervise", actor, deps, { supervisor: { profileId: actor.profileId, sipUri: device.sipUri, mode, label: actor.displayName ?? actor.profileId, ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) } }),
       "Dozor nad hovorom sa nepodarilo spustiť.",
     );
     await auditAction(deps, actor, {
@@ -689,7 +737,7 @@ export async function superviseCall(deps: CallActionDeps, actor: CallActor, sess
     });
     return result;
   } catch (error) {
-    if (reserved) await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId, status: "available", now: nowOf(deps) });
+    if (reservation.applied && !reservation.reused) await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId, status: "available", now: nowOf(deps), expectedToken: reservation.offerToken ?? undefined, expectedRevision: reservation.revision });
     throw error;
   }
 }
@@ -725,15 +773,15 @@ export async function listTransferTargets(deps: CallActionDeps, actor: CallActor
       const row = presenceById.get(profile.id);
       const device = deviceById.get(profile.id) ?? null;
       const live = deviceIsLive(device, now);
-      const allowed = row ? presenceAllowsOffer({ profileId: profile.id, status: row.status, currentSessionId: row.current_session_id, wrapUpUntil: row.wrap_up_until }, now) : { eligible: false as const, reason: "no_presence" as const };
-      return { profileId: profile.id, displayName: profile.display_name, role: profile.role, available: allowed.eligible && live, status: row?.status ?? "offline", deviceLive: live };
+      const allowed = row ? presenceAllowsOffer({ profileId: profile.id, status: effectivePresenceStatus(row, now), currentSessionId: row.current_session_id, wrapUpUntil: row.wrap_up_until }, now) : { eligible: false as const, reason: "no_presence" as const };
+      return { profileId: profile.id, displayName: profile.display_name, role: profile.role, available: allowed.eligible && live, status: row ? effectivePresenceStatus(row, now) : "offline", deviceLive: live };
     })
     .sort((left, right) => Number(right.available) - Number(left.available) || left.displayName.localeCompare(right.displayName, "sk"));
 }
 
 // --- internals ---------------------------------------------------------------
 
-function encodeState(state: { sid: string; role: "operator"; operatorId: string; intent: string; autoAnswer: boolean }): string {
+function encodeState(state: { sid: string; role: "operator"; operatorId: string; intent: string; autoAnswer: boolean; offerToken?: string }): string {
   return encodeClientState(state);
 }
 

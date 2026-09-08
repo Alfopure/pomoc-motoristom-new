@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/database.types";
 import type { MotoristActor } from "@/server/api-auth";
 import type { RecordingPolicyDocument, RecordingPolicyResponse } from "@/lib/telephony/recording-quality";
-import { ConfigServiceError } from "./config-service";
+import { ConfigServiceError } from "./service-errors";
 import type { RecordingRoutingPolicy } from "./state/recording-types";
 
 type Admin = SupabaseClient<Database>;

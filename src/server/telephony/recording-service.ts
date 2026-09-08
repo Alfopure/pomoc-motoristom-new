@@ -7,6 +7,7 @@ import { QUALITY_CRITERIA, QUALITY_RUBRIC_VERSION, type CallRecordingDetail, typ
 import { communicationMetrics, intervalSeconds, intersectIntervals, subtractIntervals, validateOperatorEvaluation, type ModelCriterion } from "@/lib/telephony/quality-scoring";
 import { buildQualitySource, dateMilliseconds, jsonObject, loadRecordingSourceRows, sourceRestricted, type RecordingSourceRows } from "./recording-source";
 import { summarizeSessionRecording } from "./state/recording-types";
+import { readMeta } from "./state/types";
 import { readRecordingPolicy } from "./recording-policy-service";
 
 type Admin = SupabaseClient<Database>;
@@ -94,6 +95,10 @@ export async function getCallRecordingDetail(admin: Admin, actor: MotoristActor,
     : states.every((s) => s === "ready") ? source.gaps.length ? "partial" : "ready"
     : states.some((s) => s === "ready" || s === "partial") ? "partial" : states.some((s) => s === "failed") ? "failed" : "processing";
   if (rows.recordings.some((r) => r.status === "available" && jsonObject(r.participant_manifest).timingVerified !== true)) result.stateReason = "Úplnosť alebo globálne časovanie zvuku nie sú overené. Prehrávanie je dostupné; záznam sa nepoužije na číselné hodnotenie operátora.";
+  if (session.data && readMeta(session.data).recording?.coverageUnconfirmed) {
+    if (result.state === "ready") result.state = "partial";
+    result.stateReason = "Rozhovor sa spojil pred potvrdením nahrávania. Časť zvuku môže chýbať; neskoršie obnovenie nahrávania ju nedoplní.";
+  }
   const analysis = analyses.data?.[0];
   const analysisJobs = jobs.data?.filter((job) => job.kind === "analysis" && job.input_revision === call.recording_source_revision) ?? [];
   result.analysisState = analysis && analysis.input_revision === call.recording_source_revision && ["draft", "complete"].includes(analysis.status) ? "ready"

@@ -14,7 +14,7 @@ function fakePhone(options: TelnyxWebphoneOptions) {
     subscribe: (fn: (state: WebphoneSnapshot) => void) => { listeners.add(fn); return () => listeners.delete(fn); },
     emit: (next: WebphoneSnapshot) => { state = next; for (const fn of listeners) fn(next); },
     start: vi.fn(() => { options.onSession?.("new-session"); phone.emit(registered()); }), stop: vi.fn(),
-    answer: vi.fn(), hangup: vi.fn(), toggleMute: vi.fn(), sendDtmf: vi.fn(), expectOperatorLeg: vi.fn(), dismissCallError: vi.fn(), takeover: vi.fn(), unlockAudio: vi.fn(), resumeAudio: vi.fn(), confirmRegistration: vi.fn(async () => undefined),
+    answer: vi.fn(), hangup: vi.fn(), toggleMute: vi.fn(), sendDtmf: vi.fn(), expectOperatorLeg: vi.fn(), setIncomingOfferPolicy: vi.fn(), dismissCallError: vi.fn(), takeover: vi.fn(), unlockAudio: vi.fn(), resumeAudio: vi.fn(), confirmRegistration: vi.fn(async () => undefined),
   };
   return phone;
 }
@@ -49,6 +49,57 @@ afterEach(() => { for (const controller of controllers) controller.dispose(); vi
 const flush = async () => { for (let i = 0; i < 15; i++) await Promise.resolve(); };
 
 describe("shared browser phone and on-demand mobile", () => {
+  it("an owner poll at the same presence revision cannot clear a follower's pending pickup", async () => {
+    const owner = create(); const follower = create(); await flush();
+    owner.setIncomingOfferPolicy({ automaticAllowed: false, presenceRevision: 12 });
+    follower.setIncomingOfferPolicy({ automaticAllowed: false, presenceRevision: 12 });
+    const request = await follower.beginOperatorRequest();
+    owner.setIncomingOfferPolicy({ automaticAllowed: false, presenceRevision: 12, requestPending: false });
+    await flush();
+    expect(phones[0].setIncomingOfferPolicy).toHaveBeenLastCalledWith(expect.objectContaining({ automaticAllowed: false, requestPending: true, presenceRevision: 12 }));
+    follower.expectOperatorLeg({ callControlId: "exact-pickup", sessionId: "chosen-session" });
+    await follower.endOperatorRequest(request);
+    expect(phones[0].expectOperatorLeg).toHaveBeenCalledWith({ callControlId: "exact-pickup", sessionId: "chosen-session" });
+    expect(phones[0].setIncomingOfferPolicy).toHaveBeenLastCalledWith(expect.objectContaining({ automaticAllowed: false, requestPending: false }));
+  });
+
+  it("retains a follower's request if the media owner closes before the API response", async () => {
+    const owner = create(); const follower = create(); await flush();
+    follower.setIncomingOfferPolicy({ automaticAllowed: false, presenceRevision: 12 });
+    const request = await follower.beginOperatorRequest();
+    owner.dispose(); await flush();
+    expect(phones).toHaveLength(2);
+    expect(phones[1].setIncomingOfferPolicy).toHaveBeenLastCalledWith(expect.objectContaining({ automaticAllowed: false, requestPending: true }));
+    await follower.endOperatorRequest(request);
+    expect(phones[1].setIncomingOfferPolicy).toHaveBeenLastCalledWith(expect.objectContaining({ requestPending: false }));
+  });
+
+  it("a failed request removes only its own intent while another tab is still requesting", async () => {
+    const owner = create(); const follower = create(); await flush();
+    owner.setIncomingOfferPolicy({ automaticAllowed: false, presenceRevision: 12 });
+    const first = await follower.beginOperatorRequest();
+    const second = await owner.beginOperatorRequest();
+    await follower.endOperatorRequest(first);
+    expect(phones[0].setIncomingOfferPolicy).toHaveBeenLastCalledWith(expect.objectContaining({ requestPending: true }));
+    await owner.endOperatorRequest(second);
+    expect(phones[0].setIncomingOfferPolicy).toHaveBeenLastCalledWith(expect.objectContaining({ requestPending: false }));
+  });
+
+  it("a follower closing during a failed request clears its pending intent on the owner", async () => {
+    create(); const follower = create(); await flush();
+    await follower.beginOperatorRequest();
+    follower.dispose(); await flush();
+    expect(phones[0].setIncomingOfferPolicy).toHaveBeenLastCalledWith(expect.objectContaining({ requestPending: false }));
+  });
+
+  it("an abandoned request expires without a poll or another tab clearing it", async () => {
+    vi.useFakeTimers();
+    create(); const follower = create(); await flush();
+    await follower.beginOperatorRequest();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(phones[0].setIncomingOfferPolicy).toHaveBeenLastCalledWith(expect.objectContaining({ requestPending: false }));
+  });
+
   it("uses one SDK across tabs, shares calls, and routes follower controls without sharing credentials", async () => {
     const first = create(); const second = create(); await flush();
     expect(phones).toHaveLength(1);

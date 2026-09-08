@@ -18,7 +18,7 @@ Pôvodný plán zvonil hlavnej skupine len 10 sekúnd, zálohe 20 sekúnd a nás
 
 Opakované ponuky používajú existujúce webhooky, kontrolu aktívnych hovorov a povolený päťminútový cron. Pri otvorenej konzole sa kontroluje dostupnosť priebežne; bez nej je ďalšou príležitosťou koniec približne minútového zvukového cyklu. Nepribúda worker, listener ani plánovač. Pri kontrole čakárne dostáva prednosť najstarší čakajúci hovor. Rezervácie a existujúci limit súbežných vetiev chránia pred dvojitým pridelením operátora.
 
-Do opakovaných ponúk vstupujú iba operátori s dostupnou prítomnosťou a platnou registráciou telefónu. Externé a mobilné čísla sa počas čakárne znova nevytáčajú. Operátor vracajúci sa z pauzy sa môže zapojiť aj vtedy, keď jeho pôvodná ponuka smerovala na mobil. Parkovanie už spojeného rozhovoru zostáva samostatnou funkciou. Opakované ponuky neresetujú pôvodný tridsaťminútový limit.
+Do opakovaných ponúk vstupujú iba operátori s dostupnou prítomnosťou a platnou registráciou telefónu. Externé a mobilné čísla sa počas čakárne znova nevytáčajú. Pauza blokuje aj automatickú ponuku na osobný mobil; po výslovnom návrate do dostupnosti môže operátor dostať webovú ponuku. Parkovanie už spojeného rozhovoru zostáva samostatnou funkciou. Opakované ponuky neresetujú pôvodný tridsaťminútový limit. [Podrobné pravidlá pauzy a obnovy hovorov](telephony-stability-rollout.md).
 
 ## Čo znamená záznam spätného volania
 
@@ -43,7 +43,7 @@ V existujúcom úvodnom menu neutrálnej linky je **1 dispečing, 2 spätné vol
 
 Izolované testy prechádzajú skutočným reducerom, persistenciou a API službou nad testovacou databázou/providerom: 30 minút bez vstupu, neplatná voľba, uvoľnenie operátora, návrat z pauzy, súbeh dvoch čakajúcich, opakované odmietnutie, callback počas zvonenia, oneskorená odpoveď, zlyhanie zápisu a obnova. Playwright overuje skutočný panel, filtre, tlačidlo Zavolať a uzavretú históriu. Zvuky sa skladajú z existujúcich nahrávok pomocou `scripts/build-queue-announcements.py`; manifest obsahuje kontrolné súčty.
 
-Kód prechádza Preview → PR do dev → overenie dev aliasu → PR dev do main → overenie produkcie. Až potom sa existujúci plán zmení na 20/30 sekúnd a `waiting_room`, pod kontrolou verzie konfigurácie. Nevyžaduje sa databázová migrácia. Nastavenia nahrávania, ASR a AI sa týmto postupom nemenia.
+Kód prechádza Preview → PR do dev → overenie dev aliasu → PR dev do main → overenie produkcie. Až potom sa existujúci plán zmení na 20/30 sekúnd a `waiting_room`, pod kontrolou verzie konfigurácie. Táto úprava čakárne nevyžaduje databázovú migráciu. Samostatná [stabilizácia hovorov a callbackov](telephony-stability-rollout.md) obsahuje štyri migrácie a vlastné podmienky aktivácie. Nastavenia nahrávania, ASR a AI sa samotnou úpravou čakárne nemenia.
 
 ## Opravy spoľahlivosti IVR a vlastných hlášok
 

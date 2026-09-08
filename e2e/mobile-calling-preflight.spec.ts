@@ -19,8 +19,14 @@ test.beforeEach(async ({ page }) => {
   const failures: string[] = [];
   browserFailures.set(page, failures);
   page.on("pageerror", (error) => failures.push(error.message));
-  await page.route("**/*", (route) => { failures.push(`Unexpected network: ${route.request().url()}`); return route.abort(); });
-  await page.setContent('<!doctype html><div id="root"></div>');
+  await page.route("**/*", (route) => {
+    if (route.request().url() === "https://preflight.test/") return route.fulfill({ contentType: "text/html", body: '<!doctype html><div id="root"></div>' });
+    if (route.request().url() === "https://preflight.test/workplace-heartbeat-worker.js") return route.fulfill({ contentType: "text/javascript", body: "" });
+    failures.push(`Unexpected network: ${route.request().url()}`); return route.abort();
+  });
+  // Match the deployed secure context (UUIDs/Web Locks) while intercepting all
+  // requests. about:blank omits these browser APIs and hides coordinator paths.
+  await page.goto("https://preflight.test/");
   await page.addScriptTag({ content: script });
   await expect(page.locator("#state")).toHaveAttribute("data-status", "registered");
 });

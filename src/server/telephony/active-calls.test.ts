@@ -23,7 +23,7 @@ describe("active calls snapshot", () => {
         expect.objectContaining({ profileId: PROFILES.o3, status: "offline", currentSessionId: null }),
       ]),
     );
-    expect(snapshot.ownPresence).toEqual({ status: "available", pauseReasonId: null, statusSince: h.now().toISOString() });
+    expect(snapshot.ownPresence).toEqual({ presenceRevision: 0, automaticOffersAllowed: true, status: "available", pauseReasonId: null, statusSince: h.now().toISOString() });
     expect(snapshot.presence.devices.find((device) => device.profileId === PROFILES.o1)?.registered).toBe(true);
   });
 

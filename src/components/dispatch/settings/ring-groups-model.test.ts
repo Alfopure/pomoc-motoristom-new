@@ -250,3 +250,10 @@ describe("notes about what the ring engine really does", () => {
     expect(memberRingSecsNote(withTime, [orderedPlan])).toBeNull();
   });
 });
+
+it("keeps explicit personal ownership when an external member is edited or reordered", () => {
+  const document = group({ members: [{ ...group().members[0], memberKind: "external_number", profileId: null, externalNumber: "+421911222333", ownerProfileId: OPERATOR_A }] });
+  const drafts = groupDraftsFromDocument([document]);
+  const updated = updateMember(drafts, drafts[0].key, drafts[0].members[0].key, { ringSecs: "25" });
+  expect(ringGroupsPayload(updated)[0].members[0]).toMatchObject({ ownerProfileId: OPERATOR_A, ringSecs: 25 });
+});

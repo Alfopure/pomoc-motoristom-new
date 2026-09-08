@@ -86,6 +86,7 @@ export type ActiveCallPayload = {
 export type ActiveCallsPayload = {
   checkedAt: string;
   configured: boolean;
+  pausedPickupEnabled?: boolean;
   /** Organisation whose Realtime topic carries telephony changes. */
   organizationId: string;
   actorProfileId: string;
@@ -93,6 +94,8 @@ export type ActiveCallsPayload = {
   waiting: ActiveCallPayload[];
   presence: TelephonyPresenceSnapshot;
   ownPresence: {
+    automaticOffersAllowed?: boolean;
+    presenceRevision?: number;
     status: TelephonyPresenceStatus;
     pauseReasonId: string | null;
     statusSince: string;
@@ -326,6 +329,7 @@ export type PhoneBarModel = {
   supervising: { sessionId: string; mode: string | null; pending: boolean } | null;
   presence: TelephonyPresenceSnapshot;
   ownPresenceStatus: TelephonyPresenceStatus | null;
+  pausedPickupEnabled?: boolean;
 };
 
 export type PhoneBarModelOptions = { operatorName?: OperatorNameLookup };
@@ -334,7 +338,7 @@ function pendingIncomingLeg(call: ActiveCallPayload, leg: ActiveCallLegPayload, 
   if (leg.profileId !== actorProfileId || (leg.role !== "operator" && leg.role !== "consult") ||
     leg.answeredAt || leg.bridgedAt || !["initiated", "ringing"].includes(leg.state) || !leg.callControlId) return false;
   if (leg.intent === "ring") return call.state === "ringing" && !call.answeredByProfileId && call.offeredProfileIds.includes(actorProfileId);
-  if (leg.intent === "internal" || leg.intent === "transfer" || leg.intent === "transfer_recorded") return call.state === "ringing";
+  if (leg.intent === "internal" || leg.intent === "transfer" || leg.intent === "transfer_recorded" || leg.intent === "transfer_safe") return call.state === "ringing";
   if (leg.intent === "consult") return call.state === "consulting";
   return leg.intent === "party" && ["talking", "held", "consulting", "conference"].includes(call.state);
 }
@@ -437,6 +441,7 @@ export function buildPhoneBarModel(payload: ActiveCallsPayload, options: PhoneBa
         ? { sessionId: supervisedCall.sessionId, mode: supervisorLeg.supervisorMode, pending: !supervisorLeg.answeredAt }
         : null,
     presence: payload.presence,
+    pausedPickupEnabled: payload.pausedPickupEnabled === true,
     ownPresenceStatus: payload.presence.presence.find((row) => row.profileId === actorProfileId)?.status ?? null,
   };
 }

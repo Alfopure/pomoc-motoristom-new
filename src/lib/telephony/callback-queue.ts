@@ -47,6 +47,9 @@ export type CallbackRequestPayload = {
 };
 
 export type CallbackQueuePayload = {
+  /** Server rollout capability; absent on older compatible deployments. */
+  unifiedRequests?: boolean;
+  schedulingEnabled?: boolean;
   checkedAt: string;
   configured: boolean;
   actorProfileId: string;

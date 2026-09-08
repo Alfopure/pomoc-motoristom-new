@@ -1,14 +1,19 @@
-import { TelnyxWebphone, type WebphoneSnapshot, type TelnyxWebphoneOptions } from "./telnyx-webphone";
+import { TelnyxWebphone, type WebphoneSnapshot, type IncomingOfferPolicy, type TelnyxWebphoneOptions } from "./telnyx-webphone";
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "./webphone-model";
 
 const idle = (): WebphoneSnapshot => ({ status: "idle", registration: webphoneRegistrationView(WEBPHONE_INITIAL_STATE), sipUsername: null, deviceSessionId: null, call: null, message: null });
-type Command = "answer" | "hangup" | "toggleMute" | "sendDtmf" | "expectOperatorLeg" | "dismissCallError";
-type Message = { type: "hello" } | { type: "state"; snapshot: WebphoneSnapshot } | { type: "command"; id: string; command: Command; callId: string | null; value?: unknown } | { type: "result"; id: string; error?: string };
+type Command = "answer" | "hangup" | "toggleMute" | "sendDtmf" | "expectOperatorLeg" | "dismissCallError" | "setIncomingOfferPolicy" | "beginOperatorRequest" | "endOperatorRequest";
+type RequestIntent = { id: string; expiresAt: number; pending: boolean };
+const REQUEST_INTENT_MS = 60_000;
+type Message = { type: "operatorRequest"; intent: RequestIntent } | { type: "hello" } | { type: "state"; snapshot: WebphoneSnapshot } | { type: "command"; id: string; command: Command; callId: string | null; value?: unknown } | { type: "result"; id: string; error?: string };
 type Pending = { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 
 /** One media owner per account/origin. Followers control that owner, never mint SIP tokens. */
 export class CoordinatedWebphone {
   private local: TelnyxWebphone | null = null;
+  private incomingPolicy: IncomingOfferPolicy = { automaticAllowed: true };
+  private operatorRequests = new Map<string, { expiresAt: number; timer: ReturnType<typeof setTimeout> }>();
+  private ownOperatorRequests = new Set<string>();
   private snapshot = idle();
   private listeners = new Set<(state: WebphoneSnapshot) => void>();
   private channel: BroadcastChannel | null = null;
@@ -68,6 +73,10 @@ export class CoordinatedWebphone {
     // Keep pageshow for bfcache restore; dispose() removes it on real unmount.
     this.abort?.abort();
     this.abort = null;
+    for (const id of this.ownOperatorRequests) this.channel?.postMessage({ type: "operatorRequest", intent: { id, pending: false, expiresAt: 0 } });
+    this.ownOperatorRequests.clear();
+    for (const request of this.operatorRequests.values()) clearTimeout(request.timer);
+    this.operatorRequests.clear();
     this.stopLocal();
     this.release?.();
     this.release = null;
@@ -90,6 +99,7 @@ export class CoordinatedWebphone {
       },
     });
     this.local = phone;
+    this.applyIncomingPolicy();
     this.unsubscribe = phone.subscribe((state) => { this.publish(state); this.scheduleStandby(); });
     if (connect) phone.start();
   }
@@ -113,7 +123,11 @@ export class CoordinatedWebphone {
 
   private receive(message: Message) {
     if (!message || !this.started) return;
-    if (message.type === "hello" && this.local) this.publish(this.local.getSnapshot());
+    if (message.type === "hello" && this.local) {
+      this.publish(this.local.getSnapshot());
+      for (const [id, request] of this.operatorRequests) this.channel?.postMessage({ type: "operatorRequest", intent: { id, pending: true, expiresAt: request.expiresAt } });
+    }
+    if (message.type === "operatorRequest") this.updateOperatorRequest(message.intent);
     if (message.type === "state" && !this.local) this.publish(message.snapshot, true);
     if (message.type === "result") {
       const item = this.pending.get(message.id);
@@ -140,6 +154,20 @@ export class CoordinatedWebphone {
       case "toggleMute": phone.toggleMute(); break;
       case "sendDtmf": if (typeof value === "string" && /^[0-9*#]$/.test(value)) phone.sendDtmf(value); break;
       case "dismissCallError": phone.dismissCallError(); break;
+      case "setIncomingOfferPolicy": {
+        const policy = value as IncomingOfferPolicy;
+        if (typeof policy?.automaticAllowed !== "boolean") throw new Error("Neplatná prezencia.");
+        if ((policy.presenceRevision ?? 0) < (this.incomingPolicy.presenceRevision ?? 0)) break;
+        this.storeIncomingPolicy(policy); break;
+      }
+      case "beginOperatorRequest":
+      case "endOperatorRequest": {
+        const intent = value as RequestIntent;
+        if (typeof intent?.id !== "string" || typeof intent.expiresAt !== "number") throw new Error("Neplatná požiadavka hovoru.");
+        this.updateOperatorRequest(intent);
+        this.channel?.postMessage({ type: "operatorRequest", intent });
+        break;
+      }
       case "expectOperatorLeg": {
         const leg = value as { callControlId?: unknown; sessionId?: unknown } | null;
         if (typeof leg?.callControlId !== "string" || typeof leg.sessionId !== "string") throw new Error("Neplatný hovor.");
@@ -165,6 +193,57 @@ export class CoordinatedWebphone {
   toggleMute() { void this.command("toggleMute").catch((error) => this.report(error)); }
   sendDtmf(digit: string) { void this.command("sendDtmf", digit).catch((error) => this.report(error)); }
   expectOperatorLeg(leg: { callControlId: string; sessionId: string }) { void this.command("expectOperatorLeg", leg).catch((error) => this.report(error)); }
+  setIncomingOfferPolicy(policy: IncomingOfferPolicy) {
+    if ((policy.presenceRevision ?? 0) < (this.incomingPolicy.presenceRevision ?? 0)) return;
+    this.storeIncomingPolicy(policy);
+    if (!this.local && this.channel) void this.command("setIncomingOfferPolicy", policy).catch((error) => this.report(error));
+  }
+  private storeIncomingPolicy(policy: IncomingOfferPolicy) {
+    // Presence snapshots come from every tab. A tab's local busy flag cannot
+    // change another tab's request lifecycle, even at the same revision.
+    this.incomingPolicy = { presenceRevision: policy.presenceRevision, automaticAllowed: policy.automaticAllowed, explicitLegs: policy.explicitLegs };
+    this.applyIncomingPolicy();
+  }
+
+  private applyIncomingPolicy() {
+    this.local?.setIncomingOfferPolicy({ ...this.incomingPolicy, requestPending: this.operatorRequests.size > 0 });
+  }
+
+  private updateOperatorRequest(intent: RequestIntent) {
+    if (typeof intent?.id !== "string" || typeof intent.expiresAt !== "number") return;
+    const previous = this.operatorRequests.get(intent.id);
+    if (previous) clearTimeout(previous.timer);
+    this.operatorRequests.delete(intent.id);
+    if (intent.pending && intent.expiresAt > Date.now()) {
+      const expiresAt = Math.min(intent.expiresAt, Date.now() + REQUEST_INTENT_MS);
+      const timer = setTimeout(() => { this.operatorRequests.delete(intent.id); this.ownOperatorRequests.delete(intent.id); this.applyIncomingPolicy(); }, expiresAt - Date.now());
+      this.operatorRequests.set(intent.id, { expiresAt, timer });
+    }
+    this.applyIncomingPolicy();
+  }
+
+  async beginOperatorRequest(): Promise<string> {
+    const id = crypto.randomUUID();
+    const intent: RequestIntent = { id, expiresAt: Date.now() + REQUEST_INTENT_MS, pending: true };
+    this.ownOperatorRequests.add(id);
+    this.updateOperatorRequest(intent);
+    try {
+      // Acknowledge the media owner's silent hold before sending the API call.
+      await this.command("beginOperatorRequest", intent);
+      return id;
+    } catch (error) {
+      await this.endOperatorRequest(id);
+      throw error;
+    }
+  }
+
+  async endOperatorRequest(id: string): Promise<void> {
+    if (!this.ownOperatorRequests.delete(id)) return;
+    const intent: RequestIntent = { id, expiresAt: 0, pending: false };
+    this.updateOperatorRequest(intent);
+    await this.command("endOperatorRequest", intent).catch(error => this.report(error));
+  }
+
   dismissCallError() { this.publish({ ...this.snapshot, callError: null }, !this.local); void this.command("dismissCallError").catch(() => undefined); }
   takeover() { this.local?.takeover(); }
   async unlockAudio() {

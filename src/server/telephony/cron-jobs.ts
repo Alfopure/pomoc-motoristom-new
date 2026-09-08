@@ -6,6 +6,9 @@ import { closeOrphanLegs, closeStaleRingAttempts, sweepOverdueRingSteps } from "
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
 import { processTelnyxEvent } from "./telnyx/event-processor";
 import { ACTIVE_SESSION_STATES, type SessionEvent, type SessionRow } from "./state/types";
+import { telephonyStabilityEnabled } from "./stability";
+import { readPendingEffects } from "./state/continuation";
+import { sweepExpiredWrapUp } from "./presence-service";
 
 /**
  * Jobs behind the single allowed Vercel cron (every 5 minutes →
@@ -40,6 +43,7 @@ export const ALERT_JOB = "telephony.alerts";
 export const LEDGER_REPLAY_JOB = "telephony.ledger.replay";
 export const RING_SWEEP_JOB = "telephony.ring.sweep";
 export const STUCK_SESSION_JOB = "telephony.sessions.stuck";
+export const EFFECTS_RECOVERY_JOB = "telephony.effects.recovery";
 
 /** A claimed event untouched for this long is assumed abandoned and re-driven. */
 export const STALLED_EVENT_MS = 60_000;
@@ -144,6 +148,40 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
     await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error, context: { job: RING_SWEEP_JOB } });
     return { job: RING_SWEEP_JOB, status: "failed", detail: {}, error: message };
   }
+}
+
+/** Runs inside the existing five-minute cron, including obligations on ended sessions. */
+export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
+  const now = nowOf(deps).toISOString();
+  const wrapUp = await sweepExpiredWrapUp(deps);
+  const queries = await Promise.all([
+    deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).not("pending_effects", "is", null)
+      .lte("effects_next_attempt_at", now).order("effects_next_attempt_at").limit(REPLAY_BATCH_SIZE),
+    deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).not("cancellations_next_attempt_at", "is", null)
+      .lte("cancellations_next_attempt_at", now).order("cancellations_next_attempt_at").limit(REPLAY_BATCH_SIZE),
+    deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).not("presence_pickup", "is", null)
+      .lte("presence_pickup->>expiresAt", now).order("updated_at").limit(REPLAY_BATCH_SIZE),
+  ]);
+  const error = queries.find((query) => query.error)?.error;
+  if (error) {
+    if (!telephonyStabilityEnabled() && ["42703", "PGRST204"].includes(error.code)) return { job: EFFECTS_RECOVERY_JOB, status: "skipped", detail: { reason: "compatible_schema_not_installed" } };
+    return { job: EFFECTS_RECOVERY_JOB, status: "failed", detail: {}, error: error.message };
+  }
+  const sessions = [...new Map(queries.flatMap((query) => query.data ?? []).map((session) => [session.id, session])).values()];
+  const errors: Array<{ sessionId: string; error: string }> = [];
+  for (const session of sessions) {
+    try {
+      const result = await sessionRunner(deps)(session.id, { kind: "app", type: "sweep", id: `cron-effects:${session.id}:${randomUUID()}`, actorProfileId: null, occurredAt: now }) as { apply?: { failed?: boolean; failure?: { error?: string } } } | undefined;
+      if (result?.apply?.failed) throw new Error(result.apply.failure?.error ?? "mandatory effects remain pending");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push({ sessionId: session.id, error: message });
+      const oldest = readPendingEffects(session).entries.reduce((time, entry) => Math.min(time, Date.parse(entry.createdAt)), Date.parse(now));
+      if (Date.parse(now) - oldest >= 10 * 60_000) await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error,
+        context: { sessionId: session.id, job: EFFECTS_RECOVERY_JOB, pendingAgeMs: Date.parse(now) - oldest } });
+    }
+  }
+  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || wrapUp.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, wrapUp } };
 }
 
 export async function detectStuckSessions(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
@@ -267,6 +305,7 @@ export async function pruneWebhookLedger(deps: TelephonyCronDeps): Promise<Telep
     .from("motorist_telnyx_webhook_events")
     .update({ payload: null })
     .eq("organization_id", deps.organizationId)
+    .eq("status", "processed")
     .in("event_type", LEDGER_PAYLOAD_EVENT_TYPES)
     .lt("received_at", payloadBefore)
     .not("payload", "is", null)
@@ -394,7 +433,7 @@ export async function runAlertJob(deps: TelephonyCronDeps): Promise<TelephonyCro
 
 export async function runTelephonyCronJobs(deps: TelephonyCronDeps): Promise<TelephonyCronSummary> {
   const started = nowOf(deps).getTime();
-  const jobs = [await runRingSweep(deps), await replayStalledWebhookEvents(deps), await reconcileWithTelnyx(deps), await detectStuckSessions(deps), await runAlertJob(deps), await pruneWebhookLedger(deps)];
+  const jobs = [await runRingSweep(deps), await runPendingEffectRecovery(deps), await replayStalledWebhookEvents(deps), await reconcileWithTelnyx(deps), await detectStuckSessions(deps), await runAlertJob(deps), await pruneWebhookLedger(deps)];
   const checkedAt = nowOf(deps);
   return {
     status: jobs.some((job) => job.status === "failed") ? "degraded" : "ok",
