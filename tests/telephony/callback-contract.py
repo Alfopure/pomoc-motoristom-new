@@ -10,9 +10,12 @@ import uuid
 import psycopg
 from psycopg.types.json import Jsonb
 
+# Explicit hostaddr prevents inherited PGHOSTADDR from redirecting fixture writes.
+LOOPBACK_DSN = "host=127.0.0.1 hostaddr=127.0.0.1 port=55432 user=postgres connect_timeout=5"
+
 DATABASE = 'callbacks_contract'
-DSN = f'host=127.0.0.1 port=55432 user=postgres dbname={DATABASE}'
-with psycopg.connect('host=127.0.0.1 port=55432 user=postgres dbname=postgres', autocommit=True) as bootstrap:
+DSN = f'{LOOPBACK_DSN} dbname={DATABASE}'
+with psycopg.connect(f'{LOOPBACK_DSN} dbname=postgres', autocommit=True) as bootstrap:
     if not bootstrap.execute('select 1 from pg_database where datname=%s', (DATABASE,)).fetchone():
         bootstrap.execute(f'create database {DATABASE}')
 conn = psycopg.connect(DSN, autocommit=True)

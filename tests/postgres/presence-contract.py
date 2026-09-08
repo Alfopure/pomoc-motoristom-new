@@ -9,8 +9,11 @@ from psycopg.types.json import Jsonb
 import json
 import psycopg
 
+# Explicit hostaddr prevents inherited PGHOSTADDR from redirecting fixture writes.
+LOOPBACK_DSN = "host=127.0.0.1 hostaddr=127.0.0.1 port=55432 user=postgres connect_timeout=5"
+
 ROOT = Path(__file__).resolve().parents[2]
-DSN = "host=127.0.0.1 port=55432 user=postgres dbname=presence_contract"
+DSN = f"{LOOPBACK_DSN} dbname=presence_contract"
 ORG = "00000000-0000-4000-8000-000000000001"
 OTHER = "00000000-0000-4000-8000-000000000002"
 PROFILE = "00000000-0000-4000-8000-000000000011"
@@ -41,7 +44,7 @@ def passed(name):
     results.append(name)
     print("PASS",name,flush=True)
 
-with psycopg.connect("host=127.0.0.1 port=55432 user=postgres dbname=postgres",autocommit=True) as setup:
+with psycopg.connect(f"{LOOPBACK_DSN} dbname=postgres",autocommit=True) as setup:
     setup.execute("drop database if exists presence_contract with (force)")
     setup.execute("create database presence_contract")
 with conn() as c:
