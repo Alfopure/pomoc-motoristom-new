@@ -32,6 +32,7 @@ import type { FleetGpsFreshnessFilter, FleetGpsSourceFilter, FleetKindFilter, Fl
 import { MapControlBar } from "./map/MapControlBar";
 import type { FleetLayerKey, MapLayerState, MapPanelKey } from "./map/MapControlBar";
 import { MapPlaceSearch } from "./map/MapPlaceSearch";
+import { RoutePlanner } from "./map/RoutePlanner";
 import { useFleetPositions } from "./map/useFleetPositions";
 import type { DispatchMapProps } from "./DispatchMap";
 
@@ -116,10 +117,12 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
   const [, setLoadError] = useState<string | null>(null);
   const [routeState, setRouteState] = useState<RouteState | null>(null);
   const [locationDraft, setLocationDraft] = useState<LocationDraftState>(() => ({ caseId }));
-  const [mapLayers, setMapLayers] = useState<MapLayerState>(() => hasCase ? DEFAULT_MAP_LAYERS : OVERVIEW_MAP_LAYERS);
+  const [storedMapLayers, setMapLayers] = useState<MapLayerState>(() => hasCase ? DEFAULT_MAP_LAYERS : OVERVIEW_MAP_LAYERS);
   const [planOpen, setPlanOpen] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [activePanel, setActivePanel] = useState<MapPanelKey | null>(null);
+  const plannerOpen = activePanel === "route-planner";
+  const mapLayers = plannerOpen ? DEFAULT_MAP_LAYERS : storedMapLayers;
   const [selectedFleetAssetId, setSelectedFleetAssetId] = useState<string | null>(null);
   const [fleetSearch, setFleetSearch] = useState("");
   const [fleetKindFilter, setFleetKindFilter] = useState<FleetKindFilter>("all");
@@ -283,6 +286,15 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
     if (next) {
       setFocusMode(false);
     }
+    if (next === "route-planner") {
+      setPlanOpen(false);
+      setSelectedFleetAssetId(null);
+      infoWindowRef.current?.close();
+      if (searchMarkerRef.current) {
+        searchMarkerRef.current.map = null;
+        searchMarkerRef.current = null;
+      }
+    }
   }
 
   function toggleFocusMode() {
@@ -398,6 +410,10 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
   }, [hasGoogleKey]);
 
   useEffect(() => {
+    if (loadState === "ready") mapRef.current?.setOptions({ clickableIcons: !plannerOpen });
+  }, [loadState, plannerOpen]);
+
+  useEffect(() => {
     if (loadState !== "ready" || !pickupAutocompleteHostRef.current || !destinationAutocompleteHostRef.current) {
       return;
     }
@@ -472,6 +488,8 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
       return;
     }
 
+    clearPolylines(fallbackPolylinesRef.current);
+    clearPolylines(googleRoutePolylinesRef.current);
     const runtime = routeRuntimeRef.current;
     const pickup = draftCase?.pickup;
     if (!runtime || !pickup || !draftCase) {
@@ -483,9 +501,6 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
     const sequence = routeSequenceRef.current + 1;
     routeSequenceRef.current = sequence;
     const abortController = new AbortController();
-
-    clearPolylines(fallbackPolylinesRef.current);
-    clearPolylines(googleRoutePolylinesRef.current);
 
     if (!mapLayers.route) {
       return () => {
@@ -714,7 +729,7 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
       )}
 
       <div
-        className={`pointer-events-none absolute left-2 right-2 top-2 z-20 flex flex-col items-stretch gap-2 sm:left-3 sm:top-3 sm:items-start ${
+        className={`pointer-events-none absolute left-2 right-2 top-2 z-20 flex max-h-[calc(100%-16px)] flex-col items-stretch gap-2 sm:left-3 sm:top-3 sm:items-start ${
           desktopRouteCardVisible ? "sm:right-[334px]" : "sm:right-3"
         }`}
       >
@@ -727,7 +742,7 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
           focusMode={focusMode}
           layers={mapLayers}
           planOpen={planOpen}
-          showCaseTools={hasCase}
+          showCaseTools={hasCase && !plannerOpen}
           showFilter={fleetLayersActive}
           onClearAll={handleClearAll}
           onToggleBranches={() => toggleMapLayer("branches")}
@@ -737,6 +752,8 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
           onTogglePlan={() => setPlanOpen((current) => !current)}
           onToggleRoute={() => toggleMapLayer("route")}
         />
+
+        {plannerOpen && loadState === "ready" && <RoutePlanner mapRef={mapRef} onClose={() => setActivePanel(null)} />}
 
         <MapPlaceSearch
           loadState={loadState}
