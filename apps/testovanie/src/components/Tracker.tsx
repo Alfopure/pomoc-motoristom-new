@@ -1908,8 +1908,16 @@ function HistoryModal({
           zápisov výsledkov
         </span>
         <span>
-          <strong>{entries.filter((e) => e.kind === "entry").length}</strong>{" "}
-          vstupov do evidencie
+          <strong>
+            {all
+              ? entries.filter((e) => e.kind === "entry").length
+              : new Set(
+                  entries
+                    .filter((e) => e.kind === "result_saved")
+                    .map((e) => e.scenarioId),
+                ).size}
+          </strong>{" "}
+          {all ? "vstupov do evidencie" : "hodnotených scenárov"}
         </span>
       </div>
       {entries.length ? (
