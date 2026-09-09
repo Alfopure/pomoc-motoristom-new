@@ -215,6 +215,45 @@ describe("TelnyxWebphone", () => {
     expect(h.client.connected).toBe(false);
   });
 
+  it("retries a temporary token 503 instead of disabling telephony", async () => {
+    const h = harness({ token: { ok: false, status: 503, body: { error: "Provider je dočasne nedostupný." } } });
+    h.phone.start();
+    await flush();
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    expect(h.phone.getSnapshot().message).toBe("Provider je dočasne nedostupný.");
+  });
+
+  it("keeps an established call registered and controllable through token renewal 503 then 200", async () => {
+    const credentials = { token: "jwt", expiresAt: "2026-09-03T09:00:00.000Z", deviceSessionId: "device-1", sipUsername: "gencred1" };
+    const token: TelephonyJsonResult<unknown> = { ok: true, status: 200, body: credentials };
+    const h = harness({ token });
+    const connect = vi.spyOn(h.client, "connect");
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const call = fakeCall({ state: "active" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(h.phone.getSnapshot().call?.active).toBe(true);
+
+    Object.assign(token, { ok: false, status: 503, body: { error: "Provider je dočasne nedostupný." } });
+    h.runTimer(timer => timer.delayMs === 1_800_000);
+    await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { active: true } });
+    expect(h.client.disconnected).toBe(false);
+    await expect(h.phone.confirmRegistration()).resolves.toBeUndefined();
+
+    Object.assign(token, { ok: true, status: 200, body: { ...credentials, token: "renewed-jwt", deviceSessionId: "device-2" } });
+    h.runTimer(timer => timer.delayMs < 30_000);
+    await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", deviceSessionId: "device-2", message: null, call: { active: true } });
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(h.client.disconnected).toBe(false);
+    await expect(h.phone.confirmRegistration()).resolves.toBeUndefined();
+    h.phone.hangup();
+    expect(call.hungUp).toBe(true);
+    h.phone.stop();
+  });
+
   it("auto-answers the invite that belongs to a dial this tab started", async () => {
     const h = harness();
     h.phone.start();

@@ -173,7 +173,7 @@ export function HeaderPhoneStatusMenu({
                 className="flex min-h-11 w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
               >
                 <PhoneCall size={14} aria-hidden="true" />
-                Pripojiť telefón v tomto prehliadači
+                {phone.status === "superseded" ? "Prevziať telefón do tohto okna" : "Pripojiť telefón v tomto prehliadači"}
               </button>
             </div>
           )}

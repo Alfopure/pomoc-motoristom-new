@@ -5,10 +5,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 import type { TelephonyPresenceSnapshot } from "@/lib/telephony/presence";
+import { AUDIO_CONNECTION_WARNING_MS, type AudioConnectionView } from "@/lib/telephony/audio-connection";
 
 import { deviceIsLive } from "./operator-devices";
 import { effectivePresenceStatus, effectivePresenceSince } from "./presence-service";
-import { ACTIVE_SESSION_STATES, readMeta, WAITING_STATES, type AttemptRow, type DeviceRow, type LegRow, type LineRow, type PresenceRow, type SessionRow } from "./state/types";
+import { ACTIVE_SESSION_STATES, isOpenLeg, readMeta, WAITING_STATES, type AttemptRow, type DeviceRow, type LegRow, type LineRow, type PresenceRow, type SessionRow } from "./state/types";
 import type { TelephonyEnvironment } from "./state/types";
 
 /**
@@ -69,6 +70,7 @@ export type ActiveCallView = {
   startedAt: string;
   answeredAt: string | null;
   answeredByProfileId: string | null;
+  audioConnection?: AudioConnectionView | null;
   holdStartedAt: string | null;
   parkedAt: string | null;
   /** Operator who put the caller in the waiting room (`meta.park.by`). */
@@ -116,6 +118,25 @@ export type ActiveCallsDeps = {
 };
 
 const ACTIVE_STATES = [...ACTIVE_SESSION_STATES];
+
+/** A SIP answer/recorder START does not prove the customer and operator joined. */
+function audioConnectionView(session: SessionRow, legs: LegRow[], now: Date): AudioConnectionView | null {
+  if (!["talking", "conference"].includes(session.state) || session.ended_at) return null;
+  const recording = readMeta(session).recording;
+  const pending = recording?.pendingAudio;
+  if (pending?.commands.length) {
+    const startedAt = pending.startedAt ?? pending.readyAt;
+    const expired = now.getTime() - Date.parse(startedAt) >= AUDIO_CONNECTION_WARNING_MS;
+    return { status: expired ? "failed" : "connecting", startedAt, confirmedAt: null,
+      error: expired ? "connection_confirmation_timeout" : null };
+  }
+  const connection = recording?.connection;
+  if (!connection || connection.operatorProfileId !== session.answered_by_profile_id ||
+    !connection.callControlIds.every((id) => legs.some((leg) => leg.telnyx_call_control_id === id && isOpenLeg(leg) && leg.answered_at))) return null;
+  if (!connection.confirmedAt) return { status: "failed", startedAt: connection.startedAt, confirmedAt: null, error: "connection_interrupted" };
+  if (connection.epoch !== recording?.epoch || connection.conferenceId !== session.conference_id) return null;
+  return { status: "connected", startedAt: connection.startedAt, confirmedAt: connection.confirmedAt, error: null };
+}
 
 export async function loadActiveCalls(
   deps: ActiveCallsDeps,
@@ -219,6 +240,7 @@ export async function loadActiveCalls(
       startedAt: session.started_at,
       answeredAt: session.answered_at,
       answeredByProfileId: session.answered_by_profile_id,
+      audioConnection: audioConnectionView(session, legs.filter((leg) => leg.session_id === session.id), now),
       holdStartedAt: session.hold_started_at,
       parkedAt: session.parked_at,
       parkedByProfileId: meta.park?.by ?? null,

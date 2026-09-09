@@ -54,12 +54,18 @@ import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { TELEPHONY_STALE_MESSAGE, useTelephonyConsole } from "./useTelephonyConsole";
 import { TaskPanel, type TaskCreateInput, type TaskDeleteInput, type TaskUpdateInput } from "./TaskPanel";
 import {
+  DEFAULT_MOBILE_NAVIGATION_SHORTCUTS,
   DEFAULT_PINNED_NAVIGATION_VIEWS,
+  MAX_MOBILE_NAVIGATION_SHORTCUTS,
   MAX_PINNED_NAVIGATION_VIEWS,
   isPinnableNavigationView,
+  mobileNavigationPreferenceStorageKey,
   navigationPreferenceStorageKey,
+  parseMobileNavigationShortcuts,
   parsePinnedNavigationViews,
+  toggleMobileNavigationShortcut,
   togglePinnedNavigationView,
+  type MobileNavigationShortcut,
   type PinnableNavigationView,
 } from "./navigation-preferences";
 import { signOutCurrentSession } from "@/components/auth/sign-out";
@@ -101,6 +107,16 @@ type NavigationItem = {
   label: string;
   shortLabel: string;
   view: View;
+};
+
+type MobileShortcutItem = {
+  active: boolean;
+  badgeCount?: number;
+  icon: LucideIcon;
+  label: string;
+  onSelect: () => void;
+  shortcut: MobileNavigationShortcut;
+  shortLabel: string;
 };
 
 type DispatchWorkspaceState = {
@@ -283,7 +299,11 @@ export function DispatchConsole({
   const [pinnedNavigationViews, setPinnedNavigationViews] = useState<PinnableNavigationView[]>([
     ...DEFAULT_PINNED_NAVIGATION_VIEWS,
   ]);
+  const [mobileNavigationShortcuts, setMobileNavigationShortcuts] = useState<MobileNavigationShortcut[]>([
+    ...DEFAULT_MOBILE_NAVIGATION_SHORTCUTS,
+  ]);
   const [navigationPinNotice, setNavigationPinNotice] = useState<string | null>(null);
+  const [mobileNavigationNotice, setMobileNavigationNotice] = useState<string | null>(null);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [activeCaseId, setActiveCaseId] = useState(dispatchCases.find(isActiveDispatchCase)?.id ?? "");
   const [workspace, setWorkspace] = useState<DispatchWorkspaceState>({ kind: "cockpit", mode: "split" });
@@ -334,6 +354,7 @@ export function DispatchConsole({
   const [dashboardColumns, setDashboardColumns] = useState<DashboardColumnWidths>(DEFAULT_DASHBOARD_COLUMNS);
   const dashboardColumnStorageKey = `motorist:dashboard-columns:v1:${viewerProfileId ?? "local-browser"}`;
   const navigationStorageKey = navigationPreferenceStorageKey(viewerProfileId);
+  const mobileNavigationStorageKey = mobileNavigationPreferenceStorageKey(viewerProfileId);
 
   useEffect(() => {
     consoleRef.current?.setAttribute("data-hydrated", "true");
@@ -376,6 +397,31 @@ export function DispatchConsole({
       window.removeEventListener("storage", syncAcrossTabs);
     };
   }, [navigationStorageKey]);
+
+  useEffect(() => {
+    let frameId: number | undefined;
+
+    const applyStoredPreference = (raw: string | null) => {
+      const parsed = parseMobileNavigationShortcuts(raw);
+      frameId = window.requestAnimationFrame(() => setMobileNavigationShortcuts(parsed));
+    };
+
+    try {
+      applyStoredPreference(window.localStorage.getItem(mobileNavigationStorageKey));
+    } catch {
+      // The default cases/tasks/map footer remains available without storage.
+    }
+
+    const syncAcrossTabs = (event: StorageEvent) => {
+      if (event.key === mobileNavigationStorageKey) applyStoredPreference(event.newValue);
+    };
+    window.addEventListener("storage", syncAcrossTabs);
+
+    return () => {
+      if (frameId !== undefined) window.cancelAnimationFrame(frameId);
+      window.removeEventListener("storage", syncAcrossTabs);
+    };
+  }, [mobileNavigationStorageKey]);
 
   useEffect(() => {
     let frameId: number | undefined;
@@ -685,6 +731,47 @@ export function DispatchConsole({
     .map((view) => secondaryNavItems.find((item) => item.view === view))
     .filter((item): item is NavigationItem & { view: PinnableNavigationView } => Boolean(item));
   const secondaryBadgeCount = secondaryNavItems.reduce((total, item) => total + (item.badgeCount ?? 0), 0);
+  const mobileShortcutItems: MobileShortcutItem[] = [
+    {
+      active: activeView === "cases" || activeView === "dispatch" && !focusedTaskId && (mobilePane === "cases" || workspace.kind !== "cockpit" || workspace.mode === "expanded"),
+      icon: Table2,
+      label: "Prípady",
+      onSelect: showMobileCases,
+      shortcut: "dispatch-cases",
+      shortLabel: "Prípady",
+    },
+    {
+      active: activeView === "tasks" || activeView === "dispatch" && Boolean(focusedTaskId),
+      badgeCount: taskAttentionCount,
+      icon: BellRing,
+      label: "Úlohy",
+      onSelect: () => switchView("tasks"),
+      shortcut: "tasks",
+      shortLabel: "Úlohy",
+    },
+    {
+      active: activeView === "dispatch" && mobilePane === "workspace" && workspace.kind === "cockpit" && workspace.mode !== "expanded" && !focusedTaskId,
+      icon: MapPinned,
+      label: "Mapa",
+      onSelect: showMobileMap,
+      shortcut: "dispatch-map",
+      shortLabel: "Mapa",
+    },
+    ...secondaryNavItems
+      .filter((item) => item.view !== "tasks" && item.view !== "cases")
+      .map((item): MobileShortcutItem => ({
+        active: activeView === item.view,
+        badgeCount: item.badgeCount,
+        icon: item.icon,
+        label: item.label,
+        onSelect: () => switchView(item.view),
+        shortcut: item.view as MobileNavigationShortcut,
+        shortLabel: item.shortLabel,
+      })),
+  ];
+  const visibleMobileShortcutItems = mobileNavigationShortcuts
+    .map((shortcut) => mobileShortcutItems.find((item) => item.shortcut === shortcut))
+    .filter((item): item is MobileShortcutItem => Boolean(item));
 
   function toggleNavigationPin(view: PinnableNavigationView) {
     const result = togglePinnedNavigationView(pinnedNavigationViews, view);
@@ -700,6 +787,22 @@ export function DispatchConsole({
       window.localStorage.setItem(navigationStorageKey, JSON.stringify(result.views));
     } catch {
       // The shortcut still works for this session if storage is unavailable.
+    }
+  }
+
+  function toggleMobileShortcut(shortcut: MobileNavigationShortcut) {
+    const result = toggleMobileNavigationShortcut(mobileNavigationShortcuts, shortcut);
+    if (result.limitReached) {
+      setMobileNavigationNotice(`V spodnej lište môžu byť najviac ${MAX_MOBILE_NAVIGATION_SHORTCUTS} skratky. Najprv jednu odopni.`);
+      return;
+    }
+
+    setMobileNavigationShortcuts(result.shortcuts);
+    setMobileNavigationNotice(null);
+    try {
+      window.localStorage.setItem(mobileNavigationStorageKey, JSON.stringify(result.shortcuts));
+    } catch {
+      // The customised footer remains usable for this session.
     }
   }
 
@@ -1778,6 +1881,7 @@ export function DispatchConsole({
                 onCallAction={(action, sessionId) => void runPhoneCallAction(action, sessionId)}
                 onSupervise={(sessionId, mode) => void telephony.supervise(sessionId, mode)}
                 onStopSupervise={(sessionId) => void telephony.stopSupervise(sessionId)}
+                onMakeAvailable={() => void telephony.changePresence({ status: "available" })}
               />
             </div>
           ) : null}
@@ -1837,7 +1941,7 @@ export function DispatchConsole({
         ) : null}
       </div>
 
-      {telephonyConfigured &&
+      {(telephonyConfigured || Boolean(telephony.phone.call)) &&
         phoneBarVisible({
           status: telephony.phone.status,
           hasCall: Boolean(telephony.phoneBar.active || telephony.phone.call || telephony.outboundPending),
@@ -1866,6 +1970,14 @@ export function DispatchConsole({
             outboundPending={telephony.outboundPending}
           />
         )}
+
+      {telephonyConfigured && !telephony.stale && !telephony.snapshot.ownPresence && (
+        <div role="status" className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950 sm:px-4">
+          <span>Na prijímanie hovorov najprv nastavte svoju dostupnosť.</span>
+          <button type="button" disabled={telephony.presenceBusy} onClick={() => void telephony.changePresence({ status: "available" })} className="min-h-10 rounded-md bg-zinc-950 px-3 font-semibold text-white disabled:opacity-50">{telephony.presenceBusy ? "Ukladám…" : "Som dostupný"}</button>
+          {telephony.notice && <p role="alert" className="basis-full text-sm font-semibold">{telephony.notice}</p>}
+        </div>
+      )}
 
       {visibleWarning && (
         <div role="alert" className="relative z-40 flex min-h-[42px] shrink-0 items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 sm:px-4">
@@ -2204,36 +2316,31 @@ export function DispatchConsole({
       />
 
       <nav className="dispatch-mobile-nav z-[2147483000] border-t border-zinc-200 bg-white/95 px-2 shadow-[0_-4px_20px_rgba(24,24,27,0.06)] backdrop-blur lg:hidden" aria-label="Mobilná navigácia">
-        <div className="mx-auto grid max-w-xl grid-cols-4 gap-1">
-          <MobileTabButton
-            active={activeView === "cases" || activeView === "dispatch" && !focusedTaskId && (mobilePane === "cases" || workspace.kind !== "cockpit" || workspace.mode === "expanded")}
-            icon={Table2}
-            label="Prípady"
-            shortLabel="Prípady"
-            onClick={showMobileCases}
-          />
-          <MobileTabButton
-            active={activeView === "tasks" || activeView === "dispatch" && Boolean(focusedTaskId)}
-            badgeCount={taskAttentionCount}
-            icon={BellRing}
-            label="Úlohy"
-            shortLabel="Úlohy"
-            onClick={() => switchView("tasks")}
-          />
-          <MobileTabButton
-            active={activeView === "dispatch" && mobilePane === "workspace" && workspace.kind === "cockpit" && workspace.mode !== "expanded" && !focusedTaskId}
-            icon={MapPinned}
-            label="Mapa"
-            shortLabel="Mapa"
-            onClick={showMobileMap}
-          />
+        <div
+          className="mx-auto grid max-w-xl gap-1"
+          style={{ gridTemplateColumns: `repeat(${visibleMobileShortcutItems.length + 1}, minmax(0, 1fr))` }}
+        >
+          {visibleMobileShortcutItems.map((item) => (
+            <MobileTabButton
+              key={item.shortcut}
+              active={item.active}
+              badgeCount={item.badgeCount}
+              icon={item.icon}
+              label={item.label}
+              shortLabel={item.shortLabel}
+              onClick={item.onSelect}
+            />
+          ))}
           <NavigationMenu
             activeView={activeView}
             items={secondaryNavItems}
             badgeCount={0}
-            pinNotice={navigationPinNotice}
+            mobileShortcutItems={mobileShortcutItems}
+            mobileShortcuts={mobileNavigationShortcuts}
+            pinNotice={mobileNavigationNotice}
             pinnedViews={pinnedNavigationViews}
             onSelect={switchView}
+            onToggleMobileShortcut={toggleMobileShortcut}
             onTogglePin={toggleNavigationPin}
             variant="mobile"
           />
@@ -2433,18 +2540,24 @@ function NavigationMenu({
   activeView,
   badgeCount,
   items,
+  mobileShortcutItems,
+  mobileShortcuts,
   pinNotice,
   pinnedViews,
   onSelect,
+  onToggleMobileShortcut,
   onTogglePin,
   variant,
 }: {
   activeView: View;
   badgeCount: number;
   items: Array<NavigationItem & { view: PinnableNavigationView }>;
+  mobileShortcutItems?: MobileShortcutItem[];
+  mobileShortcuts?: MobileNavigationShortcut[];
   pinNotice: string | null;
   pinnedViews: PinnableNavigationView[];
   onSelect: (view: View) => void;
+  onToggleMobileShortcut?: (shortcut: MobileNavigationShortcut) => void;
   onTogglePin: (view: PinnableNavigationView) => void;
   variant: "header" | "mobile";
 }) {
@@ -2458,6 +2571,10 @@ function NavigationMenu({
     .filter((item): item is NavigationItem & { view: PinnableNavigationView } => Boolean(item));
   const unpinnedItems = items.filter((item) => !pinnedViews.includes(item.view));
   const unpinnedBadgeCount = unpinnedItems.reduce((total, item) => total + (item.badgeCount ?? 0), 0);
+  const selectedMobileItems = (mobileShortcuts ?? [])
+    .map((shortcut) => mobileShortcutItems?.find((item) => item.shortcut === shortcut))
+    .filter((item): item is MobileShortcutItem => Boolean(item));
+  const availableMobileItems = (mobileShortcutItems ?? []).filter((item) => !(mobileShortcuts ?? []).includes(item.shortcut));
 
   useEffect(() => {
     if (!open) return;
@@ -2529,10 +2646,12 @@ function NavigationMenu({
           <div className="flex items-start justify-between gap-3 px-1 pb-2.5">
             <div>
               <p className="text-sm font-semibold text-zinc-950">Obrazovky</p>
-              <p className="mt-0.5 text-[11px] leading-4 text-zinc-500">Pripni si najpoužívanejšie do hornej lišty.</p>
+              <p className="mt-0.5 text-[11px] leading-4 text-zinc-500">
+                {mobile ? "Vyber si tri skratky do spodnej lišty. Mapa aj všetky obrazovky ostanú dostupné tu." : "Pripni si najpoužívanejšie do hornej lišty."}
+              </p>
             </div>
             <span className="shrink-0 rounded-full bg-zinc-100 px-2 py-1 text-[10px] font-bold text-zinc-600">
-              {pinnedItems.length} z {MAX_PINNED_NAVIGATION_VIEWS} skratiek
+              {mobile ? selectedMobileItems.length : pinnedItems.length} z {mobile ? MAX_MOBILE_NAVIGATION_SHORTCUTS : MAX_PINNED_NAVIGATION_VIEWS} skratiek
             </span>
           </div>
 
@@ -2542,6 +2661,36 @@ function NavigationMenu({
             </p>
           ) : null}
 
+          {mobile ? (
+            <section aria-labelledby="mobile-shortcuts-title">
+              <p id="mobile-shortcuts-title" className="px-1 text-[10px] font-bold uppercase tracking-[0.12em] text-zinc-500">
+                Skratky v spodnej lište
+              </p>
+              {selectedMobileItems.length > 0 ? (
+                <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                  {selectedMobileItems.map((item) => (
+                    <MobileShortcutMenuItem key={item.shortcut} item={item} pinned onSelect={() => { setOpen(false); item.onSelect(); }} onToggle={onToggleMobileShortcut} />
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-1.5 rounded-lg border border-dashed border-zinc-200 px-3 py-2 text-xs text-zinc-500">Vyber si skratky zo zoznamu nižšie. Menu zostáva vždy dostupné.</p>
+              )}
+              {availableMobileItems.length > 0 && (
+                <div className="mt-2 grid grid-cols-2 gap-1.5">
+                  {availableMobileItems.map((item) => (
+                    <MobileShortcutMenuItem
+                      key={item.shortcut}
+                      item={item}
+                      pinned={false}
+                      pinDisabled={selectedMobileItems.length >= MAX_MOBILE_NAVIGATION_SHORTCUTS}
+                      onSelect={() => { setOpen(false); item.onSelect(); }}
+                      onToggle={onToggleMobileShortcut}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          ) : (
           <section aria-labelledby={`${variant}-pinned-navigation-title`}>
             <p id={`${variant}-pinned-navigation-title`} className="px-1 text-[10px] font-bold uppercase tracking-[0.12em] text-zinc-500">
               Pripnuté
@@ -2566,15 +2715,18 @@ function NavigationMenu({
               </p>
             )}
           </section>
+          )}
 
           <div className="my-3 border-t border-zinc-200" />
+
+          {mobile && <p className="px-1 text-[10px] font-bold uppercase tracking-[0.12em] text-zinc-500">Všetky obrazovky</p>}
 
           {([
             ["daily", "Každodenná práca"],
             ["operations", "Prevádzka"],
             ["management", "Prehľady a správa"],
           ] as Array<[NavigationGroup, string]>).map(([group, label]) => {
-            const groupItems = unpinnedItems.filter((item) => item.group === group);
+            const groupItems = (mobile ? items : unpinnedItems).filter((item) => item.group === group);
             if (groupItems.length === 0) return null;
 
             return (
@@ -2590,6 +2742,7 @@ function NavigationMenu({
                       item={item}
                       pinned={false}
                       pinDisabled={pinnedItems.length >= MAX_PINNED_NAVIGATION_VIEWS}
+                      showPinAction={!mobile}
                       onSelect={select}
                       onTogglePin={onTogglePin}
                     />
@@ -2604,6 +2757,49 @@ function NavigationMenu({
   );
 }
 
+function MobileShortcutMenuItem({
+  item,
+  onSelect,
+  onToggle,
+  pinDisabled = false,
+  pinned,
+}: {
+  item: MobileShortcutItem;
+  onSelect: () => void;
+  onToggle?: (shortcut: MobileNavigationShortcut) => void;
+  pinDisabled?: boolean;
+  pinned: boolean;
+}) {
+  const ItemIcon = item.icon;
+  const PinIcon = pinned ? PinOff : Pin;
+  const pinAction = pinned ? "Odobrať zo spodnej lišty" : "Pridať do spodnej lišty";
+  return (
+    <div className={`group relative min-w-0 overflow-hidden rounded-lg border transition ${item.active ? "border-zinc-950 bg-zinc-950" : "border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50"}`}>
+      <button
+        type="button"
+        aria-current={item.active ? "page" : undefined}
+        aria-label={`${item.label} – skratka spodnej lišty`}
+        onClick={onSelect}
+        className={`flex min-h-11 w-full items-center gap-2 px-2.5 py-2 pr-10 text-left text-xs font-semibold ${item.active ? "text-white" : "text-zinc-700 group-hover:text-zinc-950"}`}
+      >
+        <ItemIcon size={16} className="shrink-0" aria-hidden="true" />
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      </button>
+      <button
+        type="button"
+        aria-label={pinDisabled ? `Spodná lišta je plná. Najprv jednu skratku odober, potom môžeš pridať ${item.label}` : `${pinAction}: ${item.label}`}
+        aria-pressed={pinned}
+        data-testid={`mobile-navigation-shortcut-${item.shortcut}`}
+        title={pinDisabled ? "Najprv odober jednu z troch skratiek" : `${pinAction}: ${item.label}`}
+        onClick={() => onToggle?.(item.shortcut)}
+        className={`absolute right-1.5 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md transition ${item.active ? "text-zinc-300 hover:bg-white/15 hover:text-[#FCD703]" : "text-zinc-400 hover:bg-zinc-200 hover:text-zinc-950"} ${pinDisabled ? "opacity-50" : ""}`}
+      >
+        <PinIcon size={14} aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
+
 function NavigationMenuItem({
   active,
   item,
@@ -2611,6 +2807,7 @@ function NavigationMenuItem({
   onTogglePin,
   pinDisabled,
   pinned,
+  showPinAction = true,
 }: {
   active: boolean;
   item: NavigationItem & { view: PinnableNavigationView };
@@ -2618,6 +2815,7 @@ function NavigationMenuItem({
   onTogglePin: (view: PinnableNavigationView) => void;
   pinDisabled: boolean;
   pinned: boolean;
+  showPinAction?: boolean;
 }) {
   const ItemIcon = item.icon;
   const PinIcon = pinned ? PinOff : Pin;
@@ -2630,7 +2828,7 @@ function NavigationMenuItem({
         type="button"
         aria-current={active ? "page" : undefined}
         onClick={() => onSelect(item.view)}
-        className={`flex min-h-11 w-full items-center gap-2 px-2.5 py-2 pr-10 text-left text-xs font-semibold transition ${active ? "text-white" : "text-zinc-700 group-hover:text-zinc-950"}`}
+        className={`flex min-h-11 w-full items-center gap-2 px-2.5 py-2 text-left text-xs font-semibold transition ${showPinAction ? "pr-10" : "pr-2.5"} ${active ? "text-white" : "text-zinc-700 group-hover:text-zinc-950"}`}
       >
         <ItemIcon size={16} className="shrink-0" aria-hidden="true" />
         <span className="min-w-0 flex-1 truncate">{item.label}</span>
@@ -2640,7 +2838,7 @@ function NavigationMenuItem({
           </span>
         ) : null}
       </button>
-      <button
+      {showPinAction && <button
         type="button"
         aria-label={pinDisabled ? `Limit skratiek je plný. Najprv jednu odopni, potom môžeš pripnúť ${item.label}` : `${pinAction} ${item.label}`}
         aria-pressed={pinned}
@@ -2650,7 +2848,7 @@ function NavigationMenuItem({
         className={`absolute right-1.5 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md transition ${active ? "text-zinc-300 hover:bg-white/15 hover:text-[#FCD703]" : "text-zinc-400 hover:bg-zinc-200 hover:text-zinc-950"} ${pinDisabled ? "opacity-50" : ""}`}
       >
         <PinIcon size={14} aria-hidden="true" />
-      </button>
+      </button>}
     </div>
   );
 }

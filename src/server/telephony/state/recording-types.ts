@@ -47,7 +47,11 @@ export type RecordingState = {
   /** Audio was released before START was confirmed. Later acknowledgements cannot prove that earlier coverage. */
   coverageUnconfirmed?: { since: string; epoch: number; audioCommandId: string };
   barrier?: { action: AppEvent | null; deadlineAt: string; epoch: number } | null;
-  pendingAudio?: { epoch: number; readyAt: string; sourceEventId: string; commands: Array<Extract<Command, { kind: "bridge" | "conference_unhold" | "conference_join" }>> } | null;
+  pendingAudio?: { epoch: number; startedAt?: string; readyAt: string; sourceEventId: string; operatorProfileId?: string | null; conferenceId?: string | null;
+    commands: Array<Extract<Command, { kind: "bridge" | "conference_unhold" | "conference_join" }>> } | null;
+  /** confirmedAt is set only after both parties have verified joined membership. */
+  connection?: { commandId: string; epoch: number; startedAt: string; confirmedAt: string | null; conferenceId: string | null;
+    operatorProfileId: string | null; callControlIds: string[] } | null;
 };
 
 /** A bounded, resumable customer-only announcement. Provider completion is mandatory. */
@@ -63,7 +67,8 @@ export type AnnouncementSequence = {
 };
 
 export function summarizeSessionRecording(metadata: unknown): { state: "off" | "notice" | "starting" | "recording" | "stopping" | "stopped" | "failed" | "unknown"; suppressed: boolean } {
-  const meta = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata as { recording?: RecordingState; announcement_sequence?: AnnouncementSequence } : {};
+  const meta = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata as { recording?: RecordingState; announcement_sequence?: AnnouncementSequence;
+    greeting?: { recording_notice?: string; completed_at?: string } } : {};
   const recording = meta.recording;
   const suppressed = recording?.suppressionReason === "objection";
   if (!recording || !Array.isArray(recording.recorders)) return { state: "off", suppressed: false };
@@ -74,6 +79,7 @@ export function summarizeSessionRecording(metadata: unknown): { state: "off" | "
   if (states.includes("recording")) return { state: "recording", suppressed };
   const pendingNotice = meta.announcement_sequence?.keys[meta.announcement_sequence.index];
   if (pendingNotice === "recordingNotice" || pendingNotice === "recordingServiceNotice") return { state: "notice", suppressed };
+  if (meta.greeting?.recording_notice && !meta.greeting.completed_at && !recording.noticeFailed) return { state: "notice", suppressed };
   if (recording.noticeFailed || recording.error && recording.policy.enabled) return { state: "failed", suppressed };
   return { state: recording.recorders.length || suppressed ? "stopped" : "off", suppressed };
 }

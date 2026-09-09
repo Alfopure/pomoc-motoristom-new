@@ -6,6 +6,18 @@ Run `python3 tests/postgres/presence-contract.py` after installing `psycopg[bina
 
 The TypeScript workflow fake in `src/test/fake-presence.ts` supports application tests. It does not prove PostgreSQL locks, RLS, triggers, or transactional rollback.
 
+`node tests/postgres/presence-compatibility.mjs` builds the working application and
+runs pickup → answer → hangup → manual availability through the exact installed
+presence/durable SQL RPCs for admission off/off, on/on and on/off. It also checks
+compatibility internal answer ownership and idempotent ended-session recovery.
+It recreates only the loopback `stability_compatibility` fixture; do not run it
+concurrently with `compatibility-run.mjs`, which uses the same database. The
+existing bridge persists workflow mutations to PostgreSQL and applies real
+contract RPCs; filtering still uses the test query builder. Provider and media
+are synthetic, outbound HTTP is blocked, and this does not verify PostgREST,
+production RLS or audible calls. It requires the same local PostgreSQL and
+Python dependencies as the other fixture scripts.
+
 Presence writer inventory for the stability implementation:
 
 | Writer | Contract |

@@ -1,20 +1,21 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { isDeepStrictEqual } from "node:util";
 
 import type { Database, Json } from "@/lib/supabase/database.types";
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
-import { readAnnouncementConfig, resolveAnnouncement } from "@/lib/telephony/announcements";
+import { readAnnouncementConfig, resolveAnnouncement, resolveCombinedInboundIntro } from "@/lib/telephony/announcements";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { addTelephonyUsage } from "../usage";
 import { advanceRingStep, resolvePersonalRingMembers } from "../routing/ring-plan";
-import { authorizeOperatorDispatch, reserveOperator, transitionPresence } from "../routing/reservation";
+import { authorizeOperatorDispatch, reserveAnsweredOperator, transitionPresence } from "../routing/reservation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { checkpointEffects, commandStillApplies, continuationComplete, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
 import { isCallGoneError, TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
-import { recordingCommandOutcome, recordingIntent } from "./recording";
+import { pendingAudioStillOwned, recordingCommandOutcome, recordingIntent } from "./recording";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
 import { attachContactOperations, bindContactConference, contactOperationIntent, readContactHistory, verifyConferenceContact, type ContactProof } from "../contact-proof";
@@ -96,6 +97,8 @@ function ivrDispatchOutcome(session: SessionRow, command: Command, executed: { s
 
 type AdminClient = SupabaseClient<Database>;
 
+type EventTiming = { runner_started_at: string; lease_wait_ms: number; effects_started_at?: string; completed_at: string; processing_ms: number };
+
 export type EffectsDeps = {
   admin: AdminClient;
   telnyx: TelnyxClient | null;
@@ -113,6 +116,7 @@ export type EffectsDeps = {
    * easily outlives the 4 s lease; the RPC is re-entrant for the same token.
    */
   renewLease?: () => Promise<void>;
+  eventTiming?: () => EventTiming;
 };
 
 export type CommandOutcome = {
@@ -125,7 +129,15 @@ export type CommandOutcome = {
   error: string | null;
   ms: number;
   detail?: Record<string, unknown>;
+  /** Whole effect timing, including verification/checkpointing; not device ring time. */
+  startedAt?: string;
+  phase?: string;
 };
+
+export function auditCommandOutcomes(commands: CommandOutcome[]) {
+  return commands.map((command) => ({ kind: command.kind, ok: command.ok, command_id: command.commandId, skipped: command.skipped,
+    ...(command.startedAt ? { started_at: command.startedAt, effect_ms: command.ms, phase: command.phase ?? command.kind } : {}) }));
+}
 
 export type ApplyResult = {
   session: SessionRow;
@@ -515,7 +527,7 @@ function safeEventTarget(target: AppEvent["target"] | null | undefined): Json {
 
 /** Audit row per processed event (`event_fingerprint` = event id → idempotent). */
 export async function recordCallEvent(
-  deps: Pick<EffectsDeps, "admin" | "organizationId" | "now">,
+  deps: Pick<EffectsDeps, "admin" | "organizationId" | "now" | "eventTiming">,
   input: {
     session: SessionRow | null;
     event: SessionEvent;
@@ -523,8 +535,9 @@ export async function recordCallEvent(
     stateBefore: string | null;
     stateAfter: string | null;
     notes: string[];
-    commands: Array<{ kind: string; ok: boolean }>;
+    commands: Array<{ kind: string; ok: boolean; command_id?: string | null; skipped?: boolean; started_at?: string; effect_ms?: number; phase?: string }>;
     error?: string | null;
+    timing?: EventTiming;
   },
 ): Promise<void> {
   const { admin } = deps;
@@ -534,6 +547,7 @@ export async function recordCallEvent(
     callId = call.data?.id ?? null;
   }
   const event = input.event;
+  const measuredTiming = input.timing ?? deps.eventTiming?.();
   const target = event.kind === "app" ? safeEventTarget(event.target) : null;
   const rawPayload = event.kind === "telnyx" ? toJson(event.type.includes("recording.")
     ? { recording_id: event.payload.recording_id ?? null, recording_started_at: event.payload.recording_started_at ?? null, recording_ended_at: event.payload.recording_ended_at ?? null, channels: event.payload.channels ?? null }
@@ -558,6 +572,7 @@ export async function recordCallEvent(
       notes: input.notes,
       commands: input.commands,
       error: input.error ?? null,
+      ...(measuredTiming ? { timing: measuredTiming } : {}),
       ...(input.session && readMeta(input.session).recording?.coverageUnconfirmed
         ? { recording_coverage_unconfirmed: readMeta(input.session).recording!.coverageUnconfirmed } : {}),
     }),
@@ -600,6 +615,9 @@ function resolvePrompt(deps: EffectsDeps, ctx: ExecutionContext, media: MediaRef
   const config = readAnnouncementConfig(readMeta(ctx.session).announcements);
   const key = media ? announcementKeyForMedia(media) : null;
   if (key) {
+    const notice = readMeta(ctx.session).greeting?.recording_notice;
+    const combined = key === "greeting" && notice ? resolveCombinedInboundIntro(config, notice) : null;
+    if (combined) return { url: mediaUrl(deps.mediaBaseUrl, { file: combined.file }), text: combined.text, voice: combined.voice };
     const prompt = resolveAnnouncement(config, key);
     return { url: prompt.file ? mediaUrl(deps.mediaBaseUrl, { file: prompt.file }) : null, text: prompt.text, voice: prompt.voice };
   }
@@ -837,15 +855,26 @@ class RecordingConnectionPendingError extends Error {
 async function executeRecordedConnection(deps: EffectsDeps, ctx: ExecutionContext, command: Extract<Command, { kind: "bridge" }>): Promise<{ skipped: false; detail: { conferenceId: string } }> {
   const telnyx = requireTelnyx(deps), name = command.recordingConferenceName;
   if (!deps.renewLease || name !== `rec-${ctx.session.id}-${command.commandId}`) throw new RecordingContinuationSupersededError();
+  // Normalize optional undefined values exactly as the persisted JSON snapshot.
+  const expectedCommand = toJson(command);
   const epoch = readMeta(ctx.session).recording?.epoch;
+  const sourceEventId = readMeta(ctx.session).recording?.pendingAudio?.sourceEventId;
+  const operatorProfileId = ctx.session.answered_by_profile_id;
+  let expectedConferenceId = ctx.session.conference_name === name ? ctx.session.conference_id : null;
   const readinessDeadline = Date.now() + 10_000;
   const current = async () => {
     try { await deps.renewLease?.(); } catch { throw new RecordingContinuationSupersededError(); }
     const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
     const recording = fresh.data ? readMeta(fresh.data).recording : undefined;
-    if (fresh.error || !fresh.data || fresh.data.ended_at || fresh.data.version !== ctx.session.version || !recording ||
+    if (fresh.error || !fresh.data || fresh.data.ended_at || !recording ||
       recording.epoch !== epoch || recording.suppressionReason === "objection" ||
-      !recording.pendingAudio?.commands.some((item) => item.commandId === command.commandId)) throw new RecordingContinuationSupersededError();
+      !recording.pendingAudio || recording.pendingAudio.sourceEventId !== sourceEventId ||
+      !recording.pendingAudio.commands.some((item) => isDeepStrictEqual(item, expectedCommand)) ||
+      fresh.data.answered_by_profile_id !== operatorProfileId || !["talking", "conference"].includes(fresh.data.state) ||
+      fresh.data.conference_id && (fresh.data.conference_name && fresh.data.conference_name !== name || expectedConferenceId && fresh.data.conference_id !== expectedConferenceId)) throw new RecordingContinuationSupersededError();
+    // A conference webhook or recorder acknowledgement can legitimately advance
+    // version. Validate the actual operation/epoch/topology and adopt its latest
+    // snapshot, retaining CAS for subsequent writes.
     ctx.session = fresh.data;
     const legs = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id)
       .in("telnyx_call_control_id", [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)]);
@@ -864,7 +893,7 @@ async function executeRecordedConnection(deps: EffectsDeps, ctx: ExecutionContex
   };
   try {
     let id = ctx.session.conference_id;
-    if (!id) {
+    if (!id || ctx.session.conference_name !== name) {
       try {
         const conference = await createOrFindConference(telnyx, command.commandId, resolveLeg(ctx, command.leg), name);
         id = conference.id;
@@ -876,6 +905,7 @@ async function executeRecordedConnection(deps: EffectsDeps, ctx: ExecutionContex
         if (matches.length !== 1) throw new RecordingConnectionPendingError();
         id = matches[0].id!;
       }
+      expectedConferenceId = id;
       await current();
       const updated = await deps.admin.from("motorist_call_sessions").update({ conference_id: id, conference_name: name })
         .eq("organization_id", deps.organizationId).eq("id", ctx.session.id).eq("version", ctx.session.version).is("ended_at", null).select("*").maybeSingle();
@@ -1144,12 +1174,59 @@ async function executeReduceResult(
   let compensations = result.compensations;
 
   if (result.guard && !input.continuation) {
-    const reserved = await reserveOperator(deps.admin, { profileId: result.guard.profileId, sessionId: input.session.id, organizationId: deps.organizationId, expectedToken: result.guard.offerToken });
-    if (!reserved) {
+    const reserved = await reserveAnsweredOperator(deps.admin, { profileId: result.guard.profileId, sessionId: input.session.id, organizationId: deps.organizationId, expectedToken: result.guard.offerToken });
+    if (!reserved.applied) {
       branch = "rejected";
       transition = result.guard.onRejected.next;
       commands = result.guard.onRejected.commands;
       compensations = [];
+    } else if (reserved.offerToken && !result.guard.offerToken) {
+      try {
+        // Legacy transfer/internal/consult legs can first acquire ownership at
+        // answer time. Save the returned token on that exact leg; rereading the
+        // current presence token later could steal a newer same-session owner.
+        if (input.event.kind !== "telnyx") throw new EffectsError("answer ownership requires a provider leg");
+        const callControlId = input.event.callControlId;
+        if (!callControlId) throw new EffectsError("answer ownership requires a call control id");
+        const leg = await deps.admin.from("motorist_call_legs").select("id, client_state")
+          .eq("organization_id", deps.organizationId).eq("session_id", input.session.id)
+          .eq("profile_id", result.guard.profileId).eq("telnyx_call_control_id", callControlId).maybeSingle();
+        if (leg.error) throw new EffectsError("answer ownership leg unavailable");
+        const plannedLeg = transition.legs.find(item => item.callControlId === callControlId);
+        const clientState = leg.data?.client_state ?? plannedLeg?.values.client_state;
+        const prior = clientState && typeof clientState === "object" && !Array.isArray(clientState) ? clientState : {};
+        const ownedState = { ...prior, offerToken: reserved.offerToken };
+        if (leg.data) {
+          const bound = await deps.admin.from("motorist_call_legs").update({ client_state: ownedState })
+            .eq("id", leg.data.id).eq("session_id", input.session.id).is("ended_at", null).select("id");
+          if (bound.error || !bound.data?.length) throw new EffectsError("answer ownership leg ended before binding");
+        } else if (plannedLeg?.createIfMissing) {
+          // Answer may precede initiated. Persist identity without prematurely
+          // marking the leg answered, so a session CAS retry can still handle it.
+          const identity = { ...plannedLeg.values, state: "initiated" as const, client_state: ownedState };
+          delete identity.answered_at;
+          delete identity.bridged_at;
+          await applyLegPatch(deps, input.session, { ...plannedLeg, values: identity });
+        } else throw new EffectsError("answer ownership leg missing");
+        if (plannedLeg?.values.client_state) plannedLeg.values.client_state = ownedState;
+        // The reducer ran before acquisition, so this event's compensation must
+        // use the same token as subsequent events loaded from the saved leg.
+        for (const next of [transition, ...compensations.map(item => item.next)]) {
+          for (const change of next?.presence ?? []) {
+            if (change.profileId === result.guard.profileId && !change.onlyIfToken) change.onlyIfToken = reserved.offerToken;
+          }
+        }
+      } catch (error) {
+        // Acquisition must not strand the operator if binding the leg fails.
+        // Exact revision/token guards refuse to clear any intervening winner.
+        if (!reserved.reused) await transitionPresence(deps.admin, {
+          organizationId: deps.organizationId, profileId: result.guard.profileId,
+          sessionId: input.session.id, action: "release", status: "available",
+          expectedToken: reserved.offerToken, expectedRevision: reserved.revision,
+          reason: "answer ownership binding failed",
+        });
+        throw error;
+      }
     }
   }
 
@@ -1204,7 +1281,7 @@ async function executeReduceResult(
       if (pendingCommand) {
         const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
         const recording = fresh.data ? readMeta(fresh.data).recording : undefined;
-        if (fresh.error || !fresh.data || fresh.data.ended_at || !recording || !pending || recording.epoch !== pending.epoch || recording.suppressionReason === "objection" || !recording.pendingAudio?.commands.some((item) => "commandId" in command && item.commandId === command.commandId)) throw new RecordingContinuationSupersededError();
+        if (fresh.error || !fresh.data || !recording || !pending || !pendingAudioStillOwned(fresh.data, pending) || recording.epoch !== pending.epoch || recording.suppressionReason === "objection" || !recording.pendingAudio?.commands.some((item) => "commandId" in command && item.commandId === command.commandId)) throw new RecordingContinuationSupersededError();
         if (!recording.coverageUnconfirmed && !recording.recorders.some((recorder) => recorder.epoch === pending.epoch && recorder.observed === "recording")) {
           // Commit uncertainty before connecting audio, including when the START
           // failure checkpoint was lost. A later retry cannot restore this audio.
@@ -1242,10 +1319,17 @@ async function executeReduceResult(
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
           if (fresh.error || !fresh.data) throw new EffectsError("audio checkpoint unavailable");
           const meta = readMeta(fresh.data), recording = meta.recording;
-          if (recording && recording.pendingAudio && pending && recording.pendingAudio.epoch === pending.epoch) {
+          if (recording && recording.pendingAudio && pending && recording.pendingAudio.epoch === pending.epoch &&
+            recording.pendingAudio.sourceEventId === pending.sourceEventId && pendingAudioStillOwned(fresh.data, pending) &&
+            recording.pendingAudio.commands.some((item) => "commandId" in command && item.commandId === command.commandId)) {
             const remaining = recording.pendingAudio.commands.filter((item) => !("commandId" in command) || item.commandId !== command.commandId);
             const update = emptyTransition();
-            update.session.metadata = toJson({ ...meta, recording: { ...recording, pendingAudio: remaining.length ? { ...recording.pendingAudio, commands: remaining } : null } });
+            const verifiedConnection = command.kind === "bridge" && command.recordingConferenceName && typeof executed.detail?.conferenceId === "string"
+              ? { commandId: command.commandId, epoch: pending.epoch, startedAt: pending.startedAt ?? pending.readyAt,
+                confirmedAt: deps.now().toISOString(), conferenceId: executed.detail.conferenceId,
+                operatorProfileId: fresh.data.answered_by_profile_id, callControlIds: [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)] }
+              : recording.connection;
+            update.session.metadata = toJson({ ...meta, recording: { ...recording, connection: verifiedConnection, pendingAudio: remaining.length ? { ...recording.pendingAudio, commands: remaining } : null } });
             session = await persistTransition(deps, { session: fresh.data, transition: update, expectedVersion: fresh.data.version, event: input.event });
             ctx.session = session;
           }
@@ -1256,20 +1340,37 @@ async function executeReduceResult(
         }
       }
       if (command.kind === "recording_start" || command.kind === "recording_stop") {
-        const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
-        if (latest.error || !latest.data) throw new EffectsError("recording state checkpoint unavailable");
-        ctx.session = latest.data;
-        const changed = recordingCommandOutcome(ctx.session, command, true, deps.now().toISOString(), false, false, typeof executed.detail?.providerRecordingId === "string" ? executed.detail.providerRecordingId : null);
-        const update = emptyTransition();
-        update.session.metadata = changed.metadata;
-        session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event });
+        // Provider START/STOP has already succeeded. A concurrent bookkeeping
+        // CAS must retry this acknowledgement, never report that capture became
+        // unknown or execute the provider operation again.
+        for (let retry = 0; ; retry++) {
+          const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
+          if (latest.error || !latest.data) throw new EffectsError("recording state checkpoint unavailable");
+          ctx.session = latest.data;
+          const changed = recordingCommandOutcome(ctx.session, command, true, deps.now().toISOString(), false, false, typeof executed.detail?.providerRecordingId === "string" ? executed.detail.providerRecordingId : null);
+          const update = emptyTransition();
+          update.session.metadata = changed.metadata;
+          try {
+            session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event });
+            break;
+          } catch (error) {
+            if (!(error instanceof SessionConflictError) || retry >= 3) throw error;
+          }
+        }
         ctx.session = session;
         if (command.kind === "recording_start") {
+          const pendingBeforeSettle = readMeta(session).recording?.pendingAudio;
           // Persist the provider identity before the proven media-settle interval.
           await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(RECORDING_START_SETTLE_MS);
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
-          if (fresh.error || !fresh.data || fresh.data.version !== session.version || fresh.data.ended_at) throw new RecordingContinuationSupersededError();
+          const recording = fresh.data ? readMeta(fresh.data).recording : undefined;
+          const recorder = recording?.recorders.find((item) => item.id === command.recorderId);
+          if (fresh.error || !fresh.data || fresh.data.ended_at || recording?.epoch !== command.epoch || recording.suppressionReason === "objection" ||
+            recorder?.desired !== "recording" || recorder.observed !== "recording" ||
+            pendingBeforeSettle && (!pendingAudioStillOwned(fresh.data, pendingBeforeSettle) || recording.pendingAudio?.sourceEventId !== pendingBeforeSettle.sourceEventId)) throw new RecordingContinuationSupersededError();
           try { await deps.renewLease?.(); } catch { throw new RecordingContinuationSupersededError(); }
+          ctx.session = fresh.data;
+          session = fresh.data;
         }
       }
       if (["bridge", "conference_join", "conference_leave", "conference_hold", "conference_unhold", "recording_stop", "recording_start"].includes(command.kind)) {
@@ -1402,6 +1503,14 @@ async function executeReduceResult(
         }
       }
       break;
+    } finally {
+      const outcome = outcomes.findLast((item) => item.key === key);
+      if (outcome) {
+        outcome.startedAt = new Date(started).toISOString();
+        const announcement = command.kind === "playback_start" ? announcementKeyForMedia(command.media) : null;
+        outcome.phase = command.kind === "playback_start" ? `announcement:${announcement ?? "custom"}${announcement === "greeting" && readMeta(ctx.session).greeting?.recording_notice ? `+${readMeta(ctx.session).greeting!.recording_notice}` : ""}`
+          : command.kind === "dial" ? `dial:${command.role}` : command.kind;
+      }
     }
   }
 
@@ -1422,7 +1531,7 @@ async function executeReduceResult(
     }
     if (!failure && !input.continuation.auditComplete && input.continuation.commands.every((command) => input.continuation!.completedCommands.includes(commandKey(command)))) {
       await recordCallEvent(deps, { session, event: input.continuation.event, handledStatus: "processed", stateBefore: input.continuation.stateBefore, stateAfter: session.state,
-        notes: [...transition.notes, "durable effects completed"], commands: outcomes.map((command) => ({ kind: command.kind, ok: command.ok })) });
+        notes: [...transition.notes, "durable effects completed"], commands: auditCommandOutcomes(outcomes) });
       input.continuation.auditComplete = true;
     }
     input.continuation.attempts += 1;

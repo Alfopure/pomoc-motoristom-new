@@ -13,6 +13,7 @@
  */
 
 import type { CallCenterCall, CallerMatch } from "@/data/dispatch-types";
+import type { AudioConnectionView } from "@/lib/telephony/audio-connection";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { TelephonyPresenceSnapshot, TelephonyPresenceStatus } from "@/lib/telephony/presence";
 
@@ -55,6 +56,7 @@ export type ActiveCallLegPayload = {
 };
 
 export type ActiveCallPayload = {
+  audioConnection?: AudioConnectionView | null;
   sessionId: string;
   /** `motorist_calls.id` of the log row (link-case / outcome), null until it exists. */
   callId: string | null;
@@ -211,6 +213,7 @@ export function callCenterCallFromActive(
 export type PhoneBarCallKind = "active" | "offer" | "waiting";
 
 export type PhoneBarCall = {
+  audioConnection?: AudioConnectionView | null;
   sessionId: string;
   callId: string | null;
   /** Exact browser invite identities; never derived from a phone number. */
@@ -345,6 +348,7 @@ function pendingIncomingLeg(call: ActiveCallPayload, leg: ActiveCallLegPayload, 
 
 function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorProfileId: string, options: PhoneBarModelOptions = {}): PhoneBarCall {
   return {
+    audioConnection: call.audioConnection ?? null,
     sessionId: call.sessionId,
     callId: call.callId,
     browserCallControlIds: [...new Set(call.legs.flatMap((leg) =>

@@ -111,3 +111,19 @@ test("a real call-control failure remains visible", async ({ page }) => {
   await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ error: "Ukončenie hovoru zlyhalo.", code: "command_failed" }, { status: 502 })));
   await expect(page.locator("#state")).toHaveText("Ukončenie hovoru zlyhalo.");
 });
+
+
+test("temporary hold 503 preserves configuration, server reason, polling and hangup", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.begin("hold"));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  const before = await page.evaluate(() => window.phoneHarness.activeReads);
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ error: "Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.", code: "rejected" }, { status: 503 })));
+  await expect(page.locator("#state")).toHaveAttribute("data-configured", "true");
+  await expect(page.locator("#state")).toContainText("Prebieha zmena nahrávania");
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.activeReads)).toBeGreaterThan(before);
+  await page.evaluate(() => window.phoneHarness.begin("hangup"));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(2);
+  expect(await page.evaluate(() => window.phoneHarness.requests[1].url)).toContain("/hangup");
+  await page.evaluate(() => window.phoneHarness.requests[1].resolve(Response.json({ ok: true })));
+});

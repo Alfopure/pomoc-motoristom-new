@@ -8,6 +8,15 @@ import type { TelephonyHealthSignal } from "@/lib/telephony/health";
  * every action that would need a live provider reports this state instead.
  */
 export const TELEPHONY_NOT_CONFIGURED_MESSAGE = "Telefónia nie je nakonfigurovaná.";
+export const TELEPHONY_NOT_CONFIGURED_CODE = "not_configured";
+
+/** A busy lease/provider outage is also 503; only an explicit configuration error disables the phone. */
+export function isTelephonyNotConfigured(result: { status: number; body: unknown }): boolean {
+  if (result.status !== 503 || !result.body || typeof result.body !== "object") return false;
+  const body = result.body as { code?: unknown; error?: unknown };
+  // Keep rolling deployments compatible with the previous server's exact message.
+  return body.code === TELEPHONY_NOT_CONFIGURED_CODE || (body.code == null && body.error === TELEPHONY_NOT_CONFIGURED_MESSAGE);
+}
 
 export const SMS_NOT_CONFIGURED_MESSAGE = "SMS nie je nakonfigurované.";
 

@@ -28,7 +28,7 @@ function Fixture() {
   const model = buildPhoneBarModel({
     ...EMPTY_ACTIVE_CALLS, configured: true, actorProfileId: "me",
     calls: localInvite ? [{ ...incoming, sessionId: "stale-session", callerNumber: "+421900000004", legs: [] }, incoming] : [incoming],
-    presence: { actorProfileId: "me", checkedAt: "", canManageAssignments: true, devices: [], presence: [{ profileId: "me", status: ownOffer ? "ringing" : "available", currentSessionId: scenario === "other-offer-recovery" ? "other-session" : ownOffer ? call.sessionId : null }] },
+    presence: { actorProfileId: "me", checkedAt: "", canManageAssignments: true, devices: [], presence: scenario === "unavailable" ? [] : [{ profileId: "me", status: ownOffer ? "ringing" : "available", currentSessionId: scenario === "other-offer-recovery" ? "other-session" : ownOffer ? call.sessionId : null }] },
   }, { operatorName: () => "Operátor" });
   const status = scenario === "other-device" ? "superseded" : "registered";
   const phone: WebphoneSnapshot = {
@@ -42,7 +42,7 @@ function Fixture() {
   };
   return <>
     <label>Scenár <select aria-label="Scenár" value={scenario} onChange={(event) => setScenario(event.target.value)}>
-      {["backup", "offers", "answering", "other-device", "pending", "own-offer-recovery", "other-offer-recovery"].map((value) => <option key={value}>{value}</option>)}
+      {["backup", "offers", "answering", "other-device", "pending", "own-offer-recovery", "other-offer-recovery", "unavailable"].map((value) => <option key={value}>{value}</option>)}
     </select></label>
     <HeaderPhoneStatusMenu busy={false} onChange={() => {}} onRequestPause={() => {}} onDismissNotice={() => {}}
       onTakeover={() => record("takeover")} notice={scenario === "other-device" ? "Stará chyba hovoru" : null}
@@ -51,7 +51,7 @@ function Fixture() {
     <HeaderLiveCallsMenu model={model} presences={[]} canManageCalls busyAction={null} phone={phone}
       onAnswer={() => record("answer")} onRejectOffer={() => record("reject")}
       onCallAction={(action, sessionId) => record(`${action}:${sessionId}`)}
-      onSupervise={() => {}} onStopSupervise={() => {}} />
+      onSupervise={() => {}} onStopSupervise={() => {}} onMakeAvailable={() => record("available")} />
     <output aria-label="Akcie">{events.join(",")}</output>
   </>;
 }

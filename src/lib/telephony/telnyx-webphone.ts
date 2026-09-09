@@ -434,7 +434,7 @@ export class TelnyxWebphone {
     const takeover = this.takeoverRequested;
     this.takeoverRequested = false;
     try {
-      const result = await this.requestJson<WebphoneCredentials & { error?: string }>(TOKEN_URL, {
+      const result = await this.requestJson<WebphoneCredentials & { error?: string; code?: string }>(TOKEN_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // The current session id makes the server treat this as a renewal of
@@ -445,7 +445,7 @@ export class TelnyxWebphone {
       });
       if (!this.started || generation !== this.mintGeneration) return;
       if (!result.ok || !result.body?.token) {
-        this.dispatch({ type: "token_rejected", status: result.status, message: result.body?.error ?? null });
+        this.dispatch({ type: "token_rejected", status: result.status, message: result.body?.error ?? null, code: result.body?.code });
         return;
       }
       const { token, expiresAt, deviceSessionId, sipUsername } = result.body;

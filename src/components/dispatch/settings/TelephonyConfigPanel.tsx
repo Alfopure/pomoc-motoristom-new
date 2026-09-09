@@ -48,6 +48,7 @@ const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; 
 
 export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestCall } = {}) {
   const [tab, setTab] = useState<TelephonyConfigTab>("phone");
+  const [focusPlanId, setFocusPlanId] = useState<string | null>(null);
   const [announcementsOpened, setAnnouncementsOpened] = useState(false);
   const [state, setState] = useState<RoutingConfigResponse | null>(null);
   // Bumped on every fresh document so the editors re-key and drop their drafts
@@ -155,8 +156,29 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
       </nav>
 
       {tab === "phone" && <MyPhonePanel key={`phone-${version}`} document={state.document} onSaved={applyResponse} onTestCall={onTestCall} />}
-      {tab === "groups" && <RingGroupsEditor key={`groups-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
-      {tab === "plans" && <RingPlanEditor key={`plans-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
+      {tab === "groups" && (
+        <RingGroupsEditor
+          key={`groups-${version}`}
+          canEdit={state.canEdit}
+          document={state.document}
+          onNavigateToPlan={(planId) => {
+            setFocusPlanId(planId);
+            setTab("plans");
+          }}
+          onSaved={applyResponse}
+        />
+      )}
+      {tab === "plans" && (
+        <RingPlanEditor
+          key={`plans-${version}`}
+          canEdit={state.canEdit}
+          document={state.document}
+          focusPlanId={focusPlanId}
+          onNavigateToIvr={() => setTab("ivr")}
+          onNavigateToNumbers={() => setTab("numbers")}
+          onSaved={applyResponse}
+        />
+      )}
       {tab === "ivr" && <IvrMenuEditor key={`ivr-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {announcementsOpened && (
         <div hidden={tab !== "announcements"}>

@@ -74,8 +74,12 @@ describe("manual pickup during inbound ringing", () => {
 
   it("does not create a second pickup leg for repeated requests", async () => {
     const { h, call } = await ringingOnBackup();
-    await pickupWaitingCall(h.deps, actor, call.sessionId);
-    await expect(pickupWaitingCall(h.deps, actor, call.sessionId)).rejects.toMatchObject({ status: 409 });
+    const first = await pickupWaitingCall(h.deps, actor, call.sessionId);
+    const dials = h.telnyx.of("dial").length;
+    await expect(pickupWaitingCall(h.deps, actor, call.sessionId)).resolves.toMatchObject({
+      ignored: "pickup_in_progress", operatorLegCallControlId: first.operatorLegCallControlId,
+    });
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
     h.setPresence(PROFILES.o2, { status: "available" });
     await expect(pickupWaitingCall(h.deps, { ...actor, profileId: PROFILES.o2 }, call.sessionId)).rejects.toMatchObject({ status: 409 });
     expect(h.telnyx.of("dial")).toHaveLength(2);

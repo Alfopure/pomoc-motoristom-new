@@ -59,7 +59,7 @@ describe("POST /api/telephony/telnyx/webhook", () => {
     const response = await POST(signedRequest(JSON.stringify(ENVELOPE)));
 
     expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toEqual({ error: "Telefónia nie je nakonfigurovaná." });
+    await expect(response.json()).resolves.toEqual({ error: "Telefónia nie je nakonfigurovaná.", code: "not_configured" });
     expect(processTelnyxEvent).not.toHaveBeenCalled();
   });
 

@@ -48,6 +48,12 @@ function call(overrides: Partial<PhoneBarCall> = {}): PhoneBarCall {
 }
 
 describe("phone bar capabilities", () => {
+  it.each(["connecting", "failed"] as const)("keeps hangup while %s audio cannot be used for hold or transfer", (status) => {
+    const pending = call({ audioConnection: { status, startedAt: "2026-09-09T14:06:03Z", confirmedAt: null, error: null } });
+    expect(phoneBarCapabilities({ call: pending, browserCallActive: true, browserCallRinging: false })).toMatchObject({ hangup: true, mute: true, hold: false, park: false, transfer: false, consult: false, addParty: false });
+    expect(phoneBarStateLabel(pending).label).not.toBe("Prebieha");
+  });
+
   it("offers hold, transfer, consult and park on a live call", () => {
     const capabilities = phoneBarCapabilities({ call: call(), browserCallActive: true, browserCallRinging: false });
     expect(capabilities).toMatchObject({

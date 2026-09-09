@@ -4,7 +4,7 @@ import { PhoneBar } from "../../src/components/dispatch/PhoneBar";
 import type { PhoneBarCall, PhoneBarModel } from "../../src/lib/telephony/active-calls-model";
 import type { WebphoneSnapshot } from "../../src/lib/telephony/telnyx-webphone";
 
-export type CallBarScenario = "incoming" | "answering" | "raw-active" | "active" | "blocked-audio" | "pending" | "stale-server";
+export type CallBarScenario = "incoming" | "offer" | "answering" | "raw-active" | "active" | "blocked-audio" | "pending" | "stale-server";
 declare global {
   interface Window {
     callBarScenario: (scenario: CallBarScenario) => void;
@@ -44,7 +44,7 @@ function Fixture() {
     <div className="flex h-dvh flex-col bg-zinc-50" style={{ paddingTop: "env(safe-area-inset-top)" }}>
       <header className="flex h-11 shrink-0 items-center px-3 text-xs font-bold">Dispečing</header>
       <PhoneBar
-        model={{ ...model, active: hasServer ? call : scenario === "stale-server" ? { ...call, callerName: "Stará zákazníčka", sessionId: "stale-session" } : null }}
+        model={{ ...model, offers: scenario === "offer" ? [{ ...call, kind: "offer", state: "ringing", answered: false, browserCallControlIds: ["fixture-control"] }] : [], active: hasServer ? call : scenario === "stale-server" ? { ...call, callerName: "Stará zákazníčka", sessionId: "stale-session" } : null }}
         phone={{ ...phone, call: scenario === "pending" ? null : { ...phone.call!, sessionId: hasServer ? call.sessionId : null, ringing: !isActive, active: isActive, state: isActive ? "active" : "ringing" }, answering: scenario === "answering", audioBlocked: scenario === "blocked-audio" }}
         outboundPending={scenario === "pending"}
         degradedSessionIds={new Set()}
