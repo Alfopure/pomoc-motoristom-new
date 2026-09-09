@@ -525,6 +525,8 @@ export type RoutingContext = {
   /** Frozen at the first answered event so edits affect future callers only. */
   announcements?: AnnouncementConfig;
   recordingPolicy?: RecordingRoutingPolicy;
+  /** Execution permission only; false must never be treated as policy revocation. */
+  recordingLeaseHeld?: boolean;
 };
 
 // --- session metadata -------------------------------------------------------
@@ -538,7 +540,8 @@ export type SessionMeta = {
   recording?: RecordingState;
   announcement_sequence?: AnnouncementSequence | null;
   announcements?: AnnouncementConfig;
-  greeting?: { started_at: string; deadline_at?: string; speech_retry?: boolean; completed_at?: string; closing?: boolean } | null;
+  greeting?: { started_at: string; deadline_at?: string; speech_retry?: boolean; completed_at?: string; closing?: boolean;
+    recording_notice?: "recordingNotice" | "recordingServiceNotice" } | null;
   gather?: { id: string; started_at: string; deadline_at: string; spec: GatherSpec; failed?: boolean; call_gone?: boolean } | null;
   closing_message?: boolean;
   match?: { top: CallerMatch | null; count: number; degraded: boolean } | null;

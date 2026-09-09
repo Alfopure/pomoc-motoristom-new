@@ -395,6 +395,7 @@ export function CallCenterModule({
           onCallAction={onCallAction}
           onSupervise={onSupervise}
           onStopSupervise={onStopSupervise}
+          onMakeAvailable={() => onAvailabilityAction("available")}
           onNewCase={onNewCaseFromLiveCall}
           onOpenCase={onOpenCase}
         />

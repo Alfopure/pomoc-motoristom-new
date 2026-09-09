@@ -104,6 +104,11 @@ export function addPlan(plans: readonly PlanDraft[]): PlanDraft[] {
   return [...plans, newPlanDraft()];
 }
 
+/** Removes a plan from the local replacement draft; references are validated before save. */
+export function removePlan(plans: readonly PlanDraft[], planKey: string): PlanDraft[] {
+  return plans.filter((plan) => plan.key !== planKey);
+}
+
 export function updatePlan(plans: readonly PlanDraft[], planKey: string, patch: Partial<Omit<PlanDraft, "key" | "id" | "steps">>): PlanDraft[] {
   return plans.map((plan) => (plan.key === planKey ? { ...plan, ...patch } : plan));
 }
@@ -272,6 +277,34 @@ export function ringPlanSeconds(plan: PlanDraft, groups: readonly RingGroupDoc[]
   return plan.steps.reduce((total, step) => total + stepSeconds(step, groupsById.get(step.ringGroupId)), 0);
 }
 
+export type StepTiming = {
+  strategy: RingStrategy;
+  stepSecs: number;
+  members: Array<{
+    memberId: string;
+    effectiveSecs: number;
+    source: "member" | "step";
+    memberOverrideIgnored: boolean;
+  }>;
+};
+
+/** Concrete effective timing shown directly beside one all/ordered plan step. */
+export function stepTiming(step: StepDraft, group: RingGroupDoc | undefined): StepTiming | null {
+  if (!group || !group.active || group.members.length === 0) return null;
+  const parsed = parseTimeout(step.timeoutSecs);
+  if (!Number.isFinite(parsed)) return null;
+  const stepSecs = Math.min(MAX_TIMEOUT_SECS, Math.max(MIN_TIMEOUT_SECS, parsed));
+  const members = [...group.members]
+    .sort((left, right) => left.position - right.position)
+    .map((member) => ({
+      memberId: member.id,
+      effectiveSecs: step.strategy === "all" ? stepSecs : memberRingSeconds(member.ringSecs, stepSecs),
+      source: step.strategy === "ordered" && member.ringSecs !== null ? "member" as const : "step" as const,
+      memberOverrideIgnored: step.strategy === "all" && member.ringSecs !== null,
+    }));
+  return { strategy: step.strategy, stepSecs, members };
+}
+
 function describeStep(step: StepDraft, group: RingGroupDoc | undefined, maxRingFanout?: number): string {
   const timeout = parseTimeout(step.timeoutSecs);
   const seconds = Number.isFinite(timeout) ? timeout : 0;
@@ -375,6 +408,36 @@ export function linesUsingPlan(planId: string | null, lines: readonly LineDoc[])
 export function ivrMenusUsingPlan(planId: string | null, ivrMenus: readonly IvrMenuDoc[]): string[] {
   if (!planId) return [];
   return ivrMenus.filter((menu) => menu.ringPlanIds.includes(planId)).map((menu) => menu.name);
+}
+
+export type RingPlanReference =
+  | { kind: "line"; id: string; label: string; phoneNumber: string; active: boolean }
+  | { kind: "ivr"; id: string; menuName: string; digit: string | null; optionLabel: string | null; active: boolean };
+
+/** Exact saved line and IVR-option references which prevent plan removal. */
+export function referencesUsingPlan(planId: string | null, lines: readonly LineDoc[], ivrMenus: readonly IvrMenuDoc[]): RingPlanReference[] {
+  if (!planId) return [];
+  const lineReferences: RingPlanReference[] = lines
+    .filter((line) => line.ringPlanId === planId)
+    .map((line) => ({ kind: "line", id: line.id, label: line.label.trim() || line.phoneNumber, phoneNumber: line.phoneNumber, active: line.active }));
+  const ivrReferences: RingPlanReference[] = ivrMenus.flatMap((menu) => {
+    const options = menu.options.filter((option) => option.targetRingPlanId === planId);
+    if (options.length > 0) {
+      return options.map((option): RingPlanReference => ({
+        kind: "ivr",
+        id: `${menu.id}:${option.id}`,
+        menuName: menu.name,
+        digit: option.digit,
+        optionLabel: option.label.trim() || null,
+        active: menu.active,
+      }));
+    }
+    // Compatibility for documents produced before option details were exposed.
+    return menu.ringPlanIds.includes(planId)
+      ? [{ kind: "ivr", id: menu.id, menuName: menu.name, digit: null, optionLabel: null, active: menu.active } satisfies RingPlanReference]
+      : [];
+  });
+  return [...lineReferences, ...ivrReferences];
 }
 
 /** Every plan id a line or an IVR option points at (mirror of `ringPlansInUse`). */

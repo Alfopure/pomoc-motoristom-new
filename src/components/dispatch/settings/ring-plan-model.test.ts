@@ -14,12 +14,15 @@ import {
   planDraftsFromDocument,
   planHasRunnableStep,
   planUsageNote,
+  referencesUsingPlan,
+  removePlan,
   removeStep,
   ringPlanIdsInUse,
   ringPlanSeconds,
   ringPlansDirty,
   ringPlansPayload,
   stepSeconds,
+  stepTiming,
   updatePlan,
   updateStep,
   validateRingPlanDrafts,
@@ -137,6 +140,12 @@ describe("ringPlansPayload", () => {
     expect(ringPlansDirty(updateStep(drafts, drafts[0].key, drafts[0].steps[0].key, { timeoutSecs: "30" }), [plan()])).toBe(true);
     expect(ringPlansDirty(removeStep(drafts, drafts[0].key, drafts[0].steps[0].key), [plan()])).toBe(true);
   });
+
+  it("removes only the selected plan from the replacement draft", () => {
+    const drafts = planDraftsFromDocument([plan(), plan({ id: "plan-2", name: "Nočný" })]);
+    expect(removePlan(drafts, drafts[0].key).map((entry) => entry.id)).toEqual(["plan-2"]);
+    expect(ringPlansDirty(removePlan(drafts, drafts[0].key), [plan(), plan({ id: "plan-2", name: "Nočný" })])).toBe(true);
+  });
 });
 
 describe("validateRingPlanDrafts", () => {
@@ -210,6 +219,20 @@ describe("ring time arithmetic", () => {
     expect(stepSeconds(draft.steps[0], groupA())).toBe(20);
     expect(stepSeconds(draft.steps[1], groupB())).toBe(30);
     expect(ringPlanSeconds(draft, [groupA(), groupB()])).toBe(50);
+  });
+
+  it("identifies inherited, explicit, and ignored per-member timing", () => {
+    const [draft] = planDraftsFromDocument([plan()]);
+    expect(stepTiming(draft.steps[0], groupA())?.members).toEqual([
+      { memberId: "m1", effectiveSecs: 20, source: "step", memberOverrideIgnored: false },
+      { memberId: "m2", effectiveSecs: 20, source: "step", memberOverrideIgnored: false },
+    ]);
+    expect(stepTiming(draft.steps[1], groupB())?.members).toEqual([
+      { memberId: "m3", effectiveSecs: 15, source: "member", memberOverrideIgnored: false },
+      { memberId: "m4", effectiveSecs: 15, source: "member", memberOverrideIgnored: false },
+    ]);
+    const allWithOverride = groupA({ members: [member({ ringSecs: 10 })] });
+    expect(stepTiming(draft.steps[0], allWithOverride)?.members[0]).toMatchObject({ effectiveSecs: 20, source: "step", memberOverrideIgnored: true });
   });
 
   it("counts nothing for a step whose group is missing, switched off or empty", () => {
@@ -318,6 +341,17 @@ describe("what the preview must not hide", () => {
     // ...and it is refused for deletion exactly like a line's plan.
     expect(ringPlanIdsInUse(detached, [menu()])).toEqual(["plan-1"]);
     expect(ringPlanIdsInUse([line()], [menu()])).toEqual(["plan-1"]);
+  });
+
+  it("returns exact active and inactive line and IVR-option references", () => {
+    const ivr = menu({
+      active: false,
+      options: [{ id: "option-2", digit: "2", action: "ring_plan", targetRingPlanId: "plan-1", targetNumber: null, label: "Asistencia", promptMediaUrl: null, ttsText: null }],
+    });
+    expect(referencesUsingPlan("plan-1", [line({ active: false })], [ivr])).toEqual([
+      { kind: "line", id: "line-1", label: "Hlavná linka", phoneNumber: "+421232408700", active: false },
+      { kind: "ivr", id: "ivr-1:option-2", menuName: "Hlavné menu", digit: "2", optionLabel: "Asistencia", active: false },
+    ]);
   });
 
   it("describes an inactive plan by the callback offer the engine really makes", () => {

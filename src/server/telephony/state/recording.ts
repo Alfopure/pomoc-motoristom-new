@@ -1,4 +1,4 @@
-import { announcementConfigFromMetadata, isAnnouncementEnabled, resolveAnnouncement, type AnnouncementKey } from "@/lib/telephony/announcements";
+import { announcementConfigFromMetadata, isAnnouncementEnabled, resolveAnnouncement, resolveCombinedInboundIntro, type AnnouncementKey } from "@/lib/telephony/announcements";
 import { commandId } from "../telnyx/command-id";
 import type { AnnouncementSequence, RecorderState, RecordingState } from "./recording-types";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
@@ -17,6 +17,13 @@ const ACTION_PROMPTS: Partial<Record<AppEvent["type"], AnnouncementKey>> = {
 };
 
 export function potentiallyRecording(recorder: RecorderState): boolean { return recorder.observed !== "stopped"; }
+
+/** Bookkeeping versions may change; the accepted conversation must still own audio. */
+export function pendingAudioStillOwned(session: SessionRow, pending: NonNullable<RecordingState["pendingAudio"]>): boolean {
+  return !session.ended_at && ["talking", "conference"].includes(session.state) &&
+    (pending.operatorProfileId === undefined || pending.operatorProfileId === session.answered_by_profile_id) &&
+    (!pending.conferenceId || pending.conferenceId === session.conference_id);
+}
 
 function policyState(session: SessionRow, context: RoutingContext): RecordingState | undefined {
   const existing = readMeta(session).recording;
@@ -107,6 +114,9 @@ function stopRecorders(session: SessionRow, state: RecordingState, event: AppEve
 
 function startBeforeAudio(result: ReduceResult, session: SessionRow, legs: LegRow[], event: SessionEvent, context: RoutingContext, resumeConversation = false): ReduceResult {
   result = mergeMetadata(result, session);
+  // Teardown can proceed without a media lease, but cannot start new capture.
+  // Keep approved policy intact so an overlapping sweep cannot revoke it.
+  if (context.recordingLeaseHeld === false) return result;
   const state = readMeta(session).recording;
   if (!eligible(session, context, state) || !state.noticeCompletedAt || state.recorders.some(potentiallyRecording) || session.ended_at) return mergeMetadata(result, session);
   if (state.recorders.length >= 128) return mergeMetadata(result, patched(session, { recording: { ...state, error: "recording_segment_limit" } }));
@@ -145,8 +155,15 @@ function startBeforeAudio(result: ReduceResult, session: SessionRow, legs: LegRo
   const id = commandId({ sessionId: session.id, legId: customer.telnyx_call_control_id, step: event.id, intent: `record:start:${state.epoch}` });
   const recorder: RecorderState = { id, epoch: state.epoch, callControlId: customer.telnyx_call_control_id, startCommandId: id, desired: "recording", observed: "starting", startedAt: null, stoppedAt: null, error: null };
   const pendingCommands = result.commands.slice(index).filter((command): command is Extract<Command, { kind: "bridge" | "conference_unhold" | "conference_join" }> => ["bridge", "conference_unhold", "conference_join"].includes(command.kind));
+  const operatorProfileId = result.next.session.answered_by_profile_id === undefined ? session.answered_by_profile_id : result.next.session.answered_by_profile_id;
   const changed = patched(session, { recording: { ...state, recorders: [...state.recorders, recorder], suppressionReason: null, error: null,
-    pendingAudio: pendingCommands.length ? { commands: pendingCommands, epoch: state.epoch, readyAt: new Date(context.now.getTime() + RECORDING_START_SETTLE_MS).toISOString(), sourceEventId: event.id } : null } });
+    connection: connection?.kind === "bridge" && connection.recordingConferenceName
+      ? { commandId: connection.commandId, epoch: state.epoch, startedAt: context.now.toISOString(), confirmedAt: null, conferenceId: null,
+        operatorProfileId,
+        callControlIds: [connection.leg.callControlId!, connection.target.callControlId!] }
+      : state.connection,
+    pendingAudio: pendingCommands.length ? { commands: pendingCommands, epoch: state.epoch, startedAt: context.now.toISOString(), readyAt: new Date(context.now.getTime() + RECORDING_START_SETTLE_MS).toISOString(), sourceEventId: event.id,
+      operatorProfileId, conferenceId: session.conference_id } : null } });
   result.commands.splice(index, 0, { kind: "recording_start", commandId: id, leg: { callControlId: recorder.callControlId }, recorderId: id, epoch: recorder.epoch,
     maxLength: Math.max(30, Math.min(1800, state.policy.maxSegmentSeconds)), bestEffort: true });
   result.next.session.metadata = toJson({ ...readMeta({ metadata: result.next.session.metadata ?? session.metadata }), recording: readMeta(changed).recording });
@@ -199,7 +216,7 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
   if (event.kind === "app" && event.type === "recording_policy_stop") return ignoredResult("recording policy already converged");
   if (state?.pendingAudio && !sequence && (event.kind === "app" && event.type === "sweep" || event.id === state.pendingAudio.sourceEventId)) {
     const pending = state.pendingAudio;
-    const valid = pending.epoch === state.epoch && state.suppressionReason !== "objection" && !current.ended_at && customer;
+    const valid = pending.epoch === state.epoch && state.suppressionReason !== "objection" && pendingAudioStillOwned(current, pending) && customer;
     if (!valid) return metadataResult(patched(current, { recording: { ...state, pendingAudio: null } }));
     if (Date.parse(pending.readyAt) > context.now.getTime()) return ignoredResult("recording media readiness interval pending");
     const commands = pending.commands.filter((command) => command.kind === "bridge"
@@ -284,7 +301,15 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
       if (party && !state.notifiedCallControlIds?.includes(party.telnyx_call_control_id)) return startSequence(current, context, party.telnyx_call_control_id, [noticeKey(state)], event, event.id);
     }
     if (event.kind === "telnyx" && session.direction === "inbound" && session.state === "greeting" && event.status === "completed" &&
-      (event.clientState?.intent === "greeting" || event.clientState?.intent === "greeting_retry") && eligible(current, context, state) && !state.noticeCompletedAt) {
+      event.callControlId === customer.telnyx_call_control_id && ["call.playback.ended", "call.speak.ended"].includes(event.type) &&
+      event.clientState?.intent === (meta.greeting?.speech_retry ? "greeting_retry" : "greeting") &&
+      (!meta.greeting?.speech_retry || event.type === "call.speak.ended") && eligible(current, context, state) && !state.noticeCompletedAt) {
+      const combined = meta.greeting?.recording_notice && resolveCombinedInboundIntro(announcements, meta.greeting.recording_notice);
+      if (combined && combined.notice === noticeKey(state)) {
+        current = patched(current, { recording: { ...state, noticeCompletedAt: context.now.toISOString(), noticeFailed: false,
+          notifiedCallControlIds: [...new Set([...(state.notifiedCallControlIds ?? []), customer.telnyx_call_control_id])], error: null } });
+        return mergeMetadata(core(current, legs, attempts, event, context), current);
+      }
       return startSequence(current, context, customer.telnyx_call_control_id, [noticeKey(state)], event, event.id);
     }
     if (event.kind === "telnyx" && event.type === "call.answered" && meta.outbound_audio_gate && session.direction === "outbound" && event.callControlId === customer.telnyx_call_control_id && session.state === "ringing") {

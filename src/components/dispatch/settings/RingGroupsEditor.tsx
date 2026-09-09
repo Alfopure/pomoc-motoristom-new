@@ -14,10 +14,13 @@ import {
   addMember,
   groupDraftsFromDocument,
   groupFanoutNote,
+  groupStepTimings,
   groupUsageNote,
   issuesByPath,
   memberRingSecsNote,
   moveMemberInGroups,
+  planReferencesUsingGroup,
+  removeGroup,
   removeMember,
   ringGroupsDirty,
   ringGroupsPayload,
@@ -34,16 +37,19 @@ import { SortableList, SortableRow } from "./sortable-list";
  * long. The component only renders and forwards events; drafting, reordering,
  * validation and the payload live in `ring-groups-model.ts`.
  *
- * Groups are never deleted from here — a group a plan uses may not disappear —
- * they are switched off with "Neaktívna".
+ * An unused group can be removed from the replacement draft. A plan reference,
+ * including one from an inactive plan, keeps the group protected and links the
+ * manager directly to the plan that must be changed first.
  */
 export function RingGroupsEditor({
   canEdit,
   document,
+  onNavigateToPlan,
   onSaved,
 }: {
   canEdit: boolean;
   document: RoutingDocument;
+  onNavigateToPlan?: (planId: string) => void;
   onSaved: (response: RoutingConfigResponse) => void;
 }) {
   const [groups, setGroups] = useState<GroupDraft[]>(() => groupDraftsFromDocument(document.groups));
@@ -55,6 +61,10 @@ export function RingGroupsEditor({
   const operators = useMemo(
     () => [...document.operators].sort((left, right) => left.displayName.localeCompare(right.displayName, "sk")),
     [document.operators],
+  );
+  const operatorNames = useMemo(
+    () => new Map(operators.map((operator) => [operator.profileId, operator.displayName])),
+    [operators],
   );
 
   const issues = useMemo(
@@ -123,6 +133,8 @@ export function RingGroupsEditor({
           // ring time is dropped outside an "ordered" step.
           const fanoutNote = groupFanoutNote(group, document.plans, document.limits?.maxRingFanout);
           const ringSecsNote = memberRingSecsNote(group, document.plans);
+          const planReferences = planReferencesUsingGroup(group.id, document.plans);
+          const timings = groupStepTimings(group, document.plans);
           const groupIssues = issuesFor.get(group.key) ?? [];
 
           return (
@@ -144,8 +156,8 @@ export function RingGroupsEditor({
                     onChange={(event) => setGroups((current) => updateGroup(current, group.key, { description: event.target.value }))}
                   />
                 </SettingsField>
-                <div className="flex items-end pb-1">
-                  <label className="inline-flex items-center gap-2 text-sm font-medium text-zinc-800">
+                <div className="flex items-end gap-2 pb-1">
+                  <label className="inline-flex h-10 items-center gap-2 text-sm font-medium text-zinc-800">
                     <input
                       type="checkbox"
                       className="h-4 w-4 accent-[#FCD703]"
@@ -155,12 +167,61 @@ export function RingGroupsEditor({
                     />
                     Aktívna
                   </label>
+                  <button
+                    type="button"
+                    disabled={!canEdit || planReferences.length > 0}
+                    onClick={() => setGroups((current) => removeGroup(current, group.key))}
+                    aria-label={`Odobrať skupinu ${group.name || "bez názvu"}`}
+                    title={planReferences.length > 0 ? `Najprv ju odober z plánov: ${planReferences.map((plan) => plan.name).join(", ")}` : "Odobrať skupinu z návrhu"}
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-zinc-200 disabled:text-zinc-400 disabled:hover:bg-white"
+                  >
+                    <Trash2 size={14} aria-hidden="true" />
+                    Odobrať skupinu
+                  </button>
                 </div>
               </div>
 
               {usageNote && <p className={`mt-2 text-xs ${group.active ? "text-zinc-600" : "text-amber-700"}`}>{usageNote}</p>}
+              {planReferences.length > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700">
+                  <span className="font-medium">Väzbu zrušíš v konkrétnom pláne:</span>
+                  {planReferences.map((plan) => (
+                    <button
+                      key={plan.id}
+                      type="button"
+                      onClick={() => onNavigateToPlan?.(plan.id)}
+                      disabled={!onNavigateToPlan}
+                      className="min-h-8 rounded-md border border-zinc-300 bg-zinc-50 px-2 font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-default"
+                    >
+                      Otvoriť {plan.name} ({plan.active ? "aktívny" : "neaktívny"})
+                    </button>
+                  ))}
+                </div>
+              )}
               {fanoutNote && <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">{fanoutNote}</p>}
               {ringSecsNote && <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">{ringSecsNote}</p>}
+              {timings.length > 0 && (
+                <div className="mt-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-950">
+                  <p className="font-semibold">Účinné časy v uložených plánoch</p>
+                  <ul className="mt-1 grid gap-1" aria-label={`Účinné časy skupiny ${group.name}`}>
+                    {timings.map((timing) => (
+                      <li key={`${timing.planId}:${timing.stepIndex}`}>
+                        <span className="font-medium">{timing.planName}{timing.planActive ? "" : " (neaktívny)"}, krok {timing.stepIndex + 1} · {timing.strategy === "all" ? "všetkým naraz" : "postupne"}:</span>{" "}
+                        {timing.strategy === "all"
+                          ? `${timing.timeoutSecs} s pre každého podľa času kroku; vlastné časy členov sa tu nepoužijú.`
+                          : timing.members.map((entry) => {
+                              const member = group.members.find((candidate) => candidate.key === entry.memberKey);
+                              const label = member?.memberKind === "operator"
+                                ? operatorNames.get(member.profileId ?? "") ?? "Nevybraný operátor"
+                                : member?.externalNumber || "Nevyplnené externé číslo";
+                              const seconds = entry.effectiveSecs === null ? "neplatný čas" : `${entry.effectiveSecs} s`;
+                              return `${label}: ${seconds} (${entry.source === "step" ? "preberá čas kroku" : "vlastný čas"})`;
+                            }).join("; ") + "."}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <SettingsIssueList issues={groupIssues} />
 
               <div className="mt-3">

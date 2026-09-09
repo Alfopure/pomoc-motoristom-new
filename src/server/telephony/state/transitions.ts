@@ -2,7 +2,7 @@ import type { CallLegRole, CallLegState, CallSessionState, Json, RingAttemptResu
 
 import { evaluateBusinessHours } from "@/lib/telephony/business-hours";
 import { canPickUpCall } from "@/lib/telephony/call-pickup";
-import { announcementConfigFromMetadata, resolveAnnouncement } from "@/lib/telephony/announcements";
+import { announcementConfigFromMetadata, resolveAnnouncement, resolveCombinedInboundIntro } from "@/lib/telephony/announcements";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { classifyRingHangup } from "../routing/eligibility";
 import { decideIvr, describeIvrDecision, ivrGatherSpec, type IvrGatherOutcome } from "../routing/ivr";
@@ -717,12 +717,18 @@ function onCustomerAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
 
 function startGreeting(b: TransitionBuilder, leg: LegRow, forceSpeech = false): void {
   const config = b.meta.announcements ?? b.ctx.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata);
+  const recording = b.meta.recording;
+  const notice = recording?.policy.qualityEnabled ? "recordingNotice" : "recordingServiceNotice";
+  const combined = recording?.policy.enabled && recording.policy.inbound && b.ctx.recordingPolicy?.enabled &&
+    !recording.noticeCompletedAt && !recording.noticeFailed && recording.suppressionReason !== "objection"
+    ? resolveCombinedInboundIntro(config, notice) : null;
   // Defaults finish in a few seconds; a longer custom text gets enough time
   // to finish even with a slower voice and provider/network overhead.
-  const text = resolveAnnouncement(config, "greeting").text;
+  const text = combined?.text ?? resolveAnnouncement(config, "greeting").text;
   const spokenSeconds = Math.max(text.length / 10, text.trim().split(/\s+/).length / 1.5);
   const timeout = Math.min(300_000, Math.max(GREETING_TIMEOUT_MS, Math.ceil(spokenSeconds) * 1000 + 15_000));
-  b.setState("greeting").patchMeta({ greeting: { started_at: b.nowIso, deadline_at: new Date(b.ctx.now.getTime() + timeout).toISOString(), speech_retry: forceSpeech } });
+  b.setState("greeting").patchMeta({ greeting: { started_at: b.nowIso, deadline_at: new Date(b.ctx.now.getTime() + timeout).toISOString(), speech_retry: forceSpeech,
+    ...(combined ? { recording_notice: combined.notice } : {}) } });
   const id = b.cmdId(leg.telnyx_call_control_id, forceSpeech ? "greeting:speech" : "greeting:audio");
   b.cmd({ kind: "playback_start", commandId: id, leg: ref(leg), media: { key: "greeting" }, clientState: customerState(b.session.id, forceSpeech ? "greeting_retry" : "greeting"), forceSpeech });
   const failed = b.fork();
@@ -746,8 +752,9 @@ function failGreeting(b: TransitionBuilder, leg: LegRow): void {
     b.note("retrying previously requested introduction hangup");
     return;
   }
-  // This is only the ordinary welcome, not a recording/privacy notice. Keep
-  // its failure visible without claiming it played or creating a missed call.
+  // A failed combined introduction may continue assistance, but can never
+  // authorize capture when its privacy notice was not heard.
+  if (greeting?.recording_notice && b.meta.recording) b.patchMeta({ recording: { ...b.meta.recording, noticeFailed: true, error: "notice_unavailable" } });
   b.patchMeta({ greeting_unavailable: { at: b.nowIso } });
   routeInboundCustomer(b, leg);
   b.note("ordinary introduction unavailable → normal inbound routing");

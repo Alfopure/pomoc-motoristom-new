@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
-import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
+import { defaultAnnouncementConfig, resolveAnnouncement } from "@/lib/telephony/announcements";
 import { pickupWaitingCall, cancelConsult, completeTransfer, holdCall, startConsult, stopCallRecording, unholdCall, blindTransfer, addCallParty, reconcileCallRecordingPolicy, superviseCall, stopSupervisingCall } from "../call-actions";
 import { effectsDeps, loadRoutingContext, loadSessionSnapshot, runSessionEvent } from "../session-runner";
 import { applyReduceResult } from "./effects";
@@ -15,7 +15,7 @@ import { reduce } from "./transitions";
 const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
 afterEach(() => vi.unstubAllEnvs());
 
-function enabledHarness(options: { conference?: boolean; transfer?: boolean; statusAnnouncements?: boolean } = {}) {
+function enabledHarness(options: { conference?: boolean; transfer?: boolean; statusAnnouncements?: boolean; separateIntro?: boolean } = {}) {
   vi.stubEnv("TELNYX_RECORDING_ENABLED", "true");
   vi.stubEnv("TELNYX_RECORDING_CONTRACT_VERIFIED", "true");
   vi.stubEnv("RECORDING_PROCESSING_ENABLED", "true");
@@ -24,6 +24,11 @@ function enabledHarness(options: { conference?: boolean; transfer?: boolean; sta
   const h = createTelephonyHarness();
   h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(), inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
   if (options.statusAnnouncements !== undefined) h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), recordingStatusAnnouncements: options.statusAnnouncements } } }, () => true);
+  if (options.separateIntro) {
+    const config = defaultAnnouncementConfig();
+    config.prompts.sk = { greeting: { text: resolveAnnouncement(config, "greeting").text, audioUrl: "https://example.invalid/custom-greeting.mp3", voiceId: config.voiceId } };
+    h.db.update("motorist_telephony_lines", { metadata: { announcements: config } }, () => true);
+  }
   return h;
 }
 
@@ -49,7 +54,7 @@ describe("recording lifecycle", () => {
     await stopSupervisingCall(h.deps, manager, call.sessionId);
     expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence?.keys ?? []).toEqual(statusAnnouncements ? ["recordingResumed"] : []);
     await completeCallAnnouncements(h, call.sessionId);
-    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence).toBeNull();
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence ?? null).toBeNull();
     expect(h.session(call.sessionId).state).toBe("talking");
     expect(h.telnyx.of("recordingStart")).toHaveLength(2);
   });
@@ -101,11 +106,12 @@ describe("recording lifecycle", () => {
 
   it("waits for the entire privacy notice and then starts capture before bridge", async () => {
     const h = enabledHarness();
-    const call = await h.inbound();
+    const call = await h.inbound({ completeGreeting: false });
     expect(summarizeSessionRecording(h.session(call.sessionId).metadata).state).toBe("notice");
     expect(h.telnyx.of("dial")).toHaveLength(0);
     expect(h.telnyx.of("recordingStart")).toHaveLength(0);
-    await completeCallAnnouncements(h, call.sessionId);
+    const introduction = h.telnyx.of("playbackStart").at(-1)!;
+    await h.legEvent(call.callControlId, "call.playback.ended", { status: "completed", client_state: introduction.params.clientState });
     const winner = h.legFor(call.sessionId, PROFILES.o1)!;
     await h.legEvent(String(winner.telnyx_call_control_id), "call.answered");
     const methods = h.telnyx.calls.map((entry) => entry.method);
@@ -130,9 +136,9 @@ describe("recording lifecycle", () => {
     expect(service.telnyx.of("speak").at(-1)?.params.payload).toBe("Tento hovor nahrávame na vybavenie vašej pomoci.");
     const quality = enabledHarness();
     quality.db.update("motorist_call_recording_policies", { quality_enabled: true }, () => true);
-    const second = await quality.inbound();
-    expect(readMeta(quality.session(second.sessionId) as SessionRow).announcement_sequence?.keys).toEqual(["recordingNotice"]);
-    expect(quality.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toContain("/recordingNotice.mp3");
+    const second = await quality.inbound({ completeGreeting: false });
+    expect(readMeta(quality.session(second.sessionId) as SessionRow).greeting?.recording_notice).toBe("recordingNotice");
+    expect(quality.telnyx.of("playbackStart").at(-1)?.params.audioUrl).toContain("/greeting-recordingNotice.mp3");
   });
 
   it("does not execute a delayed bridge after a newer objection during media warmup", async () => {
@@ -167,7 +173,7 @@ describe("recording lifecycle", () => {
   });
 
   it("does not let duplicate greetings or early watchdogs bypass the pending privacy notice", async () => {
-    const h = enabledHarness();
+    const h = enabledHarness({ separateIntro: true });
     const call = await h.inbound();
     const greeting = h.telnyx.of("playbackStart")[0];
     await h.legEvent(call.callControlId, "call.playback.ended", { status: "completed", client_state: greeting.params.clientState });
@@ -180,7 +186,7 @@ describe("recording lifecycle", () => {
   });
 
   it("falls back once after a missing notice completion and still helps after the second deadline", async () => {
-    const h = enabledHarness(); const call = await h.inbound();
+    const h = enabledHarness({ separateIntro: true }); const call = await h.inbound();
     const { runSessionEvent } = await import("../session-runner");
     h.advance(46_000);
     await runSessionEvent(h.deps, call.sessionId, { kind: "app", id: "notice-sweep1", type: "sweep", actorProfileId: null, occurredAt: h.now().toISOString() });
@@ -206,7 +212,7 @@ describe("recording lifecycle", () => {
   });
 
   it("continues normal assistance when audio AND locale TTS notice fail", async () => {
-    const h = enabledHarness();
+    const h = enabledHarness({ separateIntro: true });
     const call = await h.inbound({ completeGreeting: false });
     h.telnyx.failAlways("playbackStart"); h.telnyx.failAlways("speak");
     const greeting = h.telnyx.of("playbackStart")[0];
@@ -348,15 +354,17 @@ describe("recording lifecycle", () => {
     expect(h.session(call.sessionId).answered_by_profile_id).toBe(PROFILES.o2);
   });
 
-  it("informs the consulted participant before attended transfer starts a new segment", async () => {
+  it.each(["operator", "external"])("informs the consulted %s before attended transfer starts a new segment", async (targetKind) => {
     const h = enabledHarness({ conference: true, transfer: true }); const call = await talking(h);
-    await startConsult(h.deps, actor, call.sessionId, { profileId: PROFILES.o2 }); await completeCallAnnouncements(h, call.sessionId);
+    await startConsult(h.deps, actor, call.sessionId, targetKind === "operator" ? { profileId: PROFILES.o2 } : { number: "0900 000 000" }); await completeCallAnnouncements(h, call.sessionId);
     const consult = h.legs(call.sessionId).find((leg) => leg.role === "consult")!;
     await h.legEvent(String(consult.telnyx_call_control_id), "call.answered");
     await completeTransfer(h.deps, actor, call.sessionId);
     expect(h.telnyx.of("recordingStart")).toHaveLength(1);
     await completeCallAnnouncements(h, call.sessionId);
     expect(h.telnyx.of("recordingStart")).toHaveLength(2);
+    expect(h.telnyx.of("conference:unhold")).toHaveLength(1);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.pendingAudio).toBeNull();
   });
 
   it("does not record a new conference participant until its notice finishes", async () => {

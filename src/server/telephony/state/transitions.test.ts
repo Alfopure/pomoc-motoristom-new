@@ -573,7 +573,8 @@ describe("talking-phase transitions", () => {
     expect(h.session(call.sessionId).state).toBe("ended");
     expect(h.call(call.sessionId)).toMatchObject({ status: "ended", duration_seconds: 90, wait_seconds: 0, end_reason: "caller_hangup" });
     const history = h.rows("motorist_operator_statuses").filter((row) => row.profile_id === PROFILES.o1).map((row) => row.status);
-    expect(history).toEqual(["after_call_work"]);
+    // The installed reservation RPC records the accepted call atomically too.
+    expect(history).toEqual(["on_call", "after_call_work"]);
   });
 
   it("finalises a wrap_up session via the sweep when the remaining leg webhooks never arrive", async () => {

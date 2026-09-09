@@ -156,7 +156,7 @@ describe("processTelnyxEvent", () => {
     const o1 = h.legFor(call.sessionId, PROFILES.o1)!;
     const result = await h.legEvent(String(o1.telnyx_call_control_id), "call.answered");
     expect(result).toMatchObject({ status: 200, outcome: "processed" });
-    expect(h.logs.filter((entry) => entry.scope === "lease" && entry.message === "processing without lease (CAS protected)")).toHaveLength(1);
+    expect(h.logs.filter((entry) => entry.scope === "lease" && entry.message === "lease unavailable; checking whether event can safely proceed")).toHaveLength(1);
     expect(h.session(call.sessionId)).toMatchObject({ state: "talking", lease_token: "greedy" });
   });
 

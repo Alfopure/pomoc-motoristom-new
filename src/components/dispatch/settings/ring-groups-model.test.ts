@@ -6,6 +6,7 @@ import {
   addMember,
   groupDraftsFromDocument,
   groupFanoutNote,
+  groupStepTimings,
   groupUsageNote,
   plansEmptiedByGroup,
   issuesByPath,
@@ -14,6 +15,8 @@ import {
   moveMemberInGroups,
   newGroupDraft,
   plansUsingGroup,
+  planReferencesUsingGroup,
+  removeGroup,
   removeMember,
   ringGroupsDirty,
   ringGroupsPayload,
@@ -101,6 +104,12 @@ describe("ringGroupsPayload", () => {
     expect(payload[0].members[0]).toMatchObject({ memberKind: "external_number", profileId: null, externalNumber: "+421905123456", position: 0, ringSecs: 25 });
   });
 
+  it("removes only an unused group from the replacement draft", () => {
+    const drafts = groupDraftsFromDocument([group(), group({ id: "group-b", name: "Záloha" })]);
+    expect(removeGroup(drafts, drafts[1].key).map((entry) => entry.id)).toEqual(["group-a"]);
+    expect(ringGroupsDirty(removeGroup(drafts, drafts[1].key), [group(), group({ id: "group-b", name: "Záloha" })])).toBe(true);
+  });
+
   it("reports the document unchanged until something actually moves", () => {
     const drafts = groupDraftsFromDocument([group()]);
     expect(ringGroupsDirty(drafts, [group()])).toBe(false);
@@ -185,6 +194,13 @@ describe("plansUsingGroup", () => {
     expect(plansUsingGroup("group-a", [plan(), plan({ id: "plan-2", name: "Nočný", steps: [] })])).toEqual(["Denný"]);
     expect(plansUsingGroup(null, [plan()])).toEqual([]);
   });
+
+  it("keeps both active and inactive plan references navigable", () => {
+    expect(planReferencesUsingGroup("group-a", [plan(), plan({ id: "plan-2", name: "Archívny", active: false })])).toEqual([
+      { id: "plan-1", name: "Denný", active: true },
+      { id: "plan-2", name: "Archívny", active: false },
+    ]);
+  });
 });
 
 describe("groupUsageNote", () => {
@@ -248,6 +264,28 @@ describe("notes about what the ring engine really does", () => {
     expect(memberRingSecsNote(withTime, [plan()])).toContain("postupne");
     const orderedPlan: RingPlanDoc = { ...plan(), steps: plan().steps.map((step) => ({ ...step, strategy: "ordered" as const })) };
     expect(memberRingSecsNote(withTime, [orderedPlan])).toBeNull();
+  });
+
+  it("shows effective all and ordered timing without losing mixed usage", () => {
+    const [draft] = groupDraftsFromDocument([group()]);
+    const ordered = plan({
+      id: "plan-2",
+      name: "Nočný",
+      active: false,
+      steps: [{ id: "s2", stepIndex: 1, ringGroupId: "group-a", timeoutSecs: 30, strategy: "ordered" }],
+    });
+    const timings = groupStepTimings(draft, [plan(), ordered]);
+    expect(timings).toHaveLength(2);
+    expect(timings[0]).toMatchObject({ planName: "Denný", planActive: true, strategy: "all", timeoutSecs: 20 });
+    expect(timings[0].members).toEqual([
+      { memberKey: draft.members[0].key, effectiveSecs: 20, source: "step" },
+      { memberKey: draft.members[1].key, effectiveSecs: 20, source: "step" },
+    ]);
+    expect(timings[1]).toMatchObject({ planName: "Nočný", planActive: false, stepIndex: 1, strategy: "ordered" });
+    expect(timings[1].members).toEqual([
+      { memberKey: draft.members[0].key, effectiveSecs: 15, source: "member" },
+      { memberKey: draft.members[1].key, effectiveSecs: 30, source: "step" },
+    ]);
   });
 });
 

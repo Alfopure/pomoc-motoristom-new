@@ -5,6 +5,7 @@ import { isDeviceLive } from "@/lib/telephony/device-liveness";
 
 import { STALLED_EVENT_MS, STUCK_SESSION_MS } from "./cron-jobs";
 import { TELEPHONY_INCIDENT_JOBS } from "./incidents";
+import { getRecentConnectionOutcomes } from "./connection-outcomes";
 import { DEFAULT_DAILY_LEG_SOFT_CAP, usageDay } from "./usage";
 import type { TelnyxConfig } from "./telnyx/env";
 import { ACTIVE_SESSION_STATES } from "./state/types";
@@ -146,6 +147,15 @@ export async function getTelephonyHealth(deps: TelephonyHealthDeps): Promise<Tel
   });
 
   const since = new Date(now.getTime() - LEDGER_FAILURE_WINDOW_MS).toISOString();
+  const connections = await getRecentConnectionOutcomes({ admin: deps.admin, organizationId: deps.organizationId, since });
+  const pendingConnections = connections.entries.filter((entry) => entry.outcome === "pending" && now.getTime() - Date.parse(entry.failedAt) >= 30_000);
+  const unconfirmedEnded = connections.entries.filter((entry) => entry.outcome === "ended_without_confirmation");
+  const unknownConnections = connections.entries.filter((entry) => entry.outcome === "unknown");
+  checks.push({ key: "connections", status: !configured ? "skipped" : pendingConnections.length ? "fail" : unconfirmedEnded.length || unknownConnections.length || connections.error || connections.truncated ? "warn" : "ok",
+    detail: { pending: pendingConnections.length, endedWithoutConfirmation: unconfirmedEnded.length,
+      confirmedAfterFailure: connections.entries.filter((entry) => entry.outcome === "confirmed_after_failure").length,
+      commandsRecovered: connections.entries.filter((entry) => entry.outcome === "command_recovered").length, unknown: unknownConnections.length,
+      entries: connections.entries, truncated: connections.truncated, error: connections.error } });
   const failed = await deps.admin
     .from("motorist_telnyx_webhook_events")
     .select("event_id")

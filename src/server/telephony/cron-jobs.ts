@@ -9,6 +9,7 @@ import { ACTIVE_SESSION_STATES, type SessionEvent, type SessionRow } from "./sta
 import { telephonyStabilityEnabled } from "./stability";
 import { readPendingEffects } from "./state/continuation";
 import { sweepExpiredWrapUp } from "./presence-service";
+import { sweepEndedSessionPresence } from "./presence-recovery";
 
 /**
  * Jobs behind the single allowed Vercel cron (every 5 minutes →
@@ -154,6 +155,7 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
 export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
   const now = nowOf(deps).toISOString();
   const wrapUp = await sweepExpiredWrapUp(deps);
+  const presence = await sweepEndedSessionPresence(deps);
   const queries = await Promise.all([
     deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).not("pending_effects", "is", null)
       .lte("effects_next_attempt_at", now).order("effects_next_attempt_at").limit(REPLAY_BATCH_SIZE),
@@ -181,7 +183,7 @@ export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise
         context: { sessionId: session.id, job: EFFECTS_RECOVERY_JOB, pendingAgeMs: Date.parse(now) - oldest } });
     }
   }
-  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || wrapUp.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, wrapUp } };
+  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || wrapUp.errors.length || presence.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, wrapUp, presence } };
 }
 
 export async function detectStuckSessions(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
@@ -247,6 +249,10 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promi
 
   const rows = data ?? [];
   const replayed: string[] = [];
+  const ignored: string[] = [];
+  const deferred: string[] = [];
+  const duplicate: string[] = [];
+  const unknownSession: string[] = [];
   const errors: Array<{ eventId: string; error: string }> = [];
   const process = deps.replayEvent ?? ((envelope: unknown) => processTelnyxEvent(deps, envelope));
 
@@ -254,8 +260,22 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promi
     // The ledger stores the inner payload; rebuild the envelope the processor parses.
     const envelope = { data: { id: row.event_id, event_type: row.event_type, occurred_at: row.occurred_at, payload: row.payload } };
     try {
-      await process(envelope);
-      replayed.push(row.event_id);
+      const result = await process(envelope) as { outcome?: string; error?: string | null } | undefined;
+      if (result?.outcome === "busy") {
+        deferred.push(row.event_id);
+      } else if (result?.outcome === "duplicate") {
+        duplicate.push(row.event_id);
+      } else if (result?.outcome === "unknown_session") {
+        unknownSession.push(row.event_id);
+        replayed.push(row.event_id);
+      } else if (result?.outcome === "ignored") {
+        ignored.push(row.event_id);
+        replayed.push(row.event_id);
+      } else if (result?.outcome === "processed") {
+        replayed.push(row.event_id);
+      } else {
+        errors.push({ eventId: row.event_id, error: result?.error ?? `webhook replay rejected: ${result?.outcome ?? "missing outcome"}` });
+      }
     } catch (replayError) {
       errors.push({ eventId: row.event_id, error: replayError instanceof Error ? replayError.message : String(replayError) });
     }
@@ -275,7 +295,7 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promi
   return {
     job: LEDGER_REPLAY_JOB,
     status: errors.length > 0 ? "failed" : "ok",
-    detail: { stalled: rows.length, replayed: replayed.length, errors },
+    detail: { stalled: rows.length, attempted: rows.length, replayed: replayed.length, ignored: ignored.length, deferred: deferred.length, duplicate: duplicate.length, unknownSession: unknownSession.length, failed: errors.length, errors },
     error: errors.length > 0 ? errors[0].error : undefined,
   };
 }

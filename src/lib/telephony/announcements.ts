@@ -248,3 +248,14 @@ export function resolveAnnouncement(config: AnnouncementConfig, key: Announcemen
 export function estimatedAnnouncementSeconds(text: string): number {
   return Math.max(1, Math.ceil(text.trim().split(/\s+/).filter(Boolean).length / 2.2));
 }
+
+/** Exact bundled speech only: custom recordings/text/voices retain separate playback. */
+export function resolveCombinedInboundIntro(config: AnnouncementConfig, notice: "recordingNotice" | "recordingServiceNotice") {
+  const greeting = resolveAnnouncement(config, "greeting");
+  const recording = resolveAnnouncement(config, notice);
+  const base = `announcements-v4/${config.language}/`;
+  if (config.voiceId !== DEFAULT_ANNOUNCEMENT_VOICE || !greeting.isDefault || !recording.isDefault ||
+    greeting.file !== `${base}greeting.mp3` || recording.file !== `${base}${notice}.mp3`) return null;
+  return { file: `announcements-intro-v1/${config.language}/greeting-${notice}.mp3`,
+    text: `${greeting.text} ${recording.text}`, voice: greeting.voice, notice };
+}

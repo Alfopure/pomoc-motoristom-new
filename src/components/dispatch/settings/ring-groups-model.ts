@@ -105,6 +105,11 @@ export function addGroup(groups: readonly GroupDraft[]): GroupDraft[] {
   return [...groups, newGroupDraft()];
 }
 
+/** Removes a group from the local replacement draft; server validation remains authoritative. */
+export function removeGroup(groups: readonly GroupDraft[], groupKey: string): GroupDraft[] {
+  return groups.filter((group) => group.key !== groupKey);
+}
+
 export function updateGroup(groups: readonly GroupDraft[], groupKey: string, patch: Partial<Omit<GroupDraft, "key" | "id" | "members">>): GroupDraft[] {
   return groups.map((group) => (group.key === groupKey ? { ...group, ...patch } : group));
 }
@@ -274,6 +279,20 @@ export function plansUsingGroup(groupId: string | null, plans: readonly RingPlan
   return plans.filter((plan) => plan.steps.some((step) => step.ringGroupId === groupId)).map((plan) => plan.name);
 }
 
+export type GroupPlanReference = {
+  id: string;
+  name: string;
+  active: boolean;
+};
+
+/** Saved plans, active or inactive, which keep this group referenced. */
+export function planReferencesUsingGroup(groupId: string | null, plans: readonly RingPlanDoc[]): GroupPlanReference[] {
+  if (!groupId) return [];
+  return plans
+    .filter((plan) => plan.steps.some((step) => step.ringGroupId === groupId))
+    .map((plan) => ({ id: plan.id, name: plan.name, active: plan.active }));
+}
+
 /**
  * Active plans that would freeze **without a single step** once this group is
  * switched off.
@@ -315,10 +334,55 @@ export function groupUsageNote(group: GroupDraft, plans: readonly RingPlanDoc[],
   return `Skupina je vypnutá, v týchto plánoch sa krok preskočí: ${list}. Plánom ${emptied.join(", ")} tým neostane ani jeden krok — ${NO_RUNNABLE_STEP_OUTCOME}.`;
 }
 
-/** Steps that use this group, with the strategy each of them rings with. */
-export function stepsUsingGroup(groupId: string | null, plans: readonly RingPlanDoc[]): Array<{ planName: string; strategy: string }> {
+/** Steps that use this group, with enough context to explain their effective timing. */
+export function stepsUsingGroup(groupId: string | null, plans: readonly RingPlanDoc[]): Array<{
+  planId: string;
+  planName: string;
+  planActive: boolean;
+  stepIndex: number;
+  strategy: RingPlanDoc["steps"][number]["strategy"];
+  timeoutSecs: number;
+}> {
   if (!groupId) return [];
-  return plans.flatMap((plan) => plan.steps.filter((step) => step.ringGroupId === groupId).map((step) => ({ planName: plan.name, strategy: step.strategy })));
+  return plans.flatMap((plan) => plan.steps
+    .filter((step) => step.ringGroupId === groupId)
+    .map((step) => ({
+      planId: plan.id,
+      planName: plan.name,
+      planActive: plan.active,
+      stepIndex: step.stepIndex,
+      strategy: step.strategy,
+      timeoutSecs: step.timeoutSecs,
+    })));
+}
+
+export type GroupStepTiming = ReturnType<typeof stepsUsingGroup>[number] & {
+  members: Array<{
+    memberKey: string;
+    effectiveSecs: number | null;
+    source: "member" | "step";
+  }>;
+};
+
+/**
+ * Effective member timing for every concrete plan step that uses this draft.
+ * Mixed `all` and `ordered` usage is intentionally returned step-by-step: a
+ * member setting can be effective in one plan and ignored in another.
+ */
+export function groupStepTimings(group: GroupDraft, plans: readonly RingPlanDoc[]): GroupStepTiming[] {
+  return stepsUsingGroup(group.id, plans).map((step) => ({
+    ...step,
+    members: group.members.map((member) => {
+      if (step.strategy === "all") return { memberKey: member.key, effectiveSecs: step.timeoutSecs, source: "step" as const };
+      const own = parseRingSecs(member.ringSecs);
+      if (own !== null && !Number.isFinite(own)) return { memberKey: member.key, effectiveSecs: null, source: "member" as const };
+      return {
+        memberKey: member.key,
+        effectiveSecs: Math.min(MAX_RING_SECS, Math.max(MIN_RING_SECS, own ?? step.timeoutSecs)),
+        source: own === null ? "step" as const : "member" as const,
+      };
+    }),
+  }));
 }
 
 /**

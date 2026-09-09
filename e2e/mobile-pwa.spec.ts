@@ -186,6 +186,35 @@ test("mobile landscape keeps navigation reachable at 844 by 390", async ({ page 
   await page.screenshot({ animations: "disabled", path: ".context/mobile-landscape-844.png" });
 });
 
+test("mobile shortcuts persist per profile and keep the unsaved-form guard", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openDashboard(page);
+  const nav = page.getByRole("navigation", { name: "Mobilná navigácia" });
+
+  await nav.getByRole("button", { name: "Menu", exact: true }).click();
+  const menu = nav.getByRole("dialog", { name: "Obrazovky aplikácie" });
+  await menu.getByTestId("mobile-navigation-shortcut-dispatch-map").click();
+  await menu.getByTestId("mobile-navigation-shortcut-fleet").click();
+  await nav.getByRole("button", { name: "Menu", exact: true }).click();
+  await expect(nav.getByRole("button", { name: "Mapa", exact: true })).toHaveCount(0);
+  await expect(nav.getByRole("button", { name: "Flotila", exact: true })).toBeVisible();
+  await expect(nav.getByRole("button", { name: "Menu", exact: true })).toBeVisible();
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("dispatch-console")).toHaveAttribute("data-hydrated", "true", { timeout: 40_000 });
+  await expect(nav.getByRole("button", { name: "Flotila", exact: true })).toBeVisible();
+  await expect(nav.getByRole("button", { name: "Mapa", exact: true })).toHaveCount(0);
+
+  await nav.getByRole("button", { name: "Prípady", exact: true }).click();
+  await page.getByRole("button", { name: "Nový prípad", exact: true }).first().click();
+  await page.getByLabel("EČV", { exact: true }).fill("NAV DRAFT");
+  await nav.getByRole("button", { name: "Flotila", exact: true }).click();
+  const unsaved = page.getByRole("dialog", { name: "Rozpracovaný prípad nie je uložený", exact: true });
+  await expect(unsaved).toBeVisible();
+  await unsaved.getByRole("button", { name: "Zostať vo formulári", exact: true }).last().click();
+  await expect(page.getByLabel("EČV", { exact: true })).toHaveValue("NAV DRAFT");
+});
+
 async function openDashboard(page: Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("dispatch-console")).toHaveAttribute("data-hydrated", "true", { timeout: 40_000 });

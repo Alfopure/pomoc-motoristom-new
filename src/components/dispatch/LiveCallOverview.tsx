@@ -84,6 +84,7 @@ type SharedOverviewProps = {
   onCallAction: (action: PhoneCallAction, sessionId: string) => void;
   onSupervise: (sessionId: string, mode: SupervisorMode) => void;
   onStopSupervise: (sessionId: string) => void;
+  onMakeAvailable?: () => void;
 };
 
 type WorkspaceOverviewProps = SharedOverviewProps & {
@@ -231,6 +232,7 @@ function LiveCallRow({
   onRejectOffer,
   onStopSupervise,
   onSupervise,
+  onMakeAvailable,
 }: SharedOverviewProps & {
   call: PhoneBarCall;
   browserInviteSessionId: string | null;
@@ -295,6 +297,7 @@ function LiveCallRow({
         {canAnswer && <ActionButton busy={phone?.answering} disabled={answerBlocked} icon={PhoneCall} label="Prijať" tone="accept" onClick={onAnswer} />}
         {canAnswer && <ActionButton disabled={answerBlocked} icon={X} label="Odmietnuť" tone="danger-outline" onClick={onRejectOffer} />}
         {canPickup && <ActionButton busy={busyAction === "pickup"} disabled={Boolean(pickupBlockReason)} icon={PhoneIncoming} label={pickupBlockReason ?? (phone?.onDemand ? "Prijať v appke" : "Prevziať")} tone="accept" onClick={() => onCallAction("pickup", call.sessionId)} />}
+        {canPickup && pickupBlockReason === "Najprv sa nastav dostupný" && onMakeAvailable && <ActionButton disabled={isBusy} icon={PhoneCall} label="Som dostupný" tone="outline" onClick={onMakeAvailable} />}
         {call.kind === "active" && call.mine && <ActionButton busy={busyAction === "hangup"} disabled={isBusy && busyAction !== "hangup"} icon={PhoneOff} label="Ukončiť" tone="danger" onClick={confirmAndEnd} />}
         {call.kind === "active" && !call.mine && Boolean(call.operatorProfileId) && canManageCalls && !supervising && (
           <>
@@ -332,7 +335,7 @@ function ActionButton({ busy = false, disabled = false, icon: Icon, label, onCli
   return (
     <button type="button" disabled={disabled} onClick={onClick} title={label} className={`inline-flex min-h-7 items-center justify-center gap-1 rounded-md border px-2 text-[11px] font-bold transition disabled:cursor-not-allowed disabled:border-zinc-200 disabled:bg-zinc-100 disabled:text-zinc-400 ${colors}`}>
       {busy ? <Loader2 size={12} className="animate-spin" aria-hidden="true" /> : <Icon size={12} aria-hidden="true" />}
-      <span className={label.length > 16 ? "hidden 2xl:inline" : ""}>{label}</span>
+      <span className="text-left whitespace-normal">{label}</span>
     </button>
   );
 }

@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { registerPresenceRpcs } from "./fake-presence";
 import { registerStabilityRpcs } from "./fake-stability";
-import { telephonyStabilityEnabled } from "@/server/telephony/stability";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
@@ -112,7 +111,7 @@ export const TABLE_DEFAULTS: Record<string, FakeRow> = {
   motorist_call_sessions: { state: "received", version: 0, current_step: 0, metadata: {}, lease_token: null, lease_until: null, conference_id: null, conference_name: null, customer_leg_id: null, answered_by_profile_id: null, case_id: null, answered_at: null, ended_at: null, hold_started_at: null, parked_at: null },
   motorist_call_legs: { state: "initiated", client_state: {}, metadata: {}, profile_id: null, hangup_cause: null, hangup_source: null, answered_at: null, bridged_at: null, ended_at: null, telnyx_call_leg_id: null },
   motorist_ring_attempts: { result: "pending", position: 0, ring_secs: 20, leg_id: null, offered_at: null, answered_at: null, ended_at: null },
-  motorist_operator_presence: { status: "offline", current_session_id: null, pause_reason_id: null, wrap_up_until: null },
+  motorist_operator_presence: { status: "offline", current_session_id: null, pause_reason_id: null, wrap_up_until: null, presence_revision: 0, offer_token: null, pause_return: null },
   motorist_operator_mobile_devices: { registration_state: "unregistered", metadata: {}, device_seen_at: null, device_session_id: null },
   motorist_operator_devices: { registration_state: "unregistered", metadata: {}, device_seen_at: null, device_session_id: null },
   motorist_calls: { recording_status: "not_requested", transcript_status: "not_requested", raw_payload: {}, raw_latest_payload: {} },
@@ -130,6 +129,14 @@ function clone<T>(value: T): T {
 
 function isNil(value: unknown): value is null | undefined {
   return value === null || value === undefined;
+}
+
+/** The installed revision trigger also runs for legacy direct writers. */
+function presenceRevisionPatch(table: string, before: FakeRow, patch: FakeRow): FakeRow {
+  if (table !== "motorist_operator_presence" || before.presence_revision === undefined) return {};
+  const fields = ["status", "current_session_id", "pause_reason_id", "wrap_up_until", "status_since", "offer_token", "pause_return"];
+  const changed = fields.some(key => key in patch && JSON.stringify(before[key] ?? null) !== JSON.stringify(patch[key] ?? null));
+  return { presence_revision: Number(before.presence_revision) + Number(changed) };
 }
 
 function sameValue(left: unknown, right: unknown): boolean {
@@ -304,7 +311,7 @@ export class FakeDatabase {
           // were inserted; an existing conflict is not returned by `.select()`.
           continue;
         }
-        Object.assign(existing, row, { updated_at: this.nowIso() });
+        Object.assign(existing, row, presenceRevisionPatch(table, existing, row), { updated_at: this.nowIso() });
         const conflict = this.findConflict(table, existing, existing);
         if (conflict) throw fakeError(`duplicate key value violates unique constraint (${conflict.key.join(", ")})`, "23505");
         results.push(clone(existing));
@@ -319,7 +326,7 @@ export class FakeDatabase {
     const updated: FakeRow[] = [];
     for (const row of this.storage(table)) {
       if (!filter(row)) continue;
-      Object.assign(row, clone(values));
+      Object.assign(row, clone(values), presenceRevisionPatch(table, row, values));
       if ("updated_at" in row && !("updated_at" in values)) row.updated_at = this.nowIso();
       const conflict = this.findConflict(table, row, row);
       if (conflict) throw fakeError(`duplicate key value violates unique constraint (${conflict.key.join(", ")})`, "23505");
@@ -427,7 +434,11 @@ export class FakeQueryBuilder implements PromiseLike<FakeResult> {
   }
 
   in(column: string, values: readonly unknown[]): this {
-    return this.addFilter(`in(${column})`, (row) => values.some((value) => sameValue(row[column], value)));
+    return this.addFilter(`in(${column})`, (row) => {
+      const [base, key] = column.split("->>");
+      const candidate = key ? (row[base] as FakeRow | null)?.[key] : row[column];
+      return values.some((value) => sameValue(candidate, value));
+    });
   }
 
   is(column: string, value: null | boolean): this {
@@ -794,32 +805,22 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
     return true;
   });
 
+  // Installed SQL has no knowledge of the application's feature flag. Model
+  // its dispatch/answer wrapper, including the returned revision/token, always.
   db.registerRpc("motorist_reserve_operator", async (args) => {
-    const presence = db.storage("motorist_operator_presence").find((row) => row.profile_id === args.p_profile_id);
+    const session = db.find("motorist_call_sessions", row => row.id === args.p_session_id);
+    if (!session) return false;
+    const presence = db.find("motorist_operator_presence", row => row.profile_id === args.p_profile_id && row.organization_id === session.organization_id);
     if (!presence) return false;
-    if (telephonyStabilityEnabled() || presence.offer_token || presence.pause_return) {
-      const session = db.find("motorist_call_sessions", r => r.id === args.p_session_id && r.organization_id === presence.organization_id);
-      if (!session) return false;
-      const transition = db.rpcHandlers.get("motorist_presence_transition_v1")!;
-      const base = { p_organization_id: session.organization_id, p_profile_id: args.p_profile_id, p_session_id: args.p_session_id };
-      if (!presence.current_session_id) {
-        const dispatched = await transition({ ...base, p_action: "dispatch", p_expected_revision: presence.presence_revision ?? 0 }, db) as FakeRow;
-        if (!dispatched.applied) return false;
-      }
-      const answered = await transition({ ...base, p_action: "answer", p_expected_token: presence.offer_token }, db) as FakeRow;
-      return answered.applied === true;
+    const transition = db.rpcHandlers.get("motorist_presence_transition_v1")!;
+    const base = { p_organization_id: session.organization_id, p_profile_id: args.p_profile_id, p_session_id: args.p_session_id };
+    let ownership = { revision: presence.presence_revision ?? 0, offerToken: presence.offer_token } as FakeRow;
+    if (!presence.current_session_id) {
+      ownership = await transition({ ...base, p_action: "dispatch", p_expected_revision: ownership.revision }, db) as FakeRow;
+      if (!ownership.applied) return false;
     }
-    const ownSession = presence.current_session_id === args.p_session_id;
-    // Re-entrant for the holder: a version CAS retry re-runs the guard.
-    const eligibleStatus = ["available", "ringing", "after_call_work"].includes(String(presence.status)) || ownSession;
-    const sessionFree = isNil(presence.current_session_id) || ownSession;
-    if (!eligibleStatus || !sessionFree) return false;
-    presence.status = "on_call";
-    presence.current_session_id = args.p_session_id;
-    presence.wrap_up_until = null;
-    presence.status_since = db.nowIso();
-    presence.updated_at = db.nowIso();
-    return true;
+    const answered = await transition({ ...base, p_action: "answer", p_expected_revision: ownership.revision, p_expected_token: ownership.offerToken }, db) as FakeRow;
+    return answered.applied === true;
   });
 
   db.registerRpc("motorist_telephony_usage_add", (args) => {

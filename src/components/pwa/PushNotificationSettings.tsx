@@ -19,7 +19,7 @@ import {
   type PushCategory,
   type PushDeviceState,
 } from "./push-client";
-import { playNotificationChime, setNativePushActive, unlockNotificationSound } from "./notification-sound";
+import { previewNotificationSound, setNativePushActive, unlockNotificationSound } from "./notification-sound";
 
 const buttonClass = "inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 text-sm font-semibold text-zinc-800 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50";
 const categories: Array<{ key: PushCategory; label: string; detail: string }> = [
@@ -35,6 +35,7 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testCooldown, setTestCooldown] = useState(0);
+  const [soundTesting, setSoundTesting] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!enabled) return;
@@ -254,14 +255,14 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
 
       <div className="mt-3 flex flex-wrap gap-2 border-t border-zinc-100 pt-4">
         <button type="button" disabled={!state?.subscribed || busy || loading || testCooldown > 0} onClick={() => void sendTest()} className={buttonClass}><Send size={15} />{testCooldown > 0 ? `Ďalší test o ${testCooldown} s` : "Poslať test"}</button>
-        <button type="button" disabled={!enabled || !state?.soundEnabled || busy} className={buttonClass}
-          onClick={() => {
-            unlockNotificationSound();
-            window.setTimeout(() => {
-              const played = playNotificationChime(undefined, true);
-              setNotice(played ? "Skúšobný zvuk bol prehratý. Ak ho nepočuješ, skontroluj hlasitosť zariadenia." : "Prehliadač zatiaľ blokuje zvuk. Skús tlačidlo stlačiť znova a skontroluj hlasitosť.");
-            }, 100);
-          }}><Volume2 size={15} />Vyskúšať zvuk</button>
+        <button type="button" disabled={!enabled || !state?.soundEnabled || busy || soundTesting} className={buttonClass}
+          onClick={async () => {
+            setSoundTesting(true);
+            try {
+              const started = await previewNotificationSound();
+              setNotice(started ? "Test zvuku je spustený. Ak ho nepočuješ, skontroluj hlasitosť, tichý režim a pripojené slúchadlá." : "Zvuk sa nepodarilo odomknúť. Vráť sa do aplikácie, ukonči prípadný iný hovor a skús test znova.");
+            } finally { setSoundTesting(false); }
+          }}><Volume2 size={15} />{soundTesting ? "Pripravujem zvuk…" : "Vyskúšať zvuk"}</button>
         <button type="button" disabled={busy || loading || !enabled} onClick={() => { window.dispatchEvent(new Event(PUSH_SETTINGS_EVENT)); void refresh(); }} className={buttonClass}>Obnoviť stav</button>
       </div>
       {notice && <p role="status" className="mt-3 rounded-xl bg-emerald-50 p-3 text-sm leading-6 text-emerald-800">{notice}</p>}
