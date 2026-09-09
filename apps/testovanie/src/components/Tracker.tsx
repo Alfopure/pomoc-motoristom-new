@@ -13,12 +13,10 @@ import {
   CircleHelp,
   ClipboardCheck,
   Clock3,
-  FileCheck2,
   History,
   Layers3,
   ListChecks,
   LoaderCircle,
-  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -232,7 +230,7 @@ export function Tracker() {
     setRunId((old) =>
       next.runs.some((r) => r.id === old)
         ? old
-        : (next.runs.find((r) => !r.archived)?.id ?? next.runs[0]?.id ?? ""),
+        : (next.runs.find((r) => !r.archived)?.id ?? ""),
     );
   }, []);
   const load = useCallback(

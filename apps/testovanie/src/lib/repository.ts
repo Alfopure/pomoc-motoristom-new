@@ -30,10 +30,15 @@ export class BlobRepository implements Repository {
       access: "private",
       token: this.token,
       useCache: false,
+      // Compression turns the entity tag into W/"...", which cannot be used
+      // for If-Match. Read the identity representation and its strong ETag.
+      headers: { "accept-encoding": "identity" },
     });
     if (!blob) return { value: emptyStore(), etag: null };
     if (!blob.stream || blob.statusCode !== 200)
       throw new Error("Blob read failed");
+    if (!blob.blob.etag || blob.blob.etag.startsWith("W/"))
+      throw new Error("Blob did not return a strong ETag");
     const value: Store = await new Response(blob.stream).json();
     if (
       value.schema !== 1 ||

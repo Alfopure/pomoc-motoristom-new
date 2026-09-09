@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { catalog } from "../src/lib/catalog";
 
 async function enter(page: Page, name: string) {
   await page.goto("/");
@@ -8,6 +9,56 @@ async function enter(page: Page, name: string) {
     page.getByRole("heading", { name: "Overme, že všetko funguje." }),
   ).toBeVisible();
 }
+
+test("a workspace with only archived checks opens on the new-round screen", async ({
+  page,
+}) => {
+  const actor = {
+    id: "qa-archive",
+    name: "QA · Archív",
+    createdAt: new Date().toISOString(),
+  };
+  const store = {
+    schema: 1,
+    revision: 2,
+    events: [],
+    runs: [
+      {
+        id: "archived-run",
+        title: "QA · archív",
+        stage: "internal",
+        targetUrl: "https://dispecing-test.vercel.app",
+        version: "qa-1",
+        device: "PC",
+        conditions: "",
+        catalogVersion: "qa",
+        scenarios: catalog,
+        results: {},
+        createdAt: actor.createdAt,
+        createdBy: actor,
+        archived: true,
+        revision: 2,
+      },
+    ],
+  };
+  await page.route("**/api/session", (route) =>
+    route.fulfill({ json: { actor } }),
+  );
+  await page.route("**/api/tracker**", (route) =>
+    route.fulfill({ json: { actor, store } }),
+  );
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "Začnime prvým testovacím kolom." }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Otvoriť archív", exact: true })
+    .click();
+  await expect(page.locator("#run-select")).toHaveValue("archived-run");
+  await expect(
+    page.getByText("Toto kolo je archivované.", { exact: false }),
+  ).toBeVisible();
+});
 async function createRun(page: Page, title: string) {
   await page.getByRole("button", { name: "Nové kolo", exact: true }).click();
   const dialog = page.getByRole("dialog");

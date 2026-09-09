@@ -32,7 +32,7 @@ Používa vlastný **private Vercel Blob store**, nie Supabase ani tabuľky disp
 - `TRACKER_SESSION_SECRET`: náhodný kľúč s aspoň 32 znakmi; stabilný medzi nasadeniami.
 - `TRACKER_STORAGE_PREFIX`: `production` pre produkciu evidencie, `preview` pre Preview/dev. Zápisy z overovania stránky sa tým nemiešajú s používaním nasadenej evidencie.
 
-Malá tímová evidencia je uložená v jednom JSON dokumente. Výsledok a audit sa zapisujú **spoločne**, pomocou podmieneného zápisu ETag (`ifMatch`) a konzistentného čítania (`useCache: false`). Súbeh v inom riadku sa bezpečne zopakuje. Zastaraná revízia rovnakého výsledku vráti 409; rozpracovaný text zostane v dialógu a tester výslovne zvolí ďalší postup. Idempotency ID a odtlačok obsahu chránia opakovanie po strate odpovede.
+Malá tímová evidencia je uložená v jednom JSON dokumente. Výsledok a audit sa zapisujú **spoločne**, pomocou podmieneného zápisu ETag (`ifMatch`) a konzistentného čítania (`useCache: false`). Čítanie výslovne požaduje `Accept-Encoding: identity`: kompresia väčšieho dokumentu inak zmení ETag na slabý `W/`, ktorý nemožno použiť pre podmienený zápis. Súbeh v inom riadku sa bezpečne zopakuje. Zastaraná revízia rovnakého výsledku vráti 409; rozpracovaný text zostane v dialógu a tester výslovne zvolí ďalší postup. Idempotency ID a odtlačok obsahu chránia opakovanie po strate odpovede.
 
 Pri chybe sa nezobrazuje falošné potvrdenie uloženia a server na Verceli nikdy neprejde na dočasný súbor alebo `localStorage`. Pre túto malú evidenciu je stanovený limit 12 MB na dokument; prekročenie zastaví nový zápis, nikdy neodstráni históriu. Pri raste počtu kôl/udalostí treba úložisko rozdeliť alebo migrovať do databázy. Export JSON zachová celý obsah potrebný na migráciu; pravidelné zálohovanie môže správca vykonávať mimo tejto aplikácie.
 
@@ -51,7 +51,7 @@ Lokálny súbor je určený len pre jeden lokálny server a automatické skúšk
 
 Vercel Root Directory: `apps/testovanie`; build gate: `pnpm check` (Vitest → TypeScript → Next build). Root projekt má vlastnú nezmenenú gate; vnorenú aplikáciu vylučuje zo svojho TypeScript/Vitest/ESLint rozsahu. Spoločný pnpm workspace a lockfile držia závislosti oboch aplikácií.
 
-Nasadenie postupuje pracovnou vetvou z aktuálneho `dev`, Preview kontrolou, PR do `dev`, kontrolou dev aliasu a produkčným PR `dev → main`. Netreba žiadne Supabase migrácie, seed ani nový plánovač.
+Nasadenie postupuje pracovnou vetvou z aktuálneho `dev`, Preview kontrolou, PR do `dev`, kontrolou dev aliasu a produkčným PR `dev → main`. Build odmietne produkčné nasadenie z inej vetvy vrátane automatického prvého nasadenia Vercelu. Netreba žiadne Supabase migrácie, seed ani nový plánovač.
 
 ## Rozsah katalógu
 
