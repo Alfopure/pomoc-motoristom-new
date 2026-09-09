@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 import { catalog } from "../src/lib/catalog";
+import type { Store } from "../src/lib/model";
 
 async function enter(page: Page, name: string) {
   await page.goto("/");
@@ -75,6 +77,110 @@ async function createRun(page: Page, title: string) {
   await expect(dialog).toHaveCount(0);
   await expect(page.locator("#run-select")).toContainText(title);
 }
+
+test("quick checks share assessments and audit with other sets and export only their scope", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1024 });
+  await enter(page, "QA · Rýchly výber");
+  await createRun(page, `QA · rýchly výber ${Date.now()}`);
+  const runId = await page.locator("#run-select").inputValue();
+  const readStore = async (): Promise<Store> =>
+    (await (await page.request.get("/api/tracker")).json()).store;
+  await expect(page.locator(".scenario-row")).toHaveCount(35);
+  await page
+    .getByRole("navigation", { name: "Oblasti testovania" })
+    .getByRole("button", { name: /Flotila/ })
+    .click();
+  await page.getByLabel("Hľadať test alebo poznámku").fill("VIN");
+
+  const quick = page.getByRole("button", {
+    name: "Rýchly test dispečingu",
+    exact: true,
+  });
+  await quick.click();
+  await expect(quick).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("Hľadať test alebo poznámku")).toHaveValue("");
+  await expect(page.locator(".scenario-row")).toHaveCount(11);
+  await expect(page.locator(".scenario-row").first()).toHaveAttribute(
+    "aria-label",
+    /^AUTH-01:/,
+  );
+  await expect(page.locator(".scenario-row").last()).toHaveAttribute(
+    "aria-label",
+    /^AUTH-02:/,
+  );
+  await expect(
+    page
+      .getByRole("navigation", { name: "Oblasti testovania" })
+      .getByRole("button"),
+  ).toHaveCount(4);
+
+  await page.getByRole("button", { name: /^CALL-01:/ }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog
+    .getByRole("button", { name: "Akceptované", exact: true })
+    .click();
+  await dialog
+    .getByLabel(/Poznámka/)
+    .fill("Jeden spoločný výsledok vo všetkých sadách");
+  await dialog.getByRole("button", { name: "Uložiť a ďalší" }).click();
+  await expect(
+    dialog.getByRole("heading", { name: "Priame a dohodnuté prepojenie" }),
+  ).toBeVisible();
+  await dialog.getByRole("button", { name: "Zavrieť", exact: true }).click();
+  await expect(
+    page
+      .getByRole("region", { name: "Postup testovania" })
+      .locator(".stat-progress"),
+  ).toContainText("1 / 11");
+  const saved = await readStore();
+
+  await page.getByRole("button", { name: /Kompletná sada/ }).click();
+  await expect(page.locator(".scenario-row")).toHaveCount(92);
+  await expect(page.getByRole("button", { name: /^CALL-01:/ })).toContainText(
+    "Jeden spoločný výsledok",
+  );
+  await page.getByRole("button", { name: /Základná sada/ }).click();
+  await expect(page.locator(".scenario-row")).toHaveCount(35);
+  await expect(page.getByRole("button", { name: /^CALL-01:/ })).toContainText(
+    "Jeden spoločný výsledok",
+  );
+  await quick.click();
+  const afterSwitches = await readStore();
+  expect(afterSwitches.runs.find((r) => r.id === runId)).toEqual(
+    saved.runs.find((r) => r.id === runId),
+  );
+  expect(afterSwitches.events.filter((e) => e.runId === runId)).toEqual(
+    saved.events.filter((e) => e.runId === runId),
+  );
+  expect(
+    saved.events.filter((e) => e.runId === runId && e.kind === "result_saved"),
+  ).toHaveLength(1);
+
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export CSV" }).click();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toMatch(/-quick\.csv$/);
+  const csv = await readFile((await download.path())!, "utf8");
+  expect(csv).toContain('"CALL-05"');
+  expect(csv).toContain('"CALL-08"');
+  expect(csv).not.toContain('"AUTH-03"');
+  expect(csv).not.toContain('"CB-04"');
+  expect(csv.split("\r\n")).toHaveLength(12);
+  await page.screenshot({ path: "test-results/quick-desktop.png" });
+  await page.setViewportSize({ width: 360, height: 800 });
+  await expect(quick).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /Kompletná sada/ }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({ path: "test-results/quick-mobile.png" });
+});
 
 test("names, shared results, conflicts, immutable history, export and mobile", async ({
   browser,
