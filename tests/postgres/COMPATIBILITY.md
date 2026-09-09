@@ -13,7 +13,7 @@ Python requires `psycopg[binary]`. The bridge recreates only the dedicated `stab
 
 The oldest compatible source is `6c314610327d383f95e381c9fa30422d89fe57ad`, the first stability contract commit. Its parent has no compatible return-context/effect-journal contract and is not a permitted rollback target. The build extracts that exact Git archive and separately bundles the candidate working tree. The first passing candidate was `3766803898da4c515a9d25a872488a8f67d5bbad`: its application source is unchanged from the baseline; its additional owner-index migration is installed in the fixture. This verifies an additive-schema rollback boundary, not compatibility with the pre-contract application.
 
-Eight assertion groups exercise actual application services and event processors:
+Nine assertion groups exercise actual application services and event processors:
 
 1. Candidate `setCallOutcome` creates a scheduled callback; `pickupWaitingCall` creates a paused pickup and durable return context.
 2. A fresh baseline runtime reads the same PostgreSQL rows and handles answer plus the exact bridge observations. A real PostgreSQL audit trigger rejects fulfillment and leaves the callback open with a saved proof/continuation.
@@ -23,6 +23,7 @@ Eight assertion groups exercise actual application services and event processors
 6. A baseline wrap-up sweep restores the original pause/reason exactly once; history contains no available interval. PostgreSQL uses its real clock, so this step places the stored wrap-up deadline one second in the past rather than pretending the application test clock controls SQL `now()`.
 7. Baseline creation-off pickup rejects a new call. The actual console sweep function processes its overdue ring step and does not dial the configured legacy pause mobile number.
 8. Repeated baseline cron recovery leaves one fulfillment audit and does not reopen the callback.
+9. A fresh candidate-created pickup/callback reaches `wrap_up` with a saved proof, failed audit and owner return after the customer hangs up; the operator hangup webhook is withheld. At +121 seconds, a fresh baseline console sweep discovers that exact stale session, completes callback/audit and owner release, and ends its remaining leg rows without restarting audio. The baseline console end-wrap-up service restores the original pause. Repeating the sweep does not revisit the ended session or duplicate the audit. This is a separate scenario, so it does not replace the independent five-minute cron recovery evidence above.
 
 ## Evidence limits
 

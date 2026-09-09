@@ -9,6 +9,7 @@ import {
   BellRing,
   CalendarDays,
   ChevronDown,
+  ClipboardCheck,
   Headphones,
   LayoutDashboard,
   Loader2,
@@ -2358,6 +2359,19 @@ function AccountMenu({
             </span>
           </div>
           <div className="border-t border-zinc-200 p-2">
+            <a
+              href="https://dispecing-testovanie.vercel.app"
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => setOpen(false)}
+              className="flex min-h-11 w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100"
+            >
+              <ClipboardCheck size={16} className="shrink-0" aria-hidden="true" />
+              <span className="min-w-0">
+                <span className="block">Testovanie</span>
+                <span className="mt-0.5 block text-[11px] font-normal text-zinc-500">Scenáre, výsledky a história tímu · nové okno</span>
+              </span>
+            </a>
             <button
               type="button"
               onClick={() => { setOpen(false); onRefresh(); }}
