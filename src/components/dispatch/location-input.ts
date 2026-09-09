@@ -23,11 +23,5 @@ export function parseLocationCoordinates(value: string): ParsedCoordinates | nul
 }
 
 export function buildApproximateLocationQuery(value: string) {
-  const query = value.trim();
-
-  if (!query || /(?:slovensko|slovakia)\s*$/i.test(query)) {
-    return query;
-  }
-
-  return `${query}, Slovensko`;
+  return value.trim();
 }

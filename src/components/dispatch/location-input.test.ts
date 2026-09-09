@@ -10,9 +10,11 @@ describe("location form helpers", () => {
     expect(parseLocationCoordinates("Bratislava")).toBeNull();
   });
 
-  it("adds the Slovak search region only when it is missing", () => {
-    expect(buildApproximateLocationQuery("R1 pri Nitre")).toBe("R1 pri Nitre, Slovensko");
+  it("preserves domestic and foreign queries without appending a country", () => {
+    expect(buildApproximateLocationQuery("R1 pri Nitre")).toBe("R1 pri Nitre");
     expect(buildApproximateLocationQuery("Bratislava, Slovensko")).toBe("Bratislava, Slovensko");
+    expect(buildApproximateLocationQuery("  Wien, Österreich  ")).toBe("Wien, Österreich");
+    expect(buildApproximateLocationQuery("Praha")).toBe("Praha");
     expect(buildApproximateLocationQuery("")).toBe("");
   });
 });

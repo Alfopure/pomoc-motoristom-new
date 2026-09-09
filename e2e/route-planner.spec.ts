@@ -1,0 +1,148 @@
+import { expect, test, type Page } from "@playwright/test";
+import { build } from "esbuild";
+import { mkdir, readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import path from "node:path";
+import tailwindcss from "@tailwindcss/postcss";
+
+const postcss = createRequire(require.resolve("@tailwindcss/postcss"))("postcss");
+let script: string;
+let css: string;
+test.beforeAll(async () => {
+  await mkdir(".context/route-planner-browser", { recursive: true });
+  script = (await build({ entryPoints: ["e2e/fixtures/route-planner.tsx"], bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic", define: { "process.env": JSON.stringify({ NODE_ENV: "production", NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY: "browser-test-key" }) } })).outputFiles[0].text;
+  css = (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css;
+});
+
+async function boot(page: Page, width = 1440) {
+  const state = { requests: [] as Record<string, unknown>[], errors: [] as string[], fail: false, delay: 0 };
+  page.on("pageerror", error => { state.errors.push(error.message); console.error(error.message); });
+  await page.setViewportSize({ width, height: 900 });
+  await page.route("**/*", async route => {
+    const url = new URL(route.request().url());
+    if (url.origin === "http://route-planner.test" && url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><body><div id="root"></div></body></html>' });
+    if (url.origin === "http://route-planner.test" && url.pathname === "/api/maps/route") {
+      state.requests.push(route.request().postDataJSON());
+      if (state.delay) await new Promise(resolve => setTimeout(resolve, state.delay));
+      return route.fulfill({ status: state.fail ? 502 : 200, json: state.fail ? { error: "Medzi zadanými miestami sa nenašla prejazdná cesta." } : { distanceMeters: 420123, durationSeconds: 15300, encodedPolyline: "test", calculatedAt: new Date().toISOString(), provider: "google-routes" } });
+    }
+    state.errors.push(`Unexpected request: ${route.request().method()} ${url.origin}${url.pathname}`);
+    return route.abort();
+  });
+  await page.goto("http://route-planner.test/");
+  await page.addStyleTag({ content: css });
+  await page.addScriptTag({ content: script });
+  await expect(page.getByRole("button", { name: "Trasa", exact: true })).toBeVisible();
+  return state;
+}
+
+async function select(page: Page, label: string, query: string) {
+  const input = page.getByRole("textbox", { name: label, exact: true });
+  await input.fill(query);
+  await input.press("Enter");
+  await expect(input).toHaveValue(new RegExp(query));
+  await expect(page.getByText("Načítavam miesto…")).toHaveCount(0);
+}
+
+async function mapState(page: Page) {
+  return page.evaluate(() => {
+    const state = (window as unknown as { routePlannerTest: { markers: { map: unknown; title: string }[]; polylines: { map: unknown }[]; autocompleteOptions: Record<string, unknown>[]; clickableIcons: boolean } }).routePlannerTest;
+    return { markers: state.markers.filter(marker => marker.map).map(marker => marker.title), polylines: state.polylines.filter(polyline => polyline.map).length, restricted: state.autocompleteOptions.some(options => Boolean(options.includedRegionCodes)), clickableIcons: state.clickableIcons };
+  });
+}
+
+for (const width of [1440, 390]) test(`international route is independent from fleet and branches at ${width}px`, async ({ page }) => {
+  const state = await boot(page, width);
+  await expect.poll(async () => (await mapState(page)).markers).toContain("Testovacia pobočka");
+  await page.getByRole("button", { name: "Trasa", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Odťahovky", exact: true })).toHaveCount(0);
+  await expect.poll(async () => (await mapState(page)).markers.length).toBe(0);
+  await select(page, "Odkiaľ", "Bratislava");
+  await select(page, "Kam", "Praha");
+  await page.getByRole("button", { name: "Pridať bod prejazdu" }).click();
+  await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeDisabled();
+  await select(page, "Bod prejazdu 1", "Wien");
+  await page.getByRole("button", { name: "Vypočítať trasu" }).click();
+  await expect(page.getByText("420,1 km", { exact: true })).toBeVisible();
+  await expect(page.getByText("4 h 15 min", { exact: true })).toBeVisible();
+  expect(state.requests).toEqual([{ origin: { lat: 48.1486, lng: 17.1077 }, destination: { lat: 50.0755, lng: 14.4378 }, intermediates: [{ lat: 48.2082, lng: 16.3738 }] }]);
+  expect(await mapState(page)).toEqual({ markers: ["1. Bratislava, Slovensko", "2. Wien, Österreich", "3. Praha, Česko"], polylines: 1, restricted: false, clickableIcons: false });
+  const panel = page.getByRole("region", { name: "Plánovač trasy" });
+  expect(await panel.evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+  await page.screenshot({ path: `.context/route-planner-browser/route-${width}.png` });
+  await page.getByRole("button", { name: "Prepočítať podľa dopravy" }).click();
+  await expect(page.getByText("420,1 km", { exact: true })).toBeVisible();
+  expect(state.requests).toHaveLength(2);
+  await page.getByRole("button", { name: "Zavrieť plánovač trasy" }).click();
+  expect((await mapState(page)).polylines).toBe(0);
+  await expect.poll(async () => (await mapState(page)).markers).toContain("Testovacia pobočka");
+  expect(state.errors).toEqual([]);
+});
+
+test("waypoints reorder, reverse and remove, while editing invalidates stale results", async ({ page }) => {
+  const state = await boot(page);
+  await page.getByRole("button", { name: "Trasa", exact: true }).click();
+  await select(page, "Odkiaľ", "Bratislava"); await select(page, "Kam", "Praha");
+  await page.getByRole("button", { name: "Pridať bod prejazdu" }).click(); await select(page, "Bod prejazdu 1", "Wien");
+  await page.getByRole("button", { name: "Pridať bod prejazdu" }).click(); await select(page, "Bod prejazdu 2", "Brno");
+  await page.getByRole("button", { name: "Posunúť bod 2 vyššie" }).click();
+  await expect(page.getByRole("textbox", { name: "Bod prejazdu 1", exact: true })).toHaveValue("Brno, Česko");
+  await page.getByRole("button", { name: "Otočiť trasu" }).click();
+  await expect(page.getByRole("textbox", { name: "Odkiaľ", exact: true })).toHaveValue("Praha, Česko");
+  await expect(page.getByRole("textbox", { name: "Bod prejazdu 1", exact: true })).toHaveValue("Wien, Österreich");
+  await page.getByRole("button", { name: "Odstrániť bod 2" }).click();
+  await page.getByRole("button", { name: "Vypočítať trasu" }).click();
+  await expect(page.getByText("420,1 km", { exact: true })).toBeVisible();
+  expect(state.requests[0]).toEqual({ origin: { lat: 50.0755, lng: 14.4378 }, destination: { lat: 48.1486, lng: 17.1077 }, intermediates: [{ lat: 48.2082, lng: 16.3738 }] });
+  await page.getByRole("textbox", { name: "Kam", exact: true }).fill("unfinished address");
+  await expect(page.getByText("420,1 km", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeDisabled();
+  expect((await mapState(page)).polylines).toBe(0);
+  expect(state.errors).toEqual([]);
+});
+
+test("late place and route responses are discarded; errors allow retry and clearing removes overlays", async ({ page }) => {
+  const state = await boot(page);
+  await page.getByRole("button", { name: "Trasa", exact: true }).click();
+  await select(page, "Odkiaľ", "Bratislava");
+  const destination = page.getByRole("textbox", { name: "Kam", exact: true });
+  await page.locator('gmp-place-autocomplete[aria-label="Kam"]').evaluate(node => { (node as HTMLElement).dataset.delay = "300"; });
+  await destination.fill("Praha"); await destination.press("Enter"); await destination.fill("new query");
+  await page.waitForTimeout(350);
+  await expect(destination).toHaveValue("new query");
+  await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeDisabled();
+  await select(page, "Kam", "Praha");
+  state.delay = 300;
+  await page.getByRole("button", { name: "Vypočítať trasu" }).click();
+  await expect.poll(() => state.requests.length).toBe(1);
+  await destination.fill("Wien");
+  await page.waitForTimeout(350);
+  await expect(page.getByText("420,1 km", { exact: true })).toHaveCount(0);
+  await select(page, "Kam", "Wien"); state.fail = true; state.delay = 0;
+  await page.getByRole("button", { name: "Vypočítať trasu" }).click();
+  await expect(page.getByRole("alert")).toContainText("nenašla prejazdná cesta");
+  state.fail = false;
+  await page.getByRole("button", { name: "Vypočítať trasu" }).click();
+  await expect(page.getByText("420,1 km", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Vyčistiť mapu" }).click();
+  await expect(page.getByRole("region", { name: "Plánovač trasy" })).toHaveCount(0);
+  expect((await mapState(page)).markers).toEqual([]);
+  expect((await mapState(page)).polylines).toBe(0);
+  expect(state.errors).toEqual([]);
+});
+
+test("foreign map searches work and a late search cannot overlay the route planner", async ({ page }) => {
+  const state = await boot(page);
+  await page.getByRole("button", { name: "Hľadať miesto", exact: true }).click();
+  const input = page.getByRole("textbox", { name: "Hľadať miesto", exact: true });
+  await input.fill("Wien"); await input.press("Enter");
+  await expect.poll(async () => (await mapState(page)).markers).toContain("Wien, Österreich");
+  await page.locator('gmp-place-autocomplete[aria-label="Hľadať miesto"]').evaluate(node => { (node as HTMLElement).dataset.delay = "300"; });
+  await input.fill("Praha"); await input.press("Enter");
+  await page.getByRole("button", { name: "Trasa", exact: true }).click();
+  await page.waitForTimeout(350);
+  expect((await mapState(page)).markers).toEqual([]);
+  expect(state.requests).toEqual([]);
+  expect(state.errors).toEqual([]);
+});

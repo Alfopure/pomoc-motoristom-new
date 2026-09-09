@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import { X } from "lucide-react";
 import { createPlaceAutocompleteElement } from "@/lib/google-maps-places";
@@ -19,6 +19,12 @@ export function MapPlaceSearch({
   onClose: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const selectionSequenceRef = useRef(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) selectionSequenceRef.current += 1;
+  }, [open]);
 
   useEffect(() => {
     if (loadState !== "ready" || !hostRef.current) {
@@ -26,16 +32,22 @@ export function MapPlaceSearch({
     }
 
     const host = hostRef.current;
-    const element = createPlaceAutocompleteElement("Hľadať miesto", "", "Hľadať miesto");
+    const element = createPlaceAutocompleteElement("Hľadať miesto", "", "Miesto na Slovensku aj v zahraničí");
     const listener: EventListener = (event) => {
       const selectEvent = event as google.maps.places.PlacePredictionSelectEvent;
-      void applyPlaceSelection(selectEvent.placePrediction, mapRef, searchMarkerRef);
+      const sequence = ++selectionSequenceRef.current;
+      setError(null);
+      void applyPlaceSelection(selectEvent.placePrediction, mapRef, searchMarkerRef, () => selectionSequenceRef.current === sequence)
+        .catch(() => {
+          if (selectionSequenceRef.current === sequence) setError("Miesto sa nepodarilo načítať. Skúste ho vybrať znova.");
+        });
     };
 
     element.addEventListener("gmp-select", listener);
     host.replaceChildren(element);
 
     return () => {
+      selectionSequenceRef.current += 1;
       element.removeEventListener("gmp-select", listener);
       host.replaceChildren();
     };
@@ -73,6 +85,7 @@ export function MapPlaceSearch({
       >
         <X size={16} />
       </button>
+      {error && <p role="alert" className="col-span-2 px-2 pb-1 text-xs text-amber-800">{error}</p>}
     </div>
   );
 }
@@ -81,6 +94,7 @@ async function applyPlaceSelection(
   placePrediction: google.maps.places.PlacePrediction,
   mapRef: MutableRefObject<google.maps.Map | null>,
   searchMarkerRef: MutableRefObject<google.maps.marker.AdvancedMarkerElement | null>,
+  isCurrent: () => boolean,
 ) {
   const map = mapRef.current;
   if (!map) {
@@ -91,7 +105,7 @@ async function applyPlaceSelection(
   await place.fetchFields({ fields: ["displayName", "formattedAddress", "location"] });
 
   const location = place.location;
-  if (!location) {
+  if (!location || !isCurrent() || mapRef.current !== map) {
     return;
   }
 
