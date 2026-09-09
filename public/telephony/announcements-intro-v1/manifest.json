@@ -1,0 +1,186 @@
+[
+  {
+    "file": "announcements-intro-v1/sk/greeting-recordingServiceNotice.mp3",
+    "language": "sk",
+    "notice": "recordingServiceNotice",
+    "text": "Pomoc motoristom, dobrý deň. Naša spoločnosť hovor nahráva na vybavenie pomoci. Informácie a námietky vybaví dispečer.",
+    "voiceId": "T4CPtAHlrClEH8iCFo2h",
+    "durationSeconds": 6.53,
+    "sha256": "1b83c17909711a4b0fded1f1f97636a4a2841d87d06c247ad3c0ebd04032e576",
+    "bytes": 52460,
+    "assetOrigin": "composed_existing_approved_speech",
+    "sourceFiles": [
+      {
+        "file": "announcements-v4/sk/greeting.mp3",
+        "sha256": "d934bea4e26bb6bb397ae8b41064bc573d387f1cbe8460bbf2ea67433effcc7a"
+      },
+      {
+        "file": "announcements-v4/sk/recordingServiceNotice.mp3",
+        "sha256": "1efcf3fb2a49dfa555b93cafa9c0bed48f04f6911f05467ec921e11999e23d91"
+      }
+    ],
+    "sampleRate": 24000,
+    "channels": 1
+  },
+  {
+    "file": "announcements-intro-v1/sk/greeting-recordingNotice.mp3",
+    "language": "sk",
+    "notice": "recordingNotice",
+    "text": "Pomoc motoristom, dobrý deň. Naša spoločnosť hovor nahráva na vybavenie pomoci a kontrolu kvality. Informácie a námietky vybaví dispečer.",
+    "voiceId": "T4CPtAHlrClEH8iCFo2h",
+    "durationSeconds": 7.58,
+    "sha256": "867476df80c9f582deadc05c061776a16ac541d60117a828b5edaf09cba00fe2",
+    "bytes": 60908,
+    "assetOrigin": "composed_existing_approved_speech",
+    "sourceFiles": [
+      {
+        "file": "announcements-v4/sk/greeting.mp3",
+        "sha256": "d934bea4e26bb6bb397ae8b41064bc573d387f1cbe8460bbf2ea67433effcc7a"
+      },
+      {
+        "file": "announcements-v4/sk/recordingNotice.mp3",
+        "sha256": "1fe471319f322aabd40303a0fa1f29ab7e6a83adb274a6c813f79c26478c7185"
+      }
+    ],
+    "sampleRate": 24000,
+    "channels": 1
+  },
+  {
+    "file": "announcements-intro-v1/cs/greeting-recordingServiceNotice.mp3",
+    "language": "cs",
+    "notice": "recordingServiceNotice",
+    "text": "Pomoc motoristům, dobrý den. Naše společnost hovor nahrává pro zajištění pomoci. Informace a námitky vyřídí dispečer.",
+    "voiceId": "T4CPtAHlrClEH8iCFo2h",
+    "durationSeconds": 5.42,
+    "sha256": "245bd92445ec9d74bc8a52292b4484aa7e28b22f300687e8351da3aac6344bcc",
+    "bytes": 43628,
+    "assetOrigin": "composed_existing_approved_speech",
+    "sourceFiles": [
+      {
+        "file": "announcements-v4/cs/greeting.mp3",
+        "sha256": "cb8073f82a0f630851a8eed191660c25cfa92cf3b651e27e066de52f76c16f94"
+      },
+      {
+        "file": "announcements-v4/cs/recordingServiceNotice.mp3",
+        "sha256": "ba4e57bb7c3b698be53b375a0975ae8d1753878fc7ef57d977d4c6be8f77b434"
+      }
+    ],
+    "sampleRate": 24000,
+    "channels": 1
+  },
+  {
+    "file": "announcements-intro-v1/cs/greeting-recordingNotice.mp3",
+    "language": "cs",
+    "notice": "recordingNotice",
+    "text": "Pomoc motoristům, dobrý den. Naše společnost hovor nahrává pro zajištění pomoci a kontrolu kvality. Informace a námitky vyřídí dispečer.",
+    "voiceId": "T4CPtAHlrClEH8iCFo2h",
+    "durationSeconds": 7.68,
+    "sha256": "42159d5aa049cd95e72297cefc0d6c1c2823ff4068fb78e26d7ab05c1d37d305",
+    "bytes": 61676,
+    "assetOrigin": "composed_existing_approved_speech",
+    "sourceFiles": [
+      {
+        "file": "announcements-v4/cs/greeting.mp3",
+        "sha256": "cb8073f82a0f630851a8eed191660c25cfa92cf3b651e27e066de52f76c16f94"
+      },
+      {
+        "file": "announcements-v4/cs/recordingNotice.mp3",
+        "sha256": "7faf69f2c32e5dfe2eed104f6256a5b4773265cfead1a6044701a721f9ce735b"
+      }
+    ],
+    "sampleRate": 24000,
+    "channels": 1
+  },
+  {
+    "file": "announcements-intro-v1/en/greeting-recordingServiceNotice.mp3",
+    "language": "en",
+    "notice": "recordingServiceNotice",
+    "text": "Hello, Pomoc motoristom roadside assistance. Our company records this call to arrange assistance. Ask the dispatcher for details or to object.",
+    "voiceId": "T4CPtAHlrClEH8iCFo2h",
+    "durationSeconds": 6.58,
+    "sha256": "3c3579e9c319801875d0d69a0dfd38d68955ae1453b249e06bacdd95957bf370",
+    "bytes": 52844,
+    "assetOrigin": "composed_existing_approved_speech",
+    "sourceFiles": [
+      {
+        "file": "announcements-v4/en/greeting.mp3",
+        "sha256": "79b916b425ed9ae27c6e6ebcefb8158a62ece9cb3a3f44e963bec37de00cd765"
+      },
+      {
+        "file": "announcements-v4/en/recordingServiceNotice.mp3",
+        "sha256": "c0a26788f00d68d33d2ce401d2d3742408da39ec907b0dd641883521ef98a009"
+      }
+    ],
+    "sampleRate": 24000,
+    "channels": 1
+  },
+  {
+    "file": "announcements-intro-v1/en/greeting-recordingNotice.mp3",
+    "language": "en",
+    "notice": "recordingNotice",
+    "text": "Hello, Pomoc motoristom roadside assistance. Our company records this call to arrange assistance and check service quality. Ask the dispatcher for details or to object.",
+    "voiceId": "T4CPtAHlrClEH8iCFo2h",
+    "durationSeconds": 8.26,
+    "sha256": "fc732525e82575c6f36ebeb38f3fa615d73d698e9672673185bad80965fb67df",
+    "bytes": 66284,
+    "assetOrigin": "composed_existing_approved_speech",
+    "sourceFiles": [
+      {
+        "file": "announcements-v4/en/greeting.mp3",
+        "sha256": "79b916b425ed9ae27c6e6ebcefb8158a62ece9cb3a3f44e963bec37de00cd765"
+      },
+      {
+        "file": "announcements-v4/en/recordingNotice.mp3",
+        "sha256": "1c5468b4dbd251219ca7e576259ce72a2ee7c76b12bf352fd4627d7442286b2c"
+      }
+    ],
+    "sampleRate": 24000,
+    "channels": 1
+  },
+  {
+    "file": "announcements-intro-v1/de/greeting-recordingServiceNotice.mp3",
+    "language": "de",
+    "notice": "recordingServiceNotice",
+    "text": "Guten Tag, hier ist Pomoc motoristom, Ihre Pannenhilfe. Wir zeichnen dieses Gespräch auf, um Ihnen zu helfen. Auskunft und Widerspruch sind bei der Leitstelle möglich.",
+    "voiceId": "T4CPtAHlrClEH8iCFo2h",
+    "durationSeconds": 7.97,
+    "sha256": "15f039f6bfb7a9228008c28d9ec6c358cdc1a19d54e121c8e6b7752c68e4c01b",
+    "bytes": 63980,
+    "assetOrigin": "composed_existing_approved_speech",
+    "sourceFiles": [
+      {
+        "file": "announcements-v4/de/greeting.mp3",
+        "sha256": "8841b828aa2b993775db39a35ab0602cca08179c26cb3dc35e9d0947bf28bf11"
+      },
+      {
+        "file": "announcements-v4/de/recordingServiceNotice.mp3",
+        "sha256": "c6303732de3124308d14e5de30006c478befd3b542e678a2ce7000f43c6d035a"
+      }
+    ],
+    "sampleRate": 24000,
+    "channels": 1
+  },
+  {
+    "file": "announcements-intro-v1/de/greeting-recordingNotice.mp3",
+    "language": "de",
+    "notice": "recordingNotice",
+    "text": "Guten Tag, hier ist Pomoc motoristom, Ihre Pannenhilfe. Wir zeichnen dieses Gespräch auf, um Ihnen zu helfen und unsere Servicequalität zu prüfen. Auskunft und Widerspruch sind bei der Leitstelle möglich.",
+    "voiceId": "T4CPtAHlrClEH8iCFo2h",
+    "durationSeconds": 9.89,
+    "sha256": "04f95eb22a4a1cb01666e11db1ec49236c12a6e898798018f14a51fe364ba72e",
+    "bytes": 79340,
+    "assetOrigin": "composed_existing_approved_speech",
+    "sourceFiles": [
+      {
+        "file": "announcements-v4/de/greeting.mp3",
+        "sha256": "8841b828aa2b993775db39a35ab0602cca08179c26cb3dc35e9d0947bf28bf11"
+      },
+      {
+        "file": "announcements-v4/de/recordingNotice.mp3",
+        "sha256": "d23470cbbb500b88abd9f3219cec0917d88f9d78562b62297800f908aee658c8"
+      }
+    ],
+    "sampleRate": 24000,
+    "channels": 1
+  }
+]

@@ -157,11 +157,17 @@ describe("fake-supabase telephony RPCs", () => {
 
   it("reserves an operator exactly once", async () => {
     const { client, db } = createFakeSupabase();
+    // The installed wrapper validates session ownership before reserving.
+    db.seed("motorist_call_sessions", [
+      { id: SESSION, organization_id: ORG, state: "ringing" },
+      { id: "other", organization_id: ORG, state: "ringing" },
+    ]);
     db.seed("motorist_operator_presence", [
       { organization_id: ORG, profile_id: PROFILE, status: "available", current_session_id: null },
       { organization_id: ORG, profile_id: "paused", status: "paused", current_session_id: null },
     ]);
 
+    expect((await client.rpc("motorist_reserve_operator", { p_profile_id: PROFILE, p_session_id: SESSION })).data).toBe(true);
     expect((await client.rpc("motorist_reserve_operator", { p_profile_id: PROFILE, p_session_id: SESSION })).data).toBe(true);
     expect((await client.rpc("motorist_reserve_operator", { p_profile_id: PROFILE, p_session_id: "other" })).data).toBe(false);
     expect((await client.rpc("motorist_reserve_operator", { p_profile_id: "paused", p_session_id: SESSION })).data).toBe(false);

@@ -163,14 +163,15 @@ export function phoneBarCapabilities(input: {
   // park and transfer act on the caller alone and the reducer refuses them in
   // `conference`, so the bar must not offer them either. What is left is the
   // participant list, adding one more, leaving and hanging up.
-  const twoParty = call.state === "talking" || call.state === "held";
+  const connectionPending = call.audioConnection != null && call.audioConnection.status !== "connected";
+  const twoParty = !connectionPending && (call.state === "talking" || call.state === "held");
   const conference = call.state === "conference";
-  const advanced = !input.degraded;
+  const advanced = !input.degraded && !connectionPending;
   return {
     answer: input.browserCallRinging,
     hangup: true,
     hold: call.state === "talking" && advanced,
-    unhold: call.state === "held",
+    unhold: call.state === "held" && !connectionPending,
     park: twoParty && call.answered,
     pickup: false,
     transfer: twoParty,
@@ -210,6 +211,8 @@ export type PhoneBarStateLabel = { label: string; tone: "live" | "hold" | "ring"
 export function phoneBarStateLabel(call: PhoneBarCall): PhoneBarStateLabel {
   if (call.kind === "offer") return { label: "Zvoní", tone: "ring" };
   if (call.kind === "waiting") return { label: call.parked ? "V čakárni" : "Čaká", tone: "wait" };
+  if (call.audioConnection?.status === "connecting") return { label: "Pripája sa zvuk…", tone: "wait" };
+  if (call.audioConnection?.status === "failed") return { label: "Spojenie zvuku nepotvrdené", tone: "hold" };
   switch (call.state) {
     case "held":
       return { label: "Podržaný", tone: "hold" };

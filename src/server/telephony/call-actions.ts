@@ -540,7 +540,21 @@ export async function pickupWaitingCall(deps: CallActionDeps, actor: CallActor, 
   const presence = await deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", session.organization_id).eq("profile_id", actor.profileId).maybeSingle();
   if (presence.error) throw new CallActionError(`Prezenciu sa nepodarilo overiť: ${presence.error.message}`, 500);
   const device = await requireLiveDevice(deps, actor.profileId);
-  if (telephonyStabilityEnabled() || (presence.data?.current_session_id === sessionId && (presence.data?.pause_return || presence.data?.offer_token))) {
+  const continuingOwnership = presence.data?.current_session_id === sessionId && Boolean(presence.data?.pause_return || presence.data?.offer_token);
+  // Schema compatibility is independent of new-feature admission. In particular,
+  // creation-off still requires availability; it must nevertheless retain the
+  // token created by the migrated reservation RPC before dialing the picker.
+  if (!telephonyStabilityEnabled() && !continuingOwnership) {
+    const allowed = presenceAllowsOffer(presence.data ? { profileId: actor.profileId,
+      status: presence.data.status, currentSessionId: presence.data.current_session_id,
+      wrapUpUntil: presence.data.wrap_up_until, pauseReturn: presence.data.pause_return } : undefined, nowOf(deps), session.id);
+    if (!allowed.eligible) throw new CallActionError("Prevziať hovor je možné len v stave dostupný.", 409, "operator_unavailable");
+  }
+  // A legacy automatic offer already owns this session without a token. Keep
+  // that identity when its browser/mobile accepts; a second dispatch cannot
+  // take over its current_session_id. New pickups must acquire before dialing.
+  const needsTokenizedPickup = presence.data?.presence_revision !== undefined && !presence.data.current_session_id;
+  if (telephonyStabilityEnabled() || needsTokenizedPickup || continuingOwnership) {
     const reservation = await reserveOperatorPickup(deps.admin, { organizationId: session.organization_id,
       profileId: actor.profileId, sessionId, expectedRevision: presence.data?.presence_revision });
     if (!reservation.applied) throw new CallActionError("Operátor alebo hovor už má inú rezerváciu.", 409, "operator_unavailable");

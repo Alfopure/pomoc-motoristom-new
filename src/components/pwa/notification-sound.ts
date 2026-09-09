@@ -9,16 +9,33 @@ export function setNativePushActive(active: boolean) {
 }
 
 /** Call from a pointer/key gesture; never ask the browser for audio permission. */
-export function unlockNotificationSound() {
-  if (typeof window === "undefined") return;
+export async function unlockNotificationSound(): Promise<boolean> {
+  if (typeof window === "undefined") return false;
   const Audio = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-  if (!Audio) return;
+  if (!Audio) return false;
   try {
-    audioContext ??= new Audio();
-    if (audioContext.state === "suspended") void audioContext.resume().catch(() => undefined);
+    if (!audioContext || audioContext.state === "closed") audioContext = new Audio();
+    // iOS can also report an interrupted context after another application owns audio.
+    if (audioContext.state !== "running") {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const resumed = await Promise.race([
+          audioContext.resume().then(() => true),
+          new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 5_000); }),
+        ]);
+        if (!resumed) return false;
+      } finally { if (timer !== undefined) clearTimeout(timer); }
+    }
+    return audioContext.state === "running";
   } catch {
     // The device may not have an available audio output.
+    return false;
   }
+}
+
+/** Start from the user's gesture, then wait for actual readiness instead of a fixed delay. */
+export async function previewNotificationSound(): Promise<boolean> {
+  return await unlockNotificationSound() && playNotificationChime(undefined, true);
 }
 
 export function shouldPlayNotificationSound(input: { enabled: boolean; visible: boolean; nativePushActive: boolean; alreadyPlayed: boolean }) {

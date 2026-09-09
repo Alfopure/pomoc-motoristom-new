@@ -17,7 +17,7 @@ import {
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { browserCallStartError, checkMicrophone, type PhoneReadiness } from "@/lib/telephony/call-preflight";
 import { acquireCallWakeLock } from "@/lib/telephony/call-wake-lock";
-import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
+import { isTelephonyNotConfigured, TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { activeCallPollDelayMs, telephonyPollActivity } from "@/lib/telephony/poll-schedule";
 import { subscribeTelephonyRealtime } from "@/lib/telephony/realtime-client";
 import {
@@ -47,9 +47,8 @@ export type PhonePresenceAction = { status: "available" | "paused" | "offline"; 
  * the pure models (`active-calls-model.ts`, `webphone-model.ts`,
  * `phone-bar-model.ts`) that are unit-tested.
  *
- * Not-configured mode is a first-class outcome, not an error: any 503 from a
- * telephony route parks the whole surface (`configured === false`), the console
- * keeps its "Telefónia nie je nakonfigurovaná" notice and nothing polls.
+ * Only an explicit not-configured response disables the phone. Temporary 503
+ * responses retain the current snapshot, polling and call controls.
  */
 
 const IDLE_SNAPSHOT: WebphoneSnapshot = {
@@ -261,15 +260,14 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           timeoutMs: TELEPHONY_TIMEOUT_MS.snapshot,
         });
         if (cancelled) return;
-        if (result.status === 503) {
+        if (isTelephonyNotConfigured(result)) {
           setConfigured(false);
           return;
         }
         if (!result.ok || !result.body || !Array.isArray(result.body.calls)) {
           failures += 1;
-          // Anything that is not a 503 proves the stack exists; keep the console
-          // usable and report the outage separately instead of showing the
-          // "not configured" notice.
+          // A transient failure, including a busy 503, retains the last snapshot
+          // and keeps call controls and recovery polling available.
           setConfigured(true);
           setStale(true);
           return;
@@ -369,7 +367,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         timeoutMs: TELEPHONY_TIMEOUT_MS.read,
       }).catch(() => null);
       if (!result || controller.signal.aborted) return;
-      if (result.status === 503) {
+      if (isTelephonyNotConfigured(result)) {
         setConfigured(false);
         return;
       }
@@ -395,7 +393,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           label: "zmena dostupnosti",
           timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
         });
-        if (result.status === 503) {
+        if (isTelephonyNotConfigured(result)) {
           setConfigured(false);
           setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
           return false;
@@ -445,7 +443,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
               timeoutMs: TELEPHONY_TIMEOUT_MS.control,
             },
           );
-          if (result.status === 503) {
+          if (isTelephonyNotConfigured(result)) {
             setConfigured(false);
             setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
             return;
@@ -511,7 +509,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             label: input.label,
             timeoutMs: TELEPHONY_TIMEOUT_MS.control,
           });
-          if (result.status === 503) {
+          if (isTelephonyNotConfigured(result)) {
             setConfigured(false);
             setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
             return;
@@ -588,7 +586,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           timeoutMs: TELEPHONY_TIMEOUT_MS.control,
         },
       );
-      if (result.status === 503) {
+      if (isTelephonyNotConfigured(result)) {
         setConfigured(false);
         setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
         throw new Error(TELEPHONY_NOT_CONFIGURED_MESSAGE);
@@ -628,7 +626,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           timeoutMs: TELEPHONY_TIMEOUT_MS.control,
         },
       );
-      if (result.status === 503) {
+      if (isTelephonyNotConfigured(result)) {
         setConfigured(false);
         setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
         throw new Error(TELEPHONY_NOT_CONFIGURED_MESSAGE);

@@ -77,7 +77,7 @@ describe("telephony runtime", () => {
     expect(deps.telnyx).toBeNull();
     expect(deps.config.configured).toBe(false);
     expect(telephonyConfiguredOrResponse(deps.config)?.status).toBe(503);
-    await expect(notConfiguredResponse().json()).resolves.toEqual({ error: "Telefónia nie je nakonfigurovaná." });
+    await expect(notConfiguredResponse().json()).resolves.toEqual({ error: "Telefónia nie je nakonfigurovaná.", code: "not_configured" });
   });
 
   it("skips the organisation lookup when the caller already resolved it", async () => {

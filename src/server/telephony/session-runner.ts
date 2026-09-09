@@ -9,7 +9,7 @@ import { writeCallAudit } from "./audit";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { buildBusinessHoursSchedule, type BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import { materialiseRingPlan } from "./routing/ring-plan";
-import { applyReduceResult, recordCallEvent, resumePendingEffects, SessionConflictError, type ApplyResult, type CommandOutcome, type EffectsDeps } from "./state/effects";
+import { applyReduceResult, auditCommandOutcomes, recordCallEvent, resumePendingEffects, SessionConflictError, type ApplyResult, type CommandOutcome, type EffectsDeps } from "./state/effects";
 import { hasStabilityContract, telephonyStabilityEnabled } from "./stability";
 import { attachContactOperations, collectContactProof, readContactHistory } from "./contact-proof";
 import { readPendingEffects } from "./state/continuation";
@@ -47,8 +47,8 @@ import type { TelnyxConfig } from "./telnyx/env";
  *   context → pure reducer → effects (CAS on `version`, retry budget 20) →
  *   call-event audit row → lease release.
  *
- * If the lease cannot be obtained in time the event is still processed —
- * the version compare-and-set is the second safety net (design §2.3 item 7).
+ * Compatibility bookkeeping and teardown can fall back to version CAS. Media
+ * mutations require the lease: CAS alone cannot serialize provider commands.
  */
 
 type AdminClient = SupabaseClient<Database>;
@@ -371,18 +371,33 @@ async function auditSupervisionEnd(deps: SessionRunnerDeps, before: SessionRow, 
 }
 
 export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent): Promise<SessionRunResult> {
+  const runnerStarted = nowOf(deps)();
   const token = randomUUID();
   const leaseAcquired = await acquireSessionLease(deps, sessionId, token);
-  if (!leaseAcquired) deps.logger?.({ level: "warn", scope: "lease", sessionId, eventId: event.id, message: "processing without lease (CAS protected)" });
+  const leaseWaitMs = nowOf(deps)().getTime() - runnerStarted.getTime();
+  const timing = (effectsStarted?: Date) => {
+    const completed = nowOf(deps)();
+    return { runner_started_at: runnerStarted.toISOString(), lease_wait_ms: Math.max(0, leaseWaitMs),
+      ...(effectsStarted ? { effects_started_at: effectsStarted.toISOString() } : {}),
+      completed_at: completed.toISOString(), processing_ms: Math.max(0, completed.getTime() - runnerStarted.getTime()) };
+  };
+  if (!leaseAcquired) deps.logger?.({ level: "warn", scope: "lease", sessionId, eventId: event.id, message: "lease unavailable; checking whether event can safely proceed" });
   const maxRetries = deps.maxConflictRetries ?? MAX_CONFLICT_RETRIES;
 
   try {
     for (let retries = 0; ; retries += 1) {
       let snapshot = await loadSessionSnapshot(deps, sessionId);
       const context = await loadRoutingContext(deps, snapshot.session);
+      context.recordingLeaseHeld = leaseAcquired;
       const recordingLeaseRequired = Boolean(context.recordingPolicy?.enabled || readMeta(snapshot.session).recording?.recorders.some((item) => item.observed !== "stopped"));
       const durable = telephonyStabilityEnabled() || hasStabilityContract(snapshot.session);
-      const effects: EffectsDeps = { ...effectsDeps(deps), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token, recordingLeaseRequired || durable) : undefined };
+      const effects: EffectsDeps = { ...effectsDeps(deps), eventTiming: () => timing(), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token, recordingLeaseRequired || durable) : undefined };
+      if (!leaseAcquired && (recordingLeaseRequired || durable) && event.kind === "app" && event.type === "sweep") {
+        // Polling is retried by the next poll/cron. It must not erase the active
+        // owner's recording or pending audio intent by changing capture policy.
+        deps.logger?.({ scope: "session", sessionId, eventId: event.id, code: "sweep_deferred_lease_busy", leaseAcquired });
+        return { outcome: "ignored", reason: "sweep deferred while another event owns the session", session: snapshot.session, leaseAcquired, retries };
+      }
       if (durable && !leaseAcquired) throw new CallActionRejected("Prebieha zmena hovoru. Zopakujte akciu o chvíľu.", 503);
       if (snapshot.session.presence_cancellations && Object.keys(snapshot.session.presence_cancellations).length) {
         await cancelRevokedOffers(effects, snapshot.session, event.kind === "telnyx" && event.callControlId && event.clientState ? { callControlId: event.callControlId, clientState: event.clientState } : undefined);
@@ -398,16 +413,19 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
         }
         snapshot = await loadSessionSnapshot(deps, sessionId);
       }
-      if (!leaseAcquired && (context.recordingPolicy?.enabled || readMeta(snapshot.session).recording?.recorders.some((recorder) => recorder.observed !== "stopped"))) {
-        if (event.kind === "app" && event.type !== "hangup" && event.type !== "sweep") throw new CallActionRejected("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.", 503);
-        // Assistance may progress without capture; it may not start a concurrent recorder.
-        if (context.recordingPolicy) context.recordingPolicy = { ...context.recordingPolicy, enabled: false };
+      if (!leaseAcquired && recordingLeaseRequired && event.kind === "app" && event.type !== "hangup") {
+        throw new CallActionRejected("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.", 503);
       }
       const previousContact = JSON.stringify(readContactHistory(snapshot.session));
       if (durable || readContactHistory(snapshot.session).operations.length) {
         snapshot.session = { ...snapshot.session, metadata: toJson({ ...readMeta(snapshot.session), callback_contact: collectContactProof(snapshot, event) }) };
       }
       let result = reduce(snapshot.session, snapshot.legs, snapshot.attempts, event, context);
+      if (!leaseAcquired && recordingLeaseRequired && event.kind === "telnyx" && event.type !== "call.hangup" && result.commands.length) {
+        // The webhook ledger retains this event for retry. Pure bookkeeping
+        // (e.g. conference.created) may advance version without owning media.
+        throw new CallActionRejected("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.", 503);
+      }
       if (result.ignored && JSON.stringify(readContactHistory(snapshot.session)) !== previousContact) {
         const next = emptyTransition();
         next.session.metadata = snapshot.session.metadata;
@@ -424,11 +442,14 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
           stateAfter: snapshot.session.state,
           notes: [result.ignored],
           commands: [],
+          timing: timing(),
         });
         return { outcome: "ignored", reason: result.ignored, session: snapshot.session, leaseAcquired, retries };
       }
 
       try {
+        const effectsStarted = nowOf(deps)();
+        effects.eventTiming = () => timing(effectsStarted);
         let apply = await applyReduceResult(effects, { session: snapshot.session, result, event, expectedVersion: snapshot.session.version });
         // Complete only bounded internal continuations while retaining this event's lease.
         // These are command acknowledgements, never fabricated provider webhooks.
@@ -454,7 +475,8 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
           stateBefore: snapshot.session.state,
           stateAfter: apply.session.state,
           notes: [...apply.notes, ...apply.compensations.map((entry) => `compensation: ${entry}`)],
-          commands: apply.commands.map((command) => ({ kind: command.kind, ok: command.ok })),
+          commands: auditCommandOutcomes(apply.commands),
+          timing: timing(effectsStarted),
           error: apply.failure?.error ?? null,
         });
         await auditSupervisionEnd(deps, snapshot.session, apply.session, event, apply.compensations.length > 0);

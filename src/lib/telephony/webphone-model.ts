@@ -1,3 +1,5 @@
+import { isTelephonyNotConfigured } from "./not-configured";
+
 /**
  * Pure state machine of the browser phone (design §4 Phase 2 `webphone-model.ts`).
  *
@@ -68,7 +70,7 @@ export type WebphoneEvent =
   | { type: "stop" }
   | { type: "token_issued"; credentials: WebphoneCredentials }
   /** `status` is the HTTP status of the token route (0 for a transport failure). */
-  | { type: "token_rejected"; status: number; message?: string | null }
+  | { type: "token_rejected"; status: number; message?: string | null; code?: string | null }
   | { type: "client_ready" }
   | { type: "client_error"; message?: string | null; authFailure?: boolean }
   | { type: "socket_closed" }
@@ -173,9 +175,9 @@ export function reduceWebphone(
           // A refresh while registered must not flap the pill back to
           // "connecting": the socket is still up, only the token is new.
           status: state.status === "registered" ? "registered" : "connecting",
-          attempts: state.attempts,
+          attempts: state.status === "registered" ? 0 : state.attempts,
           credentials: event.credentials,
-          message: state.status === "registered" ? state.message : null,
+          message: null,
         },
         effects: [{ kind: "connect", credentials: event.credentials }, { kind: "refresh_after", delayMs: refreshIn }],
       };
@@ -183,7 +185,7 @@ export function reduceWebphone(
 
     case "token_rejected": {
       if (state.status === "idle" || isTerminalWebphoneStatus(state.status)) return { state, effects: [] };
-      if (event.status === 503) {
+      if (isTelephonyNotConfigured({ status: event.status, body: { code: event.code, error: event.message } })) {
         return {
           state: { status: "not_configured", attempts: 0, credentials: null, message: event.message ?? NOT_CONFIGURED_MESSAGE },
           effects: [{ kind: "clear_timers" }, { kind: "disconnect" }],
@@ -216,7 +218,11 @@ export function reduceWebphone(
       const attempts = state.attempts + 1;
       return {
         state: {
-          status: "reconnecting",
+          // Renewal can fail while the existing socket and media remain live.
+          // Keep that fact: connect() reuses an existing client, so changing to
+          // connecting after a successful retry would await a ready event that
+          // the healthy SDK client will never emit again.
+          status: state.status === "registered" ? "registered" : "reconnecting",
           attempts,
           credentials: state.credentials,
           message: event.message ?? "Telefón sa nepodarilo prihlásiť, skúšam znova.",

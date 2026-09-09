@@ -12,6 +12,7 @@ import {
   Megaphone,
   Mic,
   MicOff,
+  Minimize2,
   MoreHorizontal,
   Pause,
   PauseCircle,
@@ -108,6 +109,7 @@ function PhoneBarControls(props: PhoneBarProps) {
   const [superviseOpen, setSuperviseOpen] = useState(false);
   const [dtmfLog, setDtmfLog] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
+  const [minimizedOfferId, setMinimizedOfferId] = useState<string | null>(null);
   const secondaryId = useId();
   const keypadId = useId();
   const keypadTriggerRef = useRef<HTMLButtonElement>(null);
@@ -352,7 +354,10 @@ function PhoneBarControls(props: PhoneBarProps) {
         </span>
       )}
 
-      {focus?.kind === "offer" && (
+      {focus?.kind === "offer" && minimizedOfferId === focus.sessionId && (
+        <BarButton tone="default" icon={PhoneIncoming} label="Zobraziť prichádzajúci hovor" onClick={() => setMinimizedOfferId(null)} />
+      )}
+      {focus?.kind === "offer" && minimizedOfferId !== focus.sessionId && (
         <RingingPanel
           answerable={Boolean(phone.call?.ringing && !phone.answering)}
           now={now}
@@ -360,8 +365,11 @@ function PhoneBarControls(props: PhoneBarProps) {
           onAnswer={props.onAnswer}
           onNewCase={props.onNewCase}
           onOpenCase={props.onOpenCase}
+          onMinimize={() => setMinimizedOfferId(focus.sessionId)}
         />
       )}
+
+      {focus?.audioConnection?.status === "failed" && <p role="alert" className="basis-full rounded-md bg-amber-100 px-3 py-2 text-xs text-amber-950">Spojenie zvuku sa nepodarilo potvrdiť. Ak sa hovor nespojí, ukončite ho a zavolajte znova.</p>}
 
       {props.notice && (
         <button
@@ -452,6 +460,7 @@ function RingingPanel({
   onAnswer,
   onNewCase,
   onOpenCase,
+  onMinimize,
 }: {
   answerable: boolean;
   now: number;
@@ -459,6 +468,7 @@ function RingingPanel({
   onAnswer: () => void;
   onNewCase: (call: PhoneBarCall) => void;
   onOpenCase: (caseId: string) => void;
+  onMinimize: () => void;
 }) {
   return (
     <section
@@ -466,6 +476,10 @@ function RingingPanel({
       data-testid="phone-bar-ringing"
       className="absolute left-3 top-[calc(100%+6px)] z-50 hidden w-80 max-w-[calc(100vw-24px)] rounded-xl border border-yellow-300 bg-white p-3 text-zinc-950 shadow-2xl lg:block"
     >
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-zinc-600">Prichádzajúci hovor</span>
+        <button type="button" onClick={onMinimize} aria-label="Minimalizovať prichádzajúci hovor" className="inline-flex size-8 items-center justify-center rounded-md hover:bg-zinc-100"><Minimize2 size={16} aria-hidden="true" /></button>
+      </div>
       {offers.map((call) => (
         <div key={call.sessionId} className="border-b border-zinc-100 pb-2 last:border-0 last:pb-0 [&+&]:pt-2">
           <div className="flex items-center gap-2">

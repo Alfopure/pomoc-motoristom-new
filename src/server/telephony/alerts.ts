@@ -62,6 +62,7 @@ const SLOVAK_LABELS: Record<string, string> = {
   sessions: "Zaseknuté hovory",
   webhooks: "Prichádzajúce webhooky",
   ledger: "Webhook ledger",
+  connections: "Výsledky spojenia hovorov",
   incidents: "Otvorené incidenty",
   usage: "Denné využitie",
   devices: "Prehliadačové telefóny",

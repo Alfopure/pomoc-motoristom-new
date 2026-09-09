@@ -2,7 +2,7 @@ import "server-only";
 import { after } from "next/server";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
+import { TELEPHONY_NOT_CONFIGURED_CODE, TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 import type { MotoristActor } from "@/server/api-auth";
 import { resolveDefaultOrganizationId } from "@/server/default-organization";
 import { MutationError } from "@/server/mutation-error";
@@ -132,7 +132,7 @@ export function toCallActor(actor: MotoristActor): CallActor {
 }
 
 export function notConfiguredResponse(): Response {
-  return Response.json({ error: TELEPHONY_NOT_CONFIGURED_MESSAGE }, { status: 503 });
+  return Response.json({ error: TELEPHONY_NOT_CONFIGURED_MESSAGE, code: TELEPHONY_NOT_CONFIGURED_CODE }, { status: 503 });
 }
 
 /** Guard for routes that need a live provider; returns a 503 response or `null`. */
@@ -150,7 +150,7 @@ export function telephonyErrorResponse(error: unknown, fallback: string): Respon
   if (error instanceof CallActionError) return errorJson(error.message, error.status, error.code);
   if (error instanceof PresenceServiceError) return errorJson(error.message, error.status);
   if (error instanceof OperatorDeviceError) return errorJson(error.message, error.status);
-  if (error instanceof TelephonyNotConfiguredError) return errorJson(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
+  if (error instanceof TelephonyNotConfiguredError) return notConfiguredResponse();
   if (error instanceof TelnyxCommandError) return errorJson(`${fallback} (${error.code})`, error.status === 423 ? 423 : 502, error.code);
 
   console.error(fallback, error);

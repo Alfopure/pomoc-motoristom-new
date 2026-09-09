@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { Coffee, Headphones, Loader2, PhoneCall, PhoneOff, Save, Smartphone } from "lucide-react";
 
 import { TELEPHONY_TIMEOUT_MS, telephonyJson } from "@/lib/telephony/client-request";
-import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
+import { isTelephonyNotConfigured, TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import {
   applyAudioOutput,
   audioOutputMissing,
@@ -106,7 +106,7 @@ export function MyPhonePanel({
         timeoutMs: TELEPHONY_TIMEOUT_MS.read,
       }).catch(() => null);
       if (!result || controller.signal.aborted) return;
-      if (result.status === 503) {
+      if (isTelephonyNotConfigured(result)) {
         setError(TELEPHONY_NOT_CONFIGURED_MESSAGE);
         return;
       }
@@ -133,7 +133,7 @@ export function MyPhonePanel({
         label: "zmena dostupnosti",
         timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
       });
-      if (result.status === 503) {
+      if (isTelephonyNotConfigured(result)) {
         setError(TELEPHONY_NOT_CONFIGURED_MESSAGE);
         return false;
       }

@@ -88,7 +88,7 @@ describe("POST /api/telephony/calls/[id]/hold", () => {
     const response = await POST(request(), context);
 
     expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toEqual({ error: "Telefónia nie je nakonfigurovaná." });
+    await expect(response.json()).resolves.toEqual({ error: "Telefónia nie je nakonfigurovaná.", code: "not_configured" });
     expect(holdCall).not.toHaveBeenCalled();
   });
 

@@ -50,6 +50,6 @@ describe("GET /api/telephony/calls/active", () => {
 
     const response = await GET();
     expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toEqual({ error: "Telefónia nie je nakonfigurovaná." });
+    await expect(response.json()).resolves.toEqual({ error: "Telefónia nie je nakonfigurovaná.", code: "not_configured" });
   });
 });

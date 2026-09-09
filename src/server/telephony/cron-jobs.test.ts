@@ -106,6 +106,28 @@ describe("telephony cron jobs", () => {
     expect(replayEvent).toHaveBeenCalledWith({ data: { id: "stalled", event_type: "call.hangup", occurred_at: expect.any(String), payload: { call_control_id: "cc-1" } } });
   });
 
+  it("counts a failed processor result as failure and separates ignored replay from recovery", async () => {
+    const h = createTelephonyHarness();
+    const at = new Date(h.now().getTime() - 120_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", ["failed-again", "ended-noop"].map((id) => ({ organization_id: ORG, event_id: id,
+      event_type: "call.answered", status: "failed", attempts: 1, received_at: at, occurred_at: at, payload: {} })));
+    const replayEvent = vi.fn().mockResolvedValueOnce({ outcome: "failed", status: 200, error: "connection still pending" }).mockResolvedValueOnce({ outcome: "ignored", status: 200 });
+    const result = await replayStalledWebhookEvents({ ...h.deps, replayEvent });
+    expect(result).toMatchObject({ status: "failed", detail: { attempted: 2, replayed: 1, ignored: 1, failed: 1,
+      errors: [{ eventId: "failed-again", error: "connection still pending" }] } });
+  });
+
+  it("does not count deferred or rejected processor outcomes as replayed", async () => {
+    const h = createTelephonyHarness();
+    const at = new Date(h.now().getTime() - 120_000).toISOString();
+    const outcomes = ["busy", "duplicate", "unknown_session", "malformed", "unverified_connection"];
+    h.db.seed("motorist_telnyx_webhook_events", outcomes.map((id) => ({ organization_id: ORG, event_id: id,
+      event_type: "call.answered", status: "failed", attempts: 1, received_at: at, occurred_at: at, payload: {} })));
+    const replayEvent = vi.fn(async (envelope: unknown) => ({ outcome: (envelope as { data: { id: string } }).data.id }));
+    const result = await replayStalledWebhookEvents({ ...h.deps, replayEvent });
+    expect(result).toMatchObject({ status: "failed", detail: { attempted: 5, replayed: 1, deferred: 1, duplicate: 1, unknownSession: 1, failed: 2 } });
+  });
+
   it("skips the replay when telephony is not configured", async () => {
     const h = createTelephonyHarness();
     const result = await replayStalledWebhookEvents({ ...h.deps, telnyx: null });

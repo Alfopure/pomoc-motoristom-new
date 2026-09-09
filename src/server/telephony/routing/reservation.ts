@@ -85,6 +85,30 @@ export async function reserveOperator(admin: AdminClient, input: { profileId: st
 }
 
 /**
+ * Answer compatibility legs against the installed DB contract. The boolean
+ * legacy RPC may create an offer token, so callers that create ownership must
+ * receive that token and attach it to the exact answering leg.
+ */
+export async function reserveAnsweredOperator(
+  admin: AdminClient,
+  input: { organizationId: string; profileId: string; sessionId: string; expectedToken?: string },
+): Promise<PresenceTransitionResult> {
+  const current = await admin.from("motorist_operator_presence").select("*")
+    .eq("organization_id", input.organizationId).eq("profile_id", input.profileId).maybeSingle();
+  if (current.error) throw new ReservationError(`answer ownership read failed: ${current.error.message}`, current.error);
+  if (!current.data) return { applied: false, reason: "no_presence" };
+  if (telephonyStabilityEnabled() || current.data.presence_revision !== undefined || current.data.offer_token || current.data.pause_return) {
+    // Never let a historical tokenless answer borrow a newer same-session offer.
+    if (current.data.offer_token && !input.expectedToken) return { applied: false, reason: "not_owner" };
+    return transitionPresence(admin, { ...input,
+      action: current.data.current_session_id ? "answer" : "acquire",
+      expectedRevision: current.data.presence_revision,
+    });
+  }
+  return { applied: await reserveOperator(admin, input) };
+}
+
+/**
  * Releases a reservation held for `sessionId` (no-op when the operator has
  * meanwhile been reserved by another session). `status` is the presence the
  * operator returns to; `wrapUpUntil` is set for `after_call_work`.
