@@ -1,6 +1,6 @@
 export function createPlaceAutocompleteElement(label: string, value = "", placeholder = label) {
   const element = new google.maps.places.PlaceAutocompleteElement({
-    includedRegionCodes: ["sk"],
+    // Keep Slovak labels and formatting, but allow places in every country.
     noInputIcon: true,
     placeholder,
     requestedLanguage: "sk",

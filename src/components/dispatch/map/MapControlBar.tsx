@@ -5,7 +5,7 @@ import { Car, Eraser, MapPin, MapPinned, Maximize2, Minimize2, Navigation, Route
 
 export type FleetLayerKey = "tow" | "replacement_car";
 
-export type MapPanelKey = "search" | "addresses" | "filter";
+export type MapPanelKey = "search" | "addresses" | "filter" | "route-planner";
 
 export type MapLayerState = {
   route: boolean;
@@ -50,23 +50,27 @@ export function MapControlBar({
   onTogglePlan: () => void;
   onToggleRoute: () => void;
 }) {
+  const plannerOpen = activePanel === "route-planner";
   return (
     <div
       aria-label="Ovládanie mapy"
-      className="pointer-events-auto flex max-w-full flex-nowrap items-center gap-1 overflow-x-auto rounded-xl bg-white/95 p-1 shadow-sm ring-1 ring-zinc-200 backdrop-blur [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      className="pointer-events-auto flex max-w-full shrink-0 flex-nowrap items-center gap-1 overflow-x-auto rounded-xl bg-white/95 p-1 shadow-sm ring-1 ring-zinc-200 backdrop-blur [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       role="toolbar"
     >
       <IconToggle active={activePanel === "search"} icon={Search} label="Hľadať miesto" onClick={() => onTogglePanel("search")} />
+      <Chip active={plannerOpen} icon={Route} label="Trasa" onClick={() => onTogglePanel("route-planner")} />
       {!expandedWorkspace && showCaseTools && (
         <IconToggle active={activePanel === "addresses"} icon={MapPin} label="Adresy zásahu" onClick={() => onTogglePanel("addresses")} />
       )}
 
       {showCaseTools && <Divider />}
 
-      {showCaseTools && <Chip active={layers.route} icon={Route} label="Trasa" onClick={onToggleRoute} />}
+      {showCaseTools && <Chip active={layers.route} icon={Route} label="Trasa zásahu" onClick={onToggleRoute} />}
+      {!plannerOpen && <>
       <Chip active={layers.branches} icon={MapPinned} label="Pobočky" onClick={onToggleBranches} />
       <Chip active={layers.fleet.tow} icon={Truck} label="Odťahovky" onClick={() => onToggleFleet("tow")} />
       <Chip active={layers.fleet.replacement_car} icon={Car} label="Náhradné" onClick={() => onToggleFleet("replacement_car")} />
+      </>}
       {showFilter && (
         <Chip
           active={activePanel === "filter"}
@@ -80,7 +84,7 @@ export function MapControlBar({
       {!expandedWorkspace && showCaseTools && <Divider />}
 
       {!compactWorkspace && showCaseTools && <Chip active={planOpen} icon={Navigation} label="Plán" onClick={onTogglePlan} />}
-      {!expandedWorkspace && (
+      {!expandedWorkspace && !plannerOpen && (
         <IconToggle
           active={focusMode}
           icon={focusMode ? Minimize2 : Maximize2}
@@ -96,6 +100,7 @@ export function MapControlBar({
         onClick={onClearAll}
         disabled={!canClear}
         title="Vyčistiť mapu"
+        aria-label="Vyčistiť mapu"
         className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-zinc-600 transition hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:text-zinc-300 disabled:hover:bg-transparent disabled:hover:text-zinc-300"
       >
         <Eraser size={14} className="shrink-0" />

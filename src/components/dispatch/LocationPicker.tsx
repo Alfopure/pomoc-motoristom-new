@@ -174,7 +174,7 @@ export function LocationPicker({
     }
     setApproxBusy(true);
     try {
-      const result = await geocoderRef.current.geocode({ address: buildApproximateLocationQuery(query) });
+      const result = await geocoderRef.current.geocode({ address: buildApproximateLocationQuery(query), region: "sk" });
       const first = result.results?.[0];
       const location = first?.geometry?.location;
       if (!location) {
