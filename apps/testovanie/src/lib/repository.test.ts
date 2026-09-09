@@ -10,13 +10,24 @@ vi.mock("@vercel/blob", () => ({
   BlobPreconditionFailedError: class extends Error {},
 }));
 beforeEach(() => vi.resetAllMocks());
-function response(etag: string) {
+function response(etag: string): NonNullable<Awaited<ReturnType<typeof get>>> {
+  const content = JSON.stringify(emptyStore());
   return {
     statusCode: 200,
-    stream: new Response(JSON.stringify(emptyStore())).body,
+    stream: new Response(content).body!,
     headers: new Headers(),
-    blob: { etag },
-  } as NonNullable<Awaited<ReturnType<typeof get>>>;
+    blob: {
+      etag,
+      url: "https://fixture.private.blob.vercel-storage.com/preview/tracker-v1.json",
+      downloadUrl: "https://fixture.private.blob.vercel-storage.com/preview/tracker-v1.json?download=1",
+      pathname: "preview/tracker-v1.json",
+      contentType: "application/json",
+      contentDisposition: "attachment",
+      cacheControl: "private, no-store",
+      uploadedAt: new Date(),
+      size: Buffer.byteLength(content),
+    },
+  };
 }
 it("reads an uncached identity representation for a usable strong ETag", async () => {
   vi.mocked(get).mockResolvedValue(response('"strong-version"'));
