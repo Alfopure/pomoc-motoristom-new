@@ -14,6 +14,7 @@ const eslintConfig = defineConfig([
     "dist/**",
     "next-env.d.ts",
     ".context/**",
+    "apps/**",
     "supabase/.temp/**",
   ]),
 ]);
