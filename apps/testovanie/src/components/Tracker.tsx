@@ -24,8 +24,10 @@ import {
   SlidersHorizontal,
   Users,
   X,
+  Zap,
 } from "lucide-react";
 import { areas, catalog, catalogVersion } from "@/lib/catalog";
+import { scenariosForSet, type ScenarioSet } from "@/lib/scenario-sets";
 import {
   exportCsv,
   metrics,
@@ -203,7 +205,7 @@ export function Tracker() {
   const [store, setStore] = useState<Store | null>(null);
   const storeRef = useRef<Store | null>(null);
   const [runId, setRunId] = useState("");
-  const [level, setLevel] = useState<1 | 2>(1);
+  const [scenarioSet, setScenarioSet] = useState<ScenarioSet>("basic");
   const [area, setArea] = useState("all");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
@@ -322,9 +324,8 @@ export function Tracker() {
   }
   const run = store?.runs.find((r) => r.id === runId);
   const runOptions = store?.runs.filter((r) => archived || !r.archived) ?? [];
-  const scope = (run?.scenarios ?? catalog).filter(
-    (s) => level === 2 || s.level === 1,
-  );
+  const scope = scenariosForSet(run?.scenarios ?? catalog, scenarioSet);
+  const scopeAreas = areas.filter((a) => scope.some((s) => s.area === a.id));
   const results = run?.results ?? {};
   const summary = metrics(scope, results);
   const query = search.trim().toLocaleLowerCase("sk");
@@ -354,10 +355,14 @@ export function Tracker() {
     setSearch("");
     setMine(false);
   }
+  function chooseSet(next: ScenarioSet) {
+    setScenarioSet(next);
+    resetFilters();
+  }
   function csv() {
     if (run)
       download(
-        `testovanie-${run.id.slice(0, 8)}.csv`,
+        `testovanie-${run.id.slice(0, 8)}-${scenarioSet}.csv`,
         exportCsv(run, filtered),
         "text/csv;charset=utf-8",
       );
@@ -415,10 +420,10 @@ export function Tracker() {
             <b>{scope.length}</b>
           </button>
           <div className="sidebar-heading sidebar-section">
-            OBLASTI TESTOVANIA <span>16</span>
+            OBLASTI TESTOVANIA <span>{scopeAreas.length}</span>
           </div>
           <nav aria-label="Oblasti testovania">
-            {areas.map((a, i) => {
+            {scopeAreas.map((a) => {
               const items = scope.filter((s) => s.area === a.id);
               const m = metrics(items, results);
               return (
@@ -429,7 +434,7 @@ export function Tracker() {
                   title={a.description}
                 >
                   <span className="area-number">
-                    {String(i + 1).padStart(2, "0")}
+                    {String(areas.indexOf(a) + 1).padStart(2, "0")}
                   </span>
                   <span>{a.short}</span>
                   <small>
@@ -540,24 +545,40 @@ export function Tracker() {
                 </div>
               )}
               <div className="scope-line">
-                <div className="level-switch" aria-label="Úroveň testov">
+                <div
+                  className="level-switch"
+                  role="group"
+                  aria-label="Sada testov"
+                >
                   <button
-                    className={level === 1 ? "selected" : ""}
-                    onClick={() => setLevel(1)}
+                    className={`quick-choice ${scenarioSet === "quick" ? "selected" : ""}`}
+                    aria-pressed={scenarioSet === "quick"}
+                    onClick={() => chooseSet("quick")}
+                  >
+                    <Zap size={15} aria-hidden="true" />
+                    Rýchly test dispečingu
+                  </button>
+                  <button
+                    className={scenarioSet === "basic" ? "selected" : ""}
+                    aria-pressed={scenarioSet === "basic"}
+                    onClick={() => chooseSet("basic")}
                   >
                     <span>1</span>Základná sada
                   </button>
                   <button
-                    className={level === 2 ? "selected" : ""}
-                    onClick={() => setLevel(2)}
+                    className={scenarioSet === "complete" ? "selected" : ""}
+                    aria-pressed={scenarioSet === "complete"}
+                    onClick={() => chooseSet("complete")}
                   >
                     <span>2</span>Kompletná sada
                   </button>
                 </div>
                 <p>
-                  {level === 1
-                    ? "Bežný pracovný deň a kľúčové riziká"
-                    : "Základ + rozšírené funkcie a situácie"}
+                  {scenarioSet === "quick"
+                    ? `${scope.length} overení hovorov, páuz a bežnej práce`
+                    : scenarioSet === "basic"
+                      ? "Bežný pracovný deň a kľúčové riziká"
+                      : "Základ + rozšírené funkcie a situácie"}
                 </p>
                 <label className="archive-toggle">
                   <input
@@ -643,7 +664,7 @@ export function Tracker() {
                   onChange={(e) => setArea(e.target.value)}
                 >
                   <option value="all">Všetky oblasti</option>
-                  {areas.map((a) => (
+                  {scopeAreas.map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name}
                     </option>
@@ -654,10 +675,18 @@ export function Tracker() {
                 <div className="list-heading">
                   <div>
                     <h2>
-                      {area === "all" ? "Testovacie scenáre" : areaName(area)}{" "}
+                      {area !== "all"
+                        ? areaName(area)
+                        : scenarioSet === "quick"
+                          ? "Rýchly test dispečingu"
+                          : "Testovacie scenáre"}{" "}
                       <span>{filtered.length}</span>
                     </h2>
-                    <p>Otvorte test, prejdite kroky a zapíšte výsledok.</p>
+                    <p>
+                      {scenarioSet === "quick"
+                        ? "Výsledky a história sa zdieľajú s ostatnými sadami tohto kola."
+                        : "Otvorte test, prejdite kroky a zapíšte výsledok."}
+                    </p>
                   </div>
                   <button
                     className={`icon-button ${syncing ? "spin" : ""}`}
@@ -999,6 +1028,14 @@ export function Tracker() {
             ))}
           </div>
           <div className="help-note">
+            <strong>Rýchly test dispečingu</strong>
+            <p>
+              Krátky výber 11 existujúcich scenárov: prihlásenie, hovory,
+              prepojenie, pauzy, callbacky, výpadok spojenia, práca s prípadom a
+              odhlásenie. Použite ho na rýchle overenie bežnej prevádzky. Vo
+              všetkých sadách, ktoré daný test obsahujú, zostáva v tomto kole
+              jeden spoločný výsledok a história.
+            </p>
             <strong>
               Jedno kolo = jedna verzia a dohodnuté zariadenie/podmienky.
             </strong>

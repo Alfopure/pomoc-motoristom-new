@@ -6,13 +6,15 @@ Samostatná Next.js aplikácia s 92 scenármi (35 základných, 57 rozšírenýc
 
 1. Zadajte meno. Nie je potrebné heslo, registrácia ani účet v dispečingu.
 2. Vytvorte interné alebo klientské kolo. Zadajte testovaný build/commit, URL, zariadenie a prípadné podmienky (linky, zapnuté funkcie, roly).
-3. Vyberte základnú alebo kompletnú sadu, oblasť a scenár. Kompletná sada zahŕňa základ bez kopírovania výsledkov. Klientské kolá vynechávajú interné technické skúšky.
+3. Vyberte rýchly test, základnú alebo kompletnú sadu, oblasť a scenár. **Rýchly test dispečingu** má 11 existujúcich scenárov v poradí od prihlásenia cez hovory, pauzy, callbacky a bežnú prácu po odhlásenie. Každý scenár má v danom kole spoločný výsledok a históriu vo všetkých sadách. Klientské kolá vynechávajú interné technické skúšky.
 4. Prejdite kroky a vyhodnoťte očakávaný výsledok. Výhrada, chyba, blokovanie a vyradenie z rozsahu vyžadujú vysvetlenie. Výhrada je iba drobná a má riešiteľa; pri vyradení sa zaznamená meno koordinátora.
 5. Uložte výsledok, prípadne pokračujte ďalším neotestovaným scenárom. Zmeny kolegov sa načítajú pri návrate do okna a každých 25 sekúnd, kým je okno aktívne.
 
 Prvé uložené hodnotenie uzamkne podmienky kola. Pre iný build, zariadenie alebo rozsah založte nové kolo. Historické výsledky sa nepreberajú ako nové úspechy. Archivácia zachová výsledky aj históriu a zabráni ďalšiemu hodnoteniu; kolo možno obnoviť.
 
 CSV exportuje aktuálne zobrazené scenáre vrátane výsledkov, poznámok, autora, verzie a zariadenia. História má samostatný JSON export s pôvodnými a novými hodnotami i definíciami scenárov. Podklady možno pripojiť HTTPS odkazom; prvá verzia neprijíma súborové uploady.
+
+Rýchly výber používa `AUTH-01`, `CALL-01`, `CALL-05`, `CALL-02`, `CALL-03`, `CB-01`, `CB-03`, `CB-02`, `CALL-08`, `CASE-03`, `AUTH-02`. Zahŕňa aj vybrané bežné situácie z druhej úrovne. Výber pracuje s definíciami uloženými v konkrétnom kole, funguje aj v existujúcich kolách a nemení ich katalóg. Počítadlá, oblasti, export aj prechod na ďalší test rešpektujú zvolenú sadu; prepnutie sady zruší predchádzajúce filtre.
 
 ## Meno a audit
 
