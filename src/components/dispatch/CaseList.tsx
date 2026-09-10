@@ -8,7 +8,7 @@ import { isTaskOpen } from "@/domain/tasks";
 import { caseAssistanceServiceName, formatDateTime, formatTime } from "@/lib/dispatch-calculations";
 import type { CaseSortState } from "./CaseTable";
 
-type CenterView = "map" | "table";
+type CenterView = "map" | "table" | "tasks" | "notes";
 
 export type CaseFilters = {
   status: "all" | CaseStatus;

@@ -4,7 +4,7 @@ import { VehicleLookupControl } from "./VehicleLookupControl";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
 import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   CarFront,
@@ -130,10 +130,14 @@ import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { LocationPicker } from "./LocationPicker";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { UseCustomerLocationButton } from "./UseCustomerLocationButton";
+import { CaseEditorHeader, type CaseEditorControls } from "./CaseEditorHeader";
+import { changedCaseFields } from "./case-editor-save";
+import { CaseSummary } from "./CaseSummary";
 import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 
 type CaseDetailProps = {
+  onEditorControlsChange?: (controls: CaseEditorControls | null) => void;
   caseItem: DispatchCase;
   branches: Branch[];
   assets: FleetAsset[];
@@ -163,6 +167,8 @@ type CaseDetailProps = {
 };
 
 type ApiMutationResponse = {
+  committedRevision?: string;
+  code?: string;
   caseId?: string;
   dispatchData?: DispatchData;
   error?: string;
@@ -189,7 +195,7 @@ const actionLabels = {
   call_customer: "Zavolať zákazníkovi",
   send_sms: "Poslať lokalizačnú SMS",
   send_eta: "Poslať ETA SMS",
-  create_pdf: "Pripraviť PDF",
+  create_pdf: "Stiahnuť PDF",
   mark_completed: "Označiť dokončené",
   invoice: "Pripraviť fakturáciu",
   close_case: "Ukončiť zásah",
@@ -245,6 +251,7 @@ export function CaseDetail({
   commanderVehicles = [],
   editing,
   embedded = false,
+  onEditorControlsChange,
   focusedTaskId,
   onDataChange,
   onDial,
@@ -262,6 +269,12 @@ export function CaseDetail({
   hideNotesAndActivity = false,
   viewerProfileId,
 }: CaseDetailProps) {
+  const exportSaveRef = useRef<SaveCaseDraft | null>(null);
+  const handleEditorSaveDraft = useCallback((saveDraft: SaveCaseDraft | null) => {
+    exportSaveRef.current = saveDraft;
+    onSaveDraftChange?.(saveDraft);
+  }, [onSaveDraftChange]);
+  const [editorControls, setEditorControls] = useState<CaseEditorControls | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
   const [smsTemplate, setSmsTemplate] = useState<"custom" | "location_request" | "eta_update">("custom");
@@ -285,7 +298,6 @@ export function CaseDetail({
   const model = caseItem.pickup ? createDispatchMapModel(caseItem, branches, assets, priceRule) : null;
   const routePlan = model?.routePlan ?? null;
   const routeEta = routePlan?.segments.find((segment) => segment.id === "asset-to-pickup")?.eta ?? routePlan?.totalEta;
-  const sms = "SMS s odhadom príchodu pripravíte v editore po zadaní aktuálneho ETA a potvrdení odchodu technika.";
   const selectedAsset = caseItem.selectedAssetId ? assets.find((asset) => asset.id === caseItem.selectedAssetId) : undefined;
   const mapsUrl = caseItem.pickup
     ? `https://www.google.com/maps/search/?api=1&query=${caseItem.pickup.lat},${caseItem.pickup.lng}`
@@ -409,6 +421,11 @@ export function CaseDetail({
 
     const animationFrame = window.requestAnimationFrame(() => {
       const taskElement = document.getElementById(`task-${focusedTaskId}`);
+      let ancestor = taskElement?.parentElement;
+      while (ancestor) {
+        if (ancestor instanceof HTMLDetailsElement) ancestor.open = true;
+        ancestor = ancestor.parentElement;
+      }
       const scrollRegion = taskElement?.closest<HTMLElement>("[data-case-detail-scroll-region]");
 
       if (taskElement && scrollRegion) {
@@ -437,7 +454,7 @@ export function CaseDetail({
       const response = await fetch(`/api/cases/${caseItem.id}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, ...(typeof payload.taskId === "string" ? { taskExpectedRevision: caseItem.tasks.find(task => task.id === payload.taskId)?.revision } : {}) }),
       });
       const result = (await response.json()) as ApiMutationResponse;
       if (!response.ok || !result.dispatchData) {
@@ -465,6 +482,31 @@ export function CaseDetail({
   }
 
   async function runAction(action: keyof typeof actionLabels) {
+    if (action === "create_pdf") {
+      setIsRunningAction(true);
+      setNotice("Pripravujem PDF…");
+      try {
+        if ((draftDirty || isEditSaveLocked) && (!exportSaveRef.current || !await exportSaveRef.current())) {
+          setNotice("Pred exportom uložte rozpracované zmeny. Údaje zostávajú vo formulári.");
+          return;
+        }
+        const response = await fetch(`/api/cases/${encodeURIComponent(caseItem.id)}/pdf`, { cache: "no-store", credentials: "same-origin", signal: AbortSignal.timeout(55_000) });
+        if (!response.ok || !response.headers.get("Content-Type")?.includes("application/pdf")) {
+          const body = await response.json().catch(() => null);
+          throw new Error(body?.error ?? "PDF sa nepodarilo vytvoriť. Skúste to znova.");
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${caseItem.caseNumber.replace(/[^a-zA-Z0-9._-]/g, "_")}.pdf`;
+        document.body.append(link); link.click(); link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        setNotice("PDF uložených údajov je pripravené na stiahnutie.");
+      } catch (error) { setNotice(error instanceof Error ? error.message : "PDF sa nepodarilo vytvoriť."); }
+      finally { setIsRunningAction(false); }
+      return;
+    }
     if (action === "call_customer") {
       if (!contactPhone) {
         setNotice("Hovor nie je možné spustiť, kým v karte nie je telefónne číslo.");
@@ -498,7 +540,7 @@ export function CaseDetail({
       return;
     }
 
-    const externalWorkflow = action === "create_pdf" || action === "invoice";
+    const externalWorkflow = action === "invoice";
     const message = externalWorkflow
       ? externalActionSuccessLabels[action as keyof typeof externalActionSuccessLabels]
       : `${actionLabels[action]} zapísané do timeline.`;
@@ -611,7 +653,7 @@ export function CaseDetail({
   }
 
   return (
-    <div className={`grid min-w-0 max-w-full overflow-x-clip ${embedded ? "gap-3" : "gap-4"}`}>
+    <div className={`grid min-w-0 max-w-full overflow-x-clip @container ${embedded ? "gap-3" : "gap-4"}`}>
       {!embedded && <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 shadow-sm">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -623,7 +665,6 @@ export function CaseDetail({
               {casePriorityLabels[caseItem.priority]}
             </span>
           </div>
-          <p className="mt-1 break-words text-sm text-zinc-600">{caseItem.summary || "Prázdna karta pripravená na doplnenie údajov."}</p>
           <p className="mt-1 text-xs font-medium text-zinc-500">
             {caseItem.caseType || "Typ nezadaný"} · dispečer: {caseItem.ownerName ?? "nepriradený"} · založené {formatDateTime(caseItem.createdAt)}
           </p>
@@ -636,6 +677,7 @@ export function CaseDetail({
           ) : (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">Trasa nezadaná</div>
           )}
+          {isEditing && editorControls && <CaseEditorHeader controls={editorControls} />}
           {showInlineEditButton && (
             <button type="button" onClick={() => setEditing(!isEditing)} disabled={isEditSaveLocked} className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:cursor-wait disabled:bg-zinc-100 disabled:text-zinc-400">
               {isEditing ? <X size={16} /> : <Edit3 size={16} />}
@@ -644,6 +686,8 @@ export function CaseDetail({
           )}
         </div>
       </div>}
+
+      <CaseSummary caseItem={caseItem} assets={assets} operators={operators} />
 
       {notice && <div role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{notice}</div>}
 
@@ -714,27 +758,12 @@ export function CaseDetail({
         </section>
       )}
 
-      {isEditing ? (
-        <>
-          <EditCaseForm
-            key={`${caseItem.id}:${editorRevision}`}
-            caseItem={caseItem}
-            commanderVehicles={commanderVehicles}
-            compact={compactEditor}
-            onDataChange={onDataChange}
-            onDiscard={discardEditorDraft}
-            onDirtyChange={updateDirtyState}
-            onNotice={setNotice}
-            onSaveDraftChange={onSaveDraftChange}
-            onSavingChange={updateSavingState}
-            partnerDirectory={partnerDirectory}
-          />
-          <section className="min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm" aria-labelledby="case-tasks-heading">
-            <div className="border-b border-yellow-200 border-l-4 border-l-[#FCD703] bg-yellow-50 px-3 py-2.5">
-              <h3 id="case-tasks-heading" className="text-sm font-semibold text-zinc-950">Úlohy prípadu</h3>
+          <details open key={`${caseItem.id}:${focusedTaskId ?? "tasks"}`} data-testid="case-tasks" className="min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm" aria-labelledby="case-tasks-heading">
+            <summary className="min-h-11 cursor-pointer border-b border-yellow-200 border-l-4 border-l-[#FCD703] bg-yellow-50 px-3 py-2.5">
+              <span id="case-tasks-heading" className="text-sm font-semibold text-zinc-950">Úlohy prípadu · {openTasks.length} otvorených · {openTasks.filter((task) => isTaskOverdue(task)).length} po termíne</span>
               <p className="mt-0.5 text-xs font-medium text-zinc-600">Rozdeľte ďalšie kroky a určite, kto ich má vybaviť.</p>
-            </div>
-            <div className="grid min-w-0 gap-3 p-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
+            </summary>
+            <div className="grid min-w-0 gap-3 p-3 @3xl:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
               <div className="grid min-w-0 content-start gap-2">
                 {displayedTasks.length > 0 ? displayedTasks.map((task) => {
                   const focused = task.id === focusedTaskId;
@@ -758,7 +787,7 @@ export function CaseDetail({
                         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
                       </div>
                       {isTaskOpen(task) ? (
-                        <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 h-7 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50">Vybavené</button>
+                        <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 h-11 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50">Vybavené</button>
                       ) : (
                         <span className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md bg-emerald-50 px-2 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200"><CheckCircle2 size={13} /> Úloha je vybavená</span>
                       )}
@@ -830,7 +859,25 @@ export function CaseDetail({
                 <button type="button" onClick={() => void createTask()} disabled={isRunningAction} className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-wait disabled:bg-zinc-300 disabled:text-zinc-600">{isRunningAction ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}Pridať úlohu</button>
               </div>
             </div>
-          </section>
+          </details>
+
+      {isEditing ? (
+        <>
+          <EditCaseForm
+            onEditorControlsChange={onEditorControlsChange ?? setEditorControls}
+            key={`${caseItem.id}:${editorRevision}`}
+            caseItem={caseItem}
+            commanderVehicles={commanderVehicles}
+            compact={compactEditor}
+            onDataChange={onDataChange}
+            onDiscard={discardEditorDraft}
+            onDirtyChange={updateDirtyState}
+            onNotice={setNotice}
+            onSaveDraftChange={handleEditorSaveDraft}
+            onSavingChange={updateSavingState}
+            partnerDirectory={partnerDirectory}
+          />
+
         </>
       ) : (
         <div className="grid min-w-0 gap-3">
@@ -975,75 +1022,6 @@ export function CaseDetail({
 
               <div className="grid min-w-0 content-start gap-3">
                 <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
-                  <h4 className="text-sm font-semibold text-zinc-950">Úlohy</h4>
-                  <div className="mt-2 grid gap-2">
-                    {displayedTasks.length > 0 ? displayedTasks.map((task) => {
-                      const focused = task.id === focusedTaskId;
-
-                      return (
-                      <div
-                        key={task.id}
-                        id={`task-${task.id}`}
-                        className={`min-w-0 rounded-md border p-2.5 transition ${
-                          focused ? "border-yellow-400 bg-yellow-50 ring-2 ring-yellow-200" : "border-zinc-200 bg-white"
-                        }`}
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            {focused && <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-amber-800">Otvorená úloha</div>}
-                            <div className="break-words text-sm font-semibold text-zinc-950">{task.title}</div>
-                            <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-zinc-500">
-                              <span>{formatTime(task.dueAt)}</span>
-                              {isTaskOverdue(task) && <span className="rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 ring-1 ring-red-200">Po termíne</span>}
-                            </div>
-                          </div>
-                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
-                        </div>
-                        {isTaskOpen(task) ? (
-                          <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 h-7 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50">Vybavené</button>
-                        ) : (
-                          <span className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md bg-emerald-50 px-2 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
-                            <CheckCircle2 size={13} /> Úloha je vybavená
-                          </span>
-                        )}
-                      </div>
-                    );
-                    }) : <div className="text-sm font-medium text-zinc-500">Bez otvorených úloh.</div>}
-                  </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-1.5" role="group" aria-label="Rýchle nastavenie termínu">
-                    {taskDuePresets.map((preset) => (
-                      <button key={preset.minutes} type="button" onClick={() => setTaskDueAt(dateTimeLocalInMinutes(preset.minutes))} className="h-9 rounded-md border border-zinc-300 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">{preset.label}</button>
-                    ))}
-                  </div>
-                  <div className="mt-3 grid min-w-0 gap-3">
-                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
-                      Názov úlohy
-                      <textarea value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" rows={3} className="min-h-24 w-full min-w-0 resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 text-base! font-medium leading-6 text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
-                    </label>
-                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
-                      Termín
-                      <input type="datetime-local" value={taskDueAt} onChange={(event) => setTaskDueAt(event.target.value)} className="h-11 w-full min-w-0 max-w-full overflow-hidden rounded-md border border-zinc-300 bg-white px-3 text-base! font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Termín úlohy" />
-                    </label>
-                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
-                      Priorita
-                      <select value={taskPriority} onChange={(event) => setTaskPriority(event.target.value as CasePriority)} className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Priorita úlohy">
-                        {taskPriorityOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                      </select>
-                    </label>
-                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
-                      Zodpovedná osoba
-                      <select value={taskAssignee} onChange={(event) => setTaskAssignee(event.target.value)} className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Zodpovedná osoba">
-                        <option value="unassigned">Nepriradené</option>
-                        {operators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}
-                        {taskAssignee !== "unassigned" && !operators.some((operator) => operator.id === taskAssignee) && <option value={taskAssignee}>{taskAssignee === viewerProfileId ? "Ja (prihlásený)" : caseItem.ownerName ?? "Aktuálne priradená osoba"}</option>}
-                      </select>
-                    </label>
-                    <label className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-zinc-700"><input type="checkbox" checked={sendTaskReminderEmail} onChange={(event) => setSendTaskReminderEmail(event.target.checked)} className="size-4 shrink-0 rounded border-zinc-300 text-zinc-950" />Email operátorovi</label>
-                    <button type="button" onClick={() => void createTask()} className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800"><Plus size={15} />Pridať úlohu</button>
-                  </div>
-                </div>
-
-                <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
                   <h4 className="text-sm font-semibold text-zinc-950">Prílohy a komunikácia</h4>
                   <div className="mt-2 grid gap-2">
                     {caseItem.attachments.slice(0, 3).map((attachment, index) => (
@@ -1062,7 +1040,6 @@ export function CaseDetail({
                       <button type="button" onClick={() => void uploadAttachments()} disabled={isUploadingAttachment} className="inline-flex h-8 items-center justify-center gap-2 rounded-md bg-zinc-950 px-2 text-xs font-semibold text-white hover:bg-zinc-800 disabled:bg-zinc-300 disabled:text-zinc-600">{isUploadingAttachment ? <Loader2 size={14} className="animate-spin" /> : <FileUp size={14} />}Nahrať</button>
                     </div>
                   )}
-                  <div className="mt-3 rounded-md border border-zinc-200 bg-white p-2"><div className="mb-1 text-xs font-semibold uppercase tracking-normal text-zinc-500">SMS náhľad</div><p className="line-clamp-4 whitespace-pre-line text-xs leading-5 text-zinc-700">{sms}</p></div>
                 </div>
 
                 <div className="flex flex-wrap gap-2">
@@ -1143,7 +1120,7 @@ export function CaseNotesAndActivity({
       </div>
       {/* Panel je na celú šírku karty: na širokej obrazovke poznámky a aktivita vedľa seba,
           na úzkej sa zalomia pod seba. */}
-      <div className="grid min-w-0 gap-4 p-3 lg:grid-cols-2">
+      <div className="grid min-w-0 gap-4 p-3 @3xl:grid-cols-2">
         <div className="grid min-w-0 content-start gap-2">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Poznámky</h4>
           {notes.length > 0 ? (
@@ -1179,7 +1156,7 @@ export function CaseNotesAndActivity({
                 }
               }}
               placeholder="Napíš internú poznámku k prípadu…"
-              className="min-h-16 min-w-0 rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-sm outline-none ring-yellow-300 transition focus:ring-2"
+              className="min-h-16 min-w-0 rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-base outline-none ring-yellow-300 transition focus:ring-2"
               aria-label="Nová poznámka k prípadu"
             />
             <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
@@ -1188,7 +1165,7 @@ export function CaseNotesAndActivity({
                 type="button"
                 onClick={() => void submitNote()}
                 disabled={busy || noteText.trim().length === 0}
-                className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-zinc-950 px-3 text-xs font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-600"
+                className="inline-flex h-11 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-zinc-950 px-3 text-xs font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-600"
               >
                 {busy ? <Loader2 size={13} className="shrink-0 animate-spin" /> : <Plus size={13} className="shrink-0" />}
                 Pridať poznámku
@@ -1248,6 +1225,7 @@ function actorInitials(actor: string) {
 }
 
 function EditCaseForm({
+  onEditorControlsChange,
   caseItem,
   commanderVehicles,
   compact,
@@ -1259,6 +1237,7 @@ function EditCaseForm({
   onSavingChange,
   partnerDirectory,
 }: {
+  onEditorControlsChange?: (controls: CaseEditorControls | null) => void;
   caseItem: DispatchCase;
   commanderVehicles: CommanderVehicleConnection[];
   compact: boolean;
@@ -1369,6 +1348,10 @@ function EditCaseForm({
   }, [lastSavedAt]);
   const [retryToken, setRetryToken] = useState(0);
   const [refreshOnlyRevision, setRefreshOnlyRevision] = useState<number | null>(null);
+  const serverRevisionRef = useRef(caseItem.updatedAt);
+  const conflictRef = useRef(false);
+  const [conflict, setConflict] = useState(false);
+  const acceptedDraftRef = useRef<string | null>(null);
   const revisionRef = useRef(0);
   const savedRevisionRef = useRef(0);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -1518,10 +1501,18 @@ function EditCaseForm({
   const serializedDraft = JSON.stringify(draftPayload);
   const [acceptedDraft, setAcceptedDraft] = useState(serializedDraft);
   const isDirty = serializedDraft !== acceptedDraft;
-  const currentError = saveError?.payload === serializedDraft ? saveError.message : null;
+  const currentError = conflict ? "Prípad medzitým zmenil iný používateľ. Rozpracované údaje zostávajú v editore." : saveError?.payload === serializedDraft ? saveError.message : null;
   const displayedSavePhase: CaseSavePhase =
     savePhase === "saving" ? "saving" : currentError ? "error" : isDirty ? "waiting" : savePhase;
   const showSaveStatus = displayedSavePhase === "saving" || displayedSavePhase === "waiting" || displayedSavePhase === "error" || Boolean(lastSavedAt);
+
+  useEffect(() => {
+    if (acceptedDraftRef.current === null) acceptedDraftRef.current = serializedDraft;
+    onEditorControlsChange?.({ priority, status: caseClosureStatus || caseItem.status, busy: savePhase === "saving" || conflict,
+      onPriorityChange: setPriority, onStatusChange: setCaseClosureStatus });
+  }, [priority, caseClosureStatus, caseItem.status, savePhase, conflict, onEditorControlsChange, serializedDraft]);
+
+  useEffect(() => () => onEditorControlsChange?.(null), [onEditorControlsChange]);
 
   useEffect(() => {
     latestDraftRef.current = serializedDraft;
@@ -1695,6 +1686,7 @@ function EditCaseForm({
 
   function acceptCanonicalCaseState(dispatchData: DispatchData, revision: number, serializedPayload: string) {
     onDataChange?.(dispatchData);
+    acceptedDraftRef.current = serializedPayload;
     setAcceptedDraft(serializedPayload);
     savedRevisionRef.current = Math.max(savedRevisionRef.current, revision);
     setLastSavedAt(new Date());
@@ -1739,6 +1731,10 @@ function EditCaseForm({
   }
 
   async function persistDraft(serializedPayload: string, revision: number) {
+    if (conflictRef.current) return false;
+    const changes = changedCaseFields(acceptedDraftRef.current ?? acceptedDraft, serializedPayload);
+    if (Object.keys(changes).length === 0) return true;
+    const requestPayload = JSON.stringify({ ...changes, expectedUpdatedAt: serverRevisionRef.current });
     if (revision <= savedRevisionRef.current) {
       return true;
     }
@@ -1766,12 +1762,18 @@ function EditCaseForm({
           const response = await fetch(`/api/cases/${caseItem.id}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: serializedPayload,
+            body: requestPayload,
             signal: controller.signal,
           });
           const result = (await response.json().catch(() => null)) as ApiMutationResponse | null;
 
           if (!response.ok) {
+            if (response.status === 409 && result?.code === "CASE_REVISION_CONFLICT") {
+              conflictRef.current = true;
+              setConflict(true);
+              setSavePhase("error");
+              return false;
+            }
             failureMessage = result?.error ?? "Kartu zásahu sa nepodarilo automaticky uložiť.";
             if (response.status < 500 && response.status !== 429) {
               break;
@@ -1779,8 +1781,10 @@ function EditCaseForm({
             continue;
           }
 
+          if (result?.committedRevision) serverRevisionRef.current = result.committedRevision;
           savedRevisionRef.current = Math.max(savedRevisionRef.current, revision);
           committedDraftRef.current = { payload: serializedPayload, revision };
+          acceptedDraftRef.current = serializedPayload;
           if (result?.warnings?.length) {
             onNotice(`Karta je uložená. Upozornenia: ${result.warnings.map((warning) => warning.message).join(" · ")}`);
           }
@@ -1869,7 +1873,18 @@ function EditCaseForm({
     return () => onSaveDraftChange?.(null);
   }, [onSaveDraftChange]);
 
+  async function reloadConflictingCase() {
+    try {
+      const dispatchData = await loadCanonicalCaseState();
+      onDataChange?.(dispatchData);
+      onDiscard();
+    } catch {
+      onNotice("Aktuálny stav sa nepodarilo načítať. Váš rozpracovaný text zostáva v editore.");
+    }
+  }
+
   function retryAutosave() {
+    if (conflictRef.current) return;
     setSaveError(null);
     setSaveAttempt(0);
 
@@ -1930,7 +1945,7 @@ function EditCaseForm({
         data-testid="case-autosave-status"
         aria-live="polite"
       >
-        {isDirty && validationErrors.length > 0 && displayedSavePhase !== "saving" ? (
+        {isDirty && validationErrors.length > 0 && displayedSavePhase !== "saving" && displayedSavePhase !== "error" ? (
           <span role="alert">{validationErrors[0]} Rozpracovaná zmena sa napriek tomu automaticky uloží.</span>
         ) : displayedSavePhase === "saving" ? (
           <span className="inline-flex items-center gap-1.5">
@@ -1950,7 +1965,7 @@ function EditCaseForm({
 
         {isDirty && (validationErrors.length > 0 || displayedSavePhase === "error") && (
           <span className="flex items-center gap-3">
-            {displayedSavePhase === "error" && (
+            {displayedSavePhase === "error" && !conflict && (
               <button type="button" onClick={retryAutosave} className="font-semibold underline underline-offset-2">
                 {refreshOnlyRevision !== null ? "Overiť uložený stav" : "Skúsiť znova"}
               </button>
@@ -1968,6 +1983,10 @@ function EditCaseForm({
         </div>
       )}
 
+      {conflict && <div role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+        Prípad medzitým zmenil iný používateľ. Vaše údaje zostávajú v editore. Načítaním aktuálneho stavu nahradíte tento draft uloženými údajmi.
+        <button type="button" onClick={() => void reloadConflictingCase()} className="mt-2 flex min-h-11 items-center rounded-md border border-amber-400 bg-white px-3 font-semibold">Načítať aktuálny stav prípadu</button>
+      </div>}
       <div className="m-0 min-w-0 border-0 p-0 @container">
         <div className="grid min-w-0 gap-2 lg:gap-4" data-testid="case-edit-form-main">
       <p className="text-[10px] font-medium text-zinc-500 lg:text-xs lg:font-semibold">

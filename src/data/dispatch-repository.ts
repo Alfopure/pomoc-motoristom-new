@@ -1,3 +1,4 @@
+import { notificationAudienceFilter } from "@/server/notification-access";
 import "server-only";
 import { fleetTelemetryDetails, isFreshFleetTimestamp, validFleetPoint } from "@/lib/fleet-observation";
 
@@ -47,6 +48,8 @@ import type {
   VehicleConditionFlag,
   VehicleTransmission,
 } from "@/domain/types";
+import { loadWorkspaceCapabilities } from "@/server/workspace-capabilities";
+import { loadTaskWorkspace } from "@/server/tasks";
 import { compareNotifications } from "@/domain/notifications";
 import { isTaskOpen } from "@/domain/tasks";
 import {
@@ -166,7 +169,9 @@ export function getMockDispatchData(warning?: string): DispatchData {
   };
 }
 
-export async function loadDispatchData(): Promise<DispatchData> {
+export type DispatchViewer = { organizationId: string; profileId: string };
+
+export async function loadDispatchData(viewer?: DispatchViewer): Promise<DispatchData> {
   if (!getSupabaseServiceEnv()) {
     return mockDispatchDataOrThrow(
       "Supabase server env nie je nastavený. Beží mock fallback.",
@@ -175,7 +180,13 @@ export async function loadDispatchData(): Promise<DispatchData> {
   }
 
   try {
-    return await withTimeout(loadSupabaseDispatchData(), getSupabaseReadTimeout());
+    let authenticatedViewer = viewer;
+    if (!authenticatedViewer) {
+      const { requireDefaultMotoristActor } = await import("@/server/api-auth");
+      const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
+      authenticatedViewer = { organizationId: actor.organizationId, profileId: actor.profileId };
+    }
+    return await withTimeout(loadSupabaseDispatchData(authenticatedViewer), getSupabaseReadTimeout());
   } catch (error) {
     console.warn("Supabase dispatch data fallback:", getErrorMessage(error));
     return mockDispatchDataOrThrow(
@@ -185,7 +196,7 @@ export async function loadDispatchData(): Promise<DispatchData> {
   }
 }
 
-async function loadSupabaseDispatchData(): Promise<DispatchData> {
+async function loadSupabaseDispatchData(viewer: DispatchViewer): Promise<DispatchData> {
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
 
@@ -197,6 +208,7 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
   }
 
   const organizationId = organization.id;
+  if (viewer.organizationId !== organizationId) throw new Error("Dispatch organization access denied.");
   const [
     organizationProfilesResult,
     profilesResult,
@@ -273,6 +285,7 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
       .from("motorist_notifications")
       .select("*")
       .eq("organization_id", organizationId)
+      .or(notificationAudienceFilter(viewer?.profileId))
       .neq("status", "archived")
       .not("dedupe_key", "like", "workplace-takeover:%")
       .order("created_at", { ascending: false })
@@ -404,7 +417,7 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
   const vehiclesById = new Map((vehiclesResult.data ?? []).map((vehicle) => [vehicle.id, vehicle]));
   const tasksByCaseId = groupByCaseId(tasksResult.data ?? []);
   const eventsByCaseId = groupByCaseId(caseEventsResult.data ?? []);
-  const dispatchCases = (casesResult.data ?? []).map((caseRow) =>
+  let dispatchCases = (casesResult.data ?? []).map((caseRow) =>
     mapCase({
       caseRow,
       contactsById,
@@ -416,6 +429,10 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
       profilesById,
     }),
   );
+
+  const workspaceCapabilities = await loadWorkspaceCapabilities(viewer);
+  const workspaceTasks = workspaceCapabilities.tasks ? await loadTaskWorkspace(viewer) : undefined;
+  if (workspaceTasks) dispatchCases = dispatchCases.map(caseItem => ({ ...caseItem, tasks: workspaceTasks.filter(task => task.caseIds.includes(caseItem.id)) }));
 
   const linesById = new Map((linesResult.data ?? []).map((line) => [line.id, line]));
   const queuesById = new Map((queuesResult.data ?? []).map((queue) => [queue.id, queue]));
@@ -454,6 +471,8 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
   );
 
   return {
+    tasks: workspaceTasks,
+    workspaceCapabilities,
     attendance: buildAttendanceOverview({
       timezone: organizationProfile?.timezone ?? "Europe/Bratislava",
       templates: attendanceTemplates,
@@ -481,7 +500,7 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
     callCenterCalls,
     dispatchCases,
     notifications,
-    metrics: deriveMetrics(calls, dispatchCases),
+    metrics: { ...deriveMetrics(calls, dispatchCases), ...(workspaceTasks ? { openTasks: workspaceTasks.filter(isTaskOpen).length } : {}) },
     integrations: (integrationsResult.data ?? []).map(mapIntegrationConnection),
     commanderGpsLastSuccessAt: commanderGpsSyncResult.data?.finished_at ?? undefined,
     commanderGpsLatestRunAt:
@@ -491,12 +510,13 @@ async function loadSupabaseDispatchData(): Promise<DispatchData> {
   };
 }
 
-export async function loadDispatchNotifications(organizationId: string): Promise<DispatchNotification[]> {
+export async function loadDispatchNotifications(organizationId: string, profileId: string): Promise<DispatchNotification[]> {
   const supabase = createSupabaseAdminClient();
   const result = await supabase
     .from("motorist_notifications")
     .select("*")
     .eq("organization_id", organizationId)
+    .or(notificationAudienceFilter(profileId))
     .neq("status", "archived")
     .not("dedupe_key", "like", "workplace-takeover:%")
     .order("created_at", { ascending: false })
@@ -1208,7 +1228,7 @@ function mapCase({
     }),
     tasks: tasks.map((task) => ({
       id: task.id,
-      caseId: task.case_id,
+      caseId: task.case_id ?? "",
       title: task.title,
       // Nepriradená úloha musí ostať nepriradená (U-02) — owner prípadu nie je implicitný riešiteľ.
       assignedTo: task.assigned_to ?? "unassigned",
@@ -1566,8 +1586,9 @@ function latestAcceptedLocationSubmissions(rows: LocationSubmissionRow[]) {
   return latest;
 }
 
-function groupByCaseId<RowWithCaseId extends { case_id: string }>(rows: RowWithCaseId[]) {
+function groupByCaseId<RowWithCaseId extends { case_id: string | null }>(rows: RowWithCaseId[]) {
   return rows.reduce((groups, row) => {
+    if (!row.case_id) return groups;
     const list = groups.get(row.case_id) ?? [];
     list.push(row);
     groups.set(row.case_id, list);

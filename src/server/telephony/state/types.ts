@@ -1,3 +1,4 @@
+import type { MonitorInvitation } from "@/lib/telephony/monitor-invitations";
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { CallLegRole, CallSessionState, Database, Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
@@ -159,6 +160,8 @@ export type AppEventType =
   | "leave_conference"
   | "supervise"
   | "stop_supervise"
+  | "invite_monitor"
+  | "revoke_monitor"
   | "hangup"
   | "sweep";
 
@@ -190,7 +193,9 @@ export type AppEvent = {
   /** For `mute_party` / `unmute_party` / `remove_party`: the participant leg the action targets. */
   party?: { callControlId: string; label: string };
   /** For `supervise`: the supervisor's own device and the mode they asked for. */
-  supervisor?: { profileId: string; sipUri: string; mode: SupervisorMode; label: string; offerToken?: string };
+  supervisor?: { profileId: string; sipUri: string; mode: SupervisorMode; label: string; offerToken?: string; invitationId?: string };
+  monitorInvitation?: MonitorInvitation;
+  invitationId?: string;
   /**
    * For `sweep`: the scanner already decided this session is stale. The verdict
    * is computed *before* the session lease is taken, because acquiring the lease
@@ -249,6 +254,7 @@ export type DialCommand = CommandBase & {
    * Promoting an ordinary bridged call to a conference just to listen would
    * unbridge the caller for two round trips of dead air.
    */
+  monitorInvitationId?: string;
   superviseCallControlId?: string;
   supervisorRole?: SupervisorMode;
 };
@@ -566,7 +572,10 @@ export type SessionMeta = {
   /** A third party dialled into the conference that has not answered yet. */
   party_pending?: { target: TransferTarget; by: string | null; at: string } | null;
   /** Live supervision, keyed by the supervisor's profile id. */
-  supervise?: Record<string, { mode: SupervisorMode; at: string; by?: string | null }> | null;
+  supervise?: Record<string, { mode: SupervisorMode; at: string; by?: string | null; invitationId?: string }> | null;
+  monitorInvitations?: Record<string, MonitorInvitation>;
+  monitorInviteRecipients?: string[];
+  monitorInviteActors?: string[];
   park?: { by: string | null; at: string; timed_out_at?: string | null } | null;
   ivr?: { menu_id: string; tries: number; chosen?: string | null; action?: string | null } | null;
   after_hours?: { reason: string; at: string } | null;

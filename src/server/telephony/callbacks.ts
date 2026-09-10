@@ -1,3 +1,5 @@
+import { approveCallbackTarget, resolveCallbackTarget } from "@/server/callback-targets";
+import { confirmedCallbackTarget } from "@/lib/telephony/callback-target";
 import "server-only";
 
 import type { Database } from "@/lib/supabase/database.types";
@@ -7,6 +9,7 @@ import { callbackOrigin } from "@/lib/telephony/callback-origin";
 
 import { isUuid } from "@/lib/telephony/uuid";
 
+import { taskWorkspaceSystemEnabled } from "../task-system-gate";
 import { telephonyStabilityEnabled } from "./stability";
 import { writeCallAudit } from "./audit";
 import { CallActionError, startOutboundCall, type CallActionDeps, type CallActor, type StartOutboundResult } from "./call-actions";
@@ -302,7 +305,7 @@ export async function resolveCallbackRequest(
   const now = nowOf(deps);
   const notes = typeof input.notes === "string" && input.notes.trim() ? input.notes.trim().slice(0, 500) : null;
 
-  if (telephonyStabilityEnabled() || durableCallback(row)) {
+  if (telephonyStabilityEnabled() || durableCallback(row) || await taskWorkspaceSystemEnabled(deps.admin, deps.organizationId)) {
     const result = await deps.admin.rpc("motorist_resolve_callback_v1", {
       p_organization_id: deps.organizationId, p_request_id: id, p_actor_id: actor.profileId,
       p_status: input.status, p_notes: notes,
@@ -364,16 +367,21 @@ async function closeCallbackTask(deps: CallbackQueueDeps, actor: CallActor, case
  * The request stays open: the call being placed is not proof that the caller
  * was reached. The operator closes it with `done` or `cancel`.
  */
-export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id: string): Promise<CallbackCallResult> {
+export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id: string, verificationId?: string): Promise<CallbackCallResult> {
   const queueDeps: CallbackQueueDeps = { admin: deps.admin, organizationId: deps.organizationId, now: deps.now, logger: deps.logger };
   const row = await loadRequest(queueDeps, id);
-  const enhanced = telephonyStabilityEnabled() || durableCallback(row);
+  const target = await resolveCallbackTarget(deps.admin, deps.organizationId, row.caller_number);
+  if (!confirmedCallbackTarget(target, verificationId)) throw new CallActionError("Potvrďte platný overený cieľ spätného volania.", 409, "callback_target_confirmation_required");
+  const alternate = target.status === "verified_alternative";
+  const enhanced = telephonyStabilityEnabled() || durableCallback(row) || alternate;
   assertLive(row);
   await assertClaimable(queueDeps, row, actor);
   if (row.claimed_by !== actor.profileId) await claimCallbackRequest(queueDeps, actor, id);
 
+  if (alternate) await approveCallbackTarget(deps.admin, deps.organizationId, actor.profileId, id, verificationId!);
   const call = await startOutboundCall(deps, actor, {
     to: row.caller_number,
+    ...(alternate ? { callbackTargetVerificationId: verificationId } : {}),
     caseId: row.case_id,
     ...(enhanced ? { callbackRequestId: row.id } : {}),
     // Call back from the number the caller originally rang, so the partner line

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import { GripHorizontal } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { GripHorizontal, PanelLeftClose, Wrench } from "lucide-react";
 import type { CallCenterCall, CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
 import type { DispatchMapModel } from "@/lib/map-adapter";
@@ -14,9 +14,15 @@ import type { SaveCaseDraft } from "./NewCaseDrawer";
 
 export type WorkspaceKind = "cockpit" | "detail" | "new";
 export type WorkspaceMode = "collapsed" | "split" | "expanded";
-export type CenterView = "map" | "table";
+export type CenterView = "map" | "table" | "tasks" | "notes";
 
 type MapWorkspaceProps = {
+  active?: boolean;
+  actorKey?: string;
+  centerContent?: ReactNode;
+  onCenterViewChange?: (view: CenterView) => void;
+  onOpenTools?: () => void;
+  onToggleLeft?: () => void;
   activeCaseId: string;
   assets: FleetAsset[];
   branches: Branch[];
@@ -45,6 +51,7 @@ type MapWorkspaceProps = {
   /** Click-to-call from the case card; absent while telephony is not configured. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
   onLinkCall: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
+  caseEditorRevision?: number;
   onDirtyChange: (dirty: boolean) => void;
   onSaveDraftChange: (saveDraft: SaveCaseDraft | null) => void;
   onSavingChange: (saving: boolean) => void;
@@ -72,6 +79,12 @@ const WORKSPACE_SHELL_ID = "dispatch-workspace-shell";
 type StoredWorkspaceLayout = { desktopPanelPercent?: number };
 
 export function MapWorkspace({
+  active = true,
+  actorKey,
+  centerContent,
+  onCenterViewChange,
+  onOpenTools,
+  onToggleLeft,
   activeCaseId,
   assets,
   branches,
@@ -90,6 +103,7 @@ export function MapWorkspace({
   onDataChange,
   onDial,
   onLinkCall,
+  caseEditorRevision = 0,
   onDirtyChange,
   onSaveDraftChange,
   onSavingChange,
@@ -110,14 +124,14 @@ export function MapWorkspace({
   workspaceMode,
 }: MapWorkspaceProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const layoutStorageKey = useMemo(() => `motorist:dispatch-workspace-layout:v2:${viewerProfileId ?? "local-browser"}`, [viewerProfileId]);
+  const layoutStorageKey = useMemo(() => `motorist:dispatch-workspace-layout:v3:${actorKey ?? viewerProfileId ?? "local-browser"}`, [actorKey, viewerProfileId]);
   const desktopPanelPercentRef = useRef(DEFAULT_DESKTOP_PANEL_PERCENT);
   const pendingAnimationFrameRef = useRef<number | null>(null);
   const lastRawDesktopPanelPercentRef = useRef(DEFAULT_DESKTOP_PANEL_PERCENT);
   const [desktopPanelPercent, setDesktopPanelPercent] = useState(DEFAULT_DESKTOP_PANEL_PERCENT);
   const hasCockpitCase = Boolean(caseItem && mapModel);
   const showWorkspacePanel = workspaceKind !== "cockpit" || hasCockpitCase;
-  const showExpandedPanel = workspaceMode === "expanded" && workspaceKind !== "cockpit";
+  const showExpandedPanel = workspaceKind !== "cockpit";
   const shellClassName = `dispatch-workspace-shell relative h-full min-h-0 ${showWorkspacePanel && workspaceMode === "split" ? `lg:grid lg:gap-2 ${desktopRows[workspaceMode]}` : ""}`;
   const upperAreaClassName = `dispatch-workspace-upper h-full min-h-0 overflow-hidden ${showWorkspacePanel && workspaceMode === "split" ? "lg:h-auto lg:min-h-[340px]" : ""}`;
   // Mobile CSS displays either the full map or the full case, never a partial sheet.
@@ -127,7 +141,7 @@ export function MapWorkspace({
       ? "dispatch-workspace-panel hidden lg:absolute lg:inset-x-0 lg:bottom-0 lg:z-20 lg:block lg:h-16"
       : "dispatch-workspace-panel hidden lg:relative lg:block lg:h-full";
   const canResizeCockpit = workspaceKind === "cockpit" && hasCockpitCase;
-  const sectionClassName = "dispatch-map-workspace relative h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-zinc-50 p-1 lg:p-3";
+  const sectionClassName = "dispatch-map-workspace relative flex flex-col h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-zinc-50 p-1 lg:p-3";
   const resizeHandleClassName = `absolute left-1/2 z-[2147482600] hidden h-7 w-20 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full border border-zinc-300 bg-white/95 text-zinc-500 shadow-md backdrop-blur hover:border-zinc-400 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#FCD703] focus:ring-offset-2 lg:flex ${workspaceMode === "expanded" ? "top-3" : "top-0 -translate-y-1/2"}`;
 
   useEffect(() => {
@@ -241,10 +255,17 @@ export function MapWorkspace({
 
   return (
     <section className={sectionClassName}>
+      {onCenterViewChange && <div className="workspace-center-tabs mb-1 flex min-h-11 items-center gap-1 overflow-x-auto" aria-label="Pracovná plocha">
+        <button type="button" className="hidden min-h-11 min-w-11 items-center justify-center rounded-lg hover:bg-zinc-200 lg:flex" aria-label="Zbaliť panel prípadov" onClick={onToggleLeft}><PanelLeftClose size={18} /></button>
+        {(["map", "tasks", "notes", "table"] as const).map(view => <button key={view} type="button" aria-pressed={centerView === view} onClick={() => onCenterViewChange(view)} className={`min-h-11 shrink-0 rounded-lg px-3 text-sm font-medium ${centerView === view ? "bg-zinc-950 text-white" : "bg-white text-zinc-600 hover:bg-zinc-200"}`}>{({ map: "Mapa", tasks: "Úlohy", notes: "Poznámky", table: "Tabuľka" })[view]}</button>)}
+        <button type="button" className="ml-auto flex min-h-11 shrink-0 items-center gap-1 rounded-lg px-3 text-sm hover:bg-zinc-200" onClick={onOpenTools}><Wrench size={17} /><span>Nástroje</span></button>
+      </div>}
+      <div className="relative min-h-0 flex-1">
       <div id={WORKSPACE_SHELL_ID} ref={containerRef} className={shellClassName} data-workspace-mode={workspaceMode} suppressHydrationWarning>
         <div className={upperAreaClassName}>
-          {centerView === "map" ? (
+          <div hidden={centerView !== "map"} inert={centerView !== "map"} className="dispatch-workspace-view h-full">
             <DispatchMap
+              active={active && centerView === "map" && workspaceMode !== "expanded"}
               caseItem={caseItem}
               branches={branches}
               assets={assets}
@@ -254,7 +275,8 @@ export function MapWorkspace({
               onSendEtaSms={onSendEtaSms}
               onSendLocationSms={onSendLocationSms}
             />
-          ) : centerView === "table" ? (
+          </div>
+          {centerView === "table" && (
             <CaseTable
               activeCaseId={activeCaseId}
               assets={assets}
@@ -269,9 +291,8 @@ export function MapWorkspace({
               totalCases={totalCases}
               workspaceMode={workspaceMode}
             />
-          ) : (
-            <EmptyActiveCase />
           )}
+          <div hidden={centerView !== "tasks" && centerView !== "notes"} inert={centerView !== "tasks" && centerView !== "notes"} className="dispatch-workspace-view h-full">{centerContent}</div>
         </div>
 
         {showWorkspacePanel && (
@@ -298,7 +319,7 @@ export function MapWorkspace({
           )}
           {showExpandedPanel ? (
             <ExpandedCasePanel
-              key={`${workspaceKind}:${caseItem?.id ?? "empty"}`}
+              key={`${workspaceKind}:${caseItem?.id ?? "empty"}:${caseEditorRevision}`}
               assets={assets}
               branches={branches}
               call={call}
@@ -322,6 +343,7 @@ export function MapWorkspace({
             />
           ) : caseItem && mapModel ? (
             <CaseCockpitPanel
+              key={caseEditorRevision}
               assets={assets}
               branches={branches}
               caseItem={caseItem}
@@ -349,6 +371,7 @@ export function MapWorkspace({
           )}
           </div>
         )}
+      </div>
       </div>
     </section>
   );
