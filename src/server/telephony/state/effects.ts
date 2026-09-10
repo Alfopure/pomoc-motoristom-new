@@ -777,6 +777,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         sipRegion: "Europe",
         mediaEncryption: command.to.startsWith("sip:") ? "SRTP" : undefined,
         parkAfterUnbridge: "self",
+        customHeaders: inviteHeaders(ctx.session, command.to),
       });
       return { skipped: false, detail: { to: command.to } };
     case "conference_create": {
@@ -942,6 +943,34 @@ async function createOrFindConference(telnyx: TelnyxClient, commandId: string, c
   }
 }
 
+/** Invite header carrying the customer's number to the operator's browser phone. */
+export const CALLER_HEADER = "X-PM-Caller";
+
+/** The person the operator is about to talk to: the caller of an inbound session, the dialled party of an outbound one. */
+function presentedCallerNumber(session: SessionRow): string | null {
+  if (session.direction === "inbound") return normalizeE164(session.caller_number);
+  if (session.direction === "outbound") return normalizeE164(session.called_number);
+  return null;
+}
+
+/**
+ * Custom SIP headers of a leg we dial or transfer towards a browser phone.
+ *
+ * Every operator leg is placed from the line's own DID (the only verified
+ * origination number, runbook S3), so the SIP `From` the webphone sees is the
+ * partner line — a colleague receiving a transfer read it as "Allianz is
+ * calling me". The customer's number travels in `X-PM-Caller` instead; the
+ * browser prefers it for the ringing panel and the OS notification and falls
+ * back to `From` when the header does not survive. PSTN legs never carry it.
+ */
+function inviteHeaders(session: SessionRow, to: string, options: { autoAnswer?: boolean } = {}): Array<{ name: string; value: string }> | undefined {
+  const headers: Array<{ name: string; value: string }> = [];
+  if (options.autoAnswer) headers.push({ name: "X-PM-Auto-Answer", value: "1" });
+  const caller = to.startsWith("sip:") ? presentedCallerNumber(session) : null;
+  if (caller) headers.push({ name: CALLER_HEADER, value: caller });
+  return headers.length > 0 ? headers : undefined;
+}
+
 async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   const telnyx = requireTelnyx(deps);
   const stable = telephonyStabilityEnabled() || hasStabilityContract(ctx.session);
@@ -975,7 +1004,7 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     timeLimitSecs: LEG_TIME_LIMIT_SECS,
     sipRegion: "Europe",
     mediaEncryption: isSip ? "SRTP" : undefined,
-    customHeaders: command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" }] : undefined,
+    customHeaders: inviteHeaders(ctx.session, command.to, { autoAnswer: command.autoAnswer }),
     fromDisplayName: command.fromDisplayName,
     // Supervision attaches to a live call at dial time; the caller's bridge is
     // never touched. `supervisor_role` is only meaningful together with it.

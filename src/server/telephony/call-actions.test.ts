@@ -280,7 +280,7 @@ describe("park / pickup", () => {
     const picked = await pickupWaitingCall(actionDeps(h), o2, call.sessionId);
     expect(picked.state).toBe("parked");
     const dial = h.telnyx.of("dial").at(-1)!.params;
-    expect(dial).toMatchObject({ to: "sip:gencred002@sip.telnyx.com", linkTo: call.callControlId, customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] });
+    expect(dial).toMatchObject({ to: "sip:gencred002@sip.telnyx.com", linkTo: call.callControlId, customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }, { name: "X-PM-Caller", value: NUMBERS.customer }] });
     const pickerLeg = h.openLegFor(call.sessionId, PROFILES.o2)!;
     await h.legEvent(String(pickerLeg.telnyx_call_control_id), "call.answered");
     expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o2 });
@@ -319,6 +319,17 @@ describe("transfers", () => {
     expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, {})))).toMatchObject({ status: 400 });
     await expect(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { number: "0900 000 000" }))).resolves.toMatchObject({ state: "ringing" });
     expect(h.telnyx.of("transfer")[0].params.to).toBe(NUMBERS.external);
+    // A PSTN target gets no presentation header; only browser phones read it.
+    expect(h.telnyx.of("transfer")[0].params.customHeaders).toBeUndefined();
+  });
+
+  it("names the customer, not the line, on every leg dialled towards a browser phone", async () => {
+    const h = createTelephonyHarness();
+    const call = await talkingWith(h);
+    // The ring offer already carried the header; `from` stays the verified DID (runbook S3).
+    expect(h.telnyx.of("dial")[0].params).toMatchObject({ from: NUMBERS.allianz, customHeaders: [{ name: "X-PM-Caller", value: NUMBERS.customer }] });
+    await completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o2 }));
+    expect(h.telnyx.of("transfer")[0].params).toMatchObject({ to: "sip:gencred002@sip.telnyx.com", from: NUMBERS.allianz, customHeaders: [{ name: "X-PM-Caller", value: NUMBERS.customer }] });
   });
 
   it("moves the customer to the waiting room when the transfer target does not answer", async () => {

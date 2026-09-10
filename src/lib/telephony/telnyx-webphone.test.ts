@@ -271,6 +271,28 @@ describe("TelnyxWebphone", () => {
     expect(h.phone.getSnapshot().pendingOperatorLegs).toBe(0);
   });
 
+  it("presents the customer named in the invite rather than the line the leg was dialled from", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+    const call = fakeCall({ options: { remoteCallerNumber: "+421232408718", customHeaders: [{ name: "X-PM-Caller", value: "+421948443535" }] } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
+    expect(h.phone.getSnapshot().call).toMatchObject({ number: "+421948443535", sessionId: "sess-1" });
+  });
+
+  it("falls back to the SIP From when the invite names no caller", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+    const call = fakeCall({ options: { remoteCallerNumber: "+421232408718", customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
+    expect(h.phone.getSnapshot().call?.number).toBe("+421232408718");
+  });
+
   it("publishes pending legs before an invite and retains other concurrent legs after one connects", async () => {
     const h = harness();
     h.phone.start();
