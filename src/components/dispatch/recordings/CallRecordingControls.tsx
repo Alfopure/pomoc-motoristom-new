@@ -21,7 +21,7 @@ export function RecordingControlActions({ detail, onUpdated }: { detail: CallRec
   const retry = detail.liveState === "failed" || detail.liveState === "unknown";
   const canStop = detail.capabilities.canControl && ["notice", "starting", "recording", "failed", "unknown"].includes(detail.liveState);
   useEffect(() => {
-    if (busy || !["notice", "starting", "recording", "stopping", "unknown"].includes(detail.liveState)) return;
+    if (busy || !detail.capabilities.canControl && !["notice", "starting", "recording", "stopping", "unknown"].includes(detail.liveState)) return;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       void recordingRequest<CallRecordingDetail>(`/api/telephony/calls/${encodeURIComponent(detail.callId)}/recording-detail`, { signal: controller.signal }).then((updated) => {
