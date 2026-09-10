@@ -344,6 +344,8 @@ function DispatchConsoleContent({
   const actorKey = `${viewerOrganizationId ?? "demo"}:${viewerProfileId ?? "local-browser"}`;
   const [workspacePreferences, setWorkspacePreferences] = useState(defaultWorkspacePreferences);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [widgetSettingsOpen, setWidgetSettingsOpen] = useState(false);
+  const toolsReturnFocusRef = useRef<HTMLElement | null>(null);
   const [visitedWidgets, setVisitedWidgets] = useState<Set<WidgetId>>(() => new Set(["phone", "tasks"]));
   const drafts = useDraftEditors();
   const registerDraft = drafts.register;
@@ -353,6 +355,7 @@ function DispatchConsoleContent({
   }, []);
   const handleNotebookEditor = useCallback((editor: DraftEditorState) => registerDraft("Poznámky", editor), [registerDraft]);
   const centerView = workspacePreferences.centerView;
+  const fullPageWorkspace = centerView !== "map";
   const workspaceStorageKey = workspacePreferenceStorageKey(viewerOrganizationId, viewerProfileId);
   const currentSessionKeyRef = useRef<string | null>(actorKey);
   useEffect(() => {
@@ -818,7 +821,7 @@ function DispatchConsoleContent({
   const secondaryBadgeCount = secondaryNavItems.reduce((total, item) => total + (item.badgeCount ?? 0), 0);
   const mobileShortcutItems: MobileShortcutItem[] = [
     {
-      active: activeView === "cases" || activeView === "dispatch" && !toolsOpen && !focusedTaskId && (mobilePane === "cases" || workspace.kind !== "cockpit" || workspace.mode === "expanded"),
+      active: activeView === "cases" || activeView === "dispatch" && !toolsOpen && !focusedTaskId && (mobilePane === "cases" || centerView === "map" && (workspace.kind !== "cockpit" || workspace.mode === "expanded")),
       icon: Table2,
       label: "Prípady",
       onSelect: showMobileCases,
@@ -1019,6 +1022,8 @@ function DispatchConsoleContent({
 
   function selectCase(caseId: string) {
     return requestNavigation(() => {
+      setCenterView("map");
+      setToolsOpen(false);
       setActiveCaseId(caseId);
       setMobilePane("workspace");
       setFocusedTaskId(undefined);
@@ -1028,6 +1033,8 @@ function DispatchConsoleContent({
 
   function openCase(caseId: string) {
     requestNavigation(() => {
+      setCenterView("map");
+      setToolsOpen(false);
       const caseItem = dispatchCases.find((item) => item.id === caseId);
       const active = caseItem && isActiveDispatchCase(caseItem);
       setActiveCaseId(caseId);
@@ -1040,6 +1047,8 @@ function DispatchConsoleContent({
 
   function openCaseDetail(caseId: string) {
     requestNavigation(() => {
+      setCenterView("map");
+      setToolsOpen(false);
       setActiveCaseId(caseId);
       setMobilePane("workspace");
       setFocusedTaskId(undefined);
@@ -1081,6 +1090,8 @@ function DispatchConsoleContent({
       setMobilePane("workspace");
       setActiveView("dispatch");
       setFocusedTaskId(taskId);
+      setCenterView("map");
+      setToolsOpen(false);
       setWorkspace({ kind: "detail", mode: "expanded" });
     }, { documentNavigation: needsDocument });
   }
@@ -1540,20 +1551,35 @@ function DispatchConsoleContent({
     setToolsOpen(false);
     setActiveView("dispatch");
     setMobilePane("workspace");
-    const mobile = window.matchMedia("(max-width: 1023px)").matches;
-    setWorkspace(current => ({ ...current, mode: mobile ? "collapsed" : current.mode === "expanded" ? "split" : current.mode }));
   }
 
   function openTools() {
+    toolsReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setToolsOpen(true);
+    setWidgetSettingsOpen(true);
     setActiveView("dispatch");
     setVisitedWidgets(current => new Set([...current, ...workspacePreferences.widgets.filter(item => item.visible).map(item => item.id)]));
     updateWorkspacePreferences({ ...workspacePreferences, rightCollapsed: false });
   }
 
+  function closeTools() {
+    setToolsOpen(false);
+    setWidgetSettingsOpen(false);
+    updateWorkspacePreferences({ ...workspacePreferences, rightCollapsed: true });
+    window.requestAnimationFrame(() => {
+      const trigger = toolsReturnFocusRef.current;
+      if (trigger?.isConnected && trigger.getClientRects().length) trigger.focus({ preventScroll: true });
+    });
+  }
+
+  function toggleTools() {
+    if (toolsOpen) closeTools();
+    else openTools();
+  }
+
   function switchView(view: View) {
     if (view === "notes" || view === "tasks") { switchCenterView(view); return; }
-    if (view === "tools") { openTools(); return; }
+    if (view === "tools") { toggleTools(); return; }
     setToolsOpen(false);
     requestNavigation(() => {
       setActiveView(view);
@@ -1572,6 +1598,7 @@ function DispatchConsoleContent({
 
   function restoreMobileCase() {
     setToolsOpen(false);
+    setCenterView("map");
     setActiveView("dispatch");
     setMobilePane("workspace");
     setWorkspace(current => ({ ...current, mode: "expanded" }));
@@ -1900,6 +1927,8 @@ function DispatchConsoleContent({
         return;
       }
 
+      if (centerView !== "map" && !caseDirectoryDetailOpen) return;
+
       if (workspace.mode === "expanded") {
         event.preventDefault();
         requestNavigation(() => {
@@ -1930,7 +1959,7 @@ function DispatchConsoleContent({
     window.addEventListener("keydown", handleKeyDown);
 
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeView, cancelPendingNavigation, leaveDialogOpen, requestNavigation, workspace]);
+  }, [activeView, cancelPendingNavigation, centerView, leaveDialogOpen, requestNavigation, workspace]);
 
   function renderTasks(variant: "page" | "sidebar") {
     return <TaskPanel
@@ -2122,7 +2151,7 @@ function DispatchConsoleContent({
           ) : null}
           <div className="min-w-0">
             <h1 className="truncate text-lg font-bold tracking-tight">
-              {activeView === "dispatch" ? toolsOpen ? "Nástroje" : mobilePane === "workspace" && workspace.mode !== "expanded" && centerView !== "map" ? ({ table: "Tabuľka prípadov", tasks: "Úlohy", notes: "Poznámky" })[centerView] : mobilePane === "cases" ? "Prípady" : workspace.kind === "new" ? "Nový prípad" : workspace.kind === "detail" || workspace.mode === "expanded" ? workspaceCase?.caseNumber ?? "Detail prípadu" : "Mapa zásahov" : activeView === "cases" && workspace.kind === "detail" ? workspaceCase?.caseNumber ?? "Detail prípadu" : navItems.find((item) => item.view === activeView)?.label}
+              {activeView === "dispatch" ? toolsOpen ? "Nástroje" : mobilePane === "workspace" && centerView !== "map" ? ({ table: "Tabuľka prípadov", tasks: "Úlohy", notes: "Poznámky" })[centerView] : mobilePane === "cases" ? "Prípady" : workspace.kind === "new" ? "Nový prípad" : workspace.kind === "detail" || workspace.mode === "expanded" ? workspaceCase?.caseNumber ?? "Detail prípadu" : "Mapa zásahov" : activeView === "cases" && workspace.kind === "detail" ? workspaceCase?.caseNumber ?? "Detail prípadu" : navItems.find((item) => item.view === activeView)?.label}
               {activeView === "dispatch" && mobilePane === "cases" ? <span className="ml-1.5 font-medium text-zinc-500">{activeCasesTotal}</span> : null}
             </h1>
           </div>
@@ -2132,7 +2161,7 @@ function DispatchConsoleContent({
             <Plus size={18} aria-hidden="true" /> Nový prípad
           </button>
         ) : null}
-        {(selectedCase || workspace.kind === "new") && (activeView === "dispatch" && mobilePane === "workspace" || activeView === "cases" && workspace.kind === "detail") ? (
+        {(selectedCase || workspace.kind === "new") && !toolsOpen && (activeView === "dispatch" && mobilePane === "workspace" && centerView === "map" || activeView === "cases" && workspace.kind === "detail") ? (
           <button
             type="button"
             onClick={() => workspace.mode === "expanded" ? showMobileMap() : restoreMobileCase()}
@@ -2230,6 +2259,7 @@ function DispatchConsoleContent({
           data-left-collapsed={workspacePreferences.leftCollapsed}
           data-right-collapsed={workspacePreferences.rightCollapsed}
           data-tools-open={toolsOpen}
+          data-full-page-workspace={fullPageWorkspace}
           inert={activeView !== "dispatch"}
           style={{
             "--dashboard-left-width": `${workspacePreferences.leftCollapsed ? 44 : dashboardColumns.left}px`,
@@ -2275,10 +2305,10 @@ function DispatchConsoleContent({
           >
             <span aria-hidden="true" className="h-14 w-1 rounded-full bg-zinc-300 shadow-sm transition group-hover:bg-yellow-400 group-focus-visible:bg-yellow-400" />
           </button>
-          <div className="hidden min-w-0 p-2 lg:col-span-2 lg:block xl:hidden">
+          <div className="dashboard-tablet-phone hidden min-w-0 p-2 lg:col-span-2 lg:block xl:hidden">
             <DashboardPhone onCreateCase={() => startNewCase()} caseContext={dashboardSmsCaseContext} isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
           </div>
-          {workspacePreferences.leftCollapsed && <button type="button" className="hidden min-h-11 items-center justify-center border-r border-zinc-200 bg-white lg:flex" aria-label="Obnoviť panel prípadov" onClick={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: false })}><PanelLeftOpen size={20} /></button>}
+          {workspacePreferences.leftCollapsed && !fullPageWorkspace && <button type="button" className="hidden min-h-11 items-center justify-center border-r border-zinc-200 bg-white lg:flex" aria-label="Obnoviť panel prípadov" onClick={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: false })}><PanelLeftOpen size={20} /></button>}
           <div className="mobile-dispatch-cases lg:contents">
           <CaseList
             activeCaseId={visibleActiveCaseId}
@@ -2307,7 +2337,8 @@ function DispatchConsoleContent({
             active={activeView === "dispatch" && !toolsOpen}
             actorKey={actorKey}
             onCenterViewChange={switchCenterView}
-            onOpenTools={openTools}
+            onOpenTools={toggleTools}
+            toolsOpen={toolsOpen}
             onToggleLeft={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: !workspacePreferences.leftCollapsed })}
             centerContent={<><div hidden={centerView !== "tasks"} className="h-full overflow-y-auto">{renderTasks("page")}</div><div hidden={centerView !== "notes"} className="h-full overflow-y-auto"><NotebookPanel active={activeView === "dispatch" && centerView === "notes" && !toolsOpen} /></div></>}
             activeCaseId={visibleActiveCaseId}
@@ -2349,8 +2380,8 @@ function DispatchConsoleContent({
             onSortChange={setCaseSort}
           />
           </div>
-          {workspacePreferences.rightCollapsed && <button type="button" className="hidden min-h-11 items-center justify-center border-l border-zinc-200 bg-white xl:flex" aria-label="Obnoviť panel nástrojov" onClick={openTools}><PanelRightOpen size={20} /></button>}
-          <WidgetHost preferences={workspacePreferences} onChange={updateWorkspacePreferences} renderWidget={renderWidget} expanded={toolsOpen} active={activeView === "dispatch"} onClose={() => { setToolsOpen(false); updateWorkspacePreferences({ ...workspacePreferences, rightCollapsed: true }); }} />
+          {workspacePreferences.rightCollapsed && !fullPageWorkspace && <button type="button" className="hidden min-h-11 items-center justify-center border-l border-zinc-200 bg-white xl:flex" aria-label="Obnoviť panel nástrojov" onClick={openTools}><PanelRightOpen size={20} /></button>}
+          <WidgetHost preferences={workspacePreferences} onChange={updateWorkspacePreferences} renderWidget={renderWidget} expanded={toolsOpen} settingsOpen={widgetSettingsOpen} onSettingsChange={setWidgetSettingsOpen} active={activeView === "dispatch" && (toolsOpen || (!fullPageWorkspace && !workspacePreferences.rightCollapsed))} onClose={closeTools} />
 
         </main>
 
