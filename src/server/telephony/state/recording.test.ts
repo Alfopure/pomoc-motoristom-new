@@ -342,40 +342,74 @@ describe("recording lifecycle", () => {
     expect(h.telnyx.of("recordingStart")).toHaveLength(2);
   });
 
-  it("informs a blind-transfer target before bridging and recording its new segment", async () => {
+  /** Prompts (audio or speech) played into one leg. */
+  const promptsOn = (h: TelephonyHarness, callControlId: unknown) =>
+    h.telnyx.calls.filter((entry) => (entry.method === "playbackStart" || entry.method === "speak") && entry.params.callControlId === callControlId);
+
+  it("connects a colleague receiving a blind transfer without playing the customer notice", async () => {
     const h = enabledHarness({ transfer: true }); const call = await talking(h);
     await blindTransfer(h.deps, actor, call.sessionId, { profileId: PROFILES.o2 }); await completeCallAnnouncements(h, call.sessionId);
     expect(h.telnyx.of("transfer")).toHaveLength(0);
     const target = h.openLegFor(call.sessionId, PROFILES.o2)!;
     await h.legEvent(String(target.telnyx_call_control_id), "call.answered");
-    expect(h.telnyx.of("recordingStart")).toHaveLength(1);
-    await completeCallAnnouncements(h, call.sessionId);
+    // Nothing is played into the colleague's ear; the customer is connected and recorded right away.
+    expect(promptsOn(h, target.telnyx_call_control_id)).toHaveLength(0);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence ?? null).toBeNull();
     expect(h.telnyx.of("recordingStart")).toHaveLength(2);
     expect(h.session(call.sessionId).answered_by_profile_id).toBe(PROFILES.o2);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.notifiedCallControlIds).toContain(target.telnyx_call_control_id);
   });
 
-  it.each(["operator", "external"])("informs the consulted %s before attended transfer starts a new segment", async (targetKind) => {
+  it("informs an external blind-transfer target before bridging and recording its new segment", async () => {
+    const h = enabledHarness({ transfer: true }); const call = await talking(h);
+    await blindTransfer(h.deps, actor, call.sessionId, { number: "0900 000 000" }); await completeCallAnnouncements(h, call.sessionId);
+    expect(h.telnyx.of("transfer")).toHaveLength(0);
+    const target = h.legs(call.sessionId).find((leg) => leg.role === "external" && !leg.ended_at)!;
+    await h.legEvent(String(target.telnyx_call_control_id), "call.answered");
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence?.callControlId).toBe(target.telnyx_call_control_id);
+    expect(h.telnyx.of("recordingStart")).toHaveLength(1);
+    await completeCallAnnouncements(h, call.sessionId);
+    expect(promptsOn(h, target.telnyx_call_control_id)).toHaveLength(1);
+    expect(h.telnyx.of("recordingStart")).toHaveLength(2);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: null });
+  });
+
+  it.each([["operator", 0], ["external", 1]] as const)("plays the notice to a consulted %s before attended transfer only outside the team (%i prompts)", async (targetKind, prompts) => {
     const h = enabledHarness({ conference: true, transfer: true }); const call = await talking(h);
     await startConsult(h.deps, actor, call.sessionId, targetKind === "operator" ? { profileId: PROFILES.o2 } : { number: "0900 000 000" }); await completeCallAnnouncements(h, call.sessionId);
     const consult = h.legs(call.sessionId).find((leg) => leg.role === "consult")!;
     await h.legEvent(String(consult.telnyx_call_control_id), "call.answered");
     await completeTransfer(h.deps, actor, call.sessionId);
+    expect(promptsOn(h, consult.telnyx_call_control_id)).toHaveLength(prompts);
     expect(h.telnyx.of("recordingStart")).toHaveLength(1);
     await completeCallAnnouncements(h, call.sessionId);
     expect(h.telnyx.of("recordingStart")).toHaveLength(2);
     expect(h.telnyx.of("conference:unhold")).toHaveLength(1);
     expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.pendingAudio).toBeNull();
+    expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.notifiedCallControlIds).toContain(consult.telnyx_call_control_id);
   });
 
-  it("does not record a new conference participant until its notice finishes", async () => {
+  it("does not record a new external conference participant until its notice finishes", async () => {
+    const h = enabledHarness({ conference: true }); const call = await talking(h);
+    await addCallParty(h.deps, actor, call.sessionId, { number: "0900 000 000" }); await completeCallAnnouncements(h, call.sessionId);
+    const party = h.legs(call.sessionId).find((leg) => leg.role === "external" && !leg.ended_at)!;
+    await h.legEvent(String(party.telnyx_call_control_id), "call.answered");
+    expect(h.telnyx.of("conference:join").some((command) => command.params.call_control_id === party.telnyx_call_control_id)).toBe(false);
+    await completeCallAnnouncements(h, call.sessionId);
+    expect(promptsOn(h, party.telnyx_call_control_id)).toHaveLength(1);
+    expect(h.telnyx.of("recordingStart")).toHaveLength(2);
+    expect(h.telnyx.of("conference:join").some((command) => command.params.call_control_id === party.telnyx_call_control_id)).toBe(true);
+  });
+
+  it("joins a colleague added to the conference without the customer notice and records again", async () => {
     const h = enabledHarness({ conference: true }); const call = await talking(h);
     await addCallParty(h.deps, actor, call.sessionId, { profileId: PROFILES.o2 }); await completeCallAnnouncements(h, call.sessionId);
     const party = h.openLegFor(call.sessionId, PROFILES.o2)!;
     await h.legEvent(String(party.telnyx_call_control_id), "call.answered");
-    expect(h.telnyx.of("conference:join").some((command) => command.params.call_control_id === party.telnyx_call_control_id)).toBe(false);
-    await completeCallAnnouncements(h, call.sessionId);
-    expect(h.telnyx.of("recordingStart")).toHaveLength(2);
+    expect(promptsOn(h, party.telnyx_call_control_id)).toHaveLength(0);
     expect(h.telnyx.of("conference:join").some((command) => command.params.call_control_id === party.telnyx_call_control_id)).toBe(true);
+    expect(h.telnyx.of("recordingStart")).toHaveLength(2);
+    expect(h.session(call.sessionId).state).toBe("conference");
   });
 
   it("ignores stale command acknowledgements and does not invent a stopped webhook", async () => {

@@ -62,7 +62,7 @@ describe("manual pickup during inbound ringing", () => {
     const picked = await pickupWaitingCall(h.deps, actor, call.sessionId);
     expect(picked.operatorLegCallControlId).toBeTruthy();
     expect(h.telnyx.of("hangup")).toHaveLength(0);
-    expect(h.telnyx.of("dial").at(-1)?.params).toMatchObject({ linkTo: call.callControlId, customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] });
+    expect(h.telnyx.of("dial").at(-1)?.params).toMatchObject({ linkTo: call.callControlId, customHeaders: expect.arrayContaining([{ name: "X-PM-Auto-Answer", value: "1" }]) });
     await h.legEvent(picked.operatorLegCallControlId!, "call.answered");
     expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: actor.profileId });
     expect(h.telnyx.of("bridge").at(-1)?.params).toMatchObject({ callControlId: call.callControlId, targetCallControlId: picked.operatorLegCallControlId });

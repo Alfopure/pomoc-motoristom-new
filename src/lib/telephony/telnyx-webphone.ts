@@ -25,6 +25,7 @@ import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-requ
 import {
   EXPECTED_LEG_TTL_MS,
   heartbeatRegistrationState,
+  invitePresentedCallerNumber,
   matchAutoAnswer,
   matchExpectedLeg,
   pruneExpectedLegs,
@@ -801,7 +802,7 @@ export class TelnyxWebphone {
     if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
     try {
       this.notification = new Notification("Prichádzajúci hovor", {
-        body: call.options?.remoteCallerNumber ?? call.options?.callerNumber ?? "Neznáme číslo",
+        body: presentedCallerNumber(call) ?? call.options?.remoteCallerNumber ?? call.options?.callerNumber ?? "Neznáme číslo",
         tag: `pm-call-${call.id}`,
         silent: true,
       });
@@ -901,7 +902,7 @@ export class TelnyxWebphone {
             id: call.id,
             state,
             direction: String(call.direction ?? "").toLowerCase() === "outbound" ? "outbound" : "inbound",
-            number: call.options?.remoteCallerNumber ?? call.options?.destinationNumber ?? "",
+            number: presentedCallerNumber(call) ?? call.options?.remoteCallerNumber ?? call.options?.destinationNumber ?? "",
             callerName: call.options?.remoteCallerName ?? null,
             telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId ?? null,
             sessionId,
@@ -917,6 +918,11 @@ export class TelnyxWebphone {
     this.snapshot = this.buildSnapshot();
     for (const listener of this.listeners) listener(this.snapshot);
   }
+}
+
+/** The customer's number named in the invite (`X-PM-Caller`); the SIP `From` of our legs is the line's DID. */
+function presentedCallerNumber(call: WebphoneSdkCall): string | null {
+  return invitePresentedCallerNumber({ customHeaders: call.options?.customHeaders });
 }
 
 type WebphoneSdkError = {

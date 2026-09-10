@@ -42,6 +42,24 @@ function patched(session: SessionRow, patch: Record<string, unknown>): SessionRo
   return { ...session, metadata: toJson({ ...readMeta(session), ...patch }) };
 }
 
+/**
+ * Whether a leg joining the recorded conversation still owes the caller-facing
+ * recording notice. Colleagues (`profile_id`: a browser phone or an operator's
+ * personal mobile) are informed of recording by the organisation's internal
+ * policy, and the customer announcement played into a colleague's ear reads as
+ * a wrong number; the notice is owed to external parties only. Both kinds are
+ * tracked as notified so recording resumes the same way once they are in.
+ */
+function needsNotice(state: RecordingState, leg: LegRow): boolean {
+  return !leg.profile_id && !state.notifiedCallControlIds?.includes(leg.telnyx_call_control_id);
+}
+
+function markNotified(session: SessionRow, state: RecordingState, leg: LegRow): SessionRow {
+  const id = leg.telnyx_call_control_id;
+  if (state.notifiedCallControlIds?.includes(id)) return session;
+  return patched(session, { recording: { ...state, notifiedCallControlIds: [...(state.notifiedCallControlIds ?? []), id] } });
+}
+
 function metadataResult(session: SessionRow, commands: Command[] = [], notes: string[] = []): ReduceResult {
   const next = emptyTransition();
   next.session.metadata = session.metadata;
@@ -280,13 +298,15 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
       // A private consult participant must hear the recording notice before joining the customer.
       if (event.type === "complete_transfer" && eligible(current, context, state) && state.policy.conferenceVerified && state.policy.transferVerified) {
         const consult = legs.find((leg) => leg.role === "consult" && isOpenLeg(leg));
-        if (consult && !state.notifiedCallControlIds?.includes(consult.telnyx_call_control_id)) return startSequence(current, context, consult.telnyx_call_control_id, [noticeKey(state)], event, event.id);
+        if (consult && needsNotice(state, consult)) return startSequence(current, context, consult.telnyx_call_control_id, [noticeKey(state)], event, event.id);
+        if (consult) current = markNotified(current, state, consult);
       }
       return startSequence(current, context, customer.telnyx_call_control_id, keys, event, event.id);
     }
     if (event.kind === "app" && event.type === "supervise" && event.supervisor?.mode === "barge" && eligible(current, context, state) && state.policy.conferenceVerified) {
       const supervisor = legs.find((leg) => leg.role === "supervisor" && leg.profile_id === event.supervisor?.profileId && isOpenLeg(leg));
-      if (supervisor && !state.notifiedCallControlIds?.includes(supervisor.telnyx_call_control_id)) return startSequence(current, context, supervisor.telnyx_call_control_id, [noticeKey(state)], event, event.id);
+      if (supervisor && needsNotice(state, supervisor)) return startSequence(current, context, supervisor.telnyx_call_control_id, [noticeKey(state)], event, event.id);
+      if (supervisor) current = markNotified(current, state, supervisor);
     }
     if (event.kind === "app" && event.type === "stop_supervise" && isAnnouncementEnabled(announcements, "recordingResumed") && eligible(current, context, state) && state.recorders.length) {
       core(current, legs, attempts, event, context);
@@ -298,7 +318,8 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
         return leg.telnyx_call_control_id === event.callControlId && ((intent === "party" && state.policy.conferenceVerified) || (["transfer_recorded", "transfer_safe"].includes(intent ?? "") && state.policy.transferVerified) ||
           (leg.role === "supervisor" && state.policy.conferenceVerified && meta.supervise?.[leg.profile_id ?? ""]?.mode === "barge"));
       });
-      if (party && !state.notifiedCallControlIds?.includes(party.telnyx_call_control_id)) return startSequence(current, context, party.telnyx_call_control_id, [noticeKey(state)], event, event.id);
+      if (party && needsNotice(state, party)) return startSequence(current, context, party.telnyx_call_control_id, [noticeKey(state)], event, event.id);
+      if (party) current = markNotified(current, state, party);
     }
     if (event.kind === "telnyx" && session.direction === "inbound" && session.state === "greeting" && event.status === "completed" &&
       event.callControlId === customer.telnyx_call_control_id && ["call.playback.ended", "call.speak.ended"].includes(event.type) &&

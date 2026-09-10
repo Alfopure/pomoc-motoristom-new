@@ -8,6 +8,7 @@ import {
   heartbeatRegistrationState,
   matchExpectedLeg,
   inviteHasAutoAnswerHeader,
+  invitePresentedCallerNumber,
   reduceWebphone,
   rememberExpectedLeg,
   tokenRefreshDelayMs,
@@ -195,6 +196,14 @@ describe("auto-answer correlation", () => {
     expect(inviteHasAutoAnswerHeader({ customHeaders: [{ name: "X-Other", value: "1" }] })).toBe(false);
     // The header alone never identifies a session, so it cannot match a leg.
     expect(matchExpectedLeg([], { customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] }, NOW)).toBeNull();
+  });
+
+  it("reads the presented caller from the invite header and accepts only a phone number", () => {
+    expect(invitePresentedCallerNumber({ customHeaders: [{ name: "X-PM-Caller", value: "+421948443535" }] })).toBe("+421948443535");
+    expect(invitePresentedCallerNumber({ customHeaders: [{ name: "x-pm-caller", value: "0948 443 535" }] })).toBe("+421948443535");
+    expect(invitePresentedCallerNumber({ customHeaders: [{ name: "X-PM-Caller", value: "anonymous" }] })).toBeNull();
+    expect(invitePresentedCallerNumber({ customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] })).toBeNull();
+    expect(invitePresentedCallerNumber({})).toBeNull();
   });
 });
 

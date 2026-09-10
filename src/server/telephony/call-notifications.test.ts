@@ -180,7 +180,7 @@ describe("call push audience", () => {
     expect(push.delivery.send).toHaveBeenCalledExactlyOnceWith(h.admin, expect.objectContaining({ sessionId: call.sessionId, recipientProfileId: PROFILES.o2, category: "incoming_call" }));
   });
 
-  it("notifies the recorded blind-transfer target after its dial, but suppresses delayed push once its answer notice starts", async () => {
+  it("notifies the recorded blind-transfer target after its dial and stops once the colleague answers without a notice", async () => {
     vi.stubEnv("TELNYX_RECORDING_ENABLED", "true");
     vi.stubEnv("TELNYX_RECORDING_CONTRACT_VERIFIED", "true");
     vi.stubEnv("RECORDING_PROCESSING_ENABLED", "true");
@@ -207,13 +207,14 @@ describe("call push audience", () => {
     vi.mocked(push.delivery.send!).mockClear();
     push.scheduled.mockClear();
     expect((await h.legEvent(String(target.telnyx_call_control_id), "call.answered")).outcome).toBe("processed");
-    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence?.continuation).toMatchObject({ kind: "telnyx", type: "call.answered", callControlId: target.telnyx_call_control_id });
-    expect(h.openLegFor(call.sessionId, PROFILES.o2)?.answered_at).toBeNull();
-    expect(push.scheduled).toHaveBeenCalledWith(call.sessionId);
+    // A colleague hears no customer notice: the leg is answered and connected at
+    // once, so there is no pending invite left to push about.
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence ?? null).toBeNull();
+    expect(h.openLegFor(call.sessionId, PROFILES.o2)?.answered_at).not.toBeNull();
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o2 });
+    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
     await push.flush();
     expect(push.delivery.send).not.toHaveBeenCalled();
-    await completeCallAnnouncements(h, call.sessionId);
-    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
   });
 
   it("targets only actual offered operators and limits expiry to the remaining ring deadline", async () => {

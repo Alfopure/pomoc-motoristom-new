@@ -14,6 +14,7 @@ import { isTelephonyNotConfigured } from "./not-configured";
  */
 
 import { nextBackoffDelayMs } from "@/lib/telephony/client-request";
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 
 /** Heartbeat cadence for `POST /api/telephony/devices/heartbeat` (server window is 120 s). */
 export const WEBPHONE_HEARTBEAT_MS = 30_000;
@@ -372,6 +373,18 @@ export function inviteHasAutoAnswerHeader(invite: InviteIdentity): boolean {
   return (invite.customHeaders ?? []).some(
     (header) => header?.name?.toLowerCase() === "x-pm-auto-answer" && header?.value === "1",
   );
+}
+
+/**
+ * The caller the server asked this phone to present (`X-PM-Caller` invite
+ * header, set by `effects.ts` on every leg dialled towards a browser). The SIP
+ * `From` of such a leg is the line's own DID, so without the header a
+ * colleague receiving a transfer sees the partner line instead of the customer.
+ * Only a real phone number is accepted; a stray header can never invent one.
+ */
+export function invitePresentedCallerNumber(invite: Pick<InviteIdentity, "customHeaders">): string | null {
+  const header = (invite.customHeaders ?? []).find((entry) => entry?.name?.toLowerCase() === "x-pm-caller");
+  return header?.value ? normalizeE164(header.value) : null;
 }
 
 /**
