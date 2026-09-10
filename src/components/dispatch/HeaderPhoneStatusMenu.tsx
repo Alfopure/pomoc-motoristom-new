@@ -5,11 +5,13 @@ import { MobileCallNotificationToggle } from "@/components/pwa/MobileCallNotific
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, ChevronDown, Loader2, Mic, Pause, Phone, PhoneCall, PhoneOff, X } from "lucide-react";
 
+import { formatTime } from "@/lib/dispatch-calculations";
 import type { OperatorPresenceStatus } from "@/lib/supabase/database.types";
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 import type { PhoneReadiness } from "@/lib/telephony/call-preflight";
+import type { PausePlan } from "@/lib/telephony/pause-ending";
 
-import { presenceLabel } from "./my-phone-model";
+import { presenceChoice, presenceLabel } from "./my-phone-model";
 import { phoneTakeoverAvailable } from "./phone-bar-model";
 import type { PhonePresenceAction } from "./useTelephonyConsole";
 
@@ -22,6 +24,8 @@ type HeaderPhoneStatusMenuProps = {
   notice: string | null;
   phone: WebphoneSnapshot;
   status: string | null;
+  /** Planned end of a timed pause; `overdue` once it has passed. */
+  pausePlan?: PausePlan | null;
   readiness: PhoneReadiness;
   onPreparePhone: () => Promise<boolean>;
   outboundPending: boolean;
@@ -56,17 +60,22 @@ export function HeaderPhoneStatusMenu({
   notice,
   phone,
   status,
+  pausePlan = null,
   readiness,
   onPreparePhone,
   outboundPending,
 }: HeaderPhoneStatusMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const availabilityLabel = presenceLabel(status as OperatorPresenceStatus | null);
+  const paused = status === "paused";
+  const pauseOverdue = paused && pausePlan?.overdue === true;
+  const availabilityLabel = presenceLabel(status as OperatorPresenceStatus | null)
+    + (paused && pausePlan ? (pauseOverdue ? " · po čase" : ` · do ${formatTime(pausePlan.plannedEndAt)}`) : "");
   const connected = phone.registration.tone === "ok";
   const summaryLabel = !connected ? phone.registration.label : notice ? "Chyba telefónie" : `${phone.registration.label} · ${availabilityLabel}`;
-  const tone = !connected ? phone.registration.tone : notice ? "error" : presenceTone(status);
+  const tone = !connected ? phone.registration.tone : notice ? "error" : pauseOverdue ? "error" : presenceTone(status);
   const canTakeover = phoneTakeoverAvailable(phone.status);
+  const choice = presenceChoice(status);
 
   useEffect(() => {
     if (!open) return;
@@ -180,9 +189,9 @@ export function HeaderPhoneStatusMenu({
 
           <div className="p-2">
             <p className="px-2 pb-1.5 pt-0.5 text-[10px] font-bold uppercase tracking-wide text-zinc-400">Dostupnosť pre hovory</p>
-            <StatusOption active={status === "available"} disabled={busy} icon={PhoneCall} label="Dostupný" onClick={() => changePresence({ status: "available" })} />
+            <StatusOption active={choice === "available"} disabled={busy} icon={PhoneCall} label="Dostupný" onClick={() => changePresence({ status: "available" })} />
             <StatusOption
-              active={status === "paused"}
+              active={choice === "paused"}
               disabled={busy}
               icon={Pause}
               label="Pauza alebo presmerovanie"
@@ -192,12 +201,19 @@ export function HeaderPhoneStatusMenu({
               }}
             />
             <StatusOption
-              active={status === "offline" || !status}
+              active={choice === "offline" || !status}
               disabled={busy}
               icon={PhoneOff}
               label="Odhlásiť z telefónie"
               onClick={() => changePresence({ status: "offline" })}
             />
+            {paused && pausePlan && (
+              <p className={`mt-1 px-2 text-[11px] font-medium leading-4 ${pauseOverdue ? "text-red-700" : "text-zinc-500"}`}>
+                {pauseOverdue
+                  ? `Plánovaný koniec pauzy (${formatTime(pausePlan.plannedEndAt)}) uplynul${pausePlan.overdueMinutes > 0 ? ` pred ${pausePlan.overdueMinutes} min` : ""}. Keď si späť, prepni sa na dostupného.`
+                  : `Plánovaný koniec pauzy: ${formatTime(pausePlan.plannedEndAt)}. Minútu vopred ti príde upozornenie.`}
+              </p>
+            )}
             <p className="mt-1 border-t border-zinc-200 px-2 pt-2 text-[11px] font-medium leading-4 text-zinc-500">Stav sa nedá zmeniť počas hovoru.</p>
           </div>
         </div>

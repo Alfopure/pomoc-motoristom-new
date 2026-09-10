@@ -9,9 +9,11 @@
  * E.164 inside the organisation's destination allowlist (`normalizeDestination`).
  */
 
+import { formatTime } from "@/lib/dispatch-calculations";
 import type { OperatorPresenceStatus } from "@/lib/supabase/database.types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { pausePlan } from "@/lib/telephony/pause-ending";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { LineDoc, OperatorDoc, PauseReasonDoc, RoutingDocument } from "@/server/telephony/config-service";
 
@@ -64,6 +66,29 @@ export function presenceTone(status: OperatorPresenceStatus | null | undefined):
   }
 }
 
+export type PresenceChoice = "available" | "paused" | "offline";
+
+/**
+ * Which of the three manual choices the current status belongs to, so the
+ * buttons can show the selected one. Ringing, a call and wrap-up all happen
+ * inside "available"; nothing is selected while the status is unknown.
+ */
+export function presenceChoice(status: OperatorPresenceStatus | string | null | undefined): PresenceChoice | null {
+  switch (status) {
+    case "available":
+    case "ringing":
+    case "on_call":
+    case "after_call_work":
+      return "available";
+    case "paused":
+      return "paused";
+    case "offline":
+      return "offline";
+    default:
+      return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Wrap-up
 // ---------------------------------------------------------------------------
@@ -104,7 +129,12 @@ export function canChangePresence(presence: MyPresence | null): boolean {
   return !(presence.status === "on_call" && Boolean(presence.currentSessionId));
 }
 
-export function describePresence(presence: MyPresence | null, reasons: readonly PauseReasonDoc[]): string {
+/**
+ * With a clock, a timed pause also says when it should end and — once that
+ * moment has passed — that the operator is still paused. Presence never
+ * changes by itself, so the sentence is the nudge to switch back by hand.
+ */
+export function describePresence(presence: MyPresence | null, reasons: readonly PauseReasonDoc[], now?: Date | null): string {
   if (!presence) return "Prezencia sa ešte nenačítala.";
   switch (presence.status) {
     case "available":
@@ -117,7 +147,14 @@ export function describePresence(presence: MyPresence | null, reasons: readonly 
       return "Dopisuješ predchádzajúci hovor.";
     case "paused": {
       const reason = reasons.find((entry) => entry.id === presence.pauseReasonId);
-      return reason ? `Máš pauzu: ${reason.label}. Hovor ti nezazvoní.` : "Máš pauzu. Hovor ti nezazvoní.";
+      if (!reason) return "Máš pauzu. Hovor ti nezazvoní.";
+      const plan = now ? pausePlan({ status: presence.status, statusSince: presence.statusSince, maxMinutes: reason.maxMinutes }, now) : null;
+      if (plan?.overdue) {
+        const ago = plan.overdueMinutes > 0 ? ` (pred ${plan.overdueMinutes} min)` : "";
+        return `Pauza „${reason.label}“ mala skončiť o ${formatTime(plan.plannedEndAt)}${ago}. Keď si späť, prepni sa na dostupného — dovtedy ti hovor nezazvoní.`;
+      }
+      if (plan) return `Máš pauzu: ${reason.label} (do ${formatTime(plan.plannedEndAt)}). Hovor ti nezazvoní.`;
+      return `Máš pauzu: ${reason.label}. Hovor ti nezazvoní.`;
     }
     case "offline":
       return "Si odhlásený z telefónie. Hovor ti nezazvoní.";

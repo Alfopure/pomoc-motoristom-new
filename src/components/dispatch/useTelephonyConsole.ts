@@ -94,6 +94,8 @@ export type TelephonyConsole = {
   supervise: (sessionId: string, mode: SupervisorMode) => Promise<void>;
   stopSupervise: (sessionId: string) => Promise<void>;
   changePresence: (action: PhonePresenceAction) => Promise<boolean>;
+  /** Re-reads the pause reasons (limits edited in settings) before the pause dialog shows them. */
+  refreshPauseReasons: () => void;
   availabilityAction: (action: TelephonyAvailabilityAction) => void;
   answer: () => void;
   /** Explicit confirmation after a 409: take the phone over from another tab. */
@@ -112,12 +114,17 @@ type PresenceResponse = {
   own?: { status?: string } | null;
 };
 
+function toPhonePauseReasons(reasons: NonNullable<PresenceResponse["pauseReasons"]>): PhonePauseReason[] {
+  return reasons.map((reason) => ({ id: reason.id, code: reason.code, label: reason.label, maxMinutes: reason.max_minutes }));
+}
+
 export function useTelephonyConsole(input: { enabled: boolean; operators: Operator[]; profileId: string }): TelephonyConsole {
   const { enabled, operators, profileId } = input;
   const [configured, setConfigured] = useState<boolean | null>(enabled ? null : false);
   const [snapshot, setSnapshot] = useState<ActiveCallsPayload>(EMPTY_ACTIVE_CALLS);
   const [phone, setPhone] = useState<WebphoneSnapshot>(IDLE_SNAPSHOT);
   const [pauseReasons, setPauseReasons] = useState<PhonePauseReason[]>([]);
+  const [pauseReasonsToken, setPauseReasonsToken] = useState(0);
   const [presenceBusy, setPresenceBusy] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [outboundRequestCount, setOutboundRequestCount] = useState(0);
@@ -136,6 +143,9 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   // Read inside the poll loop rather than through state: a reconnect must not
   // restart the poll effect (it would fire an extra request every time).
   const realtimeConnectedRef = useRef(false);
+  const applyPauseReasons = useCallback((reasons: PresenceResponse["pauseReasons"]) => {
+    if (Array.isArray(reasons)) setPauseReasons(toPhonePauseReasons(reasons));
+  }, []);
   // The console learns its organisation from the first snapshot; the Realtime
   // topic is keyed on it, so the channel opens only after that answer.
   const organizationId = snapshot.organizationId;
@@ -359,7 +369,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     const controller = new AbortController();
 
     // Pause reasons and the operator's own status only change when a human
-    // changes them, so this is a one-shot read refreshed after every write.
+    // changes them, so this is a one-shot read refreshed after every write and
+    // whenever the pause dialog is about to show the limits.
     async function loadPresence() {
       const result = await telephonyJson<PresenceResponse>("/api/telephony/presence", {
         label: "prezencia",
@@ -371,14 +382,14 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         setConfigured(false);
         return;
       }
-      if (result.ok && Array.isArray(result.body?.pauseReasons)) {
-        setPauseReasons(result.body.pauseReasons.map((reason) => ({ id: reason.id, code: reason.code, label: reason.label, maxMinutes: reason.max_minutes })));
-      }
+      if (result.ok) applyPauseReasons(result.body?.pauseReasons);
     }
 
     void loadPresence();
     return () => controller.abort();
-  }, [configured, enabled]);
+  }, [applyPauseReasons, configured, enabled, pauseReasonsToken]);
+
+  const refreshPauseReasons = useCallback(() => setPauseReasonsToken((token) => token + 1), []);
 
   const changePresence = useCallback(
     async (action: PhonePresenceAction): Promise<boolean> => {
@@ -386,7 +397,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       setPresenceBusy(true);
       setNotice(null);
       try {
-        const result = await telephonyJson<{ error?: string; presence?: { status: string }; own?: { status: string; presenceRevision?: number } }>("/api/telephony/presence", {
+        const result = await telephonyJson<PresenceResponse & { presence?: { status: string }; own?: { status: string; presenceRevision?: number } | null }>("/api/telephony/presence", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ status: action.status, pauseReasonId: action.pauseReasonId }),
@@ -399,6 +410,9 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           return false;
         }
         if (!result.ok) { refreshRef.current?.(); throw new Error(result.body?.error ?? "Stav sa nepodarilo uložiť."); }
+        // The answer carries the current limits, so the pause just activated
+        // is timed by what settings hold now, not by the copy read at start.
+        applyPauseReasons(result.body?.pauseReasons);
         // Apply only an accepted server transition. A lost answer/pause race
         // refreshes the authoritative on_call state instead of optimistic pause.
         presenceGenerationRef.current += 1;
@@ -414,7 +428,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         setPresenceBusy(false);
       }
     },
-    [presenceBusy],
+    [applyPauseReasons, presenceBusy],
   );
 
   const availabilityAction = useCallback(
@@ -740,6 +754,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     supervise,
     stopSupervise,
     changePresence,
+    refreshPauseReasons,
     availabilityAction,
     answer,
     takeoverPhone,

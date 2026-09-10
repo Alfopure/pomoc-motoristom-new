@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { Coffee, Headphones, Loader2, PhoneCall, PhoneOff, Save, Smartphone } from "lucide-react";
+import { Check, Coffee, Headphones, Loader2, PhoneCall, PhoneOff, Save, Smartphone } from "lucide-react";
 
 import { TELEPHONY_TIMEOUT_MS, telephonyJson } from "@/lib/telephony/client-request";
 import { isTelephonyNotConfigured, TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
+import { pausePlan } from "@/lib/telephony/pause-ending";
 import {
   applyAudioOutput,
   audioOutputMissing,
@@ -40,6 +41,7 @@ import {
   confirmTestCall,
   describePresence,
   describeWrapUp,
+  presenceChoice,
   presenceLabel,
   presenceTone,
   testCallTarget,
@@ -155,6 +157,18 @@ export function MyPhonePanel({
   const reasons = useMemo(() => activePauseReasons(document.pauseReasons), [document.pauseReasons]);
   const changeAllowed = canChangePresence(presence);
   const wrapUp = clock ? describeWrapUp(presence, clock) : null;
+  // The filled button is the current choice, not a call to action: after a
+  // pause is activated the highlight moves to "Pauza", never stays on
+  // "Som dostupný".
+  const choice = presence ? presenceChoice(presence.status) : null;
+  const presenceText = describePresence(presence, document.pauseReasons, clock);
+  const pauseOverdue = Boolean(
+    clock && presence?.status === "paused" && pausePlan({
+      status: presence.status,
+      statusSince: presence.statusSince,
+      maxMinutes: document.pauseReasons.find((reason) => reason.id === presence.pauseReasonId)?.maxMinutes ?? null,
+    }, clock)?.overdue,
+  );
 
   // --- my settings -----------------------------------------------------------
 
@@ -307,39 +321,34 @@ export function MyPhonePanel({
             </span>
           </div>
 
-          <p className="text-xs text-zinc-600">{describePresence(presence, document.pauseReasons)}</p>
+          <p className={pauseOverdue ? "text-xs font-semibold text-red-700" : "text-xs text-zinc-600"}>{presenceText}</p>
           {wrapUp && <p className="mt-1 text-xs font-semibold text-amber-700">{wrapUp}</p>}
 
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
+          <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Moja dostupnosť">
+            <PresenceChoiceButton
+              active={choice === "available"}
+              busy={presenceBusy}
               disabled={presenceBusy || !changeAllowed}
+              icon={PhoneCall}
+              label="Som dostupný"
               onClick={() => void changePresence({ status: "available" })}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-600"
-            >
-              {presenceBusy ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <PhoneCall size={15} aria-hidden="true" />}
-              Som dostupný
-            </button>
-
-            <button
-              type="button"
+            />
+            <PresenceChoiceButton
+              active={choice === "paused"}
+              busy={false}
               disabled={presenceBusy || !changeAllowed}
+              icon={Coffee}
+              label="Pauza alebo presmerovanie"
               onClick={() => setPauseDialogOpen(true)}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
-            >
-              <Coffee size={15} aria-hidden="true" />
-              Pauza alebo presmerovanie
-            </button>
-
-            <button
-              type="button"
+            />
+            <PresenceChoiceButton
+              active={choice === "offline"}
+              busy={false}
               disabled={presenceBusy || !changeAllowed}
+              icon={PhoneOff}
+              label="Odhlásiť z telefónie"
               onClick={() => void changePresence({ status: "offline" })}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
-            >
-              <PhoneOff size={15} aria-hidden="true" />
-              Odhlásiť z telefónie
-            </button>
+            />
 
             {canEndWrapUp(presence) && (
               <button
@@ -533,5 +542,40 @@ export function MyPhonePanel({
         onActivate={({ pauseReasonId }) => changePresence({ status: "paused", pauseReasonId })}
       />
     </section>
+  );
+}
+
+/** One of the three availability choices; the current one is filled and ticked. */
+function PresenceChoiceButton({
+  active,
+  busy,
+  disabled,
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  busy: boolean;
+  disabled: boolean;
+  icon: typeof PhoneCall;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      disabled={disabled}
+      onClick={onClick}
+      className={`inline-flex h-10 items-center justify-center gap-2 rounded-md border px-3 text-sm font-semibold transition disabled:cursor-not-allowed ${
+        active
+          ? "border-zinc-950 bg-zinc-950 text-white hover:bg-zinc-800 disabled:border-zinc-300 disabled:bg-zinc-300 disabled:text-zinc-600"
+          : "border-zinc-200 bg-white text-zinc-800 hover:bg-zinc-100 disabled:text-zinc-400"
+      }`}
+    >
+      {busy ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Icon size={15} aria-hidden="true" />}
+      {label}
+      {active && <Check size={14} className="text-yellow-300" aria-hidden="true" />}
+    </button>
   );
 }
