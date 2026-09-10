@@ -175,7 +175,7 @@ revoke insert,update,delete on public.motorist_sms_messages,public.motorist_loca
 -- table grant. Security-definer callback RPCs and service-role providers retain
 -- their existing validated paths; client-set transaction flags confer no trust.
 create function app_private.motorist_guard_task_source_write() returns trigger language plpgsql set search_path='' as $$ begin
-  if current_user<>'service_role' and current_user is distinct from (select pg_get_userbyid(p.proowner) from pg_proc p where p.oid='app_private.motorist_guard_task_source_write()'::regprocedure) then
+  if current_user<>'service_role' and current_user is distinct from (select pg_catalog.pg_get_userbyid(p.proowner) from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid=p.pronamespace where n.nspname='app_private' and p.proname='motorist_guard_task_source_write' and p.pronargs=0) then
     raise exception 'Task source evidence is server managed' using errcode='42501';
   end if;
   if tg_op='DELETE' then return old; end if;

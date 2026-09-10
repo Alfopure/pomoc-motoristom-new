@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeSupabase } from "@/test/fake-supabase";
 const mocks = vi.hoisted(() => ({ admin: vi.fn(), capabilities: vi.fn(), create: vi.fn(), get: vi.fn(), update: vi.fn(), remove: vi.fn(), actor: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: mocks.admin }));
@@ -17,12 +17,15 @@ function setup() {
 }
 function writes(fake: ReturnType<typeof setup>) { return fake.db.log.filter(entry => ["insert", "update", "delete", "upsert"].includes(entry.operation ?? "")); }
 beforeEach(() => {
+  vi.stubEnv("MOTORIST_ORGANIZATION_ID", "org");
+  vi.stubEnv("MOTORIST_ORGANIZATION_SLUG", "pomoc-motoristom");
   vi.clearAllMocks(); mocks.capabilities.mockResolvedValue({ tasks: true });
   mocks.actor.mockResolvedValue({ profileId: "actor", organizationId: "org" });
   mocks.get.mockResolvedValue({ caseIds: ["case"] });
   mocks.update.mockResolvedValue({}); mocks.remove.mockResolvedValue({ deleted: true });
   mocks.create.mockResolvedValue({ id: "task", caseId: "case", assignedTo: "actor", updatedAt: "2026-09-10T00:00:00Z" });
 });
+afterEach(() => vi.unstubAllEnvs());
 describe("task integration gates before legacy effects", () => {
   it.each(["complete_task", "delete_task"] as const)("%s uses only the task transaction", async action => {
     const fake = setup();

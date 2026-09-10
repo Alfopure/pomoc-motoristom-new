@@ -122,3 +122,15 @@ backfill, raw-history preservation, flag-off/active completion rejection,
 metadata-laundering denial and valid explicit-source completion. The ordinary
 task and exact callback/SMS/location system contract suites also pass with these
 stricter proofs.
+
+The source guard validates task ID, explicit marker, workflow category,
+direction, organization and original case before any non-workflow early return.
+Existing non-workflow rows cannot enter a trusted category later. The legitimate
+case-deletion nulling path remains explicit. Browser INSERT/UPDATE/DELETE grants
+are revoked on SMS, location links/submissions and callback sources; an invoker
+trigger additionally rejects inherited column privileges and client-set GUCs.
+Only service-role writes and validated security-definer workflows running as the
+migration owner may mutate source evidence. The provenance contract reconstructs
+historical org-member FOR ALL policies, broad grants and an inherited column-grant
+role; it verifies category/direction escapes and browser provider/acceptance
+forgery are rejected while the exact existing callback/SMS service suites pass.
