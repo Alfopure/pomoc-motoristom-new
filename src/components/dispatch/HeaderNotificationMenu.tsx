@@ -137,7 +137,7 @@ export function HeaderNotificationMenu({
                         {caseNumber && <span>{caseNumber}</span>}
                         {caseNumber && <span aria-hidden="true">·</span>}
                         <span>{formatTime(notification.createdAt)}</span>
-                        {!unread && <><span aria-hidden="true">·</span><Check size={11} /><span>Vybavené</span></>}
+                        {!unread && <><span aria-hidden="true">·</span><Check size={11} /><span>Prečítané</span></>}
                       </span>
                     </span>
                     {hasTarget ? <ChevronRight size={15} className="mt-1 text-zinc-400" aria-hidden="true" /> : <span />}

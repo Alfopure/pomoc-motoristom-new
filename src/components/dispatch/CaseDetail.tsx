@@ -85,7 +85,7 @@ import {
   vehicleConditionFlagLabels,
 } from "@/domain/case-card";
 import { casePriorityLabels, caseStatusLabels, caseStatusTone } from "@/domain/statuses";
-import { isTaskOpen, isTaskOverdue, taskPriorities, taskPriorityLabels, taskPriorityTone } from "@/domain/tasks";
+import { assignableOperators, isTaskOpen, isTaskOverdue, taskPriorities, taskPriorityLabels, taskPriorityTone } from "@/domain/tasks";
 import { formatDateTime, formatTime } from "@/lib/dispatch-calculations";
 import { createDispatchMapModel } from "@/lib/map-adapter";
 import {
@@ -322,6 +322,7 @@ export function CaseDetail({
   const closureType = caseItem.closureDetails.type;
   const openTasks = caseItem.tasks.filter(isTaskOpen);
   // Dokončené úlohy ostávajú dohľadateľné v detaile prípadu vrátane autora a časov (U-06, U-09).
+  const assignableTaskOperators = assignableOperators(operators);
   const completedTasks = caseItem.tasks
     .filter((task) => !isTaskOpen(task))
     .sort((left, right) => new Date(right.completedAt ?? right.dueAt).getTime() - new Date(left.completedAt ?? left.dueAt).getTime());
@@ -798,7 +799,7 @@ export function CaseDetail({
                         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
                       </div>
                       {isTaskOpen(task) ? (
-                        <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 h-11 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50">Vybavené</button>
+                        <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 inline-flex h-11 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"><CheckCircle2 size={13} /> Vybaviť</button>
                       ) : (
                         <span className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md bg-emerald-50 px-2 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200"><CheckCircle2 size={13} /> Úloha je vybavená</span>
                       )}
@@ -855,8 +856,8 @@ export function CaseDetail({
                     Zodpovedná osoba
                     <select value={taskAssignee} onChange={(event) => setTaskAssignee(event.target.value)} className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Zodpovedná osoba">
                       <option value="unassigned">Nepriradené</option>
-                      {operators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}
-                      {taskAssignee !== "unassigned" && !operators.some((operator) => operator.id === taskAssignee) && <option value={taskAssignee}>{taskAssignee === viewerProfileId ? "Ja (prihlásený)" : caseItem.ownerName ?? "Aktuálne priradená osoba"}</option>}
+                      {assignableTaskOperators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}
+                      {taskAssignee !== "unassigned" && !assignableTaskOperators.some((operator) => operator.id === taskAssignee) && <option value={taskAssignee}>{taskAssignee === viewerProfileId ? "Ja (prihlásený)" : caseItem.ownerName ?? "Aktuálne priradená osoba"}</option>}
                     </select>
                   </label>
                   <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">

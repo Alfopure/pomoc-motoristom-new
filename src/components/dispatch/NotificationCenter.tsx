@@ -165,7 +165,7 @@ export function NotificationCenter({
           {([
             { id: "pending", label: "Na vybavenie", count: unreadCount },
             { id: "snoozed", label: "Odložené", count: snoozedCount },
-            { id: "past", label: "Vybavené", count: pastCount },
+            { id: "past", label: "Prečítané", count: pastCount },
           ] as const).map((item) => (
             <button
               key={item.id}
@@ -259,7 +259,7 @@ export function NotificationCenter({
                           className="inline-flex h-7 items-center gap-1 rounded-md bg-white px-2 text-[11px] font-semibold text-zinc-700 ring-1 ring-zinc-200 hover:bg-zinc-50 disabled:cursor-wait disabled:text-zinc-400"
                         >
                           {busy ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
-                          Vybavené
+                          Prečítané
                         </button>
                       ) : onUpdateStatus ? (
                         <button

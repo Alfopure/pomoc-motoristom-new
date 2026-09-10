@@ -1,3 +1,4 @@
+import { mapCaseTaskRow } from "@/data/dispatch-repository";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { motoristAccessGuard, requireDefaultMotoristActor } from "@/server/api-auth";
 
@@ -5,6 +6,13 @@ export const runtime = "nodejs";
 
 const MEMBER_ROLES = ["dispatcher", "senior_dispatcher", "manager", "admin"] as const;
 
+/**
+ * Incremental poll behind the console's live updates (every 10 s while the
+ * tab is visible): customer locations, their notifications and — because the
+ * case snapshot is otherwise only reloaded by this tab's own actions — every
+ * task somebody in the organisation created or changed since the cursor.
+ * Deleted tasks leave no row to report; they disappear with the next full load.
+ */
 export async function GET(request: Request) {
   const denied = await motoristAccessGuard({ roles: [...MEMBER_ROLES] });
   if (denied) return denied;
@@ -14,7 +22,7 @@ export async function GET(request: Request) {
     const checkedAt = new Date().toISOString();
     const since = parseSince(request.url);
     const supabase = createSupabaseAdminClient();
-    const [submissionsResult, notificationsResult] = await Promise.all([
+    const [submissionsResult, notificationsResult, tasksResult] = await Promise.all([
       supabase
         .from("motorist_location_submissions")
         .select("id, case_id, location_id, lat, lng, accuracy_meters, submitted_at")
@@ -34,13 +42,23 @@ export async function GET(request: Request) {
         .lte("created_at", checkedAt)
         .order("created_at", { ascending: true })
         .limit(100),
+      supabase
+        .from("motorist_case_tasks")
+        .select("*")
+        .eq("organization_id", actor.organizationId)
+        .gt("updated_at", since)
+        .lte("updated_at", checkedAt)
+        .order("updated_at", { ascending: true })
+        .limit(200),
     ]);
 
     if (submissionsResult.error) throw submissionsResult.error;
     if (notificationsResult.error) throw notificationsResult.error;
+    if (tasksResult.error) throw tasksResult.error;
 
     return Response.json({
       checkedAt,
+      tasks: (tasksResult.data ?? []).map((task) => mapCaseTaskRow(task, task.created_at)),
       notifications: (notificationsResult.data ?? []).map((notification) => ({
         id: notification.id,
         caseId: notification.case_id ?? undefined,
