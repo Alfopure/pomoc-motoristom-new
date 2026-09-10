@@ -70,7 +70,11 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
  * Ceiling with room to grow, not a target. Raising it is fine — noticing that
  * it moved is the point.
  */
-const MAX_MODULES = 45;
+// One additional pure module validates exact-request alternate callback proof.
+// Optional return routing and task workspace gates remain lazy; no heavy app
+// dependency is added. Built route local cold import measured 141ms (not a
+// claim about Vercel network or provider first-command latency).
+const MAX_MODULES = 46;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);

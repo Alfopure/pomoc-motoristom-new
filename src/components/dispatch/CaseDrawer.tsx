@@ -55,13 +55,12 @@ export function CaseDrawer({ caseItem, branches, assets, focusedTaskId, onDataCh
         <span id="case-drawer-title" className="text-sm font-semibold uppercase tracking-normal text-zinc-600">
           Karta prípadu
         </span>
-        <button ref={closeButtonRef} type="button" onClick={onClose} className="rounded-md border border-zinc-200 p-2 text-zinc-600 hover:bg-zinc-50" aria-label="Zavrieť kartu prípadu">
+        <button ref={closeButtonRef} type="button" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-zinc-200 p-2 text-zinc-600 hover:bg-zinc-50" aria-label="Zavrieť kartu prípadu">
           <X size={18} />
         </button>
       </div>
       <div className="h-[calc(100%-56px)] overflow-auto p-3 sm:p-4" data-case-detail-scroll-region>
-        {open ? (
-          <CaseDetail
+        <CaseDetail
             key={caseItem.id}
             caseItem={caseItem}
             branches={branches}
@@ -72,7 +71,6 @@ export function CaseDrawer({ caseItem, branches, assets, focusedTaskId, onDataCh
             priceRule={priceRule}
             viewerProfileId={viewerProfileId}
           />
-        ) : null}
       </div>
     </div>
   );

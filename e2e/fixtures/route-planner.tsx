@@ -1,8 +1,11 @@
+import { useState } from "react";
+import { RoutePlannerProvider } from "../../src/components/dispatch/map/RoutePlannerProvider";
+import { RoutePlanner } from "../../src/components/dispatch/map/RoutePlanner";
 import { createRoot } from "react-dom/client";
 import DispatchMapGoogle from "../../src/components/dispatch/DispatchMapGoogle";
 
 // The real map UI runs against a small Google boundary stub; no provider or database is contacted.
-const state = { markers: [] as Marker[], polylines: [] as Polyline[], autocompleteOptions: [] as Record<string, unknown>[], clickableIcons: true };
+const state = { markers: [] as Marker[], polylines: [] as Polyline[], autocompleteOptions: [] as Record<string, unknown>[], clickableIcons: true, mapCreations: 0, viewportChanges: 0 };
 Object.assign(window, { routePlannerTest: state });
 const places = [
   { label: "Bratislava, Slovensko", lat: 48.1486, lng: 17.1077 },
@@ -47,11 +50,11 @@ class Autocomplete extends HTMLElement {
 customElements.define("gmp-place-autocomplete", Autocomplete);
 
 class MapStub {
-  constructor(private host: HTMLElement) { host.style.background = "#e7ede7"; }
+  constructor(private host: HTMLElement) { state.mapCreations += 1; host.style.background = "#e7ede7"; }
   getDiv() { return this.host; }
-  fitBounds() {}
-  panTo() {}
-  setZoom() {}
+  fitBounds() { state.viewportChanges += 1; }
+  panTo() { state.viewportChanges += 1; }
+  setZoom() { state.viewportChanges += 1; }
   setOptions(options: { clickableIcons: boolean }) { state.clickableIcons = options.clickableIcons; }
 }
 class Marker {
@@ -87,11 +90,17 @@ Object.assign(window, { google: { maps: {
 } } });
 
 const point = { lat: 48.1, lng: 17.1 };
-createRoot(document.getElementById("root")!).render(
-  <div style={{ height: "100dvh", padding: 8 }}>
-    <DispatchMapGoogle
-      branches={[{ id: "branch", name: "Testovacia pobočka", address: "Adresa", phone: "", point, availableReplacementCars: 0 }]}
-      assets={[{ id: "tow", kind: "tow_truck", label: "Testovacia odťahovka", licensePlate: "TEST", status: "available", branchId: "branch", point, lastSeen: "2026-09-09T10:00:00Z", capabilities: [] }]}
-    />
-  </div>,
-);
+function Fixture() {
+  const [view, setView] = useState<"map" | "widget">(() => new URL(window.location.href).searchParams.has("widget") ? "widget" : "map");
+  return <RoutePlannerProvider>
+    <nav><button onClick={() => setView("map")}>Mapa skúšky</button><button onClick={() => setView("widget")}>Nástroj bez mapy</button></nav>
+    <div style={{ height: "calc(100dvh - 30px)", padding: 8 }} hidden={view !== "map"}>
+      <DispatchMapGoogle active={view === "map"}
+        branches={[{ id: "branch", name: "Testovacia pobočka", address: "Adresa", phone: "", point, availableReplacementCars: 0 }]}
+        assets={[{ id: "tow", kind: "tow_truck", label: "Testovacia odťahovka", licensePlate: "TEST", status: "available", branchId: "branch", point, lastSeen: "2026-09-09T10:00:00Z", capabilities: [] }]}
+      />
+    </div>
+    {view === "widget" && <div style={{ padding: 8 }}><RoutePlanner embedded /></div>}
+  </RoutePlannerProvider>;
+}
+createRoot(document.getElementById("root")!).render(<Fixture />);

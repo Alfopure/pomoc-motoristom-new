@@ -14,7 +14,7 @@ test.beforeAll(async () => {
   css = (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css;
 });
 
-async function boot(page: Page, width = 1440) {
+async function boot(page: Page, width = 1440, widget = false) {
   const state = { requests: [] as Record<string, unknown>[], errors: [] as string[], fail: false, delay: 0 };
   page.on("pageerror", error => { state.errors.push(error.message); console.error(error.message); });
   await page.setViewportSize({ width, height: 900 });
@@ -29,10 +29,11 @@ async function boot(page: Page, width = 1440) {
     state.errors.push(`Unexpected request: ${route.request().method()} ${url.origin}${url.pathname}`);
     return route.abort();
   });
-  await page.goto("http://route-planner.test/");
+  await page.goto(`http://route-planner.test/${widget ? "?widget=1" : ""}`);
   await page.addStyleTag({ content: css });
   await page.addScriptTag({ content: script });
-  await expect(page.getByRole("button", { name: "Trasa", exact: true })).toBeVisible();
+  if (widget) await expect(page.getByRole("region", { name: "Plánovač trasy" })).toBeVisible();
+  else await expect(page.getByRole("button", { name: "Plánovač", exact: true })).toBeVisible();
   return state;
 }
 
@@ -54,7 +55,7 @@ async function mapState(page: Page) {
 for (const width of [1440, 390]) test(`international route is independent from fleet and branches at ${width}px`, async ({ page }) => {
   const state = await boot(page, width);
   await expect.poll(async () => (await mapState(page)).markers).toContain("Testovacia pobočka");
-  await page.getByRole("button", { name: "Trasa", exact: true }).click();
+  await page.getByRole("button", { name: "Plánovač", exact: true }).click();
   await expect(page.getByRole("button", { name: "Odťahovky", exact: true })).toHaveCount(0);
   await expect.poll(async () => (await mapState(page)).markers.length).toBe(0);
   await select(page, "Odkiaľ", "Bratislava");
@@ -82,7 +83,7 @@ for (const width of [1440, 390]) test(`international route is independent from f
 
 test("waypoints reorder, reverse and remove, while editing invalidates stale results", async ({ page }) => {
   const state = await boot(page);
-  await page.getByRole("button", { name: "Trasa", exact: true }).click();
+  await page.getByRole("button", { name: "Plánovač", exact: true }).click();
   await select(page, "Odkiaľ", "Bratislava"); await select(page, "Kam", "Praha");
   await page.getByRole("button", { name: "Pridať bod prejazdu" }).click(); await select(page, "Bod prejazdu 1", "Wien");
   await page.getByRole("button", { name: "Pridať bod prejazdu" }).click(); await select(page, "Bod prejazdu 2", "Brno");
@@ -104,7 +105,7 @@ test("waypoints reorder, reverse and remove, while editing invalidates stale res
 
 test("late place and route responses are discarded; errors allow retry and clearing removes overlays", async ({ page }) => {
   const state = await boot(page);
-  await page.getByRole("button", { name: "Trasa", exact: true }).click();
+  await page.getByRole("button", { name: "Plánovač", exact: true }).click();
   await select(page, "Odkiaľ", "Bratislava");
   const destination = page.getByRole("textbox", { name: "Kam", exact: true });
   await page.locator('gmp-place-autocomplete[aria-label="Kam"]').evaluate(node => { (node as HTMLElement).dataset.delay = "300"; });
@@ -125,6 +126,7 @@ test("late place and route responses are discarded; errors allow retry and clear
   state.fail = false;
   await page.getByRole("button", { name: "Vypočítať trasu" }).click();
   await expect(page.getByText("420,1 km", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Viac ovládania mapy" }).click();
   await page.getByRole("button", { name: "Vyčistiť mapu" }).click();
   await expect(page.getByRole("region", { name: "Plánovač trasy" })).toHaveCount(0);
   expect((await mapState(page)).markers).toEqual([]);
@@ -140,9 +142,67 @@ test("foreign map searches work and a late search cannot overlay the route plann
   await expect.poll(async () => (await mapState(page)).markers).toContain("Wien, Österreich");
   await page.locator('gmp-place-autocomplete[aria-label="Hľadať miesto"]').evaluate(node => { (node as HTMLElement).dataset.delay = "300"; });
   await input.fill("Praha"); await input.press("Enter");
-  await page.getByRole("button", { name: "Trasa", exact: true }).click();
+  await page.getByRole("button", { name: "Plánovač", exact: true }).click();
   await page.waitForTimeout(350);
   expect((await mapState(page)).markers).toEqual([]);
   expect(state.requests).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+for (const width of [390, 1440]) test(`map and map-free widget preserve one route and raw input at ${width}px`, async ({ page }) => {
+  const state = await boot(page, width);
+  await page.getByRole("button", { name: "Plánovač", exact: true }).click();
+  await select(page, "Odkiaľ", "Bratislava");
+  await page.getByRole("textbox", { name: "Kam", exact: true }).fill("Praha unfinished");
+  await page.getByRole("button", { name: "Nástroj bez mapy", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Odkiaľ", exact: true })).toHaveValue("Bratislava, Slovensko");
+  await expect(page.getByRole("textbox", { name: "Kam", exact: true })).toHaveValue("Praha unfinished");
+  expect(state.requests).toEqual([]);
+  await select(page, "Kam", "Praha");
+  await page.getByRole("button", { name: "Vypočítať trasu" }).click();
+  await expect(page.getByRole("region", { name: "Plánovač trasy" }).getByText("420,1 km", { exact: true })).toBeVisible();
+  const panel = page.getByRole("region", { name: "Plánovač trasy" });
+  expect(await panel.evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
+  if (width === 390) {
+    expect(await page.getByRole("button", { name: "Pridať bod prejazdu" }).evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+    expect(await page.getByRole("textbox", { name: "Kam", exact: true }).evaluate(node => getComputedStyle(node).fontSize)).toBe("16px");
+  }
+  await page.getByRole("button", { name: "Mapa skúšky", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Plánovač trasy" }).getByText("420,1 km", { exact: true })).toBeVisible();
+  expect(state.requests).toHaveLength(1);
+  await page.getByRole("button", { name: "Zavrieť plánovač trasy" }).click();
+  await page.getByRole("button", { name: "Plánovač", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Plánovač trasy" }).getByText("420,1 km", { exact: true })).toBeVisible();
+  expect(state.requests).toHaveLength(1);
+  expect(state.errors).toEqual([]);
+});
+
+test("branches and focus remain keyboard-accessible under More", async ({ page }) => {
+  const state = await boot(page, 390);
+  await expect(page.getByRole("button", { name: "Pobočky", exact: true })).not.toBeVisible();
+  const more = page.getByRole("button", { name: "Viac ovládania mapy" });
+  await more.focus(); await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Pobočky", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Focus mapa", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Pobočky", exact: true }).click();
+  await expect.poll(async () => (await mapState(page)).markers).not.toContain("Testovacia pobočka");
+  expect(state.requests).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+
+test("map-free planner calculates without creating a map or changing its viewport", async ({ page }) => {
+  const state = await boot(page, 390, true);
+  const readMapActivity = () => page.evaluate(() => {
+    const state = (window as unknown as { routePlannerTest: { mapCreations: number; viewportChanges: number } }).routePlannerTest;
+    return { mapCreations: state.mapCreations, viewportChanges: state.viewportChanges };
+  });
+  expect(await readMapActivity()).toEqual({ mapCreations: 0, viewportChanges: 0 });
+  await select(page, "Odkiaľ", "Bratislava"); await select(page, "Kam", "Praha");
+  expect(state.requests).toEqual([]);
+  await page.getByRole("button", { name: "Vypočítať trasu" }).click();
+  await expect(page.getByRole("region", { name: "Plánovač trasy" }).getByText("420,1 km", { exact: true })).toBeVisible();
+  expect(await readMapActivity()).toEqual({ mapCreations: 0, viewportChanges: 0 });
+  expect(state.requests).toHaveLength(1);
   expect(state.errors).toEqual([]);
 });

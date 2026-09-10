@@ -6,6 +6,7 @@ import type { Branch, DispatchCase, FleetAsset, PriceRule } from "@/domain/types
 
 export type DispatchMapProps = {
   caseItem?: DispatchCase;
+  active?: boolean;
   branches: Branch[];
   assets: FleetAsset[];
   priceRule?: PriceRule;

@@ -1,5 +1,6 @@
 "use client";
 
+import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Clock3, Loader2, PhoneOutgoing, RefreshCw, UserRound, X } from "lucide-react";
 
@@ -73,7 +74,7 @@ export function CallbackQueuePanel({
 }: {
   configured: boolean;
   /** Console-owned outbound path: rings the caller and arms the browser phone. */
-  onCallBack?: (requestId: string) => Promise<void>;
+  onCallBack?: (requestId: string, verificationId?: string) => Promise<void>;
   /** Lets the console refresh its own surfaces once a request changed. */
   onChanged?: () => void;
   onSchedulingEnabled?: (enabled: boolean) => void;
@@ -181,8 +182,10 @@ export function CallbackQueuePanel({
     try {
       if (action === "call") {
         if (!onCallBack) throw new Error("Spätné volanie nie je z tejto obrazovky dostupné.");
-        await onCallBack(request.id);
-        setNotice(`Volanie na ${formatPhoneNumberForDisplay(request.callerNumber)} bolo spustené.`);
+        const target = await requestCallbackTargetConfirmation(request.callerNumber);
+        if (!target) return;
+        await onCallBack(request.id, target.verificationId);
+        setNotice(`Volanie na ${formatPhoneNumberForDisplay(target.dialNumber)} bolo spustené.`);
       } else {
         const result = await telephonyJson<{ error?: string }>(
           `/api/telephony/callbacks/${encodeURIComponent(request.id)}/${action}`,

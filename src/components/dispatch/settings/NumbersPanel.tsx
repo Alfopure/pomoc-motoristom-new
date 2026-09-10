@@ -50,8 +50,8 @@ export function NumbersPanel({
   const [notice, setNotice] = useState<string | null>(null);
 
   const context = useMemo<LineValidationContext>(
-    () => ({ plans: document.plans, ivrMenus: document.ivrMenus, businessHours: document.businessHours }),
-    [document.businessHours, document.ivrMenus, document.plans],
+    () => ({ lines: document.lines, plans: document.plans, ivrMenus: document.ivrMenus, businessHours: document.businessHours }),
+    [document.businessHours, document.ivrMenus, document.lines, document.plans],
   );
 
   async function saveLine(draft: LineDraft) {
@@ -129,6 +129,16 @@ export function NumbersPanel({
                     value={line.partnerName}
                     onChange={(event) => setLines((current) => updateLine(current, line.id, { partnerName: event.target.value }))}
                   />
+                </SettingsField>
+
+                <SettingsField label="Návrat na hlavnú linku" hint="Prichádzajúci hovor použije hlášku a frontu vybranej linky. Odchádzajúce číslo a štatistiky operátora sa zachovajú.">
+                  <select className={settingsInputClass} disabled={!canEdit} value={line.returnLineId ?? ""}
+                    onChange={event => setLines(current => updateLine(current, line.id, { returnLineId: event.target.value || null }))}>
+                    <option value="">Vlastné smerovanie tejto linky</option>
+                    {document.lines.filter(target => target.id !== line.id && target.active && !target.returnLineId && target.environment === line.environment).map(target => (
+                      <option key={target.id} value={target.id}>{target.label} · {target.phoneNumber}</option>
+                    ))}
+                  </select>
                 </SettingsField>
 
                 <SettingsField label="Plán zvonenia">

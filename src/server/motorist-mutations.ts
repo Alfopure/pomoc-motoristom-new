@@ -1,4 +1,9 @@
 import "server-only";
+import { loadWorkspaceCapabilities } from "./workspace-capabilities";
+import { createWorkspaceTask, TASK_WORKSPACE_ROLES } from "./tasks";
+import { taskWorkspaceSystemEnabled } from "./task-system-gate";
+import { runCompatibleCaseTaskAction } from "./legacy-task-adapter";
+import { CaseWritePlan, commitAtomicCaseSave } from "./case-atomic-save";
 import { matchFleetIdentities } from "@/lib/fleet-pairing";
 
 import { lookupSnapshotForSave } from "@/server/vehicle-lookup/snapshot";
@@ -36,6 +41,7 @@ import {
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
 import { defaultTaskTitle, taskKinds, taskPriorities } from "@/domain/tasks";
 import type { CaseAttachmentCategory, CasePriority, CaseStatus, CaseTaskKind, CustomerContactRole, FleetAssetOccupancy, JobType, TaskReminderChannel, VehicleConditionFlag } from "@/domain/types";
+import { ALLOWED_CASE_ATTACHMENT_TYPES, MAX_CASE_ATTACHMENT_BYTES } from "@/lib/case-attachments";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/database.types";
 // Lives in its own module so that latency-sensitive routes (the Telnyx webhook)
@@ -90,15 +96,7 @@ type OrganizationAuthorizer = (organizationId: string) => Promise<void>;
 
 const DEFAULT_ORGANIZATION_SLUG = "pomoc-motoristom";
 const CASE_ATTACHMENTS_BUCKET = "motorist-case-attachments";
-const MAX_CASE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const CASE_TASK_PHASE0_COLUMNS = ["priority", "kind", "created_by", "completed_by", "completed_at"] as const;
-const ALLOWED_CASE_ATTACHMENT_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-]);
 
 export async function createCase(input: CreateCaseInput, ownerProfileId?: string) {
   const warnings = collectCaseInputWarnings(input);
@@ -181,6 +179,9 @@ export async function updateCase(caseId: string, input: UpdateCaseInput, actorPr
   if (!nonEmpty(caseId)) {
     throw new MutationError("Chýba prípad.", 400);
   }
+  if (!input.expectedUpdatedAt || !Number.isFinite(Date.parse(input.expectedUpdatedAt))) {
+    throw new MutationError("Pred uložením načítajte aktuálnu revíziu prípadu.", 428, "CASE_REVISION_REQUIRED");
+  }
   const warnings = collectCaseInputWarnings(input);
 
   const supabase = createSupabaseAdminClient();
@@ -195,10 +196,11 @@ export async function updateCase(caseId: string, input: UpdateCaseInput, actorPr
 
   input = withVerifiedVehicleLookup(input, organizationId, { identity: { plate: vehicle?.license_plate ?? undefined, vin: vehicle?.vin ?? undefined }, snapshot: objectJson(existing.vehicle_details).vehicleLookup });
 
-  const contactId = await upsertCaseContact(supabase, organizationId, contact, input);
-  const vehicleId = await upsertCaseVehicle(supabase, organizationId, vehicle, input);
-  const pickupLocationId = await upsertCaseLocation(supabase, organizationId, existing.pickup_location_id, input, "pickup", "Pickup");
-  const destinationLocationId = await upsertCaseLocation(supabase, organizationId, existing.destination_location_id, input, "destination", "Servis");
+  const plan = new CaseWritePlan();
+  const contactId = upsertCaseContact(plan, contact, input);
+  const vehicleId = upsertCaseVehicle(plan, vehicle, input);
+  const pickupLocationId = upsertCaseLocation(plan, existing.pickup_location_id, input, "pickup", "Pickup");
+  const destinationLocationId = upsertCaseLocation(plan, existing.destination_location_id, input, "destination", "Servis");
 
   const updatePayload = caseUpdatePayload(
     existing,
@@ -210,49 +212,11 @@ export async function updateCase(caseId: string, input: UpdateCaseInput, actorPr
     vehicle?.license_plate ?? null,
   );
 
-  const updated = await insertSingle<CaseRow>(
-    supabase.from("motorist_cases").update(updatePayload).eq("organization_id", organizationId).eq("id", caseId).select("*").single(),
-  );
-
-  // História aktivít (P-01): udalosť vzniká len pri reálnej zmene, s menovitým popisom.
-  // Autosave bez zmeny nesmie zaplavovať timeline.
-  const changedFields = collectChangedCaseFields(existing, updatePayload);
-
-  if (changedFields.length > 0) {
-    const statusChanged = changedFields.includes("status");
-    const priorityChanged = changedFields.includes("priority");
-    const otherFields = changedFields.filter((field) => field !== "status" && field !== "priority");
-
-    if (statusChanged && updated.status) {
-      await insertCaseActivityEvent(supabase, organizationId, caseId, actorId, {
-        event_type: "status_changed",
-        title: "Stav prípadu zmenený",
-        body: `Nový stav: ${caseStatusLabels[updated.status as CaseStatus] ?? updated.status}.`,
-      });
-    }
-
-    if (priorityChanged && updated.priority) {
-      await insertCaseActivityEvent(supabase, organizationId, caseId, actorId, {
-        event_type: "priority_changed",
-        title: "Priorita prípadu zmenená",
-        body: `Nová priorita: ${casePriorityLabels[updated.priority as CasePriority] ?? updated.priority}.`,
-      });
-    }
-
-    if (otherFields.length > 0) {
-      await insertCaseActivityEvent(supabase, organizationId, caseId, actorId, {
-        event_type: "case_updated",
-        title: "Karta zásahu upravená",
-        body: `Zmenené: ${otherFields.map((field) => caseFieldLabels[field] ?? field).join(", ")}.`,
-      });
-    }
-
-    await audit(supabase, organizationId, actorId, "case.update", "motorist_cases", caseId, {
-      case_number: updated.case_number,
-      source: "extended_case_card",
-      changed_fields: changedFields,
-    });
-  }
+  if (!actorId) throw new MutationError("Uloženie vyžaduje prihláseného operátora.", 403);
+  const updated = await commitAtomicCaseSave(supabase, {
+    organizationId, actorId, caseId, expectedUpdatedAt: input.expectedUpdatedAt!,
+    casePatch: updatePayload, related: plan.writes, fieldLabels: { ...caseFieldLabels, statusLabels: caseStatusLabels, priorityLabels: casePriorityLabels },
+  });
 
   return { caseRow: updated, warnings };
 }
@@ -279,54 +243,6 @@ const caseFieldLabels: Record<string, string> = {
   vehicle_id: "vozidlo",
 };
 
-function collectChangedCaseFields(existing: CaseRow, updatePayload: Record<string, unknown>) {
-  return Object.keys(updatePayload).filter((key) => {
-    const before = (existing as Record<string, unknown>)[key];
-    const after = updatePayload[key];
-    return stableJson(before ?? null) !== stableJson(after ?? null);
-  });
-}
-
-/** Deterministická serializácia na porovnanie jsonb hodnôt bez ohľadu na poradie kľúčov. */
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableJson).join(",")}]`;
-  }
-
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, entryValue]) => entryValue !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right));
-    return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableJson(entryValue)}`).join(",")}}`;
-  }
-
-  return JSON.stringify(value ?? null);
-}
-
-async function insertCaseActivityEvent(
-  supabase: AdminClient,
-  organizationId: string,
-  caseId: string,
-  actorId: string | null,
-  event: { event_type: string; title: string; body: string },
-) {
-  await insertSingle<CaseEventRow>(
-    supabase
-      .from("motorist_case_events")
-      .insert({
-        organization_id: organizationId,
-        case_id: caseId,
-        actor_profile_id: actorId,
-        event_type: event.event_type,
-        title: event.title,
-        body: event.body,
-        payload: { source: "extended_case_card" },
-      })
-      .select("*")
-      .single(),
-  );
-}
-
 export async function runCaseAction(caseId: string, input: CaseActionInput, actorProfileId?: string) {
   if (!nonEmpty(caseId) || !nonEmpty(input.action)) {
     throw new MutationError("Chýba prípad alebo akcia.", 400);
@@ -340,6 +256,9 @@ export async function runCaseAction(caseId: string, input: CaseActionInput, acto
   // Actor = prihlásený používateľ, ktorý akciu vykonal. Owner prípadu je iba fallback
   // pre volania bez autentifikovaného profilu (napr. staršie interné workflow).
   const actorId = nonEmpty(actorProfileId) ? (await getProfile(supabase, organizationId, actorProfileId)).id : ownerId;
+
+  if (input.action === "create_pdf") throw new MutationError("PDF stiahnite cez export v karte prípadu.", 409);
+  if (await runCompatibleCaseTaskAction(organizationId, actorId, caseId, input)) return;
 
   if (input.action === "call_customer") {
     const contact = caseRow.contact_id ? await getContact(supabase, organizationId, caseRow.contact_id) : null;
@@ -381,7 +300,7 @@ export async function runCaseAction(caseId: string, input: CaseActionInput, acto
 
     await completeCaseTask(supabase, organizationId, caseId, input.taskId, actorId);
     await cancelPendingTaskReminders(supabase, organizationId, input.taskId);
-    await markTaskNotificationsRead(supabase, organizationId, input.taskId);
+    await markTaskNotificationsRead(supabase, organizationId, input.taskId, actorId);
     await insertSingle<CaseEventRow>(
       supabase
         .from("motorist_case_events")
@@ -532,7 +451,7 @@ export async function runCaseAction(caseId: string, input: CaseActionInput, acto
 
     if (updatedTask.status === "done") {
       await cancelPendingTaskReminders(supabase, organizationId, input.taskId);
-      await markTaskNotificationsRead(supabase, organizationId, input.taskId);
+      await markTaskNotificationsRead(supabase, organizationId, input.taskId, actorId);
     } else if (assignedToChanged || dueAtChanged || reopenedTask) {
       // Zachovaj pôvodný spôsob pripomienky (napr. email) aj po zmene termínu či riešiteľa (U-03).
       const previousChannels = input.taskReminderChannels ?? (await latestTaskReminderChannels(supabase, organizationId, input.taskId));
@@ -575,7 +494,7 @@ export async function runCaseAction(caseId: string, input: CaseActionInput, acto
 
     const task = await getCaseTask(supabase, organizationId, caseId, input.taskId);
     await cancelPendingTaskReminders(supabase, organizationId, input.taskId);
-    await archiveTaskNotifications(supabase, organizationId, input.taskId);
+    await archiveTaskNotifications(supabase, organizationId, input.taskId, actorId);
     await deleteCaseTask(supabase, organizationId, caseId, input.taskId);
     await insertSingle<CaseEventRow>(
       supabase
@@ -597,6 +516,7 @@ export async function runCaseAction(caseId: string, input: CaseActionInput, acto
   }
 
   const action = caseActionDescriptor(input.action, input.note);
+  const taskWorkspaceEnabled = action.taskTitle ? await preflightCaseTaskWrite(supabase, organizationId, actorId) : false;
 
   if (action.status) {
     const closureDetails = {
@@ -637,7 +557,7 @@ export async function runCaseAction(caseId: string, input: CaseActionInput, acto
       priority: action.taskPriority ?? "normal",
       kind: action.taskKind ?? "other",
       created_by: actorId,
-    });
+    }, taskWorkspaceEnabled);
     await createDefaultTaskReminder(supabase, {
       organizationId,
       caseId,
@@ -709,6 +629,7 @@ export async function assignCase(caseId: string, input: AssignCaseInput, actorPr
   const ownerId = caseRow.owner_id ?? (await resolveDefaultOwnerId(supabase, organizationId));
   // Priradenie techniky sa v histórii pripisuje prihlásenému dispečerovi (P-01).
   const actorId = nonEmpty(actorProfileId) ? (await getProfile(supabase, organizationId, actorProfileId)).id : ownerId;
+  const taskWorkspaceEnabled = await preflightCaseTaskWrite(supabase, organizationId, actorId);
   let assignmentOccupancy: FleetAssetOccupancy | undefined;
   let occupancySnapshotAt: string | null = null;
 
@@ -786,7 +707,7 @@ export async function assignCase(caseId: string, input: AssignCaseInput, actorPr
     priority: "high",
     kind: "sms",
     created_by: actorId,
-  });
+  }, taskWorkspaceEnabled);
   await createDefaultTaskReminder(supabase, {
     organizationId,
     caseId,
@@ -803,8 +724,8 @@ export async function assignCase(caseId: string, input: AssignCaseInput, actorPr
   });
 }
 
-export async function markNotificationRead(notificationId: string) {
-  return updateNotificationStatus(notificationId, "read");
+export async function markNotificationRead(notificationId: string, actor: Pick<ProfileRow, "id" | "organization_id">) {
+  return updateNotificationStatus(notificationId, "read", actor);
 }
 
 export async function snoozeNotification(
@@ -828,56 +749,22 @@ export async function snoozeNotification(
   const supabase = createSupabaseAdminClient();
   const organizationId = actor.organization_id;
   const ownerId = actor.id;
-  const now = new Date(nowTime).toISOString();
   const normalizedSnoozedUntil = new Date(snoozedUntilTime).toISOString();
-  const existing = await supabase
-    .from("motorist_notifications")
-    .select("id,payload,recipient_profile_id")
-    .eq("organization_id", organizationId)
-    .eq("id", notificationId)
-    .maybeSingle();
+  const result = await supabase.rpc("motorist_notification_action", {
+    p_organization_id: organizationId, p_actor_id: ownerId, p_action: "snooze",
+    p_notification_id: notificationId, p_snoozed_until: normalizedSnoozedUntil,
+  });
+  throwNotificationActionError(result.error);
+  const changed = { id: notificationId };
 
-  if (isNotificationSchemaMiss(existing.error)) {
-    throw new MutationError("Notifikácie zatiaľ nie sú dostupné. Treba nasadiť Supabase migráciu pre notifikačné tabuľky.", 503);
-  }
-  await throwOnResult(existing);
-  if (!existing.data) {
-    throw new MutationError("Notifikácia sa nenašla.", 404);
-  }
-  if (existing.data.recipient_profile_id !== ownerId) {
-    throw new MutationError("Túto notifikáciu nemožno odložiť.", 403);
-  }
-
-  const result = await supabase
-    .from("motorist_notifications")
-    .update({
-      status: "unread",
-      read_at: null,
-      archived_at: null,
-      payload: {
-        ...objectJson(existing.data.payload),
-        snoozed_at: now,
-        snoozed_until: normalizedSnoozedUntil,
-      },
-    })
-    .eq("organization_id", organizationId)
-    .eq("id", notificationId)
-    .select("id")
-    .maybeSingle();
-
-  await throwOnResult(result);
-  if (!result.data) {
-    throw new MutationError("Notifikáciu sa nepodarilo odložiť.", 404);
-  }
-
-  await audit(supabase, organizationId, ownerId, "notification.snoozed", "motorist_notifications", result.data.id, {
+  await audit(supabase, organizationId, ownerId, "notification.snoozed", "motorist_notifications", changed.id, {
     snoozed_until: normalizedSnoozedUntil,
   });
 
-  return result.data as Pick<NotificationRow, "id">;
+  return changed;
 }
 
-export async function updateNotificationStatus(notificationId: string, status: NotificationRow["status"]) {
+export async function updateNotificationStatus(notificationId: string, status: NotificationRow["status"], actor: Pick<ProfileRow, "id" | "organization_id">) {
   if (!nonEmpty(notificationId)) {
     throw new MutationError("Chýba notifikácia.", 400);
   }
@@ -886,30 +773,17 @@ export async function updateNotificationStatus(notificationId: string, status: N
   }
 
   const supabase = createSupabaseAdminClient();
-  const organization = await resolveOrganization(supabase);
-  const organizationId = organization.id;
-  const ownerId = await resolveDefaultOwnerId(supabase, organizationId);
-  const now = new Date().toISOString();
-  const result = await supabase
-    .from("motorist_notifications")
-    .update(notificationStatusUpdatePayload(status, now))
-    .eq("organization_id", organizationId)
-    .eq("id", notificationId)
-    .select("id")
-    .maybeSingle();
+  const organizationId = actor.organization_id;
+  const ownerId = actor.id;
+  const result = await supabase.rpc("motorist_notification_action", {
+    p_organization_id: organizationId, p_actor_id: ownerId, p_action: status,
+    p_notification_id: notificationId,
+  });
+  throwNotificationActionError(result.error);
+  const changed = { id: notificationId };
 
-  if (isNotificationSchemaMiss(result.error)) {
-    throw new MutationError("Notifikácie zatiaľ nie sú dostupné. Treba nasadiť Supabase migráciu pre notifikačné tabuľky.", 503);
-  }
-
-  await throwOnResult(result);
-
-  if (!result.data) {
-    throw new MutationError("Notifikácia sa nenašla.", 404);
-  }
-
-  await audit(supabase, organizationId, ownerId, `notification.${status}`, "motorist_notifications", result.data.id, {});
-  return result.data as Pick<NotificationRow, "id">;
+  await audit(supabase, organizationId, ownerId, `notification.${status}`, "motorist_notifications", changed.id, {});
+  return changed;
 }
 
 export async function createBranch(input: CreateBranchInput) {
@@ -1138,7 +1012,8 @@ export async function backfillAssistanceDirectoryFromCases(authorize?: Organizat
   return { created };
 }
 
-export async function uploadCaseAttachments(caseId: string, files: File[], note?: string, authorize?: OrganizationAuthorizer) {
+/** `category` is the operator's own label for the batch; anything else falls back to the file type. */
+export async function uploadCaseAttachments(caseId: string, files: File[], note?: string, authorize?: OrganizationAuthorizer, category?: string) {
   if (!nonEmpty(caseId)) {
     throw new MutationError("Chýba prípad.", 400);
   }
@@ -1172,7 +1047,7 @@ export async function uploadCaseAttachments(caseId: string, files: File[], note?
       uploadedPaths.push(storagePath);
       uploadedAttachments.push({
         id,
-        category: attachmentCategoryForMime(file.type),
+        category: category && isAttachmentCategory(category) ? category : attachmentCategoryForMime(file.type),
         fileName: file.name,
         storageBucket: CASE_ATTACHMENTS_BUCKET,
         storagePath,
@@ -2572,60 +2447,18 @@ async function createLocation(
   );
 }
 
-async function updateLocation(
-  supabase: AdminClient,
-  organizationId: string,
-  id: string,
-  input: PlaceSelectionInput,
-  fallbackLabel: string,
-) {
-  await throwOnResult(
-    supabase
-      .from("motorist_locations")
-      .update({
-        label: input.label.trim() || fallbackLabel,
-        address: input.address.trim(),
-        lat: input.lat,
-        lng: input.lng,
-        place_id: input.placeId ?? null,
-        provider: input.provider ?? "google_places",
-        confidence: input.provider === "approximate" ? 0.4 : input.provider === "manual" ? 0.7 : 0.98,
-        metadata: { source: "operator_form" },
-      })
-      .eq("organization_id", organizationId)
-      .eq("id", id),
-  );
-}
-
-async function upsertCaseLocation(
-  supabase: AdminClient,
-  organizationId: string,
-  existingId: string | null,
-  input: UpdateCaseInput,
-  field: "pickup" | "destination",
-  fallbackLabel: string,
-) {
-  if (!(field in input)) {
-    return existingId;
-  }
-
+function upsertCaseLocation(plan: CaseWritePlan, existingId: string | null, input: UpdateCaseInput,
+  field: "pickup" | "destination", fallbackLabel: string) {
+  if (!(field in input)) return existingId;
   const location = input[field];
-  if (location === null) {
-    return null;
-  }
-
-  // An incomplete draft selection produces a warning and leaves an already
-  // valid stored location untouched. Explicit null is the unlink operation.
-  if (!isValidPlaceSelection(location)) {
-    return existingId;
-  }
-
-  if (existingId) {
-    await updateLocation(supabase, organizationId, existingId, location, fallbackLabel);
-    return existingId;
-  }
-
-  return (await createLocation(supabase, organizationId, location, fallbackLabel)).id;
+  if (location === null) return null;
+  if (!isValidPlaceSelection(location)) return existingId;
+  return plan.write("motorist_locations", existingId, {
+    label: location.label.trim() || fallbackLabel, address: location.address.trim(), lat: location.lat, lng: location.lng,
+    place_id: location.placeId ?? null, provider: location.provider ?? "google_places",
+    confidence: location.provider === "approximate" ? 0.4 : location.provider === "manual" ? 0.7 : 0.98,
+    metadata: { source: "operator_form" },
+  });
 }
 
 function includesAny(value: string, needles: string[]) {
@@ -2947,7 +2780,36 @@ async function insertSingle<Row>(query: PromiseLike<{ data: unknown; error: { me
   return result.data as Row;
 }
 
-async function insertCaseTask(supabase: AdminClient, payload: CaseTaskInsertPayload): Promise<CaseTaskRow> {
+async function preflightCaseTaskWrite(supabase: AdminClient, organizationId: string, actorId: string | null | undefined) {
+  if (!actorId) {
+    if (await taskWorkspaceSystemEnabled(supabase, organizationId)) throw new MutationError("Na vytvorenie úlohy sa musíte prihlásiť.", 403);
+    return false;
+  }
+  const enabled = (await loadWorkspaceCapabilities({ organizationId, profileId: actorId })).tasks;
+  if (enabled) {
+    const { requireMotoristActor } = await import("./api-auth");
+    const actor = await requireMotoristActor(organizationId, [...TASK_WORKSPACE_ROLES]);
+    if (actor.profileId !== actorId) throw new MutationError("Autor úlohy nezodpovedá prihlásenému používateľovi.", 403);
+  }
+  return enabled;
+}
+
+async function insertCaseTask(supabase: AdminClient, payload: CaseTaskInsertPayload, preflightEnabled?: boolean): Promise<CaseTaskRow> {
+  const actorId = payload.created_by;
+  const enabled = preflightEnabled ?? await preflightCaseTaskWrite(supabase, payload.organization_id, actorId);
+  if (enabled) {
+    if (!actorId) throw new MutationError("Chýba prihlásený autor úlohy.", 403);
+    const task = await createWorkspaceTask({ organizationId: payload.organization_id, profileId: actorId }, {
+      title: payload.title, caseIds: payload.case_id ? [payload.case_id] : [], assignedTo: payload.assigned_to,
+      dueAt: payload.due_at, status: payload.status, priority: payload.priority, kind: payload.kind,
+    });
+    return { id: task.id, organization_id: payload.organization_id, case_id: task.caseId || null, title: task.title,
+      assigned_to: task.assignedTo === "unassigned" ? null : task.assignedTo, due_at: task.dueAt || null, status: task.status,
+      priority: task.priority, kind: task.kind, created_by: task.createdBy ?? actorId, completed_by: null, completed_at: null,
+      created_at: task.createdAt ?? task.updatedAt, updated_at: task.updatedAt, revision: task.revision,
+      origin_locked: task.originLocked, provenance: task.provenance, reminder_at: task.reminderAt ?? null, reminder_generation: 0, assignment_generation: 0 };
+  }
+
   const result = await supabase.from("motorist_case_tasks").insert(payload).select("*").single();
 
   if (isCaseTaskPhase0SchemaDrift(result.error)) {
@@ -3073,34 +2935,25 @@ async function completeCaseTask(supabase: AdminClient, organizationId: string, c
   await throwOnResult(result);
 }
 
-async function markTaskNotificationsRead(supabase: AdminClient, organizationId: string, taskId: string) {
-  const result = await supabase
-    .from("motorist_notifications")
-    .update({ status: "read", read_at: new Date().toISOString() })
-    .eq("organization_id", organizationId)
-    .eq("task_id", taskId)
-    .eq("status", "unread");
-
-  if (isNotificationSchemaMiss(result.error)) {
-    return;
-  }
-
-  await throwOnResult(result);
+async function markTaskNotificationsRead(supabase: AdminClient, organizationId: string, taskId: string, actorProfileId?: string | null) {
+  if (!actorProfileId) return;
+  const result = await supabase.rpc("motorist_notification_action", { p_organization_id: organizationId, p_actor_id: actorProfileId, p_action: "read", p_task_id: taskId });
+  throwNotificationActionError(result.error);
 }
 
-async function archiveTaskNotifications(supabase: AdminClient, organizationId: string, taskId: string) {
-  const result = await supabase
-    .from("motorist_notifications")
-    .update({ status: "archived", archived_at: new Date().toISOString() })
-    .eq("organization_id", organizationId)
-    .eq("task_id", taskId)
-    .neq("status", "archived");
+async function archiveTaskNotifications(supabase: AdminClient, organizationId: string, taskId: string, actorProfileId?: string | null) {
+  if (!actorProfileId) return;
+  const result = await supabase.rpc("motorist_notification_action", { p_organization_id: organizationId, p_actor_id: actorProfileId, p_action: "archived", p_task_id: taskId });
+  throwNotificationActionError(result.error);
+}
 
-  if (isNotificationSchemaMiss(result.error)) {
-    return;
-  }
-
-  await throwOnResult(result);
+function throwNotificationActionError(error: { code?: string; message?: string } | null) {
+  if (!error) return;
+  if (error.code === "P0002") throw new MutationError("Notifikácia sa nenašla.", 404);
+  if (error.code === "42501") throw new MutationError("Túto notifikáciu nemožno upraviť.", 403);
+  if (error.code === "22023") throw new MutationError("Neplatná zmena notifikácie.", 400);
+  if (error.code === "PGRST202" || isNotificationSchemaMiss(error)) throw new MutationError("Notifikácie vyžadujú aktualizovanú databázovú schému.", 503);
+  throw new MutationError("Notifikáciu sa nepodarilo upraviť.", 500);
 }
 
 function legacyCaseTaskPayload(payload: CaseTaskInsertPayload) {
@@ -3272,33 +3125,16 @@ function contactForUpdate(contact: ContactRow | null, input: UpdateCaseInput) {
   };
 }
 
-async function upsertCaseContact(supabase: AdminClient, organizationId: string, contact: ContactRow | null, input: UpdateCaseInput) {
-  if (!hasContactUpdate(input)) {
-    return contact?.id ?? null;
-  }
-
+function upsertCaseContact(plan: CaseWritePlan, contact: ContactRow | null, input: UpdateCaseInput) {
+  if (!hasContactUpdate(input)) return contact?.id ?? null;
   const next = contactForUpdate(contact, input);
-  if (!hasMeaningfulContact(next)) {
-    return null;
-  }
-
-  if (!contact) {
-    return (await createCaseContact(supabase, organizationId, next, input.customerNote))?.id ?? null;
-  }
-
-  await throwOnResult(
-    supabase
-      .from("motorist_contacts")
-      .update({
-        name: cleanString(next.name) ?? cleanString(next.phone) ?? cleanString(next.email) ?? contact.name,
-        phone: cleanString(next.phone),
-        email: cleanString(next.email),
-        ...(input.customerNote !== undefined ? { notes: cleanString(input.customerNote) } : {}),
-      })
-      .eq("organization_id", organizationId)
-      .eq("id", contact.id),
-  );
-  return contact.id;
+  if (!hasMeaningfulContact(next)) return null;
+  return plan.write("motorist_contacts", contact?.id ?? null, {
+    name: cleanString(next.name) ?? cleanString(next.phone) ?? cleanString(next.email) ?? contact?.name,
+    phone: cleanString(next.phone), email: cleanString(next.email),
+    ...(!contact ? { role: "client", notes: cleanString(input.customerNote) } : {}),
+    ...(input.customerNote !== undefined ? { notes: cleanString(input.customerNote) } : {}),
+  }, contact?.updated_at);
 }
 
 function vehicleWritePayload(input: CreateCaseInput | UpdateCaseInput) {
@@ -3348,7 +3184,7 @@ async function createCaseVehicle(supabase: AdminClient, organizationId: string, 
   );
 }
 
-async function upsertCaseVehicle(supabase: AdminClient, organizationId: string, vehicle: VehicleRow | null, input: UpdateCaseInput) {
+function upsertCaseVehicle(plan: CaseWritePlan, vehicle: VehicleRow | null, input: UpdateCaseInput) {
   if (!hasVehicleUpdate(input)) {
     return vehicle?.id ?? null;
   }
@@ -3376,15 +3212,9 @@ async function upsertCaseVehicle(supabase: AdminClient, organizationId: string, 
     return null;
   }
 
-  if (!vehicle) {
-    return (await createCaseVehicle(supabase, organizationId, input)).id;
-  }
-
+  if (!vehicle) return plan.write("motorist_vehicles", null, vehicleWritePayload(input));
   const payload = vehicleWritePayload(input);
-  await throwOnResult(
-    supabase
-      .from("motorist_vehicles")
-      .update({
+  return plan.write("motorist_vehicles", vehicle.id, {
         ...(input.licensePlate !== undefined ? { license_plate: payload.license_plate } : {}),
         ...(input.vin !== undefined ? { vin: payload.vin } : {}),
         ...(input.vehicleMake !== undefined ? { make: payload.make } : {}),
@@ -3397,11 +3227,7 @@ async function upsertCaseVehicle(supabase: AdminClient, organizationId: string, 
         ...(input.weightKg !== undefined ? { weight_kg: payload.weight_kg } : {}),
         ...(input.vehicleDriveable !== undefined ? { is_driveable: payload.is_driveable } : {}),
         ...(input.vehicleIssue !== undefined || input.incidentDescription !== undefined ? { notes: payload.notes } : {}),
-      })
-      .eq("organization_id", organizationId)
-      .eq("id", vehicle.id),
-  );
-  return vehicle.id;
+  }, vehicle.updated_at);
 }
 
 function caseSummary(input: CreateCaseInput | UpdateCaseInput) {
@@ -3813,7 +3639,7 @@ function caseUpdatePayload(
     ...(hasAny(input, ["manualPickupAddress", "manualDestinationAddress", "roadName", "kilometerSection", "drivingDirection", "placeType", "locationComplications", "accessComplications", "destinationNote"])
       ? { location_details: mergeJson(existing.location_details, locationDetailsPayload(input)) }
       : {}),
-    ...(hasAny(input, ["replacementVehicleNeeded", "replacementVehicleType", "replacementVehiclePreferences", "replacementVehicleNote"])
+    ...(hasAny(input, ["replacementVehicleNeeded", "replacementVehicleType", "replacementVehiclePreferences", "replacementVehicleNote", "replacementVehicleCategory", "replacementVehicleDeliveryPlace", "replacementVehicleEntitlement", "replacementVehicleExtensionPossible", "replacementVehicleMaxDays", "replacementVehicleProvisionStatus", "replacementVehicleProvisionReason"])
       ? { replacement_vehicle_details: mergeJson(existing.replacement_vehicle_details, replacementVehiclePayload(input)) }
       : {}),
     ...(hasAny(input, ["paymentMethod", "paymentStatus"]) ? { payment_details: mergeJson(existing.payment_details, paymentDetailsPayload(input)) } : {}),
@@ -3904,9 +3730,6 @@ function caseActionDescriptor(action: CaseActionInput["action"], note: string | 
   }
   if (action === "send_eta") {
     return { title: "ETA pripravené", body: `ETA pre klienta bolo pripravené na spracovanie mimo karty zásahu.${suffix}` };
-  }
-  if (action === "create_pdf") {
-    return { title: "PDF pripravené", body: `PDF karta zásahu bola označená ako pripravená na neskorší export.${suffix}` };
   }
   if (action === "invoice") {
     return {
@@ -4183,17 +4006,6 @@ function sameIsoDateTime(left: string | null | undefined, right: string | null |
   return leftTime === rightTime;
 }
 
-function notificationStatusUpdatePayload(status: NotificationRow["status"], now: string): Tables["motorist_notifications"]["Update"] {
-  if (status === "unread") {
-    return { status, read_at: null, archived_at: null };
-  }
-
-  if (status === "read") {
-    return { status, read_at: now, archived_at: null };
-  }
-
-  return { status, archived_at: now };
-}
 
 function addDays(dateLocal: string, days: number) {
   const date = new Date(`${dateLocal}T00:00:00`);

@@ -1,0 +1,25 @@
+.panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; height: 100%; overflow: auto; padding: 18px; background: #fff; color: #172033; }
+.header, .actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.header h2 { margin: 0; font-size: 18px; }
+.panel button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; border: 1px solid #d9e0e9; border-radius: 8px; background: #fff; padding: 8px 12px; cursor: pointer; }
+.panel button:disabled { opacity: .55; cursor: default; }
+.panel button:focus-visible, .panel input:focus-visible, .panel textarea:focus-visible, .panel summary:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.status, .actions span { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #586579; }
+.editor, .editor label, .search { display: flex; flex-direction: column; gap: 8px; }
+.editor { gap: 14px; }
+.editor label, .search { font-size: 13px; font-weight: 500; }
+.panel input:not([type=checkbox]), .panel textarea { width: 100%; min-width: 0; border: 1px solid #cdd5df; border-radius: 8px; padding: 10px; font: inherit; line-height: 1.5; background: #fff; color: inherit; }
+.panel textarea { resize: vertical; min-height: 180px; }
+.panel textarea[readonly], .panel input[readonly] { background: #f7f9fb; }
+.panel summary { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 8px 0; font-size: 13px; }
+.panel p { margin: 4px 0; font-size: 13px; line-height: 1.5; }
+.colleagues { max-height: 220px; overflow: auto; }
+.colleagues label { flex-direction: row; align-items: center; min-height: 40px; }
+.colleagues input { width: 18px; height: 18px; }
+.list { list-style: none; display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; }
+.list button { width: 100%; align-items: flex-start; flex-direction: column; text-align: left; }
+.list strong { overflow-wrap: anywhere; }
+.list span { font-size: 12px; color: #586579; }
+.error, .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border: 1px solid #e8ba76; border-radius: 8px; background: #fffbeb; font-size: 13px; }
+.compact { padding: 12px; }
+@media (max-width: 1023px) { .panel { padding: 12px; } .panel input:not([type=checkbox]), .panel textarea { font-size: 16px; min-height: 44px; } .panel button, .colleagues label, .panel summary { min-height: 44px; } }

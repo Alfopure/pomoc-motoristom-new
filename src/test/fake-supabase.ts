@@ -446,6 +446,15 @@ export class FakeQueryBuilder implements PromiseLike<FakeResult> {
     return this.addFilter(`eq(${column})`, (row) => filterValueMatches(row[column], value));
   }
 
+  contains(column: string, value: unknown): this {
+    const contains = (candidate: unknown, expected: unknown): boolean => {
+      if (Array.isArray(expected)) return Array.isArray(candidate) && expected.every(item => candidate.some(entry => contains(entry, item)));
+      if (expected && typeof expected === "object") return Boolean(candidate && typeof candidate === "object" && Object.entries(expected).every(([key, item]) => contains((candidate as FakeRow)[key], item)));
+      return candidate === expected;
+    };
+    return this.addFilter(`contains(${column})`, row => contains(row[column], value));
+  }
+
   neq(column: string, value: unknown): this {
     return this.addFilter(`neq(${column})`, (row) => !filterValueMatches(row[column], value));
   }
@@ -730,6 +739,9 @@ function toMs(value: unknown): number | null {
 export function registerTelephonyRpcs(db: FakeDatabase): void {
   registerPresenceRpcs(db);
   registerStabilityRpcs(db);
+  // Default harness models a deployment before the optional directory migration.
+  // Target-policy tests override this RPC with the migrated contract.
+  db.registerRpc("motorist_resolve_callback_target", () => { db.failNext("motorist_contact_callback_policies", "select", fakeError("Table absent from schema cache", "PGRST205")); throw fakeError("Could not find public.motorist_resolve_callback_target in schema cache", "PGRST202"); });
   db.registerRpc("motorist_reconcile_callback_contact_v1", (args) => {
     // Ordinary provider workflow tests have no callback obligations. Tests
     // exercising fulfillment install their own explicit workflow adapter; the

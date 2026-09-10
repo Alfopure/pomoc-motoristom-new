@@ -4,7 +4,7 @@ import { VehicleLookupControl } from "./VehicleLookupControl";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
 import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   CarFront,
@@ -37,6 +37,7 @@ import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-t
 import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
+import { CASE_ATTACHMENT_ACCEPT, validateCaseAttachmentFiles } from "@/lib/case-attachments";
 import type {
   AccessComplication,
   Branch,
@@ -130,10 +131,15 @@ import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { LocationPicker } from "./LocationPicker";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { UseCustomerLocationButton } from "./UseCustomerLocationButton";
+import { CaseEditorHeader, type CaseEditorControls } from "./CaseEditorHeader";
+import { changedCaseFields } from "./case-editor-save";
+import { CaseSummary } from "./CaseSummary";
+import styles from "./case-detail.module.css";
 import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 
 type CaseDetailProps = {
+  onEditorControlsChange?: (controls: CaseEditorControls | null) => void;
   caseItem: DispatchCase;
   branches: Branch[];
   assets: FleetAsset[];
@@ -163,6 +169,8 @@ type CaseDetailProps = {
 };
 
 type ApiMutationResponse = {
+  committedRevision?: string;
+  code?: string;
   caseId?: string;
   dispatchData?: DispatchData;
   error?: string;
@@ -179,6 +187,18 @@ type AttachmentUrlResponse = {
   signedUrl?: string;
 };
 
+/** Opens a stored attachment through a short-lived signed URL; the bucket itself is private. */
+async function openCaseAttachment(caseId: string, attachmentId: string) {
+  const response = await fetch(`/api/cases/${caseId}/attachments?attachmentId=${encodeURIComponent(attachmentId)}`);
+  const result = (await response.json()) as AttachmentUrlResponse;
+
+  if (!response.ok || !result.signedUrl) {
+    throw new Error(result.error ?? "Prílohu sa nepodarilo otvoriť.");
+  }
+
+  window.open(result.signedUrl, "_blank", "noopener,noreferrer");
+}
+
 const CASE_AUTOSAVE_DEBOUNCE_MS = 1_200;
 const CASE_AUTOSAVE_REQUEST_TIMEOUT_MS = 20_000;
 const CASE_SAVE_SLOW_MS = 8_000;
@@ -189,7 +209,7 @@ const actionLabels = {
   call_customer: "Zavolať zákazníkovi",
   send_sms: "Poslať lokalizačnú SMS",
   send_eta: "Poslať ETA SMS",
-  create_pdf: "Pripraviť PDF",
+  create_pdf: "Stiahnuť PDF",
   mark_completed: "Označiť dokončené",
   invoice: "Pripraviť fakturáciu",
   close_case: "Ukončiť zásah",
@@ -245,6 +265,7 @@ export function CaseDetail({
   commanderVehicles = [],
   editing,
   embedded = false,
+  onEditorControlsChange,
   focusedTaskId,
   onDataChange,
   onDial,
@@ -262,6 +283,12 @@ export function CaseDetail({
   hideNotesAndActivity = false,
   viewerProfileId,
 }: CaseDetailProps) {
+  const exportSaveRef = useRef<SaveCaseDraft | null>(null);
+  const handleEditorSaveDraft = useCallback((saveDraft: SaveCaseDraft | null) => {
+    exportSaveRef.current = saveDraft;
+    onSaveDraftChange?.(saveDraft);
+  }, [onSaveDraftChange]);
+  const [editorControls, setEditorControls] = useState<CaseEditorControls | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
   const [smsTemplate, setSmsTemplate] = useState<"custom" | "location_request" | "eta_update">("custom");
@@ -285,7 +312,6 @@ export function CaseDetail({
   const model = caseItem.pickup ? createDispatchMapModel(caseItem, branches, assets, priceRule) : null;
   const routePlan = model?.routePlan ?? null;
   const routeEta = routePlan?.segments.find((segment) => segment.id === "asset-to-pickup")?.eta ?? routePlan?.totalEta;
-  const sms = "SMS s odhadom príchodu pripravíte v editore po zadaní aktuálneho ETA a potvrdení odchodu technika.";
   const selectedAsset = caseItem.selectedAssetId ? assets.find((asset) => asset.id === caseItem.selectedAssetId) : undefined;
   const mapsUrl = caseItem.pickup
     ? `https://www.google.com/maps/search/?api=1&query=${caseItem.pickup.lat},${caseItem.pickup.lng}`
@@ -409,6 +435,11 @@ export function CaseDetail({
 
     const animationFrame = window.requestAnimationFrame(() => {
       const taskElement = document.getElementById(`task-${focusedTaskId}`);
+      let ancestor = taskElement?.parentElement;
+      while (ancestor) {
+        if (ancestor instanceof HTMLDetailsElement) ancestor.open = true;
+        ancestor = ancestor.parentElement;
+      }
       const scrollRegion = taskElement?.closest<HTMLElement>("[data-case-detail-scroll-region]");
 
       if (taskElement && scrollRegion) {
@@ -437,7 +468,7 @@ export function CaseDetail({
       const response = await fetch(`/api/cases/${caseItem.id}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, ...(typeof payload.taskId === "string" ? { taskExpectedRevision: caseItem.tasks.find(task => task.id === payload.taskId)?.revision } : {}) }),
       });
       const result = (await response.json()) as ApiMutationResponse;
       if (!response.ok || !result.dispatchData) {
@@ -465,6 +496,31 @@ export function CaseDetail({
   }
 
   async function runAction(action: keyof typeof actionLabels) {
+    if (action === "create_pdf") {
+      setIsRunningAction(true);
+      setNotice("Pripravujem PDF…");
+      try {
+        if ((draftDirty || isEditSaveLocked) && (!exportSaveRef.current || !await exportSaveRef.current())) {
+          setNotice("Pred exportom uložte rozpracované zmeny. Údaje zostávajú vo formulári.");
+          return;
+        }
+        const response = await fetch(`/api/cases/${encodeURIComponent(caseItem.id)}/pdf`, { cache: "no-store", credentials: "same-origin", signal: AbortSignal.timeout(55_000) });
+        if (!response.ok || !response.headers.get("Content-Type")?.includes("application/pdf")) {
+          const body = await response.json().catch(() => null);
+          throw new Error(body?.error ?? "PDF sa nepodarilo vytvoriť. Skúste to znova.");
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${caseItem.caseNumber.replace(/[^a-zA-Z0-9._-]/g, "_")}.pdf`;
+        document.body.append(link); link.click(); link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        setNotice("PDF uložených údajov je pripravené na stiahnutie.");
+      } catch (error) { setNotice(error instanceof Error ? error.message : "PDF sa nepodarilo vytvoriť."); }
+      finally { setIsRunningAction(false); }
+      return;
+    }
     if (action === "call_customer") {
       if (!contactPhone) {
         setNotice("Hovor nie je možné spustiť, kým v karte nie je telefónne číslo.");
@@ -498,7 +554,7 @@ export function CaseDetail({
       return;
     }
 
-    const externalWorkflow = action === "create_pdf" || action === "invoice";
+    const externalWorkflow = action === "invoice";
     const message = externalWorkflow
       ? externalActionSuccessLabels[action as keyof typeof externalActionSuccessLabels]
       : `${actionLabels[action]} zapísané do timeline.`;
@@ -581,14 +637,7 @@ export function CaseDetail({
 
   async function openAttachment(attachmentId: string) {
     try {
-      const response = await fetch(`/api/cases/${caseItem.id}/attachments?attachmentId=${encodeURIComponent(attachmentId)}`);
-      const result = (await response.json()) as AttachmentUrlResponse;
-
-      if (!response.ok || !result.signedUrl) {
-        throw new Error(result.error ?? "Prílohu sa nepodarilo otvoriť.");
-      }
-
-      window.open(result.signedUrl, "_blank", "noopener,noreferrer");
+      await openCaseAttachment(caseItem.id, attachmentId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Prílohu sa nepodarilo otvoriť.");
     }
@@ -611,11 +660,11 @@ export function CaseDetail({
   }
 
   return (
-    <div className={`grid min-w-0 max-w-full overflow-x-clip ${embedded ? "gap-3" : "gap-4"}`}>
-      {!embedded && <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 shadow-sm">
+    <div className={`${styles.surface} ${styles.detail} grid min-w-0 max-w-full overflow-x-clip @container`}>
+      {!embedded && <div className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2.5">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-xl font-semibold text-zinc-950">{caseItem.caseNumber}</h2>
+            <h2 className={styles.caseNumber}>{caseItem.caseNumber}</h2>
             <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ring-1 ${caseStatusTone[caseItem.status]}`}>
               {caseStatusLabels[caseItem.status]}
             </span>
@@ -623,7 +672,6 @@ export function CaseDetail({
               {casePriorityLabels[caseItem.priority]}
             </span>
           </div>
-          <p className="mt-1 break-words text-sm text-zinc-600">{caseItem.summary || "Prázdna karta pripravená na doplnenie údajov."}</p>
           <p className="mt-1 text-xs font-medium text-zinc-500">
             {caseItem.caseType || "Typ nezadaný"} · dispečer: {caseItem.ownerName ?? "nepriradený"} · založené {formatDateTime(caseItem.createdAt)}
           </p>
@@ -636,6 +684,7 @@ export function CaseDetail({
           ) : (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">Trasa nezadaná</div>
           )}
+          {isEditing && editorControls && <CaseEditorHeader controls={editorControls} />}
           {showInlineEditButton && (
             <button type="button" onClick={() => setEditing(!isEditing)} disabled={isEditSaveLocked} className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:cursor-wait disabled:bg-zinc-100 disabled:text-zinc-400">
               {isEditing ? <X size={16} /> : <Edit3 size={16} />}
@@ -644,6 +693,8 @@ export function CaseDetail({
           )}
         </div>
       </div>}
+
+      <CaseSummary caseItem={caseItem} assets={assets} operators={operators} identityInHeader={embedded && Boolean(onEditorControlsChange)} />
 
       {notice && <div role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{notice}</div>}
 
@@ -685,23 +736,24 @@ export function CaseDetail({
       )}
 
       {caseItem.customerSharedLocation && (
-        <section className="overflow-hidden rounded-lg border border-sky-200 bg-sky-50 shadow-sm" aria-label="Doplnková GPS poloha od klienta">
-          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex min-w-0 items-start gap-3">
-              <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-sky-600 text-white"><MapPin size={19} /></span>
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-sm font-bold text-sky-950">Klient poslal doplnkovú GPS polohu</h3>
-                  <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-sky-800 ring-1 ring-sky-200">Miesto incidentu má prioritu</span>
-                </div>
-                <p className="mt-1 break-words text-sm font-semibold text-sky-950">{caseItem.customerSharedLocation.lat}, {caseItem.customerSharedLocation.lng}</p>
-                <p className="mt-0.5 text-xs leading-5 text-sky-800">
-                  Prijaté {formatDateTime(caseItem.customerSharedLocation.submittedAt)}
-                  {caseItem.customerSharedLocation.accuracyMeters !== undefined ? ` · presnosť približne ${Math.round(caseItem.customerSharedLocation.accuracyMeters)} m` : ""}.
-                  {" "}Táto poloha nemení miesto incidentu, trasu, ETA ani navigáciu.
-                </p>
+        <section className={styles.gps} aria-label="Doplnková GPS poloha od klienta">
+          <div className={styles.gpsInformation}>
+            <span className={styles.gpsIcon}><MapPin size={15} aria-hidden="true" /></span>
+            <div className="min-w-0">
+              <div className={styles.gpsTitle}>
+                <h3>GPS od klienta</h3>
+                <span className={styles.gpsCoordinates}>{caseItem.customerSharedLocation.lat}, {caseItem.customerSharedLocation.lng}</span>
               </div>
+              <p className={styles.gpsCaption}>
+                Prijaté {formatDateTime(caseItem.customerSharedLocation.submittedAt)}
+                {caseItem.customerSharedLocation.accuracyMeters !== undefined ? ` · presnosť približne ${Math.round(caseItem.customerSharedLocation.accuracyMeters)} m` : ""}
+              </p>
+              <p className={styles.gpsCaption}>
+                Doplnková poloha. Miesto incidentu, trasa a ETA sa zmenia až po potvrdení.
+              </p>
             </div>
+          </div>
+          <div className={styles.gpsActions}>
             <UseCustomerLocationButton caseId={caseItem.id} location={caseItem.customerSharedLocation}
               disabled={draftDirty || isEditSaveLocked || isRunningAction} onNotice={setNotice}
               onApplied={(data) => { onDataChange?.(data); setEditorRevision((revision) => revision + 1); }} />
@@ -714,27 +766,15 @@ export function CaseDetail({
         </section>
       )}
 
-      {isEditing ? (
-        <>
-          <EditCaseForm
-            key={`${caseItem.id}:${editorRevision}`}
-            caseItem={caseItem}
-            commanderVehicles={commanderVehicles}
-            compact={compactEditor}
-            onDataChange={onDataChange}
-            onDiscard={discardEditorDraft}
-            onDirtyChange={updateDirtyState}
-            onNotice={setNotice}
-            onSaveDraftChange={onSaveDraftChange}
-            onSavingChange={updateSavingState}
-            partnerDirectory={partnerDirectory}
-          />
-          <section className="min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm" aria-labelledby="case-tasks-heading">
-            <div className="border-b border-yellow-200 border-l-4 border-l-[#FCD703] bg-yellow-50 px-3 py-2.5">
-              <h3 id="case-tasks-heading" className="text-sm font-semibold text-zinc-950">Úlohy prípadu</h3>
-              <p className="mt-0.5 text-xs font-medium text-zinc-600">Rozdeľte ďalšie kroky a určite, kto ich má vybaviť.</p>
-            </div>
-            <div className="grid min-w-0 gap-3 p-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
+          <details open={Boolean(focusedTaskId)} data-testid="case-tasks" className={`group ${styles.section}`} aria-labelledby="case-tasks-heading">
+            <summary className={`${styles.sectionHeader} cursor-pointer`}>
+              <span id="case-tasks-heading" className={styles.sectionTitle}>Úlohy prípadu <span className={styles.sectionHelp}>· {openTasks.length} otvorených · {openTasks.filter((task) => isTaskOverdue(task)).length} po termíne</span></span>
+              <span className="flex shrink-0 items-center gap-2">
+                <span className={`${styles.sectionHelp} group-open:hidden`}>Pridať úlohu</span>
+                <ChevronDown size={14} className="shrink-0 text-zinc-500 transition-transform group-open:rotate-180" aria-hidden="true" />
+              </span>
+            </summary>
+            <div className="grid min-w-0 gap-3 p-3 @3xl:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
               <div className="grid min-w-0 content-start gap-2">
                 {displayedTasks.length > 0 ? displayedTasks.map((task) => {
                   const focused = task.id === focusedTaskId;
@@ -758,7 +798,7 @@ export function CaseDetail({
                         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
                       </div>
                       {isTaskOpen(task) ? (
-                        <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 h-7 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50">Vybavené</button>
+                        <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 h-11 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50">Vybavené</button>
                       ) : (
                         <span className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md bg-emerald-50 px-2 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200"><CheckCircle2 size={13} /> Úloha je vybavená</span>
                       )}
@@ -795,11 +835,11 @@ export function CaseDetail({
                 )}
               </div>
 
-              <div className="grid min-w-0 content-start gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 sm:p-4">
+              <div className={`${styles.taskComposer} grid min-w-0 content-start rounded-md border border-zinc-200 bg-zinc-50`}>
                 <h4 className="text-base font-semibold text-zinc-950">Pridať novú úlohu</h4>
                 <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
                   Názov úlohy
-                  <textarea value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" rows={3} className="min-h-24 w-full min-w-0 resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 text-base! font-medium leading-6 text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
+                  <textarea value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" rows={3} className="min-h-24 w-full min-w-0 resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 text-base font-medium leading-6 text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
                 </label>
                 <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Rýchle nastavenie termínu">
                   {taskDuePresets.map((preset) => (
@@ -809,7 +849,7 @@ export function CaseDetail({
                 <div className="grid min-w-0 gap-3">
                   <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
                     Termín
-                    <input type="datetime-local" value={taskDueAt} onChange={(event) => setTaskDueAt(event.target.value)} className="h-11 w-full min-w-0 max-w-full overflow-hidden rounded-md border border-zinc-300 bg-white px-3 text-base! font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Termín úlohy" />
+                    <input type="datetime-local" value={taskDueAt} onChange={(event) => setTaskDueAt(event.target.value)} className="h-11 w-full min-w-0 max-w-full overflow-hidden rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Termín úlohy" />
                   </label>
                   <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
                     Zodpovedná osoba
@@ -830,12 +870,30 @@ export function CaseDetail({
                 <button type="button" onClick={() => void createTask()} disabled={isRunningAction} className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-wait disabled:bg-zinc-300 disabled:text-zinc-600">{isRunningAction ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}Pridať úlohu</button>
               </div>
             </div>
-          </section>
+          </details>
+
+      {isEditing ? (
+        <>
+          <EditCaseForm
+            onEditorControlsChange={onEditorControlsChange ?? setEditorControls}
+            key={`${caseItem.id}:${editorRevision}`}
+            caseItem={caseItem}
+            commanderVehicles={commanderVehicles}
+            compact={compactEditor}
+            onDataChange={onDataChange}
+            onDiscard={discardEditorDraft}
+            onDirtyChange={updateDirtyState}
+            onNotice={setNotice}
+            onSaveDraftChange={handleEditorSaveDraft}
+            onSavingChange={updateSavingState}
+            partnerDirectory={partnerDirectory}
+          />
+
         </>
       ) : (
         <div className="grid min-w-0 gap-3">
           <InfoPanel title="1. Základ prípadu" icon={ClipboardList}>
-            <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid min-w-0 gap-2 sm:grid-cols-2 @4xl:grid-cols-4">
               <InfoItem label="Typy zákazky" value={labelList(caseItem.jobTypes, jobTypeLabels)} required invalid={caseItem.jobTypes.length === 0} />
               <InfoItem label="Typ / zdroj" value={[caseItem.caseType, caseItem.sourceType].filter(Boolean).join(" · ")} required invalid={!caseItem.caseType || !caseItem.sourceType} />
               <InfoItem label="Priorita / stav" value={`${casePriorityLabels[caseItem.priority]} · ${caseStatusLabels[caseItem.status]}`} />
@@ -852,7 +910,7 @@ export function CaseDetail({
           </InfoPanel>
 
           <InfoPanel title="2. Zákazník a kontakty" icon={UserRound}>
-            <div className="grid min-w-0 gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-4">
               <InfoItem label="Typ zákazníka" value={caseItem.customerDetails.type ? customerTypeLabels[caseItem.customerDetails.type] : ""} required />
               <InfoItem
                 label="Zákazník"
@@ -879,7 +937,7 @@ export function CaseDetail({
           </InfoPanel>
 
           <InfoPanel title="3. Vozidlo a incident" icon={CarFront}>
-            <div className="grid min-w-0 gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-4">
               <InfoItem label="EČV" value={caseItem.vehicle.licensePlate} required invalid={Boolean(readOnlyFieldErrors.licensePlate)} warningMessage={readOnlyFieldErrors.licensePlate} />
               <InfoItem label="VIN" value={caseItem.vehicle.vin ?? ""} invalid={Boolean(readOnlyFieldErrors.vin)} warningMessage={readOnlyFieldErrors.vin} />
               <InfoItem label="Značka / model" value={[caseItem.vehicle.make, caseItem.vehicle.model].filter(Boolean).join(" ")} />
@@ -894,7 +952,7 @@ export function CaseDetail({
           </InfoPanel>
 
           <InfoPanel title="4. Miesto a cieľ" icon={MapPin}>
-            <div className="grid min-w-0 gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-4">
               <InfoItem
                 label="Miesto incidentu"
                 value={caseItem.pickup?.address || caseItem.locationDetails.manualPickupAddress || ""}
@@ -939,7 +997,7 @@ export function CaseDetail({
           </InfoPanel>
 
           <InfoPanel title="5. Doplnky" icon={ReceiptText}>
-            <div className="grid min-w-0 gap-3 xl:grid-cols-2">
+            <div className="grid min-w-0 gap-3 @3xl:grid-cols-2">
               <div className="grid min-w-0 content-start gap-2 sm:grid-cols-2">
                 <InfoItem
                   label="Náhradné vozidlo"
@@ -975,75 +1033,6 @@ export function CaseDetail({
 
               <div className="grid min-w-0 content-start gap-3">
                 <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
-                  <h4 className="text-sm font-semibold text-zinc-950">Úlohy</h4>
-                  <div className="mt-2 grid gap-2">
-                    {displayedTasks.length > 0 ? displayedTasks.map((task) => {
-                      const focused = task.id === focusedTaskId;
-
-                      return (
-                      <div
-                        key={task.id}
-                        id={`task-${task.id}`}
-                        className={`min-w-0 rounded-md border p-2.5 transition ${
-                          focused ? "border-yellow-400 bg-yellow-50 ring-2 ring-yellow-200" : "border-zinc-200 bg-white"
-                        }`}
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            {focused && <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-amber-800">Otvorená úloha</div>}
-                            <div className="break-words text-sm font-semibold text-zinc-950">{task.title}</div>
-                            <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-zinc-500">
-                              <span>{formatTime(task.dueAt)}</span>
-                              {isTaskOverdue(task) && <span className="rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 ring-1 ring-red-200">Po termíne</span>}
-                            </div>
-                          </div>
-                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
-                        </div>
-                        {isTaskOpen(task) ? (
-                          <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 h-7 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50">Vybavené</button>
-                        ) : (
-                          <span className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md bg-emerald-50 px-2 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
-                            <CheckCircle2 size={13} /> Úloha je vybavená
-                          </span>
-                        )}
-                      </div>
-                    );
-                    }) : <div className="text-sm font-medium text-zinc-500">Bez otvorených úloh.</div>}
-                  </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-1.5" role="group" aria-label="Rýchle nastavenie termínu">
-                    {taskDuePresets.map((preset) => (
-                      <button key={preset.minutes} type="button" onClick={() => setTaskDueAt(dateTimeLocalInMinutes(preset.minutes))} className="h-9 rounded-md border border-zinc-300 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">{preset.label}</button>
-                    ))}
-                  </div>
-                  <div className="mt-3 grid min-w-0 gap-3">
-                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
-                      Názov úlohy
-                      <textarea value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" rows={3} className="min-h-24 w-full min-w-0 resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 text-base! font-medium leading-6 text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
-                    </label>
-                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
-                      Termín
-                      <input type="datetime-local" value={taskDueAt} onChange={(event) => setTaskDueAt(event.target.value)} className="h-11 w-full min-w-0 max-w-full overflow-hidden rounded-md border border-zinc-300 bg-white px-3 text-base! font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Termín úlohy" />
-                    </label>
-                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
-                      Priorita
-                      <select value={taskPriority} onChange={(event) => setTaskPriority(event.target.value as CasePriority)} className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Priorita úlohy">
-                        {taskPriorityOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                      </select>
-                    </label>
-                    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
-                      Zodpovedná osoba
-                      <select value={taskAssignee} onChange={(event) => setTaskAssignee(event.target.value)} className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Zodpovedná osoba">
-                        <option value="unassigned">Nepriradené</option>
-                        {operators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}
-                        {taskAssignee !== "unassigned" && !operators.some((operator) => operator.id === taskAssignee) && <option value={taskAssignee}>{taskAssignee === viewerProfileId ? "Ja (prihlásený)" : caseItem.ownerName ?? "Aktuálne priradená osoba"}</option>}
-                      </select>
-                    </label>
-                    <label className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-zinc-700"><input type="checkbox" checked={sendTaskReminderEmail} onChange={(event) => setSendTaskReminderEmail(event.target.checked)} className="size-4 shrink-0 rounded border-zinc-300 text-zinc-950" />Email operátorovi</label>
-                    <button type="button" onClick={() => void createTask()} className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800"><Plus size={15} />Pridať úlohu</button>
-                  </div>
-                </div>
-
-                <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
                   <h4 className="text-sm font-semibold text-zinc-950">Prílohy a komunikácia</h4>
                   <div className="mt-2 grid gap-2">
                     {caseItem.attachments.slice(0, 3).map((attachment, index) => (
@@ -1053,8 +1042,9 @@ export function CaseDetail({
                       </div>
                     ))}
                     {caseItem.attachments.length === 0 && <div className="text-xs font-medium text-zinc-500">Bez príloh.</div>}
+                    {caseItem.attachments.length > 3 && <div className="text-xs font-medium text-zinc-500">+{caseItem.attachments.length - 3} ďalších v úprave karty zásahu.</div>}
                   </div>
-                  <label className="mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-zinc-300 bg-white px-2 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"><FileUp size={15} />Pridať súbor<input type="file" multiple accept="image/jpeg,image/png,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="sr-only" onChange={(event) => handleAttachmentFiles(event.target.files)} /></label>
+                  <label className="mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-zinc-300 bg-white px-2 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"><FileUp size={15} />Pridať súbor<input type="file" multiple accept={CASE_ATTACHMENT_ACCEPT} className="sr-only" onChange={(event) => handleAttachmentFiles(event.target.files)} /></label>
                   {pendingAttachmentFiles.length > 0 && (
                     <div className="mt-2 grid gap-1.5">
                       {pendingAttachmentFiles.map((file, index) => <div key={`${file.name}-${file.lastModified}-${index}`} className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-zinc-200 bg-white px-2 py-1.5 text-xs"><span className="min-w-0 truncate">{file.name}</span><button type="button" onClick={() => setPendingAttachmentFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="text-zinc-500 hover:text-zinc-900" aria-label="Odobrať prílohu"><X size={13} /></button></div>)}
@@ -1062,7 +1052,6 @@ export function CaseDetail({
                       <button type="button" onClick={() => void uploadAttachments()} disabled={isUploadingAttachment} className="inline-flex h-8 items-center justify-center gap-2 rounded-md bg-zinc-950 px-2 text-xs font-semibold text-white hover:bg-zinc-800 disabled:bg-zinc-300 disabled:text-zinc-600">{isUploadingAttachment ? <Loader2 size={14} className="animate-spin" /> : <FileUp size={14} />}Nahrať</button>
                     </div>
                   )}
-                  <div className="mt-3 rounded-md border border-zinc-200 bg-white p-2"><div className="mb-1 text-xs font-semibold uppercase tracking-normal text-zinc-500">SMS náhľad</div><p className="line-clamp-4 whitespace-pre-line text-xs leading-5 text-zinc-700">{sms}</p></div>
                 </div>
 
                 <div className="flex flex-wrap gap-2">
@@ -1136,14 +1125,14 @@ export function CaseNotesAndActivity({
   }
 
   return (
-    <section className="min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm" aria-labelledby="case-notes-heading">
-      <div className="border-b border-yellow-200 border-l-4 border-l-[#FCD703] bg-yellow-50 px-3 py-2.5">
-        <h3 id="case-notes-heading" className="text-sm font-semibold text-zinc-950">Poznámky a aktivita</h3>
-        <p className="mt-0.5 text-xs font-medium text-zinc-600">Interná komunikácia k prípadu a história zmien s autorom a časom.</p>
+    <section className={styles.section} aria-labelledby="case-notes-heading">
+      <div className={styles.sectionHeader}>
+        <h3 id="case-notes-heading" className={styles.sectionTitle}>Poznámky a aktivita</h3>
+        <span className={styles.sectionHelp}>Interná komunikácia a história</span>
       </div>
       {/* Panel je na celú šírku karty: na širokej obrazovke poznámky a aktivita vedľa seba,
           na úzkej sa zalomia pod seba. */}
-      <div className="grid min-w-0 gap-4 p-3 lg:grid-cols-2">
+      <div className="grid min-w-0 gap-4 p-3 @3xl:grid-cols-2">
         <div className="grid min-w-0 content-start gap-2">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Poznámky</h4>
           {notes.length > 0 ? (
@@ -1179,7 +1168,7 @@ export function CaseNotesAndActivity({
                 }
               }}
               placeholder="Napíš internú poznámku k prípadu…"
-              className="min-h-16 min-w-0 rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-sm outline-none ring-yellow-300 transition focus:ring-2"
+              className="min-h-16 min-w-0 rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-base outline-none ring-yellow-300 transition focus:ring-2"
               aria-label="Nová poznámka k prípadu"
             />
             <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
@@ -1188,7 +1177,7 @@ export function CaseNotesAndActivity({
                 type="button"
                 onClick={() => void submitNote()}
                 disabled={busy || noteText.trim().length === 0}
-                className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-zinc-950 px-3 text-xs font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-600"
+                className="inline-flex h-11 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-zinc-950 px-3 text-xs font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-600"
               >
                 {busy ? <Loader2 size={13} className="shrink-0 animate-spin" /> : <Plus size={13} className="shrink-0" />}
                 Pridať poznámku
@@ -1248,6 +1237,7 @@ function actorInitials(actor: string) {
 }
 
 function EditCaseForm({
+  onEditorControlsChange,
   caseItem,
   commanderVehicles,
   compact,
@@ -1259,6 +1249,7 @@ function EditCaseForm({
   onSavingChange,
   partnerDirectory,
 }: {
+  onEditorControlsChange?: (controls: CaseEditorControls | null) => void;
   caseItem: DispatchCase;
   commanderVehicles: CommanderVehicleConnection[];
   compact: boolean;
@@ -1356,8 +1347,9 @@ function EditCaseForm({
     })),
   );
   const [attachmentCategory, setAttachmentCategory] = useState<CaseAttachmentInput["category"]>("photo");
-  const [attachmentFileName, setAttachmentFileName] = useState("");
+  const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
   const [attachmentNote, setAttachmentNote] = useState("");
+  const [isUploadingAttachments, setIsUploadingAttachments] = useState(false);
   const [savePhase, setSavePhase] = useState<CaseSavePhase>("idle");
   const [saveSlow, setSaveSlow] = useState(false);
   const [saveAttempt, setSaveAttempt] = useState(0);
@@ -1369,6 +1361,10 @@ function EditCaseForm({
   }, [lastSavedAt]);
   const [retryToken, setRetryToken] = useState(0);
   const [refreshOnlyRevision, setRefreshOnlyRevision] = useState<number | null>(null);
+  const serverRevisionRef = useRef(caseItem.updatedAt);
+  const conflictRef = useRef(false);
+  const [conflict, setConflict] = useState(false);
+  const acceptedDraftRef = useRef<string | null>(null);
   const revisionRef = useRef(0);
   const savedRevisionRef = useRef(0);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -1518,10 +1514,18 @@ function EditCaseForm({
   const serializedDraft = JSON.stringify(draftPayload);
   const [acceptedDraft, setAcceptedDraft] = useState(serializedDraft);
   const isDirty = serializedDraft !== acceptedDraft;
-  const currentError = saveError?.payload === serializedDraft ? saveError.message : null;
+  const currentError = conflict ? "Prípad medzitým zmenil iný používateľ. Rozpracované údaje zostávajú v editore." : saveError?.payload === serializedDraft ? saveError.message : null;
   const displayedSavePhase: CaseSavePhase =
     savePhase === "saving" ? "saving" : currentError ? "error" : isDirty ? "waiting" : savePhase;
   const showSaveStatus = displayedSavePhase === "saving" || displayedSavePhase === "waiting" || displayedSavePhase === "error" || Boolean(lastSavedAt);
+
+  useEffect(() => {
+    if (acceptedDraftRef.current === null) acceptedDraftRef.current = serializedDraft;
+    onEditorControlsChange?.({ priority, status: caseClosureStatus || caseItem.status, busy: savePhase === "saving" || conflict,
+      onPriorityChange: setPriority, onStatusChange: setCaseClosureStatus });
+  }, [priority, caseClosureStatus, caseItem.status, savePhase, conflict, onEditorControlsChange, serializedDraft]);
+
+  useEffect(() => () => onEditorControlsChange?.(null), [onEditorControlsChange]);
 
   useEffect(() => {
     latestDraftRef.current = serializedDraft;
@@ -1643,12 +1647,63 @@ function EditCaseForm({
     setContacts((current) => moveById(current, id, direction));
   }
 
-  function addAttachment() {
-    const fileName = attachmentFileName.trim();
-    if (!fileName) return;
-    setAttachments((current) => [...current, { category: attachmentCategory, fileName, note: attachmentNote.trim() || undefined }]);
-    setAttachmentFileName("");
-    setAttachmentNote("");
+  function addAttachmentFiles(files: FileList | null) {
+    if (!files) return;
+    setAttachmentFiles((current) => [...current, ...Array.from(files)].slice(0, 10));
+  }
+
+  /**
+   * Uploads the chosen files right away through the attachments route (the
+   * bucket is private; the route validates, stores and records them). The
+   * metadata returned is folded into the draft so the next autosave keeps the
+   * same list instead of dropping the files it does not know about. A refused
+   * file leaves the form and the picked files untouched.
+   */
+  async function uploadFormAttachments() {
+    if (attachmentFiles.length === 0 || isUploadingAttachments) return;
+
+    const validationError = validateCaseAttachmentFiles(attachmentFiles);
+    if (validationError) {
+      onNotice(validationError);
+      return;
+    }
+
+    setIsUploadingAttachments(true);
+
+    try {
+      const form = new FormData();
+      attachmentFiles.forEach((file) => form.append("files", file));
+      form.append("category", attachmentCategory);
+      if (attachmentNote.trim()) {
+        form.append("note", attachmentNote.trim());
+      }
+
+      const response = await fetch(`/api/cases/${caseItem.id}/attachments`, { method: "POST", body: form });
+      const result = (await response.json()) as ApiMutationResponse & { attachments?: CaseAttachmentInput[] };
+
+      if (!response.ok || !result.dispatchData) {
+        throw new Error(result.error ?? "Prílohy sa nepodarilo nahrať.");
+      }
+
+      const uploaded = result.attachments ?? [];
+      setAttachments((current) => [...current, ...uploaded.filter((item) => !current.some((existing) => existing.id && existing.id === item.id))]);
+      setAttachmentFiles([]);
+      setAttachmentNote("");
+      onDataChange?.(result.dispatchData);
+      onNotice(uploaded.length === 1 ? "Príloha je nahratá a uložená pri karte zásahu." : `${uploaded.length} príloh je nahratých a uložených pri karte zásahu.`);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Prílohy sa nepodarilo nahrať.");
+    } finally {
+      setIsUploadingAttachments(false);
+    }
+  }
+
+  async function openStoredAttachment(attachmentId: string) {
+    try {
+      await openCaseAttachment(caseItem.id, attachmentId);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Prílohu sa nepodarilo otvoriť.");
+    }
   }
 
   function prefillFromCommander() {
@@ -1695,6 +1750,7 @@ function EditCaseForm({
 
   function acceptCanonicalCaseState(dispatchData: DispatchData, revision: number, serializedPayload: string) {
     onDataChange?.(dispatchData);
+    acceptedDraftRef.current = serializedPayload;
     setAcceptedDraft(serializedPayload);
     savedRevisionRef.current = Math.max(savedRevisionRef.current, revision);
     setLastSavedAt(new Date());
@@ -1739,6 +1795,10 @@ function EditCaseForm({
   }
 
   async function persistDraft(serializedPayload: string, revision: number) {
+    if (conflictRef.current) return false;
+    const changes = changedCaseFields(acceptedDraftRef.current ?? acceptedDraft, serializedPayload);
+    if (Object.keys(changes).length === 0) return true;
+    const requestPayload = JSON.stringify({ ...changes, expectedUpdatedAt: serverRevisionRef.current });
     if (revision <= savedRevisionRef.current) {
       return true;
     }
@@ -1766,12 +1826,18 @@ function EditCaseForm({
           const response = await fetch(`/api/cases/${caseItem.id}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: serializedPayload,
+            body: requestPayload,
             signal: controller.signal,
           });
           const result = (await response.json().catch(() => null)) as ApiMutationResponse | null;
 
           if (!response.ok) {
+            if (response.status === 409 && result?.code === "CASE_REVISION_CONFLICT") {
+              conflictRef.current = true;
+              setConflict(true);
+              setSavePhase("error");
+              return false;
+            }
             failureMessage = result?.error ?? "Kartu zásahu sa nepodarilo automaticky uložiť.";
             if (response.status < 500 && response.status !== 429) {
               break;
@@ -1779,8 +1845,10 @@ function EditCaseForm({
             continue;
           }
 
+          if (result?.committedRevision) serverRevisionRef.current = result.committedRevision;
           savedRevisionRef.current = Math.max(savedRevisionRef.current, revision);
           committedDraftRef.current = { payload: serializedPayload, revision };
+          acceptedDraftRef.current = serializedPayload;
           if (result?.warnings?.length) {
             onNotice(`Karta je uložená. Upozornenia: ${result.warnings.map((warning) => warning.message).join(" · ")}`);
           }
@@ -1869,7 +1937,18 @@ function EditCaseForm({
     return () => onSaveDraftChange?.(null);
   }, [onSaveDraftChange]);
 
+  async function reloadConflictingCase() {
+    try {
+      const dispatchData = await loadCanonicalCaseState();
+      onDataChange?.(dispatchData);
+      onDiscard();
+    } catch {
+      onNotice("Aktuálny stav sa nepodarilo načítať. Váš rozpracovaný text zostáva v editore.");
+    }
+  }
+
   function retryAutosave() {
+    if (conflictRef.current) return;
     setSaveError(null);
     setSaveAttempt(0);
 
@@ -1930,7 +2009,7 @@ function EditCaseForm({
         data-testid="case-autosave-status"
         aria-live="polite"
       >
-        {isDirty && validationErrors.length > 0 && displayedSavePhase !== "saving" ? (
+        {isDirty && validationErrors.length > 0 && displayedSavePhase !== "saving" && displayedSavePhase !== "error" ? (
           <span role="alert">{validationErrors[0]} Rozpracovaná zmena sa napriek tomu automaticky uloží.</span>
         ) : displayedSavePhase === "saving" ? (
           <span className="inline-flex items-center gap-1.5">
@@ -1950,7 +2029,7 @@ function EditCaseForm({
 
         {isDirty && (validationErrors.length > 0 || displayedSavePhase === "error") && (
           <span className="flex items-center gap-3">
-            {displayedSavePhase === "error" && (
+            {displayedSavePhase === "error" && !conflict && (
               <button type="button" onClick={retryAutosave} className="font-semibold underline underline-offset-2">
                 {refreshOnlyRevision !== null ? "Overiť uložený stav" : "Skúsiť znova"}
               </button>
@@ -1968,8 +2047,12 @@ function EditCaseForm({
         </div>
       )}
 
+      {conflict && <div role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+        Prípad medzitým zmenil iný používateľ. Vaše údaje zostávajú v editore. Načítaním aktuálneho stavu nahradíte tento draft uloženými údajmi.
+        <button type="button" onClick={() => void reloadConflictingCase()} className="mt-2 flex min-h-11 items-center rounded-md border border-amber-400 bg-white px-3 font-semibold">Načítať aktuálny stav prípadu</button>
+      </div>}
       <div className="m-0 min-w-0 border-0 p-0 @container">
-        <div className="grid min-w-0 gap-2 lg:gap-4" data-testid="case-edit-form-main">
+        <div className={`${styles.formMain} grid min-w-0`} data-testid="case-edit-form-main">
       <p className="text-[10px] font-medium text-zinc-500 lg:text-xs lg:font-semibold">
         <span className="text-red-600" aria-hidden="true">*</span> Povinné údaje
       </p>
@@ -1981,8 +2064,8 @@ function EditCaseForm({
         collapsible={compact}
         defaultOpen={compact}
       >
-        <div className="grid min-w-0 grid-cols-2 gap-2 lg:gap-3 lg:grid-cols-[minmax(0,1fr)_180px_180px]">
-          <div className="col-span-2 lg:col-span-1">
+        <div className="grid min-w-0 grid-cols-2 gap-2 lg:gap-3 @3xl:grid-cols-[minmax(0,1fr)_150px_150px]">
+          <div className="col-span-2 @3xl:col-span-1">
             <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Typ zákazky<RequiredMark /></span>
             <CheckboxGroup compact items={jobTypes} labels={jobTypeLabels} selected={selectedJobTypes} onChange={setSelectedJobTypes} />
           </div>
@@ -2018,7 +2101,7 @@ function EditCaseForm({
         </div>
 
         {(customerType === "insurance" || customerType === "company") && (
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-3 @3xl:grid-cols-3">
             <SelectField
               label={customerType === "insurance" ? "Adresár asistenčných služieb" : "Adresár firiem"}
               value={partnerDirectoryId}
@@ -2054,7 +2137,7 @@ function EditCaseForm({
             Prípad na náhradné vozidlo: údaje o klientovom vozidle sú voliteľné a odťahové polia sú skryté.
           </p>
         )}
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 @3xl:grid-cols-3">
           <VehicleLookupControl contextKey={caseItem.id} plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor }} onApply={(patch, snapshot) => {
             setVehicleLookup(snapshot);
             if (patch.plate !== undefined) setLicensePlate(patch.plate);
@@ -2102,7 +2185,7 @@ function EditCaseForm({
         {!replacementOnly && (
           <>
             <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Incident</h4>
-            <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid gap-3 @3xl:grid-cols-3">
               <SelectField label="Typ incidentu" value={incidentType} onChange={(value) => setIncidentType(value as IncidentType | "")} options={[["", "Nezadaný"], ...incidentTypes.map((type) => [type, incidentTypeLabels[type]] as [string, string])]} required />
               <TextField label="Počet účastníkov" value={participantsCount} onChange={setParticipantsCount} error={fieldErrors.participantsCount} type="number" inputMode="numeric" min={0} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
               <TextField label="Počet pasažierov" value={passengersCount} onChange={setPassengersCount} error={fieldErrors.passengersCount} type="number" inputMode="numeric" min={0} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
@@ -2119,7 +2202,7 @@ function EditCaseForm({
         errorCount={formValidation.sectionErrors.location.length}
         collapsible={compact}
       >
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className={styles.locationFields}>
           <GooglePlaceAutocomplete
             label={replacementOnly ? "Miesto (voliteľné, mapa)" : "Miesto incidentu"}
             required={!replacementOnly}
@@ -2159,7 +2242,7 @@ function EditCaseForm({
         </div>
         <LocationPicker value={pickup} onSelect={setPickup} />
         <div className={`rounded-md border p-3 ${placeType === "highway" ? "border-yellow-300 bg-yellow-50" : "border-zinc-200 bg-white"}`}>
-          <div className="grid gap-3 md:grid-cols-4">
+          <div className="grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-4">
             <TextField label="Diaľnica / cesta" value={roadName} onChange={setRoadName} />
             <TextField label="Km úsek" value={kilometerSection} onChange={setKilometerSection} error={fieldErrors.kilometerSection} type="number" inputMode="decimal" min={0} max={9999} step="0.01" transformValue={(value) => decimalOnly(value, 4)} />
             <TextField label="Smer jazdy" value={drivingDirection} onChange={setDrivingDirection} />
@@ -2203,7 +2286,7 @@ function EditCaseForm({
             </button>
           </div>
           <div className={`mt-3 grid gap-3 rounded-md border p-3 ${replacementVehicleNeeded ? "border-yellow-200 bg-white" : "border-zinc-200 bg-zinc-100"}`}>
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="grid gap-3 @xl:grid-cols-2">
               <TextField label="Požadovaný typ vozidla" value={replacementVehicleType} onChange={setReplacementVehicleType} disabled={!replacementVehicleNeeded} required={replacementVehicleNeeded} />
               <TextField label="Špeciálne požiadavky" value={replacementVehicleNote} onChange={setReplacementVehicleNote} disabled={!replacementVehicleNeeded} />
             </div>
@@ -2218,12 +2301,12 @@ function EditCaseForm({
               />
             </div>
             {replacementOnly && customerType !== "insurance" && (
-              <div className="grid gap-3 border-t border-zinc-100 pt-3 md:grid-cols-2">
+              <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
                 <TextField label="Asistenčná služba" value={assistanceServiceName} onChange={setAssistanceServiceName} disabled={!replacementVehicleNeeded} />
                 <TextField label="Číslo prípadu asistenčky" value={assistanceReference} onChange={setAssistanceReference} disabled={!replacementVehicleNeeded} />
               </div>
             )}
-            <div className="grid gap-3 border-t border-zinc-100 pt-3 md:grid-cols-2">
+            <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
               <SelectField
                 label="Kategória vozidla"
                 value={replacementCategory}
@@ -2265,7 +2348,7 @@ function EditCaseForm({
                 disabled={!replacementVehicleNeeded}
               />
             </div>
-            <div className="grid gap-3 border-t border-zinc-100 pt-3 md:grid-cols-2">
+            <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
               <SelectField
                 label="Poskytnuté náhradné vozidlo"
                 value={replacementProvisionStatus}
@@ -2296,35 +2379,77 @@ function EditCaseForm({
           </div>
         </div>
         <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Dokumenty</h4>
-        <div className="grid gap-3 md:grid-cols-[160px_1fr_1fr_auto]">
+        <div className="grid gap-3 @3xl:grid-cols-[160px_1fr_1fr_auto]">
           <SelectField label="Typ prílohy" value={attachmentCategory} onChange={(value) => setAttachmentCategory(value as CaseAttachmentInput["category"])} options={attachmentCategories.map((category) => [category, attachmentCategoryLabels[category]])} />
-          <TextField label="Názov prílohy" value={attachmentFileName} onChange={setAttachmentFileName} />
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Súbory</span>
+            <span className="flex h-10 w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-zinc-300 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50">
+              <FileUp size={16} />
+              {attachmentFiles.length > 0 ? `Vybrané: ${attachmentFiles.length}` : "Vybrať súbory"}
+              <input
+                type="file"
+                multiple
+                accept={CASE_ATTACHMENT_ACCEPT}
+                className="sr-only"
+                onChange={(event) => {
+                  addAttachmentFiles(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+            </span>
+          </label>
           <TextField label="Poznámka" value={attachmentNote} onChange={setAttachmentNote} />
-          <button type="button" onClick={addAttachment} className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50">
-            <Plus size={16} />
-            Pridať
+          <button
+            type="button"
+            onClick={() => void uploadFormAttachments()}
+            disabled={attachmentFiles.length === 0 || isUploadingAttachments}
+            className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-600"
+          >
+            {isUploadingAttachments ? <Loader2 size={16} className="animate-spin" /> : <FileUp size={16} />}
+            Nahrať
           </button>
         </div>
-        {attachments.length > 0 && (
-          <div className="grid gap-2">
-            {attachments.map((attachment, index) => (
-              <div key={`${attachment.fileName}-${index}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm">
-                <span>{attachmentCategoryLabels[attachment.category]} · {attachment.fileName}</span>
-                <button type="button" onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="inline-flex h-8 items-center gap-2 rounded-md border border-zinc-200 px-2 text-xs font-semibold text-zinc-600 hover:bg-zinc-50">
-                  <Trash2 size={14} />
-                  Odobrať
+        <p className="text-xs font-medium text-zinc-500">Povolené sú JPG, PNG, PDF a Word do 10 MB. Súbor sa nahrá hneď po stlačení Nahrať a uloží sa k tejto karte.</p>
+        {attachmentFiles.length > 0 && (
+          <div className="grid gap-1.5">
+            {attachmentFiles.map((file, index) => (
+              <div key={`${file.name}-${file.lastModified}-${index}`} className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-dashed border-zinc-300 bg-white px-3 py-1.5 text-xs">
+                <span className="min-w-0 truncate font-medium text-zinc-700">{file.name} · {Math.max(1, Math.round(file.size / 1024))} kB</span>
+                <button type="button" onClick={() => setAttachmentFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} disabled={isUploadingAttachments} className="shrink-0 text-zinc-500 hover:text-zinc-900 disabled:text-zinc-300" aria-label={`Nevybrať súbor ${file.name}`}>
+                  <X size={13} />
                 </button>
               </div>
             ))}
           </div>
         )}
+        {attachments.length > 0 && (
+          <div className="grid gap-2">
+            {attachments.map((attachment, index) => (
+              <div key={attachment.id ?? `${attachment.fileName}-${index}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm">
+                <span className="min-w-0 truncate">{attachmentCategoryLabels[attachment.category]} · {attachment.fileName}{attachment.note ? ` · ${attachment.note}` : ""}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {attachment.id && attachment.storagePath && (
+                    <button type="button" onClick={() => void openStoredAttachment(attachment.id!)} className="inline-flex h-8 items-center gap-2 rounded-md border border-zinc-200 px-2 text-xs font-semibold text-zinc-600 hover:bg-zinc-50">
+                      <Download size={14} />
+                      Otvoriť
+                    </button>
+                  )}
+                  <button type="button" onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="inline-flex h-8 items-center gap-2 rounded-md border border-zinc-200 px-2 text-xs font-semibold text-zinc-600 hover:bg-zinc-50">
+                    <Trash2 size={14} />
+                    Odobrať
+                  </button>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
         <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Platba</h4>
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3 @xl:grid-cols-2">
           <SelectField label="Platba" value={paymentMethod} onChange={(value) => setPaymentMethod(value as PaymentMethod | "")} options={[["", "Nezadaná"], ...paymentMethods.map((method) => [method, paymentMethodLabels[method]] as [string, string])]} required />
           <SelectField label="Stav platby" value={paymentStatus} onChange={(value) => setPaymentStatus(value as PaymentStatus | "")} options={[["", "Nezadaný"], ...paymentStatuses.map((status) => [status, paymentStatusLabels[status]] as [string, string])]} required />
         </div>
         <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Ukončenie a poznámky</h4>
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 @3xl:grid-cols-3">
           <SelectField
             label="Stav prípadu"
             value={caseClosureStatus}
@@ -2400,7 +2525,7 @@ function ContactEditor({
               </IconButton>
             </div>
           </div>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-4">
             <TextField label="Meno" value={contact.firstName} onChange={(value) => onUpdate(contact.id, { firstName: value })} error={contact.isPrimary ? fieldErrors.contactName : undefined} required={contact.isPrimary} />
             <TextField label="Priezvisko" value={contact.lastName} onChange={(value) => onUpdate(contact.id, { lastName: value })} />
             <PhoneField contact={contact} onChange={(patch) => onUpdate(contact.id, patch)} error={contact.isPrimary ? fieldErrors.contactPhone : undefined} required={contact.isPrimary} />

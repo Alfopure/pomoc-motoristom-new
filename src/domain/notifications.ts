@@ -56,7 +56,7 @@ export function buildTaskNotificationText(task: Pick<CaseTask, "title" | "dueAt"
 
   return {
     title: `${caseLabel}${task.title}`,
-    body: `Termín ${formatDue(task.dueAt)}`,
+    body: task.dueAt ? `Termín ${formatDue(task.dueAt)}` : "Úloha bez termínu.",
   };
 }
 

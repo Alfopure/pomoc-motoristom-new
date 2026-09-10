@@ -1,0 +1,60 @@
+.dispatch-widget-host { display: none; }
+.dispatch-dashboard[data-console-hidden="true"] { display: none !important; }
+.dispatch-workspace-view[hidden], .dispatch-workspace-panel[hidden], .dispatch-dashboard [data-widget][hidden] { display: none !important; }
+.dispatch-map-workspace { background: #f4f5f7; padding: 8px; }
+.workspace-toolbar { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; min-width: 0; margin-bottom: 8px; }
+.workspace-center-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; padding: 3px; overflow-x: auto; scrollbar-width: none; border: 1px solid #e4e4e7; border-radius: 8px; background: #eceef1; }
+.workspace-center-tabs button, .workspace-tools-trigger, .workspace-panel-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0; min-height: 32px; padding: 0 10px; border-radius: 5px; font-size: 12px; font-weight: 550; line-height: 1.2; color: #52525b; white-space: nowrap; }
+.workspace-center-tabs button:hover { background: #fff8; color: #18181b; }
+.workspace-center-tabs button[aria-selected="true"] { background: #fff; color: #18181b; box-shadow: 0 1px 3px #18181b1a; }
+.workspace-center-tabs button[aria-selected="true"] svg { color: #a57900; }
+.workspace-tools-trigger, .workspace-panel-toggle { min-height: 38px; border: 1px solid #e4e4e7; background: #fff; }
+.workspace-tools-trigger { margin-left: auto; }
+.workspace-tools-trigger:hover, .workspace-panel-toggle:hover { background: #fafafa; color: #18181b; }
+.workspace-tools-trigger[aria-expanded="true"] { background: #fff9d9; border-color: #e4c94e; color: #52430b; }
+.workspace-panel-toggle { padding: 0; width: 32px; }
+.workspace-center-tabs button:focus-visible, .workspace-tools-trigger:focus-visible, .workspace-panel-toggle:focus-visible { outline: 2px solid #c99b00; outline-offset: -2px; }
+.widget-host-header { min-height: 42px; }
+.widget-host-action { min-width: 30px; min-height: 32px; }
+.widget-setting-label, .widget-reset, .widget-section-toggle { min-height: 34px; }
+.widget-setting-label input { width: 14px; height: 14px; accent-color: #a57900; }
+.dispatch-widget-host.is-open { border-left-color: #dbd8cb; }
+
+@media (min-width: 1280px) {
+  .dispatch-widget-host { display: flex; }
+  .dispatch-dashboard[data-right-collapsed="true"] .dispatch-widget-host { display: none; }
+  .dispatch-dashboard[data-full-page-workspace="true"][data-tools-open="true"] { grid-template-columns: minmax(0, 1fr) var(--dashboard-right-width); }
+}
+@media (min-width: 1024px) {
+  .dispatch-dashboard[data-left-collapsed="true"] .mobile-dispatch-cases { display: none; }
+  .dispatch-dashboard[data-left-collapsed="true"] .dashboard-resize-left { display: none; }
+  .dispatch-dashboard[data-right-collapsed="true"] .dashboard-resize-right { display: none; }
+  .dispatch-dashboard[data-full-page-workspace="true"] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  .dispatch-dashboard[data-full-page-workspace="true"] .mobile-dispatch-cases,
+  .dispatch-dashboard[data-full-page-workspace="true"] .dashboard-resize-left,
+  .dispatch-dashboard[data-full-page-workspace="true"] .dashboard-resize-right,
+  .dispatch-dashboard[data-full-page-workspace="true"] .dashboard-tablet-phone { display: none; }
+  .dispatch-dashboard[data-full-page-workspace="true"][data-tools-open="false"] .dispatch-widget-host { display: none; }
+}
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .dispatch-widget-host.is-open {
+    display: flex; position: absolute; top: 0; right: 0; bottom: 0;
+    width: min(400px, 70%); z-index: 40; box-shadow: -12px 0 30px #0002;
+  }
+}
+@media (max-width: 1023px) {
+  .dispatch-dashboard[data-tools-open="true"] .mobile-dispatch-cases,
+  .dispatch-dashboard[data-tools-open="true"] .mobile-dispatch-workspace { display: none; }
+  .dispatch-widget-host.is-open { display: flex; flex: 1; border-left: 0; }
+  .dispatch-map-workspace { padding: 6px; }
+  .workspace-toolbar { gap: 4px; margin-bottom: 6px; }
+  .workspace-panel-toggle { display: none; }
+  .workspace-center-tabs { flex: 1; }
+  .workspace-center-tabs button { padding: 0 8px; }
+  .workspace-center-tabs button svg { display: none; }
+  .workspace-tools-trigger { padding: 0 9px; }
+}
+@media (max-width: 767px), (pointer: coarse) {
+  .workspace-center-tabs button, .workspace-tools-trigger, .workspace-panel-toggle, .widget-host-action, .widget-setting-label, .widget-reset, .widget-section-toggle { min-height: 44px; }
+  .widget-host-action { min-width: 44px; }
+}

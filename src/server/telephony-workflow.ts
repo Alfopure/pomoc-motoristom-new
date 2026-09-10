@@ -1,5 +1,6 @@
 import "server-only";
 
+import { taskWorkspaceSystemEnabled } from "./task-system-gate";
 import { telephonyStabilityEnabled } from "./telephony/stability";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -247,7 +248,8 @@ export async function setCallOutcome(
   const note = readString(input.note);
   const callbackMinutes = cleanCallbackMinutes(input.callbackMinutes);
   const label = outcomeLabels[input.outcome];
-  if (input.outcome === "callback" && telephonyStabilityEnabled()) {
+  const useCallbackContract = input.outcome === "callback" && (telephonyStabilityEnabled() || await taskWorkspaceSystemEnabled(supabase, organizationId));
+  if (useCallbackContract) {
     if (!actor) throw new TelephonyWorkflowError("Naplánovanie vyžaduje prihláseného dispečera.", 403);
     ensureUuid(input.callbackActionId, "callbackActionId");
     await throwOnResult(supabase.rpc("motorist_schedule_callback_v1", {
@@ -313,7 +315,7 @@ export async function setCallOutcome(
         .single(),
     );
 
-    if (input.outcome === "callback" && !telephonyStabilityEnabled()) {
+    if (input.outcome === "callback" && !useCallbackContract) {
       await createCallbackTaskIfNeeded(supabase, organizationId, call, actorId, callbackMinutes);
     }
   }

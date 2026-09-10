@@ -87,7 +87,7 @@ type CallCenterModuleProps = {
   onOpenCase: (caseId: string) => void;
   onAvailabilityAction: (action: TelephonyAvailabilityAction) => void;
   /** Console-owned outbound path for the callback queue (arms the browser phone). */
-  onCallbackCall?: (requestId: string) => Promise<void>;
+  onCallbackCall?: (requestId: string, verificationId?: string) => Promise<void>;
   onTelephonyChanged: () => void;
 };
 

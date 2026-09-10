@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     assertSameOriginRequest(request);
-    const actor = await requireDefaultMotoristActor(["dispatcher", "manager", "admin"]);
+    const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
     const { id } = await params;
     const body = (await request.json().catch(() => ({}))) as { snoozedUntil?: unknown; status?: unknown };
     if (typeof body.snoozedUntil === "string") {
@@ -15,7 +15,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         id: actor.profileId,
         organization_id: actor.organizationId,
       });
-      const notifications = await loadDispatchNotifications(actor.organizationId);
+      const notifications = await loadDispatchNotifications(actor.organizationId, actor.profileId);
 
       return Response.json({ notificationId: id, notifications });
     }
@@ -26,8 +26,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       throw new MutationError("Neplatný stav notifikácie.", 400);
     }
 
-    await updateNotificationStatus(id, status);
-    const notifications = await loadDispatchNotifications(actor.organizationId);
+    await updateNotificationStatus(id, status, { id: actor.profileId, organization_id: actor.organizationId });
+    const notifications = await loadDispatchNotifications(actor.organizationId, actor.profileId);
 
     return Response.json({ notificationId: id, notifications });
   } catch (error) {
