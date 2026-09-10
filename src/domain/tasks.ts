@@ -1,4 +1,4 @@
-import type { CasePriority, CaseTask, CaseTaskKind } from "./types";
+import type { CasePriority, CaseTask, CaseTaskKind, Operator } from "./types";
 
 export type TaskView = "mine" | "team" | "today" | "overdue" | "handover" | "done";
 
@@ -91,6 +91,18 @@ export function compareOperationalTasks<T extends Pick<CaseTask, "dueAt" | "prio
   }
 
   return dateValue(left.dueAt) - dateValue(right.dueAt);
+}
+
+/**
+ * Colleagues a task may be handed to. A profile that was only invited (or has
+ * been disabled) cannot sign in, so a task assigned to it never reaches
+ * anybody's "Moje" — and when the same person exists twice (an invited
+ * duplicate next to the real account) the picker would offer two identical
+ * names. Names of such profiles still resolve for display; they are only
+ * kept out of the choice.
+ */
+export function assignableOperators<T extends Pick<Operator, "accessStatus">>(operators: readonly T[]): T[] {
+  return operators.filter((operator) => operator.accessStatus === undefined || operator.accessStatus === "active");
 }
 
 export function defaultTaskTitle(kind: CaseTaskKind) {

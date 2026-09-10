@@ -260,6 +260,8 @@ export type Operator = {
   name: string;
   extension: string;
   status: OperatorStatus;
+  /** Access state of the profile: only an `active` colleague can be handed a task. Absent in mock data. */
+  accessStatus?: AccessStatus;
 };
 
 export type AccessUser = {
@@ -550,6 +552,8 @@ export type CaseTask = {
   createdBy?: string;
   completedBy?: string;
   completedAt?: string;
+  /** Row version from the database; lets a live update tell a newer copy from a stale one. */
+  updatedAt?: string;
 };
 
 export type TaskReminder = {

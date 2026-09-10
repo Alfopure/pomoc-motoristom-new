@@ -114,7 +114,7 @@ export function NotificationToastStack({ notifications, now, onMarkRead, onOpenC
                       className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
                     >
                       <Check size={13} />
-                      Vybavené
+                      Prečítané
                     </button>
                     {notification.taskId && notification.caseId && (
                       <button

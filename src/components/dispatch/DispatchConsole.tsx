@@ -53,6 +53,7 @@ import { phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
 import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { TELEPHONY_STALE_MESSAGE, useTelephonyConsole } from "./useTelephonyConsole";
 import { TaskPanel, type TaskCreateInput, type TaskDeleteInput, type TaskUpdateInput } from "./TaskPanel";
+import { hasLiveUpdates, mergeLiveUpdates, type LiveUpdatesResponse } from "./live-updates";
 import {
   DEFAULT_MOBILE_NAVIGATION_SHORTCUTS,
   DEFAULT_PINNED_NAVIGATION_VIEWS,
@@ -79,7 +80,7 @@ import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
 import { formatNotificationReminderTime, isNotificationForProfile, isNotificationReady, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
 import { isTaskOpen, taskPriorityLabels } from "@/domain/tasks";
-import type { AppRole, Branch, CallStatus, CaseTask, CustomerSharedLocation, DispatchCall, DispatchCase, DispatchNotification, FleetAsset, NotificationStatus, Operator, TimelineEvent } from "@/domain/types";
+import type { AppRole, Branch, CallStatus, CaseTask, DispatchCall, DispatchCase, FleetAsset, NotificationStatus, Operator, TimelineEvent } from "@/domain/types";
 import { requiresTowDestination } from "@/domain/case-card";
 import { caseAssistanceServiceName } from "@/lib/dispatch-calculations";
 import { createDispatchMapModel } from "@/lib/map-adapter";
@@ -122,17 +123,6 @@ type MobileShortcutItem = {
 type DispatchWorkspaceState = {
   kind: WorkspaceKind;
   mode: WorkspaceMode;
-};
-
-type LocationUpdatesResponse = {
-  checkedAt?: string;
-  error?: string;
-  notifications?: DispatchNotification[];
-  updates?: Array<{
-    caseId: string;
-    event: TimelineEvent;
-    location: CustomerSharedLocation;
-  }>;
 };
 
 const defaultCaseFilters: CaseFilters = {
@@ -1143,7 +1133,9 @@ export function DispatchConsole({
     };
   }, [source, syncDueNotifications]);
 
-  const pollCustomerLocationUpdates = useCallback(async () => {
+  // Customer locations, their notifications and colleagues' task changes: the
+  // case snapshot is otherwise only reloaded by this tab's own actions.
+  const pollLiveUpdates = useCallback(async () => {
     if (source !== "supabase" || locationUpdatePollInFlight.current) return;
     locationUpdatePollInFlight.current = true;
 
@@ -1153,18 +1145,18 @@ export function DispatchConsole({
         cache: "no-store",
         credentials: "same-origin",
       });
-      const result = (await response.json().catch(() => null)) as LocationUpdatesResponse | null;
+      const result = (await response.json().catch(() => null)) as LiveUpdatesResponse | null;
 
       if (!response.ok || !result?.checkedAt) {
         throw new Error(result?.error ?? "Nové polohy klientov sa nepodarilo obnoviť.");
       }
 
       locationUpdateCursorRef.current = result.checkedAt;
-      if ((result.updates?.length ?? 0) > 0 || (result.notifications?.length ?? 0) > 0) {
-        setDispatchData((current) => mergeCustomerLocationUpdates(current, result));
+      if (hasLiveUpdates(result)) {
+        setDispatchData((current) => mergeLiveUpdates(current, result));
       }
     } catch (error) {
-      console.warn("Customer location update poll failed:", error);
+      console.warn("Live update poll failed:", error);
     } finally {
       locationUpdatePollInFlight.current = false;
     }
@@ -1173,10 +1165,10 @@ export function DispatchConsole({
   useEffect(() => {
     if (source !== "supabase") return;
 
-    void pollCustomerLocationUpdates();
-    const interval = window.setInterval(() => void pollCustomerLocationUpdates(), 10_000);
+    void pollLiveUpdates();
+    const interval = window.setInterval(() => void pollLiveUpdates(), 10_000);
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") void pollCustomerLocationUpdates();
+      if (document.visibilityState === "visible") void pollLiveUpdates();
     };
 
     document.addEventListener("visibilitychange", refreshWhenVisible);
@@ -1186,7 +1178,7 @@ export function DispatchConsole({
       document.removeEventListener("visibilitychange", refreshWhenVisible);
       window.removeEventListener("focus", refreshWhenVisible);
     };
-  }, [pollCustomerLocationUpdates, source]);
+  }, [pollLiveUpdates, source]);
 
   useEffect(() => {
     const refreshNotificationClock = () => setNotificationNow(Date.now());
@@ -3161,40 +3153,6 @@ function applyMockNotificationSnooze(current: DispatchData, notificationId: stri
           }
         : notification,
     ),
-  };
-}
-
-function mergeCustomerLocationUpdates(current: DispatchData, result: LocationUpdatesResponse): DispatchData {
-  const latestByCaseId = new Map<string, NonNullable<LocationUpdatesResponse["updates"]>[number]>();
-
-  for (const update of result.updates ?? []) {
-    const previous = latestByCaseId.get(update.caseId);
-    if (!previous || dateValue(update.location.submittedAt) > dateValue(previous.location.submittedAt)) {
-      latestByCaseId.set(update.caseId, update);
-    }
-  }
-
-  const dispatchCases = current.dispatchCases.map((caseItem) => {
-    const update = latestByCaseId.get(caseItem.id);
-    if (!update || dateValue(caseItem.customerSharedLocation?.submittedAt) >= dateValue(update.location.submittedAt)) {
-      return caseItem;
-    }
-
-    return {
-      ...caseItem,
-      customerSharedLocation: update.location,
-      timeline: caseItem.timeline.some((event) => event.id === update.event.id)
-        ? caseItem.timeline
-        : [...caseItem.timeline, update.event],
-    };
-  });
-  const existingNotificationIds = new Set(current.notifications.map((notification) => notification.id));
-  const newNotifications = (result.notifications ?? []).filter((notification) => !existingNotificationIds.has(notification.id));
-
-  return {
-    ...current,
-    dispatchCases,
-    notifications: [...newNotifications, ...current.notifications],
   };
 }
 
