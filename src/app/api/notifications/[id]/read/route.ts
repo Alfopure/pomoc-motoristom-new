@@ -1,14 +1,14 @@
 import { MutationError, markNotificationRead } from "@/server/motorist-mutations";
-import { assertSameOriginRequest, requireDefaultMotoristOrgMember } from "@/server/api-auth";
+import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
 
 export const runtime = "nodejs";
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     assertSameOriginRequest(request);
-    await requireDefaultMotoristOrgMember();
+    const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
     const { id } = await params;
-    await markNotificationRead(id);
+    await markNotificationRead(id, { id: actor.profileId, organization_id: actor.organizationId });
 
     return Response.json({ notificationId: id });
   } catch (error) {

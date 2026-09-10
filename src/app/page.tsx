@@ -13,7 +13,7 @@ export default async function Home() {
     return <MotoristLogin message={authState.message} />;
   }
 
-  const dispatchData = await loadDispatchData();
+  const dispatchData = await loadDispatchData(authState.profile ? { organizationId: authState.profile.organizationId, profileId: authState.profile.profileId } : undefined);
 
   return (
     <DispatchConsole

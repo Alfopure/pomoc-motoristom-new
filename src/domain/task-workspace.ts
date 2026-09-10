@@ -1,0 +1,21 @@
+import type { CaseTask, TaskReminderChannel } from "./types";
+export type TaskCaseLink = { caseId: string; caseNumber: string; status: string };
+export type TaskOrigin = { sourceType: "callback" | "sms" | "location"; sourceId: string; originCaseId: string; cancelledAt: string | null };
+export type WorkspaceTask = CaseTask & {
+  caseIds: string[];
+  caseLinks: TaskCaseLink[];
+  revision: number;
+  originLocked: boolean;
+  provenance: "manual" | "proven" | "ambiguous";
+  origins: TaskOrigin[];
+  createdAt?: string;
+  updatedAt: string;
+  reminderAt?: string | null;
+  reminderChannels?: TaskReminderChannel[];
+};
+export type TaskMessage = { id: string; taskId: string; authorProfileId: string; authorName: string; body: string; createdAt: string; clientMessageId: string };
+export type TaskMessageCursor = { createdAt: string; id: string };
+export type TaskMessagePage = { messages: TaskMessage[]; nextCursor: TaskMessageCursor | null };
+export const TASK_MESSAGE_LIMIT = 10_000;
+export const TASK_MESSAGE_PAGE_SIZE = 50;
+export const TASK_LINK_LIMIT = 100;

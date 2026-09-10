@@ -2,6 +2,8 @@ export const MAX_PINNED_NAVIGATION_VIEWS = 3;
 
 export const PINNABLE_NAVIGATION_VIEWS = [
   "tasks",
+  "notes",
+  "tools",
   "cases",
   "call-center",
   "attendance",
@@ -19,6 +21,8 @@ export const MAX_MOBILE_NAVIGATION_SHORTCUTS = 3;
 export const MOBILE_NAVIGATION_SHORTCUTS = [
   "dispatch-cases",
   "tasks",
+  "notes",
+  "tools",
   "dispatch-map",
   "call-center",
   "attendance",

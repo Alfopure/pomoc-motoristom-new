@@ -13,7 +13,7 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type OutboundBody = { to?: unknown; caseId?: unknown; lineId?: unknown };
+type OutboundBody = { to?: unknown; caseId?: unknown; lineId?: unknown; callbackTargetVerificationId?: unknown };
 
 /**
  * Click-to-call: dials the operator's own WebRTC leg first, the customer is
@@ -33,6 +33,7 @@ export async function POST(request: Request) {
       to: readString(body.to) ?? "",
       caseId: readString(body.caseId),
       lineId: readString(body.lineId),
+      ...(readString(body.callbackTargetVerificationId) ? { callbackTargetVerificationId: readString(body.callbackTargetVerificationId)! } : {}),
     });
 
     return Response.json({ ok: true, ...result }, { status: 201 });

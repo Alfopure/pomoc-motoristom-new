@@ -131,6 +131,8 @@ export type CallCenterCall = {
 };
 
 export type DispatchData = {
+  tasks?: import("@/domain/task-workspace").WorkspaceTask[];
+  workspaceCapabilities?: import("@/domain/workspace-capabilities").WorkspaceCapabilities;
   attendance: AttendanceData;
   users: AccessUser[];
   operators: Operator[];

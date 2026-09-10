@@ -1,7 +1,7 @@
 import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { buildNotificationDedupeKey, buildReminderDedupeKey, buildTaskNotificationText, notificationKindForTask, notificationSeverityForTask } from "@/domain/notifications";
+import { buildNotificationDedupeKey, buildTaskNotificationText, notificationKindForTask, notificationSeverityForTask } from "@/domain/notifications";
 import type { CaseTask } from "@/domain/types";
 import type { Database } from "@/lib/supabase/database.types";
 import { buildAppUrl, escapeHtml, sendEmail } from "./email-delivery";
@@ -19,51 +19,20 @@ export async function createDefaultTaskReminder(
   supabase: AdminClient,
   input: {
     organizationId: string;
-    caseId: string;
-    task: Pick<CaseTaskRow, "id" | "assigned_to" | "due_at">;
+    caseId: string | null;
+    task: Pick<CaseTaskRow, "id" | "assigned_to" | "due_at"> & { reminder_at?: string | null };
     createdBy?: string | null;
     channels?: ReminderChannel[];
   },
 ) {
-  if (!input.task.due_at) {
-    return null;
-  }
-
-  const recipientProfileId = input.task.assigned_to ?? null;
-  const visibility = recipientProfileId ? "private" : "team";
-  const scheduledFor = new Date(input.task.due_at).toISOString();
-  const channels = normalizeChannels(input.channels);
-  const dedupeKey = buildReminderDedupeKey({
-    taskId: input.task.id,
-    recipientProfileId,
-    scheduledFor,
+  if (!input.task.due_at && !input.task.reminder_at) return null;
+  // The task transaction owns generation/cancellation. Retrying this bridge
+  // cannot revive a cancelled generation or allocate duplicate recipients.
+  const result = await supabase.rpc("motorist_ensure_task_reminders", {
+    p_organization_id: input.organizationId, p_task_id: input.task.id,
+    p_actor_id: input.createdBy ?? null,
+    p_channels: input.channels ? normalizeChannels(input.channels) : null,
   });
-  const result = await supabase
-    .from("motorist_task_reminders")
-    .upsert({
-      organization_id: input.organizationId,
-      case_id: input.caseId,
-      task_id: input.task.id,
-      recipient_profile_id: recipientProfileId,
-      visibility,
-      channels,
-      scheduled_for: scheduledFor,
-      status: "pending",
-      dedupe_key: dedupeKey,
-      created_by: input.createdBy ?? null,
-      payload: { source: "task_default_reminder" },
-    }, { onConflict: "organization_id,dedupe_key", ignoreDuplicates: true })
-    .select("*")
-    .maybeSingle();
-
-  if (isDuplicateError(result.error)) {
-    return null;
-  }
-
-  if (isTaskReminderSchemaMiss(result.error)) {
-    return null;
-  }
-
   throwOnSupabaseError(result);
   return result.data;
 }
@@ -76,56 +45,42 @@ export async function createTaskAssignmentNotification(
   supabase: AdminClient,
   input: {
     organizationId: string;
-    caseId: string;
+    caseId: string | null;
     task: Pick<CaseTaskRow, "id" | "assigned_to" | "created_at" | "due_at" | "kind" | "priority" | "status" | "title" | "updated_at">;
   },
 ) {
   if (!input.task.assigned_to || input.task.status === "done") return null;
-
-  const caseResult = await supabase
-    .from("motorist_cases")
-    .select("case_number")
-    .eq("organization_id", input.organizationId)
-    .eq("id", input.caseId)
-    .maybeSingle();
-
-  if (caseResult.error) throwOnSupabaseError(caseResult);
-
-  const taskView = mapTaskRow(input.task as CaseTaskRow);
-  const caseNumber = caseResult.data?.case_number;
-  const version = input.task.updated_at || input.task.created_at;
-  const title = caseNumber ? `${caseNumber}: nová pridelená úloha` : "Nová pridelená úloha";
-  const body = `${input.task.title} · termín ${formatAssignmentDue(input.task.due_at)}`;
-  const result = await supabase
-    .from("motorist_notifications")
-    .upsert({
-      organization_id: input.organizationId,
-      case_id: input.caseId,
-      task_id: input.task.id,
-      reminder_id: null,
-      recipient_profile_id: input.task.assigned_to,
-      visibility: "private",
-      kind: "task_due",
-      severity: notificationSeverityForTask(taskView),
-      title,
-      body,
-      status: "unread",
-      delivery_status: "in_app",
-      dedupe_key: `task-assigned:${input.task.id}:${input.task.assigned_to}:${version}`,
-      payload: { source: "task_assignment", assigned_at: version },
-    }, { onConflict: "organization_id,dedupe_key", ignoreDuplicates: true })
-    .select("id")
-    .maybeSingle();
-
-  if (isDuplicateError(result.error) || isNotificationSchemaMiss(result.error)) return null;
+  // The database owns the stable assignment generation and bell event. This
+  // adapter repairs/reuses that event, never inserts a timestamp-keyed duplicate.
+  const result = await supabase.rpc("motorist_ensure_task_assignment", { p_organization_id: input.organizationId, p_task_id: input.task.id });
   throwOnSupabaseError(result);
-  if (result.data) {
-    await sendTaskPush(supabase, {
-      organizationId: input.organizationId, recipientProfileId: input.task.assigned_to,
-      notificationId: result.data.id, taskId: input.task.id, title, body,
-    });
-  }
+  await deliverTaskAssignmentNotifications(supabase, input.organizationId, input.task.id);
   return result.data;
+}
+
+/** Durable assignment outbox; also drained by the existing reminder cron/poll.
+ * External delivery is at least once after an ambiguous crash, with the stable
+ * notification ID used as the browser tag. Bell insertion itself is exactly once. */
+export async function deliverTaskAssignmentNotifications(supabase: AdminClient, organizationId: string, taskId?: string) {
+  const claimed = await supabase.rpc("motorist_claim_task_assignments", { p_organization_id: organizationId, p_task_id: taskId ?? null, p_limit: 50 });
+  throwOnSupabaseError(claimed);
+  const jobs = claimed.data as unknown as Array<{ notificationId: string; taskId: string; recipientProfileId: string; leaseId: string; title: string; body: string }>;
+  if (!Array.isArray(jobs)) throw new Error("Assignment delivery response unavailable");
+  const totals = { processed: 0, sent: 0, failed: 0 };
+  for (const job of jobs) {
+    let success = false;
+    try {
+      const delivery = await sendTaskPush(supabase, { organizationId, recipientProfileId: job.recipientProfileId,
+        notificationId: job.notificationId, taskId: job.taskId, title: job.title, body: job.body });
+      success = delivery.failed === 0;
+    } catch { /* The durable lease is completed as retryable below. */ }
+    const finished = await supabase.rpc("motorist_finish_task_assignment", { p_organization_id: organizationId,
+      p_notification_id: job.notificationId, p_lease_id: job.leaseId, p_success: success });
+    throwOnSupabaseError(finished);
+    totals.processed += 1;
+    if (success) totals.sent += 1; else totals.failed += 1;
+  }
+  return totals;
 }
 
 /**
@@ -158,21 +113,14 @@ export async function latestTaskReminderChannels(supabase: AdminClient, organiza
 }
 
 export async function cancelPendingTaskReminders(supabase: AdminClient, organizationId: string, taskId: string) {
-  const result = await supabase
-    .from("motorist_task_reminders")
-    .update({ status: "cancelled", last_error: null })
-    .eq("organization_id", organizationId)
-    .eq("task_id", taskId)
-    .in("status", ["pending", "processing", "failed"]);
-
-  if (isTaskReminderSchemaMiss(result.error)) {
-    return;
-  }
-
+  // The task trigger already cancelled old work atomically. An old adapter
+  // must not cancel the newly created generation after that transaction.
+  const result = await supabase.rpc("motorist_cancel_stale_task_reminders", { p_organization_id: organizationId, p_task_id: taskId });
   throwOnSupabaseError(result);
 }
 
 export async function materializeDueTaskReminders(supabase: AdminClient, organizationId: string, now = new Date(), limit = 50) {
+  await deliverTaskAssignmentNotifications(supabase, organizationId);
   await recoverStaleProcessingReminders(supabase, organizationId, now);
 
   const dueResult = await supabase
@@ -200,12 +148,13 @@ export async function materializeDueTaskReminders(supabase: AdminClient, organiz
   const casesById = await loadCasesById(
     supabase,
     organizationId,
-    reminders.map((reminder) => reminder.case_id),
+    reminders.map((reminder) => reminder.case_id).filter((id): id is string => Boolean(id)),
   );
   const profilesById = await loadProfilesById(
     supabase,
     organizationId,
     reminders.map((reminder) => reminder.recipient_profile_id).filter((id): id is string => Boolean(id)),
+    reminders.some((reminder) => reminder.visibility === "team"),
   );
 
   const totals = { processed: 0, sent: 0, cancelled: 0, failed: 0 };
@@ -215,29 +164,33 @@ export async function materializeDueTaskReminders(supabase: AdminClient, organiz
 
     const task = tasksById.get(reminder.task_id);
 
-    if (!task || task.status === "done") {
+    if (!task || !isCurrentTaskReminder(reminder, task)) {
       await updateReminderStatus(supabase, organizationId, reminder.id, "cancelled", now);
       totals.cancelled += 1;
       continue;
     }
 
+    if (reminder.visibility === "private" && (!reminder.recipient_profile_id || !profilesById.has(reminder.recipient_profile_id))) {
+      await updateReminderStatus(supabase, organizationId, reminder.id, "cancelled", now);
+      totals.cancelled += 1;
+      continue;
+    }
     const locked = await lockReminder(supabase, organizationId, reminder.id, now);
 
     if (!locked) {
       continue;
     }
 
-    const caseRow = casesById.get(reminder.case_id);
+    const caseRow = reminder.case_id ? casesById.get(reminder.case_id) : undefined;
     const profile = reminder.recipient_profile_id ? profilesById.get(reminder.recipient_profile_id) : undefined;
-    const delivery = await createNotificationForReminder({
-      supabase,
-      organizationId,
-      reminder,
-      task,
-      caseRow,
-      recipientProfile: profile,
-      now,
-    });
+    const recipients = reminder.visibility === "private" ? (profile ? [profile] : [])
+      : [...profilesById.values()].filter((recipient) => !task.assigned_to || task.assigned_to === recipient.id);
+    const deliveries = [];
+    for (const recipientProfile of recipients) {
+      deliveries.push(await createNotificationForReminder({ supabase, organizationId, reminder, task, caseRow, recipientProfile, now }));
+    }
+    const failure = deliveries.find((delivery) => !delivery.ok);
+    const delivery = failure ?? { ok: true as const };
 
     if (delivery.ok) {
       await updateReminderStatus(supabase, organizationId, reminder.id, "sent", now);
@@ -277,18 +230,10 @@ async function createNotificationForReminder(input: {
   const dedupeKey = buildNotificationDedupeKey({
     taskId: input.task.id,
     reminderId: input.reminder.id,
-    recipientProfileId: input.reminder.recipient_profile_id,
+    recipientProfileId: input.recipientProfile?.id,
     scheduledFor: input.reminder.scheduled_for,
   });
   const text = buildTaskNotificationText(taskView, input.caseRow?.case_number);
-  const emailResult = await maybeSendReminderEmail({
-    reminder: input.reminder,
-    task: taskView,
-    caseRow: input.caseRow,
-    recipientProfile: input.recipientProfile,
-    dedupeKey,
-  });
-  const deliveryStatus = emailResult.status === "sent" ? "email_sent" : emailResult.status === "failed" ? "email_failed" : "in_app";
   const notificationResult = await input.supabase
     .from("motorist_notifications")
     .upsert({
@@ -296,20 +241,20 @@ async function createNotificationForReminder(input: {
       case_id: input.reminder.case_id,
       task_id: input.task.id,
       reminder_id: input.reminder.id,
-      recipient_profile_id: input.reminder.recipient_profile_id,
-      visibility: input.reminder.visibility,
+      recipient_profile_id: input.recipientProfile!.id,
+      visibility: "private",
       kind: notificationKindForTask(taskView, input.now),
       severity: notificationSeverityForTask(taskView, input.now),
       title: text.title,
       body: text.body,
       status: "unread",
-      delivery_status: deliveryStatus,
+      delivery_status: "in_app",
       dedupe_key: dedupeKey,
       payload: {
         source: "task_reminder_runner",
         scheduled_for: input.reminder.scheduled_for,
         channels: input.reminder.channels,
-        email: emailResult,
+        generation: input.reminder.generation ?? 0,
       },
     }, { onConflict: "organization_id,dedupe_key", ignoreDuplicates: true })
     .select("*")
@@ -331,8 +276,19 @@ async function createNotificationForReminder(input: {
     return { ok: true };
   }
 
+  // Insert/SQL generation validation precedes all external side effects.
+  // A duplicate generation is already delivered, so it never sends again.
+  if (input.reminder.channels.includes("email")) {
+    const email = await maybeSendReminderEmail({ reminder: input.reminder, task: taskView, caseRow: input.caseRow, recipientProfile: input.recipientProfile, dedupeKey });
+    const updated = await input.supabase.from("motorist_notifications").update({
+      delivery_status: email.status === "sent" ? "email_sent" : email.status === "failed" ? "email_failed" : "in_app",
+      payload: { source: "task_reminder_runner", scheduled_for: input.reminder.scheduled_for, channels: input.reminder.channels, generation: input.reminder.generation ?? 0, email },
+    }).eq("organization_id", input.organizationId).eq("id", notificationResult.data.id);
+    throwOnSupabaseError(updated);
+  }
+
   await sendTaskPush(input.supabase, {
-    organizationId: input.organizationId, recipientProfileId: input.reminder.recipient_profile_id,
+    organizationId: input.organizationId, recipientProfileId: input.recipientProfile!.id,
     notificationId: notificationResult.data.id, taskId: input.task.id, title: text.title, body: text.body,
   });
   return { ok: true };
@@ -354,10 +310,10 @@ async function maybeSendReminderEmail(input: {
   }
 
   const caseNumber = input.caseRow?.case_number ?? "prípad";
-  const url = buildAppUrl("/");
+  const url = buildAppUrl(`/?task=${encodeURIComponent(input.task.id)}`);
   const subject = `${caseNumber}: ${input.task.title}`;
-  const text = `${input.task.title}\nTermín: ${input.task.dueAt}\n${url}`;
-  const html = `<p><strong>${escapeHtml(input.task.title)}</strong></p><p>Termín: ${escapeHtml(input.task.dueAt)}</p><p><a href="${escapeHtml(url)}">Otvoriť dispečing</a></p>`;
+  const text = `${input.task.title}\nTermín: ${input.task.dueAt || "bez termínu"}\n${url}`;
+  const html = `<p><strong>${escapeHtml(input.task.title)}</strong></p><p>Termín: ${escapeHtml(input.task.dueAt || "bez termínu")}</p><p><a href="${escapeHtml(url)}">Otvoriť dispečing</a></p>`;
   const result = await sendEmail({
     to: input.recipientProfile.email,
     subject,
@@ -389,11 +345,17 @@ async function lockReminder(supabase: AdminClient, organizationId: string, remin
 }
 
 async function updateReminderStatus(supabase: AdminClient, organizationId: string, reminderId: string, status: TaskReminderRow["status"], now: Date) {
+  if (status === "cancelled") {
+    const result = await supabase.rpc("motorist_cancel_unavailable_reminder", { p_organization_id: organizationId, p_reminder_id: reminderId });
+    throwOnSupabaseError(result);
+    return;
+  }
   const result = await supabase
     .from("motorist_task_reminders")
     .update({ status, last_attempt_at: now.toISOString(), last_error: null })
     .eq("organization_id", organizationId)
-    .eq("id", reminderId);
+    .eq("id", reminderId)
+    .eq("status", "processing");
 
   throwOnSupabaseError(result);
 }
@@ -408,7 +370,8 @@ async function updateReminderFailure(supabase: AdminClient, organizationId: stri
       last_error: error,
     })
     .eq("organization_id", organizationId)
-    .eq("id", reminder.id);
+    .eq("id", reminder.id)
+    .eq("status", "processing");
 
   throwOnSupabaseError(result);
 }
@@ -439,14 +402,15 @@ async function loadCasesById(supabase: AdminClient, organizationId: string, case
   return new Map((result.data ?? []).map((caseRow) => [caseRow.id, caseRow]));
 }
 
-async function loadProfilesById(supabase: AdminClient, organizationId: string, profileIds: string[]) {
+async function loadProfilesById(supabase: AdminClient, organizationId: string, profileIds: string[], includeTeam = false) {
   const ids = unique(profileIds);
 
-  if (ids.length === 0) {
+  if (ids.length === 0 && !includeTeam) {
     return new Map<string, ProfileRow>();
   }
 
-  const result = await supabase.from("motorist_profiles").select("*").eq("organization_id", organizationId).in("id", ids);
+  const query = supabase.from("motorist_profiles").select("*").eq("organization_id", organizationId).eq("active", true).in("role", ["dispatcher", "senior_dispatcher", "manager", "admin"]);
+  const result = await (includeTeam ? query : query.in("id", ids));
   throwOnSupabaseError(result);
 
   return new Map((result.data ?? []).map((profile) => [profile.id, profile]));
@@ -455,10 +419,10 @@ async function loadProfilesById(supabase: AdminClient, organizationId: string, p
 function mapTaskRow(task: CaseTaskRow): CaseTask {
   return {
     id: task.id,
-    caseId: task.case_id,
+    caseId: task.case_id ?? "",
     title: task.title,
     assignedTo: task.assigned_to ?? "unassigned",
-    dueAt: task.due_at ?? task.updated_at,
+    dueAt: task.due_at ?? "",
     status: task.status,
     priority: task.priority ?? "normal",
     kind: task.kind ?? "other",
@@ -466,6 +430,13 @@ function mapTaskRow(task: CaseTaskRow): CaseTask {
     completedBy: task.completed_by ?? undefined,
     completedAt: task.completed_at ?? undefined,
   };
+}
+
+export function isCurrentTaskReminder(reminder: Pick<TaskReminderRow, "generation" | "visibility" | "recipient_profile_id" | "scheduled_for" | "payload">, task: Pick<CaseTaskRow, "status" | "assigned_to" | "due_at" | "reminder_generation"> & { reminder_at?: string | null }) {
+  if (task.status === "done" || (reminder.generation ?? 0) !== (task.reminder_generation ?? 0)) return false;
+  if (task.assigned_to && reminder.visibility === "private" && reminder.recipient_profile_id !== task.assigned_to) return false;
+  const source = reminder.payload && typeof reminder.payload === "object" && !Array.isArray(reminder.payload) ? reminder.payload.source : null;
+  return (source !== "task_default_reminder" && source !== "task_custom_reminder") || new Date(reminder.scheduled_for).getTime() === new Date(task.reminder_at ?? task.due_at ?? "").getTime();
 }
 
 function isBackoffElapsed(reminder: TaskReminderRow, now: Date) {
@@ -485,19 +456,7 @@ function normalizeChannels(channels: ReminderChannel[] = ["in_app"]) {
   return [...new Set(normalized.length > 0 ? normalized : ["in_app"])];
 }
 
-function formatAssignmentDue(value: string | null) {
-  if (!value) return "bez termínu";
-  const dueAt = new Date(value);
-  if (!Number.isFinite(dueAt.getTime())) return value;
 
-  return dueAt.toLocaleString("sk-SK", {
-    day: "2-digit",
-    month: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "Europe/Bratislava",
-  });
-}
 
 function unique(values: string[]) {
   return [...new Set(values.filter(Boolean))];

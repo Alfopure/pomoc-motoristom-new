@@ -3,7 +3,9 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Archive, ArrowUpRight, BookUser, Building2, CarFront, Check, ChevronRight, Edit3, Globe2, Link2, Loader2, Mail, MapPin, Phone, Plus, RotateCcw, Save, Search, UserRound, X } from "lucide-react";
 import { CONTACT_ROLES, DIRECTORY_FOCUS, DIRECTORY_KINDS, DIRECTORY_LABELS, directoryDraft, directoryKey, directoryRelations, emptyDirectoryDraft, normalizeDirectorySearch, safeDirectoryWebsite, type DirectoryDraft, type DirectoryEntry, type DirectoryKind } from "@/lib/directory";
+import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
 import { isDialablePhoneInput } from "@/lib/telephony/phone";
+import { CallbackPolicyPanel } from "./CallbackPolicyPanel";
 import { GooglePlaceAutocomplete } from "../GooglePlaceAutocomplete";
 import { useReplacementVehicleAvailability } from "../useReplacementVehicleAvailability";
 
@@ -105,21 +107,28 @@ function EntryDetails({ entry, entries, canEdit, onOpen, onEdit, onNewContact, o
   const relations = directoryRelations(entry, entries);
   const people = entries.filter(item => item.kind === "contact" && entry.contactIds.includes(item.id));
   async function call() {
-    if (!onDial || dialing) return;
+    if (dialing) return;
     setDialing(true); setCallError(null);
-    try { await onDial(entry.phone); } catch (caught) { setCallError(caught instanceof Error ? caught.message : "Hovor sa nepodarilo spustiť."); }
+    try {
+      if (onDial) await onDial(entry.phone);
+      else {
+        const target = await requestCallbackTargetConfirmation(entry.phone);
+        if (target) window.location.assign(`tel:${target.dialNumber.replace(/[^+\d]/g, "")}`);
+      }
+    } catch (caught) { setCallError(caught instanceof Error ? caught.message : "Hovor sa nepodarilo spustiť."); }
     finally { setDialing(false); }
   }
   return <div className="space-y-7">
     <div className="flex flex-wrap items-center gap-2"><span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${entry.active ? "bg-emerald-50 text-emerald-700" : "bg-zinc-100 text-zinc-500"}`}>{entry.active ? <Check size={12} /> : <Archive size={12} />}{entry.active ? "Aktívny záznam" : "V archíve"}</span>{entry.focus && <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-xs text-zinc-600">{DIRECTORY_FOCUS[entry.focus]}</span>}{entry.kind === "contact" && <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-xs text-zinc-600">{CONTACT_ROLES[entry.role]}</span>}</div>
     <div className="space-y-3">
-      <DetailLine icon={<Phone size={18} />} label="Telefón">{entry.phone ? <div className="flex flex-wrap items-center gap-3"><span className="break-all font-medium text-zinc-900">{entry.phone}</span>{isDialablePhoneInput(entry.phone) && (onDial ? <button type="button" onClick={() => void call()} disabled={dialing} className="inline-flex min-h-9 items-center gap-1.5 rounded-md bg-zinc-900 px-3 text-xs font-semibold text-white disabled:opacity-50">{dialing ? <Loader2 size={13} className="animate-spin" /> : <Phone size={13} />}Zavolať</button> : <a className="inline-flex min-h-9 items-center rounded-md bg-zinc-100 px-3 text-xs font-semibold" href={`tel:${entry.phone.replace(/[^+\d]/g, "")}`}>Zavolať</a>)}</div> : <span className="text-zinc-400">Nie je doplnený</span>}</DetailLine>
+      <DetailLine icon={<Phone size={18} />} label="Telefón">{entry.phone ? <div className="flex flex-wrap items-center gap-3"><span className="break-all font-medium text-zinc-900">{entry.phone}</span>{isDialablePhoneInput(entry.phone) && <button type="button" onClick={() => void call()} disabled={dialing} className="inline-flex min-h-11 items-center gap-1.5 rounded-md bg-zinc-900 px-3 text-xs font-semibold text-white disabled:opacity-50">{dialing ? <Loader2 size={13} className="animate-spin" /> : <Phone size={13} />}Zavolať</button>}</div> : <span className="text-zinc-400">Nie je doplnený</span>}</DetailLine>
       <DetailLine icon={<Mail size={18} />} label="E-mail">{entry.email ? <a href={`mailto:${encodeURIComponent(entry.email)}`} className="break-all text-zinc-900 underline decoration-zinc-300 underline-offset-4">{entry.email}</a> : <span className="text-zinc-400">Nie je doplnený</span>}</DetailLine>
       {entry.address && <DetailLine icon={<MapPin size={18} />} label="Adresa"><span className="block break-words">{entry.address}</span><a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(entry.location ? `${entry.location.lat},${entry.location.lng}` : entry.address)}`} target="_blank" rel="noreferrer" className="mt-1 inline-flex min-h-8 items-center gap-1 text-xs font-medium text-zinc-500 underline underline-offset-4">Zobraziť na mape<ArrowUpRight size={12} /></a></DetailLine>}
       {entry.ico && <DetailLine icon={<Building2 size={18} />} label="IČO">{entry.ico}</DetailLine>}
       {website && <DetailLine icon={<Globe2 size={18} />} label="Web"><a href={website} target="_blank" rel="noreferrer" className="break-all underline decoration-zinc-300 underline-offset-4">{entry.website}<ArrowUpRight size={12} className="ml-1 inline" /></a></DetailLine>}
       {callError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{callError}</p>}
     </div>
+    {entry.kind === "contact" && <CallbackPolicyPanel entry={entry} entries={entries} canEdit={canEdit} />}
     {entry.kind === "branch" && <BranchCapacity entry={entry} />}
     {relations.length > 0 && <section><h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-zinc-900"><Link2 size={16} />{entry.kind === "contact" ? "Priradené firmy a pobočky" : entry.kind === "branch" ? "Patrí k spoločnosti" : "Pobočky"}</h3><div className="space-y-2">{relations.map(item => <RelatedEntry key={directoryKey(item)} entry={item} onOpen={onOpen} />)}</div></section>}
     {entry.kind !== "contact" && <section className="border-t border-zinc-200 pt-5"><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-900"><UserRound size={16} />Kontaktné osoby <span className="text-zinc-400">{people.length}</span></h3>{canEdit && <button type="button" onClick={() => onNewContact(entry)} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 text-xs font-semibold"><Plus size={14} />Nová osoba</button>}</div><div className="space-y-2">{people.map(person => <RelatedEntry key={person.id} entry={person} onOpen={onOpen} />)}{people.length === 0 && <p className="rounded-lg bg-zinc-50 p-4 text-sm text-zinc-500">Zatiaľ nie je priradená žiadna kontaktná osoba.</p>}</div>{canEdit && <button type="button" onClick={() => onEdit(entry)} className="mt-2 inline-flex min-h-9 items-center gap-1.5 text-xs font-semibold text-zinc-600 underline underline-offset-4"><Link2 size={13} />Priradiť existujúcu osobu</button>}</section>}

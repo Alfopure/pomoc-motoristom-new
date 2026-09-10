@@ -201,6 +201,24 @@ describe('authoritative conference contact snapshot',()=>{
     const replay=await verify();expect(replay).toMatchObject({retry:false,reason:'already_verified',proof:result.proof});
     expect(fake.of('request')).toHaveLength(1);
   });
+  it.each(['joined', 'left'] as const)('R09: monitor %s during verification preserves the exact audible pair', async status => {
+    const { state, fake, rows, verify } = candidate();
+    const monitor = { ...rows[0], id: 'participant-monitor', call_control_id: 'supervisor-cc', call_leg_id: 'leg-supervisor', muted: true, status };
+    vi.spyOn(fake.client, 'request').mockImplementationOnce(async () => {
+      observe(state, event(`conference.participant.${status}`, 'supervisor-cc', end, { conferenceId: 'conference-a' }));
+      return { data: [...rows, monitor], meta: { page_number: 1 } } as never;
+    });
+    const result = await verify();
+    expect(result.proof?.conferenceSnapshot?.participants.map(row => row.callControlId)).toEqual(['customer-cc', 'operator-cc']);
+    expect(result.proof?.operatorProfileId).toBe('profile');
+    expect(result.history.operations).toHaveLength(1);
+    expect(result.history.operations[0].endedAt).toBeNull();
+  });
+  it('R09: an audible monitor cannot substitute for a missing customer or operator', async () => {
+    const { fake, rows, verify } = candidate();
+    fake.setConferenceParticipants('conference-a', [rows[0], { ...rows[1], id: 'participant-monitor', call_control_id: 'supervisor-cc', call_leg_id: 'leg-supervisor' }]);
+    expect(await verify()).toMatchObject({ proof: null, retry: true, reason: 'pair_not_observed' });
+  });
   it('query failure stays retryable without creating proof or issuing any audio command',async()=>{
     const {fake,verify}=candidate();fake.failNext('request','injected read failure');
     expect(await verify()).toMatchObject({proof:null,retry:true,reason:'provider_query_failed',history:{proofs:[]}});

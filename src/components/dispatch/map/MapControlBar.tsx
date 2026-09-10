@@ -1,7 +1,7 @@
 "use client";
 
 import type { LucideIcon } from "lucide-react";
-import { Car, Eraser, MapPin, MapPinned, Maximize2, Minimize2, Navigation, Route, Search, SlidersHorizontal, Truck } from "lucide-react";
+import { Car, Eraser, MapPin, MapPinned, MoreHorizontal, Maximize2, Minimize2, Navigation, Route, Search, SlidersHorizontal, Truck } from "lucide-react";
 
 export type FleetLayerKey = "tow" | "replacement_car";
 
@@ -54,11 +54,11 @@ export function MapControlBar({
   return (
     <div
       aria-label="Ovládanie mapy"
-      className="pointer-events-auto flex max-w-full shrink-0 flex-nowrap items-center gap-1 overflow-x-auto rounded-xl bg-white/95 p-1 shadow-sm ring-1 ring-zinc-200 backdrop-blur [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      className="pointer-events-auto relative z-20 flex max-w-full shrink-0 flex-wrap items-center gap-1 rounded-xl bg-white/95 p-1 shadow-sm ring-1 ring-zinc-200 backdrop-blur [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       role="toolbar"
     >
       <IconToggle active={activePanel === "search"} icon={Search} label="Hľadať miesto" onClick={() => onTogglePanel("search")} />
-      <Chip active={plannerOpen} icon={Route} label="Trasa" onClick={() => onTogglePanel("route-planner")} />
+      <Chip active={plannerOpen} icon={Route} label="Plánovač" onClick={() => onTogglePanel("route-planner")} />
       {!expandedWorkspace && showCaseTools && (
         <IconToggle active={activePanel === "addresses"} icon={MapPin} label="Adresy zásahu" onClick={() => onTogglePanel("addresses")} />
       )}
@@ -67,7 +67,6 @@ export function MapControlBar({
 
       {showCaseTools && <Chip active={layers.route} icon={Route} label="Trasa zásahu" onClick={onToggleRoute} />}
       {!plannerOpen && <>
-      <Chip active={layers.branches} icon={MapPinned} label="Pobočky" onClick={onToggleBranches} />
       <Chip active={layers.fleet.tow} icon={Truck} label="Odťahovky" onClick={() => onToggleFleet("tow")} />
       <Chip active={layers.fleet.replacement_car} icon={Car} label="Náhradné" onClick={() => onToggleFleet("replacement_car")} />
       </>}
@@ -81,19 +80,14 @@ export function MapControlBar({
         />
       )}
 
-      {!expandedWorkspace && showCaseTools && <Divider />}
-
-      {!compactWorkspace && showCaseTools && <Chip active={planOpen} icon={Navigation} label="Plán" onClick={onTogglePlan} />}
-      {!expandedWorkspace && !plannerOpen && (
-        <IconToggle
-          active={focusMode}
-          icon={focusMode ? Minimize2 : Maximize2}
-          label={focusMode ? "Späť z focusu" : "Focus mapa"}
-          onClick={onToggleFocus}
-        />
-      )}
-
-      <Divider />
+      <details className="group relative ml-auto shrink-0">
+        <summary role="button" aria-label="Viac ovládania mapy" className="flex min-h-11 min-w-11 cursor-pointer list-none items-center justify-center gap-1 rounded-lg px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-100 lg:min-h-8 [&::-webkit-details-marker]:hidden">
+          <MoreHorizontal size={16} /> Viac
+        </summary>
+        <div className="absolute right-0 top-full z-30 mt-2 flex min-w-48 flex-col items-stretch gap-1 rounded-xl bg-white p-2 shadow-lg ring-1 ring-zinc-200">
+          {!plannerOpen && <Chip active={layers.branches} icon={MapPinned} label="Pobočky" onClick={onToggleBranches} />}
+          {!compactWorkspace && showCaseTools && <Chip active={planOpen} icon={Navigation} label="Plán zásahu" onClick={onTogglePlan} />}
+          {!expandedWorkspace && !plannerOpen && <Chip active={focusMode} icon={focusMode ? Minimize2 : Maximize2} label={focusMode ? "Späť z focusu" : "Focus mapa"} onClick={onToggleFocus} />}
 
       <button
         type="button"
@@ -101,11 +95,13 @@ export function MapControlBar({
         disabled={!canClear}
         title="Vyčistiť mapu"
         aria-label="Vyčistiť mapu"
-        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-zinc-600 transition hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:text-zinc-300 disabled:hover:bg-transparent disabled:hover:text-zinc-300"
+        className="inline-flex min-h-11 lg:min-h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-zinc-600 transition hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:text-zinc-300 disabled:hover:bg-transparent disabled:hover:text-zinc-300"
       >
         <Eraser size={14} className="shrink-0" />
         <span className="hidden sm:inline">Vyčistiť</span>
       </button>
+        </div>
+      </details>
     </div>
   );
 }
@@ -129,7 +125,7 @@ function Chip({
       onClick={onClick}
       aria-pressed={active}
       title={label}
-      className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold transition ${
+      className={`inline-flex min-h-11 lg:min-h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold transition ${
         active ? "bg-zinc-950 text-white shadow-sm" : "text-zinc-700 hover:bg-zinc-100"
       }`}
     >
@@ -156,7 +152,7 @@ function IconToggle({ active, icon: Icon, label, onClick }: { active: boolean; i
       aria-pressed={active}
       aria-label={label}
       title={label}
-      className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition ${
+      className={`inline-flex h-11 w-11 lg:h-8 lg:w-8 shrink-0 items-center justify-center rounded-lg transition ${
         active ? "bg-zinc-950 text-white shadow-sm" : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
       }`}
     >

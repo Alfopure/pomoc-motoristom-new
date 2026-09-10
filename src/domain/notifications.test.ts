@@ -54,6 +54,10 @@ describe("notification domain rules", () => {
     expect(text.body).not.toContain("Spätné volanie");
   });
 
+  it("does not invent a deadline for a task with only an independent reminder", () => {
+    expect(buildTaskNotificationText(task({ dueAt: "" })).body).toBe("Úloha bez termínu.");
+  });
+
   it("builds stable reminder and notification dedupe keys from normalized time", () => {
     expect(buildReminderDedupeKey({ taskId: "task-1", recipientProfileId: "op-1", scheduledFor: "2026-06-08T12:00:00+02:00" })).toBe(
       "task-1:op-1:2026-06-08T10:00:00.000Z",
