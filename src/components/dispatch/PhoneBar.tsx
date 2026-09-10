@@ -37,6 +37,7 @@ import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
 import { CallTransferPicker, type TransferPickerMode, type TransferRequest } from "./CallTransferPicker";
 import { CallRecordingControls } from "./recordings/CallRecordingControls";
+import { CallRecordingIndicator } from "./recordings/CallRecordingIndicator";
 import styles from "./PhoneBar.module.css";
 import {
   callElapsedSeconds,
@@ -109,14 +110,19 @@ function PhoneBarControls(props: PhoneBarProps) {
   const [superviseOpen, setSuperviseOpen] = useState(false);
   const [dtmfLog, setDtmfLog] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
+  const [recordingOpen, setRecordingOpen] = useState(false);
   const [minimizedOfferId, setMinimizedOfferId] = useState<string | null>(null);
   const secondaryId = useId();
   const keypadId = useId();
+  const recordingId = useId();
+  const recordingTriggerRef = useRef<HTMLButtonElement>(null);
+  const recordingCloseRef = useRef<HTMLButtonElement>(null);
   const keypadTriggerRef = useRef<HTMLButtonElement>(null);
   const keypadCloseRef = useRef<HTMLButtonElement>(null);
 
   const focus = phoneBarFocusedCall(model, phone.call);
   const degraded = focus ? props.degradedSessionIds.has(focus.sessionId) : false;
+  const recordingCallId = focus?.kind === "active" && focus.mine ? focus.callId : null;
 
   const capabilities = useMemo(
     () =>
@@ -142,7 +148,11 @@ function PhoneBarControls(props: PhoneBarProps) {
   }, [keypadOpen]);
 
   useEffect(() => {
-    if (!keypadOpen && !moreOpen && !transferMode && !partiesOpen && !superviseOpen) return;
+    if (recordingOpen) recordingCloseRef.current?.focus();
+  }, [recordingOpen]);
+
+  useEffect(() => {
+    if (!keypadOpen && !moreOpen && !transferMode && !partiesOpen && !superviseOpen && !recordingOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setKeypadOpen(false);
@@ -150,11 +160,13 @@ function PhoneBarControls(props: PhoneBarProps) {
       setTransferMode(null);
       setPartiesOpen(false);
       setSuperviseOpen(false);
+      setRecordingOpen(false);
       if (keypadOpen) keypadTriggerRef.current?.focus();
+      if (recordingOpen) recordingTriggerRef.current?.focus();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [keypadOpen, moreOpen, transferMode, partiesOpen, superviseOpen]);
+  }, [keypadOpen, moreOpen, transferMode, partiesOpen, superviseOpen, recordingOpen]);
 
   function runAction(action: PhoneCallAction) {
     if (!focus) return;
@@ -179,6 +191,7 @@ function PhoneBarControls(props: PhoneBarProps) {
     setKeypadOpen(false);
     setPartiesOpen(false);
     setSuperviseOpen(false);
+    setRecordingOpen(false);
   }
 
   return (
@@ -187,7 +200,13 @@ function PhoneBarControls(props: PhoneBarProps) {
       className="relative z-40 flex min-h-12 shrink-0 flex-wrap items-center gap-1.5 border-b border-zinc-800 bg-zinc-900 px-3 py-1.5 text-white sm:px-4 lg:gap-2"
     >
       {focus ? (
-        <CallSummary call={focus} degraded={degraded} now={now} onOpenCase={props.onOpenCase} />
+        <CallSummary call={focus} degraded={degraded} now={now} onOpenCase={props.onOpenCase}
+          recordingIndicator={recordingCallId && <CallRecordingIndicator key={recordingCallId} callId={recordingCallId}
+            buttonRef={recordingTriggerRef} expanded={recordingOpen} controls={recordingId}
+            onClick={() => {
+              setRecordingOpen((open) => !open);
+              setKeypadOpen(false); setMoreOpen(false); setTransferMode(null); setPartiesOpen(false); setSuperviseOpen(false);
+            }} />} />
       ) : phone.call ? (
         <BrowserCallSummary call={phone.call} />
       ) : (
@@ -224,6 +243,7 @@ function PhoneBarControls(props: PhoneBarProps) {
               setTransferMode(null);
               setPartiesOpen(false);
               setSuperviseOpen(false);
+              setRecordingOpen(false);
               setMoreOpen(false);
             }}
             compact
@@ -253,6 +273,7 @@ function PhoneBarControls(props: PhoneBarProps) {
               setTransferMode(null);
               setPartiesOpen(false);
               setSuperviseOpen(false);
+              setRecordingOpen(false);
             }}
           />
         )}
@@ -309,7 +330,7 @@ function PhoneBarControls(props: PhoneBarProps) {
             icon={Users}
             label={`Účastníci (${focus.participants.length})`}
             compact
-            onClick={() => { setPartiesOpen((open) => !open); setMoreOpen(false); setSuperviseOpen(false); setTransferMode(null); }}
+            onClick={() => { setPartiesOpen((open) => !open); setMoreOpen(false); setSuperviseOpen(false); setTransferMode(null); setRecordingOpen(false); }}
           />
         )}
         {capabilities.leaveConference && (
@@ -321,7 +342,7 @@ function PhoneBarControls(props: PhoneBarProps) {
             icon={Headphones}
             label={model.supervising ? "Dozor prebieha" : "Dozor"}
             compact={!model.supervising}
-            onClick={() => { setSuperviseOpen((open) => !open); setMoreOpen(false); setPartiesOpen(false); setTransferMode(null); }}
+            onClick={() => { setSuperviseOpen((open) => !open); setMoreOpen(false); setPartiesOpen(false); setTransferMode(null); setRecordingOpen(false); }}
           />
         )}
         {capabilities.park && (
@@ -340,12 +361,6 @@ function PhoneBarControls(props: PhoneBarProps) {
           <Volume2 size={16} aria-hidden="true" />
           Zapnúť zvuk hovoru
         </button>
-      )}
-
-      {focus?.kind === "active" && focus.mine && focus.callId && (
-        <div className="min-w-0 basis-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-zinc-900">
-          <CallRecordingControls key={focus.callId} callId={focus.callId} />
-        </div>
       )}
 
       {model.offers.length > 1 && (
@@ -380,6 +395,17 @@ function PhoneBarControls(props: PhoneBarProps) {
         >
           {props.notice}
         </button>
+      )}
+
+      {recordingOpen && recordingCallId && (
+        <section id={recordingId} aria-label="Možnosti nahrávania" className={`${styles.popup} z-50 w-72 rounded-xl border border-zinc-200 bg-white p-3 text-zinc-950 shadow-2xl`}>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h3 className="text-xs font-bold">Nahrávanie hovoru</h3>
+            <button ref={recordingCloseRef} type="button" className="inline-flex size-11 items-center justify-center rounded-md hover:bg-zinc-100"
+              aria-label="Zavrieť možnosti nahrávania" onClick={() => { setRecordingOpen(false); recordingTriggerRef.current?.focus(); }}><X size={18} aria-hidden="true" /></button>
+          </div>
+          <CallRecordingControls key={recordingCallId} callId={recordingCallId} />
+        </section>
       )}
 
       {keypadOpen && capabilities.dtmf && (
@@ -740,11 +766,13 @@ function CallSummary({
   degraded,
   now,
   onOpenCase,
+  recordingIndicator,
 }: {
   call: PhoneBarCall;
   degraded: boolean;
   now: number;
   onOpenCase: (caseId: string) => void;
+  recordingIndicator?: React.ReactNode;
 }) {
   const state = phoneBarStateLabel(call);
   const elapsed = formatCallTimer(callElapsedSeconds(call, now));
@@ -764,6 +792,7 @@ function CallSummary({
           {degraded && <AlertTriangle size={14} className="shrink-0 text-amber-300" aria-label="Rozšírené funkcie nedostupné" />}
         </div>
       </div>
+      {recordingIndicator}
       {(call.caseId || call.match?.caseId) && (
         <button
           type="button"
