@@ -13,8 +13,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const formData = await request.formData();
     const files = formData.getAll("files").filter((item): item is File => item instanceof File);
     const note = stringFormValue(formData.get("note"));
+    const category = stringFormValue(formData.get("category"));
 
-    const attachments = await uploadCaseAttachments(id, files, note, requireMotoristOrgMember);
+    const attachments = await uploadCaseAttachments(id, files, note, requireMotoristOrgMember, category);
     const dispatchData = await loadDispatchData();
 
     return Response.json({ caseId: id, attachments, dispatchData });
