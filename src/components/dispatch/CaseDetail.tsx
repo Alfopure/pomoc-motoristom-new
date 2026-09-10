@@ -748,7 +748,7 @@ export function CaseDetail({
             </div>
           </div>
           <div className={styles.gpsActions}>
-            <UseCustomerLocationButton caseId={caseItem.id} location={caseItem.customerSharedLocation}
+            <UseCustomerLocationButton caseId={caseItem.id} location={caseItem.customerSharedLocation} expectedUpdatedAt={caseItem.updatedAt}
               disabled={draftDirty || isEditSaveLocked || isRunningAction} onNotice={setNotice}
               onApplied={(data) => { onDataChange?.(data); setEditorRevision((revision) => revision + 1); }} />
             {customerLocationMapsUrl && (

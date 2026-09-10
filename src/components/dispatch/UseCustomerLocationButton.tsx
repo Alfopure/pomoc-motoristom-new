@@ -3,9 +3,11 @@ import { useRef, useState } from "react";
 import type { CustomerSharedLocation } from "@/domain/types";
 import type { DispatchData } from "@/data/dispatch-types";
 
-export function UseCustomerLocationButton({ caseId, location, disabled, onApplied, onNotice }: {
+export function UseCustomerLocationButton({ caseId, location, expectedUpdatedAt, disabled, onApplied, onNotice }: {
   caseId: string;
   location: CustomerSharedLocation;
+  /** Case revision this button last saw, so the server's optimistic-lock check does not reject every request. */
+  expectedUpdatedAt: string;
   disabled?: boolean;
   onApplied: (data: DispatchData) => void;
   onNotice: (message: string) => void;
@@ -18,7 +20,10 @@ export function UseCustomerLocationButton({ caseId, location, disabled, onApplie
     try {
       const response = await fetch(`/api/cases/${encodeURIComponent(caseId)}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(20_000),
-        body: JSON.stringify({ pickup: { label: "Miesto incidentu (GPS klienta)", address: location.address || `GPS ${location.lat}, ${location.lng}`, lat: location.lat, lng: location.lng, provider: "manual" } }),
+        body: JSON.stringify({
+          expectedUpdatedAt,
+          pickup: { label: "Miesto incidentu (GPS klienta)", address: location.address || `GPS ${location.lat}, ${location.lng}`, lat: location.lat, lng: location.lng, provider: "manual" },
+        }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Miesto incidentu sa nepodarilo zmeniť.");
