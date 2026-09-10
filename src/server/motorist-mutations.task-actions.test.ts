@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const state = vi.hoisted(() => ({
   inserts: [] as Array<{ table: string; payload: Record<string, unknown> }>,
   updates: [] as Array<{ table: string; payload: Record<string, unknown> }>,
+  rpcs: [] as Array<{ name: string; args: Record<string, unknown> }>,
   existingCase: null as Record<string, unknown> | null,
   existingTask: null as Record<string, unknown> | null,
 }));
@@ -25,6 +26,10 @@ vi.mock("@/server/integrations/swhouse/occupancy-snapshot", () => ({
 vi.mock("@/lib/supabase/admin", () => ({
   createSupabaseAdminClient: () => ({
     from: (table: string) => makeQuery(table),
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      state.rpcs.push({ name, args });
+      return { data: { ...state.existingCase, ...args.p_case_patch as object }, error: null };
+    },
   }),
 }));
 
@@ -65,6 +70,7 @@ function makeQuery(table: string) {
       return query;
     },
     in: () => query,
+    or: () => query,
     like: () => query,
     ilike: () => query,
     order: () => query,
@@ -254,48 +260,41 @@ describe("runCaseAction task actor attribution (U-09)", () => {
   });
 });
 
-describe("updateCase activity history (P-01)", () => {
+describe("updateCase atomic activity boundary (P-01)", () => {
   beforeEach(() => {
     state.inserts.length = 0;
     state.updates.length = 0;
+    state.rpcs.length = 0;
     state.existingCase = existingCase();
     state.existingTask = existingTask();
   });
+  const expectedUpdatedAt = "2026-07-20T10:00:00.000Z";
 
-  it("records a status change attributed to the acting profile", async () => {
-    await updateCase("case-1", { status: "cancelled" }, "actor-9");
-
-    const caseUpdate = state.updates.find((entry) => entry.table === "motorist_cases");
-    expect(caseUpdate?.payload).toMatchObject({ status: "cancelled" });
-
-    const eventInsert = state.inserts.find((entry) => entry.table === "motorist_case_events");
-    expect(eventInsert?.payload).toMatchObject({
-      actor_profile_id: "actor-9",
-      event_type: "status_changed",
-    });
-    expect(String(eventInsert?.payload.body)).toContain("Zrušené");
+  it("sends status, actor and revision to the sole transaction", async () => {
+    await updateCase("case-1", { expectedUpdatedAt, status: "cancelled" }, "actor-9");
+    expect(state.rpcs).toHaveLength(1);
+    expect(state.rpcs[0]).toMatchObject({ name: "motorist_save_case_atomic", args: {
+      p_actor_id: "actor-9", p_expected_updated_at: expectedUpdatedAt, p_case_patch: { status: "cancelled" },
+    } });
+    expect(state.inserts).toEqual([]);
+    expect(state.updates).toEqual([]);
   });
 
-  it("can reopen a cancelled case back into work", async () => {
+  it("can reopen a cancelled case through the same transaction", async () => {
     state.existingCase = existingCase({ status: "cancelled" });
-
-    await updateCase("case-1", { status: "open" }, "actor-9");
-
-    expect(state.updates.find((entry) => entry.table === "motorist_cases")?.payload).toMatchObject({ status: "open" });
-    expect(String(state.inserts.find((entry) => entry.table === "motorist_case_events")?.payload.body)).toContain("Otvorený");
+    await updateCase("case-1", { expectedUpdatedAt, status: "open" }, "actor-9");
+    expect(state.rpcs[0].args.p_case_patch).toMatchObject({ status: "open" });
   });
 
-  it("does not write any activity event when nothing changed", async () => {
-    await updateCase("case-1", {}, "actor-9");
-
-    expect(state.inserts.some((entry) => entry.table === "motorist_case_events")).toBe(false);
+  it("never inserts application-side activity before the transaction", async () => {
+    await updateCase("case-1", { expectedUpdatedAt }, "actor-9");
+    expect(state.inserts).toEqual([]);
+    expect(state.updates).toEqual([]);
   });
 
-  it("describes which field groups changed", async () => {
-    await updateCase("case-1", { caseType: "Odťah" }, "actor-9");
-
-    const eventInsert = state.inserts.find((entry) => entry.table === "motorist_case_events");
-    expect(eventInsert?.payload).toMatchObject({ event_type: "case_updated" });
-    expect(String(eventInsert?.payload.body)).toContain("typ zásahu");
+  it("provides field labels so the committed event describes actual changes", async () => {
+    await updateCase("case-1", { expectedUpdatedAt, caseType: "Odťah" }, "actor-9");
+    expect(state.rpcs[0].args.p_case_patch).toMatchObject({ case_type: "Odťah" });
+    expect(state.rpcs[0].args.p_field_labels).toMatchObject({ case_type: "typ zásahu" });
   });
 });

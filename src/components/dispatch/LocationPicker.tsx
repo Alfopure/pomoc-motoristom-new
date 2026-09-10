@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { AlertTriangle, Crosshair, MapPin, Search } from "lucide-react";
 import type { PlaceSelectionInput } from "@/data/case-inputs";
 import { loadGoogleMaps } from "@/lib/google-maps-client";
@@ -25,6 +25,8 @@ export function LocationPicker({
   value?: PlaceSelectionInput | null;
   onSelect: (place: PlaceSelectionInput) => void;
 }) {
+  const inputId = useId();
+  const [mapRequested, setMapRequested] = useState(false);
   const mapHostRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const markerRef = useRef<google.maps.Marker | null>(null);
@@ -55,6 +57,7 @@ export function LocationPicker({
           googleMaps.maps.importLibrary?.("geocoding"),
         ]);
         if (!cancelled) {
+          geocoderRef.current = new googleMaps.maps.Geocoder();
           setLoadState("ready");
         }
       })
@@ -65,12 +68,14 @@ export function LocationPicker({
       });
     return () => {
       cancelled = true;
+      selectionRequestRef.current += 1;
+      geocoderRef.current = null;
     };
   }, []);
 
   // Inicializuj mapu raz, keď je API pripravené.
   useEffect(() => {
-    if (loadState !== "ready" || !mapHostRef.current || mapRef.current) {
+    if (!mapRequested || loadState !== "ready" || !mapHostRef.current || mapRef.current) {
       return;
     }
     const hasValue = Boolean(value && Number.isFinite(value.lat) && Number.isFinite(value.lng));
@@ -80,8 +85,9 @@ export function LocationPicker({
       disableDefaultUI: true,
       zoomControl: true,
       clickableIcons: false,
+      scrollwheel: false,
+      gestureHandling: "cooperative",
     });
-    geocoderRef.current = new google.maps.Geocoder();
     mapRef.current = map;
     const clickListener = map.addListener("click", (event: google.maps.MapMouseEvent) => {
       const latLng = event.latLng;
@@ -96,11 +102,10 @@ export function LocationPicker({
       clickListener.remove();
       markerRef.current?.setMap(null);
       markerRef.current = null;
-      geocoderRef.current = null;
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadState]);
+  }, [loadState, mapRequested]);
 
   // Ak sa miesto zmení zvonka (napr. cez Google Places našeptávač), premietni ho do mapy.
   useEffect(() => {
@@ -215,23 +220,32 @@ export function LocationPicker({
 
       {loadState === "idle" && <PickerNotice text="Chýba Google browser key pre mapu." />}
       {loadState === "error" && <PickerNotice text="Mapu sa nepodarilo načítať." />}
-      {(loadState === "loading" || loadState === "ready") && (
-        <div
-          ref={mapHostRef}
-          data-testid="location-picker-map"
-          className="h-56 w-full overflow-hidden rounded-md border border-zinc-200 bg-zinc-100"
-        />
-      )}
-      {loadState === "ready" && (
-        <p className="mt-1 text-[11px] font-medium text-zinc-400">Klikni do mapy pre presný bod incidentu.</p>
-      )}
+      <details className="mt-2 rounded-md border border-zinc-200" onToggle={(event) => {
+        if (event.currentTarget.open) {
+          setMapRequested(true);
+          if (mapRef.current) {
+            const center = mapRef.current.getCenter();
+            google.maps.event.trigger(mapRef.current, "resize");
+            if (center) mapRef.current.setCenter(center);
+          }
+        }
+      }}>
+        <summary className="min-h-11 cursor-pointer px-3 py-3 text-sm font-semibold text-zinc-700">Mapa miesta incidentu</summary>
+        <div className="px-2 pb-2">
+          {(loadState === "loading" || loadState === "ready") && (
+            <div ref={mapHostRef} data-testid="location-picker-map" className="h-56 w-full overflow-hidden rounded-md border border-zinc-200 bg-zinc-100" />
+          )}
+          {loadState === "ready" && <p className="mt-1 text-xs font-medium text-zinc-500">Kliknite do mapy pre presný bod. Priblíženie zmeníte tlačidlami + a −; koliesko posúva formulár.</p>}
+        </div>
+      </details>
 
       <div className="mt-3">
-        <label className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">
+        <label htmlFor={inputId} className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">
           Približné miesto alebo GPS súradnice
         </label>
         <div className="flex gap-2">
           <input
+            id={inputId}
             value={approxText}
             onChange={(event) => {
               selectionRequestRef.current += 1;
@@ -246,13 +260,13 @@ export function LocationPicker({
               }
             }}
             placeholder="napr. R1 pri Nitre alebo 48.1486, 17.1077"
-            className="h-9 min-w-0 flex-1 rounded-md border border-zinc-200 px-2 text-sm"
+            className="h-11 min-w-0 flex-1 rounded-md border border-zinc-200 px-2 text-base"
           />
           <button
             type="button"
             onClick={() => void submitApproximate()}
             disabled={approxBusy || !canSubmitApproximate}
-            className="inline-flex h-9 items-center gap-1.5 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+            className="inline-flex h-11 items-center gap-1.5 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
           >
             <Search size={14} /> Nájsť
           </button>
@@ -271,11 +285,11 @@ export function LocationPicker({
         <div className="mt-2 flex items-start gap-2 rounded-md bg-zinc-50 px-2 py-2 text-xs text-zinc-600">
           <MapPin size={14} className="mt-0.5 shrink-0 text-zinc-500" />
           <span className="min-w-0">
-            <span className="block truncate font-semibold text-zinc-800">
+            <span className="block break-words font-semibold text-zinc-800">
               {value.label}
               {value.provider === "approximate" ? " · približné" : ""}
             </span>
-            <span className="block truncate">{value.address}</span>
+            <span className="block break-words">{value.address}</span>
           </span>
         </div>
       )}

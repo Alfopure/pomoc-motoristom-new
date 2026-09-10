@@ -6,8 +6,8 @@ export const runtime = "nodejs";
 
 export async function GET() {
   try {
-    const actor = await requireDefaultMotoristActor(["dispatcher", "manager", "admin"]);
-    const notifications = await loadDispatchNotifications(actor.organizationId);
+    const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
+    const notifications = await loadDispatchNotifications(actor.organizationId, actor.profileId);
     return Response.json({ notifications });
   } catch (error) {
     if (error instanceof MutationError) {

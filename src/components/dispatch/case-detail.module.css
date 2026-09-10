@@ -1,0 +1,501 @@
+.surface {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.detail {
+  gap: 8px;
+}
+
+.scrollRegion {
+  padding: 8px;
+}
+
+.cockpitHeader {
+  padding: 8px 10px;
+}
+
+.cockpitTopline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.caseIdentity {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 260px;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 4px;
+}
+
+.caseNumber {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.caseCustomer {
+  overflow: hidden;
+  color: #52525b;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.caseMeta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  margin-top: 5px;
+  color: #71717a;
+  font-size: 11px;
+}
+
+.headerControls {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+
+.headerControls label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: #71717a;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.headerControls select {
+  height: 32px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0 7px;
+  border: 1px solid #e4e4e7;
+  border-radius: 6px;
+  background: #fff;
+  color: #27272a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.headerControlRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 16px;
+  padding: 5px 10px;
+  border-bottom: 1px solid #e4e4e7;
+  background: #fafafa;
+}
+
+.headerActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.headerAction {
+  height: 32px;
+  min-width: 32px;
+  padding-inline: 8px;
+  font-size: 12px;
+}
+
+.headerIcon {
+  width: 32px;
+  height: 32px;
+}
+
+.summary {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.summaryHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-bottom: 8px;
+}
+
+.summaryHeading h3 {
+  color: #27272a;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.savedLabel {
+  color: #71717a;
+  font-size: 10px;
+}
+
+.summaryFacts {
+  display: grid;
+  min-width: 0;
+  gap: 6px 20px;
+}
+
+.summaryFact {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+}
+
+.summaryFact dt {
+  color: #71717a;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.summaryFact dd {
+  color: #27272a;
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.4;
+}
+
+.nextStep {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 9px;
+  padding: 6px 8px;
+  border-left: 2px solid #eab308;
+  border-radius: 0 4px 4px 0;
+  background: #fffbeb;
+  color: #3f3f46;
+  font-size: 12px;
+}
+
+.nextStepLabel {
+  flex: 0 0 auto;
+  color: #78716c;
+  font-size: 11px;
+}
+
+.summaryDescription {
+  margin-top: 6px;
+  color: #71717a;
+  font-size: 12px;
+}
+
+.expandText {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  margin-left: 4px;
+  padding-inline: 4px;
+  color: #52525b;
+  font-size: 11px;
+  text-decoration: underline;
+}
+
+.gps {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 9px 10px;
+  border: 1px solid #bae6fd;
+  border-radius: 8px;
+  background: #f0f9ff;
+}
+
+.gpsInformation {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 320px;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.gpsIcon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 6px;
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.gpsTitle {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 10px;
+  color: #0c4a6e;
+  font-size: 12px;
+}
+
+.gpsTitle h3 {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.gpsCoordinates {
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.gpsCaption {
+  margin-top: 2px;
+  color: #0369a1;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.gpsActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.gpsActions button,
+.gpsActions a {
+  display: inline-flex;
+  min-height: 32px;
+  height: auto;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.section {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.sectionHeader {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #f4f4f5;
+  background: #fafafa;
+  list-style: none;
+}
+
+.sectionHeader::-webkit-details-marker {
+  display: none;
+}
+
+.sectionTitle {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 10px;
+  color: #27272a;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.sectionState {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.sectionBody {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 10px;
+}
+
+.sectionBody > * {
+  min-width: 0;
+}
+
+.sectionHelp {
+  color: #71717a;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.field {
+  display: block;
+  min-width: 0;
+}
+
+.fieldLabel {
+  display: block;
+  margin-bottom: 4px;
+  color: #71717a;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.fieldControl {
+  height: 34px;
+  font-size: 13px;
+}
+
+.textarea {
+  min-height: 72px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.phoneControl {
+  grid-template-columns: 72px minmax(0, 1fr);
+}
+
+.choice {
+  min-height: 32px;
+  height: auto;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.formMain {
+  gap: 8px;
+}
+
+.taskComposer {
+  padding: 10px;
+  gap: 8px;
+}
+
+.taskComposer h4 {
+  font-size: 12px;
+}
+
+.taskComposer textarea {
+  min-height: 64px;
+}
+
+.locationFields {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.locationFields :global(.google-place-autocomplete-host):empty,
+.locationFields [aria-live="polite"]:empty {
+  min-height: 0;
+  padding: 0;
+}
+
+.locationFields :global(.google-place-autocomplete) {
+  min-height: 34px;
+  font-size: 13px;
+  box-shadow: none;
+}
+
+@container (min-width: 580px) {
+  .summaryFacts,
+  .locationFields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container (min-width: 1000px) {
+  .summaryFacts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) and (pointer: fine) {
+  .surface :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select) {
+    height: 34px;
+    min-height: 34px;
+    font-size: 13px;
+  }
+
+  .surface textarea {
+    font-size: 13px;
+  }
+
+}
+
+@media (max-width: 1023px), (pointer: coarse) {
+  .surface :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea),
+  .fieldControl,
+  .textarea,
+  .headerControls select {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .locationFields :global(.google-place-autocomplete) {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .surface :is(button, summary),
+  .surface a[href],
+  .headerAction,
+  .headerIcon,
+  .choice,
+  .expandText,
+  .sectionHeader {
+    min-height: 44px;
+  }
+
+  .headerIcon {
+    min-width: 44px;
+  }
+
+  .headerControls label {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+  }
+
+  .headerControls {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .headerControls select {
+    width: 100%;
+  }
+
+  .summaryFact {
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+
+  .gpsActions {
+    width: 100%;
+  }
+
+  .gpsActions :is(button, a) {
+    min-height: 44px;
+  }
+}

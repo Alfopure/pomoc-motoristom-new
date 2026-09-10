@@ -1312,7 +1312,13 @@ function onAddedPartyAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
  */
 function onSupervisorAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
   const entry = leg.profile_id ? b.meta.supervise?.[leg.profile_id] : null;
-  const mode: SupervisorMode = entry?.mode ?? "monitor";
+  const invitationId = (leg.metadata as { monitor_invitation_id?: string } | null)?.monitor_invitation_id ?? entry?.invitationId;
+  const invitation = invitationId ? b.meta.monitorInvitations?.[invitationId] : null;
+  const mode: SupervisorMode = invitationId ? "monitor" : entry?.mode ?? "monitor";
+  if (invitationId && (!invitation?.acceptedAt || invitation.revokedAt || invitation.disconnectRequestedAt || !entry || !speakingParticipant(b, invitation.inviterProfileId))) {
+    b.cmd(hangupCmd(b, leg, "monitor_invitation_closed", false));
+    return b.note("late invited monitor answer rejected").result();
+  }
   const operator = b.answeringLeg();
   if (!TALKING_STATES.has(b.session.state) || !operator) {
     b.cmd(hangupCmd(b, leg, "supervise_unavailable", false));
@@ -1995,6 +2001,12 @@ export class CallActionRejected extends Error {
 
 function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
   if (event.type === "sweep") return onSweep(b);
+  // Ending an invited listener remains valid after the customer/session ends.
+  if (event.type === "revoke_monitor") return appRevokeMonitor(b, event);
+  if (event.type === "stop_supervise" && event.supervisor?.profileId === event.actorProfileId &&
+    Object.values(b.meta.monitorInvitations ?? {}).some(invitation => invitation.recipientProfileId === event.actorProfileId && invitation.acceptedAt)) {
+    return appStopSupervise(b, event);
+  }
   if (!ACTIVE_SESSION_STATES.has(b.session.state)) throw new CallActionRejected("Hovor už nie je aktívny.", 409, "not_active");
   const customer = b.customerLeg();
   if (!customer || b.legEnded(customer)) {
@@ -2029,6 +2041,8 @@ function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
       return appRemoveParty(b, event);
     case "leave_conference":
       return appLeaveConference(b);
+    case "invite_monitor":
+      return appInviteMonitor(b, event);
     case "supervise":
       return appSupervise(b, customer, event);
     case "stop_supervise":
@@ -2066,7 +2080,8 @@ function promoteToConference(b: TransitionBuilder, customer: LegRow, operator: L
   // and the mode switch would send `conference_update` for a non-participant.
   for (const supervisor of openSupervisorLegs(b)) {
     if (!supervisor.answered_at) continue;
-    const mode: SupervisorMode = (supervisor.profile_id ? b.meta.supervise?.[supervisor.profile_id]?.mode : null) ?? "monitor";
+    const entry = supervisor.profile_id ? b.meta.supervise?.[supervisor.profile_id] : null;
+    const mode: SupervisorMode = entry?.invitationId ? "monitor" : entry?.mode ?? "monitor";
     b.cmd({
       kind: "conference_join",
       commandId: b.cmdId(supervisor.telnyx_call_control_id, `conference:join:supervise:promote:${mode}`),
@@ -2449,6 +2464,39 @@ function appLeaveConference(b: TransitionBuilder): ReduceResult {
  * Role gating (manager/admin only) lives in `call-actions.ts`: the reducer is
  * pure and knows nothing about who the actor is.
  */
+/** Only a speaking participant can invite. A supervisor leg never grants call ownership. */
+function speakingParticipant(b: TransitionBuilder, profileId: string | null): boolean {
+  return Boolean(profileId && b.openLegs().some(leg => leg.profile_id === profileId && leg.role !== "supervisor" && Boolean(leg.answered_at)));
+}
+function appInviteMonitor(b: TransitionBuilder, event: AppEvent): ReduceResult {
+  const invitation = event.monitorInvitation;
+  if (!invitation || invitation.sessionId !== b.session.id || invitation.inviterProfileId !== event.actorProfileId ||
+    !speakingParticipant(b, event.actorProfileId)) throw new CallActionRejected("Pozvať poslucháča môže len účastník vlastného hovoru.", 403);
+  if (!TALKING_STATES.has(b.session.state)) throw new CallActionRejected("Pozvanie vyžaduje prebiehajúci hovor.", 409);
+  const entries = { ...(b.meta.monitorInvitations ?? {}) };
+  if (Object.values(entries).some(item => item.recipientProfileId === invitation.recipientProfileId && !item.revokedAt &&
+    (item.acceptedAt ? Boolean(b.meta.supervise?.[item.recipientProfileId]) : Date.parse(item.expiresAt) > Date.parse(b.nowIso)))) {
+    throw new CallActionRejected("Tento poslucháč už má pozvánku alebo počúva.", 409);
+  }
+  if (Object.keys(entries).length >= 50) throw new CallActionRejected("Limit pozvánok pre tento hovor bol dosiahnutý.", 429);
+  entries[invitation.id] = invitation;
+  b.patchMeta({ monitorInvitations: entries, monitorInviteRecipients: [...new Set(Object.values(entries).map(item => item.recipientProfileId))],
+    monitorInviteActors: [...new Set(Object.values(entries).map(item => item.inviterProfileId))] });
+  return b.note(`monitor invited: ${invitation.id}`).result();
+}
+function appRevokeMonitor(b: TransitionBuilder, event: AppEvent): ReduceResult {
+  const invitation = event.invitationId ? b.meta.monitorInvitations?.[event.invitationId] : null;
+  if (!invitation || invitation.inviterProfileId !== event.actorProfileId) {
+    throw new CallActionRejected("Túto pozvánku môže odvolať iba jej pozývateľ.", 403);
+  }
+  b.patchMeta({ monitorInvitations: { ...b.meta.monitorInvitations, [invitation.id]: { ...invitation, revokedAt: invitation.revokedAt ?? b.nowIso } } });
+  // Also retry a previous uncertain disconnect; never target customer/operator legs.
+  if (openSupervisorLegs(b).some(leg => leg.profile_id === invitation.recipientProfileId && (leg.metadata as { monitor_invitation_id?: string } | null)?.monitor_invitation_id === invitation.id)) {
+    return appStopSupervise(b, { ...event, supervisor: { profileId: invitation.recipientProfileId, sipUri: "", mode: "monitor", label: invitation.recipientName, invitationId: invitation.id } });
+  }
+  return b.note(`monitor invitation revoked: ${invitation.id}`).result();
+}
+
 function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): ReduceResult {
   const supervisor = event.supervisor;
   if (!supervisor) throw new CallActionRejected("Chýba dozorujúci operátor.", 400);
@@ -2464,6 +2512,18 @@ function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): 
   const existing = openSupervisorLegs(b).find((leg) => leg.profile_id === supervisor.profileId);
   const entries = { ...(b.meta.supervise ?? {}) };
   const previous = entries[supervisor.profileId] ?? null;
+  if (supervisor.invitationId) {
+    const invitation = b.meta.monitorInvitations?.[supervisor.invitationId];
+    if (supervisor.mode !== "monitor" || !invitation || invitation.sessionId !== b.session.id ||
+      invitation.recipientProfileId !== event.actorProfileId || invitation.recipientProfileId !== supervisor.profileId ||
+      invitation.acceptedAt || invitation.revokedAt || Date.parse(invitation.expiresAt) <= Date.parse(b.nowIso) ||
+      !speakingParticipant(b, invitation.inviterProfileId) || existing) {
+      throw new CallActionRejected("Pozvánka už nie je platná alebo bola použitá.", 403, "invitation_invalid");
+    }
+    b.patchMeta({ monitorInvitations: { ...b.meta.monitorInvitations, [invitation.id]: { ...invitation, acceptedAt: b.nowIso } } });
+  } else if (previous?.invitationId && (supervisor.mode !== "monitor" || b.meta.monitorInvitations?.[previous.invitationId]?.disconnectRequestedAt)) {
+    throw new CallActionRejected("Pozvaný poslucháč nemôže meniť režim počúvania.", 403, "monitor_only");
+  }
 
   if (existing && !b.session.conference_id) {
     // Telnyx switches the role of a supervisor attached to a bridged call in
@@ -2531,11 +2591,12 @@ function appSupervise(b: TransitionBuilder, customer: LegRow, event: AppEvent): 
     autoAnswer: true,
     ...(inConference ? {} : { superviseCallControlId: operator.telnyx_call_control_id, supervisorRole: supervisor.mode }),
   };
+  if (supervisor.invitationId) dial.monitorInvitationId = supervisor.invitationId;
   b.cmd(dial);
-  entries[supervisor.profileId] = { mode: supervisor.mode, at: b.nowIso, by: supervisor.profileId };
+  entries[supervisor.profileId] = { mode: supervisor.mode, at: b.nowIso, by: supervisor.profileId, ...(supervisor.invitationId ? { invitationId: supervisor.invitationId } : {}) };
   b.patchMeta({ supervise: entries });
   const failed = b.fork();
-  failed.patchMeta({ supervise: withoutSupervisor(b, supervisor.profileId) });
+  failed.patchMeta({ supervise: withoutSupervisor(b, supervisor.profileId), ...(supervisor.invitationId ? { monitorInvitations: b.meta.monitorInvitations } : {}) });
   b.compensate(dial.commandId, "supervisor dial failed → supervision not started", [], failed.transition());
   return b.note(`supervise (${supervisor.mode}) by ${supervisor.profileId}`).result();
 }
@@ -2545,15 +2606,27 @@ function appStopSupervise(b: TransitionBuilder, event: AppEvent): ReduceResult {
   // Every open leg of this supervisor, not just the first: a leg left behind is
   // billed, may still be audible to the caller, and the console has no second
   // button to reach it with.
-  const legs = profileId ? openSupervisorLegs(b).filter((candidate) => candidate.profile_id === profileId) : [];
+  const legs = profileId ? openSupervisorLegs(b).filter((candidate) => candidate.profile_id === profileId &&
+    (!event.supervisor?.invitationId || (candidate.metadata as { monitor_invitation_id?: string } | null)?.monitor_invitation_id === event.supervisor.invitationId)) : [];
   if (legs.length === 0 || !profileId) throw new CallActionRejected("Dozor neprebieha.", 409);
+  let invited = false;
   for (const leg of legs) {
+    const invitationId = (leg.metadata as { monitor_invitation_id?: string } | null)?.monitor_invitation_id;
+    const invitation = invitationId ? b.meta.monitorInvitations?.[invitationId] : null;
+    if (invitation) {
+      invited = true;
+      b.patchMeta({ monitorInvitations: { ...b.meta.monitorInvitations, [invitation.id]: {
+        ...invitation, disconnectRequestedAt: invitation.disconnectRequestedAt ?? b.nowIso,
+      } } });
+    }
     if (b.session.conference_id) {
       b.cmd({ kind: "conference_leave", commandId: b.cmdId(leg.telnyx_call_control_id, "conference:leave:supervise"), leg: ref(leg), bestEffort: true });
     }
-    b.cmd(hangupCmd(b, leg, "supervise_stopped", legs.length > 1));
+    b.cmd(hangupCmd(b, leg, invitation ? "invited_monitor_stopped" : "supervise_stopped", legs.length > 1));
   }
-  b.patchMeta({ supervise: withoutSupervisor(b, profileId) });
+  // For an invited listener the hangup webhook confirms the end of listening.
+  // Keep their entry and presence until then, including after provider failure.
+  if (!invited) b.patchMeta({ supervise: withoutSupervisor(b, profileId) });
   return b.note(`supervision stopped by ${profileId}${legs.length > 1 ? ` (${legs.length} legs)` : ""}`).result();
 }
 

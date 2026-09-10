@@ -25,6 +25,7 @@ export const ENVIRONMENT_LABELS: Record<TelephonyEnvironment, string> = {
 };
 
 export type LineDraft = {
+  returnLineId?: string | null;
   /** The database id doubles as the React key: lines are never created here. */
   id: string;
   phoneNumber: string;
@@ -50,6 +51,7 @@ export function lineDraftsFromDocument(lines: readonly LineDoc[]): LineDraft[] {
       label: line.label,
       partnerName: line.partnerName ?? "",
       ringPlanId: line.ringPlanId,
+      returnLineId: line.returnLineId ?? null,
       ivrMenuId: line.ivrMenuId,
       businessHoursId: line.businessHoursId,
       environment: line.environment,
@@ -72,6 +74,7 @@ export function linePatch(draft: LineDraft, original: LineDoc): LinePatchInput {
   const partnerName = draft.partnerName.trim() ? draft.partnerName.trim() : null;
   if (label !== original.label) patch.label = label;
   if (partnerName !== original.partnerName) patch.partnerName = partnerName;
+  if ((draft.returnLineId ?? null) !== (original.returnLineId ?? null)) patch.returnLineId = draft.returnLineId ?? null;
   if (draft.ringPlanId !== original.ringPlanId) patch.ringPlanId = draft.ringPlanId;
   if (draft.ivrMenuId !== original.ivrMenuId) patch.ivrMenuId = draft.ivrMenuId;
   if (draft.businessHoursId !== original.businessHoursId) patch.businessHoursId = draft.businessHoursId;
@@ -105,6 +108,7 @@ function issue(path: string, code: string, message: string): ValidationIssue {
 }
 
 export type LineValidationContext = {
+  lines?: readonly LineDoc[];
   plans: readonly RingPlanDoc[];
   ivrMenus: readonly IvrMenuDoc[];
   businessHours: readonly BusinessHoursDoc[];
@@ -180,6 +184,10 @@ export function lineWarnings(draft: LineDraft, context: LineValidationContext): 
 
 /** One-line routing summary: plan → IVR → hours. */
 export function describeLineRouting(draft: LineDraft, context: LineValidationContext): string {
+  if (draft.returnLineId) {
+    const target = context.lines?.find(line => line.id === draft.returnLineId);
+    return `Prichádzajúce hovory prevezme hlavná linka ${target?.label ?? "—"} vrátane jej hlášky, fronty a otváracích hodín.`;
+  }
   const plan = context.plans.find((candidate) => candidate.id === draft.ringPlanId);
   const menu = context.ivrMenus.find((candidate) => candidate.id === draft.ivrMenuId);
   const hours = context.businessHours.find((candidate) => candidate.id === draft.businessHoursId);

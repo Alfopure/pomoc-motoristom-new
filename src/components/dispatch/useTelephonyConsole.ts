@@ -84,15 +84,16 @@ export type TelephonyConsole = {
   liveCalls: CallCenterCall[];
   /** Waiting room: the call row plus who parked it and how long the limit still allows. */
   waitingCalls: WaitingRoomRow[];
-  dial: (phone: string, caseId?: string, options?: { lineId?: string | null }) => Promise<void>;
+  dial: (phone: string, caseId?: string, options?: { lineId?: string | null; callbackTargetVerificationId?: string }) => Promise<void>;
   /** Rings a callback request's caller back through the ordinary outbound path. */
-  callBackRequest: (requestId: string) => Promise<void>;
+  callBackRequest: (requestId: string, verificationId?: string) => Promise<void>;
   callAction: (action: PhoneCallAction, sessionId: string, target?: TransferRequest) => Promise<void>;
   /** Mute, unmute or throw out one added participant (`parties/[legId]/…`). */
   partyAction: (action: PhonePartyAction, sessionId: string, legId: string) => Promise<void>;
   /** Manager/admin: monitor, whisper into or barge a colleague's live call. */
   supervise: (sessionId: string, mode: SupervisorMode) => Promise<void>;
   stopSupervise: (sessionId: string) => Promise<void>;
+  acceptMonitorInvitation: (sessionId: string, invitationId: string) => Promise<void>;
   changePresence: (action: PhonePresenceAction) => Promise<boolean>;
   availabilityAction: (action: TelephonyAvailabilityAction) => void;
   answer: () => void;
@@ -560,6 +561,15 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     [postCallCommand],
   );
 
+  const acceptMonitorInvitation = useCallback(
+    (sessionId: string, invitationId: string) => postCallCommand({
+      busyKey: `accept-monitor:${sessionId}`, sessionId,
+      path: `/api/telephony/calls/${encodeURIComponent(sessionId)}/monitor-invitations`,
+      body: { action: "accept", invitationId }, label: "prijatie pozvaného počúvania",
+      error: "Pozvané počúvanie sa nepodarilo prijať.", createsMedia: true,
+    }), [postCallCommand],
+  );
+
   const stopSupervise = useCallback(
     (sessionId: string) =>
       postCallCommand({
@@ -574,14 +584,14 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
 
   // `lineId` is optional and only "Môj telefón" sends it: a test call has to
   // leave from the operator's own line even when the server default differs.
-  const dial = useCallback(async (phoneNumber: string, caseId?: string, options?: { lineId?: string | null }) => {
+  const dial = useCallback(async (phoneNumber: string, caseId?: string, options?: { lineId?: string | null; callbackTargetVerificationId?: string }) => {
     await startOutboundRequest(async (webphone) => {
       const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
         "/api/telephony/calls",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ to: phoneNumber, caseId, lineId: options?.lineId ?? undefined }),
+          body: JSON.stringify({ to: phoneNumber, caseId, lineId: options?.lineId ?? undefined, callbackTargetVerificationId: options?.callbackTargetVerificationId }),
           label: "odchádzajúci hovor",
           timeoutMs: TELEPHONY_TIMEOUT_MS.control,
         },
@@ -614,14 +624,14 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
    * told which invite to answer (design §2.2) — a callback started outside this
    * hook would ring the operator's tab without auto-answering it.
    */
-  const callBackRequest = useCallback(async (requestId: string) => {
+  const callBackRequest = useCallback(async (requestId: string, verificationId?: string) => {
     await startOutboundRequest(async (webphone) => {
       const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
         `/api/telephony/callbacks/${encodeURIComponent(requestId)}/call`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
+          body: JSON.stringify({ verificationId }),
           label: "spätné volanie",
           timeoutMs: TELEPHONY_TIMEOUT_MS.control,
         },
@@ -739,6 +749,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     partyAction,
     supervise,
     stopSupervise,
+    acceptMonitorInvitation,
     changePresence,
     availabilityAction,
     answer,

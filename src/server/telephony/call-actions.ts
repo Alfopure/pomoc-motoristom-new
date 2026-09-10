@@ -1,3 +1,7 @@
+import { resolveCallbackTarget } from "@/server/callback-targets";
+import { confirmedCallbackTarget } from "@/lib/telephony/callback-target";
+import { MONITOR_INVITATION_TTL_MS } from "@/lib/telephony/monitor-invitations";
+import { requireMonitorInvitations } from "./monitor-invitation-gate";
 import { randomUUID } from "node:crypto";
 import type { AppRole } from "@/domain/types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
@@ -196,7 +200,7 @@ export async function loadSession(deps: CallActionDeps, sessionId: string): Prom
 }
 
 async function assertOwnership(deps: CallActionDeps, session: SessionRow, actor: CallActor): Promise<void> {
-  const legs = await deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", session.id).is("ended_at", null);
+  const legs = await deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", session.id).neq("role", "supervisor").is("ended_at", null);
   const openLegProfileIds = (legs.data ?? []).map((leg) => leg.profile_id).filter((id): id is string => Boolean(id));
   if (!canControlSession(session, actor, { openLegProfileIds })) {
     throw new CallActionError("Na tento hovor nemáš oprávnenie.", 403, "forbidden");
@@ -269,14 +273,17 @@ async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, tar
 
 // --- outbound ----------------------------------------------------------------
 
-export type StartOutboundInput = { to: string; caseId?: string | null; lineId?: string | null; callbackRequestId?: string };
+export type StartOutboundInput = { to: string; caseId?: string | null; lineId?: string | null; callbackRequestId?: string; callbackTargetVerificationId?: string };
 export type StartOutboundResult = { sessionId: string; operatorLegCallControlId: string; telnyxSessionId: string | null; to: string; from: string };
 
 export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput): Promise<StartOutboundResult> {
   const telnyx = requireConfigured(deps);
   await assertOutboundRate(deps, actor);
   await assertLegBudget(deps);
-  const to = await normalizeDestination(deps, input.to);
+  const target = await resolveCallbackTarget(deps.admin, deps.organizationId, input.to);
+  const confirmed = confirmedCallbackTarget(target, input.callbackTargetVerificationId);
+  if (!confirmed) throw new CallActionError(target.status === "blocked" ? "Toto číslo neprijíma spätné volania. Doplňte overený cieľ v adresári." : "Potvrďte overený alternatívny cieľ volania.", 409, "callback_target_confirmation_required");
+  const to = await normalizeDestination(deps, confirmed);
   const device = await requireLiveDevice(deps, actor.profileId);
   const { line, from } = await resolveFromLine(deps, actor.profileId, input.lineId);
   const now = nowOf(deps);
@@ -625,7 +632,7 @@ async function conferenceSession(deps: CallActionDeps, actor: CallActor, session
   const session = await loadSession(deps, sessionId);
   if (!ACTIVE_SESSION_STATES.has(session.state)) throw new CallActionError("Hovor už nie je aktívny.", 409, "not_active");
   if (session.answered_by_profile_id === actor.profileId) return session;
-  const legs = await deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", session.id).is("ended_at", null);
+  const legs = await deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", session.id).neq("role", "supervisor").is("ended_at", null);
   const openLegProfileIds = (legs.data ?? []).map((leg) => leg.profile_id).filter((id): id is string => Boolean(id));
   if (openLegProfileIds.includes(actor.profileId)) return session;
   if (canSuperviseRole(actor.role)) return session;
@@ -708,11 +715,22 @@ export async function leaveConferenceCall(deps: CallActionDeps, actor: CallActor
  * is reserved best-effort so an *available* supervisor is not offered a call
  * mid-supervision — a manager who is paused or logged out may still supervise.
  */
-export async function superviseCall(deps: CallActionDeps, actor: CallActor, sessionId: string, mode: SupervisorMode): Promise<CallActionResult> {
+export async function superviseCall(deps: CallActionDeps, actor: CallActor, sessionId: string, mode: SupervisorMode, invitationId?: string): Promise<CallActionResult> {
   requireConfigured(deps);
-  if (!canSuperviseRole(actor.role)) throw new CallActionError("Dozor nad hovorom je dostupný len pre manažéra alebo administrátora.", 403, "forbidden");
+  if (invitationId) {
+    await requireMonitorInvitations(deps);
+    if (mode !== "monitor") throw new CallActionError("Pozvaný poslucháč smie iba počúvať.", 403, "monitor_only");
+    await requireActiveMonitorProfile(deps, actor.profileId);
+  }
+  if (!invitationId && !canSuperviseRole(actor.role)) throw new CallActionError("Dozor nad hovorom je dostupný len pre manažéra alebo administrátora.", 403, "forbidden");
   const session = await loadSession(deps, sessionId);
   if (!TALKING_STATES.has(session.state)) throw new CallActionError("Dozor je možný len pri prebiehajúcom hovore.", 409, "not_active");
+  if (invitationId) {
+    const invitation = (session.metadata as import("./state/types").SessionMeta).monitorInvitations?.[invitationId];
+    if (!invitation || invitation.recipientProfileId !== actor.profileId || invitation.acceptedAt || invitation.revokedAt || Date.parse(invitation.expiresAt) <= nowOf(deps).getTime()) {
+      throw new CallActionError("Pozvánka už nie je platná alebo bola použitá.", 403, "invitation_invalid");
+    }
+  }
   if (session.answered_by_profile_id === actor.profileId) throw new CallActionError("Na vlastný hovor sa dozerať nedá.", 409, "own_call");
   // A call whose operator already stepped out (a three-way handed over to an
   // external number) has nobody to whisper to: the remaining leg is the outside
@@ -737,11 +755,13 @@ export async function superviseCall(deps: CallActionDeps, actor: CallActor, sess
     }
   }
 
+  if (invitationId && !already.data && !reservation.applied) throw new CallActionError("Tvoj telefón je obsadený iným hovorom.", 409, "operator_busy");
+
   try {
     const result = await runAction(
       deps,
       session,
-      appEvent("supervise", actor, deps, { supervisor: { profileId: actor.profileId, sipUri: device.sipUri, mode, label: actor.displayName ?? actor.profileId, ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) } }),
+      appEvent("supervise", actor, deps, { supervisor: { profileId: actor.profileId, sipUri: device.sipUri, mode, label: actor.displayName ?? actor.profileId, ...(invitationId ? { invitationId } : {}), ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) } }),
       "Dozor nad hovorom sa nepodarilo spustiť.",
     );
     await auditAction(deps, actor, {
@@ -759,13 +779,45 @@ export async function superviseCall(deps: CallActionDeps, actor: CallActor, sess
 /** Ends this supervisor's own supervision of the call. */
 export async function stopSupervisingCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   requireConfigured(deps);
-  if (!canSuperviseRole(actor.role)) throw new CallActionError("Dozor nad hovorom je dostupný len pre manažéra alebo administrátora.", 403, "forbidden");
   const session = await loadSession(deps, sessionId);
+  const meta = session.metadata as import("./state/types").SessionMeta;
+  if (!canSuperviseRole(actor.role) && !Object.values(meta.monitorInvitations ?? {}).some(item => item.recipientProfileId === actor.profileId && item.acceptedAt)) {
+    throw new CallActionError("Na ukončenie tohto počúvania nemáš oprávnenie.", 403, "forbidden");
+  }
   // No audit row here: `telephony.supervise.stop` is written by the session
   // runner for *every* way a supervision ends (this button, the supervisor's
   // browser leg dropping, the call ending under them, a refused conference
   // join), so the log can answer "how long did the manager listen".
   return runAction(deps, session, appEvent("stop_supervise", actor, deps, { supervisor: { profileId: actor.profileId, sipUri: "", mode: "monitor", label: actor.displayName ?? actor.profileId } }), "Dozor sa nepodarilo ukončiť.");
+}
+
+async function requireActiveMonitorProfile(deps: CallActionDeps, profileId: string) {
+  if (!isUuid(profileId)) throw new CallActionError("Operátor sa nenašiel.", 404);
+  const { data, error } = await deps.admin.from("motorist_profiles").select("id, display_name, role, active, access_status")
+    .eq("organization_id", deps.organizationId).eq("id", profileId).maybeSingle();
+  if (error || !data?.active || data.access_status !== "active" || !["dispatcher", "senior_dispatcher", "manager", "admin"].includes(data.role)) {
+    throw new CallActionError("Operátor nie je aktívny v tejto organizácii.", 403, "recipient_unavailable");
+  }
+  return data;
+}
+
+export async function inviteCallMonitor(deps: CallActionDeps, actor: CallActor, sessionId: string, recipientProfileId: string): Promise<CallActionResult> {
+  await requireMonitorInvitations(deps);
+  const session = await conferenceSession(deps, actor, sessionId);
+  if (recipientProfileId === actor.profileId) throw new CallActionError("Nemôžeš pozvať seba.", 400);
+  const recipient = await requireActiveMonitorProfile(deps, recipientProfileId);
+  await requireLiveDevice(deps, recipientProfileId, "Telefón poslucháča nie je pripojený.");
+  const now = nowOf(deps);
+  return runAction(deps, session, appEvent("invite_monitor", actor, deps, { monitorInvitation: {
+    id: randomUUID(), sessionId, inviterProfileId: actor.profileId, inviterName: actor.displayName ?? actor.profileId,
+    recipientProfileId, recipientName: recipient.display_name, createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + MONITOR_INVITATION_TTL_MS).toISOString(),
+  } }), "Pozvánku sa nepodarilo vytvoriť.");
+}
+
+export async function revokeCallMonitorInvitation(deps: CallActionDeps, actor: CallActor, sessionId: string, invitationId: string): Promise<CallActionResult> {
+  // Revocation remains possible after the feature is disabled.
+  const session = await loadSession(deps, sessionId);
+  return runAction(deps, session, appEvent("revoke_monitor", actor, deps, { invitationId }), "Poslucháča sa nepodarilo odpojiť.");
 }
 
 export type TransferTargetOption = { profileId: string; displayName: string; role: AppRole; available: boolean; status: string; deviceLive: boolean };

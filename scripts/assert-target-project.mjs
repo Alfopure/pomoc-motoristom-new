@@ -13,8 +13,9 @@
 const FORBIDDEN_FRAGMENTS = [
   "sjcsrygkkmersoczpunh",
   "pomoc-motoristom-dispecing.vercel.app",
-  "dispecing.linkapomoci.sk",
 ];
+const ORIGINAL_APP_DOMAIN = "dispecing.linkapomoci.sk";
+const COPY_APP_HOSTNAME = "test.dispecing.linkapomoci.sk";
 
 const INSPECTED_KEYS = [
   "SUPABASE_PROJECT_REF",
@@ -36,10 +37,25 @@ export function assertTargetProject(env = process.env) {
   for (const key of INSPECTED_KEYS) {
     const value = env[key];
     if (!value) continue;
+    let url;
+    try {
+      url = new URL(value);
+    } catch {
+      // Project refs and bare database hosts are also inspected values.
+    }
+    const normalizedValue = `${value} ${url?.href ?? ""}`.toLowerCase();
     for (const fragment of FORBIDDEN_FRAGMENTS) {
-      if (value.includes(fragment)) {
+      if (normalizedValue.includes(fragment)) {
         problems.push(`${key} points at the original production project (${fragment})`);
       }
+    }
+    // The copy's exact hostname is inside the original domain. Exempt only
+    // that parsed hostname, never a substring in credentials or another host.
+    const domainValue = url?.hostname.toLowerCase() === COPY_APP_HOSTNAME
+      ? [url.username, url.password, url.pathname, url.search, url.hash].join(" ").toLowerCase()
+      : normalizedValue;
+    if (domainValue.includes(ORIGINAL_APP_DOMAIN)) {
+      problems.push(`${key} points at the original production project (${ORIGINAL_APP_DOMAIN})`);
     }
   }
 

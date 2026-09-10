@@ -172,6 +172,8 @@ export type PartnerDirectoryInput = {
 };
 
 export type UpdateCaseInput = Partial<CreateCaseInput> & {
+  /** Exact saved server revision; required by the atomic save endpoint. */
+  expectedUpdatedAt?: string;
   /** `open` slúži na vrátenie omylom ukončeného/zrušeného prípadu späť do práce. */
   status?: "open" | "completed_assisted" | "completed_no_assistance" | "waiting_for_docs" | "cancelled" | "futile_trip";
 };
@@ -195,6 +197,7 @@ export type CaseActionInput = {
     | "callback_60";
   note?: string;
   taskId?: string;
+  taskExpectedRevision?: number;
   taskStatus?: "open" | "done" | "overdue";
   taskTitle?: string;
   taskDueAt?: string;
