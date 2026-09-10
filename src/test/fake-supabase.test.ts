@@ -111,6 +111,20 @@ describe("fake-supabase query builder", () => {
       "query:motorist_calls:insert",
     ]);
   });
+
+  it("compares jsonb filter values as the text PostgREST receives", async () => {
+    const { client } = createFakeSupabase();
+    const cancellations = { b: { profileId: PROFILE, reason: "offer_released" }, a: { profileId: PROFILE, reason: "paused" } };
+    await client.from("motorist_call_sessions").insert({ id: SESSION, organization_id: ORG, presence_cancellations: cancellations });
+
+    const reordered = JSON.stringify({ a: cancellations.a, b: cancellations.b });
+    const saved = await client.from("motorist_call_sessions").update({ cancellations_next_attempt_at: null }).eq("id", SESSION).eq("presence_cancellations", reordered).select("id");
+    expect(saved).toMatchObject({ error: null, data: [{ id: SESSION }] });
+
+    // postgrest-js builds `eq.${value}`, so an object reaches Postgres as "[object Object]".
+    const rejected = await client.from("motorist_call_sessions").update({ cancellations_next_attempt_at: null }).eq("id", SESSION).eq("presence_cancellations", cancellations).select("id");
+    expect(rejected.error).toMatchObject({ code: "22P02", message: "invalid input syntax for type json" });
+  });
 });
 
 describe("fake-supabase telephony RPCs", () => {

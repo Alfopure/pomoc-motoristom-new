@@ -2,7 +2,7 @@ import { commandId } from "../telnyx/command-id";
 import { isCallGoneError } from "../telnyx/client";
 import type { TelnyxClientState } from "../telnyx/client-state";
 import type { EffectsDeps } from "./effects";
-import { toJson, type SessionRow } from "./types";
+import type { SessionRow } from "./types";
 
 type Cancellation = { profileId: string; requestedAt: string; reason: string };
 
@@ -37,8 +37,9 @@ export async function cancelRevokedOffers(deps: EffectsDeps, input: SessionRow, 
       }
     }
   }
+  // PostgREST sends filter values as text, so the jsonb compare-and-set needs the serialized value.
   const saved = await deps.admin.from("motorist_call_sessions").update({ cancellations_next_attempt_at: pending ? new Date(deps.now().getTime() + 30_000).toISOString() : null })
-    .eq("organization_id", deps.organizationId).eq("id", session.id).eq("presence_cancellations", toJson(cancellations)!);
+    .eq("organization_id", deps.organizationId).eq("id", session.id).eq("presence_cancellations", JSON.stringify(cancellations));
   if (saved.error) throw new Error(`Offer cancellation checkpoint failed: ${saved.error.message}`);
   return { cancelled, pending };
 }
