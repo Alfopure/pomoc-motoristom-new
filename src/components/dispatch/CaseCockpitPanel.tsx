@@ -6,7 +6,6 @@ import { Headphones, Loader2, Mail, Maximize2, MessageSquareText, Minimize2, Sma
 import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
 import { casePriorityLabels, caseStatusLabels, caseStatusTone, priorityTone } from "@/domain/statuses";
-import { formatTime } from "@/lib/dispatch-calculations";
 import type { DispatchMapModel } from "@/lib/map-adapter";
 import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
@@ -14,6 +13,7 @@ import { CaseEditorHeader, type CaseEditorControls } from "./CaseEditorHeader";
 import { CaseDetail } from "./CaseDetail";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { SmsComposerDialog } from "./SmsComposerDialog";
+import styles from "./case-detail.module.css";
 
 type WorkspaceMode = "collapsed" | "split" | "expanded";
 
@@ -172,35 +172,34 @@ export function CaseCockpitPanel({
           </button>
         </section>
       )}
-    <section hidden={mode === "collapsed"} inert={mode === "collapsed" ? true : undefined} className={`${mode === "collapsed" ? "hidden" : "flex"} h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white lg:rounded-md lg:border lg:border-zinc-200 lg:shadow-sm`}>
-      <div className="shrink-0 border-b border-zinc-200 bg-white px-2 py-1.5 lg:px-3 lg:py-2">
-        <div className="flex flex-wrap items-center gap-1.5 lg:gap-2">
+    <section hidden={mode === "collapsed"} inert={mode === "collapsed" ? true : undefined} className={`${styles.surface} ${mode === "collapsed" ? "hidden" : "flex"} h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white lg:rounded-md lg:border lg:border-zinc-200 lg:shadow-sm`}>
+      <div className={`${styles.cockpitHeader} shrink-0 border-b border-zinc-200 bg-white`}>
+        <div className={styles.cockpitTopline}>
           <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5 lg:gap-2">
-              <span className="hidden text-base font-semibold text-zinc-950 lg:inline">{caseItem.caseNumber}</span>
+            <div className={styles.caseIdentity}>
+              <span className={styles.caseNumber}>{caseItem.caseNumber}</span>
               <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ring-1 lg:px-2 lg:text-xs ${caseStatusTone[caseItem.status]}`}>
                 {caseStatusLabels[caseItem.status]}
               </span>
               <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold lg:px-2 lg:text-xs ${priorityTone[caseItem.priority]}`}>
                 {casePriorityLabels[caseItem.priority]}
               </span>
-              <span className="min-w-0 truncate text-xs font-semibold text-zinc-700 lg:text-sm">{customerName}</span>
+              <span className={styles.caseCustomer}>{customerName}</span>
             </div>
-            <div className="mt-1 hidden min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-zinc-600 lg:flex">
+            <div className={styles.caseMeta}>
               <span>{routeSummary}</span>
               <span>{owner}</span>
               <span className="truncate">{asset ? (selectedAsset ? asset.label : `Návrh: ${asset.label}`) : "Bez dostupnej techniky"}</span>
-              <span>Update {formatTime(caseItem.updatedAt)}</span>
             </div>
           </div>
-          <div className="flex w-full flex-wrap items-center gap-1 lg:w-auto lg:shrink-0 lg:flex-wrap lg:gap-1.5">
+          <div className={styles.headerActions}>
             {callActions}
             <QuickAction onClick={() => setSmsComposerOpen(true)} icon={MessageSquareText} label="SMS" tone="yellow" />
             {contactEmail && <QuickAction href={`mailto:${contactEmail}`} icon={Mail} label="Email" mobileLabel="" />}
             <button
               type="button"
               onClick={onCollapse}
-              className="hidden h-11 w-11 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:inline-flex"
+              className={`${styles.headerIcon} hidden items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:inline-flex`}
               aria-label="Minimalizovať na spodnú lištu"
               title="Minimalizovať na spodnú lištu"
             >
@@ -210,7 +209,7 @@ export function CaseCockpitPanel({
               <button
                 type="button"
                 onClick={onExpand}
-                className="hidden h-11 w-11 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:inline-flex"
+                className={`${styles.headerIcon} hidden items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 lg:inline-flex`}
                 aria-label="Maximalizovať kokpit"
                 title="Maximalizovať kokpit"
               >
@@ -221,8 +220,8 @@ export function CaseCockpitPanel({
         </div>
       </div>
 
-      {editorControls && <div className="shrink-0 border-b border-zinc-200 px-3 py-2"><CaseEditorHeader controls={editorControls} /></div>}
-      <div data-case-detail-scroll-region className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain bg-zinc-50 p-1.5 lg:space-y-3 lg:p-3">
+      {editorControls && <div className={`${styles.headerControlRow} shrink-0`}><CaseEditorHeader controls={editorControls} /></div>}
+      <div data-case-detail-scroll-region className={`${styles.scrollRegion} min-h-0 flex-1 overflow-y-auto overscroll-contain bg-zinc-50`}>
         <CaseDetail
           onEditorControlsChange={setEditorControls}
           key={caseItem.id}
@@ -298,7 +297,7 @@ function QuickAction({
         disabled={disabled}
         aria-label={label}
         title={title ?? label}
-        className={`inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50 lg:px-2.5 ${className}`}
+        className={`${styles.headerAction} inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border px-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50 lg:px-2.5 ${className}`}
       >
         {busy ? <Loader2 size={compact ? 15 : 14} className="motion-safe:animate-spin" aria-hidden="true" /> : <Icon size={compact ? 15 : 14} aria-hidden="true" />}
         {text}
@@ -313,7 +312,7 @@ function QuickAction({
         disabled
         aria-label={label}
         title={title ?? label}
-        className={`inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold opacity-50 ${className}`}
+        className={`${styles.headerAction} inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold opacity-50 ${className}`}
       >
         <Icon size={compact ? 15 : 14} aria-hidden="true" />
         {text}
@@ -322,7 +321,7 @@ function QuickAction({
   }
 
   return (
-    <a href={href} aria-label={label} title={title ?? label} className={`inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold ${className}`}>
+    <a href={href} aria-label={label} title={title ?? label} className={`${styles.headerAction} inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold ${className}`}>
       <Icon size={compact ? 15 : 14} aria-hidden="true" />
       {text}
     </a>

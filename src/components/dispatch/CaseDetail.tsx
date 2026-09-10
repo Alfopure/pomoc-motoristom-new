@@ -133,6 +133,7 @@ import { UseCustomerLocationButton } from "./UseCustomerLocationButton";
 import { CaseEditorHeader, type CaseEditorControls } from "./CaseEditorHeader";
 import { changedCaseFields } from "./case-editor-save";
 import { CaseSummary } from "./CaseSummary";
+import styles from "./case-detail.module.css";
 import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 
@@ -653,11 +654,11 @@ export function CaseDetail({
   }
 
   return (
-    <div className={`grid min-w-0 max-w-full overflow-x-clip @container ${embedded ? "gap-3" : "gap-4"}`}>
-      {!embedded && <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 shadow-sm">
+    <div className={`${styles.surface} ${styles.detail} grid min-w-0 max-w-full overflow-x-clip @container`}>
+      {!embedded && <div className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2.5">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-xl font-semibold text-zinc-950">{caseItem.caseNumber}</h2>
+            <h2 className={styles.caseNumber}>{caseItem.caseNumber}</h2>
             <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ring-1 ${caseStatusTone[caseItem.status]}`}>
               {caseStatusLabels[caseItem.status]}
             </span>
@@ -687,7 +688,7 @@ export function CaseDetail({
         </div>
       </div>}
 
-      <CaseSummary caseItem={caseItem} assets={assets} operators={operators} />
+      <CaseSummary caseItem={caseItem} assets={assets} operators={operators} identityInHeader={embedded && Boolean(onEditorControlsChange)} />
 
       {notice && <div role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{notice}</div>}
 
@@ -729,23 +730,24 @@ export function CaseDetail({
       )}
 
       {caseItem.customerSharedLocation && (
-        <section className="overflow-hidden rounded-lg border border-sky-200 bg-sky-50 shadow-sm" aria-label="Doplnková GPS poloha od klienta">
-          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex min-w-0 items-start gap-3">
-              <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-sky-600 text-white"><MapPin size={19} /></span>
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-sm font-bold text-sky-950">Klient poslal doplnkovú GPS polohu</h3>
-                  <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-sky-800 ring-1 ring-sky-200">Miesto incidentu má prioritu</span>
-                </div>
-                <p className="mt-1 break-words text-sm font-semibold text-sky-950">{caseItem.customerSharedLocation.lat}, {caseItem.customerSharedLocation.lng}</p>
-                <p className="mt-0.5 text-xs leading-5 text-sky-800">
-                  Prijaté {formatDateTime(caseItem.customerSharedLocation.submittedAt)}
-                  {caseItem.customerSharedLocation.accuracyMeters !== undefined ? ` · presnosť približne ${Math.round(caseItem.customerSharedLocation.accuracyMeters)} m` : ""}.
-                  {" "}Táto poloha nemení miesto incidentu, trasu, ETA ani navigáciu.
-                </p>
+        <section className={styles.gps} aria-label="Doplnková GPS poloha od klienta">
+          <div className={styles.gpsInformation}>
+            <span className={styles.gpsIcon}><MapPin size={15} aria-hidden="true" /></span>
+            <div className="min-w-0">
+              <div className={styles.gpsTitle}>
+                <h3>GPS od klienta</h3>
+                <span className={styles.gpsCoordinates}>{caseItem.customerSharedLocation.lat}, {caseItem.customerSharedLocation.lng}</span>
               </div>
+              <p className={styles.gpsCaption}>
+                Prijaté {formatDateTime(caseItem.customerSharedLocation.submittedAt)}
+                {caseItem.customerSharedLocation.accuracyMeters !== undefined ? ` · presnosť približne ${Math.round(caseItem.customerSharedLocation.accuracyMeters)} m` : ""}
+              </p>
+              <p className={styles.gpsCaption}>
+                Doplnková poloha. Miesto incidentu, trasa a ETA sa zmenia až po potvrdení.
+              </p>
             </div>
+          </div>
+          <div className={styles.gpsActions}>
             <UseCustomerLocationButton caseId={caseItem.id} location={caseItem.customerSharedLocation}
               disabled={draftDirty || isEditSaveLocked || isRunningAction} onNotice={setNotice}
               onApplied={(data) => { onDataChange?.(data); setEditorRevision((revision) => revision + 1); }} />
@@ -758,10 +760,13 @@ export function CaseDetail({
         </section>
       )}
 
-          <details open key={`${caseItem.id}:${focusedTaskId ?? "tasks"}`} data-testid="case-tasks" className="min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm" aria-labelledby="case-tasks-heading">
-            <summary className="min-h-11 cursor-pointer border-b border-yellow-200 border-l-4 border-l-[#FCD703] bg-yellow-50 px-3 py-2.5">
-              <span id="case-tasks-heading" className="text-sm font-semibold text-zinc-950">Úlohy prípadu · {openTasks.length} otvorených · {openTasks.filter((task) => isTaskOverdue(task)).length} po termíne</span>
-              <p className="mt-0.5 text-xs font-medium text-zinc-600">Rozdeľte ďalšie kroky a určite, kto ich má vybaviť.</p>
+          <details open={Boolean(focusedTaskId)} data-testid="case-tasks" className={`group ${styles.section}`} aria-labelledby="case-tasks-heading">
+            <summary className={`${styles.sectionHeader} cursor-pointer`}>
+              <span id="case-tasks-heading" className={styles.sectionTitle}>Úlohy prípadu <span className={styles.sectionHelp}>· {openTasks.length} otvorených · {openTasks.filter((task) => isTaskOverdue(task)).length} po termíne</span></span>
+              <span className="flex shrink-0 items-center gap-2">
+                <span className={`${styles.sectionHelp} group-open:hidden`}>Pridať úlohu</span>
+                <ChevronDown size={14} className="shrink-0 text-zinc-500 transition-transform group-open:rotate-180" aria-hidden="true" />
+              </span>
             </summary>
             <div className="grid min-w-0 gap-3 p-3 @3xl:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
               <div className="grid min-w-0 content-start gap-2">
@@ -824,11 +829,11 @@ export function CaseDetail({
                 )}
               </div>
 
-              <div className="grid min-w-0 content-start gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 sm:p-4">
+              <div className={`${styles.taskComposer} grid min-w-0 content-start rounded-md border border-zinc-200 bg-zinc-50`}>
                 <h4 className="text-base font-semibold text-zinc-950">Pridať novú úlohu</h4>
                 <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
                   Názov úlohy
-                  <textarea value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" rows={3} className="min-h-24 w-full min-w-0 resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 text-base! font-medium leading-6 text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
+                  <textarea value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="Nová úloha" rows={3} className="min-h-24 w-full min-w-0 resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 text-base font-medium leading-6 text-zinc-950 outline-none ring-yellow-300 transition placeholder:font-normal placeholder:text-zinc-400 focus:ring-2" aria-label="Názov novej úlohy" />
                 </label>
                 <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Rýchle nastavenie termínu">
                   {taskDuePresets.map((preset) => (
@@ -838,7 +843,7 @@ export function CaseDetail({
                 <div className="grid min-w-0 gap-3">
                   <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
                     Termín
-                    <input type="datetime-local" value={taskDueAt} onChange={(event) => setTaskDueAt(event.target.value)} className="h-11 w-full min-w-0 max-w-full overflow-hidden rounded-md border border-zinc-300 bg-white px-3 text-base! font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Termín úlohy" />
+                    <input type="datetime-local" value={taskDueAt} onChange={(event) => setTaskDueAt(event.target.value)} className="h-11 w-full min-w-0 max-w-full overflow-hidden rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Termín úlohy" />
                   </label>
                   <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
                     Zodpovedná osoba
@@ -882,7 +887,7 @@ export function CaseDetail({
       ) : (
         <div className="grid min-w-0 gap-3">
           <InfoPanel title="1. Základ prípadu" icon={ClipboardList}>
-            <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid min-w-0 gap-2 sm:grid-cols-2 @4xl:grid-cols-4">
               <InfoItem label="Typy zákazky" value={labelList(caseItem.jobTypes, jobTypeLabels)} required invalid={caseItem.jobTypes.length === 0} />
               <InfoItem label="Typ / zdroj" value={[caseItem.caseType, caseItem.sourceType].filter(Boolean).join(" · ")} required invalid={!caseItem.caseType || !caseItem.sourceType} />
               <InfoItem label="Priorita / stav" value={`${casePriorityLabels[caseItem.priority]} · ${caseStatusLabels[caseItem.status]}`} />
@@ -899,7 +904,7 @@ export function CaseDetail({
           </InfoPanel>
 
           <InfoPanel title="2. Zákazník a kontakty" icon={UserRound}>
-            <div className="grid min-w-0 gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-4">
               <InfoItem label="Typ zákazníka" value={caseItem.customerDetails.type ? customerTypeLabels[caseItem.customerDetails.type] : ""} required />
               <InfoItem
                 label="Zákazník"
@@ -926,7 +931,7 @@ export function CaseDetail({
           </InfoPanel>
 
           <InfoPanel title="3. Vozidlo a incident" icon={CarFront}>
-            <div className="grid min-w-0 gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-4">
               <InfoItem label="EČV" value={caseItem.vehicle.licensePlate} required invalid={Boolean(readOnlyFieldErrors.licensePlate)} warningMessage={readOnlyFieldErrors.licensePlate} />
               <InfoItem label="VIN" value={caseItem.vehicle.vin ?? ""} invalid={Boolean(readOnlyFieldErrors.vin)} warningMessage={readOnlyFieldErrors.vin} />
               <InfoItem label="Značka / model" value={[caseItem.vehicle.make, caseItem.vehicle.model].filter(Boolean).join(" ")} />
@@ -941,7 +946,7 @@ export function CaseDetail({
           </InfoPanel>
 
           <InfoPanel title="4. Miesto a cieľ" icon={MapPin}>
-            <div className="grid min-w-0 gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @4xl:grid-cols-4">
               <InfoItem
                 label="Miesto incidentu"
                 value={caseItem.pickup?.address || caseItem.locationDetails.manualPickupAddress || ""}
@@ -986,7 +991,7 @@ export function CaseDetail({
           </InfoPanel>
 
           <InfoPanel title="5. Doplnky" icon={ReceiptText}>
-            <div className="grid min-w-0 gap-3 xl:grid-cols-2">
+            <div className="grid min-w-0 gap-3 @3xl:grid-cols-2">
               <div className="grid min-w-0 content-start gap-2 sm:grid-cols-2">
                 <InfoItem
                   label="Náhradné vozidlo"
@@ -1113,10 +1118,10 @@ export function CaseNotesAndActivity({
   }
 
   return (
-    <section className="min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm" aria-labelledby="case-notes-heading">
-      <div className="border-b border-yellow-200 border-l-4 border-l-[#FCD703] bg-yellow-50 px-3 py-2.5">
-        <h3 id="case-notes-heading" className="text-sm font-semibold text-zinc-950">Poznámky a aktivita</h3>
-        <p className="mt-0.5 text-xs font-medium text-zinc-600">Interná komunikácia k prípadu a história zmien s autorom a časom.</p>
+    <section className={styles.section} aria-labelledby="case-notes-heading">
+      <div className={styles.sectionHeader}>
+        <h3 id="case-notes-heading" className={styles.sectionTitle}>Poznámky a aktivita</h3>
+        <span className={styles.sectionHelp}>Interná komunikácia a história</span>
       </div>
       {/* Panel je na celú šírku karty: na širokej obrazovke poznámky a aktivita vedľa seba,
           na úzkej sa zalomia pod seba. */}
@@ -1988,7 +1993,7 @@ function EditCaseForm({
         <button type="button" onClick={() => void reloadConflictingCase()} className="mt-2 flex min-h-11 items-center rounded-md border border-amber-400 bg-white px-3 font-semibold">Načítať aktuálny stav prípadu</button>
       </div>}
       <div className="m-0 min-w-0 border-0 p-0 @container">
-        <div className="grid min-w-0 gap-2 lg:gap-4" data-testid="case-edit-form-main">
+        <div className={`${styles.formMain} grid min-w-0`} data-testid="case-edit-form-main">
       <p className="text-[10px] font-medium text-zinc-500 lg:text-xs lg:font-semibold">
         <span className="text-red-600" aria-hidden="true">*</span> Povinné údaje
       </p>
@@ -2000,8 +2005,8 @@ function EditCaseForm({
         collapsible={compact}
         defaultOpen={compact}
       >
-        <div className="grid min-w-0 grid-cols-2 gap-2 lg:gap-3 lg:grid-cols-[minmax(0,1fr)_180px_180px]">
-          <div className="col-span-2 lg:col-span-1">
+        <div className="grid min-w-0 grid-cols-2 gap-2 lg:gap-3 @3xl:grid-cols-[minmax(0,1fr)_150px_150px]">
+          <div className="col-span-2 @3xl:col-span-1">
             <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Typ zákazky<RequiredMark /></span>
             <CheckboxGroup compact items={jobTypes} labels={jobTypeLabels} selected={selectedJobTypes} onChange={setSelectedJobTypes} />
           </div>
@@ -2037,7 +2042,7 @@ function EditCaseForm({
         </div>
 
         {(customerType === "insurance" || customerType === "company") && (
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-3 @3xl:grid-cols-3">
             <SelectField
               label={customerType === "insurance" ? "Adresár asistenčných služieb" : "Adresár firiem"}
               value={partnerDirectoryId}
@@ -2073,7 +2078,7 @@ function EditCaseForm({
             Prípad na náhradné vozidlo: údaje o klientovom vozidle sú voliteľné a odťahové polia sú skryté.
           </p>
         )}
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 @3xl:grid-cols-3">
           <VehicleLookupControl contextKey={caseItem.id} plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor }} onApply={(patch, snapshot) => {
             setVehicleLookup(snapshot);
             if (patch.plate !== undefined) setLicensePlate(patch.plate);
@@ -2121,7 +2126,7 @@ function EditCaseForm({
         {!replacementOnly && (
           <>
             <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Incident</h4>
-            <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid gap-3 @3xl:grid-cols-3">
               <SelectField label="Typ incidentu" value={incidentType} onChange={(value) => setIncidentType(value as IncidentType | "")} options={[["", "Nezadaný"], ...incidentTypes.map((type) => [type, incidentTypeLabels[type]] as [string, string])]} required />
               <TextField label="Počet účastníkov" value={participantsCount} onChange={setParticipantsCount} error={fieldErrors.participantsCount} type="number" inputMode="numeric" min={0} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
               <TextField label="Počet pasažierov" value={passengersCount} onChange={setPassengersCount} error={fieldErrors.passengersCount} type="number" inputMode="numeric" min={0} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
@@ -2138,7 +2143,7 @@ function EditCaseForm({
         errorCount={formValidation.sectionErrors.location.length}
         collapsible={compact}
       >
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className={styles.locationFields}>
           <GooglePlaceAutocomplete
             label={replacementOnly ? "Miesto (voliteľné, mapa)" : "Miesto incidentu"}
             required={!replacementOnly}
@@ -2178,7 +2183,7 @@ function EditCaseForm({
         </div>
         <LocationPicker value={pickup} onSelect={setPickup} />
         <div className={`rounded-md border p-3 ${placeType === "highway" ? "border-yellow-300 bg-yellow-50" : "border-zinc-200 bg-white"}`}>
-          <div className="grid gap-3 md:grid-cols-4">
+          <div className="grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-4">
             <TextField label="Diaľnica / cesta" value={roadName} onChange={setRoadName} />
             <TextField label="Km úsek" value={kilometerSection} onChange={setKilometerSection} error={fieldErrors.kilometerSection} type="number" inputMode="decimal" min={0} max={9999} step="0.01" transformValue={(value) => decimalOnly(value, 4)} />
             <TextField label="Smer jazdy" value={drivingDirection} onChange={setDrivingDirection} />
@@ -2222,7 +2227,7 @@ function EditCaseForm({
             </button>
           </div>
           <div className={`mt-3 grid gap-3 rounded-md border p-3 ${replacementVehicleNeeded ? "border-yellow-200 bg-white" : "border-zinc-200 bg-zinc-100"}`}>
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="grid gap-3 @xl:grid-cols-2">
               <TextField label="Požadovaný typ vozidla" value={replacementVehicleType} onChange={setReplacementVehicleType} disabled={!replacementVehicleNeeded} required={replacementVehicleNeeded} />
               <TextField label="Špeciálne požiadavky" value={replacementVehicleNote} onChange={setReplacementVehicleNote} disabled={!replacementVehicleNeeded} />
             </div>
@@ -2237,12 +2242,12 @@ function EditCaseForm({
               />
             </div>
             {replacementOnly && customerType !== "insurance" && (
-              <div className="grid gap-3 border-t border-zinc-100 pt-3 md:grid-cols-2">
+              <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
                 <TextField label="Asistenčná služba" value={assistanceServiceName} onChange={setAssistanceServiceName} disabled={!replacementVehicleNeeded} />
                 <TextField label="Číslo prípadu asistenčky" value={assistanceReference} onChange={setAssistanceReference} disabled={!replacementVehicleNeeded} />
               </div>
             )}
-            <div className="grid gap-3 border-t border-zinc-100 pt-3 md:grid-cols-2">
+            <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
               <SelectField
                 label="Kategória vozidla"
                 value={replacementCategory}
@@ -2284,7 +2289,7 @@ function EditCaseForm({
                 disabled={!replacementVehicleNeeded}
               />
             </div>
-            <div className="grid gap-3 border-t border-zinc-100 pt-3 md:grid-cols-2">
+            <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
               <SelectField
                 label="Poskytnuté náhradné vozidlo"
                 value={replacementProvisionStatus}
@@ -2315,7 +2320,7 @@ function EditCaseForm({
           </div>
         </div>
         <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Dokumenty</h4>
-        <div className="grid gap-3 md:grid-cols-[160px_1fr_1fr_auto]">
+        <div className="grid gap-3 @3xl:grid-cols-[160px_1fr_1fr_auto]">
           <SelectField label="Typ prílohy" value={attachmentCategory} onChange={(value) => setAttachmentCategory(value as CaseAttachmentInput["category"])} options={attachmentCategories.map((category) => [category, attachmentCategoryLabels[category]])} />
           <TextField label="Názov prílohy" value={attachmentFileName} onChange={setAttachmentFileName} />
           <TextField label="Poznámka" value={attachmentNote} onChange={setAttachmentNote} />
@@ -2338,12 +2343,12 @@ function EditCaseForm({
           </div>
         )}
         <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Platba</h4>
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3 @xl:grid-cols-2">
           <SelectField label="Platba" value={paymentMethod} onChange={(value) => setPaymentMethod(value as PaymentMethod | "")} options={[["", "Nezadaná"], ...paymentMethods.map((method) => [method, paymentMethodLabels[method]] as [string, string])]} required />
           <SelectField label="Stav platby" value={paymentStatus} onChange={(value) => setPaymentStatus(value as PaymentStatus | "")} options={[["", "Nezadaný"], ...paymentStatuses.map((status) => [status, paymentStatusLabels[status]] as [string, string])]} required />
         </div>
         <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Ukončenie a poznámky</h4>
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 @3xl:grid-cols-3">
           <SelectField
             label="Stav prípadu"
             value={caseClosureStatus}
@@ -2419,7 +2424,7 @@ function ContactEditor({
               </IconButton>
             </div>
           </div>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-4">
             <TextField label="Meno" value={contact.firstName} onChange={(value) => onUpdate(contact.id, { firstName: value })} error={contact.isPrimary ? fieldErrors.contactName : undefined} required={contact.isPrimary} />
             <TextField label="Priezvisko" value={contact.lastName} onChange={(value) => onUpdate(contact.id, { lastName: value })} />
             <PhoneField contact={contact} onChange={(patch) => onUpdate(contact.id, patch)} error={contact.isPrimary ? fieldErrors.contactPhone : undefined} required={contact.isPrimary} />
