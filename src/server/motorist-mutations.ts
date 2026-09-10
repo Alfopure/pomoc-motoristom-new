@@ -41,6 +41,7 @@ import {
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
 import { defaultTaskTitle, taskKinds, taskPriorities } from "@/domain/tasks";
 import type { CaseAttachmentCategory, CasePriority, CaseStatus, CaseTaskKind, CustomerContactRole, FleetAssetOccupancy, JobType, TaskReminderChannel, VehicleConditionFlag } from "@/domain/types";
+import { ALLOWED_CASE_ATTACHMENT_TYPES, MAX_CASE_ATTACHMENT_BYTES } from "@/lib/case-attachments";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/database.types";
 // Lives in its own module so that latency-sensitive routes (the Telnyx webhook)
@@ -95,15 +96,7 @@ type OrganizationAuthorizer = (organizationId: string) => Promise<void>;
 
 const DEFAULT_ORGANIZATION_SLUG = "pomoc-motoristom";
 const CASE_ATTACHMENTS_BUCKET = "motorist-case-attachments";
-const MAX_CASE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const CASE_TASK_PHASE0_COLUMNS = ["priority", "kind", "created_by", "completed_by", "completed_at"] as const;
-const ALLOWED_CASE_ATTACHMENT_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-]);
 
 export async function createCase(input: CreateCaseInput, ownerProfileId?: string) {
   const warnings = collectCaseInputWarnings(input);
@@ -1019,7 +1012,8 @@ export async function backfillAssistanceDirectoryFromCases(authorize?: Organizat
   return { created };
 }
 
-export async function uploadCaseAttachments(caseId: string, files: File[], note?: string, authorize?: OrganizationAuthorizer) {
+/** `category` is the operator's own label for the batch; anything else falls back to the file type. */
+export async function uploadCaseAttachments(caseId: string, files: File[], note?: string, authorize?: OrganizationAuthorizer, category?: string) {
   if (!nonEmpty(caseId)) {
     throw new MutationError("Chýba prípad.", 400);
   }
@@ -1053,7 +1047,7 @@ export async function uploadCaseAttachments(caseId: string, files: File[], note?
       uploadedPaths.push(storagePath);
       uploadedAttachments.push({
         id,
-        category: attachmentCategoryForMime(file.type),
+        category: category && isAttachmentCategory(category) ? category : attachmentCategoryForMime(file.type),
         fileName: file.name,
         storageBucket: CASE_ATTACHMENTS_BUCKET,
         storagePath,

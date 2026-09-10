@@ -2,6 +2,7 @@
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
+import { CASE_ATTACHMENT_ACCEPT, validateCaseAttachmentFiles } from "@/lib/case-attachments";
 import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -120,15 +121,6 @@ const driveTypeOptions = [
   ["unknown", "Nezistené"],
 ] as const;
 
-const maxAttachmentBytes = 10 * 1024 * 1024;
-const allowedAttachmentTypes = new Set([
-  "image/jpeg",
-  "image/png",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-]);
-
 export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, onDirtyChange, onSaveDraftChange, onSavingChange, partnerDirectory }: NewCaseFormProps) {
   // Predvyplň kontakt IBA z reálneho aktívneho hovoru. Bez neho (generická nová karta,
   // idle/mock hovor) štartuje formulár čistý — žiadne prenesené meno/číslo.
@@ -232,7 +224,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   const existingAssistanceEntry = directoryEntries.find(
     (entry) => entry.kind === "assistance" && entry.active && entry.name.trim().toLocaleLowerCase("sk-SK") === assistanceServiceName.trim().toLocaleLowerCase("sk-SK"),
   );
-  const attachmentValidationError = validateAttachmentFiles(pendingFiles);
+  const attachmentValidationError = validateCaseAttachmentFiles(pendingFiles);
   const formValidation = getCaseFormValidation({
     additionalContacts: contacts
       .filter((contact) => contact.id !== primaryContact?.id)
@@ -1094,7 +1086,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
                 <FileUp size={22} />
                 Pridať dokument, fotku alebo PDF
                 <span className="text-xs font-medium text-zinc-500">JPG, PNG, PDF alebo Word do 10 MB</span>
-                <input type="file" multiple accept="image/jpeg,image/png,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="sr-only" onChange={(event) => handleFiles(event.target.files)} />
+                <input type="file" multiple accept={CASE_ATTACHMENT_ACCEPT} className="sr-only" onChange={(event) => handleFiles(event.target.files)} />
               </label>
               {pendingFiles.length > 0 && (
                 <div className="mt-3 grid gap-2">
@@ -1344,20 +1336,3 @@ function toOptionalNumber(value: string) {
   return Number.isFinite(number) && value.trim() ? number : undefined;
 }
 
-function validateAttachmentFiles(files: File[]) {
-  for (const file of files) {
-    if (file.size <= 0) {
-      return `Súbor ${file.name} je prázdny.`;
-    }
-
-    if (file.size > maxAttachmentBytes) {
-      return `Súbor ${file.name} presahuje limit 10 MB.`;
-    }
-
-    if (!allowedAttachmentTypes.has(file.type)) {
-      return `Typ súboru ${file.type || "neznámy"} nie je povolený.`;
-    }
-  }
-
-  return null;
-}
