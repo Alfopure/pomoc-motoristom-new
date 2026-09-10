@@ -2,7 +2,9 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { pauseEndingSchedule, pauseEndingWindowStatus } from "@/lib/telephony/pause-ending";
+import { formatTime } from "@/lib/dispatch-calculations";
+import { PAUSE_OVERDUE_NOTICE_MAX_AGE_MS, pauseEndingSchedule, pauseEndingWindowStatus } from "@/lib/telephony/pause-ending";
+import { effectivePresenceSince, effectivePresenceStatus, readPauseReturn } from "@/lib/telephony/presence-policy";
 import type { Database } from "@/lib/supabase/database.types";
 import { pauseEndingNotificationEnabled, sendPauseEndingPush } from "@/server/web-push";
 
@@ -19,14 +21,25 @@ export type PauseEndingMaterializationStatus =
   | "early"
   | "expired";
 
+/** `warning` a minute before the planned end, `overdue` once it has passed. */
+export type PauseEndingPhase = "warning" | "overdue";
+
 export type PauseEndingMaterializationResult = {
   status: PauseEndingMaterializationStatus;
   delivered: boolean;
+  phase?: PauseEndingPhase;
   notificationId?: string;
   warningAt?: string;
   plannedEndAt?: string;
 };
 
+/**
+ * One private in-app notification (plus push) per pause and phase, claimed
+ * atomically through the dedupe key: the open console fires it at the exact
+ * moment, the five-minute cron is the closed-app fallback. The overdue notice
+ * has no upper bound inside `PAUSE_OVERDUE_NOTICE_MAX_AGE_MS`, so a pause
+ * shorter than the cron cadence still gets reported when nobody ended it.
+ */
 export async function materializePauseEndingNotification(
   supabase: AdminClient,
   input: {
@@ -40,45 +53,54 @@ export async function materializePauseEndingNotification(
     return { status: "disabled", delivered: false };
   }
 
+  const now = input.now ?? new Date();
   const presenceResult = await supabase.from("motorist_operator_presence").select("*")
     .eq("organization_id", input.organizationId).eq("profile_id", input.profileId).maybeSingle();
   throwOnStorageError(presenceResult.error, "Prezenciu pre upozornenie sa nepodarilo načítať.");
   const presence = presenceResult.data;
-  if (!presence || presence.status !== "paused" || !presence.pause_reason_id) {
+  // Wrap-up that returns into a pause is already "paused" for the console and
+  // for ringing; the notice follows the same effective status.
+  const pauseReasonId = presence ? readPauseReturn(presence.pause_return)?.pauseReasonId ?? presence.pause_reason_id : null;
+  if (!presence || effectivePresenceStatus(presence, now) !== "paused" || !pauseReasonId) {
     return { status: "not_paused", delivered: false };
   }
 
-  const pauseStartedAt = normalizedTimestamp(presence.status_since);
+  const pauseStartedAt = normalizedTimestamp(effectivePresenceSince(presence, now));
   const expectedPauseStartedAt = input.expectedPauseStartedAt ? normalizedTimestamp(input.expectedPauseStartedAt) : null;
   if (input.expectedPauseStartedAt && (!expectedPauseStartedAt || expectedPauseStartedAt !== pauseStartedAt)) {
     return { status: "stale", delivered: false };
   }
 
   const reasonResult = await supabase.from("motorist_pause_reasons").select("id,label,max_minutes,active")
-    .eq("organization_id", input.organizationId).eq("id", presence.pause_reason_id).maybeSingle();
+    .eq("organization_id", input.organizationId).eq("id", pauseReasonId).maybeSingle();
   throwOnStorageError(reasonResult.error, "Dôvod pauzy pre upozornenie sa nepodarilo načítať.");
   const reason = reasonResult.data;
   const schedule = pauseEndingSchedule({
-    status: presence.status,
-    statusSince: presence.status_since,
+    status: "paused",
+    statusSince: pauseStartedAt,
     maxMinutes: reason?.active === false ? null : reason?.max_minutes,
   });
   if (!schedule) return { status: "untimed", delivered: false };
 
-  const windowStatus = pauseEndingWindowStatus(schedule, input.now ?? new Date());
-  if (windowStatus !== "due") {
-    return { status: windowStatus, delivered: false, warningAt: schedule.warningAt, plannedEndAt: schedule.plannedEndAt };
+  const windowStatus = pauseEndingWindowStatus(schedule, now);
+  const timing = { warningAt: schedule.warningAt, plannedEndAt: schedule.plannedEndAt };
+  if (windowStatus === "early") return { status: "early", delivered: false, ...timing };
+  if (windowStatus === "expired" && now.getTime() - Date.parse(schedule.plannedEndAt) > PAUSE_OVERDUE_NOTICE_MAX_AGE_MS) {
+    return { status: "expired", delivered: false, ...timing };
   }
+  const phase: PauseEndingPhase = windowStatus === "due" ? "warning" : "overdue";
 
   // Let an opt-out that raced the schedule/presence reads win before the
   // in-app notification is claimed. Web Push repeats this check at send time.
   if (!await pauseEndingNotificationEnabled(supabase, { organizationId: input.organizationId, profileId: input.profileId })) {
-    return { status: "disabled", delivered: false, warningAt: schedule.warningAt, plannedEndAt: schedule.plannedEndAt };
+    return { status: "disabled", delivered: false, ...timing };
   }
 
-  const title = "Plánovaný koniec pauzy o 1 minútu";
-  const body = `Pauza „${reason!.label}“ dosiahne plánovaný čas. Keď budeš pripravený, prepni sa ručne na dostupného.`;
-  const dedupeKey = `pause-ending:${input.profileId}:${schedule.pauseStartedAt}`;
+  const title = phase === "warning" ? "Plánovaný koniec pauzy o 1 minútu" : "Plánovaný čas pauzy uplynul";
+  const body = phase === "warning"
+    ? `Pauza „${reason!.label}“ dosiahne plánovaný čas. Keď budeš pripravený, prepni sa ručne na dostupného.`
+    : `Pauza „${reason!.label}“ mala skončiť o ${formatTime(schedule.plannedEndAt)}. Kým sa neprepneš na dostupného, hovory ti nezvonia.`;
+  const dedupeKey = `${phase === "warning" ? "pause-ending" : "pause-overdue"}:${input.profileId}:${schedule.pauseStartedAt}`;
   const notificationResult = await supabase.from("motorist_notifications").upsert({
     organization_id: input.organizationId,
     case_id: null,
@@ -94,16 +116,16 @@ export async function materializePauseEndingNotification(
     delivery_status: "in_app",
     dedupe_key: dedupeKey,
     payload: {
-      source: "pause_ending_warning",
+      source: phase === "warning" ? "pause_ending_warning" : "pause_overdue",
       pause_reason_id: reason!.id,
       pause_started_at: schedule.pauseStartedAt,
       warning_at: schedule.warningAt,
       planned_end_at: schedule.plannedEndAt,
     },
   }, { onConflict: "organization_id,dedupe_key", ignoreDuplicates: true }).select("id").maybeSingle();
-  if (notificationResult.error?.code === "23505") return { status: "duplicate", delivered: false, warningAt: schedule.warningAt, plannedEndAt: schedule.plannedEndAt };
+  if (notificationResult.error?.code === "23505") return { status: "duplicate", delivered: false, phase, ...timing };
   throwOnStorageError(notificationResult.error, "Upozornenie na koniec pauzy sa nepodarilo uložiť.");
-  if (!notificationResult.data) return { status: "duplicate", delivered: false, warningAt: schedule.warningAt, plannedEndAt: schedule.plannedEndAt };
+  if (!notificationResult.data) return { status: "duplicate", delivered: false, phase, ...timing };
 
   await sendPauseEndingPush(supabase, {
     organizationId: input.organizationId,
@@ -115,13 +137,13 @@ export async function materializePauseEndingNotification(
   return {
     status: "delivered",
     delivered: true,
+    phase,
     notificationId: notificationResult.data.id,
-    warningAt: schedule.warningAt,
-    plannedEndAt: schedule.plannedEndAt,
+    ...timing,
   };
 }
 
-/** Strict one-minute window: the five-minute cron is only a fallback and never sends early or after the planned end. */
+/** Cron fallback: the warning only inside its one-minute window, the overdue notice any time after the planned end. */
 export async function materializeDuePauseEndingNotifications(
   supabase: AdminClient,
   organizationId: string,
@@ -131,8 +153,8 @@ export async function materializeDuePauseEndingNotifications(
   const rows = await supabase.from("motorist_operator_presence").select("*")
     .eq("organization_id", organizationId).eq("status", "paused").order("status_since", { ascending: true }).limit(limit);
   throwOnStorageError(rows.error, "Pauzy pre upozornenia sa nepodarilo načítať.");
-  const totals: Record<PauseEndingMaterializationStatus, number> = {
-    delivered: 0, duplicate: 0, disabled: 0, not_paused: 0, untimed: 0, stale: 0, early: 0, expired: 0,
+  const totals: Record<PauseEndingMaterializationStatus | "overdue", number> = {
+    delivered: 0, duplicate: 0, disabled: 0, not_paused: 0, untimed: 0, stale: 0, early: 0, expired: 0, overdue: 0,
   };
   for (const presence of (rows.data ?? []) as PresenceRow[]) {
     const result = await materializePauseEndingNotification(supabase, {
@@ -142,6 +164,7 @@ export async function materializeDuePauseEndingNotifications(
       now,
     });
     totals[result.status] += 1;
+    if (result.delivered && result.phase === "overdue") totals.overdue += 1;
   }
   return { checked: rows.data?.length ?? 0, ...totals };
 }

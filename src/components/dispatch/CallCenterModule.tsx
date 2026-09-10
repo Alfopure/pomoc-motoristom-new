@@ -87,7 +87,7 @@ type CallCenterModuleProps = {
   onOpenCase: (caseId: string) => void;
   onAvailabilityAction: (action: TelephonyAvailabilityAction) => void;
   /** Console-owned outbound path for the callback queue (arms the browser phone). */
-  onCallbackCall?: (requestId: string) => Promise<void>;
+  onCallbackCall?: (requestId: string, verificationId?: string) => Promise<void>;
   onTelephonyChanged: () => void;
 };
 
@@ -405,8 +405,11 @@ export function CallCenterModule({
       {actionNotice && <div className="mb-3 shrink-0 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900">{actionNotice}</div>}
 
       <div>
-        <div className={`${styles.contentGrid} grid min-w-0 max-w-full gap-3 xl:grid-cols-[minmax(240px,290px)_minmax(0,1fr)_minmax(270px,320px)] 2xl:grid-cols-[minmax(270px,320px)_minmax(0,1fr)_minmax(290px,340px)]`}>
-          <aside className={`${styles.phonebookArea} grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0`}>
+        {/* Between lg and xl (typical 125 %-scaled laptops) the queue sits under
+            the phonebook next to the history instead of at the very bottom of a
+            single column. */}
+        <div className={`${styles.contentGrid} grid min-w-0 max-w-full gap-3 lg:grid-cols-[minmax(240px,290px)_minmax(0,1fr)] xl:grid-cols-[minmax(240px,290px)_minmax(0,1fr)_minmax(270px,320px)] 2xl:grid-cols-[minmax(270px,320px)_minmax(0,1fr)_minmax(290px,340px)]`}>
+          <aside className={`${styles.phonebookArea} grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0 lg:col-start-1 lg:row-start-1`}>
             <PhonebookPanel
               busyAction={busyAction}
               onQuickCall={(entry) => void startQuickCall(entry)}
@@ -427,7 +430,7 @@ export function CallCenterModule({
             totalCalls={storedCalls.length}
           />
 
-          <aside className={`${styles.callbackArea} grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0`}>
+          <aside className={`${styles.callbackArea} grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0 lg:col-start-1 lg:row-start-2 xl:col-start-3 xl:row-start-1`}>
             <CallbackQueuePanel
               configured={telephonyConfigured}
               onCallBack={onCallbackCall}
@@ -611,7 +614,7 @@ function HistoryPanel({
   }
 
   return (
-    <section data-testid="call-center-history" className={`${styles.historyPanel} min-w-0 overflow-hidden rounded-md border border-zinc-200 bg-white @container xl:flex xl:h-full xl:min-h-0 xl:flex-col`}>
+    <section data-testid="call-center-history" className={`${styles.historyPanel} min-w-0 overflow-hidden rounded-md border border-zinc-200 bg-white @container lg:col-start-2 lg:row-start-1 lg:row-span-2 xl:row-span-1 xl:flex xl:h-full xl:min-h-0 xl:flex-col`}>
       <div className={`${styles.historyHeading} flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 p-3`}>
         <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950">
           <History size={17} />

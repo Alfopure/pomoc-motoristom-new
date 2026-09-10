@@ -542,7 +542,13 @@ export type PriceRule = {
 
 export type CaseTask = {
   id: string;
+  /** Compatibility origin; empty for an independent team task. Use caseIds for links. */
   caseId: string;
+  caseIds?: string[];
+  reminderAt?: string | null;
+  revision?: number;
+  originLocked?: boolean;
+  provenance?: "manual" | "proven" | "ambiguous";
   title: string;
   assignedTo: string;
   dueAt: string;

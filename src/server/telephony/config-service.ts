@@ -1,3 +1,4 @@
+import { returnLineId, returnLineProblem } from "@/lib/telephony/return-line";
 import { telephonyStabilityEnabled } from "./stability";
 import { randomUUID } from "node:crypto";
 
@@ -195,6 +196,7 @@ export type IvrMenuInput = {
 };
 
 export type LinePatchInput = {
+  returnLineId?: string | null;
   label?: string;
   partnerName?: string | null;
   ringPlanId?: string | null;
@@ -259,6 +261,7 @@ export type BusinessHoursDoc = {
 export type PauseReasonDoc = { id: string; code: string; label: string; maxMinutes: number | null; sortOrder: number; active: boolean };
 
 export type LineDoc = {
+  returnLineId?: string | null;
   id: string;
   phoneNumber: string;
   label: string;
@@ -638,6 +641,7 @@ export function parseLinePatch(value: unknown): LinePatchInput {
   const patch: LinePatchInput = {};
   if ("label" in row) patch.label = typeof row.label === "string" ? row.label : "";
   if ("partnerName" in row) patch.partnerName = readText(row.partnerName);
+  if ("returnLineId" in row) patch.returnLineId = readOptionalId(row, "returnLineId", "", issues);
   if ("ringPlanId" in row) patch.ringPlanId = readOptionalId(row, "ringPlanId", "", issues);
   if ("ivrMenuId" in row) patch.ivrMenuId = readOptionalId(row, "ivrMenuId", "", issues);
   if ("businessHoursId" in row) patch.businessHoursId = readOptionalId(row, "businessHoursId", "", issues);
@@ -1151,6 +1155,7 @@ export function validateIvrMenus(input: IvrMenuInput[], context: ValidationConte
 
 export function validateLinePatch(patch: LinePatchInput, context: ValidationContext): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  if (patch.returnLineId && !context.lineIds.has(patch.returnLineId)) issues.push(issue("returnLineId", "line_foreign", "Cieľová linka nepatrí do tejto organizácie."));
   if (patch.label !== undefined && !patch.label.trim()) issues.push(issue("label", "label_required", "Linka potrebuje štítok."));
   if (patch.ringPlanId !== undefined && patch.ringPlanId !== null && !context.ringPlanIds.has(patch.ringPlanId)) {
     issues.push(issue("ringPlanId", "plan_foreign", "Plán zvonenia nepatrí do tejto organizácie."));
@@ -1427,6 +1432,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
     pauseReasons: pauseReasons.map((row) => ({ id: row.id, code: row.code, label: row.label, maxMinutes: row.max_minutes, sortOrder: row.sort_order, active: row.active })),
     pauseReasonsInUse: [...new Set(presence.map((row) => row.pause_reason_id).filter((id): id is string => Boolean(id)))],
     lines: lines.map((line) => ({
+      returnLineId: returnLineId(line.metadata),
       id: line.id,
       phoneNumber: line.phone_number,
       label: line.label,
@@ -1899,8 +1905,20 @@ export async function updateTelephonyLine(
   const current = before.lines.find((line) => line.id === input.lineId);
   if (!current) throw new ConfigServiceError("Linka neexistuje.", 404, "line_not_found");
   assertValid(validateLinePatch(input.patch, context));
+  const proposed = before.lines.map(line => line.id === input.lineId ? { ...line, ...input.patch } : line);
+  for (const source of proposed) {
+    const problem = returnLineProblem(source, proposed, before.plans, before.groups, new Set(before.operators.filter(operator => operator.active).map(operator => operator.profileId)));
+    if (problem) assertValid([issue("returnLineId", "invalid_return_line", problem)]);
+  }
 
   const values: Tables["motorist_telephony_lines"]["Update"] = {};
+  let metadataRevision: string | undefined;
+  if (input.patch.returnLineId !== undefined) {
+    const stored = await deps.admin.from("motorist_telephony_lines").select("metadata,updated_at").eq("organization_id", input.organizationId).eq("id", input.lineId).single();
+    if (stored.error) throw new ConfigServiceError("Nastavenie linky sa nepodarilo načítať.", 503, "config_read_failed");
+    metadataRevision = stored.data.updated_at;
+    values.metadata = { ...(isRecord(stored.data.metadata) ? stored.data.metadata : {}), return_line_id: input.patch.returnLineId };
+  }
   if (input.patch.label !== undefined) values.label = input.patch.label.trim();
   if (input.patch.partnerName !== undefined) values.partner_name = input.patch.partnerName?.trim() || null;
   if (input.patch.ringPlanId !== undefined) values.ring_plan_id = input.patch.ringPlanId;
@@ -1910,8 +1928,11 @@ export async function updateTelephonyLine(
   if (input.patch.active !== undefined) values.active = input.patch.active;
 
   if (Object.keys(values).length > 0) {
-    const { error } = await deps.admin.from("motorist_telephony_lines").update(values).eq("id", input.lineId).eq("organization_id", input.organizationId);
+    let update = deps.admin.from("motorist_telephony_lines").update(values).eq("id", input.lineId).eq("organization_id", input.organizationId);
+    if (metadataRevision) update = update.eq("updated_at", metadataRevision);
+    const { data, error } = await update.select("id").maybeSingle();
     if (error) throw new ConfigServiceError(`Linku sa nepodarilo uložiť: ${error.message}`, 500, "config_write_failed");
+    if (!data) throw new ConfigServiceError("Nastavenie linky medzitým zmenil iný používateľ. Obnovte ho a skúste to znova.", 409, "config_conflict");
   }
 
   const after = await getRoutingDocument(deps, { organizationId: input.organizationId, includeSettings: true });
@@ -1933,6 +1954,7 @@ export async function updateTelephonyLine(
 /** Maps the changed DB columns back onto the document fields for the audit row. */
 function pick(line: LineDoc, columns: string[]): Record<string, unknown> {
   const map: Record<string, keyof LineDoc> = {
+    metadata: "returnLineId",
     label: "label",
     partner_name: "partnerName",
     ring_plan_id: "ringPlanId",

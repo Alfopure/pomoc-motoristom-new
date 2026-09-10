@@ -1,4 +1,5 @@
 import "server-only";
+import { completeTaskSourceIfSupported } from "./task-source-completion";
 
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -15,7 +16,6 @@ import {
 type AdminClient = SupabaseClient<Database>;
 type Tables = Database["public"]["Tables"];
 type Row<TableName extends keyof Tables> = Tables[TableName]["Row"];
-type CaseEventRow = Row<"motorist_case_events">;
 type LinkRow = Row<"motorist_location_share_links">;
 type LocationRow = Row<"motorist_locations">;
 
@@ -68,6 +68,7 @@ export async function createCaseLocationShareLink(input: CreateLocationShareLink
         metadata: {
           source: "sms_location_request",
           task_id: input.taskId ?? null,
+          task_association: input.taskId ? "explicit" : null,
         },
       })
       .select("*")
@@ -112,6 +113,25 @@ export async function submitPublicLocation(token: string, payload: unknown, meta
   }
 
   const status = publicLocationLinkStatus(link.status, link.expires_at);
+  let location: ValidatedPublicLocation;
+  try { location = validatePublicLocationPayload(payload); }
+  catch (error) { throw new LocationShareError(error instanceof Error ? error.message : "Poloha nie je platná.", 400); }
+
+  if (status === "used") {
+    const accepted = await supabase.from("motorist_location_submissions").select("*")
+      .eq("organization_id", link.organization_id).eq("case_id", link.case_id).eq("link_id", link.id)
+      .eq("accepted", true).order("submitted_at", { ascending: false }).limit(1).maybeSingle();
+    await throwOnResult(accepted);
+    const previous = accepted.data;
+    // Retry only the same normalized coordinates. The used bearer link cannot
+    // create a second location or replace the accepted submission.
+    if (!previous?.location_id || previous.lat !== location.lat || previous.lng !== location.lng
+      || previous.accuracy_meters !== location.accuracy) {
+      throw new LocationShareError("Link na odoslanie polohy už nie je aktívny.", 410);
+    }
+    await finishAcceptedLocation(supabase, link, location, previous.id);
+    return { locationId: previous.location_id, status: "stored" as const, submittedAt: previous.submitted_at };
+  }
 
   if (status !== "active") {
     if (status === "expired" && link.status !== "expired") {
@@ -121,9 +141,6 @@ export async function submitPublicLocation(token: string, payload: unknown, meta
     throw new LocationShareError("Link na odoslanie polohy uz nie je aktivny.", 410);
   }
 
-  let location: ValidatedPublicLocation;
-  try { location = validatePublicLocationPayload(payload); }
-  catch (error) { throw new LocationShareError(error instanceof Error ? error.message : "Poloha nie je platná.", 400); }
   const submittedAt = new Date().toISOString();
   const locationRow = await createSubmittedLocation(supabase, link, location, submittedAt);
 
@@ -167,9 +184,7 @@ export async function submitPublicLocation(token: string, payload: unknown, meta
       .eq("id", link.id)
       .eq("status", "active"),
   );
-  await completeLocationTask(supabase, link);
-  await insertLocationSubmittedEvent(supabase, link, location, submission.id);
-  await insertLocationSubmittedNotification(supabase, link, location, submission.id);
+  await finishAcceptedLocation(supabase, link, location, submission.id);
 
   return {
     locationId: locationRow.id,
@@ -231,7 +246,11 @@ async function createSubmittedLocation(supabase: AdminClient, link: LinkRow, loc
 }
 
 async function completeLocationTask(supabase: AdminClient, link: LinkRow) {
-  const taskId = stringFromJson(objectJson(link.metadata).task_id);
+  const metadata = objectJson(link.metadata);
+  const taskId = stringFromJson(metadata.task_id);
+  // New composer links preserve an explicit "no task" choice even on the old
+  // database. Historical unmarked links retain their pre-migration fallback.
+  if (!taskId && "task_association" in metadata) return;
 
   if (taskId) {
     await throwOnResult(
@@ -256,13 +275,25 @@ async function completeLocationTask(supabase: AdminClient, link: LinkRow) {
   );
 }
 
+async function finishAcceptedLocation(supabase: AdminClient, link: LinkRow, location: ValidatedPublicLocation, submissionId: string) {
+  if (!await completeTaskSourceIfSupported(supabase, link.organization_id, "location", submissionId)) await completeLocationTask(supabase, link);
+  await insertLocationSubmittedEvent(supabase, link, location, submissionId);
+  await insertLocationSubmittedNotification(supabase, link, location, submissionId);
+}
+
 async function insertLocationSubmittedEvent(supabase: AdminClient, link: LinkRow, location: ValidatedPublicLocation, submissionId: string) {
+  const existing = await supabase.from("motorist_case_events").select("id")
+    .eq("organization_id", link.organization_id).eq("case_id", link.case_id)
+    .eq("event_type", "location_submitted").contains("payload", { submission_id: submissionId }).limit(1).maybeSingle();
+  await throwOnResult(existing);
+  if (existing.data) return;
   const accuracy = location.accuracy === null ? "bez presnosti" : `presnost ${Math.round(location.accuracy)} m`;
 
-  await insertSingle<CaseEventRow>(
-    supabase
+  const result = await supabase
       .from("motorist_case_events")
       .insert({
+        // Stable across retries, including two requests racing after acceptance.
+        id: submissionId,
         organization_id: link.organization_id,
         case_id: link.case_id,
         actor_profile_id: null,
@@ -279,12 +310,17 @@ async function insertLocationSubmittedEvent(supabase: AdminClient, link: LinkRow
         },
       })
       .select("*")
-      .single(),
-  );
+      .single();
+  if (result.error?.code !== "23505") await throwOnResult(result);
 }
 
 async function insertLocationSubmittedNotification(supabase: AdminClient, link: LinkRow, location: ValidatedPublicLocation, submissionId: string) {
   try {
+    const existing = await supabase.from("motorist_notifications").select("id")
+      .eq("organization_id", link.organization_id).contains("payload", { source: "public_location_link", submission_id: submissionId })
+      .limit(1).maybeSingle();
+    await throwOnResult(existing);
+    if (existing.data) return;
     const caseResult = await supabase
       .from("motorist_cases")
       .select("case_number, owner_id")
@@ -319,7 +355,7 @@ async function insertLocationSubmittedNotification(supabase: AdminClient, link: 
           accuracy_meters: location.accuracy,
         },
       });
-    await throwOnResult(result);
+    if (result.error?.code !== "23505") await throwOnResult(result);
   } catch (error) {
     // Uloženie GPS je primárna operácia. Výpadok upozornenia nesmie klientovi
     // zobraziť neúspech po tom, čo už bola poloha bezpečne prijatá.

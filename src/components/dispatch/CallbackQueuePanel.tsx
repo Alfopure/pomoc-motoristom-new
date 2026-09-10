@@ -1,5 +1,6 @@
 "use client";
 
+import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Clock3, Loader2, PhoneOutgoing, RefreshCw, UserRound, X } from "lucide-react";
 
@@ -13,12 +14,15 @@ import {
   callbackQueueSummary,
   callbackUrgency,
   callbackWaitSeconds,
+  CALLBACK_ORDER_LABELS,
   CALLBACK_OVERDUE_MINUTES,
+  CALLBACK_QUEUE_ORDERS,
   CALLBACK_SOURCE_LABELS,
   CALLBACK_STATUS_LABELS,
   EMPTY_CALLBACK_QUEUE,
   formatCallbackWait,
   sortCallbackQueue,
+  type CallbackQueueOrder,
   type CallbackQueuePayload,
   type CallbackRequestPayload,
   type CallbackUrgency,
@@ -70,7 +74,7 @@ export function CallbackQueuePanel({
 }: {
   configured: boolean;
   /** Console-owned outbound path: rings the caller and arms the browser phone. */
-  onCallBack?: (requestId: string) => Promise<void>;
+  onCallBack?: (requestId: string, verificationId?: string) => Promise<void>;
   /** Lets the console refresh its own surfaces once a request changed. */
   onChanged?: () => void;
   onSchedulingEnabled?: (enabled: boolean) => void;
@@ -84,6 +88,7 @@ export function CallbackQueuePanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [originFilter, setOriginFilter] = useState<"all" | CallbackOrigin["kind"]>("all");
+  const [order, setOrder] = useState<CallbackQueueOrder>("oldest");
   const failures = useRef(0);
   // Ageing is re-derived against the browser's own clock: the answer on screen
   // is up to a poll interval old, and a request must not look fresher than it
@@ -159,7 +164,7 @@ export function CallbackQueuePanel({
     };
   }, [reloadToken, refreshToken, onSchedulingEnabled, onLiveCount]);
 
-  const open = useMemo(() => sortCallbackQueue(queue.open), [queue.open]);
+  const open = useMemo(() => sortCallbackQueue(queue.open, order), [order, queue.open]);
   const visible = open.filter((request) => originFilter === "all" || originOf(request).kind === originFilter);
   const summary = useMemo(
     () => callbackQueueSummary(open, { now, actorProfileId: queue.actorProfileId }),
@@ -177,8 +182,10 @@ export function CallbackQueuePanel({
     try {
       if (action === "call") {
         if (!onCallBack) throw new Error("Spätné volanie nie je z tejto obrazovky dostupné.");
-        await onCallBack(request.id);
-        setNotice(`Volanie na ${formatPhoneNumberForDisplay(request.callerNumber)} bolo spustené.`);
+        const target = await requestCallbackTargetConfirmation(request.callerNumber);
+        if (!target) return;
+        await onCallBack(request.id, target.verificationId);
+        setNotice(`Volanie na ${formatPhoneNumberForDisplay(target.dialNumber)} bolo spustené.`);
       } else {
         const result = await telephonyJson<{ error?: string }>(
           `/api/telephony/callbacks/${encodeURIComponent(request.id)}/${action}`,
@@ -239,15 +246,27 @@ export function CallbackQueuePanel({
       )}
 
       {open.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 border-b border-zinc-100 p-3" aria-label="Druh spätného volania">
-          {(["all", "requested", "missed", "manual", "unknown"] as const).map((kind) => {
-            const count = kind === "all" ? open.length : open.filter((request) => originOf(request).kind === kind).length;
-            if (!count && kind !== "all" && kind !== "requested" && kind !== "missed") return null;
-            return <button key={kind} type="button" aria-pressed={originFilter === kind} onClick={() => setOriginFilter(kind)}
-              className={`rounded-md border px-2 py-1 text-[11px] font-semibold ${originFilter === kind ? "border-zinc-950 bg-zinc-950 text-white" : "border-zinc-200 text-zinc-700"}`}>
-              {kind === "all" ? "Všetky" : CALLBACK_ORIGIN_LABELS[kind]} ({count})
-            </button>;
-          })}
+        <div className="grid gap-2 border-b border-zinc-100 p-3">
+          <div className="flex flex-wrap gap-1.5" aria-label="Druh spätného volania">
+            {(["all", "requested", "missed", "manual", "unknown"] as const).map((kind) => {
+              const count = kind === "all" ? open.length : open.filter((request) => originOf(request).kind === kind).length;
+              if (!count && kind !== "all" && kind !== "requested" && kind !== "missed") return null;
+              return <button key={kind} type="button" aria-pressed={originFilter === kind} onClick={() => setOriginFilter(kind)}
+                className={`rounded-md border px-2 py-1 text-[11px] font-semibold ${originFilter === kind ? "border-zinc-950 bg-zinc-950 text-white" : "border-zinc-200 text-zinc-700"}`}>
+                {kind === "all" ? "Všetky" : CALLBACK_ORIGIN_LABELS[kind]} ({count})
+              </button>;
+            })}
+          </div>
+          <label className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-[11px] font-semibold text-zinc-600">
+            Zoradiť
+            <select
+              value={order}
+              onChange={(event) => setOrder(event.target.value as CallbackQueueOrder)}
+              className="h-8 min-w-0 rounded-md border border-zinc-200 bg-white px-2 pr-7 text-[11px] font-semibold text-zinc-800 outline-none ring-yellow-300 focus:ring-2"
+            >
+              {CALLBACK_QUEUE_ORDERS.map((option) => <option key={option} value={option}>{CALLBACK_ORDER_LABELS[option]}</option>)}
+            </select>
+          </label>
         </div>
       )}
 
@@ -259,7 +278,9 @@ export function CallbackQueuePanel({
         </p>
       )}
 
-      <div className="grid gap-2 p-3">
+      {/* On wide screens the column scrolls inside itself instead of pushing the
+          page down by one tall card per waiting caller. */}
+      <div className="grid gap-2 overscroll-contain p-3 xl:max-h-[60vh] xl:overflow-y-auto">
         {visible.length === 0 ? (
           <div className="rounded-md border border-dashed border-zinc-200 px-3 py-4 text-center text-xs font-medium text-zinc-500">
             {loaded ? open.length ? "V tejto skupine nie sú žiadne požiadavky." : "Nikto nečaká na spätné volanie." : "Načítavam frontu…"}
@@ -335,8 +356,13 @@ function CallbackQueueRow({
   const locked = busy !== null;
   const origin = originOf(request);
 
+  const detail = callbackOriginDetail(origin);
+
+  // Three lines per caller: who and how long, where from, then state and
+  // actions on one row. The old six-line card made a queue of a few callers
+  // run far down the page.
   return (
-    <article className={`rounded-md border px-3 py-2 ${URGENCY_ROW_CLASS[urgency]}`}>
+    <article className={`rounded-md border px-2.5 py-2 ${URGENCY_ROW_CLASS[urgency]}`}>
       <div className="flex min-w-0 items-center justify-between gap-2">
         <span className="truncate text-sm font-bold text-zinc-950">
           {request.callerName ?? formatPhoneNumberForDisplay(request.callerNumber)}
@@ -347,75 +373,67 @@ function CallbackQueueRow({
         </span>
       </div>
 
-      <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-600">
-        {request.callerName && <span className="truncate">{formatPhoneNumberForDisplay(request.callerNumber)}</span>}
+      <p className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-zinc-600">
+        {request.callerName && <span>{formatPhoneNumberForDisplay(request.callerNumber)}</span>}
         <span className="truncate">{request.lineLabel ?? request.partnerName ?? "Neznáma linka"}</span>
         <span className="truncate">{origin.kind === "requested" && request.source === "missed" ? "Po zvonení / počas čakania" : CALLBACK_SOURCE_LABELS[request.source]}</span>
-      </div>
+        <span className={`font-semibold ${origin.kind === "requested" ? "text-blue-900" : "text-zinc-700"}`} title={detail ?? undefined}>{CALLBACK_ORIGIN_LABELS[origin.kind]}</span>
+      </p>
 
-      <p className={`mt-1 text-[11px] font-semibold ${origin.kind === "requested" ? "text-blue-900" : "text-zinc-700"}`}>{CALLBACK_ORIGIN_LABELS[origin.kind]}</p>
-      {callbackOriginDetail(origin) && <p className="mt-0.5 text-[11px] text-zinc-700">{callbackOriginDetail(origin)}</p>}
-
-      <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
-        <span
-          className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
-            request.status === "scheduled" ? "bg-sky-100 text-sky-900" : "bg-zinc-100 text-zinc-700"
-          }`}
-        >
-          {CALLBACK_STATUS_LABELS[request.status]}
-        </span>
-        {request.claimedByName && (
-          <span className="inline-flex min-w-0 items-center gap-1 text-[11px] font-medium text-zinc-600">
-            <UserRound size={11} aria-hidden="true" />
-            <span className="truncate">{request.claimedByName}</span>
+      <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5">
+        {request.status === "scheduled" && (
+          <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-bold text-sky-900">
+            {CALLBACK_STATUS_LABELS[request.status]}
+            {request.claimedByName && <span className="truncate font-medium">· {request.claimedByName}</span>}
           </span>
         )}
         {urgency === "overdue" && (
           <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-800">Po termíne</span>
         )}
-      </div>
-
-      {permissions.blockedReason ? (
-        <p className="mt-1.5 text-[11px] font-medium leading-4 text-zinc-500">{permissions.blockedReason}</p>
-      ) : (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {permissions.canClaim && (
+        {permissions.blockedReason ? (
+          <span className="text-[11px] font-medium leading-4 text-zinc-500">{permissions.blockedReason}</span>
+        ) : (
+          <span className="ml-auto flex flex-wrap items-center gap-1">
+            {permissions.canClaim && (
+              <ActionButton
+                busy={running("claim")}
+                disabled={locked}
+                icon={UserRound}
+                label="Prevziať"
+                onClick={() => onAction("claim")}
+                tone="primary"
+              />
+            )}
             <ActionButton
-              busy={running("claim")}
-              disabled={locked}
-              icon={UserRound}
-              label="Prevziať"
-              onClick={() => onAction("claim")}
+              busy={running("call")}
+              disabled={locked || !permissions.canCall || !callable}
+              icon={PhoneOutgoing}
+              label="Zavolať"
+              onClick={() => onAction("call")}
+              title={callable ? undefined : TELEPHONY_NOT_CONFIGURED_MESSAGE}
               tone="primary"
             />
-          )}
-          <ActionButton
-            busy={running("call")}
-            disabled={locked || !permissions.canCall || !callable}
-            icon={PhoneOutgoing}
-            label="Zavolať"
-            onClick={() => onAction("call")}
-            title={callable ? undefined : TELEPHONY_NOT_CONFIGURED_MESSAGE}
-            tone="primary"
-          />
-          <ActionButton
-            busy={running("done")}
-            disabled={locked || !permissions.canResolve}
-            icon={Check}
-            label="Vybavené"
-            onClick={() => onAction("done")}
-            tone="ghost"
-          />
-          <ActionButton
-            busy={running("cancel")}
-            disabled={locked || !permissions.canResolve}
-            icon={X}
-            label="Zrušiť"
-            onClick={() => onAction("cancel")}
-            tone="ghost"
-          />
-        </div>
-      )}
+            <ActionButton
+              busy={running("done")}
+              disabled={locked || !permissions.canResolve}
+              icon={Check}
+              iconOnly
+              label="Vybavené"
+              onClick={() => onAction("done")}
+              tone="ghost"
+            />
+            <ActionButton
+              busy={running("cancel")}
+              disabled={locked || !permissions.canResolve}
+              icon={X}
+              iconOnly
+              label="Zrušiť"
+              onClick={() => onAction("cancel")}
+              tone="ghost"
+            />
+          </span>
+        )}
+      </div>
     </article>
   );
 }
@@ -424,6 +442,7 @@ function ActionButton({
   busy,
   disabled,
   icon: Icon,
+  iconOnly = false,
   label,
   onClick,
   title,
@@ -432,6 +451,8 @@ function ActionButton({
   busy: boolean;
   disabled: boolean;
   icon: typeof Check;
+  /** Square button with the label as tooltip and accessible name only. */
+  iconOnly?: boolean;
   label: string;
   onClick: () => void;
   title?: string;
@@ -442,15 +463,16 @@ function ActionButton({
       type="button"
       onClick={onClick}
       disabled={disabled || busy}
-      title={title}
-      className={`inline-flex min-h-8 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-bold outline-none transition focus-visible:ring-2 focus-visible:ring-yellow-400 disabled:cursor-not-allowed ${
+      title={title ?? (iconOnly ? label : undefined)}
+      aria-label={iconOnly ? label : undefined}
+      className={`inline-flex min-h-8 items-center gap-1.5 rounded-md text-[11px] font-bold outline-none transition focus-visible:ring-2 focus-visible:ring-yellow-400 disabled:cursor-not-allowed ${iconOnly ? "w-8 justify-center" : "px-2.5"} ${
         tone === "primary"
           ? "bg-zinc-950 text-white hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-500"
           : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100 disabled:text-zinc-400"
       }`}
     >
-      {busy ? <Loader2 size={12} className="motion-safe:animate-spin" aria-hidden="true" /> : <Icon size={12} aria-hidden="true" />}
-      {label}
+      {busy ? <Loader2 size={12} className="motion-safe:animate-spin" aria-hidden="true" /> : <Icon size={iconOnly ? 13 : 12} aria-hidden="true" />}
+      {!iconOnly && label}
     </button>
   );
 }

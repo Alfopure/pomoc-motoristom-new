@@ -29,6 +29,57 @@ beforeEach(() => { vi.stubEnv("TELNYX_API_KEY", ""); });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("SMS preparation and verified recipient", () => {
+  it.each([false, true])("never promotes an editable title to task proof (workspace enabled=%s)", async enabled => {
+    const h = harness();
+    h.db.seed("motorist_task_workspace_settings", [{ organization_id: "org-1", enabled, writer_inventory_verified_at: "2026-09-10", writer_inventory_note: "Local test" }]);
+    h.db.seed("motorist_case_tasks", [
+      { id: "contract", organization_id: "org-1", case_id: "case-1", status: "open", title: "Overiť ETA zmluvy" },
+      { id: "unrelated", organization_id: "org-1", case_id: "case-1", status: "open", title: "Vyúčtovať lokalizačnú SMS" },
+    ]);
+    const eta = await preview({ caseId: "case-1", template: "eta_update", etaMinutes: 20, technicianDeparted: true });
+    const location = await preview({ caseId: "case-1", template: "location_request" });
+    expect(eta.draft).toMatchObject({ taskId: null, taskAssociation: null });
+    expect(location.draft).toMatchObject({ taskId: null, taskAssociation: null });
+    await sendPreparedSms({ ...actor, ...eta, message: eta.draft.message }, { transport: h.transport });
+    expect(h.db.rows("motorist_sms_messages")[0].raw_payload).toMatchObject({ task_id: null, task_association: null });
+    expect(h.db.rows("motorist_case_tasks").every(task => task.status === "open")).toBe(true);
+  });
+  it("accepts only an explicit open original-case task and rechecks before provider effects", async () => {
+    const h = harness();
+    h.db.seed("motorist_case_tasks", [
+      { id: "chosen", organization_id: "org-1", case_id: "case-1", status: "overdue", title: "Explicit user choice" },
+      { id: "done", organization_id: "org-1", case_id: "case-1", status: "done" },
+      { id: "elsewhere", organization_id: "org-2", case_id: "case-1", status: "open" },
+    ]);
+    const context = { caseId: "case-1", template: "eta_update" as const, etaMinutes: 20, technicianDeparted: true };
+    for (const taskId of ["done", "elsewhere"]) await expect(preview({ ...context, taskId })).rejects.toMatchObject({ status: 400 });
+    const selected = await preview({ ...context, taskId: "chosen" });
+    expect(selected.draft).toMatchObject({ taskId: "chosen", taskAssociation: "explicit" });
+    await h.admin.from("motorist_case_tasks").update({ status: "done" }).eq("id", "chosen");
+    await expect(sendPreparedSms({ ...actor, ...selected, message: selected.draft.message }, { transport: h.transport })).rejects.toMatchObject({ status: 400 });
+    expect(h.send).not.toHaveBeenCalled(); expect(h.db.rows("motorist_sms_messages")).toHaveLength(0);
+  });
+  it("preserves explicit task association on the old schema and the same proven SMS workflow", async () => {
+    const h = harness();
+    h.db.seed("motorist_case_tasks", [{ id: "chosen", organization_id: "org-1", case_id: "case-1", status: "open", title: "Renamed" }]);
+    const context = { caseId: "case-1", template: "eta_update" as const, etaMinutes: 20, technicianDeparted: true, taskId: "chosen" };
+    h.db.failNext("motorist_task_origins", "select", { code: "42P01", message: "relation absent", details: null, hint: null });
+    expect((await preview(context)).draft.taskId).toBe("chosen");
+    h.db.seed("motorist_task_origins", [{ task_id: "chosen", organization_id: "org-1", source_type: "sms", source_id: "original-sms", origin_case_id: "case-1", cancelled_at: null }]);
+    h.db.seed("motorist_sms_messages", [{ id: "original-sms", organization_id: "org-1", case_id: "case-1", template_key: "eta_update" }]);
+    const selected = await preview(context);
+    expect(selected.draft.taskAssociation).toBe("explicit");
+    h.db.failNext("motorist_task_origins", "select", { code: "08006", message: "temporary", details: null, hint: null });
+    await expect(preview(context)).rejects.toMatchObject({ status: 503 });
+  });
+  it("cannot fulfill a callback obligation by explicitly selecting its task for ETA", async () => {
+    const h = harness();
+    h.db.seed("motorist_case_tasks", [{ id: "callback", organization_id: "org-1", case_id: "case-1", status: "open", title: "Renamed ETA" }]);
+    h.db.seed("motorist_task_origins", [{ task_id: "callback", organization_id: "org-1", source_type: "callback", source_id: "request", origin_case_id: "case-1", cancelled_at: null }]);
+    await expect(preview({ caseId: "case-1", template: "eta_update", etaMinutes: 20, technicianDeparted: true, taskId: "callback" })).rejects.toMatchObject({ status: 409 });
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
   it("prepares a global draft with no case and without a write", async () => {
     const h = harness();
     const p = await preview();
@@ -73,6 +124,44 @@ describe("SMS preparation and verified recipient", () => {
 });
 
 describe("durable SMS send and retries", () => {
+  it("reconciles durable ETA acceptance after a transient completion failure without sending or auditing twice", async () => {
+    const h = harness();
+    const complete = vi.fn(() => ({ completed: true }));
+    h.db.seed("motorist_case_tasks", [{ id: "task-1", organization_id: "org-1", case_id: "case-1", status: "open" }]);
+    h.db.registerRpc("motorist_complete_task_source_v1", complete);
+    h.db.failNext("motorist_complete_task_source_v1", "rpc", { code: "08006", message: "temporary", details: null, hint: null });
+    const p = await preview({ caseId: "case-1", template: "eta_update", etaMinutes: 20, technicianDeparted: true, taskId: "task-1" });
+    const input = { ...actor, ...p, message: p.draft.message };
+    await expect(sendPreparedSms(input, { transport: h.transport })).rejects.toThrow("Task source completion failed.");
+    await expect(sendPreparedSms(input, { transport: h.transport })).resolves.toMatchObject({ reused: true, providerMessageId: "msg-1" });
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(h.db.rows("motorist_sms_messages")).toHaveLength(1);
+    expect(h.db.rows("motorist_sms_attempts")).toHaveLength(1);
+    expect(h.db.rows("motorist_case_events")).toHaveLength(1);
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(h.db.log.filter(entry => entry.kind === "rpc" && entry.table === "motorist_complete_task_source_v1")).toHaveLength(2);
+    await expect(sendPreparedSms({ ...input, message: input.message + " changed" }, { transport: h.transport })).rejects.toMatchObject({ status: 409 });
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+  it("does not complete an ETA task on uncertain transport or fall back after unsupported proof", async () => {
+    const h = harness();
+    const complete = vi.fn(() => ({ completed: false }));
+    h.db.registerRpc("motorist_complete_task_source_v1", complete);
+    h.db.seed("motorist_case_tasks", [{ id: "task-1", organization_id: "org-1", case_id: "case-1", status: "open" }]);
+    const p = await preview({ caseId: "case-1", template: "eta_update", etaMinutes: 20, technicianDeparted: true, taskId: "task-1" });
+    const input = { ...actor, ...p, message: p.draft.message };
+    await sendPreparedSms(input, { transport: h.transport });
+    await sendPreparedSms(input, { transport: h.transport });
+    expect(h.db.rows("motorist_case_tasks")[0].status).toBe("open");
+    expect(complete).toHaveBeenCalledTimes(2);
+    const uncertain = await preview({ caseId: "case-1", template: "eta_update", etaMinutes: 20, technicianDeparted: true, taskId: "task-1" });
+    h.send.mockRejectedValueOnce(new Error("socket closed"));
+    const uncertainInput = { ...actor, ...uncertain, message: uncertain.draft.message };
+    await sendPreparedSms(uncertainInput, { transport: h.transport });
+    await sendPreparedSms(uncertainInput, { transport: h.transport });
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
   it("persists exact text, authenticated author and template version", async () => {
     const h = harness(); const p = await preview({ caseId: "case-1", template: "location_request" });
     const result = await sendPreparedSms({ ...actor, ...p, message: p.draft.message }, { transport: h.transport });

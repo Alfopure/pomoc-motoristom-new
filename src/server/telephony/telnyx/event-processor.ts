@@ -128,7 +128,12 @@ async function findLine(deps: ProcessorDeps, environment: string, to: string | n
 export async function createInboundSession(deps: ProcessorDeps, event: TelephonyEvent): Promise<SessionRow> {
   const { admin, organizationId } = deps;
   const now = nowOf(deps)();
-  const line = await findLine(deps, deps.environment, event.to);
+  const sourceLine = await findLine(deps, deps.environment, event.to);
+  const sourceMetadata = sourceLine?.metadata;
+  const hasReturnRoute = sourceMetadata && typeof sourceMetadata === "object" && !Array.isArray(sourceMetadata) && Boolean(sourceMetadata.return_line_id);
+  const line = hasReturnRoute
+    ? await (await import("../return-line")).resolveInboundReturnLine(admin, organizationId, sourceLine)
+    : sourceLine;
   const callerNumber = event.from ? (normalizeE164(event.from) ?? event.from) : null;
   const calledNumber = event.to ? (normalizeE164(event.to) ?? event.to) : null;
 
@@ -149,7 +154,7 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
       caller_number: callerNumber,
       called_number: calledNumber,
       started_at: event.occurredAt ?? now.toISOString(),
-      metadata: toJson({ line_label: line?.label ?? null, partner_name: line?.partner_name ?? null, environment: deps.environment }),
+      metadata: toJson({ line_label: sourceLine?.label ?? null, partner_name: sourceLine?.partner_name ?? null, environment: deps.environment, ...(sourceLine && line && sourceLine.id !== line.id ? { return_routing: { source_line_id: sourceLine.id, target_line_id: line.id, original_called_number: calledNumber } } : {}) }),
     })
     .select("*")
     .single();

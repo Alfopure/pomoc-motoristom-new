@@ -6,10 +6,14 @@ import type { CasePriority, CaseTask, DispatchCase, DispatchNotification, Notifi
 import { isNotificationForProfile, isNotificationReady } from "@/domain/notifications";
 import { assignableOperators, compareOperationalTasks, isTaskDueToday, isTaskHandoverRelevant, isTaskOpen, isTaskOverdue, taskPriorities, taskPriorityLabels, taskPriorityTone, taskStatusLabel } from "@/domain/tasks";
 import { formatTime } from "@/lib/dispatch-calculations";
+import type { WorkspaceTask } from "@/domain/task-workspace";
+import { TaskWorkspacePanel } from "./TaskWorkspacePanel";
 import { NotificationCenter } from "./NotificationCenter";
 import styles from "./TaskPanel.module.css";
 
 export type TaskCreateInput = {
+  caseIds?: string[];
+  expectedRevision?: number;
   assignedTo: string;
   caseId: string;
   taskDueAt: string;
@@ -19,6 +23,8 @@ export type TaskCreateInput = {
 };
 
 export type TaskUpdateInput = {
+  caseIds?: string[];
+  expectedRevision?: number;
   assignedTo?: string;
   caseId: string;
   note?: string;
@@ -30,6 +36,8 @@ export type TaskUpdateInput = {
 };
 
 export type TaskDeleteInput = {
+  caseIds?: string[];
+  expectedRevision?: number;
   caseId: string;
   note?: string;
   taskId: string;
@@ -68,6 +76,9 @@ const PAGE_TASK_LIMIT = 8;
 const SIDEBAR_TASK_LIMIT = 6;
 
 type TaskPanelProps = {
+  taskWorkspaceEnabled?: boolean;
+  tasks?: WorkspaceTask[];
+  onOpenCase?: (caseId: string) => void;
   activeTaskId?: string;
   cases: DispatchCase[];
   isNotificationSyncing?: boolean;
@@ -90,7 +101,12 @@ type TaskPanelProps = {
   viewerProfileId?: string;
 };
 
-export function TaskPanel({
+export function TaskPanel(props: TaskPanelProps) {
+  if (props.taskWorkspaceEnabled) return <TaskWorkspacePanel tasks={props.tasks} cases={props.cases} operators={props.operators} viewerProfileId={props.viewerProfileId} variant={props.variant} onOpenCase={props.onOpenCase} />;
+  return <LegacyTaskPanel {...props} />;
+}
+
+function LegacyTaskPanel({
   activeTaskId,
   cases,
   isNotificationSyncing,
@@ -140,14 +156,14 @@ export function TaskPanel({
   const effectiveNewTaskAssignee = newTaskAssignee === "unassigned" || assignableTaskOperators.some((operator) => operator.id === newTaskAssignee) ? newTaskAssignee : "unassigned";
   const tasks: TaskPanelTask[] = useMemo(
     () =>
-      cases.flatMap((caseItem) =>
+      [...new Map(cases.flatMap((caseItem) =>
         caseItem.tasks.map((task) => ({
           ...task,
           caseId: caseItem.id,
           caseNumber: caseItem.caseNumber,
           ownerName: caseItem.ownerName,
         })),
-      ),
+      ).map(task => [task.id, task])).values()],
     [cases],
   );
   const recentlyCreatedTaskId = recentCreation
@@ -287,7 +303,7 @@ export function TaskPanel({
       return;
     }
 
-    await runTaskAction(`update:${input.taskId}`, () => onUpdateTask(input));
+    return runTaskAction(`update:${input.taskId}`, () => onUpdateTask(input));
   }
 
   async function deleteTask(input: TaskDeleteInput) {
@@ -334,7 +350,7 @@ export function TaskPanel({
       return;
     }
 
-    await updateTask({
+    const saved = await updateTask({
       assignedTo: editDraft.assignedTo,
       caseId: task.caseId,
       note: editDraft.note.trim() || undefined,
@@ -344,7 +360,7 @@ export function TaskPanel({
       taskStatus: editDraft.status,
       taskTitle,
     });
-    cancelTaskEdit();
+    if (saved) cancelTaskEdit();
   }
 
   async function toggleTaskStatus(task: TaskPanelTask) {

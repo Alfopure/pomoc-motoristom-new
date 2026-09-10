@@ -3,6 +3,7 @@
 import { useId, useState, type HTMLInputTypeAttribute, type ReactNode } from "react";
 import { CheckCircle2, ChevronDown, CircleAlert } from "lucide-react";
 import type { CustomerContactRole } from "@/domain/types";
+import styles from "./case-detail.module.css";
 
 /**
  * Shared form primitives used by both the new-case form (NewCaseDrawer) and the
@@ -96,57 +97,50 @@ export function FormSection({
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const stateLabel = valid ? "Vyplnené správne" : errorCount > 0 ? `Doplniť · ${errorCount}` : "Doplniť";
   const stateIcon = valid ? (
-    <CheckCircle2 size={17} className="shrink-0 text-emerald-700" />
+    <CheckCircle2 size={14} className="shrink-0 text-emerald-700" />
   ) : (
-    <CircleAlert size={17} className="shrink-0 text-red-700" />
+    <CircleAlert size={14} className="shrink-0 text-red-700" />
   );
-  const headerTone = valid ? "border-emerald-200 bg-emerald-50" : "border-red-200 bg-red-50";
   const stateTone = valid ? "text-emerald-800" : "text-red-800";
 
   if (collapsible) {
     return (
       <details
-        className={`group min-w-0 overflow-hidden rounded-lg border bg-white shadow-sm ${
-          valid ? "border-emerald-300" : "border-red-300"
-        }`}
+        className={`group ${styles.section}`}
         data-form-section-state={valid ? "valid" : "invalid"}
         open={isOpen}
         onToggle={(event) => setIsOpen(event.currentTarget.open)}
       >
         <summary
-          className={`flex min-h-9 cursor-pointer list-none items-center justify-between gap-2 border-b border-l-4 border-l-[#FCD703] px-2 py-1.5 transition hover:brightness-[0.98] [&::-webkit-details-marker]:hidden lg:gap-3 lg:px-3 lg:py-2.5 ${headerTone}`}
+          className={`${styles.sectionHeader} cursor-pointer transition hover:bg-zinc-100`}
         >
-          <span className="flex min-w-0 items-center gap-1.5 text-xs font-semibold text-zinc-950 lg:gap-2 lg:text-sm">
+          <span className={styles.sectionTitle}>
             {stateIcon}
             <span>{title}</span>
           </span>
           <span className="flex shrink-0 items-center gap-2">
-            <span className={`hidden text-xs font-semibold sm:inline ${stateTone}`}>{stateLabel}</span>
-            <ChevronDown size={17} className="text-zinc-500 transition-transform group-open:rotate-180" aria-hidden="true" />
+            <span className={`${styles.sectionState} hidden sm:inline ${stateTone}`}>{stateLabel}</span>
+            <ChevronDown size={14} className="text-zinc-500 transition-transform group-open:rotate-180" aria-hidden="true" />
           </span>
         </summary>
-        <div className="grid min-w-0 gap-2 p-2 lg:gap-3 lg:p-3 [&>*]:min-w-0">{children}</div>
+        <div className={styles.sectionBody}>{children}</div>
       </details>
     );
   }
 
   return (
     <section
-      className={`min-w-0 overflow-hidden rounded-lg border bg-white shadow-sm ${
-        valid ? "border-emerald-300" : "border-red-300"
-      }`}
+      className={styles.section}
       data-form-section-state={valid ? "valid" : "invalid"}
     >
-      <div className={`flex items-center justify-between gap-3 border-b px-3 py-2.5 ${
-        valid ? "border-emerald-200 bg-emerald-50" : "border-red-200 bg-red-50"
-      }`}>
-        <h3 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-zinc-950">
+      <div className={styles.sectionHeader}>
+        <h3 className={styles.sectionTitle}>
           {stateIcon}
           <span>{title}</span>
         </h3>
-        <span className={`shrink-0 text-xs font-semibold ${stateTone}`}>{stateLabel}</span>
+        <span className={`${styles.sectionState} shrink-0 ${stateTone}`}>{stateLabel}</span>
       </div>
-      <div className="grid min-w-0 gap-3 p-3 [&>*]:min-w-0">{children}</div>
+      <div className={styles.sectionBody}>{children}</div>
     </section>
   );
 }
@@ -189,8 +183,8 @@ export function TextField({
   const errorId = useId();
 
   return (
-    <label className="block">
-      <span className="mb-1 block text-[13px] font-semibold text-zinc-600">{label}{required && <RequiredMark />}</span>
+    <label className={styles.field}>
+      <span className={styles.fieldLabel}>{label}{required && <RequiredMark />}</span>
       <input
         type={type}
         aria-label={label}
@@ -213,7 +207,7 @@ export function TextField({
         onChange={(event) => onChange(transformValue ? transformValue(event.target.value) : event.target.value)}
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : undefined}
-        className={`h-10 w-full min-w-0 rounded-md border bg-white px-3 text-sm outline-none transition focus:ring-2 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-500 ${
+        className={`${styles.fieldControl} w-full min-w-0 rounded-md border bg-white px-3 text-sm outline-none transition focus:ring-2 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-500 ${
           error ? "border-red-300 ring-red-200" : "border-zinc-200 ring-yellow-300"
         }`}
       />
@@ -242,8 +236,8 @@ export function TextareaField({
   const errorId = useId();
 
   return (
-    <label className="block">
-      <span className="mb-1 block text-[13px] font-semibold text-zinc-600">{label}{required && <RequiredMark />}</span>
+    <label className={styles.field}>
+      <span className={styles.fieldLabel}>{label}{required && <RequiredMark />}</span>
       <textarea
         aria-label={label}
         aria-required={required}
@@ -253,7 +247,7 @@ export function TextareaField({
         onChange={(event) => onChange(event.target.value)}
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : undefined}
-        className={`min-h-28 w-full min-w-0 resize-y rounded-md border bg-white px-3 py-2 text-sm outline-none transition focus:ring-2 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-500 ${
+        className={`${styles.textarea} w-full min-w-0 resize-y rounded-md border bg-white px-3 py-2 text-sm outline-none transition focus:ring-2 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-500 ${
           error ? "border-red-300 ring-red-200" : "border-zinc-200 ring-yellow-300"
         }`}
       />
@@ -284,8 +278,8 @@ export function SelectField({
   const errorId = useId();
 
   return (
-    <label className="block">
-      <span className="mb-1 block text-[13px] font-semibold text-zinc-600">{label}{required && <RequiredMark />}</span>
+    <label className={styles.field}>
+      <span className={styles.fieldLabel}>{label}{required && <RequiredMark />}</span>
       <select
         aria-label={label}
         aria-required={required}
@@ -295,7 +289,7 @@ export function SelectField({
         onChange={(event) => onChange(event.target.value)}
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : undefined}
-        className={`h-10 w-full min-w-0 rounded-md border bg-white px-3 text-sm font-medium outline-none transition focus:ring-2 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-500 ${
+        className={`${styles.fieldControl} w-full min-w-0 rounded-md border bg-white px-3 text-sm font-medium outline-none transition focus:ring-2 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-500 ${
           error ? "border-red-300 ring-red-200" : "border-zinc-200 ring-yellow-300"
         }`}
       >
@@ -335,7 +329,7 @@ export function CheckboxGroup<T extends string>({
         return (
           <label
             key={item}
-            className={`inline-flex min-w-0 items-center rounded-md font-semibold ring-1 ${compact ? "min-h-8 gap-1.5 px-2 text-[11px] lg:h-9 lg:gap-2 lg:px-3 lg:text-xs" : "h-9 gap-2 px-3 text-xs"} ${
+            className={`${styles.choice} inline-flex min-w-0 items-center gap-1.5 rounded-md ring-1 ${
               disabled
                 ? "cursor-not-allowed bg-zinc-100 text-zinc-400 ring-zinc-200"
                 : active
@@ -384,9 +378,9 @@ export function PhoneField({
   const prefixListId = useId();
 
   return (
-    <label className="block">
-      <span className="mb-1 block text-[13px] font-semibold text-zinc-600">Telefón{required && <RequiredMark />}</span>
-      <div className={`grid grid-cols-[96px_minmax(0,1fr)] rounded-md border bg-white focus-within:ring-2 ${error ? "border-red-300 focus-within:ring-red-200" : "border-zinc-200 focus-within:ring-yellow-300"}`}>
+    <label className={styles.field}>
+      <span className={styles.fieldLabel}>Telefón{required && <RequiredMark />}</span>
+      <div className={`${styles.phoneControl} grid rounded-md border bg-white focus-within:ring-2 ${error ? "border-red-300 focus-within:ring-red-200" : "border-zinc-200 focus-within:ring-yellow-300"}`}>
         <input
           type="tel"
           list={prefixListId}
@@ -396,7 +390,7 @@ export function PhoneField({
           value={contact.phonePrefix}
           disabled={disabled}
           onChange={(event) => onChange({ phonePrefix: normalizePhonePrefixInput(event.target.value) })}
-          className="h-10 min-w-0 rounded-l-md border-r border-zinc-200 bg-zinc-50 px-2 text-sm font-semibold outline-none disabled:cursor-not-allowed disabled:text-zinc-400"
+          className={`${styles.fieldControl} min-w-0 rounded-l-md border-r border-zinc-200 bg-zinc-50 px-2 text-sm font-semibold outline-none disabled:cursor-not-allowed disabled:text-zinc-400`}
         />
         <datalist id={prefixListId}>
           {countryPrefixes.map(([prefix, country]) => (
@@ -415,7 +409,7 @@ export function PhoneField({
           onChange={(event) => onChange({ phoneNational: event.target.value.replace(/\D/g, "").slice(0, 15) })}
           aria-invalid={Boolean(error)}
           aria-describedby={error ? errorId : undefined}
-          className="h-10 min-w-0 rounded-r-md px-3 text-sm outline-none disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+          className={`${styles.fieldControl} min-w-0 rounded-r-md px-3 text-sm outline-none disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400`}
         />
       </div>
       <FieldError id={errorId} error={error} reserveSpace={reserveErrorSpace} />

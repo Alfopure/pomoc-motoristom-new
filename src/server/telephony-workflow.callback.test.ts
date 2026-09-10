@@ -29,3 +29,17 @@ it('CB-14: scheduling transaction failure is surfaced before the historical outc
   await expect(setCallOutcome(call,{outcome:'callback',callbackActionId:action},{profileId:profile,organizationId:org})).rejects.toThrow('injected write failure');
   expect(fake.db.find('motorist_calls',r=>r.id===call)?.raw_latest_payload).toEqual({smsMarker:'preserved'});
 });
+it('active task workspace uses scheduling before outcome effects even with the old telephony flag off',async()=>{
+  vi.stubEnv('TELEPHONY_STABILITY_V1_ENABLED','false');
+  fake.db.seed('motorist_task_workspace_settings',[{organization_id:org,enabled:true,writer_inventory_verified_at:'2026-09-10',writer_inventory_note:'isolated test'}]);
+  let invoked=false;
+  fake.db.registerRpc('motorist_schedule_callback_v1',()=>{invoked=true;expect(fake.db.rows('motorist_call_events')).toEqual([]);return {id:'request'};});
+  await setCallOutcome(call,{outcome:'callback',callbackMinutes:30,callbackActionId:action},{profileId:profile,organizationId:org});
+  expect(invoked).toBe(true);expect(fake.db.rows('motorist_case_tasks')).toEqual([]);
+});
+it('uncertain task workspace capability rejects callback scheduling before outcome writes',async()=>{
+  vi.stubEnv('TELEPHONY_STABILITY_V1_ENABLED','false');
+  fake.db.failNext('motorist_task_workspace_settings','select','unavailable');
+  await expect(setCallOutcome(call,{outcome:'callback',callbackActionId:action},{profileId:profile,organizationId:org})).rejects.toThrow('overiť');
+  expect(fake.db.rows('motorist_call_events')).toEqual([]);
+});

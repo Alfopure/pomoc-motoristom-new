@@ -8,12 +8,13 @@ import { smsSender } from "./sms-channel";
 
 export async function loadSmsOptions(organizationId: string) {
   const admin = createSupabaseAdminClient();
-  const [cases, contacts, profile] = await Promise.all([
+  const [cases, contacts, profile, tasks] = await Promise.all([
     admin.from("motorist_cases").select("id, case_number, contact_id").eq("organization_id", organizationId).order("created_at", { ascending: false }).limit(1000),
     admin.from("motorist_contacts").select("id, name, phone").eq("organization_id", organizationId),
     admin.from("motorist_organization_profiles").select("primary_phone").eq("organization_id", organizationId).maybeSingle(),
+    admin.from("motorist_case_tasks").select("id,case_id,title").eq("organization_id", organizationId).in("status", ["open", "overdue"]).order("created_at", { ascending: false }).limit(1000),
   ]);
-  if (cases.error || contacts.error || profile.error) throw new SmsWorkflowError("Prípady a kontakty sa nepodarilo načítať.");
+  if (cases.error || contacts.error || profile.error || tasks.error) throw new SmsWorkflowError("Prípady a kontakty sa nepodarilo načítať.");
   const contactsById = new Map((contacts.data ?? []).map((contact) => [contact.id, contact]));
   return {
     cases: (cases.data ?? []).map((row) => {
@@ -23,6 +24,7 @@ export async function loadSmsOptions(organizationId: string) {
       try { phone = normalizeSmsRecipient(phone); validPhone = true; } catch { /* Invalid contacts remain visible for repair. */ }
       return { id: row.id, caseNumber: row.case_number, name: contact?.name ?? "Bez kontaktu", phone, validPhone };
     }),
+    tasks: (tasks.data ?? []).filter(task => task.case_id).map(task => ({ id: task.id, caseId: task.case_id!, title: task.title })),
     callbackNumber: profile.data?.primary_phone ?? "",
     ...smsSender(organizationId, null),
   };

@@ -1,4 +1,6 @@
 import "server-only";
+import { validateSmsTaskAssociation } from "./sms-task-association";
+import { completeTaskSourceIfSupported } from "./task-source-completion";
 
 import { createHash, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -80,18 +82,8 @@ export async function prepareSms(input: SmsPrepareInput & SmsActor & { publicBas
   const context = caseId && !reply ? await getSmsCaseContext(admin, input.organizationId, caseId) : null;
   const profile = await admin.from("motorist_organization_profiles").select("*").eq("organization_id", input.organizationId).maybeSingle();
   if (profile.error) throw new SmsWorkflowError("Nastavenia organizácie sa nepodarilo načítať.");
-  if (input.taskId) {
-    const task = await admin.from("motorist_case_tasks").select("id").eq("organization_id", input.organizationId).eq("case_id", caseId!).eq("id", input.taskId).maybeSingle();
-    if (task.error || !task.data) throw new SmsWorkflowError("Úloha nepatrí k vybranému prípadu.", 400);
-  }
-  let taskId = input.taskId ?? null;
-  if (!taskId && caseId && (input.template === "location_request" || input.template === "eta_update")) {
-    const task = await admin.from("motorist_case_tasks").select("id").eq("organization_id", input.organizationId)
-      .eq("case_id", caseId).eq("status", "open").ilike("title", input.template === "eta_update" ? "%ETA%" : "%lokaliza%SMS%")
-      .order("created_at").limit(1).maybeSingle();
-    if (task.error) throw new SmsWorkflowError("Úlohu prípadu sa nepodarilo načítať.");
-    taskId = task.data?.id ?? null;
-  }
+  const taskId = input.taskId?.trim() || null;
+  if (taskId) await validateSmsTaskAssociation(admin, input.organizationId, caseId, taskId, input.template);
   if (input.template === "eta_update" && input.technicianDeparted !== true) {
     throw new SmsWorkflowError("Potvrďte, že technik skutočne vyrazil. Výpočet trasy nestačí.", 400);
   }
@@ -119,7 +111,7 @@ export async function prepareSms(input: SmsPrepareInput & SmsActor & { publicBas
     recipientName: reply ? "Odosielateľ prijatej SMS" : context?.contact.name ?? "Ručne zadaný príjemca", toNumber, template: input.template, templateContext, message,
     ...channel, replyToMessageId: reply?.row.id ?? null,
     messagingProfileId: config.configured ? config.messagingProfileId : null,
-    locationToken, locationLinkId: locationToken ? randomUUID() : null, taskId,
+    locationToken, locationLinkId: locationToken ? randomUUID() : null, taskId, taskAssociation: taskId ? "explicit" : null,
     expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
   }));
   return { draft, proof: signSmsDraft(draft) };
@@ -143,7 +135,7 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
   const admin = createSupabaseAdminClient();
   const existing = await findRequest(admin, input.organizationId, idempotencyKey);
   // Retry consults the durable row even if the preview expired or the contact changed.
-  if (existing) return reuse(existing, fingerprint);
+  if (existing) return reuse(admin, existing, fingerprint, input.actorProfileId);
   if (Date.parse(draft.expiresAt) <= Date.now()) throw new SmsWorkflowError("Platnosť náhľadu vypršala. Pripravte ho znovu.", 409);
   if (draft.replyToMessageId) {
     const reply = await loadSmsReplyContext(admin, input.organizationId, draft.replyToMessageId);
@@ -164,6 +156,10 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
     || Boolean(draft.repliesEnabled) !== channel.repliesEnabled || Boolean(draft.repliesPendingVerification) !== channel.repliesPendingVerification)) {
     throw new SmsWorkflowError("SMS kanál sa zmenil. Pripravte nový náhľad.", 409);
   }
+  if (draft.taskId) {
+    if (draft.taskAssociation !== "explicit") throw new SmsWorkflowError("Obnovte náhľad a výslovne vyberte úlohu na dokončenie.", 409);
+    await validateSmsTaskAssociation(admin, input.organizationId, draft.caseId, draft.taskId, draft.template);
+  }
   const transport = options.transport ?? resolveSmsTransport();
   if (transport === notConfiguredTransport) throw new SmsWorkflowError(SMS_NOT_CONFIGURED_MESSAGE, 503);
   await transport.preflight?.({ organizationId: input.organizationId, to: draft.toNumber });
@@ -176,7 +172,7 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
     raw_payload: {
       actor_profile_id: input.actorProfileId, recipient_name: draft.recipientName, case_number: draft.caseNumber,
       template_version: SMS_TEMPLATE_VERSION, template_context: draft.templateContext as Json, source: "sms_composer",
-      task_id: draft.taskId, location_link_id: draft.locationLinkId, location_link_expires_at: locationExpiresAt,
+      task_id: draft.taskId, task_association: draft.taskId ? "explicit" : null, location_link_id: draft.locationLinkId, location_link_expires_at: locationExpiresAt,
       encoding: smsSegments(body).encoding, segments: smsSegments(body).segments,
       reply_to_message_id: draft.replyToMessageId ?? null,
     },
@@ -184,7 +180,7 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
   }).select("*").single();
   if (inserted.error?.code === "23505") {
     const winner = await findRequest(admin, input.organizationId, idempotencyKey);
-    if (winner) return reuse(winner, fingerprint);
+    if (winner) return reuse(admin, winner, fingerprint, input.actorProfileId);
   }
   if (inserted.error || !inserted.data) throw new SmsWorkflowError("Požiadavku sa nepodarilo uložiť. Zopakujte tú istú požiadavku.");
   const row = inserted.data;
@@ -195,7 +191,7 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
         id: draft.locationLinkId, organization_id: input.organizationId, case_id: draft.caseId,
         scope: "pickup_location", token_hash: hashLocationShareToken(draft.locationToken), status: "active",
         expires_at: locationExpiresAt!, created_by: input.actorProfileId,
-        metadata: { source: "sms_location_request", task_id: draft.taskId, sms_message_id: row.id },
+        metadata: { source: "sms_location_request", task_id: draft.taskId, task_association: draft.taskId ? "explicit" : null, sms_message_id: row.id },
       });
       if (link.error) throw new SmsWorkflowError("Lokalizačný link sa nepodarilo uložiť. SMS nebola odoslaná.", 400);
     }
@@ -238,9 +234,7 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
       payload: { sms_message_id: row.id, template: draft.template, status_detail: statusDetail, location_link_id: draft.locationLinkId },
     });
     if (event.error) console.error("SMS timeline audit failed", { smsMessageId: row.id });
-    if (draft.template === "eta_update" && delivery.status !== "failed" && draft.taskId) {
-      await admin.from("motorist_case_tasks").update({ status: "done" }).eq("organization_id", input.organizationId).eq("case_id", draft.caseId).eq("id", draft.taskId);
-    }
+    await reconcileAcceptedSmsTask(admin, { ...row, status: delivery.status, provider_message_id: delivery.providerMessageId }, input.actorProfileId);
   }
   return { providerMessageId: delivery.providerMessageId, smsMessageId: row.id, status: delivery.status, statusDetail, reused: false };
 }
@@ -268,9 +262,22 @@ async function findRequest(admin: AdminClient, organizationId: string, key: stri
   if (found.error) throw new SmsWorkflowError("Históriu požiadavky sa nepodarilo overiť. SMS nebola znova odoslaná.");
   return found.data;
 }
-function reuse(row: SmsRow, fingerprint: string) {
+async function reuse(admin: AdminClient, row: SmsRow, fingerprint: string, actorProfileId: string) {
   if (row.request_fingerprint !== fingerprint) throw new SmsWorkflowError("Toto ID už patrí inému textu alebo príjemcovi. Skontrolujte históriu.", 409);
+  await reconcileAcceptedSmsTask(admin, row, actorProfileId);
   return { ...resultFromRow(row), reused: true };
+}
+async function reconcileAcceptedSmsTask(admin: AdminClient, row: SmsRow, actorProfileId: string) {
+  // A persisted provider acceptance is required even on an idempotent retry.
+  // An uncertain transport result must never complete a task or send again.
+  if (row.template_key !== "eta_update" || !row.case_id || !row.provider_message_id
+    || !["queued", "sent", "delivered"].includes(row.status)) return;
+  if (await completeTaskSourceIfSupported(admin, row.organization_id, "sms", row.id, actorProfileId)) return;
+  const payload = row.raw_payload as Record<string, Json> | null;
+  if (typeof payload?.task_id !== "string") return;
+  const result = await admin.from("motorist_case_tasks").update({ status: "done" })
+    .eq("organization_id", row.organization_id).eq("case_id", row.case_id).eq("id", payload.task_id);
+  if (result.error) throw new SmsWorkflowError("SMS bola prijatá, dokončenie úlohy sa nepodarilo uložiť. Zopakujte tú istú požiadavku.");
 }
 function resultFromRow(row: SmsRow) {
   return { providerMessageId: row.provider_message_id ?? null, smsMessageId: row.id, status: row.status, statusDetail: row.status_detail, reused: false };

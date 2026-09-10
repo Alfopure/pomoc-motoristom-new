@@ -23,7 +23,17 @@ export type LiveLocationUpdate = {
   location: CustomerSharedLocation;
 };
 
-type LiveUpdatable = { dispatchCases: DispatchCase[]; notifications: DispatchNotification[] };
+type LiveUpdatable = {
+  dispatchCases: DispatchCase[];
+  notifications: DispatchNotification[];
+  /**
+   * Present only while the task workspace is active. Its store polls
+   * `/api/tasks` itself and rewrites the cases' task lists from tasks that
+   * carry links and revisions, so the poll must not overwrite them with the
+   * plain case-task shape.
+   */
+  tasks?: unknown[];
+};
 
 export function hasLiveUpdates(result: LiveUpdatesResponse): boolean {
   return (result.updates?.length ?? 0) > 0 || (result.notifications?.length ?? 0) > 0 || (result.tasks?.length ?? 0) > 0;
@@ -39,8 +49,10 @@ export function mergeLiveUpdates<T extends LiveUpdatable>(current: T, result: Li
   }
 
   const tasksByCaseId = new Map<string, CaseTask[]>();
-  for (const task of result.tasks ?? []) {
-    tasksByCaseId.set(task.caseId, [...(tasksByCaseId.get(task.caseId) ?? []), task]);
+  if (!current.tasks) {
+    for (const task of result.tasks ?? []) {
+      tasksByCaseId.set(task.caseId, [...(tasksByCaseId.get(task.caseId) ?? []), task]);
+    }
   }
 
   const dispatchCases = current.dispatchCases.map((caseItem) => {

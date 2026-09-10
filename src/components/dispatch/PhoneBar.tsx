@@ -221,7 +221,7 @@ function PhoneBarControls(props: PhoneBarProps) {
         {capabilities.answer && (
           <BarButton tone="accept" icon={PhoneCall} label={phone.answering ? "Prijímam…" : "Prijať"} busy={phone.answering} onClick={props.onAnswer} />
         )}
-        {capabilities.mute && (
+        {capabilities.mute && !(model.supervising && !props.canSupervise) && (
           <BarButton
             tone={phone.call?.muted ? "warn" : "default"}
             icon={phone.call?.muted ? MicOff : Mic}

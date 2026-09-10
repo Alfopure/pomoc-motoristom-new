@@ -128,15 +128,33 @@ export function callbackUrgency(request: Pick<CallbackRequestPayload, "status" |
   return now >= deadline - CALLBACK_WARN_MINUTES * 60_000 ? "due" : "fresh";
 }
 
+export type CallbackQueueOrder = "oldest" | "newest" | "deadline";
+
+export const CALLBACK_QUEUE_ORDERS: CallbackQueueOrder[] = ["oldest", "newest", "deadline"];
+
+export const CALLBACK_ORDER_LABELS: Record<CallbackQueueOrder, string> = {
+  oldest: "Najdlhšie čakajúce",
+  newest: "Najnovšie",
+  deadline: "Najbližší termín",
+};
+
 /**
- * FIFO by age. Colour, not order, carries urgency: a queue that reorders itself
- * as rows turn red moves the button out from under the dispatcher's cursor.
+ * FIFO by age unless the dispatcher picks another order. Every order is a
+ * stable function of the rows themselves — never of the clock — so colour, not
+ * order, carries urgency: a queue that reorders itself as rows turn red moves
+ * the button out from under the dispatcher's cursor.
  */
-export function sortCallbackQueue(requests: CallbackRequestPayload[]): CallbackRequestPayload[] {
+export function sortCallbackQueue(requests: CallbackRequestPayload[], order: CallbackQueueOrder = "oldest"): CallbackRequestPayload[] {
   return [...requests].sort((left, right) => {
+    if (order === "deadline") {
+      // A row without any parsable timestamp has no promise to keep; it sorts last.
+      const a = callbackDeadline(left) ?? Number.POSITIVE_INFINITY;
+      const b = callbackDeadline(right) ?? Number.POSITIVE_INFINITY;
+      if (a !== b) return a - b;
+    }
     const a = parse(left.createdAt) ?? 0;
     const b = parse(right.createdAt) ?? 0;
-    return a - b || left.id.localeCompare(right.id);
+    return (order === "newest" ? b - a : a - b) || left.id.localeCompare(right.id);
   });
 }
 

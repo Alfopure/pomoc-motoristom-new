@@ -83,3 +83,27 @@ describe("live task updates", () => {
     expect(hasLiveUpdates({ notifications: [{ id: "n-1" } as DispatchNotification] })).toBe(true);
   });
 });
+
+describe("live updates while the task workspace is active", () => {
+  it("leaves the cases' task lists to the workspace store and still folds in notifications", () => {
+    // With the workspace on, `dispatchData.tasks` exists and its store polls
+    // `/api/tasks` itself; the plain case-task shape from this poll must not
+    // overwrite the linked, revisioned tasks it writes into the cases.
+    const current = { ...snapshot([dispatchCase({ tasks: [task({ title: "Z workspace" })] })]), tasks: [task()] };
+    const incoming = task({ title: "Z pollu", updatedAt: "2026-09-10T13:00:00.000Z" });
+    const notification = { id: "n-1", status: "unread", severity: "info", createdAt: "2026-09-10T13:00:00.000Z" } as unknown as DispatchNotification;
+
+    const merged = mergeLiveUpdates(current, { tasks: [incoming], notifications: [notification] });
+
+    expect(merged.dispatchCases[0]).toBe(current.dispatchCases[0]);
+    expect(merged.dispatchCases[0].tasks[0].title).toBe("Z workspace");
+    expect(merged.notifications.map((entry) => entry.id)).toEqual(["n-1"]);
+    expect(merged.tasks).toBe(current.tasks);
+  });
+
+  it("merges polled tasks into the cases as before when the workspace list is absent", () => {
+    const current = snapshot([dispatchCase()]);
+    const merged = mergeLiveUpdates(current, { tasks: [task({ title: "Z pollu" })] });
+    expect(merged.dispatchCases[0].tasks.map((entry) => entry.title)).toEqual(["Z pollu"]);
+  });
+});
