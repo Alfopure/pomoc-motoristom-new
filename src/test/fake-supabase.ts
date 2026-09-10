@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { registerPresenceRpcs } from "./fake-presence";
 import { registerStabilityRpcs } from "./fake-stability";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -146,6 +147,22 @@ function sameValue(left: unknown, right: unknown): boolean {
     return JSON.stringify(left) === JSON.stringify(right);
   }
   return String(left) === String(right);
+}
+
+/**
+ * postgrest-js sends `eq`/`neq`/`not.eq` values as text (`eq.${value}`). A jsonb
+ * column compares structurally against that parsed text, so an object value
+ * reaches Postgres as "[object Object]" and is rejected.
+ */
+function filterValueMatches(cell: unknown, value: unknown): boolean {
+  if (isNil(cell) || typeof cell !== "object") return sameValue(cell, value);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(`${value}`);
+  } catch {
+    throw fakeError("invalid input syntax for type json", "22P02");
+  }
+  return isDeepStrictEqual(cell, parsed);
 }
 
 function compare(left: unknown, right: unknown): number {
@@ -426,11 +443,11 @@ export class FakeQueryBuilder implements PromiseLike<FakeResult> {
   }
 
   eq(column: string, value: unknown): this {
-    return this.addFilter(`eq(${column})`, (row) => sameValue(row[column], value));
+    return this.addFilter(`eq(${column})`, (row) => filterValueMatches(row[column], value));
   }
 
   neq(column: string, value: unknown): this {
-    return this.addFilter(`neq(${column})`, (row) => !sameValue(row[column], value));
+    return this.addFilter(`neq(${column})`, (row) => !filterValueMatches(row[column], value));
   }
 
   in(column: string, values: readonly unknown[]): this {
@@ -448,7 +465,7 @@ export class FakeQueryBuilder implements PromiseLike<FakeResult> {
   not(column: string, operator: "is" | "eq" | "in", value: unknown): this {
     return this.addFilter(`not.${operator}(${column})`, (row) => {
       if (operator === "is") return value === null ? !isNil(row[column]) : row[column] !== value;
-      if (operator === "eq") return !sameValue(row[column], value);
+      if (operator === "eq") return !filterValueMatches(row[column], value);
       return !(value as unknown[]).some((candidate) => sameValue(row[column], candidate));
     });
   }
