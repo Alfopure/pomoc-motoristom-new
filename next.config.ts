@@ -13,6 +13,12 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   serverExternalPackages: ["@sparticuz/chromium", "playwright-core"],
   outputFileTracingIncludes: {
+    "/api/cases/*/pdf": [
+      "./node_modules/@sparticuz/chromium/bin/**/*",
+      `${playwrightRuntime}/browsers.json`,
+      `${playwrightRuntime}/lib/**/*`,
+      "./src/assets/pdf-fonts/**/*",
+    ],
     "/api/vehicles/lookup": [
       "./node_modules/@sparticuz/chromium/bin/**/*",
       // Playwright loads runtime JSON/assets dynamically; Next cannot trace all of them.

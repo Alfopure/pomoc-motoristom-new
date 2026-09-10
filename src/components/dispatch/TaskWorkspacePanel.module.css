@@ -1,0 +1,28 @@
+.panel { min-width: 0; height: 100%; overflow: auto; background: white; padding: .75rem; color: #27272a; }
+.panel *, .panel *::before, .panel *::after { box-sizing: border-box; }
+.panel button, .panel select, .panel input:not([type=checkbox]) { min-height: 44px; }
+.panel button { border: 1px solid #d4d4d8; border-radius: .375rem; padding: .5rem .75rem; font-weight: 600; background: white; cursor: pointer; }
+.panel button:disabled { opacity: .5; cursor: default; }
+.panel button:focus-visible, .panel input:focus-visible, .panel select:focus-visible, .panel textarea:focus-visible { outline: 2px solid #eab308; outline-offset: 2px; }
+.panel input:not([type=checkbox]), .panel select, .panel textarea { min-width: 0; width: 100%; border: 1px solid #d4d4d8; border-radius: .375rem; padding: .5rem; background: white; font-size: 16px; }
+.panel label { display: grid; min-width: 0; gap: .375rem; font-size: .875rem; font-weight: 600; }
+.panel h2, .panel h3 { margin: 0; font-size: 1rem; font-weight: 700; }
+.panel p { margin: 0; }
+.row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; min-width: 0; }
+.section { display: grid; gap: .75rem; min-width: 0; padding: .75rem 0; border-bottom: 1px solid #e4e4e7; }
+.grid { display: grid; gap: .75rem; min-width: 0; }
+.caseChoices { max-height: 15rem; overflow: auto; border: 1px solid #e4e4e7; border-radius: .375rem; padding: .5rem; }
+.panel .caseChoice { display: flex; align-items: center; gap: .5rem; min-height: 44px; overflow-wrap: anywhere; }
+.caseChoice input { flex: 0 0 auto; width: 20px; height: 20px; }
+.list { display: grid; gap: .5rem; padding: .5rem 0; list-style: none; }
+.card { min-width: 0; border: 1px solid #d4d4d8; border-radius: .5rem; padding: .75rem; }
+.panel .title { display: block; width: 100%; text-align: left; overflow-wrap: anywhere; border: 0; padding: .25rem 0; }
+.meta { display: flex; flex-wrap: wrap; gap: .5rem; font-size: .75rem; color: #52525b; }
+.error { border: 1px solid #fca5a5; border-radius: .375rem; background: #fef2f2; color: #991b1b; padding: .75rem; overflow-wrap: anywhere; }
+.messages { display: grid; gap: .75rem; }
+.messages article { min-width: 0; border-radius: .375rem; background: #f4f4f5; padding: .75rem; }
+.messages time { font-size: .75rem; color: #71717a; }
+.messageBody { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: .375rem !important; }
+.links { display: grid; gap: .5rem; min-width: 0; }
+.panel .danger { color: #b91c1c; border-color: #fca5a5; }
+@container (min-width: 540px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

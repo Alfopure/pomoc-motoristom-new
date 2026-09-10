@@ -1,0 +1,26 @@
+.dispatch-widget-host { display: none; }
+.dispatch-dashboard[data-console-hidden="true"] { display: none !important; }
+.dispatch-workspace-view[hidden], .dispatch-dashboard [data-widget][hidden] { display: none !important; }
+.workspace-center-tabs { scrollbar-width: thin; }
+
+@media (min-width: 1280px) {
+  .dispatch-widget-host { display: flex; }
+  .dispatch-dashboard[data-right-collapsed="true"] .dispatch-widget-host { display: none; }
+}
+@media (min-width: 1024px) {
+  .dispatch-dashboard[data-left-collapsed="true"] .mobile-dispatch-cases { display: none; }
+  .dispatch-dashboard[data-left-collapsed="true"] .dashboard-resize-left { display: none; }
+  .dispatch-dashboard[data-right-collapsed="true"] .dashboard-resize-right { display: none; }
+}
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .dispatch-widget-host.is-open {
+    display: flex; position: absolute; top: 0; right: 0; bottom: 0;
+    width: min(440px, 70%); z-index: 40; box-shadow: -12px 0 30px #0002;
+  }
+}
+@media (max-width: 1023px) {
+  .dispatch-dashboard[data-tools-open="true"] .mobile-dispatch-cases,
+  .dispatch-dashboard[data-tools-open="true"] .mobile-dispatch-workspace { display: none; }
+  .dispatch-widget-host.is-open { display: flex; flex: 1; border-left: 0; }
+  .workspace-center-tabs { flex-shrink: 0; }
+}

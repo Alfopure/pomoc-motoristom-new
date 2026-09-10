@@ -30,6 +30,8 @@ export type RouteAuthEntry = {
 };
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
+  "telephony/callback-target": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "directory/contacts/[id]/callback-policy": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "GET directory policy; PUT manager/admin only with same-origin guard." },
   "vehicles/lookup": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   // ── public (6) ──────────────────────────────────────────────────────────
   "auth/forgot-password": { class: "public" },
@@ -60,6 +62,14 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // notifications/materialize: Bearer ${secret} ALEBO session requireDefaultMotoristOrgMember
   "notifications/materialize": { class: "dual" },
   "notifications": { class: "session" },
+  "notes": { class: "session" },
+  "notes/[id]": { class: "session" },
+  "notes/colleagues": { class: "session" },
+  "workspace/capabilities": { class: "session" },
+  "tasks": { class: "session" },
+  "tasks/[id]": { class: "session" },
+  "tasks/[id]/links": { class: "session" },
+  "tasks/[id]/messages": { class: "session" },
 
   // ── session — Supabase session guard ────────────────────────────────────
   // attendance
@@ -97,6 +107,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "cases/[id]/assign": { class: "session" },
   "cases/[id]/attachments": { class: "session" },
   "cases/[id]/sms": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "cases/[id]/pdf": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
 
   // fleet-assets
   "fleet-assets": { class: "session", role: ["manager", "admin"] },
@@ -154,7 +165,9 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "telephony/calls/[id]/parties/[legId]/kick": { class: "session" },
   "telephony/calls/[id]/parties/[legId]/mute": { class: "session" },
   "telephony/calls/[id]/parties/[legId]/unmute": { class: "session" },
-  "telephony/calls/[id]/stop-supervise": { class: "session", role: ["manager", "admin"], note: "Ukončí vlastný dozor; role-gate je v call-actions (canSupervise)." },
+  "telephony/calls/[id]/stop-supervise": { class: "session", note: "Manažér/admin ukončí vlastný dozor; pozvaný dispečer iba vlastné prijaté počúvanie." },
+  "telephony/monitor-invitations": { class: "session", note: "Privátny inbox iba pozývateľa/príjemcu v jeho organizácii; DB gate default false." },
+  "telephony/calls/[id]/monitor-invitations": { class: "session", note: "Účastník vlastného hovoru pozýva/odvoláva, presný príjemca prijme jednorazovo pod session lease/CAS; server/provider monitor-only." },
   "telephony/calls/[id]/supervise": { class: "session", role: ["manager", "admin"], note: "Dozor nad cudzím hovorom (monitor/whisper/barge). Na bežne premostenom hovore sa dozorca pripája priamo cez Telnyx supervise_call_control_id (volajúci sa nerozpája), v konferencii cez supervisor_role. Role-gate je v call-actions (canSupervise), dispečer dostane 403. Každý dozor zapisuje audit riadok." },
   "telephony/calls/[id]/transfer": { class: "session" },
   "telephony/calls/[id]/transfer-targets": { class: "session" },

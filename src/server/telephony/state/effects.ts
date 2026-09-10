@@ -365,6 +365,10 @@ export async function appendPresenceHistory(
 
 async function createCallbackRequest(deps: EffectsDeps, session: SessionRow, plan: CallbackPlan, occurredAt?: string): Promise<void> {
   if (telephonyStabilityEnabled() || hasStabilityContract(session)) return createCallbackObligation(deps, session, plan, occurredAt);
+  // Load the compatibility gate only for an actual callback, before any legacy
+  // callback/task write. Ordinary call events need no task-workspace startup.
+  const { taskWorkspaceSystemEnabled } = await import("../../task-system-gate");
+  if (await taskWorkspaceSystemEnabled(deps.admin, session.organization_id)) return createCallbackObligation(deps, session, plan, occurredAt);
   const { admin } = deps;
   const callerNumber = normalizeE164(plan.callerNumber || session.caller_number);
   if (!callerNumber) {
@@ -551,7 +555,7 @@ export async function recordCallEvent(
   const target = event.kind === "app" ? safeEventTarget(event.target) : null;
   const rawPayload = event.kind === "telnyx" ? toJson(event.type.includes("recording.")
     ? { recording_id: event.payload.recording_id ?? null, recording_started_at: event.payload.recording_started_at ?? null, recording_ended_at: event.payload.recording_ended_at ?? null, channels: event.payload.channels ?? null }
-    : event.payload) : toJson({ type: event.type, actor: event.actorProfileId, target });
+    : event.payload) : toJson({ type: event.type, actor: event.actorProfileId, target, ...(event.monitorInvitation ? { invitationId: event.monitorInvitation.id, recipientProfileId: event.monitorInvitation.recipientProfileId, expiresAt: event.monitorInvitation.expiresAt } : {}), ...(event.invitationId || event.supervisor?.invitationId ? { invitationId: event.invitationId ?? event.supervisor?.invitationId } : {}) });
   const inserted = await admin.from("motorist_call_events").insert({
     organization_id: deps.organizationId,
     call_id: callId,
@@ -626,6 +630,20 @@ function resolvePrompt(deps: EffectsDeps, ctx: ExecutionContext, media: MediaRef
 
 async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command: Command): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   const telnyx = requireTelnyx(deps);
+  // Defense at the provider boundary: even a replayed/stale command cannot
+  // promote an invited leg to audible audio or remove its provider mute.
+  if (command.kind === "conference_join" || command.kind === "conference_update" || command.kind === "supervisor_role_switch" || command.kind === "conference_unmute" || command.kind === "conference_unhold") {
+    const refs = (command.kind === "conference_unmute" || command.kind === "conference_unhold") ? command.legs : [command.leg];
+    for (const legRef of refs) {
+      const { data: leg, error } = await deps.admin.from("motorist_call_legs").select("metadata, profile_id").eq("session_id", ctx.session.id).eq("telnyx_call_control_id", resolveLeg(ctx, legRef)).maybeSingle();
+      if (error) throw new EffectsError("monitor permission unavailable");
+      const invitationId = (leg?.metadata as { monitor_invitation_id?: string } | null)?.monitor_invitation_id;
+      if (!invitationId) continue;
+      const invitation = readMeta(ctx.session).monitorInvitations?.[invitationId];
+      if (!invitation?.acceptedAt || invitation.revokedAt || invitation.disconnectRequestedAt || ctx.session.ended_at || (command.kind === "conference_unmute" || command.kind === "conference_unhold") || command.supervisorRole !== "monitor" ||
+        ("whisper" in command && command.whisper?.length)) throw new EffectsError("invited monitor audio escalation denied");
+    }
+  }
   if (command.kind.startsWith("conference_") && command.kind !== "conference_create" && !command.conferenceId) {
     command.conferenceId = requireConference(ctx);
     if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id);
@@ -944,6 +962,11 @@ async function createOrFindConference(telnyx: TelnyxClient, commandId: string, c
 
 async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   const telnyx = requireTelnyx(deps);
+  if (command.monitorInvitationId) {
+    const invitation = readMeta(ctx.session).monitorInvitations?.[command.monitorInvitationId];
+    if (!invitation?.acceptedAt || invitation.revokedAt || invitation.disconnectRequestedAt || invitation.recipientProfileId !== command.profileId || ctx.session.ended_at ||
+      command.role !== "supervisor" || (command.superviseCallControlId && command.supervisorRole !== "monitor")) throw new EffectsError("invited monitor dial denied");
+  }
   const stable = telephonyStabilityEnabled() || hasStabilityContract(ctx.session);
   if (stable && command.role === "external" && !command.profileId) {
     const settings = await deps.admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", deps.organizationId);
@@ -1004,7 +1027,7 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
     from_number: command.from,
     initiated_at: prior.data?.initiated_at ?? now,
     client_state: toJson(command.clientState),
-    metadata: toJson({ intent: command.clientState.intent ?? null, attempt: command.attempt ?? null, dial_command_id: command.commandId }),
+    metadata: toJson({ intent: command.clientState.intent ?? null, attempt: command.attempt ?? null, dial_command_id: command.commandId, ...(command.monitorInvitationId ? { monitor_invitation_id: command.monitorInvitationId, supervisor_mode: "monitor" } : {}) }),
   };
   const upserted = await admin.from("motorist_call_legs").upsert(values, { onConflict: "telnyx_call_control_id" }).select("*").single();
   if (upserted.error) fail("dialed leg upsert failed", upserted.error);
@@ -1561,7 +1584,8 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
         const ending = entry.event.kind === "app" ? entry.event.type === "hangup" : entry.event.type === "call.hangup";
         // Transfer/leave hangups depend on earlier commands succeeding. Only an
         // explicit end decision or privacy STOP can bypass historical writes.
-        if (!(command.kind === "recording_stop" || ending && command.kind === "hangup") || entry.completedCommands.includes(commandKey(command))) continue;
+        const monitorDisconnect = command.kind === "hangup" && command.reason === "invited_monitor_stopped";
+        if (!(command.kind === "recording_stop" || ending && command.kind === "hangup" || monitorDisconnect) || entry.completedCommands.includes(commandKey(command))) continue;
         try {
           await deps.renewLease?.();
           await executeCommand(deps, ctx, command);

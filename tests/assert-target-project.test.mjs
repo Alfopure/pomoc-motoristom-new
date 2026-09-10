@@ -46,3 +46,44 @@ test("refuses a project ref that differs from the expected one", () => {
   });
   assert.equal(problems.length, 1);
 });
+
+test("accepts only the copy's exact application hostname, including an explicit port", () => {
+  for (const value of [
+    "https://test.dispecing.linkapomoci.sk",
+    "https://test.dispecing.linkapomoci.sk:443/dispatch",
+    "https://TEST.DISPECING.LINKAPOMOCI.SK:8443/dispatch?view=tasks",
+  ]) {
+    assert.deepEqual(assertTargetProject({ APP_BASE_URL: value }), [], value);
+  }
+  const result = run({ APP_BASE_URL: "https://test.dispecing.linkapomoci.sk" });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("the copy hostname cannot disguise an original or unapproved target", () => {
+  for (const value of [
+    "https://dispecing.linkapomoci.sk:443",
+    "https://DISPECING.LINKAPOMOCI.SK",
+    "https://dispecing.linkapomoci.sk.",
+    "https://dev.dispecing.linkapomoci.sk",
+    "https://other.test.dispecing.linkapomoci.sk",
+    "https://test.dispecing.linkapomoci.sk.evil.example",
+    "https://test.dispecing.linkapomoci.sk@dispecing.linkapomoci.sk:8443",
+    "https://dispecing.linkapomoci.sk@test.dispecing.linkapomoci.sk",
+    "https://test.dispecing.linkapomoci.sk/?next=https://dispecing.linkapomoci.sk",
+    "https://%64ispecing.linkapomoci.sk",
+    "dispecing.linkapomoci.sk:443",
+  ]) {
+    assert.equal(assertTargetProject({ APP_BASE_URL: value }).length, 1, value);
+  }
+});
+
+test("the allowed copy hostname never exempts original project identifiers", () => {
+  for (const value of [
+    "https://sjcsrygkkmersoczpunh@test.dispecing.linkapomoci.sk",
+    "https://test.dispecing.linkapomoci.sk/?project=sjcsrygkkmersoczpunh",
+    "https://POMOC-MOTORISTOM-DISPECING.VERCEL.APP",
+    "https://SJCSRYGKKMERSOCZPUNH.supabase.co",
+  ]) {
+    assert.equal(assertTargetProject({ SUPABASE_URL: value }).length, 1, value);
+  }
+});

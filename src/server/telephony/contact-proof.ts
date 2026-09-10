@@ -1,3 +1,4 @@
+import { callbackTargetAuthorization, type CallbackTargetAuthorization } from "@/lib/telephony/callback-target";
 import { createHash } from "node:crypto";
 import type { Command, LegRow, ReduceResult, SessionEvent, SessionRow } from "./state/types";
 import { readMeta, toJson } from "./state/types";
@@ -5,7 +6,7 @@ import type { TelnyxClient } from "./telnyx/client";
 
 export type ContactScope = {
   organizationId: string; caseId: string | null; lineId: string | null;
-  customerNumber: string | null; startedAt: string; callbackRequestId: string | null;
+  customerNumber: string | null; startedAt: string; callbackRequestId: string | null; callbackTargetAuthorization?: CallbackTargetAuthorization;
 };
 
 /** Historical facts only: none of these records authorizes a provider command. */
@@ -98,6 +99,8 @@ export function collectContactOperation(state: ContactSnapshot, commands: Comman
       customerNumber: state.session.direction === "outbound" ? state.session.called_number : state.session.caller_number,
       startedAt: state.session.started_at, callbackRequestId: typeof callbackRequestId === "string" ? callbackRequestId : null,
     };
+    const targetAuthorization = callbackTargetAuthorization(meta.callback_target_authorization, scope.callbackRequestId, scope.customerNumber);
+    if (state.session.direction === "outbound" && targetAuthorization) scope.callbackTargetAuthorization = targetAuthorization;
     history.operations.push({ id: command.commandId, scope, sourceControlId: affected!, topology: command.kind === "bridge" && !command.recordingConferenceName ? "bridge" : "conference", startedAt: at, endedAt: null,
       customerLegId: customer.id, operatorLegId: operator.id, operatorProfileId: operator.profile_id,
       customerControlId: customer.telnyx_call_control_id, operatorControlId: operator.telnyx_call_control_id,

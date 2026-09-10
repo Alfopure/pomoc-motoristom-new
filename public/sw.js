@@ -112,16 +112,67 @@ function safeNotificationUrl(value) {
   }
 }
 
+// A pending intent contains only an allowlisted URL and an opaque request ID.
+// A visible retry notification survives worker termination without caching any
+// authenticated content or automatically replaying work into another session.
+const notificationRequests = new Map();
+
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();
-  event.waitUntil(openNotification(event.notification.data?.url, event.notification.data?.mobileApp === true));
+  event.waitUntil(openNotification(event.notification));
 });
 
-async function openNotification(value, preferMobileApp = false) {
-  const url = safeNotificationUrl(value);
-  const isCall = new URL(url).searchParams.has("call");
-  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  if (preferMobileApp) {
+self.addEventListener("message", function (event) {
+  const data = event.data;
+  if (data?.type !== "PM_NOTIFICATION_ACK" || typeof data.requestId !== "string" || !event.source?.id) return;
+  event.waitUntil(acknowledgeNotification(data.requestId, event.source.id));
+});
+
+async function closeDeferredNotification(requestId, clientId) {
+  const notifications = await self.registration.getNotifications();
+  notifications.filter((notification) => notification.data?.requestId === requestId && notification.data?.clientId === clientId)
+    .forEach((notification) => notification.close());
+}
+
+async function acknowledgeNotification(requestId, clientId) {
+  const request = notificationRequests.get(requestId);
+  if (request && request.clientId === clientId) {
+    request.acknowledged = true;
+    // An ACK can race the platform's asynchronous showNotification().
+    if (request.deferred) await request.deferred;
+  }
+  await closeDeferredNotification(requestId, clientId);
+}
+
+async function deferNotification(request, notification) {
+  request.deferred = self.registration.showNotification("Pomoc Motoristom", {
+    body: "Aplikácia ešte neotvorila upozornenie. Po návrate do aplikácie klepnite sem znova.",
+    icon: "/icon-192", badge: "/icon-192", silent: true,
+    tag: notification.tag || "pm-dispatch-pending-" + request.requestId,
+    data: { url: request.url, requestId: request.requestId, clientId: request.clientId,
+      ...(notification.data?.mobileApp === true ? { mobileApp: true } : {}) },
+  });
+  await request.deferred;
+  if (request.acknowledged) await closeDeferredNotification(request.requestId, request.clientId);
+}
+
+async function openNotification(notification) {
+  const url = safeNotificationUrl(notification.data?.url);
+  const requestId = typeof notification.data?.requestId === "string" && /^[a-zA-Z0-9_-]{1,100}$/.test(notification.data.requestId)
+    ? notification.data.requestId : crypto.randomUUID();
+  const allWindows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  // A retry belongs to the original document while it still exists: its first
+  // message may only be suspended. Reassigning it could open the same intent in
+  // two live dispatch consoles when that document resumes.
+  const previousClient = typeof notification.data?.clientId === "string"
+    ? allWindows.find((client) => client.id === notification.data.clientId && new URL(client.url).origin === self.location.origin)
+    : undefined;
+  const windows = previousClient ? [previousClient] : allWindows;
+  if (previousClient && new URL(previousClient.url).pathname !== "/") {
+    await deferNotification({ requestId, clientId: previousClient.id, url, acknowledged: false, deferred: null }, notification);
+    return;
+  }
+  if (notification.data?.mobileApp === true) {
     const mobile = new Set((await Promise.all(windows.filter((client) => new URL(client.url).origin === self.location.origin).map(async (client) => await isMobileClient(client) ? client.id : null))).filter(Boolean));
     windows.sort((a, b) => Number(mobile.has(b.id)) - Number(mobile.has(a.id)));
   }
@@ -130,22 +181,32 @@ async function openNotification(value, preferMobileApp = false) {
     if (current.origin !== self.location.origin || current.pathname !== "/") continue;
     try {
       await client.focus();
-      // The application uses its existing unsaved-work guard before opening
-      // the task. A login screen or a page that has not hydrated cannot handle
-      // this message, so preserve the task URL through normal navigation there.
-      if (await requestNotificationOpen(client, url)) return;
-      // An older app cannot understand call links. Do not navigate its live
-      // call or draft away when the new message goes unacknowledged.
-      if (isCall) continue;
-      if (typeof client.navigate === "function" && await client.navigate(url)) return;
     } catch {
-      // A window may close between enumeration and navigation; try the next one.
+      if (previousClient) {
+        await deferNotification({ requestId, clientId: previousClient.id, url, acknowledged: false, deferred: null }, notification);
+        return;
+      }
+      // A closed window is safe to skip; silence from a live one is not.
+      continue;
     }
+    const request = { requestId, clientId: client.id, url, acknowledged: false, deferred: null };
+    notificationRequests.set(requestId, request);
+    try {
+      if (await requestNotificationOpen(client, url, requestId)) request.acknowledged = true;
+      // A suspended, unhydrated or older document can still contain a draft
+      // or active call. A timeout never authorizes navigation or a second app.
+      if (!request.acknowledged) await deferNotification(request, notification);
+    } finally {
+      if (notificationRequests.get(requestId) === request) notificationRequests.delete(requestId);
+    }
+    return;
   }
+  // Only the absence of a usable app window permits a cold start. Its safe
+  // task query is preserved by the login form until authentication completes.
   await self.clients.openWindow(url);
 }
 
-function requestNotificationOpen(client, url) {
+function requestNotificationOpen(client, url, requestId) {
   return new Promise(function (resolve) {
     const channel = new MessageChannel();
     let settled = false;
@@ -159,13 +220,13 @@ function requestNotificationOpen(client, url) {
       resolve(handled);
     }
     channel.port1.onmessage = function (event) {
-      // The console acknowledges receipt before showing its unsaved-work
-      // dialog. Waiting for the user's decision must never trigger a reload.
+      // Keep the old-client ACK shape compatible. New clients also ACK via
+      // the worker message channel so a late receipt closes the retry notice.
       if (event.data?.handled === true) finish(true);
     };
     try {
       const type = new URL(url).searchParams.has("call") ? "PM_OPEN_CALL_NOTIFICATION" : "PM_OPEN_NOTIFICATION";
-      client.postMessage({ type, url }, [channel.port2]);
+      client.postMessage({ type, url, requestId }, [channel.port2]);
     } catch {
       channel.port2.close();
       finish(false);
