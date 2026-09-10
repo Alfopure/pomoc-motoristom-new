@@ -87,6 +87,7 @@ import {
 } from "./case-form-fields";
 import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { LocationPicker } from "./LocationPicker";
+import styles from "./case-detail.module.css";
 
 type NewCaseFormProps = {
   call: DispatchCall;
@@ -699,12 +700,12 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
 
   return (
     <div
-      className="h-full min-h-0 min-w-0 max-w-full flex-1 overflow-y-auto overflow-x-hidden overscroll-contain bg-zinc-50 p-2 sm:p-3 max-lg:[&_button]:min-h-11 @container"
+      className={`${styles.surface} ${styles.scrollRegion} h-full min-h-0 min-w-0 max-w-full flex-1 overflow-y-auto overflow-x-hidden overscroll-contain bg-zinc-50 @container`}
       data-testid="case-form-scroll-region"
       onChangeCapture={markDirty}
     >
       <div className="grid gap-3">
-        <div className="grid min-w-0 gap-4 [&>section]:min-w-0" data-testid="case-form-main">
+        <div className={`${styles.formMain} grid min-w-0 [&>section]:min-w-0`} data-testid="case-form-main">
           <p className="text-right text-xs font-medium text-zinc-500">
             <span className="font-bold text-red-600" aria-hidden="true">*</span> Povinné údaje
           </p>
@@ -714,7 +715,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
             valid={formValidation.sectionValid.basic}
             errorCount={formValidation.sectionErrors.basic.length}
           >
-            <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_180px_180px]">
+            <div className="grid min-w-0 gap-3 @3xl:grid-cols-[minmax(0,1fr)_150px_150px]">
               <div>
                 <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Typ zákazky<RequiredMark /></span>
                 <CheckboxGroup items={jobTypes} labels={jobTypeLabels} selected={selectedJobTypes} onChange={setSelectedJobTypes} />
@@ -756,7 +757,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
             </div>
 
             {(customerType === "insurance" || customerType === "company") && (
-              <div className="grid gap-3 md:grid-cols-3">
+              <div className="grid gap-3 @3xl:grid-cols-3">
                 <SelectField
                   label={customerType === "insurance" ? "Adresár asistenčných služieb" : "Adresár firiem"}
                   value={partnerDirectoryId}
@@ -850,7 +851,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
                 Prípad na náhradné vozidlo: údaje o klientovom vozidle sú voliteľné a odťahové polia sú skryté.
               </p>
             )}
-            <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid gap-3 @3xl:grid-cols-3">
               <VehicleLookupControl contextKey="new-case" plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor }} onApply={(patch, snapshot) => {
                 markDirty(); setVehicleLookup(snapshot);
                 if (patch.plate !== undefined) setLicensePlate(patch.plate);
@@ -911,7 +912,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
             {!replacementOnly && (
               <>
                 <h4 className="border-t border-zinc-200 pt-3 text-sm font-semibold text-zinc-900">Incident</h4>
-                <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-3 @3xl:grid-cols-3">
                   <SelectField label="Typ incidentu" required value={incidentType} onChange={(value) => setIncidentType(value as IncidentType | "")} options={[["", "Nezadané"], ...incidentTypes.map((type) => [type, incidentTypeLabels[type]] as [string, string])]} />
                   <TextField label="Počet účastníkov" value={participantsCount} onChange={setParticipantsCount} error={fieldErrors.participantsCount} type="number" inputMode="numeric" min={0} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
                   <TextField label="Počet pasažierov" value={passengersCount} onChange={setPassengersCount} error={fieldErrors.passengersCount} type="number" inputMode="numeric" min={0} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
@@ -927,7 +928,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
             valid={formValidation.sectionValid.location}
             errorCount={formValidation.sectionErrors.location.length}
           >
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className={styles.locationFields}>
               <GooglePlaceAutocomplete
                 label={replacementOnly ? "Miesto (voliteľné, mapa)" : "Miesto incidentu"}
                 required={!replacementOnly}
@@ -973,7 +974,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
               <LocationPicker value={pickup} onSelect={(value) => { markDirty(); setPickup(value); }} />
             </div>
             <div className={`mt-3 rounded-md border p-3 ${placeType === "highway" ? "border-yellow-300 bg-yellow-50" : "border-zinc-200 bg-white"}`}>
-              <div className="grid gap-3 md:grid-cols-4">
+              <div className="grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-4">
                 <TextField label="Diaľnica / cesta" value={roadName} onChange={setRoadName} />
                 <TextField label="Km úsek" value={kilometerSection} onChange={setKilometerSection} error={fieldErrors.kilometerSection} type="number" inputMode="decimal" min={0} max={9999} step="0.01" transformValue={(value) => decimalOnly(value, 4)} />
                 <TextField label="Smer jazdy" value={drivingDirection} onChange={setDrivingDirection} />
@@ -1016,7 +1017,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
                 </button>
               </div>
               <div className={`mt-3 grid gap-3 rounded-md border p-3 ${replacementVehicleNeeded === true ? "border-yellow-200 bg-white" : "border-zinc-200 bg-zinc-100"}`}>
-                <div className="grid gap-3 md:grid-cols-2">
+                <div className="grid gap-3 @xl:grid-cols-2">
                   <TextField label="Požadovaný typ vozidla" required={replacementVehicleNeeded === true} value={replacementVehicleType} onChange={setReplacementVehicleType} disabled={replacementVehicleNeeded !== true} />
                   <TextField label="Špeciálne požiadavky" value={replacementVehicleNote} onChange={setReplacementVehicleNote} disabled={replacementVehicleNeeded !== true} />
                 </div>
@@ -1031,12 +1032,12 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
                   />
                 </div>
                 {replacementOnly && customerType !== "insurance" && (
-                  <div className="grid gap-3 border-t border-zinc-100 pt-3 md:grid-cols-2">
+                  <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
                     <TextField label="Asistenčná služba" value={assistanceServiceName} onChange={setAssistanceServiceName} disabled={replacementVehicleNeeded !== true} />
                     <TextField label="Číslo prípadu asistenčky" value={assistanceReference} onChange={setAssistanceReference} disabled={replacementVehicleNeeded !== true} />
                   </div>
                 )}
-                <div className="grid gap-3 border-t border-zinc-100 pt-3 md:grid-cols-2">
+                <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
                   <SelectField
                     label="Kategória vozidla"
                     value={replacementCategory}
@@ -1115,7 +1116,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
             <div className="grid gap-3 @3xl:grid-cols-2">
               <div className="rounded-lg border border-zinc-200 bg-white p-3">
                 <h4 className="text-sm font-semibold text-zinc-950">Platba</h4>
-                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <div className="mt-3 grid gap-3 @xl:grid-cols-2">
                   <SelectField label="Spôsob platby" required value={paymentMethod} onChange={(value) => setPaymentMethod(value as PaymentMethod | "")} options={[["", "Nezadané"], ...paymentMethods.map((method) => [method, paymentMethodLabels[method]] as [string, string])]} />
                   <SelectField label="Stav platby" required value={paymentStatus} onChange={(value) => setPaymentStatus(value as PaymentStatus | "")} options={[["", "Nezadané"], ...paymentStatuses.map((status) => [status, paymentStatusLabels[status]] as [string, string])]} />
                 </div>
@@ -1260,7 +1261,7 @@ function ContactList({
               </IconButton>
             </div>
           </div>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-4">
             <TextField label="Meno" required={contact.isPrimary} value={contact.firstName} onChange={(value) => onUpdate(contact.id, { firstName: value })} error={contact.isPrimary ? fieldErrors.contactName : undefined} reserveErrorSpace={contact.isPrimary} />
             <TextField label="Priezvisko" value={contact.lastName} onChange={(value) => onUpdate(contact.id, { lastName: value })} />
             <PhoneField contact={contact} required={contact.isPrimary} onChange={(patch) => onUpdate(contact.id, patch)} error={contact.isPrimary ? fieldErrors.contactPhone : undefined} reserveErrorSpace={contact.isPrimary} />

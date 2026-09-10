@@ -52,6 +52,7 @@ const caseItem: DispatchCase = {
   vehicle: { id: "vehicle-fixture", licensePlate: populated ? "TEST001" : "", make: populated ? "Škoda" : "", model: populated ? "Octavia" : "", category: "", driveable: false, conditionFlags: [], issue: "" },
   incidentDetails: { damageAreas: [], description: populated ? description : "" },
   pickup: populated ? { id: "pickup-fixture", label: "Nitra", address: "Dlhá ulica 1, Nitra", lat: 48.3064, lng: 18.0764, kind: "pickup" } : undefined,
+  customerSharedLocation: populated ? { label: "Testovacia GPS poloha", lat: 48.1486, lng: 17.1077, submittedAt: "2026-09-10T10:55:00Z", accuracyMeters: 22 } : undefined,
   locationDetails: { accessComplications: [] }, replacementVehicle: { needed: false, preferences: [] }, attachments: [],
   paymentDetails: populated ? { method: "card", status: "unpaid" } : {}, closureDetails: {},
   summary: populated ? description : "", mainNote: "", nextStep: populated ? "Overiť príjazd" : "",
@@ -70,6 +71,6 @@ function Fixture() {
   const view = new URLSearchParams(location.search).get("view");
   if (view === "location") return <div style={{ maxWidth: 600, margin: "auto", paddingBottom: 1000 }}><LocationPicker value={point} onSelect={setPoint} /><output data-testid="selected-point">{JSON.stringify(point)}</output></div>;
   if (view === "drawer") return <><button onClick={() => setOpen(true)}>Otvoriť drawer</button><CaseDrawer caseItem={currentCase} assets={[]} branches={[]} partnerDirectory={[]} priceRule={priceRule} open={open} onClose={() => setOpen(false)} /></>;
-  return <div style={{ height: "100dvh", display: "flex", flexDirection: "column" }}><CaseCockpitPanel assets={[]} branches={[]} caseItem={currentCase} commanderVehicles={[]} mode={mode} model={createDispatchMapModel(currentCase, [], [])} operators={[]} partnerDirectory={[]} onCollapse={() => setMode("collapsed")} onExpand={() => setMode("expanded")} onRestore={() => setMode("split")} onDataChange={data => { const next = data.dispatchCases.find(item => item.id === currentCase.id); if (next) setCurrentCase(next); }} onDirtyChange={noop} onSaveDraftChange={noop} onSavingChange={noop} /></div>;
+  return <div style={{ height: "100dvh", display: "flex", flexDirection: "column" }}><CaseCockpitPanel assets={[]} branches={[]} caseItem={currentCase} commanderVehicles={[]} focusedTaskId={new URLSearchParams(location.search).get("task") ?? undefined} mode={mode} model={createDispatchMapModel(currentCase, [], [])} operators={[]} partnerDirectory={[]} onCollapse={() => setMode("collapsed")} onExpand={() => setMode("expanded")} onRestore={() => setMode("split")} onDataChange={data => { const next = data.dispatchCases.find(item => item.id === currentCase.id); if (next) setCurrentCase(next); }} onDirtyChange={noop} onSaveDraftChange={noop} onSavingChange={noop} /></div>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

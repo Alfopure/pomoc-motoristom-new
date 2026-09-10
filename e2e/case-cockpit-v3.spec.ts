@@ -9,8 +9,10 @@ const postcss = createRequire(require.resolve("@tailwindcss/postcss"))("postcss"
 let script: string;
 let css: string;
 test.beforeAll(async () => {
-  script = (await build({ entryPoints: ["src/components/dispatch/CaseCockpitPanel.fixture.tsx"], bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic", define: { "process.env": JSON.stringify({ NODE_ENV: "production", NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY: "isolated-browser-key" }) } })).outputFiles[0].text;
-  css = (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css;
+  const fixture = await build({ entryPoints: ["src/components/dispatch/CaseCockpitPanel.fixture.tsx"], outfile: "case-cockpit-fixture.js", bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic", define: { "process.env": JSON.stringify({ NODE_ENV: "production", NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY: "isolated-browser-key" }) } });
+  script = fixture.outputFiles.find(file => file.path.endsWith(".js"))!.text;
+  css = (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css
+    + fixture.outputFiles.filter(file => file.path.endsWith(".css")).map(file => file.text).join("\n");
 });
 async function boot(page: Page, width: number, query = "") {
   const errors: string[] = [];
@@ -46,6 +48,8 @@ for (const width of [360, 390, 768, 1024, 1279, 1280]) {
     await assertOrder(page);
     const tasks = page.getByTestId("case-tasks");
     await expect(tasks.locator(":scope > summary")).toContainText(filled ? "1 otvorených · 1 po termíne" : "0 otvorených · 0 po termíne");
+    await expect(tasks.getByRole("textbox", { name: "Názov novej úlohy" })).toBeHidden();
+    await tasks.locator(":scope > summary").click();
     await tasks.getByRole("textbox", { name: "Názov novej úlohy" }).fill("Rozpracovaná úloha");
     await tasks.locator(":scope > summary").click();
     await expect(tasks.getByRole("textbox", { name: "Názov novej úlohy" })).toBeHidden();
@@ -73,6 +77,28 @@ test("collapse and restore retain the same case editor and one final SMS section
   await page.getByRole("button", { name: "Maximalizovať spodnú lištu" }).click();
   await expect(plate).toHaveValue("KEEP DRAFT");
   await assertOrder(page);
+  expect(errors).toEqual([]);
+});
+test("focused task opens its section while the ordinary case keeps it compact", async ({ page }) => {
+  const errors = await boot(page, 1280, "?task=task-fixture");
+  await expect(page.getByTestId("case-tasks")).toHaveAttribute("open", "");
+  await expect(page.getByTestId("case-tasks").getByRole("textbox", { name: "Názov novej úlohy" })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("compact GPS strip keeps the saved incident separate and mobile controls usable", async ({ page }) => {
+  const errors = await boot(page, 1280);
+  const gps = page.getByRole("region", { name: "Doplnková GPS poloha od klienta" });
+  await expect(gps).toContainText("48.1486, 17.1077");
+  await expect(page.getByTestId("case-summary")).toContainText("Dlhá ulica 1, Nitra");
+  await expect(gps.getByRole("button", { name: "Použiť ako miesto incidentu" })).toBeEnabled();
+  expect((await gps.boundingBox())!.height).toBeLessThan(100);
+  const priority = page.getByLabel("Priorita prípadu v hlavičke");
+  expect(await priority.evaluate(node => parseFloat(getComputedStyle(node).fontSize))).toBeLessThanOrEqual(13);
+  await page.setViewportSize({ width: 390, height: 900 });
+  expect(await priority.evaluate(node => parseFloat(getComputedStyle(node).fontSize))).toBeGreaterThanOrEqual(16);
+  expect((await gps.getByRole("button", { name: "Použiť ako miesto incidentu" }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   expect(errors).toEqual([]);
 });
 test("drawer keeps draft after close and reopen and has only final SMS", async ({ page }) => {
@@ -123,6 +149,7 @@ test("case remains usable at 200 percent zoom and after orientation change", asy
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   await page.setViewportSize({ width: 900, height: 390 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+  await page.getByTestId("case-tasks").locator(":scope > summary").click();
   await page.getByTestId("case-tasks").getByRole("textbox", { name: "Názov novej úlohy" }).fill("Po otočení");
   await expect(page.getByTestId("case-tasks").getByRole("textbox", { name: "Názov novej úlohy" })).toHaveValue("Po otočení");
   expect(errors).toEqual([]);
