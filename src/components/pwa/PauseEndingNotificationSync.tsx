@@ -2,75 +2,81 @@
 
 import { useEffect, useEffectEvent, useRef } from "react";
 
-import { pauseEndingSchedule, pauseEndingWindowStatus } from "@/lib/telephony/pause-ending";
 import type { OperatorPresenceStatus } from "@/lib/supabase/database.types";
 import { pushRequest } from "./push-client";
 
-type PauseReason = { id: string; maxMinutes: number | null };
+type PauseEndingAnswer = {
+  status?: string;
+  delivered?: boolean;
+  phase?: "warning" | "overdue";
+  warningAt?: string;
+  plannedEndAt?: string;
+};
 
 /**
- * The open console owns the precise timer. The authenticated server still
- * validates and atomically claims the warning; multiple tabs therefore cannot
- * create or push duplicates. The existing cron remains a closed-app fallback.
+ * The open console owns the precise timers; the server owns the schedule.
+ *
+ * Each pause asks `/api/push/pause-ending` once right away. The answer carries
+ * the warning and planned-end moments computed from the stored pause reason,
+ * so a limit edited in settings a moment ago is honoured without a reload, and
+ * the component only has to come back at those two moments. The server
+ * validates and atomically claims every notice, so several tabs cannot create
+ * or push duplicates; the existing cron remains the closed-app fallback.
  */
 export function PauseEndingNotificationSync({
   enabled,
   onDelivered,
   pauseReasonId,
-  pauseReasons,
   status,
   statusSince,
 }: {
   enabled: boolean;
   onDelivered: () => void;
   pauseReasonId: string | null | undefined;
-  pauseReasons: readonly PauseReason[];
   status: OperatorPresenceStatus | string | null | undefined;
   statusSince: string | null | undefined;
 }) {
-  const deliveredKeys = useRef(new Set<string>());
+  const settledKeys = useRef(new Set<string>());
   const notifyDelivered = useEffectEvent(onDelivered);
 
   useEffect(() => {
-    if (!enabled || !pauseReasonId) return;
-    const reason = pauseReasons.find((candidate) => candidate.id === pauseReasonId);
-    const schedule = pauseEndingSchedule({ status, statusSince, maxMinutes: reason?.maxMinutes });
-    if (!schedule) return;
-    const key = `${pauseReasonId}:${schedule.pauseStartedAt}`;
-    if (deliveredKeys.current.has(key)) return;
+    if (!enabled || status !== "paused" || !pauseReasonId) return;
+    const startedAt = Date.parse(statusSince ?? "");
+    if (!Number.isFinite(startedAt)) return;
+    const pauseStartedAt = new Date(startedAt).toISOString();
+    const key = `${pauseReasonId}:${pauseStartedAt}`;
+    if (settledKeys.current.has(key)) return;
 
     let disposed = false;
     let timer: number | undefined;
-    const plannedEnd = Date.parse(schedule.plannedEndAt);
 
-    const trigger = async () => {
-      if (disposed || Date.now() >= plannedEnd) return;
-      try {
-        const result = await pushRequest<{ delivered?: boolean; status?: string }>("/api/push/pause-ending", "POST", {
-          pauseStartedAt: schedule.pauseStartedAt,
-        });
-        if (disposed) return;
-        if (result.delivered) notifyDelivered();
-        if (result.status !== "early") {
-          deliveredKeys.current.add(key);
-          return;
-        }
-      } catch {
-        if (disposed) return;
-      }
-      if (!disposed && Date.now() < plannedEnd) timer = window.setTimeout(() => void trigger(), 10_000);
+    const comeBackAt = (moment: string) => {
+      timer = window.setTimeout(() => void ask(), Math.max(0, Date.parse(moment) - Date.now() + 500));
     };
 
-    const windowStatus = pauseEndingWindowStatus(schedule, new Date());
-    if (windowStatus === "expired") return;
-    const delay = windowStatus === "due" ? 0 : Math.max(0, Date.parse(schedule.warningAt) - Date.now() + 500);
-    timer = window.setTimeout(() => void trigger(), delay);
+    const ask = async () => {
+      if (disposed) return;
+      try {
+        const answer = await pushRequest<PauseEndingAnswer>("/api/push/pause-ending", "POST", { pauseStartedAt });
+        if (disposed) return;
+        if (answer.delivered) notifyDelivered();
+        if (answer.status === "early" && answer.warningAt) return comeBackAt(answer.warningAt);
+        // The warning is done (here or in another tab); the overdue notice is
+        // still owed at the planned end.
+        if (answer.plannedEndAt && Date.now() < Date.parse(answer.plannedEndAt)) return comeBackAt(answer.plannedEndAt);
+        settledKeys.current.add(key);
+      } catch {
+        if (!disposed) timer = window.setTimeout(() => void ask(), 30_000);
+      }
+    };
+
+    void ask();
 
     return () => {
       disposed = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [enabled, pauseReasonId, pauseReasons, status, statusSince]);
+  }, [enabled, pauseReasonId, status, statusSince]);
 
   return null;
 }

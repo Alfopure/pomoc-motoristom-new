@@ -110,6 +110,7 @@ import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-req
 import { supportPollDelayMs } from "@/lib/telephony/poll-schedule";
 import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
+import { pausePlan } from "@/lib/telephony/pause-ending";
 import type { TelephonyAvailabilityAction } from "@/lib/telephony/presence";
 
 type View = "dispatch" | PinnableNavigationView;
@@ -668,6 +669,7 @@ function DispatchConsoleContent({
         return;
       }
       if (action === "pause") {
+        telephony.refreshPauseReasons();
         setPauseRoutingOpen(true);
         return;
       }
@@ -675,6 +677,14 @@ function DispatchConsoleContent({
     },
     [telephony, telephonyConfigured],
   );
+  // Timed pause: when it should end and whether the operator is past it. Shown
+  // in the header; presence itself never changes without the operator's click.
+  const ownPausePlan = useMemo(() => {
+    const own = telephony.snapshot.ownPresence;
+    if (!own) return null;
+    const reason = telephony.pauseReasons.find((entry) => entry.id === own.pauseReasonId);
+    return pausePlan({ status: own.status, statusSince: own.statusSince, maxMinutes: reason?.maxMinutes }, new Date(notificationNow));
+  }, [notificationNow, telephony.pauseReasons, telephony.snapshot.ownPresence]);
   const visibleCallCenterCalls = useMemo(
     () => (telephonyConfigured ? mergeCallCenterCalls(telephony.liveCalls, callCenterCalls) : callCenterCalls),
     [callCenterCalls, telephony.liveCalls, telephonyConfigured],
@@ -2067,12 +2077,16 @@ function DispatchConsoleContent({
             <HeaderPhoneStatusMenu
               busy={telephony.presenceBusy}
               onChange={telephony.changePresence}
-              onRequestPause={() => setPauseRoutingOpen(true)}
+              onRequestPause={() => {
+                telephony.refreshPauseReasons();
+                setPauseRoutingOpen(true);
+              }}
               onDismissNotice={telephony.dismissNotice}
               onTakeover={telephony.takeoverPhone}
               notice={telephony.notice}
               phone={telephony.phone}
               status={telephony.phoneBar.ownPresenceStatus}
+              pausePlan={ownPausePlan}
               readiness={telephony.readiness}
               onPreparePhone={telephony.preparePhone}
               outboundPending={telephony.outboundPending}
@@ -2087,6 +2101,7 @@ function DispatchConsoleContent({
             notifications={viewerNotifications}
             now={notificationNow}
             onMarkRead={(notificationId) => void markNotificationRead(notificationId)}
+            onArchive={(notificationId) => void updateNotificationStatusFromPanel(notificationId, "archived")}
             onOpenCase={openCase}
             onOpenTask={openTask}
             onSnooze={snoozeNotificationFromPanel}
@@ -2488,7 +2503,6 @@ function DispatchConsoleContent({
       <PauseEndingNotificationSync
         enabled={source === "supabase" && telephonyConfigured}
         pauseReasonId={telephony.snapshot.ownPresence?.pauseReasonId}
-        pauseReasons={telephony.pauseReasons}
         status={telephony.snapshot.ownPresence?.status}
         statusSince={telephony.snapshot.ownPresence?.statusSince}
         onDelivered={() => void syncDueNotifications(true)}
