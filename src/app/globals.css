@@ -18,9 +18,11 @@ body {
   font-family: var(--font-poppins), Arial, Helvetica, sans-serif;
 }
 
-button,
-input {
-  font: inherit;
+@layer base {
+  button,
+  input {
+    font: inherit;
+  }
 }
 
 .auth-app-shell input {
@@ -41,6 +43,9 @@ input {
 
 .dispatch-app-shell {
   --dispatch-mobile-nav-height: 72px;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 @media (max-width: 1023px) {
@@ -180,7 +185,7 @@ input {
     max-height: min(34rem, calc(100dvh - var(--dispatch-mobile-nav-height) - env(safe-area-inset-bottom, 0px) - max(24px, env(safe-area-inset-top, 0px))));
   }
 
-  .dispatch-workspace-shell[data-workspace-mode="expanded"] > .dispatch-workspace-upper {
+  .dispatch-workspace-shell[data-center-view="map"][data-workspace-mode="expanded"] > .dispatch-workspace-upper {
     display: none;
   }
 
@@ -225,7 +230,7 @@ input {
 }
 
 @media (min-width: 1024px) {
-  .dispatch-workspace-shell[data-workspace-mode="split"] {
+  .dispatch-workspace-shell[data-center-view="map"][data-workspace-mode="split"] {
     grid-template-rows: var(--dispatch-desktop-grid-rows, minmax(260px, 66fr) minmax(96px, 34fr));
   }
 

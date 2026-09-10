@@ -33,6 +33,7 @@ import { MapControlBar } from "./map/MapControlBar";
 import type { FleetLayerKey, MapLayerState, MapPanelKey } from "./map/MapControlBar";
 import { MapPlaceSearch } from "./map/MapPlaceSearch";
 import { RoutePlanner } from "./map/RoutePlanner";
+import { RoutePlannerProvider, useOptionalRoutePlannerStore } from "./map/RoutePlannerProvider";
 import { useFleetPositions } from "./map/useFleetPositions";
 import type { DispatchMapProps } from "./DispatchMap";
 
@@ -109,7 +110,13 @@ const OVERVIEW_MAP_LAYERS: MapLayerState = {
 const EMPTY_MAP_CENTER: google.maps.LatLngLiteral = { lat: 48.7, lng: 19.5 };
 const EMPTY_MAP_ZOOM = 7;
 
-export default function DispatchMapGoogle({ caseItem, branches, assets, priceRule, avoidMobileNav, onAssignAsset, onSendLocationSms, onSendEtaSms, workspaceMode = "collapsed" }: DispatchMapProps) {
+export default function DispatchMapGoogle(props: DispatchMapProps) {
+  const store = useOptionalRoutePlannerStore();
+  if (!store) return <RoutePlannerProvider><DispatchMapGoogleContent {...props} /></RoutePlannerProvider>;
+  return <DispatchMapGoogleContent {...props} />;
+}
+
+function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, priceRule, avoidMobileNav, onAssignAsset, onSendLocationSms, onSendEtaSms, workspaceMode = "collapsed" }: DispatchMapProps) {
   const caseId = caseItem?.id ?? "overview";
   const hasCase = Boolean(caseItem);
   const hasGoogleKey = isConfiguredGoogleKey(googleMapsApiKey);
@@ -145,6 +152,10 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
   const fallbackPolylinesRef = useRef<google.maps.Polyline[]>([]);
   const googleRoutePolylinesRef = useRef<google.maps.Polyline[]>([]);
   const routeSequenceRef = useRef(0);
+  const caseRouteCacheRef = useRef<{ signature: string; result: GoogleRouteResult } | null>(null);
+  const addressSequenceRef = useRef({ pickup: 0, destination: 0 });
+  const markerViewportSignatureRef = useRef("");
+  useEffect(() => { if (!active) { addressSequenceRef.current.pickup += 1; addressSequenceRef.current.destination += 1; } }, [active]);
   const positionOverrides = useFleetPositions(assets);
   const previousHasCaseRef = useRef(hasCase);
 
@@ -332,13 +343,14 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
   }
 
   const applyPlacePrediction = useCallback(async (target: EditableLocationKey, placePrediction: google.maps.places.PlacePrediction) => {
-    if (!caseItem) return;
+    if (!caseItem || !active) return;
+    const sequence = ++addressSequenceRef.current[target];
     const currentCase = caseItem;
     const place = placePrediction.toPlace();
     await place.fetchFields({ fields: ["displayName", "formattedAddress", "location", "id"] });
 
     const location = place.location;
-    if (!location) {
+    if (!location || addressSequenceRef.current[target] !== sequence) {
       return;
     }
 
@@ -356,10 +368,10 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
         notes: place.id ? `Google Place ID: ${place.id}` : undefined,
       },
     }));
-  }, [caseItem]);
+  }, [active, caseItem]);
 
   useEffect(() => {
-    if (!hasGoogleKey || !googleMapsApiKey) {
+    if (!active || !hasGoogleKey || !googleMapsApiKey) {
       return;
     }
 
@@ -407,14 +419,14 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
     return () => {
       cancelled = true;
     };
-  }, [hasGoogleKey]);
+  }, [active, hasGoogleKey]);
 
   useEffect(() => {
     if (loadState === "ready") mapRef.current?.setOptions({ clickableIcons: !plannerOpen });
   }, [loadState, plannerOpen]);
 
   useEffect(() => {
-    if (loadState !== "ready" || !pickupAutocompleteHostRef.current || !destinationAutocompleteHostRef.current) {
+    if (!active || loadState !== "ready" || !pickupAutocompleteHostRef.current || !destinationAutocompleteHostRef.current) {
       return;
     }
 
@@ -443,6 +455,7 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
       destinationHost.replaceChildren();
     };
   }, [
+    active,
     applyPlacePrediction,
     caseId,
     draftLocations.destination?.address,
@@ -453,7 +466,7 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
   ]);
 
   useEffect(() => {
-    if (loadState !== "ready" || !mapRef.current) {
+    if (!active || loadState !== "ready" || !mapRef.current) {
       return;
     }
 
@@ -478,13 +491,13 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
         }),
       );
     });
-    if (visibleMarkers.length > 0) {
-      map.fitBounds(bounds, 42);
-    }
-  }, [loadState, mapLayers.branches, mapLayers.route, model]);
+    const signature = visibleMarkers.map(marker => `${marker.id}:${marker.point.lat}:${marker.point.lng}`).join("|");
+    if (visibleMarkers.length > 0 && signature !== markerViewportSignatureRef.current) map.fitBounds(bounds, 42);
+    markerViewportSignatureRef.current = signature;
+  }, [active, loadState, mapLayers.branches, mapLayers.route, model]);
 
   useEffect(() => {
-    if (loadState !== "ready" || !mapRef.current) {
+    if (!active || loadState !== "ready" || !mapRef.current) {
       return;
     }
 
@@ -516,16 +529,28 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
       ...(needsDestination && draftCase.destination ? [draftCase.destination] : []),
     ];
 
+    const requestBody = JSON.stringify({
+      destination: toLatLngLiteral(runtime.nearestBranchPoint),
+      intermediates: routeIntermediates.map(toLatLngLiteral),
+      origin: toLatLngLiteral(routeOrigin),
+    });
+    const requestSignature = `${runtime.routeSignature}:${requestBody}`;
+    function applyResult(result: GoogleRouteResult) {
+      if (googleMaps.maps.geometry?.encoding) googleRoutePolylinesRef.current = drawGoogleRoute(map, result, runtime!.routeSegments, googleMaps);
+      if (googleRoutePolylinesRef.current.length === 0) fallbackPolylinesRef.current = drawFallbackRoute(map, runtime!.routeSegments, googleMaps);
+      setRouteState(routeStateFromGoogleRoute(result, runtime!.routeSignature));
+    }
+    if (caseRouteCacheRef.current?.signature === requestSignature) {
+      applyResult(caseRouteCacheRef.current.result);
+      return;
+    }
+
     fetch("/api/maps/route", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        destination: toLatLngLiteral(runtime.nearestBranchPoint),
-        intermediates: routeIntermediates.map(toLatLngLiteral),
-        origin: toLatLngLiteral(routeOrigin),
-      }),
+      body: requestBody,
       signal: abortController.signal,
     })
       .then(async (response) => {
@@ -543,15 +568,8 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
           return;
         }
 
-        if (googleMaps.maps.geometry?.encoding) {
-          googleRoutePolylinesRef.current = drawGoogleRoute(map, result, runtime.routeSegments, googleMaps);
-        }
-
-        if (googleRoutePolylinesRef.current.length === 0) {
-          fallbackPolylinesRef.current = drawFallbackRoute(map, runtime.routeSegments, googleMaps);
-        }
-
-        setRouteState(routeStateFromGoogleRoute(result, runtime.routeSignature));
+        caseRouteCacheRef.current = { signature: requestSignature, result };
+        applyResult(result);
       })
       .catch((error: Error) => {
         if (abortController.signal.aborted || routeSequenceRef.current !== sequence) {
@@ -569,10 +587,10 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
       routeSequenceRef.current += 1;
       abortController.abort();
     };
-  }, [draftCase, loadState, mapLayers.route, nearestAssetId, nearestBranchId, routeSignature]);
+  }, [active, draftCase, loadState, mapLayers.route, nearestAssetId, nearestBranchId, routeSignature]);
 
   useEffect(() => {
-    if (loadState !== "ready" || !mapRef.current) {
+    if (!active || loadState !== "ready" || !mapRef.current) {
       return;
     }
 
@@ -655,6 +673,7 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
       fleetViewportSignatureRef.current = viewportSignature;
     }
   }, [
+    active,
     assets,
     fleetGpsFreshnessFilter,
     fleetGpsSourceFilter,
@@ -671,7 +690,7 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
 
   // Malá bublina so základnými údajmi priamo nad markerom vozidla.
   useEffect(() => {
-    if (loadState !== "ready" || !mapRef.current) {
+    if (!active || loadState !== "ready" || !mapRef.current) {
       return;
     }
 
@@ -700,7 +719,7 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
 
     const closeListener = infoWindow.addListener("closeclick", () => setSelectedFleetAssetId(null));
     return () => closeListener.remove();
-  }, [assets, branches, loadState, selectedFleetAssetId]);
+  }, [active, assets, branches, loadState, selectedFleetAssetId]);
 
   useEffect(
     () => () => {
@@ -753,10 +772,10 @@ export default function DispatchMapGoogle({ caseItem, branches, assets, priceRul
           onToggleRoute={() => toggleMapLayer("route")}
         />
 
-        {plannerOpen && loadState === "ready" && <RoutePlanner mapRef={mapRef} onClose={() => setActivePanel(null)} />}
+        {plannerOpen && loadState === "ready" && <RoutePlanner active={active} mapRef={mapRef} onClose={() => setActivePanel(null)} />}
 
         <MapPlaceSearch
-          loadState={loadState}
+          loadState={active ? loadState : "idle"}
           mapRef={mapRef}
           open={activePanel === "search" && !focusMode}
           searchMarkerRef={searchMarkerRef}

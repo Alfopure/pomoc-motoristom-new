@@ -30,12 +30,14 @@ export type PreparedSms = SmsActor & {
   locationToken: string | null;
   locationLinkId: string | null;
   taskId: string | null;
+  taskAssociation?: "explicit" | null;
   expiresAt: string;
   replyToMessageId?: string | null;
   repliesEnabled?: boolean;
   repliesPendingVerification?: boolean;
 };
 export type SmsPreview = { draft: PreparedSms; proof: string };
+export type SmsTaskOption = { id: string; caseId: string; title: string };
 export type SmsCaseOption = { id: string; caseNumber: string; name: string; phone: string; validPhone: boolean };
 export type SmsHistoryEntry = {
   id: string;

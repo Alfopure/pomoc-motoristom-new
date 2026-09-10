@@ -22,6 +22,12 @@ vi.mock("@/server/integrations/swhouse/occupancy-snapshot", () => ({
 vi.mock("@/lib/supabase/admin", () => ({
   createSupabaseAdminClient: () => ({
     from: (table: string) => makeQuery(table),
+    rpc: async (_name: string, args: { p_case_patch: Record<string, unknown>; p_related: { table: string; insert: boolean; patch: Record<string, unknown> }[] }) => {
+      // Boundary stub: these assertions cover normalized plan contents; PostgreSQL tests prove rollback.
+      for (const write of args.p_related) (write.insert ? state.inserts : state.updates).push({ table: write.table, payload: write.patch });
+      state.updates.push({ table: "motorist_cases", payload: args.p_case_patch });
+      return { data: { ...state.existingCase, ...args.p_case_patch }, error: null };
+    },
   }),
 }));
 
@@ -214,7 +220,7 @@ describe("updateCase optional relations", () => {
   });
 
   it("creates missing contact, vehicle and pickup when the draft is completed later", async () => {
-    await updateCase("case-1", {
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z",
       contactName: "Ján Novák",
       contactPhone: "+421 900 123 456",
       licensePlate: "ba123xy",
@@ -225,9 +231,9 @@ describe("updateCase optional relations", () => {
     expect(state.inserts.some((entry) => entry.table === "motorist_vehicles")).toBe(true);
     expect(state.inserts.some((entry) => entry.table === "motorist_locations")).toBe(true);
     expect(state.updates.find((entry) => entry.table === "motorist_cases")?.payload).toMatchObject({
-      contact_id: "motorist_contacts-1",
-      vehicle_id: "motorist_vehicles-1",
-      pickup_location_id: "motorist_locations-1",
+      contact_id: expect.any(String),
+      vehicle_id: expect.any(String),
+      pickup_location_id: expect.any(String),
       destination_location_id: null,
     });
   });
@@ -240,7 +246,7 @@ describe("updateCase optional relations", () => {
       destination_location_id: "destination-old",
     });
 
-    await updateCase("case-1", {
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z",
       contactName: "",
       contactPhone: "",
       contactEmail: "",
@@ -269,7 +275,7 @@ describe("updateCase optional relations", () => {
   });
 
   it("persists a manually entered location without fabricating coordinates", async () => {
-    await updateCase("case-1", {
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z",
       manualPickupAddress: "R1, smer Nitra, približne pri 42. kilometri",
       pickup: null,
     });
@@ -284,14 +290,14 @@ describe("updateCase optional relations", () => {
   });
 
   it("allows cancelling an otherwise empty case", async () => {
-    await updateCase("case-1", { status: "cancelled" });
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z", status: "cancelled" });
     expect(state.updates.find((entry) => entry.table === "motorist_cases")?.payload).toMatchObject({ status: "cancelled" });
   });
 
   it("keeps the existing license plate in the summary when only the case type changes", async () => {
     state.existingCase = existingCase({ vehicle_id: "vehicle-old", case_type: "Pôvodný typ", summary: "Pôvodný typ · OLD" });
 
-    await updateCase("case-1", { caseType: "Nový typ" });
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z", caseType: "Nový typ" });
 
     expect(state.updates.find((entry) => entry.table === "motorist_cases")?.payload).toMatchObject({
       case_type: "Nový typ",
@@ -312,7 +318,7 @@ describe("updateCase optional relations", () => {
       closure_details: { type: "self_payer" },
     });
 
-    await updateCase("case-1", {
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z",
       caseType: null,
       closureType: null,
       customerType: null,
@@ -342,23 +348,29 @@ describe("updateCase optional relations", () => {
   });
 
   it("creates a minimal vehicle relation when only driveability is known", async () => {
-    await updateCase("case-1", {
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z",
       vehicleDriveable: false,
       vehicleConditionFlags: ["immobile", "after_accident"],
     });
 
     expect(state.inserts.find((entry) => entry.table === "motorist_vehicles")?.payload).toMatchObject({ is_driveable: false });
     expect(state.updates.find((entry) => entry.table === "motorist_cases")?.payload).toMatchObject({
-      vehicle_id: "motorist_vehicles-1",
+      vehicle_id: expect.any(String),
       vehicle_details: expect.objectContaining({ conditionFlags: ["immobile", "after_accident"] }),
     });
+  });
+
+  it("persists a replacement detail delta without resending its base fields", async () => {
+    state.existingCase = existingCase({ replacement_vehicle_details: { needed: true, requestedType: "SUV" } });
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z", replacementVehicleCategory: "suv", replacementVehicleDeliveryPlace: "Nitra", replacementVehicleProvisionStatus: "provided", replacementVehicleMaxDays: 3 });
+    expect(state.updates.find(entry => entry.table === "motorist_cases")?.payload.replacement_vehicle_details).toMatchObject({ needed: true, requestedType: "SUV", category: "suv", deliveryPlace: "Nitra", provisionStatus: "provided", maxDays: 3 });
   });
 
   it("does not grow the canonical problem text on repeated updates", async () => {
     state.existingCase = existingCase({ vehicle_id: "vehicle-old" });
 
-    await updateCase("case-1", { vehicleIssue: "Defekt", incidentDescription: "Defekt", vehicleNote: "Poškodený disk" });
-    await updateCase("case-1", { vehicleIssue: "Defekt", incidentDescription: "Defekt", vehicleNote: "Poškodený disk" });
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z", vehicleIssue: "Defekt", incidentDescription: "Defekt", vehicleNote: "Poškodený disk" });
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z", vehicleIssue: "Defekt", incidentDescription: "Defekt", vehicleNote: "Poškodený disk" });
 
     const vehicleUpdates = state.updates.filter((entry) => entry.table === "motorist_vehicles");
     expect(vehicleUpdates).toHaveLength(2);

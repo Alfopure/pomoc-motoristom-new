@@ -1,5 +1,8 @@
 "use client";
 
+import { CallMonitorInvitations } from "./CallMonitorInvitations";
+import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
+import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { LucideIcon } from "lucide-react";
@@ -10,6 +13,10 @@ import {
   CalendarDays,
   ChevronDown,
   ClipboardCheck,
+  NotebookPen,
+  PanelLeftOpen,
+  PanelRightOpen,
+  Wrench,
   Headphones,
   LayoutDashboard,
   Loader2,
@@ -39,7 +46,6 @@ import { DashboardPhone } from "./DashboardPhone";
 import type { CaseSortState } from "./CaseTable";
 import { FleetModule } from "./FleetModule";
 import { mergeFleetData, useFleetRefresh } from "./useFleetRefresh";
-import { ExpandedCasePanel } from "./ExpandedCasePanel";
 import { IntegrationSettings } from "./IntegrationSettings";
 import { MapWorkspace, type CenterView, type WorkspaceKind, type WorkspaceMode } from "./MapWorkspace";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
@@ -68,6 +74,21 @@ import {
   type MobileNavigationShortcut,
   type PinnableNavigationView,
 } from "./navigation-preferences";
+import { WidgetHost } from "./WidgetHost";
+import { CalculatorWidget } from "./CalculatorWidget";
+import { WorkspacePlaceSearch } from "./WorkspacePlaceSearch";
+import { WorkspaceSearchWidget } from "./WorkspaceSearchWidget";
+import { fleetWidgetStatus } from "./workspace-search";
+import { defaultWorkspacePreferences, parseWorkspacePreferences, workspacePreferenceStorageKey, type WorkspacePreferences, type WidgetId } from "./workspace-preferences";
+import { NotebookPanel, NotebookProvider } from "./NotebookPanel";
+import { RoutePlannerProvider } from "./map/RoutePlannerProvider";
+import { RoutePlanner } from "./map/RoutePlanner";
+import { TaskWorkspaceProvider, useTaskWorkspace } from "./TaskWorkspaceProvider";
+import type { WorkspaceTask } from "@/domain/task-workspace";
+import { unavailableWorkspaceCapabilities } from "@/domain/workspace-capabilities";
+import { useDraftEditors, type DraftEditorState } from "./useDraftEditors";
+import { createNotificationNavigationReceiver } from "@/components/pwa/notification-navigation";
+import "./workspace-tools.css";
 import { signOutCurrentSession } from "@/components/auth/sign-out";
 import { PushNotificationSync } from "@/components/pwa/PushNotificationSync";
 import { PauseEndingNotificationSync } from "@/components/pwa/PauseEndingNotificationSync";
@@ -76,7 +97,7 @@ import { isAppRefreshBlocked } from "@/components/pwa/app-refresh-policy";
 import { notificationTarget } from "@/components/pwa/notification-target";
 import { navigateAfterDraftApproval } from "@/lib/draft-unload";
 import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
-import { formatNotificationReminderTime, isNotificationForProfile, isNotificationReady, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
+import { formatNotificationReminderTime, isNotificationForProfile, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
 import { isTaskOpen, taskPriorityLabels } from "@/domain/tasks";
 import type { AppRole, Branch, CallStatus, CaseTask, CustomerSharedLocation, DispatchCall, DispatchCase, DispatchNotification, FleetAsset, NotificationStatus, Operator, TimelineEvent } from "@/domain/types";
@@ -89,6 +110,7 @@ import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-req
 import { supportPollDelayMs } from "@/lib/telephony/poll-schedule";
 import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
+import { pausePlan } from "@/lib/telephony/pause-ending";
 import type { TelephonyAvailabilityAction } from "@/lib/telephony/presence";
 
 type View = "dispatch" | PinnableNavigationView;
@@ -246,11 +268,16 @@ const sourceLabels: Record<NonNullable<DispatchCase["sourceType"]>, string> = {
   internal: "Interné",
 };
 
-export function DispatchConsole({
+export function DispatchConsole(props: Parameters<typeof DispatchConsoleContent>[0]) {
+  return <RoutePlannerProvider key={`${props.viewerOrganizationId ?? "demo"}:${props.viewerProfileId ?? "local-browser"}`}><DispatchConsoleContent {...props} /></RoutePlannerProvider>;
+}
+
+function DispatchConsoleContent({
   initialData,
   appVersion = "development",
   viewerDisplayName,
   viewerEmail,
+  viewerOrganizationId,
   viewerProfileId,
   viewerRole,
 }: {
@@ -285,6 +312,7 @@ export function DispatchConsole({
     users,
     warning,
   } = dispatchData;
+  const capabilities = dispatchData.workspaceCapabilities ?? unavailableWorkspaceCapabilities;
   const notificationViewerProfileId = viewerProfileId ?? (source === "mock" ? operators[0]?.id : undefined);
   const signedInName =
     viewerDisplayName?.trim() ||
@@ -314,14 +342,69 @@ export function DispatchConsole({
   const [mutationNotice, setMutationNotice] = useState<string | null>(null);
   const [pauseRoutingOpen, setPauseRoutingOpen] = useState(false);
   const [dismissedWarning, setDismissedWarning] = useState<string | null>(null);
-  const [centerView, setCenterView] = useState<CenterView>("map");
+  const actorKey = `${viewerOrganizationId ?? "demo"}:${viewerProfileId ?? "local-browser"}`;
+  const [workspacePreferences, setWorkspacePreferences] = useState(defaultWorkspacePreferences);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [widgetSettingsOpen, setWidgetSettingsOpen] = useState(false);
+  const toolsReturnFocusRef = useRef<HTMLElement | null>(null);
+  const [visitedWidgets, setVisitedWidgets] = useState<Set<WidgetId>>(() => new Set(["phone", "tasks"]));
+  const drafts = useDraftEditors();
+  const registerDraft = drafts.register;
+  const handleTaskEditor = useCallback((editor: DraftEditorState | null) => registerDraft("Úlohy a chat", editor), [registerDraft]);
+  const handleWorkspaceTasks = useCallback((tasks: WorkspaceTask[]) => {
+    setDispatchData(current => ({ ...current, tasks, dispatchCases: current.dispatchCases.map(item => ({ ...item, tasks: tasks.filter(task => task.caseIds.includes(item.id)) })), metrics: { ...current.metrics, openTasks: tasks.filter(isTaskOpen).length } }));
+  }, []);
+  const handleNotebookEditor = useCallback((editor: DraftEditorState) => registerDraft("Poznámky", editor), [registerDraft]);
+  const centerView = workspacePreferences.centerView;
+  const fullPageWorkspace = centerView !== "map";
+  const workspaceStorageKey = workspacePreferenceStorageKey(viewerOrganizationId, viewerProfileId);
+  const currentSessionKeyRef = useRef<string | null>(actorKey);
+  useEffect(() => {
+    currentSessionKeyRef.current = actorKey;
+    let userId: string | undefined;
+    try {
+      const client = createSupabaseBrowserClient();
+      const { data } = client.auth.onAuthStateChange((event, session) => {
+        if (!session || event === "SIGNED_OUT" || (userId && userId !== session.user.id)) currentSessionKeyRef.current = null;
+        if (session?.user.id) userId = session.user.id;
+      });
+      return () => { currentSessionKeyRef.current = null; data.subscription.unsubscribe(); };
+    } catch { /* The isolated demo has no authentication client. */ }
+  }, [actorKey]);
+  function updateWorkspacePreferences(next: WorkspacePreferences) {
+    setWorkspacePreferences(next);
+    setVisitedWidgets(current => new Set([...current, ...next.widgets.filter(item => item.visible).map(item => item.id)]));
+    try { window.localStorage.setItem(workspaceStorageKey, JSON.stringify(next)); } catch { /* Layout works without storage. */ }
+  }
+  function setCenterView(view: CenterView) {
+    updateWorkspacePreferences({ ...workspacePreferences, centerView: view });
+  }
+  useEffect(() => {
+    const load = (raw: string | null) => {
+      const next = parseWorkspacePreferences(raw);
+      setWorkspacePreferences(next);
+      setVisitedWidgets(current => new Set([...current, ...next.widgets.filter(item => item.visible).map(item => item.id)]));
+    };
+    const frame = window.requestAnimationFrame(() => {
+      try { load(window.localStorage.getItem(workspaceStorageKey)); } catch { load(null); }
+    });
+    const sync = (event: StorageEvent) => { if (event.key === workspaceStorageKey) load(event.newValue); };
+    window.addEventListener("storage", sync);
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener("storage", sync); };
+  }, [workspaceStorageKey]);
   const [caseSearch, setCaseSearch] = useState("");
   const [caseFilters, setCaseFilters] = useState<CaseFilters>(defaultCaseFilters);
   const [caseSort, setCaseSort] = useState<CaseSortState>({ key: "updatedAt", direction: "desc" });
   const [focusedTaskId, setFocusedTaskId] = useState<string | undefined>(undefined);
+  const [taskOpenVersion, setTaskOpenVersion] = useState(0);
   const [callNotificationFocus, setCallNotificationFocus] = useState<CallNotificationFocus | null>(null);
   const [priorityChangeCaseId, setPriorityChangeCaseId] = useState<string | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [caseEditorRevision, setCaseEditorRevision] = useState(0);
+  const caseDirtyRef = useRef(false);
+  const caseSavingRef = useRef(false);
+  const handleCaseDirtyChange = useCallback((dirty: boolean) => { caseDirtyRef.current = dirty; setHasUnsavedChanges(dirty); }, []);
+  const handleCaseSavingChange = useCallback((saving: boolean) => { caseSavingRef.current = saving; setIsCaseSaveLocked(saving); }, []);
   const [isCaseSaveLocked, setIsCaseSaveLocked] = useState(false);
   const [leaveDialogOpen, setLeaveDialogOpen] = useState(false);
   const [leaveDialogSaving, setLeaveDialogSaving] = useState(false);
@@ -352,9 +435,9 @@ export function DispatchConsole({
     startX: number;
   } | null>(null);
   const [dashboardColumns, setDashboardColumns] = useState<DashboardColumnWidths>(DEFAULT_DASHBOARD_COLUMNS);
-  const dashboardColumnStorageKey = `motorist:dashboard-columns:v1:${viewerProfileId ?? "local-browser"}`;
-  const navigationStorageKey = navigationPreferenceStorageKey(viewerProfileId);
-  const mobileNavigationStorageKey = mobileNavigationPreferenceStorageKey(viewerProfileId);
+  const dashboardColumnStorageKey = `motorist:dashboard-columns:v2:${actorKey}`;
+  const navigationStorageKey = navigationPreferenceStorageKey(actorKey);
+  const mobileNavigationStorageKey = mobileNavigationPreferenceStorageKey(actorKey);
 
   useEffect(() => {
     consoleRef.current?.setAttribute("data-hydrated", "true");
@@ -504,6 +587,7 @@ export function DispatchConsole({
 
     const pointerDelta = event.clientX - resize.startX;
     const widthDelta = resize.side === "left" ? pointerDelta : -pointerDelta;
+    dashboardGridRef.current?.setAttribute("data-collapse-candidate", resize.startWidth + widthDelta < 120 ? resize.side : "");
     updateDashboardColumn(resize.side, resize.startWidth + widthDelta);
   }
 
@@ -512,7 +596,14 @@ export function DispatchConsole({
     if (!resize || resize.pointerId !== event.pointerId) return;
 
     dashboardResizeRef.current = null;
+    const collapseSide = dashboardGridRef.current?.getAttribute("data-collapse-candidate");
     dashboardGridRef.current?.removeAttribute("data-resizing");
+    dashboardGridRef.current?.removeAttribute("data-collapse-candidate");
+    if (collapseSide === resize.side) {
+      dashboardColumnsRef.current = { ...dashboardColumnsRef.current, [resize.side]: resize.startWidth };
+      setDashboardColumns(dashboardColumnsRef.current);
+      updateWorkspacePreferences({ ...workspacePreferences, [resize.side === "left" ? "leftCollapsed" : "rightCollapsed"]: true });
+    }
     persistDashboardColumns(dashboardColumnsRef.current);
   }
 
@@ -578,6 +669,7 @@ export function DispatchConsole({
         return;
       }
       if (action === "pause") {
+        telephony.refreshPauseReasons();
         setPauseRoutingOpen(true);
         return;
       }
@@ -585,6 +677,14 @@ export function DispatchConsole({
     },
     [telephony, telephonyConfigured],
   );
+  // Timed pause: when it should end and whether the operator is past it. Shown
+  // in the header; presence itself never changes without the operator's click.
+  const ownPausePlan = useMemo(() => {
+    const own = telephony.snapshot.ownPresence;
+    if (!own) return null;
+    const reason = telephony.pauseReasons.find((entry) => entry.id === own.pauseReasonId);
+    return pausePlan({ status: own.status, statusSince: own.statusSince, maxMinutes: reason?.maxMinutes }, new Date(notificationNow));
+  }, [notificationNow, telephony.pauseReasons, telephony.snapshot.ownPresence]);
   const visibleCallCenterCalls = useMemo(
     () => (telephonyConfigured ? mergeCallCenterCalls(telephony.liveCalls, callCenterCalls) : callCenterCalls),
     [callCenterCalls, telephony.liveCalls, telephonyConfigured],
@@ -631,22 +731,18 @@ export function DispatchConsole({
   const visibleWarning = warning && warning !== dismissedWarning ? warning : null;
   const visibleMutationError = mutationNotice && isGlobalErrorNotice(mutationNotice) ? mutationNotice : null;
   const openTaskCount = useMemo(
-    () => dispatchCases.reduce((count, caseItem) => count + caseItem.tasks.filter(isTaskOpen).length, 0),
-    [dispatchCases],
+    () => (dispatchData.tasks ?? [...new Map(dispatchCases.flatMap(item => item.tasks).map(task => [task.id, task])).values()]).filter(isTaskOpen).length,
+    [dispatchCases, dispatchData.tasks],
   );
   const viewerNotifications = useMemo(
     () => notifications.filter((notification) => isNotificationForProfile(notification, notificationViewerProfileId)),
     [notificationViewerProfileId, notifications],
   );
-  const unreadNotificationCount = useMemo(
-    () => viewerNotifications.filter((notification) => isNotificationReady(notification, notificationNow)).length,
-    [notificationNow, viewerNotifications],
-  );
-  const taskAttentionCount = openTaskCount + unreadNotificationCount;
-  const activeCase =
-    dispatchCases.find((caseItem) => caseItem.id === activeCaseId && isActiveDispatchCase(caseItem)) ??
-    dispatchCases.find(isActiveDispatchCase);
+  const taskAttentionCount = openTaskCount;
   const selectedCase = dispatchCases.find((caseItem) => caseItem.id === activeCaseId);
+  // Saving a terminal status must not replace the mounted editor while a newer
+  // draft is waiting for its next save. Selection changes are explicit/guarded.
+  const activeCase = selectedCase ?? dispatchCases.find(isActiveDispatchCase);
   const workspaceCase = workspace.kind === "detail" ? selectedCase ?? activeCase : activeCase;
   const dashboardSmsCaseContext = workspace.kind === "detail" && selectedCase
     ? { caseNumber: selectedCase.caseNumber, id: selectedCase.id, phone: selectedCase.contact.phone }
@@ -716,6 +812,8 @@ export function DispatchConsole({
   const navItems: NavigationItem[] = [
     { icon: LayoutDashboard, label: "Nástenka", shortLabel: "Nástenka", view: "dispatch" },
     { badgeCount: taskAttentionCount, group: "daily", icon: BellRing, label: "Úlohy", shortLabel: "Úlohy", view: "tasks" },
+    { group: "daily", icon: NotebookPen, label: "Poznámky", shortLabel: "Poznámky", view: "notes" },
+    { group: "daily", icon: Wrench, label: "Nástroje", shortLabel: "Nástroje", view: "tools" },
     { group: "daily", icon: Table2, label: "Prípady", shortLabel: "Prípady", view: "cases" },
     { group: "daily", icon: Headphones, label: "Ústredňa", shortLabel: "Ústredňa", view: "call-center" },
     { group: "operations", icon: CalendarDays, label: "Dochádzka", shortLabel: "Doch.", view: "attendance" },
@@ -733,7 +831,7 @@ export function DispatchConsole({
   const secondaryBadgeCount = secondaryNavItems.reduce((total, item) => total + (item.badgeCount ?? 0), 0);
   const mobileShortcutItems: MobileShortcutItem[] = [
     {
-      active: activeView === "cases" || activeView === "dispatch" && !focusedTaskId && (mobilePane === "cases" || workspace.kind !== "cockpit" || workspace.mode === "expanded"),
+      active: activeView === "cases" || activeView === "dispatch" && !toolsOpen && !focusedTaskId && (mobilePane === "cases" || centerView === "map" && (workspace.kind !== "cockpit" || workspace.mode === "expanded")),
       icon: Table2,
       label: "Prípady",
       onSelect: showMobileCases,
@@ -741,7 +839,7 @@ export function DispatchConsole({
       shortLabel: "Prípady",
     },
     {
-      active: activeView === "tasks" || activeView === "dispatch" && Boolean(focusedTaskId),
+      active: activeView === "tasks" || activeView === "dispatch" && !toolsOpen && centerView === "tasks",
       badgeCount: taskAttentionCount,
       icon: BellRing,
       label: "Úlohy",
@@ -750,7 +848,7 @@ export function DispatchConsole({
       shortLabel: "Úlohy",
     },
     {
-      active: activeView === "dispatch" && mobilePane === "workspace" && workspace.kind === "cockpit" && workspace.mode !== "expanded" && !focusedTaskId,
+      active: activeView === "dispatch" && !toolsOpen && centerView === "map" && mobilePane === "workspace" && workspace.kind === "cockpit" && workspace.mode !== "expanded" && !focusedTaskId,
       icon: MapPinned,
       label: "Mapa",
       onSelect: showMobileMap,
@@ -760,7 +858,7 @@ export function DispatchConsole({
     ...secondaryNavItems
       .filter((item) => item.view !== "tasks" && item.view !== "cases")
       .map((item): MobileShortcutItem => ({
-        active: activeView === item.view,
+        active: item.view === "notes" ? activeView === "dispatch" && centerView === "notes" && !toolsOpen : item.view === "tools" ? toolsOpen : activeView === item.view,
         badgeCount: item.badgeCount,
         icon: item.icon,
         label: item.label,
@@ -847,7 +945,7 @@ export function DispatchConsole({
 
   const requestNavigation = useCallback((navigate: () => void, options: NavigationOptions = {}) => {
     if (options.beforeNavigate?.() === false) return false;
-    if (!hasUnsavedChanges && !isCaseSaveLocked) {
+    if (!hasUnsavedChanges && !isCaseSaveLocked && !drafts.dirty && !drafts.saving) {
       if (options.documentNavigation) navigateAfterDraftApproval(navigate);
       else navigate();
       return true;
@@ -858,7 +956,7 @@ export function DispatchConsole({
     setLeaveDialogError(null);
     setLeaveDialogOpen(true);
     return false;
-  }, [hasUnsavedChanges, isCaseSaveLocked]);
+  }, [hasUnsavedChanges, isCaseSaveLocked, drafts.dirty, drafts.saving]);
 
   const cancelPendingNavigation = useCallback(() => {
     pendingNavigationRef.current = null;
@@ -877,7 +975,14 @@ export function DispatchConsole({
   }
 
   function discardAndLeave() {
-    if (isCaseSaveLocked || leaveDialogSaving) return;
+    if (isCaseSaveLocked || caseSavingRef.current || leaveDialogSaving || !drafts.discard()) return;
+    if (caseDirtyRef.current) {
+      // The case stays mounted across views. Explicit discard resets that
+      // editor and cancels its pending autosave before the next view opens.
+      setCaseEditorRevision(revision => revision + 1);
+      caseDirtyRef.current = false;
+      saveCaseDraftRef.current = null;
+    }
     finishPendingNavigation();
   }
 
@@ -890,8 +995,22 @@ export function DispatchConsole({
       return;
     }
 
+    setLeaveDialogSaving(true);
+    const failedEditor = await drafts.save();
+    if (failedEditor) {
+      setLeaveDialogSaving(false);
+      setLeaveDialogError(`${failedEditor}: uloženie sa nepodarilo. Rozpracovaný obsah zostáva otvorený.`);
+      return;
+    }
+    if (caseSavingRef.current) {
+      setLeaveDialogSaving(false);
+      setLeaveAfterSave(true);
+      return;
+    }
+    if (!caseDirtyRef.current) { finishPendingNavigation(); return; }
     const saveDraft = saveCaseDraftRef.current;
     if (!saveDraft) {
+      setLeaveDialogSaving(false);
       setLeaveDialogError("Karta ešte nie je pripravená na uloženie. Skúste to znova.");
       return;
     }
@@ -902,6 +1021,8 @@ export function DispatchConsole({
     setLeaveDialogSaving(false);
 
     if (saved) {
+      const pendingEditor = drafts.pendingLabel();
+      if (pendingEditor) { setLeaveDialogError(`${pendingEditor}: pribudli neuložené zmeny. Uložte ich pred odchodom.`); return; }
       finishPendingNavigation();
       return;
     }
@@ -911,6 +1032,8 @@ export function DispatchConsole({
 
   function selectCase(caseId: string) {
     return requestNavigation(() => {
+      setCenterView("map");
+      setToolsOpen(false);
       setActiveCaseId(caseId);
       setMobilePane("workspace");
       setFocusedTaskId(undefined);
@@ -920,6 +1043,8 @@ export function DispatchConsole({
 
   function openCase(caseId: string) {
     requestNavigation(() => {
+      setCenterView("map");
+      setToolsOpen(false);
       const caseItem = dispatchCases.find((item) => item.id === caseId);
       const active = caseItem && isActiveDispatchCase(caseItem);
       setActiveCaseId(caseId);
@@ -932,18 +1057,32 @@ export function DispatchConsole({
 
   function openCaseDetail(caseId: string) {
     requestNavigation(() => {
+      setCenterView("map");
+      setToolsOpen(false);
       setActiveCaseId(caseId);
       setMobilePane("workspace");
       setFocusedTaskId(undefined);
       returnViewRef.current = activeView;
-      if (activeView !== "cases") {
-        setActiveView("dispatch");
-      }
+      setActiveView("dispatch");
       setWorkspace({ kind: "detail", mode: "expanded" });
     });
   }
 
   function openTask(taskId: string, caseId: string, fromPush = false) {
+    if (capabilities.tasks) {
+      requestNavigation(() => {
+        // TaskProvider authorizes this exact ID, including a task with no case.
+        acknowledgeTaskNotifications(taskId);
+        setFocusedTaskId(taskId);
+        setTaskOpenVersion(version => version + 1);
+        switchCenterView("tasks");
+        if (fromPush) {
+          const url = new URL(window.location.href); url.searchParams.delete("task");
+          window.history.replaceState(window.history.state, "", url);
+        }
+      });
+      return;
+    }
     const needsDocument = !dispatchCases.some((item) => item.id === caseId && item.tasks.some((task) => task.id === taskId));
     requestNavigation(() => {
       if (needsDocument) {
@@ -961,6 +1100,8 @@ export function DispatchConsole({
       setMobilePane("workspace");
       setActiveView("dispatch");
       setFocusedTaskId(taskId);
+      setCenterView("map");
+      setToolsOpen(false);
       setWorkspace({ kind: "detail", mode: "expanded" });
     }, { documentNavigation: needsDocument });
   }
@@ -970,6 +1111,7 @@ export function DispatchConsole({
     if (!target || target.kind === "settings") return;
     if (target.kind === "call") { openCallNotification(target.id); return; }
     const taskId = target.id;
+    if (taskId && capabilities.tasks) { openTask(taskId, "", true); return; }
     const caseItem = taskId && dispatchCases.find((item) => item.tasks.some((task) => task.id === taskId));
     if (taskId && caseItem) openTask(taskId, caseItem.id, true);
     else {
@@ -983,6 +1125,7 @@ export function DispatchConsole({
     if (!target) return;
     if (target.kind === "call") { openCallNotification(target.id); return; }
     const taskId = target.kind === "task" ? target.id : null;
+    if (taskId && capabilities.tasks) { openTask(taskId, "", true); return; }
     const caseItem = taskId && dispatchCases.find((item) => item.tasks.some((task) => task.id === taskId));
     if (taskId && caseItem) openTask(taskId, caseItem.id, true);
     else if (!taskId) switchView("settings");
@@ -1007,18 +1150,20 @@ export function DispatchConsole({
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
+    const receive = createNotificationNavigationReceiver({
+      origin: window.location.origin,
+      sessionKey: actorKey,
+      currentSessionKey: () => currentSessionKeyRef.current,
+      open: handlePushOpen,
+      acknowledge: requestId => navigator.serviceWorker.controller?.postMessage({ type: "PM_NOTIFICATION_ACK", requestId }),
+    });
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === "PM_CLIENT_CONTEXT") { event.ports[0]?.postMessage({ mobileApp: isMobileApp() }); return; }
-      if (event.data?.type === "PM_OPEN_NOTIFICATION" || event.data?.type === "PM_OPEN_CALL_NOTIFICATION") {
-        // Acknowledge before the save/discard dialog: the worker must not
-        // mistake time spent deciding about a draft for an unresponsive page.
-        event.ports[0]?.postMessage({ handled: true });
-        handlePushOpen(event.data.url);
-      }
+      receive(event.data, event.ports[0]);
     };
     navigator.serviceWorker.addEventListener("message", handleMessage);
     return () => navigator.serviceWorker.removeEventListener("message", handleMessage);
-  }, []);
+  }, [actorKey]);
 
   function acknowledgeTaskNotifications(taskId: string) {
     const notificationIds = viewerNotifications
@@ -1048,6 +1193,8 @@ export function DispatchConsole({
     })).catch((error) => console.warn("Task notification acknowledgement failed:", error));
   }
 
+  const resumePendingEditorSave = useEffectEvent(() => { void saveAndLeave(); });
+
   useEffect(() => {
     if (!leaveAfterSave) {
       leaveObservedSavingRef.current = false;
@@ -1064,7 +1211,8 @@ export function DispatchConsole({
     // synchronously inside the effect body.
     const timer = window.setTimeout(() => {
       if (!hasUnsavedChanges) {
-        finishPendingNavigation();
+        setLeaveAfterSave(false);
+        resumePendingEditorSave();
         return;
       }
 
@@ -1076,7 +1224,7 @@ export function DispatchConsole({
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [finishPendingNavigation, hasUnsavedChanges, isCaseSaveLocked, leaveAfterSave]);
+  }, [finishPendingNavigation, hasUnsavedChanges, isCaseSaveLocked, leaveAfterSave, drafts.dirty, drafts.saving]);
 
   const syncDueNotifications = useCallback(
     async (silent = true) => {
@@ -1283,6 +1431,10 @@ export function DispatchConsole({
   }
 
   async function changeCasePriority(caseId: string, priority: DispatchCase["priority"]) {
+    if (caseId === activeCaseId && (hasUnsavedChanges || isCaseSaveLocked)) {
+      setMutationNotice("Prioritu sa nepodarilo zmeniť v zozname: zmeňte ju v hlavičke otvoreného prípadu, kde sa uloží spolu s rozpracovanými údajmi.");
+      return;
+    }
     if (priorityChangeCaseId) {
       return;
     }
@@ -1304,7 +1456,7 @@ export function DispatchConsole({
       const response = await fetch(`/api/cases/${caseId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ priority }),
+        body: JSON.stringify({ priority, expectedUpdatedAt: dispatchCases.find(item => item.id === caseId)?.updatedAt }),
       });
       const result = (await response.json()) as { dispatchData?: DispatchData; error?: string; refreshRequired?: boolean };
 
@@ -1381,7 +1533,7 @@ export function DispatchConsole({
       const response = await fetch(`/api/cases/${caseId}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, ...(typeof payload.taskId === "string" ? { taskExpectedRevision: dispatchData.tasks?.find(task => task.id === payload.taskId)?.revision } : {}) }),
       });
       const result = (await response.json()) as { dispatchData?: DispatchData; error?: string };
 
@@ -1404,10 +1556,41 @@ export function DispatchConsole({
   }
 
   function switchCenterView(view: CenterView) {
-    requestNavigation(() => setCenterView(view));
+    // These views share mounted editors. Merely showing another tool does not leave a draft.
+    setCenterView(view);
+    setToolsOpen(false);
+    setActiveView("dispatch");
+    setMobilePane("workspace");
+  }
+
+  function openTools() {
+    toolsReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setToolsOpen(true);
+    setWidgetSettingsOpen(true);
+    setActiveView("dispatch");
+    setVisitedWidgets(current => new Set([...current, ...workspacePreferences.widgets.filter(item => item.visible).map(item => item.id)]));
+    updateWorkspacePreferences({ ...workspacePreferences, rightCollapsed: false });
+  }
+
+  function closeTools() {
+    setToolsOpen(false);
+    setWidgetSettingsOpen(false);
+    updateWorkspacePreferences({ ...workspacePreferences, rightCollapsed: true });
+    window.requestAnimationFrame(() => {
+      const trigger = toolsReturnFocusRef.current;
+      if (trigger?.isConnected && trigger.getClientRects().length) trigger.focus({ preventScroll: true });
+    });
+  }
+
+  function toggleTools() {
+    if (toolsOpen) closeTools();
+    else openTools();
   }
 
   function switchView(view: View) {
+    if (view === "notes" || view === "tasks") { switchCenterView(view); return; }
+    if (view === "tools") { toggleTools(); return; }
+    setToolsOpen(false);
     requestNavigation(() => {
       setActiveView(view);
       if (view === "dispatch") setMobilePane("cases");
@@ -1415,17 +1598,24 @@ export function DispatchConsole({
   }
 
   function showMobileMap() {
-    requestNavigation(() => {
-      setActiveCaseId(activeCase?.id ?? "");
-      setActiveView("dispatch");
-      setMobilePane("workspace");
-      setCenterView("map");
-      setFocusedTaskId(undefined);
-      setWorkspace({ kind: "cockpit", mode: "collapsed" });
-    });
+    setToolsOpen(false);
+    setActiveView("dispatch");
+    setMobilePane("workspace");
+    setCenterView("map");
+    setFocusedTaskId(undefined);
+    setWorkspace(current => ({ ...current, mode: "collapsed" }));
+  }
+
+  function restoreMobileCase() {
+    setToolsOpen(false);
+    setCenterView("map");
+    setActiveView("dispatch");
+    setMobilePane("workspace");
+    setWorkspace(current => ({ ...current, mode: "expanded" }));
   }
 
   function showMobileCases() {
+    setToolsOpen(false);
     requestNavigation(() => {
       setActiveView("dispatch");
       setMobilePane("cases");
@@ -1440,9 +1630,11 @@ export function DispatchConsole({
     setIsSigningOut(true);
     setMutationNotice(null);
 
+    currentSessionKeyRef.current = null;
     try {
       await signOutCurrentSession();
     } catch {
+      currentSessionKeyRef.current = actorKey;
       setIsSigningOut(false);
       setMutationNotice("Odhlásenie sa nepodarilo. Skontroluj pripojenie a skús to znova.");
     }
@@ -1537,8 +1729,10 @@ export function DispatchConsole({
       throw new TelephonyNotConfiguredError();
     }
 
-    await telephony.dial(phone, caseId);
-    setMutationNotice(`Volanie na ${phone} bolo spustené.`);
+    const target = await requestCallbackTargetConfirmation(phone);
+    if (!target) return;
+    await telephony.dial(phone, caseId, { callbackTargetVerificationId: target.verificationId });
+    setMutationNotice(`Volanie na ${target.dialNumber} bolo spustené.`);
   }
 
   /** "Môj telefón" test call: a normal outbound dial from a chosen line. */
@@ -1547,8 +1741,10 @@ export function DispatchConsole({
       setMutationNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
       throw new TelephonyNotConfiguredError();
     }
-    await telephony.dial(input.to, undefined, { lineId: input.lineId });
-    setMutationNotice(`Skúšobný hovor na ${input.to} bol spustený.`);
+    const target = await requestCallbackTargetConfirmation(input.to);
+    if (!target) return;
+    await telephony.dial(input.to, undefined, { lineId: input.lineId, callbackTargetVerificationId: target.verificationId });
+    setMutationNotice(`Skúšobný hovor na ${target.dialNumber} bol spustený.`);
   }
 
   /** Links a live or logged call to the case the console currently shows. */
@@ -1610,7 +1806,7 @@ export function DispatchConsole({
     if (isAssigning) {
       return;
     }
-    if (!activeCase) {
+    if (!activeCase || !isActiveDispatchCase(activeCase)) {
       setMutationNotice("Najprv vyberte aktívny prípad.");
       return;
     }
@@ -1741,6 +1937,8 @@ export function DispatchConsole({
         return;
       }
 
+      if (centerView !== "map" && !caseDirectoryDetailOpen) return;
+
       if (workspace.mode === "expanded") {
         event.preventDefault();
         requestNavigation(() => {
@@ -1771,9 +1969,50 @@ export function DispatchConsole({
     window.addEventListener("keydown", handleKeyDown);
 
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeView, cancelPendingNavigation, leaveDialogOpen, requestNavigation, workspace]);
+  }, [activeView, cancelPendingNavigation, centerView, leaveDialogOpen, requestNavigation, workspace]);
+
+  function renderTasks(variant: "page" | "sidebar") {
+    return <TaskPanel
+                taskWorkspaceEnabled={capabilities.tasks}
+                tasks={dispatchData.tasks}
+                onOpenCase={openCase}
+                activeTaskId={focusedTaskId}
+                cases={dispatchCases}
+                isNotificationSyncing={isNotificationSyncing}
+                lastNotificationSyncAt={lastNotificationSyncAt}
+                markingNotificationId={markingNotificationId}
+                notificationNow={notificationNow}
+                notificationViewerProfileId={notificationViewerProfileId}
+                notifications={notifications}
+                onCreateTask={createTaskFromPanel}
+                onDeleteTask={deleteTaskFromPanel}
+                onMarkNotificationRead={(notificationId) => void markNotificationRead(notificationId)}
+                onOpenTask={openTask}
+                onRefreshNotifications={() => void syncDueNotifications(false)}
+                onSnoozeNotification={snoozeNotificationFromPanel}
+                onUpdateTask={updateTaskFromPanel}
+                onUpdateNotificationStatus={updateNotificationStatusFromPanel}
+                operators={effectiveOperators}
+                notificationSyncEnabled={source === "supabase"}
+                viewerProfileId={viewerProfileId}
+                variant={variant}
+              />;
+  }
+  function renderWidget(id: WidgetId, visible: boolean) {
+    if (!visitedWidgets.has(id)) return null;
+    if (id === "phone") return <DashboardPhone onCreateCase={() => startNewCase()} caseContext={dashboardSmsCaseContext} isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} variant="rail" />;
+    if (id === "tasks") return centerView === "tasks" && !toolsOpen ? <button type="button" className="min-h-11 p-3 text-sm" onClick={() => switchCenterView("tasks")}>{taskAttentionCount} úloh na pozornosť · otvorené v strede</button> : <div data-testid="dashboard-task-panel-shell">{renderTasks("sidebar")}</div>;
+    if (id === "notes") return <><NotebookPanel active={visible && (centerView !== "notes" || toolsOpen)} compact /><button type="button" className="min-h-11 px-3 text-sm underline" onClick={() => switchCenterView("notes")}>Otvoriť poznámky v strede</button></>;
+    if (id === "calculator") return <CalculatorWidget />;
+    if (id === "route") return <RoutePlanner embedded active={visible} />;
+    if (id === "search") return <WorkspaceSearchWidget cases={dispatchCases} contacts={partnerDirectory} fleet={fleetAssets} onOpenCase={openCase} onOpenFleet={() => switchView("fleet")} onDial={telephonyConfigured ? dialNumber : undefined} places={<WorkspacePlaceSearch active={visible} />} />;
+    return <div className="space-y-2 p-3">{fleetAssets.slice(0, 12).map(asset => <div key={asset.id} className="rounded-lg border border-zinc-200 p-2 text-sm"><p className="font-medium">{asset.licensePlate} · {asset.label}</p><p>{fleetWidgetStatus(asset)}</p><p className="text-xs text-zinc-500">{asset.positionKnown === false || !asset.gps ? "GPS neoverené" : asset.gps.stale ? "GPS neaktuálne" : "GPS aktuálne"}</p></div>)}<button type="button" className="min-h-11 text-sm underline" onClick={() => switchView("fleet")}>Otvoriť celú flotilu ({fleetAssets.length})</button></div>;
+  }
 
   return (
+    <NotebookProvider actorKey={actorKey} viewerProfileId={viewerProfileId} enabled={capabilities.notes} onEditorStateChange={handleNotebookEditor}>
+    <TaskWorkspaceProvider actorKey={actorKey} enabled={capabilities.tasks} initialTasks={dispatchData.tasks} viewerProfileId={viewerProfileId} onEditorStateChange={handleTaskEditor} onTasksChange={handleWorkspaceTasks}>
+    <TaskFocusBridge requestVersion={taskOpenVersion} taskId={focusedTaskId} enabled={capabilities.tasks} />
     <div
       className={`dispatch-app-shell isolate flex flex-col bg-zinc-100 text-zinc-950 ${
         activeView === "settings" || activeView === "reports"
@@ -1838,12 +2077,16 @@ export function DispatchConsole({
             <HeaderPhoneStatusMenu
               busy={telephony.presenceBusy}
               onChange={telephony.changePresence}
-              onRequestPause={() => setPauseRoutingOpen(true)}
+              onRequestPause={() => {
+                telephony.refreshPauseReasons();
+                setPauseRoutingOpen(true);
+              }}
               onDismissNotice={telephony.dismissNotice}
               onTakeover={telephony.takeoverPhone}
               notice={telephony.notice}
               phone={telephony.phone}
               status={telephony.phoneBar.ownPresenceStatus}
+              pausePlan={ownPausePlan}
               readiness={telephony.readiness}
               onPreparePhone={telephony.preparePhone}
               outboundPending={telephony.outboundPending}
@@ -1858,6 +2101,7 @@ export function DispatchConsole({
             notifications={viewerNotifications}
             now={notificationNow}
             onMarkRead={(notificationId) => void markNotificationRead(notificationId)}
+            onArchive={(notificationId) => void updateNotificationStatusFromPanel(notificationId, "archived")}
             onOpenCase={openCase}
             onOpenTask={openTask}
             onSnooze={snoozeNotificationFromPanel}
@@ -1909,6 +2153,10 @@ export function DispatchConsole({
         </div>
       )}
 
+      {telephonyConfigured && <CallMonitorInvitations key={actorKey} sessionId={telephony.phoneBar.active?.sessionId ?? null}
+        listeningSessionId={telephony.phoneBar.supervising?.sessionId ?? null}
+        onStop={sessionId => void telephony.stopSupervise(sessionId)} onAccept={telephony.acceptMonitorInvitation} />}
+
       <div className={activeView === "tasks" ? "hidden" : "mobile-workspace-heading flex min-h-16 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-4 py-2.5 lg:hidden"}>
         <div className="flex min-w-0 items-center gap-2">
           {(activeView === "dispatch" && mobilePane === "workspace") || (activeView === "cases" && workspace.kind === "detail") ? (
@@ -1918,7 +2166,7 @@ export function DispatchConsole({
           ) : null}
           <div className="min-w-0">
             <h1 className="truncate text-lg font-bold tracking-tight">
-              {activeView === "dispatch" ? mobilePane === "cases" ? "Prípady" : workspace.kind === "new" ? "Nový prípad" : workspace.kind === "detail" || workspace.mode === "expanded" ? workspaceCase?.caseNumber ?? "Detail prípadu" : "Mapa zásahov" : activeView === "cases" && workspace.kind === "detail" ? workspaceCase?.caseNumber ?? "Detail prípadu" : navItems.find((item) => item.view === activeView)?.label}
+              {activeView === "dispatch" ? toolsOpen ? "Nástroje" : mobilePane === "workspace" && centerView !== "map" ? ({ table: "Tabuľka prípadov", tasks: "Úlohy", notes: "Poznámky" })[centerView] : mobilePane === "cases" ? "Prípady" : workspace.kind === "new" ? "Nový prípad" : workspace.kind === "detail" || workspace.mode === "expanded" ? workspaceCase?.caseNumber ?? "Detail prípadu" : "Mapa zásahov" : activeView === "cases" && workspace.kind === "detail" ? workspaceCase?.caseNumber ?? "Detail prípadu" : navItems.find((item) => item.view === activeView)?.label}
               {activeView === "dispatch" && mobilePane === "cases" ? <span className="ml-1.5 font-medium text-zinc-500">{activeCasesTotal}</span> : null}
             </h1>
           </div>
@@ -1928,13 +2176,13 @@ export function DispatchConsole({
             <Plus size={18} aria-hidden="true" /> Nový prípad
           </button>
         ) : null}
-        {selectedCase && isActiveDispatchCase(selectedCase) && workspace.kind !== "new" && (activeView === "dispatch" && mobilePane === "workspace" || activeView === "cases" && workspace.kind === "detail") ? (
+        {(selectedCase || workspace.kind === "new") && !toolsOpen && (activeView === "dispatch" && mobilePane === "workspace" && centerView === "map" || activeView === "cases" && workspace.kind === "detail") ? (
           <button
             type="button"
-            onClick={() => workspace.mode === "expanded" ? showMobileMap() : openCase(selectedCase.id)}
+            onClick={() => workspace.mode === "expanded" ? showMobileMap() : restoreMobileCase()}
             aria-label={workspace.mode === "expanded" ? "Zobraziť mapu na celú plochu" : "Skryť mapu a zobraziť prípad"}
             title={workspace.mode === "expanded" ? "Zobraziť mapu" : "Zobraziť prípad"}
-            className="mobile-map-toggle flex size-9 shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-700"
+            className="mobile-map-toggle flex size-11 shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-700"
           >
             {workspace.mode === "expanded" ? <Maximize2 size={17} aria-hidden="true" /> : <Minimize2 size={17} aria-hidden="true" />}
           </button>
@@ -1998,33 +2246,6 @@ export function DispatchConsole({
       </div>
 
       {activeView === "cases" && (
-        workspace.kind === "detail" ? (
-          <main className="min-h-0 flex-1 overflow-hidden bg-zinc-100 p-2 pb-[calc(76px+env(safe-area-inset-bottom))] sm:p-3 sm:pb-3">
-            <ExpandedCasePanel
-              key={`cases:${selectedCase?.id ?? "empty"}`}
-              assets={fleetAssets}
-              branches={branches}
-              call={newCaseCall}
-              caseItem={selectedCase}
-              callLinkCandidates={callLinkCandidates}
-              commanderVehicles={commanderVehicles}
-              focusedTaskId={focusedTaskId}
-              kind="detail"
-              onBackToCockpit={returnToCockpit}
-              onCaseCreated={handleCaseCreated}
-              onDataChange={setDispatchData}
-              onDial={telephonyConfigured ? dialNumber : undefined}
-              onLinkCall={linkPhoneCallToCase}
-              onDirtyChange={setHasUnsavedChanges}
-              onSaveDraftChange={handleSaveDraftChange}
-              onSavingChange={setIsCaseSaveLocked}
-              operators={effectiveOperators}
-              partnerDirectory={partnerDirectory}
-              priceRule={activePriceRule}
-              viewerProfileId={viewerProfileId}
-            />
-          </main>
-        ) : (
           <CaseDirectory
             activeCaseId={activeCaseId}
             activeFilterCount={activeFilterCount}
@@ -2045,15 +2266,19 @@ export function DispatchConsole({
             sort={caseSort}
             totalCases={dispatchCases.length}
           />
-        )
       )}
 
-      {activeView === "dispatch" && (
-        <main
+      <main
           ref={dashboardGridRef}
+          data-console-hidden={activeView !== "dispatch"}
+          data-left-collapsed={workspacePreferences.leftCollapsed}
+          data-right-collapsed={workspacePreferences.rightCollapsed}
+          data-tools-open={toolsOpen}
+          data-full-page-workspace={fullPageWorkspace}
+          inert={activeView !== "dispatch"}
           style={{
-            "--dashboard-left-width": `${dashboardColumns.left}px`,
-            "--dashboard-right-width": `${dashboardColumns.right}px`,
+            "--dashboard-left-width": `${workspacePreferences.leftCollapsed ? 44 : dashboardColumns.left}px`,
+            "--dashboard-right-width": `${workspacePreferences.rightCollapsed ? 44 : dashboardColumns.right}px`,
           } as CSSProperties}
           className="dispatch-dashboard relative z-0 isolate grid h-full min-h-0 min-w-0 flex-1 grid-cols-1 overflow-x-hidden overflow-y-auto lg:h-auto lg:grid-rows-[auto_minmax(0,1fr)] lg:overflow-hidden lg:grid-cols-[var(--dashboard-left-width)_minmax(0,1fr)] xl:grid-rows-[minmax(0,1fr)] xl:grid-cols-[var(--dashboard-left-width)_minmax(0,1fr)_var(--dashboard-right-width)]"
         >
@@ -2072,7 +2297,7 @@ export function DispatchConsole({
             onPointerMove={moveDashboardColumnResize}
             onPointerUp={finishDashboardColumnResize}
             onPointerCancel={finishDashboardColumnResize}
-            className="group absolute bottom-0 left-[var(--dashboard-left-width)] top-0 z-30 hidden w-3 -translate-x-1/2 touch-none cursor-col-resize items-center justify-center outline-none lg:flex"
+            className="dashboard-resize-left group absolute bottom-0 left-[var(--dashboard-left-width)] top-0 z-30 hidden w-3 -translate-x-1/2 touch-none cursor-col-resize items-center justify-center outline-none lg:flex"
           >
             <span aria-hidden="true" className="h-14 w-1 rounded-full bg-zinc-300 shadow-sm transition group-hover:bg-yellow-400 group-focus-visible:bg-yellow-400" />
           </button>
@@ -2091,13 +2316,14 @@ export function DispatchConsole({
             onPointerMove={moveDashboardColumnResize}
             onPointerUp={finishDashboardColumnResize}
             onPointerCancel={finishDashboardColumnResize}
-            className="group absolute bottom-0 right-[var(--dashboard-right-width)] top-0 z-30 hidden w-3 translate-x-1/2 touch-none cursor-col-resize items-center justify-center outline-none xl:flex"
+            className="dashboard-resize-right group absolute bottom-0 right-[var(--dashboard-right-width)] top-0 z-30 hidden w-3 translate-x-1/2 touch-none cursor-col-resize items-center justify-center outline-none xl:flex"
           >
             <span aria-hidden="true" className="h-14 w-1 rounded-full bg-zinc-300 shadow-sm transition group-hover:bg-yellow-400 group-focus-visible:bg-yellow-400" />
           </button>
-          <div className="hidden min-w-0 p-2 lg:col-span-2 lg:block xl:hidden">
+          <div className="dashboard-tablet-phone hidden min-w-0 p-2 lg:col-span-2 lg:block xl:hidden">
             <DashboardPhone onCreateCase={() => startNewCase()} caseContext={dashboardSmsCaseContext} isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
           </div>
+          {workspacePreferences.leftCollapsed && !fullPageWorkspace && <button type="button" className="hidden min-h-11 items-center justify-center border-r border-zinc-200 bg-white lg:flex" aria-label="Obnoviť panel prípadov" onClick={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: false })}><PanelLeftOpen size={20} /></button>}
           <div className="mobile-dispatch-cases lg:contents">
           <CaseList
             activeCaseId={visibleActiveCaseId}
@@ -2123,6 +2349,13 @@ export function DispatchConsole({
           </div>
           <div className="mobile-dispatch-workspace lg:contents">
           <MapWorkspace
+            active={activeView === "dispatch" && !toolsOpen}
+            actorKey={actorKey}
+            onCenterViewChange={switchCenterView}
+            onOpenTools={toggleTools}
+            toolsOpen={toolsOpen}
+            onToggleLeft={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: !workspacePreferences.leftCollapsed })}
+            centerContent={<><div hidden={centerView !== "tasks"} className="h-full overflow-y-auto">{renderTasks("page")}</div><div hidden={centerView !== "notes"} className="h-full overflow-y-auto"><NotebookPanel active={activeView === "dispatch" && centerView === "notes" && !toolsOpen} /></div></>}
             activeCaseId={visibleActiveCaseId}
             assets={fleetAssets}
             branches={branches}
@@ -2150,9 +2383,10 @@ export function DispatchConsole({
             onDataChange={setDispatchData}
             onDial={telephonyConfigured ? dialNumber : undefined}
             onLinkCall={linkPhoneCallToCase}
-            onDirtyChange={setHasUnsavedChanges}
+            caseEditorRevision={caseEditorRevision}
+            onDirtyChange={handleCaseDirtyChange}
             onSaveDraftChange={handleSaveDraftChange}
-            onSavingChange={setIsCaseSaveLocked}
+            onSavingChange={handleCaseSavingChange}
             onExpand={expandCockpit}
             onOpenDetail={openCaseDetail}
             onRestore={restoreCockpit}
@@ -2161,39 +2395,18 @@ export function DispatchConsole({
             onSortChange={setCaseSort}
           />
           </div>
-          <div className="hidden min-h-0 min-w-0 flex-col border-l border-zinc-200 bg-white xl:flex">
-            <DashboardPhone onCreateCase={() => startNewCase()} caseContext={dashboardSmsCaseContext} className="shrink-0" isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} variant="rail" />
-            <div className="min-h-0 min-w-0 flex-1 overflow-hidden" data-testid="dashboard-task-panel-shell">
-              <TaskPanel
-                activeTaskId={focusedTaskId}
-                cases={dispatchCases}
-                isNotificationSyncing={isNotificationSyncing}
-                lastNotificationSyncAt={lastNotificationSyncAt}
-                markingNotificationId={markingNotificationId}
-                notificationNow={notificationNow}
-                notificationViewerProfileId={notificationViewerProfileId}
-                notifications={notifications}
-                onCreateTask={createTaskFromPanel}
-                onDeleteTask={deleteTaskFromPanel}
-                onMarkNotificationRead={(notificationId) => void markNotificationRead(notificationId)}
-                onOpenTask={openTask}
-                onRefreshNotifications={() => void syncDueNotifications(false)}
-                onSnoozeNotification={snoozeNotificationFromPanel}
-                onUpdateTask={updateTaskFromPanel}
-                onUpdateNotificationStatus={updateNotificationStatusFromPanel}
-                operators={effectiveOperators}
-                notificationSyncEnabled={source === "supabase"}
-                viewerProfileId={viewerProfileId}
-              />
-            </div>
-          </div>
+          {workspacePreferences.rightCollapsed && !fullPageWorkspace && <button type="button" className="hidden min-h-11 items-center justify-center border-l border-zinc-200 bg-white xl:flex" aria-label="Obnoviť panel nástrojov" onClick={openTools}><PanelRightOpen size={20} /></button>}
+          <WidgetHost preferences={workspacePreferences} onChange={updateWorkspacePreferences} renderWidget={renderWidget} expanded={toolsOpen} settingsOpen={widgetSettingsOpen} onSettingsChange={setWidgetSettingsOpen} active={activeView === "dispatch" && (toolsOpen || (!fullPageWorkspace && !workspacePreferences.rightCollapsed))} onClose={closeTools} />
+
         </main>
-      )}
 
       {activeView === "tasks" && (
-        <main className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-zinc-100 p-2 pb-[calc(88px+env(safe-area-inset-bottom))] sm:p-4">
+        <main className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-zinc-100 p-2 sm:p-4">
           <div className="mx-auto min-h-full w-full min-w-0 max-w-7xl">
             <TaskPanel
+                taskWorkspaceEnabled={capabilities.tasks}
+                tasks={dispatchData.tasks}
+                onOpenCase={openCase}
               activeTaskId={focusedTaskId}
               cases={dispatchCases}
               isNotificationSyncing={isNotificationSyncing}
@@ -2290,7 +2503,6 @@ export function DispatchConsole({
       <PauseEndingNotificationSync
         enabled={source === "supabase" && telephonyConfigured}
         pauseReasonId={telephony.snapshot.ownPresence?.pauseReasonId}
-        pauseReasons={telephony.pauseReasons}
         status={telephony.snapshot.ownPresence?.status}
         statusSince={telephony.snapshot.ownPresence?.statusSince}
         onDelivered={() => void syncDueNotifications(true)}
@@ -2359,6 +2571,8 @@ export function DispatchConsole({
         />
       )}
     </div>
+    </TaskWorkspaceProvider>
+    </NotebookProvider>
   );
 }
 
@@ -2368,6 +2582,12 @@ const accountRoleLabels: Record<AppRole, string> = {
   manager: "Manažér",
   senior_dispatcher: "Senior dispečer",
 };
+
+function TaskFocusBridge({ taskId, enabled, requestVersion }: { taskId?: string; enabled: boolean; requestVersion: number }) {
+  const { store } = useTaskWorkspace();
+  useEffect(() => { if (enabled && taskId) void store.open(taskId); }, [enabled, store, taskId, requestVersion]);
+  return null;
+}
 
 function AccountMenu({
   displayName,

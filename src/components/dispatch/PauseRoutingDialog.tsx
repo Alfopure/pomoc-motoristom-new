@@ -8,6 +8,7 @@ import { DEFAULT_OPERATOR_SETTINGS, type PauseRoutingMode } from "@/lib/telephon
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
 
+import { activePauseReasons } from "./my-phone-model";
 import { ConfigRequestError, loadRoutingConfig, saveOperatorSettings } from "./settings/config-client";
 import { findOperator } from "./settings/operators-model";
 import type { PhonePauseReason } from "./useTelephonyConsole";
@@ -56,6 +57,11 @@ export function PauseRoutingDialog({
   const [externalNumber, setExternalNumber] = useState("");
   const [forwardProfileId, setForwardProfileId] = useState("");
   const [pauseReasonId, setPauseReasonId] = useState("");
+  // The console's copy of the reasons was read when it started; a limit edited
+  // in settings since then must show here, so the dialog prefers the document
+  // it loads anyway.
+  const [freshReasons, setFreshReasons] = useState<PhonePauseReason[] | null>(null);
+  const reasonOptions = freshReasons ?? pauseReasons;
 
   useEffect(() => {
     if (!open || !profileId) return;
@@ -75,6 +81,9 @@ export function PauseRoutingDialog({
         setDefaultMobile(settings.defaultMobileNumber ?? "");
         setExternalNumber(settings.pauseForwardNumber ?? "");
         setForwardProfileId(settings.pauseForwardProfileId ?? "");
+        if (Array.isArray(response.document.pauseReasons)) {
+          setFreshReasons(activePauseReasons(response.document.pauseReasons).map((reason) => ({ id: reason.id, code: reason.code, label: reason.label, maxMinutes: reason.maxMinutes })));
+        }
       })
       .catch((caught) => {
         if (controller.signal.aborted) return;
@@ -170,13 +179,14 @@ export function PauseRoutingDialog({
             <div className="flex min-h-40 items-center justify-center gap-2 text-sm font-medium text-zinc-500"><Loader2 size={17} className="animate-spin" /> Načítavam nastavenia…</div>
           ) : (
             <>
-              {pauseReasons.length > 0 && (
+              {reasonOptions.length > 0 && (
                 <label className="grid gap-1.5 text-xs font-semibold text-zinc-700">
                   Dôvod pauzy
                   <select value={pauseReasonId} onChange={(event) => setPauseReasonId(event.target.value)} className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-yellow-300">
                     <option value="">Bez uvedenia dôvodu</option>
-                    {pauseReasons.map((reason) => <option key={reason.id} value={reason.id}>{reason.label}{reason.maxMinutes ? ` (${reason.maxMinutes} min)` : ""}</option>)}
+                    {reasonOptions.map((reason) => <option key={reason.id} value={reason.id}>{reason.label}{reason.maxMinutes ? ` (${reason.maxMinutes} min)` : ""}</option>)}
                   </select>
+                  <span className="font-normal text-zinc-500">Minútu pred plánovaným koncom ti príde upozornenie a po jeho uplynutí ďalšie. Dostupnosť si potom zapneš sám.</span>
                 </label>
               )}
 

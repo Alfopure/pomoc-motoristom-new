@@ -63,6 +63,27 @@ async function cron(h: TelephonyHarness) {
 }
 
 describe("conference callback maintenance recovery", () => {
+  it("R09: a monitor topology update during provider verification retries CAS without replacing the customer/operator proof", async () => {
+    const call = await ringing(), { h } = call;
+    let changed = false;
+    afterJoinRead(h, async response => {
+      if (!changed) {
+        changed = true;
+        const current = session(h, call.sessionId);
+        h.db.update("motorist_call_sessions", { version: current.version + 1, metadata: { ...current.metadata as object, monitorInviteActors: [PROFILES.o1] } }, row => row.id === call.sessionId);
+      }
+      const body = response as { data: Record<string, unknown>[] };
+      return { ...body, data: [...body.data, { ...body.data[0], id: "monitor-participant", call_control_id: "monitor-control", call_leg_id: "monitor-leg", muted: true }] };
+    });
+    await h.legEvent(call.operator, "call.answered");
+    if (call.callbackStatus() !== "done") await cron(h);
+    expect(changed).toBe(true);
+    expect(call.callbackStatus()).toBe("done");
+    expect(proofs(h, call.sessionId)).toHaveLength(1);
+    expect(proofs(h, call.sessionId)[0].conferenceSnapshot?.participants.map(row => row.callControlId)).toEqual([call.callControlId, call.operator]);
+    expect(h.rows("motorist_audit_log").filter(row => row.entity_id === call.callbackId)).toHaveLength(1);
+  });
+
   it("fulfills immediately from the physical conference after create/join, without another provider webhook", async () => {
     const call = await ringing(), { h } = call;
     await h.legEvent(call.operator, "call.answered");

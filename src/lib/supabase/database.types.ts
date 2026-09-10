@@ -275,6 +275,7 @@ export type Database = {
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
+      motorist_contact_callback_policies: Table<{ source_contact_id: string; organization_id: string; non_callback: boolean; verification_id: string | null; revision: number; updated_at: Timestamp }>;
       motorist_contacts: Table<{
         id: string;
         organization_id: string;
@@ -602,11 +603,17 @@ export type Database = {
       }>;
       motorist_case_tasks: Table<{
         id: string;
+        reminder_generation: number;
+        assignment_generation: number;
         organization_id: string;
-        case_id: string;
+        case_id: string | null;
+        revision: number;
+        origin_locked: boolean;
+        provenance: "manual" | "proven" | "ambiguous";
         title: string;
         assigned_to: string | null;
         due_at: Timestamp | null;
+        reminder_at: Timestamp | null;
         status: "open" | "done" | "overdue";
         priority: "urgent" | "high" | "normal" | "low";
         kind: "callback" | "sms" | "dispatch" | "documents" | "billing" | "handover" | "other";
@@ -616,11 +623,63 @@ export type Database = {
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
+      motorist_notes: Table<{
+        id: string;
+        organization_id: string;
+        owner_profile_id: string;
+        title: string;
+        body: string;
+        revision: number;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_note_shares: Table<{
+        note_id: string;
+        recipient_profile_id: string;
+        organization_id: string;
+      }>;
+      motorist_task_workspace_settings: Table<{
+        organization_id: string;
+        enabled: boolean;
+        writer_inventory_verified_at: Timestamp | null;
+        writer_inventory_note: string | null;
+      }>;
+      motorist_task_case_links: Table<{
+        organization_id: string;
+        task_id: string;
+        case_id: string;
+        created_at: Timestamp;
+      }>;
+      motorist_task_origins: Table<{
+        organization_id: string;
+        task_id: string;
+        source_type: "callback" | "sms" | "location";
+        source_id: string;
+        origin_case_id: string;
+        created_at: Timestamp;
+        cancelled_at: Timestamp | null;
+        cancellation_reason: string | null;
+      }>;
+      motorist_task_messages: Table<{
+        id: string;
+        organization_id: string;
+        task_id: string;
+        author_profile_id: string;
+        body: string;
+        client_message_id: string;
+        created_at: Timestamp;
+      }>;
+      motorist_task_assignment_deliveries: Table<{
+        notification_id: string; organization_id: string; task_id: string; recipient_profile_id: string;
+        generation: number; status: "pending" | "processing" | "sent" | "cancelled" | "failed";
+        attempts: number; lease_id: string | null; available_at: Timestamp; claimed_at: Timestamp | null; created_at: Timestamp;
+      }>;
       motorist_task_reminders: Table<{
         id: string;
         organization_id: string;
-        case_id: string;
+        case_id: string | null;
         task_id: string;
+        generation: number;
         recipient_profile_id: string | null;
         visibility: "private" | "team";
         channels: string[];
@@ -1349,6 +1408,7 @@ export type Database = {
         organization_id: string;
         live_calls_enabled: boolean;
         sms_live_sends: boolean;
+        monitor_invites_enabled: boolean;
         daily_leg_soft_cap: number;
         park_max_minutes: number;
         destination_allowlist: string[];
@@ -1458,6 +1518,41 @@ export type Database = {
       }>;
     };
     Functions: {
+      motorist_ensure_task_assignment: { Args: { p_organization_id: string; p_task_id: string }; Returns: Json };
+      motorist_claim_task_assignments: { Args: { p_organization_id: string; p_task_id?: string | null; p_limit?: number }; Returns: Json };
+      motorist_finish_task_assignment: { Args: { p_organization_id: string; p_notification_id: string; p_lease_id: string; p_success: boolean }; Returns: boolean };
+
+      motorist_notebook: {
+        Args: { p_organization_id: string; p_actor_profile_id: string; p_action: string; p_note_id?: string | null; p_expected_revision?: number | null; p_title?: string; p_body?: string; p_recipients?: string[] };
+        Returns: Json;
+      };
+      motorist_task_workspace: {
+        Args: { p_organization_id: string; p_actor_profile_id: string; p_action: string; p_task_id?: string | null; p_input?: Json };
+        Returns: Json;
+      };
+      motorist_resolve_callback_target: { Args: { p_organization_id: string; p_number: string }; Returns: Json };
+      motorist_contact_callback_policy: { Args: { p_organization_id: string; p_actor_id: string; p_contact_id: string; p_action: string; p_non_callback?: boolean; p_target_contact_id?: string | null; p_expected_revision?: number; p_verified?: boolean }; Returns: Json };
+      motorist_approve_callback_target: { Args: { p_organization_id: string; p_actor_id: string; p_request_id: string; p_verification_id: string }; Returns: Json };
+      motorist_complete_task_source_v1: {
+        Args: { p_organization_id: string; p_source_type: string; p_source_id: string; p_actor_id: string | null };
+        Returns: Json;
+      };
+      motorist_cancel_unavailable_reminder: { Args: { p_organization_id: string; p_reminder_id: string }; Returns: undefined };
+      motorist_workspace_capabilities: {
+        Args: { p_organization_id: string; p_actor_id: string };
+        Returns: Json;
+      };
+      motorist_notification_action: { Args: { p_organization_id: string; p_actor_id: string; p_action: string; p_notification_id?: string | null; p_task_id?: string | null; p_snoozed_until?: string | null }; Returns: Json };
+      motorist_case_pdf_snapshot: {
+        Args: { p_organization_id: string; p_actor_id: string; p_case_id: string };
+        Returns: Json;
+      };
+      motorist_cancel_stale_task_reminders: { Args: { p_organization_id: string; p_task_id: string }; Returns: undefined };
+      motorist_ensure_task_reminders: { Args: { p_organization_id: string; p_task_id: string; p_actor_id?: string | null; p_channels?: string[] | null }; Returns: Json };
+      motorist_save_case_atomic: {
+        Args: { p_organization_id: string; p_actor_id: string; p_case_id: string; p_expected_updated_at: string; p_case_patch: Json; p_related: Json; p_field_labels: Json };
+        Returns: Json;
+      };
       motorist_create_callback_obligation_v1: { Args: { p_organization_id: string; p_session_id: string; p_plan: Json; p_now: string }; Returns: Json };
       motorist_resolve_callback_v1: { Args: { p_organization_id: string; p_request_id: string; p_actor_id: string | null; p_status: string; p_proof?: Json | null; p_notes?: string | null }; Returns: Json };
       motorist_reconcile_callback_contact_v1: { Args: { p_organization_id: string; p_session_id: string; p_proof: Json }; Returns: Json };

@@ -2,8 +2,19 @@ import { describe, expect, it, vi } from "vitest";
 import { createFakeSupabase } from "@/test/fake-supabase";
 const admin = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: admin }));
-import { loadSmsHistory } from "./sms-repository";
+import { loadSmsHistory, loadSmsOptions } from "./sms-repository";
 describe("shared SMS history", () => {
+  it("offers explicit original-case open task options scoped to the organization", async () => {
+    const fake = createFakeSupabase(); admin.mockReturnValue(fake.admin);
+    fake.db.seed("motorist_case_tasks", [
+      { id: "open", organization_id: "org", case_id: "case", status: "open", title: "Choose me" },
+      { id: "done", organization_id: "org", case_id: "case", status: "done", title: "Done" },
+      { id: "foreign", organization_id: "other", case_id: "case", status: "open" },
+      { id: "independent", organization_id: "org", case_id: null, status: "open" },
+    ]);
+    expect((await loadSmsOptions("org")).tasks).toEqual([{ id: "open", caseId: "case", title: "Choose me" }]);
+  });
+
   it("includes messages without cases and isolates organization and case filters", async () => {
     const fake = createFakeSupabase(); admin.mockReturnValue(fake.admin);
     fake.db.seed("motorist_sms_messages", [

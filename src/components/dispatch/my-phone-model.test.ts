@@ -12,6 +12,7 @@ import {
   describePauseReason,
   describePresence,
   describeWrapUp,
+  presenceChoice,
   presenceLabel,
   presenceTone,
   testCallTarget,
@@ -89,6 +90,16 @@ describe("presence vocabulary", () => {
     expect(presenceTone("offline")).toBe("neutral");
     expect(presenceTone(null)).toBe("neutral");
   });
+
+  it("maps every status onto the manual choice it belongs to", () => {
+    // The tester read the filled button as "current state": after activating
+    // a pause, the selected choice must move to the pause button.
+    expect(presenceChoice("paused")).toBe("paused");
+    expect(presenceChoice("offline")).toBe("offline");
+    for (const status of ["available", "ringing", "on_call", "after_call_work"]) expect(presenceChoice(status)).toBe("available");
+    expect(presenceChoice(null)).toBeNull();
+    expect(presenceChoice("something-new")).toBeNull();
+  });
 });
 
 describe("wrap-up", () => {
@@ -134,6 +145,17 @@ describe("describePresence", () => {
   it("names the pause reason when there is one", () => {
     expect(describePresence(presence({ status: "paused", pauseReasonId: "reason-1" }), [reason()])).toContain("Obed");
     expect(describePresence(presence({ status: "paused", pauseReasonId: null }), [reason()])).toContain("pauzu");
+  });
+
+  it("tells a timed pause when it ends and, past that, that the operator is still paused", () => {
+    const paused = presence({ status: "paused", pauseReasonId: "reason-1" });
+    // NOW is 12:00 in Bratislava; a 30-minute "Obed" ends at 12:30.
+    expect(describePresence(paused, [reason()], NOW)).toBe("Máš pauzu: Obed (do 12:30). Hovor ti nezazvoní.");
+    expect(describePresence(paused, [reason()], new Date(NOW.getTime() + 30 * 60_000))).toContain("mala skončiť o 12:30.");
+    expect(describePresence(paused, [reason()], new Date(NOW.getTime() + 37 * 60_000))).toContain("mala skončiť o 12:30 (pred 7 min)");
+    // Without a limit or a clock the sentence stays as it was.
+    expect(describePresence(paused, [reason({ maxMinutes: null })], NOW)).toBe("Máš pauzu: Obed. Hovor ti nezazvoní.");
+    expect(describePresence(paused, [reason()])).toBe("Máš pauzu: Obed. Hovor ti nezazvoní.");
   });
 
   it("says a call blocks the change", () => {

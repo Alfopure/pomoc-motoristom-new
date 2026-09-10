@@ -20,7 +20,7 @@ export async function GET() {
     return Response.json({ dispatchData });
   } catch (error) {
     if (error instanceof MutationError) {
-      return Response.json({ error: error.message }, { status: error.status });
+      return Response.json({ error: error.message, code: error.code }, { status: error.status });
     }
 
     console.error("Case refresh failed:", error);
@@ -39,7 +39,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     try {
       const dispatchData = await loadDispatchData();
       if (dispatchData.source === "supabase") {
-        return Response.json({ caseId: caseRow.id, dispatchData, warnings });
+        return Response.json({ caseId: caseRow.id, committedRevision: caseRow.updated_at, dispatchData, warnings });
       }
     } catch (refreshError) {
       console.error("Case update succeeded but canonical refresh failed:", refreshError);
@@ -47,10 +47,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
     // The mutation already committed. Tell the client to reconcile with a safe GET
     // instead of returning an error that could trigger a duplicate PATCH.
-    return Response.json({ caseId: caseRow.id, refreshRequired: true, warnings });
+    return Response.json({ caseId: caseRow.id, committedRevision: caseRow.updated_at, refreshRequired: true, warnings });
   } catch (error) {
     if (error instanceof MutationError) {
-      return Response.json({ error: error.message }, { status: error.status });
+      return Response.json({ error: error.message, code: error.code }, { status: error.status });
     }
 
     console.error("Case update failed:", error);

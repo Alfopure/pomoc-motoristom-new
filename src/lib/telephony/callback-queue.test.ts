@@ -126,6 +126,26 @@ describe("sortCallbackQueue", () => {
     expect(sorted.map((row) => row.id)).toEqual(["old", "new"]);
     expect(rows.map((row) => row.id)).toEqual(["old", "new"]);
   });
+
+  it("offers newest-first with the same stable tie-break", () => {
+    const rows = [
+      request({ id: "b", createdAt: minutesAgo(5) }),
+      request({ id: "c", createdAt: minutesAgo(40) }),
+      request({ id: "a", createdAt: minutesAgo(5) }),
+    ];
+    expect(sortCallbackQueue(rows, "newest").map((row) => row.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("orders by the promise deadline, with rows that have none last", () => {
+    const rows = [
+      // Created recently but promised sooner than the older row.
+      request({ id: "soon", createdAt: minutesAgo(2), dueAt: new Date(NOW + 5 * 60_000).toISOString() }),
+      request({ id: "later", createdAt: minutesAgo(20), dueAt: new Date(NOW + 40 * 60_000).toISOString() }),
+      request({ id: "fallback", createdAt: minutesAgo(10), dueAt: null }),
+      request({ id: "undated", createdAt: "x", dueAt: null }),
+    ];
+    expect(sortCallbackQueue(rows, "deadline").map((row) => row.id)).toEqual(["soon", "fallback", "later", "undated"]);
+  });
 });
 
 describe("callbackQueueSummary", () => {
