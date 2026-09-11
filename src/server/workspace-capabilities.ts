@@ -3,8 +3,9 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { unavailableWorkspaceCapabilities, type WorkspaceCapabilities } from "@/domain/workspace-capabilities";
 import { MutationError } from "./mutation-error";
 
-export async function loadWorkspaceCapabilities(actor: { organizationId: string; profileId: string }): Promise<WorkspaceCapabilities> {
-  const { data, error } = await createSupabaseAdminClient().rpc("motorist_workspace_capabilities", { p_organization_id: actor.organizationId, p_actor_id: actor.profileId });
+export async function loadWorkspaceCapabilities(actor: { organizationId: string; profileId: string }, signal?: AbortSignal): Promise<WorkspaceCapabilities> {
+  const request = createSupabaseAdminClient().rpc("motorist_workspace_capabilities", { p_organization_id: actor.organizationId, p_actor_id: actor.profileId });
+  const { data, error } = await (signal ? request.abortSignal(signal) : request);
   // An old schema is a supported pre-activation state. Other failures must not
   // silently route writes back to an older mutation workflow.
   if (error?.code === "PGRST202" || error?.code === "42883") return { ...unavailableWorkspaceCapabilities };

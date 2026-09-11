@@ -1,4 +1,5 @@
 "use client";
+import type { CaseDetailData } from "@/data/case-detail";
 
 import { useState } from "react";
 import { ArrowLeft, FileText, Plus } from "lucide-react";
@@ -25,6 +26,7 @@ type ExpandedCasePanelProps = {
   onBackToCockpit: () => void;
   onCaseCreated: (dispatchData: DispatchData, caseId: string, notice?: string) => void;
   onDataChange?: (dispatchData: DispatchData) => void;
+  onCaseChange?: (caseDetail: CaseDetailData) => void;
   /** Click-to-call from the case card; absent while telephony is not configured. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
   onLinkCall?: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
@@ -47,6 +49,7 @@ export function ExpandedCasePanel({
   onBackToCockpit,
   onCaseCreated,
   onDataChange,
+  onCaseChange,
   onDial,
   onLinkCall,
   onDirtyChange,
@@ -118,6 +121,7 @@ export function ExpandedCasePanel({
               editing
               embedded
               onDataChange={onDataChange}
+            onCaseChange={onCaseChange}
               onDial={onDial}
               onLinkCall={onLinkCall}
               onDirtyChange={handleDirtyChange}

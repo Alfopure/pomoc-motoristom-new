@@ -1,4 +1,5 @@
 "use client";
+import { mergeCaseDetail } from "@/data/case-detail";
 
 import { CallMonitorInvitations } from "./CallMonitorInvitations";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
@@ -313,6 +314,24 @@ function DispatchConsoleContent({
   const [activeView, setActiveView] = useState<View>("dispatch");
   const [mobilePane, setMobilePane] = useState<"cases" | "workspace">("cases");
   const pushDeepLinkHandled = useRef(false);
+  const [attendanceLoaded, setAttendanceLoaded] = useState(source !== "supabase");
+  const [attendanceError, setAttendanceError] = useState<string | null>(null);
+  useEffect(() => {
+    if (activeView !== "attendance" || source !== "supabase") return;
+    const controller = new AbortController();
+    const originalAttendance = attendance;
+    void fetch("/api/attendance", { cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]) }).then(async response => {
+      const body = await response.json();
+      if (!response.ok || !body.attendance) throw new Error(body.error ?? "Dochádzka je nedostupná.");
+      if (!controller.signal.aborted) {
+        setDispatchData(current => current.attendance === originalAttendance ? { ...current, attendance: body.attendance } : current);
+        setAttendanceLoaded(true); setAttendanceError(null);
+      }
+    }).catch(error => { if (!controller.signal.aborted) setAttendanceError(error instanceof Error ? error.message : "Dochádzka je nedostupná."); });
+    return () => controller.abort();
+    // Opening this module starts one bounded read; mutations own subsequent state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, source]);
   const fleetRefresh = useFleetRefresh(source === "supabase" && ["dispatch", "fleet", "cases"].includes(activeView), setDispatchData);
   const [pinnedNavigationViews, setPinnedNavigationViews] = useState<PinnableNavigationView[]>([
     ...DEFAULT_PINNED_NAVIGATION_VIEWS,
@@ -744,6 +763,17 @@ function DispatchConsoleContent({
     () => (workspaceCase ? createDispatchMapModel(workspaceCase, branches, fleetAssets, activePriceRule) : undefined),
     [activePriceRule, branches, fleetAssets, workspaceCase],
   );
+  const visibleCaseId = workspaceCase?.id;
+  useEffect(() => {
+    if (source !== "supabase" || !visibleCaseId || activeView !== "dispatch") return;
+    const controller = new AbortController();
+    void fetch(`/api/cases/${visibleCaseId}`, { headers: { "x-case-response": "detail-v2" }, cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]) }).then(async response => {
+      const body = await response.json();
+      if (!response.ok || body.caseDetail?.id !== visibleCaseId) throw new Error("Aktuálny detail a históriu prípadu sa nepodarilo načítať.");
+      if (!controller.signal.aborted) setDispatchData(current => mergeCaseDetail(current, body.caseDetail));
+    }).catch(error => { if (!controller.signal.aborted) setMutationNotice(error instanceof Error ? error.message : "Detail prípadu je nedostupný."); });
+    return () => controller.abort();
+  }, [visibleCaseId, source, activeView]);
   const refreshCallHistory = useCallback(async () => {
     if (callHistoryRefreshInFlight.current) return;
     callHistoryRefreshInFlight.current = true;
@@ -772,6 +802,8 @@ function DispatchConsoleContent({
   }, []);
 
   useEffect(() => {
+    if (source !== "supabase" || activeView !== "call-center") return;
+    const initialHistoryRead = window.setTimeout(() => void refreshCallHistory(), 0);
     // History is the least time-critical read here: a call that ended while the
     // tab was hidden is equally interesting a few seconds later.
     let cancelled = false;
@@ -793,10 +825,11 @@ function DispatchConsoleContent({
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
+      window.clearTimeout(initialHistoryRead);
       document.removeEventListener("visibilitychange", onVisible);
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     };
-  }, [refreshCallHistory]);
+  }, [refreshCallHistory, activeView, source]);
 
   const navItems: NavigationItem[] = [
     { icon: LayoutDashboard, label: "Nástenka", shortLabel: "Nástenka", view: "dispatch" },
@@ -1291,6 +1324,7 @@ function DispatchConsoleContent({
       const response = await fetch(`/api/cases/location-updates?${params.toString()}`, {
         cache: "no-store",
         credentials: "same-origin",
+        signal: AbortSignal.timeout(8_000),
       });
       const result = (await response.json().catch(() => null)) as LiveUpdatesResponse | null;
 
@@ -1312,18 +1346,27 @@ function DispatchConsoleContent({
   useEffect(() => {
     if (source !== "supabase") return;
 
-    void pollLiveUpdates();
-    const interval = window.setInterval(() => void pollLiveUpdates(), 10_000);
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") void pollLiveUpdates();
+    let stopped = false;
+    let polling = false;
+    let timer: number;
+    const tick = async () => {
+      window.clearTimeout(timer);
+      if (stopped || polling) return;
+      polling = true;
+      try { if (document.visibilityState === "visible") await pollLiveUpdates(); } finally { polling = false; }
+      if (!stopped) timer = window.setTimeout(tick, 10_000 + Math.random() * 1_000);
     };
-
+    const refreshWhenVisible = () => { if (document.visibilityState === "visible") void tick(); };
+    void tick();
     document.addEventListener("visibilitychange", refreshWhenVisible);
     window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener("online", refreshWhenVisible);
     return () => {
-      window.clearInterval(interval);
+      stopped = true;
+      window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
       window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener("online", refreshWhenVisible);
     };
   }, [pollLiveUpdates, source]);
 
@@ -2377,6 +2420,7 @@ function DispatchConsoleContent({
             onCaseCreated={handleCaseCreated}
             onCollapse={collapseWorkspace}
             onDataChange={setDispatchData}
+            onCaseChange={(detail) => setDispatchData(current => mergeCaseDetail(current, detail))}
             onDial={telephonyConfigured ? dialNumber : undefined}
             onLinkCall={linkPhoneCallToCase}
             caseEditorRevision={caseEditorRevision}
@@ -2438,7 +2482,7 @@ function DispatchConsoleContent({
         />
       )}
 
-      {activeView === "attendance" && <AttendanceModule attendance={attendance} operators={effectiveOperators} onDataChange={setDispatchData} />}
+      {activeView === "attendance" && (attendanceLoaded ? <AttendanceModule attendance={attendance} operators={effectiveOperators} onDataChange={setDispatchData} /> : <p role="status">{attendanceError ?? "Načítavam dochádzku…"}</p>)}
       {activeView === "reports" && <ReportDashboard />}
       {activeView === "fleet" && (
         <FleetModule

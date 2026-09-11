@@ -12,7 +12,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const { id } = await params;
     const input = (await request.json()) as UpdateAccessUserInput;
     await updateAccessUser(actor, id, input);
-    const dispatchData = await loadDispatchData();
+    const dispatchData = await loadDispatchData(actor, { access: true });
 
     return Response.json({ dispatchData });
   } catch (error) {
@@ -34,7 +34,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
     const actor = await requireDefaultMotoristActor(["admin"]);
     const { id } = await params;
     const result = await deleteAccessUser(actor, id);
-    const dispatchData = await loadDispatchData();
+    const dispatchData = await loadDispatchData(actor, { access: true });
     const completion =
       result.mode === "anonymised"
         ? `Účet ${result.displayName} bol vymazaný. Pracovná história zostala zachovaná bez aktívneho používateľského účtu.`

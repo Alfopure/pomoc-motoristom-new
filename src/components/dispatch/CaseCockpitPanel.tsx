@@ -1,4 +1,5 @@
 "use client";
+import type { CaseDetailData } from "@/data/case-detail";
 
 import { useEffect, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
@@ -31,6 +32,7 @@ type CaseCockpitPanelProps = {
   priceRule?: PriceRule;
   onCollapse: () => void;
   onDataChange: (dispatchData: DispatchData) => void;
+  onCaseChange?: (caseDetail: CaseDetailData) => void;
   /** Click-to-call from the case card; absent while telephony is not configured. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
   onLinkCall?: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
@@ -53,6 +55,7 @@ export function CaseCockpitPanel({
   model,
   onCollapse,
   onDataChange,
+  onCaseChange,
   onDial,
   onLinkCall,
   onDirtyChange,
@@ -235,6 +238,7 @@ export function CaseCockpitPanel({
           embedded
           focusedTaskId={focusedTaskId}
           onDataChange={onDataChange}
+            onCaseChange={onCaseChange}
           onDial={onDial}
           onLinkCall={onLinkCall}
           onDirtyChange={onDirtyChange}

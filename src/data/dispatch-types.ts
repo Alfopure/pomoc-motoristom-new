@@ -155,3 +155,5 @@ export type DispatchData = {
   source: DispatchDataSource;
   warning?: string;
 };
+
+export type FleetData = Pick<DispatchData, "fleetAssets" | "fleetProviderVehicles" | "commanderVehicles" | "commanderGpsLastSuccessAt" | "commanderGpsLatestRunAt" | "commanderGpsLatestStatus" | "integrations">;
