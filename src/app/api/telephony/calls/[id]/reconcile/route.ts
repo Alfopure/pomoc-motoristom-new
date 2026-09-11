@@ -2,7 +2,7 @@ import { handleCallActionRoute } from "@/server/telephony/call-action-route";
 import { reconcileBrowserCall } from "@/server/telephony/call-reconciliation";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   return handleCallActionRoute(request, context, {

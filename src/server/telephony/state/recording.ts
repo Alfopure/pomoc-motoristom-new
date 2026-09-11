@@ -45,6 +45,18 @@ function eligible(session: SessionRow, context: RoutingContext, state: Recording
     (session.direction === "inbound" ? state.policy.inbound : session.direction === "outbound" && state.policy.outbound));
 }
 
+/** A global recording switch alone cannot make a silent call require a media lease. */
+export function requiresRecordingLease(session: SessionRow, context: RoutingContext): boolean {
+  const state = policyState(session, context);
+  if (!state) return false;
+  // Frozen policy decides whether this call may capture; live policy may revoke
+  // it. Uncertain capture and pending privacy/audio work remain serialized even
+  // after either policy is disabled.
+  return Boolean(state.recorders.some(potentiallyRecording) || state.barrier || state.pendingAudio ||
+    state.policy.enabled && context.recordingPolicy?.enabled &&
+    (session.direction === "inbound" ? state.policy.inbound : session.direction === "outbound" && state.policy.outbound));
+}
+
 function patched(session: SessionRow, patch: Record<string, unknown>): SessionRow {
   return { ...session, metadata: toJson({ ...readMeta(session), ...patch }) };
 }
