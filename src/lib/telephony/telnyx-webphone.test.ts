@@ -735,6 +735,108 @@ describe("TelnyxWebphone", () => {
     h.phone.stop();
   });
 
+  it.each(["resolve", "reject"])("releases a silently terminated answer when the SDK promise settles with %s", async (settlement) => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const answer = deferred<void>();
+    const call = fakeCall({ answer: () => answer.promise });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    h.phone.answer();
+    expect(h.phone.getSnapshot().answering).toBe(true);
+    call.state = "destroy";
+    if (settlement === "resolve") answer.resolve(); else answer.reject(new Error("call ended"));
+    await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: null, answering: false });
+    h.phone.stop();
+  });
+
+  it("releases local hangup before its signaling promise finishes without a terminal notification", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const signaling = deferred<void>();
+    const call = fakeCall({ state: "active", hangup: () => { call.state = "hangup"; return signaling.promise; } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    const ending = h.phone.hangup();
+    expect(h.phone.getSnapshot()).toMatchObject({ call: null, answering: false });
+    const next = fakeCall({ id: "next-call", state: "active" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: next });
+    signaling.reject(new Error("BYE failed"));
+    await ending;
+    expect(h.phone.getSnapshot().call?.id).toBe(next.id);
+    h.phone.stop();
+  });
+
+  it("keeps a live call when the SDK hangup throws without confirming termination", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const call = fakeCall({ state: "active", hangup: () => { throw new Error("unconfirmed hangup"); } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    await h.phone.hangup();
+    expect(h.phone.getSnapshot().call?.id).toBe(call.id);
+    h.phone.stop();
+  });
+
+  it("clears a matching server-confirmed end without awaiting SDK hangup and ignores stale updates", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const signaling = deferred<void>();
+    const hangup = vi.fn(() => signaling.promise);
+    const call = fakeCall({ state: "active", hangup });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    h.phone.confirmCallEnded("older-call");
+    expect(h.phone.getSnapshot().call?.id).toBe(call.id);
+    expect(hangup).not.toHaveBeenCalled();
+    h.phone.confirmCallEnded(call.id);
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: null, answering: false });
+    await flush();
+    expect(hangup).toHaveBeenCalledOnce();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(h.phone.getSnapshot().call).toBeNull();
+    const next = fakeCall({ id: "next-call", state: "active" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: next });
+    h.phone.confirmCallEnded(call.id);
+    signaling.reject(new Error("already gone"));
+    await flush();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(h.phone.getSnapshot().call?.id).toBe(next.id);
+    expect(h.client.disconnected).toBe(false);
+    h.phone.stop();
+  });
+
+  it("reconciles terminal SDK state on call error while retaining the healthy registration", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const call = fakeCall({ state: "active" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "destroy";
+    h.client.emit("telnyx.error", { error: { code: 44003 }, callId: call.id });
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: null, answering: false });
+    expect(h.phone.getSnapshot().callError).toBeTruthy();
+    expect(h.client.disconnected).toBe(false);
+    h.phone.stop();
+  });
+
+  it("clears a silently terminated call when the mobile browser resumes", async () => {
+    audioDom();
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const call = fakeCall({ state: "active" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "hangup";
+    window.dispatchEvent(new Event("pageshow"));
+    expect(h.phone.getSnapshot().call).toBeNull();
+    h.phone.stop();
+  });
+
   it.each(["ended", "stopped"])("ignores an answer rejection after its call is %s", async (ending) => {
     const h = harness();
     h.phone.start();
@@ -765,6 +867,7 @@ describe("TelnyxWebphone", () => {
     expect(h.phone.getSnapshot().status).toBe("registered");
     expect(h.phone.getSnapshot().callError).toBeTruthy();
     expect(h.client.disconnected).toBe(false);
+    expect(h.phone.getSnapshot().call?.id).toBe(call.id);
     call.state = "hangup";
     h.client.emit("telnyx.notification", { type: "callUpdate", call });
     expect(h.phone.getSnapshot().callError).toBeTruthy();

@@ -126,6 +126,66 @@ test("a real call-control failure remains visible", async ({ page }) => {
   await expect(page.locator("#state")).toHaveText("Ukončenie hovoru zlyhalo.");
 });
 
+for (const outcome of ["success", "call_gone", "not_active"] as const) {
+  test(`${outcome} hangup unlocks the matched browser call without an SDK hangup notification`, async ({ page }) => {
+    await page.evaluate(() => window.phoneHarness.connected());
+    await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+    await expect(page.locator("#state")).toHaveAttribute("data-call", "fixture-incoming");
+    await page.evaluate(() => window.phoneHarness.begin("hangup"));
+    await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+    await page.evaluate((result) => {
+      window.phoneHarness.calls = [];
+      window.phoneHarness.requests[0].resolve(result === "success"
+        ? Response.json({ ok: true })
+        : Response.json({ code: result, error: "Hovor už skončil." }, { status: 409 }));
+    }, outcome);
+    await expect(page.locator("#state")).toHaveAttribute("data-call", "");
+    await expect(page.locator("#state")).toHaveAttribute("data-server-call", "");
+    await expect(page.locator("#state")).toHaveAttribute("data-status", "registered");
+    expect(await page.evaluate(() => window.phoneHarness.sdkHangups)).toBe(1);
+  });
+}
+
+test("a failed hangup keeps the active browser call available", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.connected());
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  await page.evaluate(() => window.phoneHarness.begin("hangup"));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ error: "Ukončenie hovoru zlyhalo." }, { status: 502 })));
+  await expect(page.locator("#state")).toHaveText("Ukončenie hovoru zlyhalo.");
+  await expect(page.locator("#state")).toHaveAttribute("data-call", "fixture-incoming");
+  expect(await page.evaluate(() => window.phoneHarness.sdkHangups)).toBe(0);
+});
+
+test("browser hangup verifies the exact server leg immediately when its webhook is missing", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.connected());
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  await page.evaluate(() => window.phoneHarness.callState("hangup"));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  expect(await page.evaluate(() => ({ url: window.phoneHarness.requests[0].url, body: window.phoneHarness.requests[0].body })))
+    .toEqual({ url: "/api/telephony/calls/fixture/reconcile", body: JSON.stringify({ callControlId: "incoming-leg" }) });
+  await page.evaluate(() => {
+    window.phoneHarness.calls = [];
+    window.phoneHarness.requests[0].resolve(Response.json({ reconciled: true }));
+  });
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "");
+});
+
+test("a late hangup response cannot clear the next incoming call", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.connected());
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  await page.evaluate(() => window.phoneHarness.begin("hangup"));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  await page.evaluate(() => {
+    window.phoneHarness.callState("hangup");
+    window.phoneHarness.callState("ringing", "next-incoming");
+  });
+  await expect(page.locator("#state")).toHaveAttribute("data-call", "next-incoming");
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ code: "not_active" }, { status: 409 })));
+  await expect(page.locator("#state")).toHaveAttribute("data-call", "next-incoming");
+  expect(await page.evaluate(() => window.phoneHarness.sdkHangups)).toBe(0);
+});
+
 
 test("temporary hold 503 preserves configuration, server reason, polling and hangup", async ({ page }) => {
   await page.evaluate(() => window.phoneHarness.begin("hold"));

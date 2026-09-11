@@ -32,7 +32,7 @@ import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "@/lib/telephony/webphone-model";
 
 import type { TransferRequest } from "./CallTransferPicker";
-import { partyBusyKey, PHONE_ACTION_ERRORS, type PhoneCallAction, type PhonePartyAction } from "./phone-bar-model";
+import { partyBusyKey, phoneBarCallMatchesBrowser, PHONE_ACTION_ERRORS, type PhoneCallAction, type PhonePartyAction } from "./phone-bar-model";
 
 export type PhonePauseReason = { id: string; code: string; label: string; maxMinutes: number | null };
 export type PhonePresenceAction = { status: "available" | "paused" | "offline"; pauseReasonId?: string };
@@ -123,6 +123,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const { enabled, operators, profileId } = input;
   const [configured, setConfigured] = useState<boolean | null>(enabled ? null : false);
   const [snapshot, setSnapshot] = useState<ActiveCallsPayload>(EMPTY_ACTIVE_CALLS);
+  const snapshotRef = useRef(snapshot);
   const [phone, setPhone] = useState<WebphoneSnapshot>(IDLE_SNAPSHOT);
   const [pauseReasons, setPauseReasons] = useState<PhonePauseReason[]>([]);
   const [pauseReasonsToken, setPauseReasonsToken] = useState(0);
@@ -151,6 +152,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   // topic is keyed on it, so the channel opens only after that answer.
   const organizationId = snapshot.organizationId;
 
+  useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
+
   // --- browser phone ---------------------------------------------------------
 
   useEffect(() => {
@@ -159,7 +162,25 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     webphoneRef.current = webphone;
     webphone.setIncomingOfferPolicy(incomingPolicyRef.current);
     let callState = "";
+    let previousCall: WebphoneSnapshot["call"] = null;
     const unsubscribe = webphone.subscribe((next) => {
+      const endedCall = previousCall;
+      previousCall = next.call;
+      if (endedCall?.telnyxCallControlId && endedCall.id !== next.call?.id) {
+        const callControlId = endedCall.telnyxCallControlId;
+        const sessionId = endedCall.sessionId ?? snapshotRef.current.calls.find((call) =>
+          call.legs.some((leg) => leg.callControlId === callControlId))?.sessionId;
+        if (sessionId) {
+          // A lost hangup webhook must not hold this operator until cron runs.
+          // The server verifies this exact leg with Telnyx before changing it;
+          // a socket disconnect alone does not prove that the call ended.
+          void telephonyJson(`/api/telephony/calls/${encodeURIComponent(sessionId)}/reconcile`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ callControlId }), label: "overenie skončeného hovoru",
+            timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+          }).catch(() => null).finally(() => refreshRef.current?.());
+        }
+      }
       setPhone(next);
       if (next.status === "not_configured") setConfigured(false);
       const nextCallState = next.call ? `${next.call.id}:${next.call.state}` : "";
@@ -454,6 +475,15 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       if (busyAction) return;
       setBusyAction(action);
       setNotice(null);
+      const browser = webphoneRef.current;
+      const browserCall = browser?.getSnapshot().call;
+      const model = buildPhoneBarModel(snapshotRef.current);
+      const serverCall = [model.active, ...model.offers].find((call) => call?.sessionId === sessionId);
+      const endedBrowserCallId = browserCall && serverCall && phoneBarCallMatchesBrowser(serverCall, browserCall)
+        ? browserCall.id : null;
+      const confirmEndedBrowserCall = () => {
+        if (endedBrowserCallId && browser === webphoneRef.current) browser?.confirmCallEnded(endedBrowserCallId);
+      };
       try {
         const execute = async (webphone = webphoneRef.current) => {
           const result = await telephonyJson<{ error?: string; code?: string; operatorLegCallControlId?: string }>(
@@ -475,6 +505,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             // A hangup webhook can trail the caller by a few seconds. An action
             // against that finished call must not poison the next call's status.
             if (result.status === 409 && (result.body?.code === "call_gone" || result.body?.code === "not_active")) {
+              confirmEndedBrowserCall();
               refreshRef.current?.();
               return;
             }
@@ -486,6 +517,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             }
             throw new Error(result.body?.error ?? PHONE_ACTION_ERRORS[action]);
           }
+          if (action === "hangup") confirmEndedBrowserCall();
           // A pickup dials this operator's own leg server-side: remember its
           // call-control id so the browser answers exactly that invite.
           if (result.body?.operatorLegCallControlId && webphone === webphoneRef.current) {
