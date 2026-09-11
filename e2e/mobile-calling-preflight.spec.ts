@@ -186,6 +186,28 @@ test("a late hangup response cannot clear the next incoming call", async ({ page
   expect(await page.evaluate(() => window.phoneHarness.sdkHangups)).toBe(0);
 });
 
+test("reopening the app verifies a stuck server call once without a previous browser call", async ({ page }) => {
+  await page.evaluate(() => {
+    window.phoneHarness.connected(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  expect(await page.evaluate(() => window.phoneHarness.requests[0].url)).toBe("/api/telephony/calls/fixture/reconcile");
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ reconciled: false, reason: "alive" })));
+  const reads = await page.evaluate(() => window.phoneHarness.activeReads);
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.activeReads)).toBeGreaterThan(reads);
+  expect(await page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  // A later foreground check may now confirm that the same leg really ended.
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(2);
+  await page.evaluate(() => {
+    window.phoneHarness.calls = [];
+    window.phoneHarness.requests[1].resolve(Response.json({ reconciled: true }));
+  });
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "");
+});
+
 
 test("temporary hold 503 preserves configuration, server reason, polling and hangup", async ({ page }) => {
   await page.evaluate(() => window.phoneHarness.begin("hold"));

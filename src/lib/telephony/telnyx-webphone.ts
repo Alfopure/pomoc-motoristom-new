@@ -157,6 +157,7 @@ export class TelnyxWebphone {
   private incomingPolicy: IncomingOfferPolicy = { automaticAllowed: true };
   private withdrawnInvites = new Set<string>();
   private confirmedEndedCallIds = new Set<string>();
+  private endedCallControlIds = new Set<string>();
   /** Our session id for the call currently on this tab's media leg, when known. */
   private callSessionId: string | null = null;
   private listeners = new Set<(snapshot: WebphoneSnapshot) => void>();
@@ -259,6 +260,9 @@ export class TelnyxWebphone {
    * is on `telnyxIDs.telnyxCallControlId`, never on arrival order.
    */
   expectOperatorLeg(input: { callControlId: string; sessionId: string }): void {
+    // An invite can end before the API response identifies its operator leg.
+    // That late response must not reserve the mobile phone for another 90 s.
+    if (this.endedCallControlIds.has(input.callControlId)) return;
     this.expected = rememberExpectedLeg(this.expected, { ...input, at: this.now() }, this.now());
     // The invite usually arrives before `POST /api/telephony/calls` answers (the
     // route still writes leg/session rows), so the ringing call is re-evaluated
@@ -274,6 +278,7 @@ export class TelnyxWebphone {
     if ((policy.presenceRevision ?? 0) < (this.incomingPolicy.presenceRevision ?? 0)) return;
     this.incomingPolicy = policy;
     for (const leg of policy.explicitLegs ?? []) {
+      if (this.endedCallControlIds.has(leg.callControlId)) continue;
       this.expected = rememberExpectedLeg(this.expected, { ...leg, at: this.now() }, this.now());
     }
     if (this.call && RINGING_STATES.has(String(this.call.state).toLowerCase())) {
@@ -355,8 +360,6 @@ export class TelnyxWebphone {
     const call = this.call;
     if (!call || call.id !== callId) return;
     this.confirmedEndedCallIds.add(callId);
-    this.expected = this.expected.filter((leg) => leg.callControlId !== call.telnyxIDs?.telnyxCallControlId);
-    this.scheduleExpectedLegExpiry();
     this.clearCurrentCall();
     this.publish();
     // Server confirmation is authoritative even when the stale SDK call can
@@ -709,6 +712,7 @@ export class TelnyxWebphone {
     this.clientGeneration += 1;
     this.connecting = false;
     this.confirmedEndedCallIds.clear();
+    this.endedCallControlIds.clear();
     this.stopRinging();
     this.call = null;
     this.callSessionId = null;
@@ -742,6 +746,7 @@ export class TelnyxWebphone {
     const state = String(call.state ?? "").toLowerCase();
 
     if (DEAD_STATES.has(state)) {
+      this.rememberEndedOperatorLeg(call.telnyxIDs?.telnyxCallControlId);
       if (this.call?.id === call.id) this.clearCurrentCall();
       this.publish();
       return;
@@ -939,7 +944,17 @@ export class TelnyxWebphone {
 
   // --- snapshot --------------------------------------------------------------
 
+  private rememberEndedOperatorLeg(callControlId: string | undefined): void {
+    if (!callControlId) return;
+    this.endedCallControlIds.add(callControlId);
+    const expected = this.expected.filter((leg) => leg.callControlId !== callControlId);
+    if (expected.length === this.expected.length) return;
+    this.expected = expected;
+    this.scheduleExpectedLegExpiry();
+  }
+
   private clearCurrentCall(): void {
+    this.rememberEndedOperatorLeg(this.call?.telnyxIDs?.telnyxCallControlId);
     this.stopRinging();
     this.call = null;
     this.callSessionId = null;

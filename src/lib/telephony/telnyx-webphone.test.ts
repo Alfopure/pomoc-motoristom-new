@@ -379,6 +379,50 @@ describe("TelnyxWebphone", () => {
     expect(h.phone.getSnapshot()).toMatchObject({ pendingOperatorLegs: 1, call: null });
   });
 
+  it("does not reserve an operator leg whose invite ended before the API response or presence poll", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const call = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "hangup";
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    const endedLeg = { callControlId: "cc-1", sessionId: "sess-1" };
+    h.phone.expectOperatorLeg(endedLeg);
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: true, explicitLegs: [endedLeg] });
+    expect(h.phone.getSnapshot()).toMatchObject({ call: null, pendingOperatorLegs: 0 });
+    h.phone.expectOperatorLeg({ callControlId: "next-leg", sessionId: "next-session" });
+    expect(h.phone.getSnapshot().pendingOperatorLegs).toBe(1);
+    h.phone.stop();
+  });
+
+  it("removes only the matching pending leg when a terminal notification precedes its invite", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+    h.phone.expectOperatorLeg({ callControlId: "next-leg", sessionId: "next-session" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: fakeCall({ state: "destroy" }) });
+    expect(h.phone.getSnapshot()).toMatchObject({ call: null, pendingOperatorLegs: 1 });
+    const next = fakeCall({ id: "next-call", telnyxIDs: { telnyxCallControlId: "next-leg", telnyxSessionId: "next-session", telnyxLegId: "next-leg" } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: next });
+    expect(h.phone.getSnapshot()).toMatchObject({ call: { id: next.id, active: true }, pendingOperatorLegs: 0 });
+    h.phone.stop();
+  });
+
+  it("scopes ended operator-leg tracking to the disconnected SDK client", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: fakeCall({ state: "hangup" }) });
+    h.phone.stop();
+    h.phone.start();
+    await flush();
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "sess-1" });
+    expect(h.phone.getSnapshot().pendingOperatorLegs).toBe(1);
+    h.phone.stop();
+  });
+
   it("expires missing invites on their existing TTL and publishes each remaining count", async () => {
     let now = Date.parse("2026-09-03T08:00:00.000Z");
     const h = harness({ now: () => now });

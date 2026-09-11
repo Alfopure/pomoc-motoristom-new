@@ -16,7 +16,7 @@ const harness = {
   stoppedTracks: 0,
   sdkHangups: 0,
   calls: [] as ActiveCallPayload[],
-  connected: () => {
+  connected: (browser = true) => {
     const now = new Date().toISOString();
     harness.calls = [{
       sessionId: "fixture", callId: "fixture-log", state: "talking", direction: "inbound",
@@ -29,7 +29,7 @@ const harness = {
         state: "bridged", toNumber: null, fromNumber: null, answeredAt: now, bridgedAt: now,
         intent: "ring", muted: false, supervisorMode: null }],
     }];
-    harness.callState("active");
+    if (browser) harness.callState("active");
   },
   grant: () => {},
   deny: () => {},
