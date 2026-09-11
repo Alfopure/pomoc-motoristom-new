@@ -17,15 +17,29 @@ export type PresenceRecoveryResult = {
 
 /**
  * Repairs historical ownership only after the entire session is terminal and
- * every leg is closed. Runs in the existing cron; it never contacts a provider.
+ * every leg is closed. It never contacts a provider.
  * The release RPC checks the captured session, revision and token under locks,
  * retaining pause return and history in the same transaction.
  */
 export async function sweepEndedSessionPresence(deps: RecoveryDeps, limit = 100): Promise<PresenceRecoveryResult> {
+  return recoverEndedSessionPresence(deps, { limit, source: "cron" });
+}
+
+/** A console poll repairs only its authenticated operator, including calls no longer in the active snapshot. */
+export async function recoverOwnEndedSessionPresence(deps: RecoveryDeps, profileId: string): Promise<PresenceRecoveryResult> {
+  return recoverEndedSessionPresence(deps, { limit: 1, profileId, source: "calls/active" });
+}
+
+async function recoverEndedSessionPresence(
+  deps: RecoveryDeps,
+  options: { limit: number; profileId?: string; source: string },
+): Promise<PresenceRecoveryResult> {
   const now = (deps.now ?? (() => new Date()))();
-  const candidates = await deps.admin.from("motorist_operator_presence").select("*")
+  let query = deps.admin.from("motorist_operator_presence").select("*")
     .eq("organization_id", deps.organizationId).in("status", ["ringing", "on_call"])
-    .not("current_session_id", "is", null).order("status_since").limit(Math.max(1, Math.min(100, limit)));
+    .not("current_session_id", "is", null);
+  if (options.profileId) query = query.eq("profile_id", options.profileId);
+  const candidates = await query.order("status_since").limit(Math.max(1, Math.min(100, options.limit)));
   if (candidates.error) throw new Error(`stale presence lookup failed: ${candidates.error.message}`);
   const result: PresenceRecoveryResult = { scanned: candidates.data?.length ?? 0, released: 0, skipped: 0, errors: [] };
   for (const presence of candidates.data ?? []) {
@@ -55,7 +69,7 @@ export async function sweepEndedSessionPresence(deps: RecoveryDeps, limit = 100)
       const release = await releaseOperatorPresence(deps.admin, { organizationId: deps.organizationId,
         profileId: presence.profile_id, sessionId, expectedRevision: presence.presence_revision,
         expectedToken: presence.offer_token, status: wrapUpUntil ? "after_call_work" : "available", wrapUpUntil,
-        source: "cron", reason: `ended session presence recovery:${sessionId}` });
+        source: options.source, reason: `ended session presence recovery:${sessionId}` });
       if (release.applied) result.released++;
       else result.skipped++;
     } catch (error) {
