@@ -1,6 +1,7 @@
 import type { CasePriority } from "@/domain/types";
 import { TASK_MESSAGE_LIMIT, type TaskMessage, type TaskMessageCursor, type WorkspaceTask } from "@/domain/task-workspace";
 export type TaskDraft = { title: string; assignedTo: string; dueAt: string; reminderAt: string; priority: CasePriority; status: "open" | "done"; caseIds: string[]; reminderChannels: ("in_app" | "email")[] };
+export type TaskBoardMutation = { status: "open" | "done"; dueAt?: string | null };
 export type TaskWorkspaceSnapshot = {
   tasks: WorkspaceTask[]; selectedId: string | null; creating: boolean; createDraft: TaskDraft;
   drafts: Record<string, { value: TaskDraft; revision: number }>;
@@ -177,17 +178,35 @@ export class TaskWorkspaceStore {
       this.update({ drafts, conflicts: this.state.conflicts.filter(value => value !== id) });
     } catch (error) { if (generation === this.generation && (error as { status?: number }).status === 409) this.update({ conflicts: [...new Set([...this.state.conflicts, id])] }); throw error; }
   });
-  setTaskStatus = async (id: string, status: "open" | "done", expectedRevision?: number): Promise<boolean> => {
+  setTaskStatus = (id: string, status: "open" | "done", expectedRevision?: number): Promise<boolean> => {
+    // Status-only controls historically treat legacy overdue tasks as open.
+    if (status === "open" && this.state.tasks.some(task => task.id === id && task.status === "overdue")) return Promise.resolve(false);
+    return this.moveTask(id, { status }, expectedRevision);
+  };
+  moveTask = async (id: string, patch: TaskBoardMutation, expectedRevision?: number): Promise<boolean> => {
     if (!this.enabled || this.state.hidden || this.state.saving) return false;
     const current = this.state.tasks.find(task => task.id === id);
-    if (!current || (current.status === "done" ? "done" : "open") === status) return false;
+    if (!current) return false;
+    let dueAt = patch.dueAt;
+    if (dueAt !== undefined && dueAt !== null) {
+      if (!Number.isFinite(Date.parse(dueAt))) {
+        this.update({ error: "Skontrolujte termín úlohy." });
+        return false;
+      }
+      dueAt = new Date(dueAt).toISOString();
+    }
+    const sameDueAt = dueAt === undefined || (dueAt === null ? !current.dueAt : Date.parse(current.dueAt) === Date.parse(dueAt));
+    // A board move must clear legacy overdue status even when its date stays
+    // unchanged; grouping still gives that explicit status precedence.
+    if (current.status === patch.status && sameDueAt) return false;
+    const change = dueAt === undefined ? "zmenou stavu" : "presunom úlohy";
     if (this.state.drafts[id]) {
-      this.update({ error: "Pred zmenou stavu uložte rozpracovanú úlohu." });
+      this.update({ error: `Pred ${change} uložte rozpracovanú úlohu.` });
       return false;
     }
     if (this.state.conflicts.includes(id)) {
       this.select(id);
-      this.update({ error: "Pred zmenou stavu načítajte aktuálnu úlohu." });
+      this.update({ error: `Pred ${change} načítajte aktuálnu úlohu.` });
       return false;
     }
     const revision = expectedRevision ?? current.revision;
@@ -195,18 +214,18 @@ export class TaskWorkspaceStore {
     const saved = await this.operation(async () => {
       const generation = this.generation;
       try {
-        const { task } = await this.request(`/api/tasks/${encodeURIComponent(id)}`, { method: "PATCH", ...this.body({ status, expectedRevision: revision }) }) as { task: WorkspaceTask };
+        const { task } = await this.request(`/api/tasks/${encodeURIComponent(id)}`, { method: "PATCH", ...this.body({ status: patch.status, ...(dueAt === undefined ? {} : { dueAt }), expectedRevision: revision }) }) as { task: WorkspaceTask };
         if (generation !== this.generation || this.state.hidden || !this.state.tasks.some(item => item.id === id)) return;
         this.accept(task);
         accepted = true;
-        // Typing can start while the status request is pending. Keep that draft
-        // on its original revision: rebasing it would silently undo this status
+        // Typing can start while the board request is pending. Keep that draft
+        // on its original revision: rebasing it would silently undo this board
         // change (or another writer's newer edit) on the next full draft save.
         const draft = this.state.drafts[id];
         const canonical = this.state.tasks.find(item => item.id === id)!;
         if (draft && draft.revision < canonical.revision) {
           this.select(id);
-          this.update({ conflicts: [...new Set([...this.state.conflicts, id])], error: "Stav je uložený. Rozpracovaná úloha zostala zachovaná; pred ďalším uložením načítajte aktuálnu úlohu." });
+          this.update({ conflicts: [...new Set([...this.state.conflicts, id])], error: `${dueAt === undefined ? "Stav" : "Presun"} je uložený. Rozpracovaná úloha zostala zachovaná; pred ďalším uložením načítajte aktuálnu úlohu.` });
         }
       } catch (error) {
         if (generation === this.generation && !this.state.hidden && this.state.tasks.some(item => item.id === id) && (error as { status?: number }).status === 409) {
