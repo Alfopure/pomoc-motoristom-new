@@ -1126,6 +1126,13 @@ export type Database = {
         connection_id: string | null;
         status: "queued" | "processed" | "failed";
         attempts: number;
+        contract_version?: number;
+        delivery_count?: number;
+        deferral_count?: number;
+        effect_failure_count?: number;
+        retry_state?: "ready" | "deferred" | "awaiting_correlation" | "dead_letter";
+        next_attempt_at?: Timestamp | null;
+        terminal_reason?: string | null;
         claimed_at: Timestamp | null;
         error: string | null;
         payload: Json | null;
@@ -1142,6 +1149,10 @@ export type Database = {
         version: number;
         lease_token: string | null;
         lease_until: Timestamp | null;
+        ownership_generation?: number;
+        writer_contract?: number;
+        termination_requested_at?: Timestamp | null;
+        termination_next_attempt_at?: Timestamp | null;
         line_id: string | null;
         ring_plan_id: string | null;
         current_step: number;
@@ -1654,6 +1665,35 @@ export type Database = {
           event_attempts: number;
           event_claimed_at: Timestamp | null;
         }[];
+      };
+      motorist_telnyx_claim_webhook_event_v2: {
+        Args: {
+          p_event_id: string;
+          p_event_type: string;
+          p_payload: Json;
+          p_organization_id: string;
+          p_call_session_id?: string | null;
+          p_call_leg_id?: string | null;
+          p_call_control_id?: string | null;
+          p_connection_id?: string | null;
+          p_occurred_at?: Timestamp | null;
+          p_stale_after_ms?: number;
+          p_delivery?: boolean;
+          p_correlation?: boolean;
+        };
+        Returns: {
+          outcome: "claimed" | "duplicate" | "busy" | "terminal";
+          event_status: "queued" | "processed" | "failed";
+          event_attempts: number;
+          event_claimed_at: Timestamp | null;
+          event_received_at: Timestamp;
+          event_retry_state: "ready" | "deferred" | "awaiting_correlation" | "dead_letter";
+          event_terminal_reason: string | null;
+        }[];
+      };
+      motorist_telnyx_finish_webhook_event_v2: {
+        Args: { p_event_id: string; p_claimed_at: Timestamp; p_result: "processed" | "deferred" | "awaiting_correlation" | "failed"; p_error?: string | null };
+        Returns: boolean;
       };
       motorist_session_lease_acquire: {
         Args: {

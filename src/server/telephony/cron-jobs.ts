@@ -4,7 +4,7 @@ import { runTelephonyAlerts, type TelephonyAlertDeps } from "./alerts";
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { closeOrphanLegs, closeStaleRingAttempts, sweepOverdueRingSteps } from "./routing/ring-plan";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
-import { processTelnyxEvent } from "./telnyx/event-processor";
+import { processTelnyxEvent, storedWebhookEnvelope } from "./telnyx/event-processor";
 import { ACTIVE_SESSION_STATES, type SessionEvent, type SessionRow } from "./state/types";
 import { telephonyStabilityEnabled } from "./stability";
 import { readPendingEffects } from "./state/continuation";
@@ -49,7 +49,7 @@ export const EFFECTS_RECOVERY_JOB = "telephony.effects.recovery";
 
 /** A claimed event untouched for this long is assumed abandoned and re-driven. */
 export const STALLED_EVENT_MS = 60_000;
-/** Give up on an event after this many attempts so a poison row cannot loop. */
+/** The database terminalizes after five actual effect failures; deferrals have a separate age bound. */
 export const MAX_EVENT_ATTEMPTS = 5;
 /** Upper bound per cron tick, so one backlog cannot exhaust the function budget. */
 export const REPLAY_BATCH_SIZE = 20;
@@ -164,6 +164,8 @@ export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise
       .lte("cancellations_next_attempt_at", now).order("cancellations_next_attempt_at").limit(REPLAY_BATCH_SIZE),
     deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).not("presence_pickup", "is", null)
       .lte("presence_pickup->>expiresAt", now).order("updated_at").limit(REPLAY_BATCH_SIZE),
+    deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).not("termination_next_attempt_at", "is", null)
+      .lte("termination_next_attempt_at", now).order("termination_next_attempt_at").limit(REPLAY_BATCH_SIZE),
   ]);
   const error = queries.find((query) => query.error)?.error;
   if (error) {
@@ -172,10 +174,20 @@ export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise
   }
   const sessions = [...new Map(queries.flatMap((query) => query.data ?? []).map((session) => [session.id, session])).values()];
   const errors: Array<{ sessionId: string; error: string }> = [];
+  const scheduled: string[] = [];
   for (const session of sessions) {
     try {
-      const result = await sessionRunner(deps)(session.id, { kind: "app", type: "sweep", id: `cron-effects:${session.id}:${randomUUID()}`, actorProfileId: null, occurredAt: now }) as { apply?: { failed?: boolean; failure?: { error?: string } } } | undefined;
+      const result = await sessionRunner(deps)(session.id, { kind: "app", type: "sweep", id: `cron-effects:${session.id}:${randomUUID()}`, actorProfileId: null, occurredAt: now }) as { session?: SessionRow; apply?: { failed?: boolean; projectionPending?: boolean; failure?: { error?: string } } } | undefined;
       if (result?.apply?.failed) throw new Error(result.apply.failure?.error ?? "mandatory effects remain pending");
+      if (result?.apply?.projectionPending) throw new Error("auxiliary call projections remain pending");
+      const verified = await deps.admin.from("motorist_call_sessions").select("*")
+        .eq("organization_id", deps.organizationId).eq("id", session.id).single();
+      const current = verified.data;
+      if (verified.error || !current) throw new Error("recovery completion could not be verified");
+      const entries = readPendingEffects(current).entries;
+      const due = (at: string | null | undefined) => Boolean(at && Date.parse(at) <= Date.parse(now));
+      if (entries.length && (!current.effects_next_attempt_at || due(current.effects_next_attempt_at)) || due(current.cancellations_next_attempt_at) || current.termination_next_attempt_at) throw new Error("durable call recovery remains pending");
+      if (entries.length || current.cancellations_next_attempt_at) scheduled.push(session.id);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       errors.push({ sessionId: session.id, error: message });
@@ -184,7 +196,7 @@ export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise
         context: { sessionId: session.id, job: EFFECTS_RECOVERY_JOB, pendingAgeMs: Date.parse(now) - oldest } });
     }
   }
-  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || wrapUp.errors.length || presence.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, wrapUp, presence } };
+  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || wrapUp.errors.length || presence.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, scheduled, wrapUp, presence } };
 }
 
 export async function detectStuckSessions(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
@@ -239,11 +251,12 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promi
   const cutoff = new Date(now.getTime() - (deps.stalledEventMs ?? STALLED_EVENT_MS)).toISOString();
   const { data, error } = await deps.admin
     .from("motorist_telnyx_webhook_events")
-    .select("event_id, event_type, payload, occurred_at, attempts")
+    .select("event_id, event_type, payload, occurred_at, attempts, call_control_id, call_session_id, call_leg_id, connection_id, next_attempt_at, retry_state")
     .eq("organization_id", deps.organizationId)
     .in("status", ["queued", "failed"])
     .lt("received_at", cutoff)
-    .lt("attempts", MAX_EVENT_ATTEMPTS)
+    .neq("retry_state", "dead_letter")
+    .or(`next_attempt_at.is.null,next_attempt_at.lte.${now.toISOString()}`)
     .order("received_at", { ascending: true })
     .limit(REPLAY_BATCH_SIZE);
   if (error) return { job: LEDGER_REPLAY_JOB, status: "failed", detail: {}, error: error.message };
@@ -255,20 +268,19 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promi
   const duplicate: string[] = [];
   const unknownSession: string[] = [];
   const errors: Array<{ eventId: string; error: string }> = [];
-  const process = deps.replayEvent ?? ((envelope: unknown) => processTelnyxEvent(deps, envelope));
+  const process = deps.replayEvent ?? ((envelope: unknown) => processTelnyxEvent({ ...deps, ledgerReplay: "cron" }, envelope));
 
   for (const row of rows) {
     // The ledger stores the inner payload; rebuild the envelope the processor parses.
-    const envelope = { data: { id: row.event_id, event_type: row.event_type, occurred_at: row.occurred_at, payload: row.payload } };
+    const envelope = storedWebhookEnvelope(row);
     try {
       const result = await process(envelope) as { outcome?: string; error?: string | null } | undefined;
-      if (result?.outcome === "busy") {
+      if (result?.outcome === "busy" || result?.outcome === "awaiting_correlation") {
         deferred.push(row.event_id);
       } else if (result?.outcome === "duplicate") {
         duplicate.push(row.event_id);
       } else if (result?.outcome === "unknown_session") {
         unknownSession.push(row.event_id);
-        replayed.push(row.event_id);
       } else if (result?.outcome === "ignored") {
         ignored.push(row.event_id);
         replayed.push(row.event_id);

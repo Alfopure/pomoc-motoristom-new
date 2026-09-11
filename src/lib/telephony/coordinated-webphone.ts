@@ -172,9 +172,10 @@ export class CoordinatedWebphone {
         break;
       }
       case "expectOperatorLeg": {
-        const leg = value as { callControlId?: unknown; sessionId?: unknown } | null;
+        const leg = value as { callControlId?: unknown; sessionId?: unknown; timingOperationId?: unknown } | null;
         if (typeof leg?.callControlId !== "string" || typeof leg.sessionId !== "string") throw new Error("Neplatný hovor.");
-        phone.expectOperatorLeg({ callControlId: leg.callControlId, sessionId: leg.sessionId }); break;
+        phone.expectOperatorLeg({ callControlId: leg.callControlId, sessionId: leg.sessionId,
+          ...(typeof leg.timingOperationId === "string" ? { timingOperationId: leg.timingOperationId } : {}) }); break;
       }
     }
   }
@@ -196,7 +197,7 @@ export class CoordinatedWebphone {
   confirmCallEnded(callId: string) { return this.command("confirmCallEnded", callId).catch((error) => this.report(error)); }
   toggleMute() { void this.command("toggleMute").catch((error) => this.report(error)); }
   sendDtmf(digit: string) { void this.command("sendDtmf", digit).catch((error) => this.report(error)); }
-  expectOperatorLeg(leg: { callControlId: string; sessionId: string }) { void this.command("expectOperatorLeg", leg).catch((error) => this.report(error)); }
+  expectOperatorLeg(leg: { callControlId: string; sessionId: string; timingOperationId?: string }) { void this.command("expectOperatorLeg", leg).catch((error) => this.report(error)); }
   setIncomingOfferPolicy(policy: IncomingOfferPolicy) {
     if ((policy.presenceRevision ?? 0) < (this.incomingPolicy.presenceRevision ?? 0)) return;
     this.storeIncomingPolicy(policy);

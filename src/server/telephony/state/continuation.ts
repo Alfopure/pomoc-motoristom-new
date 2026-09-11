@@ -1,3 +1,4 @@
+import { measureRequestStep } from "@/server/request-metrics";
 import type { Json } from "@/lib/supabase/database.types";
 import type { EffectsDeps } from "./effects";
 import { SessionConflictError } from "../service-errors";
@@ -53,11 +54,15 @@ export function commandStillApplies(session: SessionRow, entry: EffectContinuati
     if (!recording?.policy.enabled || recording.epoch !== command.epoch || recording.suppressionReason === "objection" || recording.noticeFailed || !recording.noticeCompletedAt ||
       !recording.recorders.some((recorder) => recorder.id === command.recorderId && recorder.desired === "recording" && recorder.startCommandId === command.commandId)) return false;
   }
-  return !session.ended_at && !["ended", "failed"].includes(session.state) && effectGeneration(session) === entry.generation;
+  return !session.termination_requested_at && !session.ended_at && !["ended", "failed"].includes(session.state) && effectGeneration(session) === entry.generation;
 }
 
 export function databaseEffectCount(transition: Transition): number {
   return transition.legs.length + transition.attempts.length + transition.presence.filter((change) => !change.afterCommandId).length + transition.callbacks.length + (transition.contactProofs?.length ?? 0) + transition.memberTouches.length + 1;
+}
+
+export function criticalDatabaseEffectCount(transition: Transition): number {
+  return transition.legs.length + transition.attempts.length + transition.presence.filter((change) => !change.afterCommandId).length + transition.callbacks.length;
 }
 
 export function continuationComplete(entry: EffectContinuation): boolean {
@@ -98,6 +103,10 @@ export async function stageEffects(deps: EffectsDeps, input: { session: SessionR
 }
 
 export async function checkpointEffects(deps: EffectsDeps, sessionId: string, entry: EffectContinuation | null, entryId: string): Promise<SessionRow> {
+  return measureRequestStep("checkpoint", () => checkpointOwnedEffects(deps, sessionId, entry, entryId));
+}
+
+async function checkpointOwnedEffects(deps: EffectsDeps, sessionId: string, entry: EffectContinuation | null, entryId: string): Promise<SessionRow> {
   for (let retry = 0; retry < 3; retry += 1) {
     const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).single();
     if (fresh.error || !fresh.data) throw new Error(`Effects checkpoint read failed: ${fresh.error?.message ?? "missing session"}`);

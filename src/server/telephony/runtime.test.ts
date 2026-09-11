@@ -43,6 +43,7 @@ describe("telephony runtime", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     delete process.env.TELNYX_API_KEY;
     delete process.env.TELNYX_LIVE_CALLS_ENABLED;
     delete process.env.VERCEL_ENV;
@@ -61,6 +62,25 @@ describe("telephony runtime", () => {
     expect(deps.organizationId).toBe(ORG);
     expect(deps.environment).toBe("development");
     expect(deps.telnyx?.liveGate).toEqual({ callsEnabled: true, smsEnabled: false });
+  });
+
+  it("logs provider HTTP timing with sanitized identifiers through the runtime logger", async () => {
+    const logger = vi.fn();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { result: "ok" } }), {
+      status: 200, headers: { "content-type": "application/json" },
+    })));
+    const deps = await createTelephonyDeps({ logger });
+    const commandId = "bb824028-87c9-442f-bfac-ac527f733493";
+    await deps.telnyx!.bridge({ callControlId: "PRIVATE_CALL_CONTROL_TOKEN", targetCallControlId: "PRIVATE_TARGET_TOKEN", commandId });
+    expect(logger).toHaveBeenCalledExactlyOnceWith({ scope: "telnyx-http", level: "info", method: "POST", path: "/calls/:id/actions/bridge",
+      commandId, status: 200, ms: expect.any(Number), retried: false, errorCode: null });
+    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/PRIVATE_|KEYtest/);
+  });
+
+  it("keeps accepted provider commands successful when the runtime logger throws", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('{"data":{"result":"ok"}}', { status: 200 })));
+    const deps = await createTelephonyDeps({ logger: () => { throw new Error("logger failed"); } });
+    await expect(deps.telnyx!.answer({ callControlId: "PRIVATE_CALL_CONTROL_TOKEN", commandId: "bb824028-87c9-442f-bfac-ac527f733493" })).resolves.toBeUndefined();
   });
 
   it("fails the live gate closed when the settings row switches calls off", async () => {

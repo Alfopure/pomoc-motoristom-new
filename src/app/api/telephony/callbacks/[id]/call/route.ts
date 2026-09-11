@@ -12,7 +12,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     requiresProvider: true,
     fallback: "Spätné volanie sa nepodarilo spustiť.",
     run: async ({ deps, actor, requestId, body }) => {
-      const result = await callBackRequest(deps, actor, requestId, typeof body.verificationId === "string" ? body.verificationId : undefined);
+      const result = await callBackRequest(deps, actor, requestId, typeof body.verificationId === "string" ? body.verificationId : undefined,
+        typeof body.requestId === "string" ? body.requestId : undefined);
       return {
         request: result.request,
         linked: result.linked,

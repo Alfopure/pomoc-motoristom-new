@@ -60,6 +60,15 @@ describe("deleteAccessUser", () => {
     deleteTelephonyCredential.mockResolvedValue();
   });
 
+  it("refuses a reserved operator before the first provider leg without changing the account", async () => {
+    fake.db.seed("motorist_operator_presence", [{ id: "presence-1", organization_id: ORG, profile_id: TARGET, current_session_id: "reserved-session" }]);
+    expect(await fails(deleteAccessUser(actor, TARGET))).toMatchObject({ status: 409 });
+    expect(fake.db.rows("motorist_profiles").find(row => row.id === TARGET)).toMatchObject({ active: true, access_status: "active" });
+    expect(fake.db.rows("motorist_audit_log")).toHaveLength(0);
+    expect(deleteUser).not.toHaveBeenCalled();
+    expect(deleteTelephonyCredential).not.toHaveBeenCalled();
+  });
+
   it("removes an unused profile, its login, every phone credential and ring-group membership", async () => {
     fake.db.seed("motorist_operator_devices", [
       { id: "dev-1", organization_id: ORG, profile_id: TARGET, environment: "production", telnyx_credential_id: "cred-9", sip_username: "gencred009" },

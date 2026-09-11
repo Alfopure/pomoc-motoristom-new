@@ -258,6 +258,15 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string):
     throw new MutationError("Používateľ je práve v hovore. Skús to znova, keď hovor skončí.", 409);
   }
 
+  // An offer can reserve the operator before Telnyx creates its first leg.
+  // Refuse removal before changing the account while that reservation exists.
+  const presence = await supabase.from("motorist_operator_presence").select("current_session_id")
+    .eq("organization_id", profile.organization_id).eq("profile_id", profile.id).maybeSingle();
+  if (presence.error) throw new MutationError("Stav telefónnej dostupnosti sa nepodarilo overiť.", 500);
+  if (presence.data?.current_session_id) {
+    throw new MutationError("Používateľ má pridelený hovor alebo dokončuje jeho spracovanie. Najprv uvoľnite hovor.", 409);
+  }
+
   const keepHistory = await hasRecordedHistory(supabase, profile);
   const mode: DeleteAccessUserResult["mode"] = keepHistory ? "anonymised" : "deleted";
 

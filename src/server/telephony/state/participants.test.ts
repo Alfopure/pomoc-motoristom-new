@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Database } from "@/lib/supabase/database.types";
-import { participantManifest } from "./participants";
-import type { SessionRow } from "./types";
+import { observeParticipants, participantManifest } from "./participants";
+import { readMeta, toJson, type SessionRow } from "./types";
+import { createTelephonyHarness, PROFILES } from "@/test/telephony-harness";
 
 type Interval = Database["public"]["Tables"]["motorist_call_participant_intervals"]["Row"];
 const startedAt = "2026-09-06T12:00:05.000Z", endedAt = "2026-09-06T12:02:00.000Z";
@@ -13,6 +14,30 @@ function interval(role: string, channel: number | null): Interval {
 const proof = { session, startedAt, endedAt, recorderId: "recorder" };
 
 describe("participant evidence", () => {
+  it("keeps recording interval work off a frozen silent call's control path", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound();
+    const silent = h.session(call.sessionId) as SessionRow;
+    expect(readMeta(silent).recording?.policy.enabled).toBe(false);
+    h.db.log.length = 0;
+    await observeParticipants(h.admin, silent, "silent-answer", h.now().toISOString(), true);
+    expect(h.db.log).toEqual([]);
+  });
+
+  it("closes existing recorded evidence even when the call's policy is now disabled", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound();
+    const leg = h.legFor(call.sessionId, PROFILES.o1)!;
+    const original = h.session(call.sessionId) as SessionRow;
+    h.db.insert("motorist_call_participant_intervals", { id: "open-evidence", organization_id: original.organization_id,
+      call_id: h.call(call.sessionId)!.id, session_id: original.id, leg_id: leg.id, profile_id: PROFILES.o1,
+      role: "operator", started_at: h.now().toISOString(), ended_at: null, topology_epoch: 0, verified: true });
+    const ended = { ...original, state: "ended", ended_at: h.now().toISOString(), metadata: toJson({ ...readMeta(original),
+      recording: { ...readMeta(original).recording!, recorders: [{ id: "past-capture", epoch: 0, observed: "stopped", desired: "stopped" }] } }) } as SessionRow;
+    await observeParticipants(h.admin, ended, "hangup", h.now().toISOString(), true);
+    expect(h.rows("motorist_call_participant_intervals")[0].ended_at).toBe(h.now().toISOString());
+  });
+
   it("permits completeness only for observed, mapped, fully covered intervals", () => {
     const manifest = participantManifest([interval("operator", 1), interval("customer", 0)], 0, proof);
     expect(manifest).toMatchObject({ coverage: "verified", channelMappingVerified: true, openingComplete: true, conversationComplete: true, closingComplete: true, gaps: [] });

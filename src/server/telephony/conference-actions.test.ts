@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { completeAnnouncedAction, completeCallAnnouncements } from "@/test/complete-call-announcements";
 
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
@@ -30,6 +30,7 @@ const o1: CallActor = { profileId: PROFILES.o1, role: "dispatcher", displayName:
 const o2: CallActor = { profileId: PROFILES.o2, role: "dispatcher", displayName: "Peter" };
 const senior: CallActor = { profileId: PROFILES.o3, role: "senior_dispatcher", displayName: "Senior" };
 const manager: CallActor = { profileId: PROFILES.o4, role: "manager", displayName: "Manažér" };
+afterEach(() => vi.unstubAllEnvs());
 
 function actionDeps(h: TelephonyHarness, overrides: Partial<CallActionDeps> = {}): CallActionDeps {
   return { ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }), ...overrides };
@@ -103,8 +104,8 @@ describe("addCallParty", () => {
 
     const pending = addCallParty(actionDeps(h), o1, call.sessionId, { number: "0900 000 000" });
     await pending;
-    expect(h.telnyx.of("createConference")).toHaveLength(0);
-    expect(h.session(call.sessionId).metadata).toMatchObject({ announcement_sequence: expect.any(Object) });
+    expect(h.telnyx.of("createConference")).toHaveLength(1);
+    expect((h.session(call.sessionId).metadata as { announcement_sequence?: unknown }).announcement_sequence ?? null).toBeNull();
     const result = await completeAnnouncedAction(h, pending);
     expect(result.ignored).toBeNull();
 
@@ -680,6 +681,7 @@ describe("supervision when the call leaves its conference", () => {
   });
 
   it("handles a caller ending during the announced park without raising an incident", async () => {
+    vi.stubEnv("TELNYX_CALL_ACTION_ANNOUNCEMENTS_ENABLED", "true");
     const h = createTelephonyHarness();
     const call = await talkingWith(h);
     // Telnyx 90018: the leg is gone. In production this is the caller hanging up

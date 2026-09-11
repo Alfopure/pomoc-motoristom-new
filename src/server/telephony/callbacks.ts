@@ -12,7 +12,8 @@ import { isUuid } from "@/lib/telephony/uuid";
 import { taskWorkspaceSystemEnabled } from "../task-system-gate";
 import { telephonyStabilityEnabled } from "./stability";
 import { writeCallAudit } from "./audit";
-import { CallActionError, startOutboundCall, type CallActionDeps, type CallActor, type StartOutboundResult } from "./call-actions";
+import { findInitialCallByRequest, readInitialCallPlan } from "./initial-call-operation";
+import { CallActionError, startOutboundCall, type StartOutboundInput, type CallActionDeps, type CallActor, type StartOutboundResult } from "./call-actions";
 import { toJson, type LineRow } from "./state/types";
 
 /**
@@ -367,19 +368,29 @@ async function closeCallbackTask(deps: CallbackQueueDeps, actor: CallActor, case
  * The request stays open: the call being placed is not proof that the caller
  * was reached. The operator closes it with `done` or `cancel`.
  */
-export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id: string, verificationId?: string): Promise<CallbackCallResult> {
+export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id: string, verificationId?: string, operationId?: string): Promise<CallbackCallResult> {
   const queueDeps: CallbackQueueDeps = { admin: deps.admin, organizationId: deps.organizationId, now: deps.now, logger: deps.logger };
   const row = await loadRequest(queueDeps, id);
+  if (operationId) {
+    const prior = await findInitialCallByRequest(deps, actor.profileId, operationId);
+    const plan = prior ? readInitialCallPlan(prior) : null;
+    if (plan) {
+      if (plan.callbackRequestId !== id || plan.request?.callbackTargetVerificationId !== verificationId || !plan.request) throw new CallActionError("Identita spätného volania patrí inej požiadavke.", 409, "request_id_conflict");
+      const call = await startOutboundCall(deps, actor, plan.request as StartOutboundInput);
+      return { request: await present(queueDeps, await loadRequest(queueDeps, id)), call, linked: true };
+    }
+  }
   const target = await resolveCallbackTarget(deps.admin, deps.organizationId, row.caller_number);
   if (!confirmedCallbackTarget(target, verificationId)) throw new CallActionError("Potvrďte platný overený cieľ spätného volania.", 409, "callback_target_confirmation_required");
   const alternate = target.status === "verified_alternative";
-  const enhanced = telephonyStabilityEnabled() || durableCallback(row) || alternate;
+  const enhanced = Boolean(operationId) || telephonyStabilityEnabled() || durableCallback(row) || alternate;
   assertLive(row);
   await assertClaimable(queueDeps, row, actor);
   if (row.claimed_by !== actor.profileId) await claimCallbackRequest(queueDeps, actor, id);
 
   if (alternate) await approveCallbackTarget(deps.admin, deps.organizationId, actor.profileId, id, verificationId!);
   const call = await startOutboundCall(deps, actor, {
+    ...(operationId ? { requestId: operationId } : {}),
     to: row.caller_number,
     ...(alternate ? { callbackTargetVerificationId: verificationId } : {}),
     caseId: row.case_id,

@@ -22,7 +22,7 @@ it("RC-03: final processed-mark failure replays the same ledger event through cr
   const takeError = h.db.takeInjectedError.bind(h.db);
   vi.spyOn(h.db, "takeInjectedError").mockImplementation((table, operation) => {
     const error = takeError(table, operation);
-    if (table === "motorist_telnyx_webhook_events" && operation === "update" && error) {
+    if (table === "motorist_telnyx_finish_webhook_event_v2" && operation === "rpc" && error) {
       faultReached = true;
       expect(physicalAnswer).toHaveBeenCalledTimes(1);
       expect(h.rows("motorist_call_sessions")).toHaveLength(1);
@@ -32,13 +32,13 @@ it("RC-03: final processed-mark failure replays the same ledger event through cr
     }
     return error;
   });
-  h.db.failNext("motorist_telnyx_webhook_events", "update", "injected final processed-mark failure");
-  expect(await h.process(envelope)).toMatchObject({ status:200, outcome:"failed", error:expect.stringContaining("Could not mark event processed") });
+  h.db.failNext("motorist_telnyx_finish_webhook_event_v2", "rpc", "injected final processed-mark failure");
+  expect(await h.process(envelope)).toMatchObject({ status:200, outcome:"failed", error:expect.stringContaining("Could not finish event") });
   expect(faultReached).toBe(true);
-  expect(ledger()).toMatchObject({ status:"failed", attempts:1, claimed_at:h.now().toISOString(), processed_at:null });
+  expect(ledger()).toMatchObject({ status:"failed", attempts:1, claimed_at:null, processed_at:null, effect_failure_count:1 });
   const savedAudit = audit()[0], originalPayload = ledger().payload, originalOccurredAt = ledger().occurred_at;
   expect(h.telnyx.physical.legs.get("cc-ledger-recovery")).toMatchObject({ answered:true, ended:false });
-  // The failed final mark retains its claim; immediate redelivery is busy.
+  // The failed final mark releases its claim with backoff; immediate redelivery is busy.
   expect(await h.process(envelope)).toMatchObject({ outcome:"busy", claim:{attempts:1} });
   expect(h.telnyx.of("answer")).toHaveLength(1);
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "false");

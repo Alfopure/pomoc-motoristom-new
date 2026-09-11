@@ -23,6 +23,10 @@ export class CallActionError extends Error {
   }
 }
 
+export class SessionTerminationPendingError extends CallActionError {
+  constructor() { super("Ukončenie niektorých vetiev sa ešte overuje.", 503, "provider_outcome_unknown"); }
+}
+
 export class PresenceServiceError extends Error {
   constructor(
     message: string,

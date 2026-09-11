@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { registerPresenceRpcs } from "./fake-presence";
 import { registerStabilityRpcs } from "./fake-stability";
+import { registerWebhookRpcs } from "./fake-webhook";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
@@ -265,6 +266,7 @@ export class FakeDatabase {
 
   private withDefaults(table: string, row: FakeRow): FakeRow {
     const next: FakeRow = { ...(TABLE_DEFAULTS[table] ?? {}), ...row };
+    if (table === "motorist_telnyx_webhook_events" && isNil(next.received_at)) next.received_at = this.nowIso();
     if (table === "motorist_job_incidents") {
       if (isNil(next.incident_id)) next.incident_id = randomUUID();
     } else if (table !== "motorist_job_controls" && table !== "motorist_telnyx_webhook_events" && isNil(next.id)) {
@@ -737,6 +739,7 @@ function toMs(value: unknown): number | null {
 }
 
 export function registerTelephonyRpcs(db: FakeDatabase): void {
+  registerWebhookRpcs(db);
   registerPresenceRpcs(db);
   registerStabilityRpcs(db);
   // Default harness models a deployment before the optional directory migration.

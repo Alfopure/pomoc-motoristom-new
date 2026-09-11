@@ -1,6 +1,7 @@
 import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { useTelephonyConsole } from "../../src/components/dispatch/useTelephonyConsole";
+import { PhoneBar } from "../../src/components/dispatch/PhoneBar";
 import { EMPTY_ACTIVE_CALLS, type ActiveCallPayload } from "../../src/lib/telephony/active-calls-model";
 
 type Request = { url: string; body?: string; resolve: (response: Response) => void };
@@ -15,6 +16,10 @@ const harness = {
   microphoneRequests: 0,
   stoppedTracks: 0,
   sdkHangups: 0,
+  sdkAnswers: 0,
+  deferredActiveReads: [] as Array<(response: Response) => void>,
+  deferActiveReads: false,
+  resolveActiveRead: () => harness.deferredActiveReads.shift()?.(activeResponse()),
   calls: [] as ActiveCallPayload[],
   connected: (browser = true) => {
     const now = new Date().toISOString();
@@ -35,15 +40,22 @@ const harness = {
   deny: () => {},
   begin: (kind: "dial" | "callback" | "pickup" | "supervise" | "hangup" | "hold"): void => { throw new Error(`Fixture is not mounted: ${kind}`); },
   prepare: () => {},
+  answer: () => {},
+  realtimeStatus: (status: "connected" | "disconnected") => window.dispatchEvent(new CustomEvent("fixture-realtime-status", { detail: status })),
+  realtimeChange: () => window.dispatchEvent(new Event("fixture-realtime-change")),
   incoming: () => harness.callState("ringing"),
   callState: (state: "ringing" | "active" | "hangup", id = "fixture-incoming") => emit("telnyx.notification", { type: "callUpdate", call: {
     id, state, direction: "inbound",
     options: { remoteCallerNumber: "+421900000002" }, telnyxIDs: { telnyxCallControlId: "incoming-leg" },
-    isAudioMuted: false, answer() {}, hangup() { harness.sdkHangups++; }, muteAudio() {}, unmuteAudio() {}, dtmf() {},
+    isAudioMuted: false, answer() { harness.sdkAnswers++; }, hangup() { harness.sdkHangups++; }, muteAudio() {}, unmuteAudio() {}, dtmf() {},
   } }),
 };
 declare global { interface Window { phoneHarness: typeof harness } }
 window.phoneHarness = harness;
+
+function activeResponse() {
+  return Response.json({ ...EMPTY_ACTIVE_CALLS, calls: harness.calls, organizationId: "fixture-org", actorProfileId: "fixture-operator", ownPresence: { status: "available", pauseReasonId: null, statusSince: new Date().toISOString() } });
+}
 
 Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: {
   getUserMedia: () => {
@@ -64,7 +76,11 @@ window.fetch = async (input, init) => {
     return new Promise<Response>((resolve) => requests.push({ url, body: init?.body as string | undefined, resolve }));
   }
   if (url === "/api/telephony/webphone/token") return Response.json({ token: "fixture-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), deviceSessionId: "fixture-device", sipUsername: "fixture" });
-  if (url === "/api/telephony/calls/active") { harness.activeReads++; return Response.json({ ...EMPTY_ACTIVE_CALLS, calls: harness.calls, organizationId: "fixture-org", actorProfileId: "fixture-operator", ownPresence: { status: "available", pauseReasonId: null, statusSince: new Date().toISOString() } }); }
+  if (url === "/api/telephony/calls/active") {
+    harness.activeReads++;
+    if (harness.deferActiveReads) return new Promise<Response>((resolve) => harness.deferredActiveReads.push(resolve));
+    return activeResponse();
+  }
   if (url.includes("/presence")) return Response.json({ own: { status: "available" }, pauseReasons: [] });
   return Response.json({});
 };
@@ -77,7 +93,16 @@ function Fixture() {
       void action.then(() => outcomes.push("ok"), (error: Error) => outcomes.push(error.message));
     };
     harness.prepare = () => { void telephony.preparePhone(); };
+    harness.answer = telephony.answer;
   }, [telephony]);
-  return <output id="state" data-call={telephony.phone.call?.id ?? ""} data-server-call={telephony.phoneBar.active?.sessionId ?? ""} data-configured={String(telephony.configured)} data-pending={String(telephony.outboundPending)} data-legs={telephony.phone.pendingOperatorLegs ?? 0} data-status={telephony.phone.status} data-readiness={telephony.readiness.status} data-ringing={String(telephony.phone.call?.ringing ?? false)}>{telephony.notice ?? telephony.readiness.message}</output>;
+  return <>
+    <PhoneBar model={telephony.phoneBar} phone={telephony.phone} degradedSessionIds={telephony.degradedSessionIds}
+      busyAction={telephony.busyAction} notice={telephony.notice} onDismissNotice={telephony.dismissNotice}
+      onCallAction={telephony.callAction} onPartyAction={telephony.partyAction} canSupervise={false}
+      onSupervise={telephony.supervise} onStopSupervise={telephony.stopSupervise} onAnswer={telephony.answer}
+      onHangupBrowser={telephony.hangupBrowser} onToggleMute={telephony.toggleMute} onDtmf={telephony.sendDtmf}
+      onNewCase={() => {}} onLinkCase={() => {}} onOpenCase={() => {}} />
+    <output id="state" data-call={telephony.phone.call?.id ?? ""} data-server-call={telephony.phoneBar.active?.sessionId ?? ""} data-configured={String(telephony.configured)} data-pending={String(telephony.outboundPending)} data-legs={telephony.phone.pendingOperatorLegs ?? 0} data-status={telephony.phone.status} data-readiness={telephony.readiness.status} data-ringing={String(telephony.phone.call?.ringing ?? false)}>{telephony.notice ?? telephony.readiness.message}</output>
+  </>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);
