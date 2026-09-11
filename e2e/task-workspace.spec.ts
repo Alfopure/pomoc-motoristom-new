@@ -163,12 +163,13 @@ test("pointer drops complete an empty column and reopen by the preserved due dat
 
 test("invalid time-column drops, Escape, and opening the title never write a status", async ({ page }) => {
   const { requests, errors } = await boot(page, 1440);
+  await page.getByRole("button", { name: standaloneTitle, exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Názov úlohy", exact: true })).toHaveValue(standaloneTitle);
+  await page.getByRole("button", { name: "Späť na úlohy", exact: true }).click();
   await pointerDrag(page, taskHandle(page), taskColumn(page, "today"));
   await expect(cardIn(page, "overdue")).toBeVisible();
   await pointerDrag(page, taskHandle(page), taskColumn(page, "done"), true);
   await expect(cardIn(page, "overdue")).toBeVisible();
-  await page.getByRole("button", { name: standaloneTitle, exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "Názov úlohy", exact: true })).toHaveValue(standaloneTitle);
   expect(requests.filter(request => request.method === "PATCH")).toEqual([]);
   expect(errors).toEqual([]);
 });
