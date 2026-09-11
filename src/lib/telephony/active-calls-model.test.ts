@@ -381,6 +381,20 @@ describe("PhoneBar model", () => {
     );
     expect(ringing.offers[0].timerSince).toBe("2026-09-03T08:00:00.000Z");
   });
+
+  it("counts setup separately and begins conversation time only on confirmed audio", () => {
+    const connection = { status: "connecting" as const, startedAt: "2026-09-03T08:00:22.000Z", confirmedAt: null, error: null };
+    const pending = buildPhoneBarModel(payload({ calls: [call({ direction: "outbound", audioConnection: connection })] }));
+    expect(pending.active?.timerSince).toBe(connection.startedAt);
+    const confirmedAt = "2026-09-03T08:00:52.000Z";
+    const connected = buildPhoneBarModel(payload({ calls: [call({ direction: "outbound", audioConnection: { ...connection, status: "connected", confirmedAt } })] }));
+    expect(connected.active?.timerSince).toBe(confirmedAt);
+  });
+
+  it("shows the actual outbound caller ID when line metadata is missing", () => {
+    const model = buildPhoneBarModel(payload({ calls: [call({ direction: "outbound", lineLabel: null, partnerName: null, callerNumber: "+421232408700" })] }));
+    expect(model.active?.lineLabel).toBe("+421 232 408 700");
+  });
 });
 
 describe("supervision in the phone bar model", () => {

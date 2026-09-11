@@ -40,6 +40,7 @@ import { CallRecordingControls } from "./recordings/CallRecordingControls";
 import { CallRecordingIndicator } from "./recordings/CallRecordingIndicator";
 import styles from "./PhoneBar.module.css";
 import {
+  browserCallStateLabel,
   callElapsedSeconds,
   DTMF_KEYS,
   formatCallTimer,
@@ -47,6 +48,7 @@ import {
   phoneBarCapabilities,
   phoneBarFocusedCall,
   phoneBarStateLabel,
+  phoneBarTimerLabel,
   PHONE_ACTION_LABELS,
   type PhoneCallAction,
   type PhonePartyAction,
@@ -787,7 +789,7 @@ function CallSummary({
         <div className="flex min-w-0 items-center gap-1.5 text-[10px] lg:text-[11px]">
           <span className={`shrink-0 rounded px-1.5 py-0.5 font-bold ${STATE_TONES[state.tone]}`}>{state.label}</span>
           <span className="min-w-0 truncate font-semibold text-zinc-300" title={`Volaná linka: ${call.lineLabel}`}>{call.lineLabel}</span>
-          <span className="shrink-0 font-mono font-semibold tabular-nums text-zinc-200" aria-label="Dĺžka hovoru">{elapsed}</span>
+          <span className="shrink-0 font-mono font-semibold tabular-nums text-zinc-200" aria-label={phoneBarTimerLabel(call)} title={phoneBarTimerLabel(call)}>{elapsed}</span>
           {call.match && call.matchCount > 1 && <span className="hidden shrink-0 text-zinc-400 lg:inline">+{call.matchCount - 1} ďalšie zhody</span>}
           {degraded && <AlertTriangle size={14} className="shrink-0 text-amber-300" aria-label="Rozšírené funkcie nedostupné" />}
         </div>
@@ -809,13 +811,14 @@ function CallSummary({
 
 function BrowserCallSummary({ call }: { call: NonNullable<WebphoneSnapshot["call"]> }) {
   const number = formatPhoneNumberForDisplay(call.number) || call.number || "Neznáme číslo";
+  const state = browserCallStateLabel(call);
   return (
     <div className="min-w-0 flex-1 basis-full lg:basis-auto" data-testid="phone-bar-browser-call">
       <p className="truncate text-xs font-bold leading-5 lg:text-sm" title={call.callerName ? `${call.callerName} · ${number}` : number}>
         {call.callerName ? `${call.callerName} · ${number}` : number}
       </p>
-      <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold ${STATE_TONES[call.ringing ? "ring" : "live"]}`}>
-        {call.ringing ? "Prichádzajúci hovor" : call.active ? "Prebieha" : "Pripájam hovor…"}
+      <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold ${STATE_TONES[state.tone]}`}>
+        {state.label}
       </span>
     </div>
   );

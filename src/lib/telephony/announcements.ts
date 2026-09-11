@@ -37,7 +37,7 @@ export const ANNOUNCEMENT_CATEGORIES = [
 ] as const;
 export type AnnouncementCategory = (typeof ANNOUNCEMENT_CATEGORIES)[number]["key"];
 export const ANNOUNCEMENT_DEFINITIONS = [
-  { key: "greeting", label: "Privítanie", description: "Krátky úvod pred spojením alebo hlasovým menu.", file: "greeting.mp3", assetVersion: "v4", category: "active", runtimeStatus: "active" },
+  { key: "greeting", label: "Privítanie", description: "Krátky úvod pred spojením alebo hlasovým menu, ak sú zapnuté úvodné hlášky prichádzajúcich hovorov.", file: "greeting.mp3", assetVersion: "v4", category: "active", runtimeStatus: "active" },
   { key: "afterHours", label: "Mimo otváracích hodín", description: "Ponuka spätného volania stlačením jednotky.", file: "after-hours.mp3", assetVersion: "v4", category: "active", runtimeStatus: "active" },
   { key: "ivrMain", label: "Hlavné hlasové menu", description: "Jednotka spojí dispečing, dvojka požiada o spätné volanie. Text musí zodpovedať nastaveniu IVR menu.", file: "ivr-main.mp3", assetVersion: "v4", category: "active", runtimeStatus: "active" },
   { key: "callbackOffer", label: "Ponuka spätného volania", description: "Keď dispečeri nemôžu prijať hovor. Jednotka potvrdí spätné volanie.", file: "callback-offer.mp3", assetVersion: "v4", category: "active", runtimeStatus: "active" },
@@ -54,7 +54,7 @@ export const ANNOUNCEMENT_DEFINITIONS = [
   { key: "parkStart", label: "Čakanie na prevzatie", description: "Oznámenie, že hovor čaká na prevzatie kolegom.", file: "parkStart.mp3", assetVersion: "v4", category: "handoff", runtimeStatus: "active" },
   { key: "conferenceJoin", label: "Pripojenie účastníka", description: "Upozornenie pred pripojením ďalšieho účastníka.", file: "conferenceJoin.mp3", assetVersion: "v4", category: "handoff", runtimeStatus: "active" },
   { key: "conferenceLeave", label: "Odchod účastníka", description: "Voliteľné potvrdenie odchodu účastníka.", file: "conferenceLeave.mp3", assetVersion: "v4", category: "handoff", runtimeStatus: "active" },
-  { key: "outboundIntro", label: "Úvod odchádzajúceho hovoru", description: "Vypnuté pre rýchlejšie spojenie odchádzajúcich hovorov aj spätných volaní. Uloženie textu ani nahrávky hlášku nezapne.", file: "outboundIntro.mp3", assetVersion: "v4", category: "other", runtimeStatus: "active" },
+  { key: "outboundIntro", label: "Úvod odchádzajúceho hovoru", description: "Predstavenie služby pri zapnutých úvodných hláškach odchádzajúcich hovorov. Platí aj pre spätné volania; predvolene je vypnuté.", file: "outboundIntro.mp3", assetVersion: "v4", category: "other", runtimeStatus: "active" },
   { key: "noInput", label: "Voľba nezachytená", description: "Výzva pri nezachytenej voľbe v hlasovom menu.", file: "noInput.mp3", assetVersion: "v4", category: "other", runtimeStatus: "prepared" },
   { key: "afterHoursNoCallback", label: "Mimo hodín bez spätného volania", description: "Odkaz mimo otváracích hodín, ak chýba číslo volajúceho alebo zlyhá ponuka spätného volania.", file: "afterHoursNoCallback.mp3", assetVersion: "v4", category: "other", runtimeStatus: "active" },
   { key: "callbackFailed", label: "Neúspešné uloženie požiadavky", description: "Pravdivé oznámenie, ak požiadavku nemožno uložiť.", file: "callbackFailed.mp3", assetVersion: "v4", category: "other", runtimeStatus: "prepared" },
@@ -70,6 +70,10 @@ export type AnnouncementConfig = {
   version: 1;
   language: AnnouncementLanguage;
   voiceId: string;
+  /** Automatic greeting and recording notice at inbound startup; legacy default is on. */
+  inboundStartAnnouncements?: boolean;
+  /** Automatic introduction and recording notice at outbound startup; legacy default is off. */
+  outboundStartAnnouncements?: boolean;
   /** Legacy configurations omit this and keep mid-call recording status messages silent. */
   recordingStatusAnnouncements?: boolean;
   prompts: Partial<Record<AnnouncementLanguage, Partial<Record<AnnouncementKey, AnnouncementPrompt>>>>;
@@ -189,11 +193,12 @@ export const DEFAULT_ANNOUNCEMENT_TEXTS: Record<AnnouncementLanguage, Record<Ann
   }
 };
 export function defaultAnnouncementConfig(): AnnouncementConfig {
-  return { version: 1, language: "sk", voiceId: DEFAULT_ANNOUNCEMENT_VOICE, recordingStatusAnnouncements: false, prompts: {} };
+  return { version: 1, language: "sk", voiceId: DEFAULT_ANNOUNCEMENT_VOICE, inboundStartAnnouncements: true, outboundStartAnnouncements: false, recordingStatusAnnouncements: false, prompts: {} };
 }
-/** Initial recording notices stay enabled; the retired outbound intro stays silent. */
+/** Direction controls startup greetings; recording notices also serve later participants. */
 export function isAnnouncementEnabled(config: AnnouncementConfig, key: AnnouncementKey): boolean {
-  if (key === "outboundIntro") return false;
+  if (key === "greeting") return config.inboundStartAnnouncements !== false;
+  if (key === "outboundIntro") return config.outboundStartAnnouncements === true;
   return !["recordingPaused", "recordingResumed", "recordingUnavailable"].includes(key) || config.recordingStatusAnnouncements === true;
 }
 export function isAnnouncementLanguage(value: unknown): value is AnnouncementLanguage {
@@ -222,7 +227,8 @@ export function readAnnouncementConfig(value: unknown): AnnouncementConfig {
       };
     }
   }
-  return { version: 1, language: raw.language, voiceId: raw.voiceId!, recordingStatusAnnouncements: raw.recordingStatusAnnouncements === true, prompts };
+  return { version: 1, language: raw.language, voiceId: raw.voiceId!, inboundStartAnnouncements: raw.inboundStartAnnouncements !== false,
+    outboundStartAnnouncements: raw.outboundStartAnnouncements === true, recordingStatusAnnouncements: raw.recordingStatusAnnouncements === true, prompts };
 }
 export function announcementConfigFromMetadata(metadata: unknown): AnnouncementConfig {
   return readAnnouncementConfig(metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>).announcements : null);

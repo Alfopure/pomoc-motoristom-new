@@ -182,6 +182,21 @@ export function AnnouncementsPanel({ active = true }: { active?: boolean }) {
               </SettingsField>
             </div>
 
+            <div className="grid gap-3 rounded-md border border-zinc-200 p-3 sm:p-4">
+              <div><h3 className="text-sm font-semibold text-zinc-900">Úvodné hlášky podľa smeru hovoru</h3><p className="mt-1 text-xs leading-relaxed text-zinc-500">Samostatne zapnite alebo vypnite automatický úvod a úvodný oznam o nahrávaní. Platí pre nové hovory vo všetkých jazykoch tejto linky.</p></div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="flex min-h-11 cursor-pointer items-center justify-between gap-4 rounded-md border border-zinc-200 bg-zinc-50 p-3">
+                  <span className="min-w-0"><span className="block text-sm font-semibold text-zinc-900">Prichádzajúce hovory</span><span id={`inbound-start-hint-${line.id}`} className="mt-1 block text-xs leading-relaxed text-zinc-500">{config.inboundStartAnnouncements !== false ? "Zapnuté — volajúci najprv počuje úvodné hlášky." : "Vypnuté — hovor pokračuje bez úvodných hlášok."}</span></span>
+                  <input type="checkbox" role="switch" aria-label="Úvodné hlášky prichádzajúcich hovorov" aria-describedby={`inbound-start-hint-${line.id}`} checked={config.inboundStartAnnouncements !== false} disabled={!canEdit || saving} onChange={(event) => updateConfig({ ...config, inboundStartAnnouncements: event.target.checked })} className="h-5 w-5 shrink-0 cursor-pointer accent-zinc-900 disabled:cursor-not-allowed" />
+                </label>
+                <label className="flex min-h-11 cursor-pointer items-center justify-between gap-4 rounded-md border border-zinc-200 bg-zinc-50 p-3">
+                  <span className="min-w-0"><span className="block text-sm font-semibold text-zinc-900">Odchádzajúce hovory</span><span id={`outbound-start-hint-${line.id}`} className="mt-1 block text-xs leading-relaxed text-zinc-500">{config.outboundStartAnnouncements === true ? "Zapnuté — po prijatí sa prehrajú úvodné hlášky." : "Vypnuté — bez úvodných hlášok, aj pri spätnom volaní."}</span></span>
+                  <input type="checkbox" role="switch" aria-label="Úvodné hlášky odchádzajúcich hovorov" aria-describedby={`outbound-start-hint-${line.id}`} checked={config.outboundStartAnnouncements === true} disabled={!canEdit || saving} onChange={(event) => updateConfig({ ...config, outboundStartAnnouncements: event.target.checked })} className="h-5 w-5 shrink-0 cursor-pointer accent-zinc-900 disabled:cursor-not-allowed" />
+                </label>
+              </div>
+              <p className="text-xs leading-relaxed text-zinc-600">Hovory s vypnutými úvodnými hláškami sa automaticky nenahrávajú. Platí to pre zvolený smer tejto linky.</p>
+            </div>
+
             <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-zinc-600">
               <span className="inline-flex items-center gap-1.5"><Globe2 size={14} aria-hidden="true" />Texty upravujete v jazyku {LANGUAGE_LABELS[config.language]}</span>
               <span className="inline-flex items-center gap-1.5"><Clock3 size={14} aria-hidden="true" />Dĺžka je orientačná</span>
@@ -211,7 +226,7 @@ export function AnnouncementsPanel({ active = true }: { active?: boolean }) {
                   <span className="min-w-0"><span className="block text-sm font-semibold text-zinc-900">Hlášky o zmenách nahrávania</span><span id={`recording-status-hint-${line.id}`} className="mt-1 block text-xs leading-relaxed text-zinc-500">Oznámi volajúcemu vypnutie a obnovenie nahrávania. Platí pre všetky jazyky tejto linky.</span></span>
                   <input type="checkbox" role="switch" aria-label="Hlášky o zmenách nahrávania" aria-describedby={`recording-status-hint-${line.id}`} checked={config.recordingStatusAnnouncements === true} disabled={!canEdit || saving} onChange={(event) => updateConfig({ ...config, recordingStatusAnnouncements: event.target.checked })} className="h-5 w-5 shrink-0 cursor-pointer accent-zinc-900 disabled:cursor-not-allowed" />
                 </label>
-                <p className="mt-3 border-t border-zinc-100 pt-3 text-xs leading-relaxed text-zinc-600"><strong>{config.recordingStatusAnnouncements === true ? "Zapnuté." : "Vypnuté."}</strong> Úvodný oznam o nahrávaní sa prehrá aj pri vypnutom prepínači.</p>
+                <p className="mt-3 border-t border-zinc-100 pt-3 text-xs leading-relaxed text-zinc-600"><strong>{config.recordingStatusAnnouncements === true ? "Zapnuté." : "Vypnuté."}</strong> Úvodný oznam o nahrávaní sa riadi samostatnými prepínačmi podľa smeru hovoru vyššie.</p>
               </div>}
             </div>
 

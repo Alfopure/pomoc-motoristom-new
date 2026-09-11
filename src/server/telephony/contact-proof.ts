@@ -1,6 +1,6 @@
 import { callbackTargetAuthorization, type CallbackTargetAuthorization } from "@/lib/telephony/callback-target";
 import { createHash } from "node:crypto";
-import type { Command, LegRow, ReduceResult, SessionEvent, SessionRow } from "./state/types";
+import type { Command, LegRow, ReduceResult, SessionEvent, SessionRow, TelephonyEvent } from "./state/types";
 import { readMeta, toJson } from "./state/types";
 import type { TelnyxClient } from "./telnyx/client";
 
@@ -31,7 +31,13 @@ export type ContactOperation = {
   customerProviderLegId?: string | null; operatorProviderLegId?: string | null;
 };
 type ConferenceObservation = { eventId: string; at: string; conferenceId: string; controlId: string; joined: boolean };
-export type ContactHistory = { version: 1; operations: ContactOperation[]; proofs: ContactProof[]; conferenceObservations?: ConferenceObservation[] };
+type BridgeEvent = Pick<TelephonyEvent, "id" | "type" | "callControlId" | "occurredAt" | "clientState">;
+type PendingDialContact = {
+  id: string; scope: ContactScope; startedAt: string; endedAt: string | null;
+  operatorLegId: string | null; operatorControlId: string; operatorProfileId: string | null; operatorProviderLegId: string | null;
+  bridgeEvents: BridgeEvent[];
+};
+export type ContactHistory = { version: 1; operations: ContactOperation[]; proofs: ContactProof[]; conferenceObservations?: ConferenceObservation[]; pendingDials?: PendingDialContact[] };
 export type ContactSnapshot = { session: SessionRow; legs: LegRow[] };
 
 /** Short enough for the 200-byte Telnyx client_state with an owned leg token. */
@@ -50,6 +56,19 @@ function servesCustomer(state: ContactSnapshot, leg: LegRow): boolean {
     || leg.role === "external" && !leg.profile_id && leg.to_number === readMeta(state.session).answered_external;
 }
 
+function contactScope(session: SessionRow): ContactScope {
+  const meta = readMeta(session);
+  const callbackRequestId = meta.callbackRequestId;
+  const scope: ContactScope = {
+    organizationId: session.organization_id, caseId: session.case_id, lineId: session.line_id,
+    customerNumber: session.direction === "outbound" ? session.called_number : session.caller_number,
+    startedAt: session.started_at, callbackRequestId: typeof callbackRequestId === "string" ? callbackRequestId : null,
+  };
+  const authorization = callbackTargetAuthorization(meta.callback_target_authorization, scope.callbackRequestId, scope.customerNumber);
+  if (session.direction === "outbound" && authorization) scope.callbackTargetAuthorization = authorization;
+  return scope;
+}
+
 /** Save under the session lease BEFORE executing commands, independently of recording policy. */
 export function collectContactOperation(state: ContactSnapshot, commands: Command[], event: SessionEvent): ContactHistory {
   const history = readContactHistory(state.session);
@@ -66,12 +85,32 @@ export function collectContactOperation(state: ContactSnapshot, commands: Comman
     : serving.length === 1 ? serving[0] : undefined;
   for (const command of commands) {
     if (command.kind === "ring_fanout") continue;
+    const answeringOperator = operator ?? (event.kind === "telnyx" && ["call.answered", "call.bridged"].includes(event.type) &&
+      event.callControlId && event.clientState?.sid === state.session.id && event.clientState.role === "operator" &&
+      event.clientState.operatorId === state.session.answered_by_profile_id && event.clientState.intent === "outbound"
+      ? { id: null, telnyx_call_control_id: event.callControlId, telnyx_call_leg_id: event.callLegId, profile_id: event.clientState.operatorId } : null);
+    if (command.kind === "dial" && command.bridgeOnAnswer && command.role === "customer" && answeringOperator &&
+      state.session.direction === "outbound" && command.linkTo === answeringOperator.telnyx_call_control_id && command.to === state.session.called_number &&
+      command.clientState.intent === contactOperationIntent(command.commandId)) {
+      // The customer control ID does not exist until dial returns. Freeze its
+      // authorized destination and exact operator before issuing the command;
+      // later provider events bind this intent to the persisted customer leg.
+      const pending = history.pendingDials ??= [];
+      if (!pending.some((item) => item.id === command.commandId) && !history.operations.some((item) => item.id === command.commandId)) {
+        pending.push({ id: command.commandId, scope: contactScope(state.session), startedAt: at, endedAt: null,
+          operatorLegId: answeringOperator.id, operatorControlId: answeringOperator.telnyx_call_control_id, operatorProfileId: answeringOperator.profile_id ?? null,
+          operatorProviderLegId: answeringOperator.telnyx_call_leg_id, bridgeEvents: [] });
+      }
+    }
     const affected = "leg" in command ? command.leg.callControlId : "legs" in command
       ? command.legs.find(leg => leg.callControlId === customer?.telnyx_call_control_id || leg.callControlId === operator?.telnyx_call_control_id)?.callControlId ?? null : null;
     const conferenceId = command.conferenceId ?? state.session.conference_id;
     const closes = ["bridge", "conference_create", "conference_join", "hangup", "transfer", "conference_leave", "conference_hold", "conference_mute"].includes(command.kind);
     if (closes) {
       const ids = command.kind === "bridge" ? [command.leg.callControlId, command.target.callControlId] : "legs" in command ? command.legs.map((leg) => leg.callControlId) : [affected];
+      for (const pending of history.pendingDials ?? []) {
+        if (!pending.endedAt && (ids.includes(pending.operatorControlId) || ids.some((id) => pending.bridgeEvents.some((event) => event.callControlId === id)))) pending.endedAt = at;
+      }
       for (const operation of history.operations) {
         if (operation.id === command.commandId) continue;
         if (command.kind === "conference_join" && operation.topology === "conference" && operation.conferenceId === state.session.conference_id) continue;
@@ -93,14 +132,7 @@ export function collectContactOperation(state: ContactSnapshot, commands: Comman
         && (operation.conferenceId === conferenceId || operation.conferenceId === null))) continue;
     } else continue;
     for (const operation of history.operations) if (!operation.endedAt) operation.endedAt = at;
-    const callbackRequestId = readMeta(state.session).callbackRequestId;
-    const scope: ContactScope = {
-      organizationId: state.session.organization_id, caseId: state.session.case_id, lineId: state.session.line_id,
-      customerNumber: state.session.direction === "outbound" ? state.session.called_number : state.session.caller_number,
-      startedAt: state.session.started_at, callbackRequestId: typeof callbackRequestId === "string" ? callbackRequestId : null,
-    };
-    const targetAuthorization = callbackTargetAuthorization(meta.callback_target_authorization, scope.callbackRequestId, scope.customerNumber);
-    if (state.session.direction === "outbound" && targetAuthorization) scope.callbackTargetAuthorization = targetAuthorization;
+    const scope = contactScope(state.session);
     history.operations.push({ id: command.commandId, scope, sourceControlId: affected!, topology: command.kind === "bridge" && !command.recordingConferenceName ? "bridge" : "conference", startedAt: at, endedAt: null,
       customerLegId: customer.id, operatorLegId: operator.id, operatorProfileId: operator.profile_id,
       customerControlId: customer.telnyx_call_control_id, operatorControlId: operator.telnyx_call_control_id,
@@ -155,29 +187,67 @@ function appendContactProof(state: ContactSnapshot, history: ContactHistory, ope
     topology: operation.topology, conferenceId: operation.conferenceId, eventIds: [a.eventId, b.eventId] });
 }
 
+function observeBridge(state: ContactSnapshot, operation: ContactOperation, event: BridgeEvent): void {
+  const at = event.occurredAt;
+  if (event.type !== "call.bridged" || !at || !Number.isFinite(Date.parse(at)) || !event.callControlId ||
+    ![operation.customerControlId, operation.operatorControlId].includes(event.callControlId)) return;
+  if (Date.parse(at) < Date.parse(operation.startedAt) || operation.endedAt && Date.parse(at) > Date.parse(operation.endedAt)) return;
+  const customer = state.legs.find((leg) => leg.id === operation.customerLegId && leg.telnyx_call_control_id === operation.customerControlId);
+  const operator = state.legs.find((leg) => leg.id === operation.operatorLegId && leg.telnyx_call_control_id === operation.operatorControlId);
+  if (!validAt(customer, at) || !validAt(operator, at) || ![operation.customerControlId, operation.operatorControlId].includes(operation.sourceControlId)) return;
+  const intent = contactOperationIntent(operation.id);
+  if (event.callControlId === operation.sourceControlId && (event.clientState?.sid !== state.session.id || event.clientState?.intent !== intent)) return;
+  if (event.clientState?.intent?.startsWith("ct:") && event.clientState.intent !== intent) return;
+  operation.observations[event.callControlId] ??= { eventId: event.id, at, conferenceId: null };
+}
+
+function bindDialContact(state: ContactSnapshot, history: ContactHistory, event: TelephonyEvent): void {
+  for (const pending of history.pendingDials ?? []) {
+    if (pending.scope.organizationId !== state.session.organization_id) continue;
+    const intent = contactOperationIntent(pending.id);
+    if (event.type === "call.bridged" && event.callControlId &&
+      (event.callControlId === pending.operatorControlId || event.clientState?.sid === state.session.id && event.clientState.role === "customer" && event.clientState.intent === intent) &&
+      !pending.bridgeEvents.some((item) => item.id === event.id) && pending.bridgeEvents.length < 4) {
+      pending.bridgeEvents.push({ id: event.id, type: event.type, callControlId: event.callControlId, occurredAt: event.occurredAt, clientState: event.clientState });
+    }
+    const customers = state.legs.filter((leg) => leg.role === "customer" && leg.to_number === pending.scope.customerNumber &&
+      (leg.client_state as { sid?: string; intent?: string } | null)?.sid === state.session.id &&
+      (leg.client_state as { intent?: string } | null)?.intent === intent);
+    const operator = state.legs.find((leg) => (!pending.operatorLegId || leg.id === pending.operatorLegId) && leg.telnyx_call_control_id === pending.operatorControlId && leg.profile_id === pending.operatorProfileId &&
+      (!pending.operatorProviderLegId || leg.telnyx_call_leg_id === pending.operatorProviderLegId));
+    if (customers.length !== 1 || !operator || !operator.answered_at) continue;
+    const customer = customers[0];
+    let operation = history.operations.find((item) => item.id === pending.id);
+    if (!operation) {
+      operation = { id: pending.id, scope: pending.scope, startedAt: pending.startedAt, endedAt: pending.endedAt,
+        sourceControlId: customer.telnyx_call_control_id, topology: "bridge", customerLegId: customer.id,
+        customerControlId: customer.telnyx_call_control_id, customerProviderLegId: customer.telnyx_call_leg_id,
+        operatorLegId: operator.id, operatorControlId: pending.operatorControlId, operatorProfileId: pending.operatorProfileId,
+        operatorProviderLegId: pending.operatorProviderLegId, conferenceId: null, conferenceName: null, observations: {} };
+      history.operations.push(operation);
+    }
+    for (const observed of pending.bridgeEvents) observeBridge(state, operation, observed);
+    appendContactProof(state, history, operation);
+  }
+  if (history.pendingDials) history.pendingDials = history.pendingDials.filter((pending) => !history.operations.some((operation) => operation.id === pending.id));
+}
+
 /** Also run for ignored/terminal and duplicate events. Event-time identities survive transfer/hangup. */
 export function collectContactProof(state: ContactSnapshot, event: SessionEvent): ContactHistory {
   const history = readContactHistory(state.session);
   if (event.kind !== "telnyx" || !event.occurredAt || !Number.isFinite(Date.parse(event.occurredAt))) return history;
   const at = event.occurredAt;
+  bindDialContact(state, history, event);
   if (event.type === "conference.ended" && event.conferenceId) {
     const observations = history.conferenceObservations ??= [];
     if (!observations.some(item => item.eventId === event.id)) observations.push({ eventId: event.id, at, conferenceId: event.conferenceId, controlId: "*", joined: false });
   }
   for (const operation of history.operations) {
     if (!operation.scope || operation.scope.organizationId !== state.session.organization_id) continue;
-    const customer = state.legs.find((leg) => leg.id === operation.customerLegId && leg.telnyx_call_control_id === operation.customerControlId);
-    const operator = state.legs.find((leg) => leg.id === operation.operatorLegId && leg.telnyx_call_control_id === operation.operatorControlId);
     if (operation.topology === "bridge") {
-      if (!event.callControlId || event.callControlId !== operation.customerControlId && event.callControlId !== operation.operatorControlId) continue;
-      if (Date.parse(at) < Date.parse(operation.startedAt) || operation.endedAt && Date.parse(at) > Date.parse(operation.endedAt)) continue;
-      if (!validAt(customer, at) || !validAt(operator, at)) continue;
-      if (![operation.customerControlId, operation.operatorControlId].includes(operation.sourceControlId)) continue;
-      if (event.type !== "call.bridged") continue;
-      const expectedIntent = contactOperationIntent(operation.id);
-      if (event.callControlId === operation.sourceControlId
-        && (event.clientState?.sid !== state.session.id || event.clientState?.intent !== expectedIntent)) continue;
-      if (event.clientState?.intent?.startsWith("ct:") && event.clientState.intent !== expectedIntent) continue;
+      observeBridge(state, operation, event);
+      appendContactProof(state, history, operation);
+      continue;
     }
     if (operation.topology === "conference") {
       if (event.type === "conference.created" && event.conferenceId && event.payload.name === operation.conferenceName &&
@@ -185,8 +255,7 @@ export function collectContactProof(state: ContactSnapshot, event: SessionEvent)
         operation.conferenceId ??= event.conferenceId;
       }
       continue;
-    } else if (event.callControlId) operation.observations[event.callControlId] ??= { eventId: event.id, at, conferenceId: event.conferenceId };
-    appendContactProof(state, history, operation);
+    }
   }
   return history;
 }

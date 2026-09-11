@@ -18,8 +18,9 @@ const harness = {
   deny: () => {},
   begin: (kind: "dial" | "callback" | "pickup" | "supervise" | "hangup" | "hold"): void => { throw new Error(`Fixture is not mounted: ${kind}`); },
   prepare: () => {},
-  incoming: () => emit("telnyx.notification", { type: "callUpdate", call: {
-    id: "fixture-incoming", state: "ringing", direction: "inbound",
+  incoming: () => harness.callState("ringing"),
+  callState: (state: "ringing" | "active" | "hangup") => emit("telnyx.notification", { type: "callUpdate", call: {
+    id: "fixture-incoming", state, direction: "inbound",
     options: { remoteCallerNumber: "+421900000002" }, telnyxIDs: { telnyxCallControlId: "incoming-leg" },
     isAudioMuted: false, answer() {}, hangup() {}, muteAudio() {}, unmuteAudio() {}, dtmf() {},
   } }),
