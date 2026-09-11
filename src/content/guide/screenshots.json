@@ -33,8 +33,8 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
     "id": "overview",
@@ -62,8 +62,8 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
     "id": "menu-mobile",
@@ -91,8 +91,8 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
     "id": "phone-settings",
@@ -120,400 +120,8 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "ivr",
-    "file": "ivr.webp",
-    "title": "IVR menu",
-    "alt": "Voľby jednotka pre dispečing a dvojka pre spätné volanie.",
-    "width": 1440,
-    "height": 1280,
-    "annotations": [
-      {
-        "id": "ivr-name",
-        "label": "Názov hlasového menu",
-        "x": 7.36,
-        "y": 32.58,
-        "width": 54.78,
-        "height": 3.75
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "hours",
-    "file": "hours.webp",
-    "title": "Otváracie hodiny",
-    "alt": "Týždenný rozvrh linky a časové pásmo.",
-    "width": 1440,
-    "height": 1280,
-    "annotations": [
-      {
-        "id": "hours-schedule",
-        "label": "Rozvrh otváracích hodín",
-        "x": 7.36,
-        "y": 32.58,
-        "width": 56,
-        "height": 3.75
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "numbers",
-    "file": "numbers.webp",
-    "title": "Čísla",
-    "alt": "Priradenie plánu, IVR a otváracích hodín ku konkrétnej linke.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "numbers-line",
-        "label": "Výber konkrétnej linky",
-        "x": 85.58,
-        "y": 45.5,
-        "width": 7.06,
-        "height": 2.4
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "announcements",
-    "file": "announcements.webp",
-    "title": "Hlášky a jazyk",
-    "alt": "Výber linky, jazyka a hlášok pre volajúcich.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "announcements-language",
-        "label": "Jazyk hlášok",
-        "x": 50.14,
-        "y": 40.1,
-        "width": 42.22,
-        "height": 2.4
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "recording",
-    "file": "recording.webp",
-    "title": "Nahrávanie a kvalita",
-    "alt": "Nastavenia nahrávania, prepisu a spracovania rozhovorov.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "recording-recording",
-        "label": "Nahrávanie rozhovorov",
-        "x": 7.36,
-        "y": 40.1,
-        "width": 1.67,
-        "height": 2.4
-      },
-      {
-        "id": "recording-transcript",
-        "label": "Nadväzujúci prepis",
-        "x": 51.04,
-        "y": 40.1,
-        "width": 1.67,
-        "height": 2.4
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "incoming-call",
-    "file": "incoming-call.webp",
-    "title": "Prijatie prichádzajúceho hovoru",
-    "alt": "Prichádzajúci hovor z ukážkového telefónneho čísla s ovládaním prijatia.",
-    "width": 1100,
-    "height": 300,
-    "annotations": [
-      {
-        "id": "incoming-call-answer",
-        "label": "Prijať ponúknutý hovor",
-        "x": 78.51,
-        "y": 40,
-        "width": 6.82,
-        "height": 13.33
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "callbacks",
-    "file": "callbacks.webp",
-    "title": "Požiadavky na spätné volanie",
-    "alt": "Otvorená požiadavka a požiadavka prevzatá ukážkovým dispečerom.",
-    "width": 1100,
-    "height": 700,
-    "annotations": [
-      {
-        "id": "callbacks-claim",
-        "label": "Prevziať zodpovednosť za požiadavku",
-        "x": 72.43,
-        "y": 64.43,
-        "width": 8.22,
-        "height": 5.71
-      },
-      {
-        "id": "callbacks-call",
-        "label": "Zavolať klientovi späť",
-        "x": 80.29,
-        "y": 49.79,
-        "width": 7.9,
-        "height": 5.71
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "cases",
-    "file": "cases.webp",
-    "title": "Vyhľadávanie prípadov",
-    "alt": "Register prípadov s vyhľadávaním, filtrami a históriou.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "cases-history",
-        "label": "Prepnutie do histórie",
-        "x": 12.71,
-        "y": 13.3,
-        "width": 11.25,
-        "height": 4.4
-      },
-      {
-        "id": "cases-search",
-        "label": "Hľadanie prípadu",
-        "x": 4.03,
-        "y": 20.42,
-        "width": 19.81,
-        "height": 2.8
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "new-case",
-    "file": "new-case.webp",
-    "title": "Založenie nového prípadu",
-    "alt": "Začiatok formulára nového prípadu a uloženie rozpracovanej karty.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "new-case-basics",
-        "label": "Základné údaje prípadu",
-        "x": 26.25,
-        "y": 20.61,
-        "width": 7.6,
-        "height": 2.48
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "case-detail",
-    "file": "case-detail.webp",
-    "title": "Karta prípadu",
-    "alt": "Detail ukážkového prípadu s údajmi zákazníka a vozidla.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "case-detail-client",
-        "label": "Kontaktné údaje klienta",
-        "x": 39.3,
-        "y": 11.86,
-        "width": 7.54,
-        "height": 2.48
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "tasks",
-    "file": "tasks.webp",
-    "title": "Prehľad úloh",
-    "alt": "Pracovná tabuľa s úlohami na dnes a naplánovanými úlohami.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "tasks-today",
-        "label": "Úlohy s dnešným termínom",
-        "x": 23.08,
-        "y": 26.4,
-        "width": 2.77,
-        "height": 2.68
-      },
-      {
-        "id": "tasks-new",
-        "label": "Vytvorenie samostatnej úlohy",
-        "x": 90.44,
-        "y": 11.9,
-        "width": 8.17,
-        "height": 4.2
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "notes",
-    "file": "notes.webp",
-    "title": "Osobná poznámka",
-    "alt": "Súkromná poznámka a voľba kolegov, ktorí ju môžu čítať.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "notes-privacy",
-        "label": "Súkromie a zdieľanie iba na čítanie",
-        "x": 1.53,
-        "y": 69.91,
-        "width": 96.94,
-        "height": 4.28
-      },
-      {
-        "id": "notes-save",
-        "label": "Stav uloženia poznámky",
-        "x": 1.53,
-        "y": 17.8,
-        "width": 96.94,
-        "height": 2.54
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "notifications",
-    "file": "notifications.webp",
-    "title": "Nastavenia upozornení",
-    "alt": "Typy upozornení a nastavenie zvuku pre zariadenie.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "notifications-section",
-        "label": "Nastavenia upozornení",
-        "x": 5.28,
-        "y": 7.6,
-        "width": 22.36,
-        "height": 5.6
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "attendance",
-    "file": "attendance.webp",
-    "title": "Plánovanie dochádzky",
-    "alt": "Kalendár plánovaných smien s prepínaním na vlastnú dochádzku.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "attendance-mine",
-        "label": "Moja dochádzka",
-        "x": 17.4,
-        "y": 6.5,
-        "width": 11.67,
-        "height": 4.4
-      },
-      {
-        "id": "attendance-requests",
-        "label": "Žiadosti o neprítomnosť",
-        "x": 9.67,
-        "y": 6.5,
-        "width": 7.73,
-        "height": 4.4
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "fleet",
-    "file": "fleet.webp",
-    "title": "Prehľad flotily",
-    "alt": "Náhradné vozidlá a odťahová technika so stavom dostupnosti.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "fleet-replacement",
-        "label": "Náhradné vozidlá",
-        "x": 2.01,
-        "y": 38.78,
-        "width": 12.21,
-        "height": 4.4
-      },
-      {
-        "id": "fleet-tow",
-        "label": "Odťahová technika",
-        "x": 13.67,
-        "y": 38.78,
-        "width": 9.07,
-        "height": 4.4
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
-  },
-  {
-    "id": "directory",
-    "file": "directory.webp",
-    "title": "Adresár kontaktov",
-    "alt": "Ukážkové kontakty na odťahovú službu, servis a asistenciu.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "directory-search",
-        "label": "Hľadanie kontaktov",
-        "x": 9.86,
-        "y": 27.08,
-        "width": 65.28,
-        "height": 4.8
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:11:29.829Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
     "id": "groups",
@@ -541,8 +149,8 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:13:49.388Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
     "id": "ring-plans",
@@ -578,37 +186,142 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:13:49.388Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
-    "id": "sms",
-    "file": "sms.webp",
-    "title": "SMS ku konkrétnemu prípadu",
-    "alt": "SMS formulár pred odoslaním, s adresátom a prepojením na prípad.",
-    "width": 1100,
-    "height": 900,
+    "id": "ivr",
+    "file": "ivr.webp",
+    "title": "IVR menu",
+    "alt": "Voľby jednotka pre dispečing a dvojka pre spätné volanie.",
+    "width": 1440,
+    "height": 1280,
     "annotations": [
       {
-        "id": "sms-recipient",
-        "label": "Prípad určuje kontakt príjemcu",
-        "x": 21,
-        "y": 26.94,
-        "width": 58,
-        "height": 5.67
-      },
-      {
-        "id": "sms-message",
-        "label": "Text správy",
-        "x": 21,
-        "y": 54.72,
-        "width": 58,
-        "height": 16.67
+        "id": "ivr-name",
+        "label": "Názov hlasového menu",
+        "x": 7.36,
+        "y": 32.58,
+        "width": 54.78,
+        "height": 3.75
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:13:49.388Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "hours",
+    "file": "hours.webp",
+    "title": "Otváracie hodiny",
+    "alt": "Týždenný rozvrh linky a časové pásmo.",
+    "width": 1440,
+    "height": 1280,
+    "annotations": [
+      {
+        "id": "hours-schedule",
+        "label": "Rozvrh otváracích hodín",
+        "x": 7.36,
+        "y": 32.58,
+        "width": 56,
+        "height": 3.75
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "numbers",
+    "file": "numbers.webp",
+    "title": "Čísla",
+    "alt": "Priradenie plánu, IVR a otváracích hodín ku konkrétnej linke.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "numbers-line",
+        "label": "Výber konkrétnej linky",
+        "x": 85.58,
+        "y": 45.5,
+        "width": 7.06,
+        "height": 2.4
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "announcements",
+    "file": "announcements.webp",
+    "title": "Hlášky a jazyk",
+    "alt": "Výber linky, jazyka a hlášok pre volajúcich.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "announcements-language",
+        "label": "Jazyk hlášok",
+        "x": 50.14,
+        "y": 40.1,
+        "width": 42.22,
+        "height": 2.4
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "recording",
+    "file": "recording.webp",
+    "title": "Nahrávanie a kvalita",
+    "alt": "Nastavenia nahrávania, prepisu a spracovania rozhovorov.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "recording-recording",
+        "label": "Nahrávanie rozhovorov",
+        "x": 7.36,
+        "y": 40.1,
+        "width": 1.67,
+        "height": 2.4
+      },
+      {
+        "id": "recording-transcript",
+        "label": "Nadväzujúci prepis",
+        "x": 51.04,
+        "y": 40.1,
+        "width": 1.67,
+        "height": 2.4
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "incoming-call",
+    "file": "incoming-call.webp",
+    "title": "Prijatie prichádzajúceho hovoru",
+    "alt": "Prichádzajúci hovor z ukážkového telefónneho čísla s ovládaním prijatia.",
+    "width": 1100,
+    "height": 300,
+    "annotations": [
+      {
+        "id": "incoming-call-answer",
+        "label": "Prijať ponúknutý hovor",
+        "x": 78.51,
+        "y": 40,
+        "width": 6.82,
+        "height": 13.33
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
     "id": "active-call",
@@ -636,8 +349,8 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:14:57.179Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
     "id": "transfer",
@@ -665,8 +378,8 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:14:57.179Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
     "id": "queue",
@@ -694,8 +407,37 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:14:57.179Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "callbacks",
+    "file": "callbacks.webp",
+    "title": "Požiadavky na spätné volanie",
+    "alt": "Otvorená požiadavka a požiadavka prevzatá ukážkovým dispečerom.",
+    "width": 1100,
+    "height": 700,
+    "annotations": [
+      {
+        "id": "callbacks-claim",
+        "label": "Prevziať zodpovednosť za požiadavku",
+        "x": 72.43,
+        "y": 64.43,
+        "width": 8.22,
+        "height": 5.71
+      },
+      {
+        "id": "callbacks-call",
+        "label": "Zavolať klientovi späť",
+        "x": 80.29,
+        "y": 49.79,
+        "width": 7.9,
+        "height": 5.71
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
     "id": "pause",
@@ -723,8 +465,266 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:14:57.179Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "cases",
+    "file": "cases.webp",
+    "title": "Vyhľadávanie prípadov",
+    "alt": "Register prípadov s vyhľadávaním, filtrami a históriou.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "cases-history",
+        "label": "Prepnutie do histórie",
+        "x": 12.71,
+        "y": 13.3,
+        "width": 11.25,
+        "height": 4.4
+      },
+      {
+        "id": "cases-search",
+        "label": "Hľadanie prípadu",
+        "x": 4.03,
+        "y": 20.42,
+        "width": 19.81,
+        "height": 2.8
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "new-case",
+    "file": "new-case.webp",
+    "title": "Založenie nového prípadu",
+    "alt": "Začiatok formulára nového prípadu a uloženie rozpracovanej karty.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "new-case-basics",
+        "label": "Základné údaje prípadu",
+        "x": 26.25,
+        "y": 20.61,
+        "width": 7.6,
+        "height": 2.48
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "case-detail",
+    "file": "case-detail.webp",
+    "title": "Karta prípadu",
+    "alt": "Detail ukážkového prípadu s údajmi zákazníka a vozidla.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "case-detail-client",
+        "label": "Kontaktné údaje klienta",
+        "x": 39.3,
+        "y": 11.86,
+        "width": 7.54,
+        "height": 2.48
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "sms",
+    "file": "sms.webp",
+    "title": "SMS ku konkrétnemu prípadu",
+    "alt": "SMS formulár pred odoslaním, s adresátom a prepojením na prípad.",
+    "width": 1100,
+    "height": 900,
+    "annotations": [
+      {
+        "id": "sms-recipient",
+        "label": "Prípad určuje kontakt príjemcu",
+        "x": 21,
+        "y": 26.94,
+        "width": 58,
+        "height": 5.67
+      },
+      {
+        "id": "sms-message",
+        "label": "Text správy",
+        "x": 21,
+        "y": 54.72,
+        "width": 58,
+        "height": 16.67
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "tasks",
+    "file": "tasks.webp",
+    "title": "Prehľad úloh",
+    "alt": "Pracovná tabuľa s úlohami na dnes a naplánovanými úlohami.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "tasks-today",
+        "label": "Úlohy s dnešným termínom",
+        "x": 23.08,
+        "y": 21.6,
+        "width": 2.77,
+        "height": 2.68
+      },
+      {
+        "id": "tasks-new",
+        "label": "Vytvorenie samostatnej úlohy",
+        "x": 90.44,
+        "y": 7.1,
+        "width": 8.17,
+        "height": 4.2
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "notes",
+    "file": "notes.webp",
+    "title": "Osobná poznámka",
+    "alt": "Súkromná poznámka a voľba kolegov, ktorí ju môžu čítať.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "notes-privacy",
+        "label": "Súkromie a zdieľanie iba na čítanie",
+        "x": 1.53,
+        "y": 65.11,
+        "width": 96.94,
+        "height": 4.28
+      },
+      {
+        "id": "notes-save",
+        "label": "Stav uloženia poznámky",
+        "x": 1.53,
+        "y": 13,
+        "width": 96.94,
+        "height": 2.54
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "notifications",
+    "file": "notifications.webp",
+    "title": "Nastavenia upozornení",
+    "alt": "Typy upozornení a nastavenie zvuku pre zariadenie.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "notifications-section",
+        "label": "Nastavenia upozornení",
+        "x": 5.28,
+        "y": 7.6,
+        "width": 22.36,
+        "height": 5.6
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "attendance",
+    "file": "attendance.webp",
+    "title": "Plánovanie dochádzky",
+    "alt": "Kalendár plánovaných smien s prepínaním na vlastnú dochádzku.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "attendance-mine",
+        "label": "Moja dochádzka",
+        "x": 17.4,
+        "y": 6.5,
+        "width": 11.67,
+        "height": 4.4
+      },
+      {
+        "id": "attendance-requests",
+        "label": "Žiadosti o neprítomnosť",
+        "x": 9.67,
+        "y": 6.5,
+        "width": 7.73,
+        "height": 4.4
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "fleet",
+    "file": "fleet.webp",
+    "title": "Prehľad flotily",
+    "alt": "Náhradné vozidlá a odťahová technika so stavom dostupnosti.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "fleet-replacement",
+        "label": "Náhradné vozidlá",
+        "x": 2.01,
+        "y": 38.78,
+        "width": 12.21,
+        "height": 4.4
+      },
+      {
+        "id": "fleet-tow",
+        "label": "Odťahová technika",
+        "x": 13.67,
+        "y": 38.78,
+        "width": 9.07,
+        "height": 4.4
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "directory",
+    "file": "directory.webp",
+    "title": "Adresár kontaktov",
+    "alt": "Ukážkové kontakty na odťahovú službu, servis a asistenciu.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "directory-search",
+        "label": "Hľadanie kontaktov",
+        "x": 9.86,
+        "y": 27.08,
+        "width": 65.28,
+        "height": 4.8
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
     "id": "reports",
@@ -752,7 +752,7 @@
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:14:57.179Z",
-    "sourceRevision": "5ae0d99b5f6bb4c22dc2a265b4be66a9c6bc3391+working-tree"
+    "capturedAt": "2026-09-11T07:26:48.630Z",
+    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   }
 ]

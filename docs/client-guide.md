@@ -20,7 +20,7 @@ Výsledkom je 24 HTML stránok, spoločné CSS/JavaScript, obrázky a `knowledge
 
 | Súbor | Úloha |
 | --- | --- |
-| `src/content/guide/chapters.ts` | Kategórie, základné kapitoly, telefonovanie, dátum a verzia obsahu. |
+| `src/content/guide/chapters.ts` | Kategórie, základné kapitoly, telefonovanie, dátum, verzia obsahu a revízia overeného zdroja `GUIDE_SOURCE_REVISION`. |
 | `src/content/guide/operations.ts` | Prevádzka, riešenie problémov, slovník a kontrolné zoznamy. |
 | `src/content/guide/types.ts` | Spoločná štruktúra kapitol, krokov a obrázkov. |
 | `src/content/guide/screenshots.json` | Popisy obrázkov, percentuálne súradnice zvýraznení a pôvod snímok. |

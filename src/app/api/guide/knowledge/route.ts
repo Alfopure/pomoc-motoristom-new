@@ -1,4 +1,4 @@
-import { guideChapters, GUIDE_CONTENT_VERSION, GUIDE_UPDATED_AT } from "@/content/guide/chapters";
+import { guideChapters, GUIDE_CONTENT_VERSION, GUIDE_UPDATED_AT, GUIDE_SOURCE_REVISION } from "@/content/guide/chapters";
 import screenshots from "@/content/guide/screenshots.json";
 import { buildGuideKnowledge } from "@/content/guide/knowledge";
 import { motoristAccessGuard } from "@/server/api-auth";
@@ -12,6 +12,6 @@ export async function GET() {
   return Response.json(buildGuideKnowledge(guideChapters, screenshots, {
     version: GUIDE_CONTENT_VERSION,
     updatedAt: GUIDE_UPDATED_AT,
-    sourceRevision: "5ae0d99",
+    sourceRevision: GUIDE_SOURCE_REVISION,
   }), { headers: { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } });
 }

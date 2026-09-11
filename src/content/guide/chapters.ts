@@ -3,6 +3,8 @@ import { guideOperationsChapters } from "./operations";
 
 export const GUIDE_UPDATED_AT = "2026-09-11";
 export const GUIDE_CONTENT_VERSION = "1.0.0";
+// Application revision used to verify the documented behavior, not a live-state revision.
+export const GUIDE_SOURCE_REVISION = "518e9883a690b6428f8ba9f26d895552be6848cf";
 
 export const guideCategories: GuideCategory[] = [
   { id: "zaciname", title: "Začíname", description: "Prvý prístup, orientácia a pripravené pracovisko.", icon: "start" },
@@ -46,7 +48,7 @@ export const guideChapters: GuideChapter[] = [
     slug: "orientacia", title: "Orientácia v aplikácii", description: "Kde nájdete prípady, telefón, menu a nástroje na každodennú prácu.", categoryId: "zaciname", audience: "all", minutes: 4,
     keywords: ["nástenka", "menu", "navigácia", "prehľad", "mobil", "pripnúť", "ústredňa", "nástroje"], prerequisites: ["Ste prihlásený do aplikácie."],
     sections: [
-      { id: "pracovna-obrazovka", title: "Začnite Nástenkou", paragraphs: ["Nástenka spája pracovný prehľad, prípady a nástroje. V hornej časti kontrolujte vlastný telefón, dostupnosť, čakáreň a upozornenia. V pracovnej ploche otvárate prípady alebo mapu a podľa potreby úlohy či poznámky.", "Rozloženie sa môže líšiť podľa šírky okna a pripnutých položiek. Pri hľadaní funkcie sa orientujte podľa názvu, nielen podľa polohy na obrázku."], screenshotIds: ["overview"] },
+      { id: "pracovna-obrazovka", title: "Začnite Nástenkou", paragraphs: ["Nástenka spája pracovný prehľad, prípady a nástroje. V hornej časti kontrolujte vlastný telefón, dostupnosť, čakáreň a upozornenia. V pracovnej ploche otvárate prípady alebo mapu a podľa potreby úlohy či poznámky.", "Záložky Mapa, Úlohy a Poznámky nad mapou menia túto časť pracovnej plochy; na počítači zostáva karta prípadu aj bočné panely poruke. Keď otvoríte Úlohy alebo Poznámky cez Menu, dostanete samostatnú obrazovku na prácu s nimi. Rozpracovaná karta pri tomto prepnutí zostáva zachovaná.", "Rozloženie sa môže líšiť podľa šírky okna a pripnutých položiek. Pri hľadaní funkcie sa orientujte podľa názvu, nielen podľa polohy na obrázku."], screenshotIds: ["overview"] },
       { id: "kam-ist", title: "Čo hľadať v Menu", table: { headers: ["Oblasť", "Kedy ju otvoriť"], rows: [
         ["Nástenka", "Chcete mať počas služby pracovný prehľad a rýchly prístup k nástrojom."],
         ["Prípady", "Hľadáte konkrétny zásah alebo prechádzate aktívne a historické prípady."],
@@ -95,7 +97,7 @@ export const guideChapters: GuideChapter[] = [
       { id: "odchadzajuci-hovor", title: "Ako zavolať klientovi", steps: [
         { id: "overit-ciel", title: "Vyberte správne telefónne číslo", text: "Použite volanie pri kontakte v prípade alebo adresári, prípadne zadajte číslo v telefóne. Pri viacerých kontaktoch overte, komu voláte. Pri ručnom zadaní použite aj medzinárodnú predvoľbu." },
         { id: "overit-linku", title: "Skontrolujte odchádzajúcu linku", text: "Pred volaním overte, z ktorého pracovného čísla voláte. Predvolenú Odchádzajúcu linku nastavíte v Môj telefón; toto číslo sa zobrazuje volanému." },
-        { id: "zavolat", title: "Spustite volanie a počkajte", text: "Stlačte volanie raz a sledujte jeho stav. Opätovným klikaním počas vytáčania neurychlíte spojenie.", result: "Po prijatí druhou stranou sa zobrazuje aktívny hovor. Neúspešný pokus nie je potvrdením kontaktovania klienta." },
+        { id: "zavolat", title: "Spustite volanie a počkajte", text: "Stlačte volanie raz a sledujte jeho stav. Opätovným klikaním počas vytáčania neurychlíte spojenie. Pri odchádzajúcom aj spätnom hovore sa klientovi predstavte sami: automatický úvod sa neprehráva. Pri zapnutom nahrávaní môže pred rozhovorom zaznieť príslušný oznam o nahrávaní.", result: "Po prijatí druhou stranou sa zobrazuje aktívny hovor. Neúspešný pokus nie je potvrdením kontaktovania klienta." },
       ] },
       { id: "hovor-a-pripad", title: "Prepojte rozhovor s prípadom", steps: [
         { id: "najst-kartu", title: "Otvorte existujúci prípad alebo vytvorte nový", text: "Najprv overte, či už prípad existuje. Pri novej požiadavke použite vytvorenie prípadu z hovoru alebo Nový prípad." },
