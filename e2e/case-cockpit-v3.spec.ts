@@ -30,6 +30,8 @@ async function boot(page: Page, width: number, query = "") {
   return errors;
 }
 const sms = (page: Page) => page.locator("summary").filter({ hasText: /^História SMS prípadu$/ });
+const pdfButton = (page: Page) => page.getByRole("button", { name: "Stiahnuť PDF", exact: true });
+const pdfFixture = "%PDF-1.4\n% Isolated case download fixture\n%%EOF";
 async function assertOrder(page: Page) {
   const order = await page.evaluate(() => {
     const selectors = ['[data-testid="case-summary"]', '[data-testid="case-tasks"]', '[data-testid="case-edit-form-main"]', '[aria-labelledby="case-notes-heading"]'];
@@ -45,6 +47,10 @@ for (const width of [360, 390, 768, 1024, 1279, 1280]) {
   for (const filled of [false, true]) test(`case sections remain ordered and fit at ${width}px (${filled ? "filled" : "empty"})`, async ({ page }) => {
     const errors = await boot(page, width, `?filled=${filled}`);
     await expect(page.getByTestId("case-summary")).toBeVisible();
+    const header = page.getByRole("group", { name: "Stav a priorita prípadu", exact: true });
+    await expect(header.getByRole("button", { name: "Stiahnuť PDF", exact: true })).toBeVisible();
+    await expect(pdfButton(page)).toHaveCount(1);
+    await expect(pdfButton(page)).toBeEnabled();
     await assertOrder(page);
     const tasks = page.getByTestId("case-tasks");
     await expect(tasks.locator(":scope > summary")).toContainText(filled ? "1 otvorených · 1 po termíne" : "0 otvorených · 0 po termíne");
@@ -174,6 +180,118 @@ async function mockCaseSaves(page: Page, options: { conflict?: boolean; fail?: b
   });
   return requests;
 }
+test("header PDF downloads the saved case without a needless save", async ({ page }) => {
+  const errors = await boot(page, 1280);
+  const saves = await mockCaseSaves(page);
+  let exports = 0;
+  await page.route("**/api/cases/case-fixture/pdf", route => {
+    exports++;
+    return route.fulfill({ contentType: "application/pdf", body: pdfFixture });
+  });
+  const downloadEvent = page.waitForEvent("download");
+  await pdfButton(page).click();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toBe("TEST-001.pdf");
+  expect(await readFile((await download.path())!, "utf8")).toBe(pdfFixture);
+  await expect(pdfButton(page)).toBeEnabled();
+  expect(saves).toEqual([]);
+  expect(exports).toBe(1);
+  expect(errors).toEqual([]);
+});
+
+for (const saveAlreadyStarted of [false, true]) {
+  test(`header PDF waits for ${saveAlreadyStarted ? "in-flight autosave" : "the pending draft save"} before downloading`, async ({ page }) => {
+    const errors = await boot(page, 1280);
+    let release!: () => void;
+    const delay = new Promise<void>(resolve => { release = resolve; });
+    const saves = await mockCaseSaves(page, { delayFirst: delay });
+    let exports = 0;
+    await page.route("**/api/cases/case-fixture/pdf", route => {
+      exports++;
+      return route.fulfill({ contentType: "application/pdf", body: pdfFixture });
+    });
+    const priority = page.getByLabel("Priorita prípadu v hlavičke");
+    await priority.selectOption("high");
+    if (saveAlreadyStarted) await expect.poll(() => saves.length).toBe(1);
+    const downloadEvent = page.waitForEvent("download");
+    try {
+      await expect(pdfButton(page)).toBeEnabled();
+      await pdfButton(page).click();
+      await expect.poll(() => saves.length).toBe(1);
+      await expect(pdfButton(page)).toBeDisabled();
+      expect(exports).toBe(0);
+      expect(saves[0]).toEqual({ priority: "high", expectedUpdatedAt: "2026-09-10T11:00:00Z" });
+    } finally {
+      release();
+    }
+    expect((await downloadEvent).suggestedFilename()).toBe("TEST-001.pdf");
+    await expect(pdfButton(page)).toBeEnabled();
+    await expect(priority).toHaveValue("high");
+    expect(saves).toHaveLength(1);
+    expect(exports).toBe(1);
+    expect(errors).toEqual([]);
+  });
+}
+
+test("failed save blocks header PDF and preserves the pending draft", async ({ page }) => {
+  const errors = await boot(page, 390);
+  const saves = await mockCaseSaves(page, { fail: true });
+  let exports = 0;
+  let downloads = 0;
+  page.on("download", () => { downloads++; });
+  await page.route("**/api/cases/case-fixture/pdf", route => {
+    exports++;
+    return route.fulfill({ contentType: "application/pdf", body: pdfFixture });
+  });
+  const priority = page.getByLabel("Priorita prípadu v hlavičke");
+  await priority.selectOption("urgent");
+  await pdfButton(page).click();
+  await expect(page.getByRole("status").filter({ hasText: "Pred exportom uložte rozpracované zmeny" })).toBeVisible();
+  await expect(pdfButton(page)).toBeEnabled();
+  await expect(priority).toHaveValue("urgent");
+  expect(saves.length).toBeGreaterThan(0);
+  expect(exports).toBe(0);
+  expect(downloads).toBe(0);
+  expect(errors).toEqual([]);
+});
+
+test("PDF endpoint failure shows its error and allows retry", async ({ page }) => {
+  const errors = await boot(page, 390);
+  let exports = 0;
+  await page.route("**/api/cases/case-fixture/pdf", route => {
+    exports++;
+    return exports === 1
+      ? route.fulfill({ status: 503, json: { error: "PDF je dočasne nedostupné." } })
+      : route.fulfill({ contentType: "application/pdf", body: pdfFixture });
+  });
+  await pdfButton(page).click();
+  await expect(page.getByRole("status").filter({ hasText: "PDF je dočasne nedostupné." })).toBeVisible();
+  await expect(pdfButton(page)).toBeEnabled();
+  const downloadEvent = page.waitForEvent("download");
+  await pdfButton(page).click();
+  expect((await downloadEvent).suggestedFilename()).toBe("TEST-001.pdf");
+  await expect(pdfButton(page)).toBeEnabled();
+  expect(exports).toBe(2);
+  expect(errors).toEqual([]);
+});
+
+for (const width of [390, 1280]) {
+  test(`expanded detail keeps PDF beside case controls at ${width}px`, async ({ page }) => {
+    const errors = await boot(page, width, "?view=detail");
+    const header = page.getByRole("group", { name: "Stav a priorita prípadu", exact: true });
+    await expect(header.getByRole("button", { name: "Stiahnuť PDF", exact: true })).toBeVisible();
+    await expect(header.getByLabel("Priorita prípadu v hlavičke")).toBeVisible();
+    await expect(page.getByTestId("case-summary").getByRole("definition").filter({ hasText: "TEST-001" })).toBeVisible();
+    await expect(pdfButton(page)).toHaveCount(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    await page.route("**/api/cases/case-fixture/pdf", route => route.fulfill({ contentType: "application/pdf", body: pdfFixture }));
+    const downloadEvent = page.waitForEvent("download");
+    await pdfButton(page).click();
+    expect((await downloadEvent).suggestedFilename()).toBe("TEST-001.pdf");
+    expect(errors).toEqual([]);
+  });
+}
+
 test("header priority shares the editor snapshot and later autosave sends only changed fields", async ({ page }) => {
   const errors = await boot(page, 1280);
   const requests = await mockCaseSaves(page);

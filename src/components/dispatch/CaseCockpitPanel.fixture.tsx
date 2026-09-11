@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { DispatchCase, PriceRule } from "@/domain/types";
+import type { DispatchCall, DispatchCase, PriceRule } from "@/domain/types";
+import type { DispatchData } from "@/data/dispatch-types";
 import type { PlaceSelectionInput } from "@/data/case-inputs";
 import { createDispatchMapModel } from "@/lib/map-adapter";
 import { CaseCockpitPanel } from "./CaseCockpitPanel";
 import { CaseDrawer } from "./CaseDrawer";
+import { ExpandedCasePanel } from "./ExpandedCasePanel";
 import { LocationPicker } from "./LocationPicker";
 
 // Browser-only fixture: the real components use a Google boundary stub and blocked network.
@@ -62,15 +64,21 @@ const caseItem: DispatchCase = {
 };
 Object.assign(window, { caseCardFixture: caseItem });
 const priceRule: PriceRule = { id: "price-fixture", name: "Test", sourceType: "samoplatca", baseFee: 0, pricePerKm: 0, minimumPrice: 0, vatRate: 0 };
+const call: DispatchCall = { id: "call-fixture", status: "ended", callerNumber: "+421900000001", calledNumber: "+421900000002", lineLabel: "Testovacia linka", startedAt: "2026-09-10T10:00:00Z", waitSeconds: 0, history: [] };
 const noop = () => {};
 function Fixture() {
   const [currentCase, setCurrentCase] = useState(caseItem);
   const [mode, setMode] = useState<"expanded" | "split" | "collapsed">("split");
   const [open, setOpen] = useState(true);
   const [point, setPoint] = useState<PlaceSelectionInput | null>(null);
+  const onDataChange = (data: DispatchData) => {
+    const next = data.dispatchCases.find(item => item.id === currentCase.id);
+    if (next) setCurrentCase(next);
+  };
   const view = new URLSearchParams(location.search).get("view");
   if (view === "location") return <div style={{ maxWidth: 600, margin: "auto", paddingBottom: 1000 }}><LocationPicker value={point} onSelect={setPoint} /><output data-testid="selected-point">{JSON.stringify(point)}</output></div>;
   if (view === "drawer") return <><button onClick={() => setOpen(true)}>Otvoriť drawer</button><CaseDrawer caseItem={currentCase} assets={[]} branches={[]} partnerDirectory={[]} priceRule={priceRule} open={open} onClose={() => setOpen(false)} /></>;
-  return <div style={{ height: "100dvh", display: "flex", flexDirection: "column" }}><CaseCockpitPanel assets={[]} branches={[]} caseItem={currentCase} commanderVehicles={[]} focusedTaskId={new URLSearchParams(location.search).get("task") ?? undefined} mode={mode} model={createDispatchMapModel(currentCase, [], [])} operators={[]} partnerDirectory={[]} onCollapse={() => setMode("collapsed")} onExpand={() => setMode("expanded")} onRestore={() => setMode("split")} onDataChange={data => { const next = data.dispatchCases.find(item => item.id === currentCase.id); if (next) setCurrentCase(next); }} onDirtyChange={noop} onSaveDraftChange={noop} onSavingChange={noop} /></div>;
+  if (view === "detail") return <div style={{ height: "100dvh" }}><ExpandedCasePanel assets={[]} branches={[]} call={call} caseItem={currentCase} commanderVehicles={[]} kind="detail" operators={[]} partnerDirectory={[]} onBackToCockpit={noop} onCaseCreated={noop} onDataChange={onDataChange} /></div>;
+  return <div style={{ height: "100dvh", display: "flex", flexDirection: "column" }}><CaseCockpitPanel assets={[]} branches={[]} caseItem={currentCase} commanderVehicles={[]} focusedTaskId={new URLSearchParams(location.search).get("task") ?? undefined} mode={mode} model={createDispatchMapModel(currentCase, [], [])} operators={[]} partnerDirectory={[]} onCollapse={() => setMode("collapsed")} onExpand={() => setMode("expanded")} onRestore={() => setMode("split")} onDataChange={onDataChange} onDirtyChange={noop} onSaveDraftChange={noop} onSavingChange={noop} /></div>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);
