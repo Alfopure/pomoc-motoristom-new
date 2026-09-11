@@ -21,6 +21,7 @@
 
 import { applyStoredAudioOutput, REMOTE_AUDIO_ELEMENT_ID } from "@/lib/telephony/audio-output";
 import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
+import { beginBrowserCallStep, type CallTimingContext } from "@/lib/telephony/call-timing";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS, type TelephonyJsonResult } from "@/lib/telephony/client-request";
 import type { IClientOptions } from "@telnyx/webrtc";
 import {
@@ -158,6 +159,10 @@ export class TelnyxWebphone {
   private withdrawnInvites = new Set<string>();
   private confirmedEndedCallIds = new Set<string>();
   private endedCallControlIds = new Set<string>();
+  private finishInviteTiming: ReturnType<typeof beginBrowserCallStep> | null = null;
+  private callTiming: CallTimingContext = {};
+  private finishAudioTiming: ReturnType<typeof beginBrowserCallStep> | null = null;
+  private timedActiveCallId: string | null = null;
   /** Our session id for the call currently on this tab's media leg, when known. */
   private callSessionId: string | null = null;
   private listeners = new Set<(snapshot: WebphoneSnapshot) => void>();
@@ -194,7 +199,10 @@ export class TelnyxWebphone {
   };
   private readonly boundResume = () => this.onResume();
   private readonly boundAudioReady = () => void this.playRemoteAudio();
-  private readonly boundAudioPlaying = () => this.setAudioBlocked(false);
+  private readonly boundAudioPlaying = () => {
+    if (this.hasRemoteMedia()) { this.finishAudioTiming?.(); this.finishAudioTiming = null; }
+    this.setAudioBlocked(false);
+  };
   private readonly boundAudioPause = () => {
     if (this.hasRemoteMedia()) this.setAudioBlocked(true);
   };
@@ -259,10 +267,11 @@ export class TelnyxWebphone {
    * answered without the operator touching anything (design §2.2). Correlation
    * is on `telnyxIDs.telnyxCallControlId`, never on arrival order.
    */
-  expectOperatorLeg(input: { callControlId: string; sessionId: string }): void {
+  expectOperatorLeg(input: { callControlId: string; sessionId: string; timingOperationId?: string }): void {
     // An invite can end before the API response identifies its operator leg.
     // That late response must not reserve the mobile phone for another 90 s.
     if (this.endedCallControlIds.has(input.callControlId)) return;
+    if (input.timingOperationId && this.call?.telnyxIDs?.telnyxCallControlId === input.callControlId) this.callTiming.operationId = input.timingOperationId;
     this.expected = rememberExpectedLeg(this.expected, { ...input, at: this.now() }, this.now());
     // The invite usually arrives before `POST /api/telephony/calls` answers (the
     // route still writes leg/session rows), so the ringing call is re-evaluated
@@ -753,6 +762,13 @@ export class TelnyxWebphone {
     }
 
     if (this.call?.id !== call.id) {
+      this.finishInviteTiming?.({ outcome: "cancelled" });
+      this.finishAudioTiming?.({ outcome: "cancelled" });
+      const expected = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now());
+      this.callTiming = { operationId: expected?.timingOperationId ?? crypto.randomUUID() };
+      this.finishInviteTiming = beginBrowserCallStep("invite_to_active", this.callTiming);
+      this.finishAudioTiming = null;
+      this.timedActiveCallId = null;
       this.callSessionId = null;
       this.callError = null;
       this.answeringCallId = null;
@@ -773,6 +789,13 @@ export class TelnyxWebphone {
     }
 
     if (ACTIVE_STATES.has(state)) {
+      // SDK "early" and "answering" are not evidence of an active media call.
+      if (state === "active" && this.timedActiveCallId !== call.id) {
+        this.timedActiveCallId = call.id;
+        this.finishInviteTiming?.();
+        this.finishInviteTiming = null;
+        this.finishAudioTiming = beginBrowserCallStep("audio_playback", this.callTiming);
+      }
       this.stopRinging();
       this.answeredCallId = null;
       void this.playRemoteAudio();
@@ -802,6 +825,7 @@ export class TelnyxWebphone {
     this.expected = this.expected.filter((entry) => entry.callControlId !== expected.callControlId);
     this.scheduleExpectedLegExpiry();
     this.callSessionId = expected.sessionId;
+    if (expected.timingOperationId) this.callTiming.operationId = expected.timingOperationId;
 
     void this.answerCall(call);
     return true;
@@ -818,14 +842,17 @@ export class TelnyxWebphone {
     this.publish();
     // The answer button is also a sound-unlock gesture on mobile browsers.
     void this.resumeAudio();
+    const finishTiming = beginBrowserCallStep("answer", this.callTiming);
     try {
       const result = call.answer();
       if (this.isCurrentCall(call, generation)) this.publish();
       await result;
+      finishTiming({ outcome: this.isCurrentCall(call, generation) ? "ok" : "cancelled" });
       if (!this.isCurrentCall(call, generation)) return;
       this.answeredCallId = RINGING_STATES.has(String(call.state).toLowerCase()) ? call.id : null;
       void this.playRemoteAudio();
     } catch (error) {
+      finishTiming({ outcome: "failed" });
       if (!this.isCurrentCall(call, generation)) return;
       this.callError = callFailureMessage(error);
       if (RINGING_STATES.has(String(call.state).toLowerCase())) this.startRinging(call);
@@ -954,6 +981,11 @@ export class TelnyxWebphone {
   }
 
   private clearCurrentCall(): void {
+    this.finishInviteTiming?.({ outcome: "cancelled" });
+    this.finishAudioTiming?.({ outcome: "cancelled" });
+    this.finishInviteTiming = null;
+    this.finishAudioTiming = null;
+    this.timedActiveCallId = null;
     this.rememberEndedOperatorLeg(this.call?.telnyxIDs?.telnyxCallControlId);
     this.stopRinging();
     this.call = null;

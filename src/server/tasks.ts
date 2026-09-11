@@ -37,9 +37,10 @@ export function validateTaskInput(input: Record<string, unknown>, create = false
   }
   return result;
 }
-async function workspaceRpc<T>(actor: TaskWorkspaceActor, action: string, id?: string, input: Record<string, unknown> = {}): Promise<T> {
+async function workspaceRpc<T>(actor: TaskWorkspaceActor, action: string, id?: string, input: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
   const client = await createSupabaseServerClient();
-  const { data, error } = await client.rpc("motorist_task_workspace", { p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId, p_action: action, p_task_id: id ? taskId(id) : null, p_input: input });
+  const request = client.rpc("motorist_task_workspace", { p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId, p_action: action, p_task_id: id ? taskId(id) : null, p_input: input });
+  const { data, error } = await (signal ? request.abortSignal(signal) : request);
   if (error) {
     const status = error.code === "42501" ? 403 : error.code === "P0002" ? 404 : error.code === "40001" || error.code === "23505" ? 409 : error.code === "22023" || error.code === "22P02" ? 400 : 503;
     const message = error.code === "55000" ? "Nové úlohy ešte nie sú aktivované. Vyžaduje sa kompatibilná databáza a overenie všetkých zapisujúcich verzií aplikácie." : status === 409 ? "Úloha sa medzičasom zmenila. Načítajte aktuálnu verziu." : status === 403 || status === 404 ? "Úloha nie je dostupná alebo nemáte oprávnenie." : status === 400 ? "Skontrolujte údaje úlohy a jej väzby." : "Úlohu sa nepodarilo spracovať. Skúste to znova.";
@@ -55,7 +56,7 @@ async function workspaceRpc<T>(actor: TaskWorkspaceActor, action: string, id?: s
   }
   return data as T;
 }
-export function loadTaskWorkspace(actor: TaskWorkspaceActor) { return workspaceRpc<WorkspaceTask[]>(actor, "list"); }
+export function loadTaskWorkspace(actor: TaskWorkspaceActor, signal?: AbortSignal) { return workspaceRpc<WorkspaceTask[]>(actor, "list", undefined, {}, signal); }
 export function loadWorkspaceTask(actor: TaskWorkspaceActor, id: string) { return workspaceRpc<WorkspaceTask>(actor, "get", id); }
 export function createWorkspaceTask(actor: TaskWorkspaceActor, input: Record<string, unknown>) { return workspaceRpc<WorkspaceTask>(actor, "create", undefined, validateTaskInput(input, true)); }
 export function updateWorkspaceTask(actor: TaskWorkspaceActor, id: string, input: Record<string, unknown>) { return workspaceRpc<WorkspaceTask>(actor, "update", id, validateTaskInput(input)); }

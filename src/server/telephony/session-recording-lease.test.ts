@@ -57,7 +57,7 @@ describe("per-call recording lease requirements", () => {
     expect(h.telnyx.calls).toHaveLength(commands);
   });
 
-  it.each([false, true])("replays the same answered event immediately after lease release (durable=%s)", async durable => {
+  it.each([false, true])("replays the same answered event when its deferral is due after lease release (durable=%s)", async durable => {
     const { h, call, operator } = await ringing(!durable, durable);
     const before = h.now().getTime();
     const id = "contended-answer";
@@ -65,6 +65,10 @@ describe("per-call recording lease requirements", () => {
     expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === id)).toMatchObject({ status: "failed", claimed_at: null, attempts: 1 });
     await h.admin.rpc("motorist_session_lease_release", { p_session_id: call.sessionId, p_token: "other-request" });
 
+    expect(await h.legEvent(operator, "call.answered", {}, id)).toMatchObject({ status: 500, outcome: "busy", claim: { attempts: 1 } });
+    const deferred = h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === id)!;
+    expect(deferred).toMatchObject({ deferral_count: 1, effect_failure_count: 0 });
+    h.advance(Date.parse(String(deferred.next_attempt_at)) - h.now().getTime());
     expect(await h.legEvent(operator, "call.answered", {}, id)).toMatchObject({ status: 200, outcome: "processed", claim: { attempts: 2 } });
     expect(h.session(call.sessionId).state).toBe("talking");
     const count = h.telnyx.calls.length;

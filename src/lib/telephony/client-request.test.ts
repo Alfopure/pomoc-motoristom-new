@@ -13,6 +13,56 @@ import {
 afterEach(() => vi.useRealTimers());
 
 describe("bounded telephony requests", () => {
+  it("aborts and cancels a stalled response body after headers without retrying", async () => {
+    vi.useFakeTimers();
+    const cancelled = vi.fn();
+    let requestSignal: AbortSignal | null | undefined;
+    const fetchSpy = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      requestSignal = init?.signal;
+      return new Response(new ReadableStream({
+        start(controller) { controller.enqueue(new TextEncoder().encode('{"ok":')); },
+        cancel: cancelled,
+      }), { status: 200 });
+    });
+    const pending = telephonyJson("/api/telephony/calls/active", { label: "hovory", timeoutMs: 50 },
+      { fetch: fetchSpy as typeof fetch }).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(await pending).toBeInstanceOf(TelephonyRequestTimeoutError);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(cancelled).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retains caller cancellation during the response body instead of returning malformed JSON", async () => {
+    const controller = new AbortController();
+    const cancelled = vi.fn();
+    let bodyStarted!: () => void;
+    const ready = new Promise<void>((resolve) => { bodyStarted = resolve; });
+    const fetchSpy = vi.fn(async () => new Response(new ReadableStream({
+      pull() { bodyStarted(); }, cancel: cancelled,
+    })));
+    const pending = telephonyJson("/api/telephony/calls/active", { label: "hovory", timeoutMs: 1000, signal: controller.signal },
+      { fetch: fetchSpy as typeof fetch }).catch((error: unknown) => error);
+    await ready;
+    controller.abort();
+    const error = await pending;
+    expect(error).toMatchObject({ name: "AbortError" });
+    expect(isTelephonyTimeout(error)).toBe(false);
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds API body memory and cancels oversized responses", async () => {
+    const cancelled = vi.fn();
+    const fetchSpy = vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array(8 * 1024 * 1024 + 1)); },
+      cancel: cancelled,
+    })));
+    await expect(telephonyJson("/api/telephony/calls/active", { label: "hovory", timeoutMs: 1000 },
+      { fetch: fetchSpy as typeof fetch })).rejects.toThrow(/príliš veľká/);
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
   it("accepts a call-control result after 15 seconds without aborting or retrying", async () => {
     vi.useFakeTimers();
     const aborted = vi.fn();
@@ -106,8 +156,8 @@ describe("bounded telephony requests", () => {
     controller.abort();
 
     const error = await pending.catch((caught: unknown) => caught);
-    // A caller abort must never be reported as a timeout: only a timeout
-    // implies the request may still have reached the provider.
+    // Caller cancellation stays distinguishable. Neither kind of cancellation
+    // proves the remote mutation did not happen.
     expect(isTelephonyTimeout(error)).toBe(false);
     expect(isAbortLikeError(error)).toBe(true);
   });

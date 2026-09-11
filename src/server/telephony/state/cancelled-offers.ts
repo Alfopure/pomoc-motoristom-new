@@ -1,3 +1,4 @@
+import { SessionLeaseLostError } from "../service-errors";
 import { commandId } from "../telnyx/command-id";
 import { isCallGoneError } from "../telnyx/client";
 import type { TelnyxClientState } from "../telnyx/client-state";
@@ -29,6 +30,7 @@ export async function cancelRevokedOffers(deps: EffectsDeps, input: SessionRow, 
         await deps.telnyx.hangup({ callControlId, commandId: commandId({ sessionId: session.id, legId: callControlId, step: token, intent: "cancel:offer" }) });
         cancelled += 1;
       } catch (error) {
+        if (error instanceof SessionLeaseLostError) throw error;
         if (isCallGoneError(error)) cancelled += 1;
         else {
           pending += 1;

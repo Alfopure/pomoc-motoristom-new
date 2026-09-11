@@ -18,7 +18,9 @@ import { presenceAllowsOffer } from "./routing/eligibility";
 import { releaseOperator, reserveOperatorOwnership, reserveOperatorPickup, releaseOperatorPresence, type PresenceTransitionResult } from "./routing/reservation";
 import { telephonyStabilityEnabled } from "./stability";
 import { effectivePresenceStatus } from "@/lib/telephony/presence-policy";
-import { effectsDeps, loadRoutingSettings, runSessionEvent, type SessionRunnerDeps, type SessionRunResult } from "./session-runner";
+import { findInitialCall, initialOperationIdentity, InitialOperationExistsError, readInitialCallPlan, recoverInitialDial, type InitialCallPlan } from "./initial-call-operation";
+import { sessionOwnership } from "./ownership";
+import { ownedSessionWork, effectsDeps, loadRoutingSettings, runSessionEvent, type SessionRunnerDeps, type SessionRunResult } from "./session-runner";
 import { isOverLegCap, loadDailyUsage, type DailyUsage } from "./usage";
 import { upsertCallRow, upsertDialedLeg, type CommandOutcome } from "./state/effects";
 import { CallActionRejected } from "./state/transitions";
@@ -286,10 +288,21 @@ async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, tar
 
 // --- outbound ----------------------------------------------------------------
 
-export type StartOutboundInput = { to: string; caseId?: string | null; lineId?: string | null; callbackRequestId?: string; callbackTargetVerificationId?: string };
+export type StartOutboundInput = { requestId?: string; to: string; caseId?: string | null; lineId?: string | null; callbackRequestId?: string; callbackTargetVerificationId?: string };
 export type StartOutboundResult = { sessionId: string; operatorLegCallControlId: string; telnyxSessionId: string | null; to: string; from: string };
 
 export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput): Promise<StartOutboundResult> {
+  const identity = initialOperationIdentity(actor, "outbound", input);
+  const prior = await findInitialCall(deps, identity);
+  if (prior) return initializeOutgoingSession(deps, actor, prior, undefined, true);
+  try { return await startOutboundCallNew(deps, actor, input); }
+  catch (error) {
+    if (error instanceof InitialOperationExistsError) return initializeOutgoingSession(deps, actor, error.session, undefined, true);
+    throw error;
+  }
+}
+
+async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput): Promise<StartOutboundResult> {
   const startedAt = nowOf(deps).getTime();
   const telnyx = requireConfigured(deps);
   await assertOutboundRate(deps, actor);
@@ -315,68 +328,30 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
     lineId: line?.id ?? null,
     caseId: input.caseId ?? null,
     answeredBy: actor.profileId,
-    metadata: { ...(input.callbackRequestId ? { callbackRequestId: input.callbackRequestId, effects_v1: { generation: 0 } } : {}), outbound: { to, by: actor.profileId, from, case_id: input.caseId ?? null }, announcements: announcementConfigFromMetadata(line?.metadata), line_label: line?.label ?? null, partner_name: line?.partner_name ?? null },
+    metadata: { ...(input.requestId ? { initial_operation: { ...initialOperationIdentity(actor, "outbound", input)!, request: input, to, from, sipUri: device.sipUri,
+      fromDisplayName: actor.displayName?.replace(/[^A-Za-z0-9 \-\_~!.+]/g, "").slice(0, 128) || undefined,
+      ...(input.callbackRequestId ? { callbackRequestId: input.callbackRequestId } : {}) } } : {}), ...(input.callbackRequestId ? { callbackRequestId: input.callbackRequestId, effects_v1: { generation: 0 } } : {}), outbound: { to, by: actor.profileId, from, case_id: input.caseId ?? null }, announcements: announcementConfigFromMetadata(line?.metadata), line_label: line?.label ?? null, partner_name: line?.partner_name ?? null },
   });
 
-  if (input.callbackRequestId) {
-    const linked = await deps.admin.rpc("motorist_link_callback_outbound_v1", {
-      p_organization_id: deps.organizationId, p_request_id: input.callbackRequestId,
-      p_session_id: session.id, p_actor_id: actor.profileId,
-    });
-    if (linked.error || !linked.data) {
-      await markSessionFailed(deps, session, "callback_link_rejected");
-      throw new CallActionError("Požiadavka už bola vybavená alebo prebieha jej spätné volanie.", 409, "callback_link_rejected");
-    }
-  }
+  const result = await initializeOutgoingSession(deps, actor, session, { to, from, sipUri: device.sipUri,
+    fromDisplayName: actor.displayName?.replace(/[^A-Za-z0-9 \-\_~!.+]/g, "").slice(0, 128) || undefined,
+    callbackRequestId: input.callbackRequestId });
+  deps.logger?.({ scope: "call-actions", action: "start_outbound", sessionId: session.id, by: actor.profileId, preflightMs: now.getTime() - startedAt, ms: nowOf(deps).getTime() - startedAt });
+  return result;
+}
 
-  const reservation = await reserveOperatorOwnership(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, sessionId: session.id });
-  if (!reservation.applied) {
-    await markSessionFailed(deps, session, "operator_busy");
-    throw new CallActionError("Operátor nie je dostupný (prebieha iný hovor).", 409, "operator_busy");
-  }
-
-  const dial = {
-    kind: "dial" as const,
-    commandId: commandId({ sessionId: session.id, legId: actor.profileId, step: 0, intent: "dial:own" }),
-    to: device.sipUri,
-    from,
-    role: "operator" as const,
-    profileId: actor.profileId,
-    externalNumber: null,
-    clientState: { sid: session.id, role: "operator" as const, operatorId: actor.profileId, intent: "outbound", autoAnswer: true, ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) },
-    linkTo: null,
-    timeoutSecs: 30,
-    autoAnswer: true,
-  };
-  try {
-    const result = await telnyx.dial({
-      commandId: dial.commandId,
-      to: dial.to,
-      from,
-      clientState: encodeState(dial.clientState),
-      timeoutSecs: dial.timeoutSecs,
-      // Backstop: if this HTTP call times out while Telnyx did create the leg,
-      // we never learn its id and could not hang it up.
-      timeLimitSecs: LEG_TIME_LIMIT_SECS,
-      sipRegion: "Europe",
-      mediaEncryption: "SRTP",
-      customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }],
-      fromDisplayName: actor.displayName?.replace(/[^A-Za-z0-9 \-_~!.+]/g, "").slice(0, 128) || undefined,
-    });
-    const effects = effectsFor(deps);
-    await upsertDialedLeg(effects, session, dial, result);
-    const fresh = await loadSession(deps, session.id);
-    await upsertCallRow(effects, fresh, { status: "outbound" });
-    deps.logger?.({ scope: "call-actions", action: "start_outbound", sessionId: session.id, by: actor.profileId, to, from, preflightMs: now.getTime() - startedAt, ms: nowOf(deps).getTime() - startedAt });
-    return { sessionId: session.id, operatorLegCallControlId: result.callControlId, telnyxSessionId: result.callSessionId, to, from };
-  } catch (error) {
-    await markSessionFailed(deps, session, error instanceof TelnyxLiveCallsDisabledError ? "live_calls_disabled" : "dial_failed");
-    await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId: session.id, status: "available", now: nowOf(deps), expectedToken: reservation.offerToken ?? undefined, expectedRevision: reservation.revision });
-    throw toActionError(error, "Hovor sa nepodarilo vytočiť.");
+export async function callColleague(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string }): Promise<StartOutboundResult> {
+  const identity = initialOperationIdentity(actor, "internal", input);
+  const prior = await findInitialCall(deps, identity);
+  if (prior) return initializeOutgoingSession(deps, actor, prior, undefined, true);
+  try { return await callColleagueNew(deps, actor, input); }
+  catch (error) {
+    if (error instanceof InitialOperationExistsError) return initializeOutgoingSession(deps, actor, error.session, undefined, true);
+    throw error;
   }
 }
 
-export async function callColleague(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string }): Promise<StartOutboundResult> {
+async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string }): Promise<StartOutboundResult> {
   const telnyx = requireConfigured(deps);
   if (input.targetProfileId === actor.profileId) throw new CallActionError("Nie je možné volať sám sebe.", 400, "self_call");
   await assertOutboundRate(deps, actor);
@@ -393,50 +368,67 @@ export async function callColleague(deps: CallActionDeps, actor: CallActor, inpu
     lineId: line?.id ?? null,
     caseId: null,
     answeredBy: actor.profileId,
-    metadata: { internal: { target_profile_id: target.profileId, target_sip: target.sipUri, by: actor.profileId }, line_label: line?.label ?? null },
+    metadata: { ...(input.requestId ? { initial_operation: { ...initialOperationIdentity(actor, "internal", input)!, request: input, to: target.sipUri, from, sipUri: device.sipUri } } : {}), internal: { target_profile_id: target.profileId, target_sip: target.sipUri, by: actor.profileId }, line_label: line?.label ?? null },
   });
-  const reservation = await reserveOperatorOwnership(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, sessionId: session.id });
-  if (!reservation.applied) {
-    await markSessionFailed(deps, session, "operator_busy");
-    throw new CallActionError("Operátor nie je dostupný (prebieha iný hovor).", 409, "operator_busy");
-  }
-  const dial = {
-    kind: "dial" as const,
-    commandId: commandId({ sessionId: session.id, legId: actor.profileId, step: 0, intent: "dial:own" }),
-    to: device.sipUri,
-    from,
-    role: "operator" as const,
-    profileId: actor.profileId,
-    externalNumber: null,
-    clientState: { sid: session.id, role: "operator" as const, operatorId: actor.profileId, intent: "internal_caller", autoAnswer: true, ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) },
-    linkTo: null,
-    timeoutSecs: 30,
-    autoAnswer: true,
-  };
-  try {
-    const result = await telnyx.dial({
-      commandId: dial.commandId,
-      to: dial.to,
-      from,
-      clientState: encodeState(dial.clientState),
-      timeoutSecs: dial.timeoutSecs,
-      // Backstop: if this HTTP call times out while Telnyx did create the leg,
-      // we never learn its id and could not hang it up.
-      timeLimitSecs: LEG_TIME_LIMIT_SECS,
-      sipRegion: "Europe",
-      mediaEncryption: "SRTP",
-      customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }],
-    });
-    const effects = effectsFor(deps);
-    await upsertDialedLeg(effects, session, dial, result);
-    const fresh = await loadSession(deps, session.id);
-    await upsertCallRow(effects, fresh, { status: "outbound" });
-    return { sessionId: session.id, operatorLegCallControlId: result.callControlId, telnyxSessionId: result.callSessionId, to: target.sipUri, from };
-  } catch (error) {
-    await markSessionFailed(deps, session, error instanceof TelnyxLiveCallsDisabledError ? "live_calls_disabled" : "dial_failed");
-    await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId: session.id, status: "available", now: nowOf(deps), expectedToken: reservation.offerToken ?? undefined, expectedRevision: reservation.revision });
-    throw toActionError(error, "Interný hovor sa nepodarilo vytočiť.");
-  }
+  return initializeOutgoingSession(deps, actor, session, { to: target.sipUri, from, sipUri: device.sipUri });
+}
+
+async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor, original: SessionRow,
+  legacyPlan?: Pick<InitialCallPlan, "to" | "from" | "sipUri" | "fromDisplayName" | "callbackRequestId">, recovering = false): Promise<StartOutboundResult> {
+  return ownedSessionWork(deps, original.id, async () => {
+    const session = await loadSession(deps, original.id);
+    const plan = readInitialCallPlan(session) ?? legacyPlan;
+    if (!plan || session.writer_contract === 2 && !readInitialCallPlan(session)) throw new CallActionError("Volanie vyžaduje stabilnú identitu požiadavky.", 400, "request_id_required");
+    const telnyx = requireConfigured(deps);
+    const id = commandId({ sessionId: session.id, legId: actor.profileId, step: 0, intent: "dial:own" });
+    if (recovering && session.writer_contract !== 2) {
+      const legs = await deps.admin.from("motorist_call_legs").select("telnyx_call_control_id").eq("session_id", session.id).eq("profile_id", actor.profileId)
+        .contains("metadata", { dial_command_id: id }).maybeSingle();
+      if (legs.error || !legs.data) throw new CallActionError("Výsledok pôvodného vytáčania sa overuje.", 503, "provider_outcome_unknown");
+      if (session.ended_at) throw new CallActionError("Pôvodný hovor už skončil.", 409, "initial_call_ended");
+      return { sessionId: session.id, operatorLegCallControlId: legs.data.telnyx_call_control_id, telnyxSessionId: session.telnyx_session_id, to: plan.to, from: plan.from };
+    }
+    const recovered = await recoverInitialDial(deps, session, id, plan);
+    if (recovered) return recovered;
+    if (plan.callbackRequestId) {
+      const linked = await deps.admin.rpc("motorist_link_callback_outbound_v1", { p_organization_id: deps.organizationId,
+        p_request_id: plan.callbackRequestId, p_session_id: session.id, p_actor_id: actor.profileId });
+      if (linked.error || !linked.data) {
+        await markSessionFailed(deps, session, "callback_link_rejected");
+        throw new CallActionError("Požiadavka už bola vybavená alebo prebieha jej spätné volanie.", 409, "callback_link_rejected");
+      }
+    }
+    const reservation = await reserveOperatorOwnership(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, sessionId: session.id });
+    if (!reservation.applied) {
+      await markSessionFailed(deps, session, "operator_busy");
+      throw new CallActionError("Operátor nie je dostupný (prebieha iný hovor).", 409, "operator_busy");
+    }
+    const dial = { kind: "dial" as const, commandId: id, to: plan.sipUri, from: plan.from, role: "operator" as const,
+      profileId: actor.profileId, externalNumber: null, clientState: { sid: session.id, role: "operator" as const,
+        operatorId: actor.profileId, intent: session.direction === "internal" ? "internal_caller" : "outbound", autoAnswer: true,
+        ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) }, linkTo: null, timeoutSecs: 30, autoAnswer: true };
+    let accepted: Awaited<ReturnType<typeof telnyx.dial>> | null = null;
+    try {
+      const result = await telnyx.dial({ commandId: id, to: plan.sipUri, from: plan.from, clientState: encodeState(dial.clientState),
+        timeoutSecs: 30, timeLimitSecs: LEG_TIME_LIMIT_SECS, sipRegion: "Europe", mediaEncryption: "SRTP",
+        customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }], fromDisplayName: plan.fromDisplayName });
+      accepted = result;
+      const effects = effectsFor(deps);
+      await upsertDialedLeg(effects, session, dial, result);
+      await upsertCallRow(effects, await loadSession(deps, session.id), { status: "outbound" });
+      return { sessionId: session.id, operatorLegCallControlId: result.callControlId, telnyxSessionId: result.callSessionId, to: plan.to, from: plan.from };
+    } catch (error) {
+      if (session.writer_contract === 2) {
+        if (accepted) return { sessionId: session.id, operatorLegCallControlId: accepted.callControlId, telnyxSessionId: accepted.callSessionId, to: plan.to, from: plan.from };
+        if (!(error instanceof TelnyxCommandError) || error.status >= 500 || error.status === 408 || error.status === 429) {
+          throw new CallActionError("Výsledok vytáčania sa overuje. Neopakujte vytáčanie.", 503, "provider_outcome_unknown");
+        }
+      }
+      await markSessionFailed(deps, session, error instanceof TelnyxLiveCallsDisabledError ? "live_calls_disabled" : "dial_failed");
+      await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId: session.id, status: "available", now: nowOf(deps), expectedToken: reservation.offerToken ?? undefined, expectedRevision: reservation.revision });
+      throw toActionError(error, "Hovor sa nepodarilo vytočiť.");
+    }
+  });
 }
 
 // --- in-call actions ---------------------------------------------------------
@@ -556,6 +548,10 @@ export async function cancelConsult(deps: CallActionDeps, actor: CallActor, sess
 }
 
 export async function pickupWaitingCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
+  return ownedSessionWork(deps, sessionId, () => pickupWaitingCallOwned(deps, actor, sessionId));
+}
+
+async function pickupWaitingCallOwned(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   requireConfigured(deps);
   await assertLegBudget(deps);
   const session = await loadSession(deps, sessionId);
@@ -736,6 +732,10 @@ export async function leaveConferenceCall(deps: CallActionDeps, actor: CallActor
  * mid-supervision — a manager who is paused or logged out may still supervise.
  */
 export async function superviseCall(deps: CallActionDeps, actor: CallActor, sessionId: string, mode: SupervisorMode, invitationId?: string): Promise<CallActionResult> {
+  return ownedSessionWork(deps, sessionId, () => superviseCallOwned(deps, actor, sessionId, mode, invitationId));
+}
+
+async function superviseCallOwned(deps: CallActionDeps, actor: CallActor, sessionId: string, mode: SupervisorMode, invitationId?: string): Promise<CallActionResult> {
   requireConfigured(deps);
   if (invitationId) {
     await requireMonitorInvitations(deps);
@@ -905,6 +905,11 @@ async function createSession(
     })
     .select("*")
     .single();
+  if (inserted.error?.code === "23505" && input.metadata.initial_operation) {
+    const existing = await findInitialCall(deps, input.metadata.initial_operation as InitialCallPlan);
+    if (existing) throw new InitialOperationExistsError(existing);
+  }
+  if (inserted.error?.code === "PT409" && inserted.error.message.includes("request identity")) throw new CallActionError("Obnovte aplikáciu pred novým volaním.", 409, "reload_required");
   if (inserted.error) throw new CallActionError(`Hovor sa nepodarilo založiť: ${inserted.error.message}`, 500);
   return inserted.data;
 }

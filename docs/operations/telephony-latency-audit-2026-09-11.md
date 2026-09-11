@@ -1,5 +1,7 @@
 # Oneskorenia telefonovania — zistenia a oprava z 11. 9. 2026
 
+> **Aktualizácia po druhej kritickej kontrole:** našiel sa aktívny databázový problém s približne 1 400 rollbackmi/s a ďalšie medzery obnovy/vlastníctva hovorov. Prvý PR zostáva čiastočnou opravou. Aktuálne poradie zásahov a podmienky prijatia určuje [revidovaný návrh](../../.omx/plans/call-and-app-performance-repair.md); [samostatný audit výkonu](app-performance-review-2026-09-11.md) obsahuje nové merania. Pôvodné časové dôkazy nižšie zostávajú platné.
+
 ## Záver
 
 Používateľom hlásené čakanie 15–20 sekúnd je doložené. Problém nie je iba v zobrazení: pri prichádzajúcich hovoroch je v dátach rozdiel medzi zdvihnutím operátora a potvrdeným spojením 10,04–21,68 s. Odchádzajúce volanie sa oneskoruje hlavne pred vytvorením zákazníckej vetvy; keď už zákazník zdvihol, šesť doložených automatických spojení trvalo 0–0,42 s.

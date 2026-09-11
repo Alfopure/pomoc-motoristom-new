@@ -42,6 +42,7 @@ describe("session routing setup", () => {
     const eventId = "routing-read-retry";
     expect(await h.legEvent(call.callControlId, "call.answered", {}, eventId)).toMatchObject({ status: 500, outcome: "failed" });
     expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === eventId)).toMatchObject({ status: "failed", claimed_at: null });
+    h.advance(500);
     expect(await h.legEvent(call.callControlId, "call.answered", {}, eventId)).toMatchObject({ status: 200, outcome: "processed", claim: { attempts: 2 } });
     expect(h.session(call.sessionId).state).toBe("greeting");
     expect(h.telnyx.of("answer")).toHaveLength(1);

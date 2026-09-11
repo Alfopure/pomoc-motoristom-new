@@ -1,4 +1,4 @@
-import { loadDispatchData } from "@/data/dispatch-repository";
+import { loadDispatchData, loadAccessUsers } from "@/data/dispatch-repository";
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
 import { createAccessUser, type CreateAccessUserInput } from "@/server/access-management";
 import { MutationError } from "@/server/motorist-mutations";
@@ -7,10 +7,8 @@ export const runtime = "nodejs";
 
 export async function GET() {
   try {
-    await requireDefaultMotoristActor(["manager", "admin"]);
-    const dispatchData = await loadDispatchData();
-
-    return Response.json({ users: dispatchData.users });
+    const actor = await requireDefaultMotoristActor(["manager", "admin"]);
+    return Response.json({ users: await loadAccessUsers(actor.organizationId) }, { headers: { "Cache-Control": "private, no-store", Vary: "Cookie" } });
   } catch (error) {
     return mutationErrorResponse(error);
   }
@@ -22,7 +20,7 @@ export async function POST(request: Request) {
     const actor = await requireDefaultMotoristActor(["manager", "admin"]);
     const input = (await request.json()) as CreateAccessUserInput;
     const result = await createAccessUser(actor, input, request);
-    const dispatchData = await loadDispatchData();
+    const dispatchData = await loadDispatchData(actor, { access: true });
 
     return Response.json({ dispatchData, userId: result.profile.id, notice: result.notice });
   } catch (error) {

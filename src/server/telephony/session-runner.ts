@@ -1,3 +1,7 @@
+import { reconcileProviderEvent } from "./provider-event-evidence";
+import { measureRequestStep } from "@/server/request-metrics";
+import { reconcileTermination } from "./termination";
+import { sessionOwnership, ownershipRpc, assertOwnership, SESSION_WORK_MS, SESSION_LEASE_MS, DATABASE_REQUEST_MS, type Ownership } from "./ownership";
 import { resolvePersonalRingMembers } from "./routing/ring-plan";
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -16,7 +20,7 @@ import { readPendingEffects } from "./state/continuation";
 import { cancelRevokedOffers } from "./state/cancelled-offers";
 import { CallActionRejected, reduce } from "./state/transitions";
 import { needsRecordingContinuation, requiresRecordingLease } from "./state/recording";
-import { SessionLeaseLostError } from "./service-errors";
+import { SessionLeaseLostError, SessionTerminationPendingError } from "./service-errors";
 import { resolveSessionRecordingPolicy } from "./recording-policy-service";
 import {
   DEFAULT_ROUTING_SETTINGS,
@@ -70,7 +74,7 @@ export type SessionRunnerDeps = {
 };
 
 export const LEASE_WAIT_MS = 3_000;
-export const LEASE_TTL_MS = 4_000;
+export const LEASE_TTL_MS = SESSION_LEASE_MS;
 export const LEASE_JITTER_MIN_MS = 50;
 export const LEASE_JITTER_MAX_MS = 150;
 export const MAX_CONFLICT_RETRIES = 20;
@@ -107,14 +111,12 @@ function nowOf(deps: SessionRunnerDeps): () => Date {
   return deps.now ?? (() => new Date());
 }
 
-function sleepOf(deps: SessionRunnerDeps): (ms: number) => Promise<void> {
+function sleepOf(deps: Pick<SessionRunnerDeps, "sleep">): (ms: number) => Promise<void> {
   return deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 }
 
-function leaseTtl(deps: SessionRunnerDeps): number {
-  // Recording/notice commands can consume two 5s provider attempts. The privacy
-  // barrier must never execute concurrently after the historical 4s lease expires.
-  return deps.leaseTtlMs ?? (process.env.TELNYX_RECORDING_ENABLED === "true" ? 15_000 : LEASE_TTL_MS);
+function leaseTtl(deps: Pick<SessionRunnerDeps, "leaseTtlMs">): number {
+  return Math.max(SESSION_LEASE_MS, deps.leaseTtlMs ?? LEASE_TTL_MS);
 }
 
 export async function acquireSessionLease(deps: SessionRunnerDeps, sessionId: string, token: string): Promise<boolean> {
@@ -139,6 +141,7 @@ export async function acquireSessionLease(deps: SessionRunnerDeps, sessionId: st
 
 /** Re-acquires the lease with the same token (re-entrant RPC); best effort. */
 export async function renewSessionLease(deps: SessionRunnerDeps, sessionId: string, token: string, required = false): Promise<void> {
+  if (sessionOwnership.getStore()) return assertOwnership();
   const { data, error } = await deps.admin.rpc("motorist_session_lease_acquire", { p_session_id: sessionId, p_token: token, p_ttl_ms: leaseTtl(deps) });
   if (error) deps.logger?.({ level: "warn", scope: "lease", sessionId, message: "renew failed", error: error.message });
   else if (data !== true) deps.logger?.({ level: "warn", scope: "lease", sessionId, message: "lease lost during effects" });
@@ -397,10 +400,69 @@ async function auditSupervisionEnd(deps: SessionRunnerDeps, before: SessionRow, 
   }
 }
 
-export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent): Promise<SessionRunResult> {
-  const runnerStarted = nowOf(deps)();
+/** Entry point for per-session webhook bookkeeping and other short DB work.
+ * V2 scopes are reusable only for the same session. Never transfer a generation
+ * from a freshly read row into a running invocation.
+ */
+export type SessionOwnershipDeps = Pick<SessionRunnerDeps, "admin" | "organizationId" | "leaseTtlMs" | "leaseWaitMs" | "sleep" | "logger">;
+
+export async function ownedSessionWork<T>(deps: SessionOwnershipDeps, sessionId: string, work: () => Promise<T>): Promise<T> {
+  const existing = sessionOwnership.getStore();
+  if (existing) {
+    if (existing.sessionId !== sessionId) throw new SessionLeaseLostError();
+    await assertOwnership(existing);
+    return work();
+  }
+  // The database controls admission. Before expand, rows have no contract
+  // column; after expand, all new writers participate without a second flag.
+  const probe = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
+  if (probe.error) throw new SessionEventDeferredError(`Session ownership lookup failed: ${probe.error.message}`);
+  if (!probe.data) throw new SessionNotFoundError(sessionId);
+  if (probe.data.writer_contract === undefined) return work();
   const token = randomUUID();
-  const leaseAcquired = await acquireSessionLease(deps, sessionId, token);
+  const started = Date.now();
+  let claim: { generation: number; contract: number } | null;
+  try {
+    for (;;) {
+      claim = await measureRequestStep("lease", () => ownershipRpc<{ generation: number; contract: number } | null>(deps.admin, "motorist_session_lease_acquire_v2", { p_session_id: sessionId, p_token: token, p_ttl_ms: leaseTtl(deps) }));
+      if (claim) break;
+      if (Date.now() - started >= (deps.leaseWaitMs ?? LEASE_WAIT_MS)) throw new SessionEventDeferredError("Session lease unavailable");
+      await sleepOf(deps)(LEASE_JITTER_MIN_MS);
+    }
+  } catch (error) {
+    throw new SessionEventDeferredError(error instanceof Error ? error.message : "Session lease unavailable");
+  }
+  const owner: Ownership = { admin: deps.admin, sessionId, organizationId: deps.organizationId, token,
+    generation: claim.generation, contract: claim.contract, deadline: Date.now() + SESSION_WORK_MS };
+  try { return await sessionOwnership.run(owner, work); }
+  finally {
+    // Release failure cannot rewrite a completed operation into a safe retry.
+    try { await ownershipRpc(deps.admin, "motorist_session_lease_release_v2", { p_session_id: sessionId, p_token: token, p_generation: owner.generation }); }
+    catch (error) { deps.logger?.({ level: "warn", scope: "lease", sessionId, message: "lease release pending expiry", error: error instanceof Error ? error.message : String(error) }); }
+  }
+}
+
+export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent): Promise<SessionRunResult> {
+  if (event.kind === "app" && event.type === "hangup") {
+    const target = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
+    if (target.error) throw new SessionEventDeferredError(`Termination intent lookup failed: ${target.error.message}`);
+    if (target.data?.writer_contract === 2) await ownershipRpc(deps.admin, "motorist_session_terminate_v2", { p_organization_id: deps.organizationId, p_session_id: sessionId });
+  }
+  return ownedSessionWork(deps, sessionId, async () => {
+    const owner = sessionOwnership.getStore();
+    if (owner) owner.terminationPending = false;
+    const result = await runOwnedSessionEvent(deps, sessionId, event, owner);
+    if (owner?.terminationPending && event.kind === "app") throw new SessionTerminationPendingError();
+    return result;
+  });
+}
+
+async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership): Promise<SessionRunResult> {
+  const runnerStarted = nowOf(deps)();
+  const token = owner?.token ?? randomUUID();
+  let leaseAcquired: boolean;
+  try { leaseAcquired = Boolean(owner) || await measureRequestStep("lease", () => acquireSessionLease(deps, sessionId, token)); }
+  catch (error) { throw new SessionEventDeferredError(error instanceof Error ? error.message : "Session lease unavailable"); }
   const leaseWaitMs = nowOf(deps)().getTime() - runnerStarted.getTime();
   const timing = (effectsStarted?: Date) => {
     const completed = nowOf(deps)();
@@ -410,6 +472,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
   };
   if (!leaseAcquired) deps.logger?.({ level: "warn", scope: "lease", sessionId, eventId: event.id, message: "lease unavailable; checking whether event can safely proceed" });
   const maxRetries = deps.maxConflictRetries ?? MAX_CONFLICT_RETRIES;
+  let effectsMayHaveStarted = false;
 
   try {
     for (let retries = 0; ; retries += 1) {
@@ -417,10 +480,20 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
       try {
         snapshot = await loadSessionSnapshot(deps, sessionId);
       } catch (error) {
-        if (error instanceof SessionNotFoundError) throw error;
+        if (error instanceof SessionNotFoundError || effectsMayHaveStarted) throw error;
         throw new SessionEventDeferredError(error instanceof Error ? error.message : "session snapshot unavailable");
       }
-      const durable = telephonyStabilityEnabled() || hasStabilityContract(snapshot.session);
+      const durable = snapshot.session.writer_contract === 2 || telephonyStabilityEnabled() || hasStabilityContract(snapshot.session);
+      if (owner?.contract === 2 && event.kind === "telnyx") await reconcileProviderEvent(deps.admin, sessionId, event, deps.telnyx);
+      if (owner?.contract === 2 && event.kind === "telnyx" && event.rawClientState && event.callControlId && ["call.initiated", "call.answered", "call.hangup"].includes(event.type)) {
+        await ownershipRpc(deps.admin, "motorist_provider_observe_dial_v2", { p_session_id: sessionId,
+          p_client_state: event.rawClientState, p_call_control_id: event.callControlId, p_call_leg_id: event.callLegId,
+          p_call_session_id: event.callSessionId, p_alive: event.type !== "call.hangup" });
+      }
+      if (owner?.contract === 2 && snapshot.session.termination_requested_at) {
+        effectsMayHaveStarted = true;
+        owner.terminationPending = await reconcileTermination(deps, sessionId);
+      }
       // This verdict needs only the session. Loading every routing dependency
       // before returning it needlessly extends contention for both invocations.
       if (durable && !leaseAcquired) {
@@ -433,6 +506,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
       try {
         context = await loadRoutingContext(deps, snapshot.session, event);
       } catch (error) {
+        if (effectsMayHaveStarted) throw error;
         // A failed read has not applied this event or run compensation. Keep
         // its claim retryable just like a contended lease, not an HTTP 200 loss.
         throw new SessionEventDeferredError(error instanceof Error ? error.message : "routing context unavailable");
@@ -447,18 +521,26 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
         return { outcome: "ignored", reason: "sweep deferred while another event owns the session", session: snapshot.session, leaseAcquired, retries };
       }
       if (snapshot.session.presence_cancellations && Object.keys(snapshot.session.presence_cancellations).length) {
+        effectsMayHaveStarted = true;
         await cancelRevokedOffers(effects, snapshot.session, event.kind === "telnyx" && event.callControlId && event.clientState ? { callControlId: event.callControlId, clientState: event.clientState } : undefined);
       }
       if (readPendingEffects(snapshot.session).entries.length) {
         const preemptsAudio = event.kind === "telnyx" ? event.type === "call.hangup" : !["sweep", "pickup", "recording_continue"].includes(event.type);
         try {
-          const resumed = await resumePendingEffects(effects, snapshot.session, { databaseOnly: preemptsAudio });
-          if (resumed?.failed && !preemptsAudio) return { outcome: "applied", apply: resumed, session: resumed.session, leaseAcquired, retries, stateBefore: snapshot.session.state, commands: resumed.commands };
+          effectsMayHaveStarted = true;
+          const resumed = await resumePendingEffects(effects, snapshot.session, { databaseOnly: preemptsAudio, skipCompletedProjections: event.kind !== "app" || event.type !== "sweep" });
+          if (resumed?.failed && !preemptsAudio && event.kind === "app") return { outcome: "applied", apply: resumed, session: resumed.session, leaseAcquired, retries, stateBefore: snapshot.session.state, commands: resumed.commands };
         } catch (error) {
           if (!preemptsAudio) throw error;
           deps.logger?.({ level: "warn", scope: "effects", sessionId, code: "bookkeeping_deferred_for_teardown" });
         }
         snapshot = await loadSessionSnapshot(deps, sessionId);
+        // Resuming a guarded winner can revoke other offers after the initial
+        // cancellation pass. Finish those newly staged obligations in this turn.
+        if (snapshot.session.cancellations_next_attempt_at) {
+          await cancelRevokedOffers(effects, snapshot.session);
+          snapshot = await loadSessionSnapshot(deps, sessionId);
+        }
       }
       if (!leaseAcquired && recordingLeaseRequired && event.kind === "app" && event.type !== "hangup") {
         throw new SessionEventDeferredError("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.");
@@ -497,6 +579,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
       try {
         const effectsStarted = nowOf(deps)();
         effects.eventTiming = () => timing(effectsStarted);
+        effectsMayHaveStarted = true;
         let apply = await applyReduceResult(effects, { session: snapshot.session, result, event, expectedVersion: snapshot.session.version });
         // Complete only bounded internal continuations while retaining this event's lease.
         // These are command acknowledgements, never fabricated provider webhooks.
@@ -515,7 +598,11 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
           const nextApply = await applyReduceResult(effects, { session: fresh.session, result: follow, event: followEvent, expectedVersion: fresh.session.version });
           apply = { ...nextApply, commands: [...apply.commands, ...nextApply.commands], notes: [...apply.notes, ...nextApply.notes] };
         }
-        await recordCallEvent(effects, {
+        if (apply.session.cancellations_next_attempt_at && Date.parse(apply.session.cancellations_next_attempt_at) <= nowOf(deps)().getTime()) {
+          await cancelRevokedOffers(effects, apply.session);
+          apply = { ...apply, session: (await loadSessionSnapshot(deps, sessionId)).session };
+        }
+        if (!durable) await recordCallEvent(effects, {
           session: apply.session,
           event,
           handledStatus: apply.failed ? "failed" : "processed",
@@ -556,6 +643,6 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
       }
     }
   } finally {
-    if (leaseAcquired) await releaseSessionLease(deps, sessionId, token);
+    if (leaseAcquired && !owner) await releaseSessionLease(deps, sessionId, token);
   }
 }

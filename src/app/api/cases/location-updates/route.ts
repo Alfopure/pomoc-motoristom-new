@@ -1,6 +1,7 @@
+import { MutationError } from "@/server/mutation-error";
 import { mapCaseTaskRow } from "@/data/dispatch-repository";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import { motoristAccessGuard, requireDefaultMotoristActor } from "@/server/api-auth";
+import { requireDefaultMotoristActor } from "@/server/api-auth";
 
 export const runtime = "nodejs";
 
@@ -14,9 +15,6 @@ const MEMBER_ROLES = ["dispatcher", "senior_dispatcher", "manager", "admin"] as 
  * Deleted tasks leave no row to report; they disappear with the next full load.
  */
 export async function GET(request: Request) {
-  const denied = await motoristAccessGuard({ roles: [...MEMBER_ROLES] });
-  if (denied) return denied;
-
   try {
     const actor = await requireDefaultMotoristActor([...MEMBER_ROLES]);
     const checkedAt = new Date().toISOString();
@@ -102,6 +100,7 @@ export async function GET(request: Request) {
       })),
     });
   } catch (error) {
+    if (error instanceof MutationError) return Response.json({ error: error.message }, { status: error.status });
     console.error("Location update poll failed:", error);
     return Response.json({ error: "Nové polohy klientov sa nepodarilo obnoviť." }, { status: 500 });
   }

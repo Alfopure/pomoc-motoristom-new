@@ -1,4 +1,5 @@
 "use client";
+import type { CaseDetailData } from "@/data/case-detail";
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { Columns3, GripHorizontal, Map, PanelLeftClose, StickyNote, Table2, Wrench } from "lucide-react";
@@ -49,6 +50,7 @@ type MapWorkspaceProps = {
   onCaseCreated: (dispatchData: DispatchData, caseId: string, notice?: string) => void;
   onCollapse: () => void;
   onDataChange: (dispatchData: DispatchData) => void;
+  onCaseChange?: (caseDetail: CaseDetailData) => void;
   /** Click-to-call from the case card; absent while telephony is not configured. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
   onLinkCall: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
@@ -109,6 +111,7 @@ export function MapWorkspace({
   onCaseCreated,
   onCollapse,
   onDataChange,
+  onCaseChange,
   onDial,
   onLinkCall,
   caseEditorRevision = 0,
@@ -353,6 +356,7 @@ export function MapWorkspace({
               onBackToCockpit={onBackToCockpit}
               onCaseCreated={onCaseCreated}
               onDataChange={onDataChange}
+            onCaseChange={onCaseChange}
               onDial={onDial}
               onLinkCall={onLinkCall}
               onDirtyChange={onDirtyChange}
@@ -376,6 +380,7 @@ export function MapWorkspace({
               model={mapModel}
               onCollapse={onCollapse}
               onDataChange={onDataChange}
+            onCaseChange={onCaseChange}
               onDial={onDial}
               onLinkCall={onLinkCall}
               onDirtyChange={onDirtyChange}

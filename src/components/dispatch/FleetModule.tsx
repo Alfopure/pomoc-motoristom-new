@@ -1,4 +1,6 @@
 "use client";
+import { requestFleetRefresh } from "./fleet-refresh-client";
+import type { FleetData } from "@/data/dispatch-types";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
 import type { VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
@@ -60,7 +62,7 @@ type FleetModuleProps = {
   onRefresh?: () => Promise<void>;
   refreshing?: boolean;
   refreshMessage?: string | null;
-  onDataChange: (dispatchData: DispatchData) => void;
+  onDataChange: (dispatchData: FleetData) => void;
 };
 
 type ApiMutationResponse = {
@@ -594,7 +596,7 @@ function GpsConnectionsPanel({
   branches: Branch[];
   commanderVehicles: CommanderVehicleConnection[];
   message: string | null;
-  onDataChange: (dispatchData: DispatchData) => void;
+  onDataChange: (dispatchData: FleetData) => void;
   onMessage: (message: string | null) => void;
   onSwitchMode: (mode: FleetMode) => void;
 }) {
@@ -653,16 +655,8 @@ function GpsConnectionsPanel({
     setRefreshing(true);
     onMessage(null);
     try {
-      const response = await fetch("/api/integrations/fleet/refresh", { method: "POST" });
-      const data = (await response.json()) as {
-        dispatchData?: DispatchData;
-        error?: string;
-        summary?: { autoPaired: number; warnings: string[]; skipped?: boolean };
-      };
-      if (!response.ok || !data.dispatchData) {
-        throw new Error(data.error ?? "Obnovenie zlyhalo.");
-      }
-      onDataChange(data.dispatchData);
+      const data = await requestFleetRefresh();
+      onDataChange(data.fleetData);
       const autoPaired = data.summary?.autoPaired ?? 0;
       const warnings = data.summary?.warnings?.length ? ` ${data.summary.warnings.join(" ")}` : "";
       onMessage(data.summary?.skipped ? "Zobrazené posledné uložené údaje. Spoločná obnova už beží alebo prebehla pred chvíľou." : `Aktualizované. Automaticky spárované: ${autoPaired}.${warnings}`);

@@ -143,7 +143,7 @@ test("browser media transitions refresh customer state immediately without waiti
   expect(await page.evaluate(() => window.phoneHarness.requests.length)).toBe(0);
 });
 
-test("rapid dial and callback taps create just one request; failure unlocks retry", async ({ page }) => {
+test("rapid dial and callback taps create one request; uncertain failure only allows the same operation", async ({ page }) => {
   await page.evaluate(() => { window.phoneHarness.begin("dial"); window.phoneHarness.begin("callback"); });
   expect(await page.evaluate(() => window.phoneHarness.microphoneRequests)).toBe(1);
   await page.evaluate(() => window.phoneHarness.grant());
@@ -152,7 +152,28 @@ test("rapid dial and callback taps create just one request; failure unlocks retr
   await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ error: "Fixture failure" }, { status: 500 })));
   await expect(page.locator("#state")).toHaveAttribute("data-pending", "false");
   await page.evaluate(() => window.phoneHarness.begin("callback"));
+  await expect(page.locator("#state")).toContainText("predchádzajúceho volania");
+  expect(await page.evaluate(() => window.phoneHarness.microphoneRequests)).toBe(1);
+  expect(await page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  await page.evaluate(() => window.phoneHarness.begin("dial"));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(2);
+  expect(await page.evaluate(() => window.phoneHarness.microphoneRequests)).toBe(1);
+  expect(await page.evaluate(() => window.phoneHarness.requests[1].body)).toBe(await page.evaluate(() => window.phoneHarness.requests[0].body));
+});
+
+test("a definitive 422 refusal clears the operation so a different callback can start", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.begin("dial"));
+  await page.evaluate(() => window.phoneHarness.grant());
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ error: "Invalid destination" }, { status: 422 })));
+  await expect(page.locator("#state")).toHaveAttribute("data-pending", "false");
+  await page.evaluate(() => window.phoneHarness.begin("callback"));
   expect(await page.evaluate(() => window.phoneHarness.microphoneRequests)).toBe(2);
+  await page.evaluate(() => window.phoneHarness.grant());
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(2);
+  const requests = await page.evaluate(() => window.phoneHarness.requests.map((request) => ({ url: request.url, body: JSON.parse(request.body!) })));
+  expect(requests[1].url).toBe("/api/telephony/callbacks/fixture/call");
+  expect(requests[1].body.requestId).not.toBe(requests[0].body.requestId);
 });
 
 test("accepted dial stays guarded until its browser invite arrives", async ({ page }) => {

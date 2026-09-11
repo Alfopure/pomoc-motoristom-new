@@ -326,6 +326,7 @@ export function heartbeatRegistrationState(status: WebphoneStatus): "registered"
 // --- auto-answer correlation -------------------------------------------------
 
 export type ExpectedOperatorLeg = {
+  timingOperationId?: string;
   /** `operatorLegCallControlId` returned by `POST /api/telephony/calls`. */
   callControlId: string;
   sessionId: string;

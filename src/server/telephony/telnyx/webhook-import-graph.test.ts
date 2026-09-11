@@ -70,13 +70,12 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
  * Ceiling with room to grow, not a target. Raising it is fine — noticing that
  * it moved is the point.
  */
-// Reviewed increase 46 → 48: sanitized provider HTTP telemetry and the shared
-// UUID validator are two pure modules with no additional runtime dependencies.
-// Together they bundle to 2,158 minified bytes. After this change the built
-// route's local cold import measured 189–247ms (median 196ms, five fresh Node
-// processes with fetch disabled). This measures neither Vercel cold-start nor
-// provider/network latency; the forbidden-heavy-dependency guard remains intact.
-const MAX_MODULES = 48;
+// Reviewed increase 48 → 53: request metrics, fixed ownership, provider journal,
+// exact event evidence and termination recovery. These add no heavy runtime
+// dependencies. The built route imported in 167–178ms (median 174ms), five fresh
+// Node processes with fetch disabled on 2026-09-11. This is local import time,
+// not Vercel cold-start or provider latency; the forbidden-dependency guard stays.
+const MAX_MODULES = 53;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);

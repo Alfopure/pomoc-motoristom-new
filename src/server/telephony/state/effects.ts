@@ -1,4 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { assertOwnership } from "../ownership";
+import { payloadFingerprint } from "../provider-journal";
 import { isDeepStrictEqual } from "node:util";
 
 import type { Database, Json } from "@/lib/supabase/database.types";
@@ -11,7 +13,7 @@ import { addTelephonyUsage } from "../usage";
 import { advanceRingStep, resolvePersonalRingMembers } from "../routing/ring-plan";
 import { authorizeOperatorDispatch, reserveAnsweredOperator, transitionPresence } from "../routing/reservation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
-import { checkpointEffects, commandStillApplies, continuationComplete, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
+import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
 import { isCallGoneError, TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
@@ -146,6 +148,8 @@ export type ApplyResult = {
   commands: CommandOutcome[];
   compensations: string[];
   failed: boolean;
+  /** Core commands finished; the durable cursor still owes auxiliary projections. */
+  projectionPending?: boolean;
   /** `callGone`: Telnyx refused because the leg had already ended — a race with the caller, not a fault. */
   failure: { command: string; error: string; callGone: boolean; prerequisiteRejected?: boolean } | null;
   notes: string[];
@@ -181,7 +185,7 @@ function isDuplicate(error: { code?: string } | null): boolean {
 
 export async function persistTransition(
   deps: EffectsDeps,
-  input: { session: SessionRow; transition: Transition; expectedVersion: number | null; event: SessionEvent | null; continuation?: EffectContinuation },
+  input: { session: SessionRow; transition: Transition; expectedVersion: number | null; event: SessionEvent | null; continuation?: EffectContinuation; phase?: "critical" | "projection" },
 ): Promise<SessionRow> {
   const { admin } = deps;
   const now = deps.now().toISOString();
@@ -204,8 +208,11 @@ export async function persistTransition(
   }
 
   let cursor = 0;
-  const effect = async (run: () => Promise<unknown>) => {
+  const effect = async (run: () => Promise<unknown>, critical = true) => {
     const index = cursor++;
+    // Preserve the original cursor indices so a pending entry from an older
+    // compatible writer can still be resumed without repeating commands.
+    if (input.phase === "critical" && !critical || input.phase === "projection" && critical) return;
     if (input.continuation && input.continuation.databaseCursor > index) return;
     await run();
     if (input.continuation) {
@@ -228,17 +235,26 @@ export async function persistTransition(
     if (input.continuation && change.afterCommandId) continue;
     await effect(() => applyPresenceChange(deps, session, change));
   }
+  // A confirmation announcement must never precede its committed callback.
   for (const plan of input.transition.callbacks) await effect(() => createCallbackRequest(deps, session, plan, input.event?.occurredAt ?? undefined));
-  for (const proof of input.transition.contactProofs ?? []) await effect(() => reconcileCallbackContact(deps, session, proof as unknown as ContactProof));
+  for (const proof of input.transition.contactProofs ?? []) await effect(() => reconcileCallbackContact(deps, session, proof as unknown as ContactProof), false);
   for (const touch of input.transition.memberTouches) {
-    const values = touch.field === "last_offered_at" ? { last_offered_at: now } : { last_answered_at: now };
+    const observedAt = input.event?.occurredAt ?? now;
+    const values = touch.field === "last_offered_at" ? { last_offered_at: observedAt } : { last_answered_at: observedAt };
     await effect(async () => {
-      const result = await admin.from("motorist_ring_group_members").update(values).eq("id", touch.memberId);
+      // Projection retries retain event time and may only advance fairness.
+      // The condition is part of the UPDATE, including concurrent sessions.
+      const result = await admin.from("motorist_ring_group_members").update(values).eq("id", touch.memberId)
+        .or(`${touch.field}.is.null,${touch.field}.lt.${observedAt}`);
       if (result.error) fail("member touch failed", result.error);
-    });
+    }, false);
   }
 
-  await effect(() => upsertCallRow(deps, session, input.transition.call));
+  // A newer topology may already have completed its own projection while this
+  // historical obligation was skipped. Recompute current state/owner from the
+  // fresh session instead of restoring old transition-specific overrides.
+  const callOverrides = input.continuation && input.continuation.generation !== effectGeneration(session) ? {} : input.transition.call;
+  await effect(() => upsertCallRow(deps, session, callOverrides), false);
   return session;
 }
 
@@ -595,6 +611,7 @@ export async function recordCallEvent(
 type ExecutionContext = {
   session: SessionRow;
   dialResults: Map<string, DialResult>;
+  dialFingerprints?: Map<string, string>;
   conferenceId: string | null;
   continuation?: EffectContinuation;
 };
@@ -630,6 +647,7 @@ function resolvePrompt(deps: EffectsDeps, ctx: ExecutionContext, media: MediaRef
 }
 
 async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command: Command): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
+  await assertOwnership();
   const telnyx = requireTelnyx(deps);
   // Defense at the provider boundary: even a replayed/stale command cannot
   // promote an invited leg to audible audio or remove its provider mute.
@@ -962,7 +980,12 @@ async function createOrFindConference(telnyx: TelnyxClient, commandId: string, c
 }
 
 async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
+  await assertOwnership();
   const telnyx = requireTelnyx(deps);
+  const adopted = ctx.dialResults.get(command.commandId);
+  if (adopted && ctx.dialFingerprints?.get(command.commandId) === payloadFingerprint(command)) {
+    return { skipped: false, detail: { callControlId: adopted.callControlId, adopted: true } };
+  }
   if (command.monitorInvitationId) {
     const invitation = readMeta(ctx.session).monitorInvitations?.[command.monitorInvitationId];
     if (!invitation?.acceptedAt || invitation.revokedAt || invitation.disconnectRequestedAt || invitation.recipientProfileId !== command.profileId || ctx.session.ended_at ||
@@ -1031,7 +1054,7 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
     from_number: command.from,
     initiated_at: prior.data?.initiated_at ?? now,
     client_state: toJson(command.clientState),
-    metadata: toJson({ intent: command.clientState.intent ?? null, attempt: command.attempt ?? null, dial_command_id: command.commandId, ...(command.monitorInvitationId ? { monitor_invitation_id: command.monitorInvitationId, supervisor_mode: "monitor" } : {}) }),
+    metadata: toJson({ intent: command.clientState.intent ?? null, attempt: command.attempt ?? null, dial_command_id: command.commandId, dial_command_fingerprint: payloadFingerprint(command), ...(command.monitorInvitationId ? { monitor_invitation_id: command.monitorInvitationId, supervisor_mode: "monitor" } : {}) }),
   };
   const upserted = await admin.from("motorist_call_legs").upsert(values, { onConflict: "telnyx_call_control_id" }).select("*").single();
   if (upserted.error) fail("dialed leg upsert failed", upserted.error);
@@ -1274,7 +1297,13 @@ async function executeReduceResult(
     }
   }
 
-  let session = await persistTransition(deps, { session: input.session, transition, expectedVersion: input.continuation ? null : input.expectedVersion, event: input.event, continuation: input.continuation });
+  // Frozen recording-disabled calls need identity/ownership before audio, but
+  // call history and fairness timestamps must not hold answer/bridge hostage.
+  // Recording transitions retain their existing prerequisite ordering.
+  const deferProjections = Boolean(input.continuation && !input.databaseOnly && readMeta(input.session).recording?.policy.enabled === false);
+  let projectionError: string | null = null;
+  let session = await persistTransition(deps, { session: input.session, transition, expectedVersion: input.continuation ? null : input.expectedVersion,
+    event: input.event, continuation: input.continuation, ...(deferProjections ? { phase: "critical" as const } : {}) });
   if (input.event.kind === "app" && ["recording_stop", "recording_retry_stop"].includes(input.event.type) && readMeta(session).recording?.suppressionReason === "objection") {
     const restricted = await deps.admin.rpc("motorist_recording_restrict_session", { p_organization_id: deps.organizationId, p_session_id: session.id });
     // The persisted session suppression also gates all processing checkpoints.
@@ -1283,12 +1312,13 @@ async function executeReduceResult(
   }
   // A transition can clear the persisted conference while its effects still
   // need to leave the old one (park / blind transfer).
-  const ctx: ExecutionContext = { session, dialResults: new Map(), conferenceId: input.continuation?.previousConferenceId ?? session.conference_id ?? input.session.conference_id, continuation: input.continuation };
+  const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: input.continuation?.previousConferenceId ?? session.conference_id ?? input.session.conference_id, continuation: input.continuation };
   if (input.continuation) {
     const legs = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", session.id);
     if (legs.error) throw new EffectsError("continuation dial results unavailable");
     for (const leg of legs.data ?? []) {
-      const metadata = leg.metadata as { dial_command_id?: string } | null;
+      const metadata = leg.metadata as { dial_command_id?: string; dial_command_fingerprint?: string } | null;
+      if (metadata?.dial_command_id && metadata.dial_command_fingerprint) ctx.dialFingerprints?.set(metadata.dial_command_id, metadata.dial_command_fingerprint);
       if (metadata?.dial_command_id) ctx.dialResults.set(metadata.dial_command_id, { callControlId: leg.telnyx_call_control_id, callLegId: leg.telnyx_call_leg_id, callSessionId: session.telnyx_session_id, isAlive: !leg.ended_at });
     }
   }
@@ -1572,8 +1602,20 @@ async function executeReduceResult(
     }
   }
 
+  if (deferProjections && !failure) {
+    try {
+      session = await persistTransition(deps, { session: ctx.session, transition, expectedVersion: null, event: input.event,
+        continuation: input.continuation, phase: "projection" });
+      ctx.session = session;
+    } catch (error) {
+      if (error instanceof SessionLeaseLostError) throw error;
+      projectionError = describeError(error);
+      deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "call_projection_pending" });
+    }
+  }
+
   if (input.continuation && !input.databaseOnly) {
-    if (!failure) {
+    if (!failure && !projectionError) {
       const history = readContactHistory(session);
       for (const operation of history.operations) {
         const checkId = `contact-check:${operation.id}`;
@@ -1587,15 +1629,20 @@ async function executeReduceResult(
         ctx.session = session;
       }
     }
-    if (!failure && !input.continuation.auditComplete && input.continuation.commands.every((command) => input.continuation!.completedCommands.includes(commandKey(command)))) {
-      await recordCallEvent(deps, { session, event: input.continuation.event, handledStatus: "processed", stateBefore: input.continuation.stateBefore, stateAfter: session.state,
-        notes: [...transition.notes, "durable effects completed"], commands: auditCommandOutcomes(outcomes) });
-      input.continuation.auditComplete = true;
+    if (!failure && !projectionError && !input.continuation.auditComplete && input.continuation.commands.every((command) => input.continuation!.completedCommands.includes(commandKey(command)))) {
+      try {
+        await recordCallEvent(deps, { session, event: input.continuation.event, handledStatus: "processed", stateBefore: input.continuation.stateBefore, stateAfter: session.state,
+          notes: [...transition.notes, "durable effects completed"], commands: auditCommandOutcomes(outcomes) });
+        input.continuation.auditComplete = true;
+      } catch (error) {
+        if (!deferProjections || error instanceof SessionLeaseLostError) throw error;
+        projectionError = describeError(error);
+      }
     }
     input.continuation.attempts += 1;
-    input.continuation.lastError = failure?.error ?? (continuationComplete(input.continuation) ? null : "mandatory effects pending");
+    input.continuation.lastError = projectionError ?? failure?.error ?? (continuationComplete(input.continuation) ? null : "mandatory effects pending");
     session = await checkpointEffects(deps, session.id, continuationComplete(input.continuation) ? null : input.continuation, input.continuation.id);
-    if (!continuationComplete(input.continuation) && !failure) failure = { command: "continuation", error: "mandatory effects pending", callGone: false };
+    if (!continuationComplete(input.continuation) && !failure && !projectionError) failure = { command: "continuation", error: "mandatory effects pending", callGone: false };
   }
 
   if (!failure) {
@@ -1605,32 +1652,36 @@ async function executeReduceResult(
     await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.commands, deps.now());
   }
 
-  return { session, branch, commands: outcomes, compensations: compensated, failed: failure !== null, failure, notes: transition.notes };
+  return { session, branch, commands: outcomes, compensations: compensated, failed: failure !== null, failure,
+    ...(projectionError ? { projectionPending: true } : {}), notes: transition.notes };
 }
 
-export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean } = {}): Promise<ApplyResult | null> {
-  let latest: ApplyResult | null = null;
-  if (!options.databaseOnly) {
-    // A committed hangup/privacy decision must reach the provider even when an
-    // unrelated historical callback or projection write is still unavailable.
-    for (const entry of readPendingEffects(session).entries) {
-      const ctx: ExecutionContext = { session, dialResults: new Map(), conferenceId: entry.previousConferenceId };
-      for (const command of entry.commands) {
-        const ending = entry.event.kind === "app" ? entry.event.type === "hangup" : entry.event.type === "call.hangup";
-        // Transfer/leave hangups depend on earlier commands succeeding. Only an
-        // explicit end decision or privacy STOP can bypass historical writes.
-        const monitorDisconnect = command.kind === "hangup" && command.reason === "invited_monitor_stopped";
-        if (!(command.kind === "recording_stop" || ending && command.kind === "hangup" || monitorDisconnect) || entry.completedCommands.includes(commandKey(command))) continue;
-        try {
-          await deps.renewLease?.();
-          await executeCommand(deps, ctx, command);
-        } catch (error) {
-          if (error instanceof SessionLeaseLostError) throw error;
-          deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "teardown_pending", command: command.kind });
-        }
+async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): Promise<void> {
+  // A committed hangup/privacy decision must reach the provider even when an
+  // unrelated historical callback or projection write is still unavailable.
+  for (const entry of readPendingEffects(session).entries) {
+    const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: entry.previousConferenceId };
+    for (const command of entry.commands) {
+      const ending = entry.event.kind === "app" ? entry.event.type === "hangup" : entry.event.type === "call.hangup";
+      // Transfer/leave hangups depend on earlier commands succeeding. Only an
+      // explicit end decision or privacy STOP can bypass historical writes.
+      const monitorDisconnect = command.kind === "hangup" && command.reason === "invited_monitor_stopped";
+      if (!(command.kind === "recording_stop" || ending && command.kind === "hangup" || monitorDisconnect) || entry.completedCommands.includes(commandKey(command))) continue;
+      try {
+        await deps.renewLease?.();
+        await executeCommand(deps, ctx, command);
+      } catch (error) {
+        if (error instanceof SessionLeaseLostError) throw error;
+        deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "teardown_pending", command: command.kind });
       }
     }
   }
+}
+
+export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean } = {}): Promise<ApplyResult | null> {
+  let latest: ApplyResult | null = null;
+  let requested: ApplyResult | null = null;
+  if (!options.databaseOnly && !options.teardownPrepared) await dispatchUrgentTeardown(deps, session);
   const queued = readPendingEffects(session).entries;
   const seen = new Set(queued.map((entry) => entry.id));
   const enqueue = (current: SessionRow) => {
@@ -1646,6 +1697,10 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     if (fresh.error) throw new EffectsError("pending effects session unavailable");
     const current = readPendingEffects(fresh.data).entries.find((item) => item.id === entry.id);
     if (!current) continue;
+    if ((options.skipCompletedProjections || options.priorityEntryId && current.id !== options.priorityEntryId) &&
+      readMeta(fresh.data).recording?.policy.enabled === false && !current.transition.contactChecks?.length &&
+      current.databaseCursor >= criticalDatabaseEffectCount(current.transition) &&
+      current.commands.every((command) => current.completedCommands.includes(commandKey(command)))) continue;
     if (current.transition.contactChecks?.length) {
       if (options.databaseOnly) continue;
       try {
@@ -1703,16 +1758,32 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
       throw error;
     }
     latest.branch = current.branch;
+    if (current.id === options.priorityEntryId) requested = latest;
     enqueue(latest.session);
     if (latest.failed) break;
+  }
+  if (options.priorityEntryId) {
+    if (requested) return { ...requested, session: latest?.session ?? requested.session };
+    return { session: latest?.session ?? session, branch: "main", commands: [], compensations: [], failed: true,
+      failure: { command: "continuation", error: "Earlier effects remain pending", callGone: false }, notes: [] };
   }
   return latest;
 }
 
 export async function applyReduceResult(deps: EffectsDeps, input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number }): Promise<ApplyResult> {
-  if (!telephonyStabilityEnabled() && !hasStabilityContract(input.session)) return executeReduceResult(deps, input);
-  const staged = await stageEffects(deps, input);
-  const result = await resumePendingEffects(deps, staged);
+  if (input.session.writer_contract !== 2 && !telephonyStabilityEnabled() && !hasStabilityContract(input.session)) return executeReduceResult(deps, input);
+  let staged = await stageEffects(deps, input);
+  const prepareFacts = input.event.kind === "telnyx" && readPendingEffects(staged).entries.length > 1;
+  if (prepareFacts) {
+    await dispatchUrgentTeardown(deps, staged);
+    // Provider observations must reach the leg/attempt state even if an older
+    // command has an unknown outcome. Only provider commands remain in FIFO.
+    const current = readPendingEffects(staged).entries.find((entry) => entry.id === input.event.id);
+    if (!current) throw new EffectsError("staged provider event missing its continuation");
+    staged = await persistTransition(deps, { session: staged, transition: current.transition, expectedVersion: null,
+      event: current.event, continuation: current, phase: "critical" });
+  }
+  const result = await resumePendingEffects(deps, staged, { priorityEntryId: input.event.id, teardownPrepared: prepareFacts });
   if (!result) throw new EffectsError("staged transition missing its continuation");
   return result;
 }

@@ -442,14 +442,32 @@ export async function closeOrphanLegs(
     .map((row) => row.id);
   if (orphans.length === 0) return [];
 
-  const closed = await admin
-    .from("motorist_call_legs")
-    .update({ state: "ended", ended_at: input.now.toISOString(), hangup_cause: "orphan_sweep" })
-    .in("id", orphans)
-    .is("ended_at", null)
-    .select("id");
-  if (closed.error) throw new Error(`orphan leg close failed: ${closed.error.message}`);
-  return (closed.data ?? []).map((row) => row.id);
+  {
+    const { ownedSessionWork } = await import("../session-runner");
+    const closedIds: string[] = [];
+    for (const sessionId of sessionIds) {
+      const candidateIds = rows.filter(row => row.session_id === sessionId && orphans.includes(row.id)).map(row => row.id);
+      // Real child rows have cascading session FKs. Missing parents cannot be leased.
+      if (candidateIds.length === 0 || !stateById.has(sessionId)) continue;
+      await ownedSessionWork({ admin, organizationId: input.organizationId, leaseWaitMs: 0 }, sessionId, async () => {
+        const [freshSession, freshLegs] = await Promise.all([
+          admin.from("motorist_call_sessions").select("state").eq("organization_id", input.organizationId).eq("id", sessionId).maybeSingle(),
+          admin.from("motorist_call_legs").select("id, initiated_at").eq("organization_id", input.organizationId).eq("session_id", sessionId).in("id", candidateIds).is("ended_at", null),
+        ]);
+        if (freshSession.error || freshLegs.error) throw new Error("owned orphan leg recheck failed");
+        if (!freshSession.data) return;
+        const state = freshSession.data.state;
+        const ids = (freshLegs.data ?? []).filter(row => TERMINAL_STATES.has(state) || state === "missed" || (ms(row.initiated_at) !== null && ms(row.initiated_at)! < Date.parse(cutoff))).map(row => row.id);
+        if (!ids.length) return;
+        const closed = await admin.from("motorist_call_legs").update({ state: "ended", ended_at: input.now.toISOString(), hangup_cause: "orphan_sweep" })
+          .eq("organization_id", input.organizationId).eq("session_id", sessionId).in("id", ids).is("ended_at", null).select("id");
+        if (closed.error) throw new Error(`orphan leg close failed: ${closed.error.message}`);
+        closedIds.push(...(closed.data ?? []).map(row => row.id));
+      });
+    }
+    return closedIds;
+  }
+
 }
 
 /**
@@ -493,14 +511,31 @@ export async function closeStaleRingAttempts(
     .map((row) => row.id);
   if (stale.length === 0) return [];
 
-  const closed = await admin
-    .from("motorist_ring_attempts")
-    .update({ result: "failed", ended_at: input.now.toISOString() })
-    .in("id", stale)
-    .eq("result", "offered")
-    .select("id");
-  if (closed.error) throw new Error(`stale ring attempt close failed: ${closed.error.message}`);
-  return (closed.data ?? []).map((row) => row.id);
+  {
+    const { ownedSessionWork } = await import("../session-runner");
+    const closedIds: string[] = [];
+    for (const sessionId of sessionIds) {
+      const candidateIds = rows.filter(row => row.session_id === sessionId && stale.includes(row.id)).map(row => row.id);
+      if (candidateIds.length === 0 || !stateById.has(sessionId)) continue;
+      await ownedSessionWork({ admin, organizationId: input.organizationId, leaseWaitMs: 0 }, sessionId, async () => {
+        const [freshSession, freshAttempts] = await Promise.all([
+          admin.from("motorist_call_sessions").select("state").eq("organization_id", input.organizationId).eq("id", sessionId).maybeSingle(),
+          admin.from("motorist_ring_attempts").select("id, offered_at").eq("organization_id", input.organizationId).eq("session_id", sessionId).in("id", candidateIds).eq("result", "offered"),
+        ]);
+        if (freshSession.error || freshAttempts.error) throw new Error("owned ring attempt recheck failed");
+        if (!freshSession.data) return;
+        const state = freshSession.data.state;
+        const ids = (freshAttempts.data ?? []).filter(row => TERMINAL_STATES.has(state) || state === "missed" || state === "wrap_up" || ms(row.offered_at) === null || ms(row.offered_at)! < Date.parse(cutoff)).map(row => row.id);
+        if (!ids.length) return;
+        const closed = await admin.from("motorist_ring_attempts").update({ result: "failed", ended_at: input.now.toISOString() })
+          .eq("organization_id", input.organizationId).eq("session_id", sessionId).in("id", ids).eq("result", "offered").select("id");
+        if (closed.error) throw new Error(`stale ring attempt close failed: ${closed.error.message}`);
+        closedIds.push(...(closed.data ?? []).map(row => row.id));
+      });
+    }
+    return closedIds;
+  }
+
 }
 
 export type SweepDeps = {

@@ -16,6 +16,7 @@ vi.mock("@/data/dispatch-repository", () => ({
 }));
 
 import { linkCallToCase } from "./telephony-workflow";
+import { sessionOwnership } from "./telephony/ownership";
 
 const ORG_ID = "00000000-0000-4000-8000-000000000001";
 const PROFILE_ID = "00000000-0000-4000-8000-000000000101";
@@ -52,6 +53,26 @@ beforeEach(() => {
 });
 
 describe("linkCallToCase", () => {
+  it("holds the persisted v2 owner and rereads the call before changing its projections", async () => {
+    fake.db.update("motorist_call_sessions", { writer_contract: 2 }, row => row.id === SESSION_ID);
+    fake.db.registerRpc("motorist_session_lease_acquire_v2", () => {
+      fake.db.update("motorist_calls", { raw_latest_payload: { concurrentField: "preserved" } }, row => row.id === CALL_ID);
+      return { generation: 1, contract: 2 };
+    });
+    fake.db.registerRpc("motorist_session_lease_release_v2", () => true);
+    const update = fake.db.update.bind(fake.db);
+    const owners: string[] = [];
+    vi.spyOn(fake.db, "update").mockImplementation((table, patch, filter) => {
+      if (table === "motorist_calls" && "case_id" in patch || table === "motorist_call_sessions" && "case_id" in patch) {
+        owners.push(sessionOwnership.getStore()?.sessionId ?? "missing");
+      }
+      return update(table, patch, filter);
+    });
+    await linkCallToCase(CALL_ID, CASE_ID);
+    expect(owners).toEqual([SESSION_ID, SESSION_ID]);
+    expect(fake.db.find("motorist_calls", row => row.id === CALL_ID)?.raw_latest_payload).toMatchObject({ concurrentField: "preserved", linkedCaseId: CASE_ID });
+    expect(sessionOwnership.getStore()).toBeUndefined();
+  });
   it("updates both the call log and its live session after a manual link", async () => {
     await expect(linkCallToCase(CALL_ID, CASE_ID)).resolves.toBe(dispatchData);
 

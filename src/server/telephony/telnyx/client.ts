@@ -1,4 +1,7 @@
 import "server-only";
+import { measureRequestStep } from "@/server/request-metrics";
+import { assertOwnership, sessionOwnership } from "../ownership";
+import { journalRequest, prepareProviderRequest, recordProviderResponse, ProviderOutcomeUnknownError } from "../provider-journal";
 
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 
@@ -37,6 +40,7 @@ export function resolveTelnyxLiveGate(config: TelnyxConfig, settings: TelnyxSett
 }
 
 export const TELNYX_COMMAND_TIMEOUT_MS = 5_000;
+export const TELNYX_OPERATION_TIMEOUT_MS = 12_000;
 export const TELNYX_MAX_RETRY_AFTER_MS = 2_000;
 export const TELNYX_DEFAULT_RETRY_AFTER_MS = 500;
 
@@ -118,6 +122,7 @@ export type TelnyxClientOptions = {
   liveGate: TelnyxLiveGate;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  operationTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
   maxRetryAfterMs?: number;
   onRequest?: (entry: TelnyxRequestLog) => void;
@@ -332,6 +337,8 @@ export type TelnyxClient = {
 };
 
 export type RequestOptions = {
+  /** Internal identity for endpoints whose wire schema omits command_id. */
+  journalCommandId?: string;
   body?: Record<string, unknown>;
   query?: Record<string, string | number | undefined>;
   commandId?: string;
@@ -406,9 +413,12 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     body: string | undefined,
     commandId: string | null,
     extraHeaders: Record<string, string | undefined> = {},
+    deadline = now() + TELNYX_OPERATION_TIMEOUT_MS,
   ): Promise<{ response: Response; parsed: unknown }> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const remaining = Math.min(timeoutMs, deadline - now());
+    if (remaining <= 0) throw new TelnyxCommandError({ code: "deadline", status: 504, retryable: false, commandId });
+    const timer = setTimeout(() => controller.abort(), remaining);
     try {
       const response = await fetchImpl(url, {
         method,
@@ -457,26 +467,58 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
   }
 
   async function request<T>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, requestOptions: RequestOptions = {}): Promise<T> {
-    const commandId = requestOptions.commandId ?? null;
+    const commandId = requestOptions.journalCommandId ?? requestOptions.commandId ?? null;
+    const wireCommandId = requestOptions.commandId ?? null;
     const url = new URL(`${configured.apiBaseUrl}${path.startsWith("/") ? path : `/${path}`}`);
     for (const [key, value] of Object.entries(requestOptions.query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
-    const payload = requestOptions.body || commandId ? compact({ ...(requestOptions.body ?? {}), command_id: commandId ?? undefined }) : undefined;
+    const payload = requestOptions.body || wireCommandId ? compact({ ...(requestOptions.body ?? {}), command_id: wireCommandId ?? undefined }) : undefined;
     const body = payload ? JSON.stringify(payload) : undefined;
 
     const started = now();
+    const owner = sessionOwnership.getStore();
+    const deadline = Math.min(started + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS), owner?.deadline ?? Infinity);
+    const journal = journalRequest(method, path, commandId, body);
+    const dispatch = async () => {
+      await assertOwnership();
+      if (journal) {
+        const decision = await prepareProviderRequest(journal);
+        if (!decision.dispatch) {
+          if (decision.outcome === "accepted") return { cached: true as const, result: decision.result };
+          if (decision.outcome === "rejected") throw errorFromBody(decision.http_status ?? 422, decision.result, commandId);
+          if (decision.outcome === "rate_limited") throw errorFromBody(429, decision.result, commandId);
+          throw new ProviderOutcomeUnknownError(commandId!);
+        }
+      }
+      const result = await measureRequestStep("provider", () => attempt(method, url.toString(), body, commandId, requestOptions.headers, deadline));
+      if (journal) {
+        const data = asRecord(asRecord(result.parsed).data);
+        const invalidAcknowledgement = result.response.ok && (path === "/calls" && !str(data.call_control_id) ||
+          path === "/conferences" && !str(data.id) || /\/actions\/record_(start|stop)$/.test(path) && data.result !== "ok");
+        await recordProviderResponse(journal, invalidAcknowledgement ? 504 : result.response.status, result.parsed,
+          result.response.status === 429 ? parseRetryAfterMs(result.response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS : undefined);
+      }
+      return { cached: false as const, ...result };
+    };
     let retried = false;
     let response: Response;
     let parsed: unknown;
 
     try {
-      ({ response, parsed } = await attempt(method, url.toString(), body, commandId, requestOptions.headers));
+      const first = await dispatch();
+      if (first.cached) return first.result as T;
+      ({ response, parsed } = first);
       if (response.status === 429) {
         const retryAfter = parseRetryAfterMs(response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS;
-        await sleep(Math.min(retryAfter, maxRetryAfterMs));
+        // Never shorten the provider's interval. A long wait is a durable
+        // deferral; another invocation may resume it after next_attempt_at.
+        if (retryAfter > maxRetryAfterMs || retryAfter + timeoutMs > deadline - now()) throw errorFromBody(429, parsed, commandId);
+        await sleep(retryAfter);
         retried = true;
-        ({ response, parsed } = await attempt(method, url.toString(), body, commandId, requestOptions.headers));
+        const second = await dispatch();
+        if (second.cached) return second.result as T;
+        ({ response, parsed } = second);
       }
       if (!response.ok) {
         throw errorFromBody(response.status, parsed, commandId);
@@ -749,7 +791,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       // gather_using_audio) would receive an undocumented key.
       const acceptsCommandId = action === "join" || action === "leave" || action === "speak" || action === "update" || action === "end";
       const idempotencyId = acceptsCommandId ? commandId : undefined;
-      await request<unknown>("POST", `/conferences/${encodeURIComponent(conferenceId)}/actions/${action}`, { body: compact(rest), commandId: idempotencyId });
+      await request<unknown>("POST", `/conferences/${encodeURIComponent(conferenceId)}/actions/${action}`, { body: compact(rest), commandId: idempotencyId, journalCommandId: commandId });
     },
 
     async retrieveCall(callControlId: string) {

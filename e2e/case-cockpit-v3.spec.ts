@@ -20,11 +20,11 @@ async function boot(page: Page, width: number, query = "") {
   await page.setViewportSize({ width, height: 900 });
   await page.route("**/*", route => {
     const url = new URL(route.request().url());
-    if (url.origin === "http://case-card.test" && url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><body><div id="root"></div></body></html>' });
+    if (url.origin === "https://case-card.test" && url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><body><div id="root"></div></body></html>' });
     errors.push(`Unexpected network request: ${url.pathname}`);
     return route.abort();
   });
-  await page.goto(`http://case-card.test/${query}`);
+  await page.goto(`https://case-card.test/${query}`);
   await page.addStyleTag({ content: css });
   await page.addScriptTag({ content: script });
   return errors;
@@ -161,13 +161,17 @@ test("case remains usable at 200 percent zoom and after orientation change", asy
   expect(errors).toEqual([]);
 });
 
-async function mockCaseSaves(page: Page, options: { conflict?: boolean; fail?: boolean; delayFirst?: Promise<void> } = {}) {
+async function mockCaseSaves(page: Page, options: { conflict?: boolean; fail?: boolean; delayFirst?: Promise<void>; loseFirstResponse?: boolean; failRefresh?: boolean } = {}) {
   const requests: Record<string, unknown>[] = [];
+  const receipts = new Map<string, unknown>();
   let canonical = await page.evaluate(() => (window as unknown as { caseCardFixture: Record<string, unknown> }).caseCardFixture);
   await page.route("**/api/cases/case-fixture", async route => {
-    if (route.request().method() === "GET") return route.fulfill({ json: { dispatchData: { source: "supabase", dispatchCases: [canonical] } } });
+    expect(route.request().headers()["x-case-response"]).toBe("detail-v2");
+    if (route.request().method() === "GET") return options.failRefresh ? route.fulfill({ status: 503, json: { error: "read unavailable" } }) : route.fulfill({ json: { caseDetail: canonical } });
     const input = route.request().postDataJSON() as Record<string, unknown>;
     requests.push(input);
+    const receipt = receipts.get(String(input.mutationId));
+    if (receipt) return route.fulfill({ json: receipt });
     if (options.conflict) return route.fulfill({ status: 409, json: { error: "Súbežná zmena", code: "CASE_REVISION_CONFLICT" } });
     if (options.fail) return route.fulfill({ status: 400, json: { error: "Uloženie zlyhalo" } });
     if (requests.length === 1 && options.delayFirst) await options.delayFirst;
@@ -176,7 +180,10 @@ async function mockCaseSaves(page: Page, options: { conflict?: boolean; fail?: b
       ...(input.priority ? { priority: input.priority } : {}), ...(input.status ? { status: input.status } : {}),
       ...(input.licensePlate ? { vehicle: { ...(canonical.vehicle as Record<string, unknown>), licensePlate: input.licensePlate } } : {}),
     };
-    await route.fulfill({ json: { committedRevision: revision, dispatchData: { source: "supabase", dispatchCases: [canonical] } } });
+    const result = { committedRevision: revision, mutationId: input.mutationId, ...(options.failRefresh ? { refreshRequired: true } : { caseDetail: canonical }) };
+    receipts.set(String(input.mutationId), result);
+    if (options.loseFirstResponse && requests.length === 1) return route.abort("failed");
+    await route.fulfill({ json: result });
   });
   return requests;
 }
@@ -220,7 +227,7 @@ for (const saveAlreadyStarted of [false, true]) {
       await expect.poll(() => saves.length).toBe(1);
       await expect(pdfButton(page)).toBeDisabled();
       expect(exports).toBe(0);
-      expect(saves[0]).toEqual({ priority: "high", expectedUpdatedAt: "2026-09-10T11:00:00Z" });
+      expect(saves[0]).toEqual({ mutationId: expect.any(String), priority: "high", expectedUpdatedAt: "2026-09-10T11:00:00Z" });
     } finally {
       release();
     }
@@ -298,12 +305,12 @@ test("header priority shares the editor snapshot and later autosave sends only c
   await page.getByLabel("Priorita prípadu v hlavičke").selectOption("high");
   await expect.poll(() => requests.length).toBe(1);
   await expect(page.getByLabel("Priorita prípadu v hlavičke")).toBeEnabled();
-  expect(requests[0]).toEqual({ priority: "high", expectedUpdatedAt: "2026-09-10T11:00:00Z" });
+  expect(requests[0]).toEqual({ mutationId: expect.any(String), priority: "high", expectedUpdatedAt: "2026-09-10T11:00:00Z" });
   const editor = page.getByTestId("case-edit-form-main");
   await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
   await editor.getByLabel("EČV", { exact: true }).fill("NEXT123");
   await expect.poll(() => requests.length).toBe(2);
-  expect(requests[1]).toEqual({ licensePlate: "NEXT123", expectedUpdatedAt: "2026-09-10T11:00:01.000Z" });
+  expect(requests[1]).toEqual({ mutationId: expect.any(String), licensePlate: "NEXT123", expectedUpdatedAt: "2026-09-10T11:00:01.000Z" });
   await expect(page.getByLabel("Priorita prípadu v hlavičke")).toHaveValue("high");
   expect(errors).toEqual([]);
 });
@@ -321,7 +328,7 @@ test("delayed acknowledgement preserves newer typing and serializes its revision
   release();
   await expect(plate).toHaveValue("NEWER456");
   await expect.poll(() => requests.length).toBe(2);
-  expect(requests[1]).toEqual({ licensePlate: "NEWER456", expectedUpdatedAt: "2026-09-10T11:00:01.000Z" });
+  expect(requests[1]).toEqual({ mutationId: expect.any(String), licensePlate: "NEWER456", expectedUpdatedAt: "2026-09-10T11:00:01.000Z" });
   await expect(plate).toHaveValue("NEWER456");
   expect(errors).toEqual([]);
 });
@@ -347,7 +354,7 @@ test("failed status change leaves the case mounted and the pending draft availab
   await expect(page.getByTestId("case-edit-form-main")).toBeVisible();
   await expect(page.getByTestId("case-autosave-status")).toContainText("Uloženie zlyhalo");
   await expect(page.getByLabel("Stav prípadu v hlavičke")).toHaveValue("cancelled");
-  expect(requests[0]).toEqual({ status: "cancelled", expectedUpdatedAt: "2026-09-10T11:00:00Z" });
+  expect(requests[0]).toEqual({ mutationId: expect.any(String), status: "cancelled", expectedUpdatedAt: "2026-09-10T11:00:00Z" });
   expect(errors).toEqual([]);
 });
 
@@ -370,4 +377,31 @@ test("native call requires confirmation of the resolved alternative and respects
   expect(confirmation.message()).toContain("Overený dispečing"); await confirmation.dismiss();
   await expect(page.getByRole("button", { name: "Volať cez mobil" })).toBeEnabled();
   expect(page.url()).toContain("case-card.test"); expect(errors).toEqual([]);
+});
+
+test("lost commit response reuses one mutation identity and preserves subsequent typing", async ({ page }) => {
+  const errors = await boot(page, 1280);
+  const requests = await mockCaseSaves(page, { loseFirstResponse: true });
+  const priority = page.getByLabel("Priorita prípadu v hlavičke");
+  await priority.selectOption("urgent");
+  await expect.poll(() => requests.length).toBe(2);
+  expect(requests[1]).toEqual(requests[0]);
+  expect(requests[0].mutationId).toEqual(expect.any(String));
+  await expect(page.getByRole("button", { name: "Načítať aktuálny stav prípadu" })).toHaveCount(0);
+  await expect(priority).toHaveValue("urgent");
+  await priority.selectOption("high");
+  await expect.poll(() => requests.length).toBe(3);
+  expect(requests[2].mutationId).not.toBe(requests[0].mutationId);
+  expect(requests[2].expectedUpdatedAt).toBe("2026-09-10T11:00:01.000Z");
+  expect(errors).toEqual([]);
+});
+test("committed save with unavailable canonical reads retries only GET and keeps its draft", async ({ page }) => {
+  const errors = await boot(page, 390);
+  const requests = await mockCaseSaves(page, { failRefresh: true });
+  const priority = page.getByLabel("Priorita prípadu v hlavičke");
+  await priority.selectOption("urgent");
+  await expect(page.getByTestId("case-autosave-status")).toContainText("Zmena bola prijatá");
+  await expect(priority).toHaveValue("urgent");
+  expect(requests).toHaveLength(1);
+  expect(errors).toEqual([]);
 });

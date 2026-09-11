@@ -197,15 +197,15 @@ describe("createTelnyxClient", () => {
     expect(logs[0]).toMatchObject({ status: 200, retried: true });
   });
 
-  it("caps retry-after, defaults it when missing, and gives up after the second 429", async () => {
+  it("defers a long retry-after without shortening it and defaults a missing interval", async () => {
     const capped = makeFetch([jsonResponse(429, undefined, { "retry-after": "30" }), jsonResponse(429, { errors: [{ code: "10011", detail: "slow down" }] })]);
     const client = makeClient(capped.impl);
 
     const failure = await client.client.hangup({ callControlId: "cc-1", commandId: "cmd" }).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(TelnyxCommandError);
-    expect(failure).toMatchObject({ code: "10011", status: 429, detail: "slow down", retryable: true, commandId: "cmd" });
-    expect(client.sleeps).toEqual([2000]);
-    expect(capped.calls).toHaveLength(2);
+    expect(failure).toMatchObject({ status: 429, retryable: true, commandId: "cmd" });
+    expect(client.sleeps).toEqual([]);
+    expect(capped.calls).toHaveLength(1);
 
     const missing = makeFetch([jsonResponse(429, undefined), jsonResponse(200, { data: {} })]);
     const second = makeClient(missing.impl);

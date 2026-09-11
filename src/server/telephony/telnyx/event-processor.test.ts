@@ -62,12 +62,12 @@ describe("processTelnyxEvent", () => {
     expect(h.telnyx.of("dial")).toHaveLength(0);
   });
 
-  it("acknowledges events for unknown sessions and records them without a call", async () => {
+  it("retains allowed-connection events awaiting exact session correlation", async () => {
     const h = createTelephonyHarness();
     const result = await h.process(h.envelope("call.answered", { call_control_id: "cc-unknown", call_session_id: "tsess-unknown" }));
-    expect(result).toMatchObject({ status: 200, outcome: "unknown_session" });
-    expect(h.rows("motorist_telnyx_webhook_events")[0]).toMatchObject({ status: "processed" });
-    expect(h.rows("motorist_call_events")).toEqual([expect.objectContaining({ event_fingerprint: result.eventId, call_id: null, handled_status: "ignored" })]);
+    expect(result).toMatchObject({ status: 500, outcome: "awaiting_correlation" });
+    expect(h.rows("motorist_telnyx_webhook_events")[0]).toMatchObject({ status: "failed", retry_state: "awaiting_correlation", effect_failure_count: 0 });
+    expect(h.rows("motorist_call_events")).toHaveLength(0);
   });
 
   it("processes bookkeeping events without the reducer and returns 500 when the database fails", async () => {
@@ -178,4 +178,43 @@ describe("processTelnyxEvent", () => {
     expect(h.rows("motorist_call_sessions")[0]).toMatchObject({ caller_number: "+421905123456", called_number: NUMBERS.allianz, state: "received" });
     expect(h.logs.at(-1)).toMatchObject({ scope: "webhook", outcome: "processed", verified: true });
   });
+  it("replays an early answer when its exact incoming control ID becomes known", async () => {
+    const h = createTelephonyHarness();
+    const early = h.envelope("call.answered", { call_control_id: "early-cc", call_session_id: "early-provider-session" }, "early-answer");
+    expect(await h.process(early)).toMatchObject({ outcome: "awaiting_correlation", status: 500 });
+    await h.process(h.envelope("call.initiated", { call_control_id: "early-cc", call_session_id: "early-provider-session", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "later-init"));
+    expect(h.db.find("motorist_telnyx_webhook_events", (row) => row.event_id === "early-answer")).toMatchObject({ status: "processed", attempts: 2, delivery_count: 1 });
+  });
+
+  it("does not adopt a different unknown leg just because its provider session matches", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const providerSession = h.session(call.sessionId).telnyx_session_id;
+    expect(await h.process(h.envelope("call.answered", { call_control_id: "unregistered-leg", call_session_id: providerSession }, "wrong-leg"))).toMatchObject({ status: 500, outcome: "awaiting_correlation" });
+    expect(h.db.find("motorist_telnyx_webhook_events", (row) => row.event_id === "wrong-leg")).toMatchObject({ status: "failed", retry_state: "awaiting_correlation" });
+  });
+
+  it("expires unmatched events after sixty seconds from first receipt with an incident", async () => {
+    const h = createTelephonyHarness();
+    const event = h.envelope("call.answered", { call_control_id: "missing-cc" }, "expires");
+    expect(await h.process(event)).toMatchObject({ outcome: "awaiting_correlation" });
+    const received = h.rows("motorist_telnyx_webhook_events")[0].received_at;
+    h.advance(60_001);
+    expect(await h.process(event)).toMatchObject({ status: 200, outcome: "unresolved", error: "awaiting_correlation_expired" });
+    expect(h.rows("motorist_telnyx_webhook_events")[0]).toMatchObject({ received_at: received, retry_state: "dead_letter", terminal_reason: "awaiting_correlation_expired" });
+    expect(h.rows("motorist_job_incidents")).toHaveLength(1);
+    expect(h.rows("motorist_call_sessions")).toHaveLength(0);
+  });
+
+  it("never creates a customer session for an unmatched credential-connection leg", async () => {
+    const h = createTelephonyHarness();
+    if (!h.deps.config.configured) throw new Error("Expected configured fixture");
+    const result = await h.process(h.envelope("call.initiated", { connection_id: h.deps.config.credentialConnectionId,
+      call_control_id: "credential-only", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "credential-event"));
+    expect(result).toMatchObject({ status: 500, outcome: "awaiting_correlation" });
+    expect(h.rows("motorist_call_sessions")).toHaveLength(0);
+    expect(h.rows("motorist_call_legs")).toHaveLength(0);
+    expect(h.telnyx.of("answer")).toHaveLength(0);
+  });
+
 });

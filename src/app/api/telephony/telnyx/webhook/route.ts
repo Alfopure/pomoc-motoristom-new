@@ -1,3 +1,4 @@
+import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
 import { createTelephonyDeps, notConfiguredResponse, telephonyLogger } from "@/server/telephony/runtime";
 import { getTelnyxConfig } from "@/server/telephony/telnyx/env";
 import { processTelnyxEvent } from "@/server/telephony/telnyx/event-processor";
@@ -24,43 +25,45 @@ export const maxDuration = 60;
  * acknowledged with 200 and ignored.
  */
 export async function POST(request: Request) {
-  const config = getTelnyxConfig();
-  if (!config.configured || !config.publicKey) {
-    return notConfiguredResponse();
-  }
+  return withRequestMetrics("call.webhook", async () => {
+    const config = getTelnyxConfig();
+    if (!config.configured || !config.publicKey) {
+      return notConfiguredResponse();
+    }
 
-  const raw = await request.text();
-  const verified = verifyTelnyxRequest(request.headers, raw, { publicKey: config.publicKey });
-  if (!verified.ok) {
-    telephonyLogger({ level: "warn", scope: "webhook", verified: false, reason: verified.reason });
-    return Response.json({ error: "invalid_signature", reason: verified.reason }, { status: 400 });
-  }
+    const raw = await request.text();
+    const verified = verifyTelnyxRequest(request.headers, raw, { publicKey: config.publicKey });
+    if (!verified.ok) {
+      telephonyLogger({ level: "warn", scope: "webhook", verified: false, reason: verified.reason });
+      return Response.json({ error: "invalid_signature", reason: verified.reason }, { status: 400 });
+    }
 
-  let envelope: unknown;
-  try {
-    envelope = JSON.parse(raw);
-  } catch {
-    return Response.json({ error: "invalid_json" }, { status: 400 });
-  }
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(raw);
+    } catch {
+      return Response.json({ error: "invalid_json" }, { status: 400 });
+    }
 
-  try {
-    const deps = await createTelephonyDeps({ config });
-    const result = await processTelnyxEvent(deps, envelope);
+    try {
+      const deps = await measureRequestStep("read", () => createTelephonyDeps({ config }));
+      const result = await processTelnyxEvent(deps, envelope);
 
-    return Response.json(
-      {
-        ok: result.status === 200,
-        outcome: result.outcome,
-        eventId: result.eventId,
-        type: result.type,
-        sessionId: result.sessionId,
-        commands: result.commands.map((command) => `${command.kind}${command.ok ? "" : "!"}`),
-        ms: result.ms,
-      },
-      { status: result.status },
-    );
-  } catch (error) {
-    telephonyLogger({ level: "error", scope: "webhook", message: "processing failed", error: error instanceof Error ? error.message : String(error) });
-    return Response.json({ error: "processing_failed" }, { status: 500 });
-  }
+      return Response.json(
+        {
+          ok: result.status === 200,
+          outcome: result.outcome,
+          eventId: result.eventId,
+          type: result.type,
+          sessionId: result.sessionId,
+          commands: result.commands.map((command) => `${command.kind}${command.ok ? "" : "!"}`),
+          ms: result.ms,
+        },
+        { status: result.status },
+      );
+    } catch (error) {
+      telephonyLogger({ level: "error", scope: "webhook", message: "processing failed", error: error instanceof Error ? error.message : String(error) });
+      return Response.json({ error: "processing_failed" }, { status: 500 });
+    }
+  });
 }

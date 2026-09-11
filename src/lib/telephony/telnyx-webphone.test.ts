@@ -342,6 +342,28 @@ describe("TelnyxWebphone", () => {
     h.phone.stop();
   });
 
+  it.each(["before", "after"])("keeps one timing operation when exact-leg identity arrives %s the invite", async (order) => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: false, requestPending: true });
+    const measure = vi.spyOn(performance, "measure");
+    const operationId = "00000000-0000-4000-8000-000000000123";
+    const expected = { callControlId: "cc-1", sessionId: "sess-1", timingOperationId: operationId };
+    if (order === "before") h.phone.expectOperatorLeg(expected);
+    const call = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    if (order === "after") h.phone.expectOperatorLeg(expected);
+    await flush();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: { ...call, state: "active" } });
+    const steps = measure.mock.calls.map(([, options]) => (options as PerformanceMeasureOptions)?.detail)
+      .filter(value => value?.phase === "answer" || value?.phase === "invite_to_active");
+    expect(steps.map(step => step.phase).sort()).toEqual(["answer", "invite_to_active"]);
+    expect(steps.every(step => step.operationId === operationId)).toBe(true);
+    measure.mockRestore();
+  });
+
   it("auto-answers the invite that belongs to a dial this tab started", async () => {
     const h = harness();
     h.phone.start();

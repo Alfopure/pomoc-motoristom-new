@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { KeyRound, Mail, Power, RefreshCw, Save, Trash2, UserPlus, Users } from "lucide-react";
 import type { DispatchData } from "@/data/dispatch-types";
 import type { AccessStatus, AccessUser, AppRole } from "@/domain/types";
@@ -48,12 +48,24 @@ const accessStatusClass: Record<AccessStatus, string> = {
   disabled: "bg-red-100 text-red-800",
 };
 
-export function UserAccessSettings({ onDataChange, onNotice, users, viewerRole }: UserAccessSettingsProps) {
+export function UserAccessSettings({ onDataChange, onNotice, users: initialUsers, viewerRole }: UserAccessSettingsProps) {
+  const [users, setUsers] = useState(initialUsers);
+  const [error, setError] = useState<string | null>(null);
+  const receiptVersion = useRef(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    const version = receiptVersion.current;
+    void fetch("/api/users", { cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]) }).then(async response => {
+      const body = await response.json();
+      if (!response.ok || !Array.isArray(body.users)) throw new Error("Správu používateľov sa nepodarilo načítať.");
+      if (!controller.signal.aborted && version === receiptVersion.current) setUsers(body.users);
+    }).catch(error => { if (!controller.signal.aborted) setError(error instanceof Error ? error.message : "Používatelia sú nedostupní."); });
+    return () => controller.abort();
+  }, []);
   const [drafts, setDrafts] = useState<Record<string, UserDraft>>({});
   const [newUser, setNewUser] = useState<UserDraft>({ displayName: "", email: "", role: "dispatcher" });
   const [sendInvite, setSendInvite] = useState(true);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [newPassword, setNewPassword] = useState("");
   const [newPasswordAgain, setNewPasswordAgain] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -194,6 +206,8 @@ export function UserAccessSettings({ onDataChange, onNotice, users, viewerRole }
   function applyMutationResult(result: ApiMutationResponse, fallbackNotice: string) {
     if (result.dispatchData) {
       setDrafts({});
+      receiptVersion.current++;
+      setUsers(result.dispatchData.users);
       onDataChange(result.dispatchData);
     }
 

@@ -1,4 +1,5 @@
 import { isMobileApp } from "./phone-platform";
+import { beginBrowserCallStep } from "./call-timing";
 
 /**
  * Bounded browser requests for telephony endpoints.
@@ -30,9 +31,9 @@ export const TELEPHONY_TIMEOUT_MS = {
 export type TelephonyTimeoutKind = keyof typeof TELEPHONY_TIMEOUT_MS;
 
 /**
- * Raised only when *our* budget elapsed. A caller-initiated abort keeps its own
- * AbortError, because the two mean different things: a timeout is a possibly
- * delivered request, while a caller abort is a user who changed their mind.
+ * Raised only when our budget elapsed. A caller-initiated abort keeps its own
+ * AbortError. Either kind of abort may happen after a mutation was delivered;
+ * neither is proof that the remote operation was cancelled.
  */
 export class TelephonyRequestTimeoutError extends Error {
   readonly timedOut = true;
@@ -62,6 +63,9 @@ export type TelephonyFetchInit = Omit<RequestInit, "signal"> & {
   /** Short human-readable name used in the timeout message and in tests. */
   label: string;
   signal?: AbortSignal | null;
+  operationId?: string;
+  /** UI feedback only; an uncertain operation remains in flight until its real result. */
+  onSlow?: () => void;
 };
 
 /**
@@ -74,13 +78,14 @@ export async function telephonyFetch(
   init: TelephonyFetchInit,
   runtime: { fetch?: typeof fetch; setTimeout?: typeof setTimeout; clearTimeout?: typeof clearTimeout } = {},
 ): Promise<Response> {
-  const { timeoutMs, label, signal: callerSignal, ...rest } = init;
+  const { timeoutMs, label, signal: callerSignal, onSlow, operationId, ...rest } = init;
   const doFetch = runtime.fetch ?? globalThis.fetch;
   const schedule = runtime.setTimeout ?? globalThis.setTimeout;
   const cancel = runtime.clearTimeout ?? globalThis.clearTimeout;
 
   if (callerSignal?.aborted) throw abortError();
 
+  const finishTiming = beginBrowserCallStep("request", { operationId });
   const controller = new AbortController();
   let timedOut = false;
   const onCallerAbort = () => controller.abort();
@@ -89,24 +94,65 @@ export async function telephonyFetch(
     timedOut = true;
     controller.abort();
   }, timeoutMs);
+  const slowTimer = onSlow && timeoutMs > 15_000 ? schedule(() => {
+    try { onSlow(); } catch { /* UI reporting must not interrupt an in-flight mutation. */ }
+  }, 15_000) : null;
 
   try {
-    return await doFetch(input, {
+    const response = await doFetch(input, {
       cache: "no-store",
       credentials: "same-origin",
       ...rest,
       headers: isMobileApp() && input.startsWith("/api/telephony/") ? { ...Object.fromEntries(new Headers(rest.headers)), "x-pm-phone-kind": "mobile" } : rest.headers,
       signal: controller.signal,
     });
+    // Every caller consumes a finite API response. Keep the deadline alive
+    // through the body: fetch() alone resolves as soon as headers arrive.
+    const body = response.body ? await readBoundedBody(response.body, controller.signal) : null;
+    if (controller.signal.aborted) throw abortError();
+    finishTiming({ outcome: response.ok ? "ok" : "failed", requestId: response.headers.get("x-request-id") });
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   } catch (error) {
-    // Order matters: a caller abort that races our timer must not be reported
-    // as a timeout, because only a timeout implies possible delivery.
+    finishTiming({ outcome: callerSignal?.aborted ? "cancelled" : "failed" });
+    // Keep caller cancellation distinguishable if it races the timer.
     if (callerSignal?.aborted) throw abortError();
     if (timedOut) throw new TelephonyRequestTimeoutError(label, timeoutMs);
     throw error;
   } finally {
     cancel(timer);
+    if (slowTimer !== null) cancel(slowTimer);
     callerSignal?.removeEventListener("abort", onCallerAbort);
+  }
+}
+
+const MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024;
+
+async function readBoundedBody(body: ReadableStream<Uint8Array>, signal: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
+  const reader = body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", cancel, { once: true });
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    if (signal.aborted) { cancel(); throw abortError(); }
+    while (true) {
+      const { done, value } = await reader.read();
+      if (signal.aborted) throw abortError();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_API_RESPONSE_BYTES) {
+        cancel();
+        throw new Error("Odpoveď telefónnej služby je príliš veľká.");
+      }
+      chunks.push(value);
+    }
+    const result = new Uint8Array(bytes);
+    let offset = 0;
+    for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+    return result;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    reader.releaseLock();
   }
 }
 

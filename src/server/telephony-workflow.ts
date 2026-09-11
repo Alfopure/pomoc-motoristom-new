@@ -2,6 +2,7 @@ import "server-only";
 
 import { taskWorkspaceSystemEnabled } from "./task-system-gate";
 import { telephonyStabilityEnabled } from "./telephony/stability";
+import { ownedSessionWork } from "./telephony/session-runner";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadDispatchData } from "@/data/dispatch-repository";
@@ -147,77 +148,79 @@ export async function linkCallToCase(callId: string, caseId: string) {
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
   const organizationId = organization.id;
-  const [call, caseRow] = await Promise.all([getCall(supabase, organizationId, callId), getCase(supabase, organizationId, caseId)]);
-  const actorId = await resolveDefaultOwnerId(supabase, organizationId);
-  const now = new Date().toISOString();
-  const latestPayload = {
-    ...jsonRecord(call.raw_latest_payload),
-    linkedCaseId: caseId,
-    linkedAt: now,
-    linkedBy: "dispatch_console",
-  };
+  await withCallOwnership(supabase, organizationId, callId, async (call) => {
+    const caseRow = await getCase(supabase, organizationId, caseId);
+    const actorId = await resolveDefaultOwnerId(supabase, organizationId);
+    const now = new Date().toISOString();
+    const latestPayload = {
+      ...jsonRecord(call.raw_latest_payload),
+      linkedCaseId: caseId,
+      linkedAt: now,
+      linkedBy: "dispatch_console",
+    };
 
-  await throwOnResult(
-    supabase
-      .from("motorist_calls")
-      .update({
-        case_id: caseId,
-        raw_latest_payload: toJson(latestPayload),
-      })
-      .eq("organization_id", organizationId)
-      .eq("id", callId),
-  );
-  if (call.session_id) {
-    // The live-call panel reads the session, while history reads the call-log
-    // row. Keep both projections aligned after an explicit dispatcher action.
     await throwOnResult(
       supabase
-        .from("motorist_call_sessions")
-        .update({ case_id: caseId })
+        .from("motorist_calls")
+        .update({
+          case_id: caseId,
+          raw_latest_payload: toJson(latestPayload),
+        })
         .eq("organization_id", organizationId)
-        .eq("id", call.session_id),
+        .eq("id", callId),
     );
-  }
-  await insertSingle<CallEventRow>(
-    supabase
-      .from("motorist_call_events")
-      .insert({
-        organization_id: organizationId,
-        call_id: callId,
-        provider: call.provider,
-        provider_session_id: call.provider_session_id,
-        event_type: "app.link_case",
-        event_fingerprint: `app:link_case:${callId}:${caseId}:${now}`,
-        payload: toJson({ call_id: callId, case_id: caseId }),
-        raw_payload: toJson(latestPayload),
-        normalized_payload: toJson({ call_id: callId, case_id: caseId }),
-        handled_status: "processed",
-        received_at: now,
-      })
-      .select("*")
-      .single(),
-  );
-  await insertSingle<CaseEventRow>(
-    supabase
-      .from("motorist_case_events")
-      .insert({
-        organization_id: organizationId,
-        case_id: caseId,
-        actor_profile_id: actorId,
-        event_type: "call_linked",
-        title: "Hovor priradený k prípadu",
-        body: `${call.caller_number ?? call.destination_number ?? "Neznáme číslo"} · ${caseRow.case_number}`,
-        payload: toJson({ call_id: callId, caller_number: call.caller_number, status: call.status }),
-      })
-      .select("*")
-      .single(),
-  );
-  await audit(supabase, organizationId, actorId, "call.link_case", "motorist_calls", callId, {
-    call_id: callId,
-    case_id: caseId,
-    case_number: caseRow.case_number,
-  });
+    if (call.session_id) {
+      // The live-call panel reads the session, while history reads the call-log
+      // row. Keep both projections aligned after an explicit dispatcher action.
+      await throwOnResult(
+        supabase
+          .from("motorist_call_sessions")
+          .update({ case_id: caseId })
+          .eq("organization_id", organizationId)
+          .eq("id", call.session_id),
+      );
+    }
+    await insertSingle<CallEventRow>(
+      supabase
+        .from("motorist_call_events")
+        .insert({
+          organization_id: organizationId,
+          call_id: callId,
+          provider: call.provider,
+          provider_session_id: call.provider_session_id,
+          event_type: "app.link_case",
+          event_fingerprint: `app:link_case:${callId}:${caseId}:${now}`,
+          payload: toJson({ call_id: callId, case_id: caseId }),
+          raw_payload: toJson(latestPayload),
+          normalized_payload: toJson({ call_id: callId, case_id: caseId }),
+          handled_status: "processed",
+          received_at: now,
+        })
+        .select("*")
+        .single(),
+    );
+    await insertSingle<CaseEventRow>(
+      supabase
+        .from("motorist_case_events")
+        .insert({
+          organization_id: organizationId,
+          case_id: caseId,
+          actor_profile_id: actorId,
+          event_type: "call_linked",
+          title: "Hovor priradený k prípadu",
+          body: `${call.caller_number ?? call.destination_number ?? "Neznáme číslo"} · ${caseRow.case_number}`,
+          payload: toJson({ call_id: callId, caller_number: call.caller_number, status: call.status }),
+        })
+        .select("*")
+        .single(),
+    );
+    await audit(supabase, organizationId, actorId, "call.link_case", "motorist_calls", callId, {
+      call_id: callId,
+      case_id: caseId,
+      case_number: caseRow.case_number,
+    });
 
+  });
   return loadDispatchData();
 }
 
@@ -237,97 +240,109 @@ export async function setCallOutcome(
     throw new TelephonyWorkflowError("Neplatný výsledok hovoru.", 400);
   }
 
+  const outcome = input.outcome;
   ensureSupabaseServiceEnv();
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
   const organizationId = organization.id;
-  const call = await getCall(supabase, organizationId, callId);
-  if (actor && actor.organizationId !== organizationId) throw new TelephonyWorkflowError("Hovor patrí inej organizácii.", 403);
-  const actorId = actor?.profileId ?? call.operator_id ?? (await resolveDefaultOwnerId(supabase, organizationId));
-  const now = new Date().toISOString();
-  const note = readString(input.note);
-  const callbackMinutes = cleanCallbackMinutes(input.callbackMinutes);
-  const label = outcomeLabels[input.outcome];
-  const useCallbackContract = input.outcome === "callback" && (telephonyStabilityEnabled() || await taskWorkspaceSystemEnabled(supabase, organizationId));
-  if (useCallbackContract) {
-    if (!actor) throw new TelephonyWorkflowError("Naplánovanie vyžaduje prihláseného dispečera.", 403);
-    ensureUuid(input.callbackActionId, "callbackActionId");
-    await throwOnResult(supabase.rpc("motorist_schedule_callback_v1", {
-      p_organization_id: organizationId, p_call_id: call.id, p_actor_id: actor.profileId,
-      p_action_id: String(input.callbackActionId), p_due_at: dueInMinutes(callbackMinutes),
-    }));
-  }
+  await withCallOwnership(supabase, organizationId, callId, async (call) => {
+    if (actor && actor.organizationId !== organizationId) throw new TelephonyWorkflowError("Hovor patrí inej organizácii.", 403);
+    const actorId = actor?.profileId ?? call.operator_id ?? (await resolveDefaultOwnerId(supabase, organizationId));
+    const now = new Date().toISOString();
+    const note = readString(input.note);
+    const callbackMinutes = cleanCallbackMinutes(input.callbackMinutes);
+    const label = outcomeLabels[outcome];
+    const useCallbackContract = input.outcome === "callback" && (telephonyStabilityEnabled() || await taskWorkspaceSystemEnabled(supabase, organizationId));
+    if (useCallbackContract) {
+      if (!actor) throw new TelephonyWorkflowError("Naplánovanie vyžaduje prihláseného dispečera.", 403);
+      ensureUuid(input.callbackActionId, "callbackActionId");
+      await throwOnResult(supabase.rpc("motorist_schedule_callback_v1", {
+        p_organization_id: organizationId, p_call_id: call.id, p_actor_id: actor.profileId,
+        p_action_id: String(input.callbackActionId), p_due_at: dueInMinutes(callbackMinutes),
+      }));
+    }
 
-  const latestPayload = {
-    ...jsonRecord(call.raw_latest_payload),
-    outcome: input.outcome,
-    outcomeLabel: label,
-    outcomeNote: note,
-    callbackMinutes: input.outcome === "callback" ? callbackMinutes : undefined,
-    outcomeAt: now,
-    outcomeBy: "dispatch_console",
-  };
+    const latestPayload = {
+      ...jsonRecord(call.raw_latest_payload),
+      outcome,
+      outcomeLabel: label,
+      outcomeNote: note,
+      callbackMinutes: input.outcome === "callback" ? callbackMinutes : undefined,
+      outcomeAt: now,
+      outcomeBy: "dispatch_console",
+    };
 
-  await throwOnResult(
-    supabase
-      .from("motorist_calls")
-      .update({
-        summary: note ? `${label}: ${note}` : label,
-        raw_latest_payload: toJson(latestPayload),
-      })
-      .eq("organization_id", organizationId)
-      .eq("id", callId),
-  );
-  await insertSingle<CallEventRow>(
-    supabase
-      .from("motorist_call_events")
-      .insert({
-        organization_id: organizationId,
-        call_id: callId,
-        provider: call.provider,
-        provider_session_id: call.provider_session_id,
-        event_type: "app.outcome",
-        event_fingerprint: `app:outcome:${callId}:${input.outcome}:${now}`,
-        payload: toJson({ call_id: callId, outcome: input.outcome, note }),
-        raw_payload: toJson(latestPayload),
-        normalized_payload: toJson({ call_id: callId, outcome: input.outcome }),
-        handled_status: "processed",
-        received_at: now,
-      })
-      .select("*")
-      .single(),
-  );
-
-  if (call.case_id) {
-    await insertSingle<CaseEventRow>(
+    await throwOnResult(
       supabase
-        .from("motorist_case_events")
+        .from("motorist_calls")
+        .update({
+          summary: note ? `${label}: ${note}` : label,
+          raw_latest_payload: toJson(latestPayload),
+        })
+        .eq("organization_id", organizationId)
+        .eq("id", callId),
+    );
+    await insertSingle<CallEventRow>(
+      supabase
+        .from("motorist_call_events")
         .insert({
           organization_id: organizationId,
-          case_id: call.case_id,
-          actor_profile_id: actorId,
-          event_type: "call_outcome",
-          title: `Výsledok hovoru: ${label}`,
-          body: note ?? `${call.caller_number ?? call.destination_number ?? "Neznáme číslo"}`,
-          payload: toJson({ call_id: callId, outcome: input.outcome, callback_minutes: callbackMinutes }),
+          call_id: callId,
+          provider: call.provider,
+          provider_session_id: call.provider_session_id,
+          event_type: "app.outcome",
+          event_fingerprint: `app:outcome:${callId}:${input.outcome}:${now}`,
+          payload: toJson({ call_id: callId, outcome: input.outcome, note }),
+          raw_payload: toJson(latestPayload),
+          normalized_payload: toJson({ call_id: callId, outcome: input.outcome }),
+          handled_status: "processed",
+          received_at: now,
         })
         .select("*")
         .single(),
     );
 
-    if (input.outcome === "callback" && !useCallbackContract) {
-      await createCallbackTaskIfNeeded(supabase, organizationId, call, actorId, callbackMinutes);
+    if (call.case_id) {
+      await insertSingle<CaseEventRow>(
+        supabase
+          .from("motorist_case_events")
+          .insert({
+            organization_id: organizationId,
+            case_id: call.case_id,
+            actor_profile_id: actorId,
+            event_type: "call_outcome",
+            title: `Výsledok hovoru: ${label}`,
+            body: note ?? `${call.caller_number ?? call.destination_number ?? "Neznáme číslo"}`,
+            payload: toJson({ call_id: callId, outcome: input.outcome, callback_minutes: callbackMinutes }),
+          })
+          .select("*")
+          .single(),
+      );
+
+      if (input.outcome === "callback" && !useCallbackContract) {
+        await createCallbackTaskIfNeeded(supabase, organizationId, call, actorId, callbackMinutes);
+      }
     }
-  }
 
-  await audit(supabase, organizationId, actorId, "call.outcome", "motorist_calls", callId, {
-    call_id: callId,
-    case_id: call.case_id,
-    outcome: input.outcome,
-    note,
+    await audit(supabase, organizationId, actorId, "call.outcome", "motorist_calls", callId, {
+      call_id: callId,
+      case_id: call.case_id,
+      outcome,
+      note,
+    });
+
   });
-
   return loadDispatchData();
+}
+
+async function withCallOwnership(supabase: AdminClient, organizationId: string, callId: string, work: (call: CallRow) => Promise<void>) {
+  const initial = await getCall(supabase, organizationId, callId);
+  if (!initial.session_id) return work(initial);
+  return ownedSessionWork({ admin: supabase, organizationId }, initial.session_id, async () => {
+    const current = await getCall(supabase, organizationId, callId);
+    if (current.session_id !== initial.session_id) throw new TelephonyWorkflowError("Hovor sa zmenil. Obnovte ho a zopakujte akciu.", 409);
+    return work(current);
+  });
 }
 
 async function createCallbackTaskIfNeeded(

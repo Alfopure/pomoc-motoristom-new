@@ -6,7 +6,7 @@ import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
-import { effectsDeps, runSessionEvent, SessionEventDeferredError, type SessionRunnerDeps } from "../session-runner";
+import { effectsDeps, ownedSessionWork, runSessionEvent, SessionEventDeferredError, type SessionRunnerDeps } from "../session-runner";
 import { recordCallEvent, type CommandOutcome } from "../state/effects";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
 import { toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
@@ -34,6 +34,9 @@ type AdminClient = SupabaseClient<Database>;
 export type ProcessorDeps = SessionRunnerDeps & {
   /** Run the overdue-step sweep after each control event (design §2.3 item 9a). */
   sweepAfterEvent?: boolean;
+  /** Internal durable replay; never changes the envelope authorization rules. */
+  ledgerReplay?: "cron" | "correlation";
+  replayCorrelated?: boolean;
   /** Sessions the inline sweep may re-drive (default `INLINE_SWEEP_LIMIT`). */
   sweepLimit?: number;
   /** Wall-clock budget shared by the event and its inline sweep. */
@@ -44,7 +47,7 @@ export type ProcessorDeps = SessionRunnerDeps & {
 export const INLINE_SWEEP_LIMIT = 2;
 export const INLINE_SWEEP_BUDGET_MS = 4_000;
 
-export type ProcessorOutcome = "processed" | "ignored" | "duplicate" | "busy" | "failed" | "malformed" | "unverified_connection" | "unknown_session";
+export type ProcessorOutcome = "processed" | "ignored" | "duplicate" | "busy" | "failed" | "malformed" | "unverified_connection" | "unknown_session" | "awaiting_correlation" | "unresolved";
 
 export type ProcessorResult = {
   status: 200 | 400 | 500;
@@ -91,7 +94,9 @@ async function findSession(admin: AdminClient, organizationId: string, event: Te
   if (event.callSessionId) {
     const bySession = await admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).eq("telnyx_session_id", event.callSessionId).maybeSingle();
     if (bySession.error) throw new Error(`session lookup failed: ${bySession.error.message}`);
-    if (bySession.data) return bySession.data;
+    // A provider session can contain several legs. An unregistered control ID
+    // without our exact client-state correlation must wait for its own leg.
+    if (bySession.data && !event.callControlId) return bySession.data;
   }
   if (event.conferenceId) {
     const conference = await admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).eq("conference_id", event.conferenceId).maybeSingle();
@@ -177,34 +182,36 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
     session = inserted.data;
   }
 
-  if (event.callControlId) {
-    const leg = await admin
-      .from("motorist_call_legs")
-      .upsert(
-        {
-          organization_id: organizationId,
-          session_id: session.id,
-          telnyx_call_control_id: event.callControlId,
-          telnyx_call_leg_id: event.callLegId,
-          role: "customer",
-          to_number: calledNumber,
-          from_number: callerNumber,
-          state: "initiated",
-          initiated_at: event.occurredAt ?? now.toISOString(),
-          client_state: toJson({ sid: session.id, role: "customer" }),
-        },
-        { onConflict: "telnyx_call_control_id" },
-      )
-      .select("id")
-      .single();
-    if (leg.error) throw new Error(`customer leg upsert failed: ${leg.error.message}`);
-    if (!session.customer_leg_id) {
-      const updated = await admin.from("motorist_call_sessions").update({ customer_leg_id: leg.data.id }).eq("id", session.id).is("customer_leg_id", null).select("*").maybeSingle();
-      if (updated.data) session = updated.data;
-      else session = { ...session, customer_leg_id: leg.data.id };
+  return ownedSessionWork(deps, session.id, async () => {
+    if (event.callControlId) {
+      const leg = await admin
+        .from("motorist_call_legs")
+        .upsert(
+          {
+            organization_id: organizationId,
+            session_id: session.id,
+            telnyx_call_control_id: event.callControlId,
+            telnyx_call_leg_id: event.callLegId,
+            role: "customer",
+            to_number: calledNumber,
+            from_number: callerNumber,
+            state: "initiated",
+            initiated_at: event.occurredAt ?? now.toISOString(),
+            client_state: toJson({ sid: session.id, role: "customer" }),
+          },
+          { onConflict: "telnyx_call_control_id" },
+        )
+        .select("id")
+        .single();
+      if (leg.error) throw new Error(`customer leg upsert failed: ${leg.error.message}`);
+      if (!session.customer_leg_id) {
+        const updated = await admin.from("motorist_call_sessions").update({ customer_leg_id: leg.data.id }).eq("id", session.id).is("customer_leg_id", null).select("*").maybeSingle();
+        if (updated.data) session = updated.data;
+        else session = { ...session, customer_leg_id: leg.data.id };
+      }
     }
-  }
-  return session;
+    return session;
+  });
 }
 
 export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown): Promise<ProcessorResult> {
@@ -235,13 +242,19 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     callControlId: event.callControlId,
     connectionId: event.connectionId,
     occurredAt: event.occurredAt,
+    replay: deps.ledgerReplay,
   });
+  if (claim.outcome === "terminal") {
+    await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.webhook, error: new Error(claim.terminalReason ?? "Webhook dead letter"), context: { eventId: event.id, type: event.type, terminalReason: claim.terminalReason } });
+    return done({ ...identity, claim, status: 200, outcome: "unresolved", error: claim.terminalReason });
+  }
   if (claim.outcome !== "claimed") {
-    return done({ ...identity, claim, status: claim.outcome === "busy" && eventClass === "control" ? 500 : 200, outcome: claim.outcome });
+    return done({ ...identity, claim, status: claim.outcome === "busy" ? 500 : 200, outcome: claim.outcome });
   }
 
   const effects = effectsDeps(deps);
   let session: SessionRow | null = null;
+  let processingStarted = false;
   try {
     session = await findSession(deps.admin, deps.organizationId, event);
     // Only the call-control application sees real customers. A leg arriving at
@@ -252,69 +265,78 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // reason; this guard keeps the mistake harmless if it is ever set again.
     const credentialConnectionId = deps.config.configured ? deps.config.credentialConnectionId : null;
     const fromCredentialConnection = Boolean(credentialConnectionId && event.connectionId === credentialConnectionId);
-    if (!session && event.type === "call.initiated" && event.direction === "incoming" && eventClass === "control" && !fromCredentialConnection) {
+    if (!session && event.type === "call.initiated" && event.direction === "incoming" && eventClass === "control" && !fromCredentialConnection && Boolean(event.connectionId && allowed.has(event.connectionId))) {
       session = await createInboundSession(deps, event);
     }
 
     if (!session) {
-      await recordCallEvent(effects, { session: null, event, handledStatus: "ignored", stateBefore: null, stateAfter: null, notes: ["unknown session"], commands: [] });
-      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
-      deps.logger?.({ scope: "webhook", eventId: event.id, type: event.type, outcome: "unknown_session", callControlId: event.callControlId });
-      return done({ ...identity, claim, status: 200, outcome: "unknown_session", notes: ["unknown session"] });
-    }
-
-    if (eventClass === "bookkeeping") {
-      if (event.type === "call.recording.saved" || event.type === "conference.recording.saved") {
-        const payload = event.payload;
-        const urls = payload.recording_urls && typeof payload.recording_urls === "object" ? payload.recording_urls as Record<string, unknown> : {};
-        const sourceUrl = typeof urls.wav === "string" ? urls.wav : typeof urls.mp3 === "string" ? urls.mp3 : null;
-        const providerRecordingId = typeof payload.recording_id === "string" ? payload.recording_id : null;
-        const startedAt = typeof payload.recording_started_at === "string" ? payload.recording_started_at : null;
-        const endedAt = typeof payload.recording_ended_at === "string" ? payload.recording_ended_at : null;
-        // Only requested, announced captures from our registry enter processing. A provider
-        // recording enabled in its portal must not silently become an authorised app recording.
-        const recorder = readMeta(session).recording?.recorders.find((r) => r.callControlId === event.callControlId && (r.providerRecordingId && typeof event.payload.recording_id === "string" ? r.providerRecordingId === event.payload.recording_id : event.clientState?.intent === recordingIntent(r.id)));
-        if (recorder && providerRecordingId && sourceUrl && startedAt && endedAt && Number.isFinite(Date.parse(startedAt)) && Date.parse(endedAt) >= Date.parse(startedAt)) {
-          const call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", session.id).maybeSingle();
-          if (call.error || !call.data) throw new Error("recording call association unavailable");
-          await enqueueSavedRecording(deps.admin, { organizationId: deps.organizationId, callId: call.data.id, sessionId: session.id, providerRecordingId, recorderId: recorder.id,
-            providerSessionId: event.callSessionId, startedAt, endedAt, durationSeconds: Math.ceil((Date.parse(endedAt) - Date.parse(startedAt)) / 1000), sourceUrl,
-            participantManifest: await loadParticipantManifest(deps.admin, session, { startedAt, endedAt, recorderId: recorder.id }) });
-        } else if (recorder) throw new Error("recording saved payload incomplete");
+      if (event.connectionId && allowed.has(event.connectionId)) {
+        await markWebhookEventFailed(deps.admin, event.id, "Awaiting exact session/leg correlation", { claimedAt: claim.claimedAt, logger: deps.logger, awaitingCorrelation: true });
+        const expired = claim.receivedAt !== null && now().getTime() - Date.parse(claim.receivedAt) >= 60_000;
+        if (expired) await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.webhook, error: new Error("awaiting_correlation_expired"), context: { eventId: event.id, type: event.type } });
+        return done({ ...identity, claim, status: expired ? 200 : 500, outcome: expired ? "unresolved" : "awaiting_correlation", notes: ["awaiting exact correlation"] });
       }
-      if (event.type === "call.recording.saved" || event.type === "call.recording.error") await runSessionEvent(deps, session.id, event);
-      await recordCallEvent(effects, { session, event, handledStatus: "processed", stateBefore: session.state, stateAfter: session.state, notes: ["bookkeeping"], commands: [] });
       await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
-      return done({ ...identity, claim, sessionId: session.id, status: 200, outcome: "processed", notes: ["bookkeeping"] });
+      return done({ ...identity, claim, status: 200, outcome: "unknown_session", notes: ["missing allowed connection correlation"] });
     }
 
-    const run = await runSessionEvent(deps, session.id, event);
-    if (["call.bridged", "call.hangup", "conference.participant.joined", "conference.participant.left"].includes(event.type)) {
-      try { await observeParticipants(deps.admin, run.session, event.id, event.occurredAt ?? now().toISOString(), event.type === "call.bridged"); }
-      catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "participant_observation_failed" }); }
-    }
-    if (run.outcome === "ignored") {
+    const ownedSession = session;
+    const result = await ownedSessionWork(deps, ownedSession.id, async () => {
+      processingStarted = true;
+      if (eventClass === "bookkeeping") {
+        if (event.type === "call.recording.saved" || event.type === "conference.recording.saved") {
+          const payload = event.payload;
+          const urls = payload.recording_urls && typeof payload.recording_urls === "object" ? payload.recording_urls as Record<string, unknown> : {};
+          const sourceUrl = typeof urls.wav === "string" ? urls.wav : typeof urls.mp3 === "string" ? urls.mp3 : null;
+          const providerRecordingId = typeof payload.recording_id === "string" ? payload.recording_id : null;
+          const startedAt = typeof payload.recording_started_at === "string" ? payload.recording_started_at : null;
+          const endedAt = typeof payload.recording_ended_at === "string" ? payload.recording_ended_at : null;
+          // Only requested, announced captures from our registry enter processing. A provider
+          // recording enabled in its portal must not silently become an authorised app recording.
+          const recorder = readMeta(ownedSession).recording?.recorders.find((r) => r.callControlId === event.callControlId && (r.providerRecordingId && typeof event.payload.recording_id === "string" ? r.providerRecordingId === event.payload.recording_id : event.clientState?.intent === recordingIntent(r.id)));
+          if (recorder && providerRecordingId && sourceUrl && startedAt && endedAt && Number.isFinite(Date.parse(startedAt)) && Date.parse(endedAt) >= Date.parse(startedAt)) {
+            const call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", ownedSession.id).maybeSingle();
+            if (call.error || !call.data) throw new Error("recording call association unavailable");
+            await enqueueSavedRecording(deps.admin, { organizationId: deps.organizationId, callId: call.data.id, sessionId: ownedSession.id, providerRecordingId, recorderId: recorder.id,
+              providerSessionId: event.callSessionId, startedAt, endedAt, durationSeconds: Math.ceil((Date.parse(endedAt) - Date.parse(startedAt)) / 1000), sourceUrl,
+              participantManifest: await loadParticipantManifest(deps.admin, ownedSession, { startedAt, endedAt, recorderId: recorder.id }) });
+          } else if (recorder) throw new Error("recording saved payload incomplete");
+        }
+        if (event.type === "call.recording.saved" || event.type === "call.recording.error") await runSessionEvent(deps, ownedSession.id, event);
+        await recordCallEvent(effects, { session: ownedSession, event, handledStatus: "processed", stateBefore: ownedSession.state, stateAfter: ownedSession.state, notes: ["bookkeeping"], commands: [] });
+        await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+        return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", notes: ["bookkeeping"] });
+      }
+
+      const run = await runSessionEvent(deps, ownedSession.id, event);
+      if (["call.bridged", "call.hangup", "conference.participant.joined", "conference.participant.left"].includes(event.type)) {
+        try { await observeParticipants(deps.admin, run.session, event.id, event.occurredAt ?? now().toISOString(), event.type === "call.bridged"); }
+        catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: ownedSession.id, code: "participant_observation_failed" }); }
+      }
+      if (run.outcome === "ignored") {
+        await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+        logResult(deps, event, claim, ownedSession.id, "ignored", [], started, now);
+        return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "ignored", notes: [run.reason] });
+      }
+
+      if (run.apply.failed) {
+        await markWebhookEventFailed(deps.admin, event.id, run.apply.failure?.error ?? "command failed", { claimedAt: claim.claimedAt, logger: deps.logger });
+        logResult(deps, event, claim, ownedSession.id, "failed", run.commands, started, now);
+        return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "failed", commands: run.commands, notes: run.apply.notes, error: run.apply.failure?.error ?? null });
+      }
+
       await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
-      logResult(deps, event, claim, session.id, "ignored", [], started, now);
-      return done({ ...identity, claim, sessionId: session.id, status: 200, outcome: "ignored", notes: [run.reason] });
-    }
-
-    if (run.apply.failed) {
-      await markWebhookEventFailed(deps.admin, event.id, run.apply.failure?.error ?? "command failed", { claimedAt: claim.claimedAt, logger: deps.logger });
-      logResult(deps, event, claim, session.id, "failed", run.commands, started, now);
-      await maybeSweep(deps, started);
-      return done({ ...identity, claim, sessionId: session.id, status: 200, outcome: "failed", commands: run.commands, notes: run.apply.notes, error: run.apply.failure?.error ?? null });
-    }
-
-    await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
-    logResult(deps, event, claim, session.id, "processed", run.commands, started, now);
-    // A clean run closes the open webhook incident (throttled per instance).
-    await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.webhook, now());
+      logResult(deps, event, claim, ownedSession.id, "processed", run.commands, started, now);
+      // A clean run closes the open webhook incident (throttled per instance).
+      await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.webhook, now());
+      return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", commands: run.commands, notes: run.apply.notes });
+    });
+    if (result.outcome === "processed" || result.outcome === "ignored") await replayCorrelatedEvents(deps, event, ownedSession);
     await maybeSweep(deps, started);
-    return done({ ...identity, claim, sessionId: session.id, status: 200, outcome: "processed", commands: run.commands, notes: run.apply.notes });
+    return result;
   } catch (error) {
     const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-    const deferred = error instanceof SessionEventDeferredError;
+    const deferred = error instanceof SessionEventDeferredError || !processingStarted;
     try {
       await markWebhookEventFailed(deps.admin, event.id, error, { claimedAt: claim.claimedAt, logger: deps.logger, releaseForRetry: deferred });
     } catch (ledgerError) {
@@ -369,4 +391,39 @@ function logResult(deps: ProcessorDeps, event: TelephonyEvent, claim: WebhookCla
     ms: now().getTime() - started,
     commands: commands.map((command) => `${command.kind}${command.ok ? "" : "!"}`),
   });
+}
+
+/** Restore correlation columns omitted from intentionally redacted recording payloads. */
+export function storedWebhookEnvelope(row: { event_id: string; event_type: string; occurred_at: string | null; payload: unknown; call_control_id?: string | null; call_session_id?: string | null; call_leg_id?: string | null; connection_id?: string | null }): unknown {
+  const payload = row.payload && typeof row.payload === "object" && !Array.isArray(row.payload) ? row.payload : {};
+  return { data: { id: row.event_id, event_type: row.event_type, occurred_at: row.occurred_at, payload: {
+    ...(row.call_control_id ? { call_control_id: row.call_control_id } : {}),
+    ...(row.call_session_id ? { call_session_id: row.call_session_id } : {}),
+    ...(row.call_leg_id ? { call_leg_id: row.call_leg_id } : {}),
+    ...(row.connection_id ? { connection_id: row.connection_id } : {}), ...payload,
+  } } };
+}
+
+async function replayCorrelatedEvents(deps: ProcessorDeps, current: TelephonyEvent, session: SessionRow): Promise<void> {
+  if (deps.replayCorrelated === false) return;
+  try {
+    const { data, error } = await deps.admin.from("motorist_telnyx_webhook_events").select("*")
+      .eq("organization_id", deps.organizationId).eq("retry_state", "awaiting_correlation")
+      .neq("event_id", current.id).order("received_at", { ascending: true }).limit(20);
+    if (error) throw new Error(error.message);
+    let replayed = 0;
+    for (const row of data ?? []) {
+      const envelope = storedWebhookEnvelope(row);
+      const waiting = parseTelnyxEnvelope(envelope);
+      // A shared Telnyx session ID is deliberately insufficient: it can describe
+      // a different customer/operator leg. Exact control ID or our signed sid only.
+      if (!waiting || !((waiting.callControlId && waiting.callControlId === current.callControlId) || waiting.clientState?.sid === session.id)) continue;
+      await processTelnyxEvent({ ...deps, ledgerReplay: "correlation", replayCorrelated: false, sweepAfterEvent: false }, envelope);
+      if (++replayed >= 2) break;
+    }
+  } catch (error) {
+    // Current-event completion is already durable; a replay lookup failure is
+    // not a failure of the completed provider command. Cron retains the rows.
+    deps.logger?.({ level: "warn", scope: "webhook", message: "correlation replay deferred", error: error instanceof Error ? error.message : String(error) });
+  }
 }

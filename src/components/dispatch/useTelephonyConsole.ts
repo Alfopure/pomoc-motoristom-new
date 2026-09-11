@@ -15,6 +15,8 @@ import {
   type WaitingRoomRow,
 } from "@/lib/telephony/active-calls-model";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
+import { prepareCallStartRequest, type PendingCallStartRequest } from "@/lib/telephony/call-start-request";
+import { beginBrowserCallStep } from "@/lib/telephony/call-timing";
 import { browserCallStartError, checkMicrophone, type PhoneReadiness } from "@/lib/telephony/call-preflight";
 import { acquireCallWakeLock } from "@/lib/telephony/call-wake-lock";
 import { isTelephonyNotConfigured, TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
@@ -133,6 +135,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const [readiness, setReadiness] = useState<PhoneReadiness>({ status: "idle", message: null });
   const [answerRequestCallId, setAnswerRequestCallId] = useState<string | null>(null);
   const outboundBusyRef = useRef(false);
+  const pendingStartRef = useRef<PendingCallStartRequest | null>(null);
   const microphoneCheckRef = useRef<AbortController | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // `calls/active` is failing while telephony itself is configured: the console
@@ -165,6 +168,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ callControlId }), label: "overenie skončeného hovoru",
       timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+          onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
     }).catch(() => null).finally(() => refreshRef.current?.());
   }, []);
 
@@ -228,13 +232,13 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     if (phone.call?.active) return acquireCallWakeLock();
   }, [phone.call?.active]);
 
-  const verifyMicrophone = useCallback(async () => {
+  const verifyMicrophone = useCallback(async (operationId?: string) => {
     if (microphoneCheckRef.current) throw new Error("Prebieha kontrola mikrofónu. Potvrďte jeho povolenie.");
     const controller = new AbortController();
     microphoneCheckRef.current = controller;
     setReadiness({ status: "checking", message: "Potvrďte povolenie mikrofónu…" });
     try {
-      await checkMicrophone({ signal: controller.signal });
+      await checkMicrophone({ signal: controller.signal, operationId });
       setReadiness({ status: "ready", message: "Mikrofón je povolený." });
     } catch (error) {
       if (!controller.signal.aborted) setReadiness({ status: "error", message: error instanceof Error ? error.message : "Mikrofón sa nepodarilo overiť." });
@@ -253,19 +257,38 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     } catch { return false; }
   }, [verifyMicrophone]);
 
-  const startOutboundRequest = useCallback(async (request: (webphone: CoordinatedWebphone) => Promise<void>) => {
+  const reconcileCallStart = useCallback(async (request: (webphone: CoordinatedWebphone | null) => Promise<void>) => {
+    if (outboundBusyRef.current) throw new Error("Volanie sa už overuje. Počkajte na výsledok.");
+    outboundBusyRef.current = true;
+    setOutboundRequestCount((count) => count + 1);
+    setNotice(null);
+    try {
+      await request(webphoneRef.current);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Výsledok volania ešte nie je potvrdený.");
+      throw error;
+    } finally {
+      outboundBusyRef.current = false;
+      setOutboundRequestCount((count) => count - 1);
+    }
+  }, []);
+
+  const startOutboundRequest = useCallback(async (request: (webphone: CoordinatedWebphone) => Promise<void>, operationId?: string) => {
     // A ref guards rapid taps across every dial surface before React renders.
     const webphone = webphoneRef.current;
     const error = outboundBusyRef.current ? "Volanie sa už spúšťa. Počkajte na spojenie." : browserCallStartError(webphone?.getSnapshot());
     if (error || !webphone) { setNotice(error); throw new Error(error ?? "Telefón nie je pripojený."); }
+    const feedback = beginBrowserCallStep("click_feedback", { operationId });
     outboundBusyRef.current = true;
     setOutboundRequestCount((count) => count + 1);
     setNotice(null);
+    requestAnimationFrame(() => feedback());
     void webphone.unlockAudio().catch(() => undefined);
     let operatorRequestId: string | null = null;
     try {
-      await verifyMicrophone();
-      await webphone.prepareForCall();
+      await verifyMicrophone(operationId);
+      const registered = beginBrowserCallStep("registration", { operationId });
+      try { await webphone.prepareForCall(); registered(); } catch (error) { registered({ outcome: "failed" }); throw error; }
       // An incoming invite, takeover or unmount may arrive during permission.
       const changed = webphone !== webphoneRef.current ? "Telefón bol odpojený." : browserCallStartError(webphone.getSnapshot());
       if (changed) throw new Error(changed);
@@ -523,6 +546,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
               body: JSON.stringify(target ?? {}),
               label: PHONE_ACTION_LABEL_FOR_REQUEST[action],
               timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+          onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
             },
           );
           if (isTelephonyNotConfigured(result)) {
@@ -592,6 +616,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             body: JSON.stringify(input.body ?? {}),
             label: input.label,
             timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+          onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
           });
           if (isTelephonyNotConfigured(result)) {
             setConfigured(false);
@@ -667,18 +692,30 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
 
   // `lineId` is optional and only "Môj telefón" sends it: a test call has to
   // leave from the operator's own line even when the server default differs.
+  const prepareStart = useCallback((path: string, payload: Record<string, unknown>) => {
+    try { return prepareCallStartRequest(pendingStartRef.current, path, payload); }
+    catch (error) {
+      setNotice(error instanceof Error ? error.message : "Výsledok volania ešte nie je potvrdený.");
+      throw error;
+    }
+  }, []);
   const dial = useCallback(async (phoneNumber: string, caseId?: string, options?: { lineId?: string | null; callbackTargetVerificationId?: string }) => {
-    await startOutboundRequest(async (webphone) => {
+    const operation = prepareStart("/api/telephony/calls", { to: phoneNumber, caseId, lineId: options?.lineId ?? undefined, callbackTargetVerificationId: options?.callbackTargetVerificationId });
+    const execute = async (webphone: CoordinatedWebphone | null) => {
+      pendingStartRef.current = operation;
       const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
-        "/api/telephony/calls",
+        operation.path,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ to: phoneNumber, caseId, lineId: options?.lineId ?? undefined, callbackTargetVerificationId: options?.callbackTargetVerificationId }),
+          body: operation.body,
+          operationId: operation.requestId,
           label: "odchádzajúci hovor",
           timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+          onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
         },
       );
+      if (result.status >= 400 && result.status < 500 && pendingStartRef.current === operation) pendingStartRef.current = null;
       if (isTelephonyNotConfigured(result)) {
         setConfigured(false);
         setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
@@ -691,15 +728,19 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       }
       // The operator's own leg is dialled first; the browser must answer exactly
       // that invite (matched on `telnyxCallControlId`, design §2.2).
-      if (result.body.operatorLegCallControlId && webphone === webphoneRef.current) {
+      if (pendingStartRef.current === operation) pendingStartRef.current = null;
+      if (result.body.operatorLegCallControlId && webphone && webphone === webphoneRef.current) {
         webphone.expectOperatorLeg({
           callControlId: result.body.operatorLegCallControlId,
           sessionId: result.body.sessionId,
+          timingOperationId: operation.requestId,
         });
       }
       refreshRef.current?.();
-    });
-  }, [startOutboundRequest]);
+    };
+    if (pendingStartRef.current) await reconcileCallStart(execute);
+    else await startOutboundRequest(execute, operation.requestId);
+  }, [startOutboundRequest, reconcileCallStart, prepareStart]);
 
   /**
    * One-click callback from the queue. Deliberately the same shape as `dial`:
@@ -708,17 +749,22 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
    * hook would ring the operator's tab without auto-answering it.
    */
   const callBackRequest = useCallback(async (requestId: string, verificationId?: string) => {
-    await startOutboundRequest(async (webphone) => {
+    const operation = prepareStart(`/api/telephony/callbacks/${encodeURIComponent(requestId)}/call`, { verificationId });
+    const execute = async (webphone: CoordinatedWebphone | null) => {
+      pendingStartRef.current = operation;
       const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
-        `/api/telephony/callbacks/${encodeURIComponent(requestId)}/call`,
+        operation.path,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ verificationId }),
+          body: operation.body,
+          operationId: operation.requestId,
           label: "spätné volanie",
           timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+          onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
         },
       );
+      if (result.status >= 400 && result.status < 500 && pendingStartRef.current === operation) pendingStartRef.current = null;
       if (isTelephonyNotConfigured(result)) {
         setConfigured(false);
         setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
@@ -729,15 +775,19 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         setNotice(message);
         throw new Error(message);
       }
-      if (result.body.operatorLegCallControlId && webphone === webphoneRef.current) {
+      if (pendingStartRef.current === operation) pendingStartRef.current = null;
+      if (result.body.operatorLegCallControlId && webphone && webphone === webphoneRef.current) {
         webphone.expectOperatorLeg({
           callControlId: result.body.operatorLegCallControlId,
           sessionId: result.body.sessionId,
+          timingOperationId: operation.requestId,
         });
       }
       refreshRef.current?.();
-    });
-  }, [startOutboundRequest]);
+    };
+    if (pendingStartRef.current) await reconcileCallStart(execute);
+    else await startOutboundRequest(execute, operation.requestId);
+  }, [startOutboundRequest, reconcileCallStart, prepareStart]);
 
   // --- derived ---------------------------------------------------------------
 
