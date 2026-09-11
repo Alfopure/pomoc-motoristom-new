@@ -1,5 +1,7 @@
 import "server-only";
 
+import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
+
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
 
 import type { CallActor } from "./call-actions";
@@ -44,21 +46,23 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
   context: { params: Promise<P> },
   options: CallActionRouteOptions<P>,
 ): Promise<Response> {
-  try {
-    assertSameOriginRequest(request);
-    const actor = await requireDefaultMotoristActor(TELEPHONY_ROUTE_ROLES);
-    const notConfigured = telephonyConfiguredOrResponse();
-    if (notConfigured) return notConfigured;
+  return withRequestMetrics("call.action", async () => {
+    try {
+      assertSameOriginRequest(request);
+      const actor = await measureRequestStep("auth", () => requireDefaultMotoristActor(TELEPHONY_ROUTE_ROLES));
+      const notConfigured = telephonyConfiguredOrResponse();
+      if (notConfigured) return notConfigured;
 
-    const params = await context.params;
-    const body = await readJsonBody(request);
-    const deps = await createTelephonyDeps({ organizationId: actor.organizationId, deviceKind: request.headers.get("x-pm-phone-kind") === "mobile" ? "mobile" : "web" });
-    const result = await options.run({ deps, actor: toCallActor(actor), sessionId: params.id, params, body, request });
+      const params = await context.params;
+      const body = await readJsonBody(request);
+      const deps = await createTelephonyDeps({ organizationId: actor.organizationId, deviceKind: request.headers.get("x-pm-phone-kind") === "mobile" ? "mobile" : "web" });
+      const result = await options.run({ deps, actor: toCallActor(actor), sessionId: params.id, params, body, request });
 
-    return Response.json({ ok: true, ...(result && typeof result === "object" ? result : {}) });
-  } catch (error) {
-    return telephonyErrorResponse(error, options.fallback);
-  }
+      return Response.json({ ok: true, ...(result && typeof result === "object" ? result : {}) });
+    } catch (error) {
+      return telephonyErrorResponse(error, options.fallback);
+    }
+  });
 }
 
 /** `{ profileId, number }` transfer/consult target from a request body. */

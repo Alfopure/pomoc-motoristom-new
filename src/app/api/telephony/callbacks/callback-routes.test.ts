@@ -145,9 +145,10 @@ describe("callback route wiring", () => {
       sessionId: "sess-1",
       operatorLegCallControlId: "cc-1",
     });
-    expect(services.callBackRequest).toHaveBeenCalledWith(DEPS, EXPECTED_ACTOR, "cb-1", undefined);
-    await POST(post("call", { verificationId: "explicit-current-verification" }), context());
-    expect(services.callBackRequest).toHaveBeenLastCalledWith(DEPS, EXPECTED_ACTOR, "cb-1", "explicit-current-verification");
+    expect(services.callBackRequest).toHaveBeenCalledWith(DEPS, EXPECTED_ACTOR, "cb-1", undefined, undefined);
+    const requestId = "00000000-0000-4000-8000-000000000123";
+    await POST(post("call", { verificationId: "explicit-current-verification", requestId }), context());
+    expect(services.callBackRequest).toHaveBeenLastCalledWith(DEPS, EXPECTED_ACTOR, "cb-1", "explicit-current-verification", requestId);
   });
 
   it("refuses to dial without a provider but still lets the queue be cleared", async () => {

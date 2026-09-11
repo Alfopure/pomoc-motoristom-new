@@ -45,6 +45,14 @@ function eligible(session: SessionRow, context: RoutingContext, state: Recording
     (session.direction === "inbound" ? state.policy.inbound : session.direction === "outbound" && state.policy.outbound));
 }
 
+function actionAnnouncementsEnabled(session: SessionRow, context: RoutingContext, state: RecordingState | undefined): boolean {
+  // Basic call controls are immediate for calls without capture. Optional
+  // operational prompts remain available by explicit server configuration;
+  // recorded or uncertain sessions retain their existing privacy sequence.
+  return process.env.TELNYX_CALL_ACTION_ANNOUNCEMENTS_ENABLED === "true" ||
+    Boolean(state?.recorders.some(potentiallyRecording) || state?.barrier || state?.pendingAudio) || eligible(session, context, state);
+}
+
 /** A global recording switch alone cannot make a silent call require a media lease. */
 export function requiresRecordingLease(session: SessionRow, context: RoutingContext): boolean {
   const state = policyState(session, context);
@@ -292,7 +300,7 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
       if (state.barrier) return reject("Vypnutie nahrávania ešte nie je potvrdené.");
       return stopRecorders(current, state, event, context, false);
     }
-    if (event.kind === "app" && ACTION_PROMPTS[event.type] && session.direction !== "internal") {
+    if (event.kind === "app" && ACTION_PROMPTS[event.type] && session.direction !== "internal" && actionAnnouncementsEnabled(current, context, state)) {
       core(current, legs, attempts, event, context);
       const keys: AnnouncementKey[] = [ACTION_PROMPTS[event.type]!];
       if (["unhold", "cancel_consult"].includes(event.type) && isAnnouncementEnabled(announcements, "recordingResumed") && eligible(current, context, state) && state.policy.conferenceVerified && context.recordingPolicy?.conferenceVerified) keys.push("recordingResumed");

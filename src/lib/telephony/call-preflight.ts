@@ -1,4 +1,5 @@
 import type { WebphoneSnapshot } from "./telnyx-webphone";
+import { beginBrowserCallStep } from "./call-timing";
 
 export type PhoneReadiness = {
   status: "idle" | "checking" | "ready" | "error";
@@ -25,17 +26,20 @@ export function checkMicrophone(options: {
   signal: AbortSignal;
   mediaDevices?: Pick<MediaDevices, "getUserMedia">;
   timeoutMs?: number;
+  operationId?: string;
 }): Promise<void> {
   const devices = options.mediaDevices ?? (typeof navigator === "undefined" ? undefined : navigator.mediaDevices);
   return new Promise((resolve, reject) => {
     if (options.signal.aborted) { reject(new Error("Kontrola mikrofónu bola zrušená.")); return; }
     if (!devices?.getUserMedia) { reject(new Error("Volanie potrebuje prehliadač s podporou mikrofónu a zabezpečené pripojenie HTTPS.")); return; }
     let settled = false;
+    const finishTiming = beginBrowserCallStep("microphone", { operationId: options.operationId });
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       options.signal.removeEventListener("abort", cancel);
+      finishTiming({ outcome: error ? options.signal.aborted ? "cancelled" : "failed" : "ok" });
       if (error) reject(error); else resolve();
     };
     const cancel = () => finish(new Error("Kontrola mikrofónu bola zrušená."));

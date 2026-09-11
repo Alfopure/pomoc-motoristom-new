@@ -197,15 +197,15 @@ describe("createTelnyxClient", () => {
     expect(logs[0]).toMatchObject({ status: 200, retried: true });
   });
 
-  it("caps retry-after, defaults it when missing, and gives up after the second 429", async () => {
+  it("defers a long retry-after without shortening it and defaults a missing interval", async () => {
     const capped = makeFetch([jsonResponse(429, undefined, { "retry-after": "30" }), jsonResponse(429, { errors: [{ code: "10011", detail: "slow down" }] })]);
     const client = makeClient(capped.impl);
 
     const failure = await client.client.hangup({ callControlId: "cc-1", commandId: "cmd" }).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(TelnyxCommandError);
-    expect(failure).toMatchObject({ code: "10011", status: 429, detail: "slow down", retryable: true, commandId: "cmd" });
-    expect(client.sleeps).toEqual([2000]);
-    expect(capped.calls).toHaveLength(2);
+    expect(failure).toMatchObject({ status: 429, retryable: true, commandId: "cmd" });
+    expect(client.sleeps).toEqual([]);
+    expect(capped.calls).toHaveLength(1);
 
     const missing = makeFetch([jsonResponse(429, undefined), jsonResponse(200, { data: {} })]);
     const second = makeClient(missing.impl);
@@ -247,6 +247,37 @@ describe("createTelnyxClient", () => {
     expect(failure).toBeInstanceOf(TelnyxCommandError);
     expect(failure).toMatchObject({ code: "timeout", status: 504, retryable: true });
     expect(logs[0]).toMatchObject({ status: 504, error: expect.stringContaining("timeout") });
+  });
+
+  it.each([200, 429])("keeps the deadline through a stalled %s response body", async (status) => {
+    vi.useFakeTimers();
+    let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+    try {
+      const { impl, calls } = makeFetch([(request) => new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          stream = controller;
+          controller.enqueue(new TextEncoder().encode('{"data":'));
+          request.init.signal?.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")), { once: true });
+        },
+      }), { status, headers: { "content-type": "application/json", "retry-after": "0" } })]);
+      const { client, logs, sleeps } = makeClient(impl, { timeoutMs: 50 });
+      let failure: unknown;
+      const pending = client.answer({ callControlId: "cc-stalled", commandId: "answer-stalled" }).catch((error: unknown) => { failure = error; });
+
+      await vi.advanceTimersByTimeAsync(49);
+      expect(calls).toHaveLength(1);
+      expect(failure).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(failure).toMatchObject({ code: "timeout", status: 504, retryable: true, commandId: "answer-stalled" });
+      await pending;
+      expect(logs).toEqual([expect.objectContaining({ status: 504, ms: 50, retried: false })]);
+      expect(sleeps).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      stream?.error(new Error("test cleanup"));
+      vi.useRealTimers();
+    }
   });
 
   it("maps network failures", async () => {

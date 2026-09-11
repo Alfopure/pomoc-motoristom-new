@@ -1,3 +1,4 @@
+import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
 import { after } from "next/server";
 
 import { requireDefaultMotoristActor } from "@/server/api-auth";
@@ -51,35 +52,37 @@ async function maybeSweep(deps: TelephonyRuntimeDeps): Promise<void> {
 }
 
 export async function GET() {
-  try {
-    const actor = await requireDefaultMotoristActor(TELEPHONY_ROUTE_ROLES);
-    const notConfigured = telephonyConfiguredOrResponse();
-    if (notConfigured) return notConfigured;
-
-    const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
-
-    // Terminal sessions are absent from this snapshot, so browser-leg recovery
-    // cannot clear their stale owner. Repair the authenticated operator before
-    // returning presence, without waiting for cron or contacting Telnyx.
+  return withRequestMetrics("call.active", async () => {
     try {
-      const recovery = await recoverOwnEndedSessionPresence(deps, actor.profileId);
-      for (const failure of recovery.errors) {
-        deps.logger?.({ level: "warn", scope: "presence_recovery", source: "calls/active", ...failure });
+      const actor = await measureRequestStep("auth", () => requireDefaultMotoristActor(TELEPHONY_ROUTE_ROLES));
+      const notConfigured = telephonyConfiguredOrResponse();
+      if (notConfigured) return notConfigured;
+
+      const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
+
+      // Terminal sessions are absent from this snapshot, so browser-leg recovery
+      // cannot clear their stale owner. Repair the authenticated operator before
+      // returning presence, without waiting for cron or contacting Telnyx.
+      try {
+        const recovery = await recoverOwnEndedSessionPresence(deps, actor.profileId);
+        for (const failure of recovery.errors) {
+          deps.logger?.({ level: "warn", scope: "presence_recovery", source: "calls/active", ...failure });
+        }
+      } catch (error) {
+        deps.logger?.({ level: "warn", scope: "presence_recovery", source: "calls/active", error: error instanceof Error ? error.message : String(error) });
       }
+
+      const snapshot = await loadActiveCalls(
+        { admin: deps.admin, organizationId: deps.organizationId, environment: deps.environment, configured: deps.config.configured, now: deps.now },
+        { profileId: actor.profileId, canManageAssignments: actor.role === "manager" || actor.role === "admin" || actor.role === "senior_dispatcher" },
+      );
+      // A single session can outlast the sweep's start budget while waiting for
+      // its lease or provider. Send the snapshot before any sweep work begins.
+      after(() => maybeSweep(deps));
+
+      return Response.json(snapshot, { headers: { "Cache-Control": "private, no-store" } });
     } catch (error) {
-      deps.logger?.({ level: "warn", scope: "presence_recovery", source: "calls/active", error: error instanceof Error ? error.message : String(error) });
+      return telephonyErrorResponse(error, "Aktívne hovory sa nepodarilo načítať.");
     }
-
-    const snapshot = await loadActiveCalls(
-      { admin: deps.admin, organizationId: deps.organizationId, environment: deps.environment, configured: deps.config.configured, now: deps.now },
-      { profileId: actor.profileId, canManageAssignments: actor.role === "manager" || actor.role === "admin" || actor.role === "senior_dispatcher" },
-    );
-    // A single session can outlast the sweep's start budget while waiting for
-    // its lease or provider. Send the snapshot before any sweep work begins.
-    after(() => maybeSweep(deps));
-
-    return Response.json(snapshot, { headers: { "Cache-Control": "private, no-store" } });
-  } catch (error) {
-    return telephonyErrorResponse(error, "Aktívne hovory sa nepodarilo načítať.");
-  }
+  });
 }

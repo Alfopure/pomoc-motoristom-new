@@ -45,17 +45,27 @@ async function recoverEndedSessionPresence(
   for (const presence of candidates.data ?? []) {
     const sessionId = presence.current_session_id!;
     try {
-      // A pre-contract schema lacks the CAS revision needed for safe repair.
+      // Establish an authorized candidate before ownership; a dangling or
+      // cross-organization pointer is not proof of a terminal local session.
       if (presence.presence_revision === undefined) { result.skipped++; continue; }
+      const candidate = await deps.admin.from("motorist_call_sessions").select("id")
+        .eq("organization_id", deps.organizationId).eq("id", sessionId).in("state", ["ended", "failed"])
+        .abortSignal(AbortSignal.timeout(4_000)).maybeSingle();
+      if (candidate.error) throw new Error(`terminal session lookup failed: ${candidate.error.message}`);
+      if (!candidate.data) { result.skipped++; continue; }
+      const { ownedSessionWork } = await import("./session-runner");
+      await ownedSessionWork({ admin: deps.admin, organizationId: deps.organizationId }, sessionId, async () => {
+      // A pre-contract schema lacks the CAS revision needed for safe repair.
+      if (presence.presence_revision === undefined) { result.skipped++; return; }
       const session = await deps.admin.from("motorist_call_sessions").select("id, state, ended_at")
         .eq("organization_id", deps.organizationId).eq("id", sessionId).in("state", ["ended", "failed"]).maybeSingle();
       if (session.error) throw new Error(`terminal session lookup failed: ${session.error.message}`);
       const endedAt = session.data?.ended_at ? Date.parse(session.data.ended_at) : NaN;
-      if (!Number.isFinite(endedAt) || endedAt > now.getTime()) { result.skipped++; continue; }
+      if (!Number.isFinite(endedAt) || endedAt > now.getTime()) { result.skipped++; return; }
       const open = await deps.admin.from("motorist_call_legs").select("id").eq("organization_id", deps.organizationId)
         .eq("session_id", sessionId).is("ended_at", null).limit(1);
       if (open.error) throw new Error(`terminal legs lookup failed: ${open.error.message}`);
-      if (open.data?.length) { result.skipped++; continue; }
+      if (open.data?.length) { result.skipped++; return; }
 
       let wrapUpUntil: string | null = null;
       if (presence.status === "on_call") {
@@ -72,6 +82,7 @@ async function recoverEndedSessionPresence(
         source: options.source, reason: `ended session presence recovery:${sessionId}` });
       if (release.applied) result.released++;
       else result.skipped++;
+      });
     } catch (error) {
       result.errors.push({ profileId: presence.profile_id, sessionId, error: error instanceof Error ? error.message : String(error) });
     }

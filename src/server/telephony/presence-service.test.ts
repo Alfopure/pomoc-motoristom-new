@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 
@@ -41,6 +41,33 @@ describe("presence service", () => {
     await expect(setPresence(deps, { organizationId: ORG, profileId: PROFILES.o1, status: "available" })).rejects.toMatchObject({ status: 409 });
     h.setPresence(PROFILES.o2, { status: "ringing", current_session_id: "00000000-0000-4000-8000-00000000ffff" });
     await expect(setPresence(deps, { organizationId: ORG, profileId: PROFILES.o2, status: "paused" })).resolves.toMatchObject({ status: "paused", current_session_id: null });
+  });
+
+  it("refuses a foreign session pointer without acquiring or changing it", async () => {
+    const h = createTelephonyHarness();
+    const sessionId = String(h.db.insert("motorist_call_sessions", { organization_id: "foreign-org", writer_contract: 2, state: "ringing" })[0].id);
+    h.setPresence(PROFILES.o2, { status: "ringing", current_session_id: sessionId });
+    const before = h.presence(PROFILES.o2);
+    await expect(setPresence(h.deps, { organizationId: ORG, profileId: PROFILES.o2, status: "paused" })).rejects.toMatchObject({ status: 409 });
+    expect(h.presence(PROFILES.o2)).toEqual(before);
+    expect(h.db.log.filter(row => row.table === "motorist_session_lease_acquire_v2")).toEqual([]);
+  });
+
+  it("does not clear a new pointer that replaces a dangling pointer before the CAS", async () => {
+    const h = createTelephonyHarness();
+    const stale = "00000000-0000-4000-8000-00000000ffff";
+    h.setPresence(PROFILES.o2, { status: "ringing", current_session_id: stale });
+    const update = h.db.update.bind(h.db);
+    const spy = vi.spyOn(h.db, "update").mockImplementation((table, patch, filter) => {
+      if (table === "motorist_operator_presence" && patch.status === "paused") {
+        update(table, { current_session_id: "new-owner" }, row => row.profile_id === PROFILES.o2);
+      }
+      return update(table, patch, filter);
+    });
+    try {
+      await expect(setPresence(h.deps, { organizationId: ORG, profileId: PROFILES.o2, status: "paused" })).rejects.toMatchObject({ status: 409 });
+      expect(h.presence(PROFILES.o2)).toMatchObject({ status: "ringing", current_session_id: "new-owner" });
+    } finally { spy.mockRestore(); }
   });
 
   it("ends wrap-up early and treats an expired wrap-up as available", async () => {

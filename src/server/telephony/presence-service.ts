@@ -22,6 +22,29 @@ type AdminClient = SupabaseClient<Database>;
 
 export type PresenceDeps = { admin: AdminClient; now?: () => Date; onOfferCancelled?: (sessionId: string) => Promise<void> };
 
+async function withPresenceOwnership<T>(deps: PresenceDeps, organizationId: string, current: PresenceRow, work: () => Promise<T>): Promise<T> {
+  if (!current.current_session_id) return work();
+  // A dangling historical pointer has no owner to acquire. A foreign pointer
+  // is not authority to operate on that organization's session.
+  const session = await deps.admin.from("motorist_call_sessions").select("organization_id")
+    .eq("id", current.current_session_id).abortSignal(AbortSignal.timeout(4_000)).maybeSingle();
+  if (session.error) throw new PresenceServiceError("Vlastníctvo prezencie sa nepodarilo overiť.", 500);
+  if (session.data && session.data.organization_id !== organizationId) {
+    throw new PresenceServiceError("Neplatná väzba prezencie. Obnovte prezenciu.", 409);
+  }
+  // Each write below still compares the captured pointer and revision. The DB
+  // fence also rechecks a parent if one appears before the write.
+  if (!session.data) return work();
+  const { ownedSessionWork } = await import("./session-runner");
+  return ownedSessionWork({ admin: deps.admin, organizationId }, current.current_session_id, async () => {
+    const latest = await getPresence(deps, { organizationId, profileId: current.profile_id });
+    if (!latest || latest.current_session_id !== current.current_session_id || latest.presence_revision !== current.presence_revision) {
+      throw new PresenceServiceError("Stav sa medzičasom zmenil. Obnovte prezenciu.", 409);
+    }
+    return work();
+  });
+}
+
 export type ManualPresenceStatus = Extract<OperatorPresenceStatus, "available" | "paused" | "offline">;
 
 export const MANUAL_PRESENCE_STATUSES: ReadonlySet<string> = new Set<ManualPresenceStatus>(["available", "paused", "offline"]);
@@ -87,6 +110,7 @@ export async function setPresence(deps: PresenceDeps, input: SetPresenceInput): 
     throw new PresenceServiceError("Počas hovoru nie je možné zmeniť stav.", 409);
   }
 
+  return withPresenceOwnership(deps, input.organizationId, current, async () => {
   let reasonLabel: string | null = input.reason ?? null;
   let pauseReasonId: string | null = null;
   if (input.status === "paused" && input.pauseReasonId) {
@@ -144,29 +168,35 @@ export async function setPresence(deps: PresenceDeps, input: SetPresenceInput): 
     now,
   });
   return updated.data;
+  });
 }
 
 /** Ends after-call work early; a no-op in any other status. */
 export async function endWrapUp(deps: PresenceDeps, input: { organizationId: string; profileId: string; source?: string }): Promise<PresenceRow> {
   const current = await ensurePresenceRow(deps, input);
   if (current.status !== "after_call_work") return current;
+  return withPresenceOwnership(deps, input.organizationId, current, async () => {
   if (telephonyStabilityEnabled() || current.offer_token || current.pause_return) {
     const result = await transitionPresence(deps.admin, { ...input, action: "end_wrap_up", expectedRevision: current.presence_revision,
       expectedToken: current.offer_token, source: input.source ?? "dispatch_console" });
     return result.presence ?? (await getPresence(deps, input)) ?? current;
   }
   const now = nowOf(deps);
-  const updated = await deps.admin
+  let query = deps.admin
     .from("motorist_operator_presence")
     .update({ status: "available", wrap_up_until: null, current_session_id: null, status_since: now.toISOString() })
     .eq("id", current.id)
-    .eq("status", "after_call_work")
-    .select("*")
+    .eq("organization_id", input.organizationId)
+    .eq("status", "after_call_work");
+  query = current.current_session_id ? query.eq("current_session_id", current.current_session_id) : query.is("current_session_id", null);
+  if (current.presence_revision !== undefined) query = query.eq("presence_revision", current.presence_revision);
+  const updated = await query.select("*")
     .maybeSingle();
   if (updated.error) throw new PresenceServiceError(`Stav sa nepodarilo uložiť: ${updated.error.message}`, 500);
   if (!updated.data) return (await getPresence(deps, input)) ?? current;
   await appendPresenceHistory(deps.admin, { organizationId: input.organizationId, profileId: input.profileId, status: "available", reason: "wrap-up ukončený", source: input.source ?? "dispatch_console", now });
   return updated.data;
+  });
 }
 
 /** Existing cron materializes the effective state without requiring an open console. */
@@ -179,6 +209,7 @@ export async function sweepExpiredWrapUp(deps: PresenceDeps & { organizationId: 
   const errors: Array<{ profileId: string; error: string }> = [];
   for (const row of due.data ?? []) {
     try {
+      await withPresenceOwnership(deps, deps.organizationId, row, async () => {
       if (row.presence_revision !== undefined || row.offer_token || row.pause_return || telephonyStabilityEnabled()) {
         const result = await transitionPresence(deps.admin, { organizationId: deps.organizationId, profileId: row.profile_id,
           action: "end_wrap_up", expectedRevision: row.presence_revision, expectedToken: row.offer_token, source: "cron" });
@@ -187,6 +218,7 @@ export async function sweepExpiredWrapUp(deps: PresenceDeps & { organizationId: 
         const result = await endWrapUp(deps, { organizationId: deps.organizationId, profileId: row.profile_id, source: "cron" });
         if (result.status !== "after_call_work") applied += 1;
       }
+      });
     } catch (error) {
       errors.push({ profileId: row.profile_id, error: error instanceof Error ? error.message : String(error) });
     }

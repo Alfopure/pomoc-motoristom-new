@@ -85,7 +85,7 @@ describe("telephony cron jobs", () => {
     expect(h.db.find("motorist_telnyx_webhook_events", (row) => row.event_id === "playback-1d")?.payload).toEqual({ a: 1 });
   });
 
-  it("replays a claimed event the webhook never finished, and leaves fresh or exhausted ones alone", async () => {
+  it("replays abandoned and historically exhausted deliveries while preserving fresh claims", async () => {
     const h = createTelephonyHarness();
     const at = (ms: number) => new Date(h.now().getTime() - ms).toISOString();
     h.db.seed("motorist_telnyx_webhook_events", [
@@ -100,8 +100,8 @@ describe("telephony cron jobs", () => {
     const replayEvent = vi.fn(async () => ({ outcome: "processed" }));
 
     const result = await replayStalledWebhookEvents({ ...h.deps, replayEvent });
-    expect(result).toMatchObject({ job: LEDGER_REPLAY_JOB, status: "ok", detail: { stalled: 1, replayed: 1 } });
-    expect(replayEvent).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ job: LEDGER_REPLAY_JOB, status: "ok", detail: { stalled: 2, replayed: 2 } });
+    expect(replayEvent).toHaveBeenCalledTimes(2);
     // The ledger stores the inner payload; the processor is handed a full envelope.
     expect(replayEvent).toHaveBeenCalledWith({ data: { id: "stalled", event_type: "call.hangup", occurred_at: expect.any(String), payload: { call_control_id: "cc-1" } } });
   });
@@ -125,7 +125,7 @@ describe("telephony cron jobs", () => {
       event_type: "call.answered", status: "failed", attempts: 1, received_at: at, occurred_at: at, payload: {} })));
     const replayEvent = vi.fn(async (envelope: unknown) => ({ outcome: (envelope as { data: { id: string } }).data.id }));
     const result = await replayStalledWebhookEvents({ ...h.deps, replayEvent });
-    expect(result).toMatchObject({ status: "failed", detail: { attempted: 5, replayed: 1, deferred: 1, duplicate: 1, unknownSession: 1, failed: 2 } });
+    expect(result).toMatchObject({ status: "failed", detail: { attempted: 5, replayed: 0, deferred: 1, duplicate: 1, unknownSession: 1, failed: 2 } });
   });
 
   it("skips the replay when telephony is not configured", async () => {
@@ -208,4 +208,18 @@ describe("telephony cron jobs", () => {
     expect(result.status).toBe("failed");
     expect(h.rows("motorist_job_incidents").length).toBeGreaterThan(0);
   });
+  it("replays high deferral counts but excludes explicit dead letters and future admission times", async () => {
+    const h = createTelephonyHarness();
+    const old = new Date(h.now().getTime() - 120_000).toISOString();
+    const future = new Date(h.now().getTime() + 60_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [
+      { event_id: "many-deferrals", retry_state: "deferred", next_attempt_at: old, attempts: 20 },
+      { event_id: "dead-letter", retry_state: "dead_letter", next_attempt_at: null, attempts: 5 },
+      { event_id: "not-due", retry_state: "deferred", next_attempt_at: future, attempts: 2 },
+    ].map(row => ({ ...row, organization_id: ORG, status: "failed", event_type: "call.answered", payload: {}, occurred_at: old, received_at: old })));
+    const replayEvent = vi.fn(async () => ({ outcome: "processed" }));
+    expect(await replayStalledWebhookEvents({ ...h.deps, replayEvent })).toMatchObject({ status: "ok", detail: { attempted: 1, replayed: 1 } });
+    expect(replayEvent.mock.calls[0]).toEqual([expect.objectContaining({ data: expect.objectContaining({ id: "many-deferrals" }) })]);
+  });
+
 });

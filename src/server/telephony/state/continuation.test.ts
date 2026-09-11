@@ -25,6 +25,33 @@ async function ringing(recording = false) {
 const pending = (h: Awaited<ReturnType<typeof ringing>>["h"], sessionId: string) => readPendingEffects(h.session(sessionId) as SessionRow).entries;
 
 describe("durable transition recovery", () => {
+  it.each(["motorist_calls", "motorist_ring_group_members"])("connects audio before a failed %s projection and recovers it without another bridge", async (table) => {
+    const { h, call, operator } = await ringing();
+    expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.policy.enabled).toBe(false);
+    const before = h.telnyx.of("bridge").length;
+    const original = h.db.takeInjectedError.bind(h.db);
+    const failure = vi.spyOn(h.db, "takeInjectedError").mockImplementation((name, operation) => {
+      if (name === table && operation === "update") {
+        expect(h.telnyx.physical.connected(call.callControlId, operator)).toBe(true);
+        return { code: "XX000", message: "projection unavailable", details: null, hint: null };
+      }
+      return original(name, operation);
+    });
+    const result = await h.legEvent(operator, "call.answered");
+    expect(result).toMatchObject({ status: 200, outcome: "processed" });
+    expect(h.telnyx.of("bridge")).toHaveLength(before + 1);
+    expect(pending(h, call.sessionId)).toHaveLength(1);
+    expect(pending(h, call.sessionId)[0].lastError).toContain("projection unavailable");
+    // Another control event must not wait for the broken historical projection.
+    await h.legEvent(operator, "call.bridged");
+    expect(h.telnyx.of("bridge")).toHaveLength(before + 1);
+    failure.mockRestore();
+    h.advance(5 * 60_000);
+    expect((await runPendingEffectRecovery(h.deps)).status).toBe("ok");
+    expect(pending(h, call.sessionId)).toEqual([]);
+    expect(h.telnyx.of("bridge")).toHaveLength(before + 1);
+  });
+
   it.each([
     ["motorist_call_legs", "update"],
     ["motorist_ring_attempts", "update"],
@@ -89,7 +116,7 @@ describe("durable transition recovery", () => {
     expect(pending(h, call.sessionId)).toHaveLength(1);
     h.advance(5 * 60_000);
     const recovered = await runPendingEffectRecovery(h.deps);
-    expect(recovered.status).toBe("ok");
+    expect(recovered.status, JSON.stringify(recovered)).toBe("ok");
     expect(h.attempts(call.sessionId).find((attempt) => attempt.profile_id === PROFILES.o1)?.result).toBe("answered");
     expect(h.presence(PROFILES.o1).status).toBe("on_call");
     expect(h.telnyx.physical.connected(call.callControlId, operator)).toBe(true);

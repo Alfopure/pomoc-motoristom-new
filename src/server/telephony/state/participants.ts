@@ -30,6 +30,13 @@ function audible(session: SessionRow, leg: LegRow): boolean {
 
 /** Provider/command observations, never voice/name guesses. Replays cannot create duplicate open intervals. */
 export async function observeParticipants(admin: Admin, session: SessionRow, sourceEventId: string, at: string, providerConfirmed: boolean): Promise<void> {
+  const recording = readMeta(session).recording;
+  // A frozen silent call can never start recording later. Avoid recording-only
+  // lookups and interval writes on its bridge/hold/hangup critical path. Keep
+  // observing historical, active and uncertain capture so existing evidence
+  // is closed correctly even after the live recording switch is turned off.
+  if (recording && recording.policy.enabled === false && recording.recorders.length === 0 &&
+    !recording.barrier && !recording.pendingAudio) return;
   const call = await admin.from("motorist_calls").select("id").eq("organization_id", session.organization_id).eq("session_id", session.id).maybeSingle();
   if (call.error) throw new Error("participant call lookup failed");
   if (!call.data) return;

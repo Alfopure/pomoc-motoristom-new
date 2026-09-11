@@ -19,6 +19,35 @@ const inboundTables = [
 afterEach(() => vi.unstubAllEnvs());
 
 describe("session routing setup", () => {
+  it("answers an initiated caller before loading unrelated IVR and ring configuration", async () => {
+    const h = createTelephonyHarness();
+    for (const table of inboundTables) h.db.failNext(table, "select", fakeError("routing unavailable"));
+    const call = await h.inbound({ to: NUMBERS.neutral, answer: false });
+
+    expect(call.results[0]).toMatchObject({ status: 200, outcome: "processed" });
+    expect(h.telnyx.of("answer")).toHaveLength(1);
+    expect(h.telnyx.of("dial")).toHaveLength(0);
+    expect(h.db.log.filter(entry => inboundTables.includes(entry.table))).toEqual([]);
+    expect(h.db.log.filter(entry => entry.table === "motorist_operator_devices")).toEqual([]);
+    // The answered event still checks the actual route; it cannot bypass a
+    // broken business-hours/menu configuration and call an arbitrary operator.
+    expect(await h.legEvent(call.callControlId, "call.answered")).toMatchObject({ status: 500, outcome: "failed" });
+    expect(h.telnyx.of("dial")).toHaveLength(0);
+  });
+
+  it("retries an answered event after a transient routing read failure without waiting for cron", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz, answer: false });
+    h.db.failNext("motorist_telephony_settings", "select", fakeError("temporary read failure"));
+    const eventId = "routing-read-retry";
+    expect(await h.legEvent(call.callControlId, "call.answered", {}, eventId)).toMatchObject({ status: 500, outcome: "failed" });
+    expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === eventId)).toMatchObject({ status: "failed", claimed_at: null });
+    h.advance(500);
+    expect(await h.legEvent(call.callControlId, "call.answered", {}, eventId)).toMatchObject({ status: 200, outcome: "processed", claim: { attempts: 2 } });
+    expect(h.session(call.sessionId).state).toBe("greeting");
+    expect(h.telnyx.of("answer")).toHaveLength(1);
+  });
+
   it.each(["outbound", "internal"] as const)("starts the %s recipient without waiting for unrelated inbound routing", async (direction) => {
     const h = createTelephonyHarness();
     const call = direction === "outbound"
