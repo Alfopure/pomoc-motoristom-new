@@ -1,9 +1,9 @@
 import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { useTelephonyConsole } from "../../src/components/dispatch/useTelephonyConsole";
-import { EMPTY_ACTIVE_CALLS } from "../../src/lib/telephony/active-calls-model";
+import { EMPTY_ACTIVE_CALLS, type ActiveCallPayload } from "../../src/lib/telephony/active-calls-model";
 
-type Request = { url: string; resolve: (response: Response) => void };
+type Request = { url: string; body?: string; resolve: (response: Response) => void };
 const requests: Request[] = [];
 const outcomes: string[] = [];
 let emit: (event: string, payload?: unknown) => void = () => {};
@@ -14,15 +14,32 @@ const harness = {
   activeReads: 0,
   microphoneRequests: 0,
   stoppedTracks: 0,
+  sdkHangups: 0,
+  calls: [] as ActiveCallPayload[],
+  connected: (browser = true) => {
+    const now = new Date().toISOString();
+    harness.calls = [{
+      sessionId: "fixture", callId: "fixture-log", state: "talking", direction: "inbound",
+      callerNumber: "+421900000002", calledNumber: "+421900000001", lineId: null,
+      lineLabel: null, partnerName: null, caseId: null, match: null, startedAt: now,
+      answeredAt: now, answeredByProfileId: "fixture-operator", holdStartedAt: null,
+      parkedAt: null, parkedByProfileId: null, waitingSince: null, waitingReason: null,
+      waitingMaxMinutes: null, currentStep: 0, ringMode: null, offeredProfileIds: [], mine: true,
+      legs: [{ id: "fixture-leg", callControlId: "incoming-leg", role: "operator", profileId: "fixture-operator",
+        state: "bridged", toNumber: null, fromNumber: null, answeredAt: now, bridgedAt: now,
+        intent: "ring", muted: false, supervisorMode: null }],
+    }];
+    if (browser) harness.callState("active");
+  },
   grant: () => {},
   deny: () => {},
   begin: (kind: "dial" | "callback" | "pickup" | "supervise" | "hangup" | "hold"): void => { throw new Error(`Fixture is not mounted: ${kind}`); },
   prepare: () => {},
   incoming: () => harness.callState("ringing"),
-  callState: (state: "ringing" | "active" | "hangup") => emit("telnyx.notification", { type: "callUpdate", call: {
-    id: "fixture-incoming", state, direction: "inbound",
+  callState: (state: "ringing" | "active" | "hangup", id = "fixture-incoming") => emit("telnyx.notification", { type: "callUpdate", call: {
+    id, state, direction: "inbound",
     options: { remoteCallerNumber: "+421900000002" }, telnyxIDs: { telnyxCallControlId: "incoming-leg" },
-    isAudioMuted: false, answer() {}, hangup() {}, muteAudio() {}, unmuteAudio() {}, dtmf() {},
+    isAudioMuted: false, answer() {}, hangup() { harness.sdkHangups++; }, muteAudio() {}, unmuteAudio() {}, dtmf() {},
   } }),
 };
 declare global { interface Window { phoneHarness: typeof harness } }
@@ -41,13 +58,13 @@ Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: {
   },
 } });
 
-window.fetch = async (input) => {
+window.fetch = async (input, init) => {
   const url = String(input);
-  if (url === "/api/telephony/calls" || /\/api\/telephony\/callbacks\/[^/]+\/call$/.test(url) || /\/api\/telephony\/calls\/[^/]+\/(pickup|supervise|hangup|hold)$/.test(url)) {
-    return new Promise<Response>((resolve) => requests.push({ url, resolve }));
+  if (url === "/api/telephony/calls" || /\/api\/telephony\/callbacks\/[^/]+\/call$/.test(url) || /\/api\/telephony\/calls\/[^/]+\/(pickup|supervise|hangup|hold|reconcile)$/.test(url)) {
+    return new Promise<Response>((resolve) => requests.push({ url, body: init?.body as string | undefined, resolve }));
   }
   if (url === "/api/telephony/webphone/token") return Response.json({ token: "fixture-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), deviceSessionId: "fixture-device", sipUsername: "fixture" });
-  if (url === "/api/telephony/calls/active") { harness.activeReads++; return Response.json({ ...EMPTY_ACTIVE_CALLS, organizationId: "fixture-org", actorProfileId: "fixture-operator", ownPresence: { status: "available", pauseReasonId: null, statusSince: new Date().toISOString() } }); }
+  if (url === "/api/telephony/calls/active") { harness.activeReads++; return Response.json({ ...EMPTY_ACTIVE_CALLS, calls: harness.calls, organizationId: "fixture-org", actorProfileId: "fixture-operator", ownPresence: { status: "available", pauseReasonId: null, statusSince: new Date().toISOString() } }); }
   if (url.includes("/presence")) return Response.json({ own: { status: "available" }, pauseReasons: [] });
   return Response.json({});
 };
@@ -61,6 +78,6 @@ function Fixture() {
     };
     harness.prepare = () => { void telephony.preparePhone(); };
   }, [telephony]);
-  return <output id="state" data-configured={String(telephony.configured)} data-pending={String(telephony.outboundPending)} data-legs={telephony.phone.pendingOperatorLegs ?? 0} data-status={telephony.phone.status} data-readiness={telephony.readiness.status} data-ringing={String(telephony.phone.call?.ringing ?? false)}>{telephony.notice ?? telephony.readiness.message}</output>;
+  return <output id="state" data-call={telephony.phone.call?.id ?? ""} data-server-call={telephony.phoneBar.active?.sessionId ?? ""} data-configured={String(telephony.configured)} data-pending={String(telephony.outboundPending)} data-legs={telephony.phone.pendingOperatorLegs ?? 0} data-status={telephony.phone.status} data-readiness={telephony.readiness.status} data-ringing={String(telephony.phone.call?.ringing ?? false)}>{telephony.notice ?? telephony.readiness.message}</output>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

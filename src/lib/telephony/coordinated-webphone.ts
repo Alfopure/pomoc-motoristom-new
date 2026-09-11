@@ -2,7 +2,7 @@ import { TelnyxWebphone, type WebphoneSnapshot, type IncomingOfferPolicy, type T
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "./webphone-model";
 
 const idle = (): WebphoneSnapshot => ({ status: "idle", registration: webphoneRegistrationView(WEBPHONE_INITIAL_STATE), sipUsername: null, deviceSessionId: null, call: null, message: null });
-type Command = "answer" | "hangup" | "toggleMute" | "sendDtmf" | "expectOperatorLeg" | "dismissCallError" | "setIncomingOfferPolicy" | "beginOperatorRequest" | "endOperatorRequest";
+type Command = "answer" | "hangup" | "confirmCallEnded" | "toggleMute" | "sendDtmf" | "expectOperatorLeg" | "dismissCallError" | "setIncomingOfferPolicy" | "beginOperatorRequest" | "endOperatorRequest";
 type RequestIntent = { id: string; expiresAt: number; pending: boolean };
 const REQUEST_INTENT_MS = 60_000;
 type Message = { type: "operatorRequest"; intent: RequestIntent } | { type: "hello" } | { type: "state"; snapshot: WebphoneSnapshot } | { type: "command"; id: string; command: Command; callId: string | null; value?: unknown } | { type: "result"; id: string; error?: string };
@@ -151,6 +151,9 @@ export class CoordinatedWebphone {
     switch (command) {
       case "answer": phone.answer(); break;
       case "hangup": await phone.hangup(); break;
+      case "confirmCallEnded":
+        if (typeof value === "string" && phone.getSnapshot().call?.id === value) phone.confirmCallEnded(value);
+        break;
       case "toggleMute": phone.toggleMute(); break;
       case "sendDtmf": if (typeof value === "string" && /^[0-9*#]$/.test(value)) phone.sendDtmf(value); break;
       case "dismissCallError": phone.dismissCallError(); break;
@@ -190,6 +193,7 @@ export class CoordinatedWebphone {
   private report(error: unknown) { this.publish({ ...this.snapshot, callError: error instanceof Error ? error.message : "Akcia telefónu zlyhala." }, !this.local); }
   answer() { void this.command("answer").catch((error) => this.report(error)); }
   hangup() { return this.command("hangup").catch((error) => this.report(error)); }
+  confirmCallEnded(callId: string) { return this.command("confirmCallEnded", callId).catch((error) => this.report(error)); }
   toggleMute() { void this.command("toggleMute").catch((error) => this.report(error)); }
   sendDtmf(digit: string) { void this.command("sendDtmf", digit).catch((error) => this.report(error)); }
   expectOperatorLeg(leg: { callControlId: string; sessionId: string }) { void this.command("expectOperatorLeg", leg).catch((error) => this.report(error)); }

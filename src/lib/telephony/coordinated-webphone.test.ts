@@ -14,7 +14,7 @@ function fakePhone(options: TelnyxWebphoneOptions) {
     subscribe: (fn: (state: WebphoneSnapshot) => void) => { listeners.add(fn); return () => listeners.delete(fn); },
     emit: (next: WebphoneSnapshot) => { state = next; for (const fn of listeners) fn(next); },
     start: vi.fn(() => { options.onSession?.("new-session"); phone.emit(registered()); }), stop: vi.fn(),
-    answer: vi.fn(), hangup: vi.fn(), toggleMute: vi.fn(), sendDtmf: vi.fn(), expectOperatorLeg: vi.fn(), setIncomingOfferPolicy: vi.fn(), dismissCallError: vi.fn(), takeover: vi.fn(), unlockAudio: vi.fn(), resumeAudio: vi.fn(), confirmRegistration: vi.fn(async () => undefined),
+    answer: vi.fn(), hangup: vi.fn(), confirmCallEnded: vi.fn(), toggleMute: vi.fn(), sendDtmf: vi.fn(), expectOperatorLeg: vi.fn(), setIncomingOfferPolicy: vi.fn(), dismissCallError: vi.fn(), takeover: vi.fn(), unlockAudio: vi.fn(), resumeAudio: vi.fn(), confirmRegistration: vi.fn(async () => undefined),
   };
   return phone;
 }
@@ -116,6 +116,20 @@ describe("shared browser phone and on-demand mobile", () => {
     phones[0].emit({ ...registered(), call: ringing("call-b") }); await flush();
     expect(phones[0].hangup).not.toHaveBeenCalled();
     expect(follower.getSnapshot().callError).toContain("Stav hovoru sa zmenil");
+  });
+
+  it("passes server-confirmed call ends to the owner and ignores a confirmation for a previous call", async () => {
+    create(); const follower = create(); await flush();
+    phones[0].emit({ ...registered(), call: ringing("call-a") }); await flush();
+    await follower.confirmCallEnded("call-a");
+    expect(phones[0].confirmCallEnded).toHaveBeenCalledExactlyOnceWith("call-a");
+    phones[0].confirmCallEnded.mockClear();
+    const delayed = follower.confirmCallEnded("call-a");
+    phones[0].emit({ ...registered(), call: ringing("call-b") });
+    await delayed;
+    expect(phones[0].confirmCallEnded).not.toHaveBeenCalled();
+    expect(follower.getSnapshot().call?.id).toBe("call-b");
+    expect(follower.getSnapshot().callError).toBeUndefined();
   });
 
   it("hands off only after lock release and supplies the old session proof to fence late requests", async () => {

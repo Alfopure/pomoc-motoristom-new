@@ -222,7 +222,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     async retrieveCall(callControlId: string) {
       record("retrieveCall", { callControlId });
       const verdict = callStatuses.get(callControlId);
-      return { callControlId, known: verdict?.known ?? true, alive: verdict?.alive ?? true, callSessionId: null, raw: verdict ? {} : null };
+      return { callControlId, known: verdict?.known ?? true, alive: verdict?.alive ?? true, callSessionId: null, raw: verdict ? { is_alive: verdict.alive } : null };
     },
     async switchSupervisorRole(params) {
       record("switchSupervisorRole", { ...params });
