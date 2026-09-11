@@ -281,7 +281,7 @@ for (const width of [390, 1280]) {
     const header = page.getByRole("group", { name: "Stav a priorita prípadu", exact: true });
     await expect(header.getByRole("button", { name: "Stiahnuť PDF", exact: true })).toBeVisible();
     await expect(header.getByLabel("Priorita prípadu v hlavičke")).toBeVisible();
-    await expect(page.getByTestId("case-summary").getByText("TEST-001", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("case-summary").getByRole("definition").filter({ hasText: "TEST-001" })).toBeVisible();
     await expect(pdfButton(page)).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
     await page.route("**/api/cases/case-fixture/pdf", route => route.fulfill({ contentType: "application/pdf", body: pdfFixture }));
