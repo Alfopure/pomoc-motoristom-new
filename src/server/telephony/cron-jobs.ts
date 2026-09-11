@@ -10,6 +10,7 @@ import { telephonyStabilityEnabled } from "./stability";
 import { readPendingEffects } from "./state/continuation";
 import { sweepExpiredWrapUp } from "./presence-service";
 import { sweepEndedSessionPresence } from "./presence-recovery";
+import { reconciledHangupEvent } from "./call-reconciliation";
 
 /**
  * Jobs behind the single allowed Vercel cron (every 5 minutes →
@@ -389,32 +390,7 @@ export async function reconcileWithTelnyx(deps: TelephonyCronDeps): Promise<Tele
         const status = await telnyx.retrieveCall(callControlId);
         if (status.alive) continue;
         deadLegs += 1;
-        await run(session.id, {
-          kind: "telnyx",
-          // Deterministic per leg and minute: a reconcile that runs twice for
-          // the same dead leg must not write two call events.
-          id: `reconcile:${callControlId}:${Math.floor(now.getTime() / 60_000)}`,
-          type: "call.hangup",
-          occurredAt: now.toISOString(),
-          callControlId,
-          callLegId: null,
-          callSessionId: null,
-          connectionId: null,
-          clientState: null,
-          rawClientState: null,
-          from: null,
-          to: null,
-          direction: null,
-          state: null,
-          hangupCause: "reconciled",
-          hangupSource: null,
-          sipHangupCause: null,
-          digits: null,
-          status: null,
-          conferenceId: null,
-          customHeaders: [],
-          payload: { reconciled: true, known: status.known },
-        });
+        await run(session.id, reconciledHangupEvent(callControlId, now, status.known));
         closedHere += 1;
       } catch (error) {
         errors.push({ sessionId: session.id, error: error instanceof Error ? error.message : String(error) });

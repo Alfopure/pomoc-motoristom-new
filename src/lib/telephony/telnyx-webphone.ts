@@ -156,6 +156,8 @@ export class TelnyxWebphone {
   private expected: ExpectedOperatorLeg[] = [];
   private incomingPolicy: IncomingOfferPolicy = { automaticAllowed: true };
   private withdrawnInvites = new Set<string>();
+  private confirmedEndedCallIds = new Set<string>();
+  private endedCallControlIds = new Set<string>();
   /** Our session id for the call currently on this tab's media leg, when known. */
   private callSessionId: string | null = null;
   private listeners = new Set<(snapshot: WebphoneSnapshot) => void>();
@@ -258,6 +260,9 @@ export class TelnyxWebphone {
    * is on `telnyxIDs.telnyxCallControlId`, never on arrival order.
    */
   expectOperatorLeg(input: { callControlId: string; sessionId: string }): void {
+    // An invite can end before the API response identifies its operator leg.
+    // That late response must not reserve the mobile phone for another 90 s.
+    if (this.endedCallControlIds.has(input.callControlId)) return;
     this.expected = rememberExpectedLeg(this.expected, { ...input, at: this.now() }, this.now());
     // The invite usually arrives before `POST /api/telephony/calls` answers (the
     // route still writes leg/session rows), so the ringing call is re-evaluated
@@ -273,6 +278,7 @@ export class TelnyxWebphone {
     if ((policy.presenceRevision ?? 0) < (this.incomingPolicy.presenceRevision ?? 0)) return;
     this.incomingPolicy = policy;
     for (const leg of policy.explicitLegs ?? []) {
+      if (this.endedCallControlIds.has(leg.callControlId)) continue;
       this.expected = rememberExpectedLeg(this.expected, { ...leg, at: this.now() }, this.now());
     }
     if (this.call && RINGING_STATES.has(String(this.call.state).toLowerCase())) {
@@ -335,8 +341,30 @@ export class TelnyxWebphone {
     const call = this.call;
     if (!call) return;
     this.stopRinging();
-    await Promise.resolve(call.hangup()).catch(() => undefined);
+    try {
+      const result = call.hangup();
+      // The SDK can end media locally before its signaling request settles,
+      // without delivering another callUpdate to this controller.
+      this.publish();
+      await result;
+    } catch {
+      // Retain a still-live call when hangup fails; terminal SDK state is
+      // reconciled below even when the SDK throws synchronously.
+    } finally {
+      this.publish();
+    }
+  }
+
+  /** Release only the browser call whose end the server has confirmed. */
+  confirmCallEnded(callId: string): void {
+    const call = this.call;
+    if (!call || call.id !== callId) return;
+    this.confirmedEndedCallIds.add(callId);
+    this.clearCurrentCall();
     this.publish();
+    // Server confirmation is authoritative even when the stale SDK call can
+    // no longer send BYE. Release its media without blocking the next call.
+    void Promise.resolve().then(() => call.hangup()).catch(() => undefined);
   }
 
   setMuted(muted: boolean): void {
@@ -605,6 +633,7 @@ export class TelnyxWebphone {
 
   private onResume(): void {
     if (!this.started) return;
+    if (this.call && DEAD_STATES.has(String(this.call.state).toLowerCase())) this.publish();
     if (!this.heartbeatWorker && this.heartbeatTimer === null) this.startHeartbeat();
     void this.sendHeartbeat();
     // Safari may postpone the reconnect timer until long after foregrounding.
@@ -682,6 +711,8 @@ export class TelnyxWebphone {
     this.client = null;
     this.clientGeneration += 1;
     this.connecting = false;
+    this.confirmedEndedCallIds.clear();
+    this.endedCallControlIds.clear();
     this.stopRinging();
     this.call = null;
     this.callSessionId = null;
@@ -711,18 +742,12 @@ export class TelnyxWebphone {
   private onNotification(notification: WebphoneSdkNotification): void {
     if (notification?.type !== "callUpdate" || !notification.call) return;
     const call = notification.call;
+    if (this.confirmedEndedCallIds.has(call.id)) return;
     const state = String(call.state ?? "").toLowerCase();
 
     if (DEAD_STATES.has(state)) {
-      if (this.call?.id === call.id) {
-        this.stopRinging();
-        this.call = null;
-        this.callSessionId = null;
-        this.answeringCallId = null;
-        this.answeredCallId = null;
-        this.audioAttempt += 1;
-        this.audioBlocked = false;
-      }
+      this.rememberEndedOperatorLeg(call.telnyxIDs?.telnyxCallControlId);
+      if (this.call?.id === call.id) this.clearCurrentCall();
       this.publish();
       return;
     }
@@ -805,7 +830,7 @@ export class TelnyxWebphone {
       this.callError = callFailureMessage(error);
       if (RINGING_STATES.has(String(call.state).toLowerCase())) this.startRinging(call);
     } finally {
-      if (this.isCurrentCall(call, generation)) {
+      if (this.started && this.call === call && generation === this.clientGeneration) {
         this.answeringCallId = null;
         this.publish();
       }
@@ -919,6 +944,26 @@ export class TelnyxWebphone {
 
   // --- snapshot --------------------------------------------------------------
 
+  private rememberEndedOperatorLeg(callControlId: string | undefined): void {
+    if (!callControlId) return;
+    this.endedCallControlIds.add(callControlId);
+    const expected = this.expected.filter((leg) => leg.callControlId !== callControlId);
+    if (expected.length === this.expected.length) return;
+    this.expected = expected;
+    this.scheduleExpectedLegExpiry();
+  }
+
+  private clearCurrentCall(): void {
+    this.rememberEndedOperatorLeg(this.call?.telnyxIDs?.telnyxCallControlId);
+    this.stopRinging();
+    this.call = null;
+    this.callSessionId = null;
+    this.answeringCallId = null;
+    this.answeredCallId = null;
+    this.audioAttempt += 1;
+    this.audioBlocked = false;
+  }
+
   private buildSnapshot(): WebphoneSnapshot {
     const call = this.call;
     const state = String(call?.state ?? "").toLowerCase();
@@ -955,6 +1000,9 @@ export class TelnyxWebphone {
   }
 
   private publish(): void {
+    // SDK methods and errors can change the mutable Call without a final
+    // notification. Never leave a terminated call holding the mobile busy lock.
+    if (this.call && DEAD_STATES.has(String(this.call.state).toLowerCase())) this.clearCurrentCall();
     this.snapshot = this.buildSnapshot();
     for (const listener of this.listeners) listener(this.snapshot);
   }
