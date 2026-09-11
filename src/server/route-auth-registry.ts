@@ -74,6 +74,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
 
   // ── session — Supabase session guard ────────────────────────────────────
   // attendance
+  "attendance": { class: "session" },
   "attendance/copy": { class: "session", role: ["manager", "admin"] },
   "attendance/planning/bulk-shifts": { class: "session", role: ["manager", "admin"] },
   "attendance/requests": { class: "session" },

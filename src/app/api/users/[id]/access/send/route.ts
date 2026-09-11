@@ -11,7 +11,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const actor = await requireDefaultMotoristActor(["manager", "admin"]);
     const { id } = await params;
     const delivery = await sendAccessLink(actor, id, "invite", request);
-    const dispatchData = await loadDispatchData();
+    const dispatchData = await loadDispatchData(actor, { access: true });
 
     return Response.json({ dispatchData, delivery: { status: delivery.status, messageId: delivery.status === "sent" ? delivery.messageId : null } });
   } catch (error) {

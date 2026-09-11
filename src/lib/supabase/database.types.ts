@@ -57,6 +57,7 @@ export type OperatorPresenceStatus = "available" | "ringing" | "on_call" | "afte
 export type Database = {
   public: {
     Tables: {
+      motorist_case_mutation_results: Table<{ organization_id: string; actor_id: string; mutation_id: string; case_id: string; fingerprint: string; result: Json; created_at: Timestamp }>;
       motorist_organizations: Table<{
         id: string;
         slug: string;
@@ -1549,8 +1550,9 @@ export type Database = {
       };
       motorist_cancel_stale_task_reminders: { Args: { p_organization_id: string; p_task_id: string }; Returns: undefined };
       motorist_ensure_task_reminders: { Args: { p_organization_id: string; p_task_id: string; p_actor_id?: string | null; p_channels?: string[] | null }; Returns: Json };
+      motorist_case_mutation_result: { Args: { p_organization_id: string; p_actor_id: string; p_case_id: string; p_mutation_id: string; p_fingerprint: string }; Returns: Json };
       motorist_save_case_atomic: {
-        Args: { p_organization_id: string; p_actor_id: string; p_case_id: string; p_expected_updated_at: string; p_case_patch: Json; p_related: Json; p_field_labels: Json };
+        Args: { p_organization_id: string; p_actor_id: string; p_case_id: string; p_expected_updated_at: string; p_case_patch: Json; p_related: Json; p_field_labels: Json; p_mutation_id?: string; p_fingerprint?: string };
         Returns: Json;
       };
       motorist_create_callback_obligation_v1: { Args: { p_organization_id: string; p_session_id: string; p_plan: Json; p_now: string }; Returns: Json };

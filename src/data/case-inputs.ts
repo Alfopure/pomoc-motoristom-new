@@ -172,6 +172,8 @@ export type PartnerDirectoryInput = {
 };
 
 export type UpdateCaseInput = Partial<CreateCaseInput> & {
+  /** Reused unchanged until this exact save receives a definitive result. */
+  mutationId?: string;
   /** Exact saved server revision; required by the atomic save endpoint. */
   expectedUpdatedAt?: string;
   /** `open` slúži na vrátenie omylom ukončeného/zrušeného prípadu späť do práce. */

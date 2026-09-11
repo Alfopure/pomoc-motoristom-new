@@ -1,4 +1,5 @@
 "use client";
+import type { CaseDetailData } from "@/data/case-detail";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
@@ -152,6 +153,7 @@ type CaseDetailProps = {
   callLinkCandidates?: PhoneBarCall[];
   onLinkCall?: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
   onDataChange?: (dispatchData: DispatchData) => void;
+  onCaseChange?: (caseDetail: CaseDetailData) => void;
   /** Click-to-call; absent (or refusing) while no telephony provider is wired in. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
@@ -168,6 +170,8 @@ type CaseDetailProps = {
 };
 
 type ApiMutationResponse = {
+  caseDetail?: CaseDetailData;
+  mutationId?: string;
   committedRevision?: string;
   code?: string;
   caseId?: string;
@@ -265,6 +269,7 @@ export function CaseDetail({
   onEditorControlsChange,
   focusedTaskId,
   onDataChange,
+  onCaseChange,
   onDial,
   onDirtyChange,
   onEditingChange,
@@ -895,6 +900,7 @@ export function CaseDetail({
             commanderVehicles={commanderVehicles}
             compact={compactEditor}
             onDataChange={onDataChange}
+            onCaseChange={onCaseChange}
             onDiscard={discardEditorDraft}
             onDirtyChange={updateDirtyState}
             onNotice={setNotice}
@@ -1255,6 +1261,7 @@ function EditCaseForm({
   commanderVehicles,
   compact,
   onDataChange,
+  onCaseChange,
   onDiscard,
   onDirtyChange,
   onNotice,
@@ -1267,6 +1274,7 @@ function EditCaseForm({
   commanderVehicles: CommanderVehicleConnection[];
   compact: boolean;
   onDataChange?: (dispatchData: DispatchData) => void;
+  onCaseChange?: (caseDetail: CaseDetailData) => void;
   onDiscard: () => void;
   onDirtyChange?: (dirty: boolean) => void;
   onNotice: (message: string) => void;
@@ -1375,6 +1383,7 @@ function EditCaseForm({
   const [retryToken, setRetryToken] = useState(0);
   const [refreshOnlyRevision, setRefreshOnlyRevision] = useState<number | null>(null);
   const serverRevisionRef = useRef(caseItem.updatedAt);
+  const pendingMutationRef = useRef<{ payload: string; revision: number; request: string; mutationId: string } | null>(null);
   const conflictRef = useRef(false);
   const [conflict, setConflict] = useState(false);
   const acceptedDraftRef = useRef<string | null>(null);
@@ -1743,16 +1752,17 @@ function EditCaseForm({
 
     try {
       const response = await fetch(`/api/cases/${caseItem.id}`, {
+        headers: { "x-case-response": "detail-v2" },
         cache: "no-store",
         signal: controller.signal,
       });
       const result = (await response.json().catch(() => null)) as ApiMutationResponse | null;
 
-      if (!response.ok || !result?.dispatchData || result.dispatchData.source !== "supabase") {
+      if (!response.ok || !result?.caseDetail || result.caseDetail.id !== caseItem.id) {
         throw new Error(result?.error ?? "Aktuálny stav karty sa nepodarilo spoľahlivo načítať.");
       }
 
-      return result.dispatchData;
+      return result.caseDetail;
     } finally {
       window.clearTimeout(timeoutId);
       if (activeRequestRef.current === controller) {
@@ -1761,8 +1771,8 @@ function EditCaseForm({
     }
   }
 
-  function acceptCanonicalCaseState(dispatchData: DispatchData, revision: number, serializedPayload: string) {
-    onDataChange?.(dispatchData);
+  function acceptCanonicalCaseState(caseDetail: CaseDetailData, revision: number, serializedPayload: string) {
+    onCaseChange?.(caseDetail);
     acceptedDraftRef.current = serializedPayload;
     setAcceptedDraft(serializedPayload);
     savedRevisionRef.current = Math.max(savedRevisionRef.current, revision);
@@ -1809,9 +1819,19 @@ function EditCaseForm({
 
   async function persistDraft(serializedPayload: string, revision: number) {
     if (conflictRef.current) return false;
+    const unresolved = pendingMutationRef.current;
+    if (unresolved && unresolved.payload !== serializedPayload) {
+      if (!await persistDraft(unresolved.payload, unresolved.revision)) return false;
+    }
     const changes = changedCaseFields(acceptedDraftRef.current ?? acceptedDraft, serializedPayload);
     if (Object.keys(changes).length === 0) return true;
-    const requestPayload = JSON.stringify({ ...changes, expectedUpdatedAt: serverRevisionRef.current });
+    if (!pendingMutationRef.current) {
+      const mutationId = crypto.randomUUID();
+      pendingMutationRef.current = { payload: serializedPayload, revision, mutationId,
+        request: JSON.stringify({ ...changes, expectedUpdatedAt: serverRevisionRef.current, mutationId }) };
+    }
+    const operation = pendingMutationRef.current;
+    const requestPayload = operation.request;
     if (revision <= savedRevisionRef.current) {
       return true;
     }
@@ -1838,7 +1858,7 @@ function EditCaseForm({
         try {
           const response = await fetch(`/api/cases/${caseItem.id}`, {
             method: "PATCH",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", "x-case-response": "detail-v2" },
             body: requestPayload,
             signal: controller.signal,
           });
@@ -1853,19 +1873,25 @@ function EditCaseForm({
             }
             failureMessage = result?.error ?? "Kartu zásahu sa nepodarilo automaticky uložiť.";
             if (response.status < 500 && response.status !== 429) {
+              pendingMutationRef.current = null;
               break;
             }
             continue;
           }
 
-          if (result?.committedRevision) serverRevisionRef.current = result.committedRevision;
+          if (!result?.committedRevision || result.mutationId !== operation.mutationId) {
+            failureMessage = "Server nepotvrdil identitu uloženia.";
+            continue;
+          }
+          pendingMutationRef.current = null;
+          serverRevisionRef.current = result.committedRevision;
           savedRevisionRef.current = Math.max(savedRevisionRef.current, revision);
           committedDraftRef.current = { payload: serializedPayload, revision };
           acceptedDraftRef.current = serializedPayload;
           if (result?.warnings?.length) {
             onNotice(`Karta je uložená. Upozornenia: ${result.warnings.map((warning) => warning.message).join(" · ")}`);
           }
-          const responseDispatchData = result?.dispatchData?.source === "supabase" ? result.dispatchData : null;
+          const responseDispatchData = result?.caseDetail?.id === caseItem.id ? result.caseDetail : null;
           if (responseDispatchData) {
             acceptCanonicalCaseState(responseDispatchData, revision, serializedPayload);
             return true;
@@ -1953,7 +1979,7 @@ function EditCaseForm({
   async function reloadConflictingCase() {
     try {
       const dispatchData = await loadCanonicalCaseState();
-      onDataChange?.(dispatchData);
+      onCaseChange?.(dispatchData);
       onDiscard();
     } catch {
       onNotice("Aktuálny stav sa nepodarilo načítať. Váš rozpracovaný text zostáva v editore.");
