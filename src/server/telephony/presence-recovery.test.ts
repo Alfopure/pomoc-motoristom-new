@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 import { reserveOperatorPickup, transitionPresence } from "./routing/reservation";
 import { setPresence, sweepExpiredWrapUp } from "./presence-service";
-import { sweepEndedSessionPresence } from "./presence-recovery";
+import { recoverOwnEndedSessionPresence, sweepEndedSessionPresence } from "./presence-recovery";
 
 const REASON = "00000000-0000-4000-8000-000000002501";
 const own = { organizationId: ORG, profileId: PROFILES.o1 };
@@ -22,6 +22,29 @@ async function setup(paused = false) {
 }
 
 describe("ended-session presence recovery", () => {
+  it("repairs a tokenless console owner without scanning or releasing older colleagues", async () => {
+    const { h, sessionId } = await setup();
+    h.setPresence(PROFILES.o1, { offer_token: null });
+    h.setPresence(PROFILES.o2, { status: "on_call", current_session_id: sessionId,
+      status_since: new Date(h.now().getTime() - 60_000).toISOString() });
+    h.advance(300_000);
+
+    expect(await recoverOwnEndedSessionPresence(h.deps, PROFILES.o1)).toMatchObject({ scanned: 1, released: 1, errors: [] });
+    expect(h.presence(PROFILES.o1)).toMatchObject({ status: "available", current_session_id: null });
+    expect(h.presence(PROFILES.o2)).toMatchObject({ status: "on_call", current_session_id: sessionId });
+    expect(h.rows("motorist_operator_statuses").at(-1)).toMatchObject({ profile_id: PROFILES.o1, source: "calls/active" });
+    expect(h.telnyx.calls).toHaveLength(0);
+  });
+
+  it("does not repair an operator belonging to a different organization", async () => {
+    const { h } = await setup();
+    h.advance(300_000);
+    const before = h.presence(PROFILES.o1);
+    expect(await recoverOwnEndedSessionPresence({ ...h.deps, organizationId: "00000000-0000-4000-8000-000000999999" }, PROFILES.o1))
+      .toMatchObject({ scanned: 0, released: 0 });
+    expect(h.presence(PROFILES.o1)).toEqual(before);
+  });
+
   it("releases an old owner exactly once and records audited history", async () => {
     const { h } = await setup();
     h.advance(300_000);

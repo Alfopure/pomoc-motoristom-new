@@ -1,5 +1,6 @@
 import { requireDefaultMotoristActor } from "@/server/api-auth";
 import { loadActiveCalls } from "@/server/telephony/active-calls";
+import { recoverOwnEndedSessionPresence } from "@/server/telephony/presence-recovery";
 import { sweepOverdueRingSteps } from "@/server/telephony/routing/ring-plan";
 import { createTelephonyDeps, TELEPHONY_ROUTE_ROLES, telephonyConfiguredOrResponse, telephonyErrorResponse, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
 import { runSessionEvent } from "@/server/telephony/session-runner";
@@ -55,8 +56,20 @@ export async function GET() {
 
     const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
 
+    // Terminal sessions are absent from this snapshot, so browser-leg recovery
+    // cannot clear their stale owner. Repair the authenticated operator before
+    // returning presence, without waiting for cron or contacting Telnyx.
+    try {
+      const recovery = await recoverOwnEndedSessionPresence(deps, actor.profileId);
+      for (const failure of recovery.errors) {
+        deps.logger?.({ level: "warn", scope: "presence_recovery", source: "calls/active", ...failure });
+      }
+    } catch (error) {
+      deps.logger?.({ level: "warn", scope: "presence_recovery", source: "calls/active", error: error instanceof Error ? error.message : String(error) });
+    }
+
     const snapshot = await loadActiveCalls(
-      { admin: deps.admin, organizationId: deps.organizationId, environment: deps.environment, configured: deps.config.configured },
+      { admin: deps.admin, organizationId: deps.organizationId, environment: deps.environment, configured: deps.config.configured, now: deps.now },
       { profileId: actor.profileId, canManageAssignments: actor.role === "manager" || actor.role === "admin" || actor.role === "senior_dispatcher" },
     );
     // After the snapshot: the sweep must never delay the answer the console is
