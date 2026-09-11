@@ -57,6 +57,8 @@ test("an incoming browser invite can be answered and rejected before the server 
 test("local media actions remain usable without a server session", async ({ page }) => {
   await scenario(page, "raw-active");
   const bar = page.getByTestId("phone-bar");
+  await expect(bar.getByText("Čakám na spojenie hovoru…", { exact: true })).toBeVisible();
+  await expect(bar.getByText("Prebieha", { exact: true })).toHaveCount(0);
   await bar.getByRole("button", { name: "Stlmiť", exact: true }).click();
   await bar.getByRole("button", { name: "Klávesnica", exact: true }).click();
   const keypad = page.getByRole("region", { name: "Klávesnica počas hovoru", exact: true });
@@ -70,6 +72,21 @@ test("local media actions remain usable without a server session", async ({ page
   await expect(bar.getByRole("button", { name: "Klávesnica", exact: true })).toBeFocused();
   await bar.getByRole("button", { name: "Zavesiť", exact: true }).click();
   expect(await events(page)).toEqual(["mute", "dtmf:1", "dtmf:0", "dtmf:#", "browser-hangup"]);
+});
+
+test("outgoing bar distinguishes dialing, audio setup and confirmed conversation time", async ({ page }) => {
+  await page.clock.install({ time: new Date() });
+  const bar = page.getByTestId("phone-bar");
+  await scenario(page, "outbound-dialing");
+  await expect(bar.getByText("Vytáčam", { exact: true })).toBeVisible();
+  await expect(bar.getByLabel("Čas vytáčania", { exact: true })).toBeVisible();
+  await scenario(page, "outbound-connecting");
+  await expect(bar.getByText("Pripája sa zvuk…", { exact: true })).toBeVisible();
+  await expect(bar.getByText("Prebieha", { exact: true })).toHaveCount(0);
+  await expect(bar.getByLabel("Čas pripájania zvuku", { exact: true })).toHaveText(/00:3[12]/);
+  await scenario(page, "outbound-connected");
+  await expect(bar.getByText("Prebieha", { exact: true })).toBeVisible();
+  await expect(bar.getByLabel("Dĺžka rozhovoru", { exact: true })).toHaveText(/00:0[12]/);
 });
 
 test("a stale server call cannot label or hang up a new browser invite", async ({ page }) => {

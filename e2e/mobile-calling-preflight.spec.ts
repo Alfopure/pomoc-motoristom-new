@@ -45,6 +45,20 @@ test("refused microphone prevents the call and keeps registration", async ({ pag
   expect(await page.evaluate(() => window.phoneHarness.requests.length)).toBe(0);
 });
 
+test("browser media transitions refresh customer state immediately without waiting for a poll", async ({ page }) => {
+  for (const state of ["ringing", "active", "hangup"] as const) {
+    const [before, after] = await page.evaluate((next) => {
+      const before = window.phoneHarness.activeReads;
+      window.phoneHarness.callState(next);
+      return [before, window.phoneHarness.activeReads];
+    }, state);
+    expect(after).toBeGreaterThan(before);
+    // Let the snapshot settle before emitting the next independent transition.
+    await page.evaluate(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  }
+  expect(await page.evaluate(() => window.phoneHarness.requests.length)).toBe(0);
+});
+
 test("rapid dial and callback taps create just one request; failure unlocks retry", async ({ page }) => {
   await page.evaluate(() => { window.phoneHarness.begin("dial"); window.phoneHarness.begin("callback"); });
   expect(await page.evaluate(() => window.phoneHarness.microphoneRequests)).toBe(1);

@@ -33,6 +33,40 @@ function observe(state:ContactSnapshot,e:TelephonyEvent) {
 }
 
 describe('callback provider contact proof',()=>{
+  it.each(['customer-first','operator-first'] as const)('binds auto-bridge evidence after the customer row arrives, %s', order=>{
+    const state=snapshot();state.session.direction='outbound';
+    const customer=state.legs.shift()!;
+    customer.to_number=state.session.called_number;
+    customer.client_state=toJson({sid:state.session.id,role:'customer',intent:contactOperationIntent('auto-dial')});
+    const dial:Command={kind:'dial',commandId:'auto-dial',to:state.session.called_number!,from:state.session.caller_number!,role:'customer',profileId:null,
+      externalNumber:state.session.called_number,clientState:{sid:state.session.id,role:'customer',intent:contactOperationIntent('auto-dial')},linkTo:'operator-cc',timeoutSecs:45,bridgeOnAnswer:true};
+    operation(state,[dial]);
+    expect(readContactHistory(state.session).pendingDials).toHaveLength(1);
+    const customerEvent=event('call.bridged','customer-cc',at,{clientState:{sid:'session',role:'customer',intent:contactOperationIntent('auto-dial')}});
+    const operatorEvent=event('call.bridged','operator-cc',at,{clientState:{sid:'session',role:'operator',intent:'outbound'}});
+    observe(state,order==='customer-first'?customerEvent:operatorEvent);
+    expect(observe(state,order==='customer-first'?operatorEvent:customerEvent).proofs).toHaveLength(0);
+    state.legs.push(customer);
+    // Binding must use the scope frozen before dial, even after subsequent edits.
+    state.session.case_id='later-case';
+    const history=observe(state,event('call.initiated','customer-cc',end));
+    expect(history.proofs).toMatchObject([{operationId:'auto-dial',customerLegId:customer.id,operatorLegId:'operator',scope:{caseId:null}}]);
+    expect(history.pendingDials).toHaveLength(0);
+    expect(observe(state,customerEvent).proofs).toHaveLength(1);
+  });
+
+  it('auto-bridge intent cannot prove contact after its operator was disconnected',()=>{
+    const state=snapshot();state.session.direction='outbound';
+    const customer=state.legs.shift()!;customer.to_number=state.session.called_number;
+    customer.client_state=toJson({sid:state.session.id,role:'customer',intent:contactOperationIntent('auto-dial')});
+    operation(state,[{kind:'dial',commandId:'auto-dial',to:state.session.called_number!,from:state.session.caller_number!,role:'customer',profileId:null,
+      externalNumber:state.session.called_number,clientState:{sid:'session',role:'customer',intent:contactOperationIntent('auto-dial')},linkTo:'operator-cc',timeoutSecs:45,bridgeOnAnswer:true}]);
+    state.session.metadata=toJson({callback_contact:collectContactOperation(state,[{kind:'hangup',commandId:'cancel',leg:{callControlId:'operator-cc'},reason:'cancel'}],event('app','operator-cc',at))});
+    state.legs.push(customer);
+    observe(state,event('call.bridged','customer-cc',end,{clientState:{sid:'session',role:'customer',intent:contactOperationIntent('auto-dial')}}));
+    expect(observe(state,event('call.bridged','operator-cc',end,{clientState:{sid:'session',role:'operator',intent:'outbound'}})).proofs).toHaveLength(0);
+  });
+
   it.each([false,true])('CB-05/06: both exact bridge legs required, recording=%s', recording=>{
     const state=snapshot(recording); operation(state);
     for(const kind of ['call.answered','conference.participant.joined']) expect(observe(state,event(kind)).proofs).toEqual([]);

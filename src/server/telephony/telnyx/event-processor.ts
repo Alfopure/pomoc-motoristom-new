@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
+import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
 
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
@@ -154,7 +155,7 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
       caller_number: callerNumber,
       called_number: calledNumber,
       started_at: event.occurredAt ?? now.toISOString(),
-      metadata: toJson({ line_label: sourceLine?.label ?? null, partner_name: sourceLine?.partner_name ?? null, environment: deps.environment, ...(sourceLine && line && sourceLine.id !== line.id ? { return_routing: { source_line_id: sourceLine.id, target_line_id: line.id, original_called_number: calledNumber } } : {}) }),
+      metadata: toJson({ line_label: sourceLine?.label ?? null, partner_name: sourceLine?.partner_name ?? null, environment: deps.environment, announcements: announcementConfigFromMetadata(line?.metadata), ...(sourceLine && line && sourceLine.id !== line.id ? { return_routing: { source_line_id: sourceLine.id, target_line_id: line.id, original_called_number: calledNumber } } : {}) }),
     })
     .select("*")
     .single();

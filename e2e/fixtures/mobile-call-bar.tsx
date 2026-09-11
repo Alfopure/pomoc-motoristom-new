@@ -4,7 +4,7 @@ import { PhoneBar } from "../../src/components/dispatch/PhoneBar";
 import type { PhoneBarCall, PhoneBarModel } from "../../src/lib/telephony/active-calls-model";
 import type { WebphoneSnapshot } from "../../src/lib/telephony/telnyx-webphone";
 
-export type CallBarScenario = "incoming" | "offer" | "answering" | "raw-active" | "active" | "blocked-audio" | "pending" | "stale-server";
+export type CallBarScenario = "incoming" | "offer" | "answering" | "raw-active" | "active" | "blocked-audio" | "pending" | "stale-server" | "outbound-dialing" | "outbound-connecting" | "outbound-connected";
 declare global {
   interface Window {
     callBarScenario: (scenario: CallBarScenario) => void;
@@ -37,14 +37,23 @@ const record = (event: string) => window.callBarEvents.push(event);
 
 function Fixture() {
   const [scenario, setScenario] = useState<CallBarScenario>("incoming");
-  useEffect(() => { window.callBarScenario = setScenario; }, []);
-  const isActive = ["raw-active", "active", "blocked-audio"].includes(scenario);
-  const hasServer = scenario === "active" || scenario === "blocked-audio";
+  const [stageTime, setStageTime] = useState(Date.now);
+  useEffect(() => { window.callBarScenario = (next) => { setStageTime(Date.now()); setScenario(next); }; }, []);
+  const outbound = scenario.startsWith("outbound-");
+  const isActive = outbound || ["raw-active", "active", "blocked-audio"].includes(scenario);
+  const hasServer = outbound || scenario === "active" || scenario === "blocked-audio";
+  const startedAt = new Date(stageTime - 32_000).toISOString();
+  const confirmedAt = new Date(stageTime - 2_000).toISOString();
+  const serverCall: PhoneBarCall = outbound ? { ...call, direction: "outbound", callerName: null,
+    state: scenario === "outbound-dialing" ? "ringing" : "talking", answered: scenario !== "outbound-dialing",
+    timerSince: scenario === "outbound-connected" ? confirmedAt : startedAt,
+    audioConnection: scenario === "outbound-dialing" ? null : { status: scenario === "outbound-connected" ? "connected" : "connecting", startedAt, confirmedAt: scenario === "outbound-connected" ? confirmedAt : null, error: null },
+  } : call;
   return (
     <div className="flex h-dvh flex-col bg-zinc-50" style={{ paddingTop: "env(safe-area-inset-top)" }}>
       <header className="flex h-11 shrink-0 items-center px-3 text-xs font-bold">Dispečing</header>
       <PhoneBar
-        model={{ ...model, offers: scenario === "offer" ? [{ ...call, kind: "offer", state: "ringing", answered: false, browserCallControlIds: ["fixture-control"] }] : [], active: hasServer ? call : scenario === "stale-server" ? { ...call, callerName: "Stará zákazníčka", sessionId: "stale-session" } : null }}
+        model={{ ...model, offers: scenario === "offer" ? [{ ...call, kind: "offer", state: "ringing", answered: false, browserCallControlIds: ["fixture-control"] }] : [], active: hasServer ? serverCall : scenario === "stale-server" ? { ...call, callerName: "Stará zákazníčka", sessionId: "stale-session" } : null }}
         phone={{ ...phone, call: scenario === "pending" ? null : { ...phone.call!, sessionId: hasServer ? call.sessionId : null, ringing: !isActive, active: isActive, state: isActive ? "active" : "ringing" }, answering: scenario === "answering", audioBlocked: scenario === "blocked-audio" }}
         outboundPending={scenario === "pending"}
         degradedSessionIds={new Set()}

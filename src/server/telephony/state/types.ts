@@ -244,6 +244,10 @@ export type DialCommand = CommandBase & {
   clientState: TelnyxClientState;
   linkTo: string | null;
   timeoutSecs: number;
+  /** Provider connects this explicitly linked recipient as soon as they answer. */
+  bridgeOnAnswer?: boolean;
+  preventDoubleBridge?: boolean;
+  parkAfterUnbridge?: "self";
   /** Ring attempt this dial belongs to (natural key, resolved by effects). */
   attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null } | null;
   autoAnswer?: boolean;
@@ -563,6 +567,7 @@ export type SessionMeta = {
     capacity_wait_since?: string | null;
   } | null;
   outbound?: { to: string; by: string; from: string; case_id?: string | null } | null;
+  outbound_auto_bridge?: { commandId: string; operatorControlId: string; startedAt: string } | null;
   internal?: { target_profile_id: string; target_sip: string; by: string } | null;
   transfer?: { kind: "blind" | "attended"; target: TransferTarget; by: string | null; at: string; completed_at?: string | null } | null;
   consult?: { target: TransferTarget; by: string | null; at: string; leg_call_control_id?: string | null; answered_at?: string | null } | null;

@@ -209,6 +209,8 @@ export function callElapsedSeconds(call: Pick<PhoneBarCall, "timerSince">, now: 
 export type PhoneBarStateLabel = { label: string; tone: "live" | "hold" | "ring" | "wait" };
 
 export function phoneBarStateLabel(call: PhoneBarCall): PhoneBarStateLabel {
+  if (call.direction === "outbound" && call.state === "received") return { label: "Pripájam telefón…", tone: "wait" };
+  if (call.direction === "outbound" && call.state === "ringing") return { label: "Vytáčam", tone: "ring" };
   if (call.kind === "offer") return { label: "Zvoní", tone: "ring" };
   if (call.kind === "waiting") return { label: call.parked ? "V čakárni" : "Čaká", tone: "wait" };
   if (call.audioConnection?.status === "connecting") return { label: "Pripája sa zvuk…", tone: "wait" };
@@ -229,6 +231,20 @@ export function phoneBarStateLabel(call: PhoneBarCall): PhoneBarStateLabel {
     default:
       return { label: "Hovor", tone: "live" };
   }
+}
+
+/** The SDK's active state confirms only our media leg, never the far end. */
+export function browserCallStateLabel(call: WebphoneCallView): PhoneBarStateLabel {
+  return call.ringing
+    ? { label: "Prichádzajúci hovor", tone: "ring" }
+    : { label: "Čakám na spojenie hovoru…", tone: "wait" };
+}
+
+export function phoneBarTimerLabel(call: PhoneBarCall): string {
+  if (call.audioConnection && call.audioConnection.status !== "connected") return "Čas pripájania zvuku";
+  if (call.direction === "outbound" && !call.answered) return call.state === "received" ? "Čas pripájania telefónu" : "Čas vytáčania";
+  if (call.kind === "offer" || call.kind === "waiting") return "Čas čakania";
+  return "Dĺžka rozhovoru";
 }
 
 /**
