@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceTask } from "@/domain/task-workspace";
-import { groupTaskBoard, taskBoardColumn } from "./task-workspace-board";
+import { groupTaskBoard, taskBoardColumn, taskBoardDropStatus } from "./task-workspace-board";
 
 const now = new Date(2026, 8, 10, 12, 0);
 function task(id: string, patch: Partial<WorkspaceTask> = {}): WorkspaceTask {
@@ -13,6 +13,16 @@ function task(id: string, patch: Partial<WorkspaceTask> = {}): WorkspaceTask {
 const at = (day: number, hour: number) => new Date(2026, 8, day, hour, 0).toISOString();
 
 describe("task board", () => {
+  it("only completes open tasks and reopens completed tasks without mapping date buckets to statuses", () => {
+    for (const column of ["overdue", "today", "scheduled", "undated"]) {
+      expect(taskBoardDropStatus(task("open"), column)).toBeNull();
+      expect(taskBoardDropStatus(task("done", { status: "done" }), column)).toBe("open");
+    }
+    expect(taskBoardDropStatus(task("open"), "done")).toBe("done");
+    expect(taskBoardDropStatus(task("legacy", { status: "overdue" }), "done")).toBe("done");
+    expect(taskBoardDropStatus(task("done", { status: "done" }), "done")).toBeNull();
+    expect(taskBoardDropStatus(task("done", { status: "done" }), "outside")).toBeNull();
+  });
   it("places elapsed deadlines only in overdue, including earlier today, and completed tasks only in done", () => {
     const tasks = [
       task("yesterday", { dueAt: at(9, 18) }), task("earlier-today", { dueAt: at(10, 9) }),
