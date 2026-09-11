@@ -11,6 +11,7 @@ import type { TelnyxClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
 import { reduceRecording } from "./recording";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
+import { contactOperationIntent } from "../contact-proof";
 import {
   ACTIVE_SESSION_STATES,
   CALLBACK_OFFER_TIMEOUT_MS,
@@ -710,7 +711,9 @@ function onLegAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged
 function onCustomerAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
   if (b.meta.greeting_call_gone_at) return ignoredResult("introduction customer already gone at provider");
   if (b.session.state !== "received" && b.session.state !== "greeting") return b.note("customer answered late").result();
-  b.patchMeta({ announcements: b.meta.announcements ?? b.ctx.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata) });
+  const announcements = b.meta.announcements ?? b.ctx.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata);
+  b.patchMeta({ announcements });
+  if (announcements.inboundStartAnnouncements === false) return routeInboundCustomer(b, leg);
   startGreeting(b, leg);
   return b.result();
 }
@@ -1049,7 +1052,7 @@ function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
 /** Outbound/internal: the far end answered → the bridge command placed at dial time completes. */
 function onFarEndAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
   if (b.session.state !== "ringing") return b.note("far end answered outside ringing").result();
-  if (b.meta.outbound_audio_gate && !opts.alreadyBridged) {
+  if (b.meta.outbound_audio_gate && !b.meta.outbound_auto_bridge && !opts.alreadyBridged) {
     const operator = b.answeringLeg();
     if (!operator || b.legEnded(operator)) return b.note("outbound operator no longer available").result();
     b.cmd({ kind: "bridge", commandId: b.cmdId(leg.telnyx_call_control_id, "bridge:outbound:announced"), leg: ref(leg), target: ref(operator), parkAfterUnbridge: "self" });
@@ -1089,6 +1092,17 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
 }
 
 /** The operator's own WebRTC leg answered (click-to-call / internal call) → dial the far end and bridge with ringback. */
+function canDirectConnectOutbound(b: TransitionBuilder): boolean {
+  const announcements = b.meta.announcements ?? b.ctx.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata);
+  const recording = b.meta.recording;
+  // A frozen enabled policy can become eligible again if the live switch
+  // changes while the recipient rings. Keep that call behind its notice gate.
+  const recordingPolicy = recording?.policy ?? b.ctx.recordingPolicy;
+  return b.session.direction === "outbound" && announcements.outboundStartAnnouncements !== true &&
+    !(recordingPolicy?.enabled && recordingPolicy.outbound) &&
+    !recording?.pendingAudio && !recording?.barrier && !recording?.recorders.some((recorder) => recorder.observed !== "stopped");
+}
+
 function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): ReduceResult {
   if (b.session.state !== "received") return b.note("own leg answered outside received").result();
   const meta = b.meta;
@@ -1108,6 +1122,13 @@ function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): Re
       linkTo: leg.telnyx_call_control_id,
       timeoutSecs: OUTBOUND_TIMEOUT_SECS,
     };
+    if (canDirectConnectOutbound(b)) {
+      dial.bridgeOnAnswer = true;
+      dial.preventDoubleBridge = true;
+      dial.parkAfterUnbridge = "self";
+      dial.clientState.intent = contactOperationIntent(dial.commandId);
+      b.patchMeta({ outbound_auto_bridge: { commandId: dial.commandId, operatorControlId: leg.telnyx_call_control_id, startedAt: b.nowIso } });
+    }
   } else {
     const internal = meta.internal;
     if (!internal) return ignoredResult("internal session without target");

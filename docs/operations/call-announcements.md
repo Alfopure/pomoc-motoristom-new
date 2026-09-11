@@ -4,9 +4,22 @@ V **Nastavenia → Telefonovanie → Hlášky a jazyk** vyberte linku, jazyk a k
 
 Pripravené sú slovenské, české, anglické a nemecké hlášky. Vybraný jazyk platí pre linku; systém neodhaduje jazyk podľa telefónnej predvoľby. Existujúce vlastné nahrávky a texty konkrétneho IVR menu majú prednosť. Pri zmene menu vždy zosúlaďte vyslovené čísla s jeho akciami. Samotná úprava textu nemení smerovanie hovoru.
 
-Všetky používané hovorené hlášky majú jednotný prirodzený hlas Richard. Úvod prichádzajúceho hovoru trvá menej než 3 sekundy. Počas podržania hrá tichá inštrumentálna slučka; čakáreň pripomína možnosť spätného volania medzi dlhšími blokmi hudby. Úvod sa dokončí pred spustením menu, hudby alebo zvonenia operátorov. Výpadok média má hlasovú náhradu; ak nefunguje ani tá, hovor pokračuje bežným smerovaním bez privítania. Chyba úvodnej nahrávky sama neukončí zákaznícky hovor. Oznam pred nahrávaním má samostatnú kontrolu dokončenia: pri jeho výpadku hovor pokračuje bez spustenia záznamu.
+Všetky používané hovorené hlášky majú jednotný prirodzený hlas Richard. Zapnutý úvod prichádzajúceho hovoru trvá menej než 3 sekundy. Počas podržania hrá tichá inštrumentálna slučka; čakáreň pripomína možnosť spätného volania medzi dlhšími blokmi hudby. Zapnutý úvod sa dokončí pred spustením menu, hudby alebo zvonenia operátorov. Výpadok média má hlasovú náhradu; ak nefunguje ani tá, hovor pokračuje bežným smerovaním bez privítania. Chyba úvodnej nahrávky sama neukončí zákaznícky hovor. Oznam pred nahrávaním má samostatnú kontrolu dokončenia: pri jeho výpadku hovor pokračuje bez spustenia záznamu.
 
-Odchádzajúce hovory vrátane spätných volaní nemajú automatické úvodné predstavenie. Bez nahrávania sa zvuk prepojí po prijatí zákazníkom bez čakania na hlášku. Pri zapnutom nahrávaní zostáva iba príslušný oznam o nahrávaní.
+## Úvodné hlášky podľa smeru hovoru
+
+Každá linka má dva nezávislé prepínače, spoločné pre všetky jej jazyky:
+
+| Prepínač | Predvolené nastavenie | Správanie |
+| --- | --- | --- |
+| Prichádzajúce hovory | Zapnuté | Privítanie a pri povolenom nahrávaní príslušný oznam pred záznamom. |
+| Odchádzajúce hovory | Vypnuté | Bez úvodného predstavenia, oznamu o nahrávaní a automatického nahrávania. Platí aj pre spätné volania. |
+
+**Vypnutie úvodných hlášok vypne aj automatické nahrávanie nových hovorov v príslušnom smere**, aj keď ho politika organizácie inak povoľuje. Zapnutie odchádzajúcich hlášok obnoví predstavenie služby a pri splnení podmienok nahrávania aj oznam pred záznamom. Samotné zapnutie úvodu nestačí na povolenie nahrávania.
+
+Pri odchádzajúcom hovore bez úvodných hlášok sa najprv prijme vlastná WebRTC vetva operátora. Zákaznícka vetva sa potom vytáča s providerovým `bridge_on_answer`: Telnyx prepojí zvuk hneď pri prijatí zákazníkom bez čakania na úvod, spustenie automatického záznamu či následný príkaz na prepojenie zo servera aplikácie.
+
+Tieto prepínače nemenia hlasové menu, hudbu počas podržania a čakania ani oznamy pri prepájaní a zmene účastníkov. Prichádzajúci hovor s vypnutým úvodom pokračuje priamo bežným smerovaním. Uložená voľba platí pre nové hovory; prebiehajúci hovor používa vlastnú verziu nastavení. Staršie konfigurácie bez `inboundStartAnnouncements` a `outboundStartAnnouncements` používajú uvedené predvolené hodnoty bez migrácie.
 
 ## Kompletná knižnica a stav použitia
 
@@ -15,20 +28,20 @@ Editor obsahuje **26 situácií v štyroch jazykoch**, spolu 104 MP3 s hovorený
 | Kategória | Počet | Stav |
 | --- | --- | --- |
 | Používané v hovoroch | 7 | Privítanie, mimo hodín, hlavné menu, ponuka a potvrdenie spätného volania, nedostupnosť, nesprávna voľba. Zapojené do existujúcich situácií hovoru. |
-| Čakanie a návrat | 4 | Podržanie, čakáreň s ponukou spätného volania a návrat sú zapojené; samostatné pripomenutie je pripravené. |
+| Čakanie a návrat | 4 | Podržanie, pripomenutie pri čakaní, čakáreň s ponukou spätného volania a návrat sú zapojené. |
 | Prepájanie a účastníci | 6 | Prepájanie, konzultácia, parkovanie a pripojenie/odchod účastníka sú zapojené; neúspešné prepájanie je pripravené. |
-| Ďalšie situácie | 4 | Odchádzajúci úvod je vypnutý; nezachytená voľba, mimo hodín bez callbacku a chyba uloženia callbacku sú pripravené. |
+| Ďalšie situácie | 4 | Odchádzajúci úvod sa riadi prepínačom smeru a predvolene je vypnutý. Oznam mimo hodín bez callbacku je zapojený; nezachytená voľba a chyba uloženia callbacku sú pripravené. |
 | Nahrávanie | 5 | Oznámenie pre vybavenie pomoci alebo kontrolu kvality, potvrdené vypnutie a obnovenie sú zapojené pod podmienkami politiky nahrávania; nedostupnosť je pripravená. |
 
-Do stavov hovoru je zapojených 19 hlášok; šesť ďalších alternatív je pripravených a odchádzajúci úvod je vypnutý. Všetky možno upravovať, generovať, prehrávať a uložiť. **Uloženie hlášky nezapína nahrávanie, pripravenú alternatívu ani odchádzajúci úvod.** Hudba počas čakania sa používa naďalej. Pri podržaní, prepájaní a zmene účastníkov aplikácia najprv dokončí príslušnú hlášku a potom vykoná akciu; pri výpadku reči pokračuje pomoc bez hlášky.
+Knižnica rozlišuje hlášky zapojené do stavov hovoru a pripravené alternatívy. Skutočný počet používaných hlášok závisí od prepínačov linky a zapnutých funkcií; aktuálny stav zobrazuje editor. Všetky možno upravovať, generovať, prehrávať a uložiť. **Úprava samotného textu alebo nahrávky nezapína nahrávanie, pripravenú alternatívu ani vypnutý úvod.** Zmenu prepínača úvodných hlášok treba uložiť spolu s konfiguráciou. Hudba počas čakania sa používa naďalej. Pri podržaní, prepájaní a zmene účastníkov aplikácia najprv dokončí príslušnú hlášku a potom vykoná akciu; pri výpadku reči pokračuje pomoc bez hlášky.
 
 ## Upozornenie na nahrávanie
 
-Nahrávanie sa riadi samostatnou sekciou **Nahrávanie a kvalita**, schválenou politikou organizácie a serverovými prepínačmi. Zapojená implementácia vyžaduje úspešne dokončený oznam pred prvým záznamom. Záznam zákazníckeho hovoru začne pred pripojením operátora; pri odchádzajúcom hovore sa služba automatickou úvodnou hláškou nepredstavuje. Súbor v editore ani jeho uloženie nahrávanie nezapína. Nastavenia mimo aplikácie, napríklad automatické nahrávanie u operátora, treba overiť osobitne.
+Nahrávanie sa riadi samostatnou sekciou **Nahrávanie a kvalita**, schválenou politikou organizácie a serverovými prepínačmi. Automatické nahrávanie navyše vyžaduje zapnuté úvodné hlášky pre smer daného hovoru. Pred prvým záznamom sa musí úspešne dokončiť príslušný oznam; pri zapnutom odchádzajúcom úvode mu predchádza predstavenie služby. Záznam zákazníckeho hovoru začne pred pripojením operátora. Pri vypnutom úvode sa oznam ani automatický záznam nespustia. Súbor v editore ani jeho uloženie nahrávanie nezapína. Nastavenia mimo aplikácie, napríklad automatické nahrávanie u operátora, treba overiť osobitne.
 
 Pri podržaní, parkovaní, konzultácii a zmene topológie sa čaká na potvrdené zastavenie všetkých záznamov. Nejasný výsledok ostáva viditeľný ako neistý stav a súkromná akcia sa nevykoná. Návrat môže založiť nový segment iba pri overenej podpore danej topológie. Námietka vypne ďalšie nahrávanie tohto hovoru, obmedzí prístup k existujúcim segmentom a zakáže automatické obnovenie. Voliteľné hlasové potvrdenie vypnutia zaznie iba po potvrdenom zastavení. Neistý výsledok sa nevydáva za vypnuté nahrávanie.
 
-V kategórii **Nahrávanie** je prepínač **Hlášky o zmenách nahrávania**, predvolene vypnutý. Ovláda oznámenia „Nahrávanie je vypnuté“ a „Pokračujeme v nahrávaní“ pre všetky jazyky vybranej linky. Úvodný oznam, že sa hovor nahráva, sa prehráva aj pri vypnutom prepínači. Stav nahrávania zostáva viditeľný operátorovi a skutočné zastavenie či obnovenie sa riadi politikou nahrávania. Uložená voľba platí pre nové hovory; prebiehajúci hovor má vlastnú verziu nastavení. Staršie konfigurácie bez `recordingStatusAnnouncements` používajú vypnuté stavové hlášky bez migrácie. Texty, náhľady a vygenerované nahrávky zostávajú dostupné aj pri vypnutí.
+V kategórii **Nahrávanie** je samostatný prepínač **Hlášky o zmenách nahrávania**, predvolene vypnutý. Ovláda oznámenia „Nahrávanie je vypnuté“ a „Pokračujeme v nahrávaní“ pre všetky jazyky vybranej linky. Tento stavový prepínač nemení úvodný oznam pred povoleným záznamom; úvod aj automatické nahrávanie však možno vypnúť príslušným prepínačom smeru hovoru opísaným vyššie. Stav nahrávania zostáva viditeľný operátorovi a skutočné zastavenie či obnovenie sa riadi politikou nahrávania. Uložená voľba platí pre nové hovory; prebiehajúci hovor má vlastnú verziu nastavení. Staršie konfigurácie bez `recordingStatusAnnouncements` používajú vypnuté stavové hlášky bez migrácie. Texty, náhľady a vygenerované nahrávky zostávajú dostupné aj pri vypnutí.
 
 `TELNYX_RECORDING_ENABLED`, `TELNYX_RECORDING_CONTRACT_VERIFIED` a `RECORDING_PROCESSING_ENABLED` sú základné serverové podmienky; konferencie, prepájanie a identita zvukových kanálov majú samostatné overovacie prepínače. Testy s náhradným poskytovateľom nedokazujú správanie živého Telnyxu. Pred zapnutím treba zdokumentovať kontrolovaný test skutočných médií na tejto kópii aplikácie.
 

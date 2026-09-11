@@ -158,9 +158,17 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     const webphone = new CoordinatedWebphone({ scope: `${organizationId}:${profileId}`, mobile: isMobileApp() });
     webphoneRef.current = webphone;
     webphone.setIncomingOfferPolicy(incomingPolicyRef.current);
+    let callState = "";
     const unsubscribe = webphone.subscribe((next) => {
       setPhone(next);
       if (next.status === "not_configured") setConfigured(false);
+      const nextCallState = next.call ? `${next.call.id}:${next.call.state}` : "";
+      if (callState !== nextCallState) {
+        callState = nextCallState;
+        // Fetch customer/bridge state on the media transition itself. The
+        // normal poll may still be sleeping on its idle/realtime cadence.
+        refreshRef.current?.();
+      }
     });
     webphone.start();
     return () => {

@@ -23,6 +23,8 @@ test.beforeAll(async () => {
 async function boot(page: Page, { width = 1440, canEdit = true, conflict = false } = {}) {
   const legacy = defaultAnnouncementConfig();
   delete legacy.recordingStatusAnnouncements;
+  delete legacy.inboundStartAnnouncements;
+  delete legacy.outboundStartAnnouncements;
   const state = {
     lines: [
       { id: "00000000-0000-4000-8000-000000000201", label: "Hlavná linka", phoneNumber: "+421900000111", revision: "2026-09-07T12:00:00.000Z", config: legacy },
@@ -93,8 +95,46 @@ for (const width of [390, 1440]) test(`recording status preference saves and rel
 test("read-only viewers can inspect status without changing preferences", async ({ page }) => {
   const { state } = await boot(page, { canEdit: false, width: 390 });
   await expect(page.getByRole("switch", { name: "Hlášky o zmenách nahrávania" })).toBeDisabled();
+  await expect(page.getByRole("switch", { name: "Úvodné hlášky prichádzajúcich hovorov" })).toBeDisabled();
+  await expect(page.getByRole("switch", { name: "Úvodné hlášky odchádzajúcich hovorov" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Uložiť hlášky a jazyk" })).toBeDisabled();
   expect(state.writes).toHaveLength(0); expect(state.errors).toEqual([]);
+});
+
+for (const width of [390, 1440]) test(`startup announcements save independently by direction and line at ${width}px`, async ({ page }) => {
+  const { state, mount } = await boot(page, { width });
+  const inbound = page.getByRole("switch", { name: "Úvodné hlášky prichádzajúcich hovorov" });
+  const outbound = page.getByRole("switch", { name: "Úvodné hlášky odchádzajúcich hovorov" });
+  const save = page.getByRole("button", { name: "Uložiť hlášky a jazyk" });
+  await expect(inbound).toBeChecked();
+  await expect(outbound).not.toBeChecked();
+  await expect(save).toBeDisabled();
+
+  await inbound.uncheck();
+  await expect(outbound).not.toBeChecked();
+  await expect(save).toBeEnabled();
+  await page.getByRole("group", { name: "Kategórie hlášok" }).getByRole("button", { name: /^Používané/ }).click();
+  const greeting = page.locator("article").filter({ has: page.getByLabel("Privítanie", { exact: true }) });
+  await expect(greeting.getByText("Vypnuté v hovoroch", { exact: true })).toBeVisible();
+
+  await outbound.check();
+  await expect(inbound).not.toBeChecked();
+  await page.getByRole("group", { name: "Kategórie hlášok" }).getByRole("button", { name: /^Ďalšie situácie/ }).click();
+  const intro = page.locator("article").filter({ has: page.getByLabel("Úvod odchádzajúceho hovoru", { exact: true }) });
+  await expect(intro.getByText("Používa sa v hovoroch", { exact: true })).toBeVisible();
+  await save.click();
+  await expect(save).toBeDisabled();
+  expect(state.writes[0].config).toMatchObject({ inboundStartAnnouncements: false, outboundStartAnnouncements: true });
+  await mount();
+  await expect(inbound).not.toBeChecked();
+  await expect(outbound).toBeChecked();
+  await page.getByRole("combobox", { name: /^Telefónna linka/ }).selectOption(state.lines[1].id);
+  await expect(inbound).toBeChecked();
+  await expect(outbound).not.toBeChecked();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+  await inbound.evaluate(element => element.scrollIntoView({ block: "center" }));
+  await page.screenshot({ path: `.context/recording-status-browser/startup-switches-${width}.png` });
+  expect(state.errors).toEqual([]);
 });
 
 test("generation and stale saves retain a disabled preference and its draft", async ({ page }) => {

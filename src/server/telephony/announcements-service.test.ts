@@ -78,11 +78,39 @@ describe("announcement configuration", () => {
     expect(h.db.rows("motorist_audit_log")).toHaveLength(2);
   });
 
-  it("accepts legacy clients with silent defaults and rejects controls that would disable initial notices", () => {
+  it("accepts legacy clients with direction defaults and rejects unknown per-prompt controls", () => {
     const h = world();
     const legacy = { version: 1, language: "sk", voiceId: DEFAULT_ANNOUNCEMENT_VOICE, prompts: {} };
-    expect(parseAnnouncementConfig(h.deps, ORG, LINE, legacy).recordingStatusAnnouncements).toBe(false);
+    expect(parseAnnouncementConfig(h.deps, ORG, LINE, legacy)).toMatchObject({ inboundStartAnnouncements: true, outboundStartAnnouncements: false, recordingStatusAnnouncements: false });
     expect(() => parseAnnouncementConfig(h.deps, ORG, LINE, { ...legacy, recordingNotice: false })).toThrow();
+  });
+
+  it("saves each direction independently while preserving custom audio, translations and unrelated metadata", async () => {
+    const h = world();
+    const generated = await generateAnnouncementAudio(h.deps, GENERATE);
+    const original = { ...configWith(), prompts: {
+      sk: { greeting: { text: GENERATE.text, audioUrl: generated.audioUrl, voiceId: DEFAULT_ANNOUNCEMENT_VOICE } },
+      de: { outboundIntro: { text: "Guten Tag, wir rufen wegen Ihrer Hilfe an." } },
+    } };
+    let revision = NOW;
+    for (const [inboundStartAnnouncements, outboundStartAnnouncements] of [[false, false], [false, true], [true, true], [true, false]]) {
+      const config = { ...original, inboundStartAnnouncements, outboundStartAnnouncements };
+      const saved = await saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision, config });
+      expect(saved.config).toEqual(config);
+      expect((await getAnnouncementLines(h.deps, ORG))[0].config).toEqual(config);
+      expect(h.db.find("motorist_telephony_lines", (row) => row.id === LINE)?.metadata).toMatchObject({ existingSetting: { enabled: true }, announcements: config });
+      revision = saved.revision;
+    }
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+    expect(h.db.rows("motorist_telephony_lines").find((row) => row.organization_id === OTHER_ORG)?.metadata).toEqual({});
+  });
+
+  it.each(["inboundStartAnnouncements", "outboundStartAnnouncements"])("rejects malformed %s before any writes", (key) => {
+    const h = world();
+    for (const value of ["false", "true", 0, 1, null, {}, []]) {
+      expect(() => parseAnnouncementConfig(h.deps, ORG, LINE, { ...defaultAnnouncementConfig(), [key]: value })).toThrow();
+    }
+    expect(h.db.log).toHaveLength(0);
   });
 
   it.each(["false", "true", 0, null, {}, []])("rejects malformed status preference %j", recordingStatusAnnouncements => {

@@ -4,6 +4,7 @@ import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import type { WebphoneCallView } from "@/lib/telephony/telnyx-webphone";
 
 import {
+  browserCallStateLabel,
   callElapsedSeconds,
   formatCallTimer,
   isDtmfKey,
@@ -11,6 +12,7 @@ import {
   phoneBarCapabilities,
   phoneBarFocusedCall,
   phoneBarStateLabel,
+  phoneBarTimerLabel,
   phoneBarVisible,
   phoneTakeoverAvailable,
   PHONE_ACTION_LABELS,
@@ -171,6 +173,22 @@ describe("presentation helpers", () => {
     expect(phoneBarStateLabel(call({ kind: "waiting", parked: true })).label).toBe("V čakárni");
     expect(phoneBarStateLabel(call({ state: "ringing", direction: "outbound" })).label).toBe("Vytáčam");
     expect(PHONE_ACTION_LABELS.hold).toBe("Podržať");
+  });
+
+  it("shows each outgoing setup stage before a confirmed conversation", () => {
+    expect(phoneBarStateLabel(call({ direction: "outbound", state: "received", answered: false })).label).toBe("Pripájam telefón…");
+    expect(phoneBarStateLabel(call({ direction: "outbound", state: "ringing", kind: "offer", answered: false })).label).toBe("Vytáčam");
+    expect(phoneBarTimerLabel(call({ direction: "outbound", state: "ringing", answered: false }))).toBe("Čas vytáčania");
+    const connection = { status: "connecting" as const, startedAt: "2026-09-03T08:00:00Z", confirmedAt: null, error: null };
+    expect(phoneBarStateLabel(call({ audioConnection: connection })).label).toBe("Pripája sa zvuk…");
+    expect(phoneBarTimerLabel(call({ audioConnection: connection }))).toBe("Čas pripájania zvuku");
+    expect(phoneBarTimerLabel(call({ audioConnection: { ...connection, status: "connected", confirmedAt: "2026-09-03T08:00:32Z" } }))).toBe("Dĺžka rozhovoru");
+  });
+
+  it.each(["early", "answering", "active"])("a local %s media leg never claims the customer is connected", (state) => {
+    const browser = { state, active: true, ringing: false } as WebphoneCallView;
+    expect(browserCallStateLabel(browser)).toEqual({ label: "Čakám na spojenie hovoru…", tone: "wait" });
+    expect(browserCallStateLabel({ ...browser, active: false, ringing: true }).label).toBe("Prichádzajúci hovor");
   });
 
   it("hides the bar without a provider and shows it whenever something is happening", () => {
