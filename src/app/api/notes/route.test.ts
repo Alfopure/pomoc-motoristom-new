@@ -26,8 +26,8 @@ describe("notebook API", () => {
     expect((await POST(new Request("https://example.test", { method: "POST", body: "{" }))).status).toBe(400);
     expect((await PATCH(request("PATCH", { title: "x", body: "y" }), context)).status).toBe(400); expect(mocks.rpc).not.toHaveBeenCalled();
   });
-  it("preserves immediate read revocation and revision conflicts", async () => {
-    mocks.rpc.mockResolvedValueOnce({ error: { code: "P0002", message: "private" } }).mockResolvedValueOnce({ error: { code: "40001", message: "private" } });
+  it.each(["PT409", "40001"])("preserves immediate read revocation and %s revision conflicts", async code => {
+    mocks.rpc.mockResolvedValueOnce({ error: { code: "P0002", message: "private" } }).mockResolvedValueOnce({ error: { code, message: "private" } });
     expect((await handlers.read()).status).toBe(404); expect((await handlers.save()).status).toBe(409);
   });
 });

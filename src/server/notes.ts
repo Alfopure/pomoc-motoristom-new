@@ -42,7 +42,7 @@ async function notebookRpc<T>(actor: MotoristActor, action: string, args: Record
   const client = await createSupabaseServerClient();
   const { data, error } = await client.rpc("motorist_notebook", { p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId, p_action: action, ...args });
   if (error) {
-    const status = error.code === "42501" ? 403 : error.code === "P0002" ? 404 : error.code === "40001" ? 409 : error.code === "22023" ? 400 : 503;
+    const status = error.code === "42501" ? 403 : error.code === "P0002" ? 404 : error.code === "PT409" || error.code === "40001" ? 409 : error.code === "22023" ? 400 : 503;
     const message = status === 409 ? "Poznámka sa zmenila v inom okne. Načítajte aktuálnu verziu pred ďalšou úpravou." : status === 403 || status === 404 ? "Poznámka nie je dostupná alebo už nemáte oprávnenie." : "Poznámku sa nepodarilo spracovať. Skúste to znova.";
     throw new MutationError(message, status);
   }
