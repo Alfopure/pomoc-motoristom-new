@@ -253,27 +253,6 @@
     "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
   },
   {
-    "id": "announcements",
-    "file": "announcements.webp",
-    "title": "Hlášky a jazyk",
-    "alt": "Výber linky, jazyka a hlášok pre volajúcich.",
-    "width": 1440,
-    "height": 1000,
-    "annotations": [
-      {
-        "id": "announcements-language",
-        "label": "Jazyk hlášok",
-        "x": 50.14,
-        "y": 40.1,
-        "width": 42.22,
-        "height": 2.4
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:26:48.630Z",
-    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
-  },
-  {
     "id": "recording",
     "file": "recording.webp",
     "title": "Nahrávanie a kvalita",
@@ -296,56 +275,6 @@
         "y": 40.1,
         "width": 1.67,
         "height": 2.4
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:26:48.630Z",
-    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
-  },
-  {
-    "id": "incoming-call",
-    "file": "incoming-call.webp",
-    "title": "Prijatie prichádzajúceho hovoru",
-    "alt": "Prichádzajúci hovor z ukážkového telefónneho čísla s ovládaním prijatia.",
-    "width": 1100,
-    "height": 300,
-    "annotations": [
-      {
-        "id": "incoming-call-answer",
-        "label": "Prijať ponúknutý hovor",
-        "x": 78.51,
-        "y": 40,
-        "width": 6.82,
-        "height": 13.33
-      }
-    ],
-    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
-    "capturedAt": "2026-09-11T07:26:48.630Z",
-    "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
-  },
-  {
-    "id": "active-call",
-    "file": "active-call.webp",
-    "title": "Ovládanie hovoru",
-    "alt": "Panel prebiehajúceho hovoru s vypnutím mikrofónu, podržaním a ďalšími akciami.",
-    "width": 1100,
-    "height": 320,
-    "annotations": [
-      {
-        "id": "active-call-mute",
-        "label": "Vypnutie vlastného mikrofónu",
-        "x": 81.06,
-        "y": 36.95,
-        "width": 3.55,
-        "height": 12.5
-      },
-      {
-        "id": "active-call-hold",
-        "label": "Podržanie zákazníka",
-        "x": 4.55,
-        "y": 50.78,
-        "width": 7.95,
-        "height": 12.5
       }
     ],
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
@@ -754,5 +683,92 @@
     "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
     "capturedAt": "2026-09-11T07:26:48.630Z",
     "sourceRevision": "60be01f2c0e365299d379d87381d3e49f88f7556"
+  },
+  {
+    "id": "incoming-call",
+    "file": "incoming-call.webp",
+    "title": "Prijatie prichádzajúceho hovoru",
+    "alt": "Prichádzajúci hovor z ukážkového telefónneho čísla s ovládaním prijatia.",
+    "width": 1100,
+    "height": 300,
+    "annotations": [
+      {
+        "id": "incoming-call-answer",
+        "label": "Prijať ponúknutý hovor",
+        "x": 78.51,
+        "y": 40,
+        "width": 6.82,
+        "height": 13.33
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:58:14.982Z",
+    "sourceRevision": "11a06f829e05a7a7c5cbf7340e6b13ff28dccf0c"
+  },
+  {
+    "id": "active-call",
+    "file": "active-call.webp",
+    "title": "Ovládanie hovoru",
+    "alt": "Panel prebiehajúceho hovoru s vypnutím mikrofónu, podržaním a ďalšími akciami.",
+    "width": 1100,
+    "height": 320,
+    "annotations": [
+      {
+        "id": "active-call-mute",
+        "label": "Vypnutie vlastného mikrofónu",
+        "x": 81.06,
+        "y": 36.95,
+        "width": 3.55,
+        "height": 12.5
+      },
+      {
+        "id": "active-call-hold",
+        "label": "Podržanie zákazníka",
+        "x": 4.55,
+        "y": 50.78,
+        "width": 7.95,
+        "height": 12.5
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:58:14.982Z",
+    "sourceRevision": "11a06f829e05a7a7c5cbf7340e6b13ff28dccf0c"
+  },
+  {
+    "id": "announcements",
+    "file": "announcements.webp",
+    "title": "Hlášky a jazyk",
+    "alt": "Výber linky, jazyka a samostatné prepínače úvodných hlášok pre oba smery hovoru.",
+    "width": 1440,
+    "height": 1000,
+    "annotations": [
+      {
+        "id": "announcements-language",
+        "label": "Jazyk hlášok",
+        "x": 50.14,
+        "y": 40.1,
+        "width": 42.22,
+        "height": 2.4
+      },
+      {
+        "id": "announcements-inbound-start",
+        "label": "Úvodné hlášky prichádzajúcich hovorov",
+        "x": 47.01,
+        "y": 60.72,
+        "width": 1.94,
+        "height": 2.8
+      },
+      {
+        "id": "announcements-outbound-start",
+        "label": "Úvod odchádzajúcich a spätných hovorov; vypnutie blokuje aj automatické nahrávanie",
+        "x": 89.24,
+        "y": 60.72,
+        "width": 1.94,
+        "height": 2.8
+      }
+    ],
+    "scenario": "Skutočné komponenty aplikácie s izolovanými ukážkovými údajmi; žiadne spojenie so službami.",
+    "capturedAt": "2026-09-11T07:58:41.618Z",
+    "sourceRevision": "11a06f829e05a7a7c5cbf7340e6b13ff28dccf0c"
   }
 ]

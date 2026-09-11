@@ -46,7 +46,7 @@ Obsah bol overený podľa zdrojového kódu a izolovaného rozhrania. Výroba pr
 
 ## Príprava pre AI pomocníka
 
-`buildGuideKnowledge` v `src/content/guide/knowledge.ts` vytvára 121 záznamov po sekciách z presne toho istého obsahu, ktorý čitateľ vidí. Každý záznam obsahuje stabilné ID, odkaz na sekciu, kroky s odkazmi, publikum, predpoklady, text, kľúčové slová a význam screenshotov. Celý dokument má verziu schémy a obsahu, dátum, revíziu overeného zdroja a `dataKind: documentation`.
+`buildGuideKnowledge` v `src/content/guide/knowledge.ts` vytvára 123 záznamov po sekciách z presne toho istého obsahu, ktorý čitateľ vidí. Každý záznam obsahuje stabilné ID, odkaz na sekciu, kroky s odkazmi, publikum, predpoklady, text, kľúčové slová a význam screenshotov. Celý dokument má verziu schémy a obsahu, dátum, revíziu overeného zdroja a `dataKind: documentation`.
 
 V aplikácii poskytuje tieto údaje autentifikované `GET /api/guide/knowledge` s `Cache-Control: private, no-store`. Samostatné vydanie obsahuje rovnaký export v `knowledge.json`. Hodnota `audience` pomáha vysvetľovať potrebné roly; nie je náhradou serverovej autorizácie akcie. Tento export neobsahuje aktuálne nastavenia ani stav používateľov.
 
