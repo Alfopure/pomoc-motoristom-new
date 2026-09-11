@@ -1,13 +1,14 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, CalendarDays, CheckCircle2, Clock3, Plus, RefreshCw, Search } from "lucide-react";
+import { ArrowLeft, Plus, RefreshCw, Search } from "lucide-react";
 import type { DispatchCase, Operator } from "@/domain/types";
 import type { WorkspaceTask } from "@/domain/task-workspace";
 import { isTaskDueToday, isTaskHandoverRelevant, isTaskOverdue, taskPriorityLabels } from "@/domain/tasks";
 import { useTaskWorkspace } from "./TaskWorkspaceProvider";
 import { taskDraft, type TaskDraft } from "./task-workspace-store";
 import { TaskChatPanel } from "./TaskChatPanel";
-import { groupTaskBoard } from "./task-workspace-board";
+import { groupTaskBoard, taskBoardColumn, taskBoardColumns } from "./task-workspace-board";
+import { TaskWorkspaceBoard, TaskWorkspaceCard } from "./TaskWorkspaceBoard";
 import styles from "./TaskWorkspacePanel.module.css";
 export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, variant = "sidebar", onOpenCase }: {
   tasks?: WorkspaceTask[]; cases: DispatchCase[]; operators: Operator[]; viewerProfileId?: string;
@@ -19,7 +20,10 @@ export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, v
   const [search, setSearch] = useState("");
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [linkCaseId, setLinkCaseId] = useState("");
+  const [statusNotice, setStatusNotice] = useState("");
+  const [statusTaskId, setStatusTaskId] = useState<string | null>(null);
   const titleRef = useRef<HTMLTextAreaElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
   const boardRef = useRef<HTMLElement>(null);
   useEffect(() => { if (tasks) store.setTasks(tasks); }, [store, tasks]);
   useEffect(() => {
@@ -45,22 +49,47 @@ export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, v
   const change = (patch: Partial<TaskDraft>) => selected ? store.edit(selected.id, patch) : store.editCreate(patch);
   const conflict = Boolean(selected && snapshot.conflicts.includes(selected.id));
   const columns = groupTaskBoard(visible, now);
-  const taskCard = (task: WorkspaceTask) => {
-    const operator = operators.find(item => item.id === task.assignedTo);
-    return <li key={task.id} className={`${styles.card} ${selected?.id === task.id ? styles.selectedCard : ""}`}>
-      <div className={styles.cardTop}><span className={`${styles.priority} ${styles[task.priority] ?? ""}`}>{taskPriorityLabels[task.priority]}</span>{snapshot.drafts[task.id] && <span className={styles.draftBadge}>Rozpracované</span>}</div>
-      <button type="button" className={styles.title} aria-current={selected?.id === task.id ? "true" : undefined} onClick={() => store.select(task.id)}>{task.title}</button>
-      <div className={styles.caseTags}>{task.caseLinks.length ? task.caseLinks.map(link => <span key={link.caseId}>{link.caseNumber}</span>) : <span>Samostatná úloha</span>}</div>
-      <div className={styles.cardFooter}><span className={styles.assignee}><span className={styles.avatar} aria-hidden="true">{operator ? operator.name.split(" ").filter(Boolean).slice(0, 2).map(part => part[0]).join("") : "—"}</span>{operator?.name ?? "Nepriradené"}</span><span className={isTaskOverdue(task, now) ? styles.overdueDate : styles.date}><Clock3 size={12} aria-hidden="true" />{task.dueAt && Number.isFinite(new Date(task.dueAt).getTime()) ? new Date(task.dueAt).toLocaleString("sk-SK", { day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit" }) : "Bez termínu"}</span></div>
-    </li>;
-  };
+  async function changeStatus(task: WorkspaceTask, status: "open" | "done") {
+    const focusSource = document.activeElement as HTMLElement | null;
+    const restoreFocus = focusSource?.closest("[data-task-id]")?.getAttribute("data-task-id") === task.id;
+    const focusHandle = focusSource?.hasAttribute("data-task-drag-handle");
+    setStatusNotice(""); setStatusTaskId(task.id);
+    try {
+      const saved = await store.setTaskStatus(task.id, status, task.revision);
+      if (saved) {
+        const current = store.getSnapshot().tasks.find(item => item.id === task.id);
+        const column = current && taskBoardColumns.find(item => item.id === taskBoardColumn(current, new Date()));
+        if (current) {
+          const superseded = (current.status === "done" ? "done" : "open") !== status;
+          setStatusNotice(superseded
+            ? `Úloha „${current.title}“ sa medzitým znova zmenila. Aktuálny stĺpec: ${column?.label ?? ""}.`
+            : `Úloha „${current.title}“ ${status === "done" ? "bola vybavená" : "bola znova otvorená"}.${column ? ` Stĺpec: ${column.label}.` : ""} Termín zostal zachovaný.`);
+        }
+      }
+    } finally {
+      setStatusTaskId(null);
+      // A saved card remounts in another column. Restore its keyboard focus
+      // only if the user has not moved on to another control while saving.
+      if (restoreFocus) window.requestAnimationFrame(() => {
+        if (document.activeElement !== document.body && document.activeElement !== focusSource) return;
+        const card = panelRef.current?.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(task.id)}"]`);
+        const target = card?.querySelector<HTMLButtonElement>(focusHandle ? "[data-task-drag-handle]" : "[data-task-status-action]");
+        if (target && !target.disabled) target.focus();
+        else (boardRef.current ?? panelRef.current?.querySelector<HTMLButtonElement>('button[aria-label="Obnoviť úlohy"]'))?.focus();
+      });
+    }
+  }
+  const cardProps = (task: WorkspaceTask) => ({ task, operators, now, selected: selected?.id === task.id,
+    dirty: Boolean(snapshot.drafts[task.id]), disabled: snapshot.saving || Boolean(snapshot.drafts[task.id]) || snapshot.conflicts.includes(task.id),
+    saving: snapshot.saving && statusTaskId === task.id, onSelect: store.select, onStatusChange: changeStatus });
   if (snapshot.hidden) return <section className={styles.panel} aria-label="Pracovný priestor úloh"><p>Overujem prístup k úlohám…</p>{snapshot.error && <p role="alert">{snapshot.error}</p>}<button type="button" onClick={() => void store.reauthorize()}>Overiť prístup znova</button></section>;
-  return <section className={`${styles.panel} ${variant === "page" ? styles.page : styles.sidebar}`} aria-label={variant === "sidebar" ? "Widget úloh" : "Pracovný priestor úloh"} style={{ containerType: "inline-size" }}>
+  return <section ref={panelRef} className={`${styles.panel} ${variant === "page" ? styles.page : styles.sidebar}`} aria-label={variant === "sidebar" ? "Widget úloh" : "Pracovný priestor úloh"} style={{ containerType: "inline-size" }}>
     <header className={styles.header}>
       <div className={styles.heading}><h2>Úlohy</h2><span>{snapshot.tasks.filter(task => task.status !== "done").length} otvorených</span></div>
       <div className={styles.actions}><button type="button" className={styles.refresh} aria-label="Obnoviť úlohy" title="Obnoviť úlohy" disabled={snapshot.loading} onClick={() => void store.refresh()}><RefreshCw size={15} aria-hidden="true" /></button><button type="button" className={styles.primary} onClick={store.openCreate}><Plus size={15} aria-hidden="true" />Nová úloha</button></div>
     </header>
     {snapshot.error && <div role="alert" className={styles.error}>{snapshot.error}</div>}
+    {statusNotice && <p role="status" className={styles.statusNotice}>{statusNotice}</p>}
     {conflict && selected && <div role="alert" className={styles.error}>Úloha sa medzitým zmenila. Váš draft zostáva zachovaný.<button type="button" onClick={() => void store.reloadTask(selected.id)}>Načítať aktuálnu úlohu a nahradiť draft</button></div>}
     <div className={`${styles.workspaceBody} ${editing ? styles.withEditor : ""}`}>
       <div className={styles.overview}>
@@ -74,12 +103,10 @@ export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, v
           const target = boardRef.current?.querySelector<HTMLElement>(`[data-task-column="${column.id}"]`);
           if (target) boardRef.current?.scrollTo({ left: target.offsetLeft - 12 });
         }}>{column.label}<span>{column.tasks.length}</span></button>)}</nav>}
-        {variant === "page" ? <section ref={boardRef} className={styles.board} aria-label="Tabuľa úloh" tabIndex={0}>
-          {columns.map(column => <section key={column.id} data-task-column={column.id} className={`${styles.column} ${styles[column.id] ?? ""}`} aria-label={column.label}>
-            <header className={styles.columnHeader}><div>{column.id === "done" ? <CheckCircle2 size={14} aria-hidden="true" /> : column.id === "overdue" ? <Clock3 size={14} aria-hidden="true" /> : <CalendarDays size={14} aria-hidden="true" />}<h3>{column.label}</h3></div><span>{column.tasks.length}</span></header>
-            <ul className={styles.columnList}>{column.tasks.map(taskCard)}{column.tasks.length === 0 && <li className={styles.emptyColumn}>{snapshot.loading ? "Načítavam…" : filter !== "all" || assignee !== "all" || query ? "Žiadne úlohy pre tento filter." : column.empty}</li>}</ul>
-          </section>)}
-        </section> : <div className={styles.sidebarList}><ul className={styles.list}>{visible.map(taskCard)}</ul>{!snapshot.loading && visible.length === 0 && <p className={styles.emptyColumn}>Žiadne úlohy v tomto pohľade.</p>}</div>}
+        {variant === "page" ? <>
+          <p className={styles.boardHelp}>Potiahnite úlohu do Vybavené alebo späť na otvorenie. Termín sa nemení.</p>
+          <TaskWorkspaceBoard columns={columns} boardRef={boardRef} loading={snapshot.loading} filtered={filter !== "all" || assignee !== "all" || Boolean(query)} cardProps={cardProps} onStatusChange={changeStatus} />
+        </> : <div className={styles.sidebarList}><ul className={styles.list}>{visible.map(task => <TaskWorkspaceCard key={task.id} {...cardProps(task)} />)}</ul>{!snapshot.loading && visible.length === 0 && <p className={styles.emptyColumn}>Žiadne úlohy v tomto pohľade.</p>}</div>}
       </div>
       {editing && <aside className={styles.editor} aria-label={selected ? "Detail úlohy" : "Nová úloha"}>
       <header className={styles.editorHeader}><h3>{selected ? "Detail úlohy" : "Nová úloha"}</h3><button type="button" onClick={() => store.select(null)}><ArrowLeft size={14} aria-hidden="true" />Späť na úlohy</button></header>

@@ -11,6 +11,13 @@ export const taskBoardColumns = [
 
 export type TaskBoardColumnId = typeof taskBoardColumns[number]["id"];
 
+/** Moving a card changes completion only; date buckets never invent a deadline. */
+export function taskBoardDropStatus(task: WorkspaceTask, column: string): "open" | "done" | null {
+  if (!taskBoardColumns.some(item => item.id === column)) return null;
+  if (task.status !== "done") return column === "done" ? "done" : null;
+  return column === "done" ? null : "open";
+}
+
 /** A task appears exactly once: elapsed deadlines take precedence over today's date. */
 export function taskBoardColumn(task: WorkspaceTask, now: Date): TaskBoardColumnId {
   if (task.status === "done") return "done";

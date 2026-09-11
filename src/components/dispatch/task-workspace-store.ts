@@ -177,6 +177,47 @@ export class TaskWorkspaceStore {
       this.update({ drafts, conflicts: this.state.conflicts.filter(value => value !== id) });
     } catch (error) { if (generation === this.generation && (error as { status?: number }).status === 409) this.update({ conflicts: [...new Set([...this.state.conflicts, id])] }); throw error; }
   });
+  setTaskStatus = async (id: string, status: "open" | "done", expectedRevision?: number): Promise<boolean> => {
+    if (!this.enabled || this.state.hidden || this.state.saving) return false;
+    const current = this.state.tasks.find(task => task.id === id);
+    if (!current || (current.status === "done" ? "done" : "open") === status) return false;
+    if (this.state.drafts[id]) {
+      this.update({ error: "Pred zmenou stavu uložte rozpracovanú úlohu." });
+      return false;
+    }
+    if (this.state.conflicts.includes(id)) {
+      this.select(id);
+      this.update({ error: "Pred zmenou stavu načítajte aktuálnu úlohu." });
+      return false;
+    }
+    const revision = expectedRevision ?? current.revision;
+    let accepted = false;
+    const saved = await this.operation(async () => {
+      const generation = this.generation;
+      try {
+        const { task } = await this.request(`/api/tasks/${encodeURIComponent(id)}`, { method: "PATCH", ...this.body({ status, expectedRevision: revision }) }) as { task: WorkspaceTask };
+        if (generation !== this.generation || this.state.hidden || !this.state.tasks.some(item => item.id === id)) return;
+        this.accept(task);
+        accepted = true;
+        // Typing can start while the status request is pending. Keep that draft
+        // on its original revision: rebasing it would silently undo this status
+        // change (or another writer's newer edit) on the next full draft save.
+        const draft = this.state.drafts[id];
+        const canonical = this.state.tasks.find(item => item.id === id)!;
+        if (draft && draft.revision < canonical.revision) {
+          this.select(id);
+          this.update({ conflicts: [...new Set([...this.state.conflicts, id])], error: "Stav je uložený. Rozpracovaná úloha zostala zachovaná; pred ďalším uložením načítajte aktuálnu úlohu." });
+        }
+      } catch (error) {
+        if (generation === this.generation && !this.state.hidden && this.state.tasks.some(item => item.id === id) && (error as { status?: number }).status === 409) {
+          this.select(id);
+          this.update({ conflicts: [...new Set([...this.state.conflicts, id])] });
+        }
+        throw error;
+      }
+    });
+    return saved && accepted;
+  };
   reloadTask = async (id: string) => {
     if (!this.enabled || this.state.saving) return;
     const generation = this.generation;
