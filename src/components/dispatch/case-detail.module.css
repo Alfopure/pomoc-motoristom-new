@@ -487,6 +487,11 @@
     width: 100%;
   }
 
+  .pdfAction {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
   .summaryFact {
     grid-template-columns: 76px minmax(0, 1fr);
   }

@@ -9,7 +9,7 @@ import { casePriorityLabels, caseStatusLabels, caseStatusTone, priorityTone } fr
 import type { DispatchMapModel } from "@/lib/map-adapter";
 import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
-import { CaseEditorHeader, type CaseEditorControls } from "./CaseEditorHeader";
+import { CaseEditorHeader, type CaseHeaderControls } from "./CaseEditorHeader";
 import { CaseDetail } from "./CaseDetail";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { SmsComposerDialog } from "./SmsComposerDialog";
@@ -65,7 +65,7 @@ export function CaseCockpitPanel({
   priceRule,
   viewerProfileId,
 }: CaseCockpitPanelProps) {
-  const [editorControls, setEditorControls] = useState<CaseEditorControls | null>(null);
+  const [editorControls, setEditorControls] = useState<CaseHeaderControls | null>(null);
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
   const [isDialingFromHeader, setIsDialingFromHeader] = useState(false);
   const [nativeCallBusy, setNativeCallBusy] = useState(false);
