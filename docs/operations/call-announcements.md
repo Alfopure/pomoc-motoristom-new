@@ -4,7 +4,9 @@ V **Nastavenia → Telefonovanie → Hlášky a jazyk** vyberte linku, jazyk a k
 
 Pripravené sú slovenské, české, anglické a nemecké hlášky. Vybraný jazyk platí pre linku; systém neodhaduje jazyk podľa telefónnej predvoľby. Existujúce vlastné nahrávky a texty konkrétneho IVR menu majú prednosť. Pri zmene menu vždy zosúlaďte vyslovené čísla s jeho akciami. Samotná úprava textu nemení smerovanie hovoru.
 
-Všetky používané hovorené hlášky majú jednotný prirodzený hlas Richard. Úvod trvá menej než 3 sekundy. Počas podržania hrá tichá inštrumentálna slučka; čakáreň pripomína možnosť spätného volania medzi dlhšími blokmi hudby. Úvod sa dokončí pred spustením menu, hudby alebo zvonenia operátorov. Výpadok média má hlasovú náhradu; ak nefunguje ani tá, hovor pokračuje bežným smerovaním bez privítania. Chyba úvodnej nahrávky sama neukončí zákaznícky hovor. Oznam pred nahrávaním má samostatnú kontrolu dokončenia: pri jeho výpadku hovor pokračuje bez spustenia záznamu.
+Všetky používané hovorené hlášky majú jednotný prirodzený hlas Richard. Úvod prichádzajúceho hovoru trvá menej než 3 sekundy. Počas podržania hrá tichá inštrumentálna slučka; čakáreň pripomína možnosť spätného volania medzi dlhšími blokmi hudby. Úvod sa dokončí pred spustením menu, hudby alebo zvonenia operátorov. Výpadok média má hlasovú náhradu; ak nefunguje ani tá, hovor pokračuje bežným smerovaním bez privítania. Chyba úvodnej nahrávky sama neukončí zákaznícky hovor. Oznam pred nahrávaním má samostatnú kontrolu dokončenia: pri jeho výpadku hovor pokračuje bez spustenia záznamu.
+
+Odchádzajúce hovory vrátane spätných volaní nemajú automatické úvodné predstavenie. Bez nahrávania sa zvuk prepojí po prijatí zákazníkom bez čakania na hlášku. Pri zapnutom nahrávaní zostáva iba príslušný oznam o nahrávaní.
 
 ## Kompletná knižnica a stav použitia
 
@@ -15,14 +17,14 @@ Editor obsahuje **26 situácií v štyroch jazykoch**, spolu 104 MP3 s hovorený
 | Používané v hovoroch | 7 | Privítanie, mimo hodín, hlavné menu, ponuka a potvrdenie spätného volania, nedostupnosť, nesprávna voľba. Zapojené do existujúcich situácií hovoru. |
 | Čakanie a návrat | 4 | Podržanie, čakáreň s ponukou spätného volania a návrat sú zapojené; samostatné pripomenutie je pripravené. |
 | Prepájanie a účastníci | 6 | Prepájanie, konzultácia, parkovanie a pripojenie/odchod účastníka sú zapojené; neúspešné prepájanie je pripravené. |
-| Ďalšie situácie | 4 | Odchádzajúci úvod je zapojený; nezachytená voľba, mimo hodín bez callbacku a chyba uloženia callbacku sú pripravené. |
+| Ďalšie situácie | 4 | Odchádzajúci úvod je vypnutý; nezachytená voľba, mimo hodín bez callbacku a chyba uloženia callbacku sú pripravené. |
 | Nahrávanie | 5 | Oznámenie pre vybavenie pomoci alebo kontrolu kvality, potvrdené vypnutie a obnovenie sú zapojené pod podmienkami politiky nahrávania; nedostupnosť je pripravená. |
 
-Do stavov hovoru je zapojených 20 hlášok; šesť ďalších alternatív je pripravených. Všetky možno upravovať, generovať, prehrávať a uložiť. **Uloženie hlášky nezapína nahrávanie ani pripravenú alternatívu.** Hudba počas čakania sa používa naďalej. Pri podržaní, prepájaní a zmene účastníkov aplikácia najprv dokončí príslušnú hlášku a potom vykoná akciu; pri výpadku reči pokračuje pomoc bez hlášky.
+Do stavov hovoru je zapojených 19 hlášok; šesť ďalších alternatív je pripravených a odchádzajúci úvod je vypnutý. Všetky možno upravovať, generovať, prehrávať a uložiť. **Uloženie hlášky nezapína nahrávanie, pripravenú alternatívu ani odchádzajúci úvod.** Hudba počas čakania sa používa naďalej. Pri podržaní, prepájaní a zmene účastníkov aplikácia najprv dokončí príslušnú hlášku a potom vykoná akciu; pri výpadku reči pokračuje pomoc bez hlášky.
 
 ## Upozornenie na nahrávanie
 
-Nahrávanie sa riadi samostatnou sekciou **Nahrávanie a kvalita**, schválenou politikou organizácie a serverovými prepínačmi. Zapojená implementácia vyžaduje úspešne dokončený oznam pred prvým záznamom. Záznam zákazníckeho hovoru začne pred pripojením operátora; pri odchádzajúcom hovore sa zákazník najprv dozvie, kto volá. Súbor v editore ani jeho uloženie nahrávanie nezapína. Nastavenia mimo aplikácie, napríklad automatické nahrávanie u operátora, treba overiť osobitne.
+Nahrávanie sa riadi samostatnou sekciou **Nahrávanie a kvalita**, schválenou politikou organizácie a serverovými prepínačmi. Zapojená implementácia vyžaduje úspešne dokončený oznam pred prvým záznamom. Záznam zákazníckeho hovoru začne pred pripojením operátora; pri odchádzajúcom hovore sa služba automatickou úvodnou hláškou nepredstavuje. Súbor v editore ani jeho uloženie nahrávanie nezapína. Nastavenia mimo aplikácie, napríklad automatické nahrávanie u operátora, treba overiť osobitne.
 
 Pri podržaní, parkovaní, konzultácii a zmene topológie sa čaká na potvrdené zastavenie všetkých záznamov. Nejasný výsledok ostáva viditeľný ako neistý stav a súkromná akcia sa nevykoná. Návrat môže založiť nový segment iba pri overenej podpore danej topológie. Námietka vypne ďalšie nahrávanie tohto hovoru, obmedzí prístup k existujúcim segmentom a zakáže automatické obnovenie. Voliteľné hlasové potvrdenie vypnutia zaznie iba po potvrdenom zastavení. Neistý výsledok sa nevydáva za vypnuté nahrávanie.
 

@@ -21,7 +21,8 @@
 
 import { applyStoredAudioOutput, REMOTE_AUDIO_ELEMENT_ID } from "@/lib/telephony/audio-output";
 import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
-import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
+import { telephonyJson, TELEPHONY_TIMEOUT_MS, type TelephonyJsonResult } from "@/lib/telephony/client-request";
+import type { IClientOptions } from "@telnyx/webrtc";
 import {
   EXPECTED_LEG_TTL_MS,
   heartbeatRegistrationState,
@@ -82,6 +83,9 @@ export type WebphoneSdkNotification = {
   error?: Error;
 };
 
+type WebphoneSdkModule = { TelnyxRTC: new (options: IClientOptions) => WebphoneSdkClient };
+type HeartbeatResult = TelephonyJsonResult<{ error?: string; reason?: string }>;
+
 export type WebphoneCallView = {
   id: string;
   /** SDK call state (`ringing`, `active`, `held`, `hangup`, …). */
@@ -128,6 +132,8 @@ export type TelnyxWebphoneOptions = {
   random?: () => number;
   /** Test seam: replaces `@telnyx/webrtc`'s `new TelnyxRTC({ login_token })`. */
   createClient?: (credentials: WebphoneCredentials) => Promise<WebphoneSdkClient> | WebphoneSdkClient;
+  /** Test seam: download the SDK independently of credentials/socket setup. */
+  loadSdk?: () => Promise<WebphoneSdkModule>;
   /** Test seam for the two HTTP calls this module makes. */
   requestJson?: typeof telephonyJson;
   setTimeout?: (handler: () => void, timeoutMs: number) => number;
@@ -176,6 +182,8 @@ export class TelnyxWebphone {
   private resumeSessionId: string | null = null;
   private handoffPending = false;
   private mintGeneration = 0;
+  private sdkModule: Promise<WebphoneSdkModule> | null = null;
+  private heartbeatRequest: { body: string; generation: number; promise: Promise<HeartbeatResult> } | null = null;
   private readonly options: TelnyxWebphoneOptions;
   private readonly boundVisibility = () => this.onVisibilityChange();
   private readonly boundPageHide = () => {
@@ -212,6 +220,9 @@ export class TelnyxWebphone {
   start(): void {
     if (this.started) return;
     this.started = true;
+    // Download the lazy chunk while the token request is in flight. Mobile
+    // still calls start only after its microphone permission check succeeds.
+    if (!this.options.createClient) void this.loadSdk().catch(() => undefined);
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", this.boundVisibility);
       window.addEventListener("pagehide", this.boundPageHide);
@@ -521,14 +532,7 @@ export class TelnyxWebphone {
     if (!this.started || !body) return;
     const deviceSessionId = this.state.credentials?.deviceSessionId;
     try {
-      const result = await this.requestJson<{ error?: string; reason?: string }>(HEARTBEAT_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-        keepalive: options.leaving,
-        label: "heartbeat telefónu",
-        timeoutMs: TELEPHONY_TIMEOUT_MS.read,
-      });
+      const result = await this.requestHeartbeat(body, options.leaving);
       // 409 is the server saying this tab's device session was superseded (or
       // revoked). Retrying cannot help: the newest tab owns the credential.
       // A background request can finish after a token renewal changed our
@@ -541,14 +545,40 @@ export class TelnyxWebphone {
     }
   }
 
+  private requestHeartbeat(body: string, leaving = false): Promise<HeartbeatResult> {
+    const generation = this.clientGeneration;
+    const pending = this.heartbeatRequest;
+    // A page-cache restore must publish a fresh registration after its leaving
+    // report, even if an older registered heartbeat is still in flight.
+    if (leaving) this.heartbeatRequest = null;
+    // Registration publishes a heartbeat immediately. An explicit call must
+    // await that same acknowledgement instead of adding another HTTP roundtrip.
+    // Leaving/unregistered reports and new socket generations remain distinct.
+    if (!leaving && pending?.body === body && pending.generation === generation) return pending.promise;
+    const promise = this.requestJson<{ error?: string; reason?: string }>(HEARTBEAT_URL, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
+      keepalive: leaving, label: "heartbeat telefónu", timeoutMs: TELEPHONY_TIMEOUT_MS.read,
+    });
+    if (!leaving) {
+      const request = { body, generation, promise };
+      this.heartbeatRequest = request;
+      const clear = () => { if (this.heartbeatRequest === request) this.heartbeatRequest = null; };
+      void promise.then(clear, clear);
+    }
+    return promise;
+  }
+
   /** Await server liveness before an explicit on-demand call request. */
   async confirmRegistration(): Promise<void> {
     if (this.state.status !== "registered") throw new Error("Telefón ešte nie je pripojený.");
-    const result = await this.requestJson<{ error?: string }>(HEARTBEAT_URL, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: this.heartbeatBody(),
-      label: "pripravenie telefónu", timeoutMs: TELEPHONY_TIMEOUT_MS.read,
-    });
+    const generation = this.clientGeneration;
+    const body = this.heartbeatBody();
+    if (!body) throw new Error("Telefón ešte nie je pripojený.");
+    const result = await this.requestHeartbeat(body);
     if (!result.ok) throw new Error(result.body?.error ?? "Pripojenie telefónu sa nepodarilo potvrdiť.");
+    if (!this.started || this.state.status !== "registered" || generation !== this.clientGeneration || body !== this.heartbeatBody()) {
+      throw new Error("Pripojenie telefónu sa zmenilo. Skúste hovor znova.");
+    }
   }
 
   /** Fire-and-forget heartbeat that survives the tab being hidden or closed. */
@@ -632,8 +662,19 @@ export class TelnyxWebphone {
   }
 
   private async createTelnyxClient(credentials: WebphoneCredentials): Promise<WebphoneSdkClient> {
-    const { TelnyxRTC } = await import("@telnyx/webrtc");
-    return new TelnyxRTC({ login_token: credentials.token }) as unknown as WebphoneSdkClient;
+    const { TelnyxRTC } = await this.loadSdk();
+    // Send the SDP answer immediately and deliver ICE candidates as they
+    // arrive, avoiding the SDK's non-trickle gathering wait before answering.
+    return new TelnyxRTC({ login_token: credentials.token, trickleIce: true });
+  }
+
+  private loadSdk(): Promise<WebphoneSdkModule> {
+    if (!this.sdkModule) {
+      const promise = this.options.loadSdk ? this.options.loadSdk() : import("@telnyx/webrtc");
+      this.sdkModule = promise;
+      void promise.catch(() => { if (this.sdkModule === promise) this.sdkModule = null; });
+    }
+    return this.sdkModule;
   }
 
   private async disconnectClient(): Promise<void> {
