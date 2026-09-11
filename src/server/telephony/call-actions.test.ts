@@ -1,4 +1,4 @@
-import { completeAnnouncedAction, completeCallAnnouncements } from "@/test/complete-call-announcements";
+import { completeAnnouncedAction } from "@/test/complete-call-announcements";
 import { describe, expect, it } from "vitest";
 
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
@@ -107,7 +107,8 @@ describe("startOutboundCall", () => {
     await h.legEvent("cc-2", "call.answered", { direction: "outgoing" });
     expect(h.telnyx.of("playbackStart")).toHaveLength(0);
     expect(h.telnyx.of("speak")).toHaveLength(0);
-    expect(h.telnyx.of("bridge")[0].params).toMatchObject({ callControlId: "cc-2", targetCallControlId: own });
+    expect(customerDial).toMatchObject({ bridgeOnAnswer: true, linkTo: own });
+    expect(h.telnyx.of("bridge")).toHaveLength(0);
     expect(h.session(result.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o1 });
     expect(h.call(result.sessionId)).toMatchObject({ status: "answered" });
 

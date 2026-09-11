@@ -9,6 +9,18 @@ const expected = { language: "sk" as const, text: "Vitajte na našej linke.", vo
 const generated = { ...expected, audioUrl: "https://example.test/voice.mp3" };
 
 describe("announcement drafts", () => {
+  it("tracks each startup switch as an unsaved change and treats omitted legacy flags as their defaults", () => {
+    expect(sameAnnouncementConfig(initial, { ...initial, inboundStartAnnouncements: undefined, outboundStartAnnouncements: undefined })).toBe(true);
+    expect(sameAnnouncementConfig(initial, { ...initial, inboundStartAnnouncements: false })).toBe(false);
+    expect(sameAnnouncementConfig(initial, { ...initial, outboundStartAnnouncements: true })).toBe(false);
+  });
+  it("retains direction switches when editing translations, completing generation and resetting a prompt", () => {
+    const toggled = { ...initial, inboundStartAnnouncements: false, outboundStartAnnouncements: true };
+    const draft = { ...setAnnouncementText(toggled, "sk", "greeting", expected.text), language: "de" as const };
+    const completed = applyGeneratedAnnouncement(draft, "greeting", expected, generated)!;
+    expect(completed).toMatchObject({ inboundStartAnnouncements: false, outboundStartAnnouncements: true });
+    expect(resetAnnouncementPrompt(completed, "sk", "greeting")).toMatchObject({ inboundStartAnnouncements: false, outboundStartAnnouncements: true });
+  });
   it("treats status preference changes as dirty and preserves them through text, language and generation edits", () => {
     const enabled = { ...initial, recordingStatusAnnouncements: true };
     expect(sameAnnouncementConfig(initial, enabled)).toBe(false);

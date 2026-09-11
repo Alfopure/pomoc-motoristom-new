@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
 import { createTelephonyHarness, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
 import { blindTransfer, createRateLimiter, startOutboundCall } from "../call-actions";
@@ -40,6 +41,7 @@ describe("recorded customer conference connection", () => {
 
   it("uses the same customer anchor for outbound calls after their privacy notice", async () => {
     const h = harness();
+    h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), outboundStartAnnouncements: true } } }, () => true);
     const call = await startOutboundCall({ ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) }, { profileId: PROFILES.o1, role: "dispatcher" }, { to: "+421905123456" });
     h.telnyx.physical.answered(call.operatorLegCallControlId);
     await h.legEvent(call.operatorLegCallControlId, "call.answered");

@@ -30,7 +30,14 @@ function policyState(session: SessionRow, context: RoutingContext): RecordingSta
   if (existing) return existing;
   const policy = context.recordingPolicy;
   if (!policy || session.direction === "internal") return undefined;
-  return { version: 1, policy, epoch: 0, noticeCompletedAt: null, noticeFailed: false, suppressedAt: null, suppressionReason: null, recorders: [], error: policy.enabled ? null : policy.reason ?? null };
+  const announcements = readMeta(session).announcements ?? context.announcements ?? announcementConfigFromMetadata(context.line?.metadata);
+  const startupEnabled = session.direction === "inbound"
+    ? announcements.inboundStartAnnouncements !== false
+    : announcements.outboundStartAnnouncements === true;
+  // No automatic notice means no automatic capture. Freeze this per call;
+  // changing a line later must not alter a conversation already in progress.
+  const effectivePolicy = startupEnabled ? policy : { ...policy, enabled: false, reason: "start_announcements_disabled" };
+  return { version: 1, policy: effectivePolicy, epoch: 0, noticeCompletedAt: null, noticeFailed: false, suppressedAt: null, suppressionReason: null, recorders: [], error: effectivePolicy.enabled ? null : effectivePolicy.reason ?? null };
 }
 
 function eligible(session: SessionRow, context: RoutingContext, state: RecordingState | undefined): state is RecordingState {
@@ -312,10 +319,12 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
       }
       return startSequence(current, context, customer.telnyx_call_control_id, [noticeKey(state)], event, event.id);
     }
-    if (event.kind === "telnyx" && event.type === "call.answered" && meta.outbound_audio_gate && session.direction === "outbound" && event.callControlId === customer.telnyx_call_control_id && session.state === "ringing" && eligible(current, context, state)) {
-      // Outbound calls (including callbacks) skip the service introduction.
-      // Only enabled recording needs its notice before capture and connection.
-      return startSequence(current, context, customer.telnyx_call_control_id, [noticeKey(state)], event, event.id);
+    if (event.kind === "telnyx" && event.type === "call.answered" && meta.outbound_audio_gate && session.direction === "outbound" && event.callControlId === customer.telnyx_call_control_id && session.state === "ringing") {
+      const keys: AnnouncementKey[] = announcements.outboundStartAnnouncements === true ? ["outboundIntro"] : [];
+      // Existing recorded sessions keep their notice contract across releases.
+      // New silent sessions have recording disabled in their frozen policy.
+      if (eligible(current, context, state)) keys.push(noticeKey(state));
+      if (keys.length) return startSequence(current, context, customer.telnyx_call_control_id, keys, event, event.id);
     }
   }
   const result = core(current, legs, attempts, event, context);

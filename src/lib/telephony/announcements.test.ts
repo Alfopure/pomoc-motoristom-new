@@ -24,12 +24,29 @@ describe("caller announcement assets", () => {
     expect(isAnnouncementEnabled(enabled, "recordingResumed")).toBe(true);
     expect(resolveAnnouncement(enabled, "recordingNotice")).toEqual(resolveAnnouncement(defaultAnnouncementConfig(), "recordingNotice"));
   });
-  it("keeps the outbound introduction disabled even with saved custom audio and status messages enabled", () => {
+  it("defaults outbound introductions to silent even with saved custom audio and status messages enabled", () => {
     for (const { code } of ANNOUNCEMENT_LANGUAGES) {
       const config = readAnnouncementConfig({ ...defaultAnnouncementConfig(), language: code, recordingStatusAnnouncements: true,
         prompts: { [code]: { outboundIntro: { text: "Saved introduction", audioUrl: "https://media.test/custom-intro.mp3" } } } });
       expect(isAnnouncementEnabled(config, "outboundIntro")).toBe(false);
       expect(isAnnouncementEnabled(config, "recordingNotice")).toBe(true);
+    }
+  });
+  it("normalizes legacy and malformed startup preferences without enabling outbound audio", () => {
+    const legacy = { version: 1, language: "sk", voiceId: defaultAnnouncementConfig().voiceId, prompts: {} };
+    for (const input of [null, legacy, { ...legacy, inboundStartAnnouncements: "false", outboundStartAnnouncements: "true" }]) {
+      expect(readAnnouncementConfig(input)).toMatchObject({ inboundStartAnnouncements: true, outboundStartAnnouncements: false });
+    }
+  });
+  it.each([true, false])("keeps inbound and outbound startup switches independent when inbound=%s", (inboundStartAnnouncements) => {
+    for (const outboundStartAnnouncements of [true, false]) {
+      const config = readAnnouncementConfig({ ...defaultAnnouncementConfig(), inboundStartAnnouncements, outboundStartAnnouncements });
+      expect(isAnnouncementEnabled(config, "greeting")).toBe(inboundStartAnnouncements);
+      expect(isAnnouncementEnabled(config, "outboundIntro")).toBe(outboundStartAnnouncements);
+      // Recording notices remain available for later participant additions.
+      expect(isAnnouncementEnabled(config, "recordingNotice")).toBe(true);
+      expect(isAnnouncementEnabled(config, "recordingServiceNotice")).toBe(true);
+      expect(isAnnouncementEnabled(config, "ivrMain")).toBe(true);
     }
   });
   it("ships the exact configured text and intact audio in all four languages", () => {

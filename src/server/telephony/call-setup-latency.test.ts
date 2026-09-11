@@ -1,9 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createTelephonyHarness, NUMBERS, PROFILES } from "@/test/telephony-harness";
+import { createTelephonyHarness, LINES, NUMBERS, PROFILES } from "@/test/telephony-harness";
 import { createRateLimiter, startOutboundCall } from "./call-actions";
 
 describe("outbound setup latency", () => {
+  it("uses the configured caller ID's line settings when the operator has no personal default", async () => {
+    const h = createTelephonyHarness();
+    h.db.update("motorist_operator_telephony_settings", { default_from_line_id: null }, (row) => row.profile_id === PROFILES.o1);
+    const call = await startOutboundCall({ ...h.deps, rateLimiter: createRateLimiter() },
+      { profileId: PROFILES.o1, role: "dispatcher" }, { to: NUMBERS.customer });
+
+    expect(call.from).toBe(NUMBERS.allianz);
+    expect(h.session(call.sessionId)).toMatchObject({ line_id: LINES.allianz, metadata: expect.objectContaining({ line_label: expect.any(String) }) });
+  });
+
   it("loads independent guards while settings are pending, without dialling before they pass", async () => {
     const h = createTelephonyHarness();
     const from = h.client.from.bind(h.client);

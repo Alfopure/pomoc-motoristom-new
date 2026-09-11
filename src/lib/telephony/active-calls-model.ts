@@ -231,7 +231,7 @@ export type PhoneBarCall = {
   caseId: string | null;
   match: CallerMatch | null;
   matchCount: number;
-  /** Timer origin: answer time once answered, otherwise the call start. */
+  /** Conversation starts on confirmed audio; pending stages time their setup. */
   timerSince: string;
   answered: boolean;
   held: boolean;
@@ -362,14 +362,14 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
     kind,
     state: call.state,
     direction: call.direction,
-    lineLabel: call.lineLabel ?? call.partnerName ?? "Neznáma linka",
+    lineLabel: call.lineLabel ?? call.partnerName ?? (formatPhoneNumberForDisplay(call.direction === "outbound" ? call.callerNumber : call.calledNumber) || "Neznáma linka"),
     partnerName: call.partnerName,
     number: counterpartNumber(call),
     callerName: null,
     caseId: call.caseId,
     match: null,
     matchCount: 0,
-    timerSince: call.answeredAt ?? call.startedAt,
+    timerSince: call.audioConnection?.confirmedAt ?? call.audioConnection?.startedAt ?? call.answeredAt ?? call.startedAt,
     answered: Boolean(call.answeredAt),
     held: call.state === "held",
     parked: call.state === "parked" || call.state === "waiting",

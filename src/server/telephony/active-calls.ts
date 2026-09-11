@@ -131,6 +131,20 @@ function audioConnectionView(session: SessionRow, legs: LegRow[], now: Date): Au
       error: expired ? "connection_confirmation_timeout" : null };
   }
   const connection = recording?.connection;
+  // A silent outgoing call may bridge directly without recorder metadata.
+  // Customer answer changes the session to talking before that bridge finishes;
+  // require both current legs' provider confirmations before claiming audio.
+  if (!connection && session.direction === "outbound" && session.state === "talking") {
+    const customer = legs.find(leg => leg.role === "customer" && isOpenLeg(leg) && leg.answered_at);
+    const operator = legs.find(leg => leg.role === "operator" && leg.profile_id === session.answered_by_profile_id && isOpenLeg(leg) && leg.answered_at);
+    const confirmedAt = customer?.bridged_at && operator?.bridged_at
+      ? (Date.parse(customer.bridged_at) > Date.parse(operator.bridged_at) ? customer.bridged_at : operator.bridged_at)
+      : null;
+    const startedAt = session.answered_at ?? session.started_at;
+    const expired = now.getTime() - Date.parse(startedAt) >= AUDIO_CONNECTION_WARNING_MS;
+    return { status: confirmedAt ? "connected" : expired ? "failed" : "connecting", startedAt, confirmedAt,
+      error: !confirmedAt && expired ? "connection_confirmation_timeout" : null };
+  }
   if (!connection || connection.operatorProfileId !== session.answered_by_profile_id ||
     !connection.callControlIds.every((id) => legs.some((leg) => leg.telnyx_call_control_id === id && isOpenLeg(leg) && leg.answered_at))) return null;
   if (!connection.confirmedAt) return { status: "failed", startedAt: connection.startedAt, confirmedAt: null, error: "connection_interrupted" };

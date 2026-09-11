@@ -8,6 +8,7 @@ import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { isUuid } from "@/lib/telephony/uuid";
 
@@ -237,6 +238,14 @@ async function resolveFromLine(deps: CallActionDeps, profileId: string, lineId: 
   }
   const from = line?.phone_number ?? (deps.config.configured ? deps.config.defaultFromNumber : null);
   if (!from) throw new CallActionError("Chýba odchádzajúce číslo (TELNYX_DEFAULT_FROM_NUMBER).", 500, "missing_from");
+  // Operators without a personal default still use a configured DID. Resolve
+  // its line so outbound startup settings and the displayed identity apply.
+  if (!line) {
+    const result = await admin.from("motorist_telephony_lines").select("*")
+      .eq("organization_id", organizationId).eq("phone_number", from).eq("active", true).maybeSingle();
+    if (result.error) throw new CallActionError("Nastavenia odchádzajúcej linky sa nepodarilo načítať.", 503, "line_unavailable");
+    line = result.data ?? null;
+  }
   return { line, from };
 }
 
@@ -306,7 +315,7 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
     lineId: line?.id ?? null,
     caseId: input.caseId ?? null,
     answeredBy: actor.profileId,
-    metadata: { ...(input.callbackRequestId ? { callbackRequestId: input.callbackRequestId, effects_v1: { generation: 0 } } : {}), outbound: { to, by: actor.profileId, from, case_id: input.caseId ?? null }, line_label: line?.label ?? null, partner_name: line?.partner_name ?? null },
+    metadata: { ...(input.callbackRequestId ? { callbackRequestId: input.callbackRequestId, effects_v1: { generation: 0 } } : {}), outbound: { to, by: actor.profileId, from, case_id: input.caseId ?? null }, announcements: announcementConfigFromMetadata(line?.metadata), line_label: line?.label ?? null, partner_name: line?.partner_name ?? null },
   });
 
   if (input.callbackRequestId) {

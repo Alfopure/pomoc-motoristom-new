@@ -128,4 +128,27 @@ describe("active calls snapshot", () => {
     const snapshot = await loadActiveCalls(deps(h), { profileId: PROFILES.o1, canManageAssignments: false });
     expect(snapshot.calls).toEqual([]);
   });
+
+  it("an outgoing customer answer waits for both current bridge confirmations without recording metadata", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    const answeredAt = h.now().toISOString();
+    h.db.update("motorist_call_sessions", { direction: "outbound", state: "talking", answered_at: answeredAt, answered_by_profile_id: PROFILES.o1, metadata: {} }, row => row.id === sessionId);
+    h.db.update("motorist_call_legs", { answered_at: answeredAt, bridged_at: null, state: "answered" }, row => row.session_id === sessionId && (row.role === "customer" || row.profile_id === PROFILES.o1));
+    const connection = async () => (await loadActiveCalls(deps(h), { profileId: PROFILES.o1, canManageAssignments: false })).calls[0].audioConnection;
+    expect(await connection()).toEqual({ status: "connecting", startedAt: answeredAt, confirmedAt: null, error: null });
+    h.advance(5_000);
+    h.db.update("motorist_call_legs", { bridged_at: h.now().toISOString(), state: "bridged" }, row => row.session_id === sessionId && row.role === "customer");
+    // A different operator's confirmation must not match this conversation.
+    h.db.update("motorist_call_legs", { answered_at: answeredAt, bridged_at: h.now().toISOString(), state: "bridged" }, row => row.session_id === sessionId && row.profile_id === PROFILES.o2);
+    expect((await connection())?.status).toBe("connecting");
+    h.advance(30_000);
+    expect(await connection()).toMatchObject({ status: "failed", error: "connection_confirmation_timeout" });
+    const confirmedAt = h.now().toISOString();
+    h.db.update("motorist_call_legs", { bridged_at: confirmedAt, state: "bridged" }, row => row.session_id === sessionId && row.profile_id === PROFILES.o1);
+    expect(await connection()).toEqual({ status: "connected", startedAt: answeredAt, confirmedAt, error: null });
+    // Incoming calls keep their existing recording and connection semantics.
+    h.db.update("motorist_call_sessions", { direction: "inbound" }, row => row.id === sessionId);
+    expect(await connection()).toBeNull();
+  });
 });
