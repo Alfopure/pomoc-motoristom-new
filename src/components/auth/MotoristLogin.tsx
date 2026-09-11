@@ -4,8 +4,9 @@ import type { FormEvent } from "react";
 import { useState } from "react";
 import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { loginDestination } from "./login-destination";
 
-export function MotoristLogin({ message }: { message: string }) {
+export function MotoristLogin({ message, returnTo }: { message: string; returnTo?: string }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<"idle" | "working" | "error">("idle");
@@ -40,10 +41,7 @@ export function MotoristLogin({ message }: { message: string }) {
       return;
     }
 
-    // Preserve a task notification link through sign-in, without accepting
-    // arbitrary redirect destinations from query parameters.
-    const taskId = new URL(window.location.href).searchParams.get("task");
-    window.location.href = taskId ? `/?task=${encodeURIComponent(taskId)}` : "/";
+    window.location.href = loginDestination(window.location.href, returnTo);
   }
 
   const isWorking = status === "working";
@@ -102,6 +100,9 @@ export function MotoristLogin({ message }: { message: string }) {
 
           <Link href={forgotPasswordHref} className="mt-4 block w-full text-center text-sm font-semibold text-zinc-700 transition hover:text-zinc-950">
             Zabudnuté heslo
+          </Link>
+          <Link href="/navod/prihlasenie" className="mt-4 block text-center text-sm text-zinc-600 underline underline-offset-4 hover:text-zinc-950">
+            Pomoc s prihlásením
           </Link>
           <Link href="/ochrana-hovorov" className="mt-5 block text-center text-xs text-zinc-500 underline underline-offset-4 hover:text-zinc-800">
             Informácie o nahrávaní hovorov

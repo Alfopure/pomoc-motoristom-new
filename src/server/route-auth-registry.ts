@@ -30,6 +30,7 @@ export type RouteAuthEntry = {
 };
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
+  "guide/knowledge": { class: "session", note: "Versioned documentation only; no live telephony or organization data." },
   "telephony/callback-target": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   "directory/contacts/[id]/callback-policy": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "GET directory policy; PUT manager/admin only with same-origin guard." },
   "vehicles/lookup": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },

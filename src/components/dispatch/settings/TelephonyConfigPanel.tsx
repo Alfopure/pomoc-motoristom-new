@@ -30,6 +30,13 @@ import { RecordingPolicyPanel } from "./RecordingPolicyPanel";
 
 type TelephonyConfigTab = "phone" | "groups" | "plans" | "ivr" | "announcements" | "hours" | "pauses" | "numbers" | "operators" | "recording" | "settings";
 
+const GUIDE_CHAPTERS: Record<TelephonyConfigTab, string> = {
+  phone: "moj-telefon", groups: "skupiny-zvonenia", plans: "plany-zvonenia",
+  ivr: "cisla-hodiny-a-ivr", announcements: "hlasky-a-nahravanie", hours: "cisla-hodiny-a-ivr",
+  pauses: "pauza-a-zastupovanie", numbers: "cisla-hodiny-a-ivr", operators: "moj-telefon",
+  recording: "hlasky-a-nahravanie", settings: "riesenie-problemov",
+};
+
 const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; adminOnly?: boolean; managerOnly?: boolean }> = [
   // "Môj telefón" is first and open to every operator; everything after it is
   // configuration a manager owns.
@@ -131,6 +138,10 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
   return (
     <div className="grid gap-3">
       {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
+
+      <a href={`/navod/${GUIDE_CHAPTERS[tab]}`} target="_blank" rel="noopener noreferrer" className="justify-self-end rounded-md px-2 py-2 text-sm font-semibold text-zinc-600 underline decoration-zinc-300 underline-offset-4 hover:text-zinc-950">
+        Návod k tejto časti <span className="sr-only">(otvorí sa v novej karte)</span>
+      </a>
 
       <nav className="flex flex-wrap gap-2" aria-label="Nastavenia telefónie">
         {TABS.filter((entry) => (!entry.adminOnly || state.canManageSettings) && (!entry.managerOnly || state.canEdit)).map(({ icon: Icon, label, value }) => {
