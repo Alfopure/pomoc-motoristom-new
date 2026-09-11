@@ -124,6 +124,122 @@ describe("shared task workspace", () => {
 
 });
 
+describe("task status changes", () => {
+  it.each(["done", "open"] as const)("saves only status %s and revision, then publishes the canonical response", async status => {
+    const response = deferred<Response>();
+    const original = task({ status: status === "done" ? "open" : "done", reminderAt: "2026-10-01T09:00:00Z", reminderChannels: ["email"], dueAt: "2026-10-02T10:00:00Z" });
+    const fetcher = vi.fn(() => response.promise);
+    const store = new TaskWorkspaceStore(true, undefined, fetcher, [original]);
+    const onTasksChange = vi.fn(); store.setOnTasksChange(onTasksChange);
+    const saving = store.setTaskStatus(original.id, status);
+    expect(fetcher).toHaveBeenCalledWith("/api/tasks/task-1", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ status, expectedRevision: 1 }) }));
+    expect(store.getSnapshot()).toMatchObject({ tasks: [original], saving: true, drafts: {} });
+    expect(onTasksChange).not.toHaveBeenCalled();
+    expect(await store.setTaskStatus(original.id, status)).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const canonical = { ...original, status, revision: 2 };
+    response.resolve(Response.json({ task: canonical }));
+    expect(await saving).toBe(true);
+    expect(store.getSnapshot()).toMatchObject({ tasks: [canonical], saving: false, drafts: {}, conflicts: [] });
+    expect(onTasksChange).toHaveBeenCalledExactlyOnceWith([canonical]);
+  });
+  it("keeps the card in place after a failed status save", async () => {
+    const store = new TaskWorkspaceStore(true, undefined, () => reply({ error: "Offline" }, 503), [task()]);
+    expect(await store.setTaskStatus("task-1", "done")).toBe(false);
+    expect(store.getSnapshot()).toMatchObject({ tasks: [task()], saving: false, error: "Offline", drafts: {}, conflicts: [] });
+  });
+  it("uses the revision captured before a refresh and exposes a recoverable conflict", async () => {
+    const latest = task({ revision: 2, title: "Changed by another operator" });
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") return reply({ error: "Conflict" }, 409);
+      if (url.endsWith("/messages")) return reply({ messages: [], nextCursor: null });
+      return reply({ task: latest });
+    });
+    const store = new TaskWorkspaceStore(true, undefined, fetcher, [task()]);
+    const capturedRevision = store.getSnapshot().tasks[0].revision;
+    store.setTasks([latest]);
+    expect(await store.setTaskStatus("task-1", "done", capturedRevision)).toBe(false);
+    expect(fetcher.mock.calls[0][1]?.body).toBe(JSON.stringify({ status: "done", expectedRevision: 1 }));
+    expect(store.getSnapshot()).toMatchObject({ tasks: [latest], selectedId: "task-1", conflicts: ["task-1"], error: "Conflict" });
+    expect(await store.setTaskStatus("task-1", "done")).toBe(false);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
+    await store.reloadTask("task-1");
+    expect(store.getSnapshot()).toMatchObject({ tasks: [latest], conflicts: [], error: "" });
+  });
+  it("blocks an existing task draft without saving or discarding it", async () => {
+    const fetcher = vi.fn(); const store = new TaskWorkspaceStore(true, undefined, fetcher, [task()]);
+    store.edit("task-1", { title: "My unfinished changes", status: "done" });
+    const draft = store.getSnapshot().drafts["task-1"];
+    expect(await store.setTaskStatus("task-1", "done")).toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(store.getSnapshot().drafts["task-1"]).toEqual(draft);
+    expect(store.getSnapshot().error).toContain("uložte rozpracovanú úlohu");
+  });
+  it("does not save unrelated task, create, or chat drafts", async () => {
+    const store = new TaskWorkspaceStore(true, undefined, () => reply({ task: task({ status: "done", revision: 2 }) }), [task(), task({ id: "task-2" })]);
+    store.edit("task-2", { title: "Other draft" }); store.editCreate({ title: "New draft" }); store.editChat("task-1", "Unsent message");
+    const { drafts, createDraft, chatDrafts } = store.getSnapshot();
+    expect(await store.setTaskStatus("task-1", "done")).toBe(true);
+    expect(store.getSnapshot()).toMatchObject({ drafts, createDraft, chatDrafts });
+  });
+  it("preserves typing started during the status save and marks its stale revision conflicting", async () => {
+    const response = deferred<Response>();
+    const store = new TaskWorkspaceStore(true, undefined, url => url.endsWith("/messages") ? reply({ messages: [], nextCursor: null }) : response.promise, [task()]);
+    const saving = store.setTaskStatus("task-1", "done");
+    store.edit("task-1", { title: "Typed while saving" });
+    const draft = store.getSnapshot().drafts["task-1"];
+    response.resolve(Response.json({ task: task({ status: "done", revision: 2 }) }));
+    expect(await saving).toBe(true);
+    expect(store.getSnapshot().drafts["task-1"]).toEqual(draft);
+    expect(store.getSnapshot()).toMatchObject({ selectedId: "task-1", conflicts: ["task-1"], tasks: [task({ status: "done", revision: 2 })] });
+    expect(store.getSnapshot().error).toContain("Rozpracovaná úloha zostala zachovaná");
+  });
+  it("does not overwrite a newer canonical task with a late status response", async () => {
+    const response = deferred<Response>(); const store = new TaskWorkspaceStore(true, undefined, () => response.promise, [task()]);
+    const saving = store.setTaskStatus("task-1", "done");
+    const newer = task({ revision: 3, title: "More recent edit", status: "open" }); store.setTasks([newer]);
+    response.resolve(Response.json({ task: task({ status: "done", revision: 2 }) }));
+    expect(await saving).toBe(true); expect(store.getSnapshot().tasks).toEqual([newer]);
+  });
+  it("does no network work for disabled, hidden, missing, or unchanged tasks", async () => {
+    const fetcher = vi.fn();
+    const disabled = new TaskWorkspaceStore(false, undefined, fetcher, [task()]);
+    expect(await disabled.setTaskStatus("task-1", "done")).toBe(false);
+    const hidden = new TaskWorkspaceStore(true, undefined, fetcher, [task()]); hidden.clear();
+    expect(await hidden.setTaskStatus("task-1", "done")).toBe(false);
+    const store = new TaskWorkspaceStore(true, undefined, fetcher, [task(), task({ id: "overdue", status: "overdue" })]);
+    expect(await store.setTaskStatus("missing", "done")).toBe(false);
+    expect(await store.setTaskStatus("task-1", "open")).toBe(false);
+    expect(await store.setTaskStatus("overdue", "open")).toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("ignores a late status acknowledgement after the task is revoked", async () => {
+    const response = deferred<Response>();
+    const store = new TaskWorkspaceStore(true, undefined, url => url === "/api/tasks" ? reply({ tasks: [] }) : response.promise, [task()]);
+    const saving = store.setTaskStatus("task-1", "done"); await store.refresh();
+    response.resolve(Response.json({ task: task({ status: "done", revision: 2 }) }));
+    expect(await saving).toBe(false); expect(store.getSnapshot().tasks).toEqual([]);
+  });
+  it.each([200, 403])("ignores a late status response from an old session (%s)", async status => {
+    const response = deferred<Response>();
+    const store = new TaskWorkspaceStore(true, undefined, url => url === "/api/tasks" ? reply({ tasks: [task({ id: "fresh" })] }) : response.promise, [task()]);
+    const saving = store.setTaskStatus("task-1", "done");
+    store.setEnabled(false); store.setEnabled(true); await store.refresh();
+    response.resolve(Response.json(status === 200 ? { task: task({ status: "done", revision: 2 }) } : { error: "Old session denied" }, { status }));
+    expect(await saving).toBe(false);
+    expect(store.getSnapshot()).toMatchObject({ tasks: [task({ id: "fresh" })], hidden: false, error: "", saving: false });
+  });
+  it("does not invalidate a pending reauthorization when status acknowledgement arrives", async () => {
+    const response = deferred<Response>(), list = deferred<Response>();
+    const store = new TaskWorkspaceStore(true, undefined, url => url === "/api/tasks" ? list.promise : response.promise, [task()]);
+    const saving = store.setTaskStatus("task-1", "done"); const reauthorization = store.reauthorize();
+    response.resolve(Response.json({ task: task({ status: "done", revision: 2 }) }));
+    expect(await saving).toBe(false); expect(store.getSnapshot().hidden).toBe(true);
+    list.resolve(Response.json({ tasks: [task({ status: "done", revision: 2 })] })); await reauthorization;
+    expect(store.getSnapshot()).toMatchObject({ tasks: [task({ status: "done", revision: 2 })], hidden: false, loading: false });
+  });
+});
+
 describe("task list authority and capability changes", () => {
   it("unversioned props cannot erase an exact opened task or its draft", async () => {
     const store = new TaskWorkspaceStore(true, undefined, url => reply(url.endsWith("/messages") ? { messages: [], nextCursor: null } : { task: task() }));
