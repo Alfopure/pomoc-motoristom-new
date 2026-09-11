@@ -1,3 +1,5 @@
+import { after } from "next/server";
+
 import { requireDefaultMotoristActor } from "@/server/api-auth";
 import { loadActiveCalls } from "@/server/telephony/active-calls";
 import { recoverOwnEndedSessionPresence } from "@/server/telephony/presence-recovery";
@@ -7,7 +9,7 @@ import { runSessionEvent } from "@/server/telephony/session-runner";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// Includes bounded call push after the response; the inline sweep budget stays unchanged.
+// Includes the bounded sweep and call push after the response.
 export const maxDuration = 30;
 
 /**
@@ -72,9 +74,9 @@ export async function GET() {
       { admin: deps.admin, organizationId: deps.organizationId, environment: deps.environment, configured: deps.config.configured, now: deps.now },
       { profileId: actor.profileId, canManageAssignments: actor.role === "manager" || actor.role === "admin" || actor.role === "senior_dispatcher" },
     );
-    // After the snapshot: the sweep must never delay the answer the console is
-    // waiting for (a slow one only shifts the next poll's data by one tick).
-    await maybeSweep(deps);
+    // A single session can outlast the sweep's start budget while waiting for
+    // its lease or provider. Send the snapshot before any sweep work begins.
+    after(() => maybeSweep(deps));
 
     return Response.json(snapshot, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {

@@ -24,6 +24,7 @@ import { cancelRevokedOffers } from "./cancelled-offers";
 import { SessionConflictError, SessionLeaseLostError } from "../service-errors";
 export { SessionConflictError } from "../service-errors";
 import {
+  ACTIVE_SESSION_STATES,
   DEFAULT_TTS_VOICE,
   announcementKeyForMedia,
   LEG_TIME_LIMIT_SECS,
@@ -1189,6 +1190,23 @@ function describeError(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
+async function loadCompensationState(deps: EffectsDeps, sessionId: string): Promise<{ session: SessionRow; legs: LegRow[] }> {
+  const [session, legs] = await Promise.all([
+    deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).single(),
+    deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", sessionId),
+  ]);
+  if (session.error || !session.data) throw new EffectsError("compensation state unavailable");
+  if (legs.error) throw new EffectsError("compensation legs unavailable");
+  return { session: session.data, legs: legs.data ?? [] };
+}
+
+function compensationWouldReopenCall(next: Transition | null | undefined, current: { session: SessionRow; legs: LegRow[] }): boolean {
+  if (!next?.session.state || !ACTIVE_SESSION_STATES.has(next.session.state)) return false;
+  if (current.session.ended_at || !ACTIVE_SESSION_STATES.has(current.session.state)) return true;
+  const customers = current.legs.filter(leg => leg.role === "customer");
+  return customers.length > 0 && !customers.some(isOpenLeg);
+}
+
 async function executeReduceResult(
   deps: EffectsDeps,
   input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean },
@@ -1491,17 +1509,22 @@ async function executeReduceResult(
         break;
       }
       for (const compensation of compensations.filter((candidate) => candidate.forCommand === key)) {
-        compensated.push(compensation.description);
+        // A provider response can outlive its lease. The old recovery plan must
+        // not put a customer back in the queue after another event ended them.
+        const current = await loadCompensationState(deps, session.id);
+        session = current.session;
+        ctx.session = session;
+        if (compensationWouldReopenCall(compensation.next, current)) {
+          deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "compensation_superseded_by_teardown", command: command.kind });
+          await checkpointCommand(key);
+          continue;
+        }
         if (input.continuation) {
-          const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
-          if (fresh.error) throw new EffectsError("compensation state unavailable");
-          const legs = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", session.id);
-          if (legs.error) throw new EffectsError("compensation legs unavailable");
           const compensationEvent: SessionEvent = { ...input.event, id: `${input.event.id}:compensate:${key}` };
           const compensationResult: ReduceResult = { next: compensation.next ?? emptyTransition(), commands: compensation.commands, compensations: [], guard: null, ignored: null };
-          attachContactOperations({ session: fresh.data, legs: legs.data ?? [] }, compensationResult, compensationEvent, true);
+          attachContactOperations(current, compensationResult, compensationEvent, true);
           const stagedCompensation = await stageEffects(deps, {
-            session: fresh.data, expectedVersion: fresh.data.version, event: compensationEvent, result: compensationResult,
+            session, expectedVersion: session.version, event: compensationEvent, result: compensationResult,
           });
           // The successor must be durable before retiring the failed commands.
           // Replaying the predecessor first would otherwise recurse forever on
@@ -1511,6 +1534,7 @@ async function executeReduceResult(
           const compensatedResult = await resumePendingEffects(deps, session);
           if (compensatedResult) session = compensatedResult.session;
           ctx.session = session;
+          compensated.push(compensation.description);
           continue;
         }
         for (const extra of compensation.commands) {
@@ -1522,11 +1546,19 @@ async function executeReduceResult(
           }
         }
         if (compensation.next) {
-          const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("id", session.id).maybeSingle();
-          const base = fresh.data ?? ctx.session;
-          session = await persistTransition(deps, { session: base, transition: compensation.next, expectedVersion: base.version, event: input.event });
+          // Teardown may also arrive while the compensation's provider commands
+          // are running. Recheck before writing; CAS protects the remaining gap.
+          const latest = await loadCompensationState(deps, session.id);
+          session = latest.session;
+          ctx.session = session;
+          if (compensationWouldReopenCall(compensation.next, latest)) {
+            deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "compensation_superseded_by_teardown", command: command.kind });
+            continue;
+          }
+          session = await persistTransition(deps, { session, transition: compensation.next, expectedVersion: session.version, event: input.event });
           ctx.session = session;
         }
+        compensated.push(compensation.description);
       }
       break;
     } finally {
