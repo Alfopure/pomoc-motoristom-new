@@ -19,8 +19,8 @@ describe('recording policy approval boundary',()=>{
   await expect(saveRecordingPolicy(fake.admin,{...actor,role:'dispatcher'},body)).rejects.toMatchObject({status:403});expect(handler).not.toHaveBeenCalled();
   await saveRecordingPolicy(fake.admin,actor,body);expect(handler.mock.calls[0][0]).toMatchObject({p_organization_id:'org',p_actor_id:'manager',p_expected_revision:7,p_approved:false,p_policy:{approvedAt:null}});
  });
- it('maps concurrent policy changes to a conflict and never silently retries approval',async()=>{
-  const fake=createFakeSupabase();fake.db.failNext('motorist_recording_policy_save','rpc',{code:'40001',message:'conflict',hint:null,details:null});
+ it.each(['PT409','40001'])('maps %s to a conflict and never silently retries approval',async(code)=>{
+  const fake=createFakeSupabase();fake.db.failNext('motorist_recording_policy_save','rpc',{code,message:'conflict',hint:null,details:null});
   await expect(saveRecordingPolicy(fake.admin,actor,{policy:{...DEFAULT_RECORDING_POLICY,revision:3},approvePolicy:true})).rejects.toMatchObject({status:409,code:'stale_recording_policy'});
   expect(fake.db.log.filter(x=>x.kind==='rpc')).toHaveLength(1);
  });

@@ -39,7 +39,7 @@ describe("task workspace service boundary", () => {
     expect(() => loadTaskMessages(actor, id, { createdAt: "bad", id })).toThrow();
     expect(() => loadTaskMessages(actor, id, { createdAt: "2026-09-10", id: "bad" })).toThrow();
   });
-  it.each([["42501",403],["P0002",404],["40001",409],["55000",503]])("preserves %s failure without exposing internal detail", async (code, status) => {
+  it.each([["42501",403],["P0002",404],["PT409",409], ["40001",409],["55000",503]])("preserves %s failure without exposing internal detail", async (code, status) => {
     mocks.rpc.mockResolvedValue({ error: { code, message: "CHAT_PRIVATE_INTERNAL" } });
     await expect(loadWorkspaceTask(actor, id)).rejects.toMatchObject({ status });
     await expect(loadWorkspaceTask(actor, id)).rejects.not.toMatchObject({ message: "CHAT_PRIVATE_INTERNAL" });

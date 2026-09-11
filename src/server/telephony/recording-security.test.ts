@@ -23,6 +23,14 @@ function fixture() {
 }
 afterEach(()=>{vi.unstubAllGlobals();vi.unstubAllEnvs();});
 describe('recording service authorization',()=>{
+ it.each(['PT409','40001'])('maps %s after the source read to a conflict without retrying recording deletion',async code=>{
+  const f=fixture();
+  f.db.failNext('motorist_recording_delete_call','rpc',{code,message:'Private database detail',details:null,hint:null});
+  await expect(deleteOrRetryRecording(f.admin,actor('manager'),call,{sourceRevision:1,reason:'Synthetic deletion'},'delete'))
+   .rejects.toMatchObject({status:409,code:'stale_recording_source',message:'Záznam medzitým zmenil kolega. Načítaj ho znova.'});
+  expect(f.db.log.filter(entry=>entry.kind==='rpc')).toHaveLength(1);
+  expect(f.db.find('motorist_call_recordings',row=>row.id===rec)?.deleted_at).toBeNull();
+ });
  it('keeps late-recovered recording coverage partial even when the provider file claims complete timing',async()=>{
   const f=fixture();
   f.db.update('motorist_call_sessions',{metadata:{recording:{recorders:[],policy:{enabled:true},coverageUnconfirmed:{since:'2026-09-06T10:00:00Z',epoch:0,audioCommandId:'audio-command'}}}},r=>r.id===session);

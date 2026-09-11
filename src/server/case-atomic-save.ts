@@ -25,7 +25,7 @@ export async function commitAtomicCaseSave(client: SupabaseClient<Database>, inp
     p_related: input.related as unknown as Json, p_field_labels: input.fieldLabels as Json,
   });
   if (result.error) {
-    if (result.error.code === "40001") throw new MutationError("Prípad medzitým zmenil iný používateľ. Načítajte aktuálny stav; vaše zmeny zostávajú v editore.", 409, "CASE_REVISION_CONFLICT");
+    if (result.error.code === "PT409" || result.error.code === "40001") throw new MutationError("Prípad medzitým zmenil iný používateľ. Načítajte aktuálny stav; vaše zmeny zostávajú v editore.", 409, "CASE_REVISION_CONFLICT");
     if (result.error.code === "42501") throw new MutationError("Nemáte oprávnenie upraviť tento prípad.", 403);
     if (result.error.code === "P0002") throw new MutationError("Prípad alebo súvisiace údaje sa nenašli.", 404);
     throw new MutationError("Uloženie prípadu zlyhalo. Žiadna časť zmeny nebola uložená.", 500);

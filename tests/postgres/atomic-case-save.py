@@ -3,6 +3,7 @@ Usage: python3 tests/postgres/atomic-case-save.py
 Requires local PostgreSQL at 127.0.0.1:55432 and psycopg 3.
 """
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Barrier
 from uuid import uuid4
@@ -22,6 +23,14 @@ LOCATION = "70000000-0000-0000-0000-000000000001"
 TABLES = ["motorist_contacts", "motorist_vehicles", "motorist_locations", "motorist_cases", "motorist_case_events", "motorist_audit_log"]
 
 class AtomicCaseContract(unittest.TestCase):
+    conflict_sqlstate = "40001"
+
+    @contextmanager
+    def assert_conflict(self):
+        with self.assertRaises(psycopg.Error) as raised:
+            yield
+        self.assertEqual(raised.exception.sqlstate, self.conflict_sqlstate)
+
     @classmethod
     def setUpClass(cls):
         cls.dbname = "atomic_case_contract_" + uuid4().hex[:10]
@@ -97,13 +106,13 @@ class AtomicCaseContract(unittest.TestCase):
         self.db.execute("update motorist_contacts set name='Someone else'")
         before = self.snapshot()
         related = [{**self.related[0], "expectedUpdatedAt": old.isoformat()}, *self.related[1:]]
-        with self.assertRaises(psycopg.errors.SerializationFailure): self.save(related=related)
+        with self.assert_conflict(): self.save(related=related)
         self.assertEqual(self.snapshot(), before)
 
     def test_stale_token_writes_nothing(self):
         self.db.execute("update motorist_cases set priority='low' where id=%s", (CASE,))
         before = self.snapshot()
-        with self.assertRaises(psycopg.errors.SerializationFailure): self.save()
+        with self.assert_conflict(): self.save()
         self.assertEqual(self.snapshot(), before)
 
     def test_final_audit_failure_rolls_back_all_relations_case_and_events(self):
@@ -129,7 +138,9 @@ class AtomicCaseContract(unittest.TestCase):
                 try:
                     self.save(db=db, patch={**self.patch, "priority": priority})
                     return "saved"
-                except psycopg.errors.SerializationFailure:
+                except psycopg.Error as error:
+                    if error.sqlstate != self.conflict_sqlstate:
+                        raise
                     return "conflict"
         with ThreadPoolExecutor(max_workers=2) as pool:
             self.assertCountEqual(list(pool.map(writer, ["high", "urgent"])), ["saved", "conflict"])
@@ -137,7 +148,7 @@ class AtomicCaseContract(unittest.TestCase):
 
     def test_missing_token_and_wrong_actor_are_rejected(self):
         before = self.snapshot()
-        with self.assertRaises(psycopg.errors.SerializationFailure):
+        with self.assert_conflict():
             self.db.execute("select motorist_save_case_atomic(%s,%s,%s,null,'{}','[]','{}')", (ORG, ACTOR, CASE))
         with self.assertRaises(psycopg.errors.InsufficientPrivilege):
             self.save(actor="20000000-0000-0000-0000-000000000004")

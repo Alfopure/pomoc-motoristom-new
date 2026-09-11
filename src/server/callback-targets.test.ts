@@ -7,6 +7,13 @@ const contact = "30000000-0000-0000-0000-000000000001";
 const target = "30000000-0000-0000-0000-000000000002";
 const actor = { profileId: "20000000-0000-0000-0000-000000000001", organizationId: org, role: "admin" } as MotoristActor;
 describe("callback target service", () => {
+  it.each(["PT409", "40001"])("returns a conflict for %s without retrying a stale callback policy", async code => {
+    const { admin, db } = createFakeSupabase();
+    db.failNext("motorist_contact_callback_policy", "rpc", { code, message: "Private database detail", details: null, hint: null });
+    await expect(saveCallbackPolicy(admin, actor, contact, { nonCallback: true, targetContactId: target, verified: true, expectedRevision: 2 }))
+      .rejects.toMatchObject({ status: 409, message: "Cieľ sa medzitým zmenil. Overte kontakt znova." });
+    expect(db.log.filter(entry => entry.kind === "rpc")).toHaveLength(1);
+  });
   it("preserves outgoing calls only when the resolver migration is absent", async () => {
     const { admin, db } = createFakeSupabase();
     expect(await resolveCallbackTarget(admin, org, "0900 123 456")).toMatchObject({ status: "original", dialNumber: "0900 123 456" });
