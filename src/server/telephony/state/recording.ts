@@ -312,10 +312,10 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
       }
       return startSequence(current, context, customer.telnyx_call_control_id, [noticeKey(state)], event, event.id);
     }
-    if (event.kind === "telnyx" && event.type === "call.answered" && meta.outbound_audio_gate && session.direction === "outbound" && event.callControlId === customer.telnyx_call_control_id && session.state === "ringing") {
-      const keys: AnnouncementKey[] = ["outboundIntro"];
-      if (eligible(current, context, state)) keys.push(noticeKey(state));
-      return startSequence(current, context, customer.telnyx_call_control_id, keys, event, event.id);
+    if (event.kind === "telnyx" && event.type === "call.answered" && meta.outbound_audio_gate && session.direction === "outbound" && event.callControlId === customer.telnyx_call_control_id && session.state === "ringing" && eligible(current, context, state)) {
+      // Outbound calls (including callbacks) skip the service introduction.
+      // Only enabled recording needs its notice before capture and connection.
+      return startSequence(current, context, customer.telnyx_call_control_id, [noticeKey(state)], event, event.id);
     }
   }
   const result = core(current, legs, attempts, event, context);

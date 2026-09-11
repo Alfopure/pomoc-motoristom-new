@@ -24,6 +24,14 @@ describe("caller announcement assets", () => {
     expect(isAnnouncementEnabled(enabled, "recordingResumed")).toBe(true);
     expect(resolveAnnouncement(enabled, "recordingNotice")).toEqual(resolveAnnouncement(defaultAnnouncementConfig(), "recordingNotice"));
   });
+  it("keeps the outbound introduction disabled even with saved custom audio and status messages enabled", () => {
+    for (const { code } of ANNOUNCEMENT_LANGUAGES) {
+      const config = readAnnouncementConfig({ ...defaultAnnouncementConfig(), language: code, recordingStatusAnnouncements: true,
+        prompts: { [code]: { outboundIntro: { text: "Saved introduction", audioUrl: "https://media.test/custom-intro.mp3" } } } });
+      expect(isAnnouncementEnabled(config, "outboundIntro")).toBe(false);
+      expect(isAnnouncementEnabled(config, "recordingNotice")).toBe(true);
+    }
+  });
   it("ships the exact configured text and intact audio in all four languages", () => {
     const manifest = JSON.parse(readFileSync(resolve("public/telephony/announcements-v4/manifest.json"), "utf8")) as Array<{ file: string; language: string; key: string; text: string; sha256: string; durationSeconds: number; runtimeStatus: string }>;
     expect(manifest).toHaveLength(105);
