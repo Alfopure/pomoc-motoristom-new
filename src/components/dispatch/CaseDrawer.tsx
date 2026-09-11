@@ -1,4 +1,5 @@
 "use client";
+import type { CaseDetailData } from "@/data/case-detail";
 
 import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
@@ -16,10 +17,11 @@ type CaseDrawerProps = {
   open: boolean;
   onClose: () => void;
   onDataChange?: (dispatchData: DispatchData) => void;
+  onCaseChange?: (caseDetail: CaseDetailData) => void;
   viewerProfileId?: string;
 };
 
-export function CaseDrawer({ caseItem, branches, assets, focusedTaskId, onDataChange, partnerDirectory, priceRule, open, onClose, viewerProfileId }: CaseDrawerProps) {
+export function CaseDrawer({ caseItem, branches, assets, focusedTaskId, onDataChange, onCaseChange, partnerDirectory, priceRule, open, onClose, viewerProfileId }: CaseDrawerProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -67,6 +69,7 @@ export function CaseDrawer({ caseItem, branches, assets, focusedTaskId, onDataCh
             assets={assets}
             focusedTaskId={focusedTaskId}
             onDataChange={onDataChange}
+            onCaseChange={onCaseChange}
             partnerDirectory={partnerDirectory}
             priceRule={priceRule}
             viewerProfileId={viewerProfileId}

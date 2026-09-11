@@ -62,7 +62,7 @@ async function sandboxApi(page: Page, lookup: (input: VehicleLookupInput) => Pro
     }
     if (path === "/api/integrations/fleet/refresh") {
       // The dashboard refreshes feeds after mocked saves; return the unchanged fixture.
-      await route.fulfill({ status: 200, json: { dispatchData: data } });
+      await route.fulfill({ status: 200, json: { fleetData: data } });
       return;
     }
     if (path === "/api/vehicles/lookup") {

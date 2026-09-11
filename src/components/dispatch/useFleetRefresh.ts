@@ -1,6 +1,7 @@
 "use client";
+import { requestFleetRefresh } from "./fleet-refresh-client";
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import type { DispatchData } from "@/data/dispatch-types";
+import type { DispatchData, FleetData } from "@/data/dispatch-types";
 import { isFreshFleetTimestamp } from "@/lib/fleet-observation";
 
 export function ageFleetData(data: DispatchData): DispatchData {
@@ -12,7 +13,7 @@ export function ageFleetData(data: DispatchData): DispatchData {
   })) };
 }
 
-export function mergeFleetData(current: DispatchData, incoming: DispatchData): DispatchData {
+export function mergeFleetData(current: DispatchData, incoming: FleetData): DispatchData {
   // Never overwrite a case, task, call or notification edited while the vendor request was running.
   return ageFleetData({ ...current, fleetAssets: incoming.fleetAssets, fleetProviderVehicles: incoming.fleetProviderVehicles,
     commanderVehicles: incoming.commanderVehicles, commanderGpsLastSuccessAt: incoming.commanderGpsLastSuccessAt,
@@ -32,10 +33,8 @@ export function useFleetRefresh(enabled: boolean, setData: Dispatch<SetStateActi
     setRefreshing(true);
     setData(ageFleetData);
     try {
-      const response = await fetch("/api/integrations/fleet/refresh", { method: "POST", cache: "no-store", signal: AbortSignal.timeout(305_000) });
-      const body = await response.json();
-      if (!response.ok || !body.dispatchData) throw new Error("Obnova je nedostupná; zobrazujú sa posledné uložené údaje.");
-      setData((current) => mergeFleetData(current, body.dispatchData));
+      const body = await requestFleetRefresh();
+      setData((current) => mergeFleetData(current, body.fleetData));
       setRefreshMessage(body.summary?.warnings?.join(" ") || (body.summary?.skipped ? "Zobrazené posledné údaje; ďalšia spoločná obnova je do minúty." : null));
     } catch {
       setRefreshMessage("Obnova je nedostupná; zobrazujú sa posledné uložené údaje.");
@@ -44,11 +43,22 @@ export function useFleetRefresh(enabled: boolean, setData: Dispatch<SetStateActi
 
   useEffect(() => {
     if (!enabled) return;
-    const tick = () => { if (document.visibilityState === "visible") void refresh(); };
-    const initial = window.setTimeout(tick, 800);
-    const interval = window.setInterval(tick, 60_000);
-    document.addEventListener("visibilitychange", tick);
-    return () => { window.clearTimeout(initial); window.clearInterval(interval); document.removeEventListener("visibilitychange", tick); };
+    let stopped = false;
+    let polling = false;
+    let timer: number;
+    const tick = async () => {
+      window.clearTimeout(timer);
+      if (stopped || polling) return;
+      polling = true;
+      try { if (document.visibilityState === "visible") await refresh(); } finally { polling = false; }
+      if (!stopped) timer = window.setTimeout(tick, 60_000 + Math.random() * 6_000);
+    };
+    const wake = () => { if (document.visibilityState === "visible") void tick(); };
+    timer = window.setTimeout(tick, 800);
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("online", wake);
+    window.addEventListener("focus", wake);
+    return () => { stopped = true; window.clearTimeout(timer); document.removeEventListener("visibilitychange", wake); window.removeEventListener("online", wake); window.removeEventListener("focus", wake); };
   }, [enabled, refresh]);
   return { refresh, refreshing, refreshMessage };
 }

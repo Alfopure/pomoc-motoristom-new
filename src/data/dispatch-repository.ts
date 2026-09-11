@@ -172,7 +172,7 @@ export function getMockDispatchData(warning?: string): DispatchData {
 
 export type DispatchViewer = { organizationId: string; profileId: string };
 
-export async function loadDispatchData(viewer?: DispatchViewer): Promise<DispatchData> {
+export async function loadDispatchData(viewer?: DispatchViewer, options: { attendance?: boolean; access?: boolean; history?: boolean } = {}): Promise<DispatchData> {
   if (!getSupabaseServiceEnv()) {
     return mockDispatchDataOrThrow(
       "Supabase server env nie je nastavený. Beží mock fallback.",
@@ -187,7 +187,7 @@ export async function loadDispatchData(viewer?: DispatchViewer): Promise<Dispatc
       const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
       authenticatedViewer = { organizationId: actor.organizationId, profileId: actor.profileId };
     }
-    return await withTimeout(loadSupabaseDispatchData(authenticatedViewer), getSupabaseReadTimeout());
+    return await withTimeout(loadSupabaseDispatchData(authenticatedViewer, options), getSupabaseReadTimeout());
   } catch (error) {
     console.warn("Supabase dispatch data fallback:", getErrorMessage(error));
     return mockDispatchDataOrThrow(
@@ -197,9 +197,10 @@ export async function loadDispatchData(viewer?: DispatchViewer): Promise<Dispatc
   }
 }
 
-async function loadSupabaseDispatchData(viewer: DispatchViewer): Promise<DispatchData> {
-  const supabase = createSupabaseAdminClient();
-  const organization = await resolveOrganization(supabase);
+async function loadSupabaseDispatchData(viewer: DispatchViewer, options: { attendance?: boolean; access?: boolean; history?: boolean }): Promise<DispatchData> {
+  const readAbort = AbortSignal.timeout(getSupabaseReadTimeout());
+  const supabase = createSupabaseAdminClient(readAbort);
+  const organization = await resolveOrganization(supabase, readAbort);
 
   if (!organization) {
     return mockDispatchDataOrThrow(
@@ -213,7 +214,6 @@ async function loadSupabaseDispatchData(viewer: DispatchViewer): Promise<Dispatc
   const [
     organizationProfilesResult,
     profilesResult,
-    accessProfilesResult,
     statusesResult,
     attendanceTemplatesResult,
     attendanceShiftsResult,
@@ -246,58 +246,57 @@ async function loadSupabaseDispatchData(viewer: DispatchViewer): Promise<Dispatc
     commanderGpsLatestRunResult,
     recordingsResult,
   ] = await Promise.all([
-    supabase.from("motorist_organization_profiles").select("*").eq("organization_id", organizationId).limit(1),
-    supabase.from("motorist_profiles").select("*").eq("organization_id", organizationId).eq("active", true).order("display_name"),
-    supabase.from("motorist_profiles").select("*").eq("organization_id", organizationId).order("display_name"),
-    supabase.from("motorist_operator_statuses").select("*").eq("organization_id", organizationId).order("started_at", { ascending: false }),
-    supabase.from("motorist_attendance_shift_templates").select("*").eq("organization_id", organizationId).eq("active", true).order("sort_order"),
-    supabase.from("motorist_attendance_shifts").select("*").eq("organization_id", organizationId).order("planned_start_at", { ascending: true }).limit(200),
-    supabase.from("motorist_attendance_sessions").select("*").eq("organization_id", organizationId).order("started_at", { ascending: false }).limit(200),
-    supabase.from("motorist_attendance_employee_settings").select("*").eq("organization_id", organizationId).order("created_at"),
-    supabase.from("motorist_attendance_unavailability_requests").select("*").eq("organization_id", organizationId).order("start_date_local", { ascending: true }).limit(200),
-    supabase.from("motorist_attendance_time_off_balances").select("*").eq("organization_id", organizationId).order("year", { ascending: false }),
-    supabase.from("motorist_attendance_schedule_batches").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false }).limit(50),
-    supabase.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("active", true).order("label"),
-    supabase.from("motorist_telephony_queues").select("*").eq("organization_id", organizationId).eq("active", true).order("label"),
-    supabase.from("motorist_contacts").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false }),
-    supabase.from("motorist_vehicles").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false }),
-    supabase.from("motorist_locations").select("*").eq("organization_id", organizationId),
+    supabase.from("motorist_organization_profiles").select("*").abortSignal(readAbort).eq("organization_id", organizationId).limit(1),
+    supabase.from("motorist_profiles").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("display_name"),
+    supabase.from("motorist_operator_statuses").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("started_at", { ascending: false }),
+    options.attendance === false ? { data: [], error: null } : supabase.from("motorist_attendance_shift_templates").select("*").abortSignal(readAbort).eq("organization_id", organizationId).eq("active", true).order("sort_order"),
+    options.attendance === false ? { data: [], error: null } : supabase.from("motorist_attendance_shifts").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("planned_start_at", { ascending: true }).limit(200),
+    options.attendance === false ? { data: [], error: null } : supabase.from("motorist_attendance_sessions").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("started_at", { ascending: false }).limit(200),
+    options.attendance === false ? { data: [], error: null } : supabase.from("motorist_attendance_employee_settings").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("created_at"),
+    options.attendance === false ? { data: [], error: null } : supabase.from("motorist_attendance_unavailability_requests").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("start_date_local", { ascending: true }).limit(200),
+    options.attendance === false ? { data: [], error: null } : supabase.from("motorist_attendance_time_off_balances").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("year", { ascending: false }),
+    options.attendance === false ? { data: [], error: null } : supabase.from("motorist_attendance_schedule_batches").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("created_at", { ascending: false }).limit(50),
+    supabase.from("motorist_telephony_lines").select("*").abortSignal(readAbort).eq("organization_id", organizationId).eq("active", true).order("label"),
+    supabase.from("motorist_telephony_queues").select("*").abortSignal(readAbort).eq("organization_id", organizationId).eq("active", true).order("label"),
+    supabase.from("motorist_contacts").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("created_at", { ascending: false }),
+    supabase.from("motorist_vehicles").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("created_at", { ascending: false }),
+    supabase.from("motorist_locations").select("*").abortSignal(readAbort).eq("organization_id", organizationId),
     supabase
       .from("motorist_location_submissions")
-      .select("*")
+      .select("*").abortSignal(readAbort)
       .eq("organization_id", organizationId)
       .eq("accepted", true)
       .order("submitted_at", { ascending: false }),
-    supabase.from("motorist_branches").select("*").eq("organization_id", organizationId).eq("active", true).order("name"),
-    supabase.from("motorist_partner_directory").select("*").eq("organization_id", organizationId).order("kind").order("name"),
-    supabase.from("motorist_fleet_assets").select("*").eq("organization_id", organizationId).order("label"),
-    supabase.from("motorist_fleet_provider_vehicles").select("*").eq("organization_id", organizationId).eq("provider", "webdispecink").order("updated_at", { ascending: false }),
+    supabase.from("motorist_branches").select("*").abortSignal(readAbort).eq("organization_id", organizationId).eq("active", true).order("name"),
+    supabase.from("motorist_partner_directory").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("kind").order("name"),
+    supabase.from("motorist_fleet_assets").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("label"),
+    supabase.from("motorist_fleet_provider_vehicles").select("*").abortSignal(readAbort).eq("organization_id", organizationId).eq("provider", "webdispecink").order("updated_at", { ascending: false }),
     supabase
       .from("motorist_external_vehicle_records")
-      .select("*")
+      .select("*").abortSignal(readAbort)
       .eq("organization_id", organizationId)
       .eq("source_provider", "commander")
       .order("label", { ascending: true, nullsFirst: false }),
-    supabase.from("motorist_fleet_asset_links").select("*").eq("organization_id", organizationId).eq("source_provider", "commander"),
-    supabase.from("motorist_fleet_current_positions").select("*").eq("organization_id", organizationId).eq("source_provider", "commander"),
-    supabase.from("motorist_cases").select("*").eq("organization_id", organizationId).order("updated_at", { ascending: false }),
-    supabase.from("motorist_case_tasks").select("*").eq("organization_id", organizationId).order("due_at", { ascending: true }),
+    supabase.from("motorist_fleet_asset_links").select("*").abortSignal(readAbort).eq("organization_id", organizationId).eq("source_provider", "commander"),
+    supabase.from("motorist_fleet_current_positions").select("*").abortSignal(readAbort).eq("organization_id", organizationId).eq("source_provider", "commander"),
+    supabase.from("motorist_cases").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("updated_at", { ascending: false }),
+    supabase.from("motorist_case_tasks").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("due_at", { ascending: true }),
     supabase
       .from("motorist_notifications")
-      .select("*")
+      .select("*").abortSignal(readAbort)
       .eq("organization_id", organizationId)
       .or(notificationAudienceFilter(viewer?.profileId))
       .neq("status", "archived")
       .not("dedupe_key", "like", "workplace-takeover:%")
       .order("created_at", { ascending: false })
       .limit(100),
-    supabase.from("motorist_case_events").select("*").eq("organization_id", organizationId).order("created_at", { ascending: true }),
-    supabase.from("motorist_calls").select("*").eq("organization_id", organizationId).order("started_at", { ascending: false }).limit(25),
-    supabase.from("motorist_call_events").select("*").eq("organization_id", organizationId).order("created_at", { ascending: true }).limit(100),
-    supabase.from("motorist_organization_integrations").select("*").eq("organization_id", organizationId).order("provider"),
+    options.history === false ? { data: [], error: null } : supabase.from("motorist_case_events").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("created_at", { ascending: true }),
+    supabase.from("motorist_calls").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("started_at", { ascending: false }).limit(25),
+    options.history === false ? { data: [], error: null } : supabase.from("motorist_call_events").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("created_at", { ascending: true }).limit(100),
+    supabase.from("motorist_organization_integrations").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("provider"),
     supabase
       .from("motorist_fleet_sync_runs")
-      .select("finished_at")
+      .select("finished_at").abortSignal(readAbort)
       .eq("organization_id", organizationId)
       .eq("provider", "commander")
       .in("mode", ["positions", "full"])
@@ -307,7 +306,7 @@ async function loadSupabaseDispatchData(viewer: DispatchViewer): Promise<Dispatc
       .maybeSingle(),
     supabase
       .from("motorist_fleet_sync_runs")
-      .select("started_at,finished_at,status")
+      .select("started_at,finished_at,status").abortSignal(readAbort)
       .eq("organization_id", organizationId)
       .eq("provider", "commander")
       .in("mode", ["positions", "full"])
@@ -316,7 +315,7 @@ async function loadSupabaseDispatchData(viewer: DispatchViewer): Promise<Dispatc
       .maybeSingle(),
     supabase
       .from("motorist_call_recordings")
-      .select("id, call_id, created_at")
+      .select("id, call_id, created_at").abortSignal(readAbort)
       .eq("organization_id", organizationId)
       .eq("status", "available")
       .order("created_at", { ascending: false })
@@ -326,7 +325,6 @@ async function loadSupabaseDispatchData(viewer: DispatchViewer): Promise<Dispatc
   [
     { label: "motorist_organization_profiles", result: organizationProfilesResult },
     { label: "motorist_profiles.active", result: profilesResult },
-    { label: "motorist_profiles.access", result: accessProfilesResult },
     { label: "motorist_contacts", result: contactsResult },
     { label: "motorist_vehicles", result: vehiclesResult },
     { label: "motorist_locations", result: locationsResult },
@@ -377,30 +375,27 @@ async function loadSupabaseDispatchData(viewer: DispatchViewer): Promise<Dispatc
   // Potvrdené SWHouse (client_vehicle_db) linky → ktoré autá sú zo zdroja pravdy vs „duchovia".
   const swhouseLinksResult = await supabase
     .from("motorist_fleet_asset_links")
-    .select("fleet_asset_id,external_vehicle_record_id")
+    .select("fleet_asset_id,external_vehicle_record_id").abortSignal(readAbort)
     .eq("organization_id", organizationId)
     .eq("source_provider", "client_vehicle_db")
     .eq("link_status", "confirmed");
   const swhouseLinkedAssetIds = new Set((swhouseLinksResult.data ?? []).map((link) => link.fleet_asset_id));
-  const swhouseRecords = await supabase.from("motorist_external_vehicle_records").select("id,source_vehicle_id,latest_payload_snapshot")
+  const swhouseRecords = await supabase.from("motorist_external_vehicle_records").select("id,source_vehicle_id,latest_payload_snapshot").abortSignal(readAbort)
     .eq("organization_id", organizationId).eq("source_provider", "client_vehicle_db").eq("source_active", true);
   const swhouseByRecordId = new Map((swhouseRecords.data ?? []).map((record) => [record.id, record]));
   const swhouseByAssetId = new Map((swhouseLinksResult.data ?? []).map((link) => [link.fleet_asset_id, swhouseByRecordId.get(link.external_vehicle_record_id)]));
   // T2: SWHouse je jediný zdroj pravdy o obsadenosti — najnovší snapshot čítame RAZ a odvodíme per-asset occupancy.
-  const occupancySnapshot = await loadLatestOccupancySnapshot(supabase, organizationId);
+  const occupancySnapshot = await loadLatestOccupancySnapshot(supabase, organizationId, readAbort);
   const fleetAssets = (fleetAssetsResult.data ?? []).map((asset) =>
     mapFleetAsset(asset, locationById, branches, commanderPositionByFleetAssetId.get(asset.id), swhouseLinkedAssetIds.has(asset.id), occupancySnapshot, swhouseByAssetId.get(asset.id)),
   );
 
   const latestStatusByProfile = latestOperatorStatuses(statusesResult.data ?? []);
-  const profiles = profilesResult.data ?? [];
+  const profiles = (profilesResult.data ?? []).filter(profile => profile.active);
   const operators = profiles.map((profile) => mapOperator(profile, latestStatusByProfile.get(profile.id)));
-  const accessProfiles = (accessProfilesResult.data ?? []).filter((profile) => !isDeletedAccessProfile(profile));
-  const authUsersById = await loadAuthUsersById(
-    supabase,
-    accessProfiles.map((profile) => profile.user_id).filter((userId): userId is string => Boolean(userId)),
-  );
-  const users = accessProfiles.map((profile) => mapAccessUser(profile, authUsersById.get(profile.user_id ?? "")));
+  const accessProfiles = (profilesResult.data ?? []).filter((profile) => !isDeletedAccessProfile(profile));
+  const authUsersById = options.access ? await loadAuthUsersById(supabase, accessProfiles.map(profile => profile.user_id).filter((id): id is string => Boolean(id))) : new Map<string, never>();
+  const users = options.access ? accessProfiles.map(profile => mapAccessUser(profile, authUsersById.get(profile.user_id ?? ""))) : [];
   const profilesById = new Map(profiles.map((profile) => [profile.id, profile]));
   const attendanceTemplates = (attendanceTemplatesResult.data ?? []).map(mapAttendanceTemplate);
   const attendanceSessions = (attendanceSessionsResult.data ?? []).map((session) => mapAttendanceSession(session, profilesById));
@@ -431,8 +426,8 @@ async function loadSupabaseDispatchData(viewer: DispatchViewer): Promise<Dispatc
     }),
   );
 
-  const workspaceCapabilities = await loadWorkspaceCapabilities(viewer);
-  const workspaceTasks = workspaceCapabilities.tasks ? await loadTaskWorkspace(viewer) : undefined;
+  const workspaceCapabilities = await loadWorkspaceCapabilities(viewer, readAbort);
+  const workspaceTasks = workspaceCapabilities.tasks ? await loadTaskWorkspace(viewer, readAbort) : undefined;
   if (workspaceTasks) dispatchCases = dispatchCases.map(caseItem => ({ ...caseItem, tasks: workspaceTasks.filter(task => task.caseIds.includes(caseItem.id)) }));
 
   const linesById = new Map((linesResult.data ?? []).map((line) => [line.id, line]));
@@ -530,24 +525,24 @@ export async function loadDispatchNotifications(organizationId: string, profileI
     .sort(compareNotifications);
 }
 
-async function resolveOrganization(supabase: ReturnType<typeof createSupabaseAdminClient>): Promise<OrganizationRow | null> {
+async function resolveOrganization(supabase: ReturnType<typeof createSupabaseAdminClient>, signal: AbortSignal = AbortSignal.timeout(8_000)): Promise<OrganizationRow | null> {
   const organizationId = process.env.MOTORIST_ORGANIZATION_ID?.trim();
 
   if (organizationId) {
-    const result = await supabase.from("motorist_organizations").select("*").eq("id", organizationId).maybeSingle();
+    const result = await supabase.from("motorist_organizations").select("*").abortSignal(signal).eq("id", organizationId).maybeSingle();
     throwOnSupabaseError(result);
     return result.data?.active ? result.data : null;
   }
 
   const organizationSlug = process.env.MOTORIST_ORGANIZATION_SLUG?.trim() || DEFAULT_ORGANIZATION_SLUG;
-  const bySlug = await supabase.from("motorist_organizations").select("*").eq("slug", organizationSlug).maybeSingle();
+  const bySlug = await supabase.from("motorist_organizations").select("*").abortSignal(signal).eq("slug", organizationSlug).maybeSingle();
   throwOnSupabaseError(bySlug);
 
   if (bySlug.data?.active) {
     return bySlug.data;
   }
 
-  const firstActive = await supabase.from("motorist_organizations").select("*").eq("active", true).order("created_at").limit(1).maybeSingle();
+  const firstActive = await supabase.from("motorist_organizations").select("*").abortSignal(signal).eq("active", true).order("created_at").limit(1).maybeSingle();
   throwOnSupabaseError(firstActive);
   return firstActive.data ?? null;
 }
@@ -1170,7 +1165,7 @@ function isFleetGpsStale(lastSeenAt: string | null) {
   return !isFreshFleetTimestamp(lastSeenAt);
 }
 
-function mapCase({
+export function mapCase({
   caseRow,
   contactsById,
   vehiclesById,
@@ -1921,5 +1916,79 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
         reject(error);
       },
     );
+  });
+}
+
+/** The fleet refresh must not read cases, calls, attendance or Auth users. */
+export async function loadFleetData(organizationId: string, signal?: AbortSignal): Promise<import("./dispatch-types").FleetData> {
+  const supabase = createSupabaseAdminClient();
+  const deadline = AbortSignal.timeout(8_000);
+  const abort = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const query = <T extends keyof Tables>(table: T) => supabase.from(table).select("*").eq("organization_id" as never, organizationId as never).abortSignal(abort);
+  const [assets, branchRows, records, links, positions, providerVehicles, integrations, lastSuccess, latestRun, occupancy] = await Promise.all([
+    query("motorist_fleet_assets").order("label"), query("motorist_branches").eq("active", true),
+    query("motorist_external_vehicle_records").in("source_provider", ["commander", "client_vehicle_db"]),
+    query("motorist_fleet_asset_links").in("source_provider", ["commander", "client_vehicle_db"]),
+    query("motorist_fleet_current_positions").eq("source_provider", "commander"),
+    query("motorist_fleet_provider_vehicles").eq("provider", "webdispecink"),
+    query("motorist_organization_integrations").in("provider", ["commander", "client_vehicle_db", "fleet"]),
+    query("motorist_fleet_sync_runs").eq("provider", "commander").in("mode", ["positions", "full"]).eq("status", "success").order("finished_at", { ascending: false }).limit(1).maybeSingle(),
+    query("motorist_fleet_sync_runs").eq("provider", "commander").in("mode", ["positions", "full"]).order("started_at", { ascending: false }).limit(1).maybeSingle(),
+    query("motorist_fleet_replacement_occupancy").order("captured_at", { ascending: false }).limit(1).maybeSingle(),
+  ]);
+  for (const result of [assets, branchRows, records, links, positions, providerVehicles, integrations, lastSuccess, latestRun, occupancy]) {
+    if (result.error) throw new Error("Fleet snapshot unavailable");
+  }
+  const locationIds = [...new Set([...(assets.data ?? []).map(row => row.current_location_id), ...(branchRows.data ?? []).map(row => row.location_id)].filter((id): id is string => Boolean(id)))];
+  const locations = locationIds.length ? await query("motorist_locations").in("id", locationIds) : { data: [], error: null };
+  if (locations.error) throw new Error("Fleet locations unavailable");
+  const locationsById = new Map((locations.data ?? []).map(row => [row.id, row]));
+  const branches = (branchRows.data ?? []).map(row => mapBranch(row, locationsById, ""));
+  const commanderPositions = positions.data ?? [];
+  const commanderByAsset = latestCommanderPositionByFleetAssetId(commanderPositions);
+  const swhouseRecords = new Map((records.data ?? []).filter(row => row.source_provider === "client_vehicle_db" && row.source_active).map(row => [row.id, row]));
+  const swhouseLinks = new Map((links.data ?? []).filter(row => row.source_provider === "client_vehicle_db" && row.link_status === "confirmed").map(row => [row.fleet_asset_id, row.external_vehicle_record_id]));
+  const normalize = (plates: string[] | null) => new Set((plates ?? []).map(plate => plate.toUpperCase().replace(/[^A-Z0-9]/g, "")));
+  const occupancySnapshot = occupancy.data ? { capturedAt: occupancy.data.captured_at, occupiedPlates: normalize(occupancy.data.occupied_plates), freePlates: normalize(occupancy.data.free_plates) } : null;
+  return {
+    fleetAssets: (assets.data ?? []).map(row => mapFleetAsset(row, locationsById, branches, commanderByAsset.get(row.id), swhouseLinks.has(row.id), occupancySnapshot, swhouseRecords.get(swhouseLinks.get(row.id) ?? ""))),
+    fleetProviderVehicles: (providerVehicles.data ?? []).map(mapFleetProviderVehicle),
+    commanderVehicles: mapCommanderVehicleConnections((records.data ?? []).filter(row => row.source_provider === "commander"), (links.data ?? []).filter(row => row.source_provider === "commander"), commanderPositions),
+    integrations: (integrations.data ?? []).map(mapIntegrationConnection),
+    commanderGpsLastSuccessAt: lastSuccess.data?.finished_at ?? undefined,
+    commanderGpsLatestRunAt: latestRun.data?.finished_at ?? latestRun.data?.started_at ?? undefined,
+    commanderGpsLatestStatus: latestRun.data?.status ?? undefined,
+  };
+}
+
+export async function loadAccessUsers(organizationId: string): Promise<AccessUser[]> {
+  const client = createSupabaseAdminClient(AbortSignal.timeout(8_000));
+  const result = await client.from("motorist_profiles").select("*").eq("organization_id", organizationId).abortSignal(AbortSignal.timeout(8_000));
+  if (result.error) throw new Error("Access profiles unavailable");
+  const profiles = (result.data ?? []).filter(profile => !isDeletedAccessProfile(profile));
+  const users = await loadAuthUsersById(client, profiles.map(profile => profile.user_id).filter((id): id is string => Boolean(id)));
+  return profiles.map(profile => mapAccessUser(profile, users.get(profile.user_id ?? "")));
+}
+
+export async function loadAttendanceData(organizationId: string, signal?: AbortSignal): Promise<DispatchData["attendance"]> {
+  const client = createSupabaseAdminClient();
+  const timeout = AbortSignal.timeout(8_000), abort = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const query = <T extends keyof Tables>(table: T) => client.from(table).select("*").eq("organization_id" as never, organizationId as never).abortSignal(abort);
+  const [profiles, templates, shifts, sessions, settings, requests, balances, batches] = await Promise.all([
+    query("motorist_profiles").eq("active", true), query("motorist_attendance_shift_templates").eq("active", true).order("sort_order"),
+    query("motorist_attendance_shifts").order("planned_start_at").limit(200), query("motorist_attendance_sessions").order("started_at", { ascending: false }).limit(200),
+    query("motorist_attendance_employee_settings"), query("motorist_attendance_unavailability_requests").order("start_date_local").limit(200),
+    query("motorist_attendance_time_off_balances").order("year", { ascending: false }), query("motorist_attendance_schedule_batches").order("created_at", { ascending: false }).limit(50),
+  ]);
+  for (const result of [profiles, templates, shifts, sessions, settings, requests, balances, batches]) if (result.error) throw new Error("Attendance unavailable");
+  const profilesById = new Map((profiles.data ?? []).map(profile => [profile.id, profile]));
+  const mappedTemplates = (templates.data ?? []).map(mapAttendanceTemplate);
+  const mappedSessions = (sessions.data ?? []).map(row => mapAttendanceSession(row, profilesById));
+  const sessionsByShift = latestAttendanceSessionsByShift(mappedSessions);
+  return buildAttendanceOverview({ timezone: "Europe/Bratislava", operators: (profiles.data ?? []).map(profile => mapOperator(profile, undefined)), templates: mappedTemplates,
+    shifts: (shifts.data ?? []).map(row => mapAttendanceShift(row, profilesById, mappedTemplates, sessionsByShift.get(row.id))), sessions: mappedSessions,
+    employeeSettings: (settings.data ?? []).map(row => mapAttendanceEmployeeSettings(row, profilesById)),
+    unavailabilityRequests: (requests.data ?? []).map(row => mapAttendanceRequest(row, profilesById)),
+    timeOffBalances: (balances.data ?? []).map(row => mapAttendanceBalance(row, profilesById)), scheduleBatches: (batches.data ?? []).map(mapAttendanceScheduleBatch),
   });
 }

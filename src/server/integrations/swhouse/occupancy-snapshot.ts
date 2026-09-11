@@ -76,14 +76,15 @@ export function isUnverifiedAssignmentBlocked(occupancy: FleetAssetOccupancy | u
 export async function loadLatestOccupancySnapshot(
   supabase: AdminClient,
   organizationId: string,
+  signal?: AbortSignal,
 ): Promise<OccupancySnapshot | null> {
-  const result = await supabase
+  const request = supabase
     .from("motorist_fleet_replacement_occupancy")
     .select("captured_at, occupied_plates, free_plates")
     .eq("organization_id", organizationId)
     .order("captured_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
+  const result = await (signal ? request.abortSignal(signal) : request).maybeSingle();
 
   if (result.error || !result.data) {
     return null;

@@ -3,7 +3,7 @@ import { loadWorkspaceCapabilities } from "./workspace-capabilities";
 import { createWorkspaceTask, TASK_WORKSPACE_ROLES } from "./tasks";
 import { taskWorkspaceSystemEnabled } from "./task-system-gate";
 import { runCompatibleCaseTaskAction } from "./legacy-task-adapter";
-import { CaseWritePlan, commitAtomicCaseSave } from "./case-atomic-save";
+import { CaseWritePlan, commitAtomicCaseSave, caseMutationIdentity, readCaseMutationResult } from "./case-atomic-save";
 import { matchFleetIdentities } from "@/lib/fleet-pairing";
 
 import { lookupSnapshotForSave } from "@/server/vehicle-lookup/snapshot";
@@ -175,7 +175,7 @@ export async function createCase(input: CreateCaseInput, ownerProfileId?: string
   return { caseRow, warnings };
 }
 
-export async function updateCase(caseId: string, input: UpdateCaseInput, actorProfileId?: string) {
+export async function updateCase(caseId: string, input: UpdateCaseInput, actorProfileId?: string, actorOrganizationId?: string) {
   if (!nonEmpty(caseId)) {
     throw new MutationError("Chýba prípad.", 400);
   }
@@ -183,16 +183,21 @@ export async function updateCase(caseId: string, input: UpdateCaseInput, actorPr
     throw new MutationError("Pred uložením načítajte aktuálnu revíziu prípadu.", 428, "CASE_REVISION_REQUIRED");
   }
   const warnings = collectCaseInputWarnings(input);
-
+  const identity = caseMutationIdentity(input);
   const supabase = createSupabaseAdminClient();
-  const organization = await resolveOrganization(supabase);
-  const organizationId = organization.id;
+  const organizationId = actorOrganizationId ?? (await resolveOrganization(supabase)).id;
+  if (identity) {
+    if (!actorProfileId) throw new MutationError("Uloženie vyžaduje prihláseného operátora.", 403);
+    const receipt = await readCaseMutationResult(supabase, organizationId, actorProfileId, caseId, identity);
+    if (receipt) return { caseRow: receipt, warnings };
+  }
   const existing = await getCase(supabase, organizationId, caseId);
-  const ownerId = existing.owner_id ?? (await resolveDefaultOwnerId(supabase, organizationId));
-  // Aktivitu prípadu zapisujeme na prihláseného editora, nie na majiteľa prípadu (P-01).
-  const actorId = nonEmpty(actorProfileId) ? (await getProfile(supabase, organizationId, actorProfileId)).id : ownerId;
-  const contact = existing.contact_id ? await getContact(supabase, organizationId, existing.contact_id) : null;
-  const vehicle = existing.vehicle_id ? await getVehicle(supabase, organizationId, existing.vehicle_id) : null;
+  // The atomic RPC rechecks active membership at commit; the route already authenticated this actor.
+  const actorId = nonEmpty(actorProfileId) ? actorProfileId : existing.owner_id ?? await resolveDefaultOwnerId(supabase, organizationId);
+  const [contact, vehicle] = await Promise.all([
+    existing.contact_id ? getContact(supabase, organizationId, existing.contact_id) : null,
+    existing.vehicle_id ? getVehicle(supabase, organizationId, existing.vehicle_id) : null,
+  ]);
 
   input = withVerifiedVehicleLookup(input, organizationId, { identity: { plate: vehicle?.license_plate ?? undefined, vin: vehicle?.vin ?? undefined }, snapshot: objectJson(existing.vehicle_details).vehicleLookup });
 
@@ -214,7 +219,7 @@ export async function updateCase(caseId: string, input: UpdateCaseInput, actorPr
 
   if (!actorId) throw new MutationError("Uloženie vyžaduje prihláseného operátora.", 403);
   const updated = await commitAtomicCaseSave(supabase, {
-    organizationId, actorId, caseId, expectedUpdatedAt: input.expectedUpdatedAt!,
+    organizationId, actorId, caseId, expectedUpdatedAt: input.expectedUpdatedAt!, identity,
     casePatch: updatePayload, related: plan.writes, fieldLabels: { ...caseFieldLabels, statusLabels: caseStatusLabels, priorityLabels: casePriorityLabels },
   });
 
