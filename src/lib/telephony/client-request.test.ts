@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   isAbortLikeError,
@@ -10,7 +10,57 @@ import {
   TelephonyRequestTimeoutError,
 } from "./client-request";
 
+afterEach(() => vi.useRealTimers());
+
 describe("bounded telephony requests", () => {
+  it("accepts a call-control result after 15 seconds without aborting or retrying", async () => {
+    vi.useFakeTimers();
+    const aborted = vi.fn();
+    const fetchSpy = vi.fn((_input: unknown, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const responseTimer = setTimeout(() => resolve(jsonResponse(200, { ok: true, state: "ended" })), 15_000);
+      init?.signal?.addEventListener("abort", () => {
+        aborted();
+        clearTimeout(responseTimer);
+        reject(abortError());
+      }, { once: true });
+    }));
+    const pending = telephonyJson(
+      "/api/telephony/calls/session/hangup",
+      { method: "POST", label: "ukončenie hovoru", timeoutMs: TELEPHONY_TIMEOUT_MS.control },
+      { fetch: fetchSpy as unknown as typeof fetch },
+    ).catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await expect(pending).resolves.toEqual({ ok: true, status: 200, body: { ok: true, state: "ended" } });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(aborted).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("still aborts an unresponsive call-control request at 30 seconds without retrying", async () => {
+    vi.useFakeTimers();
+    const aborted = vi.fn();
+    const fetchSpy = vi.fn((_input: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => { aborted(); reject(abortError()); }, { once: true });
+    }));
+    const pending = telephonyJson(
+      "/api/telephony/calls/session/hangup",
+      { method: "POST", label: "ukončenie hovoru", timeoutMs: TELEPHONY_TIMEOUT_MS.control },
+      { fetch: fetchSpy as unknown as typeof fetch },
+    ).catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(aborted).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await pending;
+    expect(error).toBeInstanceOf(TelephonyRequestTimeoutError);
+    expect(error).toMatchObject({ timeoutMs: 30_000, label: "ukončenie hovoru" });
+    expect(aborted).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("times out a response that never arrives", async () => {
     // A hung endpoint used to pin the caller forever; the budget must fire
     // even though the promise itself never settles.

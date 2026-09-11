@@ -15,7 +15,7 @@ import { attachContactOperations, collectContactProof, readContactHistory } from
 import { readPendingEffects } from "./state/continuation";
 import { cancelRevokedOffers } from "./state/cancelled-offers";
 import { CallActionRejected, reduce } from "./state/transitions";
-import { needsRecordingContinuation } from "./state/recording";
+import { needsRecordingContinuation, requiresRecordingLease } from "./state/recording";
 import { SessionLeaseLostError } from "./service-errors";
 import { resolveSessionRecordingPolicy } from "./recording-policy-service";
 import {
@@ -224,7 +224,11 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
   // for every routing state, including parked outgoing and internal calls.
   const inboundRouting = routing && (session.direction === "inbound" || Boolean(meta.ring?.plan) || meta.ring?.mode === "plan" || Boolean(meta.queue));
 
-  const [businessHours, ivr] = inboundRouting ? await Promise.all([loadBusinessHours(admin, organizationId, line?.business_hours_id ?? null), loadIvr(admin, organizationId, line?.ivr_menu_id ?? null)]) : [null, null];
+  // Once a caller has left the introduction/menu, routing uses the frozen plan.
+  // Re-reading every IVR branch while operators answer or hang up holds the
+  // session lease for unrelated configuration work and delays those events.
+  const needsEntryRouting = inboundRouting && ["received", "greeting", "ivr"].includes(session.state);
+  const [businessHours, ivr] = needsEntryRouting ? await Promise.all([loadBusinessHours(admin, organizationId, line?.business_hours_id ?? null), loadIvr(admin, organizationId, line?.ivr_menu_id ?? null)]) : [null, null];
 
   let ringPlan: FrozenRingPlan | null = meta.ring?.plan ?? null;
   const ringPlans: Record<string, FrozenRingPlan> = {};
@@ -232,10 +236,10 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     const planIds = new Set<string>();
     if (!ringPlan && line?.ring_plan_id) planIds.add(line.ring_plan_id);
     for (const option of ivr?.options ?? []) if (option.target_ring_plan_id) planIds.add(option.target_ring_plan_id);
-    for (const planId of planIds) {
+    await Promise.all([...planIds].map(async (planId) => {
       const frozen = await materialiseRingPlan(admin, { organizationId, ringPlanId: planId, now });
       if (frozen) ringPlans[planId] = frozen;
-    }
+    }));
     if (!ringPlan && line?.ring_plan_id) ringPlan = ringPlans[line.ring_plan_id] ?? null;
     if (ringPlan) ringPlans[ringPlan.planId] = ringPlan;
   }
@@ -397,7 +401,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
       let snapshot = await loadSessionSnapshot(deps, sessionId);
       const context = await loadRoutingContext(deps, snapshot.session);
       context.recordingLeaseHeld = leaseAcquired;
-      const recordingLeaseRequired = Boolean(context.recordingPolicy?.enabled || readMeta(snapshot.session).recording?.recorders.some((item) => item.observed !== "stopped"));
+      const recordingLeaseRequired = requiresRecordingLease(snapshot.session, context);
       const durable = telephonyStabilityEnabled() || hasStabilityContract(snapshot.session);
       const effects: EffectsDeps = { ...effectsDeps(deps), eventTiming: () => timing(), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token, recordingLeaseRequired || durable) : undefined };
       if (!leaseAcquired && (recordingLeaseRequired || durable) && event.kind === "app" && event.type === "sweep") {
