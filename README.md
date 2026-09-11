@@ -53,6 +53,7 @@ Dispečerská konzola používa Supabase Auth s prihlásením heslom a mapovaní
 
 ## Dokumentácia
 
+- [Klientsky HTML návod](docs/client-guide.md) — `/navod` v aplikácii, samostatné HTML vydanie, screenshoty a spoločný zdroj pre budúceho AI pomocníka.
 - `docs/source/MOTORIST_ASSISTANCE_KNOWLEDGE_BASE.md` - importovaný zdrojový discovery dokument.
 - `docs/product-brief.md` - produktový rámec v1 demo.
 - `docs/domain-model.md` - doménové entity, statusy a traceability mock dát.
