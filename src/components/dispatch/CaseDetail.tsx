@@ -37,6 +37,7 @@ import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-t
 import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
+import { CASE_ATTACHMENT_ACCEPT, validateCaseAttachmentFiles } from "@/lib/case-attachments";
 import type {
   AccessComplication,
   Branch,
@@ -84,7 +85,7 @@ import {
   vehicleConditionFlagLabels,
 } from "@/domain/case-card";
 import { casePriorityLabels, caseStatusLabels, caseStatusTone } from "@/domain/statuses";
-import { isTaskOpen, isTaskOverdue, taskPriorities, taskPriorityLabels, taskPriorityTone } from "@/domain/tasks";
+import { assignableOperators, isTaskOpen, isTaskOverdue, taskPriorities, taskPriorityLabels, taskPriorityTone } from "@/domain/tasks";
 import { formatDateTime, formatTime } from "@/lib/dispatch-calculations";
 import { createDispatchMapModel } from "@/lib/map-adapter";
 import {
@@ -185,6 +186,18 @@ type AttachmentUrlResponse = {
   error?: string;
   signedUrl?: string;
 };
+
+/** Opens a stored attachment through a short-lived signed URL; the bucket itself is private. */
+async function openCaseAttachment(caseId: string, attachmentId: string) {
+  const response = await fetch(`/api/cases/${caseId}/attachments?attachmentId=${encodeURIComponent(attachmentId)}`);
+  const result = (await response.json()) as AttachmentUrlResponse;
+
+  if (!response.ok || !result.signedUrl) {
+    throw new Error(result.error ?? "Prílohu sa nepodarilo otvoriť.");
+  }
+
+  window.open(result.signedUrl, "_blank", "noopener,noreferrer");
+}
 
 const CASE_AUTOSAVE_DEBOUNCE_MS = 1_200;
 const CASE_AUTOSAVE_REQUEST_TIMEOUT_MS = 20_000;
@@ -309,6 +322,7 @@ export function CaseDetail({
   const closureType = caseItem.closureDetails.type;
   const openTasks = caseItem.tasks.filter(isTaskOpen);
   // Dokončené úlohy ostávajú dohľadateľné v detaile prípadu vrátane autora a časov (U-06, U-09).
+  const assignableTaskOperators = assignableOperators(operators);
   const completedTasks = caseItem.tasks
     .filter((task) => !isTaskOpen(task))
     .sort((left, right) => new Date(right.completedAt ?? right.dueAt).getTime() - new Date(left.completedAt ?? left.dueAt).getTime());
@@ -624,14 +638,7 @@ export function CaseDetail({
 
   async function openAttachment(attachmentId: string) {
     try {
-      const response = await fetch(`/api/cases/${caseItem.id}/attachments?attachmentId=${encodeURIComponent(attachmentId)}`);
-      const result = (await response.json()) as AttachmentUrlResponse;
-
-      if (!response.ok || !result.signedUrl) {
-        throw new Error(result.error ?? "Prílohu sa nepodarilo otvoriť.");
-      }
-
-      window.open(result.signedUrl, "_blank", "noopener,noreferrer");
+      await openCaseAttachment(caseItem.id, attachmentId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Prílohu sa nepodarilo otvoriť.");
     }
@@ -792,7 +799,7 @@ export function CaseDetail({
                         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
                       </div>
                       {isTaskOpen(task) ? (
-                        <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 h-11 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50">Vybavené</button>
+                        <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 inline-flex h-11 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"><CheckCircle2 size={13} /> Vybaviť</button>
                       ) : (
                         <span className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md bg-emerald-50 px-2 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200"><CheckCircle2 size={13} /> Úloha je vybavená</span>
                       )}
@@ -849,8 +856,8 @@ export function CaseDetail({
                     Zodpovedná osoba
                     <select value={taskAssignee} onChange={(event) => setTaskAssignee(event.target.value)} className="h-11 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-base font-medium text-zinc-950 outline-none ring-yellow-300 transition focus:ring-2" aria-label="Zodpovedná osoba">
                       <option value="unassigned">Nepriradené</option>
-                      {operators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}
-                      {taskAssignee !== "unassigned" && !operators.some((operator) => operator.id === taskAssignee) && <option value={taskAssignee}>{taskAssignee === viewerProfileId ? "Ja (prihlásený)" : caseItem.ownerName ?? "Aktuálne priradená osoba"}</option>}
+                      {assignableTaskOperators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}
+                      {taskAssignee !== "unassigned" && !assignableTaskOperators.some((operator) => operator.id === taskAssignee) && <option value={taskAssignee}>{taskAssignee === viewerProfileId ? "Ja (prihlásený)" : caseItem.ownerName ?? "Aktuálne priradená osoba"}</option>}
                     </select>
                   </label>
                   <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-zinc-700">
@@ -1036,8 +1043,9 @@ export function CaseDetail({
                       </div>
                     ))}
                     {caseItem.attachments.length === 0 && <div className="text-xs font-medium text-zinc-500">Bez príloh.</div>}
+                    {caseItem.attachments.length > 3 && <div className="text-xs font-medium text-zinc-500">+{caseItem.attachments.length - 3} ďalších v úprave karty zásahu.</div>}
                   </div>
-                  <label className="mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-zinc-300 bg-white px-2 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"><FileUp size={15} />Pridať súbor<input type="file" multiple accept="image/jpeg,image/png,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="sr-only" onChange={(event) => handleAttachmentFiles(event.target.files)} /></label>
+                  <label className="mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-zinc-300 bg-white px-2 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"><FileUp size={15} />Pridať súbor<input type="file" multiple accept={CASE_ATTACHMENT_ACCEPT} className="sr-only" onChange={(event) => handleAttachmentFiles(event.target.files)} /></label>
                   {pendingAttachmentFiles.length > 0 && (
                     <div className="mt-2 grid gap-1.5">
                       {pendingAttachmentFiles.map((file, index) => <div key={`${file.name}-${file.lastModified}-${index}`} className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-zinc-200 bg-white px-2 py-1.5 text-xs"><span className="min-w-0 truncate">{file.name}</span><button type="button" onClick={() => setPendingAttachmentFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="text-zinc-500 hover:text-zinc-900" aria-label="Odobrať prílohu"><X size={13} /></button></div>)}
@@ -1340,8 +1348,9 @@ function EditCaseForm({
     })),
   );
   const [attachmentCategory, setAttachmentCategory] = useState<CaseAttachmentInput["category"]>("photo");
-  const [attachmentFileName, setAttachmentFileName] = useState("");
+  const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
   const [attachmentNote, setAttachmentNote] = useState("");
+  const [isUploadingAttachments, setIsUploadingAttachments] = useState(false);
   const [savePhase, setSavePhase] = useState<CaseSavePhase>("idle");
   const [saveSlow, setSaveSlow] = useState(false);
   const [saveAttempt, setSaveAttempt] = useState(0);
@@ -1639,12 +1648,63 @@ function EditCaseForm({
     setContacts((current) => moveById(current, id, direction));
   }
 
-  function addAttachment() {
-    const fileName = attachmentFileName.trim();
-    if (!fileName) return;
-    setAttachments((current) => [...current, { category: attachmentCategory, fileName, note: attachmentNote.trim() || undefined }]);
-    setAttachmentFileName("");
-    setAttachmentNote("");
+  function addAttachmentFiles(files: FileList | null) {
+    if (!files) return;
+    setAttachmentFiles((current) => [...current, ...Array.from(files)].slice(0, 10));
+  }
+
+  /**
+   * Uploads the chosen files right away through the attachments route (the
+   * bucket is private; the route validates, stores and records them). The
+   * metadata returned is folded into the draft so the next autosave keeps the
+   * same list instead of dropping the files it does not know about. A refused
+   * file leaves the form and the picked files untouched.
+   */
+  async function uploadFormAttachments() {
+    if (attachmentFiles.length === 0 || isUploadingAttachments) return;
+
+    const validationError = validateCaseAttachmentFiles(attachmentFiles);
+    if (validationError) {
+      onNotice(validationError);
+      return;
+    }
+
+    setIsUploadingAttachments(true);
+
+    try {
+      const form = new FormData();
+      attachmentFiles.forEach((file) => form.append("files", file));
+      form.append("category", attachmentCategory);
+      if (attachmentNote.trim()) {
+        form.append("note", attachmentNote.trim());
+      }
+
+      const response = await fetch(`/api/cases/${caseItem.id}/attachments`, { method: "POST", body: form });
+      const result = (await response.json()) as ApiMutationResponse & { attachments?: CaseAttachmentInput[] };
+
+      if (!response.ok || !result.dispatchData) {
+        throw new Error(result.error ?? "Prílohy sa nepodarilo nahrať.");
+      }
+
+      const uploaded = result.attachments ?? [];
+      setAttachments((current) => [...current, ...uploaded.filter((item) => !current.some((existing) => existing.id && existing.id === item.id))]);
+      setAttachmentFiles([]);
+      setAttachmentNote("");
+      onDataChange?.(result.dispatchData);
+      onNotice(uploaded.length === 1 ? "Príloha je nahratá a uložená pri karte zásahu." : `${uploaded.length} príloh je nahratých a uložených pri karte zásahu.`);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Prílohy sa nepodarilo nahrať.");
+    } finally {
+      setIsUploadingAttachments(false);
+    }
+  }
+
+  async function openStoredAttachment(attachmentId: string) {
+    try {
+      await openCaseAttachment(caseItem.id, attachmentId);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Prílohu sa nepodarilo otvoriť.");
+    }
   }
 
   function prefillFromCommander() {
@@ -2322,22 +2382,64 @@ function EditCaseForm({
         <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Dokumenty</h4>
         <div className="grid gap-3 @3xl:grid-cols-[160px_1fr_1fr_auto]">
           <SelectField label="Typ prílohy" value={attachmentCategory} onChange={(value) => setAttachmentCategory(value as CaseAttachmentInput["category"])} options={attachmentCategories.map((category) => [category, attachmentCategoryLabels[category]])} />
-          <TextField label="Názov prílohy" value={attachmentFileName} onChange={setAttachmentFileName} />
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Súbory</span>
+            <span className="flex h-10 w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-zinc-300 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50">
+              <FileUp size={16} />
+              {attachmentFiles.length > 0 ? `Vybrané: ${attachmentFiles.length}` : "Vybrať súbory"}
+              <input
+                type="file"
+                multiple
+                accept={CASE_ATTACHMENT_ACCEPT}
+                className="sr-only"
+                onChange={(event) => {
+                  addAttachmentFiles(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+            </span>
+          </label>
           <TextField label="Poznámka" value={attachmentNote} onChange={setAttachmentNote} />
-          <button type="button" onClick={addAttachment} className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50">
-            <Plus size={16} />
-            Pridať
+          <button
+            type="button"
+            onClick={() => void uploadFormAttachments()}
+            disabled={attachmentFiles.length === 0 || isUploadingAttachments}
+            className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-600"
+          >
+            {isUploadingAttachments ? <Loader2 size={16} className="animate-spin" /> : <FileUp size={16} />}
+            Nahrať
           </button>
         </div>
+        <p className="text-xs font-medium text-zinc-500">Povolené sú JPG, PNG, PDF a Word do 10 MB. Súbor sa nahrá hneď po stlačení Nahrať a uloží sa k tejto karte.</p>
+        {attachmentFiles.length > 0 && (
+          <div className="grid gap-1.5">
+            {attachmentFiles.map((file, index) => (
+              <div key={`${file.name}-${file.lastModified}-${index}`} className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-dashed border-zinc-300 bg-white px-3 py-1.5 text-xs">
+                <span className="min-w-0 truncate font-medium text-zinc-700">{file.name} · {Math.max(1, Math.round(file.size / 1024))} kB</span>
+                <button type="button" onClick={() => setAttachmentFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} disabled={isUploadingAttachments} className="shrink-0 text-zinc-500 hover:text-zinc-900 disabled:text-zinc-300" aria-label={`Nevybrať súbor ${file.name}`}>
+                  <X size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="grid gap-2">
             {attachments.map((attachment, index) => (
-              <div key={`${attachment.fileName}-${index}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm">
-                <span>{attachmentCategoryLabels[attachment.category]} · {attachment.fileName}</span>
-                <button type="button" onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="inline-flex h-8 items-center gap-2 rounded-md border border-zinc-200 px-2 text-xs font-semibold text-zinc-600 hover:bg-zinc-50">
-                  <Trash2 size={14} />
-                  Odobrať
-                </button>
+              <div key={attachment.id ?? `${attachment.fileName}-${index}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm">
+                <span className="min-w-0 truncate">{attachmentCategoryLabels[attachment.category]} · {attachment.fileName}{attachment.note ? ` · ${attachment.note}` : ""}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {attachment.id && attachment.storagePath && (
+                    <button type="button" onClick={() => void openStoredAttachment(attachment.id!)} className="inline-flex h-8 items-center gap-2 rounded-md border border-zinc-200 px-2 text-xs font-semibold text-zinc-600 hover:bg-zinc-50">
+                      <Download size={14} />
+                      Otvoriť
+                    </button>
+                  )}
+                  <button type="button" onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="inline-flex h-8 items-center gap-2 rounded-md border border-zinc-200 px-2 text-xs font-semibold text-zinc-600 hover:bg-zinc-50">
+                    <Trash2 size={14} />
+                    Odobrať
+                  </button>
+                </span>
               </div>
             ))}
           </div>

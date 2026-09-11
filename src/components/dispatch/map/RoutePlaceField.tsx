@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { loadGoogleMaps } from "@/lib/google-maps-client";
 import { createPlaceAutocompleteElement } from "@/lib/google-maps-places";
 import type { RoutePlace } from "./route-planner-model";
 export type { RoutePlace } from "./route-planner-model";
+
+const PLACE_LOOKUP_TIMEOUT_MS = 15_000;
 
 export function RoutePlaceField({ label, value, query, onChange, actions, active = true }: {
   label: string;
@@ -19,12 +21,20 @@ export function RoutePlaceField({ label, value, query, onChange, actions, active
   const onChangeRef = useRef(onChange);
   const textRef = useRef(query);
   const sequenceRef = useRef(0);
+  const selectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [libraryReady, setLibraryReady] = useState(() => typeof google !== "undefined" && Boolean(google.maps.places?.PlaceAutocompleteElement));
   const loadingRef = useRef(false);
   const mountedRef = useRef(false);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
   useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
+  const cancelSelection = useCallback(() => {
+    if (selectionTimerRef.current !== null) {
+      clearTimeout(selectionTimerRef.current);
+      selectionTimerRef.current = null;
+    }
+    return ++sequenceRef.current;
+  }, []);
 
   async function enableSearch() {
     if (!active || loadingRef.current || libraryReady) return;
@@ -45,31 +55,53 @@ export function RoutePlaceField({ label, value, query, onChange, actions, active
     element.style.fontSize = "16px";
     element.style.minHeight = "44px";
     const onInput = () => {
-      sequenceRef.current += 1;
+      if (element.value === textRef.current) return;
+      cancelSelection();
       textRef.current = element.value;
       setNotice(null);
       onChangeRef.current(null, element.value);
     };
     const onSelect: EventListener = (event) => {
-      const requestId = ++sequenceRef.current;
-      onChangeRef.current(null, element.value);
+      const requestId = cancelSelection();
+      // Google can replace the typed query with a prediction's full address
+      // before gmp-select, without an input event. Record our own update before
+      // publishing it so prop synchronization does not cancel this lookup.
+      textRef.current = element.value;
+      onChangeRef.current(null, textRef.current);
       setNotice("Načítavam miesto…");
-      const place = (event as google.maps.places.PlacePredictionSelectEvent).placePrediction.toPlace();
-      // Google fetchFields cannot be aborted; sequence checks discard stale
-      // responses after edits, reordering, or switching away from the widget.
-      void place.fetchFields({ fields: ["formattedAddress", "displayName", "location"] }).then(() => {
+      selectionTimerRef.current = setTimeout(() => {
         if (requestId !== sequenceRef.current) return;
+        cancelSelection();
+        setNotice("Načítanie miesta trvá príliš dlho. Vyberte ho znova.");
+      }, PLACE_LOOKUP_TIMEOUT_MS);
+      // Google fetchFields cannot be aborted; sequence checks discard stale
+      // responses after edits, reordering, timeout or hiding the widget.
+      // Keep toPlace inside the async boundary so synchronous SDK errors also
+      // finish loading and allow the user to select another prediction.
+      void (async () => {
+        const place = (event as google.maps.places.PlacePredictionSelectEvent).placePrediction.toPlace();
+        await place.fetchFields({ fields: ["formattedAddress", "displayName", "location"] });
         const lat = place.location?.lat(), lng = place.location?.lng();
-        if (lat === undefined || lng === undefined || !Number.isFinite(lat) || !Number.isFinite(lng)) { setNotice("Vyberte miesto s platnou polohou."); return; }
-        const address = place.formattedAddress ?? place.displayName ?? `${lat}, ${lng}`;
-        textRef.current = address;
-        element.value = address;
-        onChangeRef.current({ label: address, lat, lng }, address);
+        if (lat === undefined || lng === undefined || !Number.isFinite(lat) || !Number.isFinite(lng)
+          || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+        return { label: place.formattedAddress?.trim() || place.displayName?.trim() || `${lat}, ${lng}`, lat, lng };
+      })().then(place => {
+        if (requestId !== sequenceRef.current) return;
+        cancelSelection();
+        if (!place) { setNotice("Vyberte miesto s platnou polohou."); return; }
+        textRef.current = place.label;
+        element.value = place.label;
+        onChangeRef.current(place, place.label);
         setNotice(null);
-      }).catch(() => { if (requestId === sequenceRef.current) setNotice("Miesto sa nepodarilo načítať. Vyberte ho znova."); });
+      }).catch(() => {
+        if (requestId !== sequenceRef.current) return;
+        cancelSelection();
+        setNotice("Miesto sa nepodarilo načítať. Vyberte ho znova.");
+      });
     };
     const onError = () => {
-      sequenceRef.current += 1;
+      cancelSelection();
+      textRef.current = element.value;
       onChangeRef.current(null, element.value);
       setNotice("Vyhľadávanie nie je dostupné. Skúste to znova.");
     };
@@ -79,20 +111,24 @@ export function RoutePlaceField({ label, value, query, onChange, actions, active
     element.addEventListener("gmp-error", onError);
     host.replaceChildren(element);
     return () => {
-      sequenceRef.current += 1;
+      cancelSelection();
+      if (mountedRef.current) setNotice(null);
       element.removeEventListener("input", onInput);
       element.removeEventListener("gmp-select", onSelect);
       element.removeEventListener("gmp-error", onError);
       elementRef.current = null;
       host.replaceChildren();
     };
-  }, [active, label, libraryReady]);
+  }, [active, cancelSelection, label, libraryReady]);
 
   useEffect(() => {
-    if (query !== textRef.current) sequenceRef.current += 1;
+    if (query !== textRef.current) {
+      cancelSelection();
+      setNotice(null);
+    }
     textRef.current = query;
     if (elementRef.current && elementRef.current.value !== query) elementRef.current.value = query;
-  }, [query, value]);
+  }, [cancelSelection, query, value]);
 
   return (
     <div className="min-w-0 flex-1">

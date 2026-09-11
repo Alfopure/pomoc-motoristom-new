@@ -22,6 +22,7 @@ import type {
   CaseLocationDetails,
   CasePriority,
   CaseStatus,
+  CaseTask,
   CaseTaskKind,
   ClientVehicleType,
   ClosureDetails,
@@ -602,6 +603,26 @@ function mapOperator(profile: ProfileRow, status: OperatorStatusRow | undefined)
     name: profile.display_name,
     extension: profileExtension(profile),
     status: status?.status ?? "offline",
+    accessStatus: profile.access_status,
+  };
+}
+
+/** One task row → the console's `CaseTask`; shared by the full load and the live-update poll. */
+export function mapCaseTaskRow(task: CaseTaskRow, fallbackDueAt: string): CaseTask {
+  return {
+    id: task.id,
+    caseId: task.case_id ?? "",
+    title: task.title,
+    // Nepriradená úloha musí ostať nepriradená (U-02) — owner prípadu nie je implicitný riešiteľ.
+    assignedTo: task.assigned_to ?? "unassigned",
+    dueAt: task.due_at ?? fallbackDueAt,
+    status: task.status,
+    priority: toCasePriority(task.priority ?? "normal"),
+    kind: toCaseTaskKind(task.kind ?? "other"),
+    createdBy: task.created_by ?? undefined,
+    completedBy: task.completed_by ?? undefined,
+    completedAt: task.completed_at ?? undefined,
+    updatedAt: task.updated_at,
   };
 }
 
@@ -1226,20 +1247,7 @@ function mapCase({
       hasPhone: Boolean(contact?.phone && contact.phone.replace(/\D/g, "").length >= 6),
       hasRequiredDestination: !requiresTowDestination(mappedJobTypes) || Boolean(destination),
     }),
-    tasks: tasks.map((task) => ({
-      id: task.id,
-      caseId: task.case_id ?? "",
-      title: task.title,
-      // Nepriradená úloha musí ostať nepriradená (U-02) — owner prípadu nie je implicitný riešiteľ.
-      assignedTo: task.assigned_to ?? "unassigned",
-      dueAt: task.due_at ?? caseRow.updated_at,
-      status: task.status,
-      priority: toCasePriority(task.priority ?? "normal"),
-      kind: toCaseTaskKind(task.kind ?? "other"),
-      createdBy: task.created_by ?? undefined,
-      completedBy: task.completed_by ?? undefined,
-      completedAt: task.completed_at ?? undefined,
-    })),
+    tasks: tasks.map((task) => mapCaseTaskRow(task, caseRow.updated_at)),
     timeline: events.map((event) => ({
       id: event.id,
       caseId: event.case_id,

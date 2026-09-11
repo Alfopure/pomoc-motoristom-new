@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CaseTask } from "./types";
-import { compareOperationalTasks, isTaskDueToday, isTaskHandoverRelevant, isTaskOpen, isTaskOverdue, taskStatusLabel } from "./tasks";
+import { assignableOperators, compareOperationalTasks, isTaskDueToday, isTaskHandoverRelevant, isTaskOpen, isTaskOverdue, taskStatusLabel } from "./tasks";
 
 const now = new Date("2026-06-08T10:00:00.000Z");
 
@@ -17,6 +17,19 @@ function task(overrides: Partial<CaseTask> = {}): CaseTask {
     ...overrides,
   };
 }
+
+describe("assignable operators", () => {
+  it("offers only colleagues who can sign in, and every operator when access is unknown", () => {
+    const operators = [
+      { id: "real", accessStatus: "active" as const },
+      { id: "invited-duplicate", accessStatus: "invited" as const },
+      { id: "never-invited", accessStatus: "not_invited" as const },
+      { id: "left", accessStatus: "disabled" as const },
+      { id: "mock" },
+    ];
+    expect(assignableOperators(operators).map((operator) => operator.id)).toEqual(["real", "mock"]);
+  });
+});
 
 describe("task inbox domain rules", () => {
   it("derives open and overdue from status and due time", () => {

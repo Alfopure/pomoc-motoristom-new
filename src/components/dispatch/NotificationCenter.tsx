@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Archive, BellRing, Check, ChevronLeft, ChevronRight, Inbox, Loader2, RefreshCw, RotateCcw, UserRound, UsersRound } from "lucide-react";
+import { BellRing, Check, ChevronLeft, ChevronRight, Inbox, Loader2, RefreshCw, RotateCcw, Trash2, UserRound, UsersRound } from "lucide-react";
 import {
   compareNotifications,
   formatNotificationReminderTime,
@@ -159,11 +159,13 @@ export function NotificationCenter({
             );
           })}
         </div>
-        <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="Stav upozornení">
+        {/* Auto-fit instead of three fixed columns: in the narrow dashboard
+            column the labels were cut to "Na v…", "Odlo…", "Vyba…". */}
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(7.5rem,1fr))] gap-1.5" role="group" aria-label="Stav upozornení">
           {([
             { id: "pending", label: "Na vybavenie", count: unreadCount },
             { id: "snoozed", label: "Odložené", count: snoozedCount },
-            { id: "past", label: "Vybavené", count: pastCount },
+            { id: "past", label: "Prečítané", count: pastCount },
           ] as const).map((item) => (
             <button
               key={item.id}
@@ -176,7 +178,7 @@ export function NotificationCenter({
                   : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
               }`}
             >
-              <span className="truncate">{item.label}</span>
+              <span className="whitespace-nowrap">{item.label}</span>
               <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${stateFilter === item.id ? "bg-white text-zinc-950" : "bg-zinc-100 text-zinc-600"}`}>
                 {item.count}
               </span>
@@ -257,7 +259,7 @@ export function NotificationCenter({
                           className="inline-flex h-7 items-center gap-1 rounded-md bg-white px-2 text-[11px] font-semibold text-zinc-700 ring-1 ring-zinc-200 hover:bg-zinc-50 disabled:cursor-wait disabled:text-zinc-400"
                         >
                           {busy ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
-                          Vybavené
+                          Prečítané
                         </button>
                       ) : onUpdateStatus ? (
                         <button
@@ -276,11 +278,11 @@ export function NotificationCenter({
                         type="button"
                         disabled={busy}
                         onClick={() => updateStatus(notification.id, "archived")}
-                        className="inline-flex size-7 items-center justify-center rounded-md bg-white text-zinc-500 ring-1 ring-zinc-200 hover:bg-zinc-50 disabled:cursor-wait disabled:text-zinc-300"
-                        aria-label="Archivovať upozornenie"
-                        title="Archivovať"
+                        className="inline-flex size-7 items-center justify-center rounded-md bg-white text-zinc-500 ring-1 ring-zinc-200 hover:bg-red-50 hover:text-red-700 disabled:cursor-wait disabled:text-zinc-300"
+                        aria-label="Odstrániť upozornenie"
+                        title="Odstrániť zo zoznamu"
                       >
-                        {busy ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} />}
+                        {busy ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
                       </button>
                     )}
                   </div>

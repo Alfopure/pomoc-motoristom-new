@@ -59,6 +59,7 @@ import { phoneBarVisible, type PhoneCallAction } from "./phone-bar-model";
 import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { TELEPHONY_STALE_MESSAGE, useTelephonyConsole } from "./useTelephonyConsole";
 import { TaskPanel, type TaskCreateInput, type TaskDeleteInput, type TaskUpdateInput } from "./TaskPanel";
+import { hasLiveUpdates, mergeLiveUpdates, type LiveUpdatesResponse } from "./live-updates";
 import {
   DEFAULT_MOBILE_NAVIGATION_SHORTCUTS,
   DEFAULT_PINNED_NAVIGATION_VIEWS,
@@ -100,7 +101,7 @@ import type { CallCenterCall, DispatchData } from "@/data/dispatch-types";
 import { formatNotificationReminderTime, isNotificationForProfile, isNotificationUnread, notificationStatusLabel } from "@/domain/notifications";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
 import { isTaskOpen, taskPriorityLabels } from "@/domain/tasks";
-import type { AppRole, Branch, CallStatus, CaseTask, CustomerSharedLocation, DispatchCall, DispatchCase, DispatchNotification, FleetAsset, NotificationStatus, Operator, TimelineEvent } from "@/domain/types";
+import type { AppRole, Branch, CallStatus, CaseTask, DispatchCall, DispatchCase, FleetAsset, NotificationStatus, Operator, TimelineEvent } from "@/domain/types";
 import { requiresTowDestination } from "@/domain/case-card";
 import { caseAssistanceServiceName } from "@/lib/dispatch-calculations";
 import { createDispatchMapModel } from "@/lib/map-adapter";
@@ -110,6 +111,7 @@ import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-req
 import { supportPollDelayMs } from "@/lib/telephony/poll-schedule";
 import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
+import { pausePlan } from "@/lib/telephony/pause-ending";
 import type { TelephonyAvailabilityAction } from "@/lib/telephony/presence";
 
 type View = "dispatch" | PinnableNavigationView;
@@ -143,17 +145,6 @@ type MobileShortcutItem = {
 type DispatchWorkspaceState = {
   kind: WorkspaceKind;
   mode: WorkspaceMode;
-};
-
-type LocationUpdatesResponse = {
-  checkedAt?: string;
-  error?: string;
-  notifications?: DispatchNotification[];
-  updates?: Array<{
-    caseId: string;
-    event: TimelineEvent;
-    location: CustomerSharedLocation;
-  }>;
 };
 
 const defaultCaseFilters: CaseFilters = {
@@ -355,7 +346,6 @@ function DispatchConsoleContent({
   }, []);
   const handleNotebookEditor = useCallback((editor: DraftEditorState) => registerDraft("Poznámky", editor), [registerDraft]);
   const centerView = workspacePreferences.centerView;
-  const fullPageWorkspace = centerView !== "map";
   const workspaceStorageKey = workspacePreferenceStorageKey(viewerOrganizationId, viewerProfileId);
   const currentSessionKeyRef = useRef<string | null>(actorKey);
   useEffect(() => {
@@ -668,6 +658,7 @@ function DispatchConsoleContent({
         return;
       }
       if (action === "pause") {
+        telephony.refreshPauseReasons();
         setPauseRoutingOpen(true);
         return;
       }
@@ -675,6 +666,14 @@ function DispatchConsoleContent({
     },
     [telephony, telephonyConfigured],
   );
+  // Timed pause: when it should end and whether the operator is past it. Shown
+  // in the header; presence itself never changes without the operator's click.
+  const ownPausePlan = useMemo(() => {
+    const own = telephony.snapshot.ownPresence;
+    if (!own) return null;
+    const reason = telephony.pauseReasons.find((entry) => entry.id === own.pauseReasonId);
+    return pausePlan({ status: own.status, statusSince: own.statusSince, maxMinutes: reason?.maxMinutes }, new Date(notificationNow));
+  }, [notificationNow, telephony.pauseReasons, telephony.snapshot.ownPresence]);
   const visibleCallCenterCalls = useMemo(
     () => (telephonyConfigured ? mergeCallCenterCalls(telephony.liveCalls, callCenterCalls) : callCenterCalls),
     [callCenterCalls, telephony.liveCalls, telephonyConfigured],
@@ -829,7 +828,7 @@ function DispatchConsoleContent({
       shortLabel: "Prípady",
     },
     {
-      active: activeView === "tasks" || activeView === "dispatch" && !toolsOpen && centerView === "tasks",
+      active: activeView === "tasks",
       badgeCount: taskAttentionCount,
       icon: BellRing,
       label: "Úlohy",
@@ -848,7 +847,7 @@ function DispatchConsoleContent({
     ...secondaryNavItems
       .filter((item) => item.view !== "tasks" && item.view !== "cases")
       .map((item): MobileShortcutItem => ({
-        active: item.view === "notes" ? activeView === "dispatch" && centerView === "notes" && !toolsOpen : item.view === "tools" ? toolsOpen : activeView === item.view,
+        active: item.view === "tools" ? toolsOpen : activeView === item.view,
         badgeCount: item.badgeCount,
         icon: item.icon,
         label: item.label,
@@ -1065,7 +1064,7 @@ function DispatchConsoleContent({
         acknowledgeTaskNotifications(taskId);
         setFocusedTaskId(taskId);
         setTaskOpenVersion(version => version + 1);
-        switchCenterView("tasks");
+        switchView("tasks");
         if (fromPush) {
           const url = new URL(window.location.href); url.searchParams.delete("task");
           window.history.replaceState(window.history.state, "", url);
@@ -1281,7 +1280,9 @@ function DispatchConsoleContent({
     };
   }, [source, syncDueNotifications]);
 
-  const pollCustomerLocationUpdates = useCallback(async () => {
+  // Customer locations, their notifications and colleagues' task changes: the
+  // case snapshot is otherwise only reloaded by this tab's own actions.
+  const pollLiveUpdates = useCallback(async () => {
     if (source !== "supabase" || locationUpdatePollInFlight.current) return;
     locationUpdatePollInFlight.current = true;
 
@@ -1291,18 +1292,18 @@ function DispatchConsoleContent({
         cache: "no-store",
         credentials: "same-origin",
       });
-      const result = (await response.json().catch(() => null)) as LocationUpdatesResponse | null;
+      const result = (await response.json().catch(() => null)) as LiveUpdatesResponse | null;
 
       if (!response.ok || !result?.checkedAt) {
         throw new Error(result?.error ?? "Nové polohy klientov sa nepodarilo obnoviť.");
       }
 
       locationUpdateCursorRef.current = result.checkedAt;
-      if ((result.updates?.length ?? 0) > 0 || (result.notifications?.length ?? 0) > 0) {
-        setDispatchData((current) => mergeCustomerLocationUpdates(current, result));
+      if (hasLiveUpdates(result)) {
+        setDispatchData((current) => mergeLiveUpdates(current, result));
       }
     } catch (error) {
-      console.warn("Customer location update poll failed:", error);
+      console.warn("Live update poll failed:", error);
     } finally {
       locationUpdatePollInFlight.current = false;
     }
@@ -1311,10 +1312,10 @@ function DispatchConsoleContent({
   useEffect(() => {
     if (source !== "supabase") return;
 
-    void pollCustomerLocationUpdates();
-    const interval = window.setInterval(() => void pollCustomerLocationUpdates(), 10_000);
+    void pollLiveUpdates();
+    const interval = window.setInterval(() => void pollLiveUpdates(), 10_000);
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") void pollCustomerLocationUpdates();
+      if (document.visibilityState === "visible") void pollLiveUpdates();
     };
 
     document.addEventListener("visibilitychange", refreshWhenVisible);
@@ -1324,7 +1325,7 @@ function DispatchConsoleContent({
       document.removeEventListener("visibilitychange", refreshWhenVisible);
       window.removeEventListener("focus", refreshWhenVisible);
     };
-  }, [pollCustomerLocationUpdates, source]);
+  }, [pollLiveUpdates, source]);
 
   useEffect(() => {
     const refreshNotificationClock = () => setNotificationNow(Date.now());
@@ -1546,11 +1547,13 @@ function DispatchConsoleContent({
   }
 
   function switchCenterView(view: CenterView) {
-    // These views share mounted editors. Merely showing another tool does not leave a draft.
+    // Local tabs replace only the map area. The case and side panels stay in place.
     setCenterView(view);
     setToolsOpen(false);
+    setWidgetSettingsOpen(false);
     setActiveView("dispatch");
     setMobilePane("workspace");
+    setWorkspace(current => ({ ...current, mode: window.matchMedia("(max-width: 1023px)").matches ? "collapsed" : current.mode === "expanded" ? "split" : current.mode }));
   }
 
   function openTools() {
@@ -1578,13 +1581,17 @@ function DispatchConsoleContent({
   }
 
   function switchView(view: View) {
-    if (view === "notes" || view === "tasks") { switchCenterView(view); return; }
     if (view === "tools") { toggleTools(); return; }
-    setToolsOpen(false);
-    requestNavigation(() => {
+    const navigate = () => {
+      setToolsOpen(false);
+      setWidgetSettingsOpen(false);
       setActiveView(view);
-      if (view === "dispatch") setMobilePane("cases");
-    });
+      if (view === "dispatch") setMobilePane("workspace");
+    };
+    // These pages share mounted case editors and the same task/notebook stores.
+    // A page change therefore preserves drafts without requiring a save/discard.
+    if (["dispatch", "tasks", "notes"].includes(view) && ["dispatch", "tasks", "notes"].includes(activeView)) navigate();
+    else requestNavigation(navigate);
   }
 
   function showMobileMap() {
@@ -1891,20 +1898,20 @@ function DispatchConsoleContent({
     setWorkspace({ kind: "cockpit", mode: "expanded" });
   }
 
-  const keepCaseVisibleOnMobile = useEffectEvent(() => {
-    // Crossing a breakpoint only changes presentation. Keep the mounted editor
-    // visible, including pending edits, when the desktop split no longer exists.
+  const keepWorkspaceVisibleOnMobile = useEffectEvent(() => {
+    // Preserve the selected local tool when the desktop split no longer fits.
+    // The map view keeps the case visible; its mounted editor retains all drafts.
     if (activeView === "dispatch" && workspace.kind === "cockpit" && workspace.mode === "split"
       && (mobilePane === "workspace" || hasUnsavedChanges || isCaseSaveLocked)) {
       setMobilePane("workspace");
-      setWorkspace({ kind: "cockpit", mode: "expanded" });
+      setWorkspace({ kind: "cockpit", mode: centerView === "map" ? "expanded" : "collapsed" });
     }
   });
 
   useEffect(() => {
     const mobile = window.matchMedia("(max-width: 1023px)");
     function onBreakpointChange(event: MediaQueryListEvent) {
-      if (event.matches) keepCaseVisibleOnMobile();
+      if (event.matches) keepWorkspaceVisibleOnMobile();
     }
     mobile.addEventListener("change", onBreakpointChange);
     return () => mobile.removeEventListener("change", onBreakpointChange);
@@ -2067,12 +2074,16 @@ function DispatchConsoleContent({
             <HeaderPhoneStatusMenu
               busy={telephony.presenceBusy}
               onChange={telephony.changePresence}
-              onRequestPause={() => setPauseRoutingOpen(true)}
+              onRequestPause={() => {
+                telephony.refreshPauseReasons();
+                setPauseRoutingOpen(true);
+              }}
               onDismissNotice={telephony.dismissNotice}
               onTakeover={telephony.takeoverPhone}
               notice={telephony.notice}
               phone={telephony.phone}
               status={telephony.phoneBar.ownPresenceStatus}
+              pausePlan={ownPausePlan}
               readiness={telephony.readiness}
               onPreparePhone={telephony.preparePhone}
               outboundPending={telephony.outboundPending}
@@ -2087,6 +2098,7 @@ function DispatchConsoleContent({
             notifications={viewerNotifications}
             now={notificationNow}
             onMarkRead={(notificationId) => void markNotificationRead(notificationId)}
+            onArchive={(notificationId) => void updateNotificationStatusFromPanel(notificationId, "archived")}
             onOpenCase={openCase}
             onOpenTask={openTask}
             onSnooze={snoozeNotificationFromPanel}
@@ -2259,7 +2271,6 @@ function DispatchConsoleContent({
           data-left-collapsed={workspacePreferences.leftCollapsed}
           data-right-collapsed={workspacePreferences.rightCollapsed}
           data-tools-open={toolsOpen}
-          data-full-page-workspace={fullPageWorkspace}
           inert={activeView !== "dispatch"}
           style={{
             "--dashboard-left-width": `${workspacePreferences.leftCollapsed ? 44 : dashboardColumns.left}px`,
@@ -2308,7 +2319,7 @@ function DispatchConsoleContent({
           <div className="dashboard-tablet-phone hidden min-w-0 p-2 lg:col-span-2 lg:block xl:hidden">
             <DashboardPhone onCreateCase={() => startNewCase()} caseContext={dashboardSmsCaseContext} isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
           </div>
-          {workspacePreferences.leftCollapsed && !fullPageWorkspace && <button type="button" className="hidden min-h-11 items-center justify-center border-r border-zinc-200 bg-white lg:flex" aria-label="Obnoviť panel prípadov" onClick={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: false })}><PanelLeftOpen size={20} /></button>}
+          {workspacePreferences.leftCollapsed && <button type="button" className="hidden min-h-11 items-center justify-center border-r border-zinc-200 bg-white lg:flex" aria-label="Obnoviť panel prípadov" onClick={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: false })}><PanelLeftOpen size={20} /></button>}
           <div className="mobile-dispatch-cases lg:contents">
           <CaseList
             activeCaseId={visibleActiveCaseId}
@@ -2380,42 +2391,17 @@ function DispatchConsoleContent({
             onSortChange={setCaseSort}
           />
           </div>
-          {workspacePreferences.rightCollapsed && !fullPageWorkspace && <button type="button" className="hidden min-h-11 items-center justify-center border-l border-zinc-200 bg-white xl:flex" aria-label="Obnoviť panel nástrojov" onClick={openTools}><PanelRightOpen size={20} /></button>}
-          <WidgetHost preferences={workspacePreferences} onChange={updateWorkspacePreferences} renderWidget={renderWidget} expanded={toolsOpen} settingsOpen={widgetSettingsOpen} onSettingsChange={setWidgetSettingsOpen} active={activeView === "dispatch" && (toolsOpen || (!fullPageWorkspace && !workspacePreferences.rightCollapsed))} onClose={closeTools} />
+          {workspacePreferences.rightCollapsed && <button type="button" className="hidden min-h-11 items-center justify-center border-l border-zinc-200 bg-white xl:flex" aria-label="Obnoviť panel nástrojov" onClick={openTools}><PanelRightOpen size={20} /></button>}
+          <WidgetHost preferences={workspacePreferences} onChange={updateWorkspacePreferences} renderWidget={renderWidget} expanded={toolsOpen} settingsOpen={widgetSettingsOpen} onSettingsChange={setWidgetSettingsOpen} active={activeView === "dispatch" && (toolsOpen || !workspacePreferences.rightCollapsed)} onClose={closeTools} />
 
         </main>
 
-      {activeView === "tasks" && (
-        <main className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-zinc-100 p-2 sm:p-4">
-          <div className="mx-auto min-h-full w-full min-w-0 max-w-7xl">
-            <TaskPanel
-                taskWorkspaceEnabled={capabilities.tasks}
-                tasks={dispatchData.tasks}
-                onOpenCase={openCase}
-              activeTaskId={focusedTaskId}
-              cases={dispatchCases}
-              isNotificationSyncing={isNotificationSyncing}
-              lastNotificationSyncAt={lastNotificationSyncAt}
-              markingNotificationId={markingNotificationId}
-              notificationNow={notificationNow}
-              notificationViewerProfileId={notificationViewerProfileId}
-              notifications={notifications}
-              onCreateTask={createTaskFromPanel}
-              onDeleteTask={deleteTaskFromPanel}
-              onMarkNotificationRead={(notificationId) => void markNotificationRead(notificationId)}
-              onOpenTask={openTask}
-              onRefreshNotifications={() => void syncDueNotifications(false)}
-              onSnoozeNotification={snoozeNotificationFromPanel}
-              onUpdateTask={updateTaskFromPanel}
-              onUpdateNotificationStatus={updateNotificationStatusFromPanel}
-              operators={effectiveOperators}
-              notificationSyncEnabled={source === "supabase"}
-              variant="page"
-              viewerProfileId={viewerProfileId}
-            />
-          </div>
-        </main>
-      )}
+      <main data-testid="standalone-tasks-page" className="dispatch-standalone-workspace" hidden={activeView !== "tasks"} inert={activeView !== "tasks"}>
+        {renderTasks("page")}
+      </main>
+      <main data-testid="standalone-notes-page" className="dispatch-standalone-workspace" hidden={activeView !== "notes"} inert={activeView !== "notes"}>
+        <NotebookPanel active={activeView === "notes"} />
+      </main>
 
       {activeView === "call-center" && (
         <CallCenterModule
@@ -2488,7 +2474,6 @@ function DispatchConsoleContent({
       <PauseEndingNotificationSync
         enabled={source === "supabase" && telephonyConfigured}
         pauseReasonId={telephony.snapshot.ownPresence?.pauseReasonId}
-        pauseReasons={telephony.pauseReasons}
         status={telephony.snapshot.ownPresence?.status}
         statusSince={telephony.snapshot.ownPresence?.statusSince}
         onDelivered={() => void syncDueNotifications(true)}
@@ -3367,40 +3352,6 @@ function applyMockNotificationSnooze(current: DispatchData, notificationId: stri
           }
         : notification,
     ),
-  };
-}
-
-function mergeCustomerLocationUpdates(current: DispatchData, result: LocationUpdatesResponse): DispatchData {
-  const latestByCaseId = new Map<string, NonNullable<LocationUpdatesResponse["updates"]>[number]>();
-
-  for (const update of result.updates ?? []) {
-    const previous = latestByCaseId.get(update.caseId);
-    if (!previous || dateValue(update.location.submittedAt) > dateValue(previous.location.submittedAt)) {
-      latestByCaseId.set(update.caseId, update);
-    }
-  }
-
-  const dispatchCases = current.dispatchCases.map((caseItem) => {
-    const update = latestByCaseId.get(caseItem.id);
-    if (!update || dateValue(caseItem.customerSharedLocation?.submittedAt) >= dateValue(update.location.submittedAt)) {
-      return caseItem;
-    }
-
-    return {
-      ...caseItem,
-      customerSharedLocation: update.location,
-      timeline: caseItem.timeline.some((event) => event.id === update.event.id)
-        ? caseItem.timeline
-        : [...caseItem.timeline, update.event],
-    };
-  });
-  const existingNotificationIds = new Set(current.notifications.map((notification) => notification.id));
-  const newNotifications = (result.notifications ?? []).filter((notification) => !existingNotificationIds.has(notification.id));
-
-  return {
-    ...current,
-    dispatchCases,
-    notifications: [...newNotifications, ...current.notifications],
   };
 }
 

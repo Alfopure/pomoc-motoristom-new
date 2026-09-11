@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlarmClock, Bell, Check, ChevronRight, Inbox, X } from "lucide-react";
+import { AlarmClock, Bell, Check, ChevronRight, Inbox, Trash2, X } from "lucide-react";
 import { compareNotifications, formatNotificationReminderTime, isNotificationReady, isNotificationSnoozed, isNotificationUnread, notificationSeverityTone } from "@/domain/notifications";
 import type { DispatchCase, DispatchNotification } from "@/domain/types";
 import { formatTime } from "@/lib/dispatch-calculations";
@@ -11,6 +11,8 @@ type HeaderNotificationMenuProps = {
   cases: DispatchCase[];
   notifications: DispatchNotification[];
   onMarkRead: (notificationId: string) => void;
+  /** Removes the notification from every list (archives it); it is never deleted server-side. */
+  onArchive?: (notificationId: string) => void;
   onOpenCase: (caseId: string) => void;
   onOpenTask: (taskId: string, caseId: string) => void;
   onSnooze: (notificationId: string, snoozedUntil: string) => boolean | Promise<boolean>;
@@ -23,6 +25,7 @@ export function HeaderNotificationMenu({
   cases,
   notifications,
   onMarkRead,
+  onArchive,
   onOpenCase,
   onOpenTask,
   onSnooze,
@@ -118,7 +121,7 @@ export function HeaderNotificationMenu({
                   <button
                     type="button"
                     onClick={() => openNotification(notification)}
-                    className="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 px-3.5 py-3 pr-12 text-left transition hover:bg-zinc-50/80"
+                    className={`grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 px-3.5 py-3 text-left transition hover:bg-zinc-50/80 ${unread && onArchive ? "pr-20" : "pr-12"}`}
                   >
                     <span className={`mt-1 size-2.5 rounded-full ${snoozed ? "bg-sky-500 ring-4 ring-sky-100" : unread ? "bg-[#F4C900] ring-4 ring-yellow-100" : "bg-zinc-200"}`} aria-hidden="true" />
                     <span className="min-w-0">
@@ -134,19 +137,32 @@ export function HeaderNotificationMenu({
                         {caseNumber && <span>{caseNumber}</span>}
                         {caseNumber && <span aria-hidden="true">·</span>}
                         <span>{formatTime(notification.createdAt)}</span>
-                        {!unread && <><span aria-hidden="true">·</span><Check size={11} /><span>Vybavené</span></>}
+                        {!unread && <><span aria-hidden="true">·</span><Check size={11} /><span>Prečítané</span></>}
                       </span>
                     </span>
                     {hasTarget ? <ChevronRight size={15} className="mt-1 text-zinc-400" aria-hidden="true" /> : <span />}
                   </button>
-                  {unread && (
-                    <div className="absolute bottom-2 right-2">
-                      <NotificationSnoozeButton
-                        notificationId={notification.id}
-                        notificationTitle={notification.title}
-                        onSnooze={onSnooze}
-                        variant="icon"
-                      />
+                  {(unread || onArchive) && (
+                    <div className="absolute bottom-2 right-2 flex items-center gap-1">
+                      {unread && (
+                        <NotificationSnoozeButton
+                          notificationId={notification.id}
+                          notificationTitle={notification.title}
+                          onSnooze={onSnooze}
+                          variant="icon"
+                        />
+                      )}
+                      {onArchive && (
+                        <button
+                          type="button"
+                          onClick={() => onArchive(notification.id)}
+                          className="inline-flex size-8 items-center justify-center rounded-md text-zinc-400 transition hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-300 lg:size-7"
+                          aria-label="Odstrániť upozornenie"
+                          title="Odstrániť zo zoznamu"
+                        >
+                          <Trash2 size={14} aria-hidden="true" />
+                        </button>
+                      )}
                     </div>
                   )}
                 </article>

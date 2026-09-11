@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import { BellRing, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Edit3, Inbox, ListTodo, Loader2, Plus, Save, SlidersHorizontal, Trash2, UserRound, X } from "lucide-react";
 import type { CasePriority, CaseTask, DispatchCase, DispatchNotification, NotificationStatus, Operator, TaskReminderChannel } from "@/domain/types";
 import { isNotificationForProfile, isNotificationReady } from "@/domain/notifications";
-import { compareOperationalTasks, isTaskDueToday, isTaskHandoverRelevant, isTaskOpen, isTaskOverdue, taskPriorities, taskPriorityLabels, taskPriorityTone, taskStatusLabel } from "@/domain/tasks";
+import { assignableOperators, compareOperationalTasks, isTaskDueToday, isTaskHandoverRelevant, isTaskOpen, isTaskOverdue, taskPriorities, taskPriorityLabels, taskPriorityTone, taskStatusLabel } from "@/domain/tasks";
 import { formatTime } from "@/lib/dispatch-calculations";
 import type { WorkspaceTask } from "@/domain/task-workspace";
 import { TaskWorkspacePanel } from "./TaskWorkspacePanel";
@@ -151,7 +151,9 @@ function LegacyTaskPanel({
   const now = new Date();
   const effectiveOperatorId = selectedOperatorId === "all" || selectedOperatorId === "unassigned" || operators.some((operator) => operator.id === selectedOperatorId) ? selectedOperatorId : "all";
   const effectiveCreateCaseId = cases.some((caseItem) => caseItem.id === createCaseId) ? createCaseId : cases[0]?.id ?? "";
-  const effectiveNewTaskAssignee = newTaskAssignee === "unassigned" || operators.some((operator) => operator.id === newTaskAssignee) ? newTaskAssignee : "unassigned";
+  // The filter above may name anybody; a task is only handed to a colleague who can sign in.
+  const assignableTaskOperators = assignableOperators(operators);
+  const effectiveNewTaskAssignee = newTaskAssignee === "unassigned" || assignableTaskOperators.some((operator) => operator.id === newTaskAssignee) ? newTaskAssignee : "unassigned";
   const tasks: TaskPanelTask[] = useMemo(
     () =>
       [...new Map(cases.flatMap((caseItem) =>
@@ -458,7 +460,7 @@ function LegacyTaskPanel({
                       className="h-10 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm font-medium text-zinc-900 outline-none ring-yellow-300 transition focus:ring-2"
                     >
                       <option value="unassigned">Bez priradenia</option>
-                      {operators.map((operator) => (
+                      {assignableTaskOperators.map((operator) => (
                         <option key={operator.id} value={operator.id}>
                           {operator.name}
                         </option>
@@ -770,8 +772,8 @@ function LegacyTaskPanel({
                                   aria-label={`Priradenie úlohy ${task.title}`}
                                 >
                                   <option value="unassigned">Nepriradené</option>
-                                  {task.assignedTo !== "unassigned" && !operators.some((operator) => operator.id === task.assignedTo) && <option value={task.assignedTo}>{assignee}</option>}
-                                  {operators.map((operator) => (
+                                  {task.assignedTo !== "unassigned" && !assignableTaskOperators.some((operator) => operator.id === task.assignedTo) && <option value={task.assignedTo}>{assignee}</option>}
+                                  {assignableTaskOperators.map((operator) => (
                                     <option key={operator.id} value={operator.id}>
                                       {operator.name}
                                     </option>
