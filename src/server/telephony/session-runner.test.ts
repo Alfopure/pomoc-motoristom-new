@@ -63,6 +63,25 @@ describe("session routing setup", () => {
     expect(context.devices.map((row) => row.profile_id)).toContain(PROFILES.o1);
   });
 
+  it.each(["ringing", "waiting", "parked"] as const)("uses the frozen plan in %s while unrelated entry routing is unavailable", async state => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const session = { ...h.session(call.sessionId), state } as SessionRow;
+    h.db.log.length = 0;
+    for (const table of inboundTables) h.db.failNext(table, "select", fakeError("entry routing unavailable"));
+
+    const context = await loadRoutingContext(h.deps, session);
+
+    expect(context.businessHours).toBeNull();
+    expect(context.ivr).toBeNull();
+    expect(context.ringPlan?.planId).toBe(PLAN_ID);
+    expect(context.presence.map(row => row.profile_id)).toContain(PROFILES.o1);
+    expect(context.devices.map(row => row.profile_id)).toContain(PROFILES.o1);
+    expect(context.activeLegCount).toBeGreaterThan(0);
+    expect(h.db.log.filter(entry => inboundTables.includes(entry.table))).toEqual([]);
+    expect(h.db.log.some(entry => entry.table === "motorist_operator_telephony_settings")).toBe(true);
+  });
+
   it("enforces capacity when another operator picks up a parked outgoing call", async () => {
     const h = createTelephonyHarness();
     const call = await startOutboundCall(deps(h), actor, { to: NUMBERS.customer });

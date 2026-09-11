@@ -5,8 +5,9 @@ import { verifyTelnyxRequest } from "@/server/telephony/telnyx/signature";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// Includes bounded after-response push delivery; SIP processing still responds immediately.
-export const maxDuration = 30;
+// Leave room to finish ledger/teardown writes during a provider or database
+// latency spike instead of killing an already-applied call transition at 30s.
+export const maxDuration = 60;
 
 /**
  * Telnyx Call Control webhook (design §2.3).

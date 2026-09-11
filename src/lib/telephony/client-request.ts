@@ -21,8 +21,8 @@ export const TELEPHONY_TIMEOUT_MS = {
   read: 8_000,
   /** Reads that may wait on a fresh provider snapshot capture. */
   snapshot: 10_000,
-  /** Call-control actions: hangup, redirect, transfer, pickup. */
-  control: 12_000,
+  /** Call control includes provider acknowledgement and durable state writes. */
+  control: 30_000,
   /** Durable workplace/state mutations that run a server-side saga. */
   mutation: 20_000,
 } as const;
