@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { assertOwnership } from "../ownership";
+import { assertOwnership, ownershipRpc, sessionOwnership } from "../ownership";
 import { payloadFingerprint } from "../provider-journal";
 import { isDeepStrictEqual } from "node:util";
 
@@ -646,6 +646,15 @@ function resolvePrompt(deps: EffectsDeps, ctx: ExecutionContext, media: MediaRef
   return { url: media ? mediaUrl(deps.mediaBaseUrl, media) : null, text: null, voice: resolveAnnouncement(config, "ivrMain").voice };
 }
 
+/** Contract2 requires a definite refusal before replacing media or advancing
+ * its failure watchdog. Older sessions retain their established recovery path.
+ */
+function canRecoverMediaFailure(session: SessionRow, error: unknown): boolean {
+  if (error instanceof SessionLeaseLostError) return false;
+  return session.writer_contract !== 2 || error instanceof TelnyxCommandError &&
+    error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429;
+}
+
 async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command: Command): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   await assertOwnership();
   const telnyx = requireTelnyx(deps);
@@ -736,7 +745,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
           await telnyx.playbackStart({ ...common, audioUrl: prompt.url, loop: command.loop });
           return { skipped: false, detail: { url: prompt.url } };
         } catch (error) {
-          if (!prompt.text || isCallGoneError(error)) throw error;
+          if (!canRecoverMediaFailure(ctx.session, error) || !prompt.text || isCallGoneError(error)) throw error;
           // A refused URL must not silently skip a spoken message. Distinct
           // command IDs let Telnyx accept the speech fallback immediately.
           common.commandId = commandId({ sessionId: ctx.session.id, legId: common.callControlId, step: command.commandId, intent: "speech_fallback" });
@@ -780,7 +789,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         } catch (error) {
           // Only managed prompts have text proven to match their recording.
           // A custom menu with an old fallback must recover to assistance.
-          if (!prompt.text || isCallGoneError(error)) throw error;
+          if (!canRecoverMediaFailure(ctx.session, error) || !prompt.text || isCallGoneError(error)) throw error;
           common.commandId = commandId({ sessionId: ctx.session.id, legId: leg, step: command.commandId, intent: "gather_speech_fallback" });
           gatherId = common.commandId.replaceAll("-", "").slice(0, 12);
           common.clientState = encodeClientState({ ...command.clientState, gatherId });
@@ -986,13 +995,22 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
   if (adopted && ctx.dialFingerprints?.get(command.commandId) === payloadFingerprint(command)) {
     return { skipped: false, detail: { callControlId: adopted.callControlId, adopted: true } };
   }
-  if (command.monitorInvitationId) {
+  // A prior dispatch has immutable wire arguments. Consult its journal before
+  // mutable presence checks: a now-busy operator cannot turn accepted evidence
+  // into a skipped dial or authorize a second dispatch. The real HTTP adapter
+  // below verifies the original fingerprint and returns its cached result.
+  const journal = sessionOwnership.getStore()?.contract === 2 && ctx.continuation
+    ? await ownershipRpc<{ outcome: string } | null>(deps.admin, "motorist_provider_command_lookup_v2", {
+      p_session_id: ctx.session.id, p_command_id: command.commandId,
+    }) : null;
+  const alreadyDispatched = Boolean(journal && journal.outcome !== "rate_limited");
+  if (!alreadyDispatched && command.monitorInvitationId) {
     const invitation = readMeta(ctx.session).monitorInvitations?.[command.monitorInvitationId];
     if (!invitation?.acceptedAt || invitation.revokedAt || invitation.disconnectRequestedAt || invitation.recipientProfileId !== command.profileId || ctx.session.ended_at ||
       command.role !== "supervisor" || (command.superviseCallControlId && command.supervisorRole !== "monitor")) throw new EffectsError("invited monitor dial denied");
   }
   const stable = telephonyStabilityEnabled() || hasStabilityContract(ctx.session);
-  if (stable && command.role === "external" && !command.profileId) {
+  if (!alreadyDispatched && stable && command.role === "external" && !command.profileId) {
     const settings = await deps.admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", deps.organizationId);
     if (settings.error) throw new EffectsError("personal destination ownership unavailable");
     const [owned] = resolvePersonalRingMembers([{ kind: "external_number", profileId: null, externalNumber: command.to, position: 0, ringSecs: command.timeoutSecs, memberId: null }], settings.data ?? [], []);
@@ -1002,7 +1020,7 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
       command.clientState.operatorId = owned.profileId;
     }
   }
-  if (stable && command.profileId && command.role !== "supervisor") {
+  if (!alreadyDispatched && stable && command.profileId && command.role !== "supervisor") {
     const authorization = await authorizeOperatorDispatch(deps.admin, {
       organizationId: deps.organizationId, profileId: command.profileId, sessionId: ctx.session.id,
       expectedToken: command.clientState.offerToken, reason: `offer:${command.clientState.intent ?? command.role}`,
@@ -1488,7 +1506,7 @@ async function executeReduceResult(
           deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "recording_checkpoint_pending" });
         }
       }
-      if (command.kind === "playback_start" && command.clientState?.intent?.startsWith("seq:") && readMeta(ctx.session).announcement_sequence) {
+      if (command.kind === "playback_start" && command.clientState?.intent?.startsWith("seq:") && readMeta(ctx.session).announcement_sequence && canRecoverMediaFailure(ctx.session, error)) {
         const update = emptyTransition();
         // executeCommand has already tried locale TTS. The immediate follow-up sweep
         // continues assistance without claiming that an unavailable privacy notice played.
@@ -1499,7 +1517,7 @@ async function executeReduceResult(
         ctx.session = session;
       }
       const message = describeError(error);
-      if (command.kind === "gather" && readMeta(ctx.session).gather?.id === command.clientState.gatherId) {
+      if (command.kind === "gather" && readMeta(ctx.session).gather?.id === command.clientState.gatherId && canRecoverMediaFailure(ctx.session, error)) {
         const meta = readMeta(ctx.session);
         const checkpoint = emptyTransition();
         // A failed silent music tick backs off for a minute. Prompt failure

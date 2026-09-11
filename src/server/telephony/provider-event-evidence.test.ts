@@ -16,7 +16,7 @@ const command = (patch: Partial<PendingProviderCommand> = {}): PendingProviderCo
 const event = (type = "call.bridged", payload: Record<string, unknown> = {}, occurredAt = "2026-09-29T12:00:01Z") => parseTelnyxEnvelope({ data: { id: "event", event_type: type, occurred_at: occurredAt, payload: { call_control_id: "source", client_state: state, ...payload } } })!;
 
 function harness(commands: PendingProviderCommand[] = [command()]) {
-  const rpc = vi.fn(async (name: string, _args: Record<string, unknown>): Promise<{ data: unknown; error: null }> => {
+  const rpc = vi.fn<(name: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: null }>>(async (name) => {
     if (name === "motorist_provider_pending_commands_v2") return { data: commands, error: null };
     if (name === "motorist_provider_command_result_v2" || name === "motorist_session_lease_renew_v2") return { data: true, error: null };
     throw new Error(`Unexpected RPC ${name}`);

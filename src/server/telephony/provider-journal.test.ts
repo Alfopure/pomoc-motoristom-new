@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
+import { SessionLeaseLostError } from "./service-errors";
 import { sessionOwnership, type Ownership } from "./ownership";
 import { createTelnyxClient } from "./telnyx/client";
+import { createTelephonyHarness, NUMBERS } from "@/test/telephony-harness";
+import { effectsDeps, runSessionEvent } from "./session-runner";
+import { applyReduceResult } from "./state/effects";
+import { parseTelnyxEnvelope } from "./state/events";
+import { emptyTransition, readMeta, type Command, type SessionRow } from "./state/types";
 import { getTelnyxConfig } from "./telnyx/env";
-import { ProviderOutcomeUnknownError } from "./provider-journal";
+import { journalRequest, payloadFingerprint, ProviderOutcomeUnknownError } from "./provider-journal";
 
 function harness() {
   let generation = 1;
@@ -26,7 +32,8 @@ function harness() {
       if (failEvidence) return { data: null, error: { message: "database unavailable" } };
       const prior = journal.get(id)!;
       expect(args.p_generation).toBe(prior.generation);
-      prior.outcome = Number(args.p_status) < 300 ? "accepted" : "unknown";
+      const status = Number(args.p_status);
+      prior.outcome = status < 300 ? "accepted" : status === 429 ? "rate_limited" : status < 500 && status !== 408 ? "rejected" : "unknown";
       prior.result = args.p_result;
       return { data: true, error: null };
     }
@@ -41,6 +48,24 @@ function harness() {
 }
 
 describe("provider HTTP journal recovery", () => {
+  it("preserves distinct absent and empty wire bodies while storing an object payload", () => {
+    const h = harness();
+    sessionOwnership.run(h.owner(), () => {
+      const absent = journalRequest("POST", "/calls/leg/actions/hangup", "hangup", undefined)!;
+      const empty = journalRequest("POST", "/calls/leg/actions/hangup", "hangup", "{}")!;
+      expect(absent.payload).toEqual({});
+      expect(empty.payload).toEqual({});
+      expect(absent.correlationState).toBeNull();
+      expect(absent.fingerprint).not.toBe(empty.fingerprint);
+      expect(absent.fingerprint).toBe(payloadFingerprint({ method: "POST", path: absent.path, body: null }));
+      const correlated = journalRequest("POST", "/calls", "dial", '{"to":"sip:operator@example.invalid","client_state":"exact-state"}')!;
+      expect(correlated.payload).toEqual({ to: "sip:operator@example.invalid", client_state: "exact-state" });
+      expect(correlated.correlationState).toBe("exact-state");
+      expect(() => journalRequest("POST", "/calls", null, "{}")).toThrow("lacks a stable command identity");
+    });
+    expect(sessionOwnership.run({ ...h.owner(), contract: 1 }, () => journalRequest("POST", "/calls", null, "{}"))).toBeNull();
+  });
+
   it("adopts provider acceptance when the later effects checkpoint failed", async () => {
     const h = harness();
     await expect(sessionOwnership.run(h.owner(), async () => {
@@ -106,4 +131,72 @@ describe("provider HTTP journal recovery", () => {
     await expect(sessionOwnership.run(h.owner(), () => h.client.dial({ commandId: "dial", to: "+421900000099", from: "+421900000002" }))).rejects.toThrow("payload identity conflict");
     expect(h.fetch).toHaveBeenCalledTimes(1);
   });
+});
+
+
+describe("contract2 media fallback boundary", () => {
+  const cases = (["playback_start", "gather"] as const).flatMap(kind =>
+    (["lost", "lease", 408, 429, 500, 422] as const).map(status => ({ kind, status })));
+  it.each(cases)("keeps $kind recovery within the $status outcome contract", async ({ kind, status }) => {
+    const provider = harness();
+    const call = createTelephonyHarness({ sweepAfterEvent: false });
+    const inbound = await call.inbound({ answer: false });
+    const row = call.db.storage("motorist_call_sessions").find(row => row.id === inbound.sessionId)!;
+    row.writer_contract = 2;
+    const command: Command = kind === "playback_start"
+      ? { kind, commandId: "media-command", leg: { callControlId: inbound.callControlId }, media: { key: "greeting" } }
+      : { kind, commandId: "media-command", leg: { callControlId: inbound.callControlId }, spec: { media: { key: "ivrMain" }, purpose: "ivr" }, clientState: { sid: inbound.sessionId, role: "customer", intent: "ivr" } };
+    const owner = { ...provider.owner(), sessionId: inbound.sessionId };
+    if (status === "lost") provider.fetch.mockRejectedValueOnce(new Error("provider accepted media; response lost"));
+    else if (status === "lease") vi.spyOn(provider.client, kind === "playback_start" ? "playbackStart" : "gatherUsingAudio").mockRejectedValueOnce(new SessionLeaseLostError());
+    else provider.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ errors: [{ code: "10000", detail: "media request rejected" }] }),
+      { status, headers: status === 429 ? { "retry-after": "30" } : undefined }));
+    const run = () => {
+      const session = call.session(inbound.sessionId) as SessionRow;
+      return applyReduceResult({ ...effectsDeps(call.deps), telnyx: provider.client, mediaBaseUrl: "https://audio.test" }, {
+        session, expectedVersion: session.version,
+        event: { kind: "app", type: "sweep", id: "media-event", actorProfileId: null, occurredAt: call.now().toISOString() },
+        result: { next: emptyTransition(), commands: [command], compensations: [], guard: null, ignored: null },
+      });
+    };
+    if (status === "lease") {
+      await expect(sessionOwnership.run(owner, run)).rejects.toBeInstanceOf(SessionLeaseLostError);
+      expect(provider.fetch).not.toHaveBeenCalled();
+      return;
+    }
+    expect((await sessionOwnership.run(owner, run)).failed).toBe(status !== 422);
+    expect((await sessionOwnership.run(owner, run)).failed).toBe(status !== 422);
+    expect(provider.fetch).toHaveBeenCalledTimes(status === 422 ? 2 : 1);
+    expect(provider.journal.size).toBe(status === 422 ? 2 : 1);
+    expect(provider.journal.get("media-command")?.outcome).toBe(status === 422 ? "rejected" : status === 429 ? "rate_limited" : "unknown");
+  });
+});
+
+
+it("keeps an unknown IVR gather pending through the runner without routing or issuing more media", async () => {
+  const provider = harness();
+  const h = createTelephonyHarness({ sweepAfterEvent: false });
+  const call = await h.inbound({ to: NUMBERS.neutral, completeGreeting: false });
+  h.db.storage("motorist_call_sessions").find(row => row.id === call.sessionId)!.writer_contract = 2;
+  const intro = h.telnyx.of("playbackStart").at(-1)!;
+  const event = parseTelnyxEnvelope(h.envelope("call.playback.ended", {
+    call_control_id: call.callControlId, status: "completed", client_state: intro.params.clientState,
+  }, "intro-completed"));
+  if (!event) throw new Error("invalid fixture event");
+  provider.fetch.mockRejectedValueOnce(new Error("gather accepted; response lost"));
+  const owner = { ...provider.owner(), sessionId: call.sessionId, organizationId: h.deps.organizationId };
+  const deps = { ...h.deps, telnyx: provider.client };
+  const first = await sessionOwnership.run(owner, () => runSessionEvent(deps, call.sessionId, event));
+  expect(first).toMatchObject({ outcome: "applied", apply: { failed: true } });
+  expect(h.session(call.sessionId).state).toBe("ivr");
+  const gather = readMeta(h.session(call.sessionId) as SessionRow).gather!;
+  expect(gather.failed).not.toBe(true);
+  expect(Date.parse(gather.deadline_at)).toBeGreaterThan(h.now().getTime());
+  await sessionOwnership.run(owner, () => runSessionEvent(deps, call.sessionId, {
+    kind: "app", type: "sweep", id: "immediate-media-recheck", actorProfileId: null, occurredAt: h.now().toISOString(),
+  }));
+  expect(h.session(call.sessionId).state).toBe("ivr");
+  expect(provider.fetch).toHaveBeenCalledTimes(1);
+  expect(h.telnyx.of("dial")).toHaveLength(0);
+  expect([...provider.journal.values()].map(row => row.outcome)).toEqual(["unknown"]);
 });

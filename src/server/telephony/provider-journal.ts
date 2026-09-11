@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { assertOwnership, ownershipRpc, sessionOwnership, type Ownership } from "./ownership";
+import { assertOwnership, DATABASE_REQUEST_MS, ownershipRpc, sessionOwnership, type Ownership } from "./ownership";
 
 export class ProviderOutcomeUnknownError extends Error {
   constructor(readonly commandId: string) {
@@ -20,7 +20,13 @@ export function journalRequest(method: string, path: string, commandId: string |
   // A v2 voice mutation without stable identity is a programming error, not a
   // license to fall back to a nonjournaled request.
   if (!commandId) throw new Error(`Provider mutation ${path} lacks a stable command identity`);
-  return { owner, commandId, method, path, payload: body ? JSON.parse(body) : {}, correlationState: body && typeof JSON.parse(body).client_state === "string" ? JSON.parse(body).client_state : null, fingerprint: payloadFingerprint({ method, path, body: body ? JSON.parse(body) : null }) };
+  const parsedBody = body ? JSON.parse(body) : null;
+  return {
+    owner, commandId, method, path,
+    payload: body ? parsedBody : {},
+    correlationState: body && typeof parsedBody.client_state === "string" ? parsedBody.client_state : null,
+    fingerprint: payloadFingerprint({ method, path, body: parsedBody }),
+  };
 }
 export async function prepareProviderRequest(request: JournalRequest): Promise<JournalDecision> {
   await assertOwnership(request.owner);
@@ -33,7 +39,7 @@ export async function recordProviderResponse(request: JournalRequest, status: nu
   // Acceptance is immutable evidence, not a topology checkpoint. Its dedicated
   // RPC accepts only the original dispatch tuple even after lease expiry.
   // Bypass the exhausted session deadline, retaining the DB request timeout.
-  await sessionOwnership.run({ ...request.owner, deadline: Date.now() + 4_000 }, async () => {
+  await sessionOwnership.run({ ...request.owner, deadline: Date.now() + DATABASE_REQUEST_MS }, async () => {
     const args = { p_session_id: request.owner.sessionId, p_command_id: request.commandId, p_fingerprint: request.fingerprint,
       p_generation: request.owner.generation, p_token: request.owner.token, p_status: status, p_result: result,
       p_retry_after_ms: retryAfterMs == null ? null : Math.min(2_147_483_647, Math.ceil(retryAfterMs)) };

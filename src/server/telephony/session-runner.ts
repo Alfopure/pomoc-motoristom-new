@@ -50,8 +50,9 @@ import type { TelnyxConfig } from "./telnyx/env";
  *   context → pure reducer → effects (CAS on `version`, retry budget 20) →
  *   call-event audit row → lease release.
  *
- * Compatibility bookkeeping and teardown can fall back to version CAS. Media
- * mutations require the lease: CAS alone cannot serialize provider commands.
+ * Contract-1 compatibility permits version CAS for bookkeeping and teardown.
+ * Contract-2 writes require the fixed ownership token and generation; version
+ * CAS alone never authorizes provider commands.
  */
 
 type AdminClient = SupabaseClient<Database>;

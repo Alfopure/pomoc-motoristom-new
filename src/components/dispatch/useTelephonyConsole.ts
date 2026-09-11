@@ -168,7 +168,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ callControlId }), label: "overenie skončeného hovoru",
       timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-          onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
+      onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
     }).catch(() => null).finally(() => refreshRef.current?.());
   }, []);
 
@@ -288,7 +288,13 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     try {
       await verifyMicrophone(operationId);
       const registered = beginBrowserCallStep("registration", { operationId });
-      try { await webphone.prepareForCall(); registered(); } catch (error) { registered({ outcome: "failed" }); throw error; }
+      try {
+        await webphone.prepareForCall();
+        registered();
+      } catch (error) {
+        registered({ outcome: "failed" });
+        throw error;
+      }
       // An incoming invite, takeover or unmount may arrive during permission.
       const changed = webphone !== webphoneRef.current ? "Telefón bol odpojený." : browserCallStartError(webphone.getSnapshot());
       if (changed) throw new Error(changed);
@@ -546,7 +552,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
               body: JSON.stringify(target ?? {}),
               label: PHONE_ACTION_LABEL_FOR_REQUEST[action],
               timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-          onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
+              onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
             },
           );
           if (isTelephonyNotConfigured(result)) {
@@ -616,7 +622,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             body: JSON.stringify(input.body ?? {}),
             label: input.label,
             timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-          onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
+            onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
           });
           if (isTelephonyNotConfigured(result)) {
             setConfigured(false);

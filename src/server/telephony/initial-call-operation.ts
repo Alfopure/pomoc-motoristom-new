@@ -1,6 +1,7 @@
 import type { CallActor, CallActionDeps, StartOutboundResult } from "./call-actions";
 import { payloadFingerprint } from "./provider-journal";
 import { ownershipRpc, sessionOwnership } from "./ownership";
+import { readPendingEffects } from "./state/continuation";
 import { CallActionError } from "./service-errors";
 import type { SessionRow } from "./state/types";
 
@@ -40,15 +41,28 @@ export async function findInitialCall(deps: CallActionDeps, identity: Pick<Initi
 }
 
 export async function recoverInitialDial(deps: CallActionDeps, session: SessionRow, dialCommandId: string, plan: Pick<InitialCallPlan, "to" | "from">): Promise<StartOutboundResult | null> {
-  if (session.ended_at || ["ended", "failed"].includes(session.state)) throw new CallActionError("Pôvodný hovor už skončil.", 409, "initial_call_ended");
+  if (session.termination_requested_at || session.ended_at || ["ended", "failed"].includes(session.state)) throw new CallActionError("Pôvodný hovor už skončil.", 409, "initial_call_ended");
   if (sessionOwnership.getStore()?.contract !== 2) return null;
   const record = await ownershipRpc<{ outcome: string; result?: { data?: { call_control_id?: string; call_session_id?: string } } } | null>(deps.admin,
     "motorist_provider_command_lookup_v2", { p_session_id: session.id, p_command_id: dialCommandId });
   if (record?.outcome === "rate_limited") return null; // prepare enforces the full persisted Retry-After before any resend.
   if (!record) return null; // The durable journal proves no provider dispatch was admitted.
   const leg = record.result?.data?.call_control_id;
-  if (record.outcome === "accepted" && leg) return { sessionId: session.id, operatorLegCallControlId: leg,
-    telnyxSessionId: record.result?.data?.call_session_id ?? null, to: plan.to, from: plan.from };
+  if (record.outcome === "accepted" && leg) {
+    if (!readPendingEffects(session).entries.some(entry => entry.id === `initial:${dialCommandId}`)) {
+      const [materialized, projection] = await Promise.all([
+        deps.admin.from("motorist_call_legs").select("id, ended_at").eq("organization_id", deps.organizationId)
+          .eq("session_id", session.id).eq("telnyx_call_control_id", leg).maybeSingle(),
+        deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", session.id).maybeSingle(),
+      ]);
+      if (materialized.data?.ended_at) throw new CallActionError("Pôvodný hovor už skončil.", 409, "initial_call_ended");
+      if (materialized.error || projection.error || !materialized.data || !projection.data) {
+        throw new CallActionError("Evidencia pôvodného volania zostáva nedokončená.", 503, "initial_materialization_pending");
+      }
+    }
+    return { sessionId: session.id, operatorLegCallControlId: leg,
+      telnyxSessionId: record.result?.data?.call_session_id ?? null, to: plan.to, from: plan.from };
+  }
   if (record.outcome === "rejected") throw new CallActionError("Pôvodné vytáčanie bolo odmietnuté.", 409, "initial_call_rejected");
   throw new CallActionError("Výsledok pôvodného vytáčania sa overuje. Nový hovor nebol vytvorený.", 503, "provider_outcome_unknown");
 }
