@@ -1,10 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import { ArrowLeft, FileText, Plus } from "lucide-react";
 import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
 import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { CaseDetail } from "./CaseDetail";
+import { CaseEditorHeader, type CaseHeaderControls } from "./CaseEditorHeader";
 import styles from "./case-detail.module.css";
 import { NewCaseForm, type SaveCaseDraft } from "./NewCaseDrawer";
 
@@ -55,6 +57,7 @@ export function ExpandedCasePanel({
   viewerProfileId,
 }: ExpandedCasePanelProps) {
   const isNew = kind === "new";
+  const [editorControls, setEditorControls] = useState<CaseHeaderControls | null>(null);
   function handleDirtyChange(dirty: boolean) {
     onDirtyChange?.(dirty);
   }
@@ -87,6 +90,7 @@ export function ExpandedCasePanel({
         </div>
       </div>
 
+      {!isNew && caseItem && editorControls && <div className={`${styles.headerControlRow} shrink-0`}><CaseEditorHeader controls={editorControls} /></div>}
       <div className="min-h-0 flex-1 overflow-hidden">
         {isNew ? (
           <NewCaseForm
@@ -103,6 +107,7 @@ export function ExpandedCasePanel({
         ) : caseItem ? (
           <div className={`${styles.scrollRegion} h-full min-w-0 overflow-y-auto overscroll-contain`} data-case-detail-scroll-region>
             <CaseDetail
+              onEditorControlsChange={setEditorControls}
               key={caseItem.id}
               caseItem={caseItem}
               callLinkCandidates={callLinkCandidates}

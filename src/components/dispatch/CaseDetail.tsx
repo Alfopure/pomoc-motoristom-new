@@ -4,7 +4,7 @@ import { VehicleLookupControl } from "./VehicleLookupControl";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
 import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   CarFront,
@@ -14,7 +14,6 @@ import {
   ClipboardList,
   Download,
   Edit3,
-  FileText,
   FileUp,
   Link2,
   Loader2,
@@ -131,7 +130,7 @@ import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { LocationPicker } from "./LocationPicker";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { UseCustomerLocationButton } from "./UseCustomerLocationButton";
-import { CaseEditorHeader, type CaseEditorControls } from "./CaseEditorHeader";
+import { CaseEditorHeader, CasePdfButton, type CaseEditorControls, type CaseHeaderControls } from "./CaseEditorHeader";
 import { changedCaseFields } from "./case-editor-save";
 import { CaseSummary } from "./CaseSummary";
 import styles from "./case-detail.module.css";
@@ -139,7 +138,7 @@ import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 
 type CaseDetailProps = {
-  onEditorControlsChange?: (controls: CaseEditorControls | null) => void;
+  onEditorControlsChange?: (controls: CaseHeaderControls | null) => void;
   caseItem: DispatchCase;
   branches: Branch[];
   assets: FleetAsset[];
@@ -209,7 +208,6 @@ const actionLabels = {
   call_customer: "Zavolať zákazníkovi",
   send_sms: "Poslať lokalizačnú SMS",
   send_eta: "Poslať ETA SMS",
-  create_pdf: "Stiahnuť PDF",
   mark_completed: "Označiť dokončené",
   invoice: "Pripraviť fakturáciu",
   close_case: "Ukončiť zásah",
@@ -218,7 +216,6 @@ const actionLabels = {
 const externalActionSuccessLabels = {
   send_sms: "SMS je pripravená a zapísaná do timeline.",
   send_eta: "ETA je pripravená a zapísaná do timeline.",
-  create_pdf: "PDF je pripravené a zapísané do timeline.",
   invoice: "Fakturácia je pripravená a zapísaná do timeline.",
 } as const;
 
@@ -293,6 +290,8 @@ export function CaseDetail({
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
   const [smsTemplate, setSmsTemplate] = useState<"custom" | "location_request" | "eta_update">("custom");
   const [isRunningAction, setIsRunningAction] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const pdfExportInFlightRef = useRef(false);
   const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
   const [linkingCallSessionId, setLinkingCallSessionId] = useState<string | null>(null);
   const [selectedCallSessionId, setSelectedCallSessionId] = useState("");
@@ -496,32 +495,44 @@ export function CaseDetail({
     setSmsComposerOpen(true);
   }
 
-  async function runAction(action: keyof typeof actionLabels) {
-    if (action === "create_pdf") {
-      setIsRunningAction(true);
-      setNotice("Pripravujem PDF…");
-      try {
-        if ((draftDirty || isEditSaveLocked) && (!exportSaveRef.current || !await exportSaveRef.current())) {
-          setNotice("Pred exportom uložte rozpracované zmeny. Údaje zostávajú vo formulári.");
-          return;
-        }
-        const response = await fetch(`/api/cases/${encodeURIComponent(caseItem.id)}/pdf`, { cache: "no-store", credentials: "same-origin", signal: AbortSignal.timeout(55_000) });
-        if (!response.ok || !response.headers.get("Content-Type")?.includes("application/pdf")) {
-          const body = await response.json().catch(() => null);
-          throw new Error(body?.error ?? "PDF sa nepodarilo vytvoriť. Skúste to znova.");
-        }
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `${caseItem.caseNumber.replace(/[^a-zA-Z0-9._-]/g, "_")}.pdf`;
-        document.body.append(link); link.click(); link.remove();
-        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        setNotice("PDF uložených údajov je pripravené na stiahnutie.");
-      } catch (error) { setNotice(error instanceof Error ? error.message : "PDF sa nepodarilo vytvoriť."); }
-      finally { setIsRunningAction(false); }
-      return;
+  const exportCasePdf = useCallback(async () => {
+    if (pdfExportInFlightRef.current) return;
+    pdfExportInFlightRef.current = true;
+    setIsRunningAction(true);
+    setIsExportingPdf(true);
+    setNotice("Pripravujem PDF…");
+    try {
+      if ((draftDirty || isEditSaveLocked) && (!exportSaveRef.current || !await exportSaveRef.current())) {
+        setNotice("Pred exportom uložte rozpracované zmeny. Údaje zostávajú vo formulári.");
+        return;
+      }
+      const response = await fetch(`/api/cases/${encodeURIComponent(caseItem.id)}/pdf`, { cache: "no-store", credentials: "same-origin", signal: AbortSignal.timeout(55_000) });
+      if (!response.ok || !response.headers.get("Content-Type")?.includes("application/pdf")) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error ?? "PDF sa nepodarilo vytvoriť. Skúste to znova.");
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${caseItem.caseNumber.replace(/[^a-zA-Z0-9._-]/g, "_")}.pdf`;
+      document.body.append(link); link.click(); link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setNotice("PDF uložených údajov je pripravené na stiahnutie.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "PDF sa nepodarilo vytvoriť."); }
+    finally {
+      pdfExportInFlightRef.current = false;
+      setIsExportingPdf(false);
+      setIsRunningAction(false);
     }
+  }, [caseItem.id, caseItem.caseNumber, draftDirty, isEditSaveLocked]);
+
+  const pdfControls = useMemo(() => ({ disabled: isRunningAction, exporting: isExportingPdf, onDownload: exportCasePdf }), [isRunningAction, isExportingPdf, exportCasePdf]);
+  const headerControls = useMemo(() => editorControls ? { ...editorControls, pdf: pdfControls } : null, [editorControls, pdfControls]);
+  useEffect(() => { onEditorControlsChange?.(headerControls); }, [onEditorControlsChange, headerControls]);
+  useEffect(() => () => onEditorControlsChange?.(null), [onEditorControlsChange]);
+
+  async function runAction(action: keyof typeof actionLabels) {
     if (action === "call_customer") {
       if (!contactPhone) {
         setNotice("Hovor nie je možné spustiť, kým v karte nie je telefónne číslo.");
@@ -685,7 +696,7 @@ export function CaseDetail({
           ) : (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">Trasa nezadaná</div>
           )}
-          {isEditing && editorControls && <CaseEditorHeader controls={editorControls} />}
+          {isEditing && editorControls ? <CaseEditorHeader controls={headerControls!} /> : <CasePdfButton controls={pdfControls} />}
           {showInlineEditButton && (
             <button type="button" onClick={() => setEditing(!isEditing)} disabled={isEditSaveLocked} className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:cursor-wait disabled:bg-zinc-100 disabled:text-zinc-400">
               {isEditing ? <X size={16} /> : <Edit3 size={16} />}
@@ -695,7 +706,9 @@ export function CaseDetail({
         </div>
       </div>}
 
-      <CaseSummary caseItem={caseItem} assets={assets} operators={operators} identityInHeader={embedded && Boolean(onEditorControlsChange)} />
+      {embedded && !onEditorControlsChange && editorControls && <CaseEditorHeader controls={headerControls!} />}
+
+      <CaseSummary caseItem={caseItem} assets={assets} operators={operators} identityInHeader={compactEditor && embedded && Boolean(onEditorControlsChange)} />
 
       {notice && <div role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{notice}</div>}
 
@@ -876,7 +889,7 @@ export function CaseDetail({
       {isEditing ? (
         <>
           <EditCaseForm
-            onEditorControlsChange={onEditorControlsChange ?? setEditorControls}
+            onEditorControlsChange={setEditorControls}
             key={`${caseItem.id}:${editorRevision}`}
             caseItem={caseItem}
             commanderVehicles={commanderVehicles}
@@ -1057,7 +1070,6 @@ export function CaseDetail({
 
                 <div className="flex flex-wrap gap-2">
                   <Action icon={Navigation} label="ETA" onClick={() => void runAction("send_eta")} disabled={!contactPhone || !caseItem.pickup || !routePlan || !routeEta || isRunningAction} disabledReason="ETA vyžaduje telefón, miesto a trasu." />
-                  <Action icon={FileText} label="PDF" onClick={() => void runAction("create_pdf")} disabled={isRunningAction} />
                   <Action icon={ReceiptText} label="Faktúra" onClick={() => void runAction("invoice")} disabled={isRunningAction} />
                   <Action icon={CheckCircle2} label="Dokončiť" onClick={() => void runAction("mark_completed")} disabled={isRunningAction} />
                 </div>
