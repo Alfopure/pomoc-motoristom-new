@@ -135,6 +135,35 @@ test("center tabs replace only the map area and retain the case and side panels"
   expect(errors).toEqual([]);
 });
 
+for (const label of ["Úlohy", "Poznámky", "Tabuľka"] as const) {
+  test(`local ${label} stays visible when desktop becomes mobile and retains the case draft`, async ({ page }) => {
+    const { errors, tasks } = await boot(page, 1440);
+    await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
+    const editor = page.getByTestId("case-edit-form-main");
+    await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
+    const plate = editor.getByLabel("EČV", { exact: true });
+    await plate.fill("SIZE777");
+    await editor.evaluate(element => { element.setAttribute("data-draft-instance", "resize-retained"); });
+    await center(page, label);
+    const upper = page.locator(".dispatch-workspace-upper");
+    const tab = page.locator(".workspace-center-tabs").getByRole("tab", { name: label, exact: true });
+
+    for (const width of [1440, 390, 1440]) {
+      await page.setViewportSize({ width, height: width < 1024 ? 844 : 960 });
+      await expect(tab).toHaveAttribute("aria-selected", "true");
+      await expect(upper).toBeVisible();
+      if (label === "Úlohy") await upper.getByRole("region", { name: "Tabuľa úloh", exact: true }).getByRole("button", { name: tasks[0].title, exact: true }).click({ trial: true });
+      else if (label === "Poznámky") await upper.getByRole("region", { name: "Osobné poznámky", exact: true }).getByRole("button", { name: note.title }).click({ trial: true });
+      else if (width < 1024) await upper.getByRole("button", { name: "Otvoriť prípad PM-2026-0517", exact: true }).click({ trial: true });
+      else await expect(upper.getByRole("table")).toBeVisible();
+      await expect(plate).toHaveValue("SIZE777");
+      await expect(editor).toHaveAttribute("data-draft-instance", "resize-retained");
+      await expectNoPageOverflow(page);
+    }
+    expect(errors).toEqual([]);
+  });
+}
+
 for (const width of [390, 1024, 1440]) {
   test(`Tools visibly opens and closes at ${width}px`, async ({ page }) => {
     const { errors } = await boot(page, width);

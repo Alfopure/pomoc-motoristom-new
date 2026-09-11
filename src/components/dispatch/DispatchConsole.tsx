@@ -1898,20 +1898,20 @@ function DispatchConsoleContent({
     setWorkspace({ kind: "cockpit", mode: "expanded" });
   }
 
-  const keepCaseVisibleOnMobile = useEffectEvent(() => {
-    // Crossing a breakpoint only changes presentation. Keep the mounted editor
-    // visible, including pending edits, when the desktop split no longer exists.
+  const keepWorkspaceVisibleOnMobile = useEffectEvent(() => {
+    // Preserve the selected local tool when the desktop split no longer fits.
+    // The map view keeps the case visible; its mounted editor retains all drafts.
     if (activeView === "dispatch" && workspace.kind === "cockpit" && workspace.mode === "split"
       && (mobilePane === "workspace" || hasUnsavedChanges || isCaseSaveLocked)) {
       setMobilePane("workspace");
-      setWorkspace({ kind: "cockpit", mode: "expanded" });
+      setWorkspace({ kind: "cockpit", mode: centerView === "map" ? "expanded" : "collapsed" });
     }
   });
 
   useEffect(() => {
     const mobile = window.matchMedia("(max-width: 1023px)");
     function onBreakpointChange(event: MediaQueryListEvent) {
-      if (event.matches) keepCaseVisibleOnMobile();
+      if (event.matches) keepWorkspaceVisibleOnMobile();
     }
     mobile.addEventListener("change", onBreakpointChange);
     return () => mobile.removeEventListener("change", onBreakpointChange);
