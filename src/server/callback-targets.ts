@@ -12,7 +12,7 @@ function failure(error: { code?: string } | null) {
   if (!error) return;
   if (error.code === "42501") throw new MutationError("Na túto zmenu kontaktu nemáte oprávnenie.", 403);
   if (error.code === "P0002") throw new MutationError("Kontakt alebo požiadavka sa nenašla.", 404);
-  if (error.code === "40001") throw new MutationError("Cieľ sa medzitým zmenil. Overte kontakt znova.", 409);
+  if (error.code === "PT409" || error.code === "40001") throw new MutationError("Cieľ sa medzitým zmenil. Overte kontakt znova.", 409);
   if (error.code === "22023") throw new MutationError("Vyberte platný overený kontaktný cieľ.", 400);
   throw new MutationError("Overený cieľ sa nepodarilo načítať.", 503);
 }

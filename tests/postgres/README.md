@@ -1,5 +1,25 @@
 Presence contract verification uses a temporary PostgreSQL 15 database on `127.0.0.1:55432`. It has no remote connection setting. The fixture contains only the tables and roles needed by the exact presence migration; this is not a full Supabase reset.
 
+`POSTGREST_BIN=/path/to/postgrest python3 tests/postgres/domain-conflict-sqlstate.py`
+verifies the domain-conflict migration against a disposable PostgreSQL 17 database
+on that loopback port and a temporary PostgREST server bound to `127.0.0.1`.
+It requires `psycopg[binary]`; it never loads application credentials. Use a
+PostgREST 14 binary to cover the affected major version. This is an isolated
+surrogate, not evidence of the hosted project's PostgREST version.
+
+The test compares all ten historical function definitions with the migration's
+result and requires exactly fifteen SQLSTATE literal changes, with signatures,
+defaults, owners, ACLs, security and search paths preserved. It checks drift
+rejection and idempotency. Only case-save has a full executable business fixture;
+the other nine functions are installed with deferred body checking for exact
+catalog comparison. The inherited case-save tests exercise authorization,
+revision checks, row locks, atomic related writes, audit rollback and concurrency.
+Real HTTP checks cover competing writes, repeated stale writes and a conflict
+after an earlier related update. A nontransactional pre-request sequence counts
+transaction attempts, so a fast HTTP response alone is not mistaken for proof
+that no retry occurred. A separate real serializable transaction conflict must
+still raise PostgreSQL `40001`.
+
 Run `python3 tests/postgres/presence-contract.py` after installing `psycopg[binary]` and starting the local cluster. The script recreates only `presence_contract`. It also applies the exact durable-transition migration and verifies atomic answer/session/journal commit, rollback, rejection, idempotency, pending retention, and version CAS (including null rejection). It verifies service-role-only RPC execution, organization isolation, two-client pause/answer in both orders, competing dispatches/pickups, revision ABA and legacy writers, transaction rollback, durable cancellation, original pause restoration, expired/zero wrap-up admission, and the original reservation signature. Race tests wait for `pg_stat_activity.wait_event_type = 'Lock'` before releasing the first transaction; they do not infer concurrency from random sleeps.
 
 `python3 tests/postgres/mobile-contract.py` separately recreates `mobile_contract` and applies the exact mobile migration. Its legacy replace function is a declared fixture stub. This covers the new wrapper, preserved owner on old-client omission, explicit null clearing, cross-organization rollback, permissions and owned PSTN attempt shape; it does not verify the full original configuration RPC.

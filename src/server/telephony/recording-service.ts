@@ -48,7 +48,10 @@ function checkedRevision(rows: RecordingSourceRows, value: unknown) {
   return revision;
 }
 function rpcError(error: { code?: string } | null) {
-  if (error) recordingError(error.code === "40001" ? "Záznam medzitým zmenil kolega. Načítaj ho znova." : "Zmenu sa nepodarilo uložiť.", error.code === "40001" ? 409 : 503, error.code === "40001" ? "stale_recording_source" : "recording_write_failed");
+  if (error) {
+    const conflict = error.code === "PT409" || error.code === "40001";
+    recordingError(conflict ? "Záznam medzitým zmenil kolega. Načítaj ho znova." : "Zmenu sa nepodarilo uložiť.", conflict ? 409 : 503, conflict ? "stale_recording_source" : "recording_write_failed");
+  }
 }
 function recordingState(r: RecordingSourceRows["recordings"][number]): RecordingContentState {
   if (r.deleted_at || r.status === "deleted") return "deleted";

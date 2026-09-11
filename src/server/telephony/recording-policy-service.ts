@@ -116,6 +116,9 @@ export async function saveRecordingPolicy(admin: Admin, actor: MotoristActor, bo
     p_organization_id: actor.organizationId, p_expected_revision: policy.revision,
     p_actor_id: actor.profileId, p_approved: approved, p_policy: policy as unknown as Json,
   });
-  if (error) throw new ConfigServiceError(error.code === "40001" ? "Nastavenia medzitým zmenil kolega. Načítaj ich znova." : "Nastavenia sa nepodarilo uložiť.", error.code === "40001" ? 409 : 503, error.code === "40001" ? "stale_recording_policy" : "recording_policy_save_failed");
+  if (error) {
+    const conflict = error.code === "PT409" || error.code === "40001";
+    throw new ConfigServiceError(conflict ? "Nastavenia medzitým zmenil kolega. Načítaj ich znova." : "Nastavenia sa nepodarilo uložiť.", conflict ? 409 : 503, conflict ? "stale_recording_policy" : "recording_policy_save_failed");
+  }
   return getRecordingPolicy(admin, actor);
 }
