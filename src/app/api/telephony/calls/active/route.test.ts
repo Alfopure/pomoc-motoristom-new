@@ -3,6 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 
 let harness: ReturnType<typeof createTelephonyHarness>;
+let sweepClock = Date.now();
+const background = vi.hoisted(() => ({ after: vi.fn(), sweep: vi.fn() }));
+
+vi.mock("next/server", async (importOriginal) => ({
+  ...await importOriginal<typeof import("next/server")>(), after: background.after,
+}));
+
+vi.mock("@/server/telephony/routing/ring-plan", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/server/telephony/routing/ring-plan")>(), sweepOverdueRingSteps: background.sweep,
+}));
 
 vi.mock("@/server/api-auth", () => ({
   requireDefaultMotoristActor: async () => ({ userId: "user-1", profileId: PROFILES.o1, organizationId: ORG, displayName: "Jana", role: "dispatcher" as const }),
@@ -32,10 +42,15 @@ describe("GET /api/telephony/calls/active", () => {
   beforeEach(() => {
     process.env.TELNYX_API_KEY = "KEYtest";
     harness = createTelephonyHarness({ ivrOnNeutralLine: false });
+    background.after.mockReset();
+    background.sweep.mockReset().mockResolvedValue({ checked: 0, swept: [], deferred: [], errors: [] });
+    sweepClock += 10_000;
+    vi.spyOn(Date, "now").mockReturnValue(sweepClock);
   });
 
   afterEach(() => {
     delete process.env.TELNYX_API_KEY;
+    vi.restoreAllMocks();
   });
 
   it("returns an uncached snapshot with presence even when nothing is ringing", async () => {
@@ -95,11 +110,50 @@ describe("GET /api/telephony/calls/active", () => {
       error: expect.stringContaining("temporary database failure") }));
   });
 
+  it("returns snapshots while an overdue-session sweep is still waiting", async () => {
+    let finishSweep!: () => void;
+    background.sweep.mockImplementationOnce(() => new Promise<void>(resolve => { finishSweep = resolve; }));
+
+    const response = await GET();
+    expect(response.status).toBe(200);
+    expect((await response.json()).calls).toEqual([]);
+    expect(background.sweep).not.toHaveBeenCalled();
+    expect(background.after).toHaveBeenCalledTimes(1);
+
+    const pendingSweep = background.after.mock.calls[0][0]();
+    expect(background.sweep).toHaveBeenCalledWith(expect.objectContaining({
+      organizationId: ORG, limit: 4, budgetMs: 2_000,
+    }));
+    try {
+      const nextResponse = await GET();
+      expect(nextResponse.status).toBe(200);
+      expect((await nextResponse.json()).calls).toEqual([]);
+      await background.after.mock.calls[1][0]();
+      expect(background.sweep).toHaveBeenCalledTimes(1);
+    } finally {
+      finishSweep();
+      await pendingSweep;
+    }
+  });
+
+  it("logs a failed background sweep without changing the successful snapshot", async () => {
+    background.sweep.mockRejectedValueOnce(new Error("session lease unavailable"));
+
+    const response = await GET();
+    expect(response.status).toBe(200);
+    await expect(background.after.mock.calls[0][0]()).resolves.toBeUndefined();
+    expect(harness.logs).toContainEqual(expect.objectContaining({
+      level: "warn", scope: "sweep", source: "calls/active", error: "session lease unavailable",
+    }));
+    expect((await response.json()).calls).toEqual([]);
+  });
+
   it("returns 503 while telephony is not configured", async () => {
     delete process.env.TELNYX_API_KEY;
 
     const response = await GET();
     expect(response.status).toBe(503);
+    expect(background.after).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toEqual({ error: "Telefónia nie je nakonfigurovaná.", code: "not_configured" });
   });
 });

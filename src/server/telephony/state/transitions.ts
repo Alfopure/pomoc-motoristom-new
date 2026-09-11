@@ -1627,7 +1627,9 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
     const remaining = answeredParties(b).filter((party) => party.telnyx_call_control_id !== leg.telnyx_call_control_id);
     if (remaining.length > 0) handOverConference(b, leg, remaining, "operator_lost");
     else operatorLost(b, customer, leg);
-  } else if ((TALKING_STATES.has(state) || state === "wrap_up") && isOwner && customerOpen && !meta.hangup) {
+  } else if (TALKING_STATES.has(state) && isOwner && customerOpen && !meta.hangup) {
+    // Wrap-up already committed the end of the conversation. Its customer-leg
+    // write may still be in flight, so an apparently open leg cannot reopen it.
     operatorLost(b, customer, leg);
   } else if (leg.profile_id) {
     // Idempotent release: only an operator still bound to this call moves to wrap-up.
@@ -2031,8 +2033,9 @@ function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
   if (!ACTIVE_SESSION_STATES.has(b.session.state)) throw new CallActionRejected("Hovor už nie je aktívny.", 409, "not_active");
   const customer = b.customerLeg();
   if (!customer || b.legEnded(customer)) {
-    // Outbound/internal call cancelled before the far end exists: only the operator's own leg is up.
-    if (event.type === "hangup" && b.openLegs().length > 0) return appHangup(b, null, event);
+    // Cancellation also repairs an active session whose legs have all ended;
+    // rejecting it would leave the stale call permanently stuck in the console.
+    if (event.type === "hangup" && b.legs.length > 0) return appHangup(b, null, event);
     throw new CallActionRejected("Hovor už nie je aktívny.", 409, "not_active");
   }
 
@@ -2651,7 +2654,19 @@ function appStopSupervise(b: TransitionBuilder, event: AppEvent): ReduceResult {
   return b.note(`supervision stopped by ${profileId}${legs.length > 1 ? ` (${legs.length} legs)` : ""}`).result();
 }
 
+function finaliseAlreadyEndedCall(b: TransitionBuilder): ReduceResult {
+  // Preserve the actual customer hangup time and existing end reason instead
+  // of recording the later repair as a new operator hangup.
+  const endedAt = b.customerLeg()?.ended_at ?? b.legs.map((leg) => leg.ended_at)
+    .filter((at): at is string => Boolean(at) && Number.isFinite(Date.parse(at!))).sort().at(-1) ?? b.nowIso;
+  cancelOpenAttempts(b, endedAt, "session already ended");
+  releaseTalkingOperators(b, Boolean(b.session.answered_at));
+  finishIfQuiet(b, endedAt);
+  return b.note("finalised an already ended call").result();
+}
+
 function appHangup(b: TransitionBuilder, customer: LegRow | null, event: AppEvent): ReduceResult {
+  if (b.openLegs().length === 0) return finaliseAlreadyEndedCall(b);
   b.patchMeta({ hangup: { by: event.actorProfileId, at: b.nowIso, scope: "session" } });
   if (customer) b.cmd(hangupCmd(b, customer, "app_hangup", false));
   for (const leg of b.openLegs()) {
@@ -2686,6 +2701,10 @@ function appHangup(b: TransitionBuilder, customer: LegRow | null, event: AppEven
 /** Timer-driven re-evaluation (cron / active-calls poll / end of webhook). */
 function onSweep(b: TransitionBuilder): ReduceResult {
   const state = b.session.state;
+  const customer = b.customerLeg();
+  if (ACTIVE_SESSION_STATES.has(state) && customer && b.legEnded(customer) && b.openLegs().length === 0) {
+    return finaliseAlreadyEndedCall(b);
+  }
   const pickup = b.session.presence_pickup as { v?: number; profileId?: string; offerToken?: string; expiresAt?: string } | null;
   if (pickup?.v === 1 && pickup.profileId && pickup.offerToken && pickup.expiresAt && Date.parse(pickup.expiresAt) <= b.ctx.now.getTime()
     && !(TALKING_STATES.has(state) && b.session.answered_by_profile_id === pickup.profileId)) {
@@ -2696,7 +2715,6 @@ function onSweep(b: TransitionBuilder): ReduceResult {
     return b.note("expired unaccepted pickup released").result();
   }
   if (state === "wrap_up" || state === "missed") return onStaleFinalise(b);
-  const customer = b.customerLeg();
   if (!customer || b.legEnded(customer)) return ignoredResult("sweep: no customer leg");
   const meta = b.meta;
 
