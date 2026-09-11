@@ -54,7 +54,7 @@ export const ANNOUNCEMENT_DEFINITIONS = [
   { key: "parkStart", label: "Čakanie na prevzatie", description: "Oznámenie, že hovor čaká na prevzatie kolegom.", file: "parkStart.mp3", assetVersion: "v4", category: "handoff", runtimeStatus: "active" },
   { key: "conferenceJoin", label: "Pripojenie účastníka", description: "Upozornenie pred pripojením ďalšieho účastníka.", file: "conferenceJoin.mp3", assetVersion: "v4", category: "handoff", runtimeStatus: "active" },
   { key: "conferenceLeave", label: "Odchod účastníka", description: "Voliteľné potvrdenie odchodu účastníka.", file: "conferenceLeave.mp3", assetVersion: "v4", category: "handoff", runtimeStatus: "active" },
-  { key: "outboundIntro", label: "Úvod odchádzajúceho hovoru", description: "Predstavenie služby po prijatí odchádzajúceho hovoru.", file: "outboundIntro.mp3", assetVersion: "v4", category: "other", runtimeStatus: "active" },
+  { key: "outboundIntro", label: "Úvod odchádzajúceho hovoru", description: "Vypnuté pre rýchlejšie spojenie odchádzajúcich hovorov aj spätných volaní. Uloženie textu ani nahrávky hlášku nezapne.", file: "outboundIntro.mp3", assetVersion: "v4", category: "other", runtimeStatus: "active" },
   { key: "noInput", label: "Voľba nezachytená", description: "Výzva pri nezachytenej voľbe v hlasovom menu.", file: "noInput.mp3", assetVersion: "v4", category: "other", runtimeStatus: "prepared" },
   { key: "afterHoursNoCallback", label: "Mimo hodín bez spätného volania", description: "Odkaz mimo otváracích hodín, ak chýba číslo volajúceho alebo zlyhá ponuka spätného volania.", file: "afterHoursNoCallback.mp3", assetVersion: "v4", category: "other", runtimeStatus: "active" },
   { key: "callbackFailed", label: "Neúspešné uloženie požiadavky", description: "Pravdivé oznámenie, ak požiadavku nemožno uložiť.", file: "callbackFailed.mp3", assetVersion: "v4", category: "other", runtimeStatus: "prepared" },
@@ -191,8 +191,9 @@ export const DEFAULT_ANNOUNCEMENT_TEXTS: Record<AnnouncementLanguage, Record<Ann
 export function defaultAnnouncementConfig(): AnnouncementConfig {
   return { version: 1, language: "sk", voiceId: DEFAULT_ANNOUNCEMENT_VOICE, recordingStatusAnnouncements: false, prompts: {} };
 }
-/** Initial recording notices are always enabled; this controls only status updates. */
+/** Initial recording notices stay enabled; the retired outbound intro stays silent. */
 export function isAnnouncementEnabled(config: AnnouncementConfig, key: AnnouncementKey): boolean {
+  if (key === "outboundIntro") return false;
   return !["recordingPaused", "recordingResumed", "recordingUnavailable"].includes(key) || config.recordingStatusAnnouncements === true;
 }
 export function isAnnouncementLanguage(value: unknown): value is AnnouncementLanguage {

@@ -28,7 +28,6 @@ import {
   type FrozenRingPlan,
   type IvrOptionRow,
   type LegRow,
-  type LineRow,
   type PresenceRow,
   type RoutingContext,
   type RoutingSettings,
@@ -201,8 +200,9 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
   const { admin, organizationId } = deps;
   const now = nowOf(deps)();
   const meta = readMeta(session);
-  const line: LineRow | null = session.line_id
-    ? await admin
+  const [line, settings, recordingPolicy] = await Promise.all([
+    session.line_id
+      ? admin
         .from("motorist_telephony_lines")
         .select("*")
         .eq("organization_id", organizationId)
@@ -212,15 +212,23 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
           if (result.error) throw new Error(`line load failed: ${result.error.message}`);
           return result.data;
         })
-    : null;
-  const settings = await loadRoutingSettings(admin, organizationId);
+      : null,
+    loadRoutingSettings(admin, organizationId),
+    resolveSessionRecordingPolicy(admin, organizationId),
+  ]);
   const routing = ROUTING_STATES.has(session.state);
+  // An outgoing call already has an explicit recipient. Loading the line's
+  // inbound IVR and ring groups on every setup webhook delays that recipient
+  // and makes unrelated inbound configuration failures block the call.
+  // Retain saved plans/queues for resumed routing, and count capacity below
+  // for every routing state, including parked outgoing and internal calls.
+  const inboundRouting = routing && (session.direction === "inbound" || Boolean(meta.ring?.plan) || meta.ring?.mode === "plan" || Boolean(meta.queue));
 
-  const [businessHours, ivr] = routing ? await Promise.all([loadBusinessHours(admin, organizationId, line?.business_hours_id ?? null), loadIvr(admin, organizationId, line?.ivr_menu_id ?? null)]) : [null, null];
+  const [businessHours, ivr] = inboundRouting ? await Promise.all([loadBusinessHours(admin, organizationId, line?.business_hours_id ?? null), loadIvr(admin, organizationId, line?.ivr_menu_id ?? null)]) : [null, null];
 
   let ringPlan: FrozenRingPlan | null = meta.ring?.plan ?? null;
   const ringPlans: Record<string, FrozenRingPlan> = {};
-  if (routing) {
+  if (inboundRouting) {
     const planIds = new Set<string>();
     if (!ringPlan && line?.ring_plan_id) planIds.add(line.ring_plan_id);
     for (const option of ivr?.options ?? []) if (option.target_ring_plan_id) planIds.add(option.target_ring_plan_id);
@@ -232,7 +240,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     if (ringPlan) ringPlans[ringPlan.planId] = ringPlan;
   }
 
-  if (routing) {
+  if (inboundRouting) {
     const personal = await admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId);
     if (personal.error) throw new Error(`personal routing load failed: ${personal.error.message}`);
     for (const [id, plan] of Object.entries(ringPlans)) {
@@ -309,7 +317,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     fromNumber: (config.configured ? config.defaultFromNumber : null) ?? line?.phone_number ?? null,
     mediaAvailable: config.configured ? Boolean(config.mediaBaseUrl) : false,
     announcements: meta.announcements ? readAnnouncementConfig(meta.announcements) : announcementConfigFromMetadata(line?.metadata),
-    recordingPolicy: await resolveSessionRecordingPolicy(admin, organizationId),
+    recordingPolicy,
   };
 }
 

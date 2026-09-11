@@ -18,7 +18,7 @@ import { releaseOperator, reserveOperatorOwnership, reserveOperatorPickup, relea
 import { telephonyStabilityEnabled } from "./stability";
 import { effectivePresenceStatus } from "@/lib/telephony/presence-policy";
 import { effectsDeps, loadRoutingSettings, runSessionEvent, type SessionRunnerDeps, type SessionRunResult } from "./session-runner";
-import { isOverLegCap, loadDailyUsage } from "./usage";
+import { isOverLegCap, loadDailyUsage, type DailyUsage } from "./usage";
 import { upsertCallRow, upsertDialedLeg, type CommandOutcome } from "./state/effects";
 import { CallActionRejected } from "./state/transitions";
 import {
@@ -149,6 +149,10 @@ async function assertSuperviseRate(deps: CallActionDeps, actor: CallActor): Prom
 async function assertLegBudget(deps: CallActionDeps): Promise<void> {
   const now = nowOf(deps);
   const [usage, settings] = await Promise.all([loadDailyUsage(deps.admin, { organizationId: deps.organizationId, now }), loadRoutingSettings(deps.admin, deps.organizationId)]);
+  assertLoadedLegBudget(deps, usage, settings);
+}
+
+function assertLoadedLegBudget(deps: CallActionDeps, usage: DailyUsage, settings: Awaited<ReturnType<typeof loadRoutingSettings>>): void {
   if (isOverLegCap(usage, settings.raw?.daily_leg_soft_cap ?? null)) {
     deps.logger?.({ level: "warn", scope: "call-actions", message: "daily leg cap reached", legs: usage.legs, cap: settings.raw?.daily_leg_soft_cap ?? null });
     throw new CallActionError("Denný limit hovorov bol vyčerpaný.", 429, "daily_cap_reached");
@@ -207,10 +211,10 @@ async function assertOwnership(deps: CallActionDeps, session: SessionRow, actor:
   }
 }
 
-async function normalizeDestination(deps: CallActionDeps, raw: string): Promise<string> {
+async function normalizeDestination(deps: CallActionDeps, raw: string, loadedSettings?: Awaited<ReturnType<typeof loadRoutingSettings>>): Promise<string> {
   const e164 = normalizeE164(raw);
   if (!e164) throw new CallActionError("Neplatné telefónne číslo.", 400, "invalid_number");
-  const settings = await loadRoutingSettings(deps.admin, deps.organizationId);
+  const settings = loadedSettings ?? await loadRoutingSettings(deps.admin, deps.organizationId);
   if (!isDestinationAllowed(e164, settings.raw?.destination_allowlist ?? null)) {
     throw new CallActionError("Cieľové číslo nie je povolené (allowlist).", 403, "destination_not_allowed");
   }
@@ -277,15 +281,22 @@ export type StartOutboundInput = { to: string; caseId?: string | null; lineId?: 
 export type StartOutboundResult = { sessionId: string; operatorLegCallControlId: string; telnyxSessionId: string | null; to: string; from: string };
 
 export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput): Promise<StartOutboundResult> {
+  const startedAt = nowOf(deps).getTime();
   const telnyx = requireConfigured(deps);
   await assertOutboundRate(deps, actor);
-  await assertLegBudget(deps);
-  const target = await resolveCallbackTarget(deps.admin, deps.organizationId, input.to);
+  // These reads are independent. Finish every guard before reserving an operator
+  // or creating a call, but do not add each database round trip to setup latency.
+  const [settings, usage, target, device, { line, from }] = await Promise.all([
+    loadRoutingSettings(deps.admin, deps.organizationId),
+    loadDailyUsage(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) }),
+    resolveCallbackTarget(deps.admin, deps.organizationId, input.to),
+    requireLiveDevice(deps, actor.profileId),
+    resolveFromLine(deps, actor.profileId, input.lineId),
+  ]);
+  assertLoadedLegBudget(deps, usage, settings);
   const confirmed = confirmedCallbackTarget(target, input.callbackTargetVerificationId);
   if (!confirmed) throw new CallActionError(target.status === "blocked" ? "Toto číslo neprijíma spätné volania. Doplňte overený cieľ v adresári." : "Potvrďte overený alternatívny cieľ volania.", 409, "callback_target_confirmation_required");
-  const to = await normalizeDestination(deps, confirmed);
-  const device = await requireLiveDevice(deps, actor.profileId);
-  const { line, from } = await resolveFromLine(deps, actor.profileId, input.lineId);
+  const to = await normalizeDestination(deps, confirmed, settings);
   const now = nowOf(deps);
 
   const session = await createSession(deps, {
@@ -347,7 +358,7 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
     await upsertDialedLeg(effects, session, dial, result);
     const fresh = await loadSession(deps, session.id);
     await upsertCallRow(effects, fresh, { status: "outbound" });
-    deps.logger?.({ scope: "call-actions", action: "start_outbound", sessionId: session.id, by: actor.profileId, to, from, ms: nowOf(deps).getTime() - now.getTime() });
+    deps.logger?.({ scope: "call-actions", action: "start_outbound", sessionId: session.id, by: actor.profileId, to, from, preflightMs: now.getTime() - startedAt, ms: nowOf(deps).getTime() - startedAt });
     return { sessionId: session.id, operatorLegCallControlId: result.callControlId, telnyxSessionId: result.callSessionId, to, from };
   } catch (error) {
     await markSessionFailed(deps, session, error instanceof TelnyxLiveCallsDisabledError ? "live_calls_disabled" : "dial_failed");

@@ -105,8 +105,8 @@ describe("startOutboundCall", () => {
     expect(customerLeg.telnyx_call_control_id).toBe("cc-2");
 
     await h.legEvent("cc-2", "call.answered", { direction: "outgoing" });
-    expect(h.telnyx.of("bridge")).toHaveLength(0);
-    await completeCallAnnouncements(h, result.sessionId);
+    expect(h.telnyx.of("playbackStart")).toHaveLength(0);
+    expect(h.telnyx.of("speak")).toHaveLength(0);
     expect(h.telnyx.of("bridge")[0].params).toMatchObject({ callControlId: "cc-2", targetCallControlId: own });
     expect(h.session(result.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o1 });
     expect(h.call(result.sessionId)).toMatchObject({ status: "answered" });

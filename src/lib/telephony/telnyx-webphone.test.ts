@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
-import type { Call } from "@telnyx/webrtc";
+import type { Call, IClientOptions, TelnyxRTC } from "@telnyx/webrtc";
 
 import { TelnyxWebphone, isAuthFailure, type TelnyxWebphoneOptions, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
 import type { TelephonyJsonResult } from "./client-request";
@@ -80,7 +80,7 @@ function fakeCall(overrides: Partial<WebphoneSdkCall> = {}): WebphoneSdkCall & {
 
 type Request = { url: string; body: unknown };
 
-function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"] } = {}) {
+function harness(options: { token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"] } = {}) {
   const requests: Request[] = [];
   const timers: Array<{ id: number; handler: () => void; delayMs: number }> = [];
   let nextTimer = 1;
@@ -89,7 +89,8 @@ function harness(options: { token?: TelephonyJsonResult<unknown>; heartbeat?: ()
   const phone = new TelnyxWebphone({
     silent: true,
     now: options.now ?? (() => Date.parse("2026-09-03T08:00:00.000Z")),
-    createClient: options.createClient ?? (() => client),
+    createClient: options.createClient ?? (options.loadSdk ? undefined : () => client),
+    loadSdk: options.loadSdk,
     setTimeout: (handler, delayMs) => {
       const id = nextTimer++;
       timers.push({ id, handler, delayMs });
@@ -187,6 +188,93 @@ function heartbeatWorkers() {
 describe("TelnyxWebphone", () => {
   it("keeps the SDK call seam compatible with its asynchronous answer API", () => {
     expectTypeOf<Call>().toMatchTypeOf<WebphoneSdkCall>();
+    expectTypeOf<TelnyxRTC>().toMatchTypeOf<WebphoneSdkClient>();
+  });
+
+  it("downloads the SDK alongside the token and connects with incremental ICE after both are ready", async () => {
+    const token = deferred<TelephonyJsonResult<unknown>>();
+    const sdk = deferred<Awaited<ReturnType<NonNullable<TelnyxWebphoneOptions["loadSdk"]>>>>();
+    const loadSdk = vi.fn(() => sdk.promise);
+    const created: Array<{ options: IClientOptions; client: FakeClient }> = [];
+    const h = harness({ token: token.promise, loadSdk });
+    h.phone.start();
+    expect(loadSdk).toHaveBeenCalledOnce();
+    expect(h.requests[0]?.url).toContain("/webphone/token");
+    token.resolve({ ok: true, status: 200, body: { token: "issued-token", expiresAt: "2026-09-03T09:00:00.000Z", deviceSessionId: "device-1", sipUsername: "gencred1" } });
+    await flush();
+    expect(created).toHaveLength(0);
+    expect(h.phone.getSnapshot().status).toBe("connecting");
+    sdk.resolve({ TelnyxRTC: class extends FakeClient {
+      constructor(options: IClientOptions) { super(); created.push({ options, client: this }); }
+    } });
+    await flush();
+    expect(loadSdk).toHaveBeenCalledOnce();
+    expect(created).toHaveLength(1);
+    expect(created[0].options).toEqual({ login_token: "issued-token", trickleIce: true });
+    expect(created[0].client.connected).toBe(true);
+    h.phone.stop();
+  });
+
+  it("recovers a failed SDK preload when credentials arrive without creating another token request", async () => {
+    const token = deferred<TelephonyJsonResult<unknown>>();
+    const loadSdk = vi.fn<NonNullable<TelnyxWebphoneOptions["loadSdk"]>>()
+      .mockRejectedValueOnce(new Error("chunk temporarily unavailable"))
+      .mockResolvedValue({ TelnyxRTC: FakeClient });
+    const h = harness({ token: token.promise, loadSdk });
+    h.phone.start();
+    await flush();
+    token.resolve({ ok: true, status: 200, body: { token: "issued-token", expiresAt: "2026-09-03T09:00:00.000Z", deviceSessionId: "device-1", sipUsername: "gencred1" } });
+    await flush();
+    expect(loadSdk).toHaveBeenCalledTimes(2);
+    expect(h.requests.filter(request => request.url.includes("/webphone/token"))).toHaveLength(1);
+    expect(h.phone.getSnapshot().status).toBe("connecting");
+    h.phone.stop();
+  });
+
+  it("an explicit call awaits the heartbeat already publishing registration", async () => {
+    const heartbeat = deferred<TelephonyJsonResult<unknown>>();
+    const h = harness({ heartbeat: () => heartbeat.promise });
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const ready = vi.fn();
+    const confirmation = h.phone.confirmRegistration().then(ready);
+    await flush();
+    expect(h.requests.filter(request => request.url.includes("/heartbeat"))).toHaveLength(1);
+    expect(ready).not.toHaveBeenCalled();
+    heartbeat.resolve({ ok: true, status: 200, body: {} });
+    await confirmation;
+    expect(ready).toHaveBeenCalledOnce();
+    // A later call still checks current server liveness.
+    await h.phone.confirmRegistration();
+    expect(h.requests.filter(request => request.url.includes("/heartbeat"))).toHaveLength(2);
+    h.phone.stop();
+  });
+
+  it("refuses an explicit call when the shared registration heartbeat is rejected", async () => {
+    const heartbeat = deferred<TelephonyJsonResult<unknown>>();
+    const h = harness({ heartbeat: () => heartbeat.promise });
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const confirmation = expect(h.phone.confirmRegistration()).rejects.toThrow("iná karta");
+    heartbeat.resolve({ ok: false, status: 409, body: { error: "iná karta" } });
+    await confirmation;
+    expect(h.phone.getSnapshot().status).toBe("superseded");
+    expect(h.requests.filter(request => request.url.includes("/heartbeat"))).toHaveLength(1);
+    h.phone.stop();
+  });
+
+  it("a successful old heartbeat cannot authorize a call after the phone disconnects", async () => {
+    const heartbeat = deferred<TelephonyJsonResult<unknown>>();
+    const h = harness({ heartbeat: () => heartbeat.promise });
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const confirmation = expect(h.phone.confirmRegistration()).rejects.toThrow("zmenilo");
+    h.phone.stop();
+    heartbeat.resolve({ ok: true, status: 200, body: {} });
+    await confirmation;
   });
 
   it("mints a token, connects and reports the registration", async () => {
@@ -462,6 +550,7 @@ describe("TelnyxWebphone", () => {
     h.phone.start();
     await flush();
     h.client.emit("telnyx.ready");
+    await flush();
     if (failure === "load") {
       const latePulse = workers[0].onmessage;
       workers[0].onerror?.();
@@ -502,6 +591,25 @@ describe("TelnyxWebphone", () => {
     window.dispatchEvent(new Event("online"));
     expect(h.requests).toHaveLength(count);
     expect(workers).toHaveLength(2);
+  });
+
+  it("page-cache restore sends a fresh registration after leaving while the old heartbeat is pending", async () => {
+    audioDom();
+    heartbeatWorkers();
+    vi.stubGlobal("navigator", { sendBeacon: () => false });
+    const pending = deferred<TelephonyJsonResult<unknown>>();
+    const h = harness({ heartbeat: () => pending.promise });
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    window.dispatchEvent(new Event("pagehide"));
+    window.dispatchEvent(new Event("pageshow"));
+    expect(h.requests.filter(request => request.url.includes("/heartbeat")).map(request => JSON.parse(request.body as string).registrationState))
+      .toEqual(["registered", "unregistered", "registered"]);
+    pending.resolve({ ok: true, status: 200, body: {} });
+    await flush();
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    h.phone.stop();
   });
 
   it.each(["visibilitychange", "pageshow", "online"])("resumes a delayed reconnect on %s without duplicate token requests", async (event) => {
