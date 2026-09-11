@@ -88,6 +88,11 @@
 .panel .danger { color: #b91c1c; border-color: #fecaca; }
 .boardHelp { flex: 0 0 auto; padding: 7px 16px; color: #62636e; background: #f8f8fb; font-size: 11px; }
 .statusNotice { flex: 0 0 auto; padding: 8px 16px; color: #166534; background: #f0fdf4; }
+.moveDialog { width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); margin: auto; border: 1px solid #dedee3; border-radius: 12px; padding: 20px; color: #27272a; background: #fff; box-shadow: 0 20px 60px #18181b33; overflow: auto; }
+.moveDialog::backdrop { background: #18181b66; }
+.moveDialog form { display: grid; gap: 16px; }
+.moveTaskTitle { font-weight: 600; overflow-wrap: anywhere; }
+.moveError { color: #991b1b; }
 .draggableCard { cursor: grab; }
 .draggingCard { opacity: .4; }
 .panel .dragHandle { width: 34px; min-height: 34px; padding: 4px; margin-left: auto; border-color: transparent; color: #747584; cursor: grab; touch-action: none; }

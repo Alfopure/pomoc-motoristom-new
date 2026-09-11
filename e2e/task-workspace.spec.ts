@@ -6,6 +6,7 @@ import path from "node:path";
 import tailwindcss from "@tailwindcss/postcss";
 import type { WorkspaceTask } from "../src/domain/task-workspace";
 const postcss = createRequire(require.resolve("@tailwindcss/postcss"))("postcss");
+test.use({ timezoneId: "Europe/Bratislava" });
 let script: string, css: string;
 test.beforeAll(async () => {
   const output = (await build({ entryPoints: ["e2e/fixtures/task-workspace.tsx"], bundle: true, write: false, outfile: "fixture.js", platform: "browser", format: "iife", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' } })).outputFiles;
@@ -39,7 +40,8 @@ async function boot(page: Page, width = 390, legacy = false) {
       if (state.failSave) return route.fulfill({ status: 409, json: { error: "Súbežná zmena" } });
       const { expectedRevision, ...patch } = body;
       if (expectedRevision !== task.revision) return route.fulfill({ status: 409, json: { error: "Súbežná zmena" } });
-      Object.assign(task, patch, { revision: task.revision + 1 }); return route.fulfill({ json: { task } });
+      // The workspace RPC serializes a removed due_at as an empty string.
+      Object.assign(task, patch, patch.dueAt === null ? { dueAt: "" } : {}, { revision: task.revision + 1 }); return route.fulfill({ json: { task } });
     }
     if (task && method === "GET") return route.fulfill({ json: { task } });
     if (task && url.pathname.endsWith("/links")) { const caseId = String(body?.caseId); task.caseIds = task.caseIds.filter(id => id !== caseId); task.caseLinks = task.caseLinks.filter(link => link.caseId !== caseId); task.revision++; return route.fulfill({ json: { task } }); }
@@ -48,6 +50,7 @@ async function boot(page: Page, width = 390, legacy = false) {
   });
   await page.goto(`https://task-workspace.test/${legacy ? "?legacy=true" : ""}`);
   await page.addStyleTag({ content: css }); await page.addScriptTag({ content: script });
+  if (!state.tasks.length) state.tasks = await page.evaluate(() => (window as unknown as { taskWorkspaceFixture: { tasks: WorkspaceTask[] } }).taskWorkspaceFixture.tasks);
   return { state, requests, errors };
 }
 for (const width of [360,390,768,1024,1279,1280]) test(`task and chat drafts share identity across views at ${width}px`, async ({ page }) => {
@@ -138,7 +141,7 @@ async function pointerDrag(page: Page, source: Locator, target: Locator, cancel 
   await page.mouse.up();
 }
 
-test("pointer drops complete an empty column and reopen by the preserved due date after refresh", async ({ page }) => {
+test("pointer drops complete an empty column and reopen with the chosen scheduled date", async ({ page }) => {
   const { state, requests, errors } = await boot(page, 1440);
   await expect(cardIn(page, "overdue")).toBeVisible();
   await expect(taskColumn(page, "done").locator("[data-task-id]")).toHaveCount(0);
@@ -149,24 +152,28 @@ test("pointer drops complete an empty column and reopen by the preserved due dat
   await page.getByRole("button", { name: "Obnoviť úlohy", exact: true }).click();
   await expect.poll(() => requests.filter(request => request.method === "GET" && request.path === "/api/tasks").length).toBeGreaterThan(0);
   await expect(cardIn(page, "done")).toBeVisible();
-  // Dropping onto a time category reopens the task without silently rescheduling it.
   await pointerDrag(page, page.getByRole("button", { name: standaloneTitle, exact: true }), taskColumn(page, "scheduled"));
-  await expect(cardIn(page, "overdue")).toBeVisible();
-  await expect(cardIn(page, "scheduled")).toHaveCount(0);
+  const dialog = page.getByRole("dialog", { name: "Presunúť úlohu do Naplánované", exact: true });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Nový termín úlohy", { exact: true }).fill("2026-09-15T09:30");
+  expect(requests.filter(request => request.method === "PATCH")).toHaveLength(1);
+  await dialog.getByRole("button", { name: "Potvrdiť presun", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(cardIn(page, "scheduled")).toBeVisible();
   await expect(page.getByRole("complementary", { name: "Detail úlohy", exact: true })).toHaveCount(0);
   expect(requests.filter(request => request.method === "PATCH").map(request => request.body)).toEqual([
-    { status: "done", expectedRevision: 1 }, { status: "open", expectedRevision: 2 },
+    { status: "done", expectedRevision: 1 }, { status: "open", dueAt: "2026-09-15T07:30:00.000Z", expectedRevision: 2 },
   ]);
-  expect(state.tasks.find(task => task.id === standaloneId)?.dueAt).toBe("2026-09-10T10:00:00Z");
+  expect(state.tasks.find(task => task.id === standaloneId)?.dueAt).toBe("2026-09-15T07:30:00.000Z");
   expect(errors).toEqual([]);
 });
 
-test("invalid time-column drops, Escape, and opening the title never write a status", async ({ page }) => {
+test("same-column drops, Escape, and opening the title never mutate the task", async ({ page }) => {
   const { requests, errors } = await boot(page, 1440);
   await page.getByRole("button", { name: standaloneTitle, exact: true }).click();
   await expect(page.getByRole("textbox", { name: "Názov úlohy", exact: true })).toHaveValue(standaloneTitle);
   await page.getByRole("button", { name: "Späť na úlohy", exact: true }).click();
-  await pointerDrag(page, taskHandle(page), taskColumn(page, "today"));
+  await pointerDrag(page, taskHandle(page), taskColumn(page, "overdue"));
   await expect(cardIn(page, "overdue")).toBeVisible();
   await pointerDrag(page, taskHandle(page), taskColumn(page, "done"), true);
   await expect(cardIn(page, "overdue")).toBeVisible();
@@ -174,15 +181,17 @@ test("invalid time-column drops, Escape, and opening the title never write a sta
   expect(errors).toEqual([]);
 });
 
-for (const width of [390, 1440]) test(`keyboard dragging completes and reopens tasks at ${width}px`, async ({ page }) => {
+for (const width of [390, 1440]) test(`keyboard dragging traverses every column and reopens without a due date at ${width}px`, async ({ page }) => {
   const { requests, errors } = await boot(page, width);
   await taskHandle(page).focus();
   // KeyboardSensor attaches its document listener on the next task. A real
   // press/release lets that listener mount before the following arrow key.
   await page.keyboard.press("Space", { delay: 20 });
   await expect(taskColumn(page, "done")).toHaveAttribute("data-drop-allowed", "true");
-  await page.keyboard.press("ArrowRight");
-  await expect(taskColumn(page, "done")).toHaveAttribute("data-drop-over", "true");
+  for (const column of ["today", "scheduled", "undated", "done"]) {
+    await page.keyboard.press("ArrowRight");
+    await expect(taskColumn(page, column)).toHaveAttribute("data-drop-over", "true");
+  }
   await page.keyboard.press("Space");
   await expect(cardIn(page, "done")).toBeVisible();
   await expect(taskHandle(page)).toBeFocused();
@@ -192,8 +201,163 @@ for (const width of [390, 1440]) test(`keyboard dragging completes and reopens t
   await page.keyboard.press("ArrowLeft");
   await expect(taskColumn(page, "undated")).toHaveAttribute("data-drop-over", "true");
   await page.keyboard.press("Space");
+  await expect(cardIn(page, "undated")).toBeVisible();
+  await expect(taskHandle(page)).toBeFocused();
+  await page.keyboard.press("Space", { delay: 20 });
+  await page.keyboard.press("ArrowLeft");
+  await expect(taskColumn(page, "scheduled")).toHaveAttribute("data-drop-over", "true");
+  await page.keyboard.press("Space");
+  const dialog = page.getByRole("dialog", { name: "Presunúť úlohu do Naplánované", exact: true });
+  await expect(dialog).toBeInViewport();
+  await expect(dialog.getByLabel("Nový termín úlohy", { exact: true })).toHaveValue("2026-09-12T09:00");
+  await page.keyboard.press("Escape");
+  await expect(dialog).not.toBeVisible();
+  await expect(taskHandle(page)).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+  expect(requests.filter(request => request.method === "PATCH").map(request => request.body)).toEqual([
+    { status: "done", expectedRevision: 1 }, { status: "open", dueAt: null, expectedRevision: 2 },
+  ]);
+  expect(errors).toEqual([]);
+});
+
+test("today and undated mouse drops change only status and due date on a shared task", async ({ page }) => {
+  const { state, requests, errors } = await boot(page, 1440);
+  const shared = state.tasks.find(task => task.title === "Úloha pre dva prípady")!;
+  shared.reminderAt = "2026-09-14T08:00:00Z";
+  shared.reminderChannels = ["in_app", "email"];
+  shared.revision = 2;
+  const before = structuredClone(shared);
+  await page.getByRole("button", { name: "Obnoviť úlohy", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Obnoviť úlohy", exact: true })).toBeEnabled();
+  await pointerDrag(page, taskHandle(page, shared.title), taskColumn(page, "today"));
+  await expect(taskColumn(page, "today").locator(`[data-task-id="${shared.id}"]`)).toBeVisible();
+  expect(state.tasks.find(task => task.id === shared.id)).toEqual({ ...before, status: "open", dueAt: "2026-09-11T21:59:59.999Z", revision: 3 });
+  await pointerDrag(page, taskHandle(page, shared.title), taskColumn(page, "undated"));
+  await expect(taskColumn(page, "undated").locator(`[data-task-id="${shared.id}"]`)).toBeVisible();
+  expect(state.tasks.find(task => task.id === shared.id)).toEqual({ ...before, status: "open", dueAt: "", revision: 4 });
+  expect(requests.filter(request => request.method === "PATCH").map(request => request.body)).toEqual([
+    { status: "open", dueAt: "2026-09-11T21:59:59.999Z", expectedRevision: 2 },
+    { status: "open", dueAt: null, expectedRevision: 3 },
+  ]);
+  expect(errors).toEqual([]);
+});
+
+test("scheduled date dialog rejects today and past dates, cancels without saving, and confirms a future date", async ({ page }) => {
+  const { requests, errors } = await boot(page, 1440);
+  await pointerDrag(page, taskHandle(page), taskColumn(page, "scheduled"));
+  const dialog = page.getByRole("dialog", { name: "Presunúť úlohu do Naplánované", exact: true });
+  const date = dialog.getByLabel("Nový termín úlohy", { exact: true });
+  await expect(date).toHaveValue("2026-09-12T09:00");
+  for (const invalidDate of ["2026-09-11T18:00", "2026-09-10T09:00"]) {
+    await date.fill(invalidDate);
+    await date.press("Enter", { delay: 20 });
+    await expect(dialog).toBeVisible();
+  }
+  expect(requests.filter(request => request.method === "PATCH")).toEqual([]);
+  await dialog.getByRole("button", { name: "Zrušiť", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
   await expect(cardIn(page, "overdue")).toBeVisible();
-  expect(requests.filter(request => request.method === "PATCH").map(request => request.body?.status)).toEqual(["done", "open"]);
+  expect(requests.filter(request => request.method === "PATCH")).toEqual([]);
+  await pointerDrag(page, taskHandle(page), taskColumn(page, "scheduled"));
+  await date.fill("2026-09-13T16:45");
+  await dialog.getByRole("button", { name: "Potvrdiť presun", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(cardIn(page, "scheduled")).toBeVisible();
+  expect(requests.filter(request => request.method === "PATCH").map(request => request.body)).toEqual([
+    { status: "open", dueAt: "2026-09-13T14:45:00.000Z", expectedRevision: 1 },
+  ]);
+  expect(errors).toEqual([]);
+});
+
+test("overdue date dialog requires and saves a past time atomically", async ({ page }) => {
+  const { state, requests, errors } = await boot(page, 1440);
+  await pointerDrag(page, taskHandle(page), taskColumn(page, "undated"));
+  await expect(cardIn(page, "undated")).toBeVisible();
+  await pointerDrag(page, taskHandle(page), taskColumn(page, "overdue"));
+  const dialog = page.getByRole("dialog", { name: "Presunúť úlohu do Po termíne", exact: true });
+  const date = dialog.getByLabel("Nový termín úlohy", { exact: true });
+  await date.fill("2026-09-12T10:00");
+  await date.press("Enter", { delay: 20 });
+  await expect(dialog).toBeVisible();
+  expect(requests.filter(request => request.method === "PATCH")).toHaveLength(1);
+  await date.fill("2026-09-11T10:00");
+  await dialog.getByRole("button", { name: "Potvrdiť presun", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(cardIn(page, "overdue")).toBeVisible();
+  expect(state.tasks.find(task => task.id === standaloneId)?.dueAt).toBe("2026-09-11T08:00:00.000Z");
+  expect(requests.filter(request => request.method === "PATCH").map(request => request.body)).toEqual([
+    { status: "open", dueAt: null, expectedRevision: 1 },
+    { status: "open", dueAt: "2026-09-11T08:00:00.000Z", expectedRevision: 2 },
+  ]);
+  expect(errors).toEqual([]);
+});
+
+test("a revision change while the date dialog is open prevents overwriting the current task", async ({ page }) => {
+  const { state, requests, errors } = await boot(page, 1440);
+  await pointerDrag(page, taskHandle(page), taskColumn(page, "scheduled"));
+  const dialog = page.getByRole("dialog", { name: "Presunúť úlohu do Naplánované", exact: true });
+  await dialog.getByLabel("Nový termín úlohy", { exact: true }).fill("2026-09-13T16:45");
+  const current = state.tasks.find(task => task.id === standaloneId)!;
+  current.title = "Názov zmenený druhým operátorom";
+  current.revision++;
+  await dialog.getByRole("button", { name: "Potvrdiť presun", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: /^Súbežná zmena$/ })).toBeVisible();
+  await expect(cardIn(page, "overdue")).toBeVisible();
+  await expect(cardIn(page, "scheduled")).toHaveCount(0);
+  expect(current).toMatchObject({ title: "Názov zmenený druhým operátorom", dueAt: "2026-09-10T10:00:00Z", status: "open", revision: 2 });
+  expect(requests.filter(request => request.method === "PATCH").map(request => request.body)).toEqual([
+    { status: "open", dueAt: "2026-09-13T14:45:00.000Z", expectedRevision: 1 },
+  ]);
+  expect(errors).toEqual([]);
+});
+
+test("a failed date save keeps the selected date and original card for retry", async ({ page }) => {
+  const { state, requests, errors } = await boot(page, 1440);
+  await pointerDrag(page, taskHandle(page), taskColumn(page, "scheduled"));
+  const dialog = page.getByRole("dialog", { name: "Presunúť úlohu do Naplánované", exact: true });
+  const date = dialog.getByLabel("Nový termín úlohy", { exact: true });
+  await date.fill("2026-09-14T11:30");
+  let releaseSave!: () => void;
+  state.holdSave = new Promise<void>(resolve => { releaseSave = resolve; });
+  state.failNetworkOnce = true;
+  try {
+    await dialog.getByRole("button", { name: "Potvrdiť presun", exact: true }).click();
+    await expect.poll(() => requests.filter(request => request.method === "PATCH").length).toBe(1);
+    await expect(date).toBeDisabled();
+    await expect(cardIn(page, "overdue")).toBeVisible();
+    await expect(cardIn(page, "scheduled")).toHaveCount(0);
+  } finally { state.holdSave = null; releaseSave(); }
+  await expect(dialog.getByRole("alert")).toBeVisible();
+  await expect(date).toHaveValue("2026-09-14T11:30");
+  await expect(date).toBeEnabled();
+  await expect(cardIn(page, "overdue")).toBeVisible();
+  await dialog.getByRole("button", { name: "Potvrdiť presun", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(cardIn(page, "scheduled")).toBeVisible();
+  expect(requests.filter(request => request.method === "PATCH").map(request => request.body)).toEqual([
+    { status: "open", dueAt: "2026-09-14T09:30:00.000Z", expectedRevision: 1 },
+    { status: "open", dueAt: "2026-09-14T09:30:00.000Z", expectedRevision: 1 },
+  ]);
+  expect(errors).toEqual([]);
+});
+
+test("the date dialog closes without a write when polling finds the exact date already applied", async ({ page }) => {
+  const { state, requests, errors } = await boot(page, 1440);
+  await pointerDrag(page, taskHandle(page), taskColumn(page, "scheduled"));
+  const dialog = page.getByRole("dialog", { name: "Presunúť úlohu do Naplánované", exact: true });
+  await dialog.getByLabel("Nový termín úlohy", { exact: true }).fill("2026-09-13T16:45");
+  const current = state.tasks.find(task => task.id === standaloneId)!;
+  current.dueAt = "2026-09-13T14:45:00.000Z";
+  current.revision++;
+  const reads = requests.filter(request => request.method === "GET" && request.path === "/api/tasks").length;
+  await page.clock.fastForward(30_000);
+  await expect.poll(() => requests.filter(request => request.method === "GET" && request.path === "/api/tasks").length).toBeGreaterThan(reads);
+  await expect(cardIn(page, "scheduled")).toBeVisible();
+  await dialog.getByRole("button", { name: "Potvrdiť presun", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "už má zvolený termín" })).toBeVisible();
+  expect(requests.filter(request => request.method === "PATCH")).toEqual([]);
   expect(errors).toEqual([]);
 });
 

@@ -5,10 +5,11 @@ import type { DispatchCase, Operator } from "@/domain/types";
 import type { WorkspaceTask } from "@/domain/task-workspace";
 import { isTaskDueToday, isTaskHandoverRelevant, isTaskOverdue, taskPriorityLabels } from "@/domain/tasks";
 import { useTaskWorkspace } from "./TaskWorkspaceProvider";
-import { taskDraft, type TaskDraft } from "./task-workspace-store";
+import { taskDraft, type TaskDraft, type TaskBoardMutation } from "./task-workspace-store";
 import { TaskChatPanel } from "./TaskChatPanel";
-import { groupTaskBoard, taskBoardColumn, taskBoardColumns } from "./task-workspace-board";
+import { groupTaskBoard, taskBoardColumn, taskBoardColumns, taskBoardDrop, type TaskBoardColumnId, type TaskBoardDateColumn } from "./task-workspace-board";
 import { TaskWorkspaceBoard, TaskWorkspaceCard } from "./TaskWorkspaceBoard";
+import { TaskBoardMoveDialog } from "./TaskBoardMoveDialog";
 import styles from "./TaskWorkspacePanel.module.css";
 export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, variant = "sidebar", onOpenCase }: {
   tasks?: WorkspaceTask[]; cases: DispatchCase[]; operators: Operator[]; viewerProfileId?: string;
@@ -22,6 +23,7 @@ export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, v
   const [linkCaseId, setLinkCaseId] = useState("");
   const [statusNotice, setStatusNotice] = useState("");
   const [statusTaskId, setStatusTaskId] = useState<string | null>(null);
+  const [dateMove, setDateMove] = useState<{ task: WorkspaceTask; column: TaskBoardDateColumn; suggestedDueAt: string } | null>(null);
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLElement>(null);
   const boardRef = useRef<HTMLElement>(null);
@@ -49,34 +51,74 @@ export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, v
   const change = (patch: Partial<TaskDraft>) => selected ? store.edit(selected.id, patch) : store.editCreate(patch);
   const conflict = Boolean(selected && snapshot.conflicts.includes(selected.id));
   const columns = groupTaskBoard(visible, now);
-  async function changeStatus(task: WorkspaceTask, status: "open" | "done") {
+  function focusTask(id: string, handle = true) {
+    const card = panelRef.current?.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id)}"]`);
+    const target = card?.querySelector<HTMLButtonElement>(handle ? "[data-task-drag-handle]" : "[data-task-status-action]");
+    if (target && !target.disabled) target.focus();
+    else (boardRef.current ?? panelRef.current?.querySelector<HTMLButtonElement>('button[aria-label="Obnoviť úlohy"]'))?.focus();
+  }
+  async function changeTask(task: WorkspaceTask, patch: TaskBoardMutation) {
     const focusSource = document.activeElement as HTMLElement | null;
     const restoreFocus = focusSource?.closest("[data-task-id]")?.getAttribute("data-task-id") === task.id;
     const focusHandle = focusSource?.hasAttribute("data-task-drag-handle");
     setStatusNotice(""); setStatusTaskId(task.id);
     try {
-      const saved = await store.setTaskStatus(task.id, status, task.revision);
+      const saved = await store.moveTask(task.id, patch, task.revision);
       if (saved) {
         const current = store.getSnapshot().tasks.find(item => item.id === task.id);
         const column = current && taskBoardColumns.find(item => item.id === taskBoardColumn(current, new Date()));
         if (current) {
-          const superseded = (current.status === "done" ? "done" : "open") !== status;
+          const superseded = (current.status === "done" ? "done" : "open") !== patch.status ||
+            (patch.dueAt !== undefined && (patch.dueAt === null ? Boolean(current.dueAt) : Date.parse(current.dueAt) !== Date.parse(patch.dueAt)));
           setStatusNotice(superseded
             ? `Úloha „${current.title}“ sa medzitým znova zmenila. Aktuálny stĺpec: ${column?.label ?? ""}.`
-            : `Úloha „${current.title}“ ${status === "done" ? "bola vybavená" : "bola znova otvorená"}.${column ? ` Stĺpec: ${column.label}.` : ""} Termín zostal zachovaný.`);
+            : patch.dueAt !== undefined
+              ? `Úloha „${current.title}“ bola presunutá. Stĺpec: ${column?.label ?? ""}. ${current.dueAt ? `Termín: ${new Date(current.dueAt).toLocaleString("sk-SK")}.` : "Termín bol odstránený."}`
+              : `Úloha „${current.title}“ ${patch.status === "done" ? "bola vybavená" : "bola znova otvorená"}.${column ? ` Stĺpec: ${column.label}.` : ""} Termín zostal zachovaný.`);
         }
       }
+      return saved;
     } finally {
       setStatusTaskId(null);
       // A saved card remounts in another column. Restore its keyboard focus
       // only if the user has not moved on to another control while saving.
       if (restoreFocus) window.requestAnimationFrame(() => {
         if (document.activeElement !== document.body && document.activeElement !== focusSource) return;
-        const card = panelRef.current?.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(task.id)}"]`);
-        const target = card?.querySelector<HTMLButtonElement>(focusHandle ? "[data-task-drag-handle]" : "[data-task-status-action]");
-        if (target && !target.disabled) target.focus();
-        else (boardRef.current ?? panelRef.current?.querySelector<HTMLButtonElement>('button[aria-label="Obnoviť úlohy"]'))?.focus();
+        focusTask(task.id, focusHandle);
       });
+    }
+  }
+  const changeStatus = (task: WorkspaceTask, status: "open" | "done") => changeTask(task, { status });
+  function moveTask(task: WorkspaceTask, column: TaskBoardColumnId) {
+    const current = store.getSnapshot();
+    if (current.hidden || current.saving || current.drafts[task.id] || current.conflicts.includes(task.id) || !current.tasks.some(item => item.id === task.id)) return;
+    const drop = taskBoardDrop(task, column, new Date());
+    if (!drop) return;
+    setStatusNotice("");
+    if (drop.kind === "date") setDateMove({ task, column: drop.column, suggestedDueAt: drop.suggestedDueAt });
+    else void changeTask(task, drop.patch);
+  }
+  function cancelDateMove() {
+    const id = dateMove?.task.id;
+    setDateMove(null);
+    if (id) window.requestAnimationFrame(() => focusTask(id));
+  }
+  async function confirmDateMove(patch: TaskBoardMutation) {
+    if (!dateMove) return;
+    const task = dateMove.task;
+    const saved = await changeTask(task, patch);
+    const current = store.getSnapshot();
+    const canonical = current.tasks.find(item => item.id === task.id);
+    const alreadyApplied = !current.hidden && !current.saving && !current.drafts[task.id] && !current.conflicts.includes(task.id) &&
+      canonical?.status === patch.status && typeof patch.dueAt === "string" && Date.parse(canonical.dueAt) === Date.parse(patch.dueAt);
+    if (saved || alreadyApplied) {
+      if (!saved) setStatusNotice(`Úloha „${canonical!.title}“ už má zvolený termín.`);
+      cancelDateMove();
+    }
+    else if (current.hidden || !current.tasks.some(item => item.id === task.id) || current.conflicts.includes(task.id)) {
+      setDateMove(null);
+      // The existing conflict editor provides the reload action.
+      window.requestAnimationFrame(() => titleRef.current?.focus({ preventScroll: true }));
     }
   }
   const cardProps = (task: WorkspaceTask) => ({ task, operators, now, selected: selected?.id === task.id,
@@ -104,8 +146,8 @@ export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, v
           if (target) boardRef.current?.scrollTo({ left: target.offsetLeft - 12 });
         }}>{column.label}<span>{column.tasks.length}</span></button>)}</nav>}
         {variant === "page" ? <>
-          <p className={styles.boardHelp}>Potiahnite úlohu do Vybavené alebo späť na otvorenie. Termín sa nemení.</p>
-          <TaskWorkspaceBoard columns={columns} boardRef={boardRef} loading={snapshot.loading} filtered={filter !== "all" || assignee !== "all" || Boolean(query)} cardProps={cardProps} onStatusChange={changeStatus} />
+          <p className={styles.boardHelp}>Potiahnite úlohu do cieľového stĺpca. Dnes nastaví termín do konca dňa, Bez termínu ho odstráni. Naplánované a Po termíne ponúknu výber dátumu. Samostatná pripomienka sa nemení.</p>
+          <TaskWorkspaceBoard columns={columns} boardRef={boardRef} loading={snapshot.loading} filtered={filter !== "all" || assignee !== "all" || Boolean(query)} now={now} cardProps={cardProps} onMove={moveTask} />
         </> : <div className={styles.sidebarList}><ul className={styles.list}>{visible.map(task => <TaskWorkspaceCard key={task.id} {...cardProps(task)} />)}</ul>{!snapshot.loading && visible.length === 0 && <p className={styles.emptyColumn}>Žiadne úlohy v tomto pohľade.</p>}</div>}
       </div>
       {editing && <aside className={styles.editor} aria-label={selected ? "Detail úlohy" : "Nová úloha"}>
@@ -137,6 +179,9 @@ export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, v
       </>}
       </aside>}
     </div>
+    {dateMove && snapshot.tasks.some(task => task.id === dateMove.task.id) && <TaskBoardMoveDialog
+      key={`${dateMove.task.id}:${dateMove.column}`} title={dateMove.task.title} column={dateMove.column} suggestedDueAt={dateMove.suggestedDueAt}
+      saving={snapshot.saving} error={snapshot.error} onCancel={cancelDateMove} onConfirm={patch => void confirmDateMove(patch)} />}
   </section>;
 }
 function localTime(value: string) { if (!value) return ""; const date = new Date(value); return Number.isFinite(date.getTime()) ? new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0,16) : value; }
