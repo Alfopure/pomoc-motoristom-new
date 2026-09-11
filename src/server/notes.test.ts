@@ -23,7 +23,7 @@ describe("notebook authenticated RPC boundary", () => {
     let response!: Response; try { await loadNote(actor, id); } catch (error) { response = noteErrorResponse(error); }
     expect(response.status).toBe(503); expect(response.headers.get("cache-control")).toBe("private, no-store"); expect(await response.text()).not.toContain("Secret"); expect(log).not.toHaveBeenCalled(); log.mockRestore();
   });
-  it.each([["42501",403], ["P0002",404], ["40001",409]])("maps %s without leaking its detail", async (code, status) => {
+  it.each([["42501",403], ["P0002",404], ["PT409",409], ["40001",409]])("maps %s without leaking its detail", async (code, status) => {
     mocks.rpc.mockResolvedValue({ error: { code, message: "private" } }); await expect(loadNote(actor, id)).rejects.toMatchObject({ status });
   });
 });
