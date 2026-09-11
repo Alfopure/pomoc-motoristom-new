@@ -140,9 +140,8 @@ export function MapWorkspace({
   const hasCockpitCase = Boolean(caseItem && mapModel);
   const showWorkspacePanel = workspaceKind !== "cockpit" || hasCockpitCase;
   const showExpandedPanel = workspaceKind !== "cockpit";
-  const caseViewActive = centerView === "map";
-  const shellClassName = `dispatch-workspace-shell relative h-full min-h-0 ${caseViewActive && showWorkspacePanel && workspaceMode === "split" ? `lg:grid lg:gap-2 ${desktopRows[workspaceMode]}` : ""}`;
-  const upperAreaClassName = `dispatch-workspace-upper h-full min-h-0 overflow-hidden ${caseViewActive && showWorkspacePanel && workspaceMode === "split" ? "lg:h-auto lg:min-h-[260px]" : ""}`;
+  const shellClassName = `dispatch-workspace-shell relative h-full min-h-0 ${showWorkspacePanel && workspaceMode === "split" ? `lg:grid lg:gap-2 ${desktopRows[workspaceMode]}` : ""}`;
+  const upperAreaClassName = `dispatch-workspace-upper h-full min-h-0 overflow-hidden ${showWorkspacePanel && workspaceMode === "split" ? "lg:h-auto lg:min-h-[260px]" : ""} ${showWorkspacePanel && workspaceMode === "collapsed" && centerView !== "map" ? "lg:pb-16" : ""}`;
   // Mobile CSS displays either the full map or the full case, never a partial sheet.
   const panelClassName = workspaceMode === "expanded"
     ? "dispatch-workspace-panel absolute inset-0 z-[2147482500] lg:z-20 lg:h-full"
@@ -277,15 +276,15 @@ export function MapWorkspace({
   return (
     <section className={sectionClassName}>
       {onCenterViewChange && <div className="workspace-toolbar">
-        {caseViewActive && <button type="button" className="workspace-panel-toggle" aria-label="Zbaliť panel prípadov" onClick={onToggleLeft}><PanelLeftClose size={16} /></button>}
+        <button type="button" className="workspace-panel-toggle" aria-label="Zbaliť panel prípadov" onClick={onToggleLeft}><PanelLeftClose size={16} /></button>
         <div className="workspace-center-tabs" role="tablist" aria-label="Pracovná plocha">
           {centerTabs.map(({ view, label, icon: Icon }, index) => <button key={view} id={`workspace-tab-${view}`} type="button" role="tab" aria-selected={centerView === view} aria-controls="workspace-tab-content" tabIndex={centerView === view ? 0 : -1} onKeyDown={event => handleTabKeyDown(event, index)} onClick={() => onCenterViewChange(view)}><Icon size={15} aria-hidden="true" /><span>{label}</span></button>)}
         </div>
         <button type="button" className="workspace-tools-trigger" aria-expanded={toolsOpen} aria-controls="dispatch-tools-panel" onClick={onOpenTools}><Wrench size={16} aria-hidden="true" /><span>Nástroje</span></button>
       </div>}
-      <div id="workspace-tab-content" role="tabpanel" aria-labelledby={`workspace-tab-${centerView}`} className="workspace-tab-content relative min-h-0 flex-1">
+      <div className="workspace-tab-content relative min-h-0 flex-1">
       <div id={WORKSPACE_SHELL_ID} ref={containerRef} className={shellClassName} data-center-view={centerView} data-workspace-mode={workspaceMode} suppressHydrationWarning>
-        <div className={upperAreaClassName}>
+        <div id="workspace-tab-content" role="tabpanel" aria-labelledby={`workspace-tab-${centerView}`} className={upperAreaClassName}>
           <div hidden={centerView !== "map"} inert={centerView !== "map"} className="dispatch-workspace-view h-full">
             <DispatchMap
               active={active && centerView === "map" && workspaceMode !== "expanded"}
@@ -319,7 +318,7 @@ export function MapWorkspace({
         </div>
 
         {showWorkspacePanel && (
-          <div className={panelClassName} hidden={!caseViewActive} inert={!caseViewActive} data-workspace-mode={workspaceMode}>
+          <div className={panelClassName} data-workspace-mode={workspaceMode}>
           {canResizeCockpit && (
             <button
               type="button"

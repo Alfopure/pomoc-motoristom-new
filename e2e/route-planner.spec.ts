@@ -52,6 +52,83 @@ async function mapState(page: Page) {
   });
 }
 
+test("selecting a prediction accepts Google's displayed address without cancelling its own lookup", async ({ page }) => {
+  const state = await boot(page);
+  await page.getByRole("button", { name: "Plánovač", exact: true }).click();
+  await page.locator('gmp-place-autocomplete[aria-label="Odkiaľ"]').evaluate(node => {
+    (node as HTMLElement).dataset.delay = "50";
+    (node as HTMLElement).dataset.selectionInput = "true";
+  });
+  await select(page, "Odkiaľ", "Bratislava");
+  await select(page, "Kam", "Praha");
+  await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeEnabled();
+  await page.getByRole("button", { name: "Vypočítať trasu" }).click();
+  await expect(page.getByText("420,1 km", { exact: true })).toBeVisible();
+  expect(state.requests).toEqual([{ origin: { lat: 48.1486, lng: 17.1077 }, destination: { lat: 50.0755, lng: 14.4378 }, intermediates: [] }]);
+  expect(state.errors).toEqual([]);
+});
+
+for (const failure of ["conversion", "fetch", "coordinates"]) test(`place ${failure} failure finishes loading without inventing a point and permits retry`, async ({ page }) => {
+  const state = await boot(page, 390, true);
+  await select(page, "Odkiaľ", "Bratislava");
+  const element = page.locator('gmp-place-autocomplete[aria-label="Kam"]');
+  await element.evaluate((node, mode) => { (node as HTMLElement).dataset.placeFailure = mode; }, failure);
+  const input = page.getByRole("textbox", { name: "Kam", exact: true });
+  await input.fill("Praha"); await input.press("Enter");
+  await expect(page.getByRole("status")).toContainText(failure === "coordinates" ? "Vyberte miesto s platnou polohou" : "Miesto sa nepodarilo načítať");
+  await expect(page.getByText("Načítavam miesto…")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeDisabled();
+  expect(state.requests).toEqual([]);
+  await element.evaluate(node => { delete (node as HTMLElement).dataset.placeFailure; });
+  await select(page, "Kam", "Praha");
+  await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeEnabled();
+  expect(state.errors).toEqual([]);
+});
+
+test("a timed out place lookup allows a new selection and cannot replace it when it finally resolves", async ({ page }) => {
+  const state = await boot(page, 1440, true);
+  await select(page, "Odkiaľ", "Bratislava");
+  await page.clock.install();
+  const element = page.locator('gmp-place-autocomplete[aria-label="Kam"]');
+  await element.evaluate(node => { (node as HTMLElement).dataset.delay = "30000"; });
+  const input = page.getByRole("textbox", { name: "Kam", exact: true });
+  await input.fill("Praha"); await input.press("Enter");
+  await expect(page.getByText("Načítavam miesto…")).toBeVisible();
+  await page.clock.fastForward(15_001);
+  await expect(page.getByRole("status")).toContainText("Načítanie miesta trvá príliš dlho");
+  await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeDisabled();
+  await element.evaluate(node => { (node as HTMLElement).dataset.delay = "0"; });
+  await select(page, "Kam", "Wien");
+  await page.clock.fastForward(30_000);
+  await expect(input).toHaveValue("Wien, Österreich");
+  await expect(page.getByRole("status")).toHaveCount(0);
+  await page.getByRole("button", { name: "Vypočítať trasu" }).click();
+  await expect(page.getByText("420,1 km", { exact: true })).toBeVisible();
+  expect(state.requests).toEqual([{ origin: { lat: 48.1486, lng: 17.1077 }, destination: { lat: 48.2082, lng: 16.3738 }, intermediates: [] }]);
+  expect(state.errors).toEqual([]);
+});
+
+test("hiding a pending place lookup clears its loading notice and rejects the late answer", async ({ page }) => {
+  const state = await boot(page);
+  await page.getByRole("button", { name: "Plánovač", exact: true }).click();
+  await select(page, "Odkiaľ", "Bratislava");
+  await page.clock.install();
+  await page.locator('gmp-place-autocomplete[aria-label="Kam"]').evaluate(node => { (node as HTMLElement).dataset.delay = "5000"; });
+  const input = page.getByRole("textbox", { name: "Kam", exact: true });
+  await input.fill("Praha"); await input.press("Enter");
+  await expect(page.getByText("Načítavam miesto…")).toBeVisible();
+  await page.getByRole("button", { name: "Nástroj bez mapy", exact: true }).click();
+  await page.clock.fastForward(6_000);
+  await page.getByRole("button", { name: "Mapa skúšky", exact: true }).click();
+  await expect(page.getByText("Načítavam miesto…")).toHaveCount(0);
+  await expect(input).toHaveValue("Praha, Česko");
+  await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeDisabled();
+  await select(page, "Kam", "Praha");
+  await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeEnabled();
+  expect(state.requests).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
 for (const width of [1440, 390]) test(`international route is independent from fleet and branches at ${width}px`, async ({ page }) => {
   const state = await boot(page, width);
   await expect.poll(async () => (await mapState(page)).markers).toContain("Testovacia pobočka");

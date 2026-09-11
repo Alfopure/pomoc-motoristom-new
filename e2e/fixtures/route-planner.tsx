@@ -30,14 +30,25 @@ class Autocomplete extends HTMLElement {
       event.preventDefault();
       const selection = places.find(place => place.label.toLowerCase().includes(this.input.value.toLowerCase()));
       if (!selection) return;
+      // Google replaces the typed query with the selected prediction before
+      // gmp-select, without requiring an additional input event.
+      this.input.value = selection.label;
       const select = new Event("gmp-select");
       const delay = Number(this.dataset.delay ?? 0);
-      Object.assign(select, { placePrediction: { toPlace: () => ({
-        formattedAddress: selection.label, displayName: selection.label,
-        location: { lat: () => selection.lat, lng: () => selection.lng },
-        fetchFields: () => new Promise(resolve => setTimeout(resolve, delay)),
-      }) } });
+      const failure = this.dataset.placeFailure;
+      Object.assign(select, { placePrediction: { toPlace: () => {
+        if (failure === "conversion") throw new Error("Isolated prediction conversion failure");
+        return {
+          formattedAddress: selection.label, displayName: selection.label,
+          location: { lat: () => failure === "coordinates" ? 91 : selection.lat, lng: () => selection.lng },
+          fetchFields: () => new Promise((resolve, reject) => setTimeout(() => {
+            if (failure === "fetch") reject(new Error("Isolated place lookup failure"));
+            else resolve({});
+          }, delay)),
+        };
+      } } });
       this.dispatchEvent(select);
+      if (this.dataset.selectionInput === "true") this.dispatchEvent(new Event("input", { bubbles: true }));
     });
   }
   override setAttribute(name: string, value: string) {

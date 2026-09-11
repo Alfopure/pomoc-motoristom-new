@@ -185,7 +185,7 @@ body {
     max-height: min(34rem, calc(100dvh - var(--dispatch-mobile-nav-height) - env(safe-area-inset-bottom, 0px) - max(24px, env(safe-area-inset-top, 0px))));
   }
 
-  .dispatch-workspace-shell[data-center-view="map"][data-workspace-mode="expanded"] > .dispatch-workspace-upper {
+  .dispatch-workspace-shell[data-workspace-mode="expanded"] > .dispatch-workspace-upper {
     display: none;
   }
 
@@ -230,7 +230,7 @@ body {
 }
 
 @media (min-width: 1024px) {
-  .dispatch-workspace-shell[data-center-view="map"][data-workspace-mode="split"] {
+  .dispatch-workspace-shell[data-workspace-mode="split"] {
     grid-template-rows: var(--dispatch-desktop-grid-rows, minmax(260px, 66fr) minmax(96px, 34fr));
   }
 
