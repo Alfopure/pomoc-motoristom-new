@@ -240,6 +240,106 @@ describe("task status changes", () => {
   });
 });
 
+describe("task date-column moves", () => {
+  it("changes an open task's deadline with a normalized partial PATCH and waits for acknowledgement", async () => {
+    const response = deferred<Response>(); const fetcher = vi.fn(() => response.promise);
+    const original = task({ dueAt: "2026-10-01T08:00:00Z", reminderAt: "2026-09-30T07:00:00Z", reminderChannels: ["email"] });
+    const store = new TaskWorkspaceStore(true, undefined, fetcher, [original]);
+    const onTasksChange = vi.fn(); store.setOnTasksChange(onTasksChange);
+    const moving = store.moveTask("task-1", { status: "open", dueAt: "2026-10-02T10:30:00+02:00" }, 1);
+    expect(fetcher).toHaveBeenCalledWith("/api/tasks/task-1", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ status: "open", dueAt: "2026-10-02T08:30:00.000Z", expectedRevision: 1 }) }));
+    expect(store.getSnapshot()).toMatchObject({ tasks: [original], saving: true, drafts: {} });
+    expect(onTasksChange).not.toHaveBeenCalled();
+    expect(await store.moveTask("task-1", { status: "open", dueAt: null })).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const canonical = { ...original, dueAt: "2026-10-02T08:30:00.000Z", revision: 2 };
+    response.resolve(Response.json({ task: canonical }));
+    expect(await moving).toBe(true);
+    expect(store.getSnapshot()).toMatchObject({ tasks: [canonical], saving: false, drafts: {} });
+    expect(onTasksChange).toHaveBeenCalledExactlyOnceWith([canonical]);
+  });
+  it("clears the deadline and reopens a completed task in the same request", async () => {
+    const canonical = task({ dueAt: "", revision: 2 });
+    const fetcher = vi.fn(() => reply({ task: canonical }));
+    const store = new TaskWorkspaceStore(true, undefined, fetcher, [task({ status: "done", dueAt: "2026-10-01T10:00:00Z" })]);
+    expect(await store.moveTask("task-1", { status: "open", dueAt: null })).toBe(true);
+    expect(fetcher).toHaveBeenCalledWith("/api/tasks/task-1", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ status: "open", dueAt: null, expectedRevision: 1 }) }));
+    expect(store.getSnapshot().tasks).toEqual([canonical]);
+  });
+  it("skips only matching status and deadline, comparing equivalent date representations", async () => {
+    const fetcher = vi.fn(() => reply({ task: task({ revision: 2, dueAt: "2026-10-02T08:00:00.000Z" }) }));
+    const store = new TaskWorkspaceStore(true, undefined, fetcher, [task({ dueAt: "2026-10-01T10:00:00+02:00" }), task({ id: "undated" })]);
+    expect(await store.moveTask("task-1", { status: "open", dueAt: "2026-10-01T08:00:00.000Z" })).toBe(false);
+    expect(await store.moveTask("undated", { status: "open", dueAt: null })).toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await store.moveTask("task-1", { status: "open", dueAt: "2026-10-02T08:00:00.000Z" })).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it.each([null, "2026-10-01T08:00:00.000Z"])("clears legacy overdue status even when the target deadline is unchanged (%s)", async dueAt => {
+    const original = task({ status: "overdue", dueAt: dueAt ?? "" });
+    const canonical = task({ dueAt: dueAt ?? "", revision: 2 });
+    const fetcher = vi.fn(() => reply({ task: canonical }));
+    const store = new TaskWorkspaceStore(true, undefined, fetcher, [original]);
+    expect(await store.moveTask("task-1", { status: "open", dueAt }, original.revision)).toBe(true);
+    expect(fetcher).toHaveBeenCalledWith("/api/tasks/task-1", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ status: "open", dueAt, expectedRevision: 1 }) }));
+    expect(store.getSnapshot().tasks).toEqual([canonical]);
+  });
+  it.each(["not-a-date", "", "2026-99-99T10:00:00Z"])("rejects invalid supplied deadlines locally (%s)", async dueAt => {
+    const fetcher = vi.fn(); const store = new TaskWorkspaceStore(true, undefined, fetcher, [task()]);
+    expect(await store.moveTask("task-1", { status: "open", dueAt })).toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(store.getSnapshot()).toMatchObject({ tasks: [task()], saving: false, error: "Skontrolujte termín úlohy." });
+  });
+  it("keeps the current deadline on failure and reports a stale drag revision as a recoverable conflict", async () => {
+    const latest = task({ dueAt: "2026-10-03T08:00:00Z", revision: 2 });
+    const fetcher = vi.fn((url: string, init?: RequestInit) => init?.method === "PATCH"
+      ? reply({ error: "Conflict" }, 409)
+      : reply(url.endsWith("/messages") ? { messages: [], nextCursor: null } : { task: latest }));
+    const store = new TaskWorkspaceStore(true, undefined, fetcher, [task()]);
+    store.setTasks([latest]);
+    expect(await store.moveTask("task-1", { status: "open", dueAt: null }, 1)).toBe(false);
+    expect(fetcher.mock.calls[0][1]?.body).toBe(JSON.stringify({ status: "open", dueAt: null, expectedRevision: 1 }));
+    expect(store.getSnapshot()).toMatchObject({ tasks: [latest], selectedId: "task-1", conflicts: ["task-1"], error: "Conflict", saving: false });
+    expect(await store.moveTask("task-1", { status: "open", dueAt: null })).toBe(false);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
+    await store.reloadTask("task-1");
+    expect(store.getSnapshot()).toMatchObject({ tasks: [latest], conflicts: [], error: "" });
+  });
+  it("preserves draft dates typed during a move at their original revision", async () => {
+    const response = deferred<Response>();
+    const store = new TaskWorkspaceStore(true, undefined, url => url.endsWith("/messages") ? reply({ messages: [], nextCursor: null }) : response.promise, [task()]);
+    const moving = store.moveTask("task-1", { status: "open", dueAt: "2026-10-01T08:00:00Z" });
+    store.edit("task-1", { dueAt: "2026-10-02T09:00:00Z", title: "Still typing" });
+    const draft = store.getSnapshot().drafts["task-1"];
+    response.resolve(Response.json({ task: task({ dueAt: "2026-10-01T08:00:00.000Z", revision: 2 }) }));
+    expect(await moving).toBe(true);
+    expect(store.getSnapshot().drafts["task-1"]).toEqual(draft);
+    expect(store.getSnapshot()).toMatchObject({ selectedId: "task-1", conflicts: ["task-1"], tasks: [task({ dueAt: "2026-10-01T08:00:00.000Z", revision: 2 })] });
+    expect(store.getSnapshot().error).toContain("Rozpracovaná úloha zostala zachovaná");
+  });
+  it("preserves an existing draft when a date move is attempted", async () => {
+    const fetcher = vi.fn(); const store = new TaskWorkspaceStore(true, undefined, fetcher, [task()]);
+    store.edit("task-1", { title: "Unfinished" }); const draft = store.getSnapshot().drafts["task-1"];
+    expect(await store.moveTask("task-1", { status: "open", dueAt: "2026-10-01T08:00:00Z" })).toBe(false);
+    expect(fetcher).not.toHaveBeenCalled(); expect(store.getSnapshot().drafts["task-1"]).toEqual(draft);
+  });
+  it("leaves the deadline unchanged on connection failure", async () => {
+    const original = task({ dueAt: "2026-10-01T08:00:00Z" });
+    const store = new TaskWorkspaceStore(true, undefined, () => reply({ error: "Offline" }, 503), [original]);
+    expect(await store.moveTask("task-1", { status: "open", dueAt: null })).toBe(false);
+    expect(store.getSnapshot()).toMatchObject({ tasks: [original], error: "Offline", saving: false, conflicts: [] });
+  });
+  it("ignores a late date move after the session is cleared", async () => {
+    const response = deferred<Response>(); const store = new TaskWorkspaceStore(true, undefined, () => response.promise, [task()]);
+    const onTasksChange = vi.fn(); store.setOnTasksChange(onTasksChange);
+    const moving = store.moveTask("task-1", { status: "open", dueAt: "2026-10-01T08:00:00Z" }); store.clear();
+    response.resolve(Response.json({ task: task({ dueAt: "2026-10-01T08:00:00.000Z", revision: 2 }) }));
+    expect(await moving).toBe(false);
+    expect(store.getSnapshot()).toMatchObject({ tasks: [], hidden: true, saving: false });
+    expect(onTasksChange).not.toHaveBeenCalled();
+  });
+});
+
 describe("task list authority and capability changes", () => {
   it("unversioned props cannot erase an exact opened task or its draft", async () => {
     const store = new TaskWorkspaceStore(true, undefined, url => reply(url.endsWith("/messages") ? { messages: [], nextCursor: null } : { task: task() }));

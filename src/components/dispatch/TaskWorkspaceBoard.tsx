@@ -7,7 +7,7 @@ import { CalendarDays, CheckCircle2, Clock3, GripVertical, RotateCcw } from "luc
 import type { Operator } from "@/domain/types";
 import type { WorkspaceTask } from "@/domain/task-workspace";
 import { isTaskOverdue, taskPriorityLabels } from "@/domain/tasks";
-import { groupTaskBoard, taskBoardDropStatus } from "./task-workspace-board";
+import { groupTaskBoard, taskBoardDrop, type TaskBoardColumnId } from "./task-workspace-board";
 import styles from "./TaskWorkspacePanel.module.css";
 
 type CardProps = {
@@ -41,7 +41,7 @@ export function TaskWorkspaceCard({ task, operators, selected, dirty, disabled, 
       {dirty && <span className={styles.draftBadge}>Rozpracované</span>}
       {draggable && <button ref={setActivatorNodeRef} type="button" {...attributes} onKeyDown={event => listeners?.onKeyDown?.(event)}
         data-task-drag-handle className={styles.dragHandle} disabled={disabled} aria-label={`Presunúť úlohu ${task.title}`}
-        title={dirty ? "Pred presunom uložte rozpracovanú úlohu." : "Potiahnutím zmeniť stav úlohy"}><GripVertical size={16} aria-hidden="true" /></button>}
+        title={dirty ? "Pred presunom uložte rozpracovanú úlohu." : "Potiahnutím zmeniť stav alebo termín úlohy"}><GripVertical size={16} aria-hidden="true" /></button>}
     </div>
     <button type="button" data-task-title className={styles.title} aria-current={selected ? "true" : undefined} onClick={() => onSelect(task.id)}>{task.title}</button>
     <div className={styles.caseTags}>{task.caseLinks.length ? task.caseLinks.map(link => <span key={link.caseId}>{link.caseNumber}</span>) : <span>Samostatná úloha</span>}</div>
@@ -62,20 +62,21 @@ type BoardProps = {
   boardRef: RefObject<HTMLElement | null>;
   loading: boolean;
   filtered: boolean;
+  now: Date;
   cardProps: (task: WorkspaceTask) => CardProps;
-  onStatusChange: CardProps["onStatusChange"];
+  onMove: (task: WorkspaceTask, column: TaskBoardColumnId) => void;
 };
 
 // Arrow keys visit the valid columns in one step, including columns currently
 // outside the horizontal viewport. The keyboard sensor handles scrolling.
-function columnKeyboardCoordinates(event: KeyboardEvent, { currentCoordinates, context }: Parameters<KeyboardCoordinateGetter>[1], task: WorkspaceTask | null) {
+function columnKeyboardCoordinates(event: KeyboardEvent, { currentCoordinates, context }: Parameters<KeyboardCoordinateGetter>[1], task: WorkspaceTask | null, now: Date) {
   if (!task || !["ArrowLeft", "ArrowRight"].includes(event.code) || !context.collisionRect) return;
   event.preventDefault();
   const direction = event.code === "ArrowRight" ? 1 : -1;
   const current = context.collisionRect;
   const centerX = current.left + current.width / 2;
   const targets = context.droppableContainers.getEnabled().flatMap(container => {
-    if (!taskBoardDropStatus(task, String(container.id))) return [];
+    if (!taskBoardDrop(task, String(container.id), now)) return [];
     const rect = context.droppableRects.get(container.id);
     return rect ? [{ rect, x: rect.left + rect.width / 2 }] : [];
   }).filter(target => direction > 0 ? target.x > centerX + 1 : target.x < centerX - 1)
@@ -84,16 +85,16 @@ function columnKeyboardCoordinates(event: KeyboardEvent, { currentCoordinates, c
   if (target) return { x: currentCoordinates.x + target.x - centerX, y: currentCoordinates.y + target.rect.top + Math.min(target.rect.height / 2, current.height / 2 + 48) - (current.top + current.height / 2) };
 }
 
-export function TaskWorkspaceBoard({ columns, boardRef, cardProps, loading, filtered, onStatusChange }: BoardProps) {
+export function TaskWorkspaceBoard({ columns, boardRef, cardProps, loading, filtered, now, onMove }: BoardProps) {
   const id = useId();
   const [dragged, setDragged] = useState<WorkspaceTask | null>(null);
   const dragStartTask = useRef<WorkspaceTask | null>(null);
-  const keyboardCoordinates: KeyboardCoordinateGetter = (event, args) => columnKeyboardCoordinates(event, args, dragStartTask.current);
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(KeyboardSensor, { coordinateGetter: keyboardCoordinates }));
+  const keyboardCoordinates: KeyboardCoordinateGetter = (event, args) => columnKeyboardCoordinates(event, args, dragStartTask.current, now);
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(KeyboardSensor, { coordinateGetter: keyboardCoordinates, scrollBehavior: "auto" }));
   const collisionDetection: CollisionDetection = args => {
     const task = dragStartTask.current;
     if (!task) return [];
-    const candidates = { ...args, droppableContainers: args.droppableContainers.filter(container => taskBoardDropStatus(task, String(container.id))) };
+    const candidates = { ...args, droppableContainers: args.droppableContainers.filter(container => taskBoardDrop(task, String(container.id), now)) };
     if (args.pointerCoordinates) {
       const bounds = boardRef.current?.getBoundingClientRect();
       const { x, y } = args.pointerCoordinates;
@@ -106,10 +107,10 @@ export function TaskWorkspaceBoard({ columns, boardRef, cardProps, loading, filt
   return <DndContext id={id} sensors={sensors} collisionDetection={collisionDetection} measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
     accessibility={{
       restoreFocus: false,
-      screenReaderInstructions: { draggable: "Medzerníkom alebo Enterom zdvihnite úlohu. Šípkami vľavo a vpravo vyberte cieľový stĺpec a medzerníkom alebo Enterom potvrďte. Escape presun zruší. Presun mení iba stav, termín zostáva zachovaný." },
+      screenReaderInstructions: { draggable: "Medzerníkom alebo Enterom zdvihnite úlohu. Šípkami vľavo a vpravo vyberte cieľový stĺpec a medzerníkom alebo Enterom potvrďte. Escape presun zruší. Dnes nastaví dnešný termín, Bez termínu ho odstráni. Naplánované a Po termíne otvoria výber termínu." },
       announcements: {
         onDragStart: () => "Úloha je zdvihnutá. Vyberte cieľový stĺpec.",
-        onDragOver: ({ over }) => over ? `Cieľ: ${columns.find(column => column.id === over.id)?.label ?? ""}. Termín zostane zachovaný.` : "Tu nie je možné zmeniť stav úlohy.",
+        onDragOver: ({ over }) => over ? `Cieľ: ${columns.find(column => column.id === over.id)?.label ?? ""}. ${dropHints[over.id as TaskBoardColumnId] ?? ""}` : "Tu nie je možné presunúť úlohu.",
         onDragEnd: ({ over }) => over ? "Presun ukončený. Výsledok uloženia sa zobrazí na tabuli." : "Presun zrušený.",
         onDragCancel: () => "Presun zrušený.",
       },
@@ -123,11 +124,10 @@ export function TaskWorkspaceBoard({ columns, boardRef, cardProps, loading, filt
     onDragEnd={({ over }) => {
       const task = dragStartTask.current;
       endDrag();
-      const status = task && over ? taskBoardDropStatus(task, String(over.id)) : null;
-      if (task && status) onStatusChange(task, status);
+      if (task && over && taskBoardDrop(task, String(over.id), new Date())) onMove(task, over.id as TaskBoardColumnId);
     }}>
     <section ref={boardRef} className={`${styles.board} ${dragged ? styles.dragActive : ""}`} aria-label="Tabuľa úloh" tabIndex={0}>
-      {columns.map(column => <TaskBoardColumn key={column.id} column={column} dragged={dragged} loading={loading} filtered={filtered} cardProps={cardProps} />)}
+      {columns.map(column => <TaskBoardColumn key={column.id} column={column} dragged={dragged} loading={loading} filtered={filtered} now={now} cardProps={cardProps} />)}
     </section>
     {typeof document !== "undefined" && createPortal(<DragOverlay dropAnimation={null} zIndex={2147483600}>
       {dragged && <div className={`${styles.card} ${styles.dragOverlay}`} aria-hidden="true"><span className={`${styles.priority} ${styles[dragged.priority] ?? ""}`}>{taskPriorityLabels[dragged.priority]}</span><p>{dragged.title}</p></div>}
@@ -135,15 +135,23 @@ export function TaskWorkspaceBoard({ columns, boardRef, cardProps, loading, filt
   </DndContext>;
 }
 
-function TaskBoardColumn({ column, dragged, loading, filtered, cardProps }: Pick<BoardProps, "cardProps" | "loading" | "filtered"> & { column: BoardProps["columns"][number]; dragged: WorkspaceTask | null }) {
-  const allowed = Boolean(dragged && taskBoardDropStatus(dragged, column.id));
+const dropHints: Record<TaskBoardColumnId, string> = {
+  overdue: "Pustením vybrať minulý termín",
+  today: "Pustením nastaviť termín na dnes",
+  scheduled: "Pustením vybrať budúci termín",
+  undated: "Pustením odstrániť termín",
+  done: "Pustením vybaviť úlohu",
+};
+
+function TaskBoardColumn({ column, dragged, loading, filtered, now, cardProps }: Pick<BoardProps, "cardProps" | "loading" | "filtered" | "now"> & { column: BoardProps["columns"][number]; dragged: WorkspaceTask | null }) {
+  const allowed = Boolean(dragged && taskBoardDrop(dragged, column.id, now));
   // Measure even at rest so a keyboard arrow immediately after pickup has
   // destinations. Validity is filtered centrally from the captured task.
   const { setNodeRef, isOver } = useDroppable({ id: column.id });
   return <section ref={setNodeRef} data-task-column={column.id} data-drop-allowed={allowed || undefined} data-drop-over={isOver || undefined}
     className={`${styles.column} ${styles[column.id] ?? ""} ${allowed ? styles.dropAllowed : ""} ${isOver ? styles.dropOver : ""}`} aria-label={column.label}>
     <header className={styles.columnHeader}><div>{column.id === "done" ? <CheckCircle2 size={14} aria-hidden="true" /> : column.id === "overdue" ? <Clock3 size={14} aria-hidden="true" /> : <CalendarDays size={14} aria-hidden="true" />}<h3>{column.label}</h3></div><span>{column.tasks.length}</span></header>
-    {allowed && <p className={styles.dropHint}>{column.id === "done" ? "Pustením vybaviť úlohu" : "Pustením otvoriť · termín zostáva"}</p>}
+    {allowed && <p className={styles.dropHint}>{dropHints[column.id]}</p>}
     <ul className={styles.columnList}>{column.tasks.map(task => <TaskWorkspaceCard key={task.id} {...cardProps(task)} draggable />)}{column.tasks.length === 0 && <li className={styles.emptyColumn}>{loading ? "Načítavam…" : filtered ? "Žiadne úlohy pre tento filter." : column.empty}</li>}</ul>
   </section>;
 }
