@@ -16,7 +16,7 @@ import type { Database, Json } from "@/lib/supabase/database.types";
  *                 call `markProcessed` or `markFailed`.
  * - `duplicate` → the event was already processed; acknowledge with 200.
  * - `busy`      → another invocation holds a fresh claim (< `staleAfterMs`);
- *                 acknowledge with 200 and do nothing.
+ *                 leave the owner alone; control events request redelivery.
  */
 
 type AdminClient = SupabaseClient<Database>;
@@ -131,10 +131,13 @@ export async function markWebhookEventFailed(
   client: AdminClient,
   eventId: string,
   failure: unknown,
-  options: { claimedAt?: string | null; logger?: (entry: Record<string, unknown>) => void } = {},
+  options: { claimedAt?: string | null; logger?: (entry: Record<string, unknown>) => void; releaseForRetry?: boolean } = {},
 ): Promise<boolean> {
   const message = failure instanceof Error ? `${failure.name}: ${failure.message}` : String(failure);
-  let query = client.from("motorist_telnyx_webhook_events").update({ status: "failed", error: message.slice(0, 2000) }).eq("event_id", eventId);
+  // Only a known pre-effect deferral may release immediately. An ambiguous
+  // provider failure keeps the stale window and its existing recovery rules.
+  let query = client.from("motorist_telnyx_webhook_events").update({ status: "failed", error: message.slice(0, 2000),
+    ...(options.releaseForRetry ? { claimed_at: null } : {}) }).eq("event_id", eventId);
   if (options.claimedAt) query = query.eq("claimed_at", options.claimedAt);
   const { data, error } = await query.select("event_id");
   if (error) throw new WebhookLedgerError(`Could not mark event failed: ${error.message}`, eventId, error);

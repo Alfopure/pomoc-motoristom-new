@@ -406,11 +406,11 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     body: string | undefined,
     commandId: string | null,
     extraHeaders: Record<string, string | undefined> = {},
-  ): Promise<Response> {
+  ): Promise<{ response: Response; parsed: unknown }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await fetchImpl(url, {
+      const response = await fetchImpl(url, {
         method,
         headers: compact({
           authorization: `Bearer ${configured.apiKey}`,
@@ -421,6 +421,11 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         body,
         signal: controller.signal,
       });
+      // fetch resolves when headers arrive. Keep the deadline alive through
+      // body consumption, including a 429 response, so a stalled stream cannot
+      // retain the call's session lease indefinitely.
+      const parsed = await readBody(response);
+      return { response, parsed };
     } catch (error) {
       if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
         throw new TelnyxCommandError({ code: "timeout", status: 504, detail: `No response within ${timeoutMs} ms`, retryable: true, commandId });
@@ -466,15 +471,13 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     let parsed: unknown;
 
     try {
-      response = await attempt(method, url.toString(), body, commandId, requestOptions.headers);
+      ({ response, parsed } = await attempt(method, url.toString(), body, commandId, requestOptions.headers));
       if (response.status === 429) {
         const retryAfter = parseRetryAfterMs(response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS;
-        await response.text().catch(() => undefined);
         await sleep(Math.min(retryAfter, maxRetryAfterMs));
         retried = true;
-        response = await attempt(method, url.toString(), body, commandId, requestOptions.headers);
+        ({ response, parsed } = await attempt(method, url.toString(), body, commandId, requestOptions.headers));
       }
-      parsed = await readBody(response);
       if (!response.ok) {
         throw errorFromBody(response.status, parsed, commandId);
       }

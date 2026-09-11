@@ -131,6 +131,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [outboundRequestCount, setOutboundRequestCount] = useState(0);
   const [readiness, setReadiness] = useState<PhoneReadiness>({ status: "idle", message: null });
+  const [answerRequestCallId, setAnswerRequestCallId] = useState<string | null>(null);
   const outboundBusyRef = useRef(false);
   const microphoneCheckRef = useRef<AbortController | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -350,15 +351,16 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         if (coalesced && !cancelled) {
           coalesced = false;
           void load();
-        }
+        } else schedule();
       }
     }
 
     function schedule() {
       if (cancelled) return;
-      timeoutId = window.setTimeout(async () => {
-        await load();
-        schedule();
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      timeoutId = window.setTimeout(() => {
+        timeoutId = undefined;
+        void load();
       }, activeCallPollDelayMs({
         activity,
         documentHidden: document.visibilityState === "hidden",
@@ -368,11 +370,15 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     }
 
     const refresh = () => {
+      if (cancelled) return;
+      // A socket/visibility/media transition invalidates the sleeping cadence.
+      // The completed read schedules the next tick using the latest status.
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      timeoutId = undefined;
       void load();
     };
     refreshRef.current = refresh;
-    void load();
-    schedule();
+    refresh();
 
     const onVisible = () => {
       if (cancelled || document.visibilityState !== "visible") return;
@@ -402,7 +408,11 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       organizationId,
       onChange: () => refreshRef.current?.(),
       onStatus: (status) => {
-        realtimeConnectedRef.current = status === "connected";
+        const connected = status === "connected";
+        if (realtimeConnectedRef.current === connected) return;
+        realtimeConnectedRef.current = connected;
+        // Do not retain a 10/30-second healthy-socket timer after losing it.
+        refreshRef.current?.();
       },
     });
     return () => {
@@ -779,13 +789,18 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   // Stable identities: the PhoneBar registers window listeners keyed on them.
   const answer = useCallback(() => {
     const webphone = webphoneRef.current;
-    const callId = webphone?.getSnapshot().call?.id;
-    if (!webphone || !callId || microphoneCheckRef.current) return;
+    const current = webphone?.getSnapshot();
+    const callId = current?.call?.id;
+    if (!webphone || !callId || !current?.call?.ringing || current.answering || microphoneCheckRef.current) return;
+    // Publish intent before microphone permission/device acquisition starts.
+    // The microphone check's ref guards repeated taps before React renders.
+    setAnswerRequestCallId(callId);
     void webphone.unlockAudio().catch(() => undefined);
     void verifyMicrophone().then(() => {
       if (webphone !== webphoneRef.current || webphone.getSnapshot().call?.id !== callId) throw new Error("Hovor už nie je dostupný.");
       webphone.answer();
-    }).catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo prijať."));
+    }).catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo prijať."))
+      .finally(() => setAnswerRequestCallId((pending) => pending === callId ? null : pending));
   }, [verifyMicrophone]);
   const takeoverPhone = useCallback(() => webphoneRef.current?.takeover(), []);
   const hangupBrowser = useCallback(() => void webphoneRef.current?.hangup(), []);
@@ -803,7 +818,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     stale,
     snapshot,
     phoneBar,
-    phone,
+    phone: answerRequestCallId !== null && answerRequestCallId === phone.call?.id ? { ...phone, answering: true } : phone,
     presences,
     pauseReasons,
     presenceBusy,

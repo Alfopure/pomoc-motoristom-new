@@ -40,7 +40,7 @@ async function answer(h: TelephonyHarness, id: string) {
   await h.legEvent(id, "call.answered");
 }
 
-async function prepare(h: TelephonyHarness, route: Route, rejectedBeforeDispatch: boolean) {
+async function prepare(h: TelephonyHarness, route: Route, rejectedBeforeDispatch: boolean, recording: boolean) {
   const deps = { ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) };
   if (route.startsWith("ring")) {
     if (route === "ring_pstn") {
@@ -76,7 +76,9 @@ async function prepare(h: TelephonyHarness, route: Route, rejectedBeforeDispatch
   }
   return async () => {
     const action = completeAnnouncedAction(h, blindTransfer(deps, actor, call.sessionId, route === "blind_pstn" ? { number: mobileNumber } : { profileId: targetProfile }));
-    if (rejectedBeforeDispatch) await expect(action).rejects.toMatchObject({ status: 502 });
+    // Silent controls reject within the HTTP action; recorded actions report
+    // the same rejection through their later announcement completion.
+    if (rejectedBeforeDispatch) await expect(action).rejects.toMatchObject({ status: recording ? 502 : 409 });
     else await action;
     return { sessionId: call.sessionId, source: call.callControlId };
   };
@@ -84,7 +86,7 @@ async function prepare(h: TelephonyHarness, route: Route, rejectedBeforeDispatch
 
 async function verifyBoundary({ route, window, recording, failedHangup }: Case) {
   const h = world(recording);
-  const start = await prepare(h, route, route.startsWith("blind") && window === "before_authorization");
+  const start = await prepare(h, route, route.startsWith("blind") && window === "before_authorization", recording);
   const dialsBefore = h.telnyx.of("dial").length;
   let paused = false;
   let unknownIdentityObserved = false;

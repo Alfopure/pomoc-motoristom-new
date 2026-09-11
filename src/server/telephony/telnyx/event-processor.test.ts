@@ -43,7 +43,7 @@ describe("processTelnyxEvent", () => {
     expect(h.rows("motorist_call_sessions")).toHaveLength(0);
   });
 
-  it("claims each event once: duplicates and busy claims answer 200 without processing", async () => {
+  it("acknowledges completed duplicates but requests redelivery while control processing is busy", async () => {
     const h = createTelephonyHarness();
     const envelope = h.envelope("call.initiated", { call_control_id: "cc-1", call_session_id: "tsess-1", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "evt-dup");
     expect(await h.process(envelope)).toMatchObject({ status: 200, outcome: "processed", claim: { outcome: "claimed", attempts: 1 } });
@@ -52,7 +52,7 @@ describe("processTelnyxEvent", () => {
 
     h.db.seed("motorist_telnyx_webhook_events", [{ event_id: "evt-busy", event_type: "call.answered", status: "queued", attempts: 1, claimed_at: h.now().toISOString(), payload: {} }]);
     const busy = h.envelope("call.answered", { call_control_id: "cc-1", call_session_id: "tsess-1" }, "evt-busy");
-    expect(await h.process(busy)).toMatchObject({ status: 200, outcome: "busy" });
+    expect(await h.process(busy)).toMatchObject({ status: 500, outcome: "busy" });
     expect(h.session(String(h.rows("motorist_call_sessions")[0].id)).state).toBe("received");
 
     // A stale claim (older than 30 s) is taken over and processed.

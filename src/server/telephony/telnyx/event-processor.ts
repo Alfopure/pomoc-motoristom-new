@@ -6,7 +6,7 @@ import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
-import { effectsDeps, runSessionEvent, type SessionRunnerDeps } from "../session-runner";
+import { effectsDeps, runSessionEvent, SessionEventDeferredError, type SessionRunnerDeps } from "../session-runner";
 import { recordCallEvent, type CommandOutcome } from "../state/effects";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
 import { toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
@@ -24,9 +24,9 @@ import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, t
  * ledger, session resolution (creating the session for an inbound
  * `call.initiated`), the per-session pipeline and the ledger bookkeeping.
  *
- * Response policy: control events always get 200 once compensation has been
- * attempted (Telnyx retries are not a real-time recovery path); bookkeeping
- * failures return 500 so Telnyx retries them later.
+ * Response policy: compensated command failures keep their existing 200 path.
+ * Events blocked before applying a transition request provider redelivery;
+ * acknowledging those would strand an answer/hangup until a later cron replay.
  */
 
 type AdminClient = SupabaseClient<Database>;
@@ -237,7 +237,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     occurredAt: event.occurredAt,
   });
   if (claim.outcome !== "claimed") {
-    return done({ ...identity, claim, status: 200, outcome: claim.outcome });
+    return done({ ...identity, claim, status: claim.outcome === "busy" && eventClass === "control" ? 500 : 200, outcome: claim.outcome });
   }
 
   const effects = effectsDeps(deps);
@@ -314,17 +314,20 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     return done({ ...identity, claim, sessionId: session.id, status: 200, outcome: "processed", commands: run.commands, notes: run.apply.notes });
   } catch (error) {
     const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-    await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.webhook, error, context: { eventId: event.id, type: event.type, sessionId: session?.id ?? null } });
+    const deferred = error instanceof SessionEventDeferredError;
     try {
-      await markWebhookEventFailed(deps.admin, event.id, error, { claimedAt: claim.claimedAt, logger: deps.logger });
+      await markWebhookEventFailed(deps.admin, event.id, error, { claimedAt: claim.claimedAt, logger: deps.logger, releaseForRetry: deferred });
     } catch (ledgerError) {
       deps.logger?.({ level: "error", scope: "webhook", eventId: event.id, message: "ledger update failed", error: ledgerError instanceof Error ? ledgerError.message : String(ledgerError) });
     }
-    deps.logger?.({ level: "error", scope: "webhook", eventId: event.id, type: event.type, sessionId: session?.id ?? null, outcome: "failed", error: message, ms: now().getTime() - started });
-    // 200 is only safe once the event is attached to a session: compensation has
-    // then run and a Telnyx retry is not a recovery path. A failure before that
-    // (session creation, session lookup) dropped the call, so ask for a retry.
-    const status = eventClass === "control" && session ? 200 : 500;
+    // Expected contention is observable in the log/ledger. Incident bookkeeping
+    // must not delay releasing an unexecuted answer for immediate redelivery.
+    if (!deferred) await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.webhook, error, context: { eventId: event.id, type: event.type, sessionId: session?.id ?? null } });
+    deps.logger?.({ level: deferred ? "warn" : "error", scope: "webhook", eventId: event.id, type: event.type, sessionId: session?.id ?? null, outcome: "failed", error: message, retryable: deferred, ms: now().getTime() - started });
+    // Preserve the existing compensation policy for ambiguous command failures.
+    // A lease deferral has not applied the main transition; neither it nor a
+    // failure resolving the session may be acknowledged as completed work.
+    const status = eventClass === "control" && session && !deferred ? 200 : 500;
     return done({ ...identity, claim, sessionId: session?.id ?? null, status, outcome: "failed", error: message });
   }
 }

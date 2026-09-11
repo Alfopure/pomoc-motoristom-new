@@ -95,6 +95,14 @@ export class LeaseTimeoutError extends Error {
   }
 }
 
+/** The event's transition was deferred: its webhook must be eligible for redelivery. */
+export class SessionEventDeferredError extends CallActionRejected {
+  constructor(message: string) {
+    super(message, 503);
+    this.name = "SessionEventDeferredError";
+  }
+}
+
 function nowOf(deps: SessionRunnerDeps): () => Date {
   return deps.now ?? (() => new Date());
 }
@@ -196,7 +204,7 @@ async function loadIvr(admin: AdminClient, organizationId: string, menuId: strin
 
 const ROUTING_STATES = new Set(["received", "greeting", "ivr", "ringing", "waiting", "parked", "after_hours", "callback_offered"]);
 
-export async function loadRoutingContext(deps: SessionRunnerDeps, session: SessionRow): Promise<RoutingContext> {
+export async function loadRoutingContext(deps: SessionRunnerDeps, session: SessionRow, event?: SessionEvent): Promise<RoutingContext> {
   const { admin, organizationId } = deps;
   const now = nowOf(deps)();
   const meta = readMeta(session);
@@ -216,7 +224,14 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     loadRoutingSettings(admin, organizationId),
     resolveSessionRecordingPolicy(admin, organizationId),
   ]);
-  const routing = ROUTING_STATES.has(session.state);
+  // An initiated leg only needs to be registered/answered. Its answered event
+  // selects the route. Do not put IVR, ring-plan materialisation and operator
+  // availability reads ahead of answer (or repeat them for every fanout leg).
+  // Recovery work can still need the full context on an initiated event.
+  const initiationOnly = event?.kind === "telnyx" && event.type === "call.initiated" &&
+    !meta.announcement_sequence && !meta.gather && !meta.recording?.barrier &&
+    !meta.recording?.pendingAudio && !readPendingEffects(session).entries.length;
+  const routing = !initiationOnly && ROUTING_STATES.has(session.state);
   // An outgoing call already has an explicit recipient. Loading the line's
   // inbound IVR and ring groups on every setup webhook delays that recipient
   // and makes unrelated inbound configuration failures block the call.
@@ -398,11 +413,32 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
 
   try {
     for (let retries = 0; ; retries += 1) {
-      let snapshot = await loadSessionSnapshot(deps, sessionId);
-      const context = await loadRoutingContext(deps, snapshot.session);
+      let snapshot: Awaited<ReturnType<typeof loadSessionSnapshot>>;
+      try {
+        snapshot = await loadSessionSnapshot(deps, sessionId);
+      } catch (error) {
+        if (error instanceof SessionNotFoundError) throw error;
+        throw new SessionEventDeferredError(error instanceof Error ? error.message : "session snapshot unavailable");
+      }
+      const durable = telephonyStabilityEnabled() || hasStabilityContract(snapshot.session);
+      // This verdict needs only the session. Loading every routing dependency
+      // before returning it needlessly extends contention for both invocations.
+      if (durable && !leaseAcquired) {
+        if (event.kind === "app" && event.type === "sweep") {
+          return { outcome: "ignored", reason: "sweep deferred while another event owns the session", session: snapshot.session, leaseAcquired, retries };
+        }
+        throw new SessionEventDeferredError("Prebieha zmena hovoru. Zopakujte akciu o chvíľu.");
+      }
+      let context: RoutingContext;
+      try {
+        context = await loadRoutingContext(deps, snapshot.session, event);
+      } catch (error) {
+        // A failed read has not applied this event or run compensation. Keep
+        // its claim retryable just like a contended lease, not an HTTP 200 loss.
+        throw new SessionEventDeferredError(error instanceof Error ? error.message : "routing context unavailable");
+      }
       context.recordingLeaseHeld = leaseAcquired;
       const recordingLeaseRequired = requiresRecordingLease(snapshot.session, context);
-      const durable = telephonyStabilityEnabled() || hasStabilityContract(snapshot.session);
       const effects: EffectsDeps = { ...effectsDeps(deps), eventTiming: () => timing(), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token, recordingLeaseRequired || durable) : undefined };
       if (!leaseAcquired && (recordingLeaseRequired || durable) && event.kind === "app" && event.type === "sweep") {
         // Polling is retried by the next poll/cron. It must not erase the active
@@ -410,7 +446,6 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
         deps.logger?.({ scope: "session", sessionId, eventId: event.id, code: "sweep_deferred_lease_busy", leaseAcquired });
         return { outcome: "ignored", reason: "sweep deferred while another event owns the session", session: snapshot.session, leaseAcquired, retries };
       }
-      if (durable && !leaseAcquired) throw new CallActionRejected("Prebieha zmena hovoru. Zopakujte akciu o chvíľu.", 503);
       if (snapshot.session.presence_cancellations && Object.keys(snapshot.session.presence_cancellations).length) {
         await cancelRevokedOffers(effects, snapshot.session, event.kind === "telnyx" && event.callControlId && event.clientState ? { callControlId: event.callControlId, clientState: event.clientState } : undefined);
       }
@@ -426,7 +461,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
         snapshot = await loadSessionSnapshot(deps, sessionId);
       }
       if (!leaseAcquired && recordingLeaseRequired && event.kind === "app" && event.type !== "hangup") {
-        throw new CallActionRejected("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.", 503);
+        throw new SessionEventDeferredError("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.");
       }
       const previousContact = JSON.stringify(readContactHistory(snapshot.session));
       if (durable || readContactHistory(snapshot.session).operations.length) {
@@ -436,7 +471,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
       if (!leaseAcquired && recordingLeaseRequired && event.kind === "telnyx" && event.type !== "call.hangup" && result.commands.length) {
         // The webhook ledger retains this event for retry. Pure bookkeeping
         // (e.g. conference.created) may advance version without owning media.
-        throw new CallActionRejected("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.", 503);
+        throw new SessionEventDeferredError("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.");
       }
       if (result.ignored && JSON.stringify(readContactHistory(snapshot.session)) !== previousContact) {
         const next = emptyTransition();

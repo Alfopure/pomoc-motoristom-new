@@ -363,7 +363,7 @@ describe("park limit", () => {
     const call = await talkingWith(h);
 
     await parkCall(actionDeps(h), o1, call.sessionId);
-    expect(h.session(call.sessionId).state).toBe("talking");
+    expect(h.session(call.sessionId).state).toBe("parked");
     await completeCallAnnouncements(h, call.sessionId);
     const parked = h.session(call.sessionId);
     expect(parked).toMatchObject({ state: "parked", answered_by_profile_id: null });

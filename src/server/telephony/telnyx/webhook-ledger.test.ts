@@ -92,6 +92,18 @@ describe("claimWebhookEvent", () => {
     expect(await claimWebhookEvent(admin, { ...input, staleAfterMs: 1000 })).toMatchObject({ outcome: "claimed", attempts: 3 });
   });
 
+  it("releases a deferred event immediately without allowing an old owner to release its replacement", async () => {
+    const { admin, db, input } = harness();
+    const first = await claimWebhookEvent(admin, input);
+    expect(await markWebhookEventFailed(admin, input.eventId, "lease busy", { claimedAt: first.claimedAt, releaseForRetry: true })).toBe(true);
+    db.setNow(new Date(START + 1));
+    const second = await claimWebhookEvent(admin, input);
+    expect(second).toMatchObject({ outcome: "claimed", attempts: 2 });
+    expect(await markWebhookEventFailed(admin, input.eventId, "late failure", { claimedAt: first.claimedAt, releaseForRetry: true })).toBe(false);
+    expect(db.rows("motorist_telnyx_webhook_events")[0].claimed_at).toBe(second.claimedAt);
+    expect(await claimWebhookEvent(admin, input)).toMatchObject({ outcome: "busy" });
+  });
+
   it("wraps RPC failures and malformed rows in WebhookLedgerError", async () => {
     const { admin, db, input } = harness();
     db.failNext("motorist_telnyx_claim_webhook_event", "rpc", "connection reset");

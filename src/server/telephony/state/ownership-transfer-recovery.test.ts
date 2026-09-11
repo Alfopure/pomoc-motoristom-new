@@ -107,7 +107,7 @@ describe("V1 ownership and provider prerequisites through the staged runner", ()
         return dispatch(args, db);
       });
       const destination = target === "web" ? { profileId: PROFILES.o2 } : { number: personalNumber };
-      await expect(completeAnnouncedAction(h, blindTransfer(actionDeps(h), actor, call.sessionId, destination))).rejects.toMatchObject({ status: 502 });
+      await expect(completeAnnouncedAction(h, blindTransfer(actionDeps(h), actor, call.sessionId, destination))).rejects.toMatchObject({ status: recording ? 502 : 409 });
       expect(barrierReached).toBe(true);
       expect(h.telnyx.of("dial")).toHaveLength(beforeDials);
       assertOriginalConversation(h, call.sessionId, call.callControlId, operator, token);

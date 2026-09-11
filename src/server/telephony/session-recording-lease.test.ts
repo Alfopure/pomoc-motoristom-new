@@ -43,7 +43,7 @@ describe("per-call recording lease requirements", () => {
     expect(state().policy.enabled).toBe(true);
     const commands = h.telnyx.calls.length;
     const result = await h.legEvent(operator, "call.answered");
-    expect(result).toMatchObject({ outcome: "failed", error: expect.stringContaining("Prebieha zmena nahrávania") });
+    expect(result).toMatchObject({ status: 500, outcome: "failed", error: expect.stringContaining("Prebieha zmena nahrávania") });
     expect(h.session(call.sessionId).state).toBe("ringing");
     expect(h.telnyx.calls).toHaveLength(commands);
   });
@@ -52,9 +52,25 @@ describe("per-call recording lease requirements", () => {
     const { h, call, operator } = await ringing(false, true);
     const commands = h.telnyx.calls.length;
     const result = await h.legEvent(operator, "call.answered");
-    expect(result).toMatchObject({ outcome: "failed", error: expect.stringContaining("Prebieha zmena hovoru") });
+    expect(result).toMatchObject({ status: 500, outcome: "failed", error: expect.stringContaining("Prebieha zmena hovoru") });
     expect(h.session(call.sessionId).state).toBe("ringing");
     expect(h.telnyx.calls).toHaveLength(commands);
+  });
+
+  it.each([false, true])("replays the same answered event immediately after lease release (durable=%s)", async durable => {
+    const { h, call, operator } = await ringing(!durable, durable);
+    const before = h.now().getTime();
+    const id = "contended-answer";
+    expect(await h.legEvent(operator, "call.answered", {}, id)).toMatchObject({ status: 500, outcome: "failed" });
+    expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === id)).toMatchObject({ status: "failed", claimed_at: null, attempts: 1 });
+    await h.admin.rpc("motorist_session_lease_release", { p_session_id: call.sessionId, p_token: "other-request" });
+
+    expect(await h.legEvent(operator, "call.answered", {}, id)).toMatchObject({ status: 200, outcome: "processed", claim: { attempts: 2 } });
+    expect(h.session(call.sessionId).state).toBe("talking");
+    const count = h.telnyx.calls.length;
+    expect(await h.legEvent(operator, "call.answered", {}, id)).toMatchObject({ status: 200, outcome: "duplicate" });
+    expect(h.telnyx.calls).toHaveLength(count);
+    expect(h.now().getTime() - before).toBeLessThan(30_000);
   });
 
   it.each(["starting", "recording", "stopping", "unknown"] as const)("keeps %s capture serialized after both policies are disabled", async (observed) => {

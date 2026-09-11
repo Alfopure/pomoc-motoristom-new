@@ -12,6 +12,7 @@ import { CallActionError, OperatorDeviceError, PresenceServiceError } from "./se
 import type { TelephonyEnvironment } from "./state/types";
 import { createTelnyxClient, resolveTelnyxLiveGate, TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
 import { getTelnyxConfig, type EnvRecord, type TelnyxConfig } from "./telnyx/env";
+import { createTelnyxRequestLogger } from "./telnyx/request-telemetry";
 import type { ProcessorDeps } from "./telnyx/event-processor";
 
 /**
@@ -71,7 +72,8 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
       .select("live_calls_enabled, sms_live_sends")
       .eq("organization_id", organizationId)
       .maybeSingle();
-    telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data ?? null) });
+    telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data ?? null),
+      onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger) });
   }
 
   return {

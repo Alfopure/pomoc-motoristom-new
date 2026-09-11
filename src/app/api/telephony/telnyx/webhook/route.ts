@@ -16,9 +16,9 @@ export const maxDuration = 60;
  * authentication. Failure order matters — raw body first (`request.text()`,
  * never `request.json()`, the signature is over the exact bytes), signature
  * second (400), then the claim ledger and the per-session pipeline inside
- * `processTelnyxEvent`, which owns the 200/500 policy: control events always
- * answer 200 once compensation was attempted, bookkeeping events may answer
- * 500 so Telnyx retries them.
+ * `processTelnyxEvent`, which owns the 200/500 policy: completed or compensated
+ * events answer 200; busy claims and pre-effect lease deferrals answer 500 so
+ * Telnyx can retry immediately. Bookkeeping failures also request redelivery.
  *
  * Foreign `connection_id` values (another environment sharing the account) are
  * acknowledged with 200 and ignored.

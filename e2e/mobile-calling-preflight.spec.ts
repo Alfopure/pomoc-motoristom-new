@@ -3,15 +3,18 @@ import { build } from "esbuild";
 import path from "node:path";
 
 let script: string;
+let fixtureCss: string;
 const browserFailures = new WeakMap<Page, string[]>();
 test.beforeAll(async () => {
   const result = await build({
     entryPoints: [path.resolve("e2e/fixtures/mobile-calling-hook.tsx")], bundle: true, write: false,
+    outdir: ".context/mobile-calling-preflight-fixture",
     platform: "browser", format: "iife", jsx: "automatic",
     alias: { "@telnyx/webrtc": path.resolve("e2e/fixtures/mobile-calling-sdk.ts"), "@/lib/telephony/realtime-client": path.resolve("e2e/fixtures/mobile-calling-realtime.ts") },
     define: { "process.env.NODE_ENV": '"development"' },
   });
-  script = result.outputFiles[0].text;
+  script = result.outputFiles.find((file) => file.path.endsWith(".js"))!.text;
+  fixtureCss = result.outputFiles.find((file) => file.path.endsWith(".css"))!.text;
 });
 
 test.beforeEach(async ({ page }) => {
@@ -27,6 +30,7 @@ test.beforeEach(async ({ page }) => {
   // Match the deployed secure context (UUIDs/Web Locks) while intercepting all
   // requests. about:blank omits these browser APIs and hides coordinator paths.
   await page.goto("https://preflight.test/");
+  await page.addStyleTag({ content: fixtureCss });
   await page.addScriptTag({ content: script });
   await expect(page.locator("#state")).toHaveAttribute("data-status", "registered");
 });
@@ -43,6 +47,86 @@ test("refused microphone prevents the call and keeps registration", async ({ pag
   await expect(page.locator("#state")).toHaveAttribute("data-status", "registered");
   await expect(page.locator("#state")).toContainText("zablokovaný");
   expect(await page.evaluate(() => window.phoneHarness.requests.length)).toBe(0);
+});
+
+test("answer shows immediate progress during microphone permission and ignores repeated taps", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.incoming());
+  await page.getByRole("button", { name: "Prijať", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Prijímam…", exact: true })).toBeDisabled();
+  await page.evaluate(() => { window.phoneHarness.answer(); window.phoneHarness.answer(); });
+  expect(await page.evaluate(() => [window.phoneHarness.microphoneRequests, window.phoneHarness.sdkAnswers])).toEqual([1, 0]);
+  await page.evaluate(() => window.phoneHarness.grant());
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.sdkAnswers)).toBe(1);
+});
+
+test("denied answer permission restores its answer button without losing the registered phone", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.incoming());
+  await page.getByRole("button", { name: "Prijať", exact: true }).click();
+  await page.evaluate(() => window.phoneHarness.deny());
+  await expect(page.getByRole("button", { name: "Prijať", exact: true })).toBeEnabled();
+  await expect(page.locator("#state")).toHaveAttribute("data-status", "registered");
+  expect(await page.evaluate(() => window.phoneHarness.sdkAnswers)).toBe(0);
+});
+
+test("a replacement invite never inherits the old answer intent while permission is pending", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.incoming());
+  await page.getByRole("button", { name: "Prijať", exact: true }).click();
+  await page.evaluate(() => {
+    window.phoneHarness.callState("hangup");
+    window.phoneHarness.callState("ringing", "replacement-incoming");
+  });
+  await expect(page.getByRole("button", { name: "Prijať", exact: true })).toBeEnabled();
+  await page.evaluate(() => window.phoneHarness.grant());
+  await expect(page.locator("#state")).toHaveAttribute("data-readiness", "ready");
+  expect(await page.evaluate(() => window.phoneHarness.sdkAnswers)).toBe(0);
+  await expect(page.locator("#state")).toHaveAttribute("data-call", "replacement-incoming");
+});
+
+for (const hidden of [false, true]) {
+  test(`realtime loss cancels the ${hidden ? "hidden" : "visible"} healthy idle timer and immediately restores fallback polling`, async ({ page }) => {
+    await page.clock.install();
+    await page.evaluate((isHidden) => Object.defineProperty(document, "visibilityState", { configurable: true, value: isHidden ? "hidden" : "visible" }), hidden);
+    const fallbackTick = hidden ? 15_100 : 2_100;
+    await page.evaluate(() => window.phoneHarness.realtimeStatus("connected"));
+    await page.clock.runFor(0);
+    const healthy = await page.evaluate(() => window.phoneHarness.activeReads);
+    await page.clock.runFor(fallbackTick);
+    expect(await page.evaluate(() => window.phoneHarness.activeReads)).toBe(healthy);
+    await page.evaluate(() => window.phoneHarness.realtimeStatus("disconnected"));
+    await page.clock.runFor(0);
+    const disconnected = await page.evaluate(() => window.phoneHarness.activeReads);
+    expect(disconnected).toBe(healthy + 1);
+    await page.clock.runFor(fallbackTick);
+    expect(await page.evaluate(() => window.phoneHarness.activeReads)).toBe(disconnected + 1);
+    await page.evaluate(() => window.phoneHarness.realtimeStatus("connected"));
+    await page.clock.runFor(0);
+    const reconnected = await page.evaluate(() => window.phoneHarness.activeReads);
+    expect(reconnected).toBe(disconnected + 2);
+    await page.clock.runFor(fallbackTick);
+    expect(await page.evaluate(() => window.phoneHarness.activeReads)).toBe(reconnected);
+  });
+}
+
+test("realtime changes during a snapshot queue one fresh read and leave only one fallback timer", async ({ page }) => {
+  await page.clock.install();
+  await page.evaluate(() => window.phoneHarness.realtimeStatus("connected"));
+  await page.clock.runFor(0);
+  const before = await page.evaluate(() => window.phoneHarness.activeReads);
+  await page.evaluate(() => {
+    window.phoneHarness.deferActiveReads = true;
+    window.phoneHarness.realtimeChange();
+    window.phoneHarness.realtimeStatus("disconnected");
+    window.phoneHarness.realtimeChange();
+  });
+  expect(await page.evaluate(() => window.phoneHarness.activeReads)).toBe(before + 1);
+  await page.evaluate(() => {
+    window.phoneHarness.deferActiveReads = false;
+    window.phoneHarness.resolveActiveRead();
+  });
+  await page.clock.runFor(0);
+  expect(await page.evaluate(() => window.phoneHarness.activeReads)).toBe(before + 2);
+  await page.clock.runFor(2_100);
+  expect(await page.evaluate(() => window.phoneHarness.activeReads)).toBe(before + 3);
 });
 
 test("browser media transitions refresh customer state immediately without waiting for a poll", async ({ page }) => {
