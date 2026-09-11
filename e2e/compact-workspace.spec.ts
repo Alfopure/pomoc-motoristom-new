@@ -8,6 +8,7 @@ import type { WorkspaceTask } from "../src/domain/task-workspace";
 
 const postcss = createRequire(require.resolve("@tailwindcss/postcss"))("postcss");
 const ownerId = "00000000-0000-4000-8000-000000000002";
+const note = { id: "00000000-0000-4000-8000-000000000030", ownerProfileId: ownerId, title: "Odovzdanie zmeny", body: "Uložený obsah poznámky", recipientProfileIds: [], canEdit: true, revision: 1, updatedAt: "2026-09-11T08:00:00Z" };
 let script: string;
 let css: string;
 test.beforeAll(async () => {
@@ -44,10 +45,11 @@ async function boot(page: Page, width: number) {
     const url = new URL(route.request().url());
     if (url.origin !== "https://compact-workspace.test") return route.abort();
     if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><body><div id="root"></div></body></html>' });
+    if (route.request().method() !== "GET") return route.fulfill({ status: 503, json: { error: "Testovací výpadok: rozpracované zmeny zostávajú zachované." } });
     if (url.pathname === "/api/tasks") return route.fulfill({ json: { tasks } });
     if (url.pathname.endsWith("/messages")) return route.fulfill({ json: { messages: [], nextCursor: null } });
     if (url.pathname.startsWith("/api/tasks/")) return route.fulfill({ json: { task: tasks.find(task => url.pathname.endsWith(task.id)) } });
-    if (url.pathname === "/api/notes") return route.fulfill({ json: { notes: [] } });
+    if (url.pathname === "/api/notes") return route.fulfill({ json: { notes: [note] } });
     if (url.pathname === "/api/notes/colleagues") return route.fulfill({ json: { colleagues: [] } });
     if (url.pathname === "/api/telephony/directory/favorites") return route.fulfill({ json: { favorites: [] } });
     if (url.pathname === "/api/version") return route.fulfill({ json: { version: "isolated-compact-workspace" } });
@@ -61,10 +63,24 @@ async function boot(page: Page, width: number) {
   return { errors, tasks };
 }
 
-async function center(page: Page, label: "Mapa" | "Úlohy") {
+async function center(page: Page, label: "Mapa" | "Úlohy" | "Poznámky" | "Tabuľka") {
   const tab = page.locator(".workspace-center-tabs").getByRole("tab", { name: label, exact: true });
-  if (await tab.isVisible()) await tab.click();
-  else await page.getByRole("button", { name: label, exact: true }).filter({ visible: true }).first().click();
+  await tab.click();
+}
+
+async function primary(page: Page, label: "Úlohy" | "Poznámky" | "Nástenka") {
+  const navigation = page.getByRole("navigation", { name: "Hlavná navigácia", exact: true });
+  if (await navigation.isVisible()) {
+    const shortcut = navigation.getByRole("button", { name: label, exact: true });
+    if (await shortcut.isVisible()) { await shortcut.click(); return; }
+    await navigation.getByRole("button", { name: "Menu", exact: true }).click();
+  } else {
+    const mobile = page.getByRole("navigation", { name: "Mobilná navigácia", exact: true });
+    const shortcut = mobile.getByRole("button", { name: label === "Nástenka" ? "Mapa" : label, exact: true });
+    if (await shortcut.isVisible()) { await shortcut.click(); return; }
+    await mobile.getByRole("button", { name: "Menu", exact: true }).click();
+  }
+  await page.getByRole("dialog", { name: "Obrazovky aplikácie", exact: true }).getByRole("button", { name: label, exact: true }).click();
 }
 
 async function openTools(page: Page) {
@@ -80,7 +96,7 @@ async function expectNoPageOverflow(page: Page) {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 }
 
-test("expanded case yields the main pane to tasks and retains its unsaved fields", async ({ page }) => {
+test("center tabs replace only the map area and retain the case and side panels", async ({ page }, testInfo) => {
   const { errors, tasks } = await boot(page, 1440);
   await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
   const editor = page.getByTestId("case-edit-form-main");
@@ -88,22 +104,65 @@ test("expanded case yields the main pane to tasks and retains its unsaved fields
   const plate = editor.getByLabel("EČV", { exact: true });
   await plate.fill("KEEP777");
   await editor.evaluate(element => { element.setAttribute("data-draft-instance", "retained"); });
+  const cases = page.getByTestId("dispatch-case-list");
+  const tools = page.getByRole("complementary", { name: "Nástroje", exact: true });
+  const caseListWidth = (await cases.boundingBox())!.width;
+  const toolsWidth = (await tools.boundingBox())!.width;
   await center(page, "Úlohy");
-  const board = page.getByRole("region", { name: "Tabuľa úloh", exact: true }).filter({ visible: true });
+  const upper = page.locator(".dispatch-workspace-upper");
+  const casePanel = page.locator(".dispatch-workspace-panel");
+  const board = upper.getByRole("region", { name: "Tabuľa úloh", exact: true });
   await expect(board).toBeVisible();
   await board.getByRole("button", { name: tasks[0].title, exact: true }).click({ trial: true });
-  const pane = await page.locator(".dispatch-workspace-shell").boundingBox();
-  const workspace = await page.getByRole("region", { name: "Pracovný priestor úloh", exact: true }).boundingBox();
-  expect(workspace!.height).toBeGreaterThan(pane!.height * 0.8);
-  await expect(editor).toHaveAttribute("data-draft-instance", "retained");
-  await expect(editor).toBeHidden();
-  await center(page, "Mapa");
-  await expect(plate).toBeVisible();
-  await expect(plate).toHaveValue("KEEP777");
-  await expect(editor).toHaveAttribute("data-draft-instance", "retained");
+  for (const label of ["Úlohy", "Poznámky", "Tabuľka", "Mapa"] as const) {
+    await center(page, label);
+    await expect(upper).toBeVisible();
+    await expect(casePanel).toBeVisible();
+    const upperBounds = (await upper.boundingBox())!;
+    const caseBounds = (await casePanel.boundingBox())!;
+    expect(upperBounds.height).toBeGreaterThanOrEqual(260);
+    expect(upperBounds.y + upperBounds.height).toBeLessThanOrEqual(caseBounds.y + 1);
+    expect(caseBounds.height).toBeGreaterThan(96);
+    await expect(cases).toBeVisible();
+    await expect(tools).toBeVisible();
+    expect((await cases.boundingBox())!.width).toBeCloseTo(caseListWidth, 0);
+    expect((await tools.boundingBox())!.width).toBeCloseTo(toolsWidth, 0);
+    await expect(plate).toHaveValue("KEEP777");
+    await expect(editor).toHaveAttribute("data-draft-instance", "retained");
+    if (label === "Úlohy") await page.screenshot({ path: testInfo.outputPath("center-tasks-with-case-1440.png"), fullPage: true });
+  }
   await expectNoPageOverflow(page);
   expect(errors).toEqual([]);
 });
+
+for (const label of ["Úlohy", "Poznámky", "Tabuľka"] as const) {
+  test(`local ${label} stays visible when desktop becomes mobile and retains the case draft`, async ({ page }) => {
+    const { errors, tasks } = await boot(page, 1440);
+    await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
+    const editor = page.getByTestId("case-edit-form-main");
+    await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
+    const plate = editor.getByLabel("EČV", { exact: true });
+    await plate.fill("SIZE777");
+    await editor.evaluate(element => { element.setAttribute("data-draft-instance", "resize-retained"); });
+    await center(page, label);
+    const upper = page.locator(".dispatch-workspace-upper");
+    const tab = page.locator(".workspace-center-tabs").getByRole("tab", { name: label, exact: true });
+
+    for (const width of [1440, 390, 1440]) {
+      await page.setViewportSize({ width, height: width < 1024 ? 844 : 960 });
+      await expect(tab).toHaveAttribute("aria-selected", "true");
+      await expect(upper).toBeVisible();
+      if (label === "Úlohy") await upper.getByRole("region", { name: "Tabuľa úloh", exact: true }).getByRole("button", { name: tasks[0].title, exact: true }).click({ trial: true });
+      else if (label === "Poznámky") await upper.getByRole("region", { name: "Osobné poznámky", exact: true }).getByRole("button", { name: note.title }).click({ trial: true });
+      else if (width < 1024) await upper.getByRole("button", { name: "Otvoriť prípad PM-2026-0517", exact: true }).click({ trial: true });
+      else await expect(upper.getByRole("table")).toBeVisible();
+      await expect(plate).toHaveValue("SIZE777");
+      await expect(editor).toHaveAttribute("data-draft-instance", "resize-retained");
+      await expectNoPageOverflow(page);
+    }
+    expect(errors).toEqual([]);
+  });
+}
 
 for (const width of [390, 1024, 1440]) {
   test(`Tools visibly opens and closes at ${width}px`, async ({ page }) => {
@@ -144,15 +203,18 @@ for (const width of [390, 1440, 1920]) {
     await expect(page.getByRole("region", { name: "Doplnková GPS poloha od klienta", exact: true }).filter({ visible: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`workspace-${width}.png`), fullPage: true });
     await expectNoPageOverflow(page);
-    await center(page, "Úlohy");
-    const board = page.getByRole("region", { name: "Tabuľa úloh", exact: true }).filter({ visible: true });
+    await primary(page, "Úlohy");
+    const taskPage = page.getByTestId("standalone-tasks-page");
+    await expect(taskPage).toBeVisible();
+    await expect(page.locator(".dispatch-dashboard")).toBeHidden();
+    const board = taskPage.getByRole("region", { name: "Tabuľa úloh", exact: true });
     await expect(board).toBeVisible();
     const columns = ["Po termíne", "Dnes", "Naplánované", "Bez termínu", "Vybavené"];
     for (const [index, column] of columns.entries()) {
       await expect(board.getByRole("region", { name: column, exact: true }).getByRole("button", { name: tasks[index].title, exact: true })).toBeVisible();
     }
     if (width < 1024) {
-      await expect(page.getByRole("heading", { name: "Úlohy", level: 1, exact: true })).toBeVisible();
+      await expect(taskPage.getByRole("heading", { name: "Úlohy", exact: true })).toBeVisible();
       const navigation = page.getByRole("navigation", { name: "Mobilná navigácia", exact: true });
       await expect(navigation.locator('[aria-current="page"]')).toHaveCount(1);
       await expect(navigation.getByRole("button", { name: "Úlohy", exact: true })).toHaveAttribute("aria-current", "page");
@@ -164,6 +226,65 @@ for (const width of [390, 1440, 1920]) {
 }
 
 for (const width of [390, 1440]) {
+  test(`center tools and standalone pages preserve case, task and note drafts at ${width}px`, async ({ page }) => {
+    const { errors, tasks } = await boot(page, width);
+    if (width < 1024) await page.getByTestId("dispatch-case-list").getByRole("button", { name: /^Otvoriť prípad / }).first().click();
+    else await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
+    const editor = page.getByTestId("case-edit-form-main");
+    await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
+    const plate = editor.getByLabel("EČV", { exact: true });
+    await plate.fill("NAV777");
+    await editor.evaluate(element => { element.setAttribute("data-draft-instance", "navigation-retained"); });
+
+    const upper = page.locator(".dispatch-workspace-upper");
+    await center(page, "Poznámky");
+    await expect(page.getByTestId("standalone-notes-page")).toBeHidden();
+    const centerNotes = upper.getByRole("region", { name: "Osobné poznámky", exact: true });
+    await centerNotes.getByRole("button", { name: note.title }).click();
+    await centerNotes.getByLabel("Text poznámky").fill("Rozpracované odovzdanie — ponechať pri zmene obrazovky");
+    await centerNotes.getByRole("button", { name: "Uložiť", exact: true }).click();
+    await expect(centerNotes.getByRole("alert")).toContainText("Zmeny nie sú uložené");
+
+    await center(page, "Úlohy");
+    await expect(page.getByTestId("standalone-tasks-page")).toBeHidden();
+    const centerTasks = upper.getByRole("region", { name: "Pracovný priestor úloh", exact: true });
+    await centerTasks.getByRole("button", { name: tasks[0].title, exact: true }).click();
+    await centerTasks.getByRole("textbox", { name: "Názov úlohy", exact: true }).fill("Rozpracovaná úloha z mapovej plochy");
+    await centerTasks.getByLabel("Správa k úlohe", { exact: true }).fill("Rozpracovaná správa ostáva pri zmene pohľadu");
+    await centerTasks.getByRole("button", { name: "Uložiť úlohu", exact: true }).click();
+    await expect(centerTasks.getByRole("alert")).toContainText("Testovací výpadok");
+
+    await primary(page, "Úlohy");
+    const taskPage = page.getByTestId("standalone-tasks-page");
+    await expect(taskPage).toBeVisible();
+    await expect(page.locator(".dispatch-dashboard")).toBeHidden();
+    await expect(page.locator(".workspace-center-tabs").getByRole("tab", { name: "Úlohy", exact: true, includeHidden: true })).toHaveAttribute("aria-selected", "true");
+    await expect(taskPage.getByRole("textbox", { name: "Názov úlohy", exact: true })).toHaveValue("Rozpracovaná úloha z mapovej plochy");
+    await expect(taskPage.getByLabel("Správa k úlohe", { exact: true })).toHaveValue("Rozpracovaná správa ostáva pri zmene pohľadu");
+    await taskPage.getByRole("textbox", { name: "Názov úlohy", exact: true }).fill("Rozpracovaná úloha zo samostatnej stránky");
+
+    await primary(page, "Poznámky");
+    const notePage = page.getByTestId("standalone-notes-page");
+    await expect(notePage).toBeVisible();
+    await expect(taskPage).toBeHidden();
+    await expect(notePage.getByLabel("Text poznámky")).toHaveValue("Rozpracované odovzdanie — ponechať pri zmene obrazovky");
+    await notePage.getByLabel("Text poznámky").fill("Odovzdanie doplnené na samostatnej stránke");
+
+    await primary(page, "Nástenka");
+    await expect(page.locator(".dispatch-dashboard")).toBeVisible();
+    await expect(notePage).toBeHidden();
+    await center(page, "Úlohy");
+    await expect(centerTasks.getByRole("textbox", { name: "Názov úlohy", exact: true })).toHaveValue("Rozpracovaná úloha zo samostatnej stránky");
+    await expect(centerTasks.getByLabel("Správa k úlohe", { exact: true })).toHaveValue("Rozpracovaná správa ostáva pri zmene pohľadu");
+    await center(page, "Poznámky");
+    await expect(centerNotes.getByLabel("Text poznámky")).toHaveValue("Odovzdanie doplnené na samostatnej stránke");
+    await expect(plate).toHaveValue("NAV777");
+    await expect(editor).toHaveAttribute("data-draft-instance", "navigation-retained");
+    await expect(page.getByRole("dialog", { name: /neuložené zmeny|Rozpracovaný prípad/ })).toHaveCount(0);
+    await expectNoPageOverflow(page);
+    expect(errors).toEqual([]);
+  });
+
   test(`opening a linked case from the task editor reveals that case at ${width}px`, async ({ page }) => {
     const { errors, tasks } = await boot(page, width);
     if (width < 1024) await page.getByTestId("dispatch-case-list").getByRole("button", { name: /^Otvoriť prípad / }).first().click();

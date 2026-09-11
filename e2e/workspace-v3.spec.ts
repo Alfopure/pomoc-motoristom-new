@@ -107,11 +107,12 @@ test("desktop side handles restore the previous width and persist widget order",
 
 async function center(page: Page, name: "Poznámky" | "Úlohy") {
   const navigation = page.getByRole("tab", { name, exact: true }).filter({ visible: true });
-  if (await navigation.count()) await navigation.first().click();
-  else {
-    await page.getByRole("button", { name: "Menu", exact: true }).click();
-    await page.getByRole("button", { name, exact: true }).last().click();
+  if (!await navigation.count()) {
+    const dashboard = page.getByRole("button", { name: "Nástenka", exact: true }).filter({ visible: true });
+    if (await dashboard.count()) await dashboard.first().click();
+    else await page.getByRole("button", { name: "Mapa", exact: true }).filter({ visible: true }).first().click();
   }
+  await navigation.first().click();
 }
 async function sendTaskPush(page: Page, requestId: string, targetTaskId = taskId) {
   await page.evaluate(({ taskId, requestId }) => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: { type: "PM_OPEN_NOTIFICATION", url: `/?task=${taskId}`, requestId } })), { taskId: targetTaskId, requestId });
@@ -189,17 +190,17 @@ test("a later notification reopens the same task after a different manual select
   expect(errors).toEqual([]);
 });
 
-test("desktop center tabs reveal tools while retaining the expanded case editor", async ({ page }) => {
+test("desktop center tabs share the map area while retaining the case editor below", async ({ page }) => {
   const errors = await boot(page, 1440, { writesFail: false, writes: [] });
   const editor = page.getByTestId("case-edit-form-main");
   await editor.evaluate(element => { element.setAttribute("data-retained-editor", "yes"); });
-  await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
   for (const view of ["Úlohy", "Poznámky"] as const) {
+    await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
     await expect(page.locator(".dispatch-workspace-shell")).toHaveAttribute("data-workspace-mode", "expanded");
     await page.getByRole("tab", { name: view, exact: true }).click();
-    await expect(page.locator(".dispatch-workspace-shell")).toHaveAttribute("data-workspace-mode", "expanded");
+    await expect(page.locator(".dispatch-workspace-shell")).toHaveAttribute("data-workspace-mode", "split");
     const control = view === "Úlohy"
-      ? page.getByRole("region", { name: "Pracovný priestor úloh", exact: true }).getByRole("button", { name: task.title, exact: true })
+      ? page.getByRole("region", { name: "Pracovný priestor úloh", exact: true }).filter({ visible: true }).getByRole("button", { name: task.title, exact: true })
       : page.getByRole("region", { name: "Osobné poznámky", exact: true }).filter({ visible: true }).getByRole("button", { name: "Moja testovacia poznámka" });
     await control.click({ trial: true });
     await expect(editor).toHaveAttribute("data-retained-editor", "yes");

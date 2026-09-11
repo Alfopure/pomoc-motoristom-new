@@ -346,7 +346,6 @@ function DispatchConsoleContent({
   }, []);
   const handleNotebookEditor = useCallback((editor: DraftEditorState) => registerDraft("Poznámky", editor), [registerDraft]);
   const centerView = workspacePreferences.centerView;
-  const fullPageWorkspace = centerView !== "map";
   const workspaceStorageKey = workspacePreferenceStorageKey(viewerOrganizationId, viewerProfileId);
   const currentSessionKeyRef = useRef<string | null>(actorKey);
   useEffect(() => {
@@ -829,7 +828,7 @@ function DispatchConsoleContent({
       shortLabel: "Prípady",
     },
     {
-      active: activeView === "tasks" || activeView === "dispatch" && !toolsOpen && centerView === "tasks",
+      active: activeView === "tasks",
       badgeCount: taskAttentionCount,
       icon: BellRing,
       label: "Úlohy",
@@ -848,7 +847,7 @@ function DispatchConsoleContent({
     ...secondaryNavItems
       .filter((item) => item.view !== "tasks" && item.view !== "cases")
       .map((item): MobileShortcutItem => ({
-        active: item.view === "notes" ? activeView === "dispatch" && centerView === "notes" && !toolsOpen : item.view === "tools" ? toolsOpen : activeView === item.view,
+        active: item.view === "tools" ? toolsOpen : activeView === item.view,
         badgeCount: item.badgeCount,
         icon: item.icon,
         label: item.label,
@@ -1065,7 +1064,7 @@ function DispatchConsoleContent({
         acknowledgeTaskNotifications(taskId);
         setFocusedTaskId(taskId);
         setTaskOpenVersion(version => version + 1);
-        switchCenterView("tasks");
+        switchView("tasks");
         if (fromPush) {
           const url = new URL(window.location.href); url.searchParams.delete("task");
           window.history.replaceState(window.history.state, "", url);
@@ -1548,11 +1547,13 @@ function DispatchConsoleContent({
   }
 
   function switchCenterView(view: CenterView) {
-    // These views share mounted editors. Merely showing another tool does not leave a draft.
+    // Local tabs replace only the map area. The case and side panels stay in place.
     setCenterView(view);
     setToolsOpen(false);
+    setWidgetSettingsOpen(false);
     setActiveView("dispatch");
     setMobilePane("workspace");
+    setWorkspace(current => ({ ...current, mode: window.matchMedia("(max-width: 1023px)").matches ? "collapsed" : current.mode === "expanded" ? "split" : current.mode }));
   }
 
   function openTools() {
@@ -1580,13 +1581,17 @@ function DispatchConsoleContent({
   }
 
   function switchView(view: View) {
-    if (view === "notes" || view === "tasks") { switchCenterView(view); return; }
     if (view === "tools") { toggleTools(); return; }
-    setToolsOpen(false);
-    requestNavigation(() => {
+    const navigate = () => {
+      setToolsOpen(false);
+      setWidgetSettingsOpen(false);
       setActiveView(view);
-      if (view === "dispatch") setMobilePane("cases");
-    });
+      if (view === "dispatch") setMobilePane("workspace");
+    };
+    // These pages share mounted case editors and the same task/notebook stores.
+    // A page change therefore preserves drafts without requiring a save/discard.
+    if (["dispatch", "tasks", "notes"].includes(view) && ["dispatch", "tasks", "notes"].includes(activeView)) navigate();
+    else requestNavigation(navigate);
   }
 
   function showMobileMap() {
@@ -1893,20 +1898,20 @@ function DispatchConsoleContent({
     setWorkspace({ kind: "cockpit", mode: "expanded" });
   }
 
-  const keepCaseVisibleOnMobile = useEffectEvent(() => {
-    // Crossing a breakpoint only changes presentation. Keep the mounted editor
-    // visible, including pending edits, when the desktop split no longer exists.
+  const keepWorkspaceVisibleOnMobile = useEffectEvent(() => {
+    // Preserve the selected local tool when the desktop split no longer fits.
+    // The map view keeps the case visible; its mounted editor retains all drafts.
     if (activeView === "dispatch" && workspace.kind === "cockpit" && workspace.mode === "split"
       && (mobilePane === "workspace" || hasUnsavedChanges || isCaseSaveLocked)) {
       setMobilePane("workspace");
-      setWorkspace({ kind: "cockpit", mode: "expanded" });
+      setWorkspace({ kind: "cockpit", mode: centerView === "map" ? "expanded" : "collapsed" });
     }
   });
 
   useEffect(() => {
     const mobile = window.matchMedia("(max-width: 1023px)");
     function onBreakpointChange(event: MediaQueryListEvent) {
-      if (event.matches) keepCaseVisibleOnMobile();
+      if (event.matches) keepWorkspaceVisibleOnMobile();
     }
     mobile.addEventListener("change", onBreakpointChange);
     return () => mobile.removeEventListener("change", onBreakpointChange);
@@ -2266,7 +2271,6 @@ function DispatchConsoleContent({
           data-left-collapsed={workspacePreferences.leftCollapsed}
           data-right-collapsed={workspacePreferences.rightCollapsed}
           data-tools-open={toolsOpen}
-          data-full-page-workspace={fullPageWorkspace}
           inert={activeView !== "dispatch"}
           style={{
             "--dashboard-left-width": `${workspacePreferences.leftCollapsed ? 44 : dashboardColumns.left}px`,
@@ -2315,7 +2319,7 @@ function DispatchConsoleContent({
           <div className="dashboard-tablet-phone hidden min-w-0 p-2 lg:col-span-2 lg:block xl:hidden">
             <DashboardPhone onCreateCase={() => startNewCase()} caseContext={dashboardSmsCaseContext} isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
           </div>
-          {workspacePreferences.leftCollapsed && !fullPageWorkspace && <button type="button" className="hidden min-h-11 items-center justify-center border-r border-zinc-200 bg-white lg:flex" aria-label="Obnoviť panel prípadov" onClick={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: false })}><PanelLeftOpen size={20} /></button>}
+          {workspacePreferences.leftCollapsed && <button type="button" className="hidden min-h-11 items-center justify-center border-r border-zinc-200 bg-white lg:flex" aria-label="Obnoviť panel prípadov" onClick={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: false })}><PanelLeftOpen size={20} /></button>}
           <div className="mobile-dispatch-cases lg:contents">
           <CaseList
             activeCaseId={visibleActiveCaseId}
@@ -2387,42 +2391,17 @@ function DispatchConsoleContent({
             onSortChange={setCaseSort}
           />
           </div>
-          {workspacePreferences.rightCollapsed && !fullPageWorkspace && <button type="button" className="hidden min-h-11 items-center justify-center border-l border-zinc-200 bg-white xl:flex" aria-label="Obnoviť panel nástrojov" onClick={openTools}><PanelRightOpen size={20} /></button>}
-          <WidgetHost preferences={workspacePreferences} onChange={updateWorkspacePreferences} renderWidget={renderWidget} expanded={toolsOpen} settingsOpen={widgetSettingsOpen} onSettingsChange={setWidgetSettingsOpen} active={activeView === "dispatch" && (toolsOpen || (!fullPageWorkspace && !workspacePreferences.rightCollapsed))} onClose={closeTools} />
+          {workspacePreferences.rightCollapsed && <button type="button" className="hidden min-h-11 items-center justify-center border-l border-zinc-200 bg-white xl:flex" aria-label="Obnoviť panel nástrojov" onClick={openTools}><PanelRightOpen size={20} /></button>}
+          <WidgetHost preferences={workspacePreferences} onChange={updateWorkspacePreferences} renderWidget={renderWidget} expanded={toolsOpen} settingsOpen={widgetSettingsOpen} onSettingsChange={setWidgetSettingsOpen} active={activeView === "dispatch" && (toolsOpen || !workspacePreferences.rightCollapsed)} onClose={closeTools} />
 
         </main>
 
-      {activeView === "tasks" && (
-        <main className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-zinc-100 p-2 sm:p-4">
-          <div className="mx-auto min-h-full w-full min-w-0 max-w-7xl">
-            <TaskPanel
-                taskWorkspaceEnabled={capabilities.tasks}
-                tasks={dispatchData.tasks}
-                onOpenCase={openCase}
-              activeTaskId={focusedTaskId}
-              cases={dispatchCases}
-              isNotificationSyncing={isNotificationSyncing}
-              lastNotificationSyncAt={lastNotificationSyncAt}
-              markingNotificationId={markingNotificationId}
-              notificationNow={notificationNow}
-              notificationViewerProfileId={notificationViewerProfileId}
-              notifications={notifications}
-              onCreateTask={createTaskFromPanel}
-              onDeleteTask={deleteTaskFromPanel}
-              onMarkNotificationRead={(notificationId) => void markNotificationRead(notificationId)}
-              onOpenTask={openTask}
-              onRefreshNotifications={() => void syncDueNotifications(false)}
-              onSnoozeNotification={snoozeNotificationFromPanel}
-              onUpdateTask={updateTaskFromPanel}
-              onUpdateNotificationStatus={updateNotificationStatusFromPanel}
-              operators={effectiveOperators}
-              notificationSyncEnabled={source === "supabase"}
-              variant="page"
-              viewerProfileId={viewerProfileId}
-            />
-          </div>
-        </main>
-      )}
+      <main data-testid="standalone-tasks-page" className="dispatch-standalone-workspace" hidden={activeView !== "tasks"} inert={activeView !== "tasks"}>
+        {renderTasks("page")}
+      </main>
+      <main data-testid="standalone-notes-page" className="dispatch-standalone-workspace" hidden={activeView !== "notes"} inert={activeView !== "notes"}>
+        <NotebookPanel active={activeView === "notes"} />
+      </main>
 
       {activeView === "call-center" && (
         <CallCenterModule
