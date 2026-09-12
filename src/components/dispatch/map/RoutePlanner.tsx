@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, Clock3, Copy, Plus, RotateCcw, Route, X } from "lucide-react";
+import { useEffect, useId, useRef, useState, type MutableRefObject, type ReactNode } from "react";
+import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors } from "@dnd-kit/core";
+import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { ArrowDown, ArrowUp, ArrowUpDown, Clock3, Copy, GripVertical, Plus, RotateCcw, Route, X } from "lucide-react";
 import { formatDrivingDistance, formatDrivingDuration, MAX_ROUTE_INTERMEDIATES } from "@/lib/driving-route";
 import { RoutePlaceField } from "./RoutePlaceField";
 import { RoutePlannerProvider, useOptionalRoutePlannerStore, useRoutePlanner } from "./RoutePlannerProvider";
@@ -23,11 +26,14 @@ export function RoutePlanner(props: RoutePlannerProps) {
 }
 
 function RoutePlannerContent({ mapRef, onClose, embedded = false, active = true }: RoutePlannerProps) {
+  const dragId = useId();
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
   const store = useOptionalRoutePlannerStore()!;
   const { stops, result, busy, error } = useRoutePlanner(store);
   const panelRef = useRef<HTMLElement>(null);
   const viewportSignatureRef = useRef("");
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const [orderNotice, setOrderNotice] = useState("");
   const ready = stops.every(stop => stop.place !== null);
 
   useEffect(() => {
@@ -86,28 +92,39 @@ function RoutePlannerContent({ mapRef, onClose, embedded = false, active = true 
         <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-950"><Route size={17} /> Plánovač trasy</h2>
         {onClose && <button type="button" className={smallButton} onClick={onClose} aria-label="Zavrieť plánovač trasy"><X size={16} /></button>}
       </div>
-      <p className="mb-3 text-xs text-zinc-500">Cesta autom na Slovensku aj v zahraničí.</p>
+      <p className="mb-3 text-xs text-zinc-500">Usporiadajte miesta potiahnutím alebo šípkami. Trasa sa prepočíta na požiadanie.</p>
+      <DndContext id={dragId} sensors={sensors} collisionDetection={closestCenter} onDragEnd={({ active: dragged, over }) => {
+        if (active && over && dragged.id !== over.id) { store.reorderStop(Number(dragged.id), Number(over.id)); setOrderNotice("Poradie bodov je zmenené. Trasu môžete prepočítať."); }
+      }} accessibility={{ announcements: {
+        onDragStart: ({ active: dragged }) => `Zdvíhate miesto ${stops.findIndex(stop => stop.id === dragged.id) + 1}.`,
+        onDragOver: ({ over }) => over ? `Miesto je nad pozíciou ${stops.findIndex(stop => stop.id === over.id) + 1}.` : "Miesto je mimo poradia.",
+        onDragEnd: ({ over }) => over ? `Presun na pozíciu ${stops.findIndex(stop => stop.id === over.id) + 1} je potvrdený.` : "Poradie zostalo zachované.",
+        onDragCancel: () => "Presun je zrušený. Poradie zostalo zachované.",
+      }, screenReaderInstructions: { draggable: "Medzerníkom zdvihnite bod, šípkami hore a dole zmeňte poradie a medzerníkom potvrďte. Escape presun zruší." } }}>
+      <SortableContext items={stops.map(stop => stop.id)} strategy={verticalListSortingStrategy}>
       <div className="space-y-3">
         {stops.map((stop, index) => (
-          <div key={stop.id} className="flex items-start gap-2">
-            <span className="mt-9 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-50 text-xs font-bold text-blue-700">{index + 1}</span>
+          <RouteStopRow key={stop.id} id={stop.id} index={index} disabled={!active}>
             <RoutePlaceField
               label={index === 0 ? "Odkiaľ" : index === stops.length - 1 ? "Kam" : `Bod prejazdu ${index}`}
               value={stop.place}
               query={stop.query}
               active={active}
-              actions={index > 0 && index < stops.length - 1 ? (
+              actions={
                 <div className="flex items-center">
-                  <button type="button" className={pointButton} disabled={index === 1} onClick={() => store.moveStop(index, -1)} aria-label={`Posunúť bod ${index} vyššie`}><ArrowUp size={14} /></button>
-                  <button type="button" className={pointButton} disabled={index === stops.length - 2} onClick={() => store.moveStop(index, 1)} aria-label={`Posunúť bod ${index} nižšie`}><ArrowDown size={14} /></button>
-                  <button type="button" className={pointButton} onClick={() => store.removeStop(stop.id)} aria-label={`Odstrániť bod ${index}`}><X size={14} /></button>
+                  <button type="button" className={pointButton} disabled={!active || index === 0} onClick={() => store.reorderStop(stop.id, stops[index - 1].id)} aria-label={`Posunúť bod ${index} vyššie`}><ArrowUp size={14} /></button>
+                  <button type="button" className={pointButton} disabled={!active || index === stops.length - 1} onClick={() => store.reorderStop(stop.id, stops[index + 1].id)} aria-label={`Posunúť bod ${index} nižšie`}><ArrowDown size={14} /></button>
+                  {index > 0 && index < stops.length - 1 && <button type="button" className={pointButton} onClick={() => store.removeStop(stop.id)} aria-label={`Odstrániť bod ${index}`}><X size={14} /></button>}
                 </div>
-              ) : undefined}
+              }
               onChange={(place, query) => store.updatePlace(stop.id, place, query)}
             />
-          </div>
+          </RouteStopRow>
         ))}
       </div>
+      </SortableContext>
+      </DndContext>
+      {orderNotice && <p role="status" className="mt-2 text-xs text-blue-800">{orderNotice}</p>}
       <div className="my-3 flex flex-wrap items-center gap-2">
         <button type="button" disabled={stops.length >= MAX_ROUTE_INTERMEDIATES + 2} onClick={() => store.addStop()} className="inline-flex min-h-11 lg:min-h-8 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-100 disabled:opacity-40"><Plus size={14} /> Pridať bod prejazdu</button>
         <button type="button" onClick={() => store.reverse()} className="inline-flex min-h-11 lg:min-h-8 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"><ArrowUpDown size={14} /> Otočiť trasu</button>
@@ -134,4 +151,15 @@ function RoutePlannerContent({ mapRef, onClose, embedded = false, active = true 
       </div>
     </section>
   );
+}
+
+function RouteStopRow({ id, index, disabled, children }: { id: number; index: number; disabled: boolean; children: ReactNode }) {
+  const { setNodeRef, setActivatorNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id, disabled });
+  return <div ref={setNodeRef} data-route-stop={id} className={`relative flex min-w-0 items-start gap-2 rounded-lg ${isDragging ? "z-20 bg-blue-50 shadow-lg" : ""}`} style={{ transform: CSS.Transform.toString(transform), transition }}>
+    <button ref={setActivatorNodeRef} type="button" {...attributes} {...listeners} disabled={disabled} aria-label={`Presunúť miesto ${index + 1}`} title="Potiahnuť pre zmenu poradia"
+      className="mt-7 flex min-h-11 w-7 shrink-0 touch-none flex-col items-center justify-center gap-0.5 rounded-lg bg-blue-50 text-xs font-bold text-blue-700 hover:bg-blue-100 focus-visible:outline-2 focus-visible:outline-blue-600">
+      <span aria-hidden="true">{index + 1}</span><GripVertical size={12} aria-hidden="true" />
+    </button>
+    {children}
+  </div>;
 }

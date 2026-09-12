@@ -49,6 +49,9 @@ describe("route-auth-registry", () => {
       "health/live",
       "health/ready",
       "public/location-links/[token]",
+      "public/handoffs/commands",
+      "public/handoffs/current",
+      "public/handoffs/session",
       // Telnyx webhooky — autentifikáciou je Ed25519 podpis, nie session.
       "sms/telnyx/webhook",
       "telephony/telnyx/webhook",

@@ -12,7 +12,7 @@ test.describe.configure({ mode: "default" });
 const postcss = createRequire(require.resolve("@tailwindcss/postcss"))("postcss");
 const origin = "https://live-layout.test";
 const ownerId = "00000000-0000-4000-8000-000000000002";
-const task: WorkspaceTask = { id: "00000000-0000-4000-8000-000000000010", caseId: "", caseIds: [], caseLinks: [], title: "Overiť odovzdanie vozidla", assignedTo: ownerId, dueAt: "", reminderAt: null, status: "open", priority: "normal", kind: "other", revision: 1, originLocked: false, provenance: "manual", origins: [], updatedAt: "2026-09-12T08:00:00Z" };
+const task: WorkspaceTask = { id: "00000000-0000-4000-8000-000000000010", caseId: "", caseIds: [], caseLinks: [], title: "Overiť odovzdanie vozidla", assignedTo: ownerId, dueAt: "", reminderAt: null, status: "open", workflowVersion: 1, workflowState: "todo", priority: "normal", kind: "other", revision: 1, originLocked: false, provenance: "manual", origins: [], updatedAt: "2026-09-12T08:00:00Z" };
 const note = { id: "00000000-0000-4000-8000-000000000020", ownerProfileId: ownerId, title: "Odovzdanie zmeny", body: "Uložené údaje poznámky", recipientProfileIds: [], canEdit: true, revision: 1, updatedAt: "2026-09-12T08:00:00Z" };
 let script: string;
 let css: string;
@@ -34,7 +34,7 @@ async function boot(page: Page, width = 1440, height = 900) {
     if (url.origin !== origin) { evidence.blockedOrigins.push(url.origin); return route.abort(); }
     if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><body><div id="root"></div></body></html>' });
     if (request.method() !== "GET") { evidence.writes.push(`${request.method()} ${url.pathname}`); return route.fulfill({ status: 503, json: { error: "Izolovaný výpadok: rozpracované údaje zostávajú zachované." } }); }
-    if (url.pathname === "/api/tasks") return route.fulfill({ json: { tasks: [task] } });
+    if (url.pathname === "/api/tasks") return route.fulfill({ json: { tasks: [task], workflowEnabled: true } });
     if (url.pathname.endsWith("/messages")) return route.fulfill({ json: { messages: [], nextCursor: null } });
     if (url.pathname.startsWith("/api/tasks/")) return route.fulfill({ json: { task } });
     if (url.pathname === "/api/notes") return route.fulfill({ json: { notes: [note] } });
@@ -86,7 +86,13 @@ async function drag(page: Page, locator: Locator, dx: number, dy = 0) {
 test("both styles retain every case-row field, five filters, all sidebar sorts and table columns", async ({ page }) => {
   const evidence = await boot(page);
   const list = page.getByTestId("dispatch-case-list");
-  const originalRows = await list.locator("[data-case-number]").allTextContents();
+  const preservedRows = () => list.locator("[data-case-number]").evaluateAll(elements => elements.map(element => {
+    const copy = element.cloneNode(true) as HTMLElement;
+    copy.querySelectorAll(".case-list-client").forEach(extra => extra.remove());
+    return copy.textContent;
+  }));
+  const originalRows = await preservedRows();
+  await expect(list.locator(".case-list-client").first()).toBeVisible();
   expect(originalRows.length).toBeGreaterThan(1);
   const assistance = list.locator('[data-case-number="PM-2026-0516"]');
   await expect(assistance).toContainText("Europe Assistance");
@@ -110,7 +116,7 @@ test("both styles retain every case-row field, five filters, all sidebar sorts a
   for (const mode of ["classic", "modern"] as const) {
     await style(page, mode);
     for (const key of ["priority", "updatedAt", "openTasks"]) { await sort.selectOption(key); await expect(sort).toHaveValue(key); }
-    expect((await list.locator("[data-case-number]").allTextContents()).sort()).toEqual([...originalRows].sort());
+    expect((await preservedRows()).sort()).toEqual([...originalRows].sort());
   }
   await page.locator(".workspace-center-tabs").getByRole("tab", { name: "Tabuľka", exact: true }).click();
   const upper = page.locator(".dispatch-workspace-upper");
@@ -130,7 +136,7 @@ test("style changes keep the same unsaved case editor and selected workspace", a
   await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
   const editor = page.getByTestId("case-edit-form-main");
   await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
-  const plate = editor.getByLabel("EČV", { exact: true });
+  const plate = editor.getByRole("textbox", { name: "EČV", exact: true });
   // Freeze the ordinary autosave debounce: this assertion isolates actions
   // caused by switching appearance from the existing timed draft saver.
   await page.clock.install();
@@ -278,7 +284,11 @@ for (const [width, height] of [[360, 800], [390, 844], [768, 1024], [1024, 768],
       await expect(calc.locator("output")).toHaveText("20");
       await page.screenshot({ path: testInfo.outputPath(`personal-tools-${width}x${height}.png`), fullPage: true });
       const calendar = host.getByRole("region", { name: "Kalendár úloh", exact: true });
-      await calendar.scrollIntoViewIfNeeded();
+      await host.getByRole("button", { name: "Otvoriť nástroj Kalendár", exact: true }).click();
+      const calendarWidget = host.locator('[data-widget="calendar"]');
+      const scrollBounds = (await host.locator(".widget-host-scroll").boundingBox())!;
+      await expect.poll(async () => (await calendarWidget.boundingBox())!.y).toBeGreaterThanOrEqual(scrollBounds.y);
+      await expect(calendarWidget.getByRole("button", {name:"Kalendár", exact:true})).toBeInViewport();
       await expect(calendar.getByRole("button", { name: "Nasledujúci mesiac", exact: true })).toBeVisible();
       await noOverflow(page);
       await page.screenshot({ path: testInfo.outputPath(`calendar-in-console-${width}x${height}.png`), fullPage: true });
@@ -363,4 +373,93 @@ test("denied browser storage still permits appearance switches and ordinary cont
   await noOverflow(page);
   expect(evidence.errors).toEqual([]);
   expect(evidence.writes).toEqual([]);
+});
+
+
+test("layout presets and quick tools preserve the selected case and widths", async ({ page }) => {
+  const evidence = await boot(page, 1366, 768);
+  const left = page.getByRole("separator", { name: "Zmeniť šírku stĺpca prípadov", exact: true });
+  const width = await left.getAttribute("aria-valuenow");
+  const lower = page.getByRole("separator", { name: "Potiahnuť a zmeniť výšku spodnej lišty", exact: true });
+  for (const [name, value] of [["Viac prípadu", 68], ["Viac mapy", 34], ["Vyvážené", 50]] as const) {
+    await page.getByLabel("Rozloženie pracovnej plochy", { exact: true }).click();
+    await page.getByRole("button", { name: new RegExp(name) }).click();
+    await expect(lower).toHaveAttribute("aria-valuenow", String(value));
+    await expect(left).toHaveAttribute("aria-valuenow", width!);
+  }
+  const host = page.getByRole("complementary", { name: "Nástroje", exact: true });
+  await host.getByRole("button", { name: "Otvoriť nástroj Kalendár", exact: true }).click();
+  await expect(host.locator('[data-widget="calendar"]')).toBeVisible();
+  await expect(host.locator('[data-widget="calendar"]')).toHaveAttribute("data-collapsed", "false");
+  await expect(left).toHaveAttribute("aria-valuenow", width!);
+  await noOverflow(page);
+  expect(evidence.writes).toEqual([]);
+  expect(evidence.errors).toEqual([]);
+});
+
+test("text proposals require explicit field selection and detect changed drafts", async ({ page }) => {
+  const evidence = await boot(page);
+  await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
+  const editor = page.getByTestId("case-edit-form-main");
+  await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
+  const plate = editor.getByRole("textbox", { name: "EČV", exact: true });
+  const originalPlate = await plate.inputValue();
+  const importer = page.getByTestId("case-text-import");
+  await importer.locator("summary").click();
+  await page.clock.install(); await page.clock.pauseAt(new Date());
+  const source = "EČV: IMPORT123\nMiesto: Nová ulica 12, Bratislava";
+  await importer.getByLabel("Pôvodný text", { exact: true }).fill(source);
+  await importer.getByRole("button", { name: "Navrhnúť údaje", exact: true }).click();
+  await expect(importer.getByRole("button", { name: "Vložiť vybrané údaje (0)", exact: true })).toBeDisabled();
+  await expect(plate).toHaveValue(originalPlate);
+  await importer.getByRole("checkbox", { name: "EČV", exact: true }).check();
+  await plate.fill("MANUAL777");
+  await expect(importer.getByRole("alert")).toContainText("medzitým zmenili");
+  await expect(importer.getByRole("button", { name: "Vložiť vybrané údaje (1)", exact: true })).toBeDisabled();
+  await importer.getByRole("button", { name: "Navrhnúť údaje", exact: true }).click();
+  await importer.getByRole("checkbox", { name: "EČV", exact: true }).check();
+  await importer.getByRole("button", { name: "Vložiť vybrané údaje (1)", exact: true }).click();
+  await expect(plate).toHaveValue("IMPORT123");
+  await expect(importer.getByLabel("Pôvodný text", { exact: true })).toHaveValue(source);
+  await expect(importer.getByRole("status")).toContainText("Vložené polia: 1");
+  await style(page, "classic"); await style(page, "modern");
+  await expect(importer.getByLabel("Pôvodný text", { exact: true })).toHaveValue(source);
+  expect(evidence.writes).toEqual([]);
+  expect(evidence.errors).toEqual([]);
+});
+
+
+test("imported manual address clears stale coordinates and retains unchecked case fields in autosave", async ({ page }) => {
+  const evidence = await boot(page);
+  await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
+  const importer = page.getByTestId("case-text-import");
+  await importer.locator("summary").click();
+  await importer.getByLabel("Pôvodný text", { exact: true }).fill("Miesto: Nová ulica 12, Bratislava\nEČV: UNCHECKED");
+  await importer.getByRole("button", { name: "Navrhnúť údaje", exact: true }).click();
+  await importer.getByRole("checkbox", { name: "Miesto incidentu", exact: true }).check();
+  const request = page.waitForRequest(request => request.method() === "PATCH" && request.url().endsWith("/api/cases/case-2026-0517"));
+  await importer.getByRole("button", { name: "Vložiť vybrané údaje (1)", exact: true }).click();
+  const payload = (await request).postDataJSON();
+  expect(payload.pickup).toBeNull();
+  expect(payload.manualPickupAddress).toBe("Nová ulica 12, Bratislava");
+  // Existing autosave sends only changed fields, so unchecked values are omitted.
+  expect(payload).not.toHaveProperty("licensePlate");
+  expect(payload).not.toHaveProperty("destination");
+  expect(payload.mutationId).toBeTruthy();
+  expect(evidence.errors).toEqual([]);
+});
+
+
+test("original imported text can be preserved as an exact file without case writes", async ({ page }) => {
+  const evidence = await boot(page);
+  await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
+  const importer = page.getByTestId("case-text-import"); await importer.locator("summary").click();
+  const source = "EČV: ABC123\nPôvodný neoznačený text so všetkými podrobnosťami.\n";
+  await importer.getByLabel("Pôvodný text", { exact: true }).fill(source);
+  const download = page.waitForEvent("download");
+  await importer.getByRole("button", { name: "Stiahnuť pôvodný text", exact: true }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toBe("podklad-pripadu.txt");
+  expect(await readFile((await file.path())!, "utf8")).toBe(source);
+  expect(evidence.writes).toEqual([]); expect(evidence.errors).toEqual([]);
 });

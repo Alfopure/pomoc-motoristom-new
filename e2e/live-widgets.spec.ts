@@ -15,7 +15,7 @@ test.beforeAll(async () => {
   css += ".widget-fixture{width:min(340px,100%);padding:4px;margin:0 auto}.widget-fixture .dispatch-widget-host{position:relative;display:flex;width:100%;max-height:calc(100dvh - 80px)}.widget-fixture nav button{min-height:44px;border:1px solid #ccc;padding:4px 8px;font-size:12px}";
 });
 
-const fixtureTask = { id: "calendar-task", title: "Pristaviť vozidlo klientovi a overiť podpísaný protokol", caseId: "case-a", caseIds: ["case-a"], caseLinks: [{ caseId: "case-a", caseNumber: "PM-2026-100", status: "open" }], assignedTo: "viewer", dueAt: "2026-09-12T09:00:00.000Z", status: "open", priority: "urgent", kind: "other", revision: 1, originLocked: false, provenance: "manual", origins: [], updatedAt: "2026-09-12T08:00:00.000Z" };
+const fixtureTask = { id: "calendar-task", title: "Pristaviť vozidlo klientovi a overiť podpísaný protokol", caseId: "case-a", caseIds: ["case-a"], caseLinks: [{ caseId: "case-a", caseNumber: "PM-2026-100", status: "open" }], assignedTo: "viewer", dueAt: "2026-09-12T09:00:00.000Z", status: "open", workflowState: "in_review", priority: "urgent", kind: "other", revision: 1, originLocked: false, provenance: "manual", origins: [], updatedAt: "2026-09-12T08:00:00.000Z" };
 async function boot(page: Page, width = 1440, production = false) {
   const errors: string[] = [], writes: string[] = [], external: string[] = [];
   await page.setViewportSize({ width, height: width < 768 ? 844 : 768 });
@@ -26,7 +26,7 @@ async function boot(page: Page, width = 1440, production = false) {
     if (url.origin !== "https://widgets.test") { external.push(url.origin); return route.abort(); }
     if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><body><div id="root"></div></body></html>' });
     if (route.request().method() !== "GET") { writes.push(url.pathname); return route.fulfill({ status: 503, json: { error: "Testovací výpadok — text zostal zachovaný." } }); }
-    if (url.pathname === "/api/tasks") return route.fulfill({ json: { tasks: [fixtureTask, { ...fixtureTask, id: "done-task", title: "Vybavená úloha", status: "done" }] } });
+    if (url.pathname === "/api/tasks") return route.fulfill({ json: { tasks: [fixtureTask, { ...fixtureTask, id: "done-task", title: "Vybavená úloha", status: "done", workflowState: "done" }] } });
     if (url.pathname === "/api/notes") return route.fulfill({ json: { notes: [{ id: "private-note", title: "Moja poznámka", body: "Pôvodný text poznámky", revision: 1, ownerProfileId: "viewer", recipientProfileIds: [], canEdit: true, updatedAt: "2026-09-12T08:00:00Z" }] } });
     if (url.pathname === "/api/notes/colleagues") return route.fulfill({ json: { colleagues: [{ id: "colleague", displayName: "Kolega" }] } });
     return route.fulfill({ status: 503, json: { error: "Neobslúžená testovacia cesta" } });
@@ -69,6 +69,7 @@ test("calendar reads existing deadlines, opens the exact task and clears private
   const result = await boot(page);
   const calendar = page.getByRole("region", { name: "Kalendár úloh" });
   await expect(calendar.getByRole("button", { name: new RegExp(fixtureTask.title) })).toBeVisible();
+  await expect(calendar.getByRole("button", { name: new RegExp(fixtureTask.title) })).toContainText("Na kontrolu");
   await expect(calendar.getByRole("button", { name: /Vybavená úloha/ })).toHaveCount(0);
   await calendar.getByLabel("Zahrnúť vybavené úlohy").check();
   await expect(calendar.getByRole("button", { name: /Vybavená úloha/ })).toBeVisible();
@@ -88,9 +89,11 @@ test("calendar reads existing deadlines, opens the exact task and clears private
   expect(result).toEqual({ errors: [], writes: [], external: [] });
 });
 
-test("paper notes keep search, sharing and dirty text when style and visibility change", async ({ page }) => {
+test("paper notes keep search, sharing and dirty text when style and visibility change", async ({ page }, testInfo) => {
   const result = await boot(page);
   const notes = page.getByRole("region", { name: "Osobné poznámky" });
+  await expect(notes.locator(".note-body-preview")).toHaveText("Pôvodný text poznámky");
+  await notes.screenshot({ path: testInfo.outputPath("paper-note-overview.png") });
   await notes.getByLabel("Hľadať v mojich a zdieľaných poznámkach").fill("poznámka");
   await notes.getByRole("button", { name: "Moja poznámka" }).click();
   const text = notes.getByLabel("Text poznámky");
@@ -109,6 +112,51 @@ test("paper notes keep search, sharing and dirty text when style and visibility 
   await expect(notes.getByLabel("Text poznámky")).toHaveValue("Rozpracovaný text — zachovať aj po prepnutí");
   expect(result.errors).toEqual([]); expect(result.external).toEqual([]);
   expect(result.writes.every(url => url.startsWith("/api/notes/"))).toBe(true);
+});
+
+test("calculator inserts at the selection and continues from its integrated result", async ({ page }, testInfo) => {
+  const result = await boot(page);
+  const calculator = page.locator('[data-widget="calculator"]');
+  const input = calculator.getByRole("textbox", { name: "Výpočet" });
+  await input.fill("12+345");
+  await input.evaluate(element => (element as HTMLInputElement).setSelectionRange(3, 6));
+  await calculator.getByRole("button", { name: "7", exact: true }).click();
+  await expect(input).toHaveValue("12+7");
+  await calculator.getByRole("button", { name: "=", exact: true }).click();
+  await expect(calculator.locator("output")).toHaveText("19");
+  const outputBox = await calculator.locator("output").boundingBox();
+  const keypadBox = await calculator.locator(".calculator-keypad").boundingBox();
+  expect(outputBox!.y + outputBox!.height).toBeLessThanOrEqual(keypadBox!.y);
+  await calculator.getByRole("button", { name: "×", exact: true }).click();
+  await calculator.getByRole("button", { name: "2", exact: true }).click();
+  await expect(input).toHaveValue("19×2");
+  await calculator.getByRole("button", { name: "=", exact: true }).click();
+  await expect(calculator.locator("output")).toHaveText("38");
+  await calculator.screenshot({ path: testInfo.outputPath("calculator-result.png") });
+  await calculator.getByRole("button", { name: "5", exact: true }).click();
+  await expect(input).toHaveValue("5");
+  await expect(calculator.locator("output")).toHaveCount(0);
+  expect(result).toEqual({ errors: [], writes: [], external: [] });
+});
+
+test("widget gallery prioritizes a tool and resets only tools while retaining calculator draft", async ({ page }, testInfo) => {
+  const result = await boot(page);
+  const calculator = page.locator('[data-widget="calculator"]');
+  await calculator.getByRole("textbox", { name: "Výpočet" }).fill("89+12");
+  await page.getByRole("button", { name: "Upraviť rozloženie pracoviska" }).click();
+  await page.getByRole("button", { name: "Prispôsobiť nástroje", exact: true }).click();
+  const settings = page.getByRole("region", { name: "Nastavenie widgetov" });
+  await expect(settings).toBeVisible();
+  await settings.screenshot({ path: testInfo.outputPath("widget-gallery.png") });
+  for (let index = 0; index < 3; index++) await settings.getByRole("button", { name: "Kalkulačka posunúť vyššie" }).click();
+  await expect(settings.locator("[data-widget-setting]").first()).toHaveAttribute("data-widget-setting", "calculator");
+  await settings.getByRole("button", { name: "Obnoviť predvolené widgety" }).click();
+  await expect(page.getByLabel("Rozloženie pracoviska", { exact: true })).toHaveText("true:true:notes");
+  await expect(settings.getByLabel("Rýchle volanie", { exact: true })).toBeChecked();
+  await expect(settings.getByLabel("Úlohy", { exact: true })).toBeChecked();
+  await settings.getByLabel("Kalkulačka", { exact: true }).check();
+  await expect(calculator.getByRole("textbox", { name: "Výpočet" })).toHaveValue("89+12");
+  expect(result).toEqual({ errors: [], writes: [], external: [] });
 });
 
 test("production keeps all seven existing controls and excludes preview-only calendar and backspace", async ({ page }) => {

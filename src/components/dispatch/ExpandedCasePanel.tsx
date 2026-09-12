@@ -1,7 +1,7 @@
 "use client";
 import type { CaseDetailData } from "@/data/case-detail";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { ArrowLeft, FileText, Plus } from "lucide-react";
 import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
@@ -12,6 +12,7 @@ import styles from "./case-detail.module.css";
 import { NewCaseForm, type SaveCaseDraft } from "./NewCaseDrawer";
 
 type ExpandedCasePanelProps = {
+  renderTaskWorkflow?: (taskId: string) => ReactNode;
   assets: FleetAsset[];
   branches: Branch[];
   call: DispatchCall;
@@ -37,6 +38,7 @@ type ExpandedCasePanelProps = {
 };
 
 export function ExpandedCasePanel({
+  renderTaskWorkflow,
   assets,
   branches,
   call,
@@ -110,6 +112,7 @@ export function ExpandedCasePanel({
         ) : caseItem ? (
           <div className={`${styles.scrollRegion} h-full min-w-0 overflow-y-auto overscroll-contain`} data-case-detail-scroll-region>
             <CaseDetail
+              renderTaskWorkflow={renderTaskWorkflow}
               onEditorControlsChange={setEditorControls}
               key={caseItem.id}
               caseItem={caseItem}

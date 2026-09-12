@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ArrowUpRight, Check, ChevronLeft, ChevronRight } from "lucide-react";
+import { taskWorkflowLabels, taskWorkflowState } from "@/domain/task-workflow";
 import { useTaskWorkspace } from "./TaskWorkspaceProvider";
 import { calendarDayKey, calendarMonthDays, calendarTasksByDay } from "./calendar-widget";
 
@@ -41,6 +42,7 @@ export function CalendarWidget({ onOpenTask }: { onOpenTask: (taskId: string, ca
   if (!store.enabled) return <p className="p-3 text-sm text-zinc-600">Termíny budú dostupné po aktivácii pracovného priestoru úloh.</p>;
   if (snapshot.hidden) return <p className="p-3 text-sm text-zinc-600" role="status">Overujem prístup k termínom úloh…</p>;
   return <section className="calendar-widget space-y-3 p-3" aria-label="Kalendár úloh">
+    <div className="calendar-date-summary calendar-modern-only" aria-hidden="true"><div className="calendar-date-badge"><span>{selected.toLocaleDateString("sk-SK", { month: "short" })}</span><strong>{selected.getDate()}</strong></div><div><span className="calendar-summary-weekday">{selected.toLocaleDateString("sk-SK", { weekday: "long" })}</span><strong>{agenda.length ? `Úlohy na tento deň: ${agenda.length}` : "Deň bez termínov"}</strong><span className="calendar-summary-caption">Váš kalendár úloh</span></div></div>
     <header className="calendar-header flex flex-wrap items-center justify-between gap-1">
       <h3 className="text-sm font-semibold capitalize" aria-live="polite">{month.toLocaleDateString("sk-SK", { month: "long", year: "numeric" })}</h3>
       <div className="flex items-center gap-1">
@@ -63,7 +65,7 @@ export function CalendarWidget({ onOpenTask }: { onOpenTask: (taskId: string, ca
     <div className="calendar-agenda border-t border-zinc-200 pt-2">
       <h4 className="text-xs font-semibold capitalize">{selected.toLocaleDateString("sk-SK", { weekday: "long", day: "numeric", month: "long" })}</h4>
       {snapshot.error && <p className="mt-2 text-xs text-amber-800" role="status">{snapshot.error}</p>}
-      {agenda.length ? <ul className="mt-2 space-y-1">{agenda.map(task => <li key={task.id}><button type="button" className="calendar-task w-full rounded-lg border border-zinc-200 p-2 text-left hover:bg-zinc-50" onClick={() => onOpenTask(task.id, task.caseId || task.caseIds[0] || "")}><span className="flex flex-wrap items-center gap-x-2 text-[11px] text-zinc-600"><time dateTime={task.dueAt}>{new Date(task.dueAt).toLocaleTimeString("sk-SK", { hour: "2-digit", minute: "2-digit" })}</time><span>{task.status === "done" ? "Vybavená" : "Otvorená"}</span>{task.priority === "urgent" && <span className="text-red-700">Urgentná</span>}</span><strong className="mt-1 block break-words text-xs font-medium">{task.title}</strong>{task.caseLinks.length > 0 && <span className="mt-1 block break-words text-[11px] text-zinc-600">{task.caseLinks.map(link => link.caseNumber).join(" · ")}</span>}</button></li>)}</ul> : <p className="mt-2 text-xs leading-relaxed text-zinc-500">{snapshot.loading ? "Načítavam termíny…" : "Na tento deň nie sú naplánované úlohy."}</p>}
+      {agenda.length ? <ul className="mt-2 space-y-1">{agenda.map(task => <li key={task.id}><button type="button" data-task-done={task.status === "done"} data-task-priority={task.priority} className="calendar-task w-full rounded-lg border border-zinc-200 p-2 text-left hover:bg-zinc-50" onClick={() => onOpenTask(task.id, task.caseId || task.caseIds[0] || "")}><span className="calendar-task-marker calendar-modern-only" aria-hidden="true">{task.status === "done" && <Check size={10} />}</span><span className="calendar-task-content"><span className="flex flex-wrap items-center gap-x-2 text-[11px] text-zinc-600"><time dateTime={task.dueAt}>{new Date(task.dueAt).toLocaleTimeString("sk-SK", { hour: "2-digit", minute: "2-digit" })}</time><span className="calendar-task-state">{taskWorkflowLabels[taskWorkflowState(task)]}</span>{task.priority === "urgent" && <span className="text-red-700">Urgentná</span>}</span><strong className="mt-1 block break-words text-xs font-medium">{task.title}</strong>{task.caseLinks.length > 0 && <span className="mt-1 block break-words text-[11px] text-zinc-600">{task.caseLinks.map(link => link.caseNumber).join(" · ")}</span>}</span><ArrowUpRight size={13} className="calendar-task-open calendar-modern-only" aria-hidden="true" /></button></li>)}</ul> : <p className="calendar-agenda-empty mt-2 text-xs leading-relaxed text-zinc-500">{snapshot.loading ? "Načítavam termíny…" : "Na tento deň nie sú naplánované úlohy."}</p>}
       <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">Termíny sa preberajú z úloh. Úlohy bez termínu nájdete v hlavnom prehľade.</p>
     </div>
   </section>;

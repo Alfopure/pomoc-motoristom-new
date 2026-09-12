@@ -19,8 +19,10 @@ function Fixture() {
     <nav aria-label="Ovládanie testovacej ukážky" className="mb-2 flex flex-wrap gap-2">
       <button onClick={() => setMode(mode === "modern" ? "classic" : "modern")}>Prepnúť vzhľad</button>
       <button onClick={() => store.clear()}>Zrušiť prístup k úlohám</button>
+      <button onClick={() => setPreferences(current => ({ ...current, leftCollapsed: true, rightCollapsed: true, centerView: "notes" }))}>Upraviť rozloženie pracoviska</button>
     </nav>
     <output aria-label="Otvorená úloha">{opened}</output>
+    <output className="sr-only" aria-label="Rozloženie pracoviska">{`${preferences.leftCollapsed}:${preferences.rightCollapsed}:${preferences.centerView}`}</output>
     <WidgetHost preferences={preferences} onChange={setPreferences} expanded settingsOpen={settings} onSettingsChange={setSettings} onClose={() => undefined} renderWidget={(id, active) => {
       if (id === "calculator") return <CalculatorWidget />;
       if (id === "calendar") return <CalendarWidget onOpenTask={(taskId, caseId) => setOpened(`${taskId}:${caseId}`)} />;

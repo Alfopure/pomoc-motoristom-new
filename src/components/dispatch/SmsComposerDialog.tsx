@@ -21,6 +21,9 @@ type Props = {
   caseId?: string;
   caseNumber?: string;
   initialPhone?: string;
+  initialMessage?: string;
+  /** Standalone custom SMS for a colleague; attaching a case would select its client phone. */
+  externalRecipientLabel?: string;
   locationPhone?: string;
   initialTemplate?: SmsPrepareInput["template"];
   initialTab?: "editor" | "inbox";
@@ -38,7 +41,7 @@ export function SmsComposerDialog(props: Props) {
   return started ? <SmsComposerSession {...props} /> : null;
 }
 
-function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemplate = "custom", initialTab = "editor", onCreateCase, onClose, onSent, open }: Props) {
+function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMessage = "", externalRecipientLabel, initialTemplate = "custom", initialTab = "editor", onCreateCase, onClose, onSent, open }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const caseRef = useRef<HTMLSelectElement>(null);
   const busyRef = useRef(false);
@@ -52,7 +55,7 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
   const [eta, setEta] = useState("");
   const [departed, setDeparted] = useState(false);
   const [towAddress, setTowAddress] = useState("");
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState(initialMessage);
   const [preview, setPreview] = useState<SmsPreview | null>(null);
   const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [attempted, setAttempted] = useState(false);
@@ -69,7 +72,8 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
   const [historyAll, setHistoryAll] = useState(!caseId);
   const [sender, setSender] = useState("PomocMotor");
   const [previousOpen, setPreviousOpen] = useState(open);
-  const [openingIntent, setOpeningIntent] = useState(() => JSON.stringify([caseId, initialTemplate, initialPhone]));
+  const [openingIntent, setOpeningIntent] = useState(() => JSON.stringify([caseId, initialTemplate, initialPhone, initialMessage]));
+  const [incomingHandoff, setIncomingHandoff] = useState(false);
   const selectedCase = cases.find((entry) => entry.id === selectedCaseId);
   const caseAvailable = Boolean(selectedCaseId && (selectedCase?.validPhone || (caseId === selectedCaseId && !selectedCase)));
   const requiresCase = template !== "custom";
@@ -80,13 +84,18 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
   if (open !== previousOpen) {
     setPreviousOpen(open);
     if (open) setTab(initialTab);
-    const intent = JSON.stringify([caseId, initialTemplate, initialPhone]);
+    const intent = JSON.stringify([caseId, initialTemplate, initialPhone, initialMessage]);
+    if (open && intent !== openingIntent && initialMessage && attempted && (!result || unresolved)) setIncomingHandoff(true);
     if (open && intent !== openingIntent && (!attempted || (result && !unresolved))) {
+      if (initialMessage && message.trim() && !result) {
+        setIncomingHandoff(true);
+      } else {
       setOpeningIntent(intent);
       setSelectedCaseId(caseId ?? ""); setTemplate(initialTemplate); setPhone(initialPhone);
-      setPreview(null); setMessage(""); setResult(null); setAttempted(false);
+      setPreview(null); setMessage(initialMessage); setResult(null); setAttempted(false);
       setRequestId(crypto.randomUUID()); setDeparted(false); setEta(""); setError("");
       setReply(null); setSelectedTaskId("");
+      }
     }
   }
   const locked = preparing || sending || attempted;
@@ -126,7 +135,7 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
     try {
       const response = await fetch("/api/sms/prepare", {
         method: "POST", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(20_000),
-        body: JSON.stringify({ requestId, caseId: selectedCaseId || null, toNumber: phone, template, callbackNumber,
+        body: JSON.stringify({ requestId, caseId: externalRecipientLabel ? null : selectedCaseId || null, toNumber: phone, template, callbackNumber,
           taskId: !reply && (template === "eta_update" || template === "location_request") ? selectedTaskId || null : null,
           etaMinutes: eta ? Number(eta) : undefined, technicianDeparted: departed, towAddress, message, replyToMessageId: reply?.id }),
       });
@@ -181,18 +190,20 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
           onCreateCase={onCreateCase ? () => { onClose(); onCreateCase(); } : undefined}
           onReply={(incoming) => { newMessage(); setReply(incoming); setPhone(incoming.from); setSelectedCaseId(incoming.caseId ?? ""); setTemplate("custom"); setTab("editor"); }} />
           : tab === "history" ? <div className="grid gap-4"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={historyAll || !selectedCaseId} disabled={!selectedCaseId} onChange={(event) => setHistoryAll(event.target.checked)} />Všetky SMS vrátane správ bez prípadu</label><SmsHistory key={historyAll ? "all" : selectedCaseId} caseId={historyAll ? undefined : selectedCaseId || undefined} /></div> : <form onSubmit={submit} className="grid gap-4">
+          {incomingHandoff && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6"><strong>Máte rozpracovanú SMS.</strong><p>Nový odkaz sa zatiaľ nepridal. Pripojiť ho k textu a nastaviť príjemcu na {initialPhone}?</p><button type="button" disabled={locked || message.length + initialMessage.length + 1 > MAX_CUSTOM_SMS_LENGTH} className="mt-2 font-semibold underline" onClick={() => { setMessage(current => current.includes(initialMessage) ? current : `${current}\n${initialMessage}`); setPhone(initialPhone); setTemplate("custom"); setSelectedCaseId(caseId ?? ""); setSelectedTaskId(""); setReply(null); setPreview(null); setError(""); setIncomingHandoff(false); setOpeningIntent(JSON.stringify([caseId, initialTemplate, initialPhone, initialMessage])); }}>Pripojiť odkaz a nastaviť príjemcu</button></div>}
           {reply && <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm leading-6"><strong>Odpoveď na prijatú SMS od {reply.from}</strong><p>{reply.caseNumber || "Bez prípadu"} · Z nášho čísla {reply.to}</p><p className="whitespace-pre-wrap break-words text-xs">{reply.body}</p>{!attempted && <button type="button" className="mt-2 text-xs font-semibold underline" disabled={preparing || sending} onClick={() => { newMessage(); setReply(null); setSelectedTaskId(""); setPhone(initialPhone); setSelectedCaseId(caseId ?? ""); }}>Zrušiť odpoveď a napísať inú SMS</button>}</div>}
           {!preview && !reply && <>
           <label className="grid gap-1.5 text-sm font-semibold">Prípad
-            <select ref={caseRef} aria-label="Prípad SMS" value={selectedCaseId} disabled={locked || !loaded} onChange={(event) => { setSelectedCaseId(event.target.value); setSelectedTaskId(""); editContext(); }} className={field}>
+            <select ref={caseRef} aria-label="Prípad SMS" value={selectedCaseId} disabled={locked || !loaded || !!externalRecipientLabel} onChange={(event) => { setSelectedCaseId(event.target.value); setSelectedTaskId(""); editContext(); }} className={field}>
               <option value="">Bez prípadu</option>
               {selectedCaseId && !selectedCase && <option value={selectedCaseId}>{caseNumber || selectedCaseId}</option>}
               {cases.map((entry) => <option key={entry.id} value={entry.id}>{entry.caseNumber} · {entry.name} · {entry.phone || "chýba telefón"}</option>)}
             </select>
           </label>
+          {externalRecipientLabel && <p className="rounded-lg bg-sky-50 p-3 text-sm"><strong>{externalRecipientLabel}</strong><br />Samostatná SMS na uvedený telefón kolegu. Číslo prípadu je v texte; kontakt klienta sa nepoužije.</p>}
           {selectedCaseId ? <p className="rounded-lg bg-zinc-50 p-3 text-sm"><strong>{selectedCase?.caseNumber || caseNumber}</strong><br />{selectedCase?.name || "Kontakt overí server"} · {selectedCase?.phone || "Kontakt nie je dostupný"}</p>
             : <label className="grid gap-1.5 text-sm font-semibold">Telefón príjemcu<input type="tel" value={phone} disabled={locked} onChange={(event) => { setPhone(event.target.value); editContext(); }} placeholder="0904 123 456" className={field} /></label>}
-          <label className="grid gap-1.5 text-sm font-semibold">Šablóna<select value={template} disabled={locked} onChange={(event) => { setTemplate(event.target.value as SmsPrepareInput["template"]); setSelectedTaskId(""); setMessage(""); editContext(); }} className={field}><option value="custom">Vlastná SMS</option>{SMS_TEMPLATES.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select></label>
+          <label className="grid gap-1.5 text-sm font-semibold">Šablóna<select value={template} disabled={locked || !!externalRecipientLabel} onChange={(event) => { setTemplate(event.target.value as SmsPrepareInput["template"]); setSelectedTaskId(""); setMessage(""); editContext(); }} className={field}><option value="custom">Vlastná SMS</option>{SMS_TEMPLATES.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select></label>
           {requiresCase && !caseAvailable && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-950">Najprv vyberte uložený prípad s platným kontaktom. Rozpracovaný prípad treba výslovne uložiť.<div className="mt-2 flex gap-2"><button type="button" className={button} disabled={locked} onClick={() => caseRef.current?.focus()}>Vybrať prípad</button>{onCreateCase && <button type="button" className={button} disabled={locked} onClick={() => { onClose(); onCreateCase(); }}>Vytvoriť prípad</button>}</div></div>}
           {requiresCase && <label className="grid gap-1.5 text-sm font-semibold">Kontaktný telefón pre spätné volanie<input type="tel" value={callbackNumber} disabled={locked} onChange={(event) => { setCallbackNumber(event.target.value); editContext(); }} className={field} /></label>}
           {(template === "eta_update" || template === "delay") && <label className="grid gap-1.5 text-sm font-semibold">Aktuálny odhad príchodu (minúty)<input type="number" min={1} max={1440} value={eta} disabled={locked} onChange={(event) => { setEta(event.target.value); editContext(); }} className={field} /></label>}

@@ -88,6 +88,7 @@ import { NotebookPanel, NotebookProvider } from "./NotebookPanel";
 import { RoutePlannerProvider } from "./map/RoutePlannerProvider";
 import { RoutePlanner } from "./map/RoutePlanner";
 import { TaskWorkspaceProvider, useTaskWorkspace } from "./TaskWorkspaceProvider";
+import { TaskCaseWorkflowActions } from "./TaskCaseWorkflowActions";
 import type { WorkspaceTask } from "@/domain/task-workspace";
 import { unavailableWorkspaceCapabilities } from "@/domain/workspace-capabilities";
 import { useDraftEditors, type DraftEditorState } from "./useDraftEditors";
@@ -2016,8 +2017,9 @@ function DispatchConsoleContent({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [activeView, cancelPendingNavigation, centerView, leaveDialogOpen, requestNavigation, workspace]);
 
-  function renderTasks(variant: "page" | "sidebar") {
+  function renderTasks(variant: "page" | "sidebar", compact = false) {
     return <TaskPanel
+                compact={compact}
                 taskWorkspaceEnabled={capabilities.tasks}
                 tasks={dispatchData.tasks}
                 onOpenCase={openCase}
@@ -2088,7 +2090,7 @@ function DispatchConsoleContent({
           refreshBlocked={appRefreshBlocked}
           updateAvailable={updateAvailable}
         />
-        <nav className="hidden min-w-0 flex-1 items-center justify-center gap-1 lg:flex" aria-label="Hlavná navigácia">
+        <nav className="dispatch-primary-navigation hidden min-w-0 flex-1 items-center justify-center gap-1 lg:flex" aria-label="Hlavná navigácia">
           <NavButton
             active={activeView === dashboardNavItem.view}
             label={dashboardNavItem.label}
@@ -2396,13 +2398,14 @@ function DispatchConsoleContent({
           </div>
           <div className="mobile-dispatch-workspace lg:contents">
           <MapWorkspace
+            renderTaskWorkflow={capabilities.tasks ? taskId => <TaskCaseWorkflowActions taskId={taskId} viewerProfileId={viewerProfileId} onOpenTask={id => openTask(id, "")} /> : undefined}
             active={activeView === "dispatch" && !toolsOpen}
             actorKey={actorKey}
             onCenterViewChange={switchCenterView}
             onOpenTools={toggleTools}
             toolsOpen={toolsOpen}
             onToggleLeft={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: !workspacePreferences.leftCollapsed })}
-            centerContent={<><div hidden={centerView !== "tasks"} className="h-full overflow-y-auto">{renderTasks("page")}</div><div hidden={centerView !== "notes"} className="h-full overflow-y-auto"><NotebookPanel active={activeView === "dispatch" && centerView === "notes" && !toolsOpen} /></div></>}
+            centerContent={<><div hidden={centerView !== "tasks"} className="h-full overflow-y-auto">{renderTasks("page", true)}</div><div hidden={centerView !== "notes"} className="h-full overflow-y-auto"><NotebookPanel active={activeView === "dispatch" && centerView === "notes" && !toolsOpen} /></div></>}
             activeCaseId={visibleActiveCaseId}
             assets={fleetAssets}
             branches={branches}
@@ -2671,11 +2674,14 @@ function AccountMenu({
         className="dispatch-account-trigger group flex h-10 min-w-0 items-center gap-2 rounded-lg px-1.5 text-left transition hover:bg-white/10 disabled:cursor-wait sm:gap-2.5"
       >
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-sm font-black text-zinc-950">PM</span>
+        <span className="dispatch-account-identity">
+        <span className="dispatch-brand-name">Pomoc motoristom</span>
         <span
           data-testid="signed-in-user-name"
           className="min-w-0 max-w-28 truncate text-sm font-semibold sm:max-w-24 md:max-w-36 lg:max-w-48"
         >
           {displayName}
+        </span>
         </span>
         {signingOut ? (
           <Loader2 size={14} className="shrink-0 animate-spin text-zinc-300" aria-label="Odhlasujem" />
@@ -3133,6 +3139,7 @@ function NavButton({
       type="button"
       aria-label={label}
       aria-current={active ? "page" : undefined}
+      data-nav-shortcut={responsiveShortcut || undefined}
       onClick={onClick}
       disabled={disabled}
       title={responsiveShortcut ? label : undefined}

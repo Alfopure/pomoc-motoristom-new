@@ -616,6 +616,16 @@ export type Database = {
         due_at: Timestamp | null;
         reminder_at: Timestamp | null;
         status: "open" | "done" | "overdue";
+        // Optional while older schemas remain supported during additive rollout.
+        workflow_state?: "todo" | "in_progress" | "in_review" | "done" | null;
+        reviewer_profile_id?: string | null;
+        review_requested_by?: string | null;
+        review_requested_at?: Timestamp | null;
+        review_submission?: string | null;
+        review_return_reason?: string | null;
+        review_generation?: number;
+        reviewed_by?: string | null;
+        reviewed_at?: Timestamp | null;
         priority: "urgent" | "high" | "normal" | "low";
         kind: "callback" | "sms" | "dispatch" | "documents" | "billing" | "handover" | "other";
         created_by: string | null;
@@ -1530,6 +1540,8 @@ export type Database = {
       }>;
     };
     Functions: {
+      motorist_case_handoff: { Args: { p_organization_id: string; p_actor_id: string; p_case_id: string; p_action: string; p_input?: Json }; Returns: Json };
+      motorist_public_handoff: { Args: { p_action: string; p_token_hash: string; p_input?: Json }; Returns: Json };
       motorist_ensure_task_assignment: { Args: { p_organization_id: string; p_task_id: string }; Returns: Json };
       motorist_claim_task_assignments: { Args: { p_organization_id: string; p_task_id?: string | null; p_limit?: number }; Returns: Json };
       motorist_finish_task_assignment: { Args: { p_organization_id: string; p_notification_id: string; p_lease_id: string; p_success: boolean }; Returns: boolean };
@@ -1542,6 +1554,8 @@ export type Database = {
         Args: { p_organization_id: string; p_actor_profile_id: string; p_action: string; p_task_id?: string | null; p_input?: Json };
         Returns: Json;
       };
+      motorist_task_workflow_enabled: { Args: { p_organization_id: string; p_actor_profile_id: string }; Returns: boolean };
+      motorist_task_workflow: { Args: { p_organization_id: string; p_actor_profile_id: string; p_task_id: string; p_input: Json }; Returns: Json };
       motorist_resolve_callback_target: { Args: { p_organization_id: string; p_number: string }; Returns: Json };
       motorist_contact_callback_policy: { Args: { p_organization_id: string; p_actor_id: string; p_contact_id: string; p_action: string; p_non_callback?: boolean; p_target_contact_id?: string | null; p_expected_revision?: number; p_verified?: boolean }; Returns: Json };
       motorist_approve_callback_target: { Args: { p_organization_id: string; p_actor_id: string; p_request_id: string; p_verification_id: string }; Returns: Json };

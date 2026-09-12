@@ -261,7 +261,7 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
               : "min-w-0 rounded-xl border border-zinc-200 bg-white p-2.5 shadow-sm"
           }
         >
-        <div className="mb-2 flex items-center justify-between gap-2">
+        {layoutMode === "modern" && variant === "rail" ? <p className="mb-2 text-[11px] text-zinc-500">Číslo, kontakt alebo obľúbené</p> : <div className="mb-2 flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#FCD703] text-zinc-950">
               <PhoneCall size={16} strokeWidth={2.4} />
@@ -271,7 +271,7 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
               <div className="truncate text-[11px] text-zinc-500">Číslo, kontakt alebo obľúbené</div>
             </div>
           </div>
-        </div>
+        </div>}
 
         <div className={variant === "rail" ? "grid min-w-0 grid-cols-2 gap-2" : "grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] gap-2"}>
           <label className={`flex min-w-0 items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 focus-within:border-zinc-400 focus-within:bg-white ${variant === "rail" ? "col-span-2" : ""}`}>

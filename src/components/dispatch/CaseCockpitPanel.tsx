@@ -1,7 +1,7 @@
 "use client";
 import type { CaseDetailData } from "@/data/case-detail";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import { Headphones, Loader2, Mail, Maximize2, MessageSquareText, Minimize2, Smartphone } from "lucide-react";
 import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
@@ -19,6 +19,7 @@ import styles from "./case-detail.module.css";
 type WorkspaceMode = "collapsed" | "split" | "expanded";
 
 type CaseCockpitPanelProps = {
+  renderTaskWorkflow?: (taskId: string) => ReactNode;
   assets: FleetAsset[];
   branches: Branch[];
   caseItem: DispatchCase;
@@ -45,6 +46,7 @@ type CaseCockpitPanelProps = {
 };
 
 export function CaseCockpitPanel({
+  renderTaskWorkflow,
   assets,
   branches,
   caseItem,
@@ -176,10 +178,10 @@ export function CaseCockpitPanel({
         </section>
       )}
     <section hidden={mode === "collapsed"} inert={mode === "collapsed" ? true : undefined} className={`${styles.surface} ${mode === "collapsed" ? "hidden" : "flex"} h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white lg:rounded-md lg:border lg:border-zinc-200 lg:shadow-sm`}>
-      <div className={`${styles.cockpitHeader} shrink-0 border-b border-zinc-200 bg-white`}>
+      <div className={`${styles.cockpitHeader} case-cockpit-heading shrink-0 border-b border-zinc-200 bg-white`}>
         <div className={styles.cockpitTopline}>
           <div className="min-w-0 flex-1">
-            <div className={styles.caseIdentity}>
+            <div className={`${styles.caseIdentity} case-cockpit-identity`}>
               <span className={styles.caseNumber}>{caseItem.caseNumber}</span>
               <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ring-1 lg:px-2 lg:text-xs ${caseStatusTone[caseItem.status]}`}>
                 {caseStatusLabels[caseItem.status]}
@@ -187,9 +189,9 @@ export function CaseCockpitPanel({
               <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold lg:px-2 lg:text-xs ${priorityTone[caseItem.priority]}`}>
                 {casePriorityLabels[caseItem.priority]}
               </span>
-              <span className={styles.caseCustomer}>{customerName}</span>
+              <span className={`${styles.caseCustomer} case-cockpit-customer`}>{customerName}</span>
             </div>
-            <div className={styles.caseMeta}>
+            <div className={`${styles.caseMeta} case-cockpit-meta`}>
               <span>{routeSummary}</span>
               <span>{owner}</span>
               <span className="truncate">{asset ? (selectedAsset ? asset.label : `Návrh: ${asset.label}`) : "Bez dostupnej techniky"}</span>
@@ -226,6 +228,7 @@ export function CaseCockpitPanel({
       {editorControls && <div className={`${styles.headerControlRow} shrink-0`}><CaseEditorHeader controls={editorControls} /></div>}
       <div data-case-detail-scroll-region className={`${styles.scrollRegion} min-h-0 flex-1 overflow-y-auto overscroll-contain bg-zinc-50`}>
         <CaseDetail
+          renderTaskWorkflow={renderTaskWorkflow}
           onEditorControlsChange={setEditorControls}
           key={caseItem.id}
           assets={assets}
