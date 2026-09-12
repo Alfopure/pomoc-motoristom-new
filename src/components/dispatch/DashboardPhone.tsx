@@ -11,6 +11,7 @@ import type {
 import type { DispatchData } from "@/data/dispatch-types";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { cleanPhoneInput } from "@/lib/telephony/phone";
+import { useLayoutPreview } from "./LayoutPreview";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 import { useSmsUnreadCount } from "./SmsInbox";
 
@@ -39,6 +40,7 @@ const CONTACT_ROLE_LABELS: Record<TelephonyDirectoryContact["role"], string> = {
 const FAVORITES_PER_PAGE = 5;
 
 export function DashboardPhone({ onCreateCase, className = "", disabled = false, isDialing = false, onDataChange, onDial, variant = "card" }: DashboardPhoneProps) {
+  const { mode: layoutMode } = useLayoutPreview();
   const rootRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const [selectedContact, setSelectedContact] = useState<TelephonyDirectoryContact | null>(null);
@@ -305,7 +307,7 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
             aria-label="Otvoriť SMS"
             onClick={() => {
               setIsOpen(false);
-              setSmsInitialTab(unreadSmsCount > 0 ? "inbox" : "editor");
+              setSmsInitialTab(layoutMode === "modern" ? "editor" : unreadSmsCount > 0 ? "inbox" : "editor");
               setSmsComposerOpen(true);
             }}
             className="inline-flex h-10 min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[#FCD703] px-3 text-sm font-semibold text-zinc-950 transition hover:bg-yellow-300"

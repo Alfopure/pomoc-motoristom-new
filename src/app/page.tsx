@@ -1,4 +1,5 @@
 import { connection } from "next/server";
+import { layoutPreviewEnabled } from "@/components/dispatch/layout-preview-policy";
 import { MotoristLogin } from "@/components/auth/MotoristLogin";
 import { DispatchConsole } from "@/components/dispatch/DispatchConsole";
 import { loadDispatchData } from "@/data/dispatch-repository";
@@ -18,6 +19,7 @@ export default async function Home() {
   return (
     <DispatchConsole
       appVersion={getAppVersion()}
+      layoutPreviewEnabled={layoutPreviewEnabled(process.env)}
       initialData={dispatchData}
       viewerDisplayName={authState.profile?.displayName}
       viewerEmail={authState.profile?.email}

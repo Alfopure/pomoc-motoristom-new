@@ -1,5 +1,6 @@
 "use client";
 
+import { useLayoutPreview } from "./LayoutPreview";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Info, Loader2, MessageSquareText, Send, X } from "lucide-react";
@@ -60,6 +61,8 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<SmsComposerResult | null>(null);
+  const { mode: layoutMode } = useLayoutPreview();
+  const modernLayout = layoutMode === "modern";
   const [tab, setTab] = useState<"editor" | "history" | "inbox">(initialTab);
   const [reply, setReply] = useState<SmsInboxMessage | null>(null);
   const [repliesEnabled, setRepliesEnabled] = useState(false);
@@ -164,10 +167,15 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialTemp
   }
   const field = "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-950 outline-none focus:border-yellow-500 focus:ring-2 focus:ring-yellow-200 disabled:bg-zinc-100 disabled:text-zinc-600";
   const button = "rounded-lg border border-zinc-300 px-3 py-2 text-sm font-semibold disabled:opacity-40";
-  return createPortal(<div className="fixed inset-0 z-[2147483640] grid place-items-center bg-zinc-950/60 p-3 text-zinc-950 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget && !sending && !preparing) onClose(); }}>
+  return createPortal(<div data-layout-preview={layoutMode} className="fixed inset-0 z-[2147483640] grid place-items-center bg-zinc-950/60 p-3 text-zinc-950 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget && !sending && !preparing) onClose(); }}>
     <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="sms-title" onKeyDown={handleKeys} className="flex max-h-[92dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl outline-none">
       <div className="flex items-center gap-3 border-b border-yellow-200 bg-yellow-50 p-4"><MessageSquareText size={24} /><div className="flex-1"><h2 id="sms-title" className="text-lg font-black">SMS</h2><p className="text-xs text-zinc-600">Vlastné správy, šablóny a žiadosti o polohu</p></div><button type="button" aria-label="Zavrieť SMS" disabled={sending || preparing} onClick={onClose} className="rounded-lg p-2 hover:bg-white"><X size={20} /></button></div>
-      <div className="flex flex-wrap gap-2 border-b px-4 py-2"><button type="button" onClick={() => setTab("editor")} className={`${button} ${tab === "editor" ? "bg-yellow-100" : ""}`}>Editor</button><button type="button" onClick={() => setTab("inbox")} className={`${button} ${tab === "inbox" ? "bg-yellow-100" : ""}`}>Prijaté SMS</button><button type="button" onClick={() => setTab("history")} className={`${button} ${tab === "history" ? "bg-yellow-100" : ""}`}>História SMS</button></div>
+      <div className="live-sms-tabs flex flex-wrap gap-2 border-b px-4 py-2">
+        <button type="button" aria-pressed={tab === "editor"} onClick={() => setTab("editor")} className={`${button} ${tab === "editor" ? "bg-yellow-100" : ""}`}>{modernLayout ? "Napísať SMS" : "Editor"}</button>
+        {!modernLayout && <button type="button" onClick={() => setTab("inbox")} className={`${button} ${tab === "inbox" ? "bg-yellow-100" : ""}`}>Prijaté SMS</button>}
+        <button type="button" aria-pressed={tab === "history"} onClick={() => setTab("history")} className={`${button} ${tab === "history" ? "bg-yellow-100" : ""}`}>{modernLayout ? "Odoslané SMS" : "História SMS"}</button>
+        {modernLayout && <details className="live-sms-secondary"><summary>Ďalšie možnosti</summary><button type="button" aria-pressed={tab === "inbox"} onClick={() => setTab("inbox")} className={`${button} ${tab === "inbox" ? "bg-yellow-100" : ""}`}>Prijaté SMS</button></details>}
+      </div>
       <div className="overflow-y-auto p-4 sm:p-5">
         {tab === "inbox" ? <SmsInbox cases={cases} repliesEnabled={loaded ? repliesEnabled : null} replyDisabled={preparing || sending || Boolean(attempted && (!result || unresolved))}
           onCreateCase={onCreateCase ? () => { onClose(); onCreateCase(); } : undefined}

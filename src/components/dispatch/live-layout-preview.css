@@ -1,0 +1,74 @@
+/* The opt-in skin never hides data, changes layout state or replaces mounted views. */
+.layout-preview-toolbar { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:4px 12px; padding:4px 12px; min-height:36px; border-bottom:1px solid #e4d9a7; background:#fff9e6; color:#514415; font-size:11px; line-height:1.35; }
+.layout-preview-description { display:flex; align-items:center; flex-wrap:wrap; gap:4px 7px; min-width:0; }
+.layout-preview-description strong { font-weight:650; }
+.layout-preview-options { display:flex; flex-shrink:0; gap:2px; padding:2px; border:1px solid #ded5b7; border-radius:7px; background:#f0ead9; }
+.layout-preview-options button { min-height:26px; padding:3px 10px; border-radius:5px; font-size:11px; font-weight:600; color:#625733; }
+.layout-preview-options button[aria-pressed="true"] { background:white; color:#302b1c; box-shadow:0 1px 3px #33280f20; }
+.layout-preview-options button:focus-visible { outline:2px solid #886400; outline-offset:1px; }
+[data-layout-preview="modern"].dispatch-app-shell { --preview-border:#dfe2e7; --preview-ink:#232830; --preview-muted:#5d6570; background:#eceef2; color:var(--preview-ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+[data-layout-preview="modern"] .dispatch-app-header { background:#fcfcfd; border-color:var(--preview-border); color:#252a32; box-shadow:0 1px 4px #1b233206; }
+[data-layout-preview="modern"] .dispatch-account-trigger { color:#252a32; }
+[data-layout-preview="modern"] .dispatch-account-trigger:hover { background:#f0f1f4; }
+[data-layout-preview="modern"] .dispatch-account-trigger > span:last-child { color:#4b5563; }
+[data-layout-preview="modern"] .dispatch-app-header nav > button:not(.bg-\[\#FCD703\]),
+[data-layout-preview="modern"] .dispatch-app-header nav > div > button:not(.bg-\[\#FCD703\]) { color:#434b56; }
+[data-layout-preview="modern"] .dispatch-app-header nav > button:hover,
+[data-layout-preview="modern"] .dispatch-app-header nav > div > button:hover { background:#eeeef1; }
+[data-layout-preview="modern"] .dispatch-app-header button { border-radius:8px; }
+[data-layout-preview="modern"] .dispatch-dashboard { background:#eceef2; }
+[data-layout-preview="modern"] .dispatch-map-workspace { padding:7px; background:transparent; }
+[data-layout-preview="modern"] .workspace-toolbar { margin-bottom:7px; gap:5px; }
+[data-layout-preview="modern"] .workspace-center-tabs { padding:3px; border-color:#dcdfe5; border-radius:10px; background:#e3e6eb; }
+[data-layout-preview="modern"] .workspace-center-tabs button { border-radius:7px; color:#535c69; font-size:12px; }
+[data-layout-preview="modern"] .workspace-center-tabs button[aria-selected="true"] { color:#222a35; box-shadow:0 1px 4px #22304a1f; }
+[data-layout-preview="modern"] .workspace-tools-trigger,
+[data-layout-preview="modern"] .workspace-panel-toggle { border-color:#dcdfe5; border-radius:9px; box-shadow:0 1px 2px #22304a06; }
+[data-layout-preview="modern"] .dispatch-workspace-upper { border:1px solid var(--preview-border); border-radius:12px; background:#fff; }
+[data-layout-preview="modern"] .dispatch-workspace-panel { min-width:0; border:1px solid var(--preview-border); border-radius:12px; background:#fff; box-shadow:0 2px 7px #24303f05; }
+[data-layout-preview="modern"] [data-case-detail-scroll-region] { background:#f3f4f7; }
+[data-layout-preview="modern"] [data-testid="case-edit-form-main"] > details,
+[data-layout-preview="modern"] [data-testid="case-tasks"] { border-radius:10px; border-color:#e1e4e9; box-shadow:0 1px 3px #24303f04; }
+[data-layout-preview="modern"] [data-testid="case-edit-form-main"] > details > summary { border-radius:9px 9px 0 0; background:#fafbfc; color:#394351; }
+[data-layout-preview="modern"] [data-testid="case-edit-form-main"] :is(input,select,textarea):not([type="checkbox"]):not([type="radio"]) { border-radius:7px; border-color:#d8dde4; background-color:#fff; }
+[data-layout-preview="modern"] [data-testid="dispatch-case-list"] { border-color:var(--preview-border); background:#fff; }
+[data-layout-preview="modern"] [data-testid="dispatch-case-list"] > div:first-child { background:#fafbfc; border-color:#e6e9ee; }
+[data-layout-preview="modern"] [data-testid="dispatch-case-list"] [data-case-number] { margin:5px 6px; padding:7px 8px; border:1px solid #e3e6eb; border-radius:10px; box-shadow:0 1px 3px #263a5705; }
+[data-layout-preview="modern"] [data-testid="dispatch-case-list"] [data-case-number].bg-yellow-50 { background:#fffae8; border-color:#e6cc6f; box-shadow:0 1px 4px #8a731112; }
+[data-layout-preview="modern"] [data-testid="dispatch-case-list"] [data-case-number] > button > span { font-size:11px; line-height:1.5; }
+[data-layout-preview="modern"] .dashboard-resize-left > span,
+[data-layout-preview="modern"] .dashboard-resize-right > span { width:3px; background:#c1c8d1; box-shadow:none; }
+[data-layout-preview="modern"] .dispatch-standalone-workspace { background:#eceef2; }
+[data-layout-preview="modern"] :focus-visible { outline-color:#927000; }
+[data-layout-preview="modern"] .live-sms-tabs { gap:6px; background:#f7f8fa; }
+[data-layout-preview="modern"] .live-sms-tabs button[aria-pressed="true"] { border-color:#d7bd58; background:#fff7d6; }
+[data-layout-preview="modern"] .live-sms-secondary { margin-left:auto; }
+[data-layout-preview="modern"] .live-sms-secondary > summary { cursor:pointer; padding:9px 5px; font-size:12px; color:#616975; }
+@media (min-width:1024px) {
+  [data-layout-preview="modern"].dispatch-app-shell:not([data-active-view="settings"]):not([data-active-view="reports"]) { height:100dvh; min-height:0; overflow:hidden; }
+  [data-layout-preview="modern"] [data-testid="dispatch-case-list"] { margin:7px 0 7px 7px; height:calc(100% - 14px); border:1px solid var(--preview-border); border-radius:12px; overflow:hidden; }
+  [data-layout-preview="modern"] [data-testid="dispatch-case-list"] > div:first-child { padding:9px; }
+  [data-layout-preview="modern"] .dispatch-widget-host { margin:7px 7px 7px 0; border:1px solid var(--preview-border); border-radius:12px; }
+}
+@media (max-width:1023px) {
+  .layout-preview-toolbar { padding:4px 8px; gap:4px; }
+  .layout-preview-description { font-size:10px; }
+  .layout-preview-options button { min-height:36px; font-size:11px; padding:3px 8px; }
+  [data-layout-preview="modern"] .dispatch-map-workspace { padding:5px; }
+  [data-layout-preview="modern"] .workspace-toolbar { gap:3px; margin-bottom:5px; }
+  [data-layout-preview="modern"] .dispatch-workspace-upper,
+  [data-layout-preview="modern"] .dispatch-workspace-panel { border-radius:9px; }
+}
+@media (max-width:767px), (pointer:coarse) {
+  .layout-preview-options button { min-height:44px; }
+  .layout-preview-toolbar { align-items:center; }
+  [data-layout-preview="modern"] .live-sms-tabs button,
+  [data-layout-preview="modern"] .live-sms-secondary > summary { min-height:44px; }
+}
+/* Legacy phone status chips used light ink on a dark header. Preserve every status
+   but give it readable ink on the preview's light header. The call bar stays dark. */
+[data-layout-preview="modern"] .dispatch-app-header :is([data-testid="telephony-not-configured"],[data-testid="phone-registration"],summary[aria-label^="Hovory:"]) { border-color:#dce1e7; background:#f0f2f5; color:#505a68; }
+[data-layout-preview="modern"] .dispatch-app-header :is([data-testid="phone-registration"],summary[aria-label^="Hovory:"]).text-emerald-100 { border-color:#b8dfcc; background:#ecf8f1; color:#17613d; }
+[data-layout-preview="modern"] .dispatch-app-header :is([data-testid="phone-registration"],summary[aria-label^="Hovory:"]).text-amber-100,
+[data-layout-preview="modern"] .dispatch-app-header [data-testid="telephony-stale"] { border-color:#e6d1a3; background:#fff6df; color:#79500b; }
+[data-layout-preview="modern"] .dispatch-app-header [data-testid="phone-registration"].text-red-100 { border-color:#edc4c4; background:#fff0f0; color:#a02626; }

@@ -1,0 +1,90 @@
+/* All presentation changes are opt-in; the existing host remains mounted. */
+[data-layout-preview="modern"] .dispatch-widget-host { background: #f3f4f6; border-color: #e0e2e7; }
+[data-layout-preview="modern"] .widget-host-header { min-height: 40px; padding-inline: 12px; background: #fafafc; }
+[data-layout-preview="modern"] .widget-host-header h2 { letter-spacing: -.01em; }
+[data-layout-preview="modern"] .dispatch-widget-host > div:nth-child(2) { padding: 8px; }
+[data-layout-preview="modern"] .dispatch-widget-host [data-widget] { margin-bottom: 8px; border: 1px solid #e0e2e7; border-radius: 13px; background: #fff; box-shadow: 0 2px 5px #17203304; }
+[data-layout-preview="modern"] .widget-section-toggle { min-height: 35px; border-bottom: 1px solid #eceef2; background: #fafafc; font-weight: 650; }
+[data-layout-preview="modern"] .widget-section-toggle[aria-expanded="false"] { border-bottom: 0; }
+[data-layout-preview="modern"] .widget-section-toggle:hover { background: #f0f1f4; }
+[data-layout-preview="modern"] .widget-settings { margin: 0 0 8px; border: 1px solid #dfe2e8; border-radius: 12px; background: #fafafc; padding: 10px; }
+[data-layout-preview="modern"] .widget-settings > div { margin-block: 4px; }
+[data-layout-preview="modern"] .widget-settings p { color: #596273; }
+[data-layout-preview="modern"] .widget-host-action { border-radius: 7px; }
+
+[data-layout-preview="modern"] .calculator-widget { padding: 11px; border-radius: 0 0 12px 12px; background: #27282d; color: #fff; }
+[data-layout-preview="modern"] .calculator-widget > label { color: #c5c7cf; font-size: 11px; }
+[data-layout-preview="modern"] .calculator-widget input { min-height: 44px; border-color: #53555f; border-radius: 8px; background: #33343b; color: #fff; text-align: right; }
+[data-layout-preview="modern"] .calculator-widget input::placeholder { color: #bbbcc5; font-size: 13px; }
+[data-layout-preview="modern"] .calculator-keypad { gap: 5px; grid-template-areas: "clear backspace open close" "seven eight nine divide" "four five six multiply" "one two three minus" "zero decimal equals plus"; }
+[data-layout-preview="modern"] .calculator-keypad button { min-height: 39px; border: 1px solid #ffffff08; border-radius: 9px; background: #42434a; color: #fff; }
+[data-layout-preview="modern"] .calculator-keypad button:hover { background: #575861; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="7"] { grid-area: seven; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="8"] { grid-area: eight; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="9"] { grid-area: nine; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="4"] { grid-area: four; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="5"] { grid-area: five; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="6"] { grid-area: six; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="1"] { grid-area: one; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="2"] { grid-area: two; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="3"] { grid-area: three; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="0"] { grid-area: zero; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key=","] { grid-area: decimal; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="("] { grid-area: open; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key=")"] { grid-area: close; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="÷"] { grid-area: divide; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="×"] { grid-area: multiply; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="−"] { grid-area: minus; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="+"] { grid-area: plus; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="equals"] { grid-area: equals; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="clear"] { grid-area: clear; font-size: 11px; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="backspace"] { grid-area: backspace; display: inline-flex; }
+[data-layout-preview="modern"] .calculator-keypad :is([data-calculator-key="clear"], [data-calculator-key="backspace"], [data-calculator-key="("], [data-calculator-key=")"]) { background: #686a75; }
+[data-layout-preview="modern"] .calculator-keypad :is([data-calculator-key="÷"], [data-calculator-key="×"], [data-calculator-key="−"], [data-calculator-key="+"], [data-calculator-key="equals"]) { background: #a95000; }
+[data-layout-preview="modern"] .calculator-keypad :is([data-calculator-key="÷"], [data-calculator-key="×"], [data-calculator-key="−"], [data-calculator-key="+"], [data-calculator-key="equals"]):hover { background: #c05c00; }
+[data-layout-preview="modern"] .calculator-keypad button:disabled { opacity: .5; cursor: default; }
+[data-layout-preview="modern"] .calculator-widget :is(button, input):focus-visible { outline: 2px solid #ffc85b; outline-offset: 2px; }
+[data-layout-preview="modern"] .calculator-result { background: #383940; color: #fff; }
+[data-layout-preview="modern"] .calculator-result button { color: #ffd087; font-size: 12px; }
+[data-layout-preview="modern"] .calculator-widget > [role="status"] { color: #f2d6af; font-size: 12px; }
+
+[data-layout-preview="modern"] [data-notebook-panel] { gap: 9px; background: #fff; }
+[data-layout-preview="modern"] [data-notebook-panel] > header h2 { font-size: 15px; }
+[data-layout-preview="modern"] [data-note-tone="0"] { --note-paper: #fff3bb; --note-edge: #e5cf77; }
+[data-layout-preview="modern"] [data-note-tone="1"] { --note-paper: #e4efd5; --note-edge: #bace9f; }
+[data-layout-preview="modern"] [data-note-tone="2"] { --note-paper: #f3e1ee; --note-edge: #dbc0d3; }
+[data-layout-preview="modern"] [data-note-tone="3"] { --note-paper: #e0ecf8; --note-edge: #b8cfe5; }
+[data-layout-preview="modern"] [data-note-list] { gap: 8px; }
+[data-layout-preview="modern"] [data-note-list] button { position: relative; padding: 13px 12px 10px; border-color: var(--note-edge); border-top-width: 4px; border-radius: 9px; background: var(--note-paper); color: #273040; box-shadow: 0 2px 3px #17203306; }
+[data-layout-preview="modern"] [data-note-list] button:hover { filter: brightness(.98); }
+[data-layout-preview="modern"] [data-note-list] button strong { font-size: 13px; }
+[data-layout-preview="modern"] [data-note-list] button span { color: #536071; }
+[data-layout-preview="modern"] [data-note-editor] { padding: 12px; border: 1px solid var(--note-edge); border-top-width: 5px; border-radius: 10px; background: var(--note-paper); }
+[data-layout-preview="modern"] [data-note-editor] :is(input:not([type="checkbox"]), textarea) { border-color: var(--note-edge); background: #ffffffb3; }
+[data-layout-preview="modern"] [data-note-editor] textarea { background-image: repeating-linear-gradient(transparent 0, transparent calc(1.5em - 1px), #5c563510 calc(1.5em - 1px), #5c563510 1.5em); background-attachment: local; }
+[data-layout-preview="modern"] [data-note-editor] button { background: #ffffffba; font-size: 12px; }
+[data-layout-preview="modern"] [data-note-editor] summary { color: #374254; }
+
+[data-layout-preview="modern"] .calendar-widget { padding: 10px; }
+[data-layout-preview="modern"] .calendar-header h3 { color: #ac321f; }
+[data-layout-preview="modern"] .calendar-days { gap: 2px; }
+[data-layout-preview="modern"] .calendar-day { min-height: 31px; border-radius: 8px; }
+[data-layout-preview="modern"] .calendar-day[aria-current="date"] { box-shadow: inset 0 0 0 1px #cb4936; }
+[data-layout-preview="modern"] .calendar-day[aria-pressed="true"] { background: #b73c2b; color: #fff; }
+[data-layout-preview="modern"] .calendar-day[data-current-month="false"]:not([aria-pressed="true"]) { color: #777e8b; }
+[data-layout-preview="modern"] .calendar-task { border-color: #e4e6eb; background: #fafbfc; }
+[data-layout-preview="modern"] .calendar-task:hover { background: #f1f3f6; }
+[data-layout-preview="modern"] .calendar-widget :is(button, input):focus-visible { outline: 2px solid #b73c2b; outline-offset: 1px; }
+[data-layout-preview="modern"] [data-widget="route"] > div > section { border-radius: 0; box-shadow: none; --tw-ring-shadow: 0 0 #0000; }
+
+@media (max-width: 767px), (pointer: coarse) {
+  [data-layout-preview="modern"] .widget-section-toggle,
+  [data-layout-preview="modern"] .calculator-keypad button,
+  [data-layout-preview="modern"] .calendar-control,
+  [data-layout-preview="modern"] .calendar-completed,
+  [data-layout-preview="modern"] .calendar-day { min-height: 44px; }
+  [data-layout-preview="modern"] .calendar-control { min-width: 44px; }
+  [data-layout-preview="modern"] .calendar-days { min-width: 308px; gap: 0; }
+  [data-layout-preview="modern"] .calendar-day { min-width: 44px; }
+  [data-layout-preview="modern"] .calculator-widget input { font-size: 16px; }
+}

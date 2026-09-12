@@ -12,6 +12,13 @@ export type NotebookEditorState = { hasPendingChanges?: () => boolean; dirty: bo
 export type NotebookProviderProps = { enabled?: boolean; actorKey: string; viewerProfileId?: string; onEditorStateChange?: (state: NotebookEditorState) => void; children: ReactNode };
 const NotebookContext = createContext<NotebookStore | null>(null);
 
+/** Presentation only: a stable paper tint without changing the private note DTO. */
+function noteTone(id: string) {
+  let hash = 0;
+  for (const character of id) hash = (hash * 31 + character.charCodeAt(0)) | 0;
+  return Math.abs(hash) % 4;
+}
+
 /** Keep this provider mounted across widget/page navigation. No note text is persisted. */
 export function NotebookProvider(props: NotebookProviderProps) {
   return <NotebookSession key={`${props.actorKey}:${props.viewerProfileId ?? ""}`} {...props} />;
@@ -81,11 +88,11 @@ export function NotebookPanel({ active = true, compact = false }: { active?: boo
   const dirty = Object.keys(state.drafts).length > 0;
   if (!active) return null;
   if (!store.enabled) return <section className={styles.panel} aria-label="Osobné poznámky"><h2>Poznámky</h2><p>Poznámky budú dostupné po aktivácii bezpečného úložiska.</p></section>;
-  return <section className={`${styles.panel} ${compact ? styles.compact : ""}`} aria-label="Osobné poznámky">
+  return <section className={`${styles.panel} ${compact ? styles.compact : ""}`} data-notebook-panel aria-label="Osobné poznámky">
     <header className={styles.header}><h2>Poznámky</h2><button type="button" onClick={() => { setConfirmDelete(null); void store.create(); }} disabled={state.saving || state.hidden} aria-label="Nová súkromná poznámka"><Plus size={17} />Nová</button></header>
     <div className={styles.status} role="status">{state.saving ? "Ukladám…" : state.hidden ? "Overujem prístup…" : state.loading ? "Aktualizujem…" : dirty ? "Neuložené zmeny" : "Uložené"}</div>
     {state.error && <div className={styles.error} role="alert">{state.error}<button type="button" onClick={() => { void (state.hidden || !dirty ? store.reauthorize() : store.save()); }} disabled={state.saving}>Skúsiť znova</button></div>}
-    {state.hidden ? <p>Obsah bude dostupný po overení prístupu.</p> : selected && draft ? <div className={styles.editor}>
+    {state.hidden ? <p>Obsah bude dostupný po overení prístupu.</p> : selected && draft ? <div className={styles.editor} data-note-editor data-note-tone={noteTone(selected.id)}>
       <div className={styles.actions}><button type="button" onClick={() => { store.select(null); setConfirmDelete(null); }}><ArrowLeft size={16} />Zoznam</button><span>{selected.canEdit ? draft.recipientProfileIds.length ? <><Share2 size={14} />Zdieľaná</> : <><LockKeyhole size={14} />Súkromná</> : "Zdieľaná so mnou · iba čítanie"}</span></div>
       <label>Názov<input value={draft.title} maxLength={NOTE_TITLE_LIMIT} readOnly={!selected.canEdit} placeholder="Bez názvu" onChange={event => store.edit(selected.id, { title: event.target.value })} /></label>
       <label>Text poznámky<textarea value={draft.body} maxLength={NOTE_BODY_LIMIT} readOnly={!selected.canEdit} rows={compact ? 7 : 15} onChange={event => store.edit(selected.id, { body: event.target.value })} /></label>
@@ -100,7 +107,7 @@ export function NotebookPanel({ active = true, compact = false }: { active?: boo
       </>}
     </div> : <>
       <label className={styles.search}>Hľadať v mojich a zdieľaných poznámkach<input type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
-      <ul className={styles.list}>{state.notes.filter(note => `${note.title}\n${note.body}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map(note => <li key={note.id}><button type="button" onClick={() => { store.select(note.id); setConfirmDelete(null); }}><strong>{state.drafts[note.id]?.title || note.title || "Bez názvu"}{state.drafts[note.id] ? " •" : ""}</strong><span>{note.canEdit ? note.recipientProfileIds.length ? "Zdieľaná" : "Súkromná" : "Zdieľaná so mnou"}</span></button></li>)}</ul>
+      <ul className={styles.list} data-note-list>{state.notes.filter(note => `${note.title}\n${note.body}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map(note => <li key={note.id}><button type="button" data-note-tone={noteTone(note.id)} onClick={() => { store.select(note.id); setConfirmDelete(null); }}><strong>{state.drafts[note.id]?.title || note.title || "Bez názvu"}{state.drafts[note.id] ? " •" : ""}</strong><span>{note.canEdit ? note.recipientProfileIds.length ? "Zdieľaná" : "Súkromná" : "Zdieľaná so mnou"}</span></button></li>)}</ul>
       {!state.loading && state.notes.length === 0 && <p>Tu si môžete uložiť súkromné poznámky a vybrané zdieľať s kolegami.</p>}
     </>}
   </section>;
