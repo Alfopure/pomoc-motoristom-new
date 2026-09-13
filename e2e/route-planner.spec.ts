@@ -75,7 +75,7 @@ for (const failure of ["conversion", "fetch", "coordinates"]) test(`place ${fail
   await element.evaluate((node, mode) => { (node as HTMLElement).dataset.placeFailure = mode; }, failure);
   const input = page.getByRole("textbox", { name: "Kam", exact: true });
   await input.fill("Praha"); await input.press("Enter");
-  await expect(page.getByRole("status")).toContainText(failure === "coordinates" ? "Vyberte miesto s platnou polohou" : "Miesto sa nepodarilo načítať");
+  await expect(page.locator('p[role="status"]')).toContainText(failure === "coordinates" ? "Vyberte miesto s platnou polohou" : "Miesto sa nepodarilo načítať");
   await expect(page.getByText("Načítavam miesto…")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeDisabled();
   expect(state.requests).toEqual([]);
@@ -95,13 +95,13 @@ test("a timed out place lookup allows a new selection and cannot replace it when
   await input.fill("Praha"); await input.press("Enter");
   await expect(page.getByText("Načítavam miesto…")).toBeVisible();
   await page.clock.fastForward(15_001);
-  await expect(page.getByRole("status")).toContainText("Načítanie miesta trvá príliš dlho");
+  await expect(page.locator('p[role="status"]')).toContainText("Načítanie miesta trvá príliš dlho");
   await expect(page.getByRole("button", { name: "Vypočítať trasu" })).toBeDisabled();
   await element.evaluate(node => { (node as HTMLElement).dataset.delay = "0"; });
   await select(page, "Kam", "Wien");
   await page.clock.fastForward(30_000);
   await expect(input).toHaveValue("Wien, Österreich");
-  await expect(page.getByRole("status")).toHaveCount(0);
+  await expect(page.locator('p[role="status"]')).toHaveCount(0);
   await page.getByRole("button", { name: "Vypočítať trasu" }).click();
   await expect(page.getByText("420,1 km", { exact: true })).toBeVisible();
   expect(state.requests).toEqual([{ origin: { lat: 48.1486, lng: 17.1077 }, destination: { lat: 48.2082, lng: 16.3738 }, intermediates: [] }]);
@@ -281,5 +281,37 @@ test("map-free planner calculates without creating a map or changing its viewpor
   await expect(page.getByRole("region", { name: "Plánovač trasy" }).getByText("420,1 km", { exact: true })).toBeVisible();
   expect(await readMapActivity()).toEqual({ mapCreations: 0, viewportChanges: 0 });
   expect(state.requests).toHaveLength(1);
+  expect(state.errors).toEqual([]);
+});
+
+
+for (const method of ["pointer", "keyboard"] as const) test(`route ${method} sorting retains selected places and changes endpoints`, async ({ page }) => {
+  const state = await boot(page, 1440, true);
+  await select(page, "Odkiaľ", "Bratislava"); await select(page, "Kam", "Praha");
+  await page.getByRole("button", { name: "Pridať bod prejazdu" }).click();
+  await select(page, "Bod prejazdu 1", "Wien");
+  const from = page.getByRole("button", { name: "Presunúť miesto 1", exact: true });
+  if (method === "keyboard") {
+    // KeyboardSensor installs its document listener on the next task after pickup.
+    await from.focus(); await from.press("Space", { delay: 50 });
+    await from.press("ArrowDown", { delay: 50 });
+    await expect(page.locator('[id^="DndLiveRegion"]')).toContainText("nad pozíciou 2");
+    await from.press("ArrowDown", { delay: 50 });
+    await expect(page.locator('[id^="DndLiveRegion"]')).toContainText("nad pozíciou 3");
+    await from.press("Space");
+  } else {
+    const a = (await from.boundingBox())!;
+    const b = (await page.getByRole("button", { name: "Presunúť miesto 3", exact: true }).boundingBox())!;
+    await page.mouse.move(a.x+a.width/2,a.y+a.height/2); await page.mouse.down();
+    await page.mouse.move(b.x+b.width/2,b.y+b.height/2,{steps:12}); await page.mouse.up();
+  }
+  await expect(page.getByRole("textbox", { name: "Odkiaľ", exact: true })).toHaveValue("Wien, Österreich");
+  await expect(page.getByRole("textbox", { name: "Bod prejazdu 1", exact: true })).toHaveValue("Praha, Česko");
+  await expect(page.getByRole("textbox", { name: "Kam", exact: true })).toHaveValue("Bratislava, Slovensko");
+  await expect(page.locator('p[role="status"]')).toContainText("Poradie bodov je zmenené");
+  expect(state.requests).toEqual([]);
+  await page.getByRole("button", { name: "Vypočítať trasu" }).click();
+  await expect(page.getByText("420,1 km", { exact: true })).toBeVisible();
+  expect(state.requests).toEqual([{ origin: { lat:48.2082,lng:16.3738 }, destination: { lat:48.1486,lng:17.1077 }, intermediates:[{lat:50.0755,lng:14.4378}] }]);
   expect(state.errors).toEqual([]);
 });

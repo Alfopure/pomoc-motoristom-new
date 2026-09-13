@@ -42,6 +42,8 @@ async function workspaceRpc<T>(actor: TaskWorkspaceActor, action: string, id?: s
   const request = client.rpc("motorist_task_workspace", { p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId, p_action: action, p_task_id: id ? taskId(id) : null, p_input: input });
   const { data, error } = await (signal ? request.abortSignal(signal) : request);
   if (error) {
+    if (error.code === "22023" && error.message === "Task review required") throw new MutationError("Táto úloha vyžaduje kontrolu. Odovzdajte ju kontrolórovi; vybaviť ju môže až po schválení.", 400);
+    if (error.code === "22023" && error.message === "Invalid task reviewer") throw new MutationError("Kontrolór a zodpovedná osoba úlohy musia byť rôzni kolegovia.", 400);
     const status = error.code === "42501" ? 403 : error.code === "P0002" ? 404 : error.code === "PT409" || error.code === "40001" || error.code === "23505" ? 409 : error.code === "22023" || error.code === "22P02" ? 400 : 503;
     const message = error.code === "55000" ? "Nové úlohy ešte nie sú aktivované. Vyžaduje sa kompatibilná databáza a overenie všetkých zapisujúcich verzií aplikácie." : status === 409 ? "Úloha sa medzičasom zmenila. Načítajte aktuálnu verziu." : status === 403 || status === 404 ? "Úloha nie je dostupná alebo nemáte oprávnenie." : status === 400 ? "Skontrolujte údaje úlohy a jej väzby." : "Úlohu sa nepodarilo spracovať. Skúste to znova.";
     throw new MutationError(message, status);

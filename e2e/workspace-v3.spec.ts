@@ -213,10 +213,10 @@ test("successful case completion retains newer typing and saves it to the same c
   let canonical = await page.evaluate(() => (window as unknown as { workspaceFixtureData: DispatchData }).workspaceFixtureData);
   let release!: () => void;
   const firstResponse = new Promise<void>(resolve => { release = resolve; });
-  const writes: { path: string; body: { status?: DispatchData["dispatchCases"][number]["status"]; licensePlate?: string; expectedUpdatedAt?: string } }[] = [];
+  const writes: { path: string; body: { status?: DispatchData["dispatchCases"][number]["status"]; licensePlate?: string; expectedUpdatedAt?: string; mutationId: string } }[] = [];
   await page.route("**/api/cases/*", async route => {
     const url = new URL(route.request().url());
-    if (route.request().method() !== "PATCH") return route.fulfill({ json: { dispatchData: canonical } });
+    if (route.request().method() !== "PATCH") return route.fulfill({ json: { caseDetail: { ...canonical.dispatchCases.find(item => item.id === url.pathname.split("/")[3]), tasks: undefined } } });
     const body = route.request().postDataJSON() as typeof writes[number]["body"];
     writes.push({ path: url.pathname, body });
     if (writes.length === 1) await firstResponse;
@@ -225,7 +225,9 @@ test("successful case completion retains newer typing and saves it to the same c
     canonical = { ...canonical, source: "supabase", dispatchCases: canonical.dispatchCases.map(item => item.id !== caseId ? item : {
       ...item, updatedAt, status: body.status ?? item.status, vehicle: { ...item.vehicle, licensePlate: body.licensePlate ?? item.vehicle.licensePlate },
     }) };
-    return route.fulfill({ json: { dispatchData: canonical, committedRevision: updatedAt } });
+    // Match the detail-v2 acknowledgement: the exact mutation identity and one
+    // canonical case, without replacing independently versioned task data.
+    return route.fulfill({ json: { caseDetail: { ...canonical.dispatchCases.find(item => item.id === caseId), tasks: undefined }, mutationId: body.mutationId, committedRevision: updatedAt } });
   });
   await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
   const editor = page.getByTestId("case-edit-form-main");
@@ -240,7 +242,9 @@ test("successful case completion retains newer typing and saves it to the same c
   await expect(plate).toHaveValue("NEWER77");
   await expect.poll(() => writes.length).toBe(2);
   expect(writes[1].path).toBe(writes[0].path);
-  expect(writes[1].body).toEqual({ licensePlate: "NEWER77", expectedUpdatedAt: "2026-09-10T11:00:01.000Z" });
+  expect(writes[0].body).toEqual({ status: "completed_assisted", expectedUpdatedAt: "2026-05-20T18:35:00+02:00", mutationId: expect.any(String) });
+  expect(writes[1].body).toEqual({ licensePlate: "NEWER77", expectedUpdatedAt: "2026-09-10T11:00:01.000Z", mutationId: expect.any(String) });
+  expect(writes[1].body.mutationId).not.toBe(writes[0].body.mutationId);
   await expect(plate).toHaveValue("NEWER77");
   expect(errors).toEqual([]);
 });

@@ -26,4 +26,19 @@ describe("workspace preferences", () => {
   it("isolates both organization and profile", () => {
     expect(new Set([workspacePreferenceStorageKey("a", "p"), workspacePreferenceStorageKey("b", "p"), workspacePreferenceStorageKey("a", "q")]).size).toBe(3);
   });
+  it("adds an optional calendar without changing any saved legacy widget preference", () => {
+    const legacy = [
+      { id: "calculator", visible: true, collapsed: false },
+      { id: "notes", visible: false, collapsed: true },
+      { id: "phone", visible: true, collapsed: true },
+      { id: "fleet", visible: false, collapsed: false },
+      { id: "tasks", visible: true, collapsed: false },
+      { id: "search", visible: false, collapsed: false },
+      { id: "route", visible: true, collapsed: true },
+    ];
+    const parsed = parseWorkspacePreferences(JSON.stringify({ widgets: legacy, leftCollapsed: true, rightCollapsed: true, centerView: "table" }));
+    expect(parsed.widgets.slice(0, legacy.length)).toEqual(legacy);
+    expect(parsed.widgets.at(-1)).toEqual({ id: "calendar", visible: false, collapsed: false });
+    expect(parsed).toMatchObject({ leftCollapsed: true, rightCollapsed: true, centerView: "table" });
+  });
 });

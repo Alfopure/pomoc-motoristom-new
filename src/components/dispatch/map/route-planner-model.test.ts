@@ -87,4 +87,23 @@ describe("shared route planner", () => {
     expect(store.getSnapshot().result).toBe(null);
     expect(store.getSnapshot().busy).toBe(false);
   });
+
+  it("reorders any selected point by stable identity and discards a stale route response", async () => {
+    let complete!: (value: Response) => void;
+    const { store } = fixture(vi.fn<typeof fetch>(() => new Promise(resolve => { complete = resolve; })));
+    store.addStop(); store.addStop();
+    const [first, second] = store.getSnapshot().stops.slice(1, -1);
+    store.updatePlace(first.id, { ...start, label: "Senec" }, "Senec");
+    store.updatePlace(second.id, { ...end, label: "Brno" }, "Brno");
+    const request = store.calculate();
+    store.reorderStop(1, 0);
+    expect(store.getSnapshot().stops.map(stop => stop.query)).toEqual(["Praha", "Bratislava", "Senec", "Brno"]);
+    expect(store.getSnapshot().stops[2]).toMatchObject({ id: first.id, place: { label: "Senec" } });
+    complete(response()); await request;
+    expect(store.getSnapshot().result).toBeNull();
+    expect(store.getSnapshot().busy).toBe(false);
+    const snapshot = store.getSnapshot();
+    store.reorderStop(999, 0); store.reorderStop(0, 0);
+    expect(store.getSnapshot()).toBe(snapshot);
+  });
 });
