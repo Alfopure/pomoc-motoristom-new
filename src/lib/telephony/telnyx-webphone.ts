@@ -62,6 +62,9 @@ export type WebphoneSdkCall = {
   };
   telnyxIDs: { telnyxCallControlId: string; telnyxSessionId: string; telnyxLegId: string };
   isAudioMuted: boolean;
+  /** Public SDK streams; terminal calls must release capture before slow BYE acknowledgement. */
+  localStream?: MediaStream;
+  remoteStream?: MediaStream;
   answer: (params?: never) => Promise<void> | void;
   hangup: () => Promise<void> | void;
   muteAudio: () => void;
@@ -179,6 +182,7 @@ export class TelnyxWebphone {
   private connecting = false;
   private clientGeneration = 0;
   private answeringCallId: string | null = null;
+  private hangupRequestedCallId: string | null = null;
   private answeredCallId: string | null = null;
   private callError: string | null = null;
   private audioBlocked = false;
@@ -350,6 +354,7 @@ export class TelnyxWebphone {
     const call = this.call;
     if (!call) return;
     this.stopRinging();
+    this.hangupRequestedCallId = call.id;
     try {
       const result = call.hangup();
       // The SDK can end media locally before its signaling request settles,
@@ -359,6 +364,7 @@ export class TelnyxWebphone {
     } catch {
       // Retain a still-live call when hangup fails; terminal SDK state is
       // reconciled below even when the SDK throws synchronously.
+      if (this.hangupRequestedCallId === call.id) this.hangupRequestedCallId = null;
     } finally {
       this.publish();
     }
@@ -368,12 +374,13 @@ export class TelnyxWebphone {
   confirmCallEnded(callId: string): void {
     const call = this.call;
     if (!call || call.id !== callId) return;
+    const hangupAlreadySent = this.hangupRequestedCallId === callId;
     this.confirmedEndedCallIds.add(callId);
     this.clearCurrentCall();
     this.publish();
     // Server confirmation is authoritative even when the stale SDK call can
     // no longer send BYE. Release its media without blocking the next call.
-    void Promise.resolve().then(() => call.hangup()).catch(() => undefined);
+    if (!hangupAlreadySent) void Promise.resolve().then(() => call.hangup()).catch(() => undefined);
   }
 
   setMuted(muted: boolean): void {
@@ -727,6 +734,7 @@ export class TelnyxWebphone {
     this.callSessionId = null;
     this.answeringCallId = null;
     this.answeredCallId = null;
+    this.hangupRequestedCallId = null;
     this.audioAttempt += 1;
     this.audioBlocked = false;
     if (!client) return;
@@ -773,6 +781,7 @@ export class TelnyxWebphone {
       this.callError = null;
       this.answeringCallId = null;
       this.answeredCallId = null;
+      this.hangupRequestedCallId = null;
       this.audioAttempt += 1;
       this.audioBlocked = false;
     }
@@ -981,6 +990,19 @@ export class TelnyxWebphone {
   }
 
   private clearCurrentCall(): void {
+    // SDK 2.27 sets Hangup before awaiting BYE (up to 5 seconds), and only
+    // closes its peer afterwards. Release this terminal call's actual tracks
+    // now; signaling and the authoritative server command still finish normally.
+    const remoteStream = this.call?.remoteStream;
+    for (const stream of new Set([this.call?.localStream, remoteStream])) {
+      for (const track of stream?.getTracks() ?? []) {
+        try { track.stop(); } catch { /* Continue releasing the other tracks. */ }
+      }
+    }
+    if (remoteStream && this.remoteAudio?.srcObject === remoteStream) {
+      this.remoteAudio.pause();
+      this.remoteAudio.srcObject = null;
+    }
     this.finishInviteTiming?.({ outcome: "cancelled" });
     this.finishAudioTiming?.({ outcome: "cancelled" });
     this.finishInviteTiming = null;

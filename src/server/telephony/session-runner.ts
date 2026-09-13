@@ -24,6 +24,7 @@ import { SessionLeaseLostError, SessionTerminationPendingError } from "./service
 import { resolveSessionRecordingPolicy } from "./recording-policy-service";
 import {
   DEFAULT_ROUTING_SETTINGS,
+  ACTIVE_SESSION_STATES,
   emptyTransition,
   readMeta,
   toJson,
@@ -208,10 +209,31 @@ async function loadIvr(admin: AdminClient, organizationId: string, menuId: strin
 
 const ROUTING_STATES = new Set(["received", "greeting", "ivr", "ringing", "waiting", "parked", "after_hours", "callback_offered"]);
 
-export async function loadRoutingContext(deps: SessionRunnerDeps, session: SessionRow, event?: SessionEvent): Promise<RoutingContext> {
+export async function loadRoutingContext(deps: SessionRunnerDeps, session: SessionRow, event?: SessionEvent, snapshotLegs?: LegRow[]): Promise<RoutingContext> {
   const { admin, organizationId } = deps;
   const now = nowOf(deps)();
   const meta = readMeta(session);
+  const bridgeObservation = event?.kind === "telnyx" && event.type === "call.bridged" &&
+    meta.recording?.policy.enabled === false && !meta.recording.recorders.length &&
+    !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence &&
+    !readPendingEffects(session).entries.length &&
+    snapshotLegs?.some(leg => leg.telnyx_call_control_id === event.callControlId && Boolean(leg.answered_at));
+  if (event?.kind === "app" && event.type === "hangup" || bridgeObservation) {
+    // Ending a call needs only its already authenticated session/legs. New
+    // IVR, capacity, media and recording settings cannot authorize a hangup
+    // more strongly, and a slow/broken settings read must not hold it hostage.
+    // Retain frozen recorder evidence so teardown never erases capture state.
+    // Likewise, a known answered leg's bridge confirmation only records that
+    // fact. An out-of-order first bridge still loads the complete route below.
+    return {
+      now, organizationId, environment: deps.environment, line: null,
+      businessHours: null, ivr: null, ringPlan: null, ringPlans: {}, presence: [], devices: [],
+      openOffers: [], activeLegCount: 0, settings: DEFAULT_ROUTING_SETTINGS,
+      fromNumber: null, mediaAvailable: false,
+      announcements: meta.announcements ? readAnnouncementConfig(meta.announcements) : undefined,
+      recordingPolicy: meta.recording?.policy,
+    };
+  }
   const [line, settings, recordingPolicy] = await Promise.all([
     session.line_id
       ? admin
@@ -485,13 +507,30 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
         throw new SessionEventDeferredError(error instanceof Error ? error.message : "session snapshot unavailable");
       }
       const durable = snapshot.session.writer_contract === 2 || telephonyStabilityEnabled() || hasStabilityContract(snapshot.session);
+      if (owner?.contract === 2 && snapshot.session.termination_requested_at &&
+        !readMeta(snapshot.session).hangup && ACTIVE_SESSION_STATES.has(snapshot.session.state) && snapshot.legs.length &&
+        !(event.kind === "app" && event.type === "hangup")) {
+        // An authorized hangup can commit its intent while another webhook
+        // owns the lease. Its original request may then time out. Resume that
+        // durable intent at the next acquired lease, including the inbound
+        // customer, which has no POST /calls journal entry to compensate.
+        const termination = await runOwnedSessionEvent(deps, sessionId, {
+          kind: "app", type: "hangup", id: `termination:${sessionId}:${snapshot.session.termination_requested_at}`,
+          actorProfileId: null, occurredAt: snapshot.session.termination_requested_at,
+        }, owner);
+        effectsMayHaveStarted = true;
+        if (event.kind === "app" && event.type === "sweep") return termination;
+        // Preserve the original provider fact after applying the stop intent;
+        // never acknowledge a hangup webhook without closing its exact leg.
+        snapshot = await loadSessionSnapshot(deps, sessionId);
+      }
       if (owner?.contract === 2 && event.kind === "telnyx") await reconcileProviderEvent(deps.admin, sessionId, event, deps.telnyx);
       if (owner?.contract === 2 && event.kind === "telnyx" && event.rawClientState && event.callControlId && ["call.initiated", "call.answered", "call.hangup"].includes(event.type)) {
         await ownershipRpc(deps.admin, "motorist_provider_observe_dial_v2", { p_session_id: sessionId,
           p_client_state: event.rawClientState, p_call_control_id: event.callControlId, p_call_leg_id: event.callLegId,
           p_call_session_id: event.callSessionId, p_alive: event.type !== "call.hangup" });
       }
-      if (owner?.contract === 2 && snapshot.session.termination_requested_at) {
+      if (owner?.contract === 2 && snapshot.session.termination_requested_at && !(event.kind === "app" && event.type === "hangup")) {
         effectsMayHaveStarted = true;
         owner.terminationPending = await reconcileTermination(deps, sessionId);
       }
@@ -505,7 +544,7 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
       }
       let context: RoutingContext;
       try {
-        context = await loadRoutingContext(deps, snapshot.session, event);
+        context = await loadRoutingContext(deps, snapshot.session, event, snapshot.legs);
       } catch (error) {
         if (effectsMayHaveStarted) throw error;
         // A failed read has not applied this event or run compensation. Keep
@@ -582,6 +621,11 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
         effects.eventTiming = () => timing(effectsStarted);
         effectsMayHaveStarted = true;
         let apply = await applyReduceResult(effects, { session: snapshot.session, result, event, expectedVersion: snapshot.session.version });
+        if (owner?.contract === 2 && snapshot.session.termination_requested_at && event.kind === "app" && event.type === "hangup") {
+          // Stop the caller through the durable hangup transition first. Late
+          // outbound acceptances are independent cleanup obligations afterward.
+          owner.terminationPending = await reconcileTermination(deps, sessionId);
+        }
         // Complete only bounded internal continuations while retaining this event's lease.
         // These are command acknowledgements, never fabricated provider webhooks.
         for (let continuation = 0; continuation < 2; continuation += 1) {

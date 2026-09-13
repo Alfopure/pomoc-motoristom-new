@@ -6,7 +6,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 
 import { resolveDefaultOrganizationId } from "./default-organization";
-import { MutationError } from "./motorist-mutations";
+import { MutationError } from "./mutation-error";
 
 type MotoristRole = Database["public"]["Tables"]["motorist_profiles"]["Row"]["role"];
 

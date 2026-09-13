@@ -1,4 +1,5 @@
 import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
+import { after } from "next/server";
 import { createTelephonyDeps, notConfiguredResponse, telephonyLogger } from "@/server/telephony/runtime";
 import { getTelnyxConfig } from "@/server/telephony/telnyx/env";
 import { processTelnyxEvent } from "@/server/telephony/telnyx/event-processor";
@@ -47,7 +48,7 @@ export async function POST(request: Request) {
 
     try {
       const deps = await measureRequestStep("read", () => createTelephonyDeps({ config }));
-      const result = await processTelnyxEvent(deps, envelope);
+      const result = await processTelnyxEvent({ ...deps, deferMaintenance: (work) => after(work) }, envelope);
 
       return Response.json(
         {
