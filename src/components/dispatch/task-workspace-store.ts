@@ -1,5 +1,6 @@
 import type { CasePriority } from "@/domain/types";
 import { TASK_MESSAGE_LIMIT, type TaskMessage, type TaskMessageCursor, type WorkspaceTask } from "@/domain/task-workspace";
+import type { TaskWorkflowAction, TaskWorkflowCommand } from "@/domain/task-workflow";
 export type TaskDraft = { title: string; assignedTo: string; dueAt: string; reminderAt: string; priority: CasePriority; status: "open" | "done"; caseIds: string[]; reminderChannels: ("in_app" | "email")[] };
 export type TaskBoardMutation = { status: "open" | "done"; dueAt?: string | null };
 export type TaskWorkspaceSnapshot = {
@@ -7,6 +8,7 @@ export type TaskWorkspaceSnapshot = {
   drafts: Record<string, { value: TaskDraft; revision: number }>;
   chats: Record<string, { messages: TaskMessage[]; nextCursor: TaskMessageCursor | null; loaded: boolean; latestFetched?: TaskMessageCursor }>;
   chatDrafts: Record<string, string>; pendingMessages: Record<string, { clientMessageId: string; body: string }>;
+  workflowEnabled: boolean; pendingWorkflow: Record<string, TaskWorkflowCommand>;
   hidden: boolean; loading: boolean; saving: boolean; error: string; conflicts: string[];
 };
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
@@ -28,7 +30,7 @@ export class TaskWorkspaceStore {
   private onTasksChange?: (tasks: WorkspaceTask[]) => void;
   setOnTasksChange = (callback?: (tasks: WorkspaceTask[]) => void) => { this.onTasksChange = callback; };
   constructor(private featureEnabled: boolean, private viewer?: string, private fetcher: Fetcher = (url, init) => fetch(url, init), initialTasks: WorkspaceTask[] = []) {
-    this.state = { tasks: featureEnabled ? initialTasks : [], selectedId: null, creating: false, createDraft: emptyTaskDraft(viewer), drafts: {}, chats: {}, chatDrafts: {}, pendingMessages: {}, hidden: !featureEnabled, loading: false, saving: false, error: "", conflicts: [] };
+    this.state = { tasks: featureEnabled ? initialTasks : [], selectedId: null, creating: false, createDraft: emptyTaskDraft(viewer), drafts: {}, chats: {}, chatDrafts: {}, pendingMessages: {}, workflowEnabled: featureEnabled && initialTasks.some(task => task.workflowVersion === 1), pendingWorkflow: {}, hidden: !featureEnabled, loading: false, saving: false, error: "", conflicts: [] };
   }
   get enabled() { return this.featureEnabled; }
   setEnabled = (enabled: boolean) => {
@@ -39,8 +41,8 @@ export class TaskWorkspaceStore {
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<TaskWorkspaceSnapshot>) { this.state = { ...this.state, ...patch }; this.listeners.forEach(listener => listener()); }
-  get dirty() { return Boolean(!same(this.state.createDraft, emptyTaskDraft(this.viewer)) || Object.keys(this.state.drafts).length || Object.values(this.state.chatDrafts).some(value => value.trim()) || Object.keys(this.state.pendingMessages).length); }
-  clear = () => { this.generation++; this.readSequence++; this.openSequence++; this.messageReads.clear(); this.savePromise = null; this.exactReads.clear(); this.authoritativeList = false; this.revokedIds.clear(); this.update({ tasks: [], selectedId: null, creating: false, createDraft: emptyTaskDraft(this.viewer), drafts: {}, chats: {}, chatDrafts: {}, pendingMessages: {}, hidden: true, loading: false, saving: false, conflicts: [], error: "Prístup k úlohám treba znovu overiť." }); };
+  get dirty() { return Boolean(!same(this.state.createDraft, emptyTaskDraft(this.viewer)) || Object.keys(this.state.drafts).length || Object.values(this.state.chatDrafts).some(value => value.trim()) || Object.keys(this.state.pendingMessages).length || Object.keys(this.state.pendingWorkflow).length); }
+  clear = () => { this.generation++; this.readSequence++; this.openSequence++; this.messageReads.clear(); this.savePromise = null; this.exactReads.clear(); this.authoritativeList = false; this.revokedIds.clear(); this.update({ tasks: [], selectedId: null, creating: false, createDraft: emptyTaskDraft(this.viewer), drafts: {}, chats: {}, chatDrafts: {}, pendingMessages: {}, workflowEnabled: false, pendingWorkflow: {}, hidden: true, loading: false, saving: false, conflicts: [], error: "Prístup k úlohám treba znovu overiť." }); };
   reauthorize = () => { this.update({ hidden: true }); return this.refresh(); };
   discard = () => { if (!this.state.saving) this.update({ drafts: {}, chatDrafts: {}, pendingMessages: {}, createDraft: emptyTaskDraft(this.viewer), conflicts: [], error: "" }); };
   select = (id: string | null) => { this.openSequence++; this.update({ selectedId: id, creating: false, error: "" }); if (id) void this.loadMessages(id); };
@@ -65,7 +67,7 @@ export class TaskWorkspaceStore {
   private removeTask(id: string) {
     this.revokedIds.add(id);
     const without = <T,>(items: Record<string, T>) => Object.fromEntries(Object.entries(items).filter(([key]) => key !== id));
-    this.update({ tasks: this.state.tasks.filter(task => task.id !== id), drafts: without(this.state.drafts), chats: without(this.state.chats), chatDrafts: without(this.state.chatDrafts), pendingMessages: without(this.state.pendingMessages), selectedId: this.state.selectedId === id ? null : this.state.selectedId });
+    this.update({ tasks: this.state.tasks.filter(task => task.id !== id), drafts: without(this.state.drafts), chats: without(this.state.chats), chatDrafts: without(this.state.chatDrafts), pendingMessages: without(this.state.pendingMessages), pendingWorkflow: without(this.state.pendingWorkflow), selectedId: this.state.selectedId === id ? null : this.state.selectedId });
   }
   openCreate = () => { if (!this.enabled || this.state.hidden) return; this.update({ creating: true, selectedId: null, error: "" }); };
   editCreate = (patch: Partial<TaskDraft>) => { if (!this.enabled || this.state.hidden) return; this.update({ createDraft: { ...this.state.createDraft, ...patch }, error: "" }); };
@@ -95,7 +97,7 @@ export class TaskWorkspaceStore {
     if (!same(merged, this.state.tasks)) this.update({ tasks: merged });
     if (needsAuthorization && !this.state.loading) void this.refresh();
   };
-  private applyAuthorizedList(tasks: WorkspaceTask[]) {
+  private applyAuthorizedList(tasks: WorkspaceTask[], workflowEnabled: boolean) {
     const current = new Map(this.state.tasks.map(task => [task.id, task]));
     const merged = tasks.map(task => {
       this.revokedIds.delete(task.id);
@@ -112,7 +114,7 @@ export class TaskWorkspaceStore {
     }
     const retain = <T,>(items: Record<string, T>) => Object.fromEntries(Object.entries(items).filter(([id]) => allowed.has(id)));
     this.authoritativeList = true;
-    this.update({ tasks: merged, drafts: retain(this.state.drafts), chats: retain(this.state.chats), chatDrafts: retain(this.state.chatDrafts), pendingMessages: retain(this.state.pendingMessages),
+    this.update({ tasks: merged, drafts: retain(this.state.drafts), chats: retain(this.state.chats), chatDrafts: retain(this.state.chatDrafts), pendingMessages: retain(this.state.pendingMessages), pendingWorkflow: retain(this.state.pendingWorkflow), workflowEnabled,
       conflicts: this.state.conflicts.filter(id => allowed.has(id)), hidden: false, error: "", selectedId: this.state.selectedId && allowed.has(this.state.selectedId) ? this.state.selectedId : null });
     this.onTasksChange?.(merged);
   }
@@ -136,9 +138,9 @@ export class TaskWorkspaceStore {
     const sequence = ++this.readSequence, generation = this.generation;
     this.update({ loading: true });
     try {
-      const { tasks } = await this.request("/api/tasks") as { tasks: WorkspaceTask[] };
+      const { tasks, workflowEnabled } = await this.request("/api/tasks") as { tasks: WorkspaceTask[]; workflowEnabled?: boolean };
       if (sequence !== this.readSequence || generation !== this.generation) return;
-      this.applyAuthorizedList(tasks);
+      this.applyAuthorizedList(tasks, workflowEnabled === true);
     } catch (error) { if (generation === this.generation && sequence === this.readSequence) this.update({ error: error instanceof Error ? error.message : "Úlohy nie sú dostupné." }); }
     finally { if (sequence === this.readSequence) this.update({ loading: false }); }
   }
@@ -166,6 +168,7 @@ export class TaskWorkspaceStore {
     this.update({ createDraft: same(draft, this.state.createDraft) ? emptyTaskDraft(this.viewer) : this.state.createDraft, creating: false, selectedId: task.id });
   });
   saveTask = (id: string) => this.operation(async () => {
+    if (this.state.pendingWorkflow[id]) throw new Error("Najskôr overte predchádzajúcu zmenu stavu úlohy.");
     const draft = this.state.drafts[id]; if (!draft) return;
     const generation = this.generation;
     try {
@@ -179,6 +182,7 @@ export class TaskWorkspaceStore {
     } catch (error) { if (generation === this.generation && (error as { status?: number }).status === 409) this.update({ conflicts: [...new Set([...this.state.conflicts, id])] }); throw error; }
   });
   setTaskStatus = (id: string, status: "open" | "done", expectedRevision?: number): Promise<boolean> => {
+    if (this.state.workflowEnabled) return this.workflow(id, status === "done" ? "complete" : "reopen", {}, expectedRevision);
     // Status-only controls historically treat legacy overdue tasks as open.
     if (status === "open" && this.state.tasks.some(task => task.id === id && task.status === "overdue")) return Promise.resolve(false);
     return this.moveTask(id, { status }, expectedRevision);
@@ -187,6 +191,7 @@ export class TaskWorkspaceStore {
     if (!this.enabled || this.state.hidden || this.state.saving) return false;
     const current = this.state.tasks.find(task => task.id === id);
     if (!current) return false;
+    if (this.state.pendingWorkflow[id]) { this.update({ error: "Najskôr overte predchádzajúcu zmenu stavu úlohy." }); return false; }
     let dueAt = patch.dueAt;
     if (dueAt !== undefined && dueAt !== null) {
       if (!Number.isFinite(Date.parse(dueAt))) {
@@ -237,6 +242,57 @@ export class TaskWorkspaceStore {
     });
     return saved && accepted;
   };
+  /** A pending command is an uncertain server write, never an optimistic stage. */
+  workflow = async (id: string, action: TaskWorkflowAction, details: { reviewerProfileId?: string; comment?: string } = {}, expectedRevision?: number): Promise<boolean> => {
+    if (!this.enabled || this.state.hidden || this.state.saving) return false;
+    const current = this.state.tasks.find(task => task.id === id);
+    if (!current) return false;
+    if (!this.state.workflowEnabled) { this.update({ error: "Pracovné stavy a kontrola úloh ešte nie sú na serveri dostupné." }); return false; }
+    const pending = this.state.pendingWorkflow[id];
+    const intent = { action, ...(details.reviewerProfileId ? { reviewerProfileId: details.reviewerProfileId } : {}), ...(details.comment !== undefined ? { comment: details.comment.trim() } : {}) };
+    if (pending && !same({ action: pending.action, ...(pending.reviewerProfileId ? { reviewerProfileId: pending.reviewerProfileId } : {}), ...(pending.comment !== undefined ? { comment: pending.comment } : {}) }, intent)) {
+      this.update({ error: "Najskôr overte predchádzajúcu zmenu stavu. Jej výsledok zatiaľ nebol potvrdený." }); return false;
+    }
+    if (!pending && this.state.drafts[id]) { this.update({ error: "Pred zmenou stavu uložte rozpracovanú úlohu." }); return false; }
+    if (!pending && this.state.conflicts.includes(id)) { this.select(id); this.update({ error: "Pred zmenou stavu načítajte aktuálnu úlohu." }); return false; }
+    const command: TaskWorkflowCommand = pending ?? { ...intent, expectedRevision: expectedRevision ?? current.revision, commandId: crypto.randomUUID() };
+    let accepted = false;
+    const saved = await this.operation(async () => {
+      const generation = this.generation;
+      this.update({ pendingWorkflow: { ...this.state.pendingWorkflow, [id]: command } });
+      try {
+        const receipt = await this.request(`/api/tasks/${encodeURIComponent(id)}/workflow`, { method: "POST", ...this.body(command) }) as { task: WorkspaceTask; commandId: string; committedRevision: number };
+        if (generation !== this.generation || this.state.hidden || !this.state.tasks.some(task => task.id === id)) return;
+        if (receipt.commandId !== command.commandId || !Number.isInteger(receipt.committedRevision) || receipt.committedRevision < 1 || receipt.task?.id !== id || receipt.task.workflowVersion !== 1 || !Number.isInteger(receipt.task.revision) || receipt.task.revision < receipt.committedRevision) {
+          throw new Error("Potvrdenie zmeny stavu je neúplné. Overte rovnaký pokus znova.");
+        }
+        this.accept(receipt.task);
+        const pendingWorkflow = { ...this.state.pendingWorkflow }; delete pendingWorkflow[id];
+        this.update({ pendingWorkflow }); accepted = true;
+        const draft = this.state.drafts[id], canonical = this.state.tasks.find(task => task.id === id)!;
+        if (draft && draft.revision < canonical.revision) {
+          this.select(id); this.update({ conflicts: [...new Set([...this.state.conflicts, id])], error: "Zmena stavu je uložená. Váš rozpísaný text zostáva zachovaný; pred jeho uložením načítajte aktuálnu úlohu." });
+        }
+        void this.loadMessages(id);
+      } catch (error) {
+        if (generation === this.generation && !this.state.hidden && this.state.tasks.some(task => task.id === id)) {
+          const status = (error as { status?: number }).status;
+          // Explicit 4xx responses reject this command. Network/5xx/malformed
+          // acknowledgements remain pending, with the same UUID and payload.
+          if (status && status >= 400 && status < 500) {
+            const pendingWorkflow = { ...this.state.pendingWorkflow }; delete pendingWorkflow[id]; this.update({ pendingWorkflow });
+          }
+          if (status === 409) { this.select(id); this.update({ conflicts: [...new Set([...this.state.conflicts, id])] }); }
+        }
+        throw error;
+      }
+    });
+    return saved && accepted;
+  };
+  retryWorkflow = (id: string): Promise<boolean> => {
+    const pending = this.state.pendingWorkflow[id];
+    return pending ? this.workflow(id, pending.action, { reviewerProfileId: pending.reviewerProfileId, comment: pending.comment }, pending.expectedRevision) : Promise.resolve(false);
+  };
   reloadTask = async (id: string) => {
     if (!this.enabled || this.state.saving) return;
     const generation = this.generation;
@@ -248,6 +304,7 @@ export class TaskWorkspaceStore {
     } catch (error) { if (generation === this.generation) this.update({ error: error instanceof Error ? error.message : "Úloha nie je dostupná." }); }
   };
   deleteTask = (id: string) => this.operation(async () => {
+    if (this.state.pendingWorkflow[id]) throw new Error("Najskôr overte predchádzajúcu zmenu stavu úlohy.");
     const task = this.state.tasks.find(item => item.id === id); if (!task) return;
     const generation = this.generation;
     await this.request(`/api/tasks/${id}`, { method: "DELETE", ...this.body({ expectedRevision: task.revision }) });
@@ -257,6 +314,7 @@ export class TaskWorkspaceStore {
     this.revokedIds.add(id); this.readSequence++; this.update({ tasks, drafts, chats, chatDrafts, pendingMessages, selectedId: null }); this.onTasksChange?.(tasks);
   });
   link = (id: string, caseId: string, unlink = false) => this.operation(async () => {
+    if (this.state.pendingWorkflow[id]) throw new Error("Najskôr overte predchádzajúcu zmenu stavu úlohy.");
     const task = this.state.tasks.find(item => item.id === id); if (!task) return;
     if (this.state.drafts[id]) throw new Error("Pred zmenou prepojenia uložte rozpracovanú úlohu.");
     const generation = this.generation;
@@ -306,6 +364,7 @@ export class TaskWorkspaceStore {
     if (this.savePromise) return this.savePromise;
     const operation = (async () => {
       if (this.state.saving) return false;
+      for (const id of Object.keys(this.state.pendingWorkflow)) if (!await this.retryWorkflow(id)) { this.select(id); return false; }
       if (!same(this.state.createDraft, emptyTaskDraft(this.viewer)) && !await this.create()) return false;
       for (const id of Object.keys(this.state.drafts)) if (!await this.saveTask(id)) { this.select(id); return false; }
       for (const id of new Set([...Object.keys(this.state.chatDrafts), ...Object.keys(this.state.pendingMessages)])) {

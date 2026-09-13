@@ -2,6 +2,16 @@ import type { CaseTask, TaskReminderChannel } from "./types";
 export type TaskCaseLink = { caseId: string; caseNumber: string; status: string };
 export type TaskOrigin = { sourceType: "callback" | "sms" | "location"; sourceId: string; originCaseId: string; cancelledAt: string | null };
 export type WorkspaceTask = CaseTask & {
+  workflowVersion?: 1;
+  workflowState?: import("./task-workflow").TaskWorkflowState;
+  reviewerProfileId?: string | null;
+  reviewRequestedBy?: string | null;
+  reviewRequestedAt?: string | null;
+  reviewSubmission?: string | null;
+  reviewReturnReason?: string | null;
+  reviewGeneration?: number;
+  reviewedBy?: string | null;
+  reviewedAt?: string | null;
   caseIds: string[];
   caseLinks: TaskCaseLink[];
   revision: number;

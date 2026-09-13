@@ -1,4 +1,4 @@
-export const WIDGET_IDS = ["phone", "tasks", "notes", "calculator", "route", "search", "fleet"] as const;
+export const WIDGET_IDS = ["phone", "tasks", "notes", "calculator", "route", "search", "fleet", "calendar"] as const;
 export type WidgetId = (typeof WIDGET_IDS)[number];
 export type WorkspaceCenterView = "map" | "table" | "tasks" | "notes";
 export type WidgetPreference = { id: WidgetId; visible: boolean; collapsed: boolean };
@@ -11,7 +11,7 @@ export type WorkspacePreferences = {
 
 export const WIDGET_LABELS: Record<WidgetId, string> = {
   phone: "Rýchle volanie", tasks: "Úlohy", notes: "Poznámky", calculator: "Kalkulačka",
-  route: "Plánovač trasy", search: "Vyhľadávanie", fleet: "Flotila",
+  route: "Plánovač trasy", search: "Vyhľadávanie", fleet: "Flotila", calendar: "Kalendár",
 };
 
 export function workspacePreferenceStorageKey(organizationId?: string, profileId?: string) {

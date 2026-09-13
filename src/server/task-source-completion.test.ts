@@ -3,6 +3,12 @@ import { createFakeSupabase } from "@/test/fake-supabase";
 import { completeTaskSourceIfSupported } from "./task-source-completion";
 
 describe("durable task source completion boundary", () => {
+  it("acknowledges a fulfilled source whose task still needs review without invoking any legacy task writer", async () => {
+    const fake = createFakeSupabase();
+    fake.db.registerRpc("motorist_complete_task_source_v1", () => ({ completed: false, reviewPending: true, taskId: "task" }));
+    await expect(completeTaskSourceIfSupported(fake.admin, "org", "sms", "source", "actor")).resolves.toBe(true);
+    expect(fake.db.log.filter(entry => ["insert", "update", "delete"].includes(entry.operation ?? ""))).toEqual([]);
+  });
   it("does not enable the legacy fallback when the installed function rejects proof", async () => {
     const fake = createFakeSupabase();
     fake.db.registerRpc("motorist_complete_task_source_v1", () => ({ completed: false }));

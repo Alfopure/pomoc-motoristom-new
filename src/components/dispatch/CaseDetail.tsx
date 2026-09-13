@@ -137,8 +137,12 @@ import { CaseSummary } from "./CaseSummary";
 import styles from "./case-detail.module.css";
 import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
+import { CaseTextImport } from "./CaseTextImport";
+import { CaseHandoffPanel } from "./CaseHandoffPanel";
+import { useLayoutPreview } from "./LayoutPreview";
 
 type CaseDetailProps = {
+  renderTaskWorkflow?: (taskId: string) => ReactNode;
   onEditorControlsChange?: (controls: CaseHeaderControls | null) => void;
   caseItem: DispatchCase;
   branches: Branch[];
@@ -259,6 +263,7 @@ const closureTypeLabels: Record<ClosureType, string> = {
 };
 
 export function CaseDetail({
+  renderTaskWorkflow,
   caseItem,
   branches,
   assets,
@@ -677,7 +682,7 @@ export function CaseDetail({
   }
 
   return (
-    <div className={`${styles.surface} ${styles.detail} grid min-w-0 max-w-full overflow-x-clip @container`}>
+    <div data-case-detail-root className={`${styles.surface} ${styles.detail} grid min-w-0 max-w-full overflow-x-clip @container`}>
       {!embedded && <div className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2.5">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -714,6 +719,8 @@ export function CaseDetail({
       {embedded && !onEditorControlsChange && editorControls && <CaseEditorHeader controls={headerControls!} />}
 
       <CaseSummary caseItem={caseItem} assets={assets} operators={operators} identityInHeader={compactEditor && embedded && Boolean(onEditorControlsChange)} />
+      <CaseSectionNavigation editing={isEditing} />
+      <CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} />
 
       {notice && <div role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{notice}</div>}
 
@@ -816,7 +823,7 @@ export function CaseDetail({
                         </div>
                         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${taskPriorityTone[task.priority]}`}>{taskPriorityLabels[task.priority]}</span>
                       </div>
-                      {isTaskOpen(task) ? (
+                      {renderTaskWorkflow ? renderTaskWorkflow(task.id) : isTaskOpen(task) ? (
                         <button type="button" onClick={() => void postAction({ action: "complete_task", taskId: task.id }, "Úloha označená ako vybavená.")} className="mt-2 inline-flex h-11 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"><CheckCircle2 size={13} /> Vybaviť</button>
                       ) : (
                         <span className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md bg-emerald-50 px-2 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200"><CheckCircle2 size={13} /> Úloha je vybavená</span>
@@ -1245,6 +1252,24 @@ function ActivityRow({ event }: { event: CaseTimelineEntry }) {
   );
 }
 
+function CaseSectionNavigation({ editing }: { editing: boolean }) {
+  const modern = useLayoutPreview().mode === "modern";
+  if (!modern) return null;
+  const links = [
+    { label: "Úlohy prípadu", selector: '[data-testid="case-tasks"]', icon: ClipboardList },
+    ...(editing ? [{ label: "Upraviť údaje", selector: '[data-testid="case-edit-form-main"]', icon: Edit3 }] : []),
+    { label: "Poznámky a aktivita", selector: '[aria-labelledby="case-notes-heading"]', icon: MessageSquareText },
+    { label: "Odoslané SMS", selector: '[data-case-sms-history]', icon: Phone },
+  ];
+  return <nav className="case-section-navigation" aria-label="Časti prípadu">{links.map(({ label, selector, icon: Icon }) => <button type="button" key={label} onClick={event => {
+    const target = event.currentTarget.closest('[data-case-detail-root]')?.querySelector<HTMLElement>(selector);
+    if (!target) return;
+    if (target instanceof HTMLDetailsElement) target.open = true;
+    target.scrollIntoView({ block: "start", behavior: "auto" });
+    target.querySelector<HTMLElement>('summary, input, textarea, button')?.focus({ preventScroll: true });
+  }}><Icon size={14} aria-hidden="true" />{label}</button>)}</nav>;
+}
+
 function actorInitials(actor: string) {
   const parts = actor.trim().split(/\s+/).filter(Boolean);
 
@@ -1282,6 +1307,7 @@ function EditCaseForm({
   onSavingChange?: (saving: boolean) => void;
   partnerDirectory: PartnerDirectoryEntry[];
 }) {
+  const { enabled: previewEnabled } = useLayoutPreview();
   const [selectedJobTypes, setSelectedJobTypes] = useState<JobType[]>(caseItem.jobTypes);
   const [priority, setPriority] = useState<CasePriority>(caseItem.priority);
   const [sourceType, setSourceType] = useState<NonNullable<DispatchCase["sourceType"]> | "">(caseItem.sourceType ?? "");
@@ -2092,6 +2118,27 @@ function EditCaseForm({
       </div>}
       <div className="m-0 min-w-0 border-0 p-0 @container">
         <div className={`${styles.formMain} grid min-w-0`} data-testid="case-edit-form-main">
+      {<CaseTextImport visible={previewEnabled}
+        disabled={conflict || savePhase === "saving" || refreshOnlyRevision !== null}
+        current={{ customer: contactName, phone: contactPhone, plate: licensePlate, make: vehicleMake, model: vehicleModel,
+          vehicleNote, pickup: pickup?.label || manualPickupAddress, destination: destination?.label || manualDestinationAddress,
+          description: vehicleIssue, reference: assistanceReference }}
+        onApply={patch => {
+          if (primaryContact && (patch.customer !== undefined || patch.phone !== undefined)) {
+            const contactPatch: Partial<ContactDraft> = {};
+            if (patch.customer !== undefined) Object.assign(contactPatch, splitName(patch.customer));
+            if (patch.phone !== undefined) { const phone = splitContactPhone(patch.phone); Object.assign(contactPatch, { phonePrefix: phone.prefix, phoneNational: phone.national }); }
+            updateContact(primaryContact.id, contactPatch);
+          }
+          if (patch.plate !== undefined) { setLicensePlate(patch.plate); setVehicleLookup(null); }
+          if (patch.make !== undefined) setVehicleMake(patch.make);
+          if (patch.model !== undefined) setVehicleModel(patch.model);
+          if (patch.vehicleNote !== undefined) setVehicleNote(patch.vehicleNote);
+          if (patch.pickup !== undefined) { setPickup(null); setManualPickupAddress(patch.pickup); }
+          if (patch.destination !== undefined) { setDestination(null); setManualDestinationAddress(patch.destination); }
+          if (patch.description !== undefined) setVehicleIssue(patch.description);
+          if (patch.reference !== undefined) setAssistanceReference(patch.reference);
+        }} />}
       <p className="text-[10px] font-medium text-zinc-500 lg:text-xs lg:font-semibold">
         <span className="text-red-600" aria-hidden="true">*</span> Povinné údaje
       </p>

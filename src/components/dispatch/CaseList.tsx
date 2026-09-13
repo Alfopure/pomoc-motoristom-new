@@ -7,6 +7,7 @@ import { casePriorityLabels, caseStatusLabels, caseStatusTone, priorityTone } fr
 import { isTaskOpen } from "@/domain/tasks";
 import { caseAssistanceServiceName, formatDateTime, formatTime } from "@/lib/dispatch-calculations";
 import type { CaseSortState } from "./CaseTable";
+import { useLayoutPreview } from "./LayoutPreview";
 
 type CenterView = "map" | "table" | "tasks" | "notes";
 
@@ -96,6 +97,7 @@ export function CaseList({
   sort,
   totalCases,
 }: CaseListProps) {
+  const modern = useLayoutPreview().mode === "modern";
   const ownerName = (ownerId: string) => operators.find((operator) => operator.id === ownerId)?.name ?? "Nepriradené";
   const [filterOpen, setFilterOpen] = useState(false);
   const ToggleIcon = centerView === "map" ? Table2 : MapPinned;
@@ -111,7 +113,7 @@ export function CaseList({
 
   return (
     <aside data-testid="dispatch-case-list" className="flex h-full min-h-0 min-w-0 flex-col bg-zinc-50 lg:w-full lg:border-r lg:border-zinc-200 lg:bg-white">
-      <div className="max-h-[70%] shrink-0 overflow-y-auto overscroll-contain border-b border-zinc-200 bg-white p-2 lg:max-h-none lg:p-1.5">
+      <div className="case-list-controls max-h-[70%] shrink-0 overflow-y-auto overscroll-contain border-b border-zinc-200 bg-white p-2 lg:max-h-none lg:p-1.5">
         <div className="mb-1.5 hidden items-center gap-1.5 lg:flex">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#FCD703] text-zinc-950 lg:h-6 lg:w-6 lg:rounded-md">
             <FileText size={13} strokeWidth={2.4} />
@@ -259,6 +261,7 @@ export function CaseList({
               <div
                 key={caseItem.id}
                 data-case-number={caseItem.caseNumber}
+                data-case-selected={active || undefined}
                 data-case-priority={caseItem.priority}
                 data-open-task-count={openTaskCount}
                 className={`border-b border-zinc-100 px-1.5 py-0.5 transition ${
@@ -323,15 +326,16 @@ export function CaseList({
                   </div>
                 </div>
 
-                <button type="button" onClick={() => onSelect(caseItem.id)} className="block w-full text-left">
+                <button type="button" onClick={() => onSelect(caseItem.id)} className="case-list-card-content block w-full text-left">
+                  {modern && <span className="case-list-client">{caseItem.contact.name || "Kontakt zatiaľ nezadaný"}</span>}
                   {/* Typografia musí byť na vnútornom prvku: globálne `button { font: inherit }`
                       zámerne drží natívne ovládanie konzistentné, no prebíja text-* na buttonoch. */}
                   <span className="grid w-full gap-0 text-[10px] leading-3.5 text-zinc-600">
-                    <span className="inline-flex min-w-0 items-center gap-1.5" title={`${caseItem.caseType || "Bez typu zásahu"} · ${[caseItem.vehicle.licensePlate, caseItem.vehicle.make, caseItem.vehicle.model].filter(Boolean).join(" · ") || "Vozidlo nezadané"}`}>
+                    <span className="case-list-vehicle inline-flex min-w-0 items-center gap-1.5" title={`${caseItem.caseType || "Bez typu zásahu"} · ${[caseItem.vehicle.licensePlate, caseItem.vehicle.make, caseItem.vehicle.model].filter(Boolean).join(" · ") || "Vozidlo nezadané"}`}>
                       <CarFront size={11} className="shrink-0 text-zinc-400" />
                       <span className="truncate"><span className="font-medium text-zinc-700">{caseItem.caseType || "Bez typu zásahu"}</span> · {[caseItem.vehicle.licensePlate, caseItem.vehicle.make, caseItem.vehicle.model].filter(Boolean).join(" · ") || "Vozidlo nezadané"}</span>
                     </span>
-                    <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <span className="case-list-location inline-flex min-w-0 items-center gap-1.5">
                       <MapPin size={11} className="shrink-0 text-zinc-400" />
                       <span className="truncate">{caseItem.pickup?.address || "Poloha nezadaná"}</span>
                     </span>
@@ -341,7 +345,7 @@ export function CaseList({
                         <span className="truncate" title={`Asistenčná služba: ${assistanceServiceName}`}>{assistanceServiceName}</span>
                       </span>
                     )}
-                    <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <span className="case-list-meta inline-flex min-w-0 items-center gap-1.5">
                       <Clock3 size={11} className="shrink-0 text-zinc-400" />
                       <span className="truncate" title={`Založené ${formatDateTime(caseItem.createdAt)} · posledná úprava ${formatTime(caseItem.updatedAt)}`}>
                         {formatDateTime(caseItem.createdAt)} · {ownerName(caseItem.ownerId)}

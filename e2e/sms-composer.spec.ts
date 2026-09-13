@@ -33,7 +33,7 @@ async function boot(page: Page, options: { global?: boolean; width?: number; abo
       const incoming = state.inbox.find((message) => message.id === body.replyToMessageId);
       const context = { caseNumber: body.caseId === "case-1" ? "PM-123" : "PM-456", callbackNumber: body.callbackNumber, etaMinutes: body.etaMinutes, towAddress: body.towAddress, link: `${origin}/l/${"a".repeat(43)}` };
       return route.fulfill({ json: { proof: "mock-proof", draft: { version: 1, requestId: body.requestId, caseId: body.caseId, caseNumber: body.caseId ? context.caseNumber : null,
-        recipientName: incoming ? "Odosielateľ prijatej SMS" : body.caseId ? "Klient jeden" : "Ručne zadaný príjemca", toNumber: incoming?.from ?? (body.caseId ? "+421905123456" : body.toNumber), template: body.template, templateContext: context,
+        recipientName: incoming ? "Odosielateľ prijatej SMS" : body.caseId === "case-2" ? "Klient dva" : body.caseId ? "Klient jeden" : "Ručne zadaný príjemca", toNumber: incoming?.from ?? (body.caseId === "case-2" ? "+421905222222" : body.caseId ? "+421905123456" : body.toNumber), template: body.template, templateContext: context,
         replyToMessageId: incoming?.id, repliesEnabled: Boolean(incoming),
         message: body.template === "custom" ? body.message : renderSmsTemplate(body.template, context), sender: incoming?.to ?? "PomocMotor" } } });
     }
@@ -121,7 +121,9 @@ test("ETA needs explicit minutes and departure; custom SMS without a case remain
   await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
   await expect(page.getByLabel("Finálny text na odoslanie")).toContainText("25 min");
   await page.getByRole("button", { name: "Upraviť údaje" }).click();
-  await page.getByLabel("Prípad SMS").selectOption(""); await page.getByLabel("Šablóna").selectOption("custom");
+  await page.getByLabel("Prípad SMS").selectOption("");
+  await page.getByRole("button", { name: "Zahodiť koncept a potvrdiť zmenu" }).click();
+  await page.getByLabel("Šablóna").selectOption("custom");
   await page.getByLabel("Telefón príjemcu").fill("+421905123456"); await page.getByLabel("Text správy").fill("Vlastna SMS bez pripadu.");
   await page.getByRole("button", { name: "Pripraviť náhľad" }).click(); await page.getByRole("button", { name: "Odoslať SMS", exact: true }).click();
   await expect(page.getByText("Odoslaná operátorovi", { exact: true })).toBeVisible();
@@ -156,6 +158,72 @@ test("a later explicit location quick action opens that template without redirec
   await page.getByRole("button", { name: "Zavrieť SMS" }).click();
   await page.getByRole("button", { name: "Otvoriť SMS" }).click();
   await expect(page.getByLabel("Šablóna")).toHaveValue("location_request");
+});
+
+test("changing a template preserves the draft until explicit discard and invalidates its old request", async ({ page }) => {
+  const state = await boot(page, { width: 390 });
+  await page.getByLabel("Text správy").fill("Text dohodnutý s klientom A.");
+  await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
+  const originalId = state.prepares[0].requestId;
+  await page.getByRole("button", { name: "Upraviť údaje" }).click();
+  await page.getByLabel("Šablóna").selectOption("location_request");
+  await expect(page.getByLabel("Šablóna")).toHaveValue("custom");
+  await expect(page.getByLabel("Text správy")).toHaveValue("Text dohodnutý s klientom A.");
+  await expect(page.getByRole("button", { name: "Pripraviť náhľad" })).toBeDisabled();
+  await page.getByRole("button", { name: "Zachovať rozpracovanú SMS" }).click();
+  await expect(page.getByLabel("Text správy")).toHaveValue("Text dohodnutý s klientom A.");
+  await page.getByLabel("Šablóna").selectOption("location_request");
+  await page.getByRole("button", { name: "Zahodiť koncept a potvrdiť zmenu" }).click();
+  await expect(page.getByLabel("Šablóna")).toHaveValue("location_request");
+  await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
+  expect(state.prepares[1]).toMatchObject({ caseId: "case-1", template: "location_request", message: "" });
+  expect(state.prepares[1].requestId).not.toBe(originalId);
+  expect(state.sends).toHaveLength(0); expect(state.errors).toEqual([]);
+});
+
+test("changing the case never carries one client's draft into another recipient", async ({ page }) => {
+  const state = await boot(page);
+  await page.getByLabel("Text správy").fill("Súkromný pokyn pre klienta A.");
+  await page.getByLabel("Prípad SMS").selectOption("case-2");
+  await expect(page.getByLabel("Prípad SMS")).toHaveValue("case-1");
+  await expect(page.getByLabel("Text správy")).toHaveValue("Súkromný pokyn pre klienta A.");
+  await page.getByRole("button", { name: "Zachovať rozpracovanú SMS" }).click();
+  await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
+  await expect(page.getByText("PM-123 · +421905123456", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Upraviť údaje" }).click();
+  await page.getByLabel("Prípad SMS").selectOption("case-2");
+  await page.getByRole("button", { name: "Zahodiť koncept a potvrdiť zmenu" }).click();
+  await expect(page.getByLabel("Text správy")).toHaveValue("");
+  await page.getByLabel("Text správy").fill("Nový pokyn iba pre klienta B.");
+  await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
+  await expect(page.getByText("PM-456 · +421905222222", { exact: true })).toBeVisible();
+  expect(state.prepares[1]).toMatchObject({ caseId: "case-2", message: "Nový pokyn iba pre klienta B." });
+  expect(state.prepares[1].requestId).not.toBe(state.prepares[0].requestId);
+  expect(state.sends).toHaveLength(0); expect(state.errors).toEqual([]);
+});
+
+for (const intent of ["case", "template"] as const) test(`reopening from a different ${intent} asks before replacing a normal SMS draft`, async ({ page }) => {
+  const state = await boot(page);
+  await page.getByLabel("Text správy").fill("Pôvodná rozpracovaná správa.");
+  await page.getByRole("button", { name: "Zavrieť SMS" }).click();
+  await page.evaluate(kind => {
+    const fixture = window as unknown as { changeSmsCase(): void; changeSmsTemplate(): void };
+    if (kind === "case") fixture.changeSmsCase(); else fixture.changeSmsTemplate();
+  }, intent);
+  await page.getByRole("button", { name: "Otvoriť SMS" }).click();
+  await expect(page.getByLabel("Prípad SMS")).toHaveValue("case-1");
+  await expect(page.getByLabel("Šablóna")).toHaveValue("custom");
+  await expect(page.getByLabel("Text správy")).toHaveValue("Pôvodná rozpracovaná správa.");
+  await page.getByRole("button", { name: "Zachovať rozpracovanú SMS" }).click();
+  await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
+  expect(state.prepares[0]).toMatchObject({ caseId: "case-1", template: "custom", message: "Pôvodná rozpracovaná správa." });
+  await page.getByRole("button", { name: "Zavrieť SMS" }).click();
+  await page.getByRole("button", { name: "Otvoriť SMS" }).click();
+  await page.getByRole("button", { name: "Zahodiť koncept a potvrdiť zmenu" }).click();
+  await expect(page.getByLabel("Prípad SMS")).toHaveValue(intent === "case" ? "case-2" : "case-1");
+  await expect(page.getByLabel("Šablóna")).toHaveValue(intent === "template" ? "location_request" : "custom");
+  if (intent === "case") await expect(page.getByLabel("Text správy")).toHaveValue("");
+  expect(state.sends).toHaveLength(0); expect(state.errors).toEqual([]);
 });
 
 function incomingMessage(): SmsInboxMessage {
