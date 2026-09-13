@@ -51,6 +51,7 @@ import { FleetModule } from "./FleetModule";
 import { mergeFleetData, useFleetRefresh } from "./useFleetRefresh";
 import { IntegrationSettings } from "./IntegrationSettings";
 import { MapWorkspace, type CenterView, type WorkspaceKind, type WorkspaceMode } from "./MapWorkspace";
+import { DASHBOARD_LEFT_MAX, DASHBOARD_LEFT_MIN, DASHBOARD_RIGHT_MAX, DASHBOARD_RIGHT_MIN, DEFAULT_DASHBOARD_COLUMNS, fitDashboardColumns, parseDashboardColumnWidths, resizeDashboardColumn, type DashboardColumnSide, type DashboardColumnWidths } from "./dashboard-column-layout";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { ReportDashboard } from "./ReportDashboard";
 import { HeaderNotificationMenu } from "./HeaderNotificationMenu";
@@ -83,7 +84,7 @@ import { CalculatorWidget } from "./CalculatorWidget";
 import { WorkspacePlaceSearch } from "./WorkspacePlaceSearch";
 import { WorkspaceSearchWidget } from "./WorkspaceSearchWidget";
 import { fleetWidgetStatus } from "./workspace-search";
-import { defaultWorkspacePreferences, parseWorkspacePreferences, workspacePreferenceStorageKey, type WorkspacePreferences, type WidgetId } from "./workspace-preferences";
+import { defaultWorkspacePreferences, parseWorkspacePreferences, visibleDesktopWorkspaceMode, workspacePreferenceStorageKey, type WorkspacePreferences, type WidgetId } from "./workspace-preferences";
 import { NotebookPanel, NotebookProvider } from "./NotebookPanel";
 import { RoutePlannerProvider } from "./map/RoutePlannerProvider";
 import { RoutePlanner } from "./map/RoutePlanner";
@@ -160,20 +161,6 @@ const defaultCaseFilters: CaseFilters = {
   status: "all",
 };
 
-type DashboardColumnSide = "left" | "right";
-
-type DashboardColumnWidths = {
-  left: number;
-  right: number;
-};
-
-const DEFAULT_DASHBOARD_COLUMNS: DashboardColumnWidths = { left: 330, right: 330 };
-const DASHBOARD_LEFT_MIN = 260;
-const DASHBOARD_LEFT_MAX = 480;
-const DASHBOARD_RIGHT_MIN = 280;
-const DASHBOARD_RIGHT_MAX = 480;
-const DASHBOARD_CENTER_MIN = 480;
-
 const priorityRank: Record<DispatchCase["priority"], number> = {
   urgent: 0,
   high: 1,
@@ -208,51 +195,6 @@ const terminalCaseStatuses = new Set<DispatchCase["status"]>([
 
 function isActiveDispatchCase(caseItem: DispatchCase) {
   return !terminalCaseStatuses.has(caseItem.status);
-}
-
-function clampNumber(value: unknown, minimum: number, maximum: number, fallback: number) {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.min(maximum, Math.max(minimum, value))
-    : fallback;
-}
-
-function fitDashboardColumns(columns: DashboardColumnWidths, gridWidth: number, rightVisible: boolean): DashboardColumnWidths {
-  let left = clampNumber(columns.left, DASHBOARD_LEFT_MIN, DASHBOARD_LEFT_MAX, DEFAULT_DASHBOARD_COLUMNS.left);
-  let right = clampNumber(columns.right, DASHBOARD_RIGHT_MIN, DASHBOARD_RIGHT_MAX, DEFAULT_DASHBOARD_COLUMNS.right);
-
-  if (!rightVisible) {
-    left = Math.min(left, Math.max(DASHBOARD_LEFT_MIN, gridWidth - DASHBOARD_CENTER_MIN));
-    return { left, right };
-  }
-
-  const availableForRails = Math.max(
-    DASHBOARD_LEFT_MIN + DASHBOARD_RIGHT_MIN,
-    gridWidth - DASHBOARD_CENTER_MIN,
-  );
-  let overflow = Math.max(0, left + right - availableForRails);
-  const rightReduction = Math.min(overflow, right - DASHBOARD_RIGHT_MIN);
-  right -= rightReduction;
-  overflow -= rightReduction;
-  left -= Math.min(overflow, left - DASHBOARD_LEFT_MIN);
-
-  return { left, right };
-}
-
-function resizeDashboardColumn(
-  columns: DashboardColumnWidths,
-  side: DashboardColumnSide,
-  requestedWidth: number,
-  gridWidth: number,
-  rightVisible: boolean,
-): DashboardColumnWidths {
-  const fitted = fitDashboardColumns(columns, gridWidth, rightVisible);
-  const minimum = side === "left" ? DASHBOARD_LEFT_MIN : DASHBOARD_RIGHT_MIN;
-  const hardMaximum = side === "left" ? DASHBOARD_LEFT_MAX : DASHBOARD_RIGHT_MAX;
-  const otherWidth = side === "left" ? (rightVisible ? fitted.right : 0) : fitted.left;
-  const viewportMaximum = Math.max(minimum, gridWidth - DASHBOARD_CENTER_MIN - otherWidth);
-  const width = clampNumber(requestedWidth, minimum, Math.min(hardMaximum, viewportMaximum), fitted[side]);
-
-  return { ...fitted, [side]: width };
 }
 
 const sourceLabels: Record<NonNullable<DispatchCase["sourceType"]>, string> = {
@@ -393,16 +335,37 @@ function DispatchConsoleContent({
   function setCenterView(view: CenterView) {
     updateWorkspacePreferences({ ...workspacePreferences, centerView: view });
   }
+  function preferredCockpitMode(mobileMode: WorkspaceMode = "split", view: CenterView = centerView): WorkspaceMode {
+    return window.matchMedia("(max-width: 1023px)").matches
+      ? mobileMode : visibleDesktopWorkspaceMode(workspacePreferences.desktopWorkspaceMode, view);
+  }
+  function rememberDesktopWorkspaceMode(mode: WorkspaceMode) {
+    if (window.matchMedia("(min-width: 1024px)").matches) {
+      updateWorkspacePreferences({ ...workspacePreferences, desktopWorkspaceMode: mode });
+    }
+  }
+  const loadWorkspacePreferences = useEffectEvent((raw: string | null, initial: boolean) => {
+    const next = parseWorkspacePreferences(raw);
+    const modeChanged = next.desktopWorkspaceMode !== workspacePreferences.desktopWorkspaceMode;
+    const centerChanged = next.centerView !== centerView;
+    setWorkspacePreferences(next);
+    setVisitedWidgets(current => new Set([...current, ...next.widgets.filter(item => item.visible).map(item => item.id)]));
+    if (window.matchMedia("(min-width: 1024px)").matches && (initial || modeChanged || centerChanged)) {
+      setWorkspace(current => {
+        if (current.kind !== "cockpit") return current;
+        const mode = initial || modeChanged
+          ? visibleDesktopWorkspaceMode(next.desktopWorkspaceMode, next.centerView)
+          : current.mode === "expanded" ? "split" : current.mode;
+        return { ...current, mode };
+      });
+    }
+  });
   useEffect(() => {
-    const load = (raw: string | null) => {
-      const next = parseWorkspacePreferences(raw);
-      setWorkspacePreferences(next);
-      setVisitedWidgets(current => new Set([...current, ...next.widgets.filter(item => item.visible).map(item => item.id)]));
-    };
     const frame = window.requestAnimationFrame(() => {
-      try { load(window.localStorage.getItem(workspaceStorageKey)); } catch { load(null); }
+      try { loadWorkspacePreferences(window.localStorage.getItem(workspaceStorageKey), true); }
+      catch { loadWorkspacePreferences(null, true); }
     });
-    const sync = (event: StorageEvent) => { if (event.key === workspaceStorageKey) load(event.newValue); };
+    const sync = (event: StorageEvent) => { if (event.key === workspaceStorageKey) loadWorkspacePreferences(event.newValue, false); };
     window.addEventListener("storage", sync);
     return () => { window.cancelAnimationFrame(frame); window.removeEventListener("storage", sync); };
   }, [workspaceStorageKey]);
@@ -442,10 +405,13 @@ function DispatchConsoleContent({
   const callHistoryRefreshInFlight = useRef(false);
   const dashboardGridRef = useRef<HTMLElement | null>(null);
   const dashboardColumnsRef = useRef<DashboardColumnWidths>(DEFAULT_DASHBOARD_COLUMNS);
+  // Responsive fitting changes the display, never the user's saved dimensions.
+  const dashboardPreferredColumnsRef = useRef<DashboardColumnWidths>(DEFAULT_DASHBOARD_COLUMNS);
   const dashboardResizeRef = useRef<{
     pointerId: number;
     side: DashboardColumnSide;
     startWidth: number;
+    startPreferredWidth: number;
     startX: number;
   } | null>(null);
   const [dashboardColumns, setDashboardColumns] = useState<DashboardColumnWidths>(DEFAULT_DASHBOARD_COLUMNS);
@@ -521,58 +487,54 @@ function DispatchConsoleContent({
   }, [mobileNavigationStorageKey]);
 
   useEffect(() => {
-    let frameId: number | undefined;
-
+    let next = { ...DEFAULT_DASHBOARD_COLUMNS };
     try {
-      const stored = window.localStorage.getItem(dashboardColumnStorageKey);
-      if (!stored) return;
-      const parsed = JSON.parse(stored) as Partial<DashboardColumnWidths>;
-      const next = {
-        left: clampNumber(parsed.left, DASHBOARD_LEFT_MIN, DASHBOARD_LEFT_MAX, DEFAULT_DASHBOARD_COLUMNS.left),
-        right: clampNumber(parsed.right, DASHBOARD_RIGHT_MIN, DASHBOARD_RIGHT_MAX, DEFAULT_DASHBOARD_COLUMNS.right),
-      };
-      frameId = window.requestAnimationFrame(() => {
-        dashboardColumnsRef.current = next;
-        setDashboardColumns(next);
-      });
+      next = parseDashboardColumnWidths(window.localStorage.getItem(dashboardColumnStorageKey));
     } catch {
-      // A malformed local preference must never prevent the dashboard from opening.
+      // A new actor or denied storage uses defaults rather than another actor's layout.
     }
-
-    return () => {
-      if (frameId !== undefined) window.cancelAnimationFrame(frameId);
-    };
+    dashboardPreferredColumnsRef.current = next;
+    dashboardResizeRef.current = null;
+    dashboardGridRef.current?.removeAttribute("data-resizing");
+    dashboardGridRef.current?.removeAttribute("data-collapse-candidate");
+    const frameId = window.requestAnimationFrame(() => {
+      const fitted = fitDashboardColumns(next, dashboardGridRef.current?.clientWidth || window.innerWidth,
+        window.matchMedia("(min-width: 1280px)").matches);
+      dashboardColumnsRef.current = fitted;
+      setDashboardColumns(fitted);
+    });
+    return () => window.cancelAnimationFrame(frameId);
   }, [dashboardColumnStorageKey]);
 
   useEffect(() => {
     const clampColumnsToViewport = () => {
       const gridWidth = dashboardGridRef.current?.clientWidth;
       if (!gridWidth) return;
-
-      setDashboardColumns((current) => {
-        const rightVisible = window.matchMedia("(min-width: 1280px)").matches;
-        const next = fitDashboardColumns(current, gridWidth, rightVisible);
-        dashboardColumnsRef.current = next;
-        return next.left === current.left && next.right === current.right ? current : next;
-      });
+      const rightVisible = window.matchMedia("(min-width: 1280px)").matches;
+      const next = fitDashboardColumns(dashboardPreferredColumnsRef.current, gridWidth, rightVisible);
+      dashboardColumnsRef.current = next;
+      setDashboardColumns(current => next.left === current.left && next.right === current.right ? current : next);
     };
 
     clampColumnsToViewport();
+    // Also refit when a hidden module returns after the browser was resized.
+    const observer = new ResizeObserver(clampColumnsToViewport);
+    const grid = dashboardGridRef.current;
+    if (grid) observer.observe(grid);
     window.addEventListener("resize", clampColumnsToViewport);
-    return () => window.removeEventListener("resize", clampColumnsToViewport);
+    return () => { observer.disconnect(); window.removeEventListener("resize", clampColumnsToViewport); };
   }, []);
 
   function updateDashboardColumn(side: DashboardColumnSide, requestedWidth: number, persist = false) {
-    const gridWidth = dashboardGridRef.current?.clientWidth ?? window.innerWidth;
+    const gridWidth = dashboardGridRef.current?.clientWidth || window.innerWidth;
     const rightVisible = window.matchMedia("(min-width: 1280px)").matches;
-    const current = dashboardColumnsRef.current;
-    const next = resizeDashboardColumn(current, side, requestedWidth, gridWidth, rightVisible);
+    const preferred = resizeDashboardColumn(dashboardPreferredColumnsRef.current, side, requestedWidth, gridWidth, rightVisible);
+    const fitted = fitDashboardColumns(preferred, gridWidth, rightVisible);
 
-    dashboardColumnsRef.current = next;
-    setDashboardColumns(next);
-    if (persist) {
-      persistDashboardColumns(next);
-    }
+    dashboardPreferredColumnsRef.current = preferred;
+    dashboardColumnsRef.current = fitted;
+    setDashboardColumns(fitted);
+    if (persist) persistDashboardColumns(preferred);
   }
 
   function persistDashboardColumns(columns: DashboardColumnWidths) {
@@ -590,6 +552,7 @@ function DispatchConsoleContent({
       pointerId: event.pointerId,
       side,
       startWidth: dashboardColumnsRef.current[side],
+      startPreferredWidth: dashboardPreferredColumnsRef.current[side],
       startX: event.clientX,
     };
     dashboardGridRef.current?.setAttribute("data-resizing", "true");
@@ -614,11 +577,13 @@ function DispatchConsoleContent({
     dashboardGridRef.current?.removeAttribute("data-resizing");
     dashboardGridRef.current?.removeAttribute("data-collapse-candidate");
     if (collapseSide === resize.side) {
-      dashboardColumnsRef.current = { ...dashboardColumnsRef.current, [resize.side]: resize.startWidth };
+      dashboardPreferredColumnsRef.current = { ...dashboardPreferredColumnsRef.current, [resize.side]: resize.startPreferredWidth };
+      dashboardColumnsRef.current = fitDashboardColumns(dashboardPreferredColumnsRef.current,
+        dashboardGridRef.current?.clientWidth || window.innerWidth, window.matchMedia("(min-width: 1280px)").matches);
       setDashboardColumns(dashboardColumnsRef.current);
       updateWorkspacePreferences({ ...workspacePreferences, [resize.side === "left" ? "leftCollapsed" : "rightCollapsed"]: true });
     }
-    persistDashboardColumns(dashboardColumnsRef.current);
+    persistDashboardColumns(dashboardPreferredColumnsRef.current);
   }
 
   function handleDashboardColumnKeyDown(side: DashboardColumnSide, event: ReactKeyboardEvent<HTMLButtonElement>) {
@@ -1065,7 +1030,7 @@ function DispatchConsoleContent({
       setActiveCaseId(caseId);
       setMobilePane("workspace");
       setFocusedTaskId(undefined);
-      setWorkspace({ kind: "cockpit", mode: window.matchMedia("(max-width: 1023px)").matches ? "expanded" : "split" });
+      setWorkspace({ kind: "cockpit", mode: preferredCockpitMode("expanded", "map") });
     });
   }
 
@@ -1078,7 +1043,7 @@ function DispatchConsoleContent({
       setActiveCaseId(caseId);
       setMobilePane("workspace");
       setFocusedTaskId(undefined);
-      setWorkspace({ kind: active ? "cockpit" : "detail", mode: !active || window.matchMedia("(max-width: 1023px)").matches ? "expanded" : "split" });
+      setWorkspace({ kind: active ? "cockpit" : "detail", mode: active ? preferredCockpitMode("expanded", "map") : "expanded" });
       setActiveView("dispatch");
     });
   }
@@ -1169,7 +1134,7 @@ function DispatchConsoleContent({
       url.searchParams.delete("task");
       window.history.replaceState(window.history.state, "", url);
       setFocusedTaskId(undefined);
-      setWorkspace({ kind: "cockpit", mode: "split" });
+      setWorkspace({ kind: "cockpit", mode: preferredCockpitMode() });
       setCallNotificationFocus({ sessionId, snapshotAtOpen: telephony.phoneBar.checkedAt });
       setActiveView("call-center");
       telephony.refresh();
@@ -1924,26 +1889,29 @@ function DispatchConsoleContent({
       setMobilePane("cases");
       if (returnViewRef.current !== "dispatch") {
         setActiveView(returnViewRef.current);
-        setWorkspace({ kind: "cockpit", mode: "split" });
+        setWorkspace({ kind: "cockpit", mode: preferredCockpitMode() });
         returnViewRef.current = "dispatch";
         return;
       }
-      setWorkspace({ kind: "cockpit", mode: "split" });
+      setWorkspace({ kind: "cockpit", mode: preferredCockpitMode() });
     });
   }
 
   function collapseWorkspace() {
     requestNavigation(() => {
       setFocusedTaskId(undefined);
+      rememberDesktopWorkspaceMode("collapsed");
       setWorkspace({ kind: "cockpit", mode: "collapsed" });
     });
   }
 
   function restoreCockpit() {
+    rememberDesktopWorkspaceMode("split");
     setWorkspace({ kind: "cockpit", mode: "split" });
   }
 
   function expandCockpit() {
+    rememberDesktopWorkspaceMode("expanded");
     setWorkspace({ kind: "cockpit", mode: "expanded" });
   }
 
@@ -1957,65 +1925,69 @@ function DispatchConsoleContent({
     }
   });
 
+  const restoreDesktopWorkspace = useEffectEvent(() => {
+    setWorkspace(current => current.kind === "cockpit"
+      ? { ...current, mode: visibleDesktopWorkspaceMode(workspacePreferences.desktopWorkspaceMode, centerView) } : current);
+  });
+
   useEffect(() => {
     const mobile = window.matchMedia("(max-width: 1023px)");
     function onBreakpointChange(event: MediaQueryListEvent) {
       if (event.matches) keepWorkspaceVisibleOnMobile();
+      else restoreDesktopWorkspace();
     }
     mobile.addEventListener("change", onBreakpointChange);
     return () => mobile.removeEventListener("change", onBreakpointChange);
   }, []);
 
-  useEffect(() => {
+  const handleWorkspaceKeyDown = useEffectEvent((event: KeyboardEvent) => {
     const caseDirectoryDetailOpen = activeView === "cases" && workspace.kind === "detail";
-    if (activeView !== "dispatch" && !caseDirectoryDetailOpen) {
+    if (activeView !== "dispatch" && !caseDirectoryDetailOpen) return;
+    if (event.key !== "Escape" || event.defaultPrevented) return;
+
+    if (leaveDialogOpen) {
+      event.preventDefault();
+      cancelPendingNavigation();
+      return;
+    }
+    if (centerView !== "map" && !caseDirectoryDetailOpen) return;
+
+    if (workspace.mode === "expanded") {
+      event.preventDefault();
+      requestNavigation(() => {
+        setFocusedTaskId(undefined);
+        if (caseDirectoryDetailOpen) {
+          setWorkspace({ kind: "cockpit", mode: preferredCockpitMode() });
+          returnViewRef.current = "dispatch";
+          return;
+        }
+        if (returnViewRef.current !== "dispatch") {
+          setActiveView(returnViewRef.current);
+          returnViewRef.current = "dispatch";
+        }
+        // Escape from a full editor restores the layout; Escape from a
+        // maximized cockpit is an explicit change to the user's layout.
+        if (workspace.kind === "cockpit") rememberDesktopWorkspaceMode("split");
+        setWorkspace({ kind: "cockpit", mode: workspace.kind === "cockpit" ? "split" : preferredCockpitMode() });
+      });
       return;
     }
 
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape" || event.defaultPrevented) {
-        return;
-      }
-
-      if (leaveDialogOpen) {
-        event.preventDefault();
-        cancelPendingNavigation();
-        return;
-      }
-
-      if (centerView !== "map" && !caseDirectoryDetailOpen) return;
-
-      if (workspace.mode === "expanded") {
-        event.preventDefault();
-        requestNavigation(() => {
-          setFocusedTaskId(undefined);
-          if (caseDirectoryDetailOpen) {
-            setWorkspace({ kind: "cockpit", mode: "split" });
-            returnViewRef.current = "dispatch";
-            return;
-          }
-          if (returnViewRef.current !== "dispatch") {
-            setActiveView(returnViewRef.current);
-            returnViewRef.current = "dispatch";
-          }
-          setWorkspace({ kind: "cockpit", mode: "split" });
-        });
-        return;
-      }
-
-      if (workspace.mode === "split") {
-        event.preventDefault();
-        requestNavigation(() => {
-          setFocusedTaskId(undefined);
-          setWorkspace({ kind: "cockpit", mode: "collapsed" });
-        });
-      }
+    if (workspace.mode === "split") {
+      event.preventDefault();
+      requestNavigation(() => {
+        setFocusedTaskId(undefined);
+        rememberDesktopWorkspaceMode("collapsed");
+        setWorkspace({ kind: "cockpit", mode: "collapsed" });
+      });
     }
+  });
 
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => handleWorkspaceKeyDown(event);
     window.addEventListener("keydown", handleKeyDown);
-
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeView, cancelPendingNavigation, centerView, leaveDialogOpen, requestNavigation, workspace]);
+  }, []);
 
   function renderTasks(variant: "page" | "sidebar", compact = false) {
     return <TaskPanel
