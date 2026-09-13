@@ -28,7 +28,7 @@ async function boot(page: Page, { width = 1440, canEdit = true, conflict = false
   const state = {
     lines: [
       { id: "00000000-0000-4000-8000-000000000201", label: "Hlavná linka", phoneNumber: "+421900000111", revision: "2026-09-07T12:00:00.000Z", config: legacy },
-      { id: "00000000-0000-4000-8000-000000000202", label: "Druhá linka", phoneNumber: "+421900000222", revision: "2026-09-07T12:00:00.000Z", config: { ...defaultAnnouncementConfig(), recordingStatusAnnouncements: true } },
+      { id: "00000000-0000-4000-8000-000000000202", label: "Druhá linka", phoneNumber: "+421900000222", revision: "2026-09-07T12:00:00.000Z", config: { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true, recordingStatusAnnouncements: true } },
     ] as AnnouncementLine[],
     writes: [] as { lineId: string; config: AnnouncementLine["config"] }[],
     errors: [] as string[], conflict,
@@ -106,13 +106,15 @@ for (const width of [390, 1440]) test(`startup announcements save independently 
   const inbound = page.getByRole("switch", { name: "Úvodné hlášky prichádzajúcich hovorov" });
   const outbound = page.getByRole("switch", { name: "Úvodné hlášky odchádzajúcich hovorov" });
   const save = page.getByRole("button", { name: "Uložiť hlášky a jazyk" });
-  await expect(inbound).toBeChecked();
+  await expect(inbound).not.toBeChecked();
   await expect(outbound).not.toBeChecked();
   await expect(save).toBeDisabled();
 
+  await inbound.check();
+  await expect(save).toBeEnabled();
   await inbound.uncheck();
   await expect(outbound).not.toBeChecked();
-  await expect(save).toBeEnabled();
+  await expect(save).toBeDisabled();
   await page.getByRole("group", { name: "Kategórie hlášok" }).getByRole("button", { name: /^Používané/ }).click();
   const greeting = page.locator("article").filter({ has: page.getByLabel("Privítanie", { exact: true }) });
   await expect(greeting.getByText("Vypnuté v hovoroch", { exact: true })).toBeVisible();

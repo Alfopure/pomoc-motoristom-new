@@ -3,7 +3,7 @@ import type { Call, IClientOptions, TelnyxRTC } from "@telnyx/webrtc";
 
 import { TelnyxWebphone, isAuthFailure, type TelnyxWebphoneOptions, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
 import type { TelephonyJsonResult } from "./client-request";
-import { EXPECTED_LEG_TTL_MS } from "./webphone-model";
+import { EXPECTED_LEG_TTL_MS, TOKEN_REFRESH_MIN_MS, WEBPHONE_RECOVERY_TIMEOUT_MS } from "./webphone-model";
 import { isDeviceLive } from "./device-liveness";
 
 /**
@@ -19,6 +19,16 @@ class FakeClient implements WebphoneSdkClient {
   connected = false;
   disconnected = false;
   remoteElement: unknown = "";
+  options: { login_token?: string };
+  connection = { connected: false, socketGeneration: 1 };
+  calls = new Set<WebphoneSdkCall>();
+  constructor(options: { login_token?: string } = {}) { this.options = options; }
+  login = vi.fn(async (options?: Parameters<WebphoneSdkClient["login"]>[0]) => {
+    // Real 2.27.10 returns without callbacks when its socket is not alive.
+    if (!this.connection.connected) return;
+    if (options?.creds?.login_token) this.options.login_token = options.creds.login_token;
+    options?.onSuccess?.();
+  });
 
   on(event: string, callback: (payload: never) => void) {
     const list = this.handlers.get(event) ?? [];
@@ -34,13 +44,20 @@ class FakeClient implements WebphoneSdkClient {
 
   async connect() {
     this.connected = true;
+    this.connection.connected = true;
   }
 
   async disconnect() {
     this.disconnected = true;
+    this.connection.connected = false;
+    // The real SDK deliberately purges calls on disconnect, unlike socket loss.
+    for (const call of this.calls) if (!["hangup", "destroy", "purge"].includes(call.state)) await call.hangup();
   }
 
   emit(event: string, payload?: unknown) {
+    if ((event === "telnyx.socket.close" || event === "telnyx.socket.error") && (!(payload as { socketGeneration?: number })?.socketGeneration || (payload as { socketGeneration?: number }).socketGeneration === this.connection.socketGeneration)) this.connection.connected = false;
+    if (event === "telnyx.socket.open" || event === "telnyx.ready") this.connection.connected = true;
+    if (event === "telnyx.notification" && (payload as WebphoneSdkNotification)?.call) this.calls.add((payload as WebphoneSdkNotification).call!);
     for (const handler of this.handlers.get(event) ?? []) handler(payload);
   }
 }
@@ -89,7 +106,7 @@ function harness(options: { token?: TelephonyJsonResult<unknown> | Promise<Telep
   const phone = new TelnyxWebphone({
     silent: true,
     now: options.now ?? (() => Date.parse("2026-09-03T08:00:00.000Z")),
-    createClient: options.createClient ?? (options.loadSdk ? undefined : () => client),
+    createClient: options.createClient ?? (options.loadSdk ? undefined : credentials => { client.options.login_token = credentials.token; return client; }),
     loadSdk: options.loadSdk,
     setTimeout: (handler, delayMs) => {
       const id = nextTimer++;
@@ -205,12 +222,12 @@ describe("TelnyxWebphone", () => {
     expect(created).toHaveLength(0);
     expect(h.phone.getSnapshot().status).toBe("connecting");
     sdk.resolve({ TelnyxRTC: class extends FakeClient {
-      constructor(options: IClientOptions) { super(); created.push({ options, client: this }); }
+      constructor(options: IClientOptions) { super(options); created.push({ options, client: this }); }
     } });
     await flush();
     expect(loadSdk).toHaveBeenCalledOnce();
     expect(created).toHaveLength(1);
-    expect(created[0].options).toEqual({ login_token: "issued-token", trickleIce: true });
+    expect(created[0].options).toEqual({ login_token: "issued-token", trickleIce: true, keepConnectionAliveOnSocketClose: true, maxReconnectAttempts: 5 });
     expect(created[0].client.connected).toBe(true);
     h.phone.stop();
   });
@@ -678,7 +695,7 @@ describe("TelnyxWebphone", () => {
     h.phone.stop();
   });
 
-  it.each(["visibilitychange", "pageshow", "online"])("resumes a delayed reconnect on %s without duplicate token requests", async (event) => {
+  it.each(["visibilitychange", "pageshow", "online"])("leaves SDK recovery in charge on %s without duplicate token requests", async (event) => {
     const { document } = audioDom();
     const h = harness();
     h.phone.start();
@@ -689,7 +706,8 @@ describe("TelnyxWebphone", () => {
     target.dispatchEvent(new Event(event));
     target.dispatchEvent(new Event(event));
     await flush();
-    expect(h.requests.filter((request) => request.url.includes("/webphone/token"))).toHaveLength(2);
+    expect(h.requests.filter((request) => request.url.includes("/webphone/token"))).toHaveLength(1);
+    expect(h.client.disconnected).toBe(false);
     h.phone.stop();
   });
 
@@ -1026,8 +1044,9 @@ describe("TelnyxWebphone", () => {
     h.client.emit("telnyx.error", { error: { code: 42001 }, callId: "old-call" });
     expect(h.phone.getSnapshot().callError).toBeNull();
     h.client.emit("telnyx.error", { error: { code: 45002, message: "Socket lost" } });
+    h.client.emit("telnyx.socket.error", { socketGeneration: h.client.connection.socketGeneration });
     expect(h.phone.getSnapshot().status).toBe("reconnecting");
-    expect(h.client.disconnected).toBe(true);
+    expect(h.client.disconnected).toBe(false);
     h.phone.stop();
   });
 
@@ -1177,4 +1196,328 @@ it("a stale available snapshot from another tab cannot undo a newer accepted pau
   const call = fakeCall(); h.client.emit("telnyx.notification", { type: "callUpdate", call }); await flush();
   expect(call.hungUp).toBe(true); expect(call.answered).toBe(false); expect(h.phone.getSnapshot().call?.ringing).toBe(false);
   h.phone.stop();
+});
+
+/** Authentication callbacks and peer replacement follow installed SDK 2.27.10, not a success-only mock. */
+describe("Telnyx SDK authentication and recovery contract", () => {
+  const epoch = Date.parse("2026-09-03T08:00:00.000Z");
+  function tokenResponse(token = "jwt-a") {
+    return { ok: true, status: 200, body: { token, expiresAt: new Date(epoch + 3_600_000).toISOString(), deviceSessionId: "device-1", sipUsername: "gencred1" } };
+  }
+  function stream() {
+    const track = { readyState: "live", stop: vi.fn(function (this: { readyState: string }) { this.readyState = "ended"; }) };
+    return { track, stream: { getTracks: () => [track] } as unknown as MediaStream };
+  }
+  async function active(options: Parameters<typeof harness>[0] = {}) {
+    const token = tokenResponse();
+    const h = harness({ token, ...options });
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    const media = stream();
+    const call = fakeCall({ state: "active", localStream: media.stream });
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "session-1" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    return { ...h, token, call, media };
+  }
+  function warning(client: FakeClient) { client.emit("telnyx.warning", { warning: { code: 34001 } }); }
+
+  it("applies the renewed JWT through login on the same healthy active-call SDK", async () => {
+    const h = await active();
+    h.token.body.token = "jwt-b";
+    warning(h.client);
+    await flush();
+    expect(h.client.login).toHaveBeenCalledOnce();
+    expect(h.client.login.mock.calls[0][0]?.creds).toEqual({ login_token: "jwt-b" });
+    expect(h.client.options.login_token).toBe("jwt-b");
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { id: h.call.id, active: true, sessionId: "session-1" } });
+    expect(h.client.disconnected).toBe(false);
+    expect(h.media.track.stop).not.toHaveBeenCalled();
+    h.phone.stop();
+  });
+
+  it("serializes authentication while coalescing repeated expiry warnings and newer credentials", async () => {
+    let now = epoch;
+    const h = await active({ now: () => now });
+    const first = deferred<void>();
+    let firstSuccess: (() => void) | undefined;
+    h.client.login.mockImplementationOnce(async options => { h.client.options.login_token = options?.creds?.login_token; firstSuccess = options?.onSuccess; await first.promise; });
+    h.token.body.token = "jwt-b";
+    warning(h.client); warning(h.client); warning(h.client);
+    await flush();
+    expect(h.client.login).toHaveBeenCalledTimes(1);
+    expect(h.requests.filter(row => row.url.includes("/token"))).toHaveLength(2);
+    now += TOKEN_REFRESH_MIN_MS;
+    h.token.body.token = "jwt-c";
+    warning(h.client);
+    await flush();
+    expect(h.client.login).toHaveBeenCalledTimes(1);
+    firstSuccess?.(); first.resolve();
+    await flush();
+    expect(h.client.login).toHaveBeenCalledTimes(2);
+    expect(h.client.options.login_token).toBe("jwt-c");
+    expect(h.media.track.stop).not.toHaveBeenCalled();
+    h.phone.stop();
+  });
+
+  it.each(["error-callback", "no-callback"])("does not mistake resolved SDK login with %s for authentication success", async mode => {
+    const h = await active();
+    h.client.login.mockImplementationOnce(async options => {
+      if (mode === "error-callback") {
+        const originalError = new Error("login rejected");
+        h.client.emit("telnyx.error", { error: { code: 46001, fatal: true, message: "Authentication failed", originalError } });
+        options?.onError?.(originalError);
+      }
+      // Real SDK catches the failed RPC and its outer Promise still resolves.
+    });
+    h.token.body.token = "jwt-b";
+    warning(h.client);
+    await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "reconnecting", call: { active: true } });
+    expect(h.media.track.stop).not.toHaveBeenCalled();
+    expect(h.client.disconnected).toBe(false);
+    h.token.body.token = "jwt-c";
+    h.runTimer(timer => timer.delayMs > 2_000 && timer.delayMs < 10_000);
+    await flush();
+    expect(h.client.login).toHaveBeenCalledTimes(2);
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    h.phone.stop();
+  });
+
+  it("stages a JWT minted during socket loss for the SDK automatic login without recreating the SDK", async () => {
+    const h = await active();
+    h.client.emit("telnyx.socket.close");
+    h.token.body.token = "jwt-b";
+    warning(h.client);
+    await flush();
+    expect(h.client.options.login_token).toBe("jwt-b");
+    expect(h.client.login).not.toHaveBeenCalled();
+    expect(h.client.disconnected).toBe(false);
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "reconnecting", call: { active: true } });
+    h.client.emit("telnyx.socket.open");
+    h.client.emit("telnyx.ready");
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    expect(h.client.login).not.toHaveBeenCalled();
+    expect(h.media.track.stop).not.toHaveBeenCalled();
+    h.phone.stop();
+  });
+
+  it("ignores a failed old-socket login response after successful automatic recovery", async () => {
+    const h = await active();
+    const pending = deferred<void>();
+    let rejectLogin: ((error: unknown) => void) | undefined;
+    h.client.login.mockImplementationOnce(async options => { h.client.options.login_token = options?.creds?.login_token; rejectLogin = options?.onError; await pending.promise; });
+    h.token.body.token = "jwt-b";
+    warning(h.client);
+    await flush();
+    h.client.emit("telnyx.socket.close");
+    h.client.emit("telnyx.socket.open");
+    h.client.emit("telnyx.ready");
+    rejectLogin?.(new Error("old socket")); pending.resolve();
+    await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { active: true } });
+    expect(h.client.login).toHaveBeenCalledOnce();
+    expect(h.requests.filter(row => row.url.includes("/token"))).toHaveLength(2);
+    h.phone.stop();
+  });
+
+  it.each(["close", "error"])("retires a lost %s-socket login so a new JWT can authenticate before the old RPC settles", async transport => {
+    let now = epoch;
+    const h = await active({ now: () => now });
+    const oldLogin = deferred<void>();
+    const newLogin = deferred<void>();
+    let oldCallbacks: Parameters<WebphoneSdkClient["login"]>[0];
+    let newCallbacks: Parameters<WebphoneSdkClient["login"]>[0];
+    h.client.login.mockImplementationOnce(async options => { oldCallbacks = options; h.client.options.login_token = options?.creds?.login_token; await oldLogin.promise; });
+    h.token.body.token = "jwt-b"; warning(h.client); await flush();
+    const oldTimer = h.timers.find(timer => timer.delayMs === 15_000)!;
+    h.client.emit(`telnyx.socket.${transport}`, { socketGeneration: 1 });
+    expect(h.timers).not.toContain(oldTimer);
+    h.client.connection.socketGeneration = 2;
+    h.client.emit("telnyx.socket.open"); h.client.emit("telnyx.ready");
+    // SDK's error-only path need not deliver close until the new socket is up.
+    h.client.emit("telnyx.socket.close", { socketGeneration: 1 });
+    now += TOKEN_REFRESH_MIN_MS;
+    h.client.login.mockImplementationOnce(async options => { newCallbacks = options; h.client.options.login_token = options?.creds?.login_token; await newLogin.promise; });
+    h.token.body.token = "jwt-c"; warning(h.client); await flush();
+    expect(h.client.login).toHaveBeenCalledTimes(2);
+    const newTimer = h.timers.find(timer => timer.delayMs === 15_000)!;
+    expect(newTimer).toBeDefined();
+    // A previously queued timer and a late SDK global error from B cannot own C.
+    oldTimer.handler();
+    const rpcError = { code: -32000, message: "old login rejected" };
+    h.client.emit("telnyx.error", { error: { code: 46001, fatal: true, originalError: new Error(String(rpcError)) } });
+    oldCallbacks?.onError?.(rpcError);
+    oldLogin.resolve(); await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { active: true } });
+    expect(h.timers).toContain(newTimer);
+    expect(h.timers.some(timer => timer.delayMs === WEBPHONE_RECOVERY_TIMEOUT_MS)).toBe(false);
+    expect(h.client.login).toHaveBeenCalledTimes(2);
+    expect(h.media.track.stop).not.toHaveBeenCalled();
+    // A real error from current C still degrades readiness and retries.
+    const currentError = new Error("current login rejected");
+    h.client.emit("telnyx.error", { error: { code: 46001, fatal: true, originalError: currentError } });
+    newCallbacks?.onError?.(currentError);
+    newLogin.resolve(); await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "reconnecting", call: { active: true } });
+    expect(h.timers.some(timer => timer.delayMs === WEBPHONE_RECOVERY_TIMEOUT_MS)).toBe(true);
+    h.phone.stop();
+  });
+
+  it("recovers an automatic SDK login failure that has no managed callback", async () => {
+    const h = await active();
+    h.token.body.token = "jwt-b";
+    h.client.emit("telnyx.error", { error: { code: 46001, fatal: true, originalError: new Error("automatic login rejected") } });
+    await flush();
+    expect(h.requests.filter(row => row.url.includes("/token"))).toHaveLength(2);
+    expect(h.client.login).toHaveBeenCalledOnce();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { active: true } });
+    h.phone.stop();
+  });
+
+  it.each(["call-1", "recovered-call"])("preserves correlated recovery %s and ignores the old object's late terminal update", async id => {
+    const h = await active();
+    h.client.emit("telnyx.socket.close");
+    h.call.state = "recovering";
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: h.call });
+    expect(h.call.answered).toBe(false);
+    expect(h.phone.getSnapshot().call?.ringing).toBe(false);
+    h.client.emit("telnyx.socket.open");
+    h.client.emit("telnyx.ready");
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    const replacementMedia = stream();
+    const replacement = fakeCall({ id, recoveredCallId: h.call.id, state: "active", localStream: replacementMedia.stream, isAudioMuted: true });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: replacement });
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { id, sessionId: "session-1", muted: true, active: true } });
+    h.call.state = "destroy";
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: h.call });
+    expect(h.phone.getSnapshot().call?.id).toBe(id);
+    expect(replacementMedia.track.stop).not.toHaveBeenCalled();
+    expect(replacement.answered).toBe(false);
+    h.phone.stop();
+  });
+
+  it.each(["call-1", "recovered-call"])("rejects recovery %s after the operator has hung up during socket loss", async id => {
+    const h = await active();
+    h.client.emit("telnyx.socket.close");
+    await h.phone.hangup();
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(h.media.track.stop).toHaveBeenCalledOnce();
+    const replacement = fakeCall({ id, recoveredCallId: h.call.id, state: "recovering" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: replacement });
+    await flush();
+    expect(replacement.hungUp).toBe(true);
+    expect(replacement.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toBeNull();
+    h.phone.stop();
+  });
+
+  it.each(["stop", "superseded"])("does not resurrect a %s phone from late authentication or SDK events", async reason => {
+    const heartbeat = { ok: true, status: 200, body: {} };
+    const h = await active({ heartbeat: () => heartbeat });
+    const pending = deferred<void>();
+    let success: (() => void) | undefined;
+    h.client.login.mockImplementationOnce(async options => { success = options?.onSuccess; await pending.promise; });
+    h.token.body.token = "jwt-b";
+    warning(h.client);
+    await flush();
+    if (reason === "stop") h.phone.stop();
+    else { Object.assign(heartbeat, { ok: false, status: 409 }); h.runTimer(timer => timer.delayMs === 30_000); await flush(); }
+    success?.(); pending.resolve();
+    h.client.emit("telnyx.socket.open"); h.client.emit("telnyx.ready"); warning(h.client);
+    await flush();
+    expect(h.phone.getSnapshot().status).toBe(reason === "stop" ? "idle" : "superseded");
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(h.client.disconnected).toBe(true);
+    expect(h.timers.filter(timer => timer.delayMs === WEBPHONE_RECOVERY_TIMEOUT_MS || timer.delayMs === 15_000)).toHaveLength(0);
+    h.phone.stop();
+  });
+
+  it("bounds repeated recovery events without resetting their deadline", async () => {
+    const h = await active();
+    h.client.emit("telnyx.error", { error: { code: 45004, fatal: false } });
+    const deadline = h.timers.find(timer => timer.delayMs === WEBPHONE_RECOVERY_TIMEOUT_MS);
+    expect(deadline).toBeDefined();
+    h.client.emit("telnyx.socket.close");
+    h.client.emit("telnyx.warning", { warning: { code: 36003 } });
+    expect(h.timers.find(timer => timer.delayMs === WEBPHONE_RECOVERY_TIMEOUT_MS)).toBe(deadline);
+    expect(h.client.disconnected).toBe(false);
+    h.runTimer(timer => timer === deadline);
+    expect(h.phone.getSnapshot().status).toBe("failed");
+    expect(h.media.track.stop).toHaveBeenCalledOnce();
+    h.client.emit("telnyx.ready");
+    expect(h.phone.getSnapshot().status).toBe("failed");
+    h.phone.stop();
+  });
+
+  it("does not overlap a timed-out authentication RPC and releases it on exhausted recovery", async () => {
+    const h = await active();
+    const pending = deferred<void>();
+    h.client.login.mockImplementationOnce(async () => { await pending.promise; });
+    h.token.body.token = "jwt-b"; warning(h.client); await flush();
+    h.runTimer(timer => timer.delayMs === 15_000);
+    h.runTimer(timer => timer.delayMs > 2_000 && timer.delayMs < 10_000);
+    await flush();
+    expect(h.client.login).toHaveBeenCalledOnce();
+    expect(h.media.track.stop).not.toHaveBeenCalled();
+    h.runTimer(timer => timer.delayMs === WEBPHONE_RECOVERY_TIMEOUT_MS);
+    pending.resolve(); await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "failed", call: null });
+    expect(h.media.track.stop).toHaveBeenCalledOnce();
+    h.phone.stop();
+  });
+
+  it("ends exhausted SDK recovery immediately instead of restarting another automatic loop", async () => {
+    const h = await active();
+    h.client.emit("telnyx.error", { error: { code: 45003, fatal: true } });
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "failed", call: null });
+    expect(h.client.disconnected).toBe(true);
+    expect(h.requests.filter(row => row.url.includes("/token"))).toHaveLength(1);
+    h.phone.stop();
+  });
+
+  it("ignores late old-socket close/error/open after the current socket has recovered", async () => {
+    const h = await active();
+    h.client.emit("telnyx.socket.open");
+    h.client.emit("telnyx.socket.close", { socketGeneration: 1 });
+    h.client.connection.socketGeneration = 2;
+    h.client.emit("telnyx.socket.open"); h.client.emit("telnyx.ready");
+    h.client.emit("telnyx.socket.close", { socketGeneration: 1 });
+    h.client.emit("telnyx.error", { error: { code: 45002, fatal: false } });
+    h.client.emit("telnyx.socket.error", { socketGeneration: 1 });
+    // A late open carries no generation in the actual SDK. It must not cause
+    // the next ready event to claim a pending manual login succeeded.
+    const pending = deferred<void>();
+    h.client.login.mockImplementationOnce(async options => { h.client.options.login_token = options?.creds?.login_token; await pending.promise; options?.onError?.(new Error("rejected")); });
+    h.token.body.token = "jwt-b"; warning(h.client); await flush();
+    h.client.emit("telnyx.socket.open");
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { active: true } });
+    expect(h.timers.some(timer => timer.delayMs === WEBPHONE_RECOVERY_TIMEOUT_MS)).toBe(false);
+    expect(h.media.track.stop).not.toHaveBeenCalled();
+    pending.resolve(); await flush();
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    h.phone.stop();
+  });
+
+  it("treats structurally invalid credentials as terminal rather than another token-renewal loop", async () => {
+    const h = await active();
+    h.client.emit("telnyx.error", { error: { code: 46002, fatal: true, message: "Invalid credential parameters" } });
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "failed", call: null });
+    expect(h.requests.filter(row => row.url.includes("/token"))).toHaveLength(1);
+    h.phone.stop();
+  });
+
+  it("preserves the answered application's session when recovery changes both SDK and provider leg IDs", async () => {
+    const h = await active();
+    h.call.state = "ringing";
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "accepted-session" });
+    await flush();
+    expect(h.phone.getSnapshot().call?.sessionId).toBe("accepted-session");
+    h.call.state = "recovering";
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: h.call });
+    const replacement = fakeCall({ id: "recovered-call", recoveredCallId: h.call.id, state: "active", telnyxIDs: { telnyxCallControlId: "new-cc", telnyxSessionId: "ts-1", telnyxLegId: "new-leg" } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: replacement });
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "recovered-call", sessionId: "accepted-session", telnyxCallControlId: "new-cc" });
+    h.phone.stop();
+  });
 });

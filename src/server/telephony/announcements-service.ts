@@ -95,7 +95,7 @@ export function parseAnnouncementConfig(deps: ConfigDeps, organizationId: string
     if (value[key] !== undefined && typeof value[key] !== "boolean") invalid("Vyberte, či sa majú prehrávať úvodné hlášky pre každý smer hovoru.");
   }
   if (value.recordingStatusAnnouncements !== undefined && typeof value.recordingStatusAnnouncements !== "boolean") invalid("Vyberte, či sa majú prehrávať hlášky o zmenách nahrávania.");
-  const config: AnnouncementConfig = { version: 1, language: value.language, voiceId: value.voiceId, inboundStartAnnouncements: value.inboundStartAnnouncements !== false,
+  const config: AnnouncementConfig = { version: 1, language: value.language, voiceId: value.voiceId, inboundStartAnnouncements: value.inboundStartAnnouncements === true,
     outboundStartAnnouncements: value.outboundStartAnnouncements === true, recordingStatusAnnouncements: value.recordingStatusAnnouncements === true, prompts: {} };
   for (const [language, prompts] of Object.entries(value.prompts)) {
     if (!isAnnouncementLanguage(language) || !isRecord(prompts)) invalid("Neplatný jazyk hlásenia.");

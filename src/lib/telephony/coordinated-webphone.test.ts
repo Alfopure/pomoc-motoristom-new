@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CoordinatedWebphone } from "./coordinated-webphone";
+import { CoordinatedWebphone, MOBILE_VISIBLE_STANDBY_MS } from "./coordinated-webphone";
 import type { TelnyxWebphone, TelnyxWebphoneOptions, WebphoneSnapshot } from "./telnyx-webphone";
 
 const registered = (): WebphoneSnapshot => ({ status: "registered", registration: { status: "registered", label: "Registrované", detail: "", tone: "ok" }, deviceSessionId: "secret-session", sipUsername: "secret-sip", call: null, message: null });
@@ -33,6 +33,7 @@ class Channel {
 beforeEach(() => {
   phones.length = 0; controllers.length = 0; channels.clear();
   vi.stubGlobal("window", new EventTarget());
+  vi.stubGlobal("document", Object.assign(new EventTarget(), { visibilityState: "visible" }));
   const data = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => data.set(key, value) });
   const tails = new Map<string, Promise<unknown>>();
@@ -47,6 +48,10 @@ beforeEach(() => {
 });
 afterEach(() => { for (const controller of controllers) controller.dispose(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 const flush = async () => { for (let i = 0; i < 15; i++) await Promise.resolve(); };
+const visibility = (state: DocumentVisibilityState) => {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+  document.dispatchEvent(new Event("visibilitychange"));
+};
 
 describe("shared browser phone and on-demand mobile", () => {
   it("an owner poll at the same presence revision cannot clear a follower's pending pickup", async () => {
@@ -165,9 +170,85 @@ describe("shared browser phone and on-demand mobile", () => {
     phones[0].emit({ ...registered(), call: { ...ringing("call-a")!, active: true, ringing: false } });
     mobile.finishRequest(); await vi.advanceTimersByTimeAsync(20_000);
     expect(phones[0].stop).not.toHaveBeenCalled();
-    phones[0].emit(registered()); await vi.advanceTimersByTimeAsync(5_000);
+    phones[0].emit(registered()); await vi.advanceTimersByTimeAsync(MOBILE_VISIBLE_STANDBY_MS - 1);
+    expect(phones[0].stop).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
     expect(phones[0].stop).toHaveBeenCalledOnce();
     expect(mobile.getSnapshot().status).toBe("idle");
+  });
+
+  it("reuses the mobile phone for a second visible call and does not extend idle time on repeated status updates", async () => {
+    vi.useFakeTimers();
+    const mobile = create(true); await mobile.prepareForCall(); mobile.finishRequest();
+    await vi.advanceTimersByTimeAsync(30_000);
+    await mobile.prepareForCall();
+    expect(phones).toHaveLength(1);
+    phones[0].emit({ ...registered(), call: { ...ringing("second-call")!, active: true, ringing: false } });
+    mobile.finishRequest();
+    await vi.advanceTimersByTimeAsync(MOBILE_VISIBLE_STANDBY_MS);
+    expect(phones[0].stop).not.toHaveBeenCalled();
+    phones[0].emit(registered());
+    for (let elapsed = 0; elapsed < 90_000; elapsed += 30_000) {
+      await vi.advanceTimersByTimeAsync(30_000);
+      phones[0].emit(registered());
+    }
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(phones[0].stop).toHaveBeenCalledOnce();
+    expect(mobile.getSnapshot().status).toBe("idle");
+  });
+
+  it("releases a hidden idle mobile phone immediately and does not register merely on foreground", async () => {
+    vi.useFakeTimers();
+    const mobile = create(true); await mobile.prepareForCall(); mobile.finishRequest();
+    visibility("hidden");
+    expect(phones[0].stop).toHaveBeenCalledOnce();
+    expect(mobile.getSnapshot().status).toBe("idle");
+    visibility("visible");
+    await vi.advanceTimersByTimeAsync(MOBILE_VISIBLE_STANDBY_MS);
+    expect(phones).toHaveLength(1);
+    await mobile.prepareForCall();
+    expect(phones).toHaveLength(2);
+  });
+
+  it("does not retire a hidden call or its pending recovery, then releases after the call ends", async () => {
+    vi.useFakeTimers();
+    const mobile = create(true); await mobile.prepareForCall();
+    phones[0].emit({ ...registered(), call: { ...ringing("recovering-call")!, state: "recovering", active: false, ringing: false } });
+    mobile.finishRequest();
+    visibility("hidden");
+    await vi.advanceTimersByTimeAsync(2 * MOBILE_VISIBLE_STANDBY_MS);
+    expect(phones[0].stop).not.toHaveBeenCalled();
+    expect(mobile.getSnapshot().call?.id).toBe("recovering-call");
+    phones[0].emit(registered());
+    expect(phones[0].stop).toHaveBeenCalledOnce();
+    expect(mobile.getSnapshot().status).toBe("idle");
+  });
+
+  it("keeps a hidden in-flight request and exact pending invite until both are complete", async () => {
+    vi.useFakeTimers();
+    const mobile = create(true); await mobile.prepareForCall();
+    visibility("hidden");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(phones[0].stop).not.toHaveBeenCalled();
+    phones[0].emit({ ...registered(), pendingOperatorLegs: 1 });
+    mobile.finishRequest();
+    await vi.advanceTimersByTimeAsync(MOBILE_VISIBLE_STANDBY_MS);
+    expect(phones[0].stop).not.toHaveBeenCalled();
+    phones[0].emit(registered());
+    expect(phones[0].stop).toHaveBeenCalledOnce();
+  });
+
+  it("visibility does not stop the desktop owner or reconnect a disposed mobile controller", async () => {
+    const desktop = create(); await flush();
+    visibility("hidden");
+    expect(phones[0].stop).not.toHaveBeenCalled();
+    visibility("visible");
+    const mobile = create(true); await mobile.prepareForCall(); mobile.finishRequest();
+    mobile.dispose();
+    visibility("hidden"); visibility("visible");
+    expect(phones).toHaveLength(2);
+    expect(phones[1].stop).toHaveBeenCalledOnce();
+    desktop.dispose();
   });
 
   it("an API request in flight does not retire the mobile phone before its correlated invite", async () => {

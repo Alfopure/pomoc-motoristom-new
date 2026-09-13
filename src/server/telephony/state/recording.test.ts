@@ -23,9 +23,9 @@ function enabledHarness(options: { conference?: boolean; transfer?: boolean; sta
   vi.stubEnv("TELNYX_RECORDING_TRANSFER_VERIFIED", options.transfer ? "true" : "false");
   const h = createTelephonyHarness();
   h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(), inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
-  if (options.statusAnnouncements !== undefined) h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), recordingStatusAnnouncements: options.statusAnnouncements } } }, () => true);
+  if (options.statusAnnouncements !== undefined) h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true, recordingStatusAnnouncements: options.statusAnnouncements } } }, () => true);
   if (options.separateIntro) {
-    const config = defaultAnnouncementConfig();
+    const config = { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true };
     config.prompts.sk = { greeting: { text: resolveAnnouncement(config, "greeting").text, audioUrl: "https://example.invalid/custom-greeting.mp3", voiceId: config.voiceId } };
     h.db.update("motorist_telephony_lines", { metadata: { announcements: config } }, () => true);
   }
@@ -97,7 +97,7 @@ describe("recording lifecycle", () => {
 
   it("keeps the preference captured at call start when the line changes mid-call", async () => {
     const h = enabledHarness({ statusAnnouncements: false }); const call = await talking(h);
-    h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), recordingStatusAnnouncements: true } } }, () => true);
+    h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true, recordingStatusAnnouncements: true } } }, () => true);
     const playbackBefore = h.telnyx.of("playbackStart").length;
     await stopCallRecording(h.deps, actor, call.sessionId);
     expect(h.telnyx.of("playbackStart")).toHaveLength(playbackBefore);
@@ -130,7 +130,7 @@ describe("recording lifecycle", () => {
 
   it("chooses the editable notice matching the approved purpose", async () => {
     const service = enabledHarness();
-    service.db.update("motorist_telephony_lines", { metadata: { announcements: { version: 1, language: "sk", voiceId: "EXAVITQu4vr4xnSDxMaL", prompts: { sk: { recordingServiceNotice: { text: "Tento hovor nahrávame na vybavenie vašej pomoci." } } } } } }, () => true);
+    service.db.update("motorist_telephony_lines", { metadata: { announcements: { version: 1, inboundStartAnnouncements: true, language: "sk", voiceId: "EXAVITQu4vr4xnSDxMaL", prompts: { sk: { recordingServiceNotice: { text: "Tento hovor nahrávame na vybavenie vašej pomoci." } } } } } }, () => true);
     const first = await service.inbound();
     expect(readMeta(service.session(first.sessionId) as SessionRow).announcement_sequence?.keys).toEqual(["recordingServiceNotice"]);
     expect(service.telnyx.of("speak").at(-1)?.params.payload).toBe("Tento hovor nahrávame na vybavenie vašej pomoci.");

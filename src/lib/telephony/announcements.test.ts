@@ -32,10 +32,10 @@ describe("caller announcement assets", () => {
       expect(isAnnouncementEnabled(config, "recordingNotice")).toBe(true);
     }
   });
-  it("normalizes legacy and malformed startup preferences without enabling outbound audio", () => {
+  it("keeps missing, legacy and malformed startup preferences silent", () => {
     const legacy = { version: 1, language: "sk", voiceId: defaultAnnouncementConfig().voiceId, prompts: {} };
     for (const input of [null, legacy, { ...legacy, inboundStartAnnouncements: "false", outboundStartAnnouncements: "true" }]) {
-      expect(readAnnouncementConfig(input)).toMatchObject({ inboundStartAnnouncements: true, outboundStartAnnouncements: false });
+      expect(readAnnouncementConfig(input)).toMatchObject({ inboundStartAnnouncements: false, outboundStartAnnouncements: false });
     }
   });
   it.each([true, false])("keeps inbound and outbound startup switches independent when inbound=%s", (inboundStartAnnouncements) => {
