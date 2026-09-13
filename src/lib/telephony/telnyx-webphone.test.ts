@@ -55,7 +55,7 @@ class FakeClient implements WebphoneSdkClient {
   }
 
   emit(event: string, payload?: unknown) {
-    if (event === "telnyx.socket.close" && (!(payload as { socketGeneration?: number })?.socketGeneration || (payload as { socketGeneration?: number }).socketGeneration === this.connection.socketGeneration)) this.connection.connected = false;
+    if ((event === "telnyx.socket.close" || event === "telnyx.socket.error") && (!(payload as { socketGeneration?: number })?.socketGeneration || (payload as { socketGeneration?: number }).socketGeneration === this.connection.socketGeneration)) this.connection.connected = false;
     if (event === "telnyx.socket.open" || event === "telnyx.ready") this.connection.connected = true;
     if (event === "telnyx.notification" && (payload as WebphoneSdkNotification)?.call) this.calls.add((payload as WebphoneSdkNotification).call!);
     for (const handler of this.handlers.get(event) ?? []) handler(payload);
@@ -1264,8 +1264,9 @@ describe("Telnyx SDK authentication and recovery contract", () => {
     const h = await active();
     h.client.login.mockImplementationOnce(async options => {
       if (mode === "error-callback") {
-        h.client.emit("telnyx.error", { error: { code: 46001, fatal: true, message: "Authentication failed" } });
-        options?.onError?.(new Error("login rejected"));
+        const originalError = new Error("login rejected");
+        h.client.emit("telnyx.error", { error: { code: 46001, fatal: true, message: "Authentication failed", originalError } });
+        options?.onError?.(originalError);
       }
       // Real SDK catches the failed RPC and its outer Promise still resolves.
     });
@@ -1317,6 +1318,60 @@ describe("Telnyx SDK authentication and recovery contract", () => {
     expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { active: true } });
     expect(h.client.login).toHaveBeenCalledOnce();
     expect(h.requests.filter(row => row.url.includes("/token"))).toHaveLength(2);
+    h.phone.stop();
+  });
+
+  it.each(["close", "error"])("retires a lost %s-socket login so a new JWT can authenticate before the old RPC settles", async transport => {
+    let now = epoch;
+    const h = await active({ now: () => now });
+    const oldLogin = deferred<void>();
+    const newLogin = deferred<void>();
+    let oldCallbacks: Parameters<WebphoneSdkClient["login"]>[0];
+    let newCallbacks: Parameters<WebphoneSdkClient["login"]>[0];
+    h.client.login.mockImplementationOnce(async options => { oldCallbacks = options; h.client.options.login_token = options?.creds?.login_token; await oldLogin.promise; });
+    h.token.body.token = "jwt-b"; warning(h.client); await flush();
+    const oldTimer = h.timers.find(timer => timer.delayMs === 15_000)!;
+    h.client.emit(`telnyx.socket.${transport}`, { socketGeneration: 1 });
+    expect(h.timers).not.toContain(oldTimer);
+    h.client.connection.socketGeneration = 2;
+    h.client.emit("telnyx.socket.open"); h.client.emit("telnyx.ready");
+    // SDK's error-only path need not deliver close until the new socket is up.
+    h.client.emit("telnyx.socket.close", { socketGeneration: 1 });
+    now += TOKEN_REFRESH_MIN_MS;
+    h.client.login.mockImplementationOnce(async options => { newCallbacks = options; h.client.options.login_token = options?.creds?.login_token; await newLogin.promise; });
+    h.token.body.token = "jwt-c"; warning(h.client); await flush();
+    expect(h.client.login).toHaveBeenCalledTimes(2);
+    const newTimer = h.timers.find(timer => timer.delayMs === 15_000)!;
+    expect(newTimer).toBeDefined();
+    // A previously queued timer and a late SDK global error from B cannot own C.
+    oldTimer.handler();
+    const rpcError = { code: -32000, message: "old login rejected" };
+    h.client.emit("telnyx.error", { error: { code: 46001, fatal: true, originalError: new Error(String(rpcError)) } });
+    oldCallbacks?.onError?.(rpcError);
+    oldLogin.resolve(); await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { active: true } });
+    expect(h.timers).toContain(newTimer);
+    expect(h.timers.some(timer => timer.delayMs === WEBPHONE_RECOVERY_TIMEOUT_MS)).toBe(false);
+    expect(h.client.login).toHaveBeenCalledTimes(2);
+    expect(h.media.track.stop).not.toHaveBeenCalled();
+    // A real error from current C still degrades readiness and retries.
+    const currentError = new Error("current login rejected");
+    h.client.emit("telnyx.error", { error: { code: 46001, fatal: true, originalError: currentError } });
+    newCallbacks?.onError?.(currentError);
+    newLogin.resolve(); await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "reconnecting", call: { active: true } });
+    expect(h.timers.some(timer => timer.delayMs === WEBPHONE_RECOVERY_TIMEOUT_MS)).toBe(true);
+    h.phone.stop();
+  });
+
+  it("recovers an automatic SDK login failure that has no managed callback", async () => {
+    const h = await active();
+    h.token.body.token = "jwt-b";
+    h.client.emit("telnyx.error", { error: { code: 46001, fatal: true, originalError: new Error("automatic login rejected") } });
+    await flush();
+    expect(h.requests.filter(row => row.url.includes("/token"))).toHaveLength(2);
+    expect(h.client.login).toHaveBeenCalledOnce();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { active: true } });
     h.phone.stop();
   });
 

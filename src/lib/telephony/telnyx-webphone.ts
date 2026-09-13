@@ -225,6 +225,7 @@ export class TelnyxWebphone {
   private connectionEpoch = 0;
   private authenticationNeeded = false;
   private loginRequest: SdkLoginRequest | null = null;
+  private loginFailureEvent: { handled: boolean; generation: number } | null = null;
   private mediaRecovering = false;
   private sdkModule: Promise<WebphoneSdkModule> | null = null;
   private heartbeatRequest: { body: string; generation: number; promise: Promise<HeartbeatResult> } | null = null;
@@ -749,12 +750,7 @@ export class TelnyxWebphone {
       }) as (payload: never) => void);
       client.on("telnyx.socket.close", ((payload: WebphoneSdkSocketEvent) => {
         if (!current() || !this.currentSocketEvent(client, payload)) return;
-        this.connectionEpoch++;
-        this.socketLoginToken = null;
-        this.beginRecovery("Spojenie telefónu vypadlo, obnovujem ho.", true);
-        // A newly minted JWT may have arrived while the socket was closing.
-        // The SDK's next automatic login reads its public options.
-        void this.applyPendingCredentials();
+        this.onTransportLost();
       }) as (payload: never) => void);
       client.on("telnyx.socket.open", (() => {
         if (!current() || !client.connection?.connected) return;
@@ -767,7 +763,7 @@ export class TelnyxWebphone {
         this.socketLoginToken = client.options.login_token ?? null;
       }) as (payload: never) => void);
       client.on("telnyx.socket.error", ((payload: WebphoneSdkSocketEvent) => {
-        if (current() && this.currentSocketEvent(client, payload)) this.beginRecovery("Spojenie telefónu vypadlo, obnovujem ho.", true);
+        if (current() && this.currentSocketEvent(client, payload)) this.onTransportLost();
       }) as (payload: never) => void);
       client.on("telnyx.warning", ((payload: WebphoneSdkWarning) => {
         if (current()) this.onSdkWarning(payload);
@@ -808,6 +804,18 @@ export class TelnyxWebphone {
     return typeof event?.socketGeneration !== "number" || typeof generation !== "number" || event.socketGeneration === generation;
   }
 
+  private onTransportLost(): void {
+    this.connectionEpoch++;
+    this.socketLoginToken = null;
+    // 2.27.10 may leave an old login RPC pending forever after transport loss.
+    // Retire its ownership now: a new socket can authenticate independently,
+    // and late old callbacks cannot clear or time out its newer login slot.
+    this.loginRequest = null;
+    this.clearTimer("loginTimer");
+    this.beginRecovery("Spojenie telefónu vypadlo, obnovujem ho.", true);
+    void this.applyPendingCredentials();
+  }
+
   private loginIsCurrent(request: SdkLoginRequest): boolean {
     return this.started && this.client === request.client && this.clientGeneration === request.generation &&
       this.connectionEpoch === request.connectionEpoch;
@@ -838,7 +846,16 @@ export class TelnyxWebphone {
       // cannot cancel that RPC and must not start overlapping authentication.
     }, SDK_LOGIN_TIMEOUT_MS);
     try {
-      await client.login({ creds: { login_token: credentials.token }, onSuccess: () => { accepted = true; }, onError: () => { accepted = false; } });
+      await client.login({ creds: { login_token: credentials.token }, onSuccess: () => { accepted = true; }, onError: () => {
+        accepted = false;
+        // SDK emits global LOGIN_FAILED just before this callback, including
+        // for a retired RPC. Claim that synchronous emission, not its error
+        // object: the SDK wraps non-Error RPC payloads in a different Error.
+        if (this.loginFailureEvent?.generation === request.generation && this.client === request.client) {
+          this.loginFailureEvent.handled = true;
+          this.loginFailureEvent = null;
+        }
+      } });
     } catch {
       accepted = false;
     } finally {
@@ -912,6 +929,7 @@ export class TelnyxWebphone {
     this.socketLoginConnection = null;
     this.socketLoginGeneration = undefined;
     this.loginRequest = null;
+    this.loginFailureEvent = null;
     this.lastWarningRefreshAt = -Infinity;
     this.clearTimer("recoveryTimer");
     this.clearTimer("loginTimer");
@@ -938,16 +956,21 @@ export class TelnyxWebphone {
       this.dispatch({ type: "recovery_failed", message: "Prihlasovacie údaje telefónu nie sú platné. Znovu pripojte telefón." });
       return;
     }
-    if (code === 46001 || code === 46003 || isAuthFailure(message)) {
-      // login() emits the global error before invoking its onError callback.
-      // Its serialized request owns this outcome, so handle it only once.
-      if (this.loginRequest?.connectionEpoch === this.connectionEpoch) return;
-      this.authenticationNeeded = true;
-      this.beginRecovery("Obnovujem prihlásenie telefónu.", false);
-      // A synchronous login failure can arrive before its original mint has
-      // finished unwinding. Schedule a fallback instead of losing that retry.
-      if (this.minting) this.dispatch({ type: "token_rejected", status: 0, message: "Obnovujem prihlásenie telefónu." });
-      else void this.mintToken();
+    if (code === 46001) {
+      const generation = this.clientGeneration;
+      const epoch = this.connectionEpoch;
+      const event = { handled: false, generation };
+      this.loginFailureEvent = event;
+      queueMicrotask(() => {
+        if (this.loginFailureEvent === event) this.loginFailureEvent = null;
+        if (!this.started || generation !== this.clientGeneration || epoch !== this.connectionEpoch) return;
+        if (event.handled) return;
+        this.recoverAuthentication();
+      });
+      return;
+    }
+    if (code === 46003 || isAuthFailure(message)) {
+      this.recoverAuthentication();
       return;
     }
     if (code === 45002) {
@@ -977,6 +1000,15 @@ export class TelnyxWebphone {
       return;
     }
     this.dispatch({ type: "client_error", message, authFailure: isAuthFailure(message) });
+  }
+
+  private recoverAuthentication(): void {
+    this.authenticationNeeded = true;
+    this.beginRecovery("Obnovujem prihlásenie telefónu.", false);
+    // A synchronous login failure can arrive before its original mint has
+    // finished unwinding. Schedule a fallback instead of losing that retry.
+    if (this.minting) this.dispatch({ type: "token_rejected", status: 0, message: "Obnovujem prihlásenie telefónu." });
+    else void this.mintToken();
   }
 
   private onNotification(notification: WebphoneSdkNotification): void {
@@ -1325,7 +1357,7 @@ export class TelnyxWebphone {
 }
 
 type WebphoneSdkError = {
-  error?: { code?: number; name?: string; message?: string; fatal?: boolean };
+  error?: { code?: number; name?: string; message?: string; fatal?: boolean; originalError?: unknown };
   message?: string;
   callId?: string;
 };
