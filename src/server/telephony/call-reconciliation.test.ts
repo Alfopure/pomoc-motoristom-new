@@ -16,6 +16,30 @@ async function talking() {
 }
 
 describe("browser leg reconciliation", () => {
+  it("defers an exact ended leg once while another contract-2 owner is updating it", async () => {
+    const { h, call } = await talking();
+    h.db.storage("motorist_call_sessions").find(row => row.id === call.sessionId)!.writer_contract = 2;
+    h.db.registerRpc("motorist_session_lease_acquire_v2", () => null);
+    h.telnyx.setCallStatus(call.operatorLegCallControlId, { alive: false });
+    const presence = h.presence(actor.profileId);
+    const leg = h.legs(call.sessionId).find(row => row.telnyx_call_control_id === call.operatorLegCallControlId);
+    expect(await reconcileBrowserCall(h.deps, actor, call.sessionId, call.operatorLegCallControlId))
+      .toMatchObject({ reconciled: false, state: "talking", reason: "session_busy", retryAfterMs: 1000 });
+    expect(h.db.log.filter(entry => entry.table === "motorist_session_lease_acquire_v2")).toHaveLength(1);
+    expect(h.presence(actor.profileId)).toEqual(presence);
+    expect(h.legs(call.sessionId).find(row => row.telnyx_call_control_id === call.operatorLegCallControlId)).toEqual(leg);
+  });
+
+  it("propagates an ownership database outage instead of misreporting a busy call", async () => {
+    const { h, call } = await talking();
+    h.db.storage("motorist_call_sessions").find(row => row.id === call.sessionId)!.writer_contract = 2;
+    h.db.failNext("motorist_session_lease_acquire_v2", "rpc", "database unavailable");
+    h.telnyx.setCallStatus(call.operatorLegCallControlId, { alive: false });
+    await expect(reconcileBrowserCall(h.deps, actor, call.sessionId, call.operatorLegCallControlId))
+      .rejects.toMatchObject({ status: 503, code: "session_event_deferred" });
+    expect(h.session(call.sessionId).state).toBe("talking");
+  });
+
   it("releases a stuck operator immediately when Telnyx confirms their browser leg ended", async () => {
     const { h, call } = await talking();
     h.telnyx.setCallStatus(call.operatorLegCallControlId, { alive: false });

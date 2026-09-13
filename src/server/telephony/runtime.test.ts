@@ -8,6 +8,7 @@ import { CallActionError } from "./call-actions";
 import { OperatorDeviceError } from "./operator-devices";
 import { PresenceServiceError } from "./presence-service";
 import { TelnyxCommandError } from "./telnyx/client";
+import { SessionEventDeferredError, SessionLeaseBusyError } from "./service-errors";
 
 let harness: ReturnType<typeof createTelephonyHarness>;
 const notifications = vi.hoisted(() => ({ after: vi.fn(), notify: vi.fn() }));
@@ -193,6 +194,31 @@ describe("telephony runtime", () => {
     expect(unexpected.status).toBe(500);
     await expect(unexpected.json()).resolves.toEqual({ error: "Akcia zlyhala." });
     consoleError.mockRestore();
+  });
+
+  it("reports ownership contention as a retryable action conflict without claiming success", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = telephonyErrorResponse(new SessionLeaseBusyError(), "Akcia zlyhala.");
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("1");
+      await expect(response.json()).resolves.toEqual({
+        error: "Prebieha iná zmena hovoru. Skúste akciu o chvíľu.", code: "session_busy", retryAfterMs: 1_000,
+      });
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally { consoleError.mockRestore(); }
+  });
+
+  it("keeps an ownership database failure distinct from a busy call", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failure = new SessionEventDeferredError("Session ownership lookup failed: internal database detail");
+      const response = telephonyErrorResponse(failure, "Stav hovoru sa nepodarilo overiť.");
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBeNull();
+      await expect(response.json()).resolves.toEqual({ error: "Stav hovoru sa nepodarilo overiť.", code: "session_event_deferred" });
+      expect(consoleError).toHaveBeenCalledWith("Stav hovoru sa nepodarilo overiť.", failure);
+    } finally { consoleError.mockRestore(); }
   });
 
   it("reads request bodies tolerantly", async () => {

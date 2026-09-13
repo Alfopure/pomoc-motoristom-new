@@ -29,6 +29,8 @@ import {
 } from "@/lib/telephony/presence";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import { type IncomingOfferPolicy, type WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
+import { retryUnstartedCallControl } from "@/lib/telephony/call-control-retry";
+import { BrowserReconciliationGate } from "@/lib/telephony/browser-reconciliation";
 import { CoordinatedWebphone } from "@/lib/telephony/coordinated-webphone";
 import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "@/lib/telephony/webphone-model";
@@ -150,7 +152,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const presenceGenerationRef = useRef(0);
   const incomingPolicyRef = useRef<IncomingOfferPolicy>({ automaticAllowed: false });
   const refreshRef = useRef<(() => void) | null>(null);
-  const reconciledLegsRef = useRef(new Set<string>());
+  const reconciliationGateRef = useRef(new BrowserReconciliationGate());
+  const [reconciliationNotice, setReconciliationNotice] = useState<{ legId: string; message: string } | null>(null);
   const endingBrowserLegsRef = useRef(new Set<string>());
   // Read inside the poll loop rather than through state: a reconnect must not
   // restart the poll effect (it would fire an extra request every time).
@@ -163,18 +166,33 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const organizationId = snapshot.organizationId;
 
   useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
+  useEffect(() => () => { busyCommandRef.current = null; setBusyAction(null); }, [enabled, profileId]);
 
   const reconcileBrowserLeg = useCallback((sessionId: string, callControlId: string) => {
-    if (reconciledLegsRef.current.has(callControlId) || endingBrowserLegsRef.current.has(callControlId)) return;
-    reconciledLegsRef.current.add(callControlId);
-    // The server verifies this exact leg with Telnyx before changing it;
-    // a missing browser connection alone does not prove that the call ended.
-    void telephonyJson(`/api/telephony/calls/${encodeURIComponent(sessionId)}/reconcile`, {
+    // Control commands have priority. Missing media is only a hint, and a
+    // concurrent diagnostic must not compete for that command's session lease.
+    if (endingBrowserLegsRef.current.has(callControlId) || busyCommandRef.current?.sessionId === sessionId || outboundBusyRef.current) return;
+    const gate = reconciliationGateRef.current;
+    if (!gate.begin(callControlId)) return;
+    const finish = (completed: boolean, retryAfterMs?: number) => {
+      if (gate !== reconciliationGateRef.current) return;
+      gate.finish(callControlId, completed, retryAfterMs);
+      if (completed) setReconciliationNotice((current) => current?.legId === callControlId ? null : current);
+      else setReconciliationNotice({ legId: callControlId, message: gate.exhausted(callControlId)
+        ? "Stav skončeného hovoru sa nepodarilo overiť. Po návrate do aplikácie ho overíme znova."
+        : "Stav skončeného hovoru ešte nie je potvrdený. Overenie zopakujeme automaticky." });
+    };
+    // Only this actor-owned leg is verified with Telnyx on every attempt. No
+    // hold, transfer, dial or other uncertain mutation is automatically replayed.
+    void telephonyJson<{ reconciled?: boolean; reason?: string; retryAfterMs?: number }>(`/api/telephony/calls/${encodeURIComponent(sessionId)}/reconcile`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ callControlId }), label: "overenie skončeného hovoru",
       timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-      onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
-    }).catch(() => null).finally(() => refreshRef.current?.());
+    }).then((result) => {
+      const completed = result.ok && (result.body?.reconciled === true ||
+        ["alive", "already_terminal", "already_ended", "ignored"].includes(result.body?.reason ?? ""));
+      finish(completed, result.body?.retryAfterMs);
+    }).catch(() => finish(false)).finally(() => refreshRef.current?.());
   }, []);
 
   // --- browser phone ---------------------------------------------------------
@@ -196,7 +214,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         if (sessionId) {
           // A new terminal transition warrants a fresh check even if the leg
           // was still alive when this app first reopened.
-          reconciledLegsRef.current.delete(callControlId);
+          reconciliationGateRef.current.invalidate(callControlId);
           reconcileBrowserLeg(sessionId, callControlId);
         }
       }
@@ -213,6 +231,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     webphone.start();
     return () => {
       microphoneCheckRef.current?.abort();
+      reconciliationGateRef.current = new BrowserReconciliationGate();
+      setReconciliationNotice(null);
       unsubscribe();
       webphone.dispose();
       webphoneRef.current = null;
@@ -367,14 +387,20 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         incomingPolicyRef.current = { presenceRevision: own?.presenceRevision, automaticAllowed: own?.automaticOffersAllowed ?? (own?.status === "available" || own?.status === "ringing"), explicitLegs };
         webphoneRef.current?.setIncomingOfferPolicy(incomingPolicyRef.current);
         setSnapshot(result.body);
+        const currentLegIds = new Set([...result.body.calls, ...result.body.waiting].flatMap((call) => call.legs.map((leg) => leg.callControlId)));
+        setReconciliationNotice((current) => current && !currentLegIds.has(current.legId) ? null : current);
         const browser = webphoneRef.current?.getSnapshot();
-        if (browser && !browser.call && !browser.pendingOperatorLegs && !outboundBusyRef.current) {
-          // A reopened mobile app has no previous SDK call to emit a hangup.
-          // Verify each unmatched owned leg once, never on every poll tick.
-          const ownedCall = result.body.calls.find((call) => call.answeredByProfileId === result.body!.actorProfileId &&
-            ["received", "ringing", "talking", "held", "consulting", "conference"].includes(call.state));
-          const leg = ownedCall?.legs.find((entry) => entry.profileId === result.body!.actorProfileId && entry.role === "operator" && entry.callControlId);
-          if (ownedCall && leg?.callControlId) reconcileBrowserLeg(ownedCall.sessionId, leg.callControlId);
+        if (browser && !browser.pendingOperatorLegs && !outboundBusyRef.current) {
+          // A reopened app or a finished previous call can leave an unmatched
+          // owned leg. The gate retries only failed exact-leg verification,
+          // including while a different new browser call is already running.
+          for (const ownedCall of result.body.calls) {
+            if (ownedCall.answeredByProfileId !== result.body.actorProfileId ||
+              !["received", "ringing", "talking", "held", "consulting", "conference"].includes(ownedCall.state) ||
+              ownedCall.sessionId === browser.call?.sessionId) continue;
+            const leg = ownedCall.legs.find((entry) => entry.profileId === result.body!.actorProfileId && entry.role === "operator" && entry.callControlId);
+            if (leg?.callControlId && leg.callControlId !== browser.call?.telnyxCallControlId) reconcileBrowserLeg(ownedCall.sessionId, leg.callControlId);
+          }
         }
         activity = telephonyPollActivity(pollActivityInput(buildPhoneBarModel(result.body)));
       } catch {
@@ -416,7 +442,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
 
     const onVisible = () => {
       if (cancelled || document.visibilityState !== "visible") return;
-      reconciledLegsRef.current.clear();
+      reconciliationGateRef.current.invalidate();
       refresh();
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -537,6 +563,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     async (action: PhoneCallAction, sessionId: string, target?: TransferRequest) => {
       if (busyCommandRef.current && (action !== "hangup" || busyCommandRef.current.key === "hangup")) return;
       const command = { key: action, sessionId };
+      const requestBody = JSON.stringify(target ?? {});
       busyCommandRef.current = command;
       setBusyAction(action);
       setNotice(null);
@@ -565,18 +592,28 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       try {
         const execute = async (webphone = webphoneRef.current) => {
           if (busyCommandRef.current !== command) return;
-          const result = await telephonyJson<{ error?: string; code?: string; operatorLegCallControlId?: string }>(
+          const send = () => telephonyJson<{ error?: string; code?: string; retryAfterMs?: number; operatorLegCallControlId?: string }>(
             `/api/telephony/calls/${encodeURIComponent(sessionId)}/${action}`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(target ?? {}),
+              body: requestBody,
               label: PHONE_ACTION_LABEL_FOR_REQUEST[action],
               timeoutMs: TELEPHONY_TIMEOUT_MS.control,
               onSlow: () => { if (busyCommandRef.current === command) setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."); },
             },
           );
-          if (busyCommandRef.current !== command) { refreshRef.current?.(); return; }
+          const result = await retryUnstartedCallControl({
+            request: send,
+            enabled: action !== "pickup",
+            isCurrent: () => {
+              const currentCall = browser?.getSnapshot().call;
+              return busyCommandRef.current === command && browser === webphoneRef.current &&
+                (action === "pickup" || (!browserCall ? !currentCall : currentCall?.id === browserCall.id || (action === "hangup" && !currentCall)));
+            },
+            canRetry: () => [...snapshotRef.current.calls, ...snapshotRef.current.waiting].some((call) => call.sessionId === sessionId),
+          });
+          if (!result || busyCommandRef.current !== command) { refreshRef.current?.(); return; }
           if (isTelephonyNotConfigured(result)) {
             setConfigured(false);
             setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
@@ -896,6 +933,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const resumeAudio = useCallback(() => void webphoneRef.current?.resumeAudio(), []);
   const dismissNotice = useCallback(() => {
     setNotice(null);
+    setReconciliationNotice(null);
     webphoneRef.current?.dismissCallError();
   }, []);
 
@@ -913,7 +951,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     readiness,
     preparePhone,
     resumeAudio,
-    notice: notice ?? phone.callError ?? null,
+    notice: notice ?? phone.callError ?? reconciliationNotice?.message ?? null,
     degradedSessionIds: degraded,
     liveCalls,
     waitingCalls,

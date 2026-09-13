@@ -7,6 +7,7 @@ export const maxDuration = 60;
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   return handleCallActionRoute(request, context, {
     fallback: "Stav hovoru sa nepodarilo overiť.",
+    replayDeferred: false,
     run: ({ deps, actor, sessionId, body }) => reconcileBrowserCall(deps, actor, sessionId, body.callControlId),
   });
 }

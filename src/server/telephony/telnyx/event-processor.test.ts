@@ -19,7 +19,7 @@ describe("processTelnyxEvent", () => {
     const replayReads = () => h.db.log.filter(entry => entry.table === "motorist_telnyx_webhook_events" && entry.operation === "select");
     expect(replayReads()).toHaveLength(0);
     await queued[0]();
-    expect(replayReads()).toHaveLength(1);
+    expect(replayReads()).toHaveLength(2);
     expect(h.telnyx.of("answer")).toHaveLength(1);
   });
 

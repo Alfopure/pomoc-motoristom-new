@@ -16,6 +16,8 @@ export type Ownership = {
   contract: number;
   deadline: number;
   terminationPending?: boolean;
+  /** Includes acquisition by an outer webhook owner, before the reducer starts. */
+  leaseWaitMs?: number;
 };
 export const sessionOwnership = new AsyncLocalStorage<Ownership>();
 

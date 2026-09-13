@@ -23,6 +23,24 @@ export class CallActionError extends Error {
   }
 }
 
+/** Work has not completed; provider events must remain eligible for redelivery. */
+export class SessionEventDeferredError extends CallActionError {
+  constructor(message: string, code = "session_event_deferred") {
+    super(message, 503, code);
+    this.name = "SessionEventDeferredError";
+  }
+}
+
+/** The ownership RPC succeeded, but another invocation still owns this call. */
+export class SessionLeaseBusyError extends SessionEventDeferredError {
+  readonly retryAfterMs = 1_000;
+
+  constructor() {
+    super("Prebieha iná zmena hovoru. Skúste akciu o chvíľu.", "session_busy");
+    this.name = "SessionLeaseBusyError";
+  }
+}
+
 export class SessionTerminationPendingError extends CallActionError {
   constructor() { super("Ukončenie niektorých vetiev sa ešte overuje.", 503, "provider_outcome_unknown"); }
 }

@@ -72,8 +72,11 @@ export function HeaderPhoneStatusMenu({
   const availabilityLabel = presenceLabel(status as OperatorPresenceStatus | null)
     + (paused && pausePlan ? (pauseOverdue ? " · po čase" : ` · do ${formatTime(pausePlan.plannedEndAt)}`) : "");
   const connected = phone.registration.tone === "ok";
-  const summaryLabel = !connected ? phone.registration.label : notice ? "Chyba telefónie" : `${phone.registration.label} · ${availabilityLabel}`;
-  const tone = !connected ? phone.registration.tone : notice ? "error" : pauseOverdue ? "error" : presenceTone(status);
+  // A refused server operation does not disconnect the registered browser
+  // phone. Keep its real connection state visible alongside the action notice.
+  const noticeLabel = phone.callError ? "Chyba hovoru" : "Upozornenie k akcii";
+  const summaryLabel = !connected ? phone.registration.label : notice ? `${phone.registration.label} · ${noticeLabel}` : `${phone.registration.label} · ${availabilityLabel}`;
+  const tone = !connected ? phone.registration.tone : notice ? phone.callError ? "error" : "warn" : pauseOverdue ? "error" : presenceTone(status);
   const canTakeover = phoneTakeoverAvailable(phone.status);
   const choice = presenceChoice(status);
 
@@ -109,7 +112,7 @@ export function HeaderPhoneStatusMenu({
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        aria-label={connected && notice ? `Chyba telefónie: ${notice}` : `Telefón: ${phone.registration.label}; dostupnosť: ${availabilityLabel}`}
+        aria-label={connected && notice ? `Telefón: ${phone.registration.label}; ${noticeLabel}: ${notice}` : `Telefón: ${phone.registration.label}; dostupnosť: ${availabilityLabel}`}
         title={connected && notice ? notice : `${phone.registration.detail} Dostupnosť: ${availabilityLabel}.`}
         className={`inline-flex h-9 items-center gap-1.5 rounded-md border px-2 text-xs font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-300 ${TRIGGER_TONES[tone]}`}
       >
@@ -136,7 +139,7 @@ export function HeaderPhoneStatusMenu({
             <div role="alert" className="flex items-start gap-2 border-b border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-semibold leading-5 text-red-800">
               <AlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
               <span className="min-w-0 flex-1">{notice}</span>
-              <button type="button" onClick={onDismissNotice} className="inline-flex size-6 shrink-0 items-center justify-center rounded-md hover:bg-red-100" aria-label="Zavrieť chybu telefónie">
+              <button type="button" onClick={onDismissNotice} className="inline-flex size-6 shrink-0 items-center justify-center rounded-md hover:bg-red-100" aria-label="Zavrieť upozornenie telefónie">
                 <X size={14} aria-hidden="true" />
               </button>
             </div>

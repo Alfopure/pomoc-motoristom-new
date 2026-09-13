@@ -52,7 +52,7 @@ describe("per-call recording lease requirements", () => {
     const { h, call, operator } = await ringing(false, true);
     const commands = h.telnyx.calls.length;
     const result = await h.legEvent(operator, "call.answered");
-    expect(result).toMatchObject({ status: 500, outcome: "failed", error: expect.stringContaining("Prebieha zmena hovoru") });
+    expect(result).toMatchObject({ status: 500, outcome: "failed", error: expect.stringContaining("SessionLeaseBusyError") });
     expect(h.session(call.sessionId).state).toBe("ringing");
     expect(h.telnyx.calls).toHaveLength(commands);
   });
