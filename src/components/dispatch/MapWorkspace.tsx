@@ -173,7 +173,11 @@ export function MapWorkspace({
     }
     desktopPanelPercentRef.current = nextPercent;
     containerRef.current?.style.setProperty("--dispatch-desktop-grid-rows", toDesktopGridRows(nextPercent));
+    // Restore the separator's accessible value as well as its visual size.
+    // Read the ref so an early user resize wins over the initial restore.
+    const restoreFrame = window.requestAnimationFrame(() => setDesktopPanelPercent(desktopPanelPercentRef.current));
     return () => {
+      window.cancelAnimationFrame(restoreFrame);
       if (pendingAnimationFrameRef.current !== null) {
         window.cancelAnimationFrame(pendingAnimationFrameRef.current);
         pendingAnimationFrameRef.current = null;

@@ -1,12 +1,15 @@
 export const WIDGET_IDS = ["phone", "tasks", "notes", "calculator", "route", "search", "fleet", "calendar"] as const;
 export type WidgetId = (typeof WIDGET_IDS)[number];
 export type WorkspaceCenterView = "map" | "table" | "tasks" | "notes";
+export type DesktopWorkspaceMode = "collapsed" | "split" | "expanded";
 export type WidgetPreference = { id: WidgetId; visible: boolean; collapsed: boolean };
 export type WorkspacePreferences = {
   widgets: WidgetPreference[];
   leftCollapsed: boolean;
   rightCollapsed: boolean;
   centerView: WorkspaceCenterView;
+  /** User choice, independent of temporary mobile and full-detail views. */
+  desktopWorkspaceMode: DesktopWorkspaceMode;
 };
 
 export const WIDGET_LABELS: Record<WidgetId, string> = {
@@ -18,10 +21,15 @@ export function workspacePreferenceStorageKey(organizationId?: string, profileId
   return `motorist:workspace:v3:${organizationId ?? "demo"}:${profileId ?? "local-browser"}`;
 }
 
+/** A local tool must remain visible even when the remembered case fills the map. */
+export function visibleDesktopWorkspaceMode(mode: DesktopWorkspaceMode, view: WorkspaceCenterView): DesktopWorkspaceMode {
+  return mode === "expanded" && view !== "map" ? "split" : mode;
+}
+
 export function defaultWorkspacePreferences(): WorkspacePreferences {
   return {
     widgets: WIDGET_IDS.map(id => ({ id, visible: id === "phone" || id === "tasks", collapsed: false })),
-    leftCollapsed: false, rightCollapsed: false, centerView: "map",
+    leftCollapsed: false, rightCollapsed: false, centerView: "map", desktopWorkspaceMode: "split",
   };
 }
 
@@ -45,6 +53,8 @@ export function parseWorkspacePreferences(raw: string | null): WorkspacePreferen
       rightCollapsed: value.rightCollapsed === true,
       centerView: ["map", "table", "tasks", "notes"].includes(String(value.centerView))
         ? value.centerView as WorkspaceCenterView : "map",
+      desktopWorkspaceMode: value.desktopWorkspaceMode === "collapsed" || value.desktopWorkspaceMode === "expanded"
+        ? value.desktopWorkspaceMode : "split",
     };
   } catch { return defaults; }
 }
