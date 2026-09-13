@@ -8,7 +8,7 @@ import { resolveDefaultOrganizationId } from "@/server/default-organization";
 import { MutationError } from "@/server/mutation-error";
 
 import type { CallActionDeps, CallActor } from "./call-actions";
-import { CallActionError, OperatorDeviceError, PresenceServiceError } from "./service-errors";
+import { CallActionError, OperatorDeviceError, PresenceServiceError, SessionEventDeferredError, SessionLeaseBusyError } from "./service-errors";
 import type { TelephonyEnvironment } from "./state/types";
 import { createTelnyxClient, resolveTelnyxLiveGate, TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
 import { getTelnyxConfig, type EnvRecord, type TelnyxConfig } from "./telnyx/env";
@@ -149,6 +149,18 @@ function errorJson(message: string, status: number, code?: string | null): Respo
 /** Maps the telephony service error classes onto responses; anything else is a logged 500. */
 export function telephonyErrorResponse(error: unknown, fallback: string): Response {
   if (error instanceof MutationError) return errorJson(error.message, error.status);
+  if (error instanceof SessionLeaseBusyError) {
+    return Response.json({ error: error.message, code: error.code, retryAfterMs: error.retryAfterMs }, {
+      status: error.status, headers: { "Retry-After": String(Math.ceil(error.retryAfterMs / 1_000)) },
+    });
+  }
+  if (error instanceof SessionEventDeferredError) {
+    // A failed RPC/checkpoint is distinct from normal contention. Preserve the
+    // retryable status and diagnostics without exposing database internals or
+    // claiming the operator's command was accepted.
+    console.error(fallback, error);
+    return errorJson(fallback, error.status, error.code);
+  }
   if (error instanceof CallActionError) return errorJson(error.message, error.status, error.code);
   if (error instanceof PresenceServiceError) return errorJson(error.message, error.status);
   if (error instanceof OperatorDeviceError) return errorJson(error.message, error.status);

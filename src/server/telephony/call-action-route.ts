@@ -1,4 +1,5 @@
 import "server-only";
+import { after } from "next/server";
 
 import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
 
@@ -39,6 +40,8 @@ export type CallActionRouteInput<P extends CallActionRouteParams = CallActionRou
 export type CallActionRouteOptions<P extends CallActionRouteParams = CallActionRouteParams> = {
   fallback: string;
   run: (input: CallActionRouteInput<P>) => Promise<unknown>;
+  /** Read-only reconciliation must not enqueue more work while the call is busy. */
+  replayDeferred?: boolean;
 };
 
 export async function handleCallActionRoute<P extends CallActionRouteParams = CallActionRouteParams>(
@@ -57,6 +60,25 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
       const body = await readJsonBody(request);
       const deps = await createTelephonyDeps({ organizationId: actor.organizationId, deviceKind: request.headers.get("x-pm-phone-kind") === "mobile" ? "mobile" : "web" });
       const result = await options.run({ deps, actor: toCallActor(actor), sessionId: params.id, params, body, request });
+
+      // A customer hangup/answer can arrive while this action owns the call.
+      // Once the action has completed and released ownership, recover its exact
+      // queued facts without waiting for provider redelivery or the cron.
+      if (options.replayDeferred !== false && result && typeof result === "object" &&
+        "sessionId" in result && result.sessionId === params.id) {
+        const reportDeferred = () => {
+          try { deps.logger?.({ level: "warn", scope: "call-action", sessionId: params.id, code: "event_replay_deferred" }); }
+          catch { /* Optional diagnostics cannot invalidate the completed action. */ }
+        };
+        try {
+          after(async () => {
+            try {
+              const { replayDeferredSessionEvents } = await import("./telnyx/event-processor");
+              await replayDeferredSessionEvents(deps, params.id);
+            } catch { reportDeferred(); }
+          });
+        } catch { reportDeferred(); }
+      }
 
       return Response.json({ ok: true, ...(result && typeof result === "object" ? result : {}) });
     } catch (error) {

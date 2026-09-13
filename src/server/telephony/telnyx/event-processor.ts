@@ -184,7 +184,7 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
     session = inserted.data;
   }
 
-  return ownedSessionWork(deps, session.id, async () => {
+  return ownedSessionWork({ ...deps, leaseWaitMs: 0 }, session.id, async () => {
     if (event.callControlId) {
       const leg = await admin
         .from("motorist_call_legs")
@@ -283,7 +283,9 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     }
 
     const ownedSession = session;
-    const result = await ownedSessionWork(deps, ownedSession.id, async () => {
+    // The durable webhook ledger owns retry. Do not have every simultaneous
+    // provider callback poll the same database lease while a control is waiting.
+    const result = await ownedSessionWork({ ...deps, leaseWaitMs: 0 }, ownedSession.id, async () => {
       processingStarted = true;
       if (eventClass === "bookkeeping") {
         if (event.type === "call.recording.saved" || event.type === "conference.recording.saved") {
@@ -423,20 +425,60 @@ export function storedWebhookEnvelope(row: { event_id: string; event_type: strin
 
 async function replayCorrelatedEvents(deps: ProcessorDeps, current: TelephonyEvent, session: SessionRow): Promise<void> {
   if (deps.replayCorrelated === false) return;
+  return replayReadySessionEvents(deps, session, current);
+}
+
+/** Called by an authenticated action's retained after-response work, once its
+ * session lease has been released. It cannot create an independent worker. */
+export async function replayDeferredSessionEvents(deps: ProcessorDeps, sessionId: string): Promise<void> {
+  const session = await deps.admin.from("motorist_call_sessions").select("*")
+    .eq("organization_id", deps.organizationId).eq("id", sessionId).maybeSingle();
+  if (session.error) throw new Error("Deferred call event session unavailable");
+  if (session.data) await replayReadySessionEvents(deps, session.data);
+}
+
+async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow, current?: TelephonyEvent): Promise<void> {
+  const deadline = Date.now() + 8_000;
   try {
-    const { data, error } = await deps.admin.from("motorist_telnyx_webhook_events").select("*")
-      .eq("organization_id", deps.organizationId).eq("retry_state", "awaiting_correlation")
-      .neq("event_id", current.id).order("received_at", { ascending: true }).limit(20);
-    if (error) throw new Error(error.message);
+    const [correlation, legs] = await Promise.all([
+      current ? deps.admin.from("motorist_telnyx_webhook_events").select("*")
+        .eq("organization_id", deps.organizationId).eq("retry_state", "awaiting_correlation")
+        .neq("event_id", current.id).order("received_at", { ascending: true }).limit(20) : { data: [], error: null },
+      deps.admin.from("motorist_call_legs").select("telnyx_call_control_id")
+        .eq("organization_id", deps.organizationId).eq("session_id", session.id),
+    ]);
+    if (correlation.error || legs.error) throw new Error(correlation.error?.message ?? legs.error!.message);
+    const controlIds = new Set((legs.data ?? []).map(leg => leg.telnyx_call_control_id));
+    // A stop/answer can lose the lease race after exact correlation is already
+    // known. Draining that ready ledger entry after the owner releases avoids
+    // waiting for provider exponential redelivery or the five-minute cron.
+    // A shared provider session ID is never enough to select another leg.
+    const deferred = controlIds.size ? await deps.admin.from("motorist_telnyx_webhook_events").select("*")
+      .eq("organization_id", deps.organizationId).eq("retry_state", "deferred")
+      .in("call_control_id", [...controlIds]).in("event_type", ["call.hangup", "call.answered", "call.bridged"])
+      .lte("next_attempt_at", new Date(nowOf(deps)().getTime() + 5_000).toISOString()).neq("event_id", current?.id ?? "")
+      .order("event_type", { ascending: false }).order("received_at", { ascending: true }).limit(20) : { data: [], error: null };
+    if (deferred.error) throw new Error(deferred.error.message);
+    const rows = [...(deferred.data ?? []).sort((a, b) => Number(b.event_type === "call.hangup") - Number(a.event_type === "call.hangup")), ...(correlation.data ?? [])];
     let replayed = 0;
-    for (const row of data ?? []) {
+    for (const row of rows) {
       const envelope = storedWebhookEnvelope(row);
       const waiting = parseTelnyxEnvelope(envelope);
       // A shared Telnyx session ID is deliberately insufficient: it can describe
       // a different customer/operator leg. Exact control ID or our signed sid only.
-      if (!waiting || !((waiting.callControlId && waiting.callControlId === current.callControlId) || waiting.clientState?.sid === session.id)) continue;
-      await processTelnyxEvent({ ...deps, ledgerReplay: "correlation", replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, envelope);
+      if (!waiting || waiting.clientState?.sid && waiting.clientState.sid !== session.id ||
+        !((waiting.callControlId && controlIds.has(waiting.callControlId)) || current?.callControlId && waiting.callControlId === current.callControlId || waiting.clientState?.sid === session.id)) continue;
+      // A terminal fact can be deferred just before the prior owner releases.
+      // Retain the SQL backoff instead of missing it until the five-minute cron.
+      // This wait owns no session and starts no independent timer/worker.
+      const waitMs = row.retry_state === "deferred" && row.next_attempt_at
+        ? Math.max(0, Date.parse(row.next_attempt_at) - nowOf(deps)().getTime()) : 0;
+      if (Date.now() + waitMs >= deadline) break;
+      if (waitMs) await (deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(waitMs);
+      const replay = await processTelnyxEvent({ ...deps, ledgerReplay: row.retry_state === "deferred" ? "cron" : "correlation",
+        replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, envelope);
       if (++replayed >= 2) break;
+      if (replay.outcome === "busy" || replay.error?.includes("SessionLeaseBusyError")) break;
     }
   } catch (error) {
     // Current-event completion is already durable; a replay lookup failure is

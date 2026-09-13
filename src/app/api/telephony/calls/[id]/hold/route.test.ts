@@ -2,6 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MutationError } from "@/server/motorist-mutations";
 import { CallActionError } from "@/server/telephony/call-actions";
+import { SessionLeaseBusyError } from "@/server/telephony/service-errors";
+
+const maintenance = vi.hoisted(() => ({ after: vi.fn(), replay: vi.fn() }));
+vi.mock("next/server", async importOriginal => ({
+  ...await importOriginal<typeof import("next/server")>(), after: maintenance.after,
+}));
+vi.mock("@/server/telephony/telnyx/event-processor", async importOriginal => ({
+  ...await importOriginal<typeof import("@/server/telephony/telnyx/event-processor")>(), replayDeferredSessionEvents: maintenance.replay,
+}));
 
 const requireDefaultMotoristActor = vi.fn();
 const assertSameOriginRequest = vi.fn();
@@ -44,6 +53,8 @@ describe("POST /api/telephony/calls/[id]/hold", () => {
     assertSameOriginRequest.mockReset();
     holdCall.mockReset();
     createTelephonyDeps.mockClear();
+    maintenance.after.mockReset();
+    maintenance.replay.mockReset().mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -59,6 +70,10 @@ describe("POST /api/telephony/calls/[id]/hold", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true, sessionId: "sess-1", state: "held" });
     expect(holdCall).toHaveBeenCalledWith({ marker: "deps" }, { profileId: "profile-1", role: "dispatcher", displayName: "Jana" }, "sess-1");
     expect(createTelephonyDeps).toHaveBeenCalledWith({ organizationId: "org-1", deviceKind: "web" });
+    expect(maintenance.after).toHaveBeenCalledTimes(1);
+    expect(maintenance.replay).not.toHaveBeenCalled();
+    await maintenance.after.mock.calls[0][0]();
+    expect(maintenance.replay).toHaveBeenCalledExactlyOnceWith({ marker: "deps" }, "sess-1");
   });
 
   it("runs the CSRF check before authentication", async () => {
@@ -71,6 +86,7 @@ describe("POST /api/telephony/calls/[id]/hold", () => {
     expect(response.status).toBe(403);
     expect(requireDefaultMotoristActor).not.toHaveBeenCalled();
     expect(holdCall).not.toHaveBeenCalled();
+    expect(maintenance.after).not.toHaveBeenCalled();
   });
 
   it("returns 401 for an anonymous request", async () => {
@@ -99,6 +115,27 @@ describe("POST /api/telephony/calls/[id]/hold", () => {
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({ error: "Hovor už nie je aktívny.", code: "not_active" });
+  });
+
+  it("keeps a contended hold visibly pending without reporting it as applied", async () => {
+    holdCall.mockRejectedValue(new SessionLeaseBusyError());
+    const response = await POST(request(), context);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("1");
+    await expect(response.json()).resolves.toEqual({
+      error: "Prebieha iná zmena hovoru. Skúste akciu o chvíľu.", code: "session_busy", retryAfterMs: 1_000,
+    });
+    expect(holdCall).toHaveBeenCalledTimes(1);
+    expect(maintenance.after).not.toHaveBeenCalled();
+  });
+
+  it("keeps a completed hold successful if optional event replay cannot be scheduled or fails", async () => {
+    holdCall.mockResolvedValue({ sessionId: "sess-1", state: "held", commands: [], ignored: null });
+    maintenance.after.mockImplementationOnce(() => { throw new Error("no request context"); });
+    expect((await POST(request(), context)).status).toBe(200);
+    maintenance.replay.mockRejectedValueOnce(new Error("database unavailable"));
+    expect((await POST(request(), context)).status).toBe(200);
+    await expect(maintenance.after.mock.calls[1][0]()).resolves.toBeUndefined();
   });
 
   it("maps the kill switch onto 423", async () => {

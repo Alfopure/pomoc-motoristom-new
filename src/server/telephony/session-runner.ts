@@ -18,9 +18,10 @@ import { hasStabilityContract, telephonyStabilityEnabled } from "./stability";
 import { attachContactOperations, collectContactProof, readContactHistory } from "./contact-proof";
 import { readPendingEffects } from "./state/continuation";
 import { cancelRevokedOffers } from "./state/cancelled-offers";
-import { CallActionRejected, reduce } from "./state/transitions";
+import { reduce } from "./state/transitions";
 import { needsRecordingContinuation, requiresRecordingLease } from "./state/recording";
-import { SessionLeaseLostError, SessionTerminationPendingError } from "./service-errors";
+import { SessionEventDeferredError, SessionLeaseBusyError, SessionLeaseLostError, SessionTerminationPendingError } from "./service-errors";
+export { SessionEventDeferredError } from "./service-errors";
 import { resolveSessionRecordingPolicy } from "./recording-policy-service";
 import {
   DEFAULT_ROUTING_SETTINGS,
@@ -98,14 +99,6 @@ export class LeaseTimeoutError extends Error {
   constructor(readonly sessionId: string) {
     super(`lease for session ${sessionId} not acquired in time`);
     this.name = "LeaseTimeoutError";
-  }
-}
-
-/** The event's transition was deferred: its webhook must be eligible for redelivery. */
-export class SessionEventDeferredError extends CallActionRejected {
-  constructor(message: string) {
-    super(message, 503);
-    this.name = "SessionEventDeferredError";
   }
 }
 
@@ -213,18 +206,26 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
   const { admin, organizationId } = deps;
   const now = nowOf(deps)();
   const meta = readMeta(session);
-  const bridgeObservation = event?.kind === "telnyx" && event.type === "call.bridged" &&
+  const noContinuation =
     meta.recording?.policy.enabled === false && !meta.recording.recorders.length &&
     !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence &&
-    !readPendingEffects(session).entries.length &&
+    !readPendingEffects(session).entries.length;
+  const bridgeObservation = noContinuation && event?.kind === "telnyx" && event.type === "call.bridged" &&
     snapshotLegs?.some(leg => leg.telnyx_call_control_id === event.callControlId && Boolean(leg.answered_at));
-  if (event?.kind === "app" && event.type === "hangup" || bridgeObservation) {
+  const passiveObservation = noContinuation && event?.kind === "telnyx" && (
+    ["conference.participant.joined", "conference.participant.left", "conference.ended"].includes(event.type) ||
+    ["call.playback.ended", "call.speak.ended"].includes(event.type) &&
+      ["talking", "held", "consulting", "conference", "ended"].includes(session.state) && !meta.gather
+  );
+  if (event?.kind === "app" && event.type === "hangup" || bridgeObservation || passiveObservation) {
     // Ending a call needs only its already authenticated session/legs. New
     // IVR, capacity, media and recording settings cannot authorize a hangup
     // more strongly, and a slow/broken settings read must not hold it hostage.
     // Retain frozen recorder evidence so teardown never erases capture state.
     // Likewise, a known answered leg's bridge confirmation only records that
     // fact. An out-of-order first bridge still loads the complete route below.
+    // Passive media/conference observations still reconcile evidence and keep
+    // their audit, but need no unrelated line/IVR/capacity configuration.
     return {
       now, organizationId, environment: deps.environment, line: null,
       businessHours: null, ivr: null, ringPlan: null, ringPlans: {}, presence: [], devices: [],
@@ -427,7 +428,7 @@ async function auditSupervisionEnd(deps: SessionRunnerDeps, before: SessionRow, 
  * V2 scopes are reusable only for the same session. Never transfer a generation
  * from a freshly read row into a running invocation.
  */
-export type SessionOwnershipDeps = Pick<SessionRunnerDeps, "admin" | "organizationId" | "leaseTtlMs" | "leaseWaitMs" | "sleep" | "logger">;
+export type SessionOwnershipDeps = Pick<SessionRunnerDeps, "admin" | "organizationId" | "leaseTtlMs" | "leaseWaitMs" | "sleep" | "random" | "logger">;
 
 export async function ownedSessionWork<T>(deps: SessionOwnershipDeps, sessionId: string, work: () => Promise<T>): Promise<T> {
   const existing = sessionOwnership.getStore();
@@ -444,19 +445,26 @@ export async function ownedSessionWork<T>(deps: SessionOwnershipDeps, sessionId:
   if (probe.data.writer_contract === undefined) return work();
   const token = randomUUID();
   const started = Date.now();
+  let attempt = 0;
   let claim: { generation: number; contract: number } | null;
   try {
     for (;;) {
       claim = await measureRequestStep("lease", () => ownershipRpc<{ generation: number; contract: number } | null>(deps.admin, "motorist_session_lease_acquire_v2", { p_session_id: sessionId, p_token: token, p_ttl_ms: leaseTtl(deps) }));
       if (claim) break;
-      if (Date.now() - started >= (deps.leaseWaitMs ?? LEASE_WAIT_MS)) throw new SessionEventDeferredError("Session lease unavailable");
-      await sleepOf(deps)(LEASE_JITTER_MIN_MS);
+      const remaining = (deps.leaseWaitMs ?? LEASE_WAIT_MS) - (Date.now() - started);
+      if (remaining <= 0) throw new SessionLeaseBusyError();
+      // Give the active writer room to finish. A fixed 50 ms retry made each
+      // contending webhook/control issue up to 17 RPCs during one busy call.
+      const delay = Math.min(800, 150 * 2 ** Math.min(attempt++, 3)) + Math.floor((deps.random ?? Math.random)() * 75);
+      await sleepOf(deps)(Math.min(remaining, delay));
     }
   } catch (error) {
+    if (error instanceof SessionEventDeferredError) throw error;
     throw new SessionEventDeferredError(error instanceof Error ? error.message : "Session lease unavailable");
   }
   const owner: Ownership = { admin: deps.admin, sessionId, organizationId: deps.organizationId, token,
-    generation: claim.generation, contract: claim.contract, deadline: Date.now() + SESSION_WORK_MS };
+    generation: claim.generation, contract: claim.contract, deadline: Date.now() + SESSION_WORK_MS,
+    leaseWaitMs: Math.max(0, Date.now() - started) };
   try { return await sessionOwnership.run(owner, work); }
   finally {
     // Release failure cannot rewrite a completed operation into a safe retry.
@@ -471,7 +479,10 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
     if (target.error) throw new SessionEventDeferredError(`Termination intent lookup failed: ${target.error.message}`);
     if (target.data?.writer_contract === 2) await ownershipRpc(deps.admin, "motorist_session_terminate_v2", { p_organization_id: deps.organizationId, p_session_id: sessionId });
   }
-  return ownedSessionWork(deps, sessionId, async () => {
+  // Timer sweeps are opportunistic: never queue repeated lock acquisition
+  // ahead of an operator's control or a real provider fact.
+  const ownershipDeps = event.kind === "app" && event.type === "sweep" ? { ...deps, leaseWaitMs: 0 } : deps;
+  return ownedSessionWork(ownershipDeps, sessionId, async () => {
     const owner = sessionOwnership.getStore();
     if (owner) owner.terminationPending = false;
     const result = await runOwnedSessionEvent(deps, sessionId, event, owner);
@@ -486,7 +497,7 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
   let leaseAcquired: boolean;
   try { leaseAcquired = Boolean(owner) || await measureRequestStep("lease", () => acquireSessionLease(deps, sessionId, token)); }
   catch (error) { throw new SessionEventDeferredError(error instanceof Error ? error.message : "Session lease unavailable"); }
-  const leaseWaitMs = nowOf(deps)().getTime() - runnerStarted.getTime();
+  const leaseWaitMs = owner?.leaseWaitMs ?? nowOf(deps)().getTime() - runnerStarted.getTime();
   const timing = (effectsStarted?: Date) => {
     const completed = nowOf(deps)();
     return { runner_started_at: runnerStarted.toISOString(), lease_wait_ms: Math.max(0, leaseWaitMs),
@@ -540,7 +551,7 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
         if (event.kind === "app" && event.type === "sweep") {
           return { outcome: "ignored", reason: "sweep deferred while another event owns the session", session: snapshot.session, leaseAcquired, retries };
         }
-        throw new SessionEventDeferredError("Prebieha zmena hovoru. Zopakujte akciu o chvíľu.");
+        throw new SessionLeaseBusyError();
       }
       let context: RoutingContext;
       try {

@@ -1,6 +1,7 @@
 import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { useTelephonyConsole } from "../../src/components/dispatch/useTelephonyConsole";
+import { HeaderPhoneStatusMenu } from "../../src/components/dispatch/HeaderPhoneStatusMenu";
 import { PhoneBar } from "../../src/components/dispatch/PhoneBar";
 import { EMPTY_ACTIVE_CALLS, type ActiveCallPayload } from "../../src/lib/telephony/active-calls-model";
 
@@ -53,6 +54,7 @@ const harness = {
   deny: () => {},
   begin: (kind: "dial" | "callback" | "pickup" | "supervise" | "hangup" | "hold"): void => { throw new Error(`Fixture is not mounted: ${kind}`); },
   prepare: () => {},
+  unmount: () => {},
   answer: () => {},
   realtimeStatus: (status: "connected" | "disconnected") => window.dispatchEvent(new CustomEvent("fixture-realtime-status", { detail: status })),
   realtimeChange: () => window.dispatchEvent(new Event("fixture-realtime-change")),
@@ -115,6 +117,10 @@ function Fixture() {
     harness.answer = telephony.answer;
   }, [telephony]);
   return <>
+    <HeaderPhoneStatusMenu busy={telephony.presenceBusy} onChange={() => {}} onRequestPause={() => {}}
+      onDismissNotice={telephony.dismissNotice} onTakeover={telephony.takeoverPhone} notice={telephony.notice}
+      phone={telephony.phone} status="available" readiness={telephony.readiness}
+      onPreparePhone={telephony.preparePhone} outboundPending={telephony.outboundPending} />
     <PhoneBar model={telephony.phoneBar} phone={telephony.phone} degradedSessionIds={telephony.degradedSessionIds}
       busyAction={telephony.busyAction} notice={telephony.notice} onDismissNotice={telephony.dismissNotice}
       onCallAction={telephony.callAction} onPartyAction={telephony.partyAction} canSupervise={false}
@@ -124,4 +130,6 @@ function Fixture() {
     <output id="state" data-busy={telephony.busyAction ?? ""} data-call={telephony.phone.call?.id ?? ""} data-server-call={telephony.phoneBar.active?.sessionId ?? ""} data-configured={String(telephony.configured)} data-pending={String(telephony.outboundPending)} data-legs={telephony.phone.pendingOperatorLegs ?? 0} data-status={telephony.phone.status} data-readiness={telephony.readiness.status} data-ringing={String(telephony.phone.call?.ringing ?? false)}>{telephony.notice ?? telephony.readiness.message}</output>
   </>;
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+const root = createRoot(document.getElementById("root")!);
+harness.unmount = () => root.unmount();
+root.render(<Fixture />);

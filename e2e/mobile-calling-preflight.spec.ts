@@ -435,3 +435,181 @@ test("terminal SDK state releases real browser audio tracks before either signal
   });
   await expect(page.locator("#state")).toHaveAttribute("data-busy", "");
 });
+
+for (const responseKind of ["session_busy", "transient_failure"] as const) {
+  test(`failed exact-leg verification recovers with bounded backoff after ${responseKind}`, async ({ page }) => {
+    await page.clock.install();
+    await page.evaluate(() => { window.phoneHarness.connected(false); document.dispatchEvent(new Event("visibilitychange")); });
+    await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+    await page.evaluate((kind) => window.phoneHarness.requests[0].resolve(kind === "session_busy"
+      ? Response.json({ reconciled: false, reason: "session_busy", retryAfterMs: 1000 })
+      : Response.json({ error: "Dočasná chyba overenia", code: "session_event_deferred" }, { status: 503 })), responseKind);
+    await expect(page.locator("#state")).toContainText("Overenie zopakujeme automaticky");
+    await expect(page.locator("#state")).toHaveAttribute("data-status", "registered");
+    await page.getByRole("button", { name: "Stav skončeného hovoru ešte nie je potvrdený. Overenie zopakujeme automaticky.", exact: true }).click();
+    await expect(page.locator("#state")).toHaveText("");
+    await page.clock.runFor(999);
+    await page.evaluate(() => window.phoneHarness.realtimeChange());
+    expect(await page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+    await page.clock.runFor(1);
+    await page.evaluate(() => window.phoneHarness.realtimeChange());
+    await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(2);
+    expect(await page.evaluate(() => window.phoneHarness.requests.map((request) => request.url)))
+      .toEqual(["/api/telephony/calls/fixture/reconcile", "/api/telephony/calls/fixture/reconcile"]);
+    await page.evaluate(() => { window.phoneHarness.calls = []; window.phoneHarness.requests[1].resolve(Response.json({ reconciled: true })); });
+    await expect(page.locator("#state")).toHaveAttribute("data-server-call", "");
+    await expect(page.locator("#state")).toHaveText("");
+  });
+}
+
+test("repeated foreground hints never overlap exact-leg reconciliation requests", async ({ page }) => {
+  await page.evaluate(() => { window.phoneHarness.connected(false); document.dispatchEvent(new Event("visibilitychange")); });
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  await page.evaluate(() => { for (let index = 0; index < 20; index++) document.dispatchEvent(new Event("visibilitychange")); });
+  expect(await page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ reconciled: false, reason: "alive" })));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(2);
+  await page.evaluate(() => window.phoneHarness.requests[1].resolve(Response.json({ reconciled: false, reason: "alive" })));
+  await page.evaluate(() => window.phoneHarness.realtimeChange());
+  expect(await page.evaluate(() => window.phoneHarness.requests.length)).toBe(2);
+});
+
+test("a pending own-session control takes priority over missing-media reconciliation", async ({ page }) => {
+  await page.evaluate(() => {
+    window.phoneHarness.begin("hold");
+    window.phoneHarness.connected(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  expect(await page.evaluate(() => window.phoneHarness.requests.map((request) => request.url)))
+    .toEqual(["/api/telephony/calls/fixture/hold"]);
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ ok: true })));
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(2);
+  expect(await page.evaluate(() => window.phoneHarness.requests[1].url)).toBe("/api/telephony/calls/fixture/reconcile");
+  await page.evaluate(() => window.phoneHarness.requests[1].resolve(Response.json({ reconciled: false, reason: "alive" })));
+});
+
+test("repeated session contention retains the failed action and registered status after one bounded retry", async ({ page }) => {
+  await page.clock.install();
+  await page.evaluate(() => window.phoneHarness.connected());
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  await page.evaluate(() => window.phoneHarness.begin("hold"));
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({
+    error: "Prebieha iná zmena hovoru. Akcia nebola prijatá.", code: "session_busy", retryAfterMs: 1000,
+  }, { status: 503 })));
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "hold");
+  await page.clock.runFor(1000);
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(2);
+  await page.evaluate(() => window.phoneHarness.requests[1].resolve(Response.json({
+    error: "Prebieha iná zmena hovoru. Akcia nebola prijatá.", code: "session_busy", retryAfterMs: 1000,
+  }, { status: 503 })));
+  await expect(page.locator("#state")).toContainText("Akcia nebola prijatá");
+  await expect(page.locator("#state")).toHaveAttribute("data-status", "registered");
+  const status = page.getByTestId("phone-registration");
+  await expect(status).toContainText("Registrované");
+  await expect(status).toContainText("Upozornenie k akcii");
+  await expect(status).not.toContainText("Chyba telefónie");
+  await status.click();
+  await expect(page.getByRole("dialog", { name: "Stav telefónu a dostupnosť" }).getByRole("alert"))
+    .toContainText("Akcia nebola prijatá");
+  await page.clock.runFor(10_000);
+  expect(await page.evaluate(() => window.phoneHarness.requests.map((request) => request.url)))
+    .toEqual(["/api/telephony/calls/fixture/hold", "/api/telephony/calls/fixture/hold"]);
+});
+
+test("an actual SDK microphone failure is identified as a call error while registration stays connected", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.incoming());
+  await page.getByRole("button", { name: "Prijať", exact: true }).click();
+  await page.evaluate(() => window.phoneHarness.deny());
+  await expect(page.getByTestId("phone-registration")).toContainText("Registrované");
+  await expect(page.getByTestId("phone-registration")).toContainText("Chyba hovoru");
+  await page.getByTestId("phone-registration").click();
+  await expect(page.getByRole("dialog", { name: "Stav telefónu a dostupnosť" }).getByRole("alert"))
+    .toContainText("Mikrofón je zablokovaný");
+});
+
+
+test("a proven not-started control retries once with the same payload and stays pending until acceptance", async ({ page }) => {
+  await page.clock.install();
+  await page.evaluate(() => window.phoneHarness.connected());
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  await page.evaluate(() => window.phoneHarness.begin("hold"));
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ code: "session_busy", retryAfterMs: 1000 }, { status: 503 })));
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "hold");
+  await page.clock.runFor(999);
+  expect(await page.evaluate(() => window.phoneHarness.requests.length)).toBe(1);
+  await page.clock.runFor(1);
+  await expect.poll(() => page.evaluate(() => window.phoneHarness.requests.length)).toBe(2);
+  expect(await page.evaluate(() => window.phoneHarness.requests.map(({ url, body }) => ({ url, body }))))
+    .toEqual([{ url: "/api/telephony/calls/fixture/hold", body: "{}" }, { url: "/api/telephony/calls/fixture/hold", body: "{}" }]);
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "hold");
+  await page.evaluate(() => window.phoneHarness.requests[1].resolve(Response.json({ ok: true })));
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "");
+  await expect(page.locator("#state")).toHaveText("");
+});
+
+test("hangup preempts a waiting safe hold retry without sending another hold", async ({ page }) => {
+  await page.clock.install();
+  await page.evaluate(() => window.phoneHarness.connected());
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  await page.evaluate(() => window.phoneHarness.begin("hold"));
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ code: "session_busy", retryAfterMs: 1000 }, { status: 503 })));
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "hold");
+  await page.getByRole("button", { name: "Zavesiť", exact: true }).click();
+  await page.clock.runFor(1500);
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "hangup");
+  expect(await page.evaluate(() => window.phoneHarness.requests.map((request) => request.url)))
+    .toEqual(["/api/telephony/calls/fixture/hold", "/api/telephony/calls/fixture/hangup"]);
+  await page.evaluate(() => { window.phoneHarness.calls = []; window.phoneHarness.requests[1].resolve(Response.json({ ok: true })); });
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "");
+});
+
+test("a replacement browser call cancels the previous call's waiting retry", async ({ page }) => {
+  await page.clock.install();
+  await page.evaluate(() => window.phoneHarness.connected());
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  await page.evaluate(() => window.phoneHarness.begin("hold"));
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ code: "session_busy", retryAfterMs: 1000 }, { status: 503 })));
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "hold");
+  await page.evaluate(() => { window.phoneHarness.callState("hangup"); window.phoneHarness.callState("ringing", "new-incoming"); });
+  await page.clock.runFor(1500);
+  await expect(page.locator("#state")).toHaveAttribute("data-call", "new-incoming");
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "");
+  expect(await page.evaluate(() => window.phoneHarness.requests.map((request) => request.url)))
+    .toEqual(["/api/telephony/calls/fixture/hold"]);
+});
+
+
+test("closing the console cancels an otherwise safe waiting control retry", async ({ page }) => {
+  await page.clock.install();
+  await page.evaluate(() => window.phoneHarness.connected());
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  await page.evaluate(() => window.phoneHarness.begin("hold"));
+  await page.evaluate(() => window.phoneHarness.requests[0].resolve(Response.json({ code: "session_busy", retryAfterMs: 1000 }, { status: 503 })));
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "hold");
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "sendBeacon", { configurable: true, value: () => true });
+    window.phoneHarness.unmount();
+  });
+  await page.clock.runFor(1500);
+  expect(await page.evaluate(() => window.phoneHarness.requests.map((request) => request.url)))
+    .toEqual(["/api/telephony/calls/fixture/hold"]);
+});
+
+
+test("a late first generic control failure cannot label a replacement call as failed", async ({ page }) => {
+  await page.evaluate(() => window.phoneHarness.connected());
+  await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
+  await page.evaluate(() => window.phoneHarness.begin("hold"));
+  await page.evaluate(() => {
+    window.phoneHarness.callState("hangup");
+    window.phoneHarness.callState("ringing", "replacement-after-first-post");
+    window.phoneHarness.requests[0].resolve(Response.json({ error: "Old session failure", code: "session_event_deferred" }, { status: 503 }));
+  });
+  await expect(page.locator("#state")).toHaveAttribute("data-call", "replacement-after-first-post");
+  await expect(page.locator("#state")).toHaveAttribute("data-busy", "");
+  await expect(page.locator("#state")).not.toContainText("Old session failure");
+  await expect(page.getByTestId("phone-registration")).not.toContainText("Upozornenie k akcii");
+  expect(await page.evaluate(() => window.phoneHarness.requests.map((request) => request.url)))
+    .toEqual(["/api/telephony/calls/fixture/hold"]);
+});
