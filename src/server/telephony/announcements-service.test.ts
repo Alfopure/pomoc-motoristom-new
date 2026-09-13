@@ -81,7 +81,7 @@ describe("announcement configuration", () => {
   it("accepts legacy clients with direction defaults and rejects unknown per-prompt controls", () => {
     const h = world();
     const legacy = { version: 1, language: "sk", voiceId: DEFAULT_ANNOUNCEMENT_VOICE, prompts: {} };
-    expect(parseAnnouncementConfig(h.deps, ORG, LINE, legacy)).toMatchObject({ inboundStartAnnouncements: true, outboundStartAnnouncements: false, recordingStatusAnnouncements: false });
+    expect(parseAnnouncementConfig(h.deps, ORG, LINE, legacy)).toMatchObject({ inboundStartAnnouncements: false, outboundStartAnnouncements: false, recordingStatusAnnouncements: false });
     expect(() => parseAnnouncementConfig(h.deps, ORG, LINE, { ...legacy, recordingNotice: false })).toThrow();
   });
 

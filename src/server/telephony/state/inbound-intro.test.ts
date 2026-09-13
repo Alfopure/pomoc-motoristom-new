@@ -10,9 +10,39 @@ function setup(language: AnnouncementLanguage = "sk", quality = false) {
   for (const key of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED"]) vi.stubEnv(key, "true");
   const h = createTelephonyHarness();
   h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(), inbound_enabled: true, outbound_enabled: true, quality_enabled: quality });
-  h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), language } } }, () => true);
+  h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true, language } } }, () => true);
   return h;
 }
+
+describe("silent inbound defaults", () => {
+  it.each([{}, { announcements: { language: "sk" } }])("rings immediately for an unconfigured line without starting capture (%j)", async (metadata) => {
+    const h = setup();
+    h.db.update("motorist_telephony_lines", { metadata }, () => true);
+    const call = await h.inbound({ completeGreeting: false });
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+    expect(h.telnyx.of("playbackStart").filter((entry) => /greeting|recording.*Notice/.test(String(entry.params.audioUrl)))).toHaveLength(0);
+    expect(h.telnyx.of("speak")).toHaveLength(0);
+    expect(readMeta(h.session(call.sessionId) as SessionRow)).toMatchObject({
+      announcements: { inboundStartAnnouncements: false },
+      recording: { policy: { enabled: false, reason: "start_announcements_disabled" }, noticeCompletedAt: null },
+    });
+    const operator = h.legFor(call.sessionId, PROFILES.o1)!;
+    await h.legEvent(String(operator.telnyx_call_control_id), "call.answered");
+    expect(h.telnyx.of("recordingStart")).toHaveLength(0);
+  });
+
+  it("keeps an already initiated call silent when a greeting is enabled on its line later", async () => {
+    const h = setup();
+    h.db.update("motorist_telephony_lines", { metadata: {} }, () => true);
+    const call = await h.inbound({ answer: false });
+    h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true } } }, () => true);
+    await h.legEvent(call.callControlId, "call.answered");
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcements?.inboundStartAnnouncements).toBe(false);
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+  });
+});
 
 describe("one verified inbound welcome and recording notice", () => {
   it.each(ANNOUNCEMENT_LANGUAGES.flatMap(({ code }) => [false, true].map((quality) => ({ language: code, quality }))))("routes only after the full $language intro for quality=$quality", async ({ language, quality }) => {

@@ -32,7 +32,7 @@ function policyState(session: SessionRow, context: RoutingContext): RecordingSta
   if (!policy || session.direction === "internal") return undefined;
   const announcements = readMeta(session).announcements ?? context.announcements ?? announcementConfigFromMetadata(context.line?.metadata);
   const startupEnabled = session.direction === "inbound"
-    ? announcements.inboundStartAnnouncements !== false
+    ? announcements.inboundStartAnnouncements === true
     : announcements.outboundStartAnnouncements === true;
   // No automatic notice means no automatic capture. Freeze this per call;
   // changing a line later must not alter a conversation already in progress.

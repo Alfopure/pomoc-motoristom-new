@@ -70,7 +70,7 @@ export type AnnouncementConfig = {
   version: 1;
   language: AnnouncementLanguage;
   voiceId: string;
-  /** Automatic greeting and recording notice at inbound startup; legacy default is on. */
+  /** Automatic greeting and recording notice at inbound startup; enable explicitly to delay ringing. */
   inboundStartAnnouncements?: boolean;
   /** Automatic introduction and recording notice at outbound startup; legacy default is off. */
   outboundStartAnnouncements?: boolean;
@@ -193,11 +193,11 @@ export const DEFAULT_ANNOUNCEMENT_TEXTS: Record<AnnouncementLanguage, Record<Ann
   }
 };
 export function defaultAnnouncementConfig(): AnnouncementConfig {
-  return { version: 1, language: "sk", voiceId: DEFAULT_ANNOUNCEMENT_VOICE, inboundStartAnnouncements: true, outboundStartAnnouncements: false, recordingStatusAnnouncements: false, prompts: {} };
+  return { version: 1, language: "sk", voiceId: DEFAULT_ANNOUNCEMENT_VOICE, inboundStartAnnouncements: false, outboundStartAnnouncements: false, recordingStatusAnnouncements: false, prompts: {} };
 }
 /** Direction controls startup greetings; recording notices also serve later participants. */
 export function isAnnouncementEnabled(config: AnnouncementConfig, key: AnnouncementKey): boolean {
-  if (key === "greeting") return config.inboundStartAnnouncements !== false;
+  if (key === "greeting") return config.inboundStartAnnouncements === true;
   if (key === "outboundIntro") return config.outboundStartAnnouncements === true;
   return !["recordingPaused", "recordingResumed", "recordingUnavailable"].includes(key) || config.recordingStatusAnnouncements === true;
 }
@@ -227,7 +227,7 @@ export function readAnnouncementConfig(value: unknown): AnnouncementConfig {
       };
     }
   }
-  return { version: 1, language: raw.language, voiceId: raw.voiceId!, inboundStartAnnouncements: raw.inboundStartAnnouncements !== false,
+  return { version: 1, language: raw.language, voiceId: raw.voiceId!, inboundStartAnnouncements: raw.inboundStartAnnouncements === true,
     outboundStartAnnouncements: raw.outboundStartAnnouncements === true, recordingStatusAnnouncements: raw.recordingStatusAnnouncements === true, prompts };
 }
 export function announcementConfigFromMetadata(metadata: unknown): AnnouncementConfig {

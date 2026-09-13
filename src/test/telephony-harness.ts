@@ -1,3 +1,4 @@
+import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
 import { randomUUID } from "node:crypto";
 
 import { createFakeSupabase, type FakeRow, type FakeSupabase } from "@/test/fake-supabase";
@@ -153,7 +154,8 @@ export function createTelephonyHarness(options: HarnessOptions = {}): TelephonyH
       business_hours_id: BUSINESS_HOURS_ID,
       environment: "production",
       active: true,
-      metadata: {},
+      // Explicit fixture opt-in keeps greeting/recording workflows covered.
+      metadata: { announcements: { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true } },
     },
     {
       id: LINES.allianz,
@@ -167,7 +169,8 @@ export function createTelephonyHarness(options: HarnessOptions = {}): TelephonyH
       business_hours_id: BUSINESS_HOURS_ID,
       environment: "production",
       active: true,
-      metadata: {},
+      // Explicit fixture opt-in keeps greeting/recording workflows covered.
+      metadata: { announcements: { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true } },
     },
   ]);
   db.seed(

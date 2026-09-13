@@ -27,6 +27,9 @@ export const TOKEN_REFRESH_SKEW_MS = 30_000;
 
 export const WEBPHONE_RECONNECT_BASE_MS = 2_000;
 export const WEBPHONE_RECONNECT_MAX_MS = 60_000;
+/** SDK reconnects itself; the application only bounds an unsuccessful recovery. */
+export const WEBPHONE_RECOVERY_TIMEOUT_MS = 60_000;
+export const WEBPHONE_MAX_CONNECT_FAILURES = 5;
 /** A dial we started stops being interesting after this long without an invite. */
 export const EXPECTED_LEG_TTL_MS = 90_000;
 
@@ -72,6 +75,8 @@ export type WebphoneEvent =
   /** `status` is the HTTP status of the token route (0 for a transport failure). */
   | { type: "token_rejected"; status: number; message?: string | null; code?: string | null }
   | { type: "client_ready" }
+  | { type: "client_recovering"; message?: string | null }
+  | { type: "recovery_failed"; message?: string | null }
   | { type: "client_error"; message?: string | null; authFailure?: boolean }
   | { type: "socket_closed" }
   /** The refresh timer fired: mint a new token for the same registration. */
@@ -83,6 +88,8 @@ export type WebphoneEffect =
   | { kind: "mint_token" }
   | { kind: "connect"; credentials: WebphoneCredentials }
   | { kind: "disconnect" }
+  | { kind: "await_recovery" }
+  | { kind: "recovery_complete" }
   /** Retry the whole connect sequence after `delayMs`. */
   | { kind: "retry_after"; delayMs: number }
   /** Mint the next token after `delayMs` (the socket stays up meanwhile). */
@@ -174,7 +181,7 @@ export function reduceWebphone(
         state: {
           // A refresh while registered must not flap the pill back to
           // "connecting": the socket is still up, only the token is new.
-          status: state.status === "registered" ? "registered" : "connecting",
+          status: state.status === "registered" || state.status === "reconnecting" ? state.status : "connecting",
           attempts: state.status === "registered" ? 0 : state.attempts,
           credentials: event.credentials,
           message: null,
@@ -235,19 +242,37 @@ export function reduceWebphone(
       if (state.status === "idle" || isTerminalWebphoneStatus(state.status)) return { state, effects: [] };
       return {
         state: { status: "registered", attempts: 0, credentials: state.credentials, message: null },
-        effects: [],
+        effects: [{ kind: "recovery_complete" }],
       };
     }
 
-    case "client_error":
+    case "client_recovering":
     case "socket_closed": {
+      if (state.status === "idle" || isTerminalWebphoneStatus(state.status)) return { state, effects: [] };
+      return {
+        state: { ...state, status: "reconnecting", message: (event.type === "client_recovering" ? event.message : null) ?? "Spojenie telefónu vypadlo, obnovujem ho." },
+        // Do not disconnect: SDK disconnect() purges active calls and disables
+        // its own reconnect. Repeated errors must not restart the watchdog.
+        effects: [{ kind: "await_recovery" }],
+      };
+    }
+
+    case "recovery_failed": {
+      if (state.status === "idle" || isTerminalWebphoneStatus(state.status)) return { state, effects: [] };
+      return {
+        state: { ...state, status: "failed", message: event.message ?? "Spojenie telefónu sa nepodarilo obnoviť. Skontrolujte internet a znovu pripojte telefón." },
+        effects: [{ kind: "clear_timers" }, { kind: "disconnect" }],
+      };
+    }
+
+    case "client_error": {
       if (state.status === "idle" || isTerminalWebphoneStatus(state.status)) return { state, effects: [] };
       const attempts = state.attempts + 1;
       const message =
         (event.type === "client_error" ? event.message : null) ?? "Spojenie telefónu vypadlo, obnovujem ho.";
       return {
         state: {
-          status: "reconnecting",
+          status: attempts >= WEBPHONE_MAX_CONNECT_FAILURES ? "failed" : "reconnecting",
           attempts,
           // An auth failure means the token is the problem: drop it so the
           // retry mints a fresh one rather than replaying the rejected JWT.
@@ -257,7 +282,7 @@ export function reduceWebphone(
         effects: [
           { kind: "clear_timers" },
           { kind: "disconnect" },
-          { kind: "retry_after", delayMs: webphoneRetryDelayMs(attempts, context.random) },
+          ...(attempts < WEBPHONE_MAX_CONNECT_FAILURES ? [{ kind: "retry_after" as const, delayMs: webphoneRetryDelayMs(attempts, context.random) }] : []),
         ],
       };
     }
