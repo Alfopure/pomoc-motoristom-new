@@ -713,7 +713,7 @@ function onCustomerAnswered(b: TransitionBuilder, leg: LegRow): ReduceResult {
   if (b.session.state !== "received" && b.session.state !== "greeting") return b.note("customer answered late").result();
   const announcements = b.meta.announcements ?? b.ctx.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata);
   b.patchMeta({ announcements });
-  if (announcements.inboundStartAnnouncements === false) return routeInboundCustomer(b, leg);
+  if (announcements.inboundStartAnnouncements !== true) return routeInboundCustomer(b, leg);
   startGreeting(b, leg);
   return b.result();
 }

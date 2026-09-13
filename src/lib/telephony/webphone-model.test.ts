@@ -94,7 +94,7 @@ describe("connect lifecycle", () => {
     expect(state.credentials?.deviceSessionId).toBe("device-2");
   });
 
-  it("backs off after a socket close and retries with exponential delay", () => {
+  it("preserves credentials and leaves transient socket recovery to the SDK", () => {
     const registered = run(WEBPHONE_INITIAL_STATE, [
       { type: "start" },
       { type: "token_issued", credentials: credentials() },
@@ -103,16 +103,21 @@ describe("connect lifecycle", () => {
 
     const first = reduceWebphone(registered, { type: "socket_closed" }, { now: NOW, random: () => 0.5 });
     expect(first.state.status).toBe("reconnecting");
-    expect(first.state.attempts).toBe(1);
-    const retry = first.effects.find((effect) => effect.kind === "retry_after");
-    expect(retry).toBeDefined();
+    expect(first.state.credentials).toEqual(registered.credentials);
+    expect(first.effects).toEqual([{ kind: "await_recovery" }]);
 
     const second = reduceWebphone(first.state, { type: "socket_closed" }, { now: NOW, random: () => 0.5 });
-    const secondRetry = second.effects.find((effect) => effect.kind === "retry_after");
-    expect(secondRetry && "delayMs" in secondRetry ? secondRetry.delayMs : 0).toBeGreaterThan(
-      retry && "delayMs" in retry ? retry.delayMs : 0,
-    );
+    expect(second.effects).toEqual([{ kind: "await_recovery" }]);
     expect(webphoneRetryDelayMs(20, () => 0.5)).toBeLessThanOrEqual(WEBPHONE_RECONNECT_MAX_MS);
+  });
+
+  it("makes exhausted recovery terminal until an explicit start", () => {
+    const { state, effects } = run(WEBPHONE_INITIAL_STATE, [{ type: "start" }, { type: "token_issued", credentials: credentials() },
+      { type: "client_ready" }, { type: "socket_closed" }, { type: "recovery_failed" }]);
+    expect(state.status).toBe("failed");
+    expect(effects).toContainEqual({ kind: "disconnect" });
+    expect(reduceWebphone(state, { type: "client_ready" }, { now: NOW }).state.status).toBe("failed");
+    expect(reduceWebphone(state, { type: "start" }, { now: NOW }).state.status).toBe("requesting_token");
   });
 
   it("drops the token on an auth failure so the retry mints a new one", () => {

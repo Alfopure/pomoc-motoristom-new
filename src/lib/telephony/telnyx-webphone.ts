@@ -33,6 +33,8 @@ import {
   rememberExpectedLeg,
   reduceWebphone,
   WEBPHONE_HEARTBEAT_MS,
+  WEBPHONE_RECOVERY_TIMEOUT_MS,
+  TOKEN_REFRESH_MIN_MS,
   WEBPHONE_INITIAL_STATE,
   webphoneRegistrationView,
   type ExpectedOperatorLeg,
@@ -51,6 +53,7 @@ import {
  */
 export type WebphoneSdkCall = {
   id: string;
+  recoveredCallId?: string;
   state: string;
   direction: string;
   options: {
@@ -73,6 +76,10 @@ export type WebphoneSdkCall = {
 };
 
 export type WebphoneSdkClient = {
+  /** Public SDK options also feed the next automatic socket login. */
+  options: { login_token?: string };
+  connection: { connected: boolean; socketGeneration?: number };
+  login: (options?: { creds?: { login_token?: string }; onSuccess?: () => void; onError?: (error: unknown) => void }) => Promise<void>;
   on: (event: string, callback: (payload: never) => void) => unknown;
   off: (event: string, callback?: (payload: never) => void) => unknown;
   connect: () => Promise<void>;
@@ -149,9 +156,19 @@ export type TelnyxWebphoneOptions = {
 
 const TOKEN_URL = "/api/telephony/webphone/token";
 const HEARTBEAT_URL = "/api/telephony/devices/heartbeat";
-const RINGING_STATES = new Set(["ringing", "recovering"]);
+// SDK attach recovery answers its own replacement peer. It is never a new offer.
+const RINGING_STATES = new Set(["ringing"]);
 const ACTIVE_STATES = new Set(["active", "held", "early", "answering"]);
 const DEAD_STATES = new Set(["hangup", "destroy", "purge"]);
+const SDK_LOGIN_TIMEOUT_MS = 15_000;
+
+type SdkLoginRequest = {
+  client: WebphoneSdkClient;
+  generation: number;
+  connectionEpoch: number;
+  credentials: WebphoneCredentials;
+  timedOut: boolean;
+};
 
 export class TelnyxWebphone {
   private state: WebphoneState = WEBPHONE_INITIAL_STATE;
@@ -161,6 +178,8 @@ export class TelnyxWebphone {
   private incomingPolicy: IncomingOfferPolicy = { automaticAllowed: true };
   private withdrawnInvites = new Set<string>();
   private confirmedEndedCallIds = new Set<string>();
+  private retiredCalls = new WeakSet<WebphoneSdkCall>();
+  private retiredCallIds = new Set<string>();
   private endedCallControlIds = new Set<string>();
   private finishInviteTiming: ReturnType<typeof beginBrowserCallStep> | null = null;
   private callTiming: CallTimingContext = {};
@@ -171,6 +190,8 @@ export class TelnyxWebphone {
   private listeners = new Set<(snapshot: WebphoneSnapshot) => void>();
   private retryTimer: number | null = null;
   private refreshTimer: number | null = null;
+  private recoveryTimer: number | null = null;
+  private loginTimer: number | null = null;
   private heartbeatTimer: number | null = null;
   private heartbeatWorker: Worker | null = null;
   private expectedLegTimer: number | null = null;
@@ -193,6 +214,18 @@ export class TelnyxWebphone {
   private resumeSessionId: string | null = null;
   private handoffPending = false;
   private mintGeneration = 0;
+  private minting = false;
+  private lastWarningRefreshAt = -Infinity;
+  private pendingCredentials: WebphoneCredentials | null = null;
+  private appliedToken: string | null = null;
+  private socketLoginToken: string | null = null;
+  private socketLoginConnection: WebphoneSdkClient["connection"] | null = null;
+  private socketLoginGeneration: number | undefined;
+  private sdkReady = false;
+  private connectionEpoch = 0;
+  private authenticationNeeded = false;
+  private loginRequest: SdkLoginRequest | null = null;
+  private mediaRecovering = false;
   private sdkModule: Promise<WebphoneSdkModule> | null = null;
   private heartbeatRequest: { body: string; generation: number; promise: Promise<HeartbeatResult> } | null = null;
   private readonly options: TelnyxWebphoneOptions;
@@ -251,6 +284,7 @@ export class TelnyxWebphone {
     if (!this.started) { this.disposeAudio(); return; }
     this.beaconHeartbeat({ leaving: true });
     this.mintGeneration++;
+    this.minting = false;
     this.started = false;
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", this.boundVisibility);
@@ -432,6 +466,18 @@ export class TelnyxWebphone {
       case "disconnect":
         void this.disconnectClient();
         return;
+      case "await_recovery":
+        if (this.recoveryTimer === null) {
+          const generation = this.clientGeneration;
+          this.recoveryTimer = this.schedule(() => {
+            this.recoveryTimer = null;
+            if (this.started && generation === this.clientGeneration) this.dispatch({ type: "recovery_failed" });
+          }, WEBPHONE_RECOVERY_TIMEOUT_MS);
+        }
+        return;
+      case "recovery_complete":
+        if (!this.mediaRecovering) this.clearTimer("recoveryTimer");
+        return;
       case "retry_after":
         this.clearTimer("retryTimer");
         this.retryTimer = this.schedule(() => {
@@ -456,7 +502,7 @@ export class TelnyxWebphone {
     return timer(handler, delayMs);
   }
 
-  private clearTimer(key: "retryTimer" | "refreshTimer" | "heartbeatTimer" | "expectedLegTimer"): void {
+  private clearTimer(key: "retryTimer" | "refreshTimer" | "heartbeatTimer" | "expectedLegTimer" | "recoveryTimer" | "loginTimer"): void {
     const handle = this[key];
     if (handle === null) return;
     this[key] = null;
@@ -485,6 +531,8 @@ export class TelnyxWebphone {
   }
 
   private async mintToken(): Promise<void> {
+    if (!this.started || this.minting) return;
+    this.minting = true;
     const generation = ++this.mintGeneration;
     const takeover = this.takeoverRequested;
     this.takeoverRequested = false;
@@ -511,6 +559,8 @@ export class TelnyxWebphone {
     } catch {
       if (!this.started || generation !== this.mintGeneration) return;
       this.dispatch({ type: "token_rejected", status: 0, message: "Telefón sa nepodarilo prihlásiť (sieť)." });
+    } finally {
+      if (generation === this.mintGeneration) this.minting = false;
     }
   }
 
@@ -665,9 +715,9 @@ export class TelnyxWebphone {
   // --- SDK -------------------------------------------------------------------
 
   private async connect(credentials: WebphoneCredentials): Promise<void> {
-    // A token refresh while the socket is up must not drop a live call: the
-    // fresh credentials are kept for the next (re)connect instead.
-    if (this.client || this.connecting) return;
+    this.pendingCredentials = credentials;
+    if (this.client) { void this.applyPendingCredentials(); return; }
+    if (this.connecting) return;
     this.connecting = true;
     const generation = ++this.clientGeneration;
     try {
@@ -679,15 +729,48 @@ export class TelnyxWebphone {
         return;
       }
       this.client = client;
+      this.appliedToken = credentials.token;
+      this.socketLoginToken = credentials.token;
       const current = () => this.started && this.client === client && generation === this.clientGeneration;
       client.on("telnyx.ready", (() => {
-        if (current()) this.dispatch({ type: "client_ready" });
+        if (!current()) return;
+        this.sdkReady = true;
+        this.authenticationNeeded = false;
+        if (this.socketLoginToken) {
+          this.appliedToken = this.socketLoginToken;
+          if (this.pendingCredentials?.token === this.appliedToken) this.pendingCredentials = null;
+          this.socketLoginToken = null;
+        }
+        if (!this.mediaRecovering) this.dispatch({ type: "client_ready" });
+        void this.applyPendingCredentials();
       }) as (payload: never) => void);
       client.on("telnyx.error", ((payload: WebphoneSdkError) => {
         if (current()) this.onSdkError(payload);
       }) as (payload: never) => void);
-      client.on("telnyx.socket.close", (() => {
-        if (current()) this.dispatch({ type: "socket_closed" });
+      client.on("telnyx.socket.close", ((payload: WebphoneSdkSocketEvent) => {
+        if (!current() || !this.currentSocketEvent(client, payload)) return;
+        this.connectionEpoch++;
+        this.socketLoginToken = null;
+        this.beginRecovery("Spojenie telefónu vypadlo, obnovujem ho.", true);
+        // A newly minted JWT may have arrived while the socket was closing.
+        // The SDK's next automatic login reads its public options.
+        void this.applyPendingCredentials();
+      }) as (payload: never) => void);
+      client.on("telnyx.socket.open", (() => {
+        if (!current() || !client.connection?.connected) return;
+        const socketGeneration = client.connection.socketGeneration;
+        // open is a raw Event in 2.27.10 (no originating generation). Observe
+        // the current connection only once; an old open cannot rewrite it.
+        if (socketGeneration !== undefined && this.socketLoginConnection === client.connection && this.socketLoginGeneration === socketGeneration) return;
+        this.socketLoginConnection = client.connection;
+        this.socketLoginGeneration = socketGeneration;
+        this.socketLoginToken = client.options.login_token ?? null;
+      }) as (payload: never) => void);
+      client.on("telnyx.socket.error", ((payload: WebphoneSdkSocketEvent) => {
+        if (current() && this.currentSocketEvent(client, payload)) this.beginRecovery("Spojenie telefónu vypadlo, obnovujem ho.", true);
+      }) as (payload: never) => void);
+      client.on("telnyx.warning", ((payload: WebphoneSdkWarning) => {
+        if (current()) this.onSdkWarning(payload);
       }) as (payload: never) => void);
       client.on("telnyx.notification", ((notification: WebphoneSdkNotification) => {
         if (current()) this.onNotification(notification);
@@ -710,7 +793,98 @@ export class TelnyxWebphone {
     const { TelnyxRTC } = await this.loadSdk();
     // Send the SDP answer immediately and deliver ICE candidates as they
     // arrive, avoiding the SDK's non-trickle gathering wait before answering.
-    return new TelnyxRTC({ login_token: credentials.token, trickleIce: true });
+    return new TelnyxRTC({ login_token: credentials.token, trickleIce: true, keepConnectionAliveOnSocketClose: true, maxReconnectAttempts: 5 });
+  }
+
+  private beginRecovery(message: string, signaling: boolean): void {
+    if (signaling) this.sdkReady = false;
+    this.dispatch({ type: "client_recovering", message });
+    // Stop new automatic routing promptly; retained media remains controllable.
+    void this.sendHeartbeat();
+  }
+
+  private currentSocketEvent(client: WebphoneSdkClient, event: WebphoneSdkSocketEvent): boolean {
+    const generation = client.connection?.socketGeneration;
+    return typeof event?.socketGeneration !== "number" || typeof generation !== "number" || event.socketGeneration === generation;
+  }
+
+  private loginIsCurrent(request: SdkLoginRequest): boolean {
+    return this.started && this.client === request.client && this.clientGeneration === request.generation &&
+      this.connectionEpoch === request.connectionEpoch;
+  }
+
+  /** SDK 2.27.10 resolves login() even after onError; only its callback confirms authentication. */
+  private async applyPendingCredentials(): Promise<void> {
+    const client = this.client;
+    const credentials = this.pendingCredentials;
+    if (!client || !credentials || !this.started) return;
+    if (credentials.token === this.appliedToken && !this.authenticationNeeded) { this.pendingCredentials = null; return; }
+    if (!client.connection?.connected) {
+      // No login RPC is sent on a closed socket. Its next automatic connection
+      // must nevertheless use the new token, not retry an expired original JWT.
+      client.options.login_token = credentials.token;
+      return;
+    }
+    if (this.loginRequest || (!this.sdkReady && !this.authenticationNeeded)) return;
+    const request: SdkLoginRequest = { client, credentials, generation: this.clientGeneration, connectionEpoch: this.connectionEpoch, timedOut: false };
+    this.loginRequest = request;
+    let accepted = false;
+    this.loginTimer = this.schedule(() => {
+      this.loginTimer = null;
+      if (!this.loginIsCurrent(request) || this.loginRequest !== request) return;
+      request.timedOut = true;
+      this.loginFailed();
+      // Keep the in-flight slot until the actual SDK request settles. A timer
+      // cannot cancel that RPC and must not start overlapping authentication.
+    }, SDK_LOGIN_TIMEOUT_MS);
+    try {
+      await client.login({ creds: { login_token: credentials.token }, onSuccess: () => { accepted = true; }, onError: () => { accepted = false; } });
+    } catch {
+      accepted = false;
+    } finally {
+      if (this.loginRequest === request) {
+        this.loginRequest = null;
+        this.clearTimer("loginTimer");
+      }
+    }
+    if (!this.loginIsCurrent(request)) {
+      // Socket recovery superseded this response. Its own ready/login events
+      // decide readiness; only stage any newer token for that connection.
+      if (this.started && this.client === client && this.clientGeneration === request.generation) void this.applyPendingCredentials();
+      return;
+    }
+    if (!accepted) { if (!request.timedOut) this.loginFailed(); return; }
+    this.appliedToken = credentials.token;
+    this.authenticationNeeded = false;
+    if (this.pendingCredentials?.token === credentials.token) this.pendingCredentials = null;
+    this.clearTimer("retryTimer");
+    if (this.sdkReady && !this.mediaRecovering) this.dispatch({ type: "client_ready" });
+    if (this.pendingCredentials) void this.applyPendingCredentials();
+  }
+
+  private loginFailed(): void {
+    this.authenticationNeeded = true;
+    this.beginRecovery("Prihlásenie telefónu sa nepodarilo obnoviť. Skúšam ho znova; prebiehajúci hovor zostáva zachovaný.", false);
+    this.dispatch({ type: "token_rejected", status: 0, message: "Obnovujem prihlásenie telefónu." });
+  }
+
+  private onSdkWarning(payload: WebphoneSdkWarning): void {
+    const code = payload?.warning?.code;
+    if (typeof code !== "number") return;
+    // Never log the provider payload: it can include tokens, SDP and numbers.
+    this.options.logger?.({ scope: "webphone", event: "sdk_warning", code });
+    if (code === 34001) {
+      if (this.now() - this.lastWarningRefreshAt < TOKEN_REFRESH_MIN_MS || this.minting) return;
+      this.lastWarningRefreshAt = this.now();
+      this.dispatch({ type: "token_expiring" });
+    } else if (code === 36003) {
+      this.beginRecovery("Obnovujem spojenie telefónu.", true);
+    } else if ((code === 33004 || code === 36004) && this.call && (!payload.callId || payload.callId === this.call.id)) {
+      this.mediaRecovering = true;
+      this.beginRecovery("Obnovujem zvuk prebiehajúceho hovoru.", false);
+    } else if (code === 36005) {
+      this.dispatch({ type: "recovery_failed" });
+    }
   }
 
   private loadSdk(): Promise<WebphoneSdkModule> {
@@ -726,24 +900,70 @@ export class TelnyxWebphone {
     const client = this.client;
     this.client = null;
     this.clientGeneration += 1;
+    this.mintGeneration++;
+    this.minting = false;
     this.connecting = false;
+    this.sdkReady = false;
+    this.authenticationNeeded = false;
+    this.mediaRecovering = false;
+    this.pendingCredentials = null;
+    this.appliedToken = null;
+    this.socketLoginToken = null;
+    this.socketLoginConnection = null;
+    this.socketLoginGeneration = undefined;
+    this.loginRequest = null;
+    this.lastWarningRefreshAt = -Infinity;
+    this.clearTimer("recoveryTimer");
+    this.clearTimer("loginTimer");
     this.confirmedEndedCallIds.clear();
+    this.retiredCalls = new WeakSet();
+    this.retiredCallIds.clear();
     this.endedCallControlIds.clear();
     this.stopRinging();
-    this.call = null;
-    this.callSessionId = null;
+    this.clearCurrentCall();
     this.answeringCallId = null;
     this.answeredCallId = null;
     this.hangupRequestedCallId = null;
     this.audioAttempt += 1;
     this.audioBlocked = false;
     if (!client) return;
-    for (const event of ["telnyx.ready", "telnyx.error", "telnyx.socket.close", "telnyx.notification"]) client.off(event);
+    for (const event of ["telnyx.ready", "telnyx.error", "telnyx.socket.close", "telnyx.socket.open", "telnyx.socket.error", "telnyx.warning", "telnyx.notification"]) client.off(event);
     await Promise.resolve(client.disconnect()).catch(() => undefined);
   }
 
   private onSdkError(payload: WebphoneSdkError): void {
     const code = payload?.error?.code;
+    const message = payload?.error?.message ?? payload?.message ?? null;
+    if (code === 46002) {
+      this.dispatch({ type: "recovery_failed", message: "Prihlasovacie údaje telefónu nie sú platné. Znovu pripojte telefón." });
+      return;
+    }
+    if (code === 46001 || code === 46003 || isAuthFailure(message)) {
+      // login() emits the global error before invoking its onError callback.
+      // Its serialized request owns this outcome, so handle it only once.
+      if (this.loginRequest?.connectionEpoch === this.connectionEpoch) return;
+      this.authenticationNeeded = true;
+      this.beginRecovery("Obnovujem prihlásenie telefónu.", false);
+      // A synchronous login failure can arrive before its original mint has
+      // finished unwinding. Schedule a fallback instead of losing that retry.
+      if (this.minting) this.dispatch({ type: "token_rejected", status: 0, message: "Obnovujem prihlásenie telefónu." });
+      else void this.mintToken();
+      return;
+    }
+    if (code === 45002) {
+      // 2.27.10 pairs this unscoped error with socket.error carrying the socket
+      // generation. Only that event may change readiness after a reconnect.
+      this.options.logger?.({ scope: "webphone", event: "sdk_socket_error", code });
+      return;
+    }
+    if (code === 45004 || code === 48001) {
+      this.beginRecovery("Spojenie telefónu vypadlo, obnovujem ho.", true);
+      return;
+    }
+    if (code === 45003 || payload?.error?.fatal === true && !CALL_ERROR_CODES.has(code ?? 0)) {
+      this.dispatch({ type: "recovery_failed" });
+      return;
+    }
     // These codes describe a single call. Resetting its healthy registration
     // would also prevent the operator receiving the next incoming call.
     if (typeof code === "number" && CALL_ERROR_CODES.has(code)) {
@@ -752,15 +972,28 @@ export class TelnyxWebphone {
       this.publish();
       return;
     }
-    const message = payload?.error?.message ?? payload?.message ?? null;
+    if (payload?.error?.fatal === false) {
+      this.options.logger?.({ scope: "webphone", event: "sdk_recoverable_error", code });
+      return;
+    }
     this.dispatch({ type: "client_error", message, authFailure: isAuthFailure(message) });
   }
 
   private onNotification(notification: WebphoneSdkNotification): void {
     if (notification?.type !== "callUpdate" || !notification.call) return;
     const call = notification.call;
-    if (this.confirmedEndedCallIds.has(call.id)) return;
+    if (this.retiredCalls.has(call) || this.retiredCallIds.has(call.id)) return;
     const state = String(call.state ?? "").toLowerCase();
+    if (call.recoveredCallId && (this.confirmedEndedCallIds.has(call.recoveredCallId) ||
+      this.hangupRequestedCallId === call.recoveredCallId || this.endedCallControlIds.has(call.telnyxIDs?.telnyxCallControlId))) {
+      if (!DEAD_STATES.has(state)) {
+        this.retiredCalls.add(call);
+        this.confirmedEndedCallIds.add(call.id);
+        void Promise.resolve().then(() => call.hangup()).catch(() => undefined);
+      }
+      return;
+    }
+    if (this.confirmedEndedCallIds.has(call.id)) return;
 
     if (DEAD_STATES.has(state)) {
       this.rememberEndedOperatorLeg(call.telnyxIDs?.telnyxCallControlId);
@@ -769,7 +1002,17 @@ export class TelnyxWebphone {
       return;
     }
 
-    if (this.call?.id !== call.id) {
+    const recovered = Boolean(this.call && call !== this.call && call.recoveredCallId === this.call.id);
+    if (recovered && this.call) {
+      // 2.27.10 can replace the Call object while reusing its id. An old peer's
+      // late terminal update must not end/release the recovered peer's streams.
+      this.retiredCalls.add(this.call);
+      if (this.call.id !== call.id) this.retiredCallIds.add(this.call.id);
+      this.answeringCallId = null;
+      this.answeredCallId = null;
+      this.audioAttempt++;
+      this.audioBlocked = false;
+    } else if (this.call?.id !== call.id) {
       this.finishInviteTiming?.({ outcome: "cancelled" });
       this.finishAudioTiming?.({ outcome: "cancelled" });
       const expected = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now());
@@ -787,6 +1030,13 @@ export class TelnyxWebphone {
     }
     this.call = call;
 
+    if (state === "recovering") {
+      this.mediaRecovering = true;
+      this.stopRinging();
+      this.beginRecovery("Obnovujem zvuk prebiehajúceho hovoru.", false);
+      return;
+    }
+
     if (RINGING_STATES.has(state) && String(call.direction ?? "").toLowerCase() === "inbound") {
       if (this.suppressAutomaticInvite(call)) { this.publish(); return; }
       // Our own click-to-call / pickup leg: answer it silently, the operator
@@ -798,6 +1048,10 @@ export class TelnyxWebphone {
     }
 
     if (ACTIVE_STATES.has(state)) {
+      if ((state === "active" || state === "held") && this.mediaRecovering) {
+        this.mediaRecovering = false;
+        if (this.sdkReady) this.dispatch({ type: "client_ready" });
+      }
       // SDK "early" and "answering" are not evidence of an active media call.
       if (state === "active" && this.timedActiveCallId !== call.id) {
         this.timedActiveCallId = call.id;
@@ -994,6 +1248,10 @@ export class TelnyxWebphone {
     // closes its peer afterwards. Release this terminal call's actual tracks
     // now; signaling and the authoritative server command still finish normally.
     const remoteStream = this.call?.remoteStream;
+    if (this.call) {
+      this.confirmedEndedCallIds.add(this.call.id);
+      if (this.confirmedEndedCallIds.size > 128) this.confirmedEndedCallIds.delete(this.confirmedEndedCallIds.values().next().value!);
+    }
     for (const stream of new Set([this.call?.localStream, remoteStream])) {
       for (const track of stream?.getTracks() ?? []) {
         try { track.stop(); } catch { /* Continue releasing the other tracks. */ }
@@ -1016,6 +1274,10 @@ export class TelnyxWebphone {
     this.answeredCallId = null;
     this.audioAttempt += 1;
     this.audioBlocked = false;
+    if (this.mediaRecovering) {
+      this.mediaRecovering = false;
+      if (this.sdkReady) this.dispatch({ type: "client_ready" });
+    }
   }
 
   private buildSnapshot(): WebphoneSnapshot {
@@ -1063,13 +1325,16 @@ export class TelnyxWebphone {
 }
 
 type WebphoneSdkError = {
-  error?: { code?: number; name?: string; message?: string };
+  error?: { code?: number; name?: string; message?: string; fatal?: boolean };
   message?: string;
   callId?: string;
 };
 
-// Verified against @telnyx/webrtc 2.27.10 SDK_ERRORS. Socket, auth and network
-// codes deliberately keep the existing registration recovery path.
+type WebphoneSdkWarning = { warning?: { code?: number }; callId?: string };
+type WebphoneSdkSocketEvent = { socketGeneration?: number } | undefined;
+
+// Verified against @telnyx/webrtc 2.27.10 SDK_ERRORS. Session/transport recovery
+// is handled separately; these errors must not reset a healthy registration.
 const CALL_ERROR_CODES = new Set([40001, 40002, 40003, 40004, 40005, 42001, 42002, 42003, 44001, 44002, 44003, 44004, 44005, 47001]);
 
 function callFailureMessage(error: unknown): string {

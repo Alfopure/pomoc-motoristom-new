@@ -12,7 +12,7 @@ Každá linka má dva nezávislé prepínače, spoločné pre všetky jej jazyky
 
 | Prepínač | Predvolené nastavenie | Správanie |
 | --- | --- | --- |
-| Prichádzajúce hovory | Zapnuté | Privítanie a pri povolenom nahrávaní príslušný oznam pred záznamom. |
+| Prichádzajúce hovory | Vypnuté | Okamžité smerovanie bez privítania, oznamu pred záznamom a automatického nahrávania. Výslovne zapnutý úvod zostáva zapnutý. |
 | Odchádzajúce hovory | Vypnuté | Bez úvodného predstavenia, oznamu o nahrávaní a automatického nahrávania. Platí aj pre spätné volania. |
 
 **Vypnutie úvodných hlášok vypne aj automatické nahrávanie nových hovorov v príslušnom smere**, aj keď ho politika organizácie inak povoľuje. Zapnutie odchádzajúcich hlášok obnoví predstavenie služby a pri splnení podmienok nahrávania aj oznam pred záznamom. Samotné zapnutie úvodu nestačí na povolenie nahrávania.
@@ -33,7 +33,7 @@ Editor obsahuje **26 situácií v štyroch jazykoch**, spolu 104 MP3 s hovorený
 | Ďalšie situácie | 4 | Odchádzajúci úvod sa riadi prepínačom smeru a predvolene je vypnutý. Oznam mimo hodín bez callbacku je zapojený; nezachytená voľba a chyba uloženia callbacku sú pripravené. |
 | Nahrávanie | 5 | Oznámenie pre vybavenie pomoci alebo kontrolu kvality, potvrdené vypnutie a obnovenie sú zapojené pod podmienkami politiky nahrávania; nedostupnosť je pripravená. |
 
-Knižnica rozlišuje hlášky zapojené do stavov hovoru a pripravené alternatívy. Skutočný počet používaných hlášok závisí od prepínačov linky a zapnutých funkcií; aktuálny stav zobrazuje editor. Všetky možno upravovať, generovať, prehrávať a uložiť. **Úprava samotného textu alebo nahrávky nezapína nahrávanie, pripravenú alternatívu ani vypnutý úvod.** Zmenu prepínača úvodných hlášok treba uložiť spolu s konfiguráciou. Hudba počas čakania sa používa naďalej. Pri podržaní, prepájaní a zmene účastníkov aplikácia najprv dokončí príslušnú hlášku a potom vykoná akciu; pri výpadku reči pokračuje pomoc bez hlášky.
+Knižnica rozlišuje hlášky zapojené do stavov hovoru a pripravené alternatívy. Skutočný počet používaných hlášok závisí od prepínačov linky a zapnutých funkcií; aktuálny stav zobrazuje editor. Všetky možno upravovať, generovať, prehrávať a uložiť. **Úprava samotného textu alebo nahrávky nezapína nahrávanie, pripravenú alternatívu ani vypnutý úvod.** Zmenu prepínača úvodných hlášok treba uložiť spolu s konfiguráciou. Hudba počas čakania sa používa naďalej. Pri hovore bez nahrávania sa podržanie, prepájanie a zmena účastníkov vykonajú bez dodatočnej hovorenej hlášky, pokiaľ ju výslovne nezapína serverové nastavenie. Pri nahrávaní zostáva zachované poradie oznámenia, ochrany súkromného zvuku a akcie; pri výpadku reči pokračuje pomoc bez hlášky.
 
 ## Upozornenie na nahrávanie
 

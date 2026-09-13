@@ -5,6 +5,8 @@ const idle = (): WebphoneSnapshot => ({ status: "idle", registration: webphoneRe
 type Command = "answer" | "hangup" | "confirmCallEnded" | "toggleMute" | "sendDtmf" | "expectOperatorLeg" | "dismissCallError" | "setIncomingOfferPolicy" | "beginOperatorRequest" | "endOperatorRequest";
 type RequestIntent = { id: string; expiresAt: number; pending: boolean };
 const REQUEST_INTENT_MS = 60_000;
+/** Reuse a foreground phone between calls without keeping an idle PWA online indefinitely. */
+export const MOBILE_VISIBLE_STANDBY_MS = 120_000;
 type Message = { type: "operatorRequest"; intent: RequestIntent } | { type: "hello" } | { type: "state"; snapshot: WebphoneSnapshot } | { type: "command"; id: string; command: Command; callId: string | null; value?: unknown } | { type: "result"; id: string; error?: string };
 type Pending = { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 
@@ -24,6 +26,7 @@ export class CoordinatedWebphone {
   private started = false;
   private requesting = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private idleDeadline: number | null = null;
   private resumeSessionId: string | null = null;
   private readonly beforeUnload = (event: BeforeUnloadEvent) => {
     if (!this.local?.getSnapshot().call) return;
@@ -31,6 +34,7 @@ export class CoordinatedWebphone {
   };
   private readonly pageHide = () => this.stop();
   private readonly pageShow = (event: PageTransitionEvent) => { if (event.persisted) this.start(); };
+  private readonly visibilityChange = () => this.scheduleStandby();
 
   constructor(private readonly options: {
     scope: string;
@@ -47,6 +51,7 @@ export class CoordinatedWebphone {
     window.addEventListener("beforeunload", this.beforeUnload);
     window.addEventListener("pagehide", this.pageHide);
     window.addEventListener("pageshow", this.pageShow);
+    if (this.options.mobile) document.addEventListener("visibilitychange", this.visibilityChange);
     if (this.options.mobile) { this.publish(idle()); return; }
     if (!navigator.locks?.request || typeof BroadcastChannel === "undefined") { this.startLocal(); return; }
     const name = `pm:phone:v1:${this.options.scope}`;
@@ -70,11 +75,13 @@ export class CoordinatedWebphone {
     this.started = false;
     window.removeEventListener("beforeunload", this.beforeUnload);
     window.removeEventListener("pagehide", this.pageHide);
+    document.removeEventListener("visibilitychange", this.visibilityChange);
     // Keep pageshow for bfcache restore; dispose() removes it on real unmount.
     this.abort?.abort();
     this.abort = null;
     for (const id of this.ownOperatorRequests) this.channel?.postMessage({ type: "operatorRequest", intent: { id, pending: false, expiresAt: 0 } });
     this.ownOperatorRequests.clear();
+    this.requesting = false;
     for (const request of this.operatorRequests.values()) clearTimeout(request.timer);
     this.operatorRequests.clear();
     this.stopLocal();
@@ -107,6 +114,7 @@ export class CoordinatedWebphone {
   private stopLocal() {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
+    this.idleDeadline = null;
     this.unsubscribe?.(); this.unsubscribe = null;
     this.local?.stop(); this.local = null;
   }
@@ -265,6 +273,7 @@ export class CoordinatedWebphone {
     if (!this.started) throw new Error("Telefón bol odpojený.");
     if (!this.options.mobile) return;
     this.requesting = true;
+    this.scheduleStandby();
     this.startLocal();
     const phone = this.local!;
     await new Promise<void>((resolve, reject) => {
@@ -284,9 +293,20 @@ export class CoordinatedWebphone {
   private scheduleStandby() {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
-    if (!this.options.mobile || this.requesting || !this.local) return;
+    if (!this.options.mobile || !this.local) return;
     const state = this.local.getSnapshot();
-    if (state.call || state.pendingOperatorLegs) return;
-    this.idleTimer = setTimeout(() => { this.stopLocal(); this.publish(idle()); }, 5_000);
+    if (this.requesting || this.operatorRequests.size || state.call || state.pendingOperatorLegs) {
+      this.idleDeadline = null;
+      return;
+    }
+    // A background idle phone does not need SIP registration. Merely returning
+    // to the foreground never starts one; only the next explicit action does.
+    if (document.visibilityState === "hidden") { this.stopLocal(); this.publish(idle()); return; }
+    this.idleDeadline ??= Date.now() + MOBILE_VISIBLE_STANDBY_MS;
+    const remaining = this.idleDeadline - Date.now();
+    if (remaining <= 0) { this.stopLocal(); this.publish(idle()); return; }
+    // State/heartbeat updates keep the same deadline. Recheck activity when the
+    // timer fires, so a new call or recovery can never be retired by an old timer.
+    this.idleTimer = setTimeout(() => this.scheduleStandby(), remaining);
   }
 }

@@ -11,7 +11,7 @@ const generated = { ...expected, audioUrl: "https://example.test/voice.mp3" };
 describe("announcement drafts", () => {
   it("tracks each startup switch as an unsaved change and treats omitted legacy flags as their defaults", () => {
     expect(sameAnnouncementConfig(initial, { ...initial, inboundStartAnnouncements: undefined, outboundStartAnnouncements: undefined })).toBe(true);
-    expect(sameAnnouncementConfig(initial, { ...initial, inboundStartAnnouncements: false })).toBe(false);
+    expect(sameAnnouncementConfig(initial, { ...initial, inboundStartAnnouncements: true })).toBe(false);
     expect(sameAnnouncementConfig(initial, { ...initial, outboundStartAnnouncements: true })).toBe(false);
   });
   it("retains direction switches when editing translations, completing generation and resetting a prompt", () => {

@@ -94,7 +94,7 @@ describe("inbound introduction", () => {
     expect(h.session(call.sessionId).state).toBe("ringing");
     expect(h.telnyx.of("dial")).toHaveLength(3);
     expect(h.attempts(call.sessionId)).toHaveLength(3);
-    expect(h.session(call.sessionId)).toMatchObject({ metadata: { announcements: defaultAnnouncementConfig() } });
+    expect(h.session(call.sessionId)).toMatchObject({ metadata: { announcements: { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true } } });
     expect(h.telnyx.of("hangup")).toHaveLength(0);
     expect(h.rows("motorist_callback_requests")).toHaveLength(0);
   });
@@ -160,7 +160,7 @@ describe("inbound introduction", () => {
 
   it("freezes the line language before later settings edits and localizes legacy IVR files", async () => {
     const h = createTelephonyHarness();
-    const announcements = { ...defaultAnnouncementConfig(), language: "en" };
+    const announcements = { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true, language: "en" };
     h.db.update("motorist_telephony_lines", { metadata: { announcements } }, (row) => row.id === LINES.neutral);
     const call = await h.inbound({ to: NUMBERS.neutral, completeGreeting: false });
     const prompt = h.telnyx.of("playbackStart")[0];
@@ -175,7 +175,7 @@ describe("inbound introduction", () => {
 
   it("uses edited text immediately without replaying the old audio", async () => {
     const h = createTelephonyHarness();
-    const announcements = { ...defaultAnnouncementConfig(), language: "de", prompts: { de: { greeting: { text: "Willkommen. Bitte warten Sie kurz." } } } };
+    const announcements = { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true, language: "de", prompts: { de: { greeting: { text: "Willkommen. Bitte warten Sie kurz." } } } };
     h.db.update("motorist_telephony_lines", { metadata: { announcements } }, (row) => row.id === LINES.allianz);
     await h.inbound({ completeGreeting: false });
     expect(h.telnyx.of("playbackStart")).toHaveLength(0);
@@ -184,7 +184,7 @@ describe("inbound introduction", () => {
 
   it("allows a longer custom introduction to finish before its watchdog retries", async () => {
     const h = createTelephonyHarness();
-    const announcements = { ...defaultAnnouncementConfig(), prompts: { sk: { greeting: { text: "Prosím zostaňte na linke. ".repeat(20).trim() } } } };
+    const announcements = { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true, prompts: { sk: { greeting: { text: "Prosím zostaňte na linke. ".repeat(20).trim() } } } };
     h.db.update("motorist_telephony_lines", { metadata: { announcements } }, (row) => row.id === LINES.allianz);
     const call = await h.inbound({ completeGreeting: false });
     h.advance(46_000);
@@ -195,7 +195,7 @@ describe("inbound introduction", () => {
 
   it("plays generated absolute URLs without requiring a media base", async () => {
     const h = createTelephonyHarness({ mediaBaseUrl: null });
-    const config = defaultAnnouncementConfig();
+    const config = { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true };
     const announcements = { ...config, prompts: { sk: { greeting: { text: "Pomoc motoristom. Dobrý deň.", voiceId: config.voiceId, audioUrl: "https://audio.test/generated.mp3" } } } };
     h.db.update("motorist_telephony_lines", { metadata: { announcements } }, (row) => row.id === LINES.allianz);
     await h.inbound({ completeGreeting: false });
@@ -205,7 +205,7 @@ describe("inbound introduction", () => {
 
   it("uses edited invalid-input text even while the main menu still has default audio", async () => {
     const h = createTelephonyHarness();
-    const announcements = { ...defaultAnnouncementConfig(), prompts: { sk: { invalidInput: { text: "Prosím, stlačte jednotku alebo dvojku." } } } };
+    const announcements = { ...defaultAnnouncementConfig(), inboundStartAnnouncements: true, prompts: { sk: { invalidInput: { text: "Prosím, stlačte jednotku alebo dvojku." } } } };
     h.db.update("motorist_telephony_lines", { metadata: { announcements } }, (row) => row.id === LINES.neutral);
     await h.inbound({ to: NUMBERS.neutral });
     expect(h.telnyx.of("gatherUsingSpeak").at(-1)?.params.invalidPayload).toBe("Prosím, stlačte jednotku alebo dvojku.");
