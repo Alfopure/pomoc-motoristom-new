@@ -1,6 +1,6 @@
 import type { CallActor } from "./call-actions";
 import { isUuid } from "@/lib/telephony/uuid";
-import { CallActionError } from "./service-errors";
+import { CallActionError, SessionLeaseBusyError } from "./service-errors";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
 import { TERMINAL_STATES, type SessionRow, type TelephonyEvent } from "./state/types";
 
@@ -21,7 +21,8 @@ export type CallReconciliationResult = {
   sessionId: string;
   state: SessionRow["state"];
   reconciled: boolean;
-  reason?: "alive" | "provider_unknown" | "already_terminal" | "already_ended" | "ignored";
+  reason?: "alive" | "provider_unknown" | "already_terminal" | "already_ended" | "ignored" | "session_busy";
+  retryAfterMs?: number;
 };
 
 /**
@@ -58,7 +59,15 @@ export async function reconcileBrowserCall(
   if (provider.alive) return { ...result, reason: "alive" };
   if (!provider.known || provider.raw?.is_alive !== false) return { ...result, reason: "provider_unknown" };
 
-  const run = await runSessionEvent(deps, sessionId, reconciledHangupEvent(callControlId, (deps.now ?? (() => new Date()))(), true));
+  let run;
+  try {
+    run = await runSessionEvent({ ...deps, leaseWaitMs: 0 }, sessionId, reconciledHangupEvent(callControlId, (deps.now ?? (() => new Date()))(), true));
+  } catch (error) {
+    // A simultaneous provider event is already updating this call. This is a
+    // pending observation, not a failed phone connection or completed cleanup.
+    if (error instanceof SessionLeaseBusyError) return { ...result, reason: "session_busy", retryAfterMs: error.retryAfterMs };
+    throw error;
+  }
   if (run.outcome === "applied" && run.apply.failed) {
     throw new CallActionError("Stav hovoru sa nepodarilo obnoviť.", 502, "command_failed");
   }

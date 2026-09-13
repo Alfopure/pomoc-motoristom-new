@@ -4,6 +4,7 @@ import type { Database } from "@/lib/supabase/database.types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { telephonyStabilityEnabled } from "../stability";
+import { SessionLeaseBusyError } from "../service-errors";
 import type { PauseRoutingMode } from "@/lib/telephony/operator-settings";
 
 import {
@@ -585,7 +586,8 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
       await deps.runSessionEvent(session.id, { kind: "app", id, type: "sweep", actorProfileId: null, occurredAt: now.toISOString(), stale });
       result.swept.push(session.id);
     } catch (error) {
-      result.errors.push({ sessionId: session.id, error: error instanceof Error ? error.message : String(error) });
+      if (error instanceof SessionLeaseBusyError) result.deferred.push(session.id);
+      else result.errors.push({ sessionId: session.id, error: error instanceof Error ? error.message : String(error) });
     }
   }
   return result;

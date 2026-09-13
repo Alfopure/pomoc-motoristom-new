@@ -20,6 +20,29 @@ const inboundTables = [
 afterEach(() => vi.unstubAllEnvs());
 
 describe("session routing setup", () => {
+  it.each(["call.playback.ended", "call.speak.ended", "conference.participant.joined", "conference.participant.left"])("keeps passive %s observations independent of fresh routing configuration", async type => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ answer: false });
+    const session = { ...h.session(call.sessionId), state: "talking" } as SessionRow;
+    const event = parseTelnyxEnvelope(h.envelope(type, { call_control_id: call.callControlId }))!;
+    h.db.log.length = 0;
+    await loadRoutingContext(h.deps, session, event);
+    expect(h.db.log).toEqual([]);
+    // An active announcement is a continuation, even with recording disabled.
+    const active = { ...session, metadata: { ...(session.metadata as object), announcement_sequence: { id: "pending-action" } } } as SessionRow;
+    await loadRoutingContext(h.deps, active, event);
+    expect(h.db.log.some(entry => entry.table === "motorist_telephony_settings")).toBe(true);
+  });
+
+  it("still loads waiting-room media policy to restart music after a playback completion", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ answer: false });
+    const session = { ...h.session(call.sessionId), state: "waiting" } as SessionRow;
+    h.db.log.length = 0;
+    await loadRoutingContext(h.deps, session, parseTelnyxEnvelope(h.envelope("call.playback.ended", { call_control_id: call.callControlId }))!);
+    expect(h.db.log.some(entry => entry.table === "motorist_telephony_settings")).toBe(true);
+  });
+
   it("loads no routing for a known answered bridge fact, but retains it for a first bridge", async () => {
     const h = createTelephonyHarness({ sweepAfterEvent: false });
     const call = await h.inbound({ answer: false });
