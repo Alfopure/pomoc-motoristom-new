@@ -83,6 +83,245 @@ async function drag(page: Page, locator: Locator, dx: number, dy = 0) {
   await page.mouse.up();
 }
 
+const layoutActorKey = `00000000-0000-4000-8000-000000000001:${ownerId}`;
+const panelStorageKey = `motorist:dispatch-workspace-layout:v3:${layoutActorKey}`;
+const columnStorageKey = `motorist:dashboard-columns:v2:${layoutActorKey}`;
+const lowerSeparator = (page: Page) => page.getByRole("separator", { name: "Potiahnuť a zmeniť výšku spodnej lišty", exact: true });
+
+async function panelDimensions(page: Page) {
+  const upper = (await page.locator(".dispatch-workspace-upper").boundingBox())!;
+  const lower = (await page.locator(".dispatch-workspace-panel").boundingBox())!;
+  return { upper: upper.height, lower: lower.height };
+}
+
+async function expectPanelDimensions(page: Page, expected: Awaited<ReturnType<typeof panelDimensions>>) {
+  // Check actual rendered space as well as the control value: the old layout
+  // could retain its saved percentage while a rerender silently changed rows.
+  await expect.poll(async () => Math.abs((await panelDimensions(page)).upper - expected.upper)).toBeLessThan(2);
+  await expect.poll(async () => Math.abs((await panelDimensions(page)).lower - expected.lower)).toBeLessThan(2);
+}
+
+async function selectFixtureCase(page: Page, caseNumber = "PM-2026-0516") {
+  const row = page.getByTestId("dispatch-case-list").locator(`[data-case-number="${caseNumber}"]`);
+  await row.getByRole("button", { name: caseNumber, exact: true }).click();
+  await expect(row).toHaveAttribute("data-case-selected", "true");
+}
+
+test("saved split dimensions survive case selection, local tools, main navigation, detail and reload", async ({ page }) => {
+  const evidence = await boot(page, 1440, 900);
+  const lower = lowerSeparator(page);
+  await lower.press("ArrowDown");
+  await drag(page, lower, 0, 38);
+  const savedPercent = await lower.getAttribute("aria-valuenow");
+  const dimensions = await panelDimensions(page);
+  expect(dimensions.upper).toBeGreaterThan(260);
+  expect(dimensions.lower).toBeGreaterThan(96);
+  await expect.poll(() => page.evaluate(key => JSON.parse(localStorage.getItem(key)!).desktopPanelPercent, panelStorageKey)).toBe(Number(savedPercent));
+
+  await selectFixtureCase(page);
+  await expectPanelDimensions(page, dimensions);
+  for (const name of ["Úlohy", "Poznámky", "Tabuľka", "Mapa"]) {
+    await page.locator(".workspace-center-tabs").getByRole("tab", { name, exact: true }).click();
+    await expect(lower).toHaveAttribute("aria-valuenow", savedPercent!);
+    await expectPanelDimensions(page, dimensions);
+  }
+  const navigation = page.getByRole("navigation", { name: "Hlavná navigácia", exact: true });
+  await navigation.getByRole("button", { name: "Úlohy", exact: true }).click();
+  await expect(page.getByTestId("standalone-tasks-page")).toBeVisible();
+  await navigation.getByRole("button", { name: "Nástenka", exact: true }).click();
+  await expectPanelDimensions(page, dimensions);
+  await page.getByRole("button", { name: "Detail prípadu PM-2026-0516", exact: true }).click();
+  await expect(page.locator(".dispatch-workspace-shell")).toHaveAttribute("data-workspace-mode", "expanded");
+  await page.locator(".dispatch-workspace-panel").getByRole("button", { name: "Späť", exact: true }).click();
+  await expectPanelDimensions(page, dimensions);
+  await page.reload();
+  await mount(page);
+  await expect(lower).toHaveAttribute("aria-valuenow", savedPercent!);
+  await expectPanelDimensions(page, dimensions);
+  await noOverflow(page);
+  expect(evidence.errors).toEqual([]);
+  expect(evidence.writes).toEqual([]);
+});
+
+test("explicit layout preset keeps its real map height after navigation and reload", async ({ page }) => {
+  const evidence = await boot(page, 1366, 768);
+  await page.getByLabel("Rozloženie pracovnej plochy", { exact: true }).click();
+  await page.getByRole("button", { name: /Viac mapy/ }).click();
+  await expect(lowerSeparator(page)).toHaveAttribute("aria-valuenow", "34");
+  const dimensions = await panelDimensions(page);
+  await selectFixtureCase(page);
+  await page.locator(".workspace-center-tabs").getByRole("tab", { name: "Úlohy", exact: true }).click();
+  await expectPanelDimensions(page, dimensions);
+  await page.reload();
+  await mount(page);
+  await expect(lowerSeparator(page)).toHaveAttribute("aria-valuenow", "34");
+  await expectPanelDimensions(page, dimensions);
+  expect(evidence.errors).toEqual([]);
+  expect(evidence.writes).toEqual([]);
+});
+
+for (const mode of ["collapsed", "expanded"] as const) {
+  test(`chosen ${mode} cockpit survives case selection, temporary detail and reload`, async ({ page }) => {
+    const evidence = await boot(page);
+    await lowerSeparator(page).press("ArrowDown");
+    const savedPercent = await lowerSeparator(page).getAttribute("aria-valuenow");
+    await page.getByRole("button", { name: mode === "collapsed" ? "Minimalizovať na spodnú lištu" : "Maximalizovať kokpit", exact: true }).click();
+    const shell = page.locator(".dispatch-workspace-shell");
+    await expect(shell).toHaveAttribute("data-workspace-mode", mode);
+    const dimensions = await panelDimensions(page);
+    await selectFixtureCase(page);
+    await expect(shell).toHaveAttribute("data-workspace-mode", mode);
+    await expectPanelDimensions(page, dimensions);
+    await page.getByRole("button", { name: "Detail prípadu PM-2026-0516", exact: true }).click();
+    await expect(shell).toHaveAttribute("data-workspace-mode", "expanded");
+    await page.locator(".dispatch-workspace-panel").getByRole("button", { name: "Späť", exact: true }).click();
+    await expect(shell).toHaveAttribute("data-workspace-mode", mode);
+    await expectPanelDimensions(page, dimensions);
+    // Refreshing while a temporary full detail is open must still recover the
+    // chosen cockpit, rather than silently saving the detail's expanded mode.
+    await page.getByRole("button", { name: "Detail prípadu PM-2026-0516", exact: true }).click();
+    await page.reload();
+    await mount(page);
+    await expect(shell).toHaveAttribute("data-workspace-mode", mode);
+    await expectPanelDimensions(page, dimensions);
+    if (mode === "expanded") await page.keyboard.press("Escape");
+    else await page.getByRole("button", { name: "Maximalizovať spodnú lištu", exact: true }).click();
+    await expect(shell).toHaveAttribute("data-workspace-mode", "split");
+    expect(await page.evaluate(key => JSON.parse(localStorage.getItem(key)!).desktopWorkspaceMode, `motorist:workspace:v3:${layoutActorKey}`)).toBe("split");
+    await expect(lowerSeparator(page)).toHaveAttribute("aria-valuenow", savedPercent!);
+    expect(evidence.errors).toEqual([]);
+    expect(evidence.writes).toEqual([]);
+  });
+}
+
+test("desktop mobile desktop restores saved split and column dimensions without hiding the case", async ({ page }) => {
+  const evidence = await boot(page, 1440, 900);
+  await selectFixtureCase(page);
+  const left = page.getByRole("separator", { name: "Zmeniť šírku stĺpca prípadov", exact: true });
+  const right = page.getByRole("separator", { name: "Zmeniť šírku stĺpca úloh a upozornení", exact: true });
+  await left.press("ArrowRight");
+  await right.press("ArrowLeft");
+  await lowerSeparator(page).press("ArrowDown");
+  const percent = await lowerSeparator(page).getAttribute("aria-valuenow");
+  const widths = [await left.getAttribute("aria-valuenow"), await right.getAttribute("aria-valuenow")];
+  const dimensions = await panelDimensions(page);
+  const savedColumns = await page.evaluate(key => localStorage.getItem(key), columnStorageKey);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByTestId("case-edit-form-main")).toBeVisible();
+  await page.getByRole("button", { name: "Zobraziť mapu na celú plochu", exact: true }).click();
+  await expect(page.getByRole("tabpanel", { name: "Mapa", exact: true })).toBeVisible();
+  await expect(page.getByTestId("case-edit-form-main")).toBeHidden();
+  await page.getByRole("button", { name: "Skryť mapu a zobraziť prípad", exact: true }).click();
+  await expect(page.getByTestId("case-edit-form-main")).toBeVisible();
+  await noOverflow(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.locator(".dispatch-workspace-shell")).toHaveAttribute("data-workspace-mode", "split");
+  await expect(lowerSeparator(page)).toHaveAttribute("aria-valuenow", percent!);
+  await expect(left).toHaveAttribute("aria-valuenow", widths[0]!);
+  await expect(right).toHaveAttribute("aria-valuenow", widths[1]!);
+  await expectPanelDimensions(page, dimensions);
+  expect(await page.evaluate(key => localStorage.getItem(key), columnStorageKey)).toBe(savedColumns);
+  await noOverflow(page);
+  expect(evidence.errors).toEqual([]);
+  expect(evidence.writes).toEqual([]);
+});
+
+test("temporary narrow desktop does not overwrite the user's saved sidebar widths", async ({ page }) => {
+  const evidence = await boot(page, 1920, 1080);
+  const left = page.getByRole("separator", { name: "Zmeniť šírku stĺpca prípadov", exact: true });
+  const right = page.getByRole("separator", { name: "Zmeniť šírku stĺpca úloh a upozornení", exact: true });
+  await drag(page, left, 250);
+  await drag(page, right, -250);
+  const widths = [await left.getAttribute("aria-valuenow"), await right.getAttribute("aria-valuenow")];
+  expect(widths).toEqual(["480", "480"]);
+  const savedColumns = await page.evaluate(key => localStorage.getItem(key), columnStorageKey);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await noOverflow(page);
+  const center = (await page.locator(".dispatch-map-workspace").boundingBox())!;
+  expect(center.width).toBeGreaterThanOrEqual(475);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await expect(left).toHaveAttribute("aria-valuenow", widths[0]!);
+  await expect(right).toHaveAttribute("aria-valuenow", widths[1]!);
+  expect(await page.evaluate(key => localStorage.getItem(key), columnStorageKey)).toBe(savedColumns);
+  await page.reload();
+  await mount(page);
+  await expect(left).toHaveAttribute("aria-valuenow", widths[0]!);
+  await expect(right).toHaveAttribute("aria-valuenow", widths[1]!);
+  expect(evidence.errors).toEqual([]);
+  expect(evidence.writes).toEqual([]);
+});
+
+test("layout choices ignore and preserve another user's stored preferences", async ({ page }) => {
+  const otherActor = "00000000-0000-4000-8000-000000000001:00000000-0000-4000-8000-000000000099";
+  const otherPreferences = {
+    [`motorist:dispatch-workspace-layout:v3:${otherActor}`]: JSON.stringify({ desktopPanelPercent: 70 }),
+    [`motorist:dashboard-columns:v2:${otherActor}`]: JSON.stringify({ left: 480, right: 480 }),
+    [`motorist:workspace:v3:${otherActor}`]: JSON.stringify({ desktopWorkspaceMode: "expanded", leftCollapsed: true, rightCollapsed: true }),
+  };
+  await page.addInitScript(entries => {
+    for (const [key, value] of Object.entries(entries)) {
+      if (localStorage.getItem(key) === null) localStorage.setItem(key, value);
+    }
+  }, otherPreferences);
+  const evidence = await boot(page);
+  await expect(page.locator(".dispatch-workspace-shell")).toHaveAttribute("data-workspace-mode", "split");
+  await expect(page.locator(".dispatch-dashboard")).toHaveAttribute("data-left-collapsed", "false");
+  await expect(lowerSeparator(page)).toHaveAttribute("aria-valuenow", "50");
+  await expect(page.getByRole("separator", { name: "Zmeniť šírku stĺpca prípadov", exact: true })).toHaveAttribute("aria-valuenow", "330");
+  await expect(page.getByRole("separator", { name: "Zmeniť šírku stĺpca úloh a upozornení", exact: true })).toHaveAttribute("aria-valuenow", "330");
+  await lowerSeparator(page).press("ArrowDown");
+  await page.getByRole("button", { name: "Minimalizovať na spodnú lištu", exact: true }).click();
+  await page.reload();
+  await mount(page);
+  await expect(page.locator(".dispatch-workspace-shell")).toHaveAttribute("data-workspace-mode", "collapsed");
+  expect(await page.evaluate(keys => Object.fromEntries(keys.map(key => [key, localStorage.getItem(key)])), Object.keys(otherPreferences))).toEqual(otherPreferences);
+  await page.getByRole("button", { name: "Maximalizovať spodnú lištu", exact: true }).click();
+  await expect(lowerSeparator(page)).toHaveAttribute("aria-valuenow", "46");
+  expect(evidence.errors).toEqual([]);
+  expect(evidence.writes).toEqual([]);
+});
+
+test("same-user storage updates use the latest cockpit choice and keep local tools visible", async ({ page }) => {
+  const evidence = await boot(page);
+  const key = `motorist:workspace:v3:${layoutActorKey}`;
+  const shell = page.locator(".dispatch-workspace-shell");
+  async function syncFromAnotherTab(patch: Record<string, unknown>) {
+    await page.evaluate(({ key, patch }) => {
+      const oldValue = localStorage.getItem(key);
+      const newValue = JSON.stringify({ ...JSON.parse(oldValue!), ...patch });
+      localStorage.setItem(key, newValue);
+      window.dispatchEvent(new StorageEvent("storage", { key, oldValue, newValue, storageArea: localStorage }));
+    }, { key, patch });
+  }
+  await lowerSeparator(page).press("ArrowDown");
+  const dimensions = await panelDimensions(page);
+  await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
+  await expect(shell).toHaveAttribute("data-workspace-mode", "expanded");
+  await syncFromAnotherTab({ desktopWorkspaceMode: "split" });
+  await expect(shell).toHaveAttribute("data-workspace-mode", "split");
+  await expectPanelDimensions(page, dimensions);
+
+  await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
+  await expect(shell).toHaveAttribute("data-workspace-mode", "expanded");
+  await syncFromAnotherTab({ centerView: "notes" });
+  await expect(shell).toHaveAttribute("data-workspace-mode", "split");
+  await expect(page.locator(".dispatch-workspace-upper").getByRole("region", { name: "Osobné poznámky", exact: true })).toBeVisible();
+  expect(await page.evaluate(key => JSON.parse(localStorage.getItem(key)!).desktopWorkspaceMode, key)).toBe("expanded");
+  await page.locator(".workspace-center-tabs").getByRole("tab", { name: "Mapa", exact: true }).click();
+  await expect(shell).toHaveAttribute("data-workspace-mode", "split");
+
+  // Changing only the widget rail in a second tab must not cover a map that
+  // this tab temporarily revealed from its remembered maximized cockpit.
+  await syncFromAnotherTab({ rightCollapsed: true });
+  await expect(page.locator(".dispatch-dashboard")).toHaveAttribute("data-right-collapsed", "true");
+  await expect(shell).toHaveAttribute("data-workspace-mode", "split");
+  await expect(page.getByRole("tabpanel", { name: "Mapa", exact: true })).toBeVisible();
+  await expectPanelDimensions(page, dimensions);
+  expect(await page.evaluate(key => JSON.parse(localStorage.getItem(key)!).desktopWorkspaceMode, key)).toBe("expanded");
+  expect(evidence.errors).toEqual([]);
+  expect(evidence.writes).toEqual([]);
+});
+
 test("both styles retain every case-row field, five filters, all sidebar sorts and table columns", async ({ page }) => {
   const evidence = await boot(page);
   const list = page.getByTestId("dispatch-case-list");

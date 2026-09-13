@@ -26,6 +26,13 @@ describe("workspace preferences", () => {
   it("isolates both organization and profile", () => {
     expect(new Set([workspacePreferenceStorageKey("a", "p"), workspacePreferenceStorageKey("b", "p"), workspacePreferenceStorageKey("a", "q")]).size).toBe(3);
   });
+  it.each(["collapsed", "split", "expanded"] as const)("retains the chosen desktop mode %s alongside existing widget preferences", desktopWorkspaceMode => {
+    const preferences = { ...defaultWorkspacePreferences(), desktopWorkspaceMode, leftCollapsed: true, centerView: "notes" as const };
+    expect(parseWorkspacePreferences(JSON.stringify(preferences))).toEqual(preferences);
+  });
+  it.each([undefined, "mobile", null, 42])("uses split mode for absent or invalid desktop preferences (%s)", desktopWorkspaceMode => {
+    expect(parseWorkspacePreferences(JSON.stringify({ desktopWorkspaceMode })).desktopWorkspaceMode).toBe("split");
+  });
   it("adds an optional calendar without changing any saved legacy widget preference", () => {
     const legacy = [
       { id: "calculator", visible: true, collapsed: false },
