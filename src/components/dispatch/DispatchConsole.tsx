@@ -1,6 +1,8 @@
 "use client";
 import { mergeCaseDetail } from "@/data/case-detail";
 
+import { LayoutPreviewProvider, LayoutPreviewToolbar, useLayoutPreview } from "./LayoutPreview";
+import { CalendarWidget } from "./CalendarWidget";
 import { CallMonitorInvitations } from "./CallMonitorInvitations";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
@@ -86,11 +88,13 @@ import { NotebookPanel, NotebookProvider } from "./NotebookPanel";
 import { RoutePlannerProvider } from "./map/RoutePlannerProvider";
 import { RoutePlanner } from "./map/RoutePlanner";
 import { TaskWorkspaceProvider, useTaskWorkspace } from "./TaskWorkspaceProvider";
+import { TaskCaseWorkflowActions } from "./TaskCaseWorkflowActions";
 import type { WorkspaceTask } from "@/domain/task-workspace";
 import { unavailableWorkspaceCapabilities } from "@/domain/workspace-capabilities";
 import { useDraftEditors, type DraftEditorState } from "./useDraftEditors";
 import { createNotificationNavigationReceiver } from "@/components/pwa/notification-navigation";
 import "./workspace-tools.css";
+import "./live-layout-preview.css";
 import { signOutCurrentSession } from "@/components/auth/sign-out";
 import { PushNotificationSync } from "@/components/pwa/PushNotificationSync";
 import { PauseEndingNotificationSync } from "@/components/pwa/PauseEndingNotificationSync";
@@ -260,7 +264,7 @@ const sourceLabels: Record<NonNullable<DispatchCase["sourceType"]>, string> = {
 };
 
 export function DispatchConsole(props: Parameters<typeof DispatchConsoleContent>[0]) {
-  return <RoutePlannerProvider key={`${props.viewerOrganizationId ?? "demo"}:${props.viewerProfileId ?? "local-browser"}`}><DispatchConsoleContent {...props} /></RoutePlannerProvider>;
+  return <LayoutPreviewProvider enabled={props.layoutPreviewEnabled ?? false} actorKey={`${props.viewerOrganizationId ?? "demo"}:${props.viewerProfileId ?? "local-browser"}`}><RoutePlannerProvider key={`${props.viewerOrganizationId ?? "demo"}:${props.viewerProfileId ?? "local-browser"}`}><DispatchConsoleContent {...props} /></RoutePlannerProvider></LayoutPreviewProvider>;
 }
 
 function DispatchConsoleContent({
@@ -273,6 +277,7 @@ function DispatchConsoleContent({
   viewerRole,
 }: {
   initialData: DispatchData;
+  layoutPreviewEnabled?: boolean;
   appVersion?: string;
   viewerDisplayName?: string;
   viewerEmail?: string;
@@ -281,6 +286,7 @@ function DispatchConsoleContent({
   /** The signed-in profile's role; only supervision is gated on it in the console. */
   viewerRole?: AppRole;
 }) {
+  const { mode: layoutMode } = useLayoutPreview();
   const updateAvailable = useAppUpdate(appVersion);
   const [dispatchData, setDispatchData] = useState(initialData);
   const {
@@ -1602,7 +1608,7 @@ function DispatchConsoleContent({
   function openTools() {
     toolsReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setToolsOpen(true);
-    setWidgetSettingsOpen(true);
+    setWidgetSettingsOpen(layoutMode !== "modern");
     setActiveView("dispatch");
     setVisitedWidgets(current => new Set([...current, ...workspacePreferences.widgets.filter(item => item.visible).map(item => item.id)]));
     updateWorkspacePreferences({ ...workspacePreferences, rightCollapsed: false });
@@ -2011,8 +2017,9 @@ function DispatchConsoleContent({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [activeView, cancelPendingNavigation, centerView, leaveDialogOpen, requestNavigation, workspace]);
 
-  function renderTasks(variant: "page" | "sidebar") {
+  function renderTasks(variant: "page" | "sidebar", compact = false) {
     return <TaskPanel
+                compact={compact}
                 taskWorkspaceEnabled={capabilities.tasks}
                 tasks={dispatchData.tasks}
                 onOpenCase={openCase}
@@ -2044,6 +2051,7 @@ function DispatchConsoleContent({
     if (id === "tasks") return centerView === "tasks" && !toolsOpen ? <button type="button" className="min-h-11 p-3 text-sm" onClick={() => switchCenterView("tasks")}>{taskAttentionCount} úloh na pozornosť · otvorené v strede</button> : <div data-testid="dashboard-task-panel-shell">{renderTasks("sidebar")}</div>;
     if (id === "notes") return <><NotebookPanel active={visible && (centerView !== "notes" || toolsOpen)} compact /><button type="button" className="min-h-11 px-3 text-sm underline" onClick={() => switchCenterView("notes")}>Otvoriť poznámky v strede</button></>;
     if (id === "calculator") return <CalculatorWidget />;
+    if (id === "calendar") return <CalendarWidget onOpenTask={openTask} />;
     if (id === "route") return <RoutePlanner embedded active={visible} />;
     if (id === "search") return <WorkspaceSearchWidget cases={dispatchCases} contacts={partnerDirectory} fleet={fleetAssets} onOpenCase={openCase} onOpenFleet={() => switchView("fleet")} onDial={telephonyConfigured ? dialNumber : undefined} places={<WorkspacePlaceSearch active={visible} />} />;
     return <div className="space-y-2 p-3">{fleetAssets.slice(0, 12).map(asset => <div key={asset.id} className="rounded-lg border border-zinc-200 p-2 text-sm"><p className="font-medium">{asset.licensePlate} · {asset.label}</p><p>{fleetWidgetStatus(asset)}</p><p className="text-xs text-zinc-500">{asset.positionKnown === false || !asset.gps ? "GPS neoverené" : asset.gps.stale ? "GPS neaktuálne" : "GPS aktuálne"}</p></div>)}<button type="button" className="min-h-11 text-sm underline" onClick={() => switchView("fleet")}>Otvoriť celú flotilu ({fleetAssets.length})</button></div>;
@@ -2061,6 +2069,7 @@ function DispatchConsoleContent({
       }`}
       data-hydrated="false"
       data-testid="dispatch-console"
+      data-layout-preview={layoutMode}
       data-mobile-pane={mobilePane}
       data-active-view={activeView}
       ref={consoleRef}
@@ -2069,6 +2078,7 @@ function DispatchConsoleContent({
         initialTemplate={caseSmsComposer.template} open={caseSmsComposer.open} onClose={() => setCaseSmsComposer((current) => current ? { ...current, open: false } : null)}
         onCreateCase={() => startNewCase()} onSent={(result) => { if (result.dispatchData) setDispatchData(result.dispatchData); }} />}
       <div className="relative z-50 shrink-0" ref={topBarsRef}>
+      <LayoutPreviewToolbar live={source === "supabase"} />
       <header className="dispatch-app-header flex min-h-14 items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-950 px-3 py-2 text-white sm:px-4 sm:py-0">
         <AccountMenu
           displayName={signedInName}
@@ -2080,7 +2090,7 @@ function DispatchConsoleContent({
           refreshBlocked={appRefreshBlocked}
           updateAvailable={updateAvailable}
         />
-        <nav className="hidden min-w-0 flex-1 items-center justify-center gap-1 lg:flex" aria-label="Hlavná navigácia">
+        <nav className="dispatch-primary-navigation hidden min-w-0 flex-1 items-center justify-center gap-1 lg:flex" aria-label="Hlavná navigácia">
           <NavButton
             active={activeView === dashboardNavItem.view}
             label={dashboardNavItem.label}
@@ -2388,13 +2398,14 @@ function DispatchConsoleContent({
           </div>
           <div className="mobile-dispatch-workspace lg:contents">
           <MapWorkspace
+            renderTaskWorkflow={capabilities.tasks ? taskId => <TaskCaseWorkflowActions taskId={taskId} viewerProfileId={viewerProfileId} onOpenTask={id => openTask(id, "")} /> : undefined}
             active={activeView === "dispatch" && !toolsOpen}
             actorKey={actorKey}
             onCenterViewChange={switchCenterView}
             onOpenTools={toggleTools}
             toolsOpen={toolsOpen}
             onToggleLeft={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: !workspacePreferences.leftCollapsed })}
-            centerContent={<><div hidden={centerView !== "tasks"} className="h-full overflow-y-auto">{renderTasks("page")}</div><div hidden={centerView !== "notes"} className="h-full overflow-y-auto"><NotebookPanel active={activeView === "dispatch" && centerView === "notes" && !toolsOpen} /></div></>}
+            centerContent={<><div hidden={centerView !== "tasks"} className="h-full overflow-y-auto">{renderTasks("page", true)}</div><div hidden={centerView !== "notes"} className="h-full overflow-y-auto"><NotebookPanel active={activeView === "dispatch" && centerView === "notes" && !toolsOpen} /></div></>}
             activeCaseId={visibleActiveCaseId}
             assets={fleetAssets}
             branches={branches}
@@ -2663,11 +2674,14 @@ function AccountMenu({
         className="dispatch-account-trigger group flex h-10 min-w-0 items-center gap-2 rounded-lg px-1.5 text-left transition hover:bg-white/10 disabled:cursor-wait sm:gap-2.5"
       >
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-sm font-black text-zinc-950">PM</span>
+        <span className="dispatch-account-identity">
+        <span className="dispatch-brand-name">Pomoc motoristom</span>
         <span
           data-testid="signed-in-user-name"
           className="min-w-0 max-w-28 truncate text-sm font-semibold sm:max-w-24 md:max-w-36 lg:max-w-48"
         >
           {displayName}
+        </span>
         </span>
         {signingOut ? (
           <Loader2 size={14} className="shrink-0 animate-spin text-zinc-300" aria-label="Odhlasujem" />
@@ -3125,6 +3139,7 @@ function NavButton({
       type="button"
       aria-label={label}
       aria-current={active ? "page" : undefined}
+      data-nav-shortcut={responsiveShortcut || undefined}
       onClick={onClick}
       disabled={disabled}
       title={responsiveShortcut ? label : undefined}

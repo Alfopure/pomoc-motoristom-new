@@ -11,6 +11,7 @@ import type {
 import type { DispatchData } from "@/data/dispatch-types";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { cleanPhoneInput } from "@/lib/telephony/phone";
+import { useLayoutPreview } from "./LayoutPreview";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 import { useSmsUnreadCount } from "./SmsInbox";
 
@@ -39,6 +40,7 @@ const CONTACT_ROLE_LABELS: Record<TelephonyDirectoryContact["role"], string> = {
 const FAVORITES_PER_PAGE = 5;
 
 export function DashboardPhone({ onCreateCase, className = "", disabled = false, isDialing = false, onDataChange, onDial, variant = "card" }: DashboardPhoneProps) {
+  const { mode: layoutMode } = useLayoutPreview();
   const rootRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const [selectedContact, setSelectedContact] = useState<TelephonyDirectoryContact | null>(null);
@@ -259,7 +261,7 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
               : "min-w-0 rounded-xl border border-zinc-200 bg-white p-2.5 shadow-sm"
           }
         >
-        <div className="mb-2 flex items-center justify-between gap-2">
+        {layoutMode === "modern" && variant === "rail" ? <p className="mb-2 text-[11px] text-zinc-500">Číslo, kontakt alebo obľúbené</p> : <div className="mb-2 flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#FCD703] text-zinc-950">
               <PhoneCall size={16} strokeWidth={2.4} />
@@ -269,7 +271,7 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
               <div className="truncate text-[11px] text-zinc-500">Číslo, kontakt alebo obľúbené</div>
             </div>
           </div>
-        </div>
+        </div>}
 
         <div className={variant === "rail" ? "grid min-w-0 grid-cols-2 gap-2" : "grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] gap-2"}>
           <label className={`flex min-w-0 items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 focus-within:border-zinc-400 focus-within:bg-white ${variant === "rail" ? "col-span-2" : ""}`}>
@@ -305,7 +307,7 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
             aria-label="Otvoriť SMS"
             onClick={() => {
               setIsOpen(false);
-              setSmsInitialTab(unreadSmsCount > 0 ? "inbox" : "editor");
+              setSmsInitialTab(layoutMode === "modern" ? "editor" : unreadSmsCount > 0 ? "inbox" : "editor");
               setSmsComposerOpen(true);
             }}
             className="inline-flex h-10 min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[#FCD703] px-3 text-sm font-semibold text-zinc-950 transition hover:bg-yellow-300"

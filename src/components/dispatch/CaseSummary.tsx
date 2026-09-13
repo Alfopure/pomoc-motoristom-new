@@ -1,11 +1,19 @@
 "use client";
 
 import { useState } from "react";
+import { CarFront, CheckCircle2, ClipboardList, CreditCard, MapPin, Navigation, Truck, UserRound, type LucideIcon } from "lucide-react";
 import type { DispatchCase, FleetAsset, Operator } from "@/domain/types";
 import { jobTypeLabels, paymentMethodLabels, paymentStatusLabels } from "@/domain/case-card";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
 import { formatTime } from "@/lib/dispatch-calculations";
 import styles from "./case-detail.module.css";
+import { useLayoutPreview } from "./LayoutPreview";
+
+const factIcons: Record<string, LucideIcon> = {
+  "Prípad": ClipboardList, "Operátor": UserRound, "Klient / telefón": UserRound,
+  "Vozidlo": CarFront, "Miesto": MapPin, "Cieľ": Navigation, "Pridelená technika": Truck,
+  "Služba": ClipboardList, "Platba": CreditCard, "Uzavreté": CheckCircle2,
+};
 
 /** A compact view of the saved case; pending edits stay in the editor below. */
 export function CaseSummary({ caseItem, assets, operators = [], identityInHeader = false }: {
@@ -14,6 +22,7 @@ export function CaseSummary({ caseItem, assets, operators = [], identityInHeader
   operators?: Operator[];
   identityInHeader?: boolean;
 }) {
+  const modern = useLayoutPreview().mode === "modern";
   const contact = caseItem.customerDetails.contacts?.find((item) => item.isPrimary)
     ?? caseItem.customerDetails.contacts?.[0] ?? caseItem.contact;
   const customer = caseItem.customerDetails.companyName || caseItem.customerDetails.assistanceServiceName
@@ -34,18 +43,20 @@ export function CaseSummary({ caseItem, assets, operators = [], identityInHeader
   ].filter((fact): fact is [string, string] => Boolean(fact[1]));
 
   return (
-    <section aria-label="Prehľad prípadu" data-testid="case-summary" className={styles.summary}>
+    <section aria-label="Prehľad prípadu" data-testid="case-summary" className={`${styles.summary} ${modern ? "case-overview-v2" : ""}`}>
       <div className={styles.summaryHeading}>
         <h3>Prehľad prípadu</h3>
         <span className={styles.savedLabel}>Uložené údaje · {formatTime(caseItem.updatedAt)}</span>
       </div>
       <dl className={styles.summaryFacts}>
-        {facts.map(([label, value]) => (
-          <div key={label} className={styles.summaryFact}>
+        {facts.map(([label, value]) => {
+          const Icon = factIcons[label] ?? ClipboardList;
+          return <div key={label} data-overview-fact={label} className={styles.summaryFact}>
+            {modern && <span className="case-overview-icon" aria-hidden="true"><Icon size={17} /></span>}
             <dt>{label}</dt>
             <dd><SummaryText text={value} /></dd>
-          </div>
-        ))}
+          </div>;
+        })}
       </dl>
       {caseItem.nextStep && <div className={styles.nextStep}><span className={styles.nextStepLabel}>Ďalší krok</span><span><SummaryText text={caseItem.nextStep} /></span></div>}
       {caseItem.summary && <div className={styles.summaryDescription}><SummaryText text={caseItem.summary} /></div>}

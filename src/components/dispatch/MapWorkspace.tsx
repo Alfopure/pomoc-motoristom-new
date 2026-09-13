@@ -1,8 +1,8 @@
 "use client";
 import type { CaseDetailData } from "@/data/case-detail";
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
-import { Columns3, GripHorizontal, Map, PanelLeftClose, StickyNote, Table2, Wrench } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { Columns3, GripHorizontal, Map, PanelLeftClose, PanelsTopLeft, StickyNote, Table2, Wrench } from "lucide-react";
 import type { CallCenterCall, CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
 import type { DispatchMapModel } from "@/lib/map-adapter";
@@ -12,12 +12,14 @@ import { CaseTable, type CaseSortState } from "./CaseTable";
 import { DispatchMap } from "./DispatchMap";
 import { ExpandedCasePanel } from "./ExpandedCasePanel";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
+import { useLayoutPreview } from "./LayoutPreview";
 
 export type WorkspaceKind = "cockpit" | "detail" | "new";
 export type WorkspaceMode = "collapsed" | "split" | "expanded";
 export type CenterView = "map" | "table" | "tasks" | "notes";
 
 type MapWorkspaceProps = {
+  renderTaskWorkflow?: (taskId: string) => ReactNode;
   active?: boolean;
   actorKey?: string;
   centerContent?: ReactNode;
@@ -88,6 +90,7 @@ const centerTabs = [
 type StoredWorkspaceLayout = { desktopPanelPercent?: number };
 
 export function MapWorkspace({
+  renderTaskWorkflow,
   active = true,
   actorKey,
   centerContent,
@@ -134,12 +137,14 @@ export function MapWorkspace({
   workspaceKind,
   workspaceMode,
 }: MapWorkspaceProps) {
+  const modern = useLayoutPreview().mode === "modern";
+  const [initialPanelPercent] = useState(() => modern ? 50 : DEFAULT_DESKTOP_PANEL_PERCENT);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const layoutStorageKey = useMemo(() => `motorist:dispatch-workspace-layout:v3:${actorKey ?? viewerProfileId ?? "local-browser"}`, [actorKey, viewerProfileId]);
-  const desktopPanelPercentRef = useRef(DEFAULT_DESKTOP_PANEL_PERCENT);
+  const desktopPanelPercentRef = useRef(initialPanelPercent);
   const pendingAnimationFrameRef = useRef<number | null>(null);
   const lastRawDesktopPanelPercentRef = useRef(DEFAULT_DESKTOP_PANEL_PERCENT);
-  const [desktopPanelPercent, setDesktopPanelPercent] = useState(DEFAULT_DESKTOP_PANEL_PERCENT);
+  const [desktopPanelPercent, setDesktopPanelPercent] = useState(initialPanelPercent);
   const hasCockpitCase = Boolean(caseItem && mapModel);
   const showWorkspacePanel = workspaceKind !== "cockpit" || hasCockpitCase;
   const showExpandedPanel = workspaceKind !== "cockpit";
@@ -156,7 +161,7 @@ export function MapWorkspace({
   const resizeHandleClassName = `absolute left-1/2 z-[2147482600] hidden -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full border border-zinc-300 bg-white/95 text-zinc-500 shadow-md backdrop-blur hover:border-zinc-400 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#FCD703] focus:ring-offset-2 lg:flex ${workspaceMode === "expanded" ? "top-0 h-2 w-12 overflow-hidden shadow-none" : "top-0 h-7 w-20 -translate-y-1/2"}`;
 
   useEffect(() => {
-    let nextPercent = DEFAULT_DESKTOP_PANEL_PERCENT;
+    let nextPercent = initialPanelPercent;
     try {
       const raw = window.localStorage.getItem(layoutStorageKey);
       const parsed = raw ? JSON.parse(raw) as StoredWorkspaceLayout : undefined;
@@ -174,7 +179,7 @@ export function MapWorkspace({
         pendingAnimationFrameRef.current = null;
       }
     };
-  }, [layoutStorageKey]);
+  }, [initialPanelPercent, layoutStorageKey]);
 
   function applyLayout() {
     containerRef.current?.style.setProperty("--dispatch-desktop-grid-rows", toDesktopGridRows(desktopPanelPercentRef.current));
@@ -283,6 +288,21 @@ export function MapWorkspace({
         <div className="workspace-center-tabs" role="tablist" aria-label="Pracovná plocha">
           {centerTabs.map(({ view, label, icon: Icon }, index) => <button key={view} id={`workspace-tab-${view}`} type="button" role="tab" aria-selected={centerView === view} aria-controls="workspace-tab-content" tabIndex={centerView === view ? 0 : -1} onKeyDown={event => handleTabKeyDown(event, index)} onClick={() => onCenterViewChange(view)}><Icon size={15} aria-hidden="true" /><span>{label}</span></button>)}
         </div>
+        {modern && canResizeCockpit && <details className="workspace-layout-presets" onKeyDown={event => {
+          if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); }
+        }}>
+          <summary aria-label="Rozloženie pracovnej plochy"><PanelsTopLeft size={16} aria-hidden="true" /><span>Rozloženie</span></summary>
+          <div className="workspace-layout-menu">
+            <strong>Priestor podľa potreby</strong>
+            {([{ value: 34, title: "Viac mapy", hint: "Väčšia pracovná plocha" }, { value: 50, title: "Vyvážené", hint: "Mapa a prípad vedľa práce" }, { value: 68, title: "Viac prípadu", hint: "Pohodlné dopĺňanie údajov" }] as const).map(preset => <button type="button" key={preset.value} onClick={event => {
+              updateDesktopPanelPercent(preset.value); commitLayoutState(); persistLayout(preset.value);
+              if (workspaceMode !== "split") onRestore();
+              const menu = event.currentTarget.closest("details"); if (menu) menu.open = false;
+              menu?.querySelector("summary")?.focus();
+            }}><span className="workspace-layout-miniature" style={{ "--case-size": `${preset.value}%` } as CSSProperties} aria-hidden="true" /><span><b>{preset.title}</b><small>{preset.hint}</small></span></button>)}
+            <p>Rozmery môžete ďalej meniť potiahnutím.</p>
+          </div>
+        </details>}
         <button type="button" className="workspace-tools-trigger" aria-expanded={toolsOpen} aria-controls="dispatch-tools-panel" onClick={onOpenTools}><Wrench size={16} aria-hidden="true" /><span>Nástroje</span></button>
       </div>}
       <div className="workspace-tab-content relative min-h-0 flex-1">
@@ -344,6 +364,7 @@ export function MapWorkspace({
           )}
           {showExpandedPanel ? (
             <ExpandedCasePanel
+              renderTaskWorkflow={renderTaskWorkflow}
               key={`${workspaceKind}:${caseItem?.id ?? "empty"}:${caseEditorRevision}`}
               assets={assets}
               branches={branches}
@@ -369,6 +390,7 @@ export function MapWorkspace({
             />
           ) : caseItem && mapModel ? (
             <CaseCockpitPanel
+              renderTaskWorkflow={renderTaskWorkflow}
               key={caseEditorRevision}
               assets={assets}
               branches={branches}

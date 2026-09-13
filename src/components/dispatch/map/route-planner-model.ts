@@ -23,6 +23,15 @@ export function createRoutePlannerStore(fetchRoute: typeof fetch = (...args) => 
     addStop: () => { if (state.stops.length < MAX_ROUTE_INTERMEDIATES + 2) updateStops([...state.stops.slice(0, -1), { id: nextId++, query: "", place: null }, state.stops[state.stops.length - 1]]); },
     removeStop: (id: number) => { if (state.stops.slice(1, -1).some(stop => stop.id === id)) updateStops(state.stops.filter(stop => stop.id !== id)); },
     reverse: () => updateStops([...state.stops].reverse()),
+    reorderStop: (id: number, beforeId: number) => {
+      const from = state.stops.findIndex(stop => stop.id === id);
+      const to = state.stops.findIndex(stop => stop.id === beforeId);
+      if (from < 0 || to < 0 || from === to) return;
+      const next = [...state.stops];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      updateStops(next);
+    },
     moveStop: (index: number, offset: number) => {
       const destination = index + offset;
       if (index < 1 || index >= state.stops.length - 1 || destination < 1 || destination >= state.stops.length - 1) return;

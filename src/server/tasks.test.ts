@@ -9,6 +9,10 @@ const actor: MotoristActor = { organizationId: "org", profileId: "a", userId: "u
 const id = "00000000-0000-4000-8000-000000000001";
 beforeEach(() => mocks.rpc.mockReset().mockResolvedValue({ data: {}, error: null }));
 describe("task workspace service boundary", () => {
+  it("explains blocked legacy completion when a task needs its designated review", async () => {
+    mocks.rpc.mockResolvedValue({ error: { code: "22023", message: "Task review required" } });
+    await expect(updateWorkspaceTask(actor, id, { expectedRevision: 4, status: "done" })).rejects.toMatchObject({ status: 400, message: expect.stringContaining("vyžaduje kontrolu") });
+  });
   it("attempts immediate assignment delivery after commit while preserving successful save on a retryable handoff failure", async () => {
     mocks.rpc.mockResolvedValue({ data: { id }, error: null });
     mocks.deliver.mockRejectedValueOnce(new Error("temporary push outage"));

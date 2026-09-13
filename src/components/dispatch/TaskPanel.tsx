@@ -77,6 +77,7 @@ const SIDEBAR_TASK_LIMIT = 6;
 
 type TaskPanelProps = {
   taskWorkspaceEnabled?: boolean;
+  compact?: boolean;
   tasks?: WorkspaceTask[];
   onOpenCase?: (caseId: string) => void;
   activeTaskId?: string;
@@ -102,7 +103,7 @@ type TaskPanelProps = {
 };
 
 export function TaskPanel(props: TaskPanelProps) {
-  if (props.taskWorkspaceEnabled) return <TaskWorkspacePanel tasks={props.tasks} cases={props.cases} operators={props.operators} viewerProfileId={props.viewerProfileId} variant={props.variant} onOpenCase={props.onOpenCase} />;
+  if (props.taskWorkspaceEnabled) return <TaskWorkspacePanel tasks={props.tasks} cases={props.cases} operators={props.operators} viewerProfileId={props.viewerProfileId} variant={props.variant} compact={props.compact} onOpenCase={props.onOpenCase} />;
   return <LegacyTaskPanel {...props} />;
 }
 

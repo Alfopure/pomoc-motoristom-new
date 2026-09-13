@@ -39,6 +39,9 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "health/live": { class: "public", note: "Sanitized infrastructure liveness probe." },
   "health/ready": { class: "public", note: "Sanitized dependency readiness probe." },
   "public/location-links/[token]": { class: "public" },
+  "public/handoffs/session": { class: "public", note: "Purpose-bound 256-bit link credential, strict same-origin JSON, hashed limited HttpOnly session; never an app account." },
+  "public/handoffs/current": { class: "public", note: "Requires limited handoff cookie AND displayed grant ID; rechecks generation/expiry, minimal no-store DTO only." },
+  "public/handoffs/commands": { class: "public", note: "Limited handoff cookie + displayed grant ID + strict origin + current revision; transactional allowlisted actions, no ordinary case access." },
   // Telnyx webhooky: autentifikáciou je Ed25519 podpis (`telnyx-signature-ed25519` + `telnyx-timestamp`,
   // tolerancia 300 s) overený PRED akoukoľvek prácou; neplatný podpis → 400, cudzí `connection_id` → 200 ignored.
   "telephony/telnyx/webhook": { class: "public", note: "Telnyx Call Control webhook; Ed25519 signature verification namiesto session." },
@@ -71,6 +74,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "tasks/[id]": { class: "session" },
   "tasks/[id]/links": { class: "session" },
   "tasks/[id]/messages": { class: "session" },
+  "tasks/[id]/workflow": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
 
   // ── session — Supabase session guard ────────────────────────────────────
   // attendance
@@ -110,6 +114,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "cases/[id]/attachments": { class: "session" },
   "cases/[id]/sms": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   "cases/[id]/pdf": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "cases/[id]/handoffs": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Actor- and case-authorized internal grant management, no token/session authority." },
 
   // fleet-assets
   "fleet-assets": { class: "session", role: ["manager", "admin"] },

@@ -1,0 +1,157 @@
+/* The same tools and editor instances serve both appearances. */
+.widget-modern-only, .note-modern-only, .calendar-modern-only, .calculator-clear-short, .calculator-copy-icon { display: none; }
+.widget-setting-copy strong { font-weight: inherit; }
+.calendar-task-content { display: block; min-width: 0; }
+[data-layout-preview="modern"] .dispatch-widget-host { background: #edf0f5; border-color: #e0e3e9; }
+[data-layout-preview="modern"] .widget-host-header { min-height: 55px; padding-inline: 13px; background: #f8f9fc; }
+[data-layout-preview="modern"] .widget-host-header h2 { font-size: 15px; letter-spacing: -.025em; line-height: 1.35; }
+[data-layout-preview="modern"] .widget-eyebrow { display: block; color: #647084; font-size: 9px; font-weight: 600; line-height: 1.4; }
+[data-layout-preview="modern"] .dispatch-widget-host > .widget-host-scroll { padding: 10px; }
+[data-layout-preview="modern"] .dispatch-widget-host [data-widget] { margin-bottom: 11px; border: 1px solid #dfe3eb; border-radius: 16px; background: #fff; box-shadow: 0 3px 10px #17203306; }
+[data-layout-preview="modern"] .widget-section-toggle { min-height: 42px; padding: 5px 10px; border-bottom: 1px solid #edf0f5; border-radius: 15px 15px 0 0; background: #fff; font-weight: 650; color: #344155; }
+[data-layout-preview="modern"] .widget-section-toggle[aria-expanded="false"] { border-bottom: 0; }
+[data-layout-preview="modern"] [data-widget][data-collapsed="true"] .widget-section-toggle { border-radius: 15px; }
+[data-layout-preview="modern"] .widget-section-toggle:hover { background: #f7f9fc; }
+[data-layout-preview="modern"] .widget-section-title { display: flex; align-items: center; gap: 8px; }
+[data-layout-preview="modern"] .widget-app-icon { display: inline-flex; flex: 0 0 26px; width: 26px; height: 26px; align-items: center; justify-content: center; border-radius: 7px; background: #e8eef7; color: #3f6393; }
+[data-layout-preview="modern"] [data-widget-icon="phone"] { background: #e1f3e5; color: #227640; }
+[data-layout-preview="modern"] [data-widget-icon="tasks"] { background: #e5e7ff; color: #5257a1; }
+[data-layout-preview="modern"] [data-widget-icon="notes"] { background: #fff0a9; color: #785e14; }
+[data-layout-preview="modern"] [data-widget-icon="calculator"] { background: #3b3d46; color: #ffb86d; }
+[data-layout-preview="modern"] [data-widget-icon="calendar"] { background: #fee9e6; color: #b54338; }
+[data-layout-preview="modern"] [data-widget-icon="route"] { background: #e0effc; color: #346f9e; }
+[data-layout-preview="modern"] [data-widget-icon="fleet"] { background: #ebe7f4; color: #795b9e; }
+[data-layout-preview="modern"] .widget-settings { margin: 0 0 12px; border: 1px solid #dfe2e8; border-radius: 14px; background: #f9fafc; padding: 10px; }
+[data-layout-preview="modern"] .widget-settings h3 { font-size: 14px; }
+[data-layout-preview="modern"] .widget-settings p { color: #596273; font-size: 11px; }
+[data-layout-preview="modern"] .widget-gallery-item { margin-block: 6px; padding: 4px 3px; border-radius: 10px; }
+[data-layout-preview="modern"] .widget-gallery-item[data-visible="true"] { border-color: #c6d4ea; box-shadow: inset 2px 0 #6685b7; }
+[data-layout-preview="modern"] .widget-setting-label { flex-wrap: wrap; gap: 5px; padding-block: 4px; }
+[data-layout-preview="modern"] .widget-setting-copy { display: flex; flex: 1; min-width: 55px; flex-direction: column; gap: 2px; }
+[data-layout-preview="modern"] .widget-setting-copy strong { font-size: 11px; font-weight: 650; }
+[data-layout-preview="modern"] .widget-setting-copy > span { display: block; color: #697587; font-size: 9px; line-height: 1.35; }
+[data-layout-preview="modern"] .widget-setting-label input { width: 15px; height: 15px; accent-color: #506fa9; }
+[data-layout-preview="modern"] .widget-host-action { border-radius: 8px; }
+[data-layout-preview="modern"] .widget-add-tool { display: flex; width: 100%; min-height: 38px; align-items: center; justify-content: center; gap: 6px; border: 1px dashed #c4cedc; border-radius: 11px; background: #f6f8fc; font-size: 11px; font-weight: 600; color: #526783; }
+[data-layout-preview="modern"] .widget-add-tool:hover { background: #e9eef7; }
+[data-layout-preview="modern"] .widget-add-tool:focus-visible { outline: 2px solid #526fa9; outline-offset: 2px; }
+
+[data-layout-preview="modern"] [data-widget="calculator"] { border-color: #303139; background: #24252b; box-shadow: 0 5px 13px #21283916; }
+[data-layout-preview="modern"] [data-widget="calculator"] .widget-section-toggle { background: #24252b; border-color: #ffffff0d; color: #f0f0f4; }
+[data-layout-preview="modern"] [data-widget="calculator"] .widget-section-toggle:hover { background: #303138; }
+[data-layout-preview="modern"] .calculator-widget { padding: 10px 12px 12px; border-radius: 0 0 15px 15px; background: #24252b; color: #fff; }
+[data-layout-preview="modern"] .calculator-display { padding: 0 2px 4px; }
+[data-layout-preview="modern"] .calculator-display > label { color: #b8bbc7; font-size: 10px; }
+[data-layout-preview="modern"] .calculator-widget input { min-height: 44px; padding: 3px 0; border: 0; border-radius: 4px; background: transparent; color: #fff; text-align: right; font-size: 27px; font-weight: 400; }
+[data-layout-preview="modern"] .calculator-display[data-has-result="true"] input { min-height: 30px; color: #b7bac7; font-size: 15px; }
+[data-layout-preview="modern"] .calculator-widget input::placeholder { color: #999eae; font-size: 12px; }
+[data-layout-preview="modern"] .calculator-keypad { gap: 6px; grid-template-areas: "clear backspace open close" "seven eight nine divide" "four five six multiply" "one two three minus" "zero decimal equals plus"; }
+[data-layout-preview="modern"] .calculator-keypad button { min-height: 39px; border: 0; border-radius: 11px; background: #3d3f49; color: #fff; font-size: 18px; font-weight: 400; }
+[data-layout-preview="modern"] .calculator-keypad button:hover { background: #525561; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="7"] { grid-area: seven; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="8"] { grid-area: eight; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="9"] { grid-area: nine; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="4"] { grid-area: four; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="5"] { grid-area: five; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="6"] { grid-area: six; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="1"] { grid-area: one; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="2"] { grid-area: two; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="3"] { grid-area: three; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="0"] { grid-area: zero; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key=","] { grid-area: decimal; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="("] { grid-area: open; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key=")"] { grid-area: close; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="÷"] { grid-area: divide; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="×"] { grid-area: multiply; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="−"] { grid-area: minus; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="+"] { grid-area: plus; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="equals"] { grid-area: equals; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="clear"] { grid-area: clear; font-size: 14px; }
+[data-layout-preview="modern"] .calculator-clear-full { display: none; }
+[data-layout-preview="modern"] .calculator-clear-short { display: inline; }
+[data-layout-preview="modern"] .calculator-keypad [data-calculator-key="backspace"] { grid-area: backspace; display: inline-flex; }
+[data-layout-preview="modern"] .calculator-keypad :is([data-calculator-key="clear"], [data-calculator-key="backspace"], [data-calculator-key="("], [data-calculator-key=")"]) { background: #696d7a; }
+[data-layout-preview="modern"] .calculator-keypad :is([data-calculator-key="÷"], [data-calculator-key="×"], [data-calculator-key="−"], [data-calculator-key="+"], [data-calculator-key="equals"]) { background: #e89438; color: #241a0d; }
+[data-layout-preview="modern"] .calculator-keypad :is([data-calculator-key="÷"], [data-calculator-key="×"], [data-calculator-key="−"], [data-calculator-key="+"], [data-calculator-key="equals"]):hover { background: #ffae53; }
+[data-layout-preview="modern"] .calculator-keypad button:disabled { opacity: .5; cursor: default; }
+[data-layout-preview="modern"] .calculator-widget :is(button, input):focus-visible { outline: 2px solid #ffc85b; outline-offset: 2px; }
+[data-layout-preview="modern"] .calculator-result { padding: 0; justify-content: flex-end; gap: 2px; background: transparent; color: #fff; }
+[data-layout-preview="modern"] .calculator-result output { width: 100%; text-align: right; font-size: 34px; font-weight: 400; line-height: 1.2; }
+[data-layout-preview="modern"] .calculator-result button { display: flex; align-items: center; gap: 5px; min-height: 28px; padding: 0; color: #ffd087; font-size: 10px; }
+[data-layout-preview="modern"] .calculator-copy-icon { display: block; }
+[data-layout-preview="modern"] .calculator-widget > [role="status"] { color: #f2d6af; font-size: 12px; }
+
+[data-layout-preview="modern"] [data-notebook-panel] { gap: 9px; background: #faf9f5; border-radius: 0 0 15px 15px; }
+[data-layout-preview="modern"] [data-notebook-panel] > header h2 { display: flex; align-items: center; gap: 7px; font-size: 15px; }
+[data-layout-preview="modern"] .note-modern-only { display: inline; }
+[data-layout-preview="modern"] .note-count { min-width: 21px; border-radius: 7px; background: #edeae1; padding: 2px 5px; font-size: 11px; color: #686456; text-align: center; }
+[data-layout-preview="modern"] [data-notebook-panel] .note-create { min-height: 33px; padding: 5px 9px; border-color: #dec979; background: #ffedac; font-size: 12px; font-weight: 600; }
+[data-layout-preview="modern"] .note-save-status { min-height: 16px; color: #687162; font-size: 10px; }
+[data-layout-preview="modern"] [data-note-tone="0"] { --note-paper: #fff3bb; --note-edge: #e5cf77; }
+[data-layout-preview="modern"] [data-note-tone="1"] { --note-paper: #e4efd5; --note-edge: #bace9f; }
+[data-layout-preview="modern"] [data-note-tone="2"] { --note-paper: #f3e1ee; --note-edge: #dbc0d3; }
+[data-layout-preview="modern"] [data-note-tone="3"] { --note-paper: #e0ecf8; --note-edge: #b8cfe5; }
+[data-layout-preview="modern"] [data-note-list] { gap: 10px; }
+[data-layout-preview="modern"] [data-notebook-compact="false"] [data-note-list] { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(225px, 100%), 1fr)); align-items: start; }
+[data-layout-preview="modern"] [data-note-list] button { position: relative; padding: 13px 12px 10px; gap: 8px; border-color: var(--note-edge); border-radius: 12px 12px 18px 12px; background: linear-gradient(135deg, #ffffff35, transparent 55%), var(--note-paper); color: #273040; box-shadow: 0 3px 5px #4a412009; }
+[data-layout-preview="modern"] [data-note-list] button::after { content: ""; position: absolute; bottom: 0; right: 0; width: 13px; height: 13px; border-top-left-radius: 6px; border-bottom-right-radius: 12px; background: var(--note-edge); opacity: .5; pointer-events: none; }
+[data-layout-preview="modern"] [data-note-list] button:hover { filter: brightness(.98); }
+[data-layout-preview="modern"] [data-note-list] button strong { font-size: 13px; line-height: 1.4; }
+[data-layout-preview="modern"] [data-note-list] .note-body-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; color: #4b514c; font-size: 12px; line-height: 1.55; font-weight: 400; }
+[data-layout-preview="modern"] .note-card-footer { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 6px; margin-top: 1px; border-top: 1px solid #615b3820; padding-top: 7px; }
+[data-layout-preview="modern"] .note-card-footer :is(span, time) { color: #626654; font-size: 10px; line-height: 1.4; }
+[data-layout-preview="modern"] .note-privacy { display: inline-flex; align-items: center; gap: 4px; }
+[data-layout-preview="modern"] [data-note-editor] { padding: 12px; border: 1px solid var(--note-edge); border-radius: 12px; background: var(--note-paper); box-shadow: 0 3px 8px #514b2010; }
+[data-layout-preview="modern"] [data-note-editor] :is(input:not([type="checkbox"]), textarea) { border-color: var(--note-edge); background: #ffffffb3; }
+[data-layout-preview="modern"] [data-note-editor] textarea { background-image: repeating-linear-gradient(transparent 0, transparent calc(1.5em - 1px), #5c563510 calc(1.5em - 1px), #5c563510 1.5em); background-attachment: local; }
+[data-layout-preview="modern"] [data-note-editor] button { background: #ffffffba; font-size: 12px; }
+[data-layout-preview="modern"] [data-note-editor] summary { color: #374254; }
+
+[data-layout-preview="modern"] .calendar-widget { padding: 10px; }
+[data-layout-preview="modern"] .calendar-date-summary { display: flex; align-items: center; gap: 11px; padding: 1px 2px 10px; border-bottom: 1px solid #edf0f4; }
+[data-layout-preview="modern"] .calendar-date-badge { flex: 0 0 49px; overflow: hidden; border: 1px solid #eed7d2; border-radius: 9px; background: #fffaf8; text-align: center; }
+[data-layout-preview="modern"] .calendar-date-badge > span { display: block; background: #b74335; padding-block: 2px; color: #fff; font-size: 9px; font-weight: 650; text-transform: uppercase; }
+[data-layout-preview="modern"] .calendar-date-badge > strong { display: block; padding-block: 3px; color: #3c3e47; font-size: 27px; font-weight: 500; line-height: 1.2; }
+[data-layout-preview="modern"] .calendar-date-summary > div:last-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+[data-layout-preview="modern"] .calendar-summary-weekday { color: #a8463a; font-size: 10px; text-transform: capitalize; }
+[data-layout-preview="modern"] .calendar-date-summary > div > strong { font-size: 12px; }
+[data-layout-preview="modern"] .calendar-date-summary .calendar-date-badge > strong { font-size: 27px; }
+[data-layout-preview="modern"] .calendar-summary-caption { color: #717b8a; font-size: 10px; }
+[data-layout-preview="modern"] .calendar-header h3 { color: #344054; font-size: 12px; }
+[data-layout-preview="modern"] .calendar-days { gap: 2px; }
+[data-layout-preview="modern"] .calendar-day { min-height: 31px; border-radius: 8px; }
+[data-layout-preview="modern"] .calendar-day[aria-current="date"] { box-shadow: inset 0 0 0 1px #cb4936; }
+[data-layout-preview="modern"] .calendar-day[aria-pressed="true"] { background: #b73c2b; color: #fff; }
+[data-layout-preview="modern"] .calendar-day[data-current-month="false"]:not([aria-pressed="true"]) { color: #777e8b; }
+[data-layout-preview="modern"] .calendar-task { display: flex; align-items: flex-start; gap: 7px; border-color: transparent; background: #f5f7fb; }
+[data-layout-preview="modern"] .calendar-task:hover { border-color: #c7d2e4; background: #edf1f8; }
+[data-layout-preview="modern"] .calendar-task-content { flex: 1; }
+[data-layout-preview="modern"] .calendar-task-marker { display: flex; flex: 0 0 12px; height: 12px; align-items: center; justify-content: center; margin-top: 2px; border: 1.5px solid #6484b5; border-radius: 4px; color: #fff; }
+[data-layout-preview="modern"] .calendar-task[data-task-done="true"] .calendar-task-marker { background: #42855e; border-color: #42855e; }
+[data-layout-preview="modern"] .calendar-task[data-task-priority="urgent"]:not([data-task-done="true"]) .calendar-task-marker { border-color: #b94737; }
+[data-layout-preview="modern"] .calendar-task-open { display: block; flex: 0 0 13px; margin-top: 2px; color: #77849a; }
+[data-layout-preview="modern"] .calendar-agenda-empty { border-left: 2px solid #e2e7ef; padding-left: 8px; }
+[data-layout-preview="modern"] .calendar-widget :is(button, input):focus-visible { outline: 2px solid #b73c2b; outline-offset: 1px; }
+[data-layout-preview="modern"] [data-widget="route"] > div > section { border-radius: 0; box-shadow: none; --tw-ring-shadow: 0 0 #0000; }
+
+@media (max-width: 767px), (pointer: coarse) {
+  [data-layout-preview="modern"] .dispatch-widget-host > .widget-host-scroll { padding: 7px 3px; }
+  [data-layout-preview="modern"] .calendar-widget { padding: 7px; }
+  [data-layout-preview="modern"] .widget-section-toggle,
+  [data-layout-preview="modern"] .calculator-keypad button,
+  [data-layout-preview="modern"] .calendar-control,
+  [data-layout-preview="modern"] .calendar-completed,
+  [data-layout-preview="modern"] .calendar-day { min-height: 44px; }
+  [data-layout-preview="modern"] .calendar-control { min-width: 44px; }
+  [data-layout-preview="modern"] .widget-add-tool,
+  [data-layout-preview="modern"] [data-notebook-panel] .note-create,
+  [data-layout-preview="modern"] .calculator-result button { min-height: 44px; }
+  [data-layout-preview="modern"] .calendar-days { min-width: 308px; gap: 0; }
+  [data-layout-preview="modern"] .calendar-day { min-width: 44px; }
+  [data-layout-preview="modern"] .calculator-widget input { font-size: 16px; }
+}
+.widget-quick-launch { display:none; }
+[data-layout-preview="modern"] .widget-quick-launch { display:grid; flex-shrink:0; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; padding:8px 10px; border-bottom:1px solid #e5e8ee; background:#f8f9fc; }
+[data-layout-preview="modern"] .widget-quick-launch button { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; min-height:55px; padding:4px; border-radius:9px; color:#627086; font-size:10px; }
+[data-layout-preview="modern"] .widget-quick-launch button:hover { background:#edf0f6; color:#344560; }
+[data-layout-preview="modern"] .widget-quick-launch .widget-app-icon { width:27px; height:27px; border-radius:8px; }

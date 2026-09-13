@@ -87,6 +87,15 @@ describe("SMS preparation and verified recipient", () => {
     expect(h.db.rows("motorist_sms_messages")).toHaveLength(0);
     expect(h.db.rows("motorist_location_share_links")).toHaveLength(0);
   });
+  it("prepares an external handoff as standalone SMS to the colleague instead of the case client", async () => {
+    const h = harness();
+    const message = "Prípad PM-2026-100 pre kolegu: https://preview.example/handoff#token=" + "a".repeat(43);
+    const prepared = await preview({ caseId: null, template: "custom", toNumber: "+421907987654", message });
+    expect(prepared.draft).toMatchObject({ caseId: null, toNumber: "+421907987654", message });
+    expect(prepared.draft.toNumber).not.toBe("+421905123456");
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.db.rows("motorist_sms_messages")).toHaveLength(0);
+  });
   it("rejects missing, nonexistent and foreign cases and missing contacts", async () => {
     const h = harness();
     await expect(preview({ template: "location_request" })).rejects.toMatchObject({ status: 400 });
