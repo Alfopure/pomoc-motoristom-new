@@ -481,8 +481,10 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const deadline = Math.min(started + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS), owner?.deadline ?? Infinity);
     const journal = journalRequest(method, path, commandId, body);
     const dispatch = async () => {
-      await assertOwnership();
       if (journal) {
+        // Preparation renews ownership and fences the exact immutable command
+        // in the database immediately before dispatch. A second renewal here
+        // adds a database round trip to every answer, bridge and hangup.
         const decision = await prepareProviderRequest(journal);
         if (!decision.dispatch) {
           if (decision.outcome === "accepted") return { cached: true as const, result: decision.result };
@@ -490,7 +492,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
           if (decision.outcome === "rate_limited") throw errorFromBody(429, decision.result, commandId);
           throw new ProviderOutcomeUnknownError(commandId!);
         }
-      }
+      } else await assertOwnership();
       const result = await measureRequestStep("provider", () => attempt(method, url.toString(), body, commandId, requestOptions.headers, deadline));
       if (journal) {
         const data = asRecord(asRecord(result.parsed).data);

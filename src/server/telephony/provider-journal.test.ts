@@ -48,6 +48,25 @@ function harness() {
 }
 
 describe("provider HTTP journal recovery", () => {
+  it("renews once before the fenced prepare and retains the exact response checkpoint", async () => {
+    const h = harness();
+    const order: string[] = [];
+    const rpc = h.rpc.getMockImplementation()!;
+    h.rpc.mockImplementation(async (name, args) => {
+      order.push(name);
+      return rpc(name, args);
+    });
+    h.fetch.mockImplementationOnce(async () => {
+      order.push("provider");
+      return new Response(JSON.stringify({ data: { call_control_id: "leg" } }), { status: 200 });
+    });
+    await sessionOwnership.run(h.owner(), h.dial);
+    expect(order).toEqual([
+      "motorist_session_lease_renew_v2", "motorist_provider_command_prepare_v2",
+      "provider", "motorist_provider_command_result_v2",
+    ]);
+  });
+
   it("preserves distinct absent and empty wire bodies while storing an object payload", () => {
     const h = harness();
     sessionOwnership.run(h.owner(), () => {

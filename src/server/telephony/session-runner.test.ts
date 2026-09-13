@@ -5,7 +5,8 @@ import { fakeError } from "@/test/fake-supabase";
 import { createTelephonyHarness, LINES, NUMBERS, ORG, PLAN_ID, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
 import { callColleague, createRateLimiter, parkCall, pickupWaitingCall, startOutboundCall } from "./call-actions";
-import { loadRoutingContext } from "./session-runner";
+import { loadRoutingContext, loadSessionSnapshot } from "./session-runner";
+import { parseTelnyxEnvelope } from "./state/events";
 import { readMeta, type SessionRow } from "./state/types";
 
 const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
@@ -19,6 +20,20 @@ const inboundTables = [
 afterEach(() => vi.unstubAllEnvs());
 
 describe("session routing setup", () => {
+  it("loads no routing for a known answered bridge fact, but retains it for a first bridge", async () => {
+    const h = createTelephonyHarness({ sweepAfterEvent: false });
+    const call = await h.inbound({ answer: false });
+    const session = h.session(call.sessionId) as SessionRow;
+    const event = parseTelnyxEnvelope(h.envelope("call.bridged", { call_control_id: call.callControlId }))!;
+    const { legs } = await loadSessionSnapshot(h.deps, call.sessionId);
+    h.db.log.length = 0;
+    await loadRoutingContext(h.deps, session, event, legs.map(leg => ({ ...leg, answered_at: h.now().toISOString() })));
+    expect(h.db.log).toEqual([]);
+    await loadRoutingContext(h.deps, session, event, legs);
+    expect(h.db.log.some(entry => entry.table === "motorist_telephony_settings")).toBe(true);
+    expect(h.db.log.some(entry => entry.table === "motorist_telephony_lines")).toBe(true);
+  });
+
   it("answers an initiated caller before loading unrelated IVR and ring configuration", async () => {
     const h = createTelephonyHarness();
     for (const table of inboundTables) h.db.failNext(table, "select", fakeError("routing unavailable"));

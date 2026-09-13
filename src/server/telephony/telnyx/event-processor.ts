@@ -41,6 +41,8 @@ export type ProcessorDeps = SessionRunnerDeps & {
   sweepLimit?: number;
   /** Wall-clock budget shared by the event and its inline sweep. */
   sweepBudgetMs?: number;
+  /** The HTTP host retains this work after replying; cron/tests await it inline. */
+  deferMaintenance?: (work: () => Promise<void>) => void;
 };
 
 /** Keep SIP processing fast; the larger route duration also covers after-response push. */
@@ -327,12 +329,27 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
 
       await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
       logResult(deps, event, claim, ownedSession.id, "processed", run.commands, started, now);
-      // A clean run closes the open webhook incident (throttled per instance).
-      await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.webhook, now());
       return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", commands: run.commands, notes: run.apply.notes });
     });
-    if (result.outcome === "processed" || result.outcome === "ignored") await replayCorrelatedEvents(deps, event, ownedSession);
-    await maybeSweep(deps, started);
+    // The provider command, its durable projections and ledger completion are
+    // finished and the session lease is released before optional maintenance.
+    // Do not hold the next answer/hangup behind incident reporting or another
+    // call's sweep. The HTTP host must retain this promise (Next after), never
+    // launch untracked work; direct cron/recovery callers still await it.
+    const maintenance = async () => {
+      if (result.outcome === "processed" || result.outcome === "ignored") await replayCorrelatedEvents(deps, event, ownedSession);
+      if (eventClass === "control" && result.outcome === "processed") {
+        await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.webhook, now());
+      }
+      await maybeSweep(deps, started);
+    };
+    if (deps.deferMaintenance) {
+      try { deps.deferMaintenance(maintenance); }
+      catch {
+        deps.logger?.({ level: "warn", scope: "webhook", message: "maintenance scheduling unavailable" });
+        await maintenance();
+      }
+    } else await maintenance();
     return result;
   } catch (error) {
     const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -418,7 +435,7 @@ async function replayCorrelatedEvents(deps: ProcessorDeps, current: TelephonyEve
       // A shared Telnyx session ID is deliberately insufficient: it can describe
       // a different customer/operator leg. Exact control ID or our signed sid only.
       if (!waiting || !((waiting.callControlId && waiting.callControlId === current.callControlId) || waiting.clientState?.sid === session.id)) continue;
-      await processTelnyxEvent({ ...deps, ledgerReplay: "correlation", replayCorrelated: false, sweepAfterEvent: false }, envelope);
+      await processTelnyxEvent({ ...deps, ledgerReplay: "correlation", replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, envelope);
       if (++replayed >= 2) break;
     }
   } catch (error) {

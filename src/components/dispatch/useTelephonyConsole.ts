@@ -131,9 +131,13 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const [pauseReasonsToken, setPauseReasonsToken] = useState(0);
   const [presenceBusy, setPresenceBusy] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  // Ref ownership closes the gap before React renders; ending a call may
+  // replace another pending command without its late result clearing the UI.
+  const busyCommandRef = useRef<{ key: string; sessionId: string } | null>(null);
   const [outboundRequestCount, setOutboundRequestCount] = useState(0);
   const [readiness, setReadiness] = useState<PhoneReadiness>({ status: "idle", message: null });
   const [answerRequestCallId, setAnswerRequestCallId] = useState<string | null>(null);
+  const answerRequestRef = useRef<string | null>(null);
   const outboundBusyRef = useRef(false);
   const pendingStartRef = useRef<PendingCallStartRequest | null>(null);
   const microphoneCheckRef = useRef<AbortController | null>(null);
@@ -147,6 +151,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const incomingPolicyRef = useRef<IncomingOfferPolicy>({ automaticAllowed: false });
   const refreshRef = useRef<(() => void) | null>(null);
   const reconciledLegsRef = useRef(new Set<string>());
+  const endingBrowserLegsRef = useRef(new Set<string>());
   // Read inside the poll loop rather than through state: a reconnect must not
   // restart the poll effect (it would fire an extra request every time).
   const realtimeConnectedRef = useRef(false);
@@ -160,7 +165,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
 
   const reconcileBrowserLeg = useCallback((sessionId: string, callControlId: string) => {
-    if (reconciledLegsRef.current.has(callControlId)) return;
+    if (reconciledLegsRef.current.has(callControlId) || endingBrowserLegsRef.current.has(callControlId)) return;
     reconciledLegsRef.current.add(callControlId);
     // The server verifies this exact leg with Telnyx before changing it;
     // a missing browser connection alone does not prove that the call ended.
@@ -273,7 +278,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     }
   }, []);
 
-  const startOutboundRequest = useCallback(async (request: (webphone: CoordinatedWebphone) => Promise<void>, operationId?: string) => {
+  const startOutboundRequest = useCallback(async (request: (webphone: CoordinatedWebphone) => Promise<void>, operationId?: string, isCurrent: () => boolean = () => true) => {
     // A ref guards rapid taps across every dial surface before React renders.
     const webphone = webphoneRef.current;
     const error = outboundBusyRef.current ? "Volanie sa už spúšťa. Počkajte na spojenie." : browserCallStartError(webphone?.getSnapshot());
@@ -301,7 +306,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       operatorRequestId = await webphone.beginOperatorRequest();
       await request(webphone);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo spustiť.");
+      if (isCurrent()) setNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo spustiť.");
       throw error;
     } finally {
       if (operatorRequestId) await webphone.endOperatorRequest(operatorRequestId);
@@ -530,7 +535,9 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
 
   const callAction = useCallback(
     async (action: PhoneCallAction, sessionId: string, target?: TransferRequest) => {
-      if (busyAction) return;
+      if (busyCommandRef.current && (action !== "hangup" || busyCommandRef.current.key === "hangup")) return;
+      const command = { key: action, sessionId };
+      busyCommandRef.current = command;
       setBusyAction(action);
       setNotice(null);
       const browser = webphoneRef.current;
@@ -542,8 +549,22 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       const confirmEndedBrowserCall = () => {
         if (endedBrowserCallId && browser === webphoneRef.current) browser?.confirmCallEnded(endedBrowserCallId);
       };
+      // Explicit termination sends the owned media leg's BYE immediately. The
+      // authenticated server command still ends the other legs and remains
+      // pending until acknowledged; a local BYE is not a server success.
+      const endingBrowserLegId = action === "hangup" && endedBrowserCallId && browserCall?.telnyxCallControlId &&
+        [...snapshotRef.current.calls, ...snapshotRef.current.waiting].some((call) => call.sessionId === sessionId &&
+          call.legs.some((leg) => leg.profileId === snapshotRef.current.actorProfileId && leg.callControlId === browserCall.telnyxCallControlId))
+        ? browserCall.telnyxCallControlId : null;
+      if (endingBrowserLegId) {
+        // Its terminal SDK update must not add a competing reconciliation
+        // request while this explicit authoritative hangup is in flight.
+        endingBrowserLegsRef.current.add(endingBrowserLegId);
+        void browser?.hangup();
+      }
       try {
         const execute = async (webphone = webphoneRef.current) => {
+          if (busyCommandRef.current !== command) return;
           const result = await telephonyJson<{ error?: string; code?: string; operatorLegCallControlId?: string }>(
             `/api/telephony/calls/${encodeURIComponent(sessionId)}/${action}`,
             {
@@ -552,9 +573,10 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
               body: JSON.stringify(target ?? {}),
               label: PHONE_ACTION_LABEL_FOR_REQUEST[action],
               timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-              onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
+              onSlow: () => { if (busyCommandRef.current === command) setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."); },
             },
           );
+          if (busyCommandRef.current !== command) { refreshRef.current?.(); return; }
           if (isTelephonyNotConfigured(result)) {
             setConfigured(false);
             setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
@@ -592,38 +614,44 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           }
           refreshRef.current?.();
         };
-        if (action === "pickup") await startOutboundRequest(execute);
+        if (action === "pickup") await startOutboundRequest(execute, undefined, () => busyCommandRef.current === command);
         else await execute();
       } catch (error) {
-        setNotice(error instanceof Error ? error.message : PHONE_ACTION_ERRORS[action]);
+        if (busyCommandRef.current === command) setNotice(error instanceof Error ? error.message : PHONE_ACTION_ERRORS[action]);
       } finally {
-        setBusyAction(null);
+        if (endingBrowserLegId) { endingBrowserLegsRef.current.delete(endingBrowserLegId); refreshRef.current?.(); }
+        if (busyCommandRef.current === command) { busyCommandRef.current = null; setBusyAction(null); }
       }
     },
-    [busyAction, startOutboundRequest],
+    [startOutboundRequest],
   );
 
   /**
    * The participant routes and the supervisor routes are keyed differently from
    * the plain call actions (`parties/[legId]/…`, a `mode` body), so they get
    * their own thin wrapper rather than bending `callAction` out of shape. Both
-   * share its busy flag so two call commands can never overlap.
+   * share its gate for ordinary commands; explicit termination can preempt
+   * either wrapper without accepting the superseded command's late UI result.
    */
   const postCallCommand = useCallback(
     async (input: { busyKey: string; sessionId: string; path: string; body?: Record<string, unknown>; label: string; error: string; createsMedia?: boolean }) => {
-      if (busyAction) return;
+      if (busyCommandRef.current) return;
+      const command = { key: input.busyKey, sessionId: input.sessionId };
+      busyCommandRef.current = command;
       setBusyAction(input.busyKey);
       setNotice(null);
       try {
         const execute = async (webphone = webphoneRef.current) => {
+          if (busyCommandRef.current !== command) return;
           const result = await telephonyJson<{ error?: string; operatorLegCallControlId?: string }>(input.path, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(input.body ?? {}),
             label: input.label,
             timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-            onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
+            onSlow: () => { if (busyCommandRef.current === command) setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."); },
           });
+          if (busyCommandRef.current !== command) { refreshRef.current?.(); return; }
           if (isTelephonyNotConfigured(result)) {
             setConfigured(false);
             setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
@@ -638,15 +666,15 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           refreshRef.current?.();
         };
         // Changing an already connected supervision mode reuses its media leg.
-        if (input.createsMedia && !webphoneRef.current?.getSnapshot().call) await startOutboundRequest(execute);
+        if (input.createsMedia && !webphoneRef.current?.getSnapshot().call) await startOutboundRequest(execute, undefined, () => busyCommandRef.current === command);
         else await execute();
       } catch (error) {
-        setNotice(error instanceof Error ? error.message : input.error);
+        if (busyCommandRef.current === command) setNotice(error instanceof Error ? error.message : input.error);
       } finally {
-        setBusyAction(null);
+        if (busyCommandRef.current === command) { busyCommandRef.current = null; setBusyAction(null); }
       }
     },
-    [busyAction, startOutboundRequest],
+    [startOutboundRequest],
   );
 
   const partyAction = useCallback(
@@ -847,17 +875,19 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     const webphone = webphoneRef.current;
     const current = webphone?.getSnapshot();
     const callId = current?.call?.id;
-    if (!webphone || !callId || !current?.call?.ringing || current.answering || microphoneCheckRef.current) return;
-    // Publish intent before microphone permission/device acquisition starts.
-    // The microphone check's ref guards repeated taps before React renders.
+    if (!webphone || !callId || !current?.call?.ringing || current.answering || answerRequestRef.current === callId) return;
+    answerRequestRef.current = callId;
     setAnswerRequestCallId(callId);
-    void webphone.unlockAudio().catch(() => undefined);
-    void verifyMicrophone().then(() => {
-      if (webphone !== webphoneRef.current || webphone.getSnapshot().call?.id !== callId) throw new Error("Hovor už nie je dostupný.");
-      webphone.answer();
-    }).catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo prijať."))
-      .finally(() => setAnswerRequestCallId((pending) => pending === callId ? null : pending));
-  }, [verifyMicrophone]);
+    setNotice(null);
+    // The SDK opens the microphone while answering this existing invite. A
+    // separate getUserMedia/open/stop cycle here delays negotiation and checks
+    // the wrong device when a different tab owns the media connection.
+    // Outgoing calls retain preflight before any customer is dialled.
+    void webphone.answer().finally(() => {
+      if (answerRequestRef.current === callId) answerRequestRef.current = null;
+      setAnswerRequestCallId((pending) => pending === callId ? null : pending);
+    });
+  }, []);
   const takeoverPhone = useCallback(() => webphoneRef.current?.takeover(), []);
   const hangupBrowser = useCallback(() => void webphoneRef.current?.hangup(), []);
   const toggleMute = useCallback(() => webphoneRef.current?.toggleMute(), []);

@@ -56,6 +56,33 @@ function prepared() {
 }
 
 describe("initial call operation recovery", () => {
+  it("returns completed startup evidence without rereading the accepted journal", async () => {
+    const t = prepared();
+    t.h.db.registerRpc("motorist_provider_command_lookup_v2", args => {
+      const prior = t.records.get(String(args.p_command_id));
+      if (prior?.outcome === "accepted") throw new Error("completed startup must not reread its accepted journal");
+      return prior ?? null;
+    });
+    expect(await t.start()).toMatchObject({ sessionId, operatorLegCallControlId: "accepted-leg", telnyxSessionId: "provider-session" });
+    expect(t.pending()).toEqual([]);
+    expect(t.h.call(sessionId)).toBeTruthy();
+    expect(t.h.legs(sessionId)).toMatchObject([{ telnyx_call_control_id: "accepted-leg", ended_at: null }]);
+    expect(t.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("still rejects an ended materialized leg when the session has not caught up", async () => {
+    const t = prepared();
+    const resume = effects.resumePendingEffects;
+    vi.spyOn(effects, "resumePendingEffects").mockImplementationOnce(async (...args) => {
+      const completed = await resume(...args);
+      t.h.db.update("motorist_call_legs", { state: "ended", ended_at: t.h.now().toISOString() }, row => row.session_id === sessionId);
+      return completed;
+    });
+    await expect(t.start()).rejects.toMatchObject({ code: "initial_call_ended", status: 409 });
+    expect(t.h.session(sessionId).ended_at).toBeNull();
+    expect(t.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("recovers a crash before dispatch from the frozen plan and stages before HTTP", async () => {
     const t = prepared();
     t.h.db.failNext("motorist_telephony_settings", "select", "live preflight must not run again");

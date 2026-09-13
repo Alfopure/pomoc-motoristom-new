@@ -85,6 +85,15 @@ describe("telnyx webhook cold path", () => {
     expect(offenders).toEqual([]);
   });
 
+  it("keeps click-to-call and hangup authentication off the dispatch mutation graph", () => {
+    for (const entry of ["src/app/api/telephony/calls/route.ts", "src/app/api/telephony/calls/[id]/hangup/route.ts"]) {
+      const actionGraph = importGraph(entry);
+      expect(actionGraph).toContain("src/server/api-auth.ts");
+      const offenders = FORBIDDEN.flatMap(({ pattern, why }) => actionGraph.filter((module) => pattern.test(module)).map((module) => `${module} — ${why}`));
+      expect(offenders, entry).toEqual([]);
+    }
+  });
+
   it("stays small enough to load inside the first-command timeout", () => {
     expect(graph.length, `webhook import graph:\n${graph.join("\n")}`).toBeLessThanOrEqual(MAX_MODULES);
   });

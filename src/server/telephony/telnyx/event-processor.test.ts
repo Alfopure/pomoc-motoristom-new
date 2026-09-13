@@ -5,6 +5,46 @@ import { CONNECTION_ID, createTelephonyHarness, NUMBERS, PROFILES } from "@/test
 import { processTelnyxEvent } from "./event-processor";
 
 describe("processTelnyxEvent", () => {
+  it("acknowledges durable call work before maintenance, with the session lease released", async () => {
+    const h = createTelephonyHarness();
+    const queued: Array<() => Promise<void>> = [];
+    const event = h.envelope("call.initiated", { call_control_id: "fast-webhook", call_session_id: "fast-session", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "fast-event");
+    const result = await processTelnyxEvent({ ...h.deps, deferMaintenance: work => queued.push(work) }, event);
+
+    expect(result).toMatchObject({ status: 200, outcome: "processed" });
+    expect(h.telnyx.of("answer")).toHaveLength(1);
+    expect(h.rows("motorist_telnyx_webhook_events")).toMatchObject([{ event_id: "fast-event", status: "processed" }]);
+    expect(h.session(result.sessionId!).lease_token).toBeNull();
+    expect(queued).toHaveLength(1);
+    const replayReads = () => h.db.log.filter(entry => entry.table === "motorist_telnyx_webhook_events" && entry.operation === "select");
+    expect(replayReads()).toHaveLength(0);
+    await queued[0]();
+    expect(replayReads()).toHaveLength(1);
+    expect(h.telnyx.of("answer")).toHaveLength(1);
+  });
+
+  it("retains early-answer recovery after the response and awaits it if scheduling is unavailable", async () => {
+    for (const schedulingFails of [false, true]) {
+      const h = createTelephonyHarness();
+      const queued: Array<() => Promise<void>> = [];
+      const early = h.envelope("call.answered", { call_control_id: "deferred-early", call_session_id: "deferred-session" }, "deferred-answer");
+      expect(await h.process(early)).toMatchObject({ outcome: "awaiting_correlation", status: 500 });
+      const result = await processTelnyxEvent({ ...h.deps, deferMaintenance: work => {
+        if (schedulingFails) throw new Error("host unavailable");
+        queued.push(work);
+      } }, h.envelope("call.initiated", { call_control_id: "deferred-early", call_session_id: "deferred-session", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "deferred-init"));
+      expect(result).toMatchObject({ status: 200, outcome: "processed" });
+      if (!schedulingFails) {
+        expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-answer")?.status).toBe("failed");
+        expect(queued).toHaveLength(1);
+        await queued[0]();
+      }
+      expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-answer")).toMatchObject({ status: "processed", attempts: 2 });
+      expect(h.session(result.sessionId!).lease_token).toBeNull();
+      expect(queued).toHaveLength(schedulingFails ? 0 : 1);
+    }
+  });
+
   it("schedules call notifications only after the offered legs have been persisted", async () => {
     const h = createTelephonyHarness();
     const afterResponse: Array<() => void> = [];

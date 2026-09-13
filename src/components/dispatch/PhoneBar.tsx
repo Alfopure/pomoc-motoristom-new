@@ -257,7 +257,6 @@ function PhoneBarControls(props: PhoneBarProps) {
             icon={PhoneOff}
             label={focus?.kind === "offer" || phone.call?.ringing ? "Odmietnuť" : PHONE_ACTION_LABELS.hangup}
             busy={props.busyAction === "hangup"}
-            disabled={busy && props.busyAction !== "hangup"}
             onClick={() => (focus?.kind === "offer" || phone.call?.ringing ? props.onHangupBrowser() : focus ? runAction("hangup") : props.onHangupBrowser())}
           />
         )}

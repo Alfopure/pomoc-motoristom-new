@@ -101,7 +101,7 @@ describe("POST /api/telephony/telnyx/webhook", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ ok: true, outcome: "processed", eventId: "evt-1", sessionId: "sess-1", commands: ["answer"] });
-    expect(processTelnyxEvent).toHaveBeenCalledWith({ marker: "deps" }, ENVELOPE);
+    expect(processTelnyxEvent).toHaveBeenCalledWith({ marker: "deps", deferMaintenance: expect.any(Function) }, ENVELOPE);
   });
 
   it("acknowledges an event from a foreign connection with 200", async () => {

@@ -32,7 +32,7 @@ const qa = {
     emit("telnyx.notification", { type: "callUpdate", call: {
       id, state, direction: "inbound", options: { remoteCallerNumber: "+421900000002" },
       telnyxIDs: { telnyxCallControlId: "incoming-leg" }, isAudioMuted: false,
-      answer() { window.phoneHarness.sdkAnswers++; }, hangup() { window.phoneHarness.sdkHangups++; },
+      answer() { return window.phoneHarness.answerSdk(); }, hangup() { window.phoneHarness.sdkHangups++; },
       muteAudio() {}, unmuteAudio() {}, dtmf() {},
     } });
   },
