@@ -298,7 +298,7 @@ function LiveCallRow({
         {canAnswer && <ActionButton disabled={answerBlocked} icon={X} label="Odmietnuť" tone="danger-outline" onClick={onRejectOffer} />}
         {canPickup && <ActionButton busy={busyAction === "pickup"} disabled={Boolean(pickupBlockReason)} icon={PhoneIncoming} label={pickupBlockReason ?? (phone?.onDemand ? "Prijať v appke" : "Prevziať")} tone="accept" onClick={() => onCallAction("pickup", call.sessionId)} />}
         {canPickup && pickupBlockReason === "Najprv sa nastav dostupný" && onMakeAvailable && <ActionButton disabled={isBusy} icon={PhoneCall} label="Som dostupný" tone="outline" onClick={onMakeAvailable} />}
-        {call.kind === "active" && call.mine && <ActionButton busy={busyAction === "hangup"} disabled={isBusy && busyAction !== "hangup"} icon={PhoneOff} label="Ukončiť" tone="danger" onClick={confirmAndEnd} />}
+        {call.kind === "active" && call.mine && <ActionButton busy={busyAction === "hangup"} icon={PhoneOff} label="Ukončiť" tone="danger" onClick={confirmAndEnd} />}
         {call.kind === "active" && !call.mine && Boolean(call.operatorProfileId) && canManageCalls && !supervising && (
           <>
             <ActionButton busy={busyAction === `supervise:${call.sessionId}`} disabled={isBusy} icon={Ear} label="Počúvať" tone="outline" onClick={() => onSupervise(call.sessionId, "monitor")} />

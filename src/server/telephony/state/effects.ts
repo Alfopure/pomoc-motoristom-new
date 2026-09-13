@@ -217,7 +217,7 @@ export async function persistTransition(
     await run();
     if (input.continuation) {
       input.continuation.databaseCursor = index + 1;
-      session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id);
+      session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
     }
   };
   for (const legPatch of input.transition.legs) await effect(() => applyLegPatch(deps, session, legPatch));
@@ -464,7 +464,10 @@ function seconds(from: string | null | undefined, to: string | null | undefined)
 /** Keeps exactly one `motorist_calls` row per session in sync with the session. */
 export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, overrides: Transition["call"]): Promise<void> {
   const { admin } = deps;
-  const existing = await admin.from("motorist_calls").select("*").eq("session_id", session.id).maybeSingle();
+  const [existing, customerLeg] = await Promise.all([
+    admin.from("motorist_calls").select("*").eq("session_id", session.id).maybeSingle(),
+    session.customer_leg_id ? admin.from("motorist_call_legs").select("telnyx_call_control_id").eq("id", session.customer_leg_id).maybeSingle() : null,
+  ]);
   if (existing.error) fail("call lookup failed", existing.error);
   const current = existing.data;
   const meta = readMeta(session);
@@ -472,7 +475,6 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
   const endedAt = overrides.ended_at ?? session.ended_at ?? current?.ended_at ?? null;
   const status = overrides.status && (!session.ended_at || TERMINAL_CALL_STATUSES.has(overrides.status)) ? overrides.status :
     current && TERMINAL_CALL_STATUSES.has(current.status) ? current.status : callStatusForSession({ state: session.state, direction: session.direction, answered_at: answeredAt });
-  const customerLeg = session.customer_leg_id ? await admin.from("motorist_call_legs").select("telnyx_call_control_id").eq("id", session.customer_leg_id).maybeSingle() : null;
 
   const values: Database["public"]["Tables"]["motorist_calls"]["Update"] = {
     provider: "telnyx",
@@ -656,7 +658,10 @@ function canRecoverMediaFailure(session: SessionRow, error: unknown): boolean {
 }
 
 async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command: Command): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
-  await assertOwnership();
+  // Contract2 database mutations are fenced and the real provider client
+  // renews/fences at dispatch. Renewing again at each wrapper does not add a
+  // stronger boundary, but serializes several DB requests ahead of each call.
+  if (sessionOwnership.getStore()?.contract !== 2) await assertOwnership();
   const telnyx = requireTelnyx(deps);
   // Defense at the provider boundary: even a replayed/stale command cannot
   // promote an invited leg to audible audio or remove its provider mute.
@@ -674,7 +679,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
   }
   if (command.kind.startsWith("conference_") && command.kind !== "conference_create" && !command.conferenceId) {
     command.conferenceId = requireConference(ctx);
-    if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id);
+    if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
   switch (command.kind) {
     case "answer":
@@ -1027,7 +1032,7 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     });
     if (!authorization.applied || !authorization.offerToken) return { skipped: true, detail: { reason: "offer no longer authorized" } };
     command.clientState.offerToken = authorization.offerToken;
-    if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id);
+    if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
   const isSip = command.to.startsWith("sip:");
   const result = await telnyx.dial({
@@ -1331,7 +1336,7 @@ async function executeReduceResult(
   // A transition can clear the persisted conference while its effects still
   // need to leave the old one (park / blind transfer).
   const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: input.continuation?.previousConferenceId ?? session.conference_id ?? input.session.conference_id, continuation: input.continuation };
-  if (input.continuation) {
+  if (input.continuation && commands.length) {
     const legs = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", session.id);
     if (legs.error) throw new EffectsError("continuation dial results unavailable");
     for (const leg of legs.data ?? []) {
@@ -1347,7 +1352,7 @@ async function executeReduceResult(
   const checkpointCommand = async (key: string) => {
     if (!input.continuation) return;
     if (!input.continuation.completedCommands.includes(key)) input.continuation.completedCommands.push(key);
-    ctx.session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id);
+    ctx.session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, ctx.session);
     session = ctx.session;
   };
   for (const command of input.databaseOnly ? [] : commands) {
@@ -1365,9 +1370,9 @@ async function executeReduceResult(
           outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: true, bestEffort: Boolean(command.bestEffort), error: null, ms: 0, detail: { reason: "superseded continuation" } });
           continue;
         }
-        await deps.renewLease?.();
+        if (sessionOwnership.getStore()?.contract !== 2) await deps.renewLease?.();
       }
-      if (readMeta(ctx.session).recording?.policy.enabled) await deps.renewLease?.();
+      if (readMeta(ctx.session).recording?.policy.enabled && sessionOwnership.getStore()?.contract !== 2) await deps.renewLease?.();
       const pending = readMeta(ctx.session).recording?.pendingAudio;
       const pendingCommand = pending?.commands.some((item) => "commandId" in command && item.commandId === command.commandId);
       if (pendingCommand) {
@@ -1578,7 +1583,7 @@ async function executeReduceResult(
           // Replaying the predecessor first would otherwise recurse forever on
           // the same deterministic provider rejection.
           input.continuation.completedCommands = commands.map(commandKey);
-          session = await checkpointEffects(deps, stagedCompensation.id, input.continuation, input.continuation.id);
+          session = await checkpointEffects(deps, stagedCompensation.id, input.continuation, input.continuation.id, stagedCompensation);
           const compensatedResult = await resumePendingEffects(deps, session);
           if (compensatedResult) session = compensatedResult.session;
           ctx.session = session;
@@ -1659,13 +1664,17 @@ async function executeReduceResult(
     }
     input.continuation.attempts += 1;
     input.continuation.lastError = projectionError ?? failure?.error ?? (continuationComplete(input.continuation) ? null : "mandatory effects pending");
-    session = await checkpointEffects(deps, session.id, continuationComplete(input.continuation) ? null : input.continuation, input.continuation.id);
+    session = await checkpointEffects(deps, session.id, continuationComplete(input.continuation) ? null : input.continuation, input.continuation.id, session);
     if (!continuationComplete(input.continuation) && !failure && !projectionError) failure = { command: "continuation", error: "mandatory effects pending", callGone: false };
   }
 
   if (!failure) {
-    const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("id", session.id).maybeSingle();
-    if (fresh.data) session = fresh.data;
+    // The final fenced checkpoint above already returned the current row.
+    // Compatibility writers still refresh because they do not own that fence.
+    if (!input.continuation || sessionOwnership.getStore()?.contract !== 2) {
+      const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("id", session.id).maybeSingle();
+      if (fresh.data) session = fresh.data;
+    }
     // Clean transition: close the open command incident (throttled per instance).
     await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.commands, deps.now());
   }
@@ -1686,7 +1695,7 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
       const monitorDisconnect = command.kind === "hangup" && command.reason === "invited_monitor_stopped";
       if (!(command.kind === "recording_stop" || ending && command.kind === "hangup" || monitorDisconnect) || entry.completedCommands.includes(commandKey(command))) continue;
       try {
-        await deps.renewLease?.();
+        if (sessionOwnership.getStore()?.contract !== 2) await deps.renewLease?.();
         await executeCommand(deps, ctx, command);
       } catch (error) {
         if (error instanceof SessionLeaseLostError) throw error;
@@ -1731,7 +1740,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
         await deps.renewLease?.();
         if (verified.proof) {
           current.verifiedContact = toJson(verified.proof);
-          const capturedSession = await checkpointEffects(deps, session.id, current, current.id);
+          const capturedSession = await checkpointEffects(deps, session.id, current, current.id, fresh.data);
           const history = readContactHistory(capturedSession);
           history.proofs = [...history.proofs.filter((proof) => proof.id !== verified.proof!.id), verified.proof];
           const next = emptyTransition();
@@ -1740,23 +1749,23 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
           const proofEvent: SessionEvent = { kind: "app", type: "sweep", id: `contact-proof:${verified.proof.id}`, actorProfileId: null, occurredAt: verified.proof.occurredAt };
           const staged = await stageEffects(deps, { session: capturedSession, expectedVersion: capturedSession.version, event: proofEvent,
             result: { next, commands: [], compensations: [], guard: null, ignored: null } });
-          const saved = await checkpointEffects(deps, session.id, null, current.id);
+          const saved = await checkpointEffects(deps, session.id, null, current.id, staged);
           const proofEntry = readPendingEffects(staged).entries.find((item) => item.id === proofEvent.id)!;
           // The provider fact is now committed with its accounting obligation;
           // a failure below cannot lose it when the call subsequently ends.
           await executeReduceResult(deps, { session: saved, expectedVersion: saved.version, event: proofEvent,
             result: { next: proofEntry.transition, commands: [], compensations: [], guard: null, ignored: null }, continuation: proofEntry });
-        } else if (!verified.retry) await checkpointEffects(deps, session.id, null, current.id);
+        } else if (!verified.retry) await checkpointEffects(deps, session.id, null, current.id, fresh.data);
         else {
           current.attempts += 1;
           current.lastError = verified.reason;
-          await checkpointEffects(deps, session.id, current, current.id);
+          await checkpointEffects(deps, session.id, current, current.id, fresh.data);
         }
       } catch (error) {
         if (error instanceof SessionLeaseLostError) throw error;
         current.attempts += 1;
         current.lastError = describeError(error);
-        await checkpointEffects(deps, session.id, current, current.id);
+        await checkpointEffects(deps, session.id, current, current.id, fresh.data);
         deps.logger?.({ level: "warn", scope: "callback", sessionId: session.id, code: "conference_contact_verification_pending" });
       }
       const updated = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
@@ -1772,7 +1781,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     } catch (error) {
       current.attempts += 1;
       current.lastError = describeError(error);
-      await checkpointEffects(deps, session.id, current, current.id);
+      await checkpointEffects(deps, session.id, current, current.id, fresh.data);
       throw error;
     }
     latest.branch = current.branch;

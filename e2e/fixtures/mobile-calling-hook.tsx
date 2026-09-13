@@ -17,6 +17,19 @@ const harness = {
   stoppedTracks: 0,
   sdkHangups: 0,
   sdkAnswers: 0,
+  answerSdk: () => {
+    harness.sdkAnswers++;
+    // Model the SDK's own acquisition, not an extra application preflight.
+    return navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      .then((stream) => { stream.getTracks().forEach((track) => track.stop()); });
+  },
+  hangupEndsMedia: false,
+  hangupFailure: false,
+  holdHangup: false,
+  finishHangup: () => {},
+  localStream: undefined as MediaStream | undefined,
+  remoteStream: undefined as MediaStream | undefined,
+  audioContext: undefined as AudioContext | undefined,
   deferredActiveReads: [] as Array<(response: Response) => void>,
   deferActiveReads: false,
   resolveActiveRead: () => harness.deferredActiveReads.shift()?.(activeResponse()),
@@ -47,7 +60,13 @@ const harness = {
   callState: (state: "ringing" | "active" | "hangup", id = "fixture-incoming") => emit("telnyx.notification", { type: "callUpdate", call: {
     id, state, direction: "inbound",
     options: { remoteCallerNumber: "+421900000002" }, telnyxIDs: { telnyxCallControlId: "incoming-leg" },
-    isAudioMuted: false, answer() { harness.sdkAnswers++; }, hangup() { harness.sdkHangups++; }, muteAudio() {}, unmuteAudio() {}, dtmf() {},
+    localStream: harness.localStream, remoteStream: harness.remoteStream,
+    isAudioMuted: false, answer() { return harness.answerSdk(); }, hangup() {
+      harness.sdkHangups++;
+      if (harness.hangupFailure) throw new Error("Fixture BYE failed");
+      if (harness.hangupEndsMedia) this.state = "hangup";
+      if (harness.holdHangup) return new Promise<void>((resolve) => { harness.finishHangup = resolve; });
+    }, muteAudio() {}, unmuteAudio() {}, dtmf() {},
   } }),
 };
 declare global { interface Window { phoneHarness: typeof harness } }
@@ -102,7 +121,7 @@ function Fixture() {
       onSupervise={telephony.supervise} onStopSupervise={telephony.stopSupervise} onAnswer={telephony.answer}
       onHangupBrowser={telephony.hangupBrowser} onToggleMute={telephony.toggleMute} onDtmf={telephony.sendDtmf}
       onNewCase={() => {}} onLinkCase={() => {}} onOpenCase={() => {}} />
-    <output id="state" data-call={telephony.phone.call?.id ?? ""} data-server-call={telephony.phoneBar.active?.sessionId ?? ""} data-configured={String(telephony.configured)} data-pending={String(telephony.outboundPending)} data-legs={telephony.phone.pendingOperatorLegs ?? 0} data-status={telephony.phone.status} data-readiness={telephony.readiness.status} data-ringing={String(telephony.phone.call?.ringing ?? false)}>{telephony.notice ?? telephony.readiness.message}</output>
+    <output id="state" data-busy={telephony.busyAction ?? ""} data-call={telephony.phone.call?.id ?? ""} data-server-call={telephony.phoneBar.active?.sessionId ?? ""} data-configured={String(telephony.configured)} data-pending={String(telephony.outboundPending)} data-legs={telephony.phone.pendingOperatorLegs ?? 0} data-status={telephony.phone.status} data-readiness={telephony.readiness.status} data-ringing={String(telephony.phone.call?.ringing ?? false)}>{telephony.notice ?? telephony.readiness.message}</output>
   </>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

@@ -450,7 +450,27 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
 async function completeDurableInitialDial(deps: CallActionDeps, session: SessionRow, id: string,
   plan: Pick<InitialCallPlan, "to" | "from">): Promise<StartOutboundResult> {
   try {
-    await resumePendingEffects(effectsFor(deps), session, { priorityEntryId: `initial:${id}` });
+    const completed = await resumePendingEffects(effectsFor(deps), session, { priorityEntryId: `initial:${id}` });
+    const dial = completed?.commands.find(command => command.kind === "dial" && command.commandId === id && command.ok && !command.skipped);
+    const controlId = dial?.detail?.callControlId;
+    if (completed && !completed.failed && !completed.projectionPending &&
+      completed.session.writer_contract === 2 && !completed.session.ended_at && !completed.session.termination_requested_at &&
+      ACTIVE_SESSION_STATES.has(completed.session.state) &&
+      !readPendingEffects(completed.session).entries.some(entry => entry.id === `initial:${id}`) && typeof controlId === "string" && controlId) {
+      // This invocation already completed the exact journalled dial, local
+      // materialization, history and final fenced checkpoint. Reuse that
+      // authoritative outcome instead of loading the same journal/history
+      // again before the browser can auto-answer its own leg. Still verify
+      // the exact materialized leg: a delayed accepted response must never
+      // revive one that has already ended.
+      const leg = await deps.admin.from("motorist_call_legs").select("id, ended_at")
+        .eq("organization_id", deps.organizationId).eq("session_id", session.id)
+        .eq("telnyx_call_control_id", controlId).maybeSingle();
+      if (!leg.error && leg.data && !leg.data.ended_at) {
+        return { sessionId: session.id, operatorLegCallControlId: controlId,
+          telnyxSessionId: completed.session.telnyx_session_id, to: plan.to, from: plan.from };
+      }
+    }
   } catch (error) {
     if (error instanceof SessionLeaseLostError) throw error;
     // A checkpoint/leg/history failure may follow acceptance. The staged entry

@@ -846,6 +846,81 @@ describe("TelnyxWebphone", () => {
     h.phone.stop();
   });
 
+  it("stops terminal call media tracks before a delayed SDK BYE acknowledgement", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const signaling = deferred<void>();
+    const stopLocal = vi.fn();
+    const stopRemote = vi.fn();
+    const call = fakeCall({
+      state: "active",
+      localStream: { getTracks: () => [{ stop: stopLocal }] } as unknown as MediaStream,
+      remoteStream: { getTracks: () => [{ stop: stopRemote }] } as unknown as MediaStream,
+      hangup: () => { call.state = "hangup"; return signaling.promise; },
+    });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    const pending = h.phone.hangup();
+    expect(stopLocal).toHaveBeenCalledOnce();
+    expect(stopRemote).toHaveBeenCalledOnce();
+    expect(h.phone.getSnapshot().call).toBeNull();
+    signaling.resolve();
+    await pending;
+    expect(stopLocal).toHaveBeenCalledOnce();
+    h.phone.stop();
+  });
+
+  it("server-confirmed termination releases only the current call's streams", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const stop = vi.fn();
+    const call = fakeCall({ state: "active", localStream: { getTracks: () => [{ stop }] } as unknown as MediaStream });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    h.phone.confirmCallEnded("some-other-call");
+    expect(stop).not.toHaveBeenCalled();
+    h.phone.confirmCallEnded(call.id);
+    expect(stop).toHaveBeenCalledOnce();
+    await flush();
+    expect(stop).toHaveBeenCalledOnce();
+    h.phone.stop();
+  });
+
+  it("does not send a second BYE when the server confirms an already dispatched browser hangup", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const signaling = deferred<void>();
+    const hangup = vi.fn(() => signaling.promise);
+    const call = fakeCall({ state: "active", hangup });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    const pending = h.phone.hangup();
+    expect(hangup).toHaveBeenCalledOnce();
+    h.phone.confirmCallEnded(call.id);
+    await flush();
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(hangup).toHaveBeenCalledOnce();
+    signaling.resolve();
+    await pending;
+    h.phone.stop();
+  });
+
+  it("releases media again after a rejected browser BYE when the server confirms termination", async () => {
+    const h = harness();
+    h.phone.start();
+    await flush();
+    const hangup = vi.fn<() => Promise<void>>().mockRejectedValueOnce(new Error("BYE refused")).mockResolvedValue(undefined);
+    const call = fakeCall({ state: "active", hangup });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    await h.phone.hangup();
+    expect(h.phone.getSnapshot().call?.id).toBe(call.id);
+    h.phone.confirmCallEnded(call.id);
+    await flush();
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(hangup).toHaveBeenCalledTimes(2);
+    h.phone.stop();
+  });
+
   it("clears a matching server-confirmed end without awaiting SDK hangup and ignores stale updates", async () => {
     const h = harness();
     h.phone.start();

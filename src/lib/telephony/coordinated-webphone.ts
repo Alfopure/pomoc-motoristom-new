@@ -192,7 +192,7 @@ export class CoordinatedWebphone {
   }
 
   private report(error: unknown) { this.publish({ ...this.snapshot, callError: error instanceof Error ? error.message : "Akcia telefónu zlyhala." }, !this.local); }
-  answer() { void this.command("answer").catch((error) => this.report(error)); }
+  answer() { return this.command("answer").catch((error) => this.report(error)); }
   hangup() { return this.command("hangup").catch((error) => this.report(error)); }
   confirmCallEnded(callId: string) { return this.command("confirmCallEnded", callId).catch((error) => this.report(error)); }
   toggleMute() { void this.command("toggleMute").catch((error) => this.report(error)); }

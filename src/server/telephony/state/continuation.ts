@@ -2,6 +2,7 @@ import { measureRequestStep } from "@/server/request-metrics";
 import type { Json } from "@/lib/supabase/database.types";
 import type { EffectsDeps } from "./effects";
 import { SessionConflictError } from "../service-errors";
+import { sessionOwnership } from "../ownership";
 import { commandKey, readMeta, toJson, type Command, type Compensation, type ReduceResult, type SessionEvent, type SessionRow, type Transition } from "./types";
 
 export type EffectContinuation = {
@@ -102,13 +103,23 @@ export async function stageEffects(deps: EffectsDeps, input: { session: SessionR
   return response.session;
 }
 
-export async function checkpointEffects(deps: EffectsDeps, sessionId: string, entry: EffectContinuation | null, entryId: string): Promise<SessionRow> {
-  return measureRequestStep("checkpoint", () => checkpointOwnedEffects(deps, sessionId, entry, entryId));
+export async function checkpointEffects(deps: EffectsDeps, sessionId: string, entry: EffectContinuation | null, entryId: string, knownSession?: SessionRow): Promise<SessionRow> {
+  return measureRequestStep("checkpoint", () => checkpointOwnedEffects(deps, sessionId, entry, entryId, knownSession));
 }
 
-async function checkpointOwnedEffects(deps: EffectsDeps, sessionId: string, entry: EffectContinuation | null, entryId: string): Promise<SessionRow> {
+async function checkpointOwnedEffects(deps: EffectsDeps, sessionId: string, entry: EffectContinuation | null, entryId: string, knownSession?: SessionRow): Promise<SessionRow> {
+  const owner = sessionOwnership.getStore();
+  // A prior stage/checkpoint already returned this complete owned row. Try its
+  // version directly; the UPDATE remains fenced and compare-and-set. A changed
+  // version falls back to a fresh read, preserving other queued obligations.
+  // Termination can update its independent flag without changing version: this
+  // patch never writes that flag and RETURNING adopts its current value.
+  const known = owner?.contract === 2 && owner.admin === deps.admin && owner.sessionId === sessionId && owner.organizationId === deps.organizationId &&
+    knownSession?.writer_contract === 2 && knownSession.id === sessionId && knownSession.organization_id === deps.organizationId &&
+    readPendingEffects(knownSession).entries.some(item => item.id === entryId) ? knownSession : null;
   for (let retry = 0; retry < 3; retry += 1) {
-    const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).single();
+    const fresh = retry === 0 && known ? { data: known, error: null }
+      : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).single();
     if (fresh.error || !fresh.data) throw new Error(`Effects checkpoint read failed: ${fresh.error?.message ?? "missing session"}`);
     const pending = readPendingEffects(fresh.data);
     if (!pending.entries.some((item) => item.id === entryId)) return fresh.data;
