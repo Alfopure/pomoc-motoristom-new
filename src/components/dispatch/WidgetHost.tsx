@@ -35,8 +35,7 @@ export function WidgetHost({ preferences, onChange, renderWidget, onClose, expan
   active?: boolean;
 }) {
   const { enabled: previewEnabled } = useLayoutPreview();
-  // Preserve the preference if this browser previously visited Preview, while
-  // keeping the additional widget out of the production controls and tree.
+  // Retain saved calendar preferences when this host runs without the released workspace.
   const widgets = preferences.widgets.filter(widget => widget.id !== "calendar" || previewEnabled);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);

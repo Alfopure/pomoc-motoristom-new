@@ -35,8 +35,8 @@ export const useLayoutPreview = () => useContext(PreviewContext);
 export function LayoutPreviewToolbar({ live }: { live: boolean }) {
   const { enabled, mode, setMode } = useLayoutPreview();
   if (!enabled) return null;
-  return <div className="layout-preview-toolbar" role="region" aria-label="Náhľad rozhrania">
-    <div className="layout-preview-description"><PanelsTopLeft size={15} aria-hidden="true" /><strong>Náhľad rozhrania</strong><span>{live ? "Spoločné údaje · uložené zmeny sú reálne" : "Testovacie údaje"}</span></div>
+  return <div className="layout-preview-toolbar" role="region" aria-label="Vzhľad pracoviska">
+    <div className="layout-preview-description"><PanelsTopLeft size={15} aria-hidden="true" /><strong>Vzhľad pracoviska</strong><span>{live ? "Spoločné údaje · uložené zmeny sú reálne" : "Testovacie údaje"}</span></div>
     <div className="layout-preview-options" role="group" aria-label="Vzhľad aplikácie">
       <button type="button" aria-pressed={mode === "modern"} onClick={() => setMode("modern")}>Nový vzhľad</button>
       <button type="button" aria-pressed={mode === "classic"} onClick={() => setMode("classic")}>Pôvodný vzhľad</button>

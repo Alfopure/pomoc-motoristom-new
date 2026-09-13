@@ -32,6 +32,8 @@ type Props = {
   onSent?: (result: SmsComposerResult) => void;
   open: boolean;
 };
+type SmsContextChange = { kind: "template"; template: SmsPrepareInput["template"] } | { kind: "case"; caseId: string }
+  | { kind: "opening"; intent: string; caseId: string; template: SmsPrepareInput["template"]; phone: string; message: string };
 
 export function SmsComposerDialog(props: Props) {
   const [started, setStarted] = useState(props.open);
@@ -74,11 +76,13 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
   const [previousOpen, setPreviousOpen] = useState(open);
   const [openingIntent, setOpeningIntent] = useState(() => JSON.stringify([caseId, initialTemplate, initialPhone, initialMessage]));
   const [incomingHandoff, setIncomingHandoff] = useState(false);
+  const [pendingContext, setPendingContext] = useState<SmsContextChange | null>(null);
   const selectedCase = cases.find((entry) => entry.id === selectedCaseId);
   const caseAvailable = Boolean(selectedCaseId && (selectedCase?.validPhone || (caseId === selectedCaseId && !selectedCase)));
   const requiresCase = template !== "custom";
   const segments = smsSegments(message.trim());
   const unresolved = result?.sms?.statusDetail === "send_unconfirmed" || result?.sms?.statusDetail === "sending_to_provider";
+  const hasDraft = !result && Boolean(message.trim() || eta || towAddress.trim() || departed);
   // A later explicit quick action may request another template/case. Apply it
   // only on reopening, and never discard an unresolved send or change an open draft.
   if (open !== previousOpen) {
@@ -86,15 +90,17 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
     if (open) setTab(initialTab);
     const intent = JSON.stringify([caseId, initialTemplate, initialPhone, initialMessage]);
     if (open && intent !== openingIntent && initialMessage && attempted && (!result || unresolved)) setIncomingHandoff(true);
-    if (open && intent !== openingIntent && (!attempted || (result && !unresolved))) {
+    if (open && intent !== openingIntent && !preparing && !sending && (!attempted || (result && !unresolved))) {
       if (initialMessage && message.trim() && !result) {
         setIncomingHandoff(true);
+      } else if (hasDraft) {
+        setPendingContext({ kind: "opening", intent, caseId: caseId ?? "", template: initialTemplate, phone: initialPhone, message: initialMessage });
       } else {
       setOpeningIntent(intent);
       setSelectedCaseId(caseId ?? ""); setTemplate(initialTemplate); setPhone(initialPhone);
       setPreview(null); setMessage(initialMessage); setResult(null); setAttempted(false);
       setRequestId(crypto.randomUUID()); setDeparted(false); setEta(""); setError("");
-      setReply(null); setSelectedTaskId("");
+      setReply(null); setSelectedTaskId(""); setTowAddress(""); setPendingContext(null);
       }
     }
   }
@@ -129,8 +135,21 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
   if (!open) return null;
 
   function editContext() { setPreview(null); setError(""); }
+  function applyContext(change: SmsContextChange) {
+    if (locked) return;
+    setPendingContext(null); setPreview(null); setResult(null); setAttempted(false); setRequestId(crypto.randomUUID());
+    setMessage(change.kind === "opening" ? change.message : ""); setError(""); setReply(null); setSelectedTaskId("");
+    setDeparted(false); setEta(""); setTowAddress(""); setIncomingHandoff(false);
+    if (change.kind === "template") setTemplate(change.template);
+    else if (change.kind === "case") setSelectedCaseId(change.caseId);
+    else { setOpeningIntent(change.intent); setSelectedCaseId(change.caseId); setTemplate(change.template); setPhone(change.phone); }
+  }
+  function requestContext(change: SmsContextChange) {
+    if (locked) return;
+    if (hasDraft) setPendingContext(change); else applyContext(change);
+  }
   async function prepare() {
-    if (busyRef.current || attempted) return;
+    if (busyRef.current || attempted || pendingContext) return;
     busyRef.current = true; setPreparing(true); setError("");
     try {
       const response = await fetch("/api/sms/prepare", {
@@ -147,7 +166,7 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
   }
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (busyRef.current || !preview || validation) return;
+    if (busyRef.current || !preview || validation || pendingContext) return;
     busyRef.current = true; setSending(true); setAttempted(true); setError("");
     try {
       const response = await fetch("/api/sms/send", { method: "POST", headers: { "Content-Type": "application/json" },
@@ -164,7 +183,7 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
   }
   function newMessage() {
     setAttempted(false); setResult(null); setPreview(null); setMessage(""); setRequestId(crypto.randomUUID()); setError("");
-    setDeparted(false); setEta(""); setSelectedTaskId("");
+    setDeparted(false); setEta(""); setSelectedTaskId(""); setPendingContext(null);
   }
   function handleKeys(event: React.KeyboardEvent) {
     if (event.key === "Escape" && !sending && !preparing) { event.preventDefault(); onClose(); }
@@ -186,24 +205,25 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
         {modernLayout && <details className="live-sms-secondary"><summary>Ďalšie možnosti</summary><button type="button" aria-pressed={tab === "inbox"} onClick={() => setTab("inbox")} className={`${button} ${tab === "inbox" ? "bg-yellow-100" : ""}`}>Prijaté SMS</button></details>}
       </div>
       <div className="overflow-y-auto p-4 sm:p-5">
-        {tab === "inbox" ? <SmsInbox cases={cases} repliesEnabled={loaded ? repliesEnabled : null} replyDisabled={preparing || sending || Boolean(attempted && (!result || unresolved))}
+        {tab === "inbox" ? <SmsInbox cases={cases} repliesEnabled={loaded ? repliesEnabled : null} replyDisabled={preparing || sending || !!pendingContext || Boolean(attempted && (!result || unresolved))}
           onCreateCase={onCreateCase ? () => { onClose(); onCreateCase(); } : undefined}
           onReply={(incoming) => { newMessage(); setReply(incoming); setPhone(incoming.from); setSelectedCaseId(incoming.caseId ?? ""); setTemplate("custom"); setTab("editor"); }} />
           : tab === "history" ? <div className="grid gap-4"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={historyAll || !selectedCaseId} disabled={!selectedCaseId} onChange={(event) => setHistoryAll(event.target.checked)} />Všetky SMS vrátane správ bez prípadu</label><SmsHistory key={historyAll ? "all" : selectedCaseId} caseId={historyAll ? undefined : selectedCaseId || undefined} /></div> : <form onSubmit={submit} className="grid gap-4">
+          {pendingContext && <div role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm leading-6"><strong>Máte rozpracovanú SMS.</strong><p>Zmena {pendingContext.kind === "template" ? "šablóny" : "prípadu alebo zadania"} zahodí jej text a údaje. Doterajší príjemca zostáva vybraný, kým zmenu nepotvrdíte.</p><div className="mt-2 flex flex-wrap gap-2"><button type="button" className={button} disabled={locked} onClick={() => setPendingContext(null)}>Zachovať rozpracovanú SMS</button><button type="button" className={button} disabled={locked} onClick={() => applyContext(pendingContext)}>Zahodiť koncept a potvrdiť zmenu</button></div></div>}
           {incomingHandoff && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6"><strong>Máte rozpracovanú SMS.</strong><p>Nový odkaz sa zatiaľ nepridal. Pripojiť ho k textu a nastaviť príjemcu na {initialPhone}?</p><button type="button" disabled={locked || message.length + initialMessage.length + 1 > MAX_CUSTOM_SMS_LENGTH} className="mt-2 font-semibold underline" onClick={() => { setMessage(current => current.includes(initialMessage) ? current : `${current}\n${initialMessage}`); setPhone(initialPhone); setTemplate("custom"); setSelectedCaseId(caseId ?? ""); setSelectedTaskId(""); setReply(null); setPreview(null); setError(""); setIncomingHandoff(false); setOpeningIntent(JSON.stringify([caseId, initialTemplate, initialPhone, initialMessage])); }}>Pripojiť odkaz a nastaviť príjemcu</button></div>}
           {reply && <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm leading-6"><strong>Odpoveď na prijatú SMS od {reply.from}</strong><p>{reply.caseNumber || "Bez prípadu"} · Z nášho čísla {reply.to}</p><p className="whitespace-pre-wrap break-words text-xs">{reply.body}</p>{!attempted && <button type="button" className="mt-2 text-xs font-semibold underline" disabled={preparing || sending} onClick={() => { newMessage(); setReply(null); setSelectedTaskId(""); setPhone(initialPhone); setSelectedCaseId(caseId ?? ""); }}>Zrušiť odpoveď a napísať inú SMS</button>}</div>}
           {!preview && !reply && <>
           <label className="grid gap-1.5 text-sm font-semibold">Prípad
-            <select ref={caseRef} aria-label="Prípad SMS" value={selectedCaseId} disabled={locked || !loaded || !!externalRecipientLabel} onChange={(event) => { setSelectedCaseId(event.target.value); setSelectedTaskId(""); editContext(); }} className={field}>
+            <select ref={caseRef} aria-label="Prípad SMS" value={selectedCaseId} disabled={locked || !!pendingContext || !loaded || !!externalRecipientLabel} onChange={(event) => requestContext({ kind: "case", caseId: event.target.value })} className={field}>
               <option value="">Bez prípadu</option>
-              {selectedCaseId && !selectedCase && <option value={selectedCaseId}>{caseNumber || selectedCaseId}</option>}
+              {selectedCaseId && !selectedCase && <option value={selectedCaseId}>{selectedCaseId === caseId ? caseNumber || selectedCaseId : selectedCaseId}</option>}
               {cases.map((entry) => <option key={entry.id} value={entry.id}>{entry.caseNumber} · {entry.name} · {entry.phone || "chýba telefón"}</option>)}
             </select>
           </label>
           {externalRecipientLabel && <p className="rounded-lg bg-sky-50 p-3 text-sm"><strong>{externalRecipientLabel}</strong><br />Samostatná SMS na uvedený telefón kolegu. Číslo prípadu je v texte; kontakt klienta sa nepoužije.</p>}
-          {selectedCaseId ? <p className="rounded-lg bg-zinc-50 p-3 text-sm"><strong>{selectedCase?.caseNumber || caseNumber}</strong><br />{selectedCase?.name || "Kontakt overí server"} · {selectedCase?.phone || "Kontakt nie je dostupný"}</p>
+          {selectedCaseId ? <p className="rounded-lg bg-zinc-50 p-3 text-sm"><strong>{selectedCase?.caseNumber || (selectedCaseId === caseId ? caseNumber : selectedCaseId)}</strong><br />{selectedCase?.name || "Kontakt overí server"} · {selectedCase?.phone || "Kontakt nie je dostupný"}</p>
             : <label className="grid gap-1.5 text-sm font-semibold">Telefón príjemcu<input type="tel" value={phone} disabled={locked} onChange={(event) => { setPhone(event.target.value); editContext(); }} placeholder="0904 123 456" className={field} /></label>}
-          <label className="grid gap-1.5 text-sm font-semibold">Šablóna<select value={template} disabled={locked || !!externalRecipientLabel} onChange={(event) => { setTemplate(event.target.value as SmsPrepareInput["template"]); setSelectedTaskId(""); setMessage(""); editContext(); }} className={field}><option value="custom">Vlastná SMS</option>{SMS_TEMPLATES.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select></label>
+          <label className="grid gap-1.5 text-sm font-semibold">Šablóna<select value={template} disabled={locked || !!pendingContext || !!externalRecipientLabel} onChange={(event) => requestContext({ kind: "template", template: event.target.value as SmsPrepareInput["template"] })} className={field}><option value="custom">Vlastná SMS</option>{SMS_TEMPLATES.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select></label>
           {requiresCase && !caseAvailable && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-950">Najprv vyberte uložený prípad s platným kontaktom. Rozpracovaný prípad treba výslovne uložiť.<div className="mt-2 flex gap-2"><button type="button" className={button} disabled={locked} onClick={() => caseRef.current?.focus()}>Vybrať prípad</button>{onCreateCase && <button type="button" className={button} disabled={locked} onClick={() => { onClose(); onCreateCase(); }}>Vytvoriť prípad</button>}</div></div>}
           {requiresCase && <label className="grid gap-1.5 text-sm font-semibold">Kontaktný telefón pre spätné volanie<input type="tel" value={callbackNumber} disabled={locked} onChange={(event) => { setCallbackNumber(event.target.value); editContext(); }} className={field} /></label>}
           {(template === "eta_update" || template === "delay") && <label className="grid gap-1.5 text-sm font-semibold">Aktuálny odhad príchodu (minúty)<input type="number" min={1} max={1440} value={eta} disabled={locked} onChange={(event) => { setEta(event.target.value); editContext(); }} className={field} /></label>}
@@ -211,7 +231,7 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
             <select aria-label="Úloha na dokončenie" value={selectedTaskId} disabled={locked} onChange={(event) => { setSelectedTaskId(event.target.value); editContext(); }} className={field}>
               <option value="">Bez dokončenia úlohy</option>
               {tasks.filter(task => task.caseId === selectedCaseId).map(task => <option key={task.id} value={task.id}>{task.title}</option>)}
-            </select><span className="text-xs font-normal text-zinc-600">{template === "eta_update" ? "Vybraná úloha sa dokončí po prijatí ETA SMS poskytovateľom." : "Vybraná úloha sa dokončí až po prijatí polohy klienta."}</span>
+            </select><span className="text-xs font-normal text-zinc-600">{template === "eta_update" ? "Prijatie ETA SMS poskytovateľom splní tento podklad. Úloha vyžadujúca kontrolu zostane pre kontrolóra." : "Prijatie polohy klienta splní tento podklad. Úloha vyžadujúca kontrolu zostane pre kontrolóra."}</span>
           </label>}
           {template === "eta_update" && <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={departed} disabled={locked} onChange={(event) => { setDeparted(event.target.checked); editContext(); }} className="mt-1" />Potvrdzujem, že technik vyrazil. Samotný výpočet trasy to nepotvrdzuje.</label>}
           {template === "tow_destination" && <label className="grid gap-1.5 text-sm font-semibold">Dohodnutý cieľ odťahu<input value={towAddress} disabled={locked} onChange={(event) => { setTowAddress(event.target.value); editContext(); }} className={field} /></label>}
@@ -228,8 +248,8 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
           {(error || validation) && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{error || validation}</p>}
           {result?.sms && <div role="status" className="rounded-lg border border-zinc-200 p-3 text-sm leading-6"><strong>{smsStatusLabel(result.sms.status || "", result.sms.statusDetail)}</strong><p>{result.sms.reused ? "Zobrazujeme výsledok pôvodnej požiadavky. Ďalšia SMS sa neodoslala." : "Požiadavka je zapísaná v histórii."}</p>{unresolved && <p>Výsledok zatiaľ nie je potvrdený. Nevytvárajte ďalšiu SMS; overte stav tejto požiadavky.</p>}</div>}
           <div className="flex flex-wrap justify-end gap-2 border-t pt-4">
-            {!attempted && <button type="button" disabled={preparing || sending || !loaded || (requiresCase && !caseAvailable) || Boolean(!reply && selectedCaseId && selectedCase && !selectedCase.validPhone) || (template === "eta_update" && !departed)} onClick={() => void prepare()} className={button}>{preparing ? "Pripravujem…" : preview ? "Obnoviť náhľad" : "Pripraviť náhľad"}</button>}
-            {preview && (!result || unresolved) && <button type="submit" disabled={sending || preparing || Boolean(validation)} className="inline-flex items-center gap-2 rounded-lg bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40">{sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}{sending ? "Overujem a odosielam…" : attempted ? "Overiť tú istú požiadavku" : "Odoslať SMS"}</button>}
+            {!attempted && <button type="button" disabled={preparing || sending || !!pendingContext || !loaded || (requiresCase && !caseAvailable) || Boolean(!reply && selectedCaseId && selectedCase && !selectedCase.validPhone) || (template === "eta_update" && !departed)} onClick={() => void prepare()} className={button}>{preparing ? "Pripravujem…" : preview ? "Obnoviť náhľad" : "Pripraviť náhľad"}</button>}
+            {preview && (!result || unresolved) && <button type="submit" disabled={sending || preparing || !!pendingContext || Boolean(validation)} className="inline-flex items-center gap-2 rounded-lg bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40">{sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}{sending ? "Overujem a odosielam…" : attempted ? "Overiť tú istú požiadavku" : "Odoslať SMS"}</button>}
             {result && !unresolved && <button type="button" onClick={newMessage} className={button}>{template === "location_request" ? "Úmyselne vyžiadať novú polohu" : "Napísať novú SMS"}</button>}
           </div>
         </form>}

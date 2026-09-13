@@ -7,6 +7,7 @@ import { NotebookPanel, NotebookProvider } from "@/components/dispatch/NotebookP
 import { TaskWorkspaceProvider, useTaskWorkspace } from "@/components/dispatch/TaskWorkspaceProvider";
 import { defaultWorkspacePreferences } from "@/components/dispatch/workspace-preferences";
 import { LayoutPreviewProvider, useLayoutPreview } from "@/components/dispatch/LayoutPreview";
+import { layoutPreviewEnabled } from "@/components/dispatch/layout-preview-policy";
 import "@/components/dispatch/workspace-tools.css";
 
 function Fixture() {
@@ -33,7 +34,7 @@ function Fixture() {
 }
 
 createRoot(document.getElementById("root")!).render(
-  <LayoutPreviewProvider enabled={!new URLSearchParams(location.search).has("production")} actorKey="fixture:viewer"><NotebookProvider actorKey="fixture:viewer" viewerProfileId="viewer" enabled>
+  <LayoutPreviewProvider enabled={layoutPreviewEnabled({ VERCEL_ENV: new URLSearchParams(location.search).has("production") ? "production" : "preview", NODE_ENV: "production" })} actorKey="fixture:viewer"><NotebookProvider actorKey="fixture:viewer" viewerProfileId="viewer" enabled>
     <TaskWorkspaceProvider actorKey="fixture:viewer" viewerProfileId="viewer" enabled><Fixture /></TaskWorkspaceProvider>
   </NotebookProvider></LayoutPreviewProvider>,
 );

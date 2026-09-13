@@ -159,17 +159,21 @@ test("widget gallery prioritizes a tool and resets only tools while retaining ca
   expect(result).toEqual({ errors: [], writes: [], external: [] });
 });
 
-test("production keeps all seven existing controls and excludes preview-only calendar and backspace", async ({ page }) => {
+test("production includes the released calendar and calculator while retaining all existing controls", async ({ page }) => {
   const result = await boot(page, 1440, true);
   await page.getByRole("button", { name: "Nastaviť widgety" }).click();
   const settings = page.getByRole("region", { name: "Nastavenie widgetov" });
-  await expect(settings.getByRole("checkbox")).toHaveCount(7);
-  await expect(settings.getByLabel("Kalendár", { exact: true })).toHaveCount(0);
-  await expect(page.locator('[data-widget="calendar"]')).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Vymazať jeden znak alebo výber" })).toHaveCount(0);
+  await expect(settings.getByRole("checkbox")).toHaveCount(8);
+  await expect(settings.getByLabel("Kalendár", { exact: true })).toBeChecked();
+  await expect(page.locator('[data-widget="calendar"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Vymazať jeden znak alebo výber" })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "Kalendár posunúť nižšie" })).toBeDisabled();
+  await settings.getByRole("button", { name: "Kalendár posunúť vyššie" }).click();
   await expect(settings.getByRole("button", { name: "Flotila posunúť nižšie" })).toBeDisabled();
-  await settings.getByRole("button", { name: "Flotila posunúť vyššie" }).click();
-  await expect(settings.getByRole("button", { name: "Vyhľadávanie posunúť nižšie" })).toBeDisabled();
+  await page.getByRole("button", { name: "Prepnúť vzhľad", exact: true }).click();
+  await expect(page.locator("main")).toHaveAttribute("data-layout-preview", "classic");
+  await expect(settings.getByLabel("Kalendár", { exact: true })).toBeChecked();
+  await expect(page.locator('[data-widget="calendar"]')).toBeVisible();
   expect(result).toEqual({ errors: [], writes: [], external: [] });
 });
 

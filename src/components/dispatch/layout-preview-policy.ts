@@ -1,7 +1,6 @@
-/** Preview is a server decision; neither URL nor browser storage can enable it in production. */
+/** The released workspace is available on both Vercel targets; appearance remains actor-specific. */
 export function layoutPreviewEnabled(env: { VERCEL_ENV?: string; NODE_ENV?: string }) {
-  if (env.VERCEL_ENV === "production") return false;
-  return env.VERCEL_ENV === "preview" || env.NODE_ENV === "development";
+  return env.VERCEL_ENV === "production" || env.VERCEL_ENV === "preview" || env.NODE_ENV === "development";
 }
 
 export type LayoutPreviewMode = "modern" | "classic";

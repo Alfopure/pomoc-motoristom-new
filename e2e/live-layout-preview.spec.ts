@@ -61,7 +61,7 @@ async function mount(page: Page, mode: "modern" | "classic" = "modern") {
 }
 
 async function style(page: Page, mode: "modern" | "classic") {
-  await page.getByRole("region", { name: "Náhľad rozhrania", exact: true }).getByRole("button", { name: mode === "modern" ? "Nový vzhľad" : "Pôvodný vzhľad", exact: true }).click();
+  await page.getByRole("region", { name: "Vzhľad pracoviska", exact: true }).getByRole("button", { name: mode === "modern" ? "Nový vzhľad" : "Pôvodný vzhľad", exact: true }).click();
   await expect(page.getByTestId("dispatch-console")).toHaveAttribute("data-layout-preview", mode);
 }
 async function noOverflow(page: Page) {

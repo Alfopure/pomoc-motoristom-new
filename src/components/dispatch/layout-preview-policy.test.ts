@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { layoutPreviewEnabled, layoutPreviewStorageKey, parseLayoutPreviewMode } from "./layout-preview-policy";
 
-describe("layout preview boundary", () => {
+describe("released workspace availability", () => {
   it("enables a deployed Preview even though its build is production mode", () => {
     expect(layoutPreviewEnabled({ VERCEL_ENV: "preview", NODE_ENV: "production" })).toBe(true);
   });
-  it("fails closed for production deployments and unclassified production builds", () => {
-    expect(layoutPreviewEnabled({ VERCEL_ENV: "production", NODE_ENV: "development" })).toBe(false);
+  it("enables the approved production release", () => {
+    expect(layoutPreviewEnabled({ VERCEL_ENV: "production", NODE_ENV: "production" })).toBe(true);
+  });
+  it("keeps unclassified production builds disabled", () => {
     expect(layoutPreviewEnabled({ NODE_ENV: "production" })).toBe(false);
     expect(layoutPreviewEnabled({})).toBe(false);
   });
