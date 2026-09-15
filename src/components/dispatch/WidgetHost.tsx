@@ -16,6 +16,7 @@ const widgetIdentity: Record<WidgetId, { icon: LucideIcon; description: string }
   search: { icon: Search, description: "Rýchle hľadanie v pracovisku" },
   fleet: { icon: CarFront, description: "Vozidlá a ich dostupnosť" },
   calendar: { icon: CalendarDays, description: "Termíny a denná agenda úloh" },
+  vehicleLookup: { icon: CarFront, description: "EČV, VIN, technické údaje a PZP" },
 };
 
 function WidgetIcon({ id }: { id: WidgetId }) {
@@ -55,7 +56,7 @@ export function WidgetHost({ preferences, onChange, renderWidget, onClose, expan
       <div className="flex"><button type="button" className={action} aria-label="Nastaviť widgety" aria-expanded={settingsOpen} aria-controls="widget-settings" onClick={() => onSettingsChange(!settingsOpen)}><Settings2 size={16} /></button><button type="button" className={action} aria-label="Zbaliť nástroje" onClick={onClose}><X size={16} /></button></div>
     </div>
     <div className="widget-quick-launch widget-modern-only" role="group" aria-label="Rýchlo otvoriť nástroj">
-      {(["notes", "calculator", ...(previewEnabled ? ["calendar"] : [])] as WidgetId[]).map(id => <button type="button" key={id} aria-label={`Otvoriť nástroj ${WIDGET_LABELS[id]}`} onClick={() => {
+      {(["notes", "calculator", ...(previewEnabled ? ["calendar"] : []), "vehicleLookup"] as WidgetId[]).map(id => <button type="button" key={id} aria-label={`Otvoriť nástroj ${WIDGET_LABELS[id]}`} onClick={() => {
         onChange({ ...preferences, widgets: preferences.widgets.map(item => item.id === id ? { ...item, visible: true, collapsed: false } : item) });
         onSettingsChange(false);
         requestAnimationFrame(() => {

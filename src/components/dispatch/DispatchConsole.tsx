@@ -3,6 +3,7 @@ import { mergeCaseDetail } from "@/data/case-detail";
 
 import { LayoutPreviewProvider, LayoutPreviewToolbar, useLayoutPreview } from "./LayoutPreview";
 import { CalendarWidget } from "./CalendarWidget";
+import { VehicleLookupSearch } from "./VehicleLookupSearch";
 import { CallMonitorInvitations } from "./CallMonitorInvitations";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
@@ -2024,6 +2025,7 @@ function DispatchConsoleContent({
     if (id === "notes") return <><NotebookPanel active={visible && (centerView !== "notes" || toolsOpen)} compact /><button type="button" className="min-h-11 px-3 text-sm underline" onClick={() => switchCenterView("notes")}>Otvoriť poznámky v strede</button></>;
     if (id === "calculator") return <CalculatorWidget />;
     if (id === "calendar") return <CalendarWidget onOpenTask={openTask} />;
+    if (id === "vehicleLookup") return <VehicleLookupSearch key={actorKey} compact active={visible} />;
     if (id === "route") return <RoutePlanner embedded active={visible} />;
     if (id === "search") return <WorkspaceSearchWidget cases={dispatchCases} contacts={partnerDirectory} fleet={fleetAssets} onOpenCase={openCase} onOpenFleet={() => switchView("fleet")} onDial={telephonyConfigured ? dialNumber : undefined} places={<WorkspacePlaceSearch active={visible} />} />;
     return <div className="space-y-2 p-3">{fleetAssets.slice(0, 12).map(asset => <div key={asset.id} className="rounded-lg border border-zinc-200 p-2 text-sm"><p className="font-medium">{asset.licensePlate} · {asset.label}</p><p>{fleetWidgetStatus(asset)}</p><p className="text-xs text-zinc-500">{asset.positionKnown === false || !asset.gps ? "GPS neoverené" : asset.gps.stale ? "GPS neaktuálne" : "GPS aktuálne"}</p></div>)}<button type="button" className="min-h-11 text-sm underline" onClick={() => switchView("fleet")}>Otvoriť celú flotilu ({fleetAssets.length})</button></div>;

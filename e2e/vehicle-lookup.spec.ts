@@ -501,3 +501,179 @@ test("partial VIN suggestions require explicit confirmation before filling field
   await page.getByRole("button", { name: acceptName }).click();
   await expect(page.getByLabel("Model", { exact: true })).toHaveValue("Návrh modelu");
 });
+
+// The fleet search and toolbox never write application data. Row scans use the
+// existing explicit proposal/accept/save workflow for exactly the selected asset.
+test("fleet has standalone lookup with an inline result and a read-only full detail", async ({ page }) => {
+  const api = await sandboxApi(page);
+  await openDashboard(page);
+  await navigate(page, /^Flotila/);
+  const search = page.getByTestId("vehicle-lookup-search");
+  await search.getByLabel("EČV alebo VIN", { exact: true }).fill(plateA);
+  expect(api.lookupInputs).toHaveLength(0);
+  await search.getByLabel("EČV alebo VIN", { exact: true }).press("Enter");
+  await expect(search.getByRole("region", { name: "Výsledok overenia vozidla", exact: true })).toContainText("Fixture poisťovňa");
+  await expect(search.getByRole("dialog")).toHaveCount(0);
+  expect(api.lookupInputs[0]).toMatchObject({ kind: "plate", value: plateA });
+  const detailsButton = search.getByRole("button", { name: "Celý detail vozidla", exact: true });
+  await detailsButton.click();
+  const detail = search.getByRole("dialog");
+  await expect(detail).toContainText("Výsledok overenia vozidla");
+  await expect(detail).not.toContainText("Uložené overenie vozidla");
+  await expect(detail.getByRole("button", { name: acceptName })).toHaveCount(0);
+  await detail.getByRole("button", { name: "Zavrieť detail vozidla", exact: true }).click();
+  await expect(detailsButton).toBeFocused();
+  expect(api.writes).toHaveLength(0);
+  await search.getByLabel("EČV alebo VIN", { exact: true }).fill(plateB);
+  await expect(search.getByRole("region", { name: "Výsledok overenia vozidla", exact: true })).toHaveCount(0);
+  expect(api.lookupInputs).toHaveLength(1);
+});
+
+test("fleet row scan preserves edits and saves only to the explicitly selected vehicle", async ({ page }) => {
+  const api = await sandboxApi(page, async input => lookupResponse(input, { vin: { value: input.knownIdentity?.vin || syntheticVin, quality: "reported" } }));
+  await openDashboard(page);
+  await navigate(page, /^Flotila/);
+  const asset = api.data.fleetAssets.find(item => item.kind === "replacement_car")!;
+  const row = page.getByRole("row").filter({ hasText: asset.licensePlate });
+  await row.getByRole("button", { name: /^Overiť vozidlo/ }).click();
+  const editor = page.locator("aside").filter({ has: page.getByLabel("Názov", { exact: true }) });
+  await expect(editor.getByRole("dialog")).toBeVisible();
+  expect(api.lookupInputs).toHaveLength(1);
+  expect(api.lookupInputs[0].value.replace(/[\s-]/g, "")).toBe(asset.licensePlate.replace(/[\s-]/g, ""));
+  await editor.getByRole("button", { name: "Zavrieť návrh dohľadania", exact: true }).click();
+  await editor.getByLabel("Model", { exact: true }).fill("Ručne upravený model");
+  await editor.getByRole("button", { name: /^Overiť vozidlo/ }).click();
+  await expect(editor.getByRole("dialog")).toBeVisible();
+  expect(api.lookupInputs).toHaveLength(2);
+  expect(api.writes).toHaveLength(0);
+  await editor.getByRole("button", { name: acceptName }).click();
+  await expect(editor.getByLabel("Model", { exact: true })).toHaveValue("Ručne upravený model");
+  expect(api.writes).toHaveLength(0);
+  await editor.getByRole("button", { name: "Uložiť zmeny", exact: true }).click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(api.writes[0]).toMatchObject({ method: "PATCH", path: `/api/fleet-assets/${asset.id}`, body: { model: "Ručne upravený model" } });
+  expect(api.writes[0].body.vehicleLookup).toBeTruthy();
+  await editor.getByText("Upraviť interné údaje vozidla", { exact: true }).click();
+  await expect(editor.getByRole("button", { name: /Uložené overenie vozidla/ })).toBeVisible();
+  await page.waitForTimeout(200);
+  expect(api.lookupInputs).toHaveLength(2);
+});
+
+test("switching fleet vehicles discards the previous pending row scan", async ({ page }) => {
+  const gate = deferred();
+  const api = await sandboxApi(page, async input => { await gate.promise; return lookupResponse(input); });
+  await openDashboard(page);
+  await navigate(page, /^Flotila/);
+  const first = api.data.fleetAssets.find(item => item.kind === "replacement_car")!;
+  await page.getByRole("row").filter({ hasText: first.licensePlate }).getByRole("button", { name: /^Overiť vozidlo/ }).click();
+  await expect.poll(() => api.lookupInputs.length).toBe(1);
+  await page.getByRole("button", { name: "Nové vozidlo", exact: true }).click();
+  gate.release();
+  const editor = page.locator("aside").filter({ has: page.getByLabel("Názov", { exact: true }) });
+  await expect(editor.getByLabel("EČV", { exact: true })).toHaveValue("");
+  await page.waitForTimeout(250);
+  await expect(editor.getByRole("dialog")).toHaveCount(0);
+  await expect(editor.getByRole("button", { name: acceptName })).toHaveCount(0);
+  expect(api.lookupInputs).toHaveLength(1);
+  expect(api.writes).toHaveLength(0);
+});
+
+async function openVehicleTool(page: Page, width: number) {
+  if (width >= 1024) await page.getByRole("button", { name: "Nástroje", exact: true }).first().click();
+  else {
+    await page.getByRole("navigation", { name: "Mobilná navigácia" }).getByRole("button", { name: "Menu", exact: true }).click();
+    await page.getByRole("button", { name: "Nástroje", exact: true }).last().click();
+  }
+  const tools = page.getByRole("complementary", { name: "Nástroje", exact: true });
+  await tools.getByRole("button", { name: "Otvoriť nástroj Overenie vozidla", exact: true }).click();
+  const widget = tools.locator('[data-widget="vehicleLookup"]');
+  await expect(widget.getByLabel("EČV alebo VIN", { exact: true })).toBeVisible();
+  return { tools, widget };
+}
+
+for (const width of [1280, 390]) {
+  test(`vehicle tool shows a compact VIN result and retains it when collapsed at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const api = await sandboxApi(page);
+    await openDashboard(page);
+    const { tools, widget } = await openVehicleTool(page, width);
+    await widget.getByLabel("EČV alebo VIN", { exact: true }).fill(syntheticVin);
+    expect(api.lookupInputs).toHaveLength(0);
+    await widget.getByRole("button", { name: "Overiť", exact: true }).click();
+    const summary = widget.getByRole("region", { name: "Výsledok overenia vozidla", exact: true });
+    await expect(summary).toContainText("Fixture poisťovňa");
+    await expect(summary).toContainText("150");
+    expect(api.lookupInputs[0]).toMatchObject({ kind: "vin", value: syntheticVin });
+    await expect(widget.getByRole("dialog")).toHaveCount(0);
+    expect(await widget.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    if (width === 390) await page.screenshot({ path: test.info().outputPath("vehicle-tool-mobile.png") });
+    await widget.getByRole("button", { name: "Celý detail vozidla", exact: true }).click();
+    await expect(widget.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(widget.getByRole("dialog")).toHaveCount(0);
+    await expect(tools).toBeVisible();
+    await widget.getByRole("button", { name: "Overenie vozidla", exact: true }).click();
+    await expect(widget.getByLabel("EČV alebo VIN", { exact: true })).toBeHidden();
+    await widget.getByRole("button", { name: "Overenie vozidla", exact: true }).click();
+    await expect(widget.getByLabel("EČV alebo VIN", { exact: true })).toHaveValue(syntheticVin);
+    await expect(summary).toBeVisible();
+    expect(api.lookupInputs).toHaveLength(1);
+    expect(api.writes).toHaveLength(0);
+  });
+}
+
+test("vehicle tool cancels stale results and never presents mismatched identity as insured", async ({ page }) => {
+  const gate = deferred();
+  const api = await sandboxApi(page, async input => {
+    if (input.value === plateA) { await gate.promise; return lookupResponse(input); }
+    return lookupResponse(input, { plate: { value: plateA, quality: "reported" } });
+  });
+  await openDashboard(page);
+  const { widget } = await openVehicleTool(page, 1280);
+  const input = widget.getByLabel("EČV alebo VIN", { exact: true });
+  await input.fill(plateA); await input.press("Enter");
+  await expect.poll(() => api.lookupInputs.length).toBe(1);
+  await input.fill(plateB); await input.press("Enter");
+  const summary = widget.getByRole("region", { name: "Výsledok overenia vozidla", exact: true });
+  await expect(summary).toContainText("PZP vozidla nepotvrdené");
+  await expect(summary).not.toContainText("POISTENÉ");
+  gate.release();
+  await page.waitForTimeout(200);
+  await expect(input).toHaveValue(plateB);
+  await expect(summary).toContainText(plateB);
+  expect(api.writes).toHaveLength(0);
+});
+
+test("raw Commander row opens a read-only vehicle lookup without changing fleet matching", async ({ page }) => {
+  const api = await sandboxApi(page);
+  api.data.commanderVehicles = [{
+    id: "fixture-commander-ghost", sourceVehicleId: "fixture-external-vehicle", label: "Commander bez potvrdenej zhody",
+    licensePlate: plateB, vin: syntheticVin, sourceActive: true, lastImportedAt: "2026-09-05T10:00:00.000Z",
+    link: { id: "fixture-candidate-link", fleetAssetId: api.data.fleetAssets[0].id, status: "candidate", matchMethod: "license_plate", confidence: 0.5 },
+  }];
+  const originalCommander = structuredClone(api.data.commanderVehicles);
+  const originalFleet = structuredClone(api.data.fleetAssets);
+  await openDashboard(page);
+  await navigate(page, /^Flotila/);
+  await page.getByRole("button", { name: /^Párovanie vozidiel/ }).click();
+  // Hydrate the external fixture through the fully mocked fleet refresh.
+  await page.getByRole("button", { name: "Obnoviť dáta", exact: true }).click();
+  const ghosts = page.locator("section").filter({ has: page.getByRole("heading", { name: "Commander bez zhody so Software House", exact: true }) }).last();
+  await expect(ghosts).toContainText("Commander bez potvrdenej zhody");
+  await ghosts.getByRole("button", { name: `Overiť vozidlo ${plateB}`, exact: true }).click();
+  const search = page.getByTestId("vehicle-lookup-search");
+  await expect(search.getByLabel("EČV alebo VIN", { exact: true })).toHaveValue(plateB);
+  await expect(search.getByRole("region", { name: "Výsledok overenia vozidla", exact: true })).toContainText("Fixture poisťovňa");
+  expect(api.lookupInputs).toHaveLength(1);
+  expect(api.lookupInputs[0]).toMatchObject({ kind: "plate", value: plateB });
+  await expect(search.getByRole("dialog")).toHaveCount(0);
+  await search.getByRole("button", { name: "Celý detail vozidla", exact: true }).click();
+  const detail = search.getByRole("dialog");
+  await expect(detail).toBeVisible();
+  await expect(detail.getByRole("button", { name: acceptName })).toHaveCount(0);
+  await detail.getByRole("button", { name: "Zavrieť detail vozidla", exact: true }).click();
+  await expect(ghosts.getByRole("button", { name: `Overiť vozidlo ${plateB}`, exact: true })).toBeVisible();
+  expect(api.data.commanderVehicles).toEqual(originalCommander);
+  expect(api.data.fleetAssets).toEqual(originalFleet);
+  expect(api.writes).toHaveLength(0);
+});

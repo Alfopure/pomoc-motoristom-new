@@ -21,6 +21,7 @@
 [data-layout-preview="modern"] [data-widget-icon="calendar"] { background: #fee9e6; color: #b54338; }
 [data-layout-preview="modern"] [data-widget-icon="route"] { background: #e0effc; color: #346f9e; }
 [data-layout-preview="modern"] [data-widget-icon="fleet"] { background: #ebe7f4; color: #795b9e; }
+[data-layout-preview="modern"] [data-widget-icon="vehicleLookup"] { background: #e1f1ef; color: #28776c; }
 [data-layout-preview="modern"] .widget-settings { margin: 0 0 12px; border: 1px solid #dfe2e8; border-radius: 14px; background: #f9fafc; padding: 10px; }
 [data-layout-preview="modern"] .widget-settings h3 { font-size: 14px; }
 [data-layout-preview="modern"] .widget-settings p { color: #596273; font-size: 11px; }
@@ -151,7 +152,7 @@
   [data-layout-preview="modern"] .calculator-widget input { font-size: 16px; }
 }
 .widget-quick-launch { display:none; }
-[data-layout-preview="modern"] .widget-quick-launch { display:grid; flex-shrink:0; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; padding:8px 10px; border-bottom:1px solid #e5e8ee; background:#f8f9fc; }
+[data-layout-preview="modern"] .widget-quick-launch { display:grid; flex-shrink:0; grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; padding:8px 10px; border-bottom:1px solid #e5e8ee; background:#f8f9fc; }
 [data-layout-preview="modern"] .widget-quick-launch button { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; min-height:55px; padding:4px; border-radius:9px; color:#627086; font-size:10px; }
 [data-layout-preview="modern"] .widget-quick-launch button:hover { background:#edf0f6; color:#344560; }
 [data-layout-preview="modern"] .widget-quick-launch .widget-app-icon { width:27px; height:27px; border-radius:8px; }
