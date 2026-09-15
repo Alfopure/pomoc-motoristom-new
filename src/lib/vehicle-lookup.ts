@@ -1,7 +1,11 @@
 /** Public contract shared by the server and all three vehicle forms. No secrets. */
-export type VehicleSource = "skp" | "stkonline" | "haka" | "vpic";
+export type VehicleSource = "databazavozidiel" | "skp" | "stkonline" | "haka" | "vpic";
 export type LookupStatus = "found" | "not_found" | "ambiguous" | "challenge_required" | "rate_limited" | "unavailable" | "unsupported";
-export type VehicleField = "plate" | "vin" | "make" | "model" | "color" | "fuel" | "modelYear" | "bodyType" | "doors" | "seats" | "transmission" | "engineCapacityCc" | "powerKw" | "technicalInspectionValidUntil" | "emissionInspectionValidUntil" | "technicalInspectionAt" | "emissionInspectionAt" | "insurer" | "insuranceStatus";
+export type VehicleField = "plate" | "vin" | "make" | "model" | "color" | "fuel" | "modelYear" | "bodyType" | "doors" | "seats" | "transmission" | "engineCapacityCc" | "powerKw" | "technicalInspectionValidUntil" | "emissionInspectionValidUntil" | "technicalInspectionAt" | "emissionInspectionAt" | "insurer" | "insuranceStatus"
+  | "vehicleCategory" | "vehicleType" | "variant" | "version" | "manufacturer" | "firstRegisteredAt" | "firstRegisteredInSkAt"
+  | "engineType" | "engineManufacturer" | "engineNumber" | "engineRpm" | "transmissionGears" | "maxSpeedKmh" | "emissionClass"
+  | "curbWeightKg" | "grossWeightKg" | "grossTrainWeightKg" | "maxAxleWeightKg" | "trailerWeightKg"
+  | "axleCount" | "drivenAxles" | "wheelbaseMm" | "lengthMm" | "widthMm" | "heightMm" | "tireDimensions" | "rimDimensions" | "towingDevice";
 export type VehicleFact = { value: string; quality: "reported" | "decoded" | "partial" };
 export type VehicleFacts = Partial<Record<VehicleField, VehicleFact>>;
 export type VehicleIdentity = { plate?: string; vin?: string; country?: string };
@@ -31,7 +35,7 @@ export type VehicleLookupSnapshot = { result: VehicleLookupResult; proof: string
 export type VehicleLookupResponse = { snapshot: VehicleLookupSnapshot; cached: boolean; conflict?: string };
 export type VehicleFormValues = Partial<Record<VehicleField, string>>;
 
-export const vehicleSourceLabels: Record<VehicleSource, string> = { skp: "SKP · PZP", stkonline: "STKonline", haka: "HAKA · hlásenia", vpic: "NHTSA · VIN dekódovanie" };
+export const vehicleSourceLabels: Record<VehicleSource, string> = { databazavozidiel: "DatabázaVozidiel.sk", skp: "SKP · PZP", stkonline: "STKonline", haka: "HAKA · hlásenia", vpic: "NHTSA · VIN dekódovanie" };
 export const vehicleFieldLabels: Record<VehicleField, string> = {
   plate: "EČV", vin: "VIN", make: "Značka", model: "Model", color: "Farba", fuel: "Palivo",
   modelYear: "Modelový rok (nie rok výroby)", bodyType: "Karoséria", doors: "Dvere", seats: "Sedadlá",
@@ -39,6 +43,14 @@ export const vehicleFieldLabels: Record<VehicleField, string> = {
   technicalInspectionValidUntil: "TK platná do", emissionInspectionValidUntil: "EK platná do",
   technicalInspectionAt: "TK vykonaná", emissionInspectionAt: "EK vykonaná",
   insurer: "Poisťovňa PZP", insuranceStatus: "PZP ku dňu overenia",
+  vehicleCategory: "Kategória vozidla", vehicleType: "Druh vozidla", variant: "Variant", version: "Verzia", manufacturer: "Výrobca vozidla",
+  firstRegisteredAt: "Prvá evidencia", firstRegisteredInSkAt: "Prvá evidencia v SR",
+  engineType: "Typ motora", engineManufacturer: "Výrobca motora", engineNumber: "Číslo motora", engineRpm: "Otáčky motora (ot./min)",
+  transmissionGears: "Počet prevodových stupňov", maxSpeedKmh: "Max. rýchlosť (km/h)", emissionClass: "Emisná norma",
+  curbWeightKg: "Prevádzková hmotnosť (kg)", grossWeightKg: "Max. prípustná hmotnosť (kg)", grossTrainWeightKg: "Max. hmotnosť súpravy (kg)",
+  maxAxleWeightKg: "Max. hmotnosť na nápravu (kg)", trailerWeightKg: "Max. hmotnosť prípojného vozidla (kg)",
+  axleCount: "Počet náprav", drivenAxles: "Poháňané nápravy", wheelbaseMm: "Rázvor (mm)", lengthMm: "Dĺžka (mm)", widthMm: "Šírka (mm)", heightMm: "Výška (mm)",
+  tireDimensions: "Pneumatiky", rimDimensions: "Ráfiky", towingDevice: "Spájacie zariadenie",
 };
 
 export function normalizeVehicleIdentifier(value: string) { return value.trim().toUpperCase().replace(/[\s-]/g, ""); }
@@ -92,7 +104,7 @@ export function lookupIdentityConflict(result: VehicleLookupResult, identity: Ve
 
 export function preferredVehicleFacts(result: VehicleLookupResult, includePartial = false): VehicleFacts {
   const facts: VehicleFacts = {};
-  const order: VehicleSource[] = ["skp", "stkonline", "vpic", "haka"];
+  const order: VehicleSource[] = ["databazavozidiel", "skp", "stkonline", "vpic", "haka"];
   for (const source of [...result.sources].sort((a, b) => order.indexOf(a.source) - order.indexOf(b.source))) {
     if (source.status !== "found" || source.source === "haka") continue;
     for (const [key, fact] of Object.entries(source.facts) as [VehicleField, VehicleFact][]) {
@@ -167,13 +179,15 @@ export function resolveInternalVehicle<T extends { licensePlate?: string; vin?: 
 export function readVehicleLookupSnapshot(value: unknown): VehicleLookupSnapshot | undefined {
   if (!value || typeof value !== "object") return undefined;
   const snapshot = value as VehicleLookupSnapshot;
-  if (typeof snapshot.proof !== "string" || !/^[\w-]{43}$/.test(snapshot.proof) || snapshot.result?.version !== 1 || !Array.isArray(snapshot.result.sources) || snapshot.result.sources.length > 4 || !snapshot.result.query) return undefined;
-  const allowedHosts = new Set(["www.skp.sk", "www.stkonline.sk", "www.hakasystem.eu", "vpic.nhtsa.dot.gov"]);
+  if (typeof snapshot.proof !== "string" || !/^[\w-]{43}$/.test(snapshot.proof) || snapshot.result?.version !== 1 || !Array.isArray(snapshot.result.sources) || snapshot.result.sources.length > 5 || !snapshot.result.query) return undefined;
+  const sourceHosts: Record<VehicleSource, string> = { databazavozidiel: "www.databazavozidiel.sk", skp: "www.skp.sk", stkonline: "www.stkonline.sk", haka: "www.hakasystem.eu", vpic: "vpic.nhtsa.dot.gov" };
+  const seen = new Set<VehicleSource>();
   try {
     for (const source of snapshot.result.sources) {
       const url = new URL(source.url);
-      if (url.protocol !== "https:" || !allowedHosts.has(url.hostname) || !vehicleSourceLabels[source.source] || !source.facts || !Array.isArray(source.warnings)) return undefined;
-      for (const [field, fact] of Object.entries(source.facts)) if (!(field in vehicleFieldLabels) || typeof fact.value !== "string" || fact.value.length > 180) return undefined;
+      if (!Object.hasOwn(sourceHosts, source.source) || seen.has(source.source) || url.protocol !== "https:" || url.hostname !== sourceHosts[source.source] || url.username || url.password || url.port || !source.facts || !Array.isArray(source.warnings)) return undefined;
+      seen.add(source.source);
+      for (const [field, fact] of Object.entries(source.facts)) if (!Object.hasOwn(vehicleFieldLabels, field) || typeof fact.value !== "string" || fact.value.length > 180) return undefined;
       for (const report of source.reports ?? []) {
         if (!/^https:\/\/www\.hakasystem\.eu\/kradeze-automobilov\/prispevok\/\d+$/.test(report.url)) return undefined;
         if (report.identity?.vin && !isVin(report.identity.vin)) return undefined;

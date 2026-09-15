@@ -1,6 +1,6 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { lookupIdentityConflict, preferredVehicleFacts, type VehicleLookupResult, type VehicleQuery, type VehicleSource, type VehicleSourceResult } from "@/lib/vehicle-lookup";
+import { isVin, lookupIdentityConflict, normalizeVehicleIdentifier, preferredVehicleFacts, type VehicleLookupResult, type VehicleQuery, type VehicleSource, type VehicleSourceResult } from "@/lib/vehicle-lookup";
 import { SKP_URL } from "./providers/skp";
 import { parseStkOnline, stkOnlineUrl } from "./providers/stkonline";
 import { hakaUrl, parseHaka } from "./providers/haka";
@@ -19,14 +19,46 @@ async function sourceResult(source: VehicleSource, url: string, enabled: boolean
 }
 export async function executeVehicleLookup(query: VehicleQuery, enabled: LookupProviders, deadline = Date.now() + 40_000): Promise<VehicleLookupResult> {
   if (Date.now() >= deadline) throw new Error("lookup_deadline");
-  const httpTimeout = Math.max(1, Math.min(9_000, deadline - Date.now()));
-  const sources = await Promise.all([
-    sourceResult("skp", SKP_URL, enabled.skp, async () => (await import("./providers/skp-browser")).lookupSkp(query, deadline)),
-    sourceResult("stkonline", stkOnlineUrl(query), enabled.stkonline, async () => parseStkOnline(await providerText(stkOnlineUrl(query), { headers: STK_HEADERS, timeoutMs: httpTimeout }), query, new Date().toISOString())),
-    sourceResult("haka", hakaUrl(query), enabled.haka, async () => parseHaka(await providerText(hakaUrl(query), { timeoutMs: httpTimeout }), query, new Date().toISOString())),
-  ]);
+  const httpTimeout = remainingTimeout(deadline, 9_000);
+  const haka = sourceResult("haka", hakaUrl(query), enabled.haka, async () => parseHaka(await providerText(hakaUrl(query), { timeoutMs: httpTimeout }), query, new Date().toISOString()));
+  // STK can establish the plate → VIN binding before we ask SKP.
+  // A VIN entered alongside a plate is only a conflict check at the route boundary.
+  const sources = [await sourceResult("stkonline", stkOnlineUrl(query), enabled.stkonline, async () => parseStkOnline(await providerText(stkOnlineUrl(query), { headers: STK_HEADERS, timeoutMs: httpTimeout }), query, new Date().toISOString()))];
   const result: VehicleLookupResult = { version: 1, id: randomUUID(), query, fetchedAt: new Date().toISOString(), sources };
-  const vin = query.kind === "vin" ? query.value : !lookupIdentityConflict(result, {}) ? preferredVehicleFacts(result).vin?.value : undefined;
-  if (vin && enabled.vpic && Date.now() < deadline) sources.push(await sourceResult("vpic", "https://vpic.nhtsa.dot.gov/api/", true, async () => parseVpic(JSON.parse(await providerText(`https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/${encodeURIComponent(vin)}?format=json`, { timeoutMs: Math.max(1, Math.min(5_000, deadline - Date.now())) })), new Date().toISOString())));
+  const resolvedVin = verifiedVin(result);
+  const insuranceQuery: VehicleQuery = resolvedVin ? { ...query, kind: "vin", value: resolvedVin } : query;
+  let insurance = await insuranceResult(insuranceQuery, enabled.skp, deadline);
+  // An empty VIN result can still have a contract under the current plate. A
+  // timeout, challenge, or ambiguous response must not trigger another attempt.
+  if (query.kind === "plate" && insuranceQuery.kind === "vin" && insurance.status === "not_found" && Date.now() < deadline) {
+    const fallback = await insuranceResult(query, enabled.skp, deadline);
+    insurance = { ...fallback, warnings: [`SKP nenašlo zmluvu podľa VIN ${insuranceQuery.value}; následne sme overili EČV ${query.value}.`, ...fallback.warnings] };
+  }
+  sources.push(insurance, await haka);
+  const vin = verifiedVin(result);
+  if (vin && enabled.vpic && Date.now() < deadline) sources.push(await sourceResult("vpic", "https://vpic.nhtsa.dot.gov/api/", true, async () => parseVpic(JSON.parse(await providerText(`https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/${encodeURIComponent(vin)}?format=json`, { timeoutMs: remainingTimeout(deadline, 5_000) })), new Date().toISOString())));
   return result;
+}
+
+function remainingTimeout(deadline: number, maximum: number) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error("lookup_deadline");
+  return Math.min(maximum, remaining);
+}
+
+function verifiedVin(result: VehicleLookupResult): string | undefined {
+  if (result.query.kind === "vin") return result.query.value;
+  if (lookupIdentityConflict(result, {})) return undefined;
+  const vin = normalizeVehicleIdentifier(preferredVehicleFacts(result).vin?.value ?? "");
+  return isVin(vin) ? vin : undefined;
+}
+
+async function insuranceResult(query: VehicleQuery, enabled: boolean, deadline: number) {
+  const result = await sourceResult("skp", SKP_URL, enabled, async () => {
+    remainingTimeout(deadline, 25_000);
+    const { lookupSkp } = await import("./providers/skp-browser");
+    remainingTimeout(deadline, 25_000);
+    return lookupSkp(query, deadline);
+  });
+  return enabled ? { ...result, warnings: [`Overenie PZP podľa ${query.kind === "vin" ? "VIN" : "EČV"}: ${query.value}.`, ...result.warnings] } : result;
 }

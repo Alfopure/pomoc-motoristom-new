@@ -18,7 +18,7 @@ export async function lookupVehicle(query: VehicleQuery, actor: MotoristActor): 
     auth: { persistSession: false, autoRefreshToken: false },
     global: { fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.any([AbortSignal.timeout(5_000), ...(init?.signal ? [init.signal] : [])]) }) },
   });
-  const queryHash = createHash("sha256").update(JSON.stringify([query.kind, query.value, query.country, query.checkedForDate, 2])).digest("hex");
+  const queryHash = createHash("sha256").update(JSON.stringify([query.kind, query.value, query.country, query.checkedForDate, 3])).digest("hex");
   const { data, error } = await admin.rpc("motorist_vehicle_lookup_claim", { p_organization_id: actor.organizationId, p_profile_id: actor.profileId, p_query_hash: queryHash });
   if (error || !data) throw new VehicleLookupError("Dohľadávanie je dočasne nedostupné. Údaje môžete vyplniť ručne.");
   const claim = data as unknown as Claim;
@@ -32,7 +32,7 @@ export async function lookupVehicle(query: VehicleQuery, actor: MotoristActor): 
     return { snapshot: sealVehicleLookup(result, actor.organizationId), cached: false };
   } finally {
     const skp = result?.sources.find((source) => source.source === "skp");
-    const success = Boolean(result && result.sources.filter((source) => source.source === "skp" || source.source === "stkonline").every((source) => source.status === "found") && result.sources.every((source) => !["unavailable", "challenge_required", "rate_limited"].includes(source.status)));
+    const success = Boolean(result && skp?.status === "found" && result.sources.find((source) => source.source === "stkonline")?.status === "found" && result.sources.every((source) => !["unavailable", "challenge_required", "rate_limited"].includes(source.status)));
     const finish = await admin.rpc("motorist_vehicle_lookup_finish", {
       p_organization_id: actor.organizationId, p_token: claim.token, p_query_hash: queryHash,
       p_result: (result ?? null) as unknown as Json, p_success: success,
