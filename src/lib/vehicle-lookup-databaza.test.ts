@@ -34,6 +34,10 @@ const technicalFacts = {
   powerKw: { value: "110", quality: "reported" },
   curbWeightKg: { value: "1540", quality: "reported" },
   grossWeightKg: { value: "2100", quality: "reported" },
+  vehicleTypeDesignation: { value: "TEST", quality: "reported" },
+  typeVariantVersion: { value: "TEST/V1/X2", quality: "reported" },
+  trailerBrakedWeightKg: { value: "1400", quality: "reported" },
+  trailerUnbrakedWeightKg: { value: "650", quality: "reported" },
   drivenAxles: { value: "2 / predná a zadná", quality: "reported" },
   axleCount: { value: "2", quality: "reported" },
   wheelbaseMm: { value: "2680", quality: "reported" },
@@ -43,6 +47,11 @@ const technicalFacts = {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("DatabázaVozidiel source precedence and operator choices", () => {
+  it("treats translated transmission names as equivalent but keeps manual/automatic conflicts", () => {
+    const api = source("databazavozidiel", { transmission: { value: "Automatická", quality: "reported" } });
+    expect(vehicleFactConflicts(result([api, source("vpic", { transmission: { value: "Automatic", quality: "decoded" } })]))).toEqual({});
+    expect(vehicleFactConflicts(result([api, source("vpic", { transmission: { value: "Manual", quality: "decoded" } })])).transmission).toHaveLength(2);
+  });
   it("prefers the API representation of equivalent facts regardless of arrival order", () => {
     const lookup = result([
       source("vpic", { fuel: { value: "Diesel", quality: "decoded" } }),

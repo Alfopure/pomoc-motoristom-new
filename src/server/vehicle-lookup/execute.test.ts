@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { VehicleQuery, VehicleSource, VehicleSourceResult } from "@/lib/vehicle-lookup";
 
-const mocks = vi.hoisted(() => ({ skp: vi.fn(), stk: vi.fn(), haka: vi.fn(), vpic: vi.fn(), text: vi.fn() }));
+const mocks = vi.hoisted(() => ({ databaza: vi.fn(), skp: vi.fn(), stk: vi.fn(), haka: vi.fn(), vpic: vi.fn(), text: vi.fn() }));
+vi.mock("./providers/databazavozidiel", () => ({ DATABAZA_VOZIDIEL_URL: "https://www.databazavozidiel.sk/api/vehicles", lookupDatabazaVozidiel: mocks.databaza }));
 vi.mock("./providers/skp-browser", () => ({ lookupSkp: mocks.skp }));
 vi.mock("./providers/stkonline", async (original) => ({ ...await original<typeof import("./providers/stkonline")>(), parseStkOnline: mocks.stk }));
 vi.mock("./providers/haka", async (original) => ({ ...await original<typeof import("./providers/haka")>(), parseHaka: mocks.haka }));
@@ -13,7 +14,7 @@ import { executeVehicleLookup, type LookupProviders } from "./execute";
 const query: VehicleQuery = { kind: "plate", value: "XX000XX", country: "SK", checkedForDate: "2026-09-15" };
 const vin = "WVWZZZ1JZXW000001";
 const otherVin = "WVWZZZ1JZXW000002";
-const enabled: LookupProviders = { skp: true, stkonline: true, haka: true, vpic: true };
+const enabled: LookupProviders = { databazavozidiel: true, skp: true, stkonline: true, haka: true, vpic: true };
 function source(name: VehicleSource, status: VehicleSourceResult["status"] = "not_found", facts: VehicleSourceResult["facts"] = {}): VehicleSourceResult {
   return { source: name, status, facts, url: "https://www.skp.sk/", fetchedAt: "2026-09-15T08:00:00Z", warnings: [] };
 }
@@ -23,6 +24,7 @@ function identity(name: VehicleSource, value = vin): VehicleSourceResult {
 
 beforeEach(() => {
   mocks.text.mockResolvedValue("{}");
+  mocks.databaza.mockResolvedValue(source("databazavozidiel"));
   mocks.stk.mockReturnValue(source("stkonline"));
   mocks.haka.mockReturnValue(source("haka"));
   mocks.skp.mockResolvedValue(source("skp", "found", { insuranceStatus: { value: "Poistené", quality: "reported" } }));
@@ -31,6 +33,61 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.resetAllMocks(); });
 
 describe("VIN-first PZP lookup", () => {
+  it("runs the registry and STK together, then uses the registry's verified VIN for insurance", async () => {
+    let resolveRegistry!: (value: VehicleSourceResult) => void;
+    mocks.databaza.mockReturnValue(new Promise<VehicleSourceResult>((resolve) => { resolveRegistry = resolve; }));
+    const pending = executeVehicleLookup(query, enabled);
+    await Promise.resolve();
+    expect(mocks.databaza).toHaveBeenCalledExactlyOnceWith(query, { timeoutMs: 9_000 });
+    expect(mocks.stk).toHaveBeenCalled();
+    expect(mocks.skp).not.toHaveBeenCalled();
+    resolveRegistry(identity("databazavozidiel"));
+    const result = await pending;
+    expect(mocks.skp).toHaveBeenCalledExactlyOnceWith({ ...query, kind: "vin", value: vin }, expect.any(Number));
+    expect(result.sources.find((item) => item.source === "databazavozidiel")?.facts.vin?.value).toBe(vin);
+  });
+
+  it("does not call the paid provider when disabled and still uses STK's VIN", async () => {
+    mocks.stk.mockReturnValue(identity("stkonline"));
+    const result = await executeVehicleLookup(query, { ...enabled, databazavozidiel: false });
+    expect(mocks.databaza).not.toHaveBeenCalled();
+    expect(mocks.skp).toHaveBeenCalledExactlyOnceWith({ ...query, kind: "vin", value: vin }, expect.any(Number));
+    expect(result.sources.find((item) => item.source === "databazavozidiel")?.status).toBe("unsupported");
+  });
+
+  it("retains registry technical facts when SKP fails", async () => {
+    mocks.databaza.mockResolvedValue(identity("databazavozidiel"));
+    mocks.skp.mockRejectedValue(new Error("provider_timeout"));
+    const result = await executeVehicleLookup(query, enabled);
+    expect(result.sources.find((item) => item.source === "databazavozidiel")?.facts.vin?.value).toBe(vin);
+    expect(result.sources.find((item) => item.source === "skp")?.status).toBe("unavailable");
+    expect(mocks.skp).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["different_vin", "ambiguous"])("does not select the registry VIN across %s STK results", async (conflict) => {
+    mocks.databaza.mockResolvedValue(identity("databazavozidiel"));
+    mocks.stk.mockReturnValue(conflict === "ambiguous" ? source("stkonline", "ambiguous") : identity("stkonline", otherVin));
+    await executeVehicleLookup(query, enabled);
+    expect(mocks.skp).toHaveBeenCalledExactlyOnceWith(query, expect.any(Number));
+    expect(mocks.vpic).not.toHaveBeenCalled();
+  });
+
+  it("uses STK's VIN if the registry is unavailable without retrying the paid request", async () => {
+    mocks.databaza.mockRejectedValue(new Error("provider_timeout"));
+    mocks.stk.mockReturnValue(identity("stkonline"));
+    const result = await executeVehicleLookup(query, enabled);
+    expect(mocks.databaza).toHaveBeenCalledTimes(1);
+    expect(mocks.skp).toHaveBeenCalledExactlyOnceWith({ ...query, kind: "vin", value: vin }, expect.any(Number));
+    expect(result.sources.find((item) => item.source === "databazavozidiel")?.status).toBe("unavailable");
+  });
+
+  it("limits the registry request to the remaining lookup deadline", async () => {
+    vi.useFakeTimers();
+    const deadline = Date.now() + 500;
+    await executeVehicleLookup(query, enabled, deadline);
+    expect(mocks.databaza).toHaveBeenCalledExactlyOnceWith(query, { timeoutMs: 500 });
+  });
+
   it("waits for STK identity and sends its VIN to SKP", async () => {
     let resolveStk!: (html: string) => void;
     const stkResponse = new Promise<string>((resolve) => { resolveStk = resolve; });
@@ -142,6 +199,7 @@ describe("VIN-first PZP lookup", () => {
 
   it("makes no provider requests when the deadline has already elapsed", async () => {
     await expect(executeVehicleLookup(query, enabled, Date.now() - 1)).rejects.toThrow("lookup_deadline");
+    expect(mocks.databaza).not.toHaveBeenCalled();
     expect(mocks.text).not.toHaveBeenCalled();
     expect(mocks.skp).not.toHaveBeenCalled();
   });
