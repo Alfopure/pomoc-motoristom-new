@@ -4,7 +4,11 @@ Táto funkcia patrí výlučne projektu `pomoc-motoristom-new`, Supabase `ifpaee
 
 ## Používanie a význam údajov
 
-Pri EČV aj VIN vo flotile, novej karte a úprave zásahu je tlačidlo vyhľadávania. Podporované sú slovenské vozidlá. Výsledok je najprv návrh: až prijatie doplní prázdne polia a uloží prehľad k vozidlu alebo zásahu. Existujúce ručné hodnoty zostávajú zachované. Návrh sa zahodí pri zmene identifikátora; nesúhlas EČV/VIN blokuje prijatie.
+Pri EČV aj VIN vo flotile, novej karte a úprave zásahu je tlačidlo vyhľadávania. Podporované sú slovenské vozidlá. Po dohľadaní sa otvorí detail vozidla s PZP a zoskupenými technickými údajmi pre zásah: palivo, karoséria, poháňané nápravy, prevádzková a najväčšia prípustná hmotnosť, farba, prevodovka a motor. Nezistené hodnoty sú označené; hmotnostná trieda nenahrádza presnú hmotnosť. Ďalšie dostupné údaje, kontroly a pôvodné hodnoty jednotlivých zdrojov sú nižšie v detaile. Zatvorenie okna ponechá návrh na opätovné otvorenie, Escape zatvorí iba detail vozidla.
+
+Výsledok je najprv návrh: až prijatie doplní prázdne polia a uloží prehľad k vozidlu alebo zásahu. Existujúce ručné hodnoty zostávajú zachované. Návrh sa zahodí pri zmene identifikátora; nesúhlas EČV/VIN blokuje prijatie. Vyhľadávanie sa spúšťa tlačidlom, nie pri každom napísanom znaku.
+
+Pri zadaní EČV sa najprv zisťuje jednoznačné VIN cez STKonline a až potom sa odošle overenie SKP podľa VIN. Ak VIN nie je dostupné alebo zdroje nesúhlasia, SKP sa osloví podľa zadanej EČV. Ak SKP podľa VIN výslovne nenájde zmluvu, nasleduje jeden pokus cez pôvodnú EČV v zostávajúcom časovom limite. Chyba, CAPTCHA, limit ani nejednoznačný výsledok nespúšťajú ďalší pokus. Pri zdroji SKP sa uvádza, podľa ktorého identifikátora bolo overenie vykonané. VIN ručne zadané vedľa EČV slúži na kontrolu konfliktu, samo nevytvára overenú väzbu EČV → VIN.
 
 Vecne rozdielne hodnoty toho istého poľa sa zobrazia spolu so zdrojmi. Prázdne konfliktné pole sa doplní až po výbere zdroja; bez výberu ostane prázdne. Uložený prehľad obsahuje pôvodné pozorovania všetkých zdrojov. Nie je potvrdením pravdivosti ručne upravených polí.
 
@@ -25,7 +29,7 @@ Diaľničná známka, prvá registrácia, presný dátum výroby ani všetky tec
 - Najviac jedna externá operácia naraz na organizáciu, 5/min na profil a 30/min na organizáciu. Limit a rezervácia sa koordinujú transakčne v databáze naprieč Vercel procesmi. Súbežný lookup vráti 409 s `Retry-After`; klient automaticky čaká najviac 30 s v najviac šiestich prestávkach. Opakovaný rovnaký dopyt po dokončení prvého dostane jeho cache. Celý klientsky pokus vrátane čakania má limit 90 s a zmena identity ho zruší. HTTP 429 ani 5xx sa automaticky neopakujú. Toto zlepšuje obsluhu čakania, nezvyšuje povolený súbeh externých zdrojov. API vyžaduje aktívnu dispečerskú alebo vyššiu rolu.
 - Úspešný SKP + STKonline výsledok bez technických chýb má cache najviac 15 minút. Čiastočný alebo neúspešný výsledok najviac minútu. Kľúč zahŕňa organizáciu, identifikátor, typ dopytu, krajinu a bratislavský deň; cache nikdy nepredstiera nové overenie.
 - Prijatý, podpísaný výsledok sa ukladá oddelene do `motorist_cases.vehicle_details.vehicleLookup` alebo `motorist_fleet_assets.metadata.vehicleLookup`. Zostáva historickým pozorovaním aj po expirácii cache. Podpis a identita sa kontrolujú pri uložení aj načítaní. Hodnota ručne vyplneného poľa nie je týmto podpisom potvrdená.
-- Uloženie flotily zlúči prijatie/zrušenie prehľadu a potvrdenie dostupnosti naraz; zachová ostatné integračné metadata. Verzia kľúča dočasnej cache je 2, aby sa nové dohľadania parsovali už s identitou hlásení HAKA. Uložené historické podpisy v1 zostávajú podporované.
+- Uloženie flotily zlúči prijatie/zrušenie prehľadu a potvrdenie dostupnosti naraz; zachová ostatné integračné metadata. Verzia kľúča dočasnej cache je 3, aby nové dohľadania používali overenie SKP prednostne cez VIN. Uložené historické podpisy v1 zostávajú podporované.
 - Telemetria `vehicle_lookup_source` obsahuje iba zdroj, stav, trvanie a počet polí. Neloguje EČV/VIN, cookies, CAPTCHA tokeny ani celý výsledok. Testovacie EČV/VIN a živé odpovede sa nedávajú do repozitára.
 
 ## Vypnutie, incident a čistenie

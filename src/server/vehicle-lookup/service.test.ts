@@ -32,3 +32,22 @@ it("keeps STK facts on a skipped SKP circuit but uses the short partial-result c
   expect(response.snapshot.result.sources[1].facts.vin?.value).toBe("WVWZZZ1JZXW000001");
   expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_token: "lease", p_success: false, p_skp_failed: null });
 });
+
+it.each(["found", "unavailable"] as const)("uses STK's %s status for the healthy cache lifetime", async (status) => {
+  mocks.rpc.mockResolvedValueOnce({ data: { status: "reserved", token: "lease", providers: { skp: true, stkonline: true, haka: true, vpic: true } }, error: null }).mockResolvedValue({ data: true, error: null });
+  mocks.execute.mockResolvedValue({ ...result, sources: [
+    { ...result.sources[0], status: "found" },
+    { ...result.sources[1], status },
+  ] } satisfies VehicleLookupResult);
+  await lookupVehicle(query, actor);
+  expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_success: status === "found", p_skp_failed: false });
+});
+
+it("keeps a short cache lifetime when a required provider result is missing", async () => {
+  mocks.rpc.mockResolvedValueOnce({ data: { status: "reserved", token: "lease", providers: { skp: true, stkonline: true, haka: true, vpic: true } }, error: null }).mockResolvedValue({ data: true, error: null });
+  mocks.execute.mockResolvedValue({ ...result, sources: [
+    { ...result.sources[0], status: "found" },
+  ] } satisfies VehicleLookupResult);
+  await lookupVehicle(query, actor);
+  expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_success: false });
+});
