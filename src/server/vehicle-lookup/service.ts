@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import { requireSupabaseServiceEnv } from "@/lib/supabase/env";
 import type { MotoristActor } from "@/server/api-auth";
-import type { VehicleLookupResponse, VehicleLookupResult, VehicleQuery } from "@/lib/vehicle-lookup";
+import { lookupIdentityConflict, type VehicleLookupResponse, type VehicleLookupResult, type VehicleQuery } from "@/lib/vehicle-lookup";
 import { sealVehicleLookup } from "./snapshot";
 import { executeVehicleLookup, type LookupProviders } from "./execute";
 import type { Database, Json } from "@/lib/supabase/database.types";
@@ -18,7 +18,8 @@ export async function lookupVehicle(query: VehicleQuery, actor: MotoristActor): 
     auth: { persistSession: false, autoRefreshToken: false },
     global: { fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.any([AbortSignal.timeout(5_000), ...(init?.signal ? [init.signal] : [])]) }) },
   });
-  const queryHash = createHash("sha256").update(JSON.stringify([query.kind, query.value, query.country, query.checkedForDate, 3])).digest("hex");
+  const databazaEnabled = Boolean(process.env.DATABAZA_VOZIDIEL_API_KEY?.trim());
+  const queryHash = createHash("sha256").update(JSON.stringify([query.kind, query.value, query.country, query.checkedForDate, 4, databazaEnabled])).digest("hex");
   const { data, error } = await admin.rpc("motorist_vehicle_lookup_claim", { p_organization_id: actor.organizationId, p_profile_id: actor.profileId, p_query_hash: queryHash });
   if (error || !data) throw new VehicleLookupError("Dohľadávanie je dočasne nedostupné. Údaje môžete vyplniť ručne.");
   const claim = data as unknown as Claim;
@@ -28,11 +29,12 @@ export async function lookupVehicle(query: VehicleQuery, actor: MotoristActor): 
   if (claim.status !== "reserved") throw new VehicleLookupError("Automatické dohľadávanie je momentálne vypnuté.");
   let result: VehicleLookupResult | undefined;
   try {
-    result = await executeVehicleLookup(query, claim.providers, deadline);
+    result = await executeVehicleLookup(query, { ...claim.providers, databazavozidiel: databazaEnabled }, deadline);
     return { snapshot: sealVehicleLookup(result, actor.organizationId), cached: false };
   } finally {
     const skp = result?.sources.find((source) => source.source === "skp");
-    const success = Boolean(result && skp?.status === "found" && result.sources.find((source) => source.source === "stkonline")?.status === "found" && result.sources.every((source) => !["unavailable", "challenge_required", "rate_limited"].includes(source.status)));
+    const primarySource = databazaEnabled ? "databazavozidiel" : "stkonline";
+    const success = Boolean(result && skp?.status === "found" && result.sources.find((source) => source.source === primarySource)?.status === "found" && !lookupIdentityConflict(result, {}) && result.sources.every((source) => !["unavailable", "challenge_required", "rate_limited"].includes(source.status)));
     const finish = await admin.rpc("motorist_vehicle_lookup_finish", {
       p_organization_id: actor.organizationId, p_token: claim.token, p_query_hash: queryHash,
       p_result: (result ?? null) as unknown as Json, p_success: success,

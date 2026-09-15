@@ -2,9 +2,9 @@
 export type VehicleSource = "databazavozidiel" | "skp" | "stkonline" | "haka" | "vpic";
 export type LookupStatus = "found" | "not_found" | "ambiguous" | "challenge_required" | "rate_limited" | "unavailable" | "unsupported";
 export type VehicleField = "plate" | "vin" | "make" | "model" | "color" | "fuel" | "modelYear" | "bodyType" | "doors" | "seats" | "transmission" | "engineCapacityCc" | "powerKw" | "technicalInspectionValidUntil" | "emissionInspectionValidUntil" | "technicalInspectionAt" | "emissionInspectionAt" | "insurer" | "insuranceStatus"
-  | "vehicleCategory" | "vehicleType" | "variant" | "version" | "manufacturer" | "firstRegisteredAt" | "firstRegisteredInSkAt"
+  | "vehicleCategory" | "vehicleType" | "vehicleTypeDesignation" | "typeVariantVersion" | "variant" | "version" | "manufacturer" | "firstRegisteredAt" | "firstRegisteredInSkAt"
   | "engineType" | "engineManufacturer" | "engineNumber" | "engineRpm" | "transmissionGears" | "maxSpeedKmh" | "emissionClass"
-  | "curbWeightKg" | "grossWeightKg" | "grossTrainWeightKg" | "maxAxleWeightKg" | "trailerWeightKg"
+  | "curbWeightKg" | "grossWeightKg" | "grossTrainWeightKg" | "maxAxleWeightKg" | "trailerWeightKg" | "trailerBrakedWeightKg" | "trailerUnbrakedWeightKg"
   | "axleCount" | "drivenAxles" | "wheelbaseMm" | "lengthMm" | "widthMm" | "heightMm" | "tireDimensions" | "rimDimensions" | "towingDevice";
 export type VehicleFact = { value: string; quality: "reported" | "decoded" | "partial" };
 export type VehicleFacts = Partial<Record<VehicleField, VehicleFact>>;
@@ -44,11 +44,13 @@ export const vehicleFieldLabels: Record<VehicleField, string> = {
   technicalInspectionAt: "TK vykonaná", emissionInspectionAt: "EK vykonaná",
   insurer: "Poisťovňa PZP", insuranceStatus: "PZP ku dňu overenia",
   vehicleCategory: "Kategória vozidla", vehicleType: "Druh vozidla", variant: "Variant", version: "Verzia", manufacturer: "Výrobca vozidla",
+  vehicleTypeDesignation: "Typ vozidla", typeVariantVersion: "Typ / variant / verzia",
   firstRegisteredAt: "Prvá evidencia", firstRegisteredInSkAt: "Prvá evidencia v SR",
   engineType: "Typ motora", engineManufacturer: "Výrobca motora", engineNumber: "Číslo motora", engineRpm: "Otáčky motora (ot./min)",
   transmissionGears: "Počet prevodových stupňov", maxSpeedKmh: "Max. rýchlosť (km/h)", emissionClass: "Emisná norma",
   curbWeightKg: "Prevádzková hmotnosť (kg)", grossWeightKg: "Max. prípustná hmotnosť (kg)", grossTrainWeightKg: "Max. hmotnosť súpravy (kg)",
   maxAxleWeightKg: "Max. hmotnosť na nápravu (kg)", trailerWeightKg: "Max. hmotnosť prípojného vozidla (kg)",
+  trailerBrakedWeightKg: "Max. hmotnosť brzdeného prívesu (kg)", trailerUnbrakedWeightKg: "Max. hmotnosť nebrzdeného prívesu (kg)",
   axleCount: "Počet náprav", drivenAxles: "Poháňané nápravy", wheelbaseMm: "Rázvor (mm)", lengthMm: "Dĺžka (mm)", widthMm: "Šírka (mm)", heightMm: "Výška (mm)",
   tireDimensions: "Pneumatiky", rimDimensions: "Ráfiky", towingDevice: "Spájacie zariadenie",
 };
@@ -120,6 +122,10 @@ function comparableFact(field: VehicleField, value: string) {
     if (["ELEKTRINA", "ELECTRIC", "ELECTRICITY"].includes(normalized)) return "ELECTRIC";
     if (["NAFTA", "DIESEL"].includes(normalized)) return "DIESEL";
     if (["BENZIN", "GASOLINE", "PETROL"].includes(normalized)) return "PETROL";
+  }
+  if (field === "transmission") {
+    if (["AT", "AUTOMATICKA", "AUTOMATIC"].includes(normalized)) return "AUTOMATIC";
+    if (["MT", "MANUALNA", "MANUAL"].includes(normalized)) return "MANUAL";
   }
   return normalized;
 }

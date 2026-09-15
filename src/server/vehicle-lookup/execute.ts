@@ -1,13 +1,14 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { isVin, lookupIdentityConflict, normalizeVehicleIdentifier, preferredVehicleFacts, type VehicleLookupResult, type VehicleQuery, type VehicleSource, type VehicleSourceResult } from "@/lib/vehicle-lookup";
+import { DATABAZA_VOZIDIEL_URL, lookupDatabazaVozidiel } from "./providers/databazavozidiel";
 import { SKP_URL } from "./providers/skp";
 import { parseStkOnline, stkOnlineUrl } from "./providers/stkonline";
 import { hakaUrl, parseHaka } from "./providers/haka";
 import { parseVpic } from "./providers/vpic";
 import { ProviderHttpError, providerText } from "./providers/http";
 
-export type LookupProviders = { skp: boolean; stkonline: boolean; haka: boolean; vpic: boolean };
+export type LookupProviders = { skp: boolean; stkonline: boolean; haka: boolean; vpic: boolean; databazavozidiel?: boolean };
 const STK_HEADERS = { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.0.0 Safari/537.36", Accept: "text/html", "Accept-Language": "sk-SK,sk;q=0.9" };
 async function sourceResult(source: VehicleSource, url: string, enabled: boolean, task: () => Promise<VehicleSourceResult>): Promise<VehicleSourceResult> {
   const started = Date.now();
@@ -21,9 +22,12 @@ export async function executeVehicleLookup(query: VehicleQuery, enabled: LookupP
   if (Date.now() >= deadline) throw new Error("lookup_deadline");
   const httpTimeout = remainingTimeout(deadline, 9_000);
   const haka = sourceResult("haka", hakaUrl(query), enabled.haka, async () => parseHaka(await providerText(hakaUrl(query), { timeoutMs: httpTimeout }), query, new Date().toISOString()));
-  // STK can establish the plate → VIN binding before we ask SKP.
+  // Registry and STK can establish the plate → VIN binding before we ask SKP.
   // A VIN entered alongside a plate is only a conflict check at the route boundary.
-  const sources = [await sourceResult("stkonline", stkOnlineUrl(query), enabled.stkonline, async () => parseStkOnline(await providerText(stkOnlineUrl(query), { headers: STK_HEADERS, timeoutMs: httpTimeout }), query, new Date().toISOString()))];
+  const sources = await Promise.all([
+    sourceResult("databazavozidiel", DATABAZA_VOZIDIEL_URL, enabled.databazavozidiel === true, async () => lookupDatabazaVozidiel(query, { timeoutMs: httpTimeout })),
+    sourceResult("stkonline", stkOnlineUrl(query), enabled.stkonline, async () => parseStkOnline(await providerText(stkOnlineUrl(query), { headers: STK_HEADERS, timeoutMs: httpTimeout }), query, new Date().toISOString())),
+  ]);
   const result: VehicleLookupResult = { version: 1, id: randomUUID(), query, fetchedAt: new Date().toISOString(), sources };
   const resolvedVin = verifiedVin(result);
   const insuranceQuery: VehicleQuery = resolvedVin ? { ...query, kind: "vin", value: resolvedVin } : query;
