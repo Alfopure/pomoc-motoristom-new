@@ -10,11 +10,11 @@ const statusLabel: Record<LookupStatus, string> = {
   unavailable: "Zdroj sa nepodarilo overiť", unsupported: "Automaticky nedostupné",
 };
 
-const technicalFields: VehicleField[] = ["fuel", "bodyType", "drivenAxles", "curbWeightKg", "grossWeightKg", "color", "transmission", "transmissionGears", "powerKw", "engineCapacityCc", "engineType", "axleCount"];
+const technicalFields: VehicleField[] = ["fuel", "bodyType", "drivenAxles", "curbWeightKg", "grossWeightKg", "color", "transmission", "transmissionGears", "powerKw", "engineCapacityCc", "engineNumber", "axleCount", "engineType"];
 const additionalGroups: { title: string; fields: VehicleField[] }[] = [
-  { title: "Motor a jazdné vlastnosti", fields: ["engineManufacturer", "engineNumber", "engineRpm", "maxSpeedKmh", "emissionClass"] },
-  { title: "Podvozok, rozmery a hmotnosti", fields: ["grossTrainWeightKg", "maxAxleWeightKg", "trailerWeightKg", "wheelbaseMm", "lengthMm", "widthMm", "heightMm", "tireDimensions", "rimDimensions", "towingDevice"] },
-  { title: "Evidencia a typ vozidla", fields: ["vehicleCategory", "vehicleType", "variant", "version", "manufacturer", "firstRegisteredAt", "firstRegisteredInSkAt"] },
+  { title: "Motor a jazdné vlastnosti", fields: ["engineManufacturer", "engineRpm", "maxSpeedKmh", "emissionClass"] },
+  { title: "Podvozok, rozmery a hmotnosti", fields: ["grossTrainWeightKg", "maxAxleWeightKg", "trailerWeightKg", "trailerBrakedWeightKg", "trailerUnbrakedWeightKg", "wheelbaseMm", "lengthMm", "widthMm", "heightMm", "tireDimensions", "rimDimensions", "towingDevice"] },
+  { title: "Evidencia a typ vozidla", fields: ["vehicleCategory", "vehicleType", "vehicleTypeDesignation", "typeVariantVersion", "variant", "version", "manufacturer", "firstRegisteredAt", "firstRegisteredInSkAt"] },
 ];
 const identityFields: VehicleField[] = ["plate", "vin", "make", "model", "modelYear", "doors", "seats"];
 const inspectionFields: VehicleField[] = ["technicalInspectionValidUntil", "emissionInspectionValidUntil", "technicalInspectionAt", "emissionInspectionAt"];
