@@ -3,9 +3,10 @@ import { requestFleetRefresh } from "./fleet-refresh-client";
 import type { FleetData } from "@/data/dispatch-types";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
-import type { VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
+import { VehicleLookupSearch } from "./VehicleLookupSearch";
+import { isSlovakPlate, isVin, normalizeVehicleIdentifier, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import { AlertTriangle, CalendarDays, Car, CheckCircle2, Clock3, Download, FileWarning, Link2, Plus, RadioTower, RefreshCw, Save, Search, Truck } from "lucide-react";
 import { fleetReconciliationCsv } from "@/lib/fleet-reconciliation";
@@ -132,6 +133,12 @@ export function FleetModule({
   const [draft, setDraft] = useState<FleetDraft>(() => assetToDraft(firstReplacement, branches[0]?.id, "replacement"));
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [editorOpen, setEditorOpen] = useState(!firstReplacement);
+  const [assetLookupRequest, setAssetLookupRequest] = useState<{ assetId: string; id: number } | null>(null);
+  const [externalLookupRequest, setExternalLookupRequest] = useState<{ id: number; value: string }>();
+  const lookupSequence = useRef(0);
+  const editor = useRef<HTMLElement | null>(null);
+  const standaloneLookup = useRef<HTMLDivElement | null>(null);
 
   // T2: SWHouse je jediný zdroj pravdy o obsadenosti. Server už dodáva asset.status (rented pri obsadenom)
   // + asset.occupancy (occupied/free/unverified/stale). Žiadny klientský overlay — renderujeme priamo zo servera.
@@ -170,12 +177,14 @@ export function FleetModule({
     const nextAsset = assets.find((asset) => asset.kind === (nextMode === "replacement" ? "replacement_car" : "tow_truck"));
     setMode(nextMode);
     setCategoryFilter("all");
+    setAssetLookupRequest(null);
     if (nextMode === "gps") {
       setMessage(null);
       return;
     }
     setSelectedAssetId(nextAsset?.id ?? null);
     setDraft(assetToDraft(nextAsset, branches[0]?.id, nextMode));
+    setEditorOpen(!nextAsset);
     setMessage(null);
   }
 
@@ -184,13 +193,34 @@ export function FleetModule({
     // Draft vždy z uloženého záznamu — SWHouse override je len na zobrazenie, nesmie sa prepísať do DB.
     const stored = assets.find((candidate) => candidate.id === asset.id) ?? asset;
     setDraft(assetToDraft(stored, branches[0]?.id, mode));
+    setAssetLookupRequest(null);
+    setEditorOpen(false);
     setMessage(null);
   }
 
   function startNewAsset() {
     setSelectedAssetId(null);
     setDraft(emptyDraft(branches[0]?.id, mode));
+    setAssetLookupRequest(null);
+    setEditorOpen(true);
     setMessage(null);
+  }
+
+  function scanAsset(asset: FleetAsset) {
+    // Keep edits already made to this vehicle. New results are still only a
+    // proposal until accepted and saved through the existing fleet form.
+    if (draft.id !== asset.id) selectAsset(asset);
+    if (mode === "gps") setMode(asset.kind === "tow_truck" ? "tow" : "replacement");
+    setEditorOpen(true);
+    setAssetLookupRequest({ assetId: asset.id, id: ++lookupSequence.current });
+    requestAnimationFrame(() => editor.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+  }
+
+  function scanExternalVehicle(vehicle: { licensePlate?: string | null; vin?: string | null }) {
+    const value = lookupIdentifier(vehicle);
+    if (!value) return;
+    setExternalLookupRequest({ id: ++lookupSequence.current, value });
+    requestAnimationFrame(() => standaloneLookup.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
   }
 
   async function saveDraft() {
@@ -218,6 +248,8 @@ export function FleetModule({
       const nextAsset = result.dispatchData.fleetAssets.find((asset) => asset.id === result.assetId);
       setSelectedAssetId(result.assetId);
       setDraft(assetToDraft(nextAsset, branches[0]?.id, mode));
+      setEditorOpen(false);
+      setAssetLookupRequest(null);
       setMessage(draft.id ? "Vozidlo je upravené." : "Vozidlo je uložené vo flotile.");
     } catch (caught) {
       setMessage(caught instanceof Error ? caught.message : "Vozidlo sa nepodarilo uložiť.");
@@ -267,6 +299,10 @@ export function FleetModule({
         </div>
       )}
 
+      <div ref={standaloneLookup} className="mb-4">
+        <VehicleLookupSearch lookupRequest={externalLookupRequest} />
+      </div>
+
       {mode === "tow" && <GpsHealthPanel overview={gpsOverview} />}
 
       {mode === "gps" ? (
@@ -278,6 +314,8 @@ export function FleetModule({
           onDataChange={onDataChange}
           onMessage={setMessage}
           onSwitchMode={switchMode}
+          onScanAsset={scanAsset}
+          onScanExternalVehicle={scanExternalVehicle}
         />
       ) : (
       <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_340px]">
@@ -295,6 +333,7 @@ export function FleetModule({
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
                   placeholder="Hľadať"
+                  aria-label="Filtrovať vozidlá vo flotile"
                   className="h-9 w-full rounded-md border border-zinc-200 pl-9 pr-3 text-sm outline-none ring-yellow-300 transition focus:ring-2"
                 />
               </label>
@@ -318,6 +357,7 @@ export function FleetModule({
                   {mode === "tow" && <th className="border-b border-zinc-200 px-3 py-2">Posádka</th>}
                   <th className="border-b border-zinc-200 px-3 py-2">Poloha</th>
                   <th className="border-b border-zinc-200 px-3 py-2">Doklady</th>
+                  <th className="border-b border-zinc-200 px-3 py-2"><span className="sr-only">Overenie vozidla</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -352,11 +392,14 @@ export function FleetModule({
                     <td className="border-b border-zinc-100 px-3 py-3">
                       <DocumentSummary asset={asset} />
                     </td>
+                    <td className="border-b border-zinc-100 px-3 py-3">
+                      <ScanVehicleButton vehicle={asset.id === draft.id ? draft : asset} onClick={() => scanAsset(asset)} />
+                    </td>
                   </tr>
                 ))}
                 {filteredAssets.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="px-3 py-10 text-center text-sm font-medium text-zinc-500">
+                    <td colSpan={mode === "tow" ? 7 : 6} className="px-3 py-10 text-center text-sm font-medium text-zinc-500">
                       Žiadne vozidlo nevyhovuje filtru.
                     </td>
                   </tr>
@@ -366,7 +409,7 @@ export function FleetModule({
           </div>
         </section>
 
-        <aside className="min-w-0 rounded-md border border-zinc-200 bg-white p-4">
+        <aside ref={editor} className="min-w-0 rounded-md border border-zinc-200 bg-white p-4">
           <div className="mb-3 flex items-start justify-between gap-3">
             <div className="flex min-w-0 items-center gap-3">
               <BrandBadge make={draft.make || selectedAsset?.make} size="lg" />
@@ -377,10 +420,12 @@ export function FleetModule({
             </div>
           </div>
 
+          {selectedAsset && <div className="mb-3"><ScanVehicleButton vehicle={draft} onClick={() => scanAsset(selectedAsset)} /></div>}
+
           {message && <div className="mb-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-900">{message}</div>}
 
           {selectedAsset && <FleetSourceDetails asset={selectedAsset} />}
-          <details key={draft.id ?? "new"} open={!draft.id}>
+          <details key={draft.id ?? "new"} open={editorOpen} onToggle={(event) => setEditorOpen(event.currentTarget.open)}>
           <summary className="mb-3 cursor-pointer text-xs font-semibold text-zinc-600">{draft.id ? "Upraviť interné údaje vozidla" : "Základné údaje"}</summary>
 
           <div className="grid gap-3">
@@ -392,7 +437,7 @@ export function FleetModule({
             <div className="grid gap-3 sm:grid-cols-2">
               <TextField label="Značka" value={draft.make} onChange={(value) => setDraft((current) => ({ ...current, make: value }))} />
               <TextField label="Model" value={draft.model} onChange={(value) => setDraft((current) => ({ ...current, model: value }))} />
-              <VehicleLookupControl contextKey={draft.id ?? "new-fleet"} plate={draft.licensePlate} vin={draft.vin} snapshot={draft.vehicleLookup} onPlateChange={(value) => setDraft((current) => ({ ...current, licensePlate: value }))} onVinChange={(value) => setDraft((current) => ({ ...current, vin: value }))} values={{ make: draft.make, model: draft.model, technicalInspectionValidUntil: draft.technicalInspectionValidUntil, emissionInspectionValidUntil: draft.emissionInspectionValidUntil }} onApply={(patch, snapshot) => setDraft((current) => ({
+              <VehicleLookupControl lookupRequest={assetLookupRequest && assetLookupRequest.assetId === draft.id ? assetLookupRequest.id : undefined} contextKey={draft.id ?? "new-fleet"} plate={draft.licensePlate} vin={draft.vin} snapshot={draft.vehicleLookup} onPlateChange={(value) => setDraft((current) => ({ ...current, licensePlate: value }))} onVinChange={(value) => setDraft((current) => ({ ...current, vin: value }))} values={{ make: draft.make, model: draft.model, technicalInspectionValidUntil: draft.technicalInspectionValidUntil, emissionInspectionValidUntil: draft.emissionInspectionValidUntil }} onApply={(patch, snapshot) => setDraft((current) => ({
                 ...current, vehicleLookup: snapshot,
                 ...(patch.plate !== undefined ? { licensePlate: patch.plate } : {}),
                 ...(patch.vin !== undefined ? { vin: patch.vin } : {}),
@@ -519,6 +564,33 @@ export function FleetModule({
   );
 }
 
+function lookupIdentifier(vehicle: { licensePlate?: string | null; vin?: string | null }): string | null {
+  const plate = normalizeVehicleIdentifier(vehicle.licensePlate ?? "");
+  if (isSlovakPlate(plate)) return plate;
+  const vin = normalizeVehicleIdentifier(vehicle.vin ?? "");
+  return isVin(vin) ? vin : null;
+}
+
+function ScanVehicleButton({ vehicle, onClick }: {
+  vehicle: { licensePlate?: string | null; vin?: string | null };
+  onClick: () => void;
+}) {
+  const identifier = lookupIdentifier(vehicle);
+  return (
+    <button
+      type="button"
+      disabled={!identifier}
+      title={identifier ? `Overiť údaje a PZP vozidla ${identifier}` : "Na overenie doplňte slovenské EČV alebo platné VIN."}
+      aria-label={`Overiť vozidlo${identifier ? ` ${identifier}` : ""}`}
+      onClick={(event) => { event.stopPropagation(); onClick(); }}
+      className="inline-flex min-h-9 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-yellow-300 bg-yellow-50 px-2.5 py-1.5 text-xs font-semibold text-zinc-800 hover:bg-yellow-100 disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      <Search size={14} aria-hidden="true" />
+      Overiť vozidlo
+    </button>
+  );
+}
+
 function Kpi({ icon: Icon, label, tone = "default", value }: { icon: LucideIcon; label: string; tone?: "default" | "ok" | "warn"; value: string }) {
   const toneClass = tone === "warn" ? "bg-amber-50 text-amber-800" : tone === "ok" ? "bg-emerald-50 text-emerald-800" : "bg-white text-zinc-950";
 
@@ -591,6 +663,8 @@ function GpsConnectionsPanel({
   onDataChange,
   onMessage,
   onSwitchMode,
+  onScanAsset,
+  onScanExternalVehicle,
 }: {
   assets: FleetAsset[];
   branches: Branch[];
@@ -599,6 +673,8 @@ function GpsConnectionsPanel({
   onDataChange: (dispatchData: FleetData) => void;
   onMessage: (message: string | null) => void;
   onSwitchMode: (mode: FleetMode) => void;
+  onScanAsset: (asset: FleetAsset) => void;
+  onScanExternalVehicle: (vehicle: CommanderVehicleConnection) => void;
 }) {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -723,6 +799,7 @@ function GpsConnectionsPanel({
                     <div className="text-xs text-zinc-500">{car.licensePlate} · VIN {car.vin ?? "—"}</div>
                   </div>
                   <FleetAvailabilityPill asset={car} />
+                  <ScanVehicleButton vehicle={car} onClick={() => onScanAsset(car)} />
                   <button
                     type="button"
                     onClick={() => {
@@ -768,7 +845,7 @@ function GpsConnectionsPanel({
         </ConnectionSection>
 
         {pairedWithoutGps.length > 0 && <ConnectionSection title="Napárované, zatiaľ bez GPS" subtitle="Identita súhlasí, ale Commander pre tieto vozidlá nevrátil platnú polohu. Napárovanie sa nemení.">
-          {pairedWithoutGps.map((car) => <div key={car.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-3 py-2 text-xs"><span>{car.licensePlate} · {car.label}</span><FleetAvailabilityPill asset={car} /></div>)}
+          {pairedWithoutGps.map((car) => <div key={car.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-3 py-2 text-xs"><span>{car.licensePlate} · {car.label}</span><FleetAvailabilityPill asset={car} /><ScanVehicleButton vehicle={car} onClick={() => onScanAsset(car)} /></div>)}
         </ConnectionSection>}
         <ConnectionSection title="Commander bez zhody so Software House" subtitle="Vrátane záznamov, ktoré ešte nikdy neboli importované. Overte VIN alebo opravte ŠPZ v zdrojovom systéme; automaticky ich nevyraďujeme.">
           {ghostSources.length > 0 ? (
@@ -781,6 +858,7 @@ function GpsConnectionsPanel({
                   </div>
                   <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                     <PolohaPill stale={car.position ? car.position.stale : null} />
+                    <ScanVehicleButton vehicle={car} onClick={() => onScanExternalVehicle(car)} />
                   </div>
                 </div>
               );

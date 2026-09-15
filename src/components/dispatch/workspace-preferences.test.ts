@@ -45,7 +45,13 @@ describe("workspace preferences", () => {
     ];
     const parsed = parseWorkspacePreferences(JSON.stringify({ widgets: legacy, leftCollapsed: true, rightCollapsed: true, centerView: "table" }));
     expect(parsed.widgets.slice(0, legacy.length)).toEqual(legacy);
-    expect(parsed.widgets.at(-1)).toEqual({ id: "calendar", visible: false, collapsed: false });
+    expect(parsed.widgets.find(widget => widget.id === "calendar")).toEqual({ id: "calendar", visible: false, collapsed: false });
+    expect(parsed.widgets.at(-1)).toEqual({ id: "vehicleLookup", visible: false, collapsed: false });
     expect(parsed).toMatchObject({ leftCollapsed: true, rightCollapsed: true, centerView: "table" });
+  });
+  it("retains a saved vehicle lookup tool's order, visibility and collapsed state", () => {
+    const saved = defaultWorkspacePreferences();
+    saved.widgets = moveWidget(saved.widgets, "vehicleLookup", 0).map(widget => widget.id === "vehicleLookup" ? { ...widget, visible: true, collapsed: true } : widget);
+    expect(parseWorkspacePreferences(JSON.stringify(saved))).toEqual(saved);
   });
 });

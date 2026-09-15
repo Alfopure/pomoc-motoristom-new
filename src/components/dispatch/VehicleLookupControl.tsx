@@ -14,6 +14,8 @@ type Props = {
   values: VehicleFormValues;
   snapshot?: VehicleLookupSnapshot | null;
   contextKey: string;
+  /** A new token represents one explicit scan requested from a fleet row. */
+  lookupRequest?: number;
   required?: boolean;
   disabled?: boolean;
   plateError?: string;
@@ -34,6 +36,8 @@ export function VehicleLookupControl(props: Props) {
   const control = useRef<HTMLDivElement | null>(null);
   const request = useRef<AbortController | null>(null);
   const opener = useRef<HTMLButtonElement | null>(null);
+  const consumedRequest = useRef<number | undefined>(undefined);
+  const latestLookup = useRef<(kind: "plate" | "vin") => Promise<void>>(null);
   const identity = `${props.contextKey}:${normalizeVehicleIdentifier(props.plate)}:${normalizeVehicleIdentifier(props.vin)}`;
   const [stateIdentity, setStateIdentity] = useState(identity);
   const currentIdentity = useRef(identity);
@@ -70,6 +74,25 @@ export function VehicleLookupControl(props: Props) {
       if (currentIdentity.current === requestedIdentity && request.current === controller) { setLoading(false); setWaiting(0); }
     }
   }
+
+  useLayoutEffect(() => { latestLookup.current = lookup; });
+  useEffect(() => {
+    if (props.lookupRequest === undefined || consumedRequest.current === props.lookupRequest) return;
+    // Deferring starts the user-requested operation once even under Strict Mode's setup/cleanup cycle.
+    const token = props.lookupRequest;
+    const requestedIdentity = identity;
+    const timer = setTimeout(() => {
+      consumedRequest.current = token;
+      if (currentIdentity.current !== requestedIdentity) return;
+      const latest = currentProps.current;
+      if (latest.disabled) return;
+      const kind = isSlovakPlate(normalizeVehicleIdentifier(latest.plate)) ? "plate" : isVin(normalizeVehicleIdentifier(latest.vin)) ? "vin" : undefined;
+      if (!kind) return;
+      if (document.activeElement instanceof HTMLButtonElement) opener.current = document.activeElement;
+      void latestLookup.current?.(kind);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [props.lookupRequest, identity]);
 
   function changeIdentity(kind: "plate" | "vin", value: string) {
     request.current?.abort(); request.current = null;
