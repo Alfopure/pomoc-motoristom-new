@@ -9,7 +9,7 @@ import type { DispatchMapModel } from "@/lib/map-adapter";
 import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { CaseCockpitPanel } from "./CaseCockpitPanel";
 import { CaseTable, type CaseSortState } from "./CaseTable";
-import { DispatchMap } from "./DispatchMap";
+import { DispatchMap, type CustomerLocationMapFocus } from "./DispatchMap";
 import { ExpandedCasePanel } from "./ExpandedCasePanel";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { useLayoutPreview } from "./LayoutPreview";
@@ -38,6 +38,8 @@ type MapWorkspaceProps = {
   centerView: CenterView;
   focusedTaskId?: string;
   mapModel?: DispatchMapModel;
+  customerLocationFocus?: CustomerLocationMapFocus;
+  onShowCustomerLocation?: () => void;
   operators: Operator[];
   partnerDirectory: PartnerDirectoryEntry[];
   priceRule?: PriceRule;
@@ -109,6 +111,8 @@ export function MapWorkspace({
   centerView,
   focusedTaskId,
   mapModel,
+  customerLocationFocus,
+  onShowCustomerLocation,
   onAssignAsset,
   onBackToCockpit,
   onCaseCreated,
@@ -316,6 +320,7 @@ export function MapWorkspace({
             <DispatchMap
               active={active && centerView === "map" && workspaceMode !== "expanded"}
               caseItem={caseItem}
+              customerLocationFocus={customerLocationFocus}
               branches={branches}
               assets={assets}
               priceRule={priceRule}
@@ -383,6 +388,7 @@ export function MapWorkspace({
               onDataChange={onDataChange}
             onCaseChange={onCaseChange}
               onDial={onDial}
+              onShowCustomerLocation={onShowCustomerLocation}
               onLinkCall={onLinkCall}
               onDirtyChange={onDirtyChange}
               onSaveDraftChange={onSaveDraftChange}
@@ -408,6 +414,7 @@ export function MapWorkspace({
               onDataChange={onDataChange}
             onCaseChange={onCaseChange}
               onDial={onDial}
+              onShowCustomerLocation={onShowCustomerLocation}
               onLinkCall={onLinkCall}
               onDirtyChange={onDirtyChange}
               onExpand={onExpand}

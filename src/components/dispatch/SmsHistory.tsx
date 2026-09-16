@@ -48,7 +48,7 @@ export function SmsHistory({ caseId, active = true }: { caseId?: string; active?
         <p>Platnosť linku: {new Date(entry.location.expiresAt).toLocaleString("sk-SK")}</p>
         {entry.location.submittedAt && <p>Prijatá: {new Date(entry.location.submittedAt).toLocaleString("sk-SK")} · Presnosť: {entry.location.accuracy == null ? "nezistená" : `${entry.location.accuracy} m`}</p>}
         {entry.location.lat != null && entry.location.lng != null && <a className="font-semibold underline" href={`https://www.google.com/maps?q=${entry.location.lat},${entry.location.lng}`} target="_blank" rel="noreferrer">Zobraziť polohu na mape</a>}
-        {entry.location.status === "used" && <p>V detaile prípadu použite „Použiť ako miesto incidentu“. GPS nemení miesto automaticky.</p>}
+        {entry.location.status === "used" && <p>V hlavičke prípadu otvorte „Poloha prijatá“. Cez „Nahradiť miesto incidentu“ môžete polohu po potvrdení vložiť do prípadu.</p>}
       </div>}
     </article>)}
     {(offset > 0 || hasMore) && <div className="flex items-center justify-between text-sm"><button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))} className="rounded border px-3 py-2 disabled:opacity-40">Novšie</button><span>{offset + 1} – {offset + messages.length}</span><button type="button" disabled={!hasMore} onClick={() => setOffset(offset + 50)} className="rounded border px-3 py-2 disabled:opacity-40">Staršie</button></div>}

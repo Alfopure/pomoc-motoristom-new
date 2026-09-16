@@ -130,14 +130,13 @@ import {
 import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { LocationPicker } from "./LocationPicker";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
-import { UseCustomerLocationButton } from "./UseCustomerLocationButton";
-import { CaseEditorHeader, CasePdfButton, type CaseEditorControls, type CaseHeaderControls } from "./CaseEditorHeader";
+import { CaseLocationDialog } from "./CaseLocationDialog";
+import { CaseEditorHeader, CaseLocationButton, CasePdfButton, type CaseEditorControls, type CaseHeaderControls } from "./CaseEditorHeader";
 import { changedCaseFields } from "./case-editor-save";
 import { CaseSummary } from "./CaseSummary";
 import styles from "./case-detail.module.css";
 import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
-import { CaseTextImport } from "./CaseTextImport";
 import { CaseHandoffPanel } from "./CaseHandoffPanel";
 import { useLayoutPreview } from "./LayoutPreview";
 
@@ -160,6 +159,7 @@ type CaseDetailProps = {
   onCaseChange?: (caseDetail: CaseDetailData) => void;
   /** Click-to-call; absent (or refusing) while no telephony provider is wired in. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
+  onShowCustomerLocation?: () => void;
   onDirtyChange?: (dirty: boolean) => void;
   onEditingChange?: (editing: boolean, force?: boolean) => boolean | void;
   onSaveDraftChange?: (saveDraft: SaveCaseDraft | null) => void;
@@ -276,6 +276,7 @@ export function CaseDetail({
   onDataChange,
   onCaseChange,
   onDial,
+  onShowCustomerLocation,
   onDirtyChange,
   onEditingChange,
   onSaveDraftChange,
@@ -298,6 +299,8 @@ export function CaseDetail({
   const [editorControls, setEditorControls] = useState<CaseEditorControls | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
+  const [locationDialogOpen, setLocationDialogOpen] = useState(false);
+  const openLocationDialog = useCallback(() => setLocationDialogOpen(true), []);
   const [smsTemplate, setSmsTemplate] = useState<"custom" | "location_request" | "eta_update">("custom");
   const [isRunningAction, setIsRunningAction] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
@@ -324,9 +327,6 @@ export function CaseDetail({
   const selectedAsset = caseItem.selectedAssetId ? assets.find((asset) => asset.id === caseItem.selectedAssetId) : undefined;
   const mapsUrl = caseItem.pickup
     ? `https://www.google.com/maps/search/?api=1&query=${caseItem.pickup.lat},${caseItem.pickup.lng}`
-    : null;
-  const customerLocationMapsUrl = caseItem.customerSharedLocation
-    ? `https://www.google.com/maps/search/?api=1&query=${caseItem.customerSharedLocation.lat},${caseItem.customerSharedLocation.lng}`
     : null;
   const closureType = caseItem.closureDetails.type;
   const openTasks = caseItem.tasks.filter(isTaskOpen);
@@ -496,8 +496,7 @@ export function CaseDetail({
   }
 
   function postLocationSms() {
-    setSmsTemplate("location_request");
-    setSmsComposerOpen(true);
+    setLocationDialogOpen(true);
   }
 
   function postEtaSms() {
@@ -538,7 +537,8 @@ export function CaseDetail({
   }, [caseItem.id, caseItem.caseNumber, draftDirty, isEditSaveLocked]);
 
   const pdfControls = useMemo(() => ({ disabled: isRunningAction, exporting: isExportingPdf, onDownload: exportCasePdf }), [isRunningAction, isExportingPdf, exportCasePdf]);
-  const headerControls = useMemo(() => editorControls ? { ...editorControls, pdf: pdfControls } : null, [editorControls, pdfControls]);
+  const locationControls = useMemo(() => ({ received: Boolean(caseItem.customerSharedLocation), onOpen: openLocationDialog }), [caseItem.customerSharedLocation, openLocationDialog]);
+  const headerControls = useMemo(() => editorControls ? { ...editorControls, pdf: pdfControls, location: locationControls } : null, [editorControls, pdfControls, locationControls]);
   useEffect(() => { onEditorControlsChange?.(headerControls); }, [onEditorControlsChange, headerControls]);
   useEffect(() => () => onEditorControlsChange?.(null), [onEditorControlsChange]);
 
@@ -706,7 +706,7 @@ export function CaseDetail({
           ) : (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">Trasa nezadaná</div>
           )}
-          {isEditing && editorControls ? <CaseEditorHeader controls={headerControls!} /> : <CasePdfButton controls={pdfControls} />}
+          {isEditing && editorControls ? <CaseEditorHeader controls={headerControls!} /> : <><CaseLocationButton controls={locationControls} /><CasePdfButton controls={pdfControls} /></>}
           {showInlineEditButton && (
             <button type="button" onClick={() => setEditing(!isEditing)} disabled={isEditSaveLocked} className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:cursor-wait disabled:bg-zinc-100 disabled:text-zinc-400">
               {isEditing ? <X size={16} /> : <Edit3 size={16} />}
@@ -757,37 +757,6 @@ export function CaseDetail({
                 </button>
               </div>
             </div>
-          </div>
-        </section>
-      )}
-
-      {caseItem.customerSharedLocation && (
-        <section className={styles.gps} aria-label="Doplnková GPS poloha od klienta">
-          <div className={styles.gpsInformation}>
-            <span className={styles.gpsIcon}><MapPin size={15} aria-hidden="true" /></span>
-            <div className="min-w-0">
-              <div className={styles.gpsTitle}>
-                <h3>GPS od klienta</h3>
-                <span className={styles.gpsCoordinates}>{caseItem.customerSharedLocation.lat}, {caseItem.customerSharedLocation.lng}</span>
-              </div>
-              <p className={styles.gpsCaption}>
-                Prijaté {formatDateTime(caseItem.customerSharedLocation.submittedAt)}
-                {caseItem.customerSharedLocation.accuracyMeters !== undefined ? ` · presnosť približne ${Math.round(caseItem.customerSharedLocation.accuracyMeters)} m` : ""}
-              </p>
-              <p className={styles.gpsCaption}>
-                Doplnková poloha. Miesto incidentu, trasa a ETA sa zmenia až po potvrdení.
-              </p>
-            </div>
-          </div>
-          <div className={styles.gpsActions}>
-            <UseCustomerLocationButton caseId={caseItem.id} location={caseItem.customerSharedLocation}
-              disabled={draftDirty || isEditSaveLocked || isRunningAction} onNotice={setNotice}
-              onApplied={(data) => { onDataChange?.(data); setEditorRevision((revision) => revision + 1); }} />
-            {customerLocationMapsUrl && (
-              <a href={customerLocationMapsUrl} target="_blank" rel="noreferrer" className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md bg-sky-700 px-3 text-xs font-semibold text-white hover:bg-sky-800">
-                <Navigation size={15} /> Otvoriť GPS
-              </a>
-            )}
           </div>
         </section>
       )}
@@ -956,7 +925,7 @@ export function CaseDetail({
             </div>
             <div className="flex flex-wrap gap-2">
               <Action icon={Phone} label="Zavolať" onClick={() => void runAction("call_customer")} disabled={!contactPhone || isRunningAction} disabledReason="Najprv doplňte telefónne číslo." />
-              <Action icon={MessageSquareText} label="Vyžiadať polohu SMS" onClick={() => void runAction("send_sms")} disabled={!contactPhone || isRunningAction} disabledReason="Najprv doplňte telefónne číslo." />
+              <CaseLocationButton controls={locationControls} />
               <Action icon={MessageSquareText} label="Napísať SMS" onClick={() => { setSmsTemplate("custom"); setSmsComposerOpen(true); }} disabled={isRunningAction} />
             </div>
             <p className="text-xs leading-5 text-zinc-500">Žiadosť o polohu pošle pripravený bezpečný link. Prijatá GPS sa uloží ako doplnková informácia a neprepíše miesto incidentu.</p>
@@ -997,13 +966,7 @@ export function CaseDetail({
               <InfoItem label="Cesta / km / smer" value={[caseItem.locationDetails.roadName, caseItem.locationDetails.kilometerSection, caseItem.locationDetails.drivingDirection].filter(Boolean).join(" · ")} />
               <InfoItem label="Komplikácie" value={labelList(caseItem.locationDetails.accessComplications, accessComplicationLabels)} detail={caseItem.locationDetails.complications} />
               <InfoItem label="Trasa" value={routePlan ? `${routePlan.totalOperationalKm} km · ${routePlan.totalEta} min` : ""} detail={!routePlan ? "Doplňte miesto zásahu; dovtedy sa trasa ani ETA nepočítajú." : undefined} />
-              {caseItem.customerSharedLocation && (
-                <InfoItem
-                  label="GPS od klienta"
-                  value={`${caseItem.customerSharedLocation.lat}, ${caseItem.customerSharedLocation.lng}`}
-                  detail={`Prijaté ${formatDateTime(caseItem.customerSharedLocation.submittedAt)}${caseItem.customerSharedLocation.accuracyMeters !== undefined ? ` · presnosť ${Math.round(caseItem.customerSharedLocation.accuracyMeters)} m` : ""}`}
-                />
-              )}
+
             </div>
             <div className="flex flex-wrap gap-2">
               {mapsUrl ? (
@@ -1014,11 +977,7 @@ export function CaseDetail({
                 <Action icon={Navigation} label="Navigovať" onClick={() => setNotice("Navigácia nie je dostupná, kým nie je doplnené miesto zásahu.")} disabled disabledReason="Najprv doplňte miesto zásahu." />
               )}
               <Action icon={MessageSquareText} label="Poslať ETA" onClick={() => void runAction("send_eta")} disabled={!contactPhone || !caseItem.pickup || !routePlan || !routeEta || isRunningAction} disabledReason={!contactPhone ? "Najprv doplňte telefónne číslo." : "Najprv doplňte miesto zásahu a trasu."} />
-              {customerLocationMapsUrl && (
-                <a href={customerLocationMapsUrl} target="_blank" rel="noreferrer" className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-800 hover:bg-sky-100">
-                  <MapPin size={15} /> Otvoriť GPS od klienta
-                </a>
-              )}
+
             </div>
             {(!caseItem.pickup || !routePlan) && <p className="text-xs font-medium text-amber-800">Navigácia a ETA sa sprístupnia po doplnení použiteľného miesta zásahu.</p>}
           </InfoPanel>
@@ -1095,6 +1054,12 @@ export function CaseDetail({
         <CaseNotesAndActivity busy={isRunningAction} timeline={caseItem.timeline} onAddNote={(note) => postAction({ action: "add_note", note }, "Poznámka pridaná.")} />
       )}
       <CaseSmsHistory key={caseItem.id} caseId={caseItem.id} />
+      <CaseLocationDialog key={caseItem.id} open={locationDialogOpen} onClose={() => setLocationDialogOpen(false)}
+        caseItem={caseItem} disabled={draftDirty || isEditSaveLocked || isRunningAction}
+        onShowOnMap={onShowCustomerLocation}
+        onApplied={data => { onDataChange?.(data); setEditorRevision(revision => revision + 1); }}
+        onCaseChange={onCaseChange ? detail => { onCaseChange(detail); setEditorRevision(revision => revision + 1); } : undefined}
+        onSent={result => { if (result.dispatchData) onDataChange?.(result.dispatchData); }} />
       <SmsComposerDialog
         initialTemplate={smsTemplate}
         caseId={caseItem.id}
@@ -1307,7 +1272,6 @@ function EditCaseForm({
   onSavingChange?: (saving: boolean) => void;
   partnerDirectory: PartnerDirectoryEntry[];
 }) {
-  const { enabled: previewEnabled } = useLayoutPreview();
   const [selectedJobTypes, setSelectedJobTypes] = useState<JobType[]>(caseItem.jobTypes);
   const [priority, setPriority] = useState<CasePriority>(caseItem.priority);
   const [sourceType, setSourceType] = useState<NonNullable<DispatchCase["sourceType"]> | "">(caseItem.sourceType ?? "");
@@ -2118,27 +2082,6 @@ function EditCaseForm({
       </div>}
       <div className="m-0 min-w-0 border-0 p-0 @container">
         <div className={`${styles.formMain} grid min-w-0`} data-testid="case-edit-form-main">
-      {<CaseTextImport visible={previewEnabled}
-        disabled={conflict || savePhase === "saving" || refreshOnlyRevision !== null}
-        current={{ customer: contactName, phone: contactPhone, plate: licensePlate, make: vehicleMake, model: vehicleModel,
-          vehicleNote, pickup: pickup?.label || manualPickupAddress, destination: destination?.label || manualDestinationAddress,
-          description: vehicleIssue, reference: assistanceReference }}
-        onApply={patch => {
-          if (primaryContact && (patch.customer !== undefined || patch.phone !== undefined)) {
-            const contactPatch: Partial<ContactDraft> = {};
-            if (patch.customer !== undefined) Object.assign(contactPatch, splitName(patch.customer));
-            if (patch.phone !== undefined) { const phone = splitContactPhone(patch.phone); Object.assign(contactPatch, { phonePrefix: phone.prefix, phoneNational: phone.national }); }
-            updateContact(primaryContact.id, contactPatch);
-          }
-          if (patch.plate !== undefined) { setLicensePlate(patch.plate); setVehicleLookup(null); }
-          if (patch.make !== undefined) setVehicleMake(patch.make);
-          if (patch.model !== undefined) setVehicleModel(patch.model);
-          if (patch.vehicleNote !== undefined) setVehicleNote(patch.vehicleNote);
-          if (patch.pickup !== undefined) { setPickup(null); setManualPickupAddress(patch.pickup); }
-          if (patch.destination !== undefined) { setDestination(null); setManualDestinationAddress(patch.destination); }
-          if (patch.description !== undefined) setVehicleIssue(patch.description);
-          if (patch.reference !== undefined) setAssistanceReference(patch.reference);
-        }} />}
       <p className="text-[10px] font-medium text-zinc-500 lg:text-xs lg:font-semibold">
         <span className="text-red-600" aria-hidden="true">*</span> Povinné údaje
       </p>

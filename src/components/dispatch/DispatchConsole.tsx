@@ -51,6 +51,7 @@ import type { CaseSortState } from "./CaseTable";
 import { FleetModule } from "./FleetModule";
 import { mergeFleetData, useFleetRefresh } from "./useFleetRefresh";
 import { IntegrationSettings } from "./IntegrationSettings";
+import type { CustomerLocationMapFocus } from "./DispatchMap";
 import { MapWorkspace, type CenterView, type WorkspaceKind, type WorkspaceMode } from "./MapWorkspace";
 import { DASHBOARD_LEFT_MAX, DASHBOARD_LEFT_MIN, DASHBOARD_RIGHT_MAX, DASHBOARD_RIGHT_MIN, DEFAULT_DASHBOARD_COLUMNS, fitDashboardColumns, parseDashboardColumnWidths, resizeDashboardColumn, type DashboardColumnSide, type DashboardColumnWidths } from "./dashboard-column-layout";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
@@ -296,6 +297,8 @@ function DispatchConsoleContent({
   const [newCaseCall, setNewCaseCall] = useState(incomingCall);
   const [callStatus, setCallStatus] = useState<CallStatus>(incomingCall.status);
   const [isAssigning, setIsAssigning] = useState(false);
+  const [customerLocationFocus, setCustomerLocationFocus] = useState<CustomerLocationMapFocus>();
+  const customerLocationFocusSequence = useRef(0);
   const [caseSmsComposer, setCaseSmsComposer] = useState<{ id: string; caseNumber: string; template: "location_request" | "eta_update"; open: boolean } | null>(null);
   const [mutationNotice, setMutationNotice] = useState<string | null>(null);
   const [pauseRoutingOpen, setPauseRoutingOpen] = useState(false);
@@ -1609,6 +1612,19 @@ function DispatchConsoleContent({
     else requestNavigation(navigate);
   }
 
+  function showCustomerLocation() {
+    if (!workspaceCase?.customerSharedLocation) return;
+    setCustomerLocationFocus({ caseId: workspaceCase.id, requestId: ++customerLocationFocusSequence.current, location: workspaceCase.customerSharedLocation });
+    setToolsOpen(false);
+    setActiveView("dispatch");
+    setMobilePane("workspace");
+    setCenterView("map");
+    // Reveal the map without remounting a full-detail editor or changing the
+    // user's saved desktop mode/height. Pending case edits remain mounted.
+    const mobile = window.matchMedia("(max-width: 1023px)").matches;
+    setWorkspace(current => ({ ...current, mode: mobile ? "collapsed" : current.mode === "expanded" ? "split" : current.mode }));
+  }
+
   function showMobileMap() {
     setToolsOpen(false);
     setActiveView("dispatch");
@@ -2391,6 +2407,8 @@ function DispatchConsoleContent({
             centerView={centerView}
             focusedTaskId={focusedTaskId}
             mapModel={mapModel}
+            customerLocationFocus={customerLocationFocus}
+            onShowCustomerLocation={showCustomerLocation}
             operators={effectiveOperators}
             partnerDirectory={partnerDirectory}
             priceRule={activePriceRule}
