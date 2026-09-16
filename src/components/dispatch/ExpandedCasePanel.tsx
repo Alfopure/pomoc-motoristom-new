@@ -30,6 +30,7 @@ type ExpandedCasePanelProps = {
   onCaseChange?: (caseDetail: CaseDetailData) => void;
   /** Click-to-call from the case card; absent while telephony is not configured. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
+  onShowCustomerLocation?: () => void;
   onLinkCall?: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
   onDirtyChange?: (dirty: boolean) => void;
   onSaveDraftChange?: (saveDraft: SaveCaseDraft | null) => void;
@@ -53,6 +54,7 @@ export function ExpandedCasePanel({
   onDataChange,
   onCaseChange,
   onDial,
+  onShowCustomerLocation,
   onLinkCall,
   onDirtyChange,
   onSaveDraftChange,
@@ -126,6 +128,7 @@ export function ExpandedCasePanel({
               onDataChange={onDataChange}
             onCaseChange={onCaseChange}
               onDial={onDial}
+              onShowCustomerLocation={onShowCustomerLocation}
               onLinkCall={onLinkCall}
               onDirtyChange={handleDirtyChange}
               onSaveDraftChange={onSaveDraftChange}

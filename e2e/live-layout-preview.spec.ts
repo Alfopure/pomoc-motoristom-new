@@ -636,69 +636,16 @@ test("layout presets and quick tools preserve the selected case and widths", asy
   expect(evidence.errors).toEqual([]);
 });
 
-test("text proposals require explicit field selection and detect changed drafts", async ({ page }) => {
-  const evidence = await boot(page);
+test("case controls keep GPS beside SMS without the removed import or GPS banners", async ({ page }) => {
+  const evidence = await boot(page, 1366, 768);
   await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
-  const editor = page.getByTestId("case-edit-form-main");
-  await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
-  const plate = editor.getByRole("textbox", { name: "EČV", exact: true });
-  const originalPlate = await plate.inputValue();
-  const importer = page.getByTestId("case-text-import");
-  await importer.locator("summary").click();
-  await page.clock.install(); await page.clock.pauseAt(new Date());
-  const source = "EČV: IMPORT123\nMiesto: Nová ulica 12, Bratislava";
-  await importer.getByLabel("Pôvodný text", { exact: true }).fill(source);
-  await importer.getByRole("button", { name: "Navrhnúť údaje", exact: true }).click();
-  await expect(importer.getByRole("button", { name: "Vložiť vybrané údaje (0)", exact: true })).toBeDisabled();
-  await expect(plate).toHaveValue(originalPlate);
-  await importer.getByRole("checkbox", { name: "EČV", exact: true }).check();
-  await plate.fill("MANUAL777");
-  await expect(importer.getByRole("alert")).toContainText("medzitým zmenili");
-  await expect(importer.getByRole("button", { name: "Vložiť vybrané údaje (1)", exact: true })).toBeDisabled();
-  await importer.getByRole("button", { name: "Navrhnúť údaje", exact: true }).click();
-  await importer.getByRole("checkbox", { name: "EČV", exact: true }).check();
-  await importer.getByRole("button", { name: "Vložiť vybrané údaje (1)", exact: true }).click();
-  await expect(plate).toHaveValue("IMPORT123");
-  await expect(importer.getByLabel("Pôvodný text", { exact: true })).toHaveValue(source);
-  await expect(importer.getByRole("status")).toContainText("Vložené polia: 1");
-  await style(page, "classic"); await style(page, "modern");
-  await expect(importer.getByLabel("Pôvodný text", { exact: true })).toHaveValue(source);
+  await expect(page.getByTestId("case-text-import")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Doplnková GPS poloha od klienta" })).toHaveCount(0);
+  const location = page.getByTestId("case-location-trigger").filter({ visible: true });
+  await expect(location).toHaveAccessibleName("Poloha prijatá");
+  const bounds = (await location.boundingBox())!;
+  expect(bounds.height).toBeLessThanOrEqual(44);
+  await noOverflow(page);
   expect(evidence.writes).toEqual([]);
   expect(evidence.errors).toEqual([]);
-});
-
-
-test("imported manual address clears stale coordinates and retains unchecked case fields in autosave", async ({ page }) => {
-  const evidence = await boot(page);
-  await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
-  const importer = page.getByTestId("case-text-import");
-  await importer.locator("summary").click();
-  await importer.getByLabel("Pôvodný text", { exact: true }).fill("Miesto: Nová ulica 12, Bratislava\nEČV: UNCHECKED");
-  await importer.getByRole("button", { name: "Navrhnúť údaje", exact: true }).click();
-  await importer.getByRole("checkbox", { name: "Miesto incidentu", exact: true }).check();
-  const request = page.waitForRequest(request => request.method() === "PATCH" && request.url().endsWith("/api/cases/case-2026-0517"));
-  await importer.getByRole("button", { name: "Vložiť vybrané údaje (1)", exact: true }).click();
-  const payload = (await request).postDataJSON();
-  expect(payload.pickup).toBeNull();
-  expect(payload.manualPickupAddress).toBe("Nová ulica 12, Bratislava");
-  // Existing autosave sends only changed fields, so unchecked values are omitted.
-  expect(payload).not.toHaveProperty("licensePlate");
-  expect(payload).not.toHaveProperty("destination");
-  expect(payload.mutationId).toBeTruthy();
-  expect(evidence.errors).toEqual([]);
-});
-
-
-test("original imported text can be preserved as an exact file without case writes", async ({ page }) => {
-  const evidence = await boot(page);
-  await page.getByRole("button", { name: "Maximalizovať kokpit", exact: true }).click();
-  const importer = page.getByTestId("case-text-import"); await importer.locator("summary").click();
-  const source = "EČV: ABC123\nPôvodný neoznačený text so všetkými podrobnosťami.\n";
-  await importer.getByLabel("Pôvodný text", { exact: true }).fill(source);
-  const download = page.waitForEvent("download");
-  await importer.getByRole("button", { name: "Stiahnuť pôvodný text", exact: true }).click();
-  const file = await download;
-  expect(file.suggestedFilename()).toBe("podklad-pripadu.txt");
-  expect(await readFile((await file.path())!, "utf8")).toBe(source);
-  expect(evidence.writes).toEqual([]); expect(evidence.errors).toEqual([]);
 });

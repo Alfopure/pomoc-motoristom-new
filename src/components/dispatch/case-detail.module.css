@@ -209,83 +209,6 @@
   text-decoration: underline;
 }
 
-.gps {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  padding: 9px 10px;
-  border: 1px solid #bae6fd;
-  border-radius: 8px;
-  background: #f0f9ff;
-}
-
-.gpsInformation {
-  display: flex;
-  min-width: 0;
-  flex: 1 1 320px;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.gpsIcon {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: 6px;
-  background: #e0f2fe;
-  color: #0369a1;
-}
-
-.gpsTitle {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 3px 10px;
-  color: #0c4a6e;
-  font-size: 12px;
-}
-
-.gpsTitle h3 {
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.gpsCoordinates {
-  overflow-wrap: anywhere;
-  font-variant-numeric: tabular-nums;
-}
-
-.gpsCaption {
-  margin-top: 2px;
-  color: #0369a1;
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.gpsActions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.gpsActions button,
-.gpsActions a {
-  display: inline-flex;
-  min-height: 32px;
-  height: auto;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 9px;
-  border-radius: 6px;
-  font-size: 11px;
-  line-height: 1.4;
-}
 
 .section {
   min-width: 0;
@@ -496,11 +419,4 @@
     grid-template-columns: 76px minmax(0, 1fr);
   }
 
-  .gpsActions {
-    width: 100%;
-  }
-
-  .gpsActions :is(button, a) {
-    min-height: 44px;
-  }
 }
