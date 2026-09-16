@@ -1,5 +1,5 @@
 "use client";
-import { Download, Loader2 } from "lucide-react";
+import { Download, Loader2, MapPin } from "lucide-react";
 import type { DispatchCase, CasePriority } from "@/domain/types";
 import type { UpdateCaseInput } from "@/data/case-inputs";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
@@ -16,9 +16,10 @@ export type CasePdfControls = {
   exporting: boolean;
   onDownload: () => Promise<void>;
 };
-export type CaseHeaderControls = CaseEditorControls & { pdf: CasePdfControls };
+export type CaseLocationControls = { received: boolean; onOpen: () => void };
+export type CaseHeaderControls = CaseEditorControls & { pdf: CasePdfControls; location?: CaseLocationControls };
 const editableStatuses = ["open", "waiting_for_docs", "completed_assisted", "completed_no_assistance", "cancelled", "futile_trip"] as const;
-export function CaseEditorHeader({ controls }: { controls: CaseHeaderControls }) {
+export function CaseEditorHeader({ controls, showLocation = true }: { controls: CaseHeaderControls; showLocation?: boolean }) {
   return <div className={styles.headerControls} role="group" aria-label="Stav a priorita prípadu">
     <label>Stav prípadu
       <select aria-label="Stav prípadu v hlavičke" value={controls.status} disabled={controls.busy} onChange={event => controls.onStatusChange(event.target.value as NonNullable<UpdateCaseInput["status"]>)}>
@@ -31,8 +32,17 @@ export function CaseEditorHeader({ controls }: { controls: CaseHeaderControls })
         {Object.entries(casePriorityLabels).map(([priority, label]) => <option key={priority} value={priority}>{label}</option>)}
       </select>
     </label>
+    {showLocation && <CaseLocationButton controls={controls.location} />}
     <CasePdfButton controls={controls.pdf} />
   </div>;
+}
+
+export function CaseLocationButton({ controls }: { controls?: CaseLocationControls }) {
+  if (!controls) return null;
+  return <button type="button" data-testid="case-location-trigger" aria-haspopup="dialog" onClick={controls.onOpen}
+    className={`${styles.headerAction} inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border px-2 font-semibold ${controls.received ? "border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100" : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"}`}>
+    <MapPin size={15} aria-hidden="true" />{controls.received ? "Poloha prijatá" : "Vyžiadať polohu"}
+  </button>;
 }
 
 export function CasePdfButton({ controls }: { controls: CasePdfControls }) {

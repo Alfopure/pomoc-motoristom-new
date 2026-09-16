@@ -2,7 +2,14 @@
 
 import { useEffect, useState } from "react";
 import type { ComponentType } from "react";
-import type { Branch, DispatchCase, FleetAsset, PriceRule } from "@/domain/types";
+import type { Branch, CustomerSharedLocation, DispatchCase, FleetAsset, PriceRule } from "@/domain/types";
+
+export type CustomerLocationMapFocus = {
+  caseId: string;
+  /** A new request also recentres an already displayed point. */
+  requestId: number;
+  location: CustomerSharedLocation;
+};
 
 export type DispatchMapProps = {
   caseItem?: DispatchCase;
@@ -15,6 +22,7 @@ export type DispatchMapProps = {
   onAssignAsset?: (assetId: string) => void;
   onSendLocationSms?: () => void;
   onSendEtaSms?: () => void;
+  customerLocationFocus?: CustomerLocationMapFocus;
 };
 
 export function DispatchMap(props: DispatchMapProps) {

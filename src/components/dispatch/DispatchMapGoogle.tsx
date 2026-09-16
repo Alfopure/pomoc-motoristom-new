@@ -116,7 +116,7 @@ export default function DispatchMapGoogle(props: DispatchMapProps) {
   return <DispatchMapGoogleContent {...props} />;
 }
 
-function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, priceRule, avoidMobileNav, onAssignAsset, onSendLocationSms, onSendEtaSms, workspaceMode = "collapsed" }: DispatchMapProps) {
+function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, priceRule, avoidMobileNav, onAssignAsset, onSendLocationSms, onSendEtaSms, customerLocationFocus, workspaceMode = "collapsed" }: DispatchMapProps) {
   const caseId = caseItem?.id ?? "overview";
   const hasCase = Boolean(caseItem);
   const hasGoogleKey = isConfiguredGoogleKey(googleMapsApiKey);
@@ -136,6 +136,26 @@ function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, p
   const [fleetStatusFilter, setFleetStatusFilter] = useState<FleetStatusFilter>("all");
   const [fleetGpsSourceFilter, setFleetGpsSourceFilter] = useState<FleetGpsSourceFilter>("all");
   const [fleetGpsFreshnessFilter, setFleetGpsFreshnessFilter] = useState<FleetGpsFreshnessFilter>("all");
+  const [dismissedCustomerFocusKey, setDismissedCustomerFocusKey] = useState<string | null>(null);
+  const [customerFocusScope, setCustomerFocusScope] = useState<{ caseId: string; retiredKey: string | null }>({ caseId, retiredKey: null });
+  const incomingCustomerFocusKey = customerLocationFocus ? `${customerLocationFocus.caseId}:${customerLocationFocus.requestId}` : null;
+  if (customerFocusScope.caseId !== caseId) {
+    // An old request must not reappear when returning to a previously selected case.
+    setCustomerFocusScope({ caseId, retiredKey: customerLocationFocus && customerLocationFocus.caseId !== caseId
+      ? incomingCustomerFocusKey : customerFocusScope.retiredKey });
+  }
+  const requestedCustomerFocus = customerLocationFocus?.caseId === caseId
+    && Number.isFinite(customerLocationFocus.location.lat) && Math.abs(customerLocationFocus.location.lat) <= 90
+    && Number.isFinite(customerLocationFocus.location.lng) && Math.abs(customerLocationFocus.location.lng) <= 180
+    ? customerLocationFocus : undefined;
+  const customerFocusKey = requestedCustomerFocus ? `${caseId}:${requestedCustomerFocus.requestId}` : null;
+  const visibleCustomerFocus = customerFocusKey !== dismissedCustomerFocusKey && customerFocusKey !== customerFocusScope.retiredKey
+    ? requestedCustomerFocus : undefined;
+  const customerFocusVisible = Boolean(visibleCustomerFocus);
+  const customerFocusLat = visibleCustomerFocus?.location.lat;
+  const customerFocusLng = visibleCustomerFocus?.location.lng;
+  const customerFocusAccuracy = visibleCustomerFocus?.location.accuracyMeters;
+  const appliedCustomerFocusKeyRef = useRef<string | null>(null);
 
   const mapElementRef = useRef<HTMLDivElement | null>(null);
   const pickupAutocompleteHostRef = useRef<HTMLDivElement | null>(null);
@@ -243,6 +263,7 @@ function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, p
     focusMode ||
     activePanel !== null ||
     selectedFleetAssetId !== null ||
+    customerFocusVisible ||
     fleetFilterCount > 0;
 
   useEffect(() => {
@@ -270,6 +291,7 @@ function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, p
   }, [nearestAssetId, nearestBranchId]);
 
   function toggleMapLayer(layer: "route" | "branches") {
+    setDismissedCustomerFocusKey(customerFocusKey);
     setMapLayers((current) => ({
       ...current,
       [layer]: !current[layer],
@@ -277,6 +299,7 @@ function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, p
   }
 
   function toggleFleetLayer(layer: FleetLayerKey) {
+    setDismissedCustomerFocusKey(customerFocusKey);
     const nextFleet = { ...mapLayers.fleet, [layer]: !mapLayers.fleet[layer] };
     setMapLayers((current) => ({
       ...current,
@@ -292,6 +315,7 @@ function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, p
   }
 
   function togglePanel(panel: MapPanelKey) {
+    setDismissedCustomerFocusKey(customerFocusKey);
     const next = activePanel === panel ? null : panel;
     setActivePanel(next);
     if (next) {
@@ -325,6 +349,7 @@ function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, p
   }
 
   function handleClearAll() {
+    setDismissedCustomerFocusKey(customerFocusKey);
     setMapLayers(DEFAULT_MAP_LAYERS);
     setPlanOpen(false);
     setActivePanel(null);
@@ -492,9 +517,9 @@ function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, p
       );
     });
     const signature = visibleMarkers.map(marker => `${marker.id}:${marker.point.lat}:${marker.point.lng}`).join("|");
-    if (visibleMarkers.length > 0 && signature !== markerViewportSignatureRef.current) map.fitBounds(bounds, 42);
+    if (!customerFocusVisible && visibleMarkers.length > 0 && signature !== markerViewportSignatureRef.current) map.fitBounds(bounds, 42);
     markerViewportSignatureRef.current = signature;
-  }, [active, loadState, mapLayers.branches, mapLayers.route, model]);
+  }, [active, customerFocusVisible, loadState, mapLayers.branches, mapLayers.route, model]);
 
   useEffect(() => {
     if (!active || loadState !== "ready" || !mapRef.current) {
@@ -669,12 +694,13 @@ function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, p
         const position = positionOverrides.get(asset.id)?.point ?? asset.point;
         bounds.extend(position);
       });
-      map.fitBounds(bounds, 56);
+      if (!customerFocusVisible) map.fitBounds(bounds, 56);
       fleetViewportSignatureRef.current = viewportSignature;
     }
   }, [
     active,
     assets,
+    customerFocusVisible,
     fleetGpsFreshnessFilter,
     fleetGpsSourceFilter,
     fleetKindFilter,
@@ -729,6 +755,42 @@ function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, p
     [],
   );
 
+  // A customer point is an explicit, temporary map inspection. It does not
+  // become the incident, alter the route, or follow subsequent live GPS polls.
+  // Run after the ordinary viewport effects and wait for an active, ready map.
+  useEffect(() => {
+    if (!active || loadState !== "ready" || !mapRef.current || !customerFocusVisible
+      || customerFocusLat === undefined || customerFocusLng === undefined || !customerFocusKey) return;
+    const map = mapRef.current;
+    const point = { lat: customerFocusLat, lng: customerFocusLng };
+    const marker = createMapMarker(window.google, {
+      active: true, kind: "search", map, position: point, title: "GPS klienta — doplnková poloha", zIndex: 40,
+    });
+    let frame: number | undefined;
+    if (appliedCustomerFocusKeyRef.current !== customerFocusKey) {
+      frame = window.requestAnimationFrame(() => {
+        setActivePanel(null);
+        setPlanOpen(false);
+        setFocusMode(false);
+        setSelectedFleetAssetId(null);
+        infoWindowRef.current?.close();
+        if (searchMarkerRef.current) {
+          searchMarkerRef.current.map = null;
+          searchMarkerRef.current = null;
+        }
+        // Keep the uncertainty area sensible when the device reports a rough fix.
+        map.panTo(point);
+        map.setZoom(customerFocusAccuracy !== undefined && customerFocusAccuracy > 2_000 ? 11
+          : customerFocusAccuracy !== undefined && customerFocusAccuracy > 500 ? 13 : 16);
+        appliedCustomerFocusKeyRef.current = customerFocusKey;
+      });
+    }
+    return () => {
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+      clearMarkers([marker]);
+    };
+  }, [active, customerFocusAccuracy, customerFocusKey, customerFocusLat, customerFocusLng, customerFocusVisible, loadState]);
+
   if (!hasGoogleKey) {
     return <MapUnavailable />;
   }
@@ -771,6 +833,12 @@ function DispatchMapGoogleContent({ active = true, caseItem, branches, assets, p
           onTogglePlan={() => setPlanOpen((current) => !current)}
           onToggleRoute={() => toggleMapLayer("route")}
         />
+
+        {visibleCustomerFocus && <div role="status" className="pointer-events-auto flex max-w-full items-center gap-2 rounded-lg border border-violet-200 bg-white/95 px-2.5 py-1.5 text-xs text-violet-950 shadow-sm">
+          <LocateFixed size={15} className="shrink-0" aria-hidden="true" />
+          <span className="min-w-0"><strong>GPS klienta</strong><span className="ml-1.5 break-words">{visibleCustomerFocus.location.lat.toFixed(5)}, {visibleCustomerFocus.location.lng.toFixed(5)}</span></span>
+          <button type="button" onClick={() => setDismissedCustomerFocusKey(customerFocusKey)} aria-label="Skryť GPS klienta na mape" className="inline-flex size-9 shrink-0 items-center justify-center rounded-md hover:bg-violet-50"><X size={14} aria-hidden="true" /></button>
+        </div>}
 
         {plannerOpen && loadState === "ready" && <RoutePlanner active={active} mapRef={mapRef} onClose={() => setActivePanel(null)} />}
 

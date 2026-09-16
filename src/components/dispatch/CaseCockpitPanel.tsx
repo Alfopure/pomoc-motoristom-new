@@ -10,7 +10,7 @@ import { casePriorityLabels, caseStatusLabels, caseStatusTone, priorityTone } fr
 import type { DispatchMapModel } from "@/lib/map-adapter";
 import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
-import { CaseEditorHeader, type CaseHeaderControls } from "./CaseEditorHeader";
+import { CaseEditorHeader, CaseLocationButton, type CaseHeaderControls } from "./CaseEditorHeader";
 import { CaseDetail } from "./CaseDetail";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { SmsComposerDialog } from "./SmsComposerDialog";
@@ -36,6 +36,7 @@ type CaseCockpitPanelProps = {
   onCaseChange?: (caseDetail: CaseDetailData) => void;
   /** Click-to-call from the case card; absent while telephony is not configured. */
   onDial?: (phone: string, caseId?: string) => Promise<void>;
+  onShowCustomerLocation?: () => void;
   onLinkCall?: (call: PhoneBarCall, caseId: string) => Promise<boolean>;
   onDirtyChange: (dirty: boolean) => void;
   onExpand: () => void;
@@ -59,6 +60,7 @@ export function CaseCockpitPanel({
   onDataChange,
   onCaseChange,
   onDial,
+  onShowCustomerLocation,
   onLinkCall,
   onDirtyChange,
   onExpand,
@@ -165,6 +167,7 @@ export function CaseCockpitPanel({
           <div className="hidden items-center gap-2 lg:flex">
             {callActions}
             <QuickAction onClick={() => setSmsComposerOpen(true)} icon={MessageSquareText} label="SMS" compact tone="yellow" />
+            <CaseLocationButton controls={editorControls?.location} />
           </div>
           <button
             type="button"
@@ -180,7 +183,7 @@ export function CaseCockpitPanel({
     <section hidden={mode === "collapsed"} inert={mode === "collapsed" ? true : undefined} className={`${styles.surface} ${mode === "collapsed" ? "hidden" : "flex"} h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white lg:rounded-md lg:border lg:border-zinc-200 lg:shadow-sm`}>
       <div className={`${styles.cockpitHeader} case-cockpit-heading shrink-0 border-b border-zinc-200 bg-white`}>
         <div className={styles.cockpitTopline}>
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-[1_1_240px]">
             <div className={`${styles.caseIdentity} case-cockpit-identity`}>
               <span className={styles.caseNumber}>{caseItem.caseNumber}</span>
               <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ring-1 lg:px-2 lg:text-xs ${caseStatusTone[caseItem.status]}`}>
@@ -200,6 +203,7 @@ export function CaseCockpitPanel({
           <div className={styles.headerActions}>
             {callActions}
             <QuickAction onClick={() => setSmsComposerOpen(true)} icon={MessageSquareText} label="SMS" tone="yellow" />
+            <CaseLocationButton controls={editorControls?.location} />
             {contactEmail && <QuickAction href={`mailto:${contactEmail}`} icon={Mail} label="Email" mobileLabel="" />}
             <button
               type="button"
@@ -225,7 +229,7 @@ export function CaseCockpitPanel({
         </div>
       </div>
 
-      {editorControls && <div className={`${styles.headerControlRow} shrink-0`}><CaseEditorHeader controls={editorControls} /></div>}
+      {editorControls && <div className={`${styles.headerControlRow} shrink-0`}><CaseEditorHeader controls={editorControls} showLocation={false} /></div>}
       <div data-case-detail-scroll-region className={`${styles.scrollRegion} min-h-0 flex-1 overflow-y-auto overscroll-contain bg-zinc-50`}>
         <CaseDetail
           renderTaskWorkflow={renderTaskWorkflow}
@@ -243,6 +247,7 @@ export function CaseCockpitPanel({
           onDataChange={onDataChange}
             onCaseChange={onCaseChange}
           onDial={onDial}
+          onShowCustomerLocation={onShowCustomerLocation}
           onLinkCall={onLinkCall}
           onDirtyChange={onDirtyChange}
           onSaveDraftChange={onSaveDraftChange}

@@ -42,7 +42,7 @@ async function boot(page: Page, options: { global?: boolean; width?: number; abo
       if (options.abortSend && !state.aborted) { state.aborted = true; return route.abort("failed"); }
       return route.fulfill({ json: { sms: { smsMessageId: "sms-1", status: "sent", statusDetail: "sent", reused: state.aborted } } });
     }
-    if (url.pathname === "/api/cases/case-1" && request.method() === "PATCH") { state.locationWrites.push(request.postDataJSON()); return route.fulfill({ json: { dispatchData: { source: "supabase" } } }); }
+    if (url.pathname === "/api/cases/case-1" && request.method() === "PATCH") { const body = request.postDataJSON(); state.locationWrites.push(body); return route.fulfill({ json: { dispatchData: { source: "supabase" }, mutationId: body.mutationId, committedRevision: "2026-09-07T12:05:00.000Z" } }); }
     if (url.pathname === "/api/sms") return route.fulfill({ json: { messages: state.history, hasMore: false } });
     if (url.pathname === "/api/sms/inbox") {
       const unreadCount = state.inbox.filter((message) => message.unread).length;
@@ -145,9 +145,11 @@ test("delivery refresh and incident-location adoption work after closing the edi
   await page.clock.fastForward(10_100);
   await expect(page.getByText("Doručená", { exact: true })).toBeVisible();
   expect(state.locationWrites).toHaveLength(0);
-  await page.getByRole("button", { name: "Použiť ako miesto incidentu" }).click();
+  await page.getByRole("button", { name: "Nahradiť miesto incidentu", exact: true }).click();
+  expect(state.locationWrites).toHaveLength(0);
+  await page.getByRole("button", { name: "Potvrdiť nahradenie", exact: true }).click();
   await expect.poll(() => state.locationWrites.length).toBe(1);
-  expect(state.locationWrites[0]).toMatchObject({ pickup: { lat: 48.1, lng: 17.1 } });
+  expect(state.locationWrites[0]).toMatchObject({ expectedUpdatedAt: "2026-09-07T11:00:00.000Z", mutationId: expect.any(String), pickup: { lat: 48.1, lng: 17.1 } });
   expect(state.errors).toEqual([]);
 });
 

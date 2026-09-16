@@ -160,27 +160,6 @@
 .case-section-navigation { display:flex; flex-wrap:wrap; gap:5px; padding:2px 0 4px; }
 .case-section-navigation button { display:flex; flex:1 1 auto; justify-content:center; align-items:center; gap:6px; min-height:33px; padding:5px 8px; border:1px solid #e0e5ed; border-radius:8px; background:#fff; font-size:11px; color:#5e6c80; }
 .case-section-navigation button:hover { background:#edf2fb; color:#375a8a; }
-.case-text-import { border:1px solid #dae2ee; border-radius:11px; background:#f4f7fc; overflow:hidden; }
-.case-text-import > summary { display:flex; align-items:center; gap:9px; padding:9px 11px; cursor:pointer; list-style:none; }
-.case-text-import > summary::-webkit-details-marker { display:none; }
-.case-text-import > summary > span:nth-child(2) { flex:1; }
-.case-text-import strong { display:block; font-size:12px; color:#3d506c; }
-.case-text-import small { display:block; margin-top:1px; font-size:10px; color:#76849a; }
-.case-text-import-icon { display:grid; place-items:center; width:31px; height:31px; border-radius:9px; background:#e6edf9; color:#6685b2; }
-.case-text-import-body { display:grid; gap:8px; padding:10px; border-top:1px solid #dfe6f0; background:white; }
-.case-text-import-body :is(label,legend) { font-size:11px; font-weight:600; color:#59677a; }
-.case-text-import-body :is(input:not([type="checkbox"]),textarea,select) { width:100%; min-width:0; padding:7px; border:1px solid #dce1e9; border-radius:7px; background:#fff; font-size:12px; }
-.case-text-import-body p { font-size:11px; color:#758092; line-height:1.5; overflow-wrap:anywhere; }
-.case-text-import-body button { display:flex; align-items:center; justify-content:center; gap:6px; min-height:34px; padding:6px 10px; border-radius:7px; font-size:12px; font-weight:600; }
-.case-text-import-body button:disabled { opacity:.45; cursor:not-allowed; }
-.case-text-analyse { justify-self:start; border:1px solid #cbd7e9; color:#4c6792; background:#f0f5ff; }
-.case-text-apply { background:#303c50; color:white; }
-.case-text-import-body fieldset { display:grid; gap:7px; }
-.case-text-import-body legend { margin-bottom:7px; }
-.case-text-proposal { display:grid; gap:4px; padding:8px; border:1px solid #e0e5ec; border-radius:8px; }
-.case-text-check { display:flex; align-items:center; gap:7px; min-height:28px; }
-.case-text-proposal .case-text-replacement { color:#866027; }
 @media (max-width:767px), (pointer:coarse) {
-  .case-section-navigation button,.case-text-import-body button,.case-text-check { min-height:44px; }
-  .case-text-import-body :is(input:not([type="checkbox"]),textarea,select) { font-size:16px; }
+  .case-section-navigation button { min-height:44px; }
 }
