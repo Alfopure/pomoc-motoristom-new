@@ -1053,8 +1053,8 @@ export function CaseDetail({
       {!hideNotesAndActivity && (
         <CaseNotesAndActivity busy={isRunningAction} timeline={caseItem.timeline} onAddNote={(note) => postAction({ action: "add_note", note }, "Poznámka pridaná.")} />
       )}
-      <CaseSmsHistory key={caseItem.id} caseId={caseItem.id} />
-      <CaseLocationDialog key={caseItem.id} open={locationDialogOpen} onClose={() => setLocationDialogOpen(false)}
+      <CaseSmsHistory key={`sms-history:${caseItem.id}`} caseId={caseItem.id} />
+      <CaseLocationDialog key={`location-dialog:${caseItem.id}`} open={locationDialogOpen} onClose={() => setLocationDialogOpen(false)}
         caseItem={caseItem} disabled={draftDirty || isEditSaveLocked || isRunningAction}
         onShowOnMap={onShowCustomerLocation}
         onApplied={data => { onDataChange?.(data); setEditorRevision(revision => revision + 1); }}
