@@ -63,6 +63,25 @@ describe("contract 2 request cost", () => {
     expect(hangup).toBeLessThanOrEqual(33);
   });
 
+  it("records why a command failed, not just that it did", async () => {
+    const h = harness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const winner = String(h.legFor(call.sessionId, PROFILES.o1)!.telnyx_call_control_id);
+    // A best-effort stop: the call still connects, so the audit is written and
+    // the failure is exactly the kind that used to leave no trace.
+    h.telnyx.failNext("playbackStop", "Telnyx refused the playback stop");
+
+    await h.legEvent(winner, "call.answered");
+
+    expect(h.session(call.sessionId).state).toBe("talking");
+    const audited = h.rows("motorist_call_events")
+      .flatMap(row => ((row.normalized_payload as { commands?: { kind: string; ok: boolean; error?: string }[] } | null)?.commands) ?? [])
+      .filter(command => !command.ok);
+    expect(audited.map(command => command.kind)).toContain("playback_stop");
+    expect(audited[0].error).toContain("Telnyx refused the playback stop");
+    expect(audited.every(command => (command.error ?? "").length <= 300)).toBe(true);
+  });
+
   it("validates later commands against the fenced row it already holds", async () => {
     const h = harness();
     const call = await talking(h);
