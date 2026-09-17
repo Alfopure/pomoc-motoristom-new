@@ -213,7 +213,7 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
       }
     }
     return session;
-  });
+  }, { known: session });
 }
 
 export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown): Promise<ProcessorResult> {
@@ -332,7 +332,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
       await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
       logResult(deps, event, claim, ownedSession.id, "processed", run.commands, started, now);
       return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", commands: run.commands, notes: run.apply.notes });
-    });
+    }, { known: ownedSession });
     // The provider command, its durable projections and ledger completion are
     // finished and the session lease is released before optional maintenance.
     // Do not hold the next answer/hangup behind incident reporting or another

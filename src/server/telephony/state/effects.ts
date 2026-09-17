@@ -208,19 +208,36 @@ export async function persistTransition(
   }
 
   let cursor = 0;
-  const effect = async (run: () => Promise<unknown>, critical = true) => {
+  // Leg patches, conditional attempt updates and token/status-guarded presence
+  // RPCs are all idempotent, so their checkpoint can be written once after the
+  // batch instead of after each one. A crash mid-batch replays the whole batch
+  // from the pending entry: same rows, no duplicate presence transition, and
+  // no provider HTTP — the commands run only after this returns. Anything that
+  // is not idempotent (the callback INSERT) keeps its own checkpoint, and the
+  // batch is retired first so a replay cannot repeat it after the INSERT.
+  let batchPending = false;
+  const flushBatch = async () => {
+    if (!input.continuation || !batchPending) return;
+    batchPending = false;
+    session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
+  };
+  const effect = async (run: () => Promise<unknown>, critical = true, batchable = false) => {
     const index = cursor++;
     // Preserve the original cursor indices so a pending entry from an older
     // compatible writer can still be resumed without repeating commands.
     if (input.phase === "critical" && !critical || input.phase === "projection" && critical) return;
     if (input.continuation && input.continuation.databaseCursor > index) return;
+    // Only the critical phase batches: it is the one that holds the caller
+    // waiting for audio. Every other phase keeps today's per-effect checkpoint.
+    const batched = batchable && input.phase === "critical";
+    if (!batched) await flushBatch();
     await run();
-    if (input.continuation) {
-      input.continuation.databaseCursor = index + 1;
-      session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
-    }
+    if (!input.continuation) return;
+    input.continuation.databaseCursor = index + 1;
+    if (batched) batchPending = true;
+    else session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
   };
-  for (const legPatch of input.transition.legs) await effect(() => applyLegPatch(deps, session, legPatch));
+  for (const legPatch of input.transition.legs) await effect(() => applyLegPatch(deps, session, legPatch), true, true);
 
   for (const attempt of input.transition.attempts) {
     await effect(async () => {
@@ -228,12 +245,12 @@ export async function persistTransition(
       if (input.continuation && ["pending", "offered", "answered"].includes(attempt.values.result ?? "")) query = query.is("ended_at", null);
       const result = await query;
       if (result.error) fail("attempt update failed", result.error);
-    });
+    }, true, true);
   }
 
   for (const change of input.transition.presence) {
     if (input.continuation && change.afterCommandId) continue;
-    await effect(() => applyPresenceChange(deps, session, change));
+    await effect(() => applyPresenceChange(deps, session, change), true, true);
   }
   // A confirmation announcement must never precede its committed callback.
   for (const plan of input.transition.callbacks) await effect(() => createCallbackRequest(deps, session, plan, input.event?.occurredAt ?? undefined));
@@ -255,6 +272,8 @@ export async function persistTransition(
   // fresh session instead of restoring old transition-specific overrides.
   const callOverrides = input.continuation && input.continuation.generation !== effectGeneration(session) ? {} : input.transition.call;
   await effect(() => upsertCallRow(deps, session, callOverrides), false);
+  // The critical batch must be durable before any provider command runs.
+  await flushBatch();
   return session;
 }
 
@@ -616,7 +635,31 @@ type ExecutionContext = {
   dialFingerprints?: Map<string, string>;
   conferenceId: string | null;
   continuation?: EffectContinuation;
+  /** Memoised `motorist_call_legs` rows for this session, loaded at most once. */
+  legs?: LegRow[];
 };
+
+/**
+ * The leg rows of this session, read once per invocation. Dial correlation and
+ * the bridge's source identity both need them and used to read them separately.
+ */
+async function sessionLegs(deps: EffectsDeps, ctx: ExecutionContext): Promise<LegRow[]> {
+  if (ctx.legs) return ctx.legs;
+  const legs = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id);
+  if (legs.error) throw new EffectsError("session legs unavailable");
+  ctx.legs = legs.data ?? [];
+  return ctx.legs;
+}
+
+/** A command whose execution can need a `dial` result: the dial itself, or a reference to one. */
+function referencesDial(command: Command): boolean {
+  if (command.kind === "dial") return true;
+  for (const value of Object.values(command as Record<string, unknown>)) {
+    if (value && typeof value === "object" && "fromDial" in value) return true;
+    if (Array.isArray(value) && value.some((item) => item && typeof item === "object" && "fromDial" in item)) return true;
+  }
+  return false;
+}
 
 function resolveLeg(ctx: ExecutionContext, ref: LegRef): string {
   if (ref.callControlId) return ref.callControlId;
@@ -701,12 +744,21 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       if (command.recordingConferenceName) return executeRecordedConnection(deps, ctx, command);
       let clientState: string | undefined;
       if (telephonyStabilityEnabled() || hasStabilityContract(ctx.session)) {
-        const source = await deps.admin.from("motorist_call_legs").select("role, profile_id, client_state").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id)
-          .eq("telnyx_call_control_id", resolveLeg(ctx, command.leg)).single();
-        if (source.error || !source.data) throw new EffectsError("bridge source identity unavailable");
-        const previous = source.data.client_state as { offerToken?: string } | null;
-        clientState = encodeClientState({ sid: ctx.session.id, role: source.data.role,
-          ...(source.data.profile_id ? { operatorId: source.data.profile_id } : {}),
+        const sourceId = resolveLeg(ctx, command.leg);
+        // Identity fields (role, owner, offer token) do not change while this
+        // invocation runs, so the snapshot is as good as a fresh read. A leg
+        // the snapshot predates still falls back to its own read.
+        let source = (await sessionLegs(deps, ctx)).find((leg) => leg.telnyx_call_control_id === sourceId) ?? null;
+        if (!source) {
+          const fresh = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id)
+            .eq("telnyx_call_control_id", sourceId).maybeSingle();
+          if (fresh.error) throw new EffectsError("bridge source identity unavailable");
+          source = fresh.data;
+        }
+        if (!source) throw new EffectsError("bridge source identity unavailable");
+        const previous = source.client_state as { offerToken?: string } | null;
+        clientState = encodeClientState({ sid: ctx.session.id, role: source.role,
+          ...(source.profile_id ? { operatorId: source.profile_id } : {}),
           ...(previous?.offerToken ? { offerToken: previous.offerToken } : {}), intent: contactOperationIntent(command.commandId) });
       }
       await telnyx.bridge({
@@ -1336,10 +1388,13 @@ async function executeReduceResult(
   // A transition can clear the persisted conference while its effects still
   // need to leave the old one (park / blind transfer).
   const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: input.continuation?.previousConferenceId ?? session.conference_id ?? input.session.conference_id, continuation: input.continuation };
-  if (input.continuation && commands.length) {
-    const legs = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", session.id);
-    if (legs.error) throw new EffectsError("continuation dial results unavailable");
-    for (const leg of legs.data ?? []) {
+  // Only a continuation that can reference a dial needs the correlation table;
+  // a hold, transfer or hangup without one was paying for a read it never used.
+  const needsDialResults = commands.some(referencesDial) ||
+    compensations.some((compensation) => compensation.commands.some(referencesDial));
+  if (input.continuation && commands.length && needsDialResults) {
+    const legs = await sessionLegs(deps, ctx);
+    for (const leg of legs) {
       const metadata = leg.metadata as { dial_command_id?: string; dial_command_fingerprint?: string } | null;
       if (metadata?.dial_command_id && metadata.dial_command_fingerprint) ctx.dialFingerprints?.set(metadata.dial_command_id, metadata.dial_command_fingerprint);
       if (metadata?.dial_command_id) ctx.dialResults.set(metadata.dial_command_id, { callControlId: leg.telnyx_call_control_id, callLegId: leg.telnyx_call_leg_id, callSessionId: session.telnyx_session_id, isAlive: !leg.ended_at });
@@ -1718,9 +1773,17 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
   };
   // Newly bound conference checks and their proof accounting can finish in the
   // same invocation; a fixed budget prevents an unbounded continuation chain.
+  // The first entry was read out of the row the caller just staged under this
+  // very lease, so re-reading it would only repeat what we already hold. Same
+  // guard as `checkpointEffects`: contract 2, our own owned scope, our client.
+  const owner = sessionOwnership.getStore();
+  const reusable = owner?.contract === 2 && owner.admin === deps.admin && owner.sessionId === session.id &&
+    owner.organizationId === deps.organizationId && session.writer_contract === 2 &&
+    session.organization_id === deps.organizationId ? session : null;
   for (let index = 0; index < queued.length && index < 64; index += 1) {
     const entry = queued[index];
-    const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
+    const fresh = index === 0 && reusable ? { data: reusable, error: null }
+      : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
     if (fresh.error) throw new EffectsError("pending effects session unavailable");
     const current = readPendingEffects(fresh.data).entries.find((item) => item.id === entry.id);
     if (!current) continue;
