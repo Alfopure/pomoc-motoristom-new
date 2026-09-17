@@ -235,3 +235,59 @@ Hold, attended transfer, add-party, park and supervision need the session to be 
 - Telnyx Messaging: https://developers.telnyx.com/docs/messaging
 - Vercel cron jobs: https://vercel.com/docs/cron-jobs
 - Supabase Realtime Broadcast from the database: https://supabase.com/docs/guides/realtime/broadcast
+
+## Deployment firewall and the cron (updated 17 Sep 2026)
+
+### What changed and why
+
+The `MG02 incompatible deployment` firewall rules used to be an **allowlist** of
+approved hosts and deployment ids. Vercel points the cron at the *immutable*
+host of the current deployment, so every production release silently moved the
+cron to a host the allowlist did not contain: `/api/telephony/cron` answered
+`403` and nothing ran `runTelephonyCronJobs` — pending-effect recovery,
+termination retries, stalled ledger replay, stale session finalisation,
+reminders, pause warnings and recording processing all stopped. Two releases on
+16 Sep did this without anyone noticing.
+
+Both rules are now **denylists** of the finite set of deployments built before
+the skew boundary `2026-09-11T20:39:53Z` (291 of them). A new deployment matches
+nothing and is served; **no manual edit is needed after a release**.
+
+Skew protection (boundary plus `maxAge` 43200) is unchanged and remains the
+second layer.
+
+### Verified behaviour
+
+| request | expected |
+|---|---|
+| current immutable host `/api/telephony/cron` | `401` (the endpoint's own `CRON_SECRET` check) |
+| current immutable host `/api/health/live` | `200` |
+| a pre-boundary host, any path | `403`, `x-vercel-mitigated: deny` |
+| `__vdpl` cookie pinning a pre-boundary deployment | `403` |
+| `__vdpl` cookie pinning the current deployment | `200` |
+
+The `dpl` query parameter and the `x-deployment-id` header are **not** evaluated
+by the firewall — Vercel consumes them upstream. That was equally true of the
+allowlist; only the cookie form is enforceable here.
+
+### Post-deploy gate — run this after every production release
+
+1. `GET https://<immutable host>/api/telephony/cron` → **401**, never `403`.
+2. `GET https://<immutable host>/api/health/live` → **200**.
+3. `crons.definitions[0].host` in the project config equals that immutable host.
+4. The next scheduled run appears in the deployment log within 10 minutes. The
+   route logs nothing on success, so look for a `{"scope":"cron"}` line from a
+   job that had work, or confirm through the dashboard.
+
+A `403` at step 1 means something re-introduced an allowlist, or the deployment
+predates the skew boundary. Do not roll back to a build from before the
+boundary: it is denied by design.
+
+### Rollback
+
+Rebuild either rule as an allowlist with `op: "ninc"` over the hosts and ids you
+want served, through
+`PATCH /v1/security/firewall/config?projectId=…&teamId=…` with
+`{"action":"rules.update","id":"<rule id>","value":{…}}`. A firewall condition
+holds at most **75** values, so long lists must be split across several
+`conditionGroup` entries (they are OR'd).
