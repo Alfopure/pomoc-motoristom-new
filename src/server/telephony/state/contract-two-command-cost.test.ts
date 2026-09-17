@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { completeAnnouncedAction } from "@/test/complete-call-announcements";
 import { blindTransfer, hangupCall, holdCall, unholdCall } from "../call-actions";
+import { readPendingEffects } from "./continuation";
+import { commandKey } from "./types";
 import type { SessionRow } from "./types";
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
@@ -50,17 +52,16 @@ describe("contract 2 request cost", () => {
     const transfer = await measure(() => completeAnnouncedAction(h, blindTransfer(h.deps, actor, call.sessionId, { number: NUMBERS.external })));
     const hangup = await measure(() => hangupCall(h.deps, actor, call.sessionId));
 
-    // Measured on this path: 64 / 40 / 36 / 47 / 39 before the 17 Sep
-    // deduplications, 53 / 38 / 34 / 43 / 32 after. Bounds carry one request of
-    // headroom because the throttled incident-recovery read fires or not
-    // depending on wall-clock, so they still catch any regression of two or
-    // more. They are guards, not targets — lower them when a change lowers the
-    // count.
-    expect(answer).toBeLessThanOrEqual(55);
-    expect(hold).toBeLessThanOrEqual(39);
+    // Measured on this path: 64 / 40 / 36 / 47 / 39 before the 17 Sep work,
+    // 51 / 35 / 33 / 41 / 32 after it. Bounds carry two requests of headroom
+    // because the throttled incident-recovery read fires or not depending on
+    // wall-clock; they still catch any regression of three or more. Guards, not
+    // targets — lower them when a change lowers the count.
+    expect(answer).toBeLessThanOrEqual(53);
+    expect(hold).toBeLessThanOrEqual(37);
     expect(unhold).toBeLessThanOrEqual(35);
-    expect(transfer).toBeLessThanOrEqual(44);
-    expect(hangup).toBeLessThanOrEqual(33);
+    expect(transfer).toBeLessThanOrEqual(43);
+    expect(hangup).toBeLessThanOrEqual(34);
   });
 
   it("records why a command failed, not just that it did", async () => {
@@ -94,6 +95,42 @@ describe("contract 2 request cost", () => {
     // One read per provider command is what this removed; a couple of reads for
     // the action itself remain.
     expect(reads(h, from)).toBeLessThanOrEqual(5);
+  });
+
+  it("retires a command the fence refuses after a termination instead of compensating the call", async () => {
+    const h = harness();
+    const call = await talking(h);
+    // What `prepare_v2` raises once another invocation has committed a
+    // termination: `app.hangup` commits it before it waits for the lease.
+    const refused = Object.assign(new Error("motorist_provider_command_prepare_v2: telephony termination blocks new provider command"), { code: "PT409" });
+    // Once a termination is committed, `prepare_v2` refuses every non-teardown
+    // command of the entry, not just the first.
+    h.telnyx.failAlways("createConference", refused);
+    h.telnyx.failAlways("conferenceAction", refused);
+    const incidents = h.rows("motorist_job_incidents").length;
+
+    const result = await completeAnnouncedAction(h, holdCall(h.deps, actor, call.sessionId)).catch(() => null);
+
+    // The call is already ending, so the command is retired rather than turned
+    // into an incident or a compensation putting the caller back anywhere.
+    expect(h.rows("motorist_job_incidents")).toHaveLength(incidents);
+    // Nothing is left half-issued for a replay to pick up either.
+    expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries
+      .every(entry => entry.commands.every(command => entry.completedCommands.includes(commandKey(command))))).toBe(true);
+    void result;
+  });
+
+  it("still treats the same refusal on a teardown command as a real failure", async () => {
+    const h = harness();
+    const call = await talking(h);
+    const refused = Object.assign(new Error("motorist_provider_command_prepare_v2: telephony termination blocks new provider command"), { code: "PT409" });
+    h.telnyx.failAlways("hangup", refused as never);
+
+    const result = await hangupCall(h.deps, actor, call.sessionId).catch(() => "threw" as const);
+
+    // `prepare_v2` never refuses teardown after a termination — it is what lets
+    // the call end. If it ever does, that is a failure to report, not a skip.
+    expect(result === "threw" || result.commands.some(command => command.kind === "hangup" && !command.ok)).toBe(true);
   });
 
   it("keeps the fresh read while a call is being recorded", async () => {
