@@ -933,6 +933,19 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
   b.note(`step ${stepIndex}: ${dials.length} dial(s)`);
 }
 
+/**
+ * "Nobody answered" and "there was nobody to ring" are different facts and the
+ * second one is an operational problem, not ordinary traffic. On 17 Sep three
+ * callers arrived within four minutes and met one reachable operator: two of
+ * them were in the waiting room eight seconds later, having never made a phone
+ * ring, and the console could not tell that from a plan that had simply run
+ * out. The reasons are already known here — `planStep` returns them — they were
+ * just collapsed into one word on the way out.
+ */
+function exhaustionReason(b: TransitionBuilder): "ring_exhausted" | "no_operator_reachable" {
+  return b.attemptsView().length === 0 ? "no_operator_reachable" : "ring_exhausted";
+}
+
 function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPlan): void {
   const ring = b.meta.ring ?? {};
   const kind = plan.fallback.kind;
@@ -952,9 +965,13 @@ function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
     return;
   }
   stopMoh(b, customer);
+  const exhaustion = exhaustionReason(b);
   b.patchMeta({ ring: { ...ring, exhausted: true, fallback: kind } });
+  if (exhaustion === "no_operator_reachable") {
+    b.note(`no operator could be rung: ${plan.steps.map((step, index) => `step ${index} (${step.groupName})`).join(", ") || "empty plan"}`);
+  }
   if (kind === "waiting_room") {
-    enterWaiting(b, customer, "ring_exhausted");
+    enterWaiting(b, customer, exhaustion);
     return;
   }
   if (kind === "hangup_message") {
@@ -1016,7 +1033,10 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
   // settings row on every event, so an admin lowering `park_max_minutes` used to
   // eject callers who were already waiting — a configuration change disturbing a
   // call in progress.
-  const queued = state === "waiting" && b.session.direction === "inbound" && !b.session.answered_at && (reason === "ring_exhausted" || reason === "ivr" || Boolean(b.meta.queue));
+  // Both exhaustions queue the caller for automatic offers; they differ only in
+  // what the console is told about why nobody picked up.
+  const queued = state === "waiting" && b.session.direction === "inbound" && !b.session.answered_at &&
+    (reason === "ring_exhausted" || reason === "no_operator_reachable" || reason === "ivr" || Boolean(b.meta.queue));
   const previous = queued && b.meta.queue ? b.meta.waiting : null;
   if (queued && !previous) stopMoh(b, customer);
   b.setState(state).patchMeta({

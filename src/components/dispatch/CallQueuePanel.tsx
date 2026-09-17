@@ -79,9 +79,17 @@ export function CallQueuePanel({
                 {callerName ? call.callerNumber : call.lineLabel ?? "Prichádzajúci hovor"}
               </span>
               <span className={`shrink-0 rounded-full px-2 py-0.5 font-bold ${
-                station ? "bg-yellow-100 text-yellow-900" : park?.parked ? "bg-sky-100 text-sky-900" : "bg-zinc-100 text-zinc-700"
+                station ? "bg-yellow-100 text-yellow-900"
+                  : park?.parked ? "bg-sky-100 text-sky-900"
+                  // Nobody's phone rang: the plan had members and none of them
+                  // could be reached. Worth telling apart from an ordinary wait.
+                  : park?.unreachable ? "bg-red-100 text-red-900"
+                  : "bg-zinc-100 text-zinc-700"
               }`}>
-                {station ? `Zvoní: ${station.name}` : park?.parked ? "Odložený hovor" : "Čaká na pridelenie"}
+                {station ? `Zvoní: ${station.name}`
+                  : park?.parked ? "Odložený hovor"
+                  : park?.unreachable ? "Nikto nebol dostupný"
+                  : "Čaká na pridelenie"}
               </span>
             </div>
             {park && <ParkedNote park={park} />}
