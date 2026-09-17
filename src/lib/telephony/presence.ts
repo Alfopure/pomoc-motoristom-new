@@ -63,6 +63,8 @@ export type TelephonyOperatorPresence = {
   paused: boolean;
   inUse: boolean;
   registered: boolean;
+  /** Last heartbeat of this operator's browser phone, when one was ever reported. */
+  seenAt?: string;
   detail: string;
   checkedAt?: string;
 };
@@ -101,7 +103,8 @@ export function deriveTelephonyOperatorPresences(input: {
       paused,
       inUse,
       registered,
-      detail: presenceDetail({ health, presence, state }),
+      ...(device?.seenAt ? { seenAt: device.seenAt } : {}),
+      detail: presenceDetail({ health, presence, state, seenAt: device?.seenAt, checkedAt }),
       checkedAt,
     };
   });
@@ -137,6 +140,8 @@ function presenceDetail(input: {
   health: TelephonyHealthSignal | undefined;
   presence: TelephonyOperatorPresenceRow | undefined;
   state: TelephonyOperatorPresenceState;
+  seenAt?: string;
+  checkedAt?: string;
 }) {
   const { health, presence, state } = input;
   if ((state === "error" || state === "stale") && health) return health.detail;
@@ -150,8 +155,17 @@ function presenceDetail(input: {
       return "Operátorovi práve zvoní hovor.";
     case "on_call":
       return "Operátor je na hovore.";
-    case "unregistered":
-      return "Telefón operátora nie je pripojený.";
+    case "unregistered": {
+      // How long, not where: a closed laptop and a dropped connection look the
+      // same from here, and the elapsed time is what tells them apart.
+      const since = Date.parse(input.checkedAt ?? "");
+      const seen = Date.parse(input.seenAt ?? "");
+      const away = Math.floor((since - seen) / 60_000);
+      if (!Number.isFinite(away) || away < 1) return "Telefón operátora nie je pripojený.";
+      return away < 90
+        ? `Telefón operátora nie je pripojený (${away} min).`
+        : `Telefón operátora nie je pripojený (${Math.floor(away / 60)} h).`;
+    }
     case "paused":
       return presence?.status === "after_call_work"
         ? "Operátor dokončuje predchádzajúci hovor."
