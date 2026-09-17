@@ -49,12 +49,12 @@ export type FakeTelnyx = {
   loseNextResponse(method: string): void;
   /** Commands of one kind (e.g. `dial`), most recent last. */
   of(method: string): FakeTelnyxCall[];
-  failNext(method: string, error?: TelnyxCommandError | string): void;
+  failNext(method: string, error?: Error | string): void;
   /** What `retrieveCall` reports for a leg (default: alive and known). */
   setCallStatus(callControlId: string, verdict: { alive: boolean; known?: boolean }): void;
   /** Exact single-page provider response, independent of webhook delivery. */
   setConferenceParticipants(conferenceId: string, rows: unknown[]): void;
-  failAlways(method: string, error?: TelnyxCommandError | string): void;
+  failAlways(method: string, error?: Error | string): void;
   clearFailures(): void;
   reset(): void;
   nextId(prefix: string): string;
@@ -65,12 +65,12 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   if (!config.configured) throw new Error("fake telnyx needs a configured env");
   const liveGate: TelnyxLiveGate = { callsEnabled: true, smsEnabled: true, ...(options.liveGate ?? {}) };
   const calls: FakeTelnyxCall[] = [];
-  const oneShot = new Map<string, TelnyxCommandError[]>();
+  const oneShot = new Map<string, Error[]>();
   const callStatuses = new Map<string, { alive: boolean; known?: boolean }>();
   const conferenceParticipants = new Map<string, Set<string>>();
   const conferenceParticipantSnapshots = new Map<string, unknown[]>();
   const conferenceParticipantFlags = new Map<string, { muted: boolean; on_hold: boolean; whisper_call_control_ids: string[] }>();
-  const always = new Map<string, TelnyxCommandError>();
+  const always = new Map<string, Error>();
   let counter = 0;
   const physicalLegs = new Map<string, PhysicalLeg>();
   const bridgePairs = new Map<string, [string, string]>();
@@ -113,8 +113,13 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     return result;
   }
 
-  function toError(error: TelnyxCommandError | string | undefined, method: string): TelnyxCommandError {
-    if (error instanceof TelnyxCommandError) return error;
+  // Any `Error` passes through untouched: the provider layer raises more than
+  // provider errors. `prepareProviderRequest` fences a command against the
+  // database before it reaches the wire, so a refusal can arrive as a plain
+  // `Error` carrying a SQLSTATE, and a double that rewrote it could not
+  // reproduce what the command loop actually sees.
+  function toError(error: Error | string | undefined, method: string): Error {
+    if (error instanceof Error) return error;
     return new TelnyxCommandError({ code: "fake_failure", status: 422, detail: error ?? `${method} failed (injected)` });
   }
 
