@@ -6,6 +6,13 @@ import { SessionLeaseLostError } from "./service-errors";
 
 export const SESSION_WORK_MS = 24_000;
 export const SESSION_LEASE_MS = 15_000;
+/**
+ * A lease taken this recently cannot have expired (TTL is `SESSION_LEASE_MS`),
+ * so a nested scope re-entering the same session may skip its renew RPC. The
+ * renew never was what protects the write: every owned request carries the
+ * token/generation headers and the database fence rejects a stale writer.
+ */
+export const OWNERSHIP_RENEW_SKIP_MS = 5_000;
 export const DATABASE_REQUEST_MS = 4_000;
 export type Ownership = {
   admin: SupabaseClient<Database>;
@@ -15,6 +22,8 @@ export type Ownership = {
   generation: number;
   contract: number;
   deadline: number;
+  /** `Date.now()` of the acquisition, for `OWNERSHIP_RENEW_SKIP_MS`. */
+  acquiredAt: number;
   terminationPending?: boolean;
   /** Includes acquisition by an outer webhook owner, before the reducer starts. */
   leaseWaitMs?: number;
@@ -50,7 +59,11 @@ export async function ownershipRpc<T>(admin: SupabaseClient<Database>, name: str
   const { data, error } = await request;
   if (error) {
     if (error.code === "PT409" && /ownership|writer|lease|contract/.test(error.message)) throw new SessionLeaseLostError();
-    throw new Error(`${name}: ${error.message}`);
+    // Keep the SQLSTATE on the error: callers distinguish a fenced refusal
+    // (PT409) from an ordinary failure without re-parsing the message.
+    const failure = new Error(`${name}: ${error.message}`);
+    if (error.code) (failure as Error & { code?: string }).code = error.code;
+    throw failure;
   }
   return data as T;
 }

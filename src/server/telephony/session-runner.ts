@@ -1,7 +1,7 @@
 import { reconcileProviderEvent } from "./provider-event-evidence";
 import { measureRequestStep } from "@/server/request-metrics";
 import { reconcileTermination } from "./termination";
-import { sessionOwnership, ownershipRpc, assertOwnership, SESSION_WORK_MS, SESSION_LEASE_MS, DATABASE_REQUEST_MS, type Ownership } from "./ownership";
+import { sessionOwnership, ownershipRpc, assertOwnership, OWNERSHIP_RENEW_SKIP_MS, SESSION_WORK_MS, SESSION_LEASE_MS, DATABASE_REQUEST_MS, type Ownership } from "./ownership";
 import { resolvePersonalRingMembers } from "./routing/ring-plan";
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -430,16 +430,27 @@ async function auditSupervisionEnd(deps: SessionRunnerDeps, before: SessionRow, 
  */
 export type SessionOwnershipDeps = Pick<SessionRunnerDeps, "admin" | "organizationId" | "leaseTtlMs" | "leaseWaitMs" | "sleep" | "random" | "logger">;
 
-export async function ownedSessionWork<T>(deps: SessionOwnershipDeps, sessionId: string, work: () => Promise<T>): Promise<T> {
+export async function ownedSessionWork<T>(
+  deps: SessionOwnershipDeps, sessionId: string, work: () => Promise<T>, options: { known?: SessionRow } = {},
+): Promise<T> {
   const existing = sessionOwnership.getStore();
   if (existing) {
     if (existing.sessionId !== sessionId) throw new SessionLeaseLostError();
-    await assertOwnership(existing);
+    // A lease acquired moments ago in this same invocation cannot have expired,
+    // and the database fence — not this RPC — is what refuses a stale writer.
+    if (Date.now() - existing.acquiredAt >= OWNERSHIP_RENEW_SKIP_MS) await assertOwnership(existing);
     return work();
   }
   // The database controls admission. Before expand, rows have no contract
   // column; after expand, all new writers participate without a second flag.
-  const probe = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
+  // The caller often just read this row (webhook correlation); re-reading it
+  // only to look at `writer_contract` is a round trip on the critical path.
+  // `writer_contract === undefined` means "no lease at all", so a partial row
+  // must never be accepted here: it would silently skip ownership.
+  const known = options.known?.id === sessionId && options.known.organization_id === deps.organizationId &&
+    options.known.writer_contract !== undefined ? options.known : null;
+  const probe = known ? { data: known, error: null }
+    : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
   if (probe.error) throw new SessionEventDeferredError(`Session ownership lookup failed: ${probe.error.message}`);
   if (!probe.data) throw new SessionNotFoundError(sessionId);
   if (probe.data.writer_contract === undefined) return work();
@@ -464,7 +475,7 @@ export async function ownedSessionWork<T>(deps: SessionOwnershipDeps, sessionId:
   }
   const owner: Ownership = { admin: deps.admin, sessionId, organizationId: deps.organizationId, token,
     generation: claim.generation, contract: claim.contract, deadline: Date.now() + SESSION_WORK_MS,
-    leaseWaitMs: Math.max(0, Date.now() - started) };
+    acquiredAt: Date.now(), leaseWaitMs: Math.max(0, Date.now() - started) };
   try { return await sessionOwnership.run(owner, work); }
   finally {
     // Release failure cannot rewrite a completed operation into a safe retry.
@@ -474,9 +485,13 @@ export async function ownedSessionWork<T>(deps: SessionOwnershipDeps, sessionId:
 }
 
 export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent): Promise<SessionRunResult> {
+  let known: SessionRow | undefined;
   if (event.kind === "app" && event.type === "hangup") {
     const target = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
     if (target.error) throw new SessionEventDeferredError(`Termination intent lookup failed: ${target.error.message}`);
+    // Both this read and the ownership probe happen before the lease, and the
+    // probe only inspects `writer_contract`, which terminating never changes.
+    known = target.data ?? undefined;
     if (target.data?.writer_contract === 2) await ownershipRpc(deps.admin, "motorist_session_terminate_v2", { p_organization_id: deps.organizationId, p_session_id: sessionId });
   }
   // Timer sweeps are opportunistic: never queue repeated lock acquisition
@@ -488,7 +503,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
     const result = await runOwnedSessionEvent(deps, sessionId, event, owner);
     if (owner?.terminationPending && event.kind === "app") throw new SessionTerminationPendingError();
     return result;
-  });
+  }, { known });
 }
 
 async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership): Promise<SessionRunResult> {

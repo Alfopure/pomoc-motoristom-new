@@ -22,7 +22,7 @@ function harness(commands: PendingProviderCommand[] = [command()]) {
     throw new Error(`Unexpected RPC ${name}`);
   });
   const admin = { rpc } as unknown as SupabaseClient<Database>;
-  const owner: Ownership = { admin, sessionId: "session", organizationId: "org", token: "new-token", generation: 9, contract: 2, deadline: Date.now() + 24_000 };
+  const owner: Ownership = { admin, sessionId: "session", organizationId: "org", token: "new-token", generation: 9, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
   return { rpc, admin, owner };
 }
 
