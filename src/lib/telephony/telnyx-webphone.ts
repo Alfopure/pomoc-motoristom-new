@@ -619,7 +619,16 @@ export class TelnyxWebphone {
     // The tab is going away: report the phone as gone instead of refreshing
     // `device_seen_at`, which would keep the operator ringable for two minutes.
     const registrationState = options.leaving ? "unregistered" : heartbeatRegistrationState(this.state.status);
-    return JSON.stringify({ deviceSessionId, registrationState, ...(this.options.deviceKind ? { deviceKind: this.options.deviceKind } : {}) });
+    // Two booleans about this device while a call is up, so "the colleague
+    // could not hear anything" stops being a report we can only answer by
+    // asking the operator to look at their browser. No numbers, no identifiers,
+    // no audio: whether the browser refused to play, and whether it has a
+    // remote stream attached at all.
+    const audio = options.leaving || !this.call ? null
+      : { blocked: this.audioBlocked, remoteMedia: this.hasRemoteMedia() };
+    return JSON.stringify({ deviceSessionId, registrationState,
+      ...(this.options.deviceKind ? { deviceKind: this.options.deviceKind } : {}),
+      ...(audio ? { audio } : {}) });
   }
 
   private async sendHeartbeat(options: { leaving?: boolean } = {}): Promise<void> {
