@@ -140,7 +140,16 @@ function audioConnectionView(session: SessionRow, legs: LegRow[], now: Date): Au
     const confirmedAt = customer?.bridged_at && operator?.bridged_at
       ? (Date.parse(customer.bridged_at) > Date.parse(operator.bridged_at) ? customer.bridged_at : operator.bridged_at)
       : null;
-    const startedAt = session.answered_at ?? session.started_at;
+    // The window belongs to the connection being confirmed, not to the call.
+    // A transfer replaces the operator leg minutes after the call was answered:
+    // measuring from the answer means the grace period is long gone, so a
+    // `call.bridged` webhook that is merely late reads as a failed audio
+    // connection — and the console disables hold, transfer and everything else
+    // while the two parties are in fact talking.
+    const latestAnswer = [customer?.answered_at, operator?.answered_at]
+      .filter((value): value is string => Boolean(value))
+      .sort((a, z) => Date.parse(z) - Date.parse(a))[0];
+    const startedAt = latestAnswer ?? session.answered_at ?? session.started_at;
     const expired = now.getTime() - Date.parse(startedAt) >= AUDIO_CONNECTION_WARNING_MS;
     return { status: confirmedAt ? "connected" : expired ? "failed" : "connecting", startedAt, confirmedAt,
       error: !confirmedAt && expired ? "connection_confirmation_timeout" : null };
