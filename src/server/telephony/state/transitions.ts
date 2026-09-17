@@ -969,11 +969,18 @@ function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
   offerCallback(b, customer, { key: "callbackOffer" }, "missed");
 }
 
+/**
+ * Ring modes that leave the waiting-room loop running on the customer leg while
+ * somebody is being called. `plan` is the ring plan (`fanout`); `transfer` is a
+ * blind transfer, which starts the same loop in `blindTransferCustomer`.
+ */
+const RINGING_WITH_MUSIC = new Set(["plan", "transfer"]);
+
 /** True while a `playback_start` loop is running on the customer leg. */
 function mohIsPlaying(b: TransitionBuilder): boolean {
   if (!b.ctx.mediaAvailable) return false;
   if (b.meta.queue) return b.meta.waiting?.audio_phase === "music";
-  return (b.session.state === "ringing" && b.meta.ring?.mode === "plan") || WAITING_STATES.has(b.session.state);
+  return (b.session.state === "ringing" && RINGING_WITH_MUSIC.has(b.meta.ring?.mode ?? "")) || WAITING_STATES.has(b.session.state);
 }
 
 function stopMoh(b: TransitionBuilder, customer: LegRow): void {
