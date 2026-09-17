@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { requestStepCount } from "@/server/request-metrics";
 import { assertOwnership, ownershipRpc, sessionOwnership } from "../ownership";
 import { payloadFingerprint } from "../provider-journal";
 import { isDeepStrictEqual } from "node:util";
@@ -135,11 +136,14 @@ export type CommandOutcome = {
   /** Whole effect timing, including verification/checkpointing; not device ring time. */
   startedAt?: string;
   phase?: string;
+  /** Database requests this handler had issued when the command reached the provider. */
+  dbCountAtDispatch?: number;
 };
 
 export function auditCommandOutcomes(commands: CommandOutcome[]) {
   return commands.map((command) => ({ kind: command.kind, ok: command.ok, command_id: command.commandId, skipped: command.skipped,
-    ...(command.startedAt ? { started_at: command.startedAt, effect_ms: command.ms, phase: command.phase ?? command.kind } : {}) }));
+    ...(command.startedAt ? { started_at: command.startedAt, effect_ms: command.ms, phase: command.phase ?? command.kind } : {}),
+    ...(command.dbCountAtDispatch === undefined ? {} : { db_count_at_dispatch: command.dbCountAtDispatch }) }));
 }
 
 export type ApplyResult = {
@@ -1412,6 +1416,7 @@ async function executeReduceResult(
   };
   for (const command of input.databaseOnly ? [] : commands) {
     const started = deps.now().getTime();
+    let dbCountAtDispatch: number | null = null;
     const key = commandKey(command);
     if (input.continuation?.completedCommands.includes(key)) continue;
     let providerExecuted = false;
@@ -1446,6 +1451,10 @@ async function executeReduceResult(
         }
       }
       const dispatchedAt = deps.now();
+      // How much sequential database work this handler did before the provider
+      // heard about the command. For `bridge` this is the number the latency
+      // work is trying to bring down, readable off a real call.
+      dbCountAtDispatch = requestStepCount("db");
       const executed = await executeCommand(deps, ctx, command);
       if (command.kind === "dial" && executed.skipped) {
         throw new CommandPrerequisiteRejectedError(String(executed.detail?.reason ?? "dial no longer authorized"));
@@ -1673,6 +1682,7 @@ async function executeReduceResult(
       const outcome = outcomes.findLast((item) => item.key === key);
       if (outcome) {
         outcome.startedAt = new Date(started).toISOString();
+        if (dbCountAtDispatch !== null) outcome.dbCountAtDispatch = dbCountAtDispatch;
         const announcement = command.kind === "playback_start" ? announcementKeyForMedia(command.media) : null;
         outcome.phase = command.kind === "playback_start" ? `announcement:${announcement ?? "custom"}${announcement === "greeting" && readMeta(ctx.session).greeting?.recording_notice ? `+${readMeta(ctx.session).greeting!.recording_notice}` : ""}`
           : command.kind === "dial" ? `dial:${command.role}` : command.kind;
