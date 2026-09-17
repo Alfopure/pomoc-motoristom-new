@@ -71,6 +71,38 @@ async function talking() {
 }
 
 describe("contract-2 session contention", () => {
+  it("takes a provider fact that arrives during a short-lived control instead of refusing it", async () => {
+    const { h, call, lease } = await talking();
+    const holding = gate(), holdAtProvider = gate();
+    const conferenceAction = h.telnyx.client.conferenceAction;
+    vi.spyOn(h.telnyx.client, "conferenceAction").mockImplementation(async (...args) => {
+      if (args[1] === "hold") { holdAtProvider.release(); await holding.promise; }
+      return conferenceAction(...args);
+    });
+    const hold = holdCall(h.deps, actor, call.sessionId);
+    await holdAtProvider.promise;
+    const before = lease.acquisitions().length;
+
+    // The callback lands while the operator's hold still owns the session, and
+    // the hold finishes well inside the callback's waiting window.
+    const arriving = h.legEvent(call.callControlId, "call.playback.ended", {}, "brief-contention");
+    await sleep(30);
+    holding.release();
+
+    // Accepted, so Telnyx has no reason to send it again. Whether the reducer
+    // needs this particular fact is beside the point; refusing it was what cost
+    // us the redelivery.
+    const taken = await arriving;
+    expect(taken.status).toBe(200);
+    expect(taken.outcome).not.toBe("failed");
+    expect(await hold).toMatchObject({ state: "held" });
+    // It had to ask more than once, which is the whole point: giving up on the
+    // first refusal is what made Telnyx redeliver it.
+    expect(lease.acquisitions().length - before).toBeGreaterThan(1);
+    expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "brief-contention")?.status)
+      .not.toBe("failed");
+  });
+
   it("lets hold/unhold/hangup finish through simultaneous provider facts, then drains terminal facts without redelivery or cron", async () => {
     const { h, call, operator, lease } = await talking();
     const holding = gate(), holdAtProvider = gate();
@@ -85,7 +117,17 @@ describe("contract-2 session contention", () => {
     const facts = ["call.playback.ended", "call.speak.ended", "conference.participant.joined", "conference.participant.left", "call.bridged"];
     const storm = await Promise.all(facts.map((type, index) => h.legEvent(call.callControlId, type, {}, `storm-${index}`)));
     expect(storm.every(result => result.status === 500 && result.outcome === "failed")).toBe(true);
-    expect(lease.acquisitions().length - beforeStorm).toBe(facts.length);
+    // Each callback now retries inside `WEBHOOK_LEASE_WAIT_MS` instead of
+    // yielding on its first refusal. Giving up at once meant Telnyx redelivered
+    // every one of them: 23 of 55 events failed outright on the heaviest test
+    // call of 17 Sep, and their provider facts reached the session minutes late
+    // through the cron, which is what left the console showing a stale call.
+    // The window stays well inside the operator's own budget, so the control
+    // below still finishes first; the answer is still a truthful 500 when the
+    // lease never comes free.
+    const attempts = lease.acquisitions().length - beforeStorm;
+    expect(attempts).toBeGreaterThan(facts.length);
+    expect(attempts).toBeLessThanOrEqual(facts.length * 6);
     expect(h.rows("motorist_telnyx_webhook_events").filter(row => String(row.event_id).startsWith("storm-")))
       .toEqual(facts.map((_, index) => expect.objectContaining({ event_id: `storm-${index}`, retry_state: "deferred", effect_failure_count: 0 })));
 
