@@ -895,20 +895,30 @@ export async function revokeCallMonitorInvitation(deps: CallActionDeps, actor: C
 
 export type TransferTargetOption = { profileId: string; displayName: string; role: AppRole; available: boolean; status: string;
   deviceLive: boolean;
-  /** Last heartbeat of the colleague's browser phone, so the picker can say how long they have been away. */
+  /** Newest heartbeat across the browser phone and the mobile app: how long since we saw them at all. */
   deviceSeenAt: string | null };
 
 /** Colleagues that can receive a transfer/consult right now (plus the rest, flagged unavailable). */
 export async function listTransferTargets(deps: CallActionDeps, actor: CallActor): Promise<TransferTargetOption[]> {
   const { admin, organizationId } = deps;
   const now = nowOf(deps);
-  const [profiles, presence, devices] = await Promise.all([
+  const [profiles, presence, devices, mobiles] = await Promise.all([
     admin.from("motorist_profiles").select("id, display_name, role, active").eq("organization_id", organizationId).eq("active", true),
     admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId),
     admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment),
+    // Only a browser phone can take a transfer, but the mobile app is the other
+    // place a colleague can be seen. "When did we last see this person at all"
+    // is the honest answer to how long they have been away.
+    admin.from("motorist_operator_mobile_devices").select("profile_id, device_seen_at").eq("organization_id", organizationId).eq("environment", deps.environment),
   ]);
   const presenceById = new Map((presence.data ?? []).map((row) => [row.profile_id, row]));
   const deviceById = new Map((devices.data ?? []).map((row) => [row.profile_id, row]));
+  const mobileSeenById = new Map((mobiles.data ?? []).map((row) => [row.profile_id, row.device_seen_at]));
+  const lastSeen = (profileId: string): string | null => {
+    const times = [deviceById.get(profileId)?.device_seen_at, mobileSeenById.get(profileId)]
+      .filter((value): value is string => Boolean(value) && Number.isFinite(Date.parse(value as string)));
+    return times.sort((a, z) => Date.parse(z) - Date.parse(a))[0] ?? null;
+  };
   return (profiles.data ?? [])
     .filter((profile) => profile.id !== actor.profileId)
     .map((profile) => {
@@ -917,7 +927,7 @@ export async function listTransferTargets(deps: CallActionDeps, actor: CallActor
       const live = deviceIsLive(device, now);
       const allowed = row ? presenceAllowsOffer({ profileId: profile.id, status: effectivePresenceStatus(row, now), currentSessionId: row.current_session_id, wrapUpUntil: row.wrap_up_until }, now) : { eligible: false as const, reason: "no_presence" as const };
       return { profileId: profile.id, displayName: profile.display_name, role: profile.role, available: allowed.eligible && live,
-        status: row ? effectivePresenceStatus(row, now) : "offline", deviceLive: live, deviceSeenAt: device?.device_seen_at ?? null };
+        status: row ? effectivePresenceStatus(row, now) : "offline", deviceLive: live, deviceSeenAt: lastSeen(profile.id) };
     })
     .sort((left, right) => Number(right.available) - Number(left.available) || left.displayName.localeCompare(right.displayName, "sk"));
 }

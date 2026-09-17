@@ -2,7 +2,7 @@ import { completeAnnouncedAction } from "@/test/complete-call-announcements";
 import { describe, expect, it } from "vitest";
 
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
-import { createTelephonyHarness, LINES, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
+import { createTelephonyHarness, LINES, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
 import {
   blindTransfer,
@@ -428,5 +428,22 @@ describe("listTransferTargets", () => {
     // Presence still says "available" — nothing revokes it when a laptop closes.
     // Only the phone's own heartbeat can tell the dispatcher otherwise.
     expect(target).toMatchObject({ status: "available", available: false, deviceLive: false, deviceSeenAt: stale });
+  });
+
+  it("reports the newest heartbeat of the two devices, without making the mobile transferable", async () => {
+    const h = createTelephonyHarness();
+    const laptopClosed = new Date(h.now().getTime() - 4 * 60 * 60_000).toISOString();
+    const onTheirPhone = new Date(h.now().getTime() - 10_000).toISOString();
+    h.db.update("motorist_operator_devices", { device_seen_at: laptopClosed }, row => row.profile_id === PROFILES.o2);
+    h.db.insert("motorist_operator_mobile_devices", { organization_id: ORG, profile_id: PROFILES.o2, environment: "development",
+      registration_state: "registered", device_seen_at: onTheirPhone, device_session_id: "mobile-1", sip_username: "mobile", telnyx_credential_id: "mobile-cred", credential_expires_at: null });
+
+    const target = (await listTransferTargets(actionDeps(h), o1)).find(entry => entry.profileId === PROFILES.o2)!;
+
+    // Somebody working on their phone with a closed laptop is not away for four
+    // hours. They are still unreachable by a transfer, which only the browser
+    // phone can take — so the time moves and the verdict does not.
+    expect(target.deviceSeenAt).toBe(onTheirPhone);
+    expect(target).toMatchObject({ available: false, deviceLive: false });
   });
 });
