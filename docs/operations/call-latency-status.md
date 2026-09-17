@@ -100,7 +100,10 @@ does not address any of them.
    transfer read `motorist_operator_devices` (web) only. Personal mobile numbers
    are configured for one operator out of eight, and no ring group has one as a
    member.
-4. **A failed add-party leaves no trace.** The audit is written after success,
-   so a destination Telnyx refuses is invisible afterwards. The error text also
-   does not carry the number that was dialled, which is how a Czech number typed
-   in national form silently became a Slovak one.
+4. ~~**A failed add-party leaves no trace.**~~ Closed. A blind transfer wrote
+   no audit row at all and an add-party wrote one only when it worked, so a
+   destination Telnyx refused left nothing behind. All three target actions now
+   write a row either way, carrying the number as typed, the number it became
+   and the refusal. The error sentence names the number too, and the console
+   previews the same normalisation before the click — which is where the Czech
+   number typed in national form silently became a Slovak one.
