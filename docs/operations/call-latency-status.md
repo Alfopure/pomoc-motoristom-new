@@ -47,6 +47,7 @@ Cost of one database request, from production `request-performance`: **~95 ms**
 | stage | state |
 | --- | --- |
 | **E0** cron and firewall | hotfix, then the allowlist inverted to a denylist of the 291 pre-boundary deployments. A release no longer needs a manual edit. Runbook carries the post-deploy gate. |
+| **E1a.1** lean context | done — accepting an offer no longer loads the whole route |
 | **E1a.2** bridge first | done |
 | **E1a.3** read deduplication | (a) (b) (c) (e) (f) done; **(d) only for `hangup`** |
 | **E1a.4** organisation cache | done — `call.active` poll 8 requests to 7, confirmed on live traffic |
@@ -54,6 +55,7 @@ Cost of one database request, from production `request-performance`: **~95 ms**
 | **E1a.6** one checkpoint per critical batch | done, critical phase only |
 | **E1b-1** low-risk concurrency | both points: parallel teardown, overlapping best-effort provider calls |
 | **E1c** bounded webhook lease wait | done — 1200 ms, backoff 150/300/600 |
+| **E1b-2.4** parallel fan-out | done — a ring step claims, persists and dials its members together instead of one after another |
 
 Outside the plan, from what the testing turned up:
 
@@ -72,15 +74,36 @@ Outside the plan, from what the testing turned up:
 | stage | why it is still open |
 | --- | --- |
 | **E0** permanent | done as the denylist; nothing left |
-| **E1a.1** lean context | not started. Last item of E1a |
 | **E1a.3(d)** in full | needs the harness to drive the provider journal: the wider version maps a fenced PT409 refusal onto the superseded path, and that branch is unreachable in every test we have |
 | **E1b-1.2** group checkpoint | same reason. One checkpoint per overlapping group instead of one per command |
 | **E1m** measurement | partly: cost per request and `db_count_at_dispatch` are in place; the 30-sample SQL A-J distributions are not |
-| **E1b-2** | superseded by E2 if E2 is approved |
+| **E1b-2** rest | .4 done; the rest superseded by E2 if E2 is approved |
 | **E2** migrations | not started. The step change: bridge chain to 5-6 requests, fanout to 6 + N |
 | **E3** controls, mobile, transfer | not started. Includes making a colleague's mobile reachable at all |
 | **E4** polling and auth | not started |
 | **E5** measurement rounds | not started |
+
+### What parallel fan-out changes
+
+A ring step with three operators used to run three times in a row: claim the
+member, write the token, dial, record the leg — then start the second member
+from scratch. On a production call the `ring_fanout` effect took 4.1 s and the
+`call.answered` handler 8.4 s, and the third operator's phone was the last to
+make a sound.
+
+The step now does the same work in three passes over the whole group: insert
+every attempt row, claim every member and persist all their tokens in **one**
+fenced write, then dial everybody at once. The tokens still land before any leg
+exists, so a replayed webhook still recognises its own offer.
+
+The one write matters more than it looks. Claiming per member under concurrency
+is not merely slower — `src/server/telephony/state/parallel-fanout.test.ts`
+reproduces it: three compare-and-sets racing on one session row lose a member
+outright, and only two of the three phones ring.
+
+Request count is unchanged; this is latency, not cost. It should show up as the
+gap between the caller being answered and the first phone ringing, and it is
+worth one verification call to confirm.
 
 ## Known gaps that are not in the plan
 
