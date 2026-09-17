@@ -293,7 +293,24 @@ describe("waiting-room park info", () => {
       seconds: 4 * 60,
       secondsToLimit: 26 * 60,
       limitMinutes: 30,
+      unreachable: false,
     });
+  });
+
+  it("marks a caller who reached the waiting room without a single phone ringing", () => {
+    // Different from an ordinary wait: the plan had members and none of them
+    // could be reached, which is an operational problem, not traffic.
+    const overflow = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null, waitingReason: "no_operator_reachable" };
+
+    expect(waitingRoomPark(overflow, { now: NOW })).toMatchObject({ parked: false, unreachable: true });
+  });
+
+  it("leaves an ordinary overflow and a parked call unmarked", () => {
+    const overflow = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null, waitingReason: "ring_exhausted" };
+
+    expect(waitingRoomPark(overflow, { now: NOW }).unreachable).toBe(false);
+    // Parking is a decision somebody made; it is never "nobody was reachable".
+    expect(waitingRoomPark({ ...parked(), waitingReason: "no_operator_reachable" }, { now: NOW }).unreachable).toBe(false);
   });
 
   it("keeps an unknown operator nameless rather than guessing", () => {
