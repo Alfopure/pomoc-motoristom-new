@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AudioLines, CalendarClock, Coffee, Hash, ListOrdered, ListTree, Loader2, PhoneCall, RefreshCw, ShieldAlert, Smartphone, Users, UserCog } from "lucide-react";
+import { AudioLines, CalendarClock, Coffee, Hash, ListOrdered, ListTree, Loader2, PhoneCall, RefreshCw, ShieldAlert, Smartphone, Sparkles, Users, UserCog } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import type { TelephonySettingsDoc } from "@/server/telephony/config-service";
 
 import { MyPhonePanel, type MyPhoneTestCall } from "../MyPhonePanel";
+import { AiDemoPanel } from "./AiDemoPanel";
 import { AnnouncementsPanel } from "./AnnouncementsPanel";
 import { BusinessHoursEditor } from "./BusinessHoursEditor";
 import { IvrMenuEditor } from "./IvrMenuEditor";
@@ -28,16 +29,16 @@ import { RecordingPolicyPanel } from "./RecordingPolicyPanel";
  * back so the neighbouring screens see the new world without a reload.
  */
 
-type TelephonyConfigTab = "phone" | "groups" | "plans" | "ivr" | "announcements" | "hours" | "pauses" | "numbers" | "operators" | "recording" | "settings";
+type TelephonyConfigTab = "phone" | "groups" | "plans" | "ivr" | "announcements" | "hours" | "pauses" | "numbers" | "operators" | "recording" | "settings" | "ai";
 
 const GUIDE_CHAPTERS: Record<TelephonyConfigTab, string> = {
   phone: "moj-telefon", groups: "skupiny-zvonenia", plans: "plany-zvonenia",
   ivr: "cisla-hodiny-a-ivr", announcements: "hlasky-a-nahravanie", hours: "cisla-hodiny-a-ivr",
   pauses: "pauza-a-zastupovanie", numbers: "cisla-hodiny-a-ivr", operators: "moj-telefon",
-  recording: "hlasky-a-nahravanie", settings: "riesenie-problemov",
+  recording: "hlasky-a-nahravanie", settings: "riesenie-problemov", ai: "riesenie-problemov",
 };
 
-const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; adminOnly?: boolean; managerOnly?: boolean }> = [
+const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; adminOnly?: boolean; managerOnly?: boolean; requiresAiDemo?: boolean }> = [
   // "Môj telefón" is first and open to every operator; everything after it is
   // configuration a manager owns.
   { icon: Smartphone, label: "Môj telefón", value: "phone" },
@@ -51,6 +52,9 @@ const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; 
   { icon: Hash, label: "Čísla", value: "numbers" },
   { icon: UserCog, label: "Operátori", value: "operators", managerOnly: true },
   { icon: ShieldAlert, label: "Bezpečnosť", value: "settings", adminOnly: true },
+  // Absent unless the deployment actually has the demo configured; every
+  // `ai-demo` route re-checks the same switch server-side.
+  { icon: Sparkles, label: "AI", value: "ai", adminOnly: true, requiresAiDemo: true },
 ];
 
 export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestCall } = {}) {
@@ -144,7 +148,7 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
       </a>
 
       <nav className="flex flex-wrap gap-2" aria-label="Nastavenia telefónie">
-        {TABS.filter((entry) => (!entry.adminOnly || state.canManageSettings) && (!entry.managerOnly || state.canEdit)).map(({ icon: Icon, label, value }) => {
+        {TABS.filter((entry) => (!entry.adminOnly || state.canManageSettings) && (!entry.managerOnly || state.canEdit) && (!entry.requiresAiDemo || state.aiDemoEnabled)).map(({ icon: Icon, label, value }) => {
           const active = tab === value;
           return (
             <button
@@ -203,6 +207,7 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
       {tab === "operators" && state.canEdit && (
         <OperatorsTelephonyPanel key={`operators-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />
       )}
+      {tab === "ai" && state.canManageSettings && state.aiDemoEnabled && <AiDemoPanel onNavigateToSettings={() => setTab("settings")} />}
       {tab === "settings" && state.canManageSettings && state.document.settings && (
         <TelephonySettingsPanel
           key={`settings-${version}`}

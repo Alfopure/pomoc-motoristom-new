@@ -254,6 +254,51 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     return done({ ...identity, claim, status: claim.outcome === "busy" ? 500 : 200, outcome: claim.outcome });
   }
 
+  // AI demo legs are not dispatch sessions: they have no operator, no ring plan
+  // and no reducer state, and `findSession` below would answer
+  // `awaiting_correlation` for every one of them. The branch sits after the
+  // ledger claim so duplicates, dead-lettering and replay are already handled,
+  // and before `findSession` so the human path is byte-identical. The handler
+  // is imported dynamically — with the demo switched off it is never loaded,
+  // and the webhook's static module budget is unchanged. That budget is also
+  // why the intent prefix is a literal here rather than an import from
+  // `ai-demo/flag.ts`; `identity.test.ts` asserts the two agree.
+  if (event.clientState?.intent?.startsWith("ai_demo:") === true) {
+    try {
+      const { handleAiDemoTelnyxEvent } = await import("../ai-demo/telnyx-events");
+      const outcome = await handleAiDemoTelnyxEvent(deps, event);
+      // A state that carries the prefix but is not a well-formed demo state is
+      // not ours to acknowledge. Falling through leaves it to the ordinary
+      // correlation path, which is where an unrecognised leg belongs.
+      if (!outcome.handled && outcome.reason === "not_ai_demo") {
+        deps.logger?.({ level: "warn", scope: "ai-demo", eventId: event.id, type: event.type, message: "malformed demo client_state" });
+      } else {
+        await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+        return done({
+          ...identity,
+          claim,
+          status: 200,
+          outcome: outcome.handled ? "processed" : "ignored",
+          notes: [outcome.handled ? `ai_demo:${outcome.action}` : `ai_demo:${outcome.reason}`],
+        });
+      }
+    } catch (error) {
+      // Without the table there can be no demo, so such a leg is not ours.
+      // Retrying it forever would be the wrong answer to a migration that was
+      // simply never applied.
+      if ((error as { name?: string }).name === "AiDemoMigrationMissingError") {
+        deps.logger?.({ level: "warn", scope: "ai-demo", eventId: event.id, type: event.type, message: "demo table missing" });
+      } else {
+        // Every demo transition is conditional, so a redelivery cannot repeat
+        // an effect; asking for one is strictly better than losing the event.
+        const message = error instanceof Error ? error.message : String(error);
+        await markWebhookEventFailed(deps.admin, event.id, "ai_demo_handler_failed", { claimedAt: claim.claimedAt, logger: deps.logger, releaseForRetry: true });
+        deps.logger?.({ level: "error", scope: "ai-demo", eventId: event.id, type: event.type, message: "handler failed", error: message });
+        return done({ ...identity, claim, status: 500, outcome: "failed", error: "ai_demo_handler_failed" });
+      }
+    }
+  }
+
   const effects = effectsDeps(deps);
   let session: SessionRow | null = null;
   let processingStarted = false;

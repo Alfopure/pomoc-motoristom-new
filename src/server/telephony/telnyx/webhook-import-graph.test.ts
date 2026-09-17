@@ -64,6 +64,11 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
   { pattern: /^src\/data\/dispatch-repository\.ts$/, why: "the whole dispatch read model" },
   { pattern: /^src\/server\/email-delivery\.ts$/, why: "e-mail transport; alerts run on the cron, not on the webhook" },
   { pattern: /^src\/components\//, why: "React components are never needed by a webhook" },
+  // The AI demo branch is reached with `await import()` from inside
+  // `processTelnyxEvent`, so a deployment with the demo off never loads it. The
+  // intent prefix is a string literal in the processor for the same reason.
+  { pattern: /^src\/server\/telephony\/ai-demo\//, why: "AI demo modules load lazily inside the branch; a static import would put the OpenAI client on every call" },
+  { pattern: /^src\/lib\/integrations\/ai\//, why: "OpenAI clients belong to the demo branch and the cron, not to answering a call" },
 ];
 
 /**

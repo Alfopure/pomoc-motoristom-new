@@ -4,6 +4,7 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { AppRole } from "@/domain/types";
 import { assertSameOriginRequest, requireDefaultMotoristActor, type MotoristActor } from "@/server/api-auth";
 
+import { aiDemoEnabled } from "./ai-demo/flag";
 import { ConfigServiceError, getRoutingDocument, type ConfigActor, type ConfigDeps, type RoutingDocument } from "./config-service";
 import { readJsonBody, telephonyErrorResponse } from "./runtime";
 
@@ -49,6 +50,14 @@ export type ConfigDocumentResponse = {
   document: RoutingDocument;
   canEdit: boolean;
   canManageSettings: boolean;
+  /**
+   * Whether the AI demo exists in this deployment.
+   *
+   * Sent only to an admin, and only so the tab can be absent rather than
+   * present-and-broken. Client gating is cosmetic: every `ai-demo` route
+   * checks the same switch server-side (precedent: `generationAvailable`).
+   */
+  aiDemoEnabled?: boolean;
   /** Non-fatal note about a save that landed (today: a missing audit row). */
   warning?: string;
 };
@@ -79,6 +88,7 @@ export function documentResponse(actor: MotoristActor, document: RoutingDocument
     document: visibleDocument(actor, document),
     canEdit: canEditConfig(actor.role),
     canManageSettings: actor.role === "admin",
+    ...(actor.role === "admin" ? { aiDemoEnabled: aiDemoEnabled() } : {}),
     ...(warning ? { warning } : {}),
   };
   return Response.json(body, { headers: { "Cache-Control": "private, no-store" } });

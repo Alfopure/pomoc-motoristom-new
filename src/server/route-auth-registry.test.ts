@@ -56,6 +56,8 @@ describe("route-auth-registry", () => {
       "sms/telnyx/webhook",
       "telephony/telnyx/webhook",
       "telephony/webhooks/scribe",
+      // OpenAI GPT-Live webhook — Standard Webhooks HMAC podpis, nie session.
+      "telephony/webhooks/openai",
     ].sort());
   });
 });
