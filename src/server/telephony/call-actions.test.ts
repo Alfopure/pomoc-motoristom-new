@@ -416,4 +416,17 @@ describe("listTransferTargets", () => {
       [PROFILES.o3, false, "offline"],
     ]);
   });
+
+  it("carries the last heartbeat so the picker can say how long somebody has been away", async () => {
+    const h = createTelephonyHarness();
+    const stale = new Date(h.now().getTime() - 20 * 60_000).toISOString();
+    h.db.update("motorist_operator_devices", { device_seen_at: stale }, row => row.profile_id === PROFILES.o2);
+
+    const targets = await listTransferTargets(actionDeps(h), o1);
+    const target = targets.find(entry => entry.profileId === PROFILES.o2)!;
+
+    // Presence still says "available" — nothing revokes it when a laptop closes.
+    // Only the phone's own heartbeat can tell the dispatcher otherwise.
+    expect(target).toMatchObject({ status: "available", available: false, deviceLive: false, deviceSeenAt: stale });
+  });
 });

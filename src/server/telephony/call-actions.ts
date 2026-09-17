@@ -893,7 +893,10 @@ export async function revokeCallMonitorInvitation(deps: CallActionDeps, actor: C
   return runAction(deps, session, appEvent("revoke_monitor", actor, deps, { invitationId }), "Poslucháča sa nepodarilo odpojiť.");
 }
 
-export type TransferTargetOption = { profileId: string; displayName: string; role: AppRole; available: boolean; status: string; deviceLive: boolean };
+export type TransferTargetOption = { profileId: string; displayName: string; role: AppRole; available: boolean; status: string;
+  deviceLive: boolean;
+  /** Last heartbeat of the colleague's browser phone, so the picker can say how long they have been away. */
+  deviceSeenAt: string | null };
 
 /** Colleagues that can receive a transfer/consult right now (plus the rest, flagged unavailable). */
 export async function listTransferTargets(deps: CallActionDeps, actor: CallActor): Promise<TransferTargetOption[]> {
@@ -913,7 +916,8 @@ export async function listTransferTargets(deps: CallActionDeps, actor: CallActor
       const device = deviceById.get(profile.id) ?? null;
       const live = deviceIsLive(device, now);
       const allowed = row ? presenceAllowsOffer({ profileId: profile.id, status: effectivePresenceStatus(row, now), currentSessionId: row.current_session_id, wrapUpUntil: row.wrap_up_until }, now) : { eligible: false as const, reason: "no_presence" as const };
-      return { profileId: profile.id, displayName: profile.display_name, role: profile.role, available: allowed.eligible && live, status: row ? effectivePresenceStatus(row, now) : "offline", deviceLive: live };
+      return { profileId: profile.id, displayName: profile.display_name, role: profile.role, available: allowed.eligible && live,
+        status: row ? effectivePresenceStatus(row, now) : "offline", deviceLive: live, deviceSeenAt: device?.device_seen_at ?? null };
     })
     .sort((left, right) => Number(right.available) - Number(left.available) || left.displayName.localeCompare(right.displayName, "sk"));
 }
