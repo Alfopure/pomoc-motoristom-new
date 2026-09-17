@@ -77,6 +77,24 @@ export type SessionRunnerDeps = {
 };
 
 export const LEASE_WAIT_MS = 3_000;
+/**
+ * How long a provider callback may wait for the lease before answering 500.
+ *
+ * It used to give up instantly, so simultaneous callbacks for the same call —
+ * a conference emits `created`, `participant.joined`, `floor.changed` and
+ * `participant.left` within milliseconds — all answered 500 and Telnyx
+ * redelivered every one of them. On the heaviest test call on 17 Sep that was
+ * 23 of 55 events failing outright, 5.2 deliveries per event, and provider
+ * facts landing minutes late through the cron.
+ *
+ * The holder finishes in 1.7 s at the median, so a short wait converts most of
+ * those into a first-delivery success. It stays well under the operator's own
+ * budget (`LEASE_WAIT_MS`) so a click still outlasts a callback competing for
+ * the same lease, and well under the provider's 30 s webhook timeout. Waiting
+ * holds nothing: the invocation is only retrying the acquire RPC. Sweeps keep
+ * giving up at once — they are opportunistic by design.
+ */
+export const WEBHOOK_LEASE_WAIT_MS = 1_200;
 export const LEASE_TTL_MS = SESSION_LEASE_MS;
 export const LEASE_JITTER_MIN_MS = 50;
 export const LEASE_JITTER_MAX_MS = 150;

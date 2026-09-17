@@ -6,7 +6,7 @@ import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
-import { effectsDeps, ownedSessionWork, runSessionEvent, SessionEventDeferredError, type SessionRunnerDeps } from "../session-runner";
+import { effectsDeps, ownedSessionWork, runSessionEvent, SessionEventDeferredError, WEBHOOK_LEASE_WAIT_MS, type SessionRunnerDeps } from "../session-runner";
 import { recordCallEvent, type CommandOutcome } from "../state/effects";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
 import { toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
@@ -184,7 +184,7 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
     session = inserted.data;
   }
 
-  return ownedSessionWork({ ...deps, leaseWaitMs: 0 }, session.id, async () => {
+  return ownedSessionWork({ ...deps, leaseWaitMs: WEBHOOK_LEASE_WAIT_MS }, session.id, async () => {
     if (event.callControlId) {
       const leg = await admin
         .from("motorist_call_legs")
@@ -285,7 +285,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     const ownedSession = session;
     // The durable webhook ledger owns retry. Do not have every simultaneous
     // provider callback poll the same database lease while a control is waiting.
-    const result = await ownedSessionWork({ ...deps, leaseWaitMs: 0 }, ownedSession.id, async () => {
+    const result = await ownedSessionWork({ ...deps, leaseWaitMs: WEBHOOK_LEASE_WAIT_MS }, ownedSession.id, async () => {
       processingStarted = true;
       if (eventClass === "bookkeeping") {
         if (event.type === "call.recording.saved" || event.type === "conference.recording.saved") {
