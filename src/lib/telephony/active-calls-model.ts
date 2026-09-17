@@ -481,10 +481,17 @@ export type WaitingRoomPark = {
   /** Seconds left before the callback offer; `null` when the limit is unknown. */
   secondsToLimit: number | null;
   limitMinutes: number | null;
+  /**
+   * The caller reached the waiting room without a single phone ringing: the
+   * plan had members and none of them could be reached. That is an operational
+   * problem rather than ordinary traffic, and the queue should say so instead
+   * of showing the same "waiting to be assigned" as everybody else.
+   */
+  unreachable: boolean;
 };
 
 export function waitingRoomPark(
-  call: Pick<ActiveCallPayload, "state" | "parkedAt" | "parkedByProfileId" | "waitingSince" | "waitingMaxMinutes">,
+  call: Pick<ActiveCallPayload, "state" | "parkedAt" | "parkedByProfileId" | "waitingSince" | "waitingMaxMinutes" | "waitingReason">,
   options: { now: number; operatorName?: OperatorNameLookup },
 ): WaitingRoomPark {
   const parked = call.state === "parked";
@@ -503,6 +510,7 @@ export function waitingRoomPark(
     seconds,
     secondsToLimit: limitMinutes === null || !Number.isFinite(started) ? null : Math.max(0, limitMinutes * 60 - seconds),
     limitMinutes,
+    unreachable: !parked && call.waitingReason === "no_operator_reachable",
   };
 }
 
