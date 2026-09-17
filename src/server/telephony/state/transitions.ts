@@ -343,6 +343,11 @@ function hangupCmd(b: TransitionBuilder, leg: LegRow, reason: string, bestEffort
   return { kind: "hangup", commandId: b.cmdId(leg.telnyx_call_control_id, `hangup:${reason}`), leg: ref(leg), reason, bestEffort };
 }
 
+/** Stops the gather running on a leg. Always bestEffort: it is audio cleanup. */
+function gatherStopCmd(b: TransitionBuilder, leg: LegRow): Command {
+  return { kind: "gather_stop", commandId: b.cmdId(leg.telnyx_call_control_id, "gather_stop"), leg: ref(leg), bestEffort: true };
+}
+
 /**
  * Hangs up a leg that belongs to a session which is already terminal (the leg
  * may not even have a row yet: a dial that timed out client-side).
@@ -1209,10 +1214,11 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
     if (intent?.startsWith("transfer")) b.patchMeta({ transfer: b.meta.transfer ? { ...b.meta.transfer, completed_at: opts.at } : null });
     b.patchMeta({ ring: { ...(b.meta.ring ?? {}), active_step: null, step_deadline_at: null } });
 
-    stopMoh(b, customer);
-    if (WAITING_STATES.has(b.session.state) || wasQueued) {
-      b.cmd({ kind: "gather_stop", commandId: b.cmdId(customer.telnyx_call_control_id, "gather_stop"), leg: ref(customer), bestEffort: true });
-    }
+    // Bridge first: the caller waits for this one command, while both stop
+    // commands below are bestEffort audio cleanup. Issuing them ahead of the
+    // bridge put up to two provider round trips (5 s timeout each) between the
+    // operator answering and the two legs being connected.
+    const gatherStopNeeded = WAITING_STATES.has(b.session.state) || wasQueued;
     if (!opts.alreadyBridged && intent !== "transfer") {
       const bridgeId = b.cmdId(customer.telnyx_call_control_id, "bridge", leg.telnyx_call_control_id);
       b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(customer), target: ref(leg), parkAfterUnbridge: "self" });
@@ -1222,8 +1228,20 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
       if (leg.profile_id) failed.presenceChange({ profileId: leg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, reason: "bridge failed" });
       failed.patchSession({ answered_by_profile_id: null });
       enterWaiting(failed, customer, "bridge_failed");
-      b.compensate(bridgeId, "bridge failed → operator leg hung up, customer to waiting room", [hangupCmd(b, leg, "bridge_failed"), ...failed.commands], failed.transition());
+      // A failed bridge drops every command staged after it, so the
+      // compensation has to carry what the waiting room still needs. No
+      // `playback_stop`: the loop is still running and `enterWaiting` will not
+      // restart it, so stopping it here would leave a silent waiting room.
+      // `gather_stop` only for a pickup from the waiting room without a queue →
+      // the one case where `enterWaiting` issues a fresh `gather`; a queued
+      // caller keeps the queue gather it already has.
+      const compensation: Command[] = [hangupCmd(b, leg, "bridge_failed")];
+      if (gatherStopNeeded && !wasQueued) compensation.push(gatherStopCmd(b, customer));
+      compensation.push(...failed.commands);
+      b.compensate(bridgeId, "bridge failed → operator leg hung up, customer to waiting room", compensation, failed.transition());
     }
+    stopMoh(b, customer);
+    if (gatherStopNeeded) b.cmd(gatherStopCmd(b, customer));
     // Losers: every other open offer leg of this session.
     for (const other of b.openLegs()) {
       if (other.telnyx_call_control_id === leg.telnyx_call_control_id || isCustomer(other) || other.role === "consult" || other.role === "supervisor") continue;
