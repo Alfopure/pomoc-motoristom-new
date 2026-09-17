@@ -1448,7 +1448,7 @@ const presenceStateLabel: Record<TelephonyOperatorPresenceState, string> = {
   ringing: "zvoní",
   on_call: "na hovore",
   paused: "pauza",
-  unregistered: "neregistrovaný",
+  unregistered: "nepripojený",
   offline: "mimo radu",
   unassigned: "bez pracoviska",
   stale: "zastarané",
