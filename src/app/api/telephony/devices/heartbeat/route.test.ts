@@ -87,4 +87,32 @@ describe("POST /api/telephony/devices/heartbeat", () => {
     expect(response.status).toBe(503);
     expect(touchDevice).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["a full report", { blocked: false, remoteMedia: true }, { blocked: false, remoteMedia: true }],
+    ["a blocked device", { blocked: true, remoteMedia: true }, { blocked: true, remoteMedia: true }],
+    ["a report without a stream", { blocked: false, remoteMedia: false }, { blocked: false, remoteMedia: false }],
+  ])("passes %s of the device's own audio through", async (_label, audio, expected) => {
+    touchDevice.mockResolvedValue({ ok: true, device: { device_seen_at: "2026-09-17T11:00:00.000Z", registration_state: "registered" } });
+
+    const response = await POST(request({ deviceSessionId: "device-1", registrationState: "registered", audio }));
+
+    expect(response.status).toBe(200);
+    expect(touchDevice).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ audio: expected }));
+  });
+
+  it.each([
+    ["a missing report", undefined],
+    ["a half report", { blocked: true }],
+    ["the wrong types", { blocked: "yes", remoteMedia: 1 }],
+    ["an array", [true, false]],
+    ["a string", "connected"],
+  ])("drops %s instead of storing it", async (_label, audio) => {
+    touchDevice.mockResolvedValue({ ok: true, device: { device_seen_at: "2026-09-17T11:00:00.000Z", registration_state: "registered" } });
+
+    const response = await POST(request({ deviceSessionId: "device-1", registrationState: "registered", ...(audio === undefined ? {} : { audio }) }));
+
+    expect(response.status).toBe(200);
+    expect(touchDevice.mock.calls[0][1]).not.toHaveProperty("audio");
+  });
 });

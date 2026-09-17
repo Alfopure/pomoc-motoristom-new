@@ -15,6 +15,14 @@ export const dynamic = "force-dynamic";
 
 const REGISTRATION_STATES = new Set<DeviceRow["registration_state"]>(["registered", "registering", "unregistered", "error"]);
 
+/** Two booleans about the operator's own device, or nothing. Anything else is dropped. */
+function readDeviceAudio(value: unknown): { blocked: boolean; remoteMedia: boolean } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { blocked, remoteMedia } = value as { blocked?: unknown; remoteMedia?: unknown };
+  if (typeof blocked !== "boolean" || typeof remoteMedia !== "boolean") return null;
+  return { blocked, remoteMedia };
+}
+
 /**
  * Browser-phone heartbeat (also sent via `navigator.sendBeacon` on
  * `visibilitychange`). A heartbeat from a superseded tab gets 409 so that tab
@@ -27,12 +35,13 @@ export async function POST(request: Request) {
     const notConfigured = telephonyConfiguredOrResponse();
     if (notConfigured) return notConfigured;
 
-    const body = await readJsonBody<{ deviceKind?: unknown; deviceSessionId?: unknown; registrationState?: unknown }>(request);
+    const body = await readJsonBody<{ deviceKind?: unknown; deviceSessionId?: unknown; registrationState?: unknown; audio?: unknown }>(request);
     const deviceSessionId = readString(body.deviceSessionId);
     if (!deviceSessionId) {
       return Response.json({ error: "Chýba identifikátor relácie zariadenia." }, { status: 400 });
     }
     const registrationState = readString(body.registrationState) as DeviceRow["registration_state"] | null;
+    const audio = readDeviceAudio(body.audio);
 
     const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
     const result = await touchDevice(
@@ -43,6 +52,7 @@ export async function POST(request: Request) {
         deviceSessionId,
         registrationState: registrationState && REGISTRATION_STATES.has(registrationState) ? registrationState : undefined,
         userAgent: request.headers.get("user-agent"),
+        ...(audio ? { audio } : {}),
       },
     );
 
