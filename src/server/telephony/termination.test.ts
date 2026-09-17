@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { reconcileTermination } from "./termination";
 import { SessionLeaseLostError } from "./service-errors";
+import { sessionOwnership, type Ownership } from "./ownership";
 import { TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
 
 function harness(failure?: Error) {
@@ -34,6 +35,51 @@ describe("durable termination cleanup", () => {
     h.hangup.mockClear();
     expect(await reconcileTermination(h.deps, "session")).toBe(true);
     expect(h.hangup.mock.calls.map(([input]) => input.callControlId)).toEqual(["leg-a"]);
+  });
+
+  it("dispatches the legs together under contract 2 instead of one behind the other", async () => {
+    const h = harness();
+    let inFlight = 0; let peak = 0;
+    h.hangup.mockImplementation(async () => {
+      inFlight += 1; peak = Math.max(peak, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      inFlight -= 1;
+      return { status: "executed" };
+    });
+
+    const owner: Ownership = { admin: h.deps.admin, sessionId: "session", organizationId: "org", token: "t",
+      generation: 1, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
+    expect(await sessionOwnership.run(owner, () => reconcileTermination(h.deps, "session"))).toBe(false);
+
+    // The customer's leg no longer waits behind an operator leg whose provider
+    // response is still outstanding.
+    expect(peak).toBe(2);
+    expect([...h.completed].sort()).toEqual(["dial-a", "dial-b"]);
+  });
+
+  it("keeps a leg with an unknown result from blocking the other under contract 2", async () => {
+    const h = harness(new Error("accepted hangup response lost"));
+    const owner: Ownership = { admin: h.deps.admin, sessionId: "session", organizationId: "org", token: "t",
+      generation: 1, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
+
+    expect(await sessionOwnership.run(owner, () => reconcileTermination(h.deps, "session"))).toBe(true);
+
+    expect(h.hangup.mock.calls.map(([input]) => input.callControlId).sort()).toEqual(["leg-a", "leg-b"]);
+    expect([...h.completed]).toEqual(["dial-b"]);
+  });
+
+  it("still reports a lost lease under contract 2, with nothing checkpointed", async () => {
+    const h = harness(new SessionLeaseLostError());
+    const owner: Ownership = { admin: h.deps.admin, sessionId: "session", organizationId: "org", token: "t",
+      generation: 1, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
+
+    await expect(sessionOwnership.run(owner, () => reconcileTermination(h.deps, "session")))
+      .rejects.toBeInstanceOf(SessionLeaseLostError);
+
+    // Both were already in flight, but `prepare_v2` fences each on its own
+    // generation, so a command from a lease we no longer hold never reaches the
+    // provider. Nothing is recorded as done.
+    expect(h.completed.size).toBe(0);
   });
 
   it("aborts later commands after lease loss", async () => {

@@ -143,7 +143,10 @@ export type CommandOutcome = {
 export function auditCommandOutcomes(commands: CommandOutcome[]) {
   return commands.map((command) => ({ kind: command.kind, ok: command.ok, command_id: command.commandId, skipped: command.skipped,
     ...(command.startedAt ? { started_at: command.startedAt, effect_ms: command.ms, phase: command.phase ?? command.kind } : {}),
-    ...(command.dbCountAtDispatch === undefined ? {} : { db_count_at_dispatch: command.dbCountAtDispatch }) }));
+    ...(command.dbCountAtDispatch === undefined ? {} : { db_count_at_dispatch: command.dbCountAtDispatch }),
+    // Without this a failed command is a bare `ok: false` in the audit and the
+    // only way to learn why is to catch it happening again.
+    ...(command.ok || !command.error ? {} : { error: command.error.slice(0, 300) }) }));
 }
 
 export type ApplyResult = {
@@ -1779,18 +1782,44 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
   // unrelated historical callback or projection write is still unavailable.
   for (const entry of readPendingEffects(session).entries) {
     const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: entry.previousConferenceId };
-    for (const command of entry.commands) {
-      const ending = entry.event.kind === "app" ? entry.event.type === "hangup" : entry.event.type === "call.hangup";
+    const ending = entry.event.kind === "app" ? entry.event.type === "hangup" : entry.event.type === "call.hangup";
+    const urgent = entry.commands.filter((command) => {
       // Transfer/leave hangups depend on earlier commands succeeding. Only an
       // explicit end decision or privacy STOP can bypass historical writes.
       const monitorDisconnect = command.kind === "hangup" && command.reason === "invited_monitor_stopped";
-      if (!(command.kind === "recording_stop" || ending && command.kind === "hangup" || monitorDisconnect) || entry.completedCommands.includes(commandKey(command))) continue;
-      try {
-        if (sessionOwnership.getStore()?.contract !== 2) await deps.renewLease?.();
-        await executeCommand(deps, ctx, command);
-      } catch (error) {
-        if (error instanceof SessionLeaseLostError) throw error;
-        deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "teardown_pending", command: command.kind });
+      return (command.kind === "recording_stop" || ending && command.kind === "hangup" || monitorDisconnect)
+        && !entry.completedCommands.includes(commandKey(command));
+    });
+    // A run of hangups goes out together: `hangup` has no post-dispatch
+    // bookkeeping, each carries its own journal entry, and an unknown outcome
+    // on one leg must not keep another leg ringing while it resolves. Anything
+    // else (a privacy STOP) keeps its position and its turn.
+    const runs: Command[][] = [];
+    for (const command of urgent) {
+      const last = runs.at(-1);
+      if (command.kind === "hangup" && last?.[0]?.kind === "hangup") last.push(command);
+      else runs.push([command]);
+    }
+    const warn = (kind: string) => deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "teardown_pending", command: kind });
+    for (const run of runs) {
+      // Contract 1 has no provider journal to fence a command issued after the
+      // lease was lost, so it keeps stopping at the first one.
+      if (sessionOwnership.getStore()?.contract !== 2) {
+        await deps.renewLease?.();
+        for (const command of run) {
+          try { await executeCommand(deps, ctx, command); }
+          catch (error) {
+            if (error instanceof SessionLeaseLostError) throw error;
+            warn(command.kind);
+          }
+        }
+        continue;
+      }
+      const settled = await Promise.allSettled(run.map((command) => executeCommand(deps, ctx, command)));
+      for (const [index, result] of settled.entries()) {
+        if (result.status === "fulfilled") continue;
+        if (result.reason instanceof SessionLeaseLostError) throw result.reason;
+        warn(run[index].kind);
       }
     }
   }
