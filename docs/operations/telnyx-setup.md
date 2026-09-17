@@ -23,11 +23,30 @@ The first number's API string carries an extra leading `0` (provider quirk); alw
 
 | Resource | ID | Notes |
 |---|---|---|
-| Call Control application | 3040091293100279025 | `pomoc-motoristom-test`, Frankfurt anchor, webhook `/api/telephony/telnyx/webhook` on the production domain, failover on the `*.vercel.app` alias, `first_command_timeout_secs` 20, `webhook_timeout_secs` 10 |
+| Call Control application | 3040091293100279025 | `pomoc-motoristom-test`, Frankfurt anchor, webhook `/api/telephony/telnyx/webhook` on the production domain, failover on the `*.vercel.app` alias, `first_command_timeout_secs` 20, `webhook_timeout_secs` **30** (raised from 10 on 17 Sep, see below) |
 | Credential connection (webphone) | 3040092094321394986 | `pomoc-motoristom-webrtc`, SRTP, Frankfurt anchor |
 | WebRTC on-demand credential | b1665411-b7cd-4f3a-98bd-e86f1ebadf42 | `test-operator-1`; JWT via `POST /v2/telephony_credentials/{id}/token` |
 | Outbound voice profile | 3040091178788717802 | EU27 whitelist, daily cap 20 USD, max destination rate 0.15 USD/min, concurrency 10 |
 | Messaging profile | 4001a062-20cf-44ea-a956-6f272163907f | SK only, alpha sender `PomocMotor` |
+
+### `webhook_timeout_secs` — why 30 and not 10
+
+At 10 s the application timed out on its own handlers and Telnyx redelivered
+almost everything. Measured on one 3.5 minute call on 17 Sep, before the change:
+
+- 72 real events produced **382 deliveries** (5.3x), 57 of them delivered six times
+- webhook processing ran **271 s behind in the median**, 683 s at worst — the state
+  machine was deciding about a call as it had looked minutes earlier
+
+Handlers take 5–11 s (hold 6.1 and 8.1 s, park 8.0 s, blind transfer 5.0 s,
+hangup 11.3 s), so the 10 s ceiling sat below the work. Telnyx allows 0–30. At
+30 s the timeouts stop and the redelivery loop with them; the failover URL still
+catches a genuinely dead handler.
+
+Lower it again only alongside a measured handler p95 well under the new value,
+and recheck the ratio afterwards: `sum(delivery_count)` against the row count of
+`motorist_telnyx_webhook_events` over the same window.
+
 
 ## Dev / preview resources
 
