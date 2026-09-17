@@ -1,6 +1,7 @@
 import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
 import { randomUUID } from "node:crypto";
 
+import { registerContractTwoRpcs } from "./fake-stability";
 import { createFakeSupabase, type FakeRow, type FakeSupabase } from "@/test/fake-supabase";
 import { createFakeTelnyx, FAKE_TELNYX_ENV, type FakeTelnyx } from "@/test/fake-telnyx";
 import { encodeClientState, type TelnyxClientState } from "@/server/telephony/telnyx/client-state";
@@ -44,6 +45,12 @@ export type HarnessOptions = {
   fallbackKind?: "external_number" | "waiting_room" | "callback_prompt" | "hangup_message";
   sweepAfterEvent?: boolean;
   leaseWaitMs?: number;
+  /**
+   * Run the session under contract 2 — generation leases and the fenced
+   * provider journal — which is what production has used since 12 Sep. Several
+   * read deduplications are gated on it and are unreachable without this.
+   */
+  writerContract?: 2;
 };
 
 export type TelephonyHarness = FakeSupabase & {
@@ -78,7 +85,9 @@ export type TelephonyHarness = FakeSupabase & {
 
 export function createTelephonyHarness(options: HarnessOptions = {}): TelephonyHarness {
   let current = new Date(options.now ?? DEFAULT_NOW);
-  const fake = createFakeSupabase({ now: () => current });
+  const fake = createFakeSupabase({ now: () => current,
+    ...(options.writerContract === 2 ? { tableDefaults: { motorist_call_sessions: { writer_contract: 2, lease_generation: 0 } } } : {}) });
+  if (options.writerContract === 2) registerContractTwoRpcs(fake.db);
   const { db } = fake;
   const environment = options.environment ?? "development";
   const nowIso = () => current.toISOString();

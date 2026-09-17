@@ -198,12 +198,15 @@ export class FakeDatabase {
   readonly rpcHandlers = new Map<string, FakeRpcHandler>();
   readonly log: FakeLogEntry[] = [];
   readonly uniqueKeys: Record<string, UniqueKeySpec[]>;
+  /** Per-instance column defaults layered over `TABLE_DEFAULTS`. */
+  readonly tableDefaults: Record<string, FakeRow>;
   private readonly injections: ErrorInjection[] = [];
   private clock: () => Date;
 
-  constructor(options: { now?: () => Date; uniqueKeys?: Record<string, UniqueKeySpec[]> } = {}) {
+  constructor(options: { now?: () => Date; uniqueKeys?: Record<string, UniqueKeySpec[]>; tableDefaults?: Record<string, FakeRow> } = {}) {
     this.clock = options.now ?? (() => new Date());
     this.uniqueKeys = { ...DEFAULT_UNIQUE_KEYS, ...(options.uniqueKeys ?? {}) };
+    this.tableDefaults = options.tableDefaults ?? {};
     registerTelephonyRpcs(this);
   }
 
@@ -265,7 +268,7 @@ export class FakeDatabase {
   }
 
   private withDefaults(table: string, row: FakeRow): FakeRow {
-    const next: FakeRow = { ...(TABLE_DEFAULTS[table] ?? {}), ...row };
+    const next: FakeRow = { ...(TABLE_DEFAULTS[table] ?? {}), ...(this.tableDefaults[table] ?? {}), ...row };
     if (table === "motorist_telnyx_webhook_events" && isNil(next.received_at)) next.received_at = this.nowIso();
     if (table === "motorist_job_incidents") {
       if (isNil(next.incident_id)) next.incident_id = randomUUID();
@@ -692,7 +695,7 @@ export type FakeSupabase = {
   admin: SupabaseClient<Database>;
 };
 
-export function createFakeSupabase(options: { now?: () => Date; uniqueKeys?: Record<string, UniqueKeySpec[]> } = {}): FakeSupabase {
+export function createFakeSupabase(options: { now?: () => Date; uniqueKeys?: Record<string, UniqueKeySpec[]>; tableDefaults?: Record<string, FakeRow> } = {}): FakeSupabase {
   const db = new FakeDatabase(options);
   const client: FakeSupabaseClient = {
     from(table) {

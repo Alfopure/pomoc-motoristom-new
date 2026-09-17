@@ -647,6 +647,30 @@ type ExecutionContext = {
  * The leg rows of this session, read once per invocation. Dial correlation and
  * the bridge's source identity both need them and used to read them separately.
  */
+/**
+ * Whether the validity read before this command can be skipped.
+ *
+ * Only for a `hangup`. `commandStillApplies` returns true for it without
+ * looking at the session at all, and `prepare_v2` keeps letting teardown
+ * through after a termination — so there is nothing the fresh row could say
+ * that would change the outcome. Every other kind keeps its read: a
+ * termination committed by another invocation (`app.hangup` commits it without
+ * the lease) is exactly what that read is there to catch, and the fenced
+ * refusal that would replace it is not reachable in any test we have.
+ *
+ * The row itself is ours either way: it came back from a fenced write under
+ * this lease. Recording is excluded — it keeps its own live view of
+ * `pendingAudio` and of recorder state.
+ */
+function providerReadCanReuseSession(session: SessionRow, command: Command): boolean {
+  if (command.kind !== "hangup") return false;
+  const owner = sessionOwnership.getStore();
+  if (owner?.contract !== 2 || owner.sessionId !== session.id) return false;
+  const meta = readMeta(session);
+  return meta.recording?.policy.enabled === false && !meta.recording.recorders.length &&
+    !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence;
+}
+
 async function sessionLegs(deps: EffectsDeps, ctx: ExecutionContext): Promise<LegRow[]> {
   if (ctx.legs) return ctx.legs;
   const legs = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id);
@@ -1422,9 +1446,11 @@ async function executeReduceResult(
     let providerExecuted = false;
     try {
       if (input.continuation) {
-        const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
-        if (fresh.error) throw new EffectsError("effect validity read failed");
-        ctx.session = fresh.data;
+        if (!providerReadCanReuseSession(ctx.session, command)) {
+          const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
+          if (fresh.error) throw new EffectsError("effect validity read failed");
+          ctx.session = fresh.data;
+        }
         if (!commandStillApplies(ctx.session, input.continuation, command)) {
           await checkpointCommand(key);
           outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: true, bestEffort: Boolean(command.bestEffort), error: null, ms: 0, detail: { reason: "superseded continuation" } });
