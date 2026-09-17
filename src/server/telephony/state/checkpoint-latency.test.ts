@@ -17,7 +17,7 @@ function fixture() {
     writer_contract: 2, version: 4, pending_effects: toJson({ version: 1, entries: [entry] }) });
   const known = structuredClone(row) as SessionRow;
   const owner: Ownership = { admin: h.admin, organizationId: ORG, sessionId: known.id, contract: 2,
-    token: "owner", generation: 1, deadline: Date.now() + 24_000 };
+    token: "owner", generation: 1, deadline: Date.now() + 24_000, acquiredAt: 0 };
   const checkpoint = (snapshot = known, ownership: Ownership | null = owner) => {
     const run = () => checkpointEffects(effectsDeps(h.deps), known.id, { ...entry, databaseCursor: 1 }, entry.id, snapshot);
     return ownership ? sessionOwnership.run(ownership, run) : run();

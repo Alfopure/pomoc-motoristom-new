@@ -17,7 +17,7 @@ function owned(h: TelephonyHarness, sessionId: string): Ownership {
   row.writer_contract = 2;
   row.termination_requested_at = h.now().toISOString();
   return { admin: h.admin, organizationId: h.deps.organizationId, sessionId,
-    token: "termination-owner", generation: 1, contract: 2, deadline: Date.now() + 24_000 };
+    token: "termination-owner", generation: 1, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
 }
 
 describe("priority call termination", () => {

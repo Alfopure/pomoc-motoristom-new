@@ -40,7 +40,7 @@ function harness() {
     throw new Error(`Unexpected RPC ${name}`);
   });
   const admin = { rpc } as unknown as SupabaseClient<Database>;
-  const owner = (): Ownership => ({ admin, sessionId: "session", organizationId: "org", token: `token-${generation}`, generation, contract: 2, deadline: Date.now() + 24_000 });
+  const owner = (): Ownership => ({ admin, sessionId: "session", organizationId: "org", token: `token-${generation}`, generation, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 });
   const fetch = vi.fn(async () => new Response(JSON.stringify({ data: { call_control_id: "exact-leg", call_leg_id: "leg", call_session_id: "provider-session", is_alive: true } }), { status: 200 }));
   const client = createTelnyxClient({ config: getTelnyxConfig({ TELNYX_API_KEY: "test", TELNYX_CALL_CONTROL_APP_ID: "app", TELNYX_API_BASE_URL: "https://telnyx.test/v2" }), liveGate: { callsEnabled: true, smsEnabled: false }, fetch });
   const dial = () => client.dial({ commandId: "dial", to: "+421900000001", from: "+421900000002" });
