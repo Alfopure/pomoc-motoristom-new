@@ -42,7 +42,18 @@ Založí jednorazový klaster, aplikuje presne tento migračný súbor a overí:
 
 ### 3. Izolovaná kópia pre živý hovor
 
-Živý hovor potrebuje verejnú URL pre dva webhooky. Aby sa nedotkol rozrobenej práce na `dev` a na produkcii, používa sa **samostatná kópia** — vlastný Vercel projekt a vlastná Supabase databáza. Všetky kroky robí majiteľ účtov; aplikácia si účty nemení sama.
+Živý hovor potrebuje verejnú URL pre dva webhooky. Aby sa nedotkol rozrobenej práce na `dev` a na produkcii, používa sa **samostatná kópia** — vlastný Vercel projekt a vlastná Supabase databáza.
+
+Väčšinu spraví skript:
+
+```bash
+cp .context/ai-demo-copy.secrets.example .context/ai-demo-copy.secrets   # vyplň tokeny
+bash scripts/setup-ai-demo-copy.sh
+```
+
+Založí novú Supabase databázu, aplikuje do nej migrácie a seed, založí nový Vercel projekt a prenesie doňho premenné z Preview existujúceho projektu — okrem Supabase hodnôt, `CRON_SECRET` (aby kópia nespustila druhý scheduler) a kľúčov na e-mail. Vercel projekt **nie je napojený na Git**: nasadzuje sa ručne z pracovného stromu, takže ho nikoho push neprenasadí. Opakované spustenie existujúce zdroje iba použije.
+
+Zvyšok — Telnyx aplikácia a OpenAI webhook — vypíše skript na konci. Ručný postup je nižšie.
 
 **A. Kópia databázy**
 
