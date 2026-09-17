@@ -264,6 +264,7 @@ async function dialSipLeg(
     timeLimitSecs: budgets.sipTimeLimitSeconds,
     mediaEncryption: "SRTP",
     sipRegion: "Europe",
+    ...(config.webhookUrl ? { webhookUrl: config.webhookUrl } : {}),
     extra: { sip_transport_protocol: "TLS", send_silence_when_idle: true },
   });
 
@@ -297,6 +298,7 @@ export async function dialMobileLeg(deps: AiDemoDeps, attempt: AiDemoAttempt): P
       // nothing at all.
       bridgeOnAnswer: true,
       preventDoubleBridge: true,
+      ...(config.webhookUrl ? { webhookUrl: config.webhookUrl } : {}),
     });
     await adoptLeg(deps.admin, attempt.id, "mobile", result, { mobile_dial_outcome: "accepted", mobile_dial_command_id: commandId });
   } catch (error) {

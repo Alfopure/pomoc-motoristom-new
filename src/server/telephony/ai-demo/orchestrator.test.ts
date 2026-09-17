@@ -148,6 +148,19 @@ describe("startAiDemo dial", () => {
     expect(params.timeLimitSecs).toBeGreaterThan(300);
   });
 
+  it("leaves the Call Control application's webhook alone by default", async () => {
+    await start(f);
+    expect(f.h.telnyx.of("dial")[0].params.webhookUrl).toBeUndefined();
+  });
+
+  it("claims this call's events when a deployment URL is configured", async () => {
+    // How a test deployment takes its own webhooks without editing the shared
+    // Call Control application everybody else is using.
+    const isolated = fixture({ AI_DEMO_WEBHOOK_BASE_URL: "https://demo.example.test" });
+    await start(isolated);
+    expect(isolated.h.telnyx.of("dial")[0].params.webhookUrl).toBe("https://demo.example.test/api/telephony/telnyx/webhook");
+  });
+
   it("puts the correlation token in the SIP From display name", async () => {
     const result = await start(f);
     const params = f.h.telnyx.of("dial")[0].params;

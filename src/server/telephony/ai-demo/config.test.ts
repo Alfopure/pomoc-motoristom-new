@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  AI_DEMO_NEUTRAL_LINE, aiDemoBudgets, aiDemoEnabled, aiDemoFromNumber, buildSipUri, getAiDemoConfig, parseRecipients,
+  AI_DEMO_NEUTRAL_LINE, aiDemoBudgets, aiDemoEnabled, aiDemoFromNumber, aiDemoWebhookUrl, buildSipUri, getAiDemoConfig, parseRecipients,
 } from "./config";
 
 const FULL = {
@@ -127,5 +127,24 @@ describe("parseRecipients", () => {
   it("drops entries that are not phone numbers rather than guessing", () => {
     expect(parseRecipients("0910988882, not-a-number, 123")).toEqual(["+421910988882"]);
     expect(parseRecipients("nonsense")).toBeNull();
+  });
+});
+
+describe("aiDemoWebhookUrl", () => {
+  it("is absent unless a base URL is configured", () => {
+    expect(aiDemoWebhookUrl({})).toBeNull();
+  });
+
+  it("builds the Telnyx webhook path from the deployment's own origin", () => {
+    expect(aiDemoWebhookUrl({ AI_DEMO_WEBHOOK_BASE_URL: "https://demo.example.test" }))
+      .toBe("https://demo.example.test/api/telephony/telnyx/webhook");
+    // A path or query on the base must not end up in the callback URL.
+    expect(aiDemoWebhookUrl({ AI_DEMO_WEBHOOK_BASE_URL: "https://demo.example.test/anything?x=1" }))
+      .toBe("https://demo.example.test/api/telephony/telnyx/webhook");
+  });
+
+  it("refuses anything that is not HTTPS", () => {
+    expect(aiDemoWebhookUrl({ AI_DEMO_WEBHOOK_BASE_URL: "http://demo.example.test" })).toBeNull();
+    expect(aiDemoWebhookUrl({ AI_DEMO_WEBHOOK_BASE_URL: "not a url" })).toBeNull();
   });
 });

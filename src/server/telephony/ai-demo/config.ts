@@ -110,6 +110,8 @@ export type AiDemoConfig =
       maxAttemptsPerDay: number;
       maxCallSeconds: number;
       ringTimeoutSeconds: number;
+      /** Per-call webhook override; `null` leaves the Call Control app's own URL in place. */
+      webhookUrl: string | null;
     }
   | { configured: false; missing: string[] };
 
@@ -154,6 +156,32 @@ export function aiDemoFromNumber(env: EnvRecord = process.env): { number: string
   if (AI_DEMO_FORBIDDEN_FROM.includes(normalized)) return { invalid: normalized };
   if (!AI_DEMO_ALLOWED_FROM.includes(normalized)) return { invalid: normalized };
   return { number: normalized };
+}
+
+/**
+ * Where Telnyx should send this call's events.
+ *
+ * Telnyx normally delivers to the webhook URL of the Call Control application
+ * the call was dialled through — which is the shared one. `dial` accepts a
+ * per-call `webhook_url`, so a demo running on its own deployment can claim its
+ * own events without anybody editing the account, and without taking events
+ * away from the deployment everybody else is using.
+ *
+ * Unset means "leave the application's URL alone", which is the right default
+ * when the demo runs on the same deployment as everything else.
+ */
+export function aiDemoWebhookUrl(env: EnvRecord = process.env): string | null {
+  const base = read(env, "AI_DEMO_WEBHOOK_BASE_URL");
+  if (base === null) return null;
+  let url: URL;
+  try {
+    url = new URL(base);
+  } catch {
+    return null;
+  }
+  // A plaintext or non-HTTP callback would be a downgrade nobody asked for.
+  if (url.protocol !== "https:") return null;
+  return `${url.origin}/api/telephony/telnyx/webhook`;
 }
 
 function allowlisted(value: string | null, allowed: readonly string[], fallback: string): string | null {
@@ -221,6 +249,7 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
     voice,
     fromNumber: from.number,
     allowedRecipients,
+    webhookUrl: aiDemoWebhookUrl(env),
     maxAttemptsPerDay: clampInt(read(env, "AI_DEMO_MAX_ATTEMPTS_PER_DAY"), 3, 1, 10),
     maxCallSeconds: clampInt(read(env, "AI_DEMO_MAX_CALL_SECONDS"), 300, 30, 300),
     ringTimeoutSeconds: clampInt(read(env, "AI_DEMO_RING_TIMEOUT_SECONDS"), AI_DEMO_LIMITS.sipRingSeconds, 5, 60),

@@ -82,6 +82,7 @@ export async function runAiDemoPreflight(deps: AiDemoDeps, options: { remote: bo
       : null,
     model: config.configured ? { live: config.model, backend: config.backendModel, voice: config.voice, sipHost: config.sipHost } : null,
     probeBudgetMs: AI_DEMO_LIMITS.probeWindowMs,
+    webhookUrl: config.configured ? config.webhookUrl : null,
     remote: null as null | RemotePreflight,
   };
 
