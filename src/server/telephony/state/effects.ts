@@ -651,6 +651,27 @@ type ExecutionContext = {
  * the bridge's source identity both need them and used to read them separately.
  */
 /**
+ * Whether this command's provider call may overlap with its neighbours'.
+ *
+ * Only a best-effort `hangup`, `playback_stop` or `gather_stop`: none of them
+ * has post-dispatch bookkeeping, each carries its own journal entry, and a
+ * best-effort failure never stops the commands behind it — so nothing later in
+ * the entry depends on when this one comes back. Recording is excluded because
+ * capture state is read and written around audio commands.
+ *
+ * A presence change keyed to the command keeps it sequential, so the "presence
+ * after this command" ordering is untouched.
+ */
+function commandMayOverlap(command: Command, session: SessionRow, transition: Transition): boolean {
+  if (!["hangup", "playback_stop", "gather_stop"].includes(command.kind) || !command.bestEffort) return false;
+  const key = commandKey(command);
+  if (transition.presence.some((change) => change.afterCommandId === key)) return false;
+  const meta = readMeta(session);
+  return meta.recording?.policy.enabled === false && !meta.recording.recorders.length &&
+    !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence;
+}
+
+/**
  * Whether the validity read before this command can be skipped.
  *
  * Only for a `hangup`. `commandStillApplies` returns true for it without
@@ -1434,6 +1455,10 @@ async function executeReduceResult(
   const outcomes: CommandOutcome[] = [];
   const compensated: string[] = [];
   let failure: ApplyResult["failure"] = null;
+  // Provider calls of an overlapping run, started early and awaited in order.
+  // Only the HTTP overlaps: validity, outcomes, checkpoints and every failure
+  // branch below run exactly as they did when each call waited its turn.
+  const overlapped = new Map<string, ReturnType<typeof executeCommand>>();
 
   const checkpointCommand = async (key: string) => {
     if (!input.continuation) return;
@@ -1441,7 +1466,8 @@ async function executeReduceResult(
     ctx.session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, ctx.session);
     session = ctx.session;
   };
-  for (const command of input.databaseOnly ? [] : commands) {
+  const dispatchList = input.databaseOnly ? [] : commands;
+  for (const [index, command] of dispatchList.entries()) {
     const started = deps.now().getTime();
     let dbCountAtDispatch: number | null = null;
     const key = commandKey(command);
@@ -1484,7 +1510,22 @@ async function executeReduceResult(
       // heard about the command. For `bridge` this is the number the latency
       // work is trying to bring down, readable off a real call.
       dbCountAtDispatch = requestStepCount("db");
-      const executed = await executeCommand(deps, ctx, command);
+      // Contract 2 only: `prepare_v2` fences each command on its own
+      // generation, so a lease lost while the run is in flight cannot let a
+      // stale command through. Contract 1 has no journal to do that.
+      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition)) {
+        for (let next = index + 1; next < dispatchList.length; next += 1) {
+          const sibling = dispatchList[next];
+          if (!commandMayOverlap(sibling, ctx.session, transition)) break;
+          const siblingKey = commandKey(sibling);
+          if (overlapped.has(siblingKey) || input.continuation?.completedCommands.includes(siblingKey)) continue;
+          const started = executeCommand(deps, ctx, sibling);
+          // Awaited when its turn comes; this only silences an early exit.
+          started.catch(() => undefined);
+          overlapped.set(siblingKey, started);
+        }
+      }
+      const executed = await (overlapped.get(key) ?? executeCommand(deps, ctx, command));
       if (command.kind === "dial" && executed.skipped) {
         throw new CommandPrerequisiteRejectedError(String(executed.detail?.reason ?? "dial no longer authorized"));
       }
