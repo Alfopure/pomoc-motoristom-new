@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
+import { completeAnnouncedAction } from "@/test/complete-call-announcements";
+import { parkCall, pickupWaitingCall } from "../call-actions";
 
 import { advanceRingStep } from "../routing/ring-plan";
 import { loadRoutingContext, loadSessionSnapshot, effectsDeps, runSessionEvent } from "../session-runner";
 import { applyReduceResult, SessionConflictError } from "./effects";
 import { reduce } from "./transitions";
-import type { RingFanout } from "./types";
+import { readMeta, type RingFanout, type SessionRow } from "./types";
 
 /**
  * End-to-end reducer tests through the real pipeline (claim ledger → lease →
@@ -589,5 +591,100 @@ describe("talking-phase transitions", () => {
     expect(swept.swept).toEqual([call.sessionId]);
     expect(h.session(call.sessionId).state).toBe("ended");
     expect(h.legs(call.sessionId).every((leg) => leg.ended_at)).toBe(true);
+  });
+});
+
+describe("bridge before the best-effort audio stops", () => {
+  const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
+
+  /** Provider methods issued after `from`, in order. */
+  function methodsSince(h: TelephonyHarness, from: number) {
+    return h.telnyx.calls.slice(from).map((entry) => entry.method);
+  }
+
+  async function parked(h: TelephonyHarness) {
+    const call = await ringingInbound(h);
+    await h.legEvent(call.o1, "call.answered");
+    await completeAnnouncedAction(h, parkCall(h.deps, actor, call.sessionId));
+    expect(h.session(call.sessionId).state).toBe("parked");
+    expect(readMeta(h.session(call.sessionId) as SessionRow).queue ?? null).toBeNull();
+    return call;
+  }
+
+  async function queued(h: TelephonyHarness) {
+    const call = await ringingInbound(h);
+    for (const leg of [call.o1, call.o2, call.o5]) await h.legEvent(leg, "call.hangup", { hangup_cause: "timeout" });
+    const external = h.legByNumber(call.sessionId, NUMBERS.external)!;
+    await h.legEvent(String(external.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
+    expect(h.session(call.sessionId).state).toBe("waiting");
+    expect(readMeta(h.session(call.sessionId) as SessionRow).queue).toBeTruthy();
+    return call;
+  }
+
+  it("bridges the ringing answer before stopping the ring music", async () => {
+    const h = createTelephonyHarness();
+    const call = await ringingInbound(h);
+    const before = h.telnyx.calls.length;
+
+    await h.legEvent(call.o2, "call.answered");
+
+    const methods = methodsSince(h, before);
+    expect(methods).toContain("playbackStop");
+    expect(methods.indexOf("bridge")).toBeGreaterThan(-1);
+    expect(methods.indexOf("bridge")).toBeLessThan(methods.indexOf("playbackStop"));
+  });
+
+  it("bridges a pickup from the waiting room before stopping the gather and the music", async () => {
+    const h = createTelephonyHarness();
+    const call = await parked(h);
+    const picked = await pickupWaitingCall(h.deps, { profileId: PROFILES.o2, role: "dispatcher" }, call.sessionId);
+    const before = h.telnyx.calls.length;
+
+    await h.legEvent(picked.operatorLegCallControlId!, "call.answered");
+
+    const methods = methodsSince(h, before);
+    expect(methods).toContain("gatherStop");
+    expect(methods).toContain("playbackStop");
+    expect(methods.indexOf("bridge")).toBeLessThan(methods.indexOf("gatherStop"));
+    expect(methods.indexOf("bridge")).toBeLessThan(methods.indexOf("playbackStop"));
+    expect(h.session(call.sessionId).state).toBe("talking");
+  });
+
+  it("keeps the waiting-room music playing and re-arms the gather when the bridge fails", async () => {
+    const h = createTelephonyHarness();
+    const call = await parked(h);
+    const picked = await pickupWaitingCall(h.deps, { profileId: PROFILES.o2, role: "dispatcher" }, call.sessionId);
+    h.telnyx.failNext("bridge", "bridge refused");
+    const before = h.telnyx.calls.length;
+
+    await h.legEvent(picked.operatorLegCallControlId!, "call.answered");
+
+    const methods = methodsSince(h, before);
+    // The loop was never stopped, so the caller keeps hearing it and
+    // `enterWaiting` does not restart it — a `playback_stop` here would leave a
+    // silent waiting room.
+    expect(methods).not.toContain("playbackStop");
+    expect(methods).not.toContain("playbackStart");
+    // The old gather is stopped by the compensation, right before the new one.
+    expect(methods).toEqual(["bridge", "hangup", "gatherStop", "gather"]);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "waiting", answered_by_profile_id: null });
+    expect(readMeta(h.session(call.sessionId) as SessionRow).waiting?.reason).toBe("bridge_failed");
+  });
+
+  it("leaves the queue gather alone when the bridge of a queued pickup fails", async () => {
+    const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
+    const call = await queued(h);
+    const picked = await pickupWaitingCall(h.deps, actor, call.sessionId);
+    h.telnyx.failNext("bridge", "bridge refused");
+    const before = h.telnyx.calls.length;
+
+    await h.legEvent(picked.operatorLegCallControlId!, "call.answered");
+
+    const methods = methodsSince(h, before);
+    // The queued caller returns to the offers they already had: `enterWaiting`
+    // issues no new gather, so stopping the running one would silence the queue.
+    expect(methods).toEqual(["bridge", "hangup"]);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "waiting", answered_by_profile_id: null });
+    expect(readMeta(h.session(call.sessionId) as SessionRow).queue).toBeTruthy();
   });
 });

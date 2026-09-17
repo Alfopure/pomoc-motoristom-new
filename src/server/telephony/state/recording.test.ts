@@ -120,6 +120,25 @@ describe("recording lifecycle", () => {
     expect(summarizeSessionRecording(h.session(call.sessionId).metadata).state).toBe("recording");
   });
 
+  it("starts capture before the bridge-first answer, ahead of the best-effort audio stops", async () => {
+    const h = enabledHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    await completeCallAnnouncements(h, call.sessionId);
+    const winner = h.legFor(call.sessionId, PROFILES.o1)!;
+    const before = h.telnyx.calls.length;
+
+    await h.legEvent(String(winner.telnyx_call_control_id), "call.answered");
+
+    // `startBeforeAudio` inserts the recorder start immediately before the
+    // `bridge`, wherever the bridge sits; moving the stop commands behind the
+    // bridge must not push capture past the moment the legs are connected.
+    const methods = h.telnyx.calls.slice(before).map(entry => entry.method);
+    expect(methods.indexOf("recordingStart")).toBe(0);
+    expect(methods.indexOf("bridge")).toBe(1);
+    expect(methods.indexOf("playbackStop")).toBeGreaterThan(methods.indexOf("bridge"));
+    expect(summarizeSessionRecording(h.session(call.sessionId).metadata).state).toBe("recording");
+  });
+
   it("does not activate recording without provider proof", async () => {
     const h = enabledHarness();
     vi.stubEnv("TELNYX_RECORDING_CONTRACT_VERIFIED", "false");
