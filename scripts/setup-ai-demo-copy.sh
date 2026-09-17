@@ -20,7 +20,7 @@
 # working without anybody retyping a secret.
 #
 # Usage:
-#   cp .context/ai-demo-copy.secrets.example .context/ai-demo-copy.secrets
+#   cp scripts/ai-demo-copy.secrets.example .context/ai-demo-copy.secrets
 #   # fill it in, then:
 #   bash scripts/setup-ai-demo-copy.sh
 #
@@ -31,7 +31,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SECRETS="${AI_DEMO_COPY_SECRETS:-$ROOT/.context/ai-demo-copy.secrets}"
 
 if [ ! -f "$SECRETS" ]; then
-  echo "Missing $SECRETS — copy .context/ai-demo-copy.secrets.example and fill it in." >&2
+  echo "Missing $SECRETS — copy scripts/ai-demo-copy.secrets.example there and fill it in." >&2
   exit 1
 fi
 # shellcheck disable=SC1090

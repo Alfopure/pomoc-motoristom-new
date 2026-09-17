@@ -47,7 +47,7 @@ Založí jednorazový klaster, aplikuje presne tento migračný súbor a overí:
 Väčšinu spraví skript:
 
 ```bash
-cp .context/ai-demo-copy.secrets.example .context/ai-demo-copy.secrets   # vyplň tokeny
+cp scripts/ai-demo-copy.secrets.example .context/ai-demo-copy.secrets   # vyplň tokeny (súbor je gitignorovaný)
 bash scripts/setup-ai-demo-copy.sh
 ```
 
