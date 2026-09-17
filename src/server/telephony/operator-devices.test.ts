@@ -113,6 +113,41 @@ describe("operator devices", () => {
     expect(await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1", registrationState: "registered" })).toMatchObject({ ok: true });
   });
 
+  it("records the browser's own audio state on the device, keeping the rest of its metadata", async () => {
+    const h = createTelephonyHarness();
+    await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1" });
+
+    const reported = await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1",
+      registrationState: "registered", audio: { blocked: false, remoteMedia: false } });
+
+    // "The colleague could not hear anything" is otherwise unanswerable from
+    // the server: every leg is answered and bridged and the browser is the only
+    // place left to look.
+    expect(reported).toMatchObject({ ok: true });
+    const metadataOfResult = (result: Awaited<ReturnType<typeof touchDevice>>) =>
+      (result.ok ? result.device.metadata : null) as Record<string, unknown> | null;
+    const metadata = metadataOfResult(reported)!;
+    expect(metadata.audio).toMatchObject({ blocked: false, remoteMedia: false, at: expect.any(String) });
+    // The merge keeps whatever the credential lifecycle already stored there.
+    expect(Object.keys(metadata).length).toBeGreaterThan(1);
+
+    const later = await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1",
+      registrationState: "registered", audio: { blocked: true, remoteMedia: true } });
+    expect(metadataOfResult(later)?.audio).toMatchObject({ blocked: true, remoteMedia: true });
+  });
+
+  it("leaves the device metadata alone when the heartbeat carries no audio report", async () => {
+    const h = createTelephonyHarness();
+    await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1" });
+    await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1", registrationState: "registered", audio: { blocked: true, remoteMedia: false } });
+
+    const quiet = await touchDevice(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1", registrationState: "registered" });
+
+    // A tab with no call reports nothing; the last known state is not erased.
+    expect((quiet.ok ? (quiet.device.metadata as Record<string, unknown>).audio : null))
+      .toMatchObject({ blocked: true, remoteMedia: false });
+  });
+
   it("keeps in-flight heartbeats valid when the same window refreshes its token", async () => {
     const h = createTelephonyHarness();
     const token = await issueWebphoneToken(deps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: "dev-1" });

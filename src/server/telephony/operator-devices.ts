@@ -262,7 +262,8 @@ export type TouchDeviceResult = { ok: true; device: DeviceRow } | { ok: false; r
 
 export async function touchDevice(
   deps: DeviceDeps,
-  input: { organizationId: string; profileId: string; deviceSessionId: string; registrationState?: DeviceRow["registration_state"]; userAgent?: string | null },
+  input: { organizationId: string; profileId: string; deviceSessionId: string; registrationState?: DeviceRow["registration_state"];
+    userAgent?: string | null; audio?: { blocked: boolean; remoteMedia: boolean } },
 ): Promise<TouchDeviceResult> {
   const device = await getOperatorDevice(deps, input);
   if (!device) return { ok: false, reason: "unknown_device" };
@@ -275,6 +276,9 @@ export async function touchDevice(
   const values: Database["public"]["Tables"]["motorist_operator_devices"]["Update"] = { device_seen_at: leaving ? null : now };
   if (input.registrationState) values.registration_state = input.registrationState;
   if (input.userAgent) values.user_agent = input.userAgent;
+  // Kept on the device, not on the call: it describes this browser's ability to
+  // play what it is sent, which is the one thing the server cannot observe.
+  if (input.audio) values.metadata = toJson({ ...metadataOf(device), audio: { ...input.audio, at: now } });
   const updated = await deps.admin.from(deviceTable(deps)).update(values).eq("id", device.id).eq("device_session_id", input.deviceSessionId).select("*").maybeSingle();
   if (updated.error) throw new OperatorDeviceError(`Heartbeat sa nepodarilo uložiť: ${updated.error.message}`, 500);
   if (!updated.data) return { ok: false, reason: "stale_session" };
