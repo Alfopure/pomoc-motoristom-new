@@ -5,7 +5,7 @@ import { Loader2, PhoneForwarded, UserRound, X } from "lucide-react";
 
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { formatPhoneNumberForDisplay, isDialablePhoneInput } from "@/lib/telephony/phone";
-import { colleagueDeviceNote } from "@/lib/telephony/colleague-availability";
+import { colleagueBadge } from "@/lib/telephony/colleague-availability";
 
 export type TransferTargetOption = {
   profileId: string;
@@ -32,15 +32,6 @@ const PICKER_SUBMIT_LABELS: Record<TransferPickerMode, string> = {
   transfer: "Prepojiť",
   consult: "Volať",
   "add-party": "Pridať",
-};
-
-const STATUS_LABELS: Record<string, string> = {
-  available: "Dostupný",
-  ringing: "Zvoní",
-  on_call: "Na hovore",
-  after_call_work: "Dopisuje",
-  paused: "Pauza",
-  offline: "Odhlásený",
 };
 
 /**
@@ -126,7 +117,7 @@ export function CallTransferPicker({
           <span className="px-1 py-2 text-xs font-medium text-zinc-500">Žiadny kolega nie je prihlásený.</span>
         )}
         {targets?.map((target) => {
-          const note = colleagueDeviceNote(target, new Date());
+          const badge = colleagueBadge(target, new Date());
           return (
           <button
             key={target.profileId}
@@ -134,19 +125,14 @@ export function CallTransferPicker({
             disabled={!target.available || busy}
             onClick={() => onSubmit({ profileId: target.profileId })}
             className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-zinc-200 px-2 py-1.5 text-left text-xs font-semibold transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:border-zinc-100 disabled:bg-zinc-50 disabled:text-zinc-400"
-            title={target.available ? undefined : note ?? "Kolega nie je dostupný."}
+            title={target.available ? undefined : `Kolega nie je dostupný: ${badge.toLowerCase()}.`}
           >
-            <span className="flex min-w-0 flex-col items-start gap-0.5">
-              <span className="flex min-w-0 items-center gap-1.5">
-                <UserRound size={13} className="shrink-0" aria-hidden="true" />
-                <span className="truncate">{target.displayName}</span>
-              </span>
-              {/* Presence alone would keep saying "Dostupný" for somebody who
-                  closed their laptop hours ago; the phone is what rings. */}
-              {note && <span className="pl-[18px] text-[10px] font-medium text-zinc-500">{note}</span>}
+            <span className="flex min-w-0 items-center gap-1.5">
+              <UserRound size={13} className="shrink-0" aria-hidden="true" />
+              <span className="truncate">{target.displayName}</span>
             </span>
             <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${target.available ? "bg-emerald-100 text-emerald-900" : "bg-zinc-100 text-zinc-600"}`}>
-              {STATUS_LABELS[target.status] ?? target.status}
+              {badge}
             </span>
           </button>
           );
