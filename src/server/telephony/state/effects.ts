@@ -671,23 +671,32 @@ function commandMayOverlap(command: Command, session: SessionRow, transition: Tr
     !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence;
 }
 
+/** `prepare_v2` lets these through after a termination; everything else it refuses. */
+const TEARDOWN_KINDS = new Set(["hangup", "recording_stop", "conference_leave"]);
+
+/**
+ * The fenced refusal `prepare_v2` raises once a termination is committed
+ * (`20260929200000:227-230`). It is the authority on that fact, so a command it
+ * refuses is superseded, not failed.
+ */
+function isTerminationBlocked(error: unknown): boolean {
+  return error instanceof Error && (error as { code?: string }).code === "PT409" &&
+    error.message.includes("telephony termination blocks new provider command");
+}
+
 /**
  * Whether the validity read before this command can be skipped.
  *
- * Only for a `hangup`. `commandStillApplies` returns true for it without
- * looking at the session at all, and `prepare_v2` keeps letting teardown
- * through after a termination — so there is nothing the fresh row could say
- * that would change the outcome. Every other kind keeps its read: a
- * termination committed by another invocation (`app.hangup` commits it without
- * the lease) is exactly what that read is there to catch, and the fenced
- * refusal that would replace it is not reachable in any test we have.
+ * The row this invocation holds came back from a fenced write under this lease,
+ * and only the lease holder can change the state, generation or `ended_at` that
+ * `commandStillApplies` reads. Termination is the one fact another invocation
+ * commits without the lease — `app.hangup` does, before it waits for the lease —
+ * and `prepare_v2` refuses those commands itself, mapped above.
  *
- * The row itself is ours either way: it came back from a fenced write under
- * this lease. Recording is excluded — it keeps its own live view of
- * `pendingAudio` and of recorder state.
+ * Recording is excluded: it keeps its own live view of `pendingAudio` and
+ * `commandStillApplies` inspects live recorder state for `recording_start`.
  */
-function providerReadCanReuseSession(session: SessionRow, command: Command): boolean {
-  if (command.kind !== "hangup") return false;
+function providerReadCanReuseSession(session: SessionRow): boolean {
   const owner = sessionOwnership.getStore();
   if (owner?.contract !== 2 || owner.sessionId !== session.id) return false;
   const meta = readMeta(session);
@@ -1475,7 +1484,7 @@ async function executeReduceResult(
     let providerExecuted = false;
     try {
       if (input.continuation) {
-        if (!providerReadCanReuseSession(ctx.session, command)) {
+        if (!providerReadCanReuseSession(ctx.session)) {
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
           if (fresh.error) throw new EffectsError("effect validity read failed");
           ctx.session = fresh.data;
@@ -1614,6 +1623,19 @@ async function executeReduceResult(
       await checkpointCommand(key);
     } catch (error) {
       if (error instanceof SessionLeaseLostError) throw error;
+      if (input.continuation && !providerExecuted && !TEARDOWN_KINDS.has(command.kind) && isTerminationBlocked(error)) {
+        // A termination committed by another invocation — the one fact the
+        // reused row can be stale about. The validity read would have skipped
+        // this command *and every one behind it*, so retiring only this one
+        // would leave a dependent successor (a `conference_join` whose
+        // `conference_create` never ran) to fail on its own preconditions and
+        // open an incident. Retire the entry, which is what the read achieved.
+        outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: true,
+          bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: { reason: "superseded continuation" } });
+        input.continuation.completedCommands = commands.map(commandKey);
+        await checkpointCommand(key);
+        break;
+      }
       if (input.continuation && providerExecuted) {
         // The provider accepted this stable command. A database checkpoint
         // failure must leave it replayable, never compensate a working bridge.
