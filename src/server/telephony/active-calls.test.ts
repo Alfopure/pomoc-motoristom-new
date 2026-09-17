@@ -129,6 +129,34 @@ describe("active calls snapshot", () => {
     expect(snapshot.calls).toEqual([]);
   });
 
+  it("gives a transferred operator its own confirmation window instead of the call's", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    const answeredAt = h.now().toISOString();
+    h.db.update("motorist_call_sessions", { direction: "outbound", state: "talking", answered_at: answeredAt, answered_by_profile_id: PROFILES.o1, metadata: {} }, row => row.id === sessionId);
+    h.db.update("motorist_call_legs", { answered_at: answeredAt, bridged_at: answeredAt, state: "bridged" }, row => row.session_id === sessionId && (row.role === "customer" || row.profile_id === PROFILES.o1));
+    const connection = async () => (await loadActiveCalls(deps(h), { profileId: PROFILES.o1, canManageAssignments: false })).calls[0].audioConnection;
+    expect((await connection())?.status).toBe("connected");
+
+    // Three minutes in, the call is transferred: the first operator's leg ends
+    // and a colleague answers. Their `call.bridged` has not landed yet.
+    h.advance(3 * 60_000);
+    h.db.update("motorist_call_legs", { ended_at: h.now().toISOString(), state: "ended" }, row => row.session_id === sessionId && row.profile_id === PROFILES.o1);
+    const transferredAt = h.now().toISOString();
+    h.db.update("motorist_call_legs", { answered_at: transferredAt, bridged_at: null, state: "answered", ended_at: null }, row => row.session_id === sessionId && row.profile_id === PROFILES.o2);
+    h.db.update("motorist_call_sessions", { answered_by_profile_id: PROFILES.o2 }, row => row.id === sessionId);
+
+    // Measured from the call's answer the window closed long ago, and the
+    // console would disable every control while the two are talking.
+    expect(await connection()).toMatchObject({ status: "connecting", startedAt: transferredAt, error: null });
+
+    h.advance(31_000);
+    expect((await connection())?.status).toBe("failed");
+    const confirmedAt = h.now().toISOString();
+    h.db.update("motorist_call_legs", { bridged_at: confirmedAt, state: "bridged" }, row => row.session_id === sessionId && row.profile_id === PROFILES.o2);
+    expect(await connection()).toMatchObject({ status: "connected", confirmedAt });
+  });
+
   it("an outgoing customer answer waits for both current bridge confirmations without recording metadata", async () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
     const { sessionId } = await h.inbound({ to: "+421232408718" });
