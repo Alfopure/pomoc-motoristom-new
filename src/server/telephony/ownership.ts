@@ -59,7 +59,11 @@ export async function ownershipRpc<T>(admin: SupabaseClient<Database>, name: str
   const { data, error } = await request;
   if (error) {
     if (error.code === "PT409" && /ownership|writer|lease|contract/.test(error.message)) throw new SessionLeaseLostError();
-    throw new Error(`${name}: ${error.message}`);
+    // Keep the SQLSTATE on the error: callers distinguish a fenced refusal
+    // (PT409) from an ordinary failure without re-parsing the message.
+    const failure = new Error(`${name}: ${error.message}`);
+    if (error.code) (failure as Error & { code?: string }).code = error.code;
+    throw failure;
   }
   return data as T;
 }

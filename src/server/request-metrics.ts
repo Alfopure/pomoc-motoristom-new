@@ -28,6 +28,19 @@ export function recordRequestStep(name: RequestStep, durationMs: number): void {
   scope.steps[name] = metric;
 }
 
+/**
+ * How many requests of a step this handler has issued so far. The number of
+ * sequential database round trips before `bridge` reaches the provider is the
+ * quantity the latency work is trying to reduce; reading it off a real call in
+ * the command audit beats inferring it from a test harness. Parallel requests
+ * are counted too, so this is an issue count, not a depth.
+ */
+export function requestStepCount(name: RequestStep): number | null {
+  const scope = requests.getStore();
+  if (!scope || scope.finished) return null;
+  return scope.steps[name]?.count ?? null;
+}
+
 export async function measureRequestStep<T>(name: RequestStep, work: () => PromiseLike<T>): Promise<T> {
   const scope = requests.getStore();
   if (!scope || scope.finished) return work();

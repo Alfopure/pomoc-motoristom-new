@@ -485,9 +485,13 @@ export async function ownedSessionWork<T>(
 }
 
 export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent): Promise<SessionRunResult> {
+  let known: SessionRow | undefined;
   if (event.kind === "app" && event.type === "hangup") {
     const target = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
     if (target.error) throw new SessionEventDeferredError(`Termination intent lookup failed: ${target.error.message}`);
+    // Both this read and the ownership probe happen before the lease, and the
+    // probe only inspects `writer_contract`, which terminating never changes.
+    known = target.data ?? undefined;
     if (target.data?.writer_contract === 2) await ownershipRpc(deps.admin, "motorist_session_terminate_v2", { p_organization_id: deps.organizationId, p_session_id: sessionId });
   }
   // Timer sweeps are opportunistic: never queue repeated lock acquisition
@@ -499,7 +503,7 @@ export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string
     const result = await runOwnedSessionEvent(deps, sessionId, event, owner);
     if (owner?.terminationPending && event.kind === "app") throw new SessionTerminationPendingError();
     return result;
-  });
+  }, { known });
 }
 
 async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership): Promise<SessionRunResult> {
