@@ -537,6 +537,12 @@ export type RoutingContext = {
   recordingPolicy?: RecordingRoutingPolicy;
   /** Execution permission only; false must never be treated as policy revocation. */
   recordingLeaseHeld?: boolean;
+  /**
+   * Loaded for one transition that needs almost none of this. Anything that
+   * plans a further ring step must reload the full context first: presence,
+   * devices and open offers are empty here, not absent.
+   */
+  lean?: true;
 };
 
 // --- session metadata -------------------------------------------------------
