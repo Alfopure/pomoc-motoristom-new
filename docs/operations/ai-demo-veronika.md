@@ -2,6 +2,8 @@
 
 Jeden autorizovaný odchádzajúci hovor, v ktorom hovorí OpenAI `gpt-live-1` po slovensky. Telnyx vytočí SIP vetvu k OpenAI, potom mobil zákazníka a obe vetvy premostí. Zvuk nikdy neprechádza cez túto aplikáciu.
 
+Ďalšia práca je naplánovaná v [`ai-demo-plan.md`](./ai-demo-plan.md).
+
 **Stav: hovor zatiaľ neprebehol.** Kód je overený offline (testy s mockmi a migrácia proti skutočnému PostgreSQL). Že OpenAI projekt má povolený SIP, že sa Veronika ozve po zdvihnutí a aká je jej slovenčina — nič z toho zatiaľ overené nie je.
 
 ## Čo je predvolene vypnuté
