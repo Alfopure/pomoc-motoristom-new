@@ -9,7 +9,7 @@ import { aiDemoPollDelayMs } from "@/lib/telephony/poll-schedule";
 
 import {
   AiDemoRequestError, loadAttempt, loadHistory, loadPreflight, reviewDemo, startDemo, stopDemo,
-  type AiDemoAttemptView, type AiDemoPreflight,
+  type AiDemoAttemptView, type AiDemoPreflight, type AiDemoTranscriptEntry,
 } from "./ai-demo-client";
 import {
   AI_DEMO_CONTEXT_MAX_CHARS, AI_DEMO_SCENARIO_OPTIONS, describeGaps, describeLatency, isActive, operatorBadge,
@@ -54,6 +54,10 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
   const [confirmed, setConfirmed] = useState(false);
   const [review, setReview] = useState<AiDemoAttemptView | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
+  // What has been heard so far on the call in progress, appended to as it
+  // arrives rather than refetched whole.
+  const [live, setLive] = useState<{ id: string; turns: AiDemoTranscriptEntry[] } | null>(null);
+  const liveCursor = useRef(-1);
 
   const failures = useRef(0);
   const [reloadToken, setReloadToken] = useState(0);
@@ -81,7 +85,23 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
         // The server is the authority on what is running: an attempt somebody
         // else started in another tab shows up here too.
         const active = next.db.activeAttempt;
-        if (active) setAttempt(active);
+        if (active) {
+          setAttempt(active);
+          // Follow the conversation while it happens: the probe checkpoints
+          // every ten seconds, so there is usually something new to show.
+          if (active.hasTranscript) {
+            if (live?.id !== active.id) liveCursor.current = -1;
+            const fresh = await loadAttempt(active.id, controller.signal, true, liveCursor.current);
+            const added = fresh.attempt.transcript ?? [];
+            if (!cancelled && added.length > 0) {
+              liveCursor.current = added[added.length - 1].ms;
+              setLive((current) => ({
+                id: active.id,
+                turns: current?.id === active.id ? [...current.turns, ...added] : added,
+              }));
+            }
+          }
+        }
         else if (followingId.current) {
           const finished = await loadAttempt(followingId.current, controller.signal);
           if (!cancelled) setAttempt(finished.attempt);
@@ -130,7 +150,7 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
       document.removeEventListener("visibilitychange", onVisibility);
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     };
-  }, [reloadToken]);
+  }, [reloadToken, live?.id]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -361,6 +381,24 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
                 >
                   {reviewBusy ? "Načítavam…" : "Zobraziť prepis"}
                 </button>
+              )}
+              {running && live?.id === attempt.id && live.turns.length > 0 && (
+                <div className="mt-3 border-t border-zinc-100 pt-3">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Rozhovor naživo</h4>
+                  <ol className="mt-1 grid max-h-64 gap-1.5 overflow-y-auto" aria-live="polite">
+                    {transcriptTurns(live.turns).map((turn, index) => (
+                      <li key={`${turn.ms}-${index}`} className="grid grid-cols-[3rem_1fr] gap-2 text-sm">
+                        <span className="pt-0.5 text-right font-mono text-xs text-zinc-400">{offsetLabel(turn.ms)}</span>
+                        <span className={turn.dir === "out" ? "text-zinc-900" : "text-zinc-600"}>
+                          <span className="mr-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                            {turn.dir === "out" ? "Veronika" : "Volajúci"}
+                          </span>
+                          {turn.text}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
               )}
               <button
                 type="button"

@@ -3,8 +3,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createFakeOpenAIFetch, createFakeSideband } from "@/test/fake-openai-live";
 import { createTelephonyHarness, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
-import { TelnyxCommandError } from "../telnyx/client";
-import { loadAttempt, transitionAttempt, type AiDemoAttempt } from "./attempts";
+import { TelnyxCommandError, TelnyxLiveCallsDisabledError } from "../telnyx/client";
+import { loadAttempt, patchAttempt, transitionAttempt, type AiDemoAttempt } from "./attempts";
 import { AI_DEMO_NEUTRAL_LINE } from "./config";
 import { cleanupVerdict, describeAttempt, endAttempt, runAiDemoCleanup, startAiDemo, stopAiDemo, type AiDemoDeps } from "./orchestrator";
 
@@ -430,5 +430,105 @@ describe("the greeting probe", () => {
     expect(row?.greeting_status).toBe("failed");
     // A probe failure is not a call failure.
     expect(row?.error_code).toBeNull();
+  });
+});
+
+describe("things the request body must not be able to decide", () => {
+  it("ignores a SIP target or a webhook URL smuggled into the body", async () => {
+    const f = fixture();
+    // The model never sees a number, and a client never picks where the call
+    // goes or where its events land.
+    await startAiDemo(f.deps, {
+      actorProfileId: PROFILES.o5,
+      requestId: null,
+      to: TARGET,
+      ...({ sipUri: "sip:attacker@evil.test", webhookUrl: "https://evil.test/hook" } as Record<string, unknown>),
+    });
+
+    const dial = f.h.telnyx.of("dial")[0].params;
+    expect(dial.to).toBe("sip:proj_test123@sip.api.openai.com;transport=tls");
+    expect(dial.webhookUrl).toBeUndefined();
+  });
+
+  it("ignores a scenario or a voice it does not know", async () => {
+    const f = fixture();
+    const { attempt } = await start(f, { scenario: "steal_everything", voice: "attacker-voice" });
+    expect(attempt.scenario).toBe("replacement_vehicle_return");
+    expect((attempt.metadata as { voice?: string }).voice).toBe("gleam");
+  });
+});
+
+describe("the kill switch thrown mid-flight", () => {
+  it("records that live calls were switched off, not that the number failed", async () => {
+    const f = fixture();
+    f.h.telnyx.failNext("dial", new TelnyxLiveCallsDisabledError());
+
+    await expect(start(f)).rejects.toMatchObject({ status: 423 });
+
+    const row = f.h.rows("motorist_ai_demo_attempts")[0] as unknown as AiDemoAttempt;
+    expect(row.error_code).toBe("live_calls_disabled");
+    expect(row.end_reason).toBe("live_calls_disabled");
+  });
+});
+
+describe("a dial whose answer never arrived", () => {
+  it("leaves the attempt open rather than redialling", async () => {
+    const f = fixture();
+    // The provider performed the dial; the acknowledgement was lost.
+    f.h.telnyx.loseNextResponse("dial");
+
+    await expect(start(f)).rejects.toMatchObject({ status: 502 });
+
+    const row = f.h.rows("motorist_ai_demo_attempts")[0] as unknown as AiDemoAttempt;
+    expect(row.sip_dial_outcome).toBe("unknown");
+    expect(row.state).toBe("ending");
+    // One dial, ever. A second would be a second billable call to nobody.
+    expect(f.h.telnyx.of("dial")).toHaveLength(1);
+  });
+
+  it("adopts the call from the webhook that follows, so the leg can still be hung up", async () => {
+    const f = fixture();
+    f.h.telnyx.loseNextResponse("dial");
+    await expect(start(f)).rejects.toThrow();
+    const attempt = f.h.rows("motorist_ai_demo_attempts")[0] as unknown as AiDemoAttempt;
+
+    const { adoptLeg } = await import("./attempts");
+    await adoptLeg(f.deps.admin, attempt.id, "sip", { callControlId: "cc-late" });
+
+    expect((await loadAttempt(f.deps.admin, ORG, attempt.id))?.telnyx_sip_call_control_id).toBe("cc-late");
+  });
+});
+
+describe("serving the transcript while the call runs", () => {
+  it("returns only what is newer than the cursor", async () => {
+    const f = fixture();
+    const { attempt } = await start(f);
+    await patchAttempt(f.deps.admin, attempt.id, {
+      transcript: [
+        { ms: 900, dir: "out", text: "Dobrý deň," },
+        { ms: 1_400, dir: "out", text: " tu je Veronika." },
+        { ms: 4_000, dir: "in", text: "áno" },
+      ],
+    });
+    const row = (await loadAttempt(f.deps.admin, ORG, attempt.id))!;
+
+    // The poll asks every two seconds; sending the whole conversation back each
+    // time would be most of a minute of speech repeated 150 times.
+    const since = describeAttempt(row, { includeTranscript: true, transcriptSince: 1_400 });
+    expect(since.transcript).toHaveLength(1);
+    expect(since.transcript?.[0].text).toBe("áno");
+
+    const whole = describeAttempt(row, { includeTranscript: true });
+    expect(whole.transcript).toHaveLength(3);
+  });
+
+  it("still says nothing when the transcript was not asked for", async () => {
+    const f = fixture();
+    const { attempt } = await start(f);
+    await patchAttempt(f.deps.admin, attempt.id, { transcript: [{ ms: 1, dir: "out", text: "tajné" }] });
+    const row = (await loadAttempt(f.deps.admin, ORG, attempt.id))!;
+
+    expect(JSON.stringify(describeAttempt(row))).not.toContain("tajné");
+    expect(describeAttempt(row).hasTranscript).toBe(true);
   });
 });

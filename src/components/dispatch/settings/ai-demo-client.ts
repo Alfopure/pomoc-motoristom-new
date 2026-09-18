@@ -133,8 +133,13 @@ export function loadPreflight(options: { remote?: boolean; signal?: AbortSignal 
   });
 }
 
-export function loadAttempt(id: string, signal?: AbortSignal, withTranscript = false) {
-  return request<{ attempt: AiDemoAttemptView }>(`/api/telephony/ai-demo/${encodeURIComponent(id)}${withTranscript ? "?transcript=1" : ""}`, {
+/**
+ * One attempt. `since` asks for only the speech newer than that offset, which
+ * is what makes polling a live transcript cheap.
+ */
+export function loadAttempt(id: string, signal?: AbortSignal, withTranscript = false, since?: number) {
+  const query = withTranscript ? `?transcript=1${since !== undefined ? `&since=${since}` : ""}` : "";
+  return request<{ attempt: AiDemoAttemptView }>(`/api/telephony/ai-demo/${encodeURIComponent(id)}${query}`, {
     ...(signal ? { signal } : {}),
     label: "stav AI dema",
     timeoutMs: TELEPHONY_TIMEOUT_MS.read,

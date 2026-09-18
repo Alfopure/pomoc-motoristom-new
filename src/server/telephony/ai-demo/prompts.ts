@@ -44,7 +44,8 @@ type ScenarioText = {
   errand: string;
   /** The step-by-step, for the backend that does the thinking. */
   procedure: string;
-  greeting: string;
+  /** Several openings; the same sentence every time is the tell that it is a machine. */
+  greetings: readonly string[];
 };
 
 const SCENARIO_TEXT: Record<AiDemoScenario, ScenarioText> = {
@@ -58,7 +59,11 @@ Ak si vlastné auto ešte neprevzal, na vrátenie netlač — dohodnite najprv p
 3. Dohodni deň, približný čas a miesto vrátenia náhradného vozidla.
 4. Zhrň dohodnuté a nechaj si to potvrdiť.
 5. Poďakuj a rozlúč sa.`,
-    greeting: "Dobrý deň, tu je Veronika z Pomoci motoristom. Volám ohľadom vášho auta zo servisu a náhradného vozidla. Máte teraz chvíľku?",
+    greetings: [
+      "Dobrý deň, tu je Veronika z Pomoci motoristom. Volám ohľadom vášho auta zo servisu a náhradného vozidla. Máte teraz chvíľku?",
+      "Dobrý deň, volám z Pomoci motoristom, Veronika. Máte chvíľku? Ide o vaše auto zo servisu a to náhradné vozidlo.",
+      "Dobrý deň, tu Veronika z Pomoci motoristom. Neruším? Chcela som sa s vami dohodnúť na vrátení náhradného vozidla.",
+    ],
   },
   repair_status: {
     label: "Informovať o stave opravy",
@@ -69,7 +74,11 @@ Presné termíny ani ceny nepoznáš — tie mu potvrdí servis.`,
 2. Zisti, či už dostal informáciu o stave opravy.
 3. Zisti, či má otázku alebo niečo potrebuje.
 4. Zhrň, čo si zistila, a rozlúč sa.`,
-    greeting: "Dobrý deň, tu je Veronika z Pomoci motoristom. Volám ohľadom opravy vášho auta. Máte teraz chvíľku?",
+    greetings: [
+      "Dobrý deň, tu je Veronika z Pomoci motoristom. Volám ohľadom opravy vášho auta. Máte teraz chvíľku?",
+      "Dobrý deň, volám z Pomoci motoristom, Veronika. Máte chvíľku? Ide o opravu vášho auta.",
+      "Dobrý deň, tu Veronika z Pomoci motoristom. Neruším? Chcela som sa opýtať na vaše auto v servise.",
+    ],
   },
   appointment_reminder: {
     label: "Pripomenúť dohodnutý termín",
@@ -80,7 +89,11 @@ Ak termín v údajoch nemáš, spýtaj sa, na kedy ho má dohodnutý.`,
 2. Pripomeň termín.
 3. Over, či mu vyhovuje. Ak nie, dohodni nový deň a približný čas.
 4. Zhrň výsledok a rozlúč sa.`,
-    greeting: "Dobrý deň, tu je Veronika z Pomoci motoristom. Volám vám pripomenúť dohodnutý termín. Máte teraz chvíľku?",
+    greetings: [
+      "Dobrý deň, tu je Veronika z Pomoci motoristom. Volám vám pripomenúť dohodnutý termín. Máte teraz chvíľku?",
+      "Dobrý deň, volám z Pomoci motoristom, Veronika. Máte chvíľku? Len vám pripomínam ten dohodnutý termín.",
+      "Dobrý deň, tu Veronika z Pomoci motoristom. Neruším? Volám kvôli termínu, ktorý máte dohodnutý.",
+    ],
   },
   custom: {
     label: "Vlastný účel (zadaj kontext)",
@@ -89,7 +102,11 @@ Ak termín v údajoch nemáš, spýtaj sa, na kedy ho má dohodnutý.`,
 1. Predstav sa a povedz, prečo voláš. Over, či má chvíľku.
 2. Vybav účel hovoru podľa údajov k hovoru. Nič si nedopĺňaj.
 3. Zhrň výsledok a rozlúč sa.`,
-    greeting: "Dobrý deň, tu je Veronika z Pomoci motoristom. Volám vám v jednej krátkej veci. Máte teraz chvíľku?",
+    greetings: [
+      "Dobrý deň, tu je Veronika z Pomoci motoristom. Volám vám v jednej krátkej veci. Máte teraz chvíľku?",
+      "Dobrý deň, volám z Pomoci motoristom, Veronika. Máte chvíľku?",
+      "Dobrý deň, tu Veronika z Pomoci motoristom. Neruším? Mám na vás jednu krátku vec.",
+    ],
   },
 };
 
@@ -151,6 +168,8 @@ Hovor vrelo a prirodzene, nezhonným tempom. Buď jasná a priama, nie prehnane 
 
 Ak je volajúci podráždený, krátko to uznaj a posuň sa ďalej.
 
+Meno volaného použi aj počas hovoru, nielen na začiatku — raz či dvakrát, ako človek.
+
 Kým hovorí, môžeš prirodzene prehodiť "hm", "rozumiem" — mierne, nie tak, aby si ho prekrikovala.
 
 Prerušenie: keď ťa volajúci preruší, prestaň hovoriť a počúvaj, čo hovorí. Keď opraví údaj, prijmi novú hodnotu a krátko ju potvrď.
@@ -179,7 +198,19 @@ Hovor neukončuješ ty a nikam neprepájaš. Keď chce človeka alebo povie, že
  * to *say* it rather than *read* it: the previous version said "exactly this
  * and nothing more", which is precisely how you get a recording.
  */
-export function buildGreetingAppend(scenario: AiDemoScenario, hasContext = false): string {
+/**
+ * One of the openings, chosen at random.
+ *
+ * Two demos in a row opening with the same sentence is the first thing anybody
+ * notices. The greeting is one line in an append that is already short, so
+ * varying it costs nothing on the critical path.
+ */
+export function pickGreeting(scenario: AiDemoScenario, random: () => number = Math.random): string {
+  const options = SCENARIO_TEXT[scenario].greetings;
+  return options[Math.min(options.length - 1, Math.floor(random() * options.length))];
+}
+
+export function buildGreetingAppend(scenario: AiDemoScenario, hasContext = false, greeting?: string): string {
   const address = hasContext
     ? `\nAk v zadaní máš meno volaného, oslov ho ním hneď na začiatku — "Dobrý deň, pán Novák," alebo "pani Nováková". Priezvisko skloňuj po slovensky. Ak meno nemáš, oslovenie vynechaj; nevymýšľaj si ho.\nAk zadanie určuje iný úvod, tón alebo štýl, drž sa zadania.\n`
     : "";
@@ -188,7 +219,7 @@ export function buildGreetingAppend(scenario: AiDemoScenario, hasContext = false
 Hovor po slovensky. Začni hovoriť hneď, sama, bez čakania na to, že sa ozve prvý.
 
 Pozdrav ho takto — povedz to prirodzene a vrelo, nie ako čítaný text:
-"${SCENARIO_TEXT[scenario].greeting}"
+"${greeting ?? SCENARIO_TEXT[scenario].greetings[0]}"
 ${address}
 Potom počkaj na odpoveď a pokračuj podľa svojich pokynov.`;
 }

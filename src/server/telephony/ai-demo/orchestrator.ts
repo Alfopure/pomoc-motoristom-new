@@ -20,7 +20,7 @@ import type { AiDemoLeg } from "./flag";
 import { aiDemoClientState, aiDemoCommandId, aiDemoCorrelationToken, maskNumber } from "./identity";
 import {
   AI_DEMO_COMMENTARY_TRIGGER, AI_DEMO_DEFAULT_SCENARIO, buildBackendInstructions, buildGreetingAppend,
-  buildStartupInstructions, isAiDemoScenario, sanitizeContext, type AiDemoScenario,
+  buildStartupInstructions, isAiDemoScenario, pickGreeting, sanitizeContext, type AiDemoScenario,
 } from "./prompts";
 
 /**
@@ -244,8 +244,12 @@ export async function startAiDemo(deps: AiDemoDeps, input: StartAiDemoInput): Pr
   } catch (error) {
     if (error instanceof TelnyxCommandError) {
       const uncertain = error.retryable || error.status === 408 || error.status >= 500;
+      // The kill switch is not a dial failure. Somebody turned live calls off
+      // between this row being written and the provider being asked, and the
+      // history should say that rather than blame the number.
+      const code = error.code === "live_calls_disabled" ? "live_calls_disabled" : uncertain ? "dial_unknown" : "sip_dial_rejected";
       await patchAttempt(deps.admin, dialing.id, { sip_dial_outcome: uncertain ? "unknown" : "rejected" });
-      await requestEnding(deps, dialing.id, uncertain ? "dial_unknown" : "sip_dial_rejected", uncertain ? "dial_unknown" : "sip_dial_rejected");
+      await requestEnding(deps, dialing.id, code, code);
       if (!uncertain) await endAttempt(deps, dialing.id, AI_DEMO_LIMITS.cleanupBudgetActionMs, "inline");
       throw new AiDemoError(
         error.code === "live_calls_disabled" ? error.message : "Volanie k AI sa nepodarilo vytvoriť.",
@@ -412,7 +416,7 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
     result = await runGreeting({
       sessionId: attempt.openai_session_id,
       apiKey: config.apiKey,
-      greetingText: buildGreetingAppend(scenario, context !== null),
+      greetingText: buildGreetingAppend(scenario, context !== null, pickGreeting(scenario, deps.random)),
       commentaryText: AI_DEMO_COMMENTARY_TRIGGER,
       eventIdSeed: attempt.id.replace(/-/g, "").slice(0, 8),
       ...(deps.webSocketFactory ? { webSocketFactory: deps.webSocketFactory } : {}),
@@ -722,6 +726,15 @@ export function cleanupVerdict(attempt: AiDemoAttempt, now: number): Verdict | n
   }
 }
 
+/** Fragments newer than the cursor; everything when there is none. */
+function sliceTranscript(stored: unknown, since: number | undefined): Array<{ ms: number; dir: string; text: string }> | null {
+  if (!Array.isArray(stored)) return null;
+  const entries = stored as Array<{ ms?: unknown; dir?: unknown; text?: unknown }>;
+  const usable = entries.filter((entry) => entry && typeof entry === "object" && typeof entry.text === "string");
+  const wanted = typeof since === "number" && Number.isFinite(since) ? usable.filter((entry) => typeof entry.ms === "number" && entry.ms > since) : usable;
+  return wanted as Array<{ ms: number; dir: string; text: string }>;
+}
+
 /** The voice actually used, from the attempt rather than from today's configuration. */
 function readVoice(metadata: unknown): string | null {
   const value = (metadata as { voice?: unknown } | null)?.voice;
@@ -736,7 +749,7 @@ function readVoice(metadata: unknown): string | null {
  * speech through either of those would be a lot of bandwidth for something
  * nobody is reading yet.
  */
-export function describeAttempt(attempt: AiDemoAttempt, options: { includeTranscript?: boolean } = {}) {
+export function describeAttempt(attempt: AiDemoAttempt, options: { includeTranscript?: boolean; transcriptSince?: number } = {}) {
   const metadata = attempt.metadata as { latency?: Record<string, unknown> } | null;
   return {
     id: attempt.id,
@@ -754,7 +767,13 @@ export function describeAttempt(attempt: AiDemoAttempt, options: { includeTransc
     review: (attempt.review as Record<string, unknown> | null) ?? null,
     reviewedAt: attempt.reviewed_at,
     ...(options.includeTranscript
-      ? { transcript: (attempt.transcript as Array<{ ms: number; dir: string; text: string }> | null) ?? null }
+      ? {
+          // While a call is running the tab asks every couple of seconds. Sending
+          // the whole conversation back each time would be most of a minute of
+          // speech repeated 150 times; a cursor makes each poll the size of
+          // whatever was said since the last one.
+          transcript: sliceTranscript(attempt.transcript, options.transcriptSince),
+        }
       : {}),
     timestamps: {
       requestedAt: attempt.requested_at,
