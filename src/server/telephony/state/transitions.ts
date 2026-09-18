@@ -110,7 +110,7 @@ const QUEUE_OPERATOR_RETRY_MS = 60_000;
  * a call and come out of wrap-up, and short enough that the caller is not
  * listening to music while nothing is happening.
  */
-const QUEUE_ESCALATE_AFTER_MS = 120_000;
+export const QUEUE_ESCALATE_AFTER_MS = 120_000;
 
 // ---------------------------------------------------------------------------
 // Builder
