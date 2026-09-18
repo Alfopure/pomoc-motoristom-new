@@ -137,6 +137,19 @@ export const AI_DEMO_ALLOWED_VOICES: readonly string[] = [
   "marin", "cedar", "sage", "alloy", "ash", "ballad", "coral", "echo", "shimmer", "verse",
 ];
 
+/**
+ * Voices the documentation lists as feminine.
+ *
+ * Used to decline the word she calls herself by. The persona is Veronika, so a
+ * voice whose presentation the table does not state is treated as feminine
+ * rather than guessed at.
+ */
+export const AI_DEMO_MASCULINE_VOICES: readonly string[] = ["ripple", "vesper", "stone", "meridian", "tempo", "beacon", "cinder", "ash", "echo", "verse"];
+
+export function voiceGender(voice: string): "m" | "f" {
+  return AI_DEMO_MASCULINE_VOICES.includes(voice) ? "m" : "f";
+}
+
 /** Voices the documentation lists as recorded rather than synthesised. */
 export const AI_DEMO_NATURAL_VOICES: readonly string[] = ["gleam", "willow", "bossa", "meridian", "vesper", "stone", "ripple", "tempo"];
 /**

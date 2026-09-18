@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  AI_DEMO_NATURAL_VOICES, AI_DEMO_NEUTRAL_LINE, aiDemoBudgets, aiDemoEnabled, aiDemoFromNumber, aiDemoWebhookUrl, buildSipUri, getAiDemoConfig, parseRecipients,
+  AI_DEMO_NATURAL_VOICES, AI_DEMO_NEUTRAL_LINE, aiDemoBudgets, voiceGender, aiDemoEnabled, aiDemoFromNumber, aiDemoWebhookUrl, buildSipUri, getAiDemoConfig, parseRecipients,
 } from "./config";
 
 const FULL = {
@@ -188,5 +188,19 @@ describe("the review model", () => {
     const config = getAiDemoConfig({ ...FULL, OPENAI_LIVE_REVIEW_MODEL: "gpt-4o" });
     if (!config.configured) expect(config.missing).toContain("OPENAI_LIVE_REVIEW_MODEL");
     else expect.unreachable("review models must be allowlisted too");
+  });
+});
+
+describe("voiceGender", () => {
+  it("follows the documented presentation of the voice", () => {
+    expect(voiceGender("gleam")).toBe("f");
+    expect(voiceGender("willow")).toBe("f");
+    expect(voiceGender("meridian")).toBe("m");
+    expect(voiceGender("vesper")).toBe("m");
+  });
+
+  it("treats an undocumented voice as feminine, matching the persona's name", () => {
+    expect(voiceGender("marin")).toBe("f");
+    expect(voiceGender("brand-new-voice")).toBe("f");
   });
 });

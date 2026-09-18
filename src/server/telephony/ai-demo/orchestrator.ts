@@ -14,7 +14,7 @@ import {
   adoptLeg, casCounter, countToday, findByRequestId, findDue, insertAttempt, loadActive, loadAttempt,
   markLegGone, patchAttempt, transitionAttempt, type AiDemoAttempt,
 } from "./attempts";
-import { AI_DEMO_ALLOWED_VOICES, AI_DEMO_LIMITS, aiDemoBudgets, aiDemoEnabled, buildSipUri, getAiDemoConfig, type AiDemoConfig, type EnvRecord } from "./config";
+import { AI_DEMO_ALLOWED_VOICES, AI_DEMO_LIMITS, aiDemoBudgets, aiDemoEnabled, buildSipUri, getAiDemoConfig, voiceGender, type AiDemoConfig, type EnvRecord } from "./config";
 import { runGreeting, type GreetingResult, type ProbeLimits, type WebSocketFactory } from "./greeting";
 import type { AiDemoLeg } from "./flag";
 import { aiDemoClientState, aiDemoCommandId, aiDemoCorrelationToken, maskNumber } from "./identity";
@@ -361,7 +361,7 @@ export async function acceptSession(deps: AiDemoDeps, attempt: AiDemoAttempt, se
       sessionId,
       model: config.model,
       voice,
-      instructions: buildStartupInstructions(scenario, context),
+      instructions: buildStartupInstructions(scenario, context, voiceGender(voice)),
       backendModel: config.backendModel,
       // The procedure lives here, not in the voice prompt: the guide is explicit
       // that long business procedures belong to the backend, and a voice model

@@ -200,9 +200,11 @@ Pole **„Zadanie pre Veroniku"** v záložke je **pokyn, nie poznámka**. Riadi
 
 Tri veci zadanie prebiť nemôže, lebo nie sú o štýle, ale o človeku na druhej strane a o expozícii firmy:
 
-1. Keď sa volajúci spýta, či je to človek, **prizná, že je virtuálna asistentka**.
+1. **Netvrdí, že je človek.** Predstaví sa ako „odborná pomocníčka Pomoci motoristom" (alebo „odborný pomocník" pri mužskom hlase) — slovo „AI" nepoužíva, ale ani nepoprie, že človekom nie je.
 2. **Nepýta si čísla platobných kariet ani rodné čísla.**
 3. **Nezaväzuje firmu** k cene, pokute ani ku garantovanému času.
+
+K bodu 1: rod sa odvodí z hlasu (`voiceGender`); nezdokumentovaný hlas sa berie ako ženský, lebo persona sa volá Veronika. Nariadenie EÚ o umelej inteligencii (čl. 50) žiada, aby človek vedel, že komunikuje so systémom AI, ak to nie je zrejmé — preto zostáva „netvrď, že si človek" ako spodná hranica. Odstrániť sa to dá, ale je to zmena v `prompts.ts`, nie veta vo formulári.
 
 Ak majú padnúť aj tieto, je to zmena v `prompts.ts` a vedomé rozhodnutie, nie preklep v jednom poli.
 
