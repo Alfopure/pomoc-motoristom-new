@@ -1778,6 +1778,26 @@ export type Database = {
         };
         Returns: number;
       };
+      /** The critical row writes of a transition in one call; presence stays in the reducer. */
+      motorist_apply_critical_v2: {
+        Args: {
+          p_session_id: string;
+          p_expected_version: number | null;
+          p_patch: Json | null;
+          p_legs: Json;
+          p_attempts: Json;
+        };
+        Returns: Json;
+      };
+      /** The provider journal for a whole group: one fence, a decision per command. */
+      motorist_provider_command_prepare_batch_v2: {
+        Args: { p_session_id: string; p_commands: Json };
+        Returns: Json;
+      };
+      motorist_provider_command_result_batch_v2: {
+        Args: { p_session_id: string; p_generation: number; p_token: string; p_results: Json };
+        Returns: Json;
+      };
     };
     Enums: { [_ in never]: never };
     CompositeTypes: { [_ in never]: never };

@@ -71,6 +71,7 @@ export function registerContractTwoRpcs(db: FakeDatabase): void {
     return true;
   });
 
+  registerCriticalWriteRpcs(db);
   registerProviderJournalRpcs(db);
 }
 
@@ -175,4 +176,44 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
     }
     return true;
   });
+}
+
+
+/**
+ * The critical row writes of a transition, in one call.
+ *
+ * Split out for the same reason the journal is: a test may hand-build its
+ * leases and still need this, because the reducer reaches for it on every
+ * contract-2 transition that touches a leg or an attempt.
+ */
+export function registerCriticalWriteRpcs(db: FakeDatabase): void {
+  const session = (id: unknown) => db.storage("motorist_call_sessions").find((row) => row.id === id);
+  db.registerRpc("motorist_apply_critical_v2", (args) => {
+    const row = session(args.p_session_id);
+    if (!row) throw new Error("session not found");
+    if (args.p_expected_version !== null && args.p_expected_version !== undefined && row.version !== args.p_expected_version) {
+      return { applied: false };
+    }
+    const patch = (args.p_patch ?? {}) as FakeRow;
+    Object.assign(row, patch, { version: Number(args.p_expected_version ?? row.version) + 1 });
+
+    for (const item of (args.p_legs ?? []) as Array<{ callControlId: string; values: FakeRow }>) {
+      const leg = db.storage("motorist_call_legs").find((entry) => entry.session_id === row.id && entry.telnyx_call_control_id === item.callControlId);
+      if (!leg) continue;
+      const values = { ...item.values };
+      // An ended leg keeps its ending: a late patch may add detail, never reopen.
+      if (leg.ended_at && !("ended_at" in values)) { delete values.state; delete values.ended_at; }
+      Object.assign(leg, values);
+    }
+
+    for (const item of (args.p_attempts ?? []) as Array<{ id: string; values: FakeRow; openOnly?: boolean }>) {
+      const attempt = db.storage("motorist_ring_attempts").find((entry) => entry.id === item.id && entry.session_id === row.id);
+      if (!attempt) continue;
+      if (item.openOnly && attempt.ended_at) continue;
+      Object.assign(attempt, item.values);
+    }
+
+    return { applied: true, session: structuredClone(row) };
+  });
+
 }

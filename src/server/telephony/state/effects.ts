@@ -199,7 +199,32 @@ export async function persistTransition(
   const patch = { ...input.transition.session };
   let session: SessionRow;
 
-  if (Object.keys(patch).length > 0 || input.expectedVersion !== null) {
+  // The critical phase in one round trip: the session, the legs it patches and
+  // the attempts it closes, written together. Presence stays out of it — its
+  // guards read a feature flag and an operator's wrap-up setting, and deciding
+  // those in SQL would move policy out of the reducer that owns it.
+  //
+  // Only from the start of an entry. A resumed one has a cursor partway
+  // through the batch, and the per-effect path below is what knows how to
+  // carry on from there. The cursor still advances effect by effect either
+  // way, so an entry staged by one writer stays resumable by the other.
+  const folded = input.phase === "critical" && sessionOwnership.getStore()?.contract === 2 &&
+    (input.continuation?.databaseCursor ?? 0) === 0 &&
+    input.transition.legs.length + input.transition.attempts.length > 0;
+  if (folded) {
+    const applied = await ownershipRpc<{ applied: boolean; session?: SessionRow } | null>(admin, "motorist_apply_critical_v2", {
+      p_session_id: input.session.id,
+      p_expected_version: input.expectedVersion,
+      p_patch: Object.keys(patch).length ? patch : null,
+      p_legs: input.transition.legs.map((leg) => ({ callControlId: leg.callControlId, values: leg.values })),
+      p_attempts: input.transition.attempts.map((attempt) => ({
+        id: attempt.id, values: attempt.values,
+        openOnly: Boolean(input.continuation) && ["pending", "offered", "answered"].includes(attempt.values.result ?? ""),
+      })),
+    });
+    if (!applied?.applied || !applied.session) throw new SessionConflictError(input.session.id, input.expectedVersion ?? input.session.version);
+    session = applied.session;
+  } else if (Object.keys(patch).length > 0 || input.expectedVersion !== null) {
     let query = admin
       .from("motorist_call_sessions")
       .update({ ...patch, version: (input.expectedVersion ?? input.session.version) + 1 })
@@ -244,16 +269,20 @@ export async function persistTransition(
     if (batched) batchPending = true;
     else session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
   };
-  for (const legPatch of input.transition.legs) await effect(() => applyLegPatch(deps, session, legPatch), true, true);
+  // Folded above, but still walked here so the cursor lands where a resuming
+  // writer expects it.
+  for (const legPatch of input.transition.legs) await effect(() => folded ? Promise.resolve() : applyLegPatch(deps, session, legPatch), true, true);
 
   for (const attempt of input.transition.attempts) {
     await effect(async () => {
+      if (folded) return;
       let query = admin.from("motorist_ring_attempts").update(attempt.values).eq("id", attempt.id).eq("session_id", session.id);
       if (input.continuation && ["pending", "offered", "answered"].includes(attempt.values.result ?? "")) query = query.is("ended_at", null);
       const result = await query;
       if (result.error) fail("attempt update failed", result.error);
     }, true, true);
   }
+
 
   for (const change of input.transition.presence) {
     if (input.continuation && change.afterCommandId) continue;

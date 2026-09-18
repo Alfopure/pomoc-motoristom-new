@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, type TelephonyHarness } from "@/test/telephony-harness";
-import { registerProviderJournalRpcs } from "@/test/fake-stability";
+import { registerCriticalWriteRpcs, registerProviderJournalRpcs } from "@/test/fake-stability";
 import { sessionOwnership, type Ownership } from "./ownership";
 import { loadRoutingContext, runSessionEvent } from "./session-runner";
 import { parseTelnyxEnvelope } from "./state/events";
@@ -14,6 +14,7 @@ function owned(h: TelephonyHarness, sessionId: string): Ownership {
   // the fence is what makes the hangup below the only command still allowed
   // once termination is committed.
   registerProviderJournalRpcs(h.db);
+  registerCriticalWriteRpcs(h.db);
   h.db.registerRpc("motorist_provider_observe_dial_v2", () => false);
   const row = h.db.storage("motorist_call_sessions").find(row => row.id === sessionId)!;
   row.writer_contract = 2;
