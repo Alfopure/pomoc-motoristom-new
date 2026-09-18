@@ -33,7 +33,9 @@ const ENV = {
 };
 
 const TARGET = "+421910988882";
-const FAST_PROBE = { probeOpenMs: 100, probeAppendedMs: 100, probeFirstDeltaMs: 150, probeWindowMs: 200, probeMaxEvents: 20 };
+// The whole rehearsal is compressed into a few hundred milliseconds, so the
+// "that was only an acknowledgement" threshold is scaled down with it.
+const FAST_PROBE = { probeOpenMs: 100, probeAppendedMs: 100, probeFirstDeltaMs: 150, probeWindowMs: 300, probeMaxEvents: 20, backchannelMaxMs: 20 };
 
 function seedDemoLine(h: TelephonyHarness) {
   h.db.seed("motorist_telephony_lines", [
@@ -75,9 +77,11 @@ describe("the AI demo, rehearsed offline", () => {
     const sideband = createFakeSideband({
       onInstructions: [
         { delayMs: 5, event: { type: "session.instructions.appended" } },
-        { delayMs: 30, event: { type: "session.output_transcript.delta", delta: "Dobrý deň, tu je Veronika" } },
-        { delayMs: 80, event: { type: "session.input_transcript.delta", delta: "áno, mám chvíľku" } },
-        { delayMs: 120, event: { type: "session.output_transcript.delta", delta: "Ďakujem" } },
+        { delayMs: 30, event: { type: "session.output_transcript.delta", delta: "Dobrý deň," } },
+        { delayMs: 70, event: { type: "session.output_transcript.delta", delta: " tu je Veronika" } },
+        { delayMs: 110, event: { type: "session.input_transcript.delta", delta: "áno, mám chvíľku" } },
+        { delayMs: 170, event: { type: "session.output_transcript.delta", delta: "Ďakujem, tak" } },
+        { delayMs: 220, event: { type: "session.output_transcript.delta", delta: " sa dohodneme" } },
       ],
     });
 

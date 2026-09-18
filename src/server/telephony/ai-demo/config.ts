@@ -47,8 +47,13 @@ export const AI_DEMO_LIMITS = {
   probeOpenMs: 3_000,
   probeAppendedMs: 4_000,
   probeFirstDeltaMs: 8_000,
-  probeWindowMs: 18_000,
-  probeMaxEvents: 40,
+  // The bridge webhook has `maxDuration = 60`, and `after()` runs inside it.
+  // At 18 s the probe saw one exchange; 40 s sees the opening few and still
+  // leaves the route twenty seconds of headroom.
+  probeWindowMs: 40_000,
+  probeMaxEvents: 60,
+  /** Shorter than this, an utterance of hers is an acknowledgement, not an answer. */
+  backchannelMaxMs: 700,
   /** Cron staleness rules; the tick is five minutes, so these are floors not ceilings. */
   requestedStaleMs: 60_000,
   sipDialingStaleMs: 120_000,

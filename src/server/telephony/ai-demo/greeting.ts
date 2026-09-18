@@ -38,7 +38,24 @@ export type LatencyProbeEntry = {
   ms: number;
   /** `out` = Veronika started a stretch of speech, `in` = the caller did. */
   dir: "in" | "out";
+  /** How long that stretch of speech lasted. */
+  durMs: number;
+  /** An outbound stretch too short to be an answer — "hm", "rozumiem". */
+  backchannel?: true;
 };
+
+/**
+ * An outbound stretch shorter than this is an acknowledgement, not a reply.
+ *
+ * The prompt now asks for these on purpose, which is what makes the call sound
+ * alive — and which is exactly why they must not be counted as response times.
+ * A 184 ms "answer" is somebody saying "hm" while the caller is still finishing.
+ *
+ * It belongs to the limits rather than being a constant so a test can compress
+ * a conversation into a few hundred milliseconds without every utterance
+ * looking like a grunt.
+ */
+export const BACKCHANNEL_MAX_MS = 700;
 
 export type GreetingStatus = "appended" | "heard_started" | "failed";
 
@@ -71,6 +88,7 @@ export type ProbeLimits = {
   probeFirstDeltaMs: number;
   probeWindowMs: number;
   probeMaxEvents: number;
+  backchannelMaxMs?: number;
 };
 
 export type RunGreetingParams = {
@@ -123,19 +141,31 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
   const commentaryEventId = `begin-${params.eventIdSeed}`;
 
   const probe: LatencyProbeEntry[] = [];
-  const responseGapsMs: number[] = [];
   let appendedMs: number | null = null;
   let firstDeltaMs: number | null = null;
-  let lastDirection: "in" | "out" | null = null;
-  let lastInboundMs: number | null = null;
   let error: string | null = null;
 
+  /**
+   * Speech is recorded as stretches, not as single events.
+   *
+   * The first version timestamped only the changes of speaker and measured a
+   * "gap" from when the caller *started* talking — which is their utterance
+   * plus the gap, not the gap. Every delta now extends the current stretch, so
+   * a stretch knows when it ended, and a response time can be measured from
+   * there.
+   */
+  type Stretch = { dir: "in" | "out"; startMs: number; endMs: number };
+  const stretches: Stretch[] = [];
+
   const record = (dir: "in" | "out") => {
-    if (dir === lastDirection) return;
-    if (probe.length < limits.probeMaxEvents) probe.push({ ms: since(), dir });
-    if (dir === "out" && lastDirection === "in" && lastInboundMs !== null) responseGapsMs.push(since() - lastInboundMs);
-    if (dir === "in") lastInboundMs = since();
-    lastDirection = dir;
+    const at = since();
+    const current = stretches[stretches.length - 1];
+    if (current && current.dir === dir) {
+      current.endMs = at;
+      return;
+    }
+    if (stretches.length >= limits.probeMaxEvents) return;
+    stretches.push({ dir, startMs: at, endMs: at });
   };
 
   let socket: MinimalWebSocket | null = null;
@@ -154,7 +184,27 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
       } catch {
         // The probe is finished either way; a failing close is not a call failure.
       }
-      resolve({ status, appendedMs, firstDeltaMs, probe, responseGapsMs, error });
+      resolve({ status, appendedMs, firstDeltaMs, probe, responseGapsMs: summarise(), error });
+    };
+
+    /**
+     * Turns the stretches into what the timeline shows.
+     *
+     * A response time is the silence between the caller finishing and Veronika
+     * beginning a real answer; acknowledgements are marked and excluded.
+     */
+    const summarise = (): number[] => {
+      const gaps: number[] = [];
+      probe.length = 0;
+      for (let index = 0; index < stretches.length; index += 1) {
+        const stretch = stretches[index];
+        const durMs = stretch.endMs - stretch.startMs;
+        const isBackchannel = stretch.dir === "out" && durMs < (limits.backchannelMaxMs ?? BACKCHANNEL_MAX_MS);
+        probe.push({ ms: stretch.startMs, dir: stretch.dir, durMs, ...(isBackchannel ? { backchannel: true as const } : {}) });
+        const previous = stretches[index - 1];
+        if (stretch.dir === "out" && !isBackchannel && previous?.dir === "in") gaps.push(stretch.startMs - previous.endMs);
+      }
+      return gaps;
     };
 
     const openTimer = setTimeout(() => {

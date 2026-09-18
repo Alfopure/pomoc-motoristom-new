@@ -120,7 +120,16 @@ Sideband sa po úvodných sekundách zatvára. Odozvu v druhej polovici hovoru p
 
 ## Ako znie — a čo sa s tým dá robiť
 
-Prvý živý hovor (17. 9. 2026) potvrdil latenciu: **prvé slovo 2,2 s po zdvihnutí, odozva 1,1 s**. Hlas však znel robotizovane. API nemá parameter na rýchlosť ani štýl reči — jediné dve páky sú **hlas** a **prompt**.
+Namerané na živých hovoroch. API nemá parameter na rýchlosť ani štýl reči — jediné dve páky sú **hlas** a **prompt**.
+
+| Hovor | Hlas | Prvé slovo po zdvihnutí |
+|---|---|---|
+| 17. 9., pôvodný prompt | `marin` | 2 215 ms |
+| 18. 9., skrátený prompt | `gleam` | 1 021 ms |
+| 18. 9. | `gleam` | 1 018 ms |
+| 18. 9. | `gleam` | 978 ms |
+
+Skrátenie hlasového promptu z ~5 500 na ~1 500 znakov **znížilo čas do prvého slova na polovicu**: model má pri inicializácii relácie o 4 000 znakov menej na spracovanie, než môže prehovoriť. Prirodzenosť a rýchlosť tu ťahajú za ten istý povraz.
 
 **Hlas.** Dokumentácia označuje pri každom hlase zdroj: *Natural* (nahrávaný človek) alebo *Generated* (syntetizovaný). Predvolený `marin` v tej tabuľke nie je, takže jeho zdroj je nezdokumentovaný. Predvolený hlas dema je preto `gleam` — ženský, nahrávaný. V záložke „AI" sa dá hlas prepnúť pre jednotlivý hovor (nahrávané sú v zozname prvé), takže sa dajú porovnať bez redeploy. Hlas sa počas hovoru už zmeniť nedá; ukladá sa k pokusu, takže história hovorí, ktorý hlas bol naozaj počuť.
 
@@ -135,6 +144,8 @@ Prvý živý hovor (17. 9. 2026) potvrdil latenciu: **prvé slovo 2,2 s po zdvih
 | — | Pozdrav znel „povedz presne toto a nič viac" — návod na čítanie textu. | „Povedz to prirodzene a vrelo, nie ako čítaný text." |
 
 Ponechané zostali pravidlá, ktoré samy osebe slúžia prirodzenosti — napríklad že časy sa hovoria „o pol tretej", nie „14:30".
+
+**Meranie odozvy.** Prvá verzia merala od okamihu, keď volajúci *začal* hovoriť, takže do odozvy počítala aj jeho vlastnú vetu; teraz sa meria od chvíle, keď dohovoril. A keďže prompt o prikyvovanie priamo žiada, krátke prehodenie (pod 700 ms) sa označí ako `backchannel` a do odozvy sa nepočíta — inak by demo vyzeralo rýchlejšie, než je. Okno odposluchu je 40 s (webhook má rozpočet 60 s), takže zachytí úvodných niekoľko výmen, nie jednu.
 
 ## Bezpečnostné hranice
 
