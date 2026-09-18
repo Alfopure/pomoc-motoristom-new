@@ -69,7 +69,7 @@ Cost of one database request, from production `request-performance`: **~95 ms**
 | **E1a.6** one checkpoint per critical batch | done, critical phase only |
 | **E1b-1** low-risk concurrency | both points: parallel teardown, overlapping best-effort provider calls |
 | **E1c** bounded webhook lease wait | done — 1200 ms, backoff 150/300/600 |
-| **E1b-2.4** parallel fan-out | done — a ring step claims, persists and dials its members together instead of one after another |
+| **E1b-2.4** parallel fan-out | done, with the plan's leaning and its full test list. An inbound call with three operators: 171 → 168 requests, one per operator rung |
 
 Outside the plan, from what the testing turned up:
 
@@ -144,6 +144,22 @@ and hold were all already correct — which is what left the caller's own hangup
 as the only remaining candidate. The conference parameters were never at fault
 either: `start_conference_on_create: true`, and `end_conference_on_exit`
 defaults to false.
+
+### One leaning the plan asked for, refused
+
+E1b-2.4 proposes taking the offer tombstones from the session snapshot when it
+shows none, instead of `cancelRevokedOffers` re-reading the row — a round trip
+per operator rung.
+
+`dispatch-pause-boundaries` refuses it, and it is right to. An operator can be
+paused while their own dial is still in flight, and the fresh row is what
+discovers that tombstone in time to hang the revoked leg up. The plan's
+backstop — the next event re-runs the pass — is not enough here, because the
+revoked leg can be answered before that event arrives.
+
+The read stays. The saving that did land is the journal lookup: it was gated on
+a continuation merely existing, and a first attempt has one, so every dial asked
+the journal about a command that could not be there.
 
 ## Known gaps that are not in the plan
 
