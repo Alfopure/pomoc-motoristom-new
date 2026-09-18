@@ -86,17 +86,23 @@ const CALL_ACTIONS: Record<string, string> = {
 };
 
 function wireRequest(method: string, params: Record<string, unknown>): { path: string; body: Record<string, unknown> } | null {
-  if (method === "dial") return { path: "/calls", body: params };
-  if (method === "createConference") return { path: "/conferences", body: params };
+  // `commandId` is the identity, not part of the payload: the real client
+  // sends it as `command_id` alongside the body. Leaving it in here would give
+  // the same command two fingerprints — one when it is sent alone and another
+  // when it is sent as part of a group — and a replay would see a payload
+  // identity conflict where there is none.
+  const rest = Object.fromEntries(Object.entries(params).filter(([key]) => key !== "commandId"));
+  if (method === "dial") return { path: "/calls", body: rest };
+  if (method === "createConference") return { path: "/conferences", body: rest };
   const conference = /^conference:(.+)$/.exec(method);
   if (conference) {
-    const { conferenceId, ...rest } = params;
-    return { path: `/conferences/${encodeURIComponent(String(conferenceId))}/actions/${conference[1]}`, body: rest };
+    const { conferenceId, ...body } = rest;
+    return { path: `/conferences/${encodeURIComponent(String(conferenceId))}/actions/${conference[1]}`, body };
   }
   const action = CALL_ACTIONS[method];
   if (!action) return null;
-  const { callControlId, ...rest } = params;
-  return { path: `/calls/${encodeURIComponent(String(callControlId))}/actions/${action}`, body: rest };
+  const { callControlId, ...body } = rest;
+  return { path: `/calls/${encodeURIComponent(String(callControlId))}/actions/${action}`, body };
 }
 
 export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Partial<TelnyxLiveGate> } = {}): FakeTelnyx {
@@ -146,7 +152,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
    * is active, `prepare_v2` decides whether this command reaches the double at
    * all, and `result_v2` records what it answered.
    */
-  async function execute<T>(method: string, params: Record<string, unknown>, action: () => T, options?: { journalled?: boolean }): Promise<T> {
+  async function execute<T>(method: string, params: Record<string, unknown>, action: () => T, options?: { journalled?: boolean; raw?: boolean }): Promise<T> {
     const commandId = params.commandId ?? params.command_id;
     const wire = options?.journalled ? null : wireRequest(method, params);
     const journal = wire
@@ -194,8 +200,8 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     );
 
     if (outcome.cached) return outcome.result as T;
-    if (outcome.sent.thrown) throw outcome.sent.thrown;
-    return outcome.sent.result as T;
+    if (outcome.sent.thrown && !options?.raw) throw outcome.sent.thrown;
+    return options?.raw ? (outcome.sent as unknown as T) : (outcome.sent.result as T);
   }
 
   /** Drops `undefined` values the way the real client's `compact` does. */
@@ -232,13 +238,28 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
 
   const nextId = (prefix: string) => `${prefix}-${++counter}`;
 
+  /** Which recorded method each wire action belongs to, so a batch records what a single call would. */
+  const FAKE_ACTION_METHODS: Record<string, string> = Object.fromEntries(
+    Object.entries(CALL_ACTIONS).map(([method, action]) => [action, method]),
+  );
+
+  /** One call action against the modelled provider. */
+  async function actionOnce<T = void>(method: string, item: { callControlId: string; commandId: string; body: Record<string, unknown> }, options?: { journalled?: boolean; raw?: boolean }): Promise<T> {
+    const params = { callControlId: item.callControlId, commandId: item.commandId, ...item.body };
+    return execute(method, params, () => {
+      if (method === "hangup") physical.ended(item.callControlId);
+      if (method === "answer") physical.answered(item.callControlId);
+      return undefined;
+    }, options) as Promise<T>;
+  }
+
   /** One dial against the modelled provider; the batch has already journalled it. */
-  function dialOnce(params: DialParams, options?: { journalled?: boolean }): Promise<DialResult> {
+  function dialOnce<T = DialResult>(params: DialParams, options?: { journalled?: boolean; raw?: boolean }): Promise<T> {
     return execute("dial", params as unknown as Record<string, unknown>, () => {
       const id = nextId("cc"); ensureLeg(id, Array.isArray(params.to) ? params.to[0] : params.to);
       if (params.bridgeOnAnswer && params.linkTo) armBridge(params.linkTo, id);
       return { callControlId: id, callLegId: `leg-${id}`, callSessionId: params.linkTo ? `sess-of-${params.linkTo}` : `tsess-${id}`, isAlive: true };
-    }, options);
+    }, options) as Promise<T>;
   }
 
   const client: TelnyxClient = {
@@ -266,6 +287,30 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
      * to the ordinary dials — which is also what keeps contract-1 tests
      * unchanged.
      */
+    /** A run of call actions under one journal, mirroring the real client. */
+    async callActionMany(list: readonly { callControlId: string; action: string; commandId: string; body: Record<string, unknown> }[]): Promise<Array<PromiseSettledResult<void>>> {
+      if (!list.length) return [];
+      const owner = sessionOwnership.getStore();
+      const methods = list.map((item) => FAKE_ACTION_METHODS[item.action] ?? item.action);
+      const journals = list.map((item) =>
+        journalRequest("POST", `/calls/${encodeURIComponent(item.callControlId)}/actions/${item.action}`,
+          typeof item.commandId === "string" ? item.commandId : null,
+          JSON.stringify(compactUndefined({ ...item.body, command_id: item.commandId }))));
+      const one = (index: number) => actionOnce<{ status: number; result: unknown; thrown?: unknown }>(methods[index], list[index], { journalled: true, raw: true });
+      if (!owner || owner.contract !== 2 || journals.some((journal) => !journal)) {
+        return Promise.allSettled(list.map((_, index) => actionOnce(methods[index], list[index])));
+      }
+      const settled = await dispatchJournaledBatch(
+        list.map((_, index) => ({ journal: journals[index]!, send: () => one(index) })),
+        { error: (status, body, commandId) => new TelnyxCommandError({ code: "journal_replay", status, detail: `replayed provider outcome: ${JSON.stringify(body)}`, commandId }) },
+      );
+      return settled.map((outcome) => {
+        if (outcome.status === "rejected") return outcome as PromiseRejectedResult;
+        const thrown = outcome.value.cached ? null : (outcome.value.sent as { thrown?: unknown }).thrown;
+        return thrown ? { status: "rejected" as const, reason: thrown } : { status: "fulfilled" as const, value: undefined };
+      });
+    },
+
     async dialMany(list: readonly DialParams[]): Promise<Array<PromiseSettledResult<DialResult>>> {
       if (!list.length) return [];
       if (!liveGate.callsEnabled) throw new TelnyxLiveCallsDisabledError();
@@ -282,13 +327,18 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       const settled = await dispatchJournaledBatch(
         list.map((params, index) => ({
           journal: journals[index]!,
-          send: async () => ({ status: 200, result: await dialOnce(params, { journalled: true }) }),
+          send: () => dialOnce<{ status: number; result: unknown; thrown?: unknown }>(params, { journalled: true, raw: true }),
         })),
         { error: (status, body, commandId) => new TelnyxCommandError({ code: "journal_replay", status, detail: `replayed provider outcome: ${JSON.stringify(body)}`, commandId }) },
       );
-      return settled.map((outcome) => outcome.status === "rejected"
-        ? outcome as PromiseRejectedResult
-        : { status: "fulfilled" as const, value: (outcome.value.cached ? outcome.value.result : outcome.value.sent.result) as DialResult });
+      return settled.map((outcome) => {
+        if (outcome.status === "rejected") return outcome as PromiseRejectedResult;
+        // A refusal the provider answered is recorded first and raised second,
+        // and it is this member's alone.
+        const thrown = outcome.value.cached ? null : (outcome.value.sent as { thrown?: unknown }).thrown;
+        if (thrown) return { status: "rejected" as const, reason: thrown };
+        return { status: "fulfilled" as const, value: (outcome.value.cached ? outcome.value.result : (outcome.value.sent as { result: unknown }).result) as DialResult };
+      });
     },
 
     async dial(params: DialParams): Promise<DialResult> {

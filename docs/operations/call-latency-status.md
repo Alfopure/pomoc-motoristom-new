@@ -14,7 +14,7 @@ generation leases and the fenced provider journal).
 
 | action | before 17 Sep | after 17 Sep | true cost |
 | --- | --- | --- | --- |
-| inbound answer | 64 | 45 | **55** |
+| inbound answer | 64 | 45 | **51** |
 | hold | 40 | 35 | **44** |
 | unhold | 36 | 33 | **36** |
 | blind transfer | 47 | 41 | **50** |
@@ -266,10 +266,22 @@ bad number would take a ring step down with it. And the members are fenced
 *together before any of them is sent*, so a termination committed meanwhile
 stops the whole step rather than the part that had not gone out yet.
 
-What is left of E2.3 is the same treatment for the overlapping teardown run
-behind a bridge — hangup, playback stop, gather stop — which is the twelve
-journal round trips still on the answer path. The machinery is in place; those
-kinds need a `callActionMany` the way dial got `dialMany`.
+The teardown run behind a bridge went the same way: `callActionMany` sends a
+stop and the losing legs' hangups as one group. Those kinds have no
+post-dispatch bookkeeping — that is why they may overlap at all — so the only
+per-member work left is the tolerance a hangup owes a leg that is already gone.
+
+An answer costs **51** requests, down from 64 before any of this and 55 before
+the batching. Its journal is 8 round trips instead of 12; a whole inbound call
+is 155 instead of 168.
+
+Two defects surfaced while wiring it, both caught by tests before they shipped.
+The double gave the same command two fingerprints — one sent alone, another
+sent in a group — because it left `commandId` inside the payload where the real
+client sends it alongside; a replay would have seen a payload identity conflict
+where there is none. And the first batch treated a provider's 4xx as though
+nothing had come back, when a refusal is evidence and has to be recorded or the
+replay tries the same doomed command again.
 
 The six lease renewals were pure duplication, and removing them was blocked on
 exactly the assumption that made the earlier measurements wrong: `prepare_v2`

@@ -58,7 +58,9 @@ describe("contract 2 request cost", () => {
     // 61 / 44 / 36 / 51 / 42 with one checkpoint per overlapping run, and
     // 55 for an answer once the lease renew was throttled to one per five
     // seconds — which needed the double to model the fence first, since the
-    // fence is what refuses a stale owner when the renew no longer does.
+    // fence is what refuses a stale owner when the renew no longer does — and
+    // 51 once the journal batched: a run of teardown and a whole ring step
+    // each fence and record once rather than twice per command.
     //
     // The jump is not a regression. It is the cost that was always there and
     // never counted: `prepare_v2` before every voice command and `result_v2`
@@ -70,7 +72,7 @@ describe("contract 2 request cost", () => {
     // incident-recovery read fires or not depending on wall-clock; they still
     // catch any regression of three or more. Guards, not targets — lower them
     // when a change lowers the count.
-    expect(answer).toBeLessThanOrEqual(57);
+    expect(answer).toBeLessThanOrEqual(53);
     expect(hold).toBeLessThanOrEqual(46);
     expect(unhold).toBeLessThanOrEqual(38);
     expect(transfer).toBeLessThanOrEqual(52);

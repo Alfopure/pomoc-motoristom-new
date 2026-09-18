@@ -310,6 +310,8 @@ export type TelnyxClient = {
   dial(params: DialParams): Promise<DialResult>;
   /** A ring step under one journal; the answer is per member. */
   dialMany(list: readonly DialParams[]): Promise<Array<PromiseSettledResult<DialResult>>>;
+  /** A run of call actions under one journal; the answer is per member. */
+  callActionMany(list: readonly { callControlId: string; action: string; commandId: string; body: Record<string, unknown> }[]): Promise<Array<PromiseSettledResult<void>>>;
   answer(params: AnswerParams): Promise<void>;
   hangup(params: HangupParams): Promise<void>;
   bridge(params: BridgeParams): Promise<void>;
@@ -623,6 +625,59 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
      *
      * The answer is per member. One operator's refusal is that operator's.
      */
+    /**
+     * A run of call actions under one journal.
+     *
+     * The teardown behind a bridge is three or four of these — the losing legs
+     * hung up, the waiting audio stopped — and each paid its own fence and its
+     * own record. They have no post-dispatch bookkeeping, which is why they may
+     * overlap at all, and it is also why they batch cleanly.
+     */
+    async callActionMany(list) {
+      if (!list.length) return [];
+      const owner = sessionOwnership.getStore();
+      const paths = list.map((item) => `/calls/${encodeURIComponent(item.callControlId)}/actions/${item.action}`);
+      const bodies = list.map((item) => compact(item.body));
+      const journals = list.map((item, index) =>
+        journalRequest("POST", paths[index], item.commandId ?? null,
+          JSON.stringify(compact({ ...bodies[index], command_id: item.commandId ?? undefined }))));
+
+      if (!owner || owner.contract !== 2 || journals.some((journal) => !journal)) {
+        return Promise.allSettled(list.map((item, index) =>
+          request<unknown>("POST", paths[index], { body: bodies[index], commandId: item.commandId }).then(() => undefined)));
+      }
+
+      const answers = new Map<number, { status: number; result: unknown; retryAfterMs?: number }>();
+      const settled = await dispatchJournaledBatch(
+        list.map((item, index) => ({
+          journal: journals[index]!,
+          send: async () => {
+            try {
+              const parsed = await request<unknown>("POST", paths[index], {
+                body: bodies[index], commandId: item.commandId, skipJournal: true,
+                observe: (sent) => answers.set(index, sent),
+              });
+              return { status: answers.get(index)?.status ?? 200, result: parsed, retryAfterMs: answers.get(index)?.retryAfterMs };
+            } catch (error) {
+              // A provider that answered 4xx has answered: that refusal is
+              // evidence and has to be recorded, or a replay tries the same
+              // doomed command again. Only a transport failure leaves nothing.
+              const answered = answers.get(index);
+              if (!answered) throw error;
+              return { ...answered, thrown: error };
+            }
+          },
+        })),
+        { error: (status, result, commandId) => errorFromBody(status, result, commandId) },
+      );
+      return settled.map((outcome) => {
+        if (outcome.status === "rejected") return outcome as PromiseRejectedResult;
+        const thrown = outcome.value.cached ? null : (outcome.value.sent as { thrown?: unknown }).thrown;
+        if (thrown) return { status: "rejected" as const, reason: thrown };
+        return { status: "fulfilled" as const, value: undefined };
+      });
+    },
+
     async dialMany(list) {
       if (!list.length) return [];
       const owner = sessionOwnership.getStore();
@@ -640,11 +695,17 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         list.map((params, index) => ({
           journal: journals[index]!,
           send: async () => {
-            const parsed = await request<unknown>("POST", "/calls", {
-              commandId: params.commandId, body: bodies[index], skipJournal: true,
-              observe: (sent) => answers.set(index, sent),
-            });
-            return { status: answers.get(index)?.status ?? 200, result: parsed, retryAfterMs: answers.get(index)?.retryAfterMs };
+            try {
+              const parsed = await request<unknown>("POST", "/calls", {
+                commandId: params.commandId, body: bodies[index], skipJournal: true,
+                observe: (sent) => answers.set(index, sent),
+              });
+              return { status: answers.get(index)?.status ?? 200, result: parsed, retryAfterMs: answers.get(index)?.retryAfterMs };
+            } catch (error) {
+              const answered = answers.get(index);
+              if (!answered) throw error;
+              return { ...answered, thrown: error };
+            }
           },
         })),
         {
@@ -655,6 +716,8 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
 
       return settled.map((outcome, index) => {
         if (outcome.status === "rejected") return outcome as PromiseRejectedResult;
+        const thrown = outcome.value.cached ? null : (outcome.value.sent as { thrown?: unknown }).thrown;
+        if (thrown) return { status: "rejected" as const, reason: thrown };
         const payload = outcome.value.cached ? outcome.value.result : outcome.value.sent.result;
         const data = asRecord(asRecord(payload).data);
         const callControlId = str(data.call_control_id);

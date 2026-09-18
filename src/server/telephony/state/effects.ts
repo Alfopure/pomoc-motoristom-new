@@ -1278,6 +1278,43 @@ async function insertAttempt(deps: EffectsDeps, session: SessionRow, plan: Attem
   return true;
 }
 
+/** The wire action and body behind an overlappable command, apart so a run can be sent at once. */
+function overlappedAction(ctx: ExecutionContext, command: Command): { callControlId: string; action: string; commandId: string; body: Record<string, unknown> } | null {
+  if (!("commandId" in command)) return null;
+  if (command.kind === "hangup") return { callControlId: resolveLeg(ctx, command.leg), action: "hangup", commandId: command.commandId, body: {} };
+  if (command.kind === "playback_stop") return { callControlId: resolveLeg(ctx, command.leg), action: "playback_stop", commandId: command.commandId, body: { stop: "all" } };
+  if (command.kind === "gather_stop") return { callControlId: resolveLeg(ctx, command.leg), action: "gather_stop", commandId: command.commandId, body: {} };
+  return null;
+}
+
+/**
+ * A run of best-effort teardown, sent and journalled as one group.
+ *
+ * These kinds have no post-dispatch bookkeeping — that is why they may overlap
+ * at all — so the only per-member work left is the tolerance a hangup owes a
+ * leg that is already gone, which is the outcome it asked for rather than a
+ * failure.
+ */
+async function executeOverlappedRun(deps: EffectsDeps, ctx: ExecutionContext, run: readonly Command[]): Promise<Map<string, Promise<{ skipped: boolean; detail?: Record<string, unknown> }>>> {
+  const actions = run.map((command) => overlappedAction(ctx, command));
+  const results = await requireTelnyx(deps).callActionMany(actions.filter((action): action is NonNullable<typeof action> => Boolean(action)));
+  const out = new Map<string, Promise<{ skipped: boolean; detail?: Record<string, unknown> }>>();
+  for (const [index, command] of run.entries()) {
+    const outcome = results[index];
+    const reason = command.kind === "hangup" ? (command as { reason?: string }).reason : undefined;
+    if (!outcome) continue;
+    if (outcome.status === "fulfilled") {
+      out.set(commandKey(command), Promise.resolve({ skipped: false, ...(reason ? { detail: { reason } } : {}) }));
+    } else if (command.kind === "hangup" && isLegAlreadyGone(outcome.reason)) {
+      out.set(commandKey(command), Promise.resolve({ skipped: true, detail: { reason, alreadyGone: true } }));
+    } else {
+      out.set(commandKey(command), Promise.reject(outcome.reason));
+    }
+  }
+  for (const promise of out.values()) promise.catch(() => undefined);
+  return out;
+}
+
 async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, command: RingFanout): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   const { admin } = deps;
   const session = ctx.session;
@@ -1632,16 +1669,18 @@ async function executeReduceResult(
       // Contract 2 only: `prepare_v2` fences each command on its own
       // generation, so a lease lost while the run is in flight cannot let a
       // stale command through. Contract 1 has no journal to do that.
-      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition)) {
+      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition) && !overlapped.has(key)) {
+        const run: Command[] = [command];
         for (let next = index + 1; next < dispatchList.length; next += 1) {
           const sibling = dispatchList[next];
           if (!commandMayOverlap(sibling, ctx.session, transition)) break;
-          const siblingKey = commandKey(sibling);
-          if (overlapped.has(siblingKey) || input.continuation?.completedCommands.includes(siblingKey)) continue;
-          const started = executeCommand(deps, ctx, sibling);
-          // Awaited when its turn comes; this only silences an early exit.
-          started.catch(() => undefined);
-          overlapped.set(siblingKey, started);
+          if (input.continuation?.completedCommands.includes(commandKey(sibling))) continue;
+          run.push(sibling);
+        }
+        // One fence and one record for the run, not one of each per command.
+        // The teardown behind a bridge is three or four of these.
+        if (run.length > 1 && run.every((member) => overlappedAction(ctx, member))) {
+          for (const [memberKey, settled] of await executeOverlappedRun(deps, ctx, run)) overlapped.set(memberKey, settled);
         }
       }
       const executed = await (overlapped.get(key) ?? executeCommand(deps, ctx, command));
