@@ -101,6 +101,50 @@ describe("who can still hear whom after somebody leaves a three-way", () => {
     expect(h.telnyx.physical.connected(call.callControlId, party)).toBe(true);
   });
 
+  it("lets the operator finish with the added number when the caller hangs up", async () => {
+    const h = createTelephonyHarness();
+    const { call, operatorLeg } = await talking(h);
+    const party = await addParty(h, o1, call.sessionId);
+    expect(h.telnyx.physical.connected(operatorLeg, party)).toBe(true);
+
+    // The caller leaves a three-way. The operator was mid-sentence with the
+    // number they added — a tow service, a partner — and that conversation is
+    // not the caller's to end.
+    await hangup(h, call.callControlId);
+
+    expect(h.telnyx.physical.connected(operatorLeg, party)).toBe(true);
+    expect(h.telnyx.physical.legs.get(party)?.ended).toBe(false);
+    expect(h.telnyx.of("hangup").filter((entry) => entry.params.callControlId === party)).toHaveLength(0);
+  });
+
+  it("hangs the added number up once the operator leaves too", async () => {
+    const h = createTelephonyHarness();
+    const { call, operatorLeg } = await talking(h);
+    const party = await addParty(h, o1, call.sessionId);
+    await hangup(h, call.callControlId);
+
+    // The operator finishes and hangs up. Nobody is left for the added number
+    // to talk to, and a stranger holding a silent call is worse than a
+    // goodbye.
+    await hangup(h, operatorLeg);
+
+    expect(h.telnyx.of("hangup").some((entry) => entry.params.callControlId === party)).toBe(true);
+    h.telnyx.physical.ended(party);
+    await h.legEvent(party, "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(["ended", "wrap_up"]).toContain(h.session(call.sessionId).state);
+  });
+
+  it("still ends the call when the caller leaves an ordinary two-party conversation", async () => {
+    const h = createTelephonyHarness();
+    const { call, operatorLeg } = await talking(h);
+
+    await hangup(h, call.callControlId);
+
+    // Nobody is left to talk to, so nothing is kept alive.
+    expect(h.telnyx.of("hangup").some((entry) => entry.params.callControlId === operatorLeg)).toBe(true);
+    expect(h.session(call.sessionId).state).toBe("wrap_up");
+  });
+
   it("never leaves the caller held behind a departing operator", async () => {
     const h = createTelephonyHarness();
     const { call, operatorLeg } = await talking(h);
