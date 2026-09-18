@@ -18,7 +18,7 @@ export const AI_DEMO_SCENARIO_OPTIONS = [
   { value: "custom", label: "Vlastný účel (zadaj kontext)" },
 ] as const;
 
-export const AI_DEMO_CONTEXT_MAX_CHARS = 300;
+export const AI_DEMO_CONTEXT_MAX_CHARS = 1_500;
 
 /**
  * How the voices are presented.

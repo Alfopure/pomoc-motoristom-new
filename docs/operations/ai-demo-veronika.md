@@ -194,6 +194,18 @@ Prepis ide do modelu ako **údaje, nikdy ako pokyn**. Pokus o príkaz skrytý v 
 
 **`AI_DEMO_STORE_TRANSCRIPT` je jediné nastavenie v systéme, ktoré spôsobí, že sa uloží obsah rozhovoru.** Predvolene je vypnuté a nič iné ho nezapne.
 
+## Zadanie pre hovor
+
+Pole **„Zadanie pre Veroniku"** v záložke je **pokyn, nie poznámka**. Riadi sa ním presne — čo má povedať, akým tónom, v akom štýle — a prebíja zvolený účel hovoru. Vypĺňa ho admin tohto nasadenia, teda niekto, kto vie aj tak prepísať premenné, z ktorých sa prompt skladá; brániť sa pred ním ako pred cudzím vstupom nedávalo zmysel a bralo to možnosť hovor riadiť. Limit je 1 500 znakov.
+
+Tri veci zadanie prebiť nemôže, lebo nie sú o štýle, ale o človeku na druhej strane a o expozícii firmy:
+
+1. Keď sa volajúci spýta, či je to človek, **prizná, že je virtuálna asistentka**.
+2. **Nepýta si čísla platobných kariet ani rodné čísla.**
+3. **Nezaväzuje firmu** k cene, pokute ani ku garantovanému času.
+
+Ak majú padnúť aj tieto, je to zmena v `prompts.ts` a vedomé rozhodnutie, nie preklep v jednom poli.
+
 ## Bezpečnostné hranice
 
 - **Brány pred vytočením:** `AI_DEMO_ENABLED`, `destination_allowlist` organizácie, voliteľný užší zoznam `AI_DEMO_ALLOWED_RECIPIENTS` a voliteľný denný limit. Ani jednu nevie ovplyvniť telo požiadavky. Posledné dve sa dajú vypnúť (prázdna hodnota, resp. `0`) — vtedy platí to isté pravidlo ako pre bežný odchádzajúci hovor dispečera a záložka to napíše.

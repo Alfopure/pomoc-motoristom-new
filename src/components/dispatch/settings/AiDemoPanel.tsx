@@ -422,16 +422,16 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
           </SettingsField>
 
           <SettingsField
-            label="Kontext pre Veroniku (vymyslené údaje)"
-            hint={`Napríklad meno zákazníka, značka auta, kedy má vrátiť náhradné vozidlo. Najviac ${AI_DEMO_CONTEXT_MAX_CHARS} znakov.`}
+            label="Zadanie pre Veroniku"
+            hint={`Čo má povedať, ako sa má vyjadrovať, akým tónom. Riadi sa tým presne a prebije to zvolený účel. Najviac ${AI_DEMO_CONTEXT_MAX_CHARS} znakov.`}
           >
             <textarea
               value={context}
               onChange={(change) => setContext(change.target.value)}
               maxLength={AI_DEMO_CONTEXT_MAX_CHARS}
-              rows={3}
+              rows={6}
               className={`${settingsInputClass} h-auto py-2`}
-              placeholder="Pán Novák, Škoda Octavia, náhradné vozidlo Fabia"
+              placeholder="Pán Novák, Škoda Octavia, náhradné vozidlo Fabia. Hovor stručne a vecne, bez zbytočnej srdečnosti."
             />
           </SettingsField>
           {contextIssue && <SettingsNotice tone="warning">{contextIssue}</SettingsNotice>}

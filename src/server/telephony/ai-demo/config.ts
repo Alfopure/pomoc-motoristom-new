@@ -85,7 +85,8 @@ export const AI_DEMO_LIMITS = {
   cronStartedCapMs: 40_000,
   /** Correlating an OpenAI `live.transport.incoming` back to a dial we made. */
   pendingWindowMs: 60_000,
-  contextMaxChars: 300,
+  /** A brief can carry task, tone and style; three hundred characters could not. */
+  contextMaxChars: 1_500,
   historyLimit: 10,
 } as const;
 
