@@ -1528,11 +1528,29 @@ async function executeReduceResult(
   // branch below run exactly as they did when each call waited its turn.
   const overlapped = new Map<string, ReturnType<typeof executeCommand>>();
 
-  const checkpointCommand = async (key: string) => {
+  // Keys banked by an overlapping run, written once when the run ends.
+  //
+  // Each of those commands has already happened at the provider; checkpointing
+  // them one by one is N fenced compare-and-sets on one session row to record
+  // N facts that are all equally true. If the invocation dies before the
+  // write, the replay re-issues them and `prepare_v2` answers every one from
+  // its recorded outcome — zero provider calls, same results.
+  let banked = 0;
+  const rememberCommand = (key: string) => {
     if (!input.continuation) return;
     if (!input.continuation.completedCommands.includes(key)) input.continuation.completedCommands.push(key);
+    banked += 1;
+  };
+  const writeCheckpoint = async () => {
+    if (!input.continuation || banked === 0) return;
+    banked = 0;
     ctx.session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, ctx.session);
     session = ctx.session;
+  };
+  const checkpointCommand = async (key: string) => {
+    if (!input.continuation) return;
+    rememberCommand(key);
+    await writeCheckpoint();
   };
   const dispatchList = input.databaseOnly ? [] : commands;
   for (const [index, command] of dispatchList.entries()) {
@@ -1679,7 +1697,12 @@ async function executeReduceResult(
         catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "participant_observation_failed" }); }
       }
       outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: executed.skipped, bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: executed.detail });
-      await checkpointCommand(key);
+      rememberCommand(key);
+      // Mid-run the key is only banked: the run's own last member writes for
+      // all of them. Any other branch below writes immediately, and so does
+      // the end of the loop.
+      const following = index + 1 < dispatchList.length ? commandKey(dispatchList[index + 1]) : null;
+      if (!following || !overlapped.has(following)) await writeCheckpoint();
     } catch (error) {
       if (error instanceof SessionLeaseLostError) throw error;
       if (input.continuation && !providerExecuted && !TEARDOWN_KINDS.has(command.kind) && isTerminationBlocked(error)) {
@@ -1840,6 +1863,8 @@ async function executeReduceResult(
       }
     }
   }
+  // Anything still banked belongs to a run that ended with the list.
+  await writeCheckpoint();
 
   if (deferProjections && !failure) {
     try {
