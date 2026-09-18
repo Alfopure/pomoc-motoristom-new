@@ -1,7 +1,7 @@
 import { openAILiveClient, OpenAILiveError } from "@/lib/integrations/ai/openai-live";
 
 import { countToday, loadActive, migrationApplied } from "./attempts";
-import { aiDemoBudgets, aiDemoEnabled, getAiDemoConfig, AI_DEMO_LIMITS } from "./config";
+import { aiDemoBudgets, aiDemoEnabled, getAiDemoConfig, AI_DEMO_ALLOWED_VOICES, AI_DEMO_LIMITS, AI_DEMO_NATURAL_VOICES } from "./config";
 import { webSocketAvailable } from "./greeting";
 import { describeAttempt, type AiDemoDeps } from "./orchestrator";
 
@@ -81,6 +81,7 @@ export async function runAiDemoPreflight(deps: AiDemoDeps, options: { remote: bo
       ? { ...aiDemoBudgets(config), maxAttemptsPerDay: config.maxAttemptsPerDay, ringTimeoutSeconds: config.ringTimeoutSeconds, maxCallSeconds: config.maxCallSeconds }
       : null,
     model: config.configured ? { live: config.model, backend: config.backendModel, voice: config.voice, sipHost: config.sipHost } : null,
+    voices: { all: AI_DEMO_ALLOWED_VOICES, natural: AI_DEMO_NATURAL_VOICES },
     probeBudgetMs: AI_DEMO_LIMITS.probeWindowMs,
     webhookUrl: config.configured ? config.webhookUrl : null,
     remote: null as null | RemotePreflight,

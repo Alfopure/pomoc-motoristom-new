@@ -38,6 +38,7 @@ export type AiDemoAttemptView = {
   errorCode: string | null;
   targetMasked: string | null;
   fromNumber: string;
+  voice: string | null;
   latency: AiDemoLatency | null;
   timestamps: AiDemoTimestamps;
 };
@@ -62,6 +63,7 @@ export type AiDemoPreflight = {
   db: { migrationApplied: boolean; activeAttempt: AiDemoAttemptView | null; attemptsToday: number };
   limits: { maxAttemptsPerDay: number; ringTimeoutSeconds: number; maxCallSeconds: number } | null;
   model: { live: string; backend: string; voice: string; sipHost: string } | null;
+  voices: { all: string[]; natural: string[] };
   probeBudgetMs: number;
   remote: {
     models: { liveAvailable: boolean; error: string | null };
@@ -121,7 +123,7 @@ export function loadHistory(limit: number, signal?: AbortSignal) {
   });
 }
 
-export type StartAiDemoBody = { requestId: string; to: string; scenario: string; context?: string };
+export type StartAiDemoBody = { requestId: string; to: string; scenario: string; context?: string; voice?: string };
 
 export function startDemo(body: StartAiDemoBody) {
   return request<{ attempt: AiDemoAttemptView; reused: boolean }>("/api/telephony/ai-demo/start", {

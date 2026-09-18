@@ -24,6 +24,7 @@ export async function POST(request: Request) {
         to: typeof body.to === "string" ? body.to : "",
         scenario: body.scenario,
         context: body.context,
+        voice: body.voice,
       });
       return Response.json({ attempt: describeAttempt(result.attempt), reused: result.reused }, { status: result.reused ? 200 : 201 });
     },

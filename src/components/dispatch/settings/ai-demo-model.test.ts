@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AiDemoAttemptView, AiDemoPreflight } from "./ai-demo-client";
 import {
   describeGaps, describeLatency, isActive, operatorBadge, readinessMessages, startErrorMessage,
-  timelineSteps, validateContext, validateTarget,
+  timelineSteps, validateContext, validateTarget, voiceLabel, voiceOptions,
 } from "./ai-demo-model";
 
 const READY: AiDemoPreflight = {
@@ -19,7 +19,8 @@ const READY: AiDemoPreflight = {
   telnyx: { configured: true, liveCallsEnv: true, liveCallsDb: true, destinationAllowlist: ["SK"], callControlAppId: "app-1" },
   db: { migrationApplied: true, activeAttempt: null, attemptsToday: 0 },
   limits: { maxAttemptsPerDay: 3, ringTimeoutSeconds: 30, maxCallSeconds: 300 },
-  model: { live: "gpt-live-1", backend: "gpt-5.6-terra", voice: "marin", sipHost: "sip.api.openai.com" },
+  model: { live: "gpt-live-1", backend: "gpt-5.6-terra", voice: "gleam", sipHost: "sip.api.openai.com" },
+  voices: { all: ["gleam", "willow", "marin", "quartz"], natural: ["gleam", "willow"] },
   probeBudgetMs: 18_000,
   remote: null,
 };
@@ -34,6 +35,7 @@ function attempt(overrides: Partial<AiDemoAttemptView> = {}): AiDemoAttemptView 
     errorCode: null,
     targetMasked: "+421910•••882",
     fromNumber: "+421232408774",
+    voice: "gleam",
     latency: null,
     timestamps: {
       requestedAt: "2026-09-03T08:00:00.000Z",
@@ -167,5 +169,20 @@ describe("startErrorMessage", () => {
     expect(startErrorMessage("ai_demo_recipient_not_allowed", "x")).toContain("povolených príjemcov");
     // An unknown code keeps the server's own message rather than inventing one.
     expect(startErrorMessage("something_new", "Serverová hláška")).toBe("Serverová hláška");
+  });
+});
+
+describe("voiceOptions", () => {
+  it("offers the recorded voices first, because those are the human-sounding ones", () => {
+    const options = voiceOptions(READY);
+    expect(options.slice(0, 2).map((o) => o.value)).toEqual(["gleam", "willow"]);
+    expect(options.map((o) => o.value)).toContain("marin");
+  });
+
+  it("labels each voice so the choice is informed rather than a guess", () => {
+    expect(voiceLabel("gleam")).toContain("nahrávaný");
+    expect(voiceLabel("quartz")).toContain("syntetický");
+    // An unknown id still renders rather than disappearing.
+    expect(voiceLabel("brand-new-voice")).toBe("brand-new-voice");
   });
 });

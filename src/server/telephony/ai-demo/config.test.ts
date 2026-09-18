@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  AI_DEMO_NEUTRAL_LINE, aiDemoBudgets, aiDemoEnabled, aiDemoFromNumber, aiDemoWebhookUrl, buildSipUri, getAiDemoConfig, parseRecipients,
+  AI_DEMO_NATURAL_VOICES, AI_DEMO_NEUTRAL_LINE, aiDemoBudgets, aiDemoEnabled, aiDemoFromNumber, aiDemoWebhookUrl, buildSipUri, getAiDemoConfig, parseRecipients,
 } from "./config";
 
 const FULL = {
@@ -59,7 +59,10 @@ describe("getAiDemoConfig", () => {
     if (!config.configured) return;
     expect(config.model).toBe("gpt-live-1");
     expect(config.backendModel).toBe("gpt-5.6-terra");
-    expect(config.voice).toBe("marin");
+    // A voice the documentation marks as recorded rather than synthesised;
+    // `marin` is the API default and sounded synthetic on the first live call.
+    expect(config.voice).toBe("gleam");
+    expect(AI_DEMO_NATURAL_VOICES).toContain(config.voice);
     // `sip-eu` needs an EU data-residency project; both hosts are GeoIP-routed.
     expect(config.sipHost).toBe("sip.api.openai.com");
   });

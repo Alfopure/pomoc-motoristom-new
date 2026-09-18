@@ -11,13 +11,13 @@ import {
   adoptLeg, casCounter, countToday, findByRequestId, findDue, insertAttempt, loadActive, loadAttempt,
   markLegGone, patchAttempt, transitionAttempt, type AiDemoAttempt,
 } from "./attempts";
-import { AI_DEMO_LIMITS, aiDemoBudgets, aiDemoEnabled, buildSipUri, getAiDemoConfig, type AiDemoConfig, type EnvRecord } from "./config";
+import { AI_DEMO_ALLOWED_VOICES, AI_DEMO_LIMITS, aiDemoBudgets, aiDemoEnabled, buildSipUri, getAiDemoConfig, type AiDemoConfig, type EnvRecord } from "./config";
 import { runGreeting, type GreetingResult, type ProbeLimits, type WebSocketFactory } from "./greeting";
 import type { AiDemoLeg } from "./flag";
 import { aiDemoClientState, aiDemoCommandId, aiDemoCorrelationToken, maskNumber } from "./identity";
 import {
-  AI_DEMO_COMMENTARY_TRIGGER, AI_DEMO_DEFAULT_SCENARIO, buildGreetingAppend, buildStartupInstructions,
-  isAiDemoScenario, sanitizeContext, VERONIKA_BACKEND_INSTRUCTIONS, type AiDemoScenario,
+  AI_DEMO_COMMENTARY_TRIGGER, AI_DEMO_DEFAULT_SCENARIO, buildBackendInstructions, buildGreetingAppend,
+  buildStartupInstructions, isAiDemoScenario, sanitizeContext, type AiDemoScenario,
 } from "./prompts";
 
 /**
@@ -106,6 +106,8 @@ export type StartAiDemoInput = {
   to: string;
   scenario?: unknown;
   context?: unknown;
+  /** Optional per-call voice; anything outside the allowlist falls back to the configured default. */
+  voice?: unknown;
 };
 
 export type StartAiDemoResult = { attempt: AiDemoAttempt; reused: boolean };
@@ -180,6 +182,10 @@ export async function startAiDemo(deps: AiDemoDeps, input: StartAiDemoInput): Pr
 
   const scenario: AiDemoScenario = isAiDemoScenario(input.scenario) ? input.scenario : AI_DEMO_DEFAULT_SCENARIO;
   const context = sanitizeContext(input.context, AI_DEMO_LIMITS.contextMaxChars);
+  // A voice cannot change once the session starts, so it is chosen here and
+  // recorded on the attempt — which also makes the history a record of which
+  // voice was actually heard.
+  const voice = typeof input.voice === "string" && AI_DEMO_ALLOWED_VOICES.includes(input.voice) ? input.voice : config.voice;
   if (scenario === "custom" && (context === null || context.length < 10)) {
     throw new AiDemoError("Pri vlastnom účele treba doplniť kontext (aspoň 10 znakov).", 400, "ai_demo_context_required");
   }
@@ -198,7 +204,7 @@ export async function startAiDemo(deps: AiDemoDeps, input: StartAiDemoInput): Pr
     sipDialCommandId: aiDemoCommandId(attemptId, "sip", "dial"),
     requestedAt: now,
     deadlineAt: new Date(now.getTime() + budgets.attemptDeadlineSeconds * 1_000),
-    metadata: { context, voice: config.voice, backendModel: config.backendModel, sipHost: config.sipHost },
+    metadata: { context, voice, backendModel: config.backendModel, sipHost: config.sipHost },
   });
 
   if ("conflict" in inserted) {
@@ -329,6 +335,9 @@ export async function acceptSession(deps: AiDemoDeps, attempt: AiDemoAttempt, se
   const scenario: AiDemoScenario = isAiDemoScenario(attempt.scenario) ? attempt.scenario : AI_DEMO_DEFAULT_SCENARIO;
   const context = typeof (attempt.metadata as { context?: unknown })?.context === "string" ? ((attempt.metadata as { context?: string }).context ?? null) : null;
 
+  const chosenVoice = readVoice(attempt.metadata);
+  const voice = chosenVoice !== null && AI_DEMO_ALLOWED_VOICES.includes(chosenVoice) ? chosenVoice : config.voice;
+
   const client = openAILiveClient({
     apiKey: config.apiKey,
     signal: AbortSignal.timeout(AI_DEMO_LIMITS.acceptTimeoutMs),
@@ -339,10 +348,13 @@ export async function acceptSession(deps: AiDemoDeps, attempt: AiDemoAttempt, se
     const result = await client.accept({
       sessionId,
       model: config.model,
-      voice: config.voice,
+      voice,
       instructions: buildStartupInstructions(scenario, context),
       backendModel: config.backendModel,
-      backendInstructions: VERONIKA_BACKEND_INSTRUCTIONS,
+      // The procedure lives here, not in the voice prompt: the guide is explicit
+      // that long business procedures belong to the backend, and a voice model
+      // reading a numbered list sounds like one.
+      backendInstructions: buildBackendInstructions(scenario, context),
       tuning: {
         // The backend is only asked to reason when the voice model delegates.
         // On a phone call, thinking time is silence, so it is turned off and
@@ -651,6 +663,12 @@ export function cleanupVerdict(attempt: AiDemoAttempt, now: number): Verdict | n
   }
 }
 
+/** The voice actually used, from the attempt rather than from today's configuration. */
+function readVoice(metadata: unknown): string | null {
+  const value = (metadata as { voice?: unknown } | null)?.voice;
+  return typeof value === "string" ? value : null;
+}
+
 /** What the timeline and the history show; never the full target number. */
 export function describeAttempt(attempt: AiDemoAttempt) {
   const metadata = attempt.metadata as { latency?: Record<string, unknown> } | null;
@@ -663,6 +681,7 @@ export function describeAttempt(attempt: AiDemoAttempt) {
     errorCode: attempt.error_code,
     targetMasked: maskNumber(attempt.target_number),
     fromNumber: attempt.from_number,
+    voice: readVoice(attempt.metadata),
     latency: metadata?.latency ?? null,
     timestamps: {
       requestedAt: attempt.requested_at,

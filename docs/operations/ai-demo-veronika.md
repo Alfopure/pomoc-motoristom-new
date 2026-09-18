@@ -118,6 +118,24 @@ Jediné, čo počuje volaný: ako dlho po zdvihnutí Veronika prehovorí. Meraj�
 
 Sideband sa po úvodných sekundách zatvára. Odozvu v druhej polovici hovoru preto treba posúdiť uchom a stopkami — dlhší odposluch by znamenal proces bežiaci celý hovor, čo toto nasadenie nedovoľuje.
 
+## Ako znie — a čo sa s tým dá robiť
+
+Prvý živý hovor (17. 9. 2026) potvrdil latenciu: **prvé slovo 2,2 s po zdvihnutí, odozva 1,1 s**. Hlas však znel robotizovane. API nemá parameter na rýchlosť ani štýl reči — jediné dve páky sú **hlas** a **prompt**.
+
+**Hlas.** Dokumentácia označuje pri každom hlase zdroj: *Natural* (nahrávaný človek) alebo *Generated* (syntetizovaný). Predvolený `marin` v tej tabuľke nie je, takže jeho zdroj je nezdokumentovaný. Predvolený hlas dema je preto `gleam` — ženský, nahrávaný. V záložke „AI" sa dá hlas prepnúť pre jednotlivý hovor (nahrávané sú v zozname prvé), takže sa dajú porovnať bez redeploy. Hlas sa počas hovoru už zmeniť nedá; ukladá sa k pokusu, takže história hovorí, ktorý hlas bol naozaj počuť.
+
+**Prompt.** Prvá verzia porušovala dve výslovné odporúčania z prompting guide:
+
+| Odporúčanie | Čo bolo zle | Ako je to teraz |
+|---|---|---|
+| „Only add a rule if you need to change a specific behavior." | ~5 500 znakov pravidiel. Model pravidlá *predvádzal*. | Hlasový prompt má ~1 500 znakov. |
+| „Keep long business procedures in the backend prompt." | Číslovaný postup bol v hlasovom prompte. | Postup je v `delegation.responses.instructions`; hlasový prompt vie iba **prečo** volá. |
+| „Use moderate backchannels… do not add a blanket 'never speak while the user is speaking' rule." | Prompt hovoril „po otázke prestaň hovoriť a počúvaj" — potláčalo to prirodzené „hm". | Prikyvovacie zvuky sú výslovne povolené; prerušenie je formulované ako v šablóne. |
+| — | „Krátko: jedna až dve vety" + „žiadne dlhé úvody" robili reč sekanou. | „Vrelo a prirodzene, nezhonným tempom", vety raz kratšie, raz dlhšie. |
+| — | Pozdrav znel „povedz presne toto a nič viac" — návod na čítanie textu. | „Povedz to prirodzene a vrelo, nie ako čítaný text." |
+
+Ponechané zostali pravidlá, ktoré samy osebe slúžia prirodzenosti — napríklad že časy sa hovoria „o pol tretej", nie „14:30".
+
 ## Bezpečnostné hranice
 
 - **Štyri nezávislé brány** pred vytočením: `AI_DEMO_ENABLED`, `destination_allowlist` organizácie, `AI_DEMO_ALLOWED_RECIPIENTS` (server, povinné) a denný limit. Ani jednu nevie ovplyvniť telo požiadavky.

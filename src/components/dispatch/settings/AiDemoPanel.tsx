@@ -14,6 +14,7 @@ import {
 import {
   AI_DEMO_CONTEXT_MAX_CHARS, AI_DEMO_SCENARIO_OPTIONS, describeGaps, describeLatency, isActive, operatorBadge,
   readinessMessages, scenarioLabel, startErrorMessage, stateLabel, timelineSteps, validateContext, validateTarget,
+  voiceLabel, voiceOptions,
 } from "./ai-demo-model";
 import { SettingsField, SettingsNotice, SettingsSectionHeader, settingsInputClass } from "./settings-ui";
 
@@ -49,6 +50,7 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
   const [target, setTarget] = useState("");
   const [scenario, setScenario] = useState<string>(AI_DEMO_SCENARIO_OPTIONS[0].value);
   const [context, setContext] = useState("");
+  const [voice, setVoice] = useState<string>("");
   const [confirmed, setConfirmed] = useState(false);
 
   const failures = useRef(0);
@@ -172,6 +174,7 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
         to: targetCheck.e164,
         scenario,
         ...(context.trim().length > 0 ? { context: context.trim() } : {}),
+        ...(voice ? { voice } : {}),
       });
       setAttempt(result.attempt);
       setConfirmed(false);
@@ -283,6 +286,7 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
               <h3 className="text-sm font-semibold text-zinc-950">Priebeh hovoru</h3>
               <p className="mt-1 text-xs text-zinc-500">
                 {scenarioLabel(attempt.scenario)} · {attempt.targetMasked ?? "—"}
+                {attempt.voice && <> · hlas {attempt.voice}</>}
               </p>
               <ol className="mt-3 grid gap-1" role="status">
                 {timelineSteps(attempt).map((step) => {
@@ -357,6 +361,17 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
             </select>
           </SettingsField>
 
+          <SettingsField label="Hlas" hint="Nahrávané hlasy znejú ľudskejšie ako syntetické. Hlas sa počas hovoru už nedá zmeniť.">
+            <select value={voice} onChange={(change) => setVoice(change.target.value)} className={settingsInputClass}>
+              <option value="">Predvolený ({preflight.model ? voiceLabel(preflight.model.voice) : "—"})</option>
+              {voiceOptions(preflight).map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </SettingsField>
+
           <SettingsField
             label="Kontext pre Veroniku (vymyslené údaje)"
             hint={`Napríklad meno zákazníka, značka auta, kedy má vrátiť náhradné vozidlo. Najviac ${AI_DEMO_CONTEXT_MAX_CHARS} znakov.`}
@@ -401,6 +416,7 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
                 </div>
                 <div className="text-xs text-zinc-600">
                   {row.targetMasked ?? "—"} · {scenarioLabel(row.scenario)}
+                  {row.voice && <> · hlas {row.voice}</>}
                 </div>
                 <div className="font-mono text-xs text-zinc-500">
                   {row.errorCode ?? row.endReason ?? "—"}

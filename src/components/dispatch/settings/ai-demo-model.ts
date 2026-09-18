@@ -20,6 +20,45 @@ export const AI_DEMO_SCENARIO_OPTIONS = [
 
 export const AI_DEMO_CONTEXT_MAX_CHARS = 300;
 
+/**
+ * How the voices are presented.
+ *
+ * The API exposes no speed or style parameter, so the only levers on how human
+ * she sounds are the prompt and this list. The documented table marks each
+ * voice as recorded ("Natural") or synthesised ("Generated"), and the regional
+ * note describes speaking *style*, not accent — none of the voices is Slovak.
+ */
+const VOICE_LABELS: Record<string, string> = {
+  gleam: "Gleam — ženský, nahrávaný (predvolený)",
+  willow: "Willow — ženský, nahrávaný",
+  bossa: "Bossa — ženský, nahrávaný",
+  meridian: "Meridian — mužský, nahrávaný",
+  vesper: "Vesper — mužský, nahrávaný",
+  stone: "Stone — mužský, nahrávaný",
+  ripple: "Ripple — mužský, nahrávaný",
+  tempo: "Tempo — mužský, nahrávaný",
+  marin: "Marin — predvolený hlas OpenAI",
+  cedar: "Cedar",
+  sage: "Sage",
+  quartz: "Quartz — ženský, syntetický",
+  delta: "Delta — ženský, syntetický",
+  beacon: "Beacon — mužský, syntetický",
+  cinder: "Cinder — mužský, syntetický",
+};
+
+export function voiceLabel(voice: string): string {
+  return VOICE_LABELS[voice] ?? voice;
+}
+
+/** Recorded voices first: they are the ones that do not sound like a machine. */
+export function voiceOptions(preflight: AiDemoPreflight): Array<{ value: string; label: string }> {
+  const all = preflight.voices?.all ?? [];
+  const natural = new Set(preflight.voices?.natural ?? []);
+  const known = all.filter((voice) => voice in VOICE_LABELS);
+  return [...known.filter((v) => natural.has(v)), ...known.filter((v) => !natural.has(v))]
+    .map((value) => ({ value, label: voiceLabel(value) }));
+}
+
 export type TimelineStep = { key: string; label: string; at: string | null; done: boolean; current: boolean };
 
 const STEP_ORDER: Array<{ key: keyof AiDemoAttemptView["timestamps"]; label: string; states: string[] }> = [

@@ -78,16 +78,34 @@ export const AI_DEMO_STRICT_TO = false;
 
 export const AI_DEMO_DEFAULT_MODEL = "gpt-live-1";
 export const AI_DEMO_DEFAULT_BACKEND_MODEL = "gpt-5.6-terra";
-export const AI_DEMO_DEFAULT_VOICE = "marin";
+export const AI_DEMO_DEFAULT_VOICE = "gleam";
 export const AI_DEMO_DEFAULT_SIP_HOST = "sip.api.openai.com";
 
 export const AI_DEMO_ALLOWED_MODELS: readonly string[] = ["gpt-live-1"];
 export const AI_DEMO_ALLOWED_BACKEND_MODELS: readonly string[] = ["gpt-5.6-terra", "gpt-5.6-luna"];
-/** GPT-Live built-in voices (`SessionAcceptParams`); a custom voice id is not accepted here. */
+/**
+ * GPT-Live built-in voices; a custom voice id is not accepted here.
+ *
+ * The documented table marks each voice's source as **Natural** (recorded from
+ * a person) or **Generated** (synthesised). A recorded voice is what carries
+ * breath and the small imperfections that stop a caller hearing a machine, so
+ * the default is a natural one. Regional influence describes speaking *style*,
+ * not accent fidelity — which is what matters here, because none of the voices
+ * is Slovak.
+ *
+ * Natural, feminine:  gleam (North American), willow (Irish), bossa (Brazilian PT)
+ * Natural, masculine: meridian, vesper, stone, ripple, tempo
+ * Generated:          quartz, beacon, delta, cinder
+ * Base voices:        marin (API default), cedar, sage — source undocumented
+ */
 export const AI_DEMO_ALLOWED_VOICES: readonly string[] = [
-  "marin", "cedar", "sage", "alloy", "ash", "ballad", "beacon", "bossa", "cinder", "coral",
-  "delta", "echo", "gleam", "meridian", "quartz", "ripple", "shimmer", "stone", "tempo", "verse", "vesper", "willow",
+  "gleam", "willow", "bossa", "meridian", "vesper", "stone", "ripple", "tempo",
+  "quartz", "beacon", "delta", "cinder",
+  "marin", "cedar", "sage", "alloy", "ash", "ballad", "coral", "echo", "shimmer", "verse",
 ];
+
+/** Voices the documentation lists as recorded rather than synthesised. */
+export const AI_DEMO_NATURAL_VOICES: readonly string[] = ["gleam", "willow", "bossa", "meridian", "vesper", "stone", "ripple", "tempo"];
 /**
  * `sip-eu` needs an EU data-residency project; on an ordinary project it does
  * not resolve. Both hosts are GeoIP-routed, so the plain host already lands in
