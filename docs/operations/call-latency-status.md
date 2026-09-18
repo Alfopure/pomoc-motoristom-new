@@ -183,6 +183,26 @@ rather than the saved one.
 so a deployment that runs ahead of its migration keeps the behaviour it had
 instead of silently ceasing to escalate.
 
+### 18 Sep: Vercel stopped deploying
+
+From 10:12 UTC no deployment of any kind reached either project — production,
+preview, both repositories, nothing. The `dev` → `main` merge that carries the
+escalation setting (`3099013`) has no check run against it at all: the push was
+never picked up, rather than picked up and failed.
+
+78 deployments are recorded against this repository for the day, and two
+projects build on every push, so the real figure is roughly double. A daily
+deployment cap fits the evidence — a clean stop after a busy day, with nothing
+queued and nothing failing — but it cannot be confirmed from here, since this
+sandbox has no Vercel credentials.
+
+Production therefore serves `e686722`. The escalation setting is merged and
+undeployed, and the migration that goes with it **is** applied. That
+combination is safe on purpose: the deployed build neither reads nor writes
+`queue_escalate_after_seconds`, so the queue keeps escalating after the
+built-in two minutes and the column sits at its default. There is no state
+where the database and the code disagree.
+
 ## Known gaps that are not in the plan
 
 Found during testing on 17 Sep; none of them is a latency problem and the plan
