@@ -1,3 +1,4 @@
+import { sessionOwnership } from "@/server/telephony/ownership";
 import type { FakeDatabase, FakeRow } from "./fake-supabase";
 
 /** Workflow adapter; locking and transaction boundaries are tested in PostgreSQL. */
@@ -83,12 +84,39 @@ export function registerContractTwoRpcs(db: FakeDatabase): void {
  * does. Registering the leases without these leaves every command failing on a
  * missing function.
  */
+/**
+ * `motorist_telephony_fence`, as the double can see it.
+ *
+ * In production the fence compares request headers against the session row.
+ * Those headers are written from the ambient owner in
+ * `telephonyDatabaseFetch`, and the double never goes through HTTP — so the
+ * ambient owner *is* the header content, and comparing it is the same
+ * comparison the database makes.
+ *
+ * Without this the double let an old owner keep working after a takeover, and
+ * the only thing refusing them was the lease renew. Every guarantee resting on
+ * the fence was therefore untestable, and a renew that is pure duplication
+ * could not be removed because nothing else could be shown to refuse.
+ */
+export function fenceSession(db: FakeDatabase, sessionId: unknown): void {
+  const row = db.storage("motorist_call_sessions").find((entry) => entry.id === sessionId);
+  if (!row || Number(row.writer_contract ?? 1) !== 2) return;
+  const owner = sessionOwnership.getStore();
+  const live = row.lease_token && row.lease_until && Date.parse(String(row.lease_until)) > db.now().getTime();
+  const held = Boolean(owner) && owner!.sessionId === row.id && owner!.token === row.lease_token &&
+    Number(owner!.generation) === Number(row.lease_generation ?? 0);
+  if (!live || !held) {
+    throw { code: "PT409", message: "telephony ownership lease or writer contract rejected", details: null, hint: null };
+  }
+}
+
 export function registerProviderJournalRpcs(db: FakeDatabase): void {
   const session = (id: unknown) => db.storage("motorist_call_sessions").find((row) => row.id === id);
   // `20260929200000:227-230`: once a termination is committed the journal
   // refuses every new provider command except teardown.
   const TEARDOWN = /\/(hangup|record_stop|leave|stop)$/;
   db.registerRpc("motorist_provider_command_prepare_v2", (args) => {
+    fenceSession(db, args.p_session_id);
     const row = session(args.p_session_id);
     if (!row) throw Object.assign(new Error("session not found"), { code: "PT409" });
     const terminal = Boolean(row.termination_requested_at) || Boolean(row.ended_at) || ["ended", "failed"].includes(String(row.state));

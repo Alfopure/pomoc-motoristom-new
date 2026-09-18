@@ -18,6 +18,11 @@ function owned(h: TelephonyHarness, sessionId: string): Ownership {
   const row = h.db.storage("motorist_call_sessions").find(row => row.id === sessionId)!;
   row.writer_contract = 2;
   row.termination_requested_at = h.now().toISOString();
+  // The fence compares the owner against this row, so an owner that does not
+  // hold it is not an owner at all.
+  row.lease_token = "termination-owner";
+  row.lease_generation = 1;
+  row.lease_until = new Date(h.now().getTime() + 30_000).toISOString();
   return { admin: h.admin, organizationId: h.deps.organizationId, sessionId,
     token: "termination-owner", generation: 1, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
 }

@@ -14,7 +14,7 @@ generation leases and the fenced provider journal).
 
 | action | before 17 Sep | after 17 Sep | true cost |
 | --- | --- | --- | --- |
-| inbound answer | 64 | 45 | **61** |
+| inbound answer | 64 | 45 | **55** |
 | hold | 40 | 35 | **44** |
 | unhold | 36 | 33 | **36** |
 | blind transfer | 47 | 41 | **50** |
@@ -248,7 +248,7 @@ No single item dominates any more, which is itself the finding: the easy
 deduplications are spent. The two largest are the journal (12, two per voice
 command) and the leases (6, one per command).
 
-**Two things were tried and are not here.**
+**One of the two is now here.**
 
 The journal batches only if `prepare`/`result` move out of the HTTP client,
 which is where they live today — every command journals itself inside
@@ -256,16 +256,23 @@ which is where they live today — every command journals itself inside
 which is E2.3 and an architectural change, not a tidy-up. Half-doing it would
 be worse than not starting.
 
-The six lease renewals look like pure duplication — `prepare_v2` fences on its
-own, so the renew is about keeping the lease alive rather than guarding the
-write — and throttling them to one per five seconds does cut them. But
-`provider-journal.test.ts` refuses it: it holds the guarantee that after a
-takeover the old owner's *next* command is refused, and today that refusal
-comes from the renew. In production the database fence would still catch it on
-the header check; the harness does not model that fence, so the replacement
-guarantee cannot be verified here. That is the same assumption that made the
-pre-18-Sep measurements wrong, so the renewals stay until the fence is
-reproducible in a test.
+The six lease renewals were pure duplication, and removing them was blocked on
+exactly the assumption that made the earlier measurements wrong: `prepare_v2`
+fences on its own, so the renew keeps the lease alive rather than guarding the
+write — but nothing in the harness could show the fence refusing anybody,
+because neither provider double modelled it.
+
+Both do now. `fenceSession` compares the ambient owner against the session row
+the way `motorist_telephony_fence` compares the request headers against it —
+and the headers are written from that same owner, so it is the same comparison.
+Five tests were passing on a false premise (hand-built owners that held no
+lease) and were corrected to hold a real one.
+
+With the fence reproducible, the renew is throttled to one per five seconds
+against a fifteen-second TTL. An answer costs **55** requests instead of 61 and
+a whole inbound call 159 instead of 168; a stale owner is refused by the fence,
+which three new tests assert directly — taken lease, expired lease, and the new
+owner going through.
 
 ## Known gaps that are not in the plan
 

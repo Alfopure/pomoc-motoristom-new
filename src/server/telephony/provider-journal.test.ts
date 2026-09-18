@@ -20,6 +20,14 @@ function harness() {
     if (name === "motorist_session_lease_renew_v2") return { data: args.p_generation === generation, error: null };
     const id = String(args.p_command_id);
     if (name === "motorist_provider_command_prepare_v2") {
+      // `motorist_telephony_fence` runs first in the real function, and it is
+      // what refuses an owner whose generation has moved on. Modelling it here
+      // is what makes "the old owner's next command is fenced" a claim about
+      // the fence rather than about the lease renew that happened to precede
+      // it.
+      if (sessionOwnership.getStore()?.generation !== generation) {
+        return { data: null, error: { message: "telephony ownership lease or writer contract rejected", code: "PT409" } };
+      }
       const prior = journal.get(id);
       if (prior) {
         if (prior.fingerprint !== args.p_fingerprint) return { data: null, error: { message: "payload identity conflict", code: "PT409" } };
