@@ -14,7 +14,7 @@ generation leases and the fenced provider journal).
 
 | action | before 17 Sep | after 17 Sep | true cost |
 | --- | --- | --- | --- |
-| inbound answer | 64 | 45 | **55** |
+| inbound answer | 64 | 45 | **51** |
 | hold | 40 | 35 | **44** |
 | unhold | 36 | 33 | **36** |
 | blind transfer | 47 | 41 | **50** |
@@ -250,11 +250,38 @@ command) and the leases (6, one per command).
 
 **One of the two is now here.**
 
-The journal batches only if `prepare`/`result` move out of the HTTP client,
-which is where they live today — every command journals itself inside
-`request()`. Batching a group means hoisting that out for grouped commands,
-which is E2.3 and an architectural change, not a tidy-up. Half-doing it would
-be worse than not starting.
+The journal now batches for a ring step (E2.3, first half).
+`prepare_batch_v2` and `result_batch_v2` are the same functions over an array:
+one fence, one lock, one statement per command, a decision back per command.
+`dispatchJournaledBatch` carries the single-command branches member by member,
+`client.dialMany` sends a whole step, and `executeRingFanout` plans every
+member, sends the group and settles each.
+
+A three-operator step costs two round trips of journal instead of six — the
+saving is two per operator beyond the first, so it grows with the group. A
+whole inbound call: 159 requests to **155**.
+
+Two properties were kept deliberately. The verdict stays **per member**, or one
+bad number would take a ring step down with it. And the members are fenced
+*together before any of them is sent*, so a termination committed meanwhile
+stops the whole step rather than the part that had not gone out yet.
+
+The teardown run behind a bridge went the same way: `callActionMany` sends a
+stop and the losing legs' hangups as one group. Those kinds have no
+post-dispatch bookkeeping — that is why they may overlap at all — so the only
+per-member work left is the tolerance a hangup owes a leg that is already gone.
+
+An answer costs **51** requests, down from 64 before any of this and 55 before
+the batching. Its journal is 8 round trips instead of 12; a whole inbound call
+is 155 instead of 168.
+
+Two defects surfaced while wiring it, both caught by tests before they shipped.
+The double gave the same command two fingerprints — one sent alone, another
+sent in a group — because it left `commandId` inside the payload where the real
+client sends it alongside; a replay would have seen a payload identity conflict
+where there is none. And the first batch treated a provider's 4xx as though
+nothing had come back, when a refusal is evidence and has to be recorded or the
+replay tries the same doomed command again.
 
 The six lease renewals were pure duplication, and removing them was blocked on
 exactly the assumption that made the earlier measurements wrong: `prepare_v2`

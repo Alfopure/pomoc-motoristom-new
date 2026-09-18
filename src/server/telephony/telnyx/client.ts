@@ -1,7 +1,7 @@
 import "server-only";
 import { measureRequestStep } from "@/server/request-metrics";
 import { sessionOwnership } from "../ownership";
-import { dispatchJournaled, journalRequest } from "../provider-journal";
+import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../provider-journal";
 
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 
@@ -308,6 +308,10 @@ export type TelnyxClient = {
   readonly config: TelnyxConfigured;
   readonly liveGate: TelnyxLiveGate;
   dial(params: DialParams): Promise<DialResult>;
+  /** A ring step under one journal; the answer is per member. */
+  dialMany(list: readonly DialParams[]): Promise<Array<PromiseSettledResult<DialResult>>>;
+  /** A run of call actions under one journal; the answer is per member. */
+  callActionMany(list: readonly { callControlId: string; action: string; commandId: string; body: Record<string, unknown> }[]): Promise<Array<PromiseSettledResult<void>>>;
   answer(params: AnswerParams): Promise<void>;
   hangup(params: HangupParams): Promise<void>;
   bridge(params: BridgeParams): Promise<void>;
@@ -344,6 +348,10 @@ export type RequestOptions = {
   commandId?: string;
   /** Extra request headers (messaging uses it for `Idempotency-Key`). */
   headers?: Record<string, string | undefined>;
+  /** The caller has journalled this command itself, as a member of a batch. */
+  skipJournal?: boolean;
+  /** What the provider answered, handed back before any error is thrown. */
+  observe?: (sent: { status: number; result: unknown; retryAfterMs?: number }) => void;
 };
 
 // --- helpers ---------------------------------------------------------------
@@ -479,14 +487,18 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const started = now();
     const owner = sessionOwnership.getStore();
     const deadline = Math.min(started + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS), owner?.deadline ?? Infinity);
-    const journal = journalRequest(method, path, commandId, body);
+    const journal = requestOptions.skipJournal ? null : journalRequest(method, path, commandId, body);
     const dispatch = async () => {
       const journaled = await dispatchJournaled(
         journal,
         async () => {
           const result = await measureRequestStep("provider", () => attempt(method, url.toString(), body, commandId, requestOptions.headers, deadline));
-          return { status: result.response.status, result: result.parsed, raw: result,
+          const sent = { status: result.response.status, result: result.parsed, raw: result,
             retryAfterMs: result.response.status === 429 ? parseRetryAfterMs(result.response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS : undefined };
+          // A batch member records its own answer, and records it whether the
+          // status was a success or a refusal.
+          requestOptions.observe?.({ status: sent.status, result: sent.result, retryAfterMs: sent.retryAfterMs });
+          return sent;
         },
         {
           error: (status, result) => errorFromBody(status, result, commandId),
@@ -541,6 +553,43 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     return parsed as T;
   }
 
+  /**
+   * Exactly the body `dial` sends, built apart from it so a batch can
+   * fingerprint the same bytes the single call would.
+   *
+   * `park_after_unbridge` is deliberately absent. The endpoint documents it,
+   * but only together with `link_to`; without it the whole request is refused
+   * with code 10000. The operator leg is dialled before any leg exists to link
+   * to, so the parameter can never apply here — bridge and transfer carry it.
+   */
+  function dialBody(params: DialParams): Record<string, unknown> {
+    assertCallsAllowed();
+    const connectionId = params.connectionId ?? configured.callControlAppId;
+    if (!connectionId) {
+      throw new TelnyxCommandError({ code: "missing_connection_id", status: 400, detail: "TELNYX_CALL_CONTROL_APP_ID is not set", commandId: params.commandId });
+    }
+    return compact({
+      to: params.to,
+      from: params.from,
+      connection_id: connectionId,
+      client_state: params.clientState,
+      link_to: params.linkTo,
+      timeout_secs: params.timeoutSecs,
+      time_limit_secs: params.timeLimitSecs,
+      from_display_name: params.fromDisplayName,
+      sip_region: params.sipRegion,
+      media_encryption: params.mediaEncryption,
+      bridge_intent: params.bridgeIntent,
+      bridge_on_answer: params.bridgeOnAnswer,
+      prevent_double_bridge: params.preventDoubleBridge,
+      custom_headers: headers(params.customHeaders),
+      supervise_call_control_id: params.superviseCallControlId,
+      supervisor_role: params.supervisorRole,
+      webhook_url: params.webhookUrl,
+      ...(params.extra ?? {}),
+    });
+  }
+
   async function callAction(callControlId: string, action: string, commandId: string, body: Record<string, unknown>): Promise<void> {
     if (!callControlId) throw new TelnyxCommandError({ code: "invalid_call_control_id", status: 400, detail: `${action}: callControlId is required`, commandId });
     await request<unknown>("POST", `/calls/${encodeURIComponent(callControlId)}/actions/${action}`, { body: compact(body), commandId });
@@ -566,39 +615,123 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     liveGate,
     request,
 
-    async dial(params) {
-      assertCallsAllowed();
-      const connectionId = params.connectionId ?? configured.callControlAppId;
-      if (!connectionId) {
-        throw new TelnyxCommandError({ code: "missing_connection_id", status: 400, detail: "TELNYX_CALL_CONTROL_APP_ID is not set", commandId: params.commandId });
+    /**
+     * A whole ring step, under one journal.
+     *
+     * The members are fenced together, sent together and recorded together:
+     * two database round trips for the group instead of two for each of them.
+     * Outside a contract-2 scope there is no journal to batch, so it falls back
+     * to the ordinary calls — still in parallel, just paying per command.
+     *
+     * The answer is per member. One operator's refusal is that operator's.
+     */
+    /**
+     * A run of call actions under one journal.
+     *
+     * The teardown behind a bridge is three or four of these — the losing legs
+     * hung up, the waiting audio stopped — and each paid its own fence and its
+     * own record. They have no post-dispatch bookkeeping, which is why they may
+     * overlap at all, and it is also why they batch cleanly.
+     */
+    async callActionMany(list) {
+      if (!list.length) return [];
+      const owner = sessionOwnership.getStore();
+      const paths = list.map((item) => `/calls/${encodeURIComponent(item.callControlId)}/actions/${item.action}`);
+      const bodies = list.map((item) => compact(item.body));
+      const journals = list.map((item, index) =>
+        journalRequest("POST", paths[index], item.commandId ?? null,
+          JSON.stringify(compact({ ...bodies[index], command_id: item.commandId ?? undefined }))));
+
+      if (!owner || owner.contract !== 2 || journals.some((journal) => !journal)) {
+        return Promise.allSettled(list.map((item, index) =>
+          request<unknown>("POST", paths[index], { body: bodies[index], commandId: item.commandId }).then(() => undefined)));
       }
-      // `park_after_unbridge` deliberately absent. The endpoint does document it,
-      // but only together with `link_to`; without it the whole request is refused
-      // with code 10000. The operator leg is dialled before any leg exists to link
-      // to, so the parameter can never apply here — bridge and transfer carry it.
-      const response = await request<unknown>("POST", "/calls", {
-        commandId: params.commandId,
-        body: compact({
-          to: params.to,
-          from: params.from,
-          connection_id: connectionId,
-          client_state: params.clientState,
-          link_to: params.linkTo,
-          timeout_secs: params.timeoutSecs,
-          time_limit_secs: params.timeLimitSecs,
-          from_display_name: params.fromDisplayName,
-          sip_region: params.sipRegion,
-          media_encryption: params.mediaEncryption,
-          bridge_intent: params.bridgeIntent,
-          bridge_on_answer: params.bridgeOnAnswer,
-          prevent_double_bridge: params.preventDoubleBridge,
-          custom_headers: headers(params.customHeaders),
-          supervise_call_control_id: params.superviseCallControlId,
-          supervisor_role: params.supervisorRole,
-          webhook_url: params.webhookUrl,
-          ...(params.extra ?? {}),
-        }),
+
+      const answers = new Map<number, { status: number; result: unknown; retryAfterMs?: number }>();
+      const settled = await dispatchJournaledBatch(
+        list.map((item, index) => ({
+          journal: journals[index]!,
+          send: async () => {
+            try {
+              const parsed = await request<unknown>("POST", paths[index], {
+                body: bodies[index], commandId: item.commandId, skipJournal: true,
+                observe: (sent) => answers.set(index, sent),
+              });
+              return { status: answers.get(index)?.status ?? 200, result: parsed, retryAfterMs: answers.get(index)?.retryAfterMs };
+            } catch (error) {
+              // A provider that answered 4xx has answered: that refusal is
+              // evidence and has to be recorded, or a replay tries the same
+              // doomed command again. Only a transport failure leaves nothing.
+              const answered = answers.get(index);
+              if (!answered) throw error;
+              return { ...answered, thrown: error };
+            }
+          },
+        })),
+        { error: (status, result, commandId) => errorFromBody(status, result, commandId) },
+      );
+      return settled.map((outcome) => {
+        if (outcome.status === "rejected") return outcome as PromiseRejectedResult;
+        const thrown = outcome.value.cached ? null : (outcome.value.sent as { thrown?: unknown }).thrown;
+        if (thrown) return { status: "rejected" as const, reason: thrown };
+        return { status: "fulfilled" as const, value: undefined };
       });
+    },
+
+    async dialMany(list) {
+      if (!list.length) return [];
+      const owner = sessionOwnership.getStore();
+      const bodies = list.map((params) => dialBody(params));
+      const journals = list.map((params, index) =>
+        journalRequest("POST", "/calls", params.commandId ?? null,
+          JSON.stringify(compact({ ...bodies[index], command_id: params.commandId ?? undefined }))));
+
+      if (!owner || owner.contract !== 2 || journals.some((journal) => !journal)) {
+        return Promise.allSettled(list.map((params) => client.dial(params)));
+      }
+
+      const answers = new Map<number, { status: number; result: unknown; retryAfterMs?: number }>();
+      const settled = await dispatchJournaledBatch(
+        list.map((params, index) => ({
+          journal: journals[index]!,
+          send: async () => {
+            try {
+              const parsed = await request<unknown>("POST", "/calls", {
+                commandId: params.commandId, body: bodies[index], skipJournal: true,
+                observe: (sent) => answers.set(index, sent),
+              });
+              return { status: answers.get(index)?.status ?? 200, result: parsed, retryAfterMs: answers.get(index)?.retryAfterMs };
+            } catch (error) {
+              const answered = answers.get(index);
+              if (!answered) throw error;
+              return { ...answered, thrown: error };
+            }
+          },
+        })),
+        {
+          error: (status, result, commandId) => errorFromBody(status, result, commandId),
+          invalid: (sent) => sent.status < 400 && !str(asRecord(asRecord(sent.result).data).call_control_id),
+        },
+      );
+
+      return settled.map((outcome, index) => {
+        if (outcome.status === "rejected") return outcome as PromiseRejectedResult;
+        const thrown = outcome.value.cached ? null : (outcome.value.sent as { thrown?: unknown }).thrown;
+        if (thrown) return { status: "rejected" as const, reason: thrown };
+        const payload = outcome.value.cached ? outcome.value.result : outcome.value.sent.result;
+        const data = asRecord(asRecord(payload).data);
+        const callControlId = str(data.call_control_id);
+        if (!callControlId) {
+          return { status: "rejected" as const, reason: new TelnyxCommandError({ code: "invalid_response", status: 502, detail: "dial response has no call_control_id", commandId: list[index].commandId }) };
+        }
+        return { status: "fulfilled" as const, value: {
+          callControlId, callLegId: str(data.call_leg_id), callSessionId: str(data.call_session_id), isAlive: data.is_alive === true,
+        } };
+      });
+    },
+
+    async dial(params) {
+      const response = await request<unknown>("POST", "/calls", { commandId: params.commandId, body: dialBody(params) });
       const data = asRecord(asRecord(response).data);
       const callControlId = str(data.call_control_id);
       if (!callControlId) {

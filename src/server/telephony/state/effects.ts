@@ -17,7 +17,7 @@ import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
-import { isCallGoneError, TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
+import { isCallGoneError, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
 import { pendingAudioStillOwned, recordingCommandOutcome, recordingIntent } from "./recording";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
@@ -1122,7 +1122,7 @@ async function claimOperatorForDial(deps: EffectsDeps, ctx: ExecutionContext, co
   return true;
 }
 
-async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, options?: { authorized?: boolean }): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
+async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, options?: { authorized?: boolean; planOnly?: boolean }): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   await assertOwnership();
   const telnyx = requireTelnyx(deps);
   const adopted = ctx.dialResults.get(command.commandId);
@@ -1165,8 +1165,15 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     // instead; see `executeRingFanout`.
     if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
+  if (options?.planOnly) return { skipped: false, detail: { planned: true, stable } };
+  const result = await telnyx.dial(dialParams(command));
+  return settleDial(deps, ctx, command, result, stable);
+}
+
+/** Exactly what `dial` is called with, apart so a whole ring step can be sent at once. */
+function dialParams(command: DialCommand): DialParams {
   const isSip = command.to.startsWith("sip:");
-  const result = await telnyx.dial({
+  return {
     commandId: command.commandId,
     to: command.to,
     from: command.from,
@@ -1185,7 +1192,11 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     // never touched. `supervisor_role` is only meaningful together with it.
     superviseCallControlId: command.superviseCallControlId,
     supervisorRole: command.superviseCallControlId ? command.supervisorRole : undefined,
-  });
+  };
+}
+
+/** The bookkeeping behind one dial, whether it was sent alone or as part of a step. */
+async function settleDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, result: DialResult, stable: boolean): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   ctx.dialResults.set(command.commandId, result);
   await upsertDialedLeg(deps, ctx.session, command, result);
   // This read stays fresh deliberately. The plan proposed taking the
@@ -1267,6 +1278,43 @@ async function insertAttempt(deps: EffectsDeps, session: SessionRow, plan: Attem
   return true;
 }
 
+/** The wire action and body behind an overlappable command, apart so a run can be sent at once. */
+function overlappedAction(ctx: ExecutionContext, command: Command): { callControlId: string; action: string; commandId: string; body: Record<string, unknown> } | null {
+  if (!("commandId" in command)) return null;
+  if (command.kind === "hangup") return { callControlId: resolveLeg(ctx, command.leg), action: "hangup", commandId: command.commandId, body: {} };
+  if (command.kind === "playback_stop") return { callControlId: resolveLeg(ctx, command.leg), action: "playback_stop", commandId: command.commandId, body: { stop: "all" } };
+  if (command.kind === "gather_stop") return { callControlId: resolveLeg(ctx, command.leg), action: "gather_stop", commandId: command.commandId, body: {} };
+  return null;
+}
+
+/**
+ * A run of best-effort teardown, sent and journalled as one group.
+ *
+ * These kinds have no post-dispatch bookkeeping — that is why they may overlap
+ * at all — so the only per-member work left is the tolerance a hangup owes a
+ * leg that is already gone, which is the outcome it asked for rather than a
+ * failure.
+ */
+async function executeOverlappedRun(deps: EffectsDeps, ctx: ExecutionContext, run: readonly Command[]): Promise<Map<string, Promise<{ skipped: boolean; detail?: Record<string, unknown> }>>> {
+  const actions = run.map((command) => overlappedAction(ctx, command));
+  const results = await requireTelnyx(deps).callActionMany(actions.filter((action): action is NonNullable<typeof action> => Boolean(action)));
+  const out = new Map<string, Promise<{ skipped: boolean; detail?: Record<string, unknown> }>>();
+  for (const [index, command] of run.entries()) {
+    const outcome = results[index];
+    const reason = command.kind === "hangup" ? (command as { reason?: string }).reason : undefined;
+    if (!outcome) continue;
+    if (outcome.status === "fulfilled") {
+      out.set(commandKey(command), Promise.resolve({ skipped: false, ...(reason ? { detail: { reason } } : {}) }));
+    } else if (command.kind === "hangup" && isLegAlreadyGone(outcome.reason)) {
+      out.set(commandKey(command), Promise.resolve({ skipped: true, detail: { reason, alreadyGone: true } }));
+    } else {
+      out.set(commandKey(command), Promise.reject(outcome.reason));
+    }
+  }
+  for (const promise of out.values()) promise.catch(() => undefined);
+  return out;
+}
+
 async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, command: RingFanout): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   const { admin } = deps;
   const session = ctx.session;
@@ -1343,7 +1391,29 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   // from it, and its `telnyx_session_id` write is conditional and idempotent,
   // so nothing here depends on a row that another member just rewrote.
   const frozen: ExecutionContext = { ...ctx, session: ctx.session };
-  const dialled = await Promise.allSettled(claimed.map((dial) => executeDial(deps, frozen, dial, { authorized: stableFanout })));
+
+  // The preconditions of every member, then the whole step on the wire under
+  // one journal, then each member's bookkeeping. Two database round trips for
+  // the group instead of two for each of them — and the members are fenced
+  // together, so a termination committed meanwhile stops all of them rather
+  // than the ones that had not gone out yet.
+  const planned = await Promise.allSettled(claimed.map((dial) => executeDial(deps, frozen, dial, { authorized: stableFanout, planOnly: true })));
+  const sendable: Array<{ index: number; dial: DialCommand }> = [];
+  const dialled: Array<PromiseSettledResult<{ skipped: boolean; detail?: Record<string, unknown> }>> = planned.map((outcome, index) => {
+    if (outcome.status === "rejected" || outcome.value.skipped) return outcome;
+    sendable.push({ index, dial: claimed[index] });
+    return outcome;
+  });
+  const results = await requireTelnyx(deps).dialMany(sendable.map(({ dial }) => dialParams(dial)));
+  for (const [position, result] of results.entries()) {
+    const { index, dial } = sendable[position];
+    if (result.status === "rejected") { dialled[index] = result; continue; }
+    try {
+      dialled[index] = { status: "fulfilled", value: await settleDial(deps, frozen, dial, result.value, stableFanout || hasStabilityContract(frozen.session)) };
+    } catch (error) {
+      dialled[index] = { status: "rejected", reason: error };
+    }
+  }
   for (const [index, outcome] of dialled.entries()) {
     const dial = claimed[index];
     try {
@@ -1599,16 +1669,18 @@ async function executeReduceResult(
       // Contract 2 only: `prepare_v2` fences each command on its own
       // generation, so a lease lost while the run is in flight cannot let a
       // stale command through. Contract 1 has no journal to do that.
-      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition)) {
+      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition) && !overlapped.has(key)) {
+        const run: Command[] = [command];
         for (let next = index + 1; next < dispatchList.length; next += 1) {
           const sibling = dispatchList[next];
           if (!commandMayOverlap(sibling, ctx.session, transition)) break;
-          const siblingKey = commandKey(sibling);
-          if (overlapped.has(siblingKey) || input.continuation?.completedCommands.includes(siblingKey)) continue;
-          const started = executeCommand(deps, ctx, sibling);
-          // Awaited when its turn comes; this only silences an early exit.
-          started.catch(() => undefined);
-          overlapped.set(siblingKey, started);
+          if (input.continuation?.completedCommands.includes(commandKey(sibling))) continue;
+          run.push(sibling);
+        }
+        // One fence and one record for the run, not one of each per command.
+        // The teardown behind a bridge is three or four of these.
+        if (run.length > 1 && run.every((member) => overlappedAction(ctx, member))) {
+          for (const [memberKey, settled] of await executeOverlappedRun(deps, ctx, run)) overlapped.set(memberKey, settled);
         }
       }
       const executed = await (overlapped.get(key) ?? executeCommand(deps, ctx, command));
