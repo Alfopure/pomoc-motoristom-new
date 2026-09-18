@@ -161,7 +161,23 @@ Po hovore sa v záložke „AI" zobrazí rozbor úvodu hovoru:
 
 Pri zapnutom `AI_DEMO_STORE_TRANSCRIPT=true` pribudne aj **prepis s milisekundovými časmi** od momentu spojenia — tlačidlo „Zobraziť prepis" pri hovore alebo „Rozbor a prepis" v histórii. Prepis sa nikdy neposiela do zoznamu ani do priebežného načítavania, iba na vyžiadanie pre jeden konkrétny hovor.
 
-**Meria sa úvod hovoru, nie celý hovor.** Sideband počúva 40 sekúnd; potom sa zavrie, lebo držať ho dlhšie by znamenalo proces bežiaci celý hovor, čo toto nasadenie nedovoľuje. Na celý hovor by bolo treba nahrávanie cez Telnyx a prepis cez existujúcu ASR linku — to je samostatná práca.
+**Prepis robí sám GPT-Live**, nie žiadna ďalšia služba: `session.input_transcript.delta` (volajúci) a `session.output_transcript.delta` (Veronika) prichádzajú po sidebande počas hovoru. Nie je v tom ElevenLabs ani prepis od Telnyxu, a neukladá sa žiadne audio.
+
+Počúvanie beží na vlastnej ceste `/api/telephony/ai-demo/listen` s vlastným stropom (320 s), nie vo webhooku Telnyxu — jeho rozpočet je nastavený pre ľudské hovory a kvôli demu sa rozširovať nesmie. Bridge webhook tam hovor iba odovzdá a vráti sa; autentifikáciou je HMAC token viazaný na jeden pokus, platný desať minút. Keď je cesta nedostupná, prepis beží priamo vo webhooku a skončí skôr — pozdrav sa tým nestratí.
+
+### Vyhodnotenie modelom
+
+Tlačidlo **„Vyhodnotiť hovor"** prečíta prepis modelom a uloží k hovoru:
+
+- **súhrn** — o čom hovor bol a ako dopadol
+- **čo bolo zle** — s časom, závažnosťou a prečo to vadí
+- **čo fungovalo**
+- **čo zmeniť v jej pokynoch** — konkrétne vety, nie všeobecné rady
+- **skóre** v piatich kritériách: jazyk, prirodzenosť, splnenie úlohy, bez vymýšľania, plynulosť
+
+Rubrika je písaná na AI operátorku, nie na dispečera — existujúca `DEFAULT_QA_RUBRIC` hodnotí prácu človeka a je tu nepoužiteľná. Spúšťa sa na požiadanie, nie automaticky: stojí to volanie modelu a po zmene rubriky sa oplatí pustiť znova.
+
+Prepis ide do modelu ako **údaje, nikdy ako pokyn**. Pokus o príkaz skrytý v reči volajúceho sa má zapísať ako nález, nie vykonať.
 
 **`AI_DEMO_STORE_TRANSCRIPT` je jediné nastavenie v systéme, ktoré spôsobí, že sa uloží obsah rozhovoru.** Predvolene je vypnuté a nič iné ho nezapne.
 

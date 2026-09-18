@@ -71,6 +71,39 @@ export async function handleAiDemoTelnyxEvent(deps: AiDemoDeps, event: Telephony
   }
 }
 
+/**
+ * Hands the call to the listener, or listens here if there is nowhere to hand
+ * it to.
+ *
+ * A failure to reach our own route must not cost the caller the greeting, so
+ * the inline path is the fallback rather than an error.
+ */
+async function handOffToListener(deps: AiDemoDeps, attemptId: string): Promise<void> {
+  const { getAiDemoConfig } = await import("./config");
+  const config = getAiDemoConfig(deps.env ?? process.env);
+  if (!config.configured || !config.listenUrl) {
+    await runGreetingAndFinish(deps, attemptId);
+    return;
+  }
+
+  try {
+    const { mintListenToken } = await import("./listen-token");
+    const response = await fetch(config.listenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attemptId, token: mintListenToken(config.webhookSecret, attemptId) }),
+      cache: "no-store",
+      redirect: "error",
+      // Only the handover is awaited; the listener runs for the whole call.
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) throw new Error(`listen_${response.status}`);
+  } catch (error) {
+    deps.logger?.({ level: "warn", scope: "ai-demo", attemptId, message: "listener unreachable, greeting inline", error: error instanceof Error ? error.message : String(error) });
+    await runGreetingAndFinish(deps, attemptId);
+  }
+}
+
 function timestampFor(leg: AiDemoLeg, type: string, now: Date): Record<string, string> {
   const iso = now.toISOString();
   if (type === "call.initiated") return leg === "sip" ? { sip_initiated_at: iso } : { mobile_initiated_at: iso };
@@ -133,10 +166,16 @@ async function bridge(deps: AiDemoDeps, attempt: AiDemoAttempt, now: Date, actio
   });
   if (!moved) return done(attempt, `${action}_noop`, attempt.state);
 
-  // After the response: the greeting needs a WebSocket round trip and Telnyx
-  // wants its 200 inside ten seconds. The conditional transition above is what
+  // After the response: Telnyx wants its 200 inside ten seconds, and what
+  // follows takes as long as the call. The conditional transition above is what
   // guarantees this runs exactly once.
-  const work = () => runGreetingAndFinish(deps, moved.id);
+  //
+  // Where possible the listening happens on a route of its own, whose budget is
+  // sized for a whole call; this route's is sized for the human call path and
+  // must not be widened for a demo. Without such a URL the probe runs here and
+  // is cut short by this route's budget — the greeting still happens, the
+  // transcript just stops early.
+  const work = () => handOffToListener(deps, moved.id);
   if (deps.deferMaintenance) deps.deferMaintenance(work);
   else await work();
   return done(attempt, action, "bridged");

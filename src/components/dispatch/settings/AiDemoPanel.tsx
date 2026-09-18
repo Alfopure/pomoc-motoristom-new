@@ -8,13 +8,13 @@ import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import { aiDemoPollDelayMs } from "@/lib/telephony/poll-schedule";
 
 import {
-  AiDemoRequestError, loadAttempt, loadHistory, loadPreflight, startDemo, stopDemo,
+  AiDemoRequestError, loadAttempt, loadHistory, loadPreflight, reviewDemo, startDemo, stopDemo,
   type AiDemoAttemptView, type AiDemoPreflight,
 } from "./ai-demo-client";
 import {
   AI_DEMO_CONTEXT_MAX_CHARS, AI_DEMO_SCENARIO_OPTIONS, describeGaps, describeLatency, isActive, operatorBadge,
-  conversationSummary, offsetLabel, readinessMessages, scenarioLabel, startErrorMessage, stateLabel, timelineSteps,
-  transcriptTurns, validateContext, validateTarget, voiceLabel, voiceOptions,
+  conversationSummary, offsetLabel, readinessMessages, reviewScores, scenarioLabel, secondsLabel, severityLabel,
+  startErrorMessage, stateLabel, timelineSteps, transcriptTurns, validateContext, validateTarget, voiceLabel, voiceOptions,
 } from "./ai-demo-model";
 import { SettingsField, SettingsNotice, SettingsSectionHeader, settingsInputClass } from "./settings-ui";
 
@@ -221,6 +221,20 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
       setReview(result.attempt);
     } catch (caught) {
       setError(caught instanceof AiDemoRequestError ? caught.message : "Prepis sa nepodarilo načítať.");
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
+  const onRunReview = async (id: string) => {
+    setReviewBusy(true);
+    setError(null);
+    try {
+      const result = await reviewDemo(id);
+      setReview(result.attempt);
+      setNotice("Hovor vyhodnotený.");
+    } catch (caught) {
+      setError(caught instanceof AiDemoRequestError ? caught.message : "Vyhodnotenie sa nepodarilo.");
     } finally {
       setReviewBusy(false);
     }
@@ -439,13 +453,82 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
         </form>
       </div>
 
+      {review?.review && (
+        <article className="rounded-lg border border-zinc-200 bg-white p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h3 className="text-sm font-semibold text-zinc-950">Vyhodnotenie hovoru</h3>
+            {review.reviewedAt && (
+              <span className="font-mono text-xs text-zinc-400">{new Date(review.reviewedAt).toLocaleString("sk-SK", { hour12: false })}</span>
+            )}
+          </div>
+          <p className="mt-2 text-sm text-zinc-800">{review.review.summary}</p>
+
+          <dl className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+            {reviewScores(review.review).map((score) => (
+              <div key={score.label} className="flex items-baseline gap-1">
+                <dt className="text-zinc-500">{score.label}</dt>
+                <dd className={score.weak ? "font-semibold text-amber-700" : "font-semibold text-zinc-800"}>{score.value ?? "—"}</dd>
+              </div>
+            ))}
+          </dl>
+
+          {review.review.problems.length > 0 && (
+            <div className="mt-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Čo bolo zle</h4>
+              <ul className="mt-1 grid gap-1.5">
+                {review.review.problems.map((problem, index) => (
+                  <li key={`${problem.at}-${index}`} className="grid grid-cols-[3.5rem_1fr] gap-2 text-sm">
+                    <span className="pt-0.5 text-right font-mono text-xs text-zinc-400">{secondsLabel(problem.at)}</span>
+                    <span>
+                      <span className="text-zinc-900">{problem.what}</span>
+                      <span className="ml-1 text-xs text-zinc-500">({severityLabel(problem.severity)})</span>
+                      {problem.why && <span className="block text-xs text-zinc-600">{problem.why}</span>}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {review.review.went_well.length > 0 && (
+            <div className="mt-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Čo fungovalo</h4>
+              <ul className="mt-1 list-disc pl-5 text-sm text-zinc-700">
+                {review.review.went_well.map((entry, index) => <li key={index}>{entry}</li>)}
+              </ul>
+            </div>
+          )}
+
+          {review.review.prompt_suggestions.length > 0 && (
+            <div className="mt-3 rounded-md border border-zinc-200 bg-zinc-50 p-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Čo zmeniť v jej pokynoch</h4>
+              <ul className="mt-1 list-disc pl-5 text-sm text-zinc-800">
+                {review.review.prompt_suggestions.map((entry, index) => <li key={index}>{entry}</li>)}
+              </ul>
+            </div>
+          )}
+        </article>
+      )}
+
       {review?.transcript && review.transcript.length > 0 && (
         <article className="rounded-lg border border-zinc-200 bg-white p-4">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h3 className="text-sm font-semibold text-zinc-950">Prepis začiatku hovoru</h3>
-            <button type="button" onClick={() => setReview(null)} className="text-xs font-semibold text-zinc-500 underline underline-offset-4">
-              Skryť
-            </button>
+            <div className="flex items-center gap-3">
+              {!review.review && (
+                <button
+                  type="button"
+                  onClick={() => void onRunReview(review.id)}
+                  disabled={reviewBusy}
+                  className="inline-flex h-8 items-center rounded-md border border-zinc-200 bg-white px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+                >
+                  {reviewBusy ? "Vyhodnocujem…" : "Vyhodnotiť hovor"}
+                </button>
+              )}
+              <button type="button" onClick={() => setReview(null)} className="text-xs font-semibold text-zinc-500 underline underline-offset-4">
+                Skryť
+              </button>
+            </div>
           </div>
           <p className="mt-1 text-xs text-zinc-500">
             Čas je od momentu spojenia. Zaznamenáva sa úvod hovoru — ďalej už nič nepočúva, takže koniec rozhovoru tu nie je.

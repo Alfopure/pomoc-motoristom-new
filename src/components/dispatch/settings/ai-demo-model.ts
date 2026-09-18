@@ -1,7 +1,7 @@
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 
-import type { AiDemoAttemptView, AiDemoConversationStats, AiDemoPreflight, AiDemoTranscriptEntry } from "./ai-demo-client";
+import type { AiDemoAttemptView, AiDemoConversationStats, AiDemoPreflight, AiDemoReview, AiDemoTranscriptEntry } from "./ai-demo-client";
 
 /**
  * Pure view logic for the AI tab.
@@ -290,4 +290,31 @@ export function transcriptTurns(entries: AiDemoTranscriptEntry[] | null | undefi
 
 export function offsetLabel(ms: number): string {
   return `${(ms / 1000).toFixed(1)} s`;
+}
+
+const SCORE_LABELS: Record<string, string> = {
+  jazyk: "Jazyk",
+  prirodzenost: "Prirodzenosť",
+  splnenie_ulohy: "Splnenie úlohy",
+  bez_vymyslania: "Bez vymýšľania",
+  plynulost: "Plynulosť",
+};
+
+/** Scores in a fixed order, with the weak ones marked so the eye finds them. */
+export function reviewScores(review: AiDemoReview | null): Array<{ label: string; value: number | null; weak: boolean }> {
+  if (!review) return [];
+  return Object.keys(SCORE_LABELS).map((key) => {
+    const value = review.scores?.[key] ?? null;
+    return { label: SCORE_LABELS[key], value, weak: typeof value === "number" && value < 70 };
+  });
+}
+
+export function severityLabel(severity: "low" | "medium" | "high"): string {
+  return severity === "high" ? "závažné" : severity === "medium" ? "stredné" : "drobné";
+}
+
+/** `75` → `1:15`, matching the stamps in the transcript. */
+export function secondsLabel(at: number | null): string {
+  if (at === null) return "—";
+  return `${Math.floor(at / 60)}:${String(at % 60).padStart(2, "0")}`;
 }

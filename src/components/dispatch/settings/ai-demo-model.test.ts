@@ -39,6 +39,8 @@ function attempt(overrides: Partial<AiDemoAttemptView> = {}): AiDemoAttemptView 
     latency: null,
     stats: null,
     hasTranscript: false,
+    review: null,
+    reviewedAt: null,
     timestamps: {
       requestedAt: "2026-09-03T08:00:00.000Z",
       sipDialedAt: "2026-09-03T08:00:01.000Z",

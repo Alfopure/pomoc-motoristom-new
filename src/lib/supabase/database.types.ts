@@ -1517,6 +1517,8 @@ export type Database = {
         latency_probe: Json;
         transcript: Json | null;
         conversation_stats: Json | null;
+        review: Json | null;
+        reviewed_at: Timestamp | null;
         cleanup_attempts: number;
         cleanup_next_attempt_at: Timestamp | null;
         metadata: Json;

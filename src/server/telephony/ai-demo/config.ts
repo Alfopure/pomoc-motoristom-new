@@ -47,15 +47,19 @@ export const AI_DEMO_LIMITS = {
   probeOpenMs: 3_000,
   probeAppendedMs: 4_000,
   probeFirstDeltaMs: 8_000,
-  // The bridge webhook has `maxDuration = 60`, and `after()` runs inside it.
-  // At 18 s the probe saw one exchange; 40 s sees the opening few and still
-  // leaves the route twenty seconds of headroom.
-  probeWindowMs: 40_000,
-  probeMaxEvents: 60,
+  /**
+   * The probe outlives the call by design.
+   *
+   * It runs on `/api/telephony/ai-demo/listen`, whose budget is sized for a
+   * whole demo (the provider caps one at `maxCallSeconds`). The window is the
+   * backstop; in practice `session.closed` ends it when the call does.
+   */
+  probeWindowMs: 300_000,
+  probeMaxEvents: 400,
   /** Shorter than this, an utterance of hers is an acknowledgement, not an answer. */
   backchannelMaxMs: 700,
   /** Cap on stored deltas; the window bounds this anyway, the cap bounds a storm. */
-  transcriptMaxEntries: 400,
+  transcriptMaxEntries: 2_000,
   /** Cron staleness rules; the tick is five minutes, so these are floors not ceilings. */
   requestedStaleMs: 60_000,
   sipDialingStaleMs: 120_000,
@@ -141,6 +145,8 @@ export type AiDemoConfig =
       webhookUrl: string | null;
       /** Keep what was said, not only when it was said. Off unless asked for. */
       storeTranscript: boolean;
+      /** Where the bridge webhook hands the call off to the listener. */
+      listenUrl: string | null;
     }
   | { configured: false; missing: string[] };
 
@@ -200,7 +206,18 @@ export function aiDemoFromNumber(env: EnvRecord = process.env): { number: string
  * when the demo runs on the same deployment as everything else.
  */
 export function aiDemoWebhookUrl(env: EnvRecord = process.env): string | null {
-  const base = read(env, "AI_DEMO_WEBHOOK_BASE_URL");
+  return aiDemoOwnUrl(env, "/api/telephony/telnyx/webhook");
+}
+
+/**
+ * A URL on this deployment.
+ *
+ * Built from `AI_DEMO_WEBHOOK_BASE_URL` or, failing that, `APP_BASE_URL`: the
+ * webhook override is the one an operator sets deliberately, and the app's own
+ * address is the sensible fallback for a call this deployment makes to itself.
+ */
+function aiDemoOwnUrl(env: EnvRecord, path: string): string | null {
+  const base = read(env, "AI_DEMO_WEBHOOK_BASE_URL") ?? read(env, "APP_BASE_URL");
   if (base === null) return null;
   let url: URL;
   try {
@@ -210,7 +227,7 @@ export function aiDemoWebhookUrl(env: EnvRecord = process.env): string | null {
   }
   // A plaintext or non-HTTP callback would be a downgrade nobody asked for.
   if (url.protocol !== "https:") return null;
-  return `${url.origin}/api/telephony/telnyx/webhook`;
+  return `${url.origin}${path}`;
 }
 
 function allowlisted(value: string | null, allowed: readonly string[], fallback: string): string | null {
@@ -279,6 +296,7 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
     allowedRecipients,
     webhookUrl: aiDemoWebhookUrl(env),
     storeTranscript: read(env, "AI_DEMO_STORE_TRANSCRIPT")?.toLowerCase() === "true",
+    listenUrl: aiDemoOwnUrl(env, "/api/telephony/ai-demo/listen"),
     maxAttemptsPerDay: clampInt(read(env, "AI_DEMO_MAX_ATTEMPTS_PER_DAY"), 3, 0, 100),
     maxCallSeconds: clampInt(read(env, "AI_DEMO_MAX_CALL_SECONDS"), 300, 30, 300),
     ringTimeoutSeconds: clampInt(read(env, "AI_DEMO_RING_TIMEOUT_SECONDS"), AI_DEMO_LIMITS.sipRingSeconds, 5, 60),

@@ -706,6 +706,8 @@ export function describeAttempt(attempt: AiDemoAttempt, options: { includeTransc
     latency: metadata?.latency ?? null,
     stats: (attempt.conversation_stats as Record<string, unknown> | null) ?? null,
     hasTranscript: Array.isArray(attempt.transcript) && attempt.transcript.length > 0,
+    review: (attempt.review as Record<string, unknown> | null) ?? null,
+    reviewedAt: attempt.reviewed_at,
     ...(options.includeTranscript
       ? { transcript: (attempt.transcript as Array<{ ms: number; dir: string; text: string }> | null) ?? null }
       : {}),

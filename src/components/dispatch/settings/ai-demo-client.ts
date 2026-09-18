@@ -31,6 +31,16 @@ export type AiDemoLatency = {
 
 export type AiDemoTranscriptEntry = { ms: number; dir: "in" | "out"; text: string };
 
+export type AiDemoReviewProblem = { at: number | null; what: string; why: string; severity: "low" | "medium" | "high" };
+
+export type AiDemoReview = {
+  summary: string;
+  went_well: string[];
+  problems: AiDemoReviewProblem[];
+  prompt_suggestions: string[];
+  scores: Record<string, number | null>;
+};
+
 export type AiDemoConversationStats = {
   turns: { in: number; out: number };
   speakingMs: { in: number; out: number };
@@ -52,6 +62,8 @@ export type AiDemoAttemptView = {
   latency: AiDemoLatency | null;
   stats: AiDemoConversationStats | null;
   hasTranscript: boolean;
+  review: AiDemoReview | null;
+  reviewedAt: string | null;
   /** Present only on `GET /ai-demo/<id>?transcript=1`. */
   transcript?: AiDemoTranscriptEntry[] | null;
   timestamps: AiDemoTimestamps;
@@ -154,5 +166,15 @@ export function stopDemo(id: string) {
     method: "POST",
     label: "ukončenie AI dema",
     timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+  });
+}
+
+/** Reads the call back with a model and stores what it found. */
+export function reviewDemo(id: string) {
+  return request<{ attempt: AiDemoAttemptView }>(`/api/telephony/ai-demo/${encodeURIComponent(id)}/review`, {
+    method: "POST",
+    label: "vyhodnotenie hovoru",
+    // A model reads the whole transcript back.
+    timeoutMs: 90_000,
   });
 }

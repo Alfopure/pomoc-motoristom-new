@@ -58,6 +58,8 @@ describe("route-auth-registry", () => {
       "telephony/webhooks/scribe",
       // OpenAI GPT-Live webhook — Standard Webhooks HMAC podpis, nie session.
       "telephony/webhooks/openai",
+      // Interný poslucháč hovoru — HMAC token viazaný na jeden pokus, nie session.
+      "telephony/ai-demo/listen",
     ].sort());
   });
 });
