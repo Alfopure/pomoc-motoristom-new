@@ -130,7 +130,7 @@ export const TABLE_DEFAULTS: Record<string, FakeRow> = {
   motorist_ai_demo_attempts: {
     direction: "outbound", state: "requested", greeting_status: "none", scenario: "replacement_vehicle_return",
     sip_dial_outcome: "none", mobile_dial_outcome: "none", openai_hangup_attempts: 0, cleanup_attempts: 0,
-    latency_probe: [], metadata: {},
+    latency_probe: [], transcript: null, conversation_stats: null, metadata: {},
     request_id: null, actor_profile_id: null, end_reason: null, error_code: null, mobile_dial_command_id: null,
     telnyx_sip_call_control_id: null, telnyx_sip_call_leg_id: null, telnyx_mobile_call_control_id: null,
     telnyx_mobile_call_leg_id: null, telnyx_call_session_id: null, openai_session_id: null,

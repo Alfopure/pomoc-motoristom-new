@@ -1,7 +1,7 @@
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 
-import type { AiDemoAttemptView, AiDemoPreflight } from "./ai-demo-client";
+import type { AiDemoAttemptView, AiDemoConversationStats, AiDemoPreflight, AiDemoTranscriptEntry } from "./ai-demo-client";
 
 /**
  * Pure view logic for the AI tab.
@@ -247,4 +247,47 @@ export function stateLabel(state: string): string {
     case "failed": return "Zlyhalo";
     default: return state;
   }
+}
+
+/**
+ * The call in numbers, phrased for somebody judging how it went.
+ *
+ * Every figure covers the opening of the call only — that is as far as
+ * anything was listening — and the label says so rather than leaving a reader
+ * to assume it describes the whole conversation.
+ */
+export function conversationSummary(stats: AiDemoConversationStats | null): Array<{ label: string; value: string; warn?: boolean }> {
+  if (!stats) return [];
+  const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+  const total = stats.speakingMs.in + stats.speakingMs.out;
+  const share = total > 0 ? Math.round((stats.speakingMs.out / total) * 100) : 0;
+  return [
+    { label: "Striedanie", value: `${stats.turns.out}× ona, ${stats.turns.in}× volajúci` },
+    { label: "Kto hovoril viac", value: `${share} % ona`, warn: share > 80 },
+    { label: "Najdlhšie ticho", value: seconds(stats.longestSilenceMs), warn: stats.longestSilenceMs > 3_000 },
+    { label: "Skákanie do reči", value: `${stats.overlaps}×`, warn: stats.overlaps > 2 },
+    { label: "Prikývnutia", value: `${stats.backchannels}×` },
+  ];
+}
+
+/**
+ * Groups the raw deltas into readable turns.
+ *
+ * The model emits a fragment at a time; a transcript that shows one line per
+ * fragment is unreadable. Consecutive fragments from the same side become one
+ * turn, keeping the millisecond offset of the first.
+ */
+export function transcriptTurns(entries: AiDemoTranscriptEntry[] | null | undefined): Array<{ ms: number; dir: "in" | "out"; text: string }> {
+  if (!entries || entries.length === 0) return [];
+  const turns: Array<{ ms: number; dir: "in" | "out"; text: string }> = [];
+  for (const entry of entries) {
+    const current = turns[turns.length - 1];
+    if (current && current.dir === entry.dir) current.text += entry.text;
+    else turns.push({ ms: entry.ms, dir: entry.dir, text: entry.text });
+  }
+  return turns.map((turn) => ({ ...turn, text: turn.text.trim() }));
+}
+
+export function offsetLabel(ms: number): string {
+  return `${(ms / 1000).toFixed(1)} s`;
 }

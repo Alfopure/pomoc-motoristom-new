@@ -1515,6 +1515,8 @@ export type Database = {
         ended_at: Timestamp | null;
         deadline_at: Timestamp;
         latency_probe: Json;
+        transcript: Json | null;
+        conversation_stats: Json | null;
         cleanup_attempts: number;
         cleanup_next_attempt_at: Timestamp | null;
         metadata: Json;

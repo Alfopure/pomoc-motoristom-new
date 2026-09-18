@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AiDemoAttemptView, AiDemoPreflight } from "./ai-demo-client";
 import {
   describeGaps, describeLatency, isActive, operatorBadge, readinessMessages, startErrorMessage,
-  timelineSteps, validateContext, validateTarget, voiceLabel, voiceOptions,
+  conversationSummary, timelineSteps, transcriptTurns, validateContext, validateTarget, voiceLabel, voiceOptions,
 } from "./ai-demo-model";
 
 const READY: AiDemoPreflight = {
@@ -37,6 +37,8 @@ function attempt(overrides: Partial<AiDemoAttemptView> = {}): AiDemoAttemptView 
     fromNumber: "+421232408774",
     voice: "gleam",
     latency: null,
+    stats: null,
+    hasTranscript: false,
     timestamps: {
       requestedAt: "2026-09-03T08:00:00.000Z",
       sipDialedAt: "2026-09-03T08:00:01.000Z",
@@ -184,5 +186,50 @@ describe("voiceOptions", () => {
     expect(voiceLabel("quartz")).toContain("syntetický");
     // An unknown id still renders rather than disappearing.
     expect(voiceLabel("brand-new-voice")).toBe("brand-new-voice");
+  });
+});
+
+describe("conversationSummary", () => {
+  const stats = { turns: { in: 3, out: 4 }, speakingMs: { in: 8_000, out: 12_000 }, overlaps: 1, longestSilenceMs: 1_400, backchannels: 2 };
+
+  it("says who spoke, how much, and where the dead air was", () => {
+    const rows = conversationSummary(stats);
+    expect(rows.map((row) => row.label)).toEqual(["Striedanie", "Kto hovoril viac", "Najdlhšie ticho", "Skákanie do reči", "Prikývnutia"]);
+    expect(rows[1].value).toBe("60 % ona");
+    expect(rows[2].value).toBe("1.4 s");
+  });
+
+  it("flags the two figures that mean the call went badly", () => {
+    // Dead air, and her talking over the customer.
+    const bad = conversationSummary({ ...stats, longestSilenceMs: 6_000, overlaps: 5 });
+    expect(bad.find((row) => row.label === "Najdlhšie ticho")?.warn).toBe(true);
+    expect(bad.find((row) => row.label === "Skákanie do reči")?.warn).toBe(true);
+    // A monologue is worth flagging too.
+    expect(conversationSummary({ ...stats, speakingMs: { in: 500, out: 20_000 } }).find((row) => row.label === "Kto hovoril viac")?.warn).toBe(true);
+  });
+
+  it("shows nothing rather than zeroes when the call was not measured", () => {
+    expect(conversationSummary(null)).toEqual([]);
+  });
+});
+
+describe("transcriptTurns", () => {
+  it("joins the fragments a model emits into readable turns", () => {
+    const turns = transcriptTurns([
+      { ms: 900, dir: "out", text: "Dobrý deň," },
+      { ms: 1_100, dir: "out", text: " tu je Veronika." },
+      { ms: 2_400, dir: "in", text: "áno, počúvam" },
+      { ms: 3_000, dir: "out", text: "Volám ohľadom auta." },
+    ]);
+
+    expect(turns).toHaveLength(3);
+    expect(turns[0]).toEqual({ ms: 900, dir: "out", text: "Dobrý deň, tu je Veronika." });
+    // The offset is the moment the turn began, not the moment it ended.
+    expect(turns[1].ms).toBe(2_400);
+  });
+
+  it("handles a call with nothing recorded", () => {
+    expect(transcriptTurns(null)).toEqual([]);
+    expect(transcriptTurns([])).toEqual([]);
   });
 });

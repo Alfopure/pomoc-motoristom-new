@@ -196,3 +196,104 @@ describe("runGreeting", () => {
     expect(result.status).toBe("failed");
   });
 });
+
+describe("the transcript", () => {
+  const CONVERSATION = {
+    onInstructions: [
+      { delayMs: 5, event: { type: "session.instructions.appended", client_event_id: "greet-1a2b3c4d" } },
+      { delayMs: 20, event: { type: "session.output_transcript.delta", delta: "Dobrý deň, pán Novák," } },
+      { delayMs: 100, event: { type: "session.output_transcript.delta", delta: " tu je Veronika." } },
+      { delayMs: 160, event: { type: "session.input_transcript.delta", delta: "áno, počúvam" } },
+      { delayMs: 300, event: { type: "session.output_transcript.delta", delta: "Volám ohľadom vášho auta." } },
+      { delayMs: 400, event: { type: "session.output_transcript.delta", delta: " Je hotové." } },
+    ],
+  };
+
+  it("keeps nothing by default", async () => {
+    const sideband = createFakeSideband(CONVERSATION);
+    const result = await runGreeting({ ...BASE, webSocketFactory: sideband.factory, limits: FAST });
+
+    expect(result.transcript).toBeNull();
+    expect(JSON.stringify(result)).not.toContain("Novák");
+  });
+
+  it("keeps the words with their arrival time when asked to", async () => {
+    const sideband = createFakeSideband(CONVERSATION);
+    const result = await runGreeting({ ...BASE, webSocketFactory: sideband.factory, limits: { ...FAST, keepTranscript: true } });
+
+    expect(result.transcript).not.toBeNull();
+    const transcript = result.transcript ?? [];
+    expect(transcript.map((entry) => entry.dir)).toEqual(["out", "out", "in", "out", "out"]);
+    expect(transcript[0].text).toBe("Dobrý deň, pán Novák,");
+    // Millisecond offsets from the moment the call was bridged.
+    expect(transcript[0].ms).toBeLessThan(transcript[2].ms);
+  });
+
+  it("stops collecting rather than growing without bound", async () => {
+    const sideband = createFakeSideband(CONVERSATION);
+    const result = await runGreeting({
+      ...BASE,
+      webSocketFactory: sideband.factory,
+      limits: { ...FAST, keepTranscript: true, transcriptMaxEntries: 2 },
+    });
+    expect(result.transcript).toHaveLength(2);
+  });
+});
+
+describe("conversation statistics", () => {
+  it("counts turns and speaking time for each side", async () => {
+    const sideband = createFakeSideband({
+      onInstructions: [
+        { delayMs: 5, event: { type: "session.instructions.appended", client_event_id: "greet-1a2b3c4d" } },
+        { delayMs: 20, event: { type: "session.output_transcript.delta", delta: "Dobrý deň," } },
+        { delayMs: 120, event: { type: "session.output_transcript.delta", delta: " tu je Veronika" } },
+        { delayMs: 200, event: { type: "session.input_transcript.delta", delta: "áno" } },
+        { delayMs: 260, event: { type: "session.input_transcript.delta", delta: " počúvam" } },
+        { delayMs: 400, event: { type: "session.output_transcript.delta", delta: "Volám ohľadom auta" } },
+        { delayMs: 480, event: { type: "session.output_transcript.delta", delta: ", je hotové." } },
+      ],
+    });
+
+    const result = await runGreeting({ ...BASE, webSocketFactory: sideband.factory, limits: FAST });
+
+    expect(result.stats.turns).toEqual({ in: 1, out: 2 });
+    expect(result.stats.speakingMs.out).toBeGreaterThan(result.stats.speakingMs.in);
+    expect(result.stats.overlaps).toBe(0);
+  });
+
+  it("reports the longest stretch in which nobody said anything", async () => {
+    const sideband = createFakeSideband({
+      onInstructions: [
+        { delayMs: 5, event: { type: "session.instructions.appended", client_event_id: "greet-1a2b3c4d" } },
+        { delayMs: 20, event: { type: "session.output_transcript.delta", delta: "Dobrý deň" } },
+        { delayMs: 60, event: { type: "session.output_transcript.delta", delta: ", tu je Veronika" } },
+        // Nobody speaks for a long time — the dead air the demo is judged on.
+        { delayMs: 400, event: { type: "session.input_transcript.delta", delta: "haló?" } },
+      ],
+    });
+
+    const result = await runGreeting({ ...BASE, webSocketFactory: sideband.factory, limits: FAST });
+
+    expect(result.stats.longestSilenceMs).toBeGreaterThan(200);
+  });
+
+  it("counts her acknowledgements separately from her answers", async () => {
+    const sideband = createFakeSideband({
+      onInstructions: [
+        { delayMs: 5, event: { type: "session.instructions.appended", client_event_id: "greet-1a2b3c4d" } },
+        { delayMs: 20, event: { type: "session.output_transcript.delta", delta: "Dobrý deň" } },
+        { delayMs: 120, event: { type: "session.output_transcript.delta", delta: ", tu je Veronika" } },
+        { delayMs: 200, event: { type: "session.input_transcript.delta", delta: "no ja neviem" } },
+        { delayMs: 260, event: { type: "session.output_transcript.delta", delta: "hm" } },
+        { delayMs: 320, event: { type: "session.input_transcript.delta", delta: "asi v stredu" } },
+        { delayMs: 450, event: { type: "session.output_transcript.delta", delta: "Dobre, v stredu" } },
+        { delayMs: 540, event: { type: "session.output_transcript.delta", delta: " popoludní." } },
+      ],
+    });
+
+    const result = await runGreeting({ ...BASE, webSocketFactory: sideband.factory, limits: FAST });
+
+    expect(result.stats.backchannels).toBe(1);
+    expect(result.responseGapsMs).toHaveLength(1);
+  });
+});

@@ -24,9 +24,10 @@ import { AI_DEMO_LIMITS } from "./config";
  *     without a process running for the whole call, which this deployment does
  *     not allow.
  *
- * The probe records offsets and a direction. Never transcript text, never
- * audio: `session.output_transcript.delta` carries what was said, and this
- * function throws it away on purpose.
+ * By default the probe records offsets and a direction and throws the words
+ * away. `keepTranscript` turns that off — it is the one switch in this system
+ * that causes what was said on a call to be stored, so it is off unless
+ * somebody asked for it, and it is never implied by wanting the timings.
  *
  * A failed probe never fails the call. The greeting may still be heard — an
  * acknowledgement was never proof that it was, and its absence is not proof
@@ -59,6 +60,28 @@ export const BACKCHANNEL_MAX_MS = 700;
 
 export type GreetingStatus = "appended" | "heard_started" | "failed";
 
+/** One delta as it arrived: who spoke, when, and what was said. */
+export type TranscriptEntry = {
+  /** Milliseconds after the bridge. */
+  ms: number;
+  dir: "in" | "out";
+  text: string;
+};
+
+/** What the opening of the call looked like, as numbers. */
+export type ConversationStats = {
+  /** Stretches of speech, per side. */
+  turns: { in: number; out: number };
+  /** Total milliseconds each side was speaking. */
+  speakingMs: { in: number; out: number };
+  /** Both talking at once — an interruption or a talk-over. */
+  overlaps: number;
+  /** The longest stretch in which neither side said anything. */
+  longestSilenceMs: number;
+  /** Acknowledgements of hers, counted rather than mistaken for answers. */
+  backchannels: number;
+};
+
 export type GreetingResult = {
   status: GreetingStatus;
   /** When the instructions were acknowledged, relative to the start of the probe. */
@@ -68,6 +91,12 @@ export type GreetingResult = {
   probe: LatencyProbeEntry[];
   /** Turn-taking gaps: caller stops, Veronika starts. */
   responseGapsMs: number[];
+  /**
+   * The words, with the time each delta arrived — present only when the caller
+   * asked for it. Everything else in this result is timings alone.
+   */
+  transcript: TranscriptEntry[] | null;
+  stats: ConversationStats;
   error: string | null;
 };
 
@@ -89,6 +118,15 @@ export type ProbeLimits = {
   probeWindowMs: number;
   probeMaxEvents: number;
   backchannelMaxMs?: number;
+  /**
+   * Keep the words, not just the timings.
+   *
+   * Off by default: this is the only place in the system where what was said
+   * on a call could be stored, and that must be a decision somebody made, not
+   * a side effect of measuring latency.
+   */
+  keepTranscript?: boolean;
+  transcriptMaxEntries?: number;
 };
 
 export type RunGreetingParams = {
@@ -114,7 +152,7 @@ export function webSocketAvailable(): boolean {
   return typeof (globalThis as { WebSocket?: unknown }).WebSocket === "function";
 }
 
-type ParsedEvent = { type: string; clientEventId: string | null };
+type ParsedEvent = { type: string; clientEventId: string | null; delta: string | null };
 
 function parseEvent(raw: unknown): ParsedEvent | null {
   const text = typeof raw === "string" ? raw : null;
@@ -126,13 +164,17 @@ function parseEvent(raw: unknown): ParsedEvent | null {
     return null;
   }
   if (!parsed || typeof parsed !== "object") return null;
-  const event = parsed as { type?: unknown; client_event_id?: unknown };
+  const event = parsed as { type?: unknown; client_event_id?: unknown; delta?: unknown };
   if (typeof event.type !== "string") return null;
-  return { type: event.type, clientEventId: typeof event.client_event_id === "string" ? event.client_event_id : null };
+  return {
+    type: event.type,
+    clientEventId: typeof event.client_event_id === "string" ? event.client_event_id : null,
+    delta: typeof event.delta === "string" ? event.delta : null,
+  };
 }
 
 export async function runGreeting(params: RunGreetingParams): Promise<GreetingResult> {
-  const limits = params.limits ?? AI_DEMO_LIMITS;
+  const limits: ProbeLimits = params.limits ?? AI_DEMO_LIMITS;
   const now = params.now ?? (() => Date.now());
   const started = now();
   const since = () => now() - started;
@@ -141,6 +183,9 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
   const commentaryEventId = `begin-${params.eventIdSeed}`;
 
   const probe: LatencyProbeEntry[] = [];
+  const transcript: TranscriptEntry[] = [];
+  const keepTranscript = limits.keepTranscript === true;
+  const transcriptMax = limits.transcriptMaxEntries ?? 400;
   let appendedMs: number | null = null;
   let firstDeltaMs: number | null = null;
   let error: string | null = null;
@@ -157,8 +202,11 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
   type Stretch = { dir: "in" | "out"; startMs: number; endMs: number };
   const stretches: Stretch[] = [];
 
-  const record = (dir: "in" | "out") => {
+  const record = (dir: "in" | "out", delta: string | null = null) => {
     const at = since();
+    if (keepTranscript && delta !== null && delta.length > 0 && transcript.length < transcriptMax) {
+      transcript.push({ ms: at, dir, text: delta.slice(0, 400) });
+    }
     const current = stretches[stretches.length - 1];
     if (current && current.dir === dir) {
       current.endMs = at;
@@ -184,7 +232,14 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
       } catch {
         // The probe is finished either way; a failing close is not a call failure.
       }
-      resolve({ status, appendedMs, firstDeltaMs, probe, responseGapsMs: summarise(), error });
+      const gaps = summarise();
+      resolve({
+        status, appendedMs, firstDeltaMs, probe,
+        responseGapsMs: gaps,
+        transcript: keepTranscript ? transcript : null,
+        stats: describeConversation(),
+        error,
+      });
     };
 
     /**
@@ -205,6 +260,33 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
         if (stretch.dir === "out" && !isBackchannel && previous?.dir === "in") gaps.push(stretch.startMs - previous.endMs);
       }
       return gaps;
+    };
+
+    /**
+     * The shape of the opening exchange, as five numbers.
+     *
+     * Overlaps and the longest silence are the two that say most about how the
+     * call felt: one is her talking over somebody, the other is dead air.
+     */
+    const describeConversation = (): ConversationStats => {
+      const stats: ConversationStats = {
+        turns: { in: 0, out: 0 },
+        speakingMs: { in: 0, out: 0 },
+        overlaps: 0,
+        longestSilenceMs: 0,
+        backchannels: probe.filter((entry) => entry.backchannel === true).length,
+      };
+      let previousEnd: number | null = null;
+      for (const stretch of stretches) {
+        stats.turns[stretch.dir] += 1;
+        stats.speakingMs[stretch.dir] += stretch.endMs - stretch.startMs;
+        if (previousEnd !== null) {
+          if (stretch.startMs < previousEnd) stats.overlaps += 1;
+          else stats.longestSilenceMs = Math.max(stats.longestSilenceMs, stretch.startMs - previousEnd);
+        }
+        previousEnd = stretch.endMs;
+      }
+      return stats;
     };
 
     const openTimer = setTimeout(() => {
@@ -257,10 +339,10 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
             firstDeltaMs = since();
             if (firstDeltaTimer) clearTimeout(firstDeltaTimer);
           }
-          record("out");
+          record("out", parsed.delta);
           break;
         case "session.input_transcript.delta":
-          record("in");
+          record("in", parsed.delta);
           break;
         case "session.closed":
           finish(firstDeltaMs !== null ? "heard_started" : appendedMs !== null ? "appended" : "failed");

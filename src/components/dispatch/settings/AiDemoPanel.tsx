@@ -13,8 +13,8 @@ import {
 } from "./ai-demo-client";
 import {
   AI_DEMO_CONTEXT_MAX_CHARS, AI_DEMO_SCENARIO_OPTIONS, describeGaps, describeLatency, isActive, operatorBadge,
-  readinessMessages, scenarioLabel, startErrorMessage, stateLabel, timelineSteps, validateContext, validateTarget,
-  voiceLabel, voiceOptions,
+  conversationSummary, offsetLabel, readinessMessages, scenarioLabel, startErrorMessage, stateLabel, timelineSteps,
+  transcriptTurns, validateContext, validateTarget, voiceLabel, voiceOptions,
 } from "./ai-demo-model";
 import { SettingsField, SettingsNotice, SettingsSectionHeader, settingsInputClass } from "./settings-ui";
 
@@ -52,6 +52,8 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
   const [context, setContext] = useState("");
   const [voice, setVoice] = useState<string>("");
   const [confirmed, setConfirmed] = useState(false);
+  const [review, setReview] = useState<AiDemoAttemptView | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
 
   const failures = useRef(0);
   const [reloadToken, setReloadToken] = useState(0);
@@ -211,6 +213,19 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
     }
   };
 
+  // The words are fetched on demand, once, for one attempt — never by the poll.
+  const onReview = async (id: string) => {
+    setReviewBusy(true);
+    try {
+      const result = await loadAttempt(id, undefined, true);
+      setReview(result.attempt);
+    } catch (caught) {
+      setError(caught instanceof AiDemoRequestError ? caught.message : "Prepis sa nepodarilo načítať.");
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
   const onCheckRemote = async () => {
     setCheckingRemote(true);
     try {
@@ -313,6 +328,26 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
                   {attempt.greetingStatus !== "none" && ` · pozdrav: ${attempt.greetingStatus}`}
                 </p>
               )}
+              {conversationSummary(attempt.stats).length > 0 && (
+                <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-zinc-100 pt-3 text-xs">
+                  {conversationSummary(attempt.stats).map((row) => (
+                    <div key={row.label} className="contents">
+                      <dt className="text-zinc-500">{row.label}</dt>
+                      <dd className={`text-right ${row.warn ? "font-semibold text-amber-700" : "text-zinc-800"}`}>{row.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              {attempt.hasTranscript && review?.id !== attempt.id && (
+                <button
+                  type="button"
+                  onClick={() => void onReview(attempt.id)}
+                  disabled={reviewBusy}
+                  className="mt-3 inline-flex h-9 items-center rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+                >
+                  {reviewBusy ? "Načítavam…" : "Zobraziť prepis"}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={onStop}
@@ -404,6 +439,33 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
         </form>
       </div>
 
+      {review?.transcript && review.transcript.length > 0 && (
+        <article className="rounded-lg border border-zinc-200 bg-white p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h3 className="text-sm font-semibold text-zinc-950">Prepis začiatku hovoru</h3>
+            <button type="button" onClick={() => setReview(null)} className="text-xs font-semibold text-zinc-500 underline underline-offset-4">
+              Skryť
+            </button>
+          </div>
+          <p className="mt-1 text-xs text-zinc-500">
+            Čas je od momentu spojenia. Zaznamenáva sa úvod hovoru — ďalej už nič nepočúva, takže koniec rozhovoru tu nie je.
+          </p>
+          <ol className="mt-3 grid gap-2">
+            {transcriptTurns(review.transcript).map((turn, index) => (
+              <li key={`${turn.ms}-${index}`} className="grid grid-cols-[3.5rem_1fr] gap-2 text-sm">
+                <span className="pt-0.5 text-right font-mono text-xs text-zinc-400">{offsetLabel(turn.ms)}</span>
+                <span className={turn.dir === "out" ? "text-zinc-900" : "text-zinc-600"}>
+                  <span className="mr-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                    {turn.dir === "out" ? "Veronika" : "Volajúci"}
+                  </span>
+                  {turn.text}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </article>
+      )}
+
       {history.length > 0 && (
         <article className="rounded-lg border border-zinc-200 bg-white p-4">
           <h3 className="text-sm font-semibold text-zinc-950">Posledné pokusy</h3>
@@ -423,6 +485,16 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
                   {describeLatency(row) && ` · ${describeLatency(row)}`}
                   {describeGaps(row) && ` · ${describeGaps(row)}`}
                 </div>
+                {row.hasTranscript && (
+                  <button
+                    type="button"
+                    onClick={() => void onReview(row.id)}
+                    disabled={reviewBusy}
+                    className="justify-self-start text-xs font-semibold text-zinc-600 underline underline-offset-4 disabled:opacity-50"
+                  >
+                    Rozbor a prepis
+                  </button>
+                )}
               </li>
             ))}
           </ul>

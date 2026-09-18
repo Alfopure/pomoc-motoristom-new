@@ -147,6 +147,24 @@ Ponechané zostali pravidlá, ktoré samy osebe slúžia prirodzenosti — napr�
 
 **Meranie odozvy.** Prvá verzia merala od okamihu, keď volajúci *začal* hovoriť, takže do odozvy počítala aj jeho vlastnú vetu; teraz sa meria od chvíle, keď dohovoril. A keďže prompt o prikyvovanie priamo žiada, krátke prehodenie (pod 700 ms) sa označí ako `backchannel` a do odozvy sa nepočíta — inak by demo vyzeralo rýchlejšie, než je. Okno odposluchu je 40 s (webhook má rozpočet 60 s), takže zachytí úvodných niekoľko výmen, nie jednu.
 
+## Vyhodnotenie hovoru
+
+Po hovore sa v záložke „AI" zobrazí rozbor úvodu hovoru:
+
+| Údaj | Čo hovorí |
+|---|---|
+| Striedanie | koľkokrát prehovorila ona a koľkokrát volajúci |
+| Kto hovoril viac | podiel jej reči; nad 80 % je to monológ a je to zvýraznené |
+| Najdlhšie ticho | najdlhší úsek, keď nehovoril nikto; nad 3 s zvýraznené |
+| Skákanie do reči | koľkokrát hovorili obaja naraz |
+| Prikývnutia | koľkokrát prehodila „hm"; do odozvy sa nerátajú |
+
+Pri zapnutom `AI_DEMO_STORE_TRANSCRIPT=true` pribudne aj **prepis s milisekundovými časmi** od momentu spojenia — tlačidlo „Zobraziť prepis" pri hovore alebo „Rozbor a prepis" v histórii. Prepis sa nikdy neposiela do zoznamu ani do priebežného načítavania, iba na vyžiadanie pre jeden konkrétny hovor.
+
+**Meria sa úvod hovoru, nie celý hovor.** Sideband počúva 40 sekúnd; potom sa zavrie, lebo držať ho dlhšie by znamenalo proces bežiaci celý hovor, čo toto nasadenie nedovoľuje. Na celý hovor by bolo treba nahrávanie cez Telnyx a prepis cez existujúcu ASR linku — to je samostatná práca.
+
+**`AI_DEMO_STORE_TRANSCRIPT` je jediné nastavenie v systéme, ktoré spôsobí, že sa uloží obsah rozhovoru.** Predvolene je vypnuté a nič iné ho nezapne.
+
 ## Bezpečnostné hranice
 
 - **Brány pred vytočením:** `AI_DEMO_ENABLED`, `destination_allowlist` organizácie, voliteľný užší zoznam `AI_DEMO_ALLOWED_RECIPIENTS` a voliteľný denný limit. Ani jednu nevie ovplyvniť telo požiadavky. Posledné dve sa dajú vypnúť (prázdna hodnota, resp. `0`) — vtedy platí to isté pravidlo ako pre bežný odchádzajúci hovor dispečera a záložka to napíše.

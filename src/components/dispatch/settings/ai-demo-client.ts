@@ -29,6 +29,16 @@ export type AiDemoLatency = {
   probe_error?: string;
 };
 
+export type AiDemoTranscriptEntry = { ms: number; dir: "in" | "out"; text: string };
+
+export type AiDemoConversationStats = {
+  turns: { in: number; out: number };
+  speakingMs: { in: number; out: number };
+  overlaps: number;
+  longestSilenceMs: number;
+  backchannels: number;
+};
+
 export type AiDemoAttemptView = {
   id: string;
   state: string;
@@ -40,6 +50,10 @@ export type AiDemoAttemptView = {
   fromNumber: string;
   voice: string | null;
   latency: AiDemoLatency | null;
+  stats: AiDemoConversationStats | null;
+  hasTranscript: boolean;
+  /** Present only on `GET /ai-demo/<id>?transcript=1`. */
+  transcript?: AiDemoTranscriptEntry[] | null;
   timestamps: AiDemoTimestamps;
 };
 
@@ -107,8 +121,8 @@ export function loadPreflight(options: { remote?: boolean; signal?: AbortSignal 
   });
 }
 
-export function loadAttempt(id: string, signal?: AbortSignal) {
-  return request<{ attempt: AiDemoAttemptView }>(`/api/telephony/ai-demo/${encodeURIComponent(id)}`, {
+export function loadAttempt(id: string, signal?: AbortSignal, withTranscript = false) {
+  return request<{ attempt: AiDemoAttemptView }>(`/api/telephony/ai-demo/${encodeURIComponent(id)}${withTranscript ? "?transcript=1" : ""}`, {
     ...(signal ? { signal } : {}),
     label: "stav AI dema",
     timeoutMs: TELEPHONY_TIMEOUT_MS.read,

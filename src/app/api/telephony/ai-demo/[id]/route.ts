@@ -13,6 +13,9 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     if (!isUuid(id)) return Response.json({ error: "Neplatný identifikátor.", code: "invalid_id" }, { status: 404 });
     const attempt = await loadAttempt(deps.admin, deps.organizationId, id);
     if (!attempt) return Response.json({ error: "Pokus neexistuje.", code: "not_found" }, { status: 404 });
-    return Response.json({ attempt: describeAttempt(attempt) }, { headers: { "Cache-Control": "private, no-store" } });
+    // The one place the words are served, and only to an admin who asked for
+    // this exact attempt.
+    const includeTranscript = new URL(_request.url).searchParams.get("transcript") === "1";
+    return Response.json({ attempt: describeAttempt(attempt, { includeTranscript }) }, { headers: { "Cache-Control": "private, no-store" } });
   }, "Stav AI dema sa nepodarilo načítať.");
 }

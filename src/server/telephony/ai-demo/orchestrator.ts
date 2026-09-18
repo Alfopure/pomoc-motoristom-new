@@ -413,7 +413,7 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string):
       commentaryText: AI_DEMO_COMMENTARY_TRIGGER,
       eventIdSeed: attempt.id.replace(/-/g, "").slice(0, 8),
       ...(deps.webSocketFactory ? { webSocketFactory: deps.webSocketFactory } : {}),
-      ...(deps.probeLimits ? { limits: deps.probeLimits } : {}),
+      limits: deps.probeLimits ?? { ...AI_DEMO_LIMITS, keepTranscript: config.storeTranscript },
     });
   } catch (error) {
     deps.logger?.({ level: "warn", scope: "ai-demo", attemptId: attempt.id, message: "greeting failed", error: error instanceof Error ? error.message : String(error) });
@@ -431,6 +431,8 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string):
     greeting_appended_at: at(result.appendedMs),
     first_transcript_at: at(result.firstDeltaMs),
     latency_probe: result.probe,
+    transcript: result.transcript,
+    conversation_stats: result.stats,
     metadata: {
       ...(attempt.metadata as Record<string, unknown>),
       latency: {
@@ -450,6 +452,8 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string):
     firstWordMs: result.firstDeltaMs,
     appendedMs: result.appendedMs,
     responseGapsMs: result.responseGapsMs,
+    // Counts and durations only; the words stay in the database row.
+    stats: result.stats,
   });
 }
 
@@ -679,8 +683,15 @@ function readVoice(metadata: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-/** What the timeline and the history show; never the full target number. */
-export function describeAttempt(attempt: AiDemoAttempt) {
+/**
+ * What the timeline and the history show; never the full target number.
+ *
+ * The transcript is left out unless asked for. The timeline polls every two
+ * seconds and the history returns ten rows: shipping four hundred fragments of
+ * speech through either of those would be a lot of bandwidth for something
+ * nobody is reading yet.
+ */
+export function describeAttempt(attempt: AiDemoAttempt, options: { includeTranscript?: boolean } = {}) {
   const metadata = attempt.metadata as { latency?: Record<string, unknown> } | null;
   return {
     id: attempt.id,
@@ -693,6 +704,11 @@ export function describeAttempt(attempt: AiDemoAttempt) {
     fromNumber: attempt.from_number,
     voice: readVoice(attempt.metadata),
     latency: metadata?.latency ?? null,
+    stats: (attempt.conversation_stats as Record<string, unknown> | null) ?? null,
+    hasTranscript: Array.isArray(attempt.transcript) && attempt.transcript.length > 0,
+    ...(options.includeTranscript
+      ? { transcript: (attempt.transcript as Array<{ ms: number; dir: string; text: string }> | null) ?? null }
+      : {}),
     timestamps: {
       requestedAt: attempt.requested_at,
       sipDialedAt: attempt.sip_dialed_at,

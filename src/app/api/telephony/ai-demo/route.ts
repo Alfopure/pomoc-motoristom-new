@@ -13,6 +13,6 @@ export async function GET(request: Request) {
     const requested = Number.parseInt(new URL(request.url).searchParams.get("limit") ?? "", 10);
     const limit = Number.isFinite(requested) ? Math.max(1, Math.min(AI_DEMO_LIMITS.historyLimit, requested)) : AI_DEMO_LIMITS.historyLimit;
     const rows = await listRecent(deps.admin, deps.organizationId, limit);
-    return Response.json({ attempts: rows.map(describeAttempt) }, { headers: { "Cache-Control": "private, no-store" } });
+    return Response.json({ attempts: rows.map((row) => describeAttempt(row)) }, { headers: { "Cache-Control": "private, no-store" } });
   }, "Históriu AI dema sa nepodarilo načítať.");
 }

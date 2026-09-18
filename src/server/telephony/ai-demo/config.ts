@@ -54,6 +54,8 @@ export const AI_DEMO_LIMITS = {
   probeMaxEvents: 60,
   /** Shorter than this, an utterance of hers is an acknowledgement, not an answer. */
   backchannelMaxMs: 700,
+  /** Cap on stored deltas; the window bounds this anyway, the cap bounds a storm. */
+  transcriptMaxEntries: 400,
   /** Cron staleness rules; the tick is five minutes, so these are floors not ceilings. */
   requestedStaleMs: 60_000,
   sipDialingStaleMs: 120_000,
@@ -137,6 +139,8 @@ export type AiDemoConfig =
       ringTimeoutSeconds: number;
       /** Per-call webhook override; `null` leaves the Call Control app's own URL in place. */
       webhookUrl: string | null;
+      /** Keep what was said, not only when it was said. Off unless asked for. */
+      storeTranscript: boolean;
     }
   | { configured: false; missing: string[] };
 
@@ -274,6 +278,7 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
     fromNumber: from.number,
     allowedRecipients,
     webhookUrl: aiDemoWebhookUrl(env),
+    storeTranscript: read(env, "AI_DEMO_STORE_TRANSCRIPT")?.toLowerCase() === "true",
     maxAttemptsPerDay: clampInt(read(env, "AI_DEMO_MAX_ATTEMPTS_PER_DAY"), 3, 0, 100),
     maxCallSeconds: clampInt(read(env, "AI_DEMO_MAX_CALL_SECONDS"), 300, 30, 300),
     ringTimeoutSeconds: clampInt(read(env, "AI_DEMO_RING_TIMEOUT_SECONDS"), AI_DEMO_LIMITS.sipRingSeconds, 5, 60),
