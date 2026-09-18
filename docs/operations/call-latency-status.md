@@ -118,6 +118,23 @@ outright, and only two of the three phones ring.
 Request count is unchanged; this is latency, not cost. It should show up as the
 gap between the caller being answered and the first phone ringing, and it is
 worth one verification call to confirm.
+### The conference silence, narrowed
+
+Reported on 17 Sep: a third number added to a call, and after somebody left it
+the remaining parties heard nobody. `src/server/telephony/conference-departure.test.ts`
+now drives all four shapes of it against the provider double's own model of who
+can hear whom — operator drops, added party hangs up, the same after a blind
+transfer, and hold — and every one of them keeps the remaining two audible.
+
+So the state machine is not where it goes wrong. Nor are the conference
+parameters: `start_conference_on_create: true`, and `end_conference_on_exit`
+defaults to false. On 18 Sep an add-party without a preceding transfer was
+tried live and worked, two mobiles audible to each other.
+
+What is left untested live is a party *leaving*. Until somebody hangs up out of
+a three-way on a real call, or the Telnyx event log for the original one is
+read, this is as far as the reasoning goes.
+
 ## Known gaps that are not in the plan
 
 Found during testing on 17 Sep; none of them is a latency problem and the plan
