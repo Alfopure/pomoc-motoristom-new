@@ -1,5 +1,6 @@
 import "server-only";
 
+import { measureRequestStep } from "@/server/request-metrics";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -154,7 +155,7 @@ async function getMotoristAuthState(organizationId: string, roles?: MotoristRole
   const {
     data: { user },
     error: userError,
-  } = await supabase.auth.getUser();
+  } = await measureRequestStep("auth.token", () => supabase.auth.getUser());
 
   if (userError || !user) {
     return {
@@ -164,13 +165,13 @@ async function getMotoristAuthState(organizationId: string, roles?: MotoristRole
     };
   }
 
-  const { data, error } = await (supabase as SupabaseClient<Database>)
+  const { data, error } = await measureRequestStep("auth.profile", () => (supabase as SupabaseClient<Database>)
     .from("motorist_profiles")
     .select("id, display_name, role, email")
     .eq("organization_id", organizationId)
     .eq("user_id", user.id)
     .eq("active", true)
-    .maybeSingle();
+    .maybeSingle());
 
   if (error) {
     return {
