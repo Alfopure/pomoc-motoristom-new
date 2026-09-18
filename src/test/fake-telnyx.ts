@@ -8,7 +8,8 @@ import type {
 } from "@/server/telephony/telnyx/client";
 import { TelnyxCommandError, TelnyxLiveCallsDisabledError, TelnyxSmsDisabledError } from "@/server/telephony/telnyx/client";
 import { getTelnyxConfig, type TelnyxConfig } from "@/server/telephony/telnyx/env";
-import { dispatchJournaled, journalRequest } from "@/server/telephony/provider-journal";
+import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "@/server/telephony/provider-journal";
+import { sessionOwnership } from "@/server/telephony/ownership";
 
 /**
  * Recording stand-in for `TelnyxClient`. Every command is appended to
@@ -145,9 +146,9 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
    * is active, `prepare_v2` decides whether this command reaches the double at
    * all, and `result_v2` records what it answered.
    */
-  async function execute<T>(method: string, params: Record<string, unknown>, action: () => T): Promise<T> {
+  async function execute<T>(method: string, params: Record<string, unknown>, action: () => T, options?: { journalled?: boolean }): Promise<T> {
     const commandId = params.commandId ?? params.command_id;
-    const wire = wireRequest(method, params);
+    const wire = options?.journalled ? null : wireRequest(method, params);
     const journal = wire
       ? journalRequest("POST", wire.path, typeof commandId === "string" ? commandId : null,
           JSON.stringify(compactUndefined({ ...wire.body, command_id: commandId })))
@@ -231,6 +232,15 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
 
   const nextId = (prefix: string) => `${prefix}-${++counter}`;
 
+  /** One dial against the modelled provider; the batch has already journalled it. */
+  function dialOnce(params: DialParams, options?: { journalled?: boolean }): Promise<DialResult> {
+    return execute("dial", params as unknown as Record<string, unknown>, () => {
+      const id = nextId("cc"); ensureLeg(id, Array.isArray(params.to) ? params.to[0] : params.to);
+      if (params.bridgeOnAnswer && params.linkTo) armBridge(params.linkTo, id);
+      return { callControlId: id, callLegId: `leg-${id}`, callSessionId: params.linkTo ? `sess-of-${params.linkTo}` : `tsess-${id}`, isAlive: true };
+    }, options);
+  }
+
   const client: TelnyxClient = {
     config,
     liveGate,
@@ -248,13 +258,42 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       }
       return {} as never;
     },
+    /**
+     * A ring step under one journal, mirroring the real client: the members
+     * are fenced together, dialled together and recorded together.
+     *
+     * Without a contract-2 scope there is nothing to batch, so it falls back
+     * to the ordinary dials — which is also what keeps contract-1 tests
+     * unchanged.
+     */
+    async dialMany(list: readonly DialParams[]): Promise<Array<PromiseSettledResult<DialResult>>> {
+      if (!list.length) return [];
+      if (!liveGate.callsEnabled) throw new TelnyxLiveCallsDisabledError();
+      const owner = sessionOwnership.getStore();
+      const journals = list.map((params) => {
+        const wire = wireRequest("dial", params as unknown as Record<string, unknown>)!;
+        return journalRequest("POST", wire.path, typeof params.commandId === "string" ? params.commandId : null,
+          JSON.stringify(compactUndefined({ ...wire.body, command_id: params.commandId })));
+      });
+      if (!owner || owner.contract !== 2 || journals.some((journal) => !journal)) {
+        return Promise.allSettled(list.map((params) => client.dial(params)));
+      }
+
+      const settled = await dispatchJournaledBatch(
+        list.map((params, index) => ({
+          journal: journals[index]!,
+          send: async () => ({ status: 200, result: await dialOnce(params, { journalled: true }) }),
+        })),
+        { error: (status, body, commandId) => new TelnyxCommandError({ code: "journal_replay", status, detail: `replayed provider outcome: ${JSON.stringify(body)}`, commandId }) },
+      );
+      return settled.map((outcome) => outcome.status === "rejected"
+        ? outcome as PromiseRejectedResult
+        : { status: "fulfilled" as const, value: (outcome.value.cached ? outcome.value.result : outcome.value.sent.result) as DialResult });
+    },
+
     async dial(params: DialParams): Promise<DialResult> {
       if (!liveGate.callsEnabled) throw new TelnyxLiveCallsDisabledError();
-      return execute("dial", params as unknown as Record<string, unknown>, () => {
-        const id = nextId("cc"); ensureLeg(id, Array.isArray(params.to) ? params.to[0] : params.to);
-        if (params.bridgeOnAnswer && params.linkTo) armBridge(params.linkTo, id);
-        return { callControlId: id, callLegId: `leg-${id}`, callSessionId: params.linkTo ? `sess-of-${params.linkTo}` : `tsess-${id}`, isAlive: true };
-      });
+      return dialOnce(params);
     },
     async answer(params) {
       await execute("answer", params, () => physical.answered(params.callControlId));

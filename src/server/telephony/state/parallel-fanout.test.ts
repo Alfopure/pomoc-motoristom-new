@@ -14,37 +14,36 @@ function harness() {
 const offered = (h: TelephonyHarness, sessionId: string) =>
   h.attempts(sessionId).filter((attempt) => attempt.result === "offered");
 
-/** Records how many dials were in flight at the same moment. */
+/** Records how the step was handed to the provider: as a group, or one by one. */
 function watchDials(h: TelephonyHarness) {
-  const state = { inFlight: 0, peak: 0 };
-  const client = h.telnyx.client as unknown as Record<string, (input: unknown) => Promise<unknown>>;
-  const dial = client.dial.bind(h.telnyx.client);
-  client.dial = async (input: unknown) => {
-    state.inFlight += 1;
-    state.peak = Math.max(state.peak, state.inFlight);
-    // Yielding here means a caller that awaits each dial in turn can never
-    // observe a peak above one.
-    try {
-      await Promise.resolve();
-      return await dial(input);
-    } finally {
-      state.inFlight -= 1;
-    }
+  const state = { groups: [] as number[], singles: 0 };
+  const client = h.telnyx.client as unknown as Record<string, (input: never) => Promise<unknown>>;
+  const many = client.dialMany.bind(h.telnyx.client);
+  const one = client.dial.bind(h.telnyx.client);
+  client.dialMany = async (list: never) => {
+    state.groups.push((list as unknown[]).length);
+    return many(list);
+  };
+  client.dial = async (params: never) => {
+    state.singles += 1;
+    return one(params);
   };
   return state;
 }
 
 describe("ring fan-out", () => {
-  it("starts every operator's phone ringing together", async () => {
+  it("hands the whole step to the provider at once", async () => {
     const h = harness();
     const seen = watchDials(h);
 
     const call = await h.inbound({ to: NUMBERS.allianz });
 
-    // Three operators share step 0. The third used to wait out the first two
-    // in full — their database round trips as well as their provider calls.
+    // Three operators share step 0. They used to go out one at a time, each
+    // waiting out the last one's database round trips as well as its provider
+    // call; now the step is one group, fenced and recorded together.
     expect(h.telnyx.of("dial")).toHaveLength(3);
-    expect(seen.peak).toBe(3);
+    expect(seen.groups).toEqual([3]);
+    expect(seen.singles).toBe(0);
     expect(offered(h, call.sessionId)).toHaveLength(3);
     expect(h.session(call.sessionId).state).toBe("ringing");
   });
@@ -52,13 +51,13 @@ describe("ring fan-out", () => {
   it("makes the offer tokens durable before any leg exists, in one write", async () => {
     const h = harness();
     const sessionWritesAtDial: number[] = [];
-    const client = h.telnyx.client as unknown as Record<string, (input: unknown) => Promise<unknown>>;
-    const dial = client.dial.bind(h.telnyx.client);
+    const client = h.telnyx.client as unknown as Record<string, (input: never) => Promise<unknown>>;
+    const many = client.dialMany.bind(h.telnyx.client);
     const sessionWrites = () =>
       h.db.log.filter((row) => row.table === "motorist_call_sessions" && row.operation === "update").length;
-    client.dial = async (input: unknown) => {
-      sessionWritesAtDial.push(sessionWrites());
-      return dial(input);
+    client.dialMany = async (list: never) => {
+      for (let member = 0; member < (list as unknown[]).length; member += 1) sessionWritesAtDial.push(sessionWrites());
+      return many(list);
     };
 
     const call = await h.inbound({ to: NUMBERS.allianz });
@@ -150,5 +149,33 @@ describe("ring fan-out", () => {
     // anything.
     const lookups = h.db.log.filter((row) => row.table === "motorist_provider_command_lookup_v2").length;
     expect(lookups).toBe(0);
+  });
+
+  it("journals the whole step in two round trips, not two per operator", async () => {
+    const h = harness();
+    const from = h.db.log.length;
+
+    await h.inbound({ to: NUMBERS.allianz });
+
+    // Three dials used to cost three `prepare_v2` and three `result_v2`, to a
+    // database that serialises them on one session row anyway. The saving is
+    // two per operator beyond the first, so it grows with the group.
+    const batched = h.db.log.slice(from).filter((row) => /provider_command_(prepare|result)_batch_v2/.test(row.table)).length;
+    const singles = h.db.log.slice(from).filter((row) => /provider_command_(prepare|result)_v2/.test(row.table) && !/batch/.test(row.table));
+    expect(batched).toBe(2);
+    expect(singles.filter((row) => row.table.includes("prepare")).length).toBeLessThanOrEqual(3);
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+  });
+
+  it("gives one member's refusal to that member only", async () => {
+    const h = harness();
+    h.telnyx.failNext("dial", new TelnyxCommandError({ code: "rejected", status: 422, detail: "dial refused" }));
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+
+    // The group is fenced and recorded together; the verdict is still per
+    // member, or one bad number would take a whole ring step down.
+    expect(offered(h, call.sessionId)).toHaveLength(2);
+    expect(h.session(call.sessionId).state).toBe("ringing");
   });
 });

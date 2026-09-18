@@ -145,6 +145,27 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
     return entry?.outcome ? { outcome: String(entry.outcome) } : null;
   });
 
+  // The same two functions over an array: one fence, one pass, a decision per
+  // command. What a caller that already holds the whole group reaches for.
+  db.registerRpc("motorist_provider_command_prepare_batch_v2", (args) => {
+    const single = db.rpcHandlers.get("motorist_provider_command_prepare_v2")!;
+    const items = (args.p_commands ?? []) as Array<Record<string, unknown>>;
+    return items.map((item) => single({
+      p_session_id: args.p_session_id, p_command_id: item.command_id, p_fingerprint: item.fingerprint,
+      p_method: item.method, p_path: item.path, p_correlation_state: item.correlation_state, p_payload: item.payload,
+    }, db));
+  });
+
+  db.registerRpc("motorist_provider_command_result_batch_v2", (args) => {
+    const single = db.rpcHandlers.get("motorist_provider_command_result_v2")!;
+    const items = (args.p_results ?? []) as Array<Record<string, unknown>>;
+    return items.map((item) => single({
+      p_session_id: args.p_session_id, p_command_id: item.command_id, p_fingerprint: item.fingerprint,
+      p_generation: args.p_generation, p_token: args.p_token, p_status: item.status,
+      p_result: item.result, p_retry_after_ms: item.retry_after_ms,
+    }, db));
+  });
+
   db.registerRpc("motorist_provider_command_result_v2", (args) => {
     const entry = db.storage("motorist_provider_commands").find((row) => row.command_id === args.p_command_id);
     if (entry) {

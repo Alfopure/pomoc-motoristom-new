@@ -250,11 +250,26 @@ command) and the leases (6, one per command).
 
 **One of the two is now here.**
 
-The journal batches only if `prepare`/`result` move out of the HTTP client,
-which is where they live today — every command journals itself inside
-`request()`. Batching a group means hoisting that out for grouped commands,
-which is E2.3 and an architectural change, not a tidy-up. Half-doing it would
-be worse than not starting.
+The journal now batches for a ring step (E2.3, first half).
+`prepare_batch_v2` and `result_batch_v2` are the same functions over an array:
+one fence, one lock, one statement per command, a decision back per command.
+`dispatchJournaledBatch` carries the single-command branches member by member,
+`client.dialMany` sends a whole step, and `executeRingFanout` plans every
+member, sends the group and settles each.
+
+A three-operator step costs two round trips of journal instead of six — the
+saving is two per operator beyond the first, so it grows with the group. A
+whole inbound call: 159 requests to **155**.
+
+Two properties were kept deliberately. The verdict stays **per member**, or one
+bad number would take a ring step down with it. And the members are fenced
+*together before any of them is sent*, so a termination committed meanwhile
+stops the whole step rather than the part that had not gone out yet.
+
+What is left of E2.3 is the same treatment for the overlapping teardown run
+behind a bridge — hangup, playback stop, gather stop — which is the twelve
+journal round trips still on the answer path. The machinery is in place; those
+kinds need a `callActionMany` the way dial got `dialMany`.
 
 The six lease renewals were pure duplication, and removing them was blocked on
 exactly the assumption that made the earlier measurements wrong: `prepare_v2`

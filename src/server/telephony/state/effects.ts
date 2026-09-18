@@ -17,7 +17,7 @@ import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
-import { isCallGoneError, TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
+import { isCallGoneError, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
 import { pendingAudioStillOwned, recordingCommandOutcome, recordingIntent } from "./recording";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
@@ -1122,7 +1122,7 @@ async function claimOperatorForDial(deps: EffectsDeps, ctx: ExecutionContext, co
   return true;
 }
 
-async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, options?: { authorized?: boolean }): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
+async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, options?: { authorized?: boolean; planOnly?: boolean }): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   await assertOwnership();
   const telnyx = requireTelnyx(deps);
   const adopted = ctx.dialResults.get(command.commandId);
@@ -1165,8 +1165,15 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     // instead; see `executeRingFanout`.
     if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
+  if (options?.planOnly) return { skipped: false, detail: { planned: true, stable } };
+  const result = await telnyx.dial(dialParams(command));
+  return settleDial(deps, ctx, command, result, stable);
+}
+
+/** Exactly what `dial` is called with, apart so a whole ring step can be sent at once. */
+function dialParams(command: DialCommand): DialParams {
   const isSip = command.to.startsWith("sip:");
-  const result = await telnyx.dial({
+  return {
     commandId: command.commandId,
     to: command.to,
     from: command.from,
@@ -1185,7 +1192,11 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     // never touched. `supervisor_role` is only meaningful together with it.
     superviseCallControlId: command.superviseCallControlId,
     supervisorRole: command.superviseCallControlId ? command.supervisorRole : undefined,
-  });
+  };
+}
+
+/** The bookkeeping behind one dial, whether it was sent alone or as part of a step. */
+async function settleDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, result: DialResult, stable: boolean): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   ctx.dialResults.set(command.commandId, result);
   await upsertDialedLeg(deps, ctx.session, command, result);
   // This read stays fresh deliberately. The plan proposed taking the
@@ -1343,7 +1354,29 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   // from it, and its `telnyx_session_id` write is conditional and idempotent,
   // so nothing here depends on a row that another member just rewrote.
   const frozen: ExecutionContext = { ...ctx, session: ctx.session };
-  const dialled = await Promise.allSettled(claimed.map((dial) => executeDial(deps, frozen, dial, { authorized: stableFanout })));
+
+  // The preconditions of every member, then the whole step on the wire under
+  // one journal, then each member's bookkeeping. Two database round trips for
+  // the group instead of two for each of them — and the members are fenced
+  // together, so a termination committed meanwhile stops all of them rather
+  // than the ones that had not gone out yet.
+  const planned = await Promise.allSettled(claimed.map((dial) => executeDial(deps, frozen, dial, { authorized: stableFanout, planOnly: true })));
+  const sendable: Array<{ index: number; dial: DialCommand }> = [];
+  const dialled: Array<PromiseSettledResult<{ skipped: boolean; detail?: Record<string, unknown> }>> = planned.map((outcome, index) => {
+    if (outcome.status === "rejected" || outcome.value.skipped) return outcome;
+    sendable.push({ index, dial: claimed[index] });
+    return outcome;
+  });
+  const results = await requireTelnyx(deps).dialMany(sendable.map(({ dial }) => dialParams(dial)));
+  for (const [position, result] of results.entries()) {
+    const { index, dial } = sendable[position];
+    if (result.status === "rejected") { dialled[index] = result; continue; }
+    try {
+      dialled[index] = { status: "fulfilled", value: await settleDial(deps, frozen, dial, result.value, stableFanout || hasStabilityContract(frozen.session)) };
+    } catch (error) {
+      dialled[index] = { status: "rejected", reason: error };
+    }
+  }
   for (const [index, outcome] of dialled.entries()) {
     const dial = claimed[index];
     try {
