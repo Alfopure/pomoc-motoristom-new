@@ -19,7 +19,7 @@ const READY: AiDemoPreflight = {
   telnyx: { configured: true, liveCallsEnv: true, liveCallsDb: true, destinationAllowlist: ["SK"], callControlAppId: "app-1" },
   db: { migrationApplied: true, activeAttempt: null, attemptsToday: 0 },
   limits: { maxAttemptsPerDay: 3, ringTimeoutSeconds: 30, maxCallSeconds: 300 },
-  model: { live: "gpt-live-1", backend: "gpt-5.6-terra", voice: "gleam", sipHost: "sip.api.openai.com" },
+  model: { live: "gpt-live-1", backend: "gpt-5.6-terra", review: "gpt-5.6-terra", voice: "gleam", sipHost: "sip.api.openai.com" },
   voices: { all: ["gleam", "willow", "marin", "quartz"], natural: ["gleam", "willow"] },
   probeBudgetMs: 18_000,
   remote: null,
@@ -89,7 +89,7 @@ describe("readinessMessages", () => {
   it("flags a DID attached to another Call Control application", () => {
     const messages = readinessMessages({
       ...READY,
-      remote: { models: { liveAvailable: true, error: null }, did: { phoneNumber: "+421232408774", connectionId: "other", onThisApp: false, status: "active", error: null } },
+      remote: { models: { liveAvailable: true, reviewAvailable: true, error: null }, did: { phoneNumber: "+421232408774", connectionId: "other", onThisApp: false, status: "active", error: null } },
     });
     expect(messages.some((entry) => entry.message.includes("inej Call Control"))).toBe(true);
   });

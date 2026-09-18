@@ -94,6 +94,18 @@ export const AI_DEMO_DEFAULT_SIP_HOST = "sip.api.openai.com";
 
 export const AI_DEMO_ALLOWED_MODELS: readonly string[] = ["gpt-live-1"];
 export const AI_DEMO_ALLOWED_BACKEND_MODELS: readonly string[] = ["gpt-5.6-terra", "gpt-5.6-luna"];
+
+/**
+ * The model that reads a finished call back.
+ *
+ * A different job from the in-call backend, and it was a mistake to let one
+ * setting decide both. In the call, thinking time is silence in somebody's
+ * ear, so the backend is the fast one with reasoning switched off. A review
+ * runs afterwards against a ninety-second budget and nobody is waiting on the
+ * line: there, only the quality of the reading matters.
+ */
+export const AI_DEMO_ALLOWED_REVIEW_MODELS: readonly string[] = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+export const AI_DEMO_DEFAULT_REVIEW_MODEL = "gpt-5.6-terra";
 /**
  * GPT-Live built-in voices; a custom voice id is not accepted here.
  *
@@ -147,6 +159,8 @@ export type AiDemoConfig =
       storeTranscript: boolean;
       /** Where the bridge webhook hands the call off to the listener. */
       listenUrl: string | null;
+      /** Reads a finished call back; chosen for quality, not for latency. */
+      reviewModel: string;
     }
   | { configured: false; missing: string[] };
 
@@ -262,6 +276,9 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
   const backendModel = allowlisted(read(env, "OPENAI_LIVE_BACKEND_MODEL"), AI_DEMO_ALLOWED_BACKEND_MODELS, AI_DEMO_DEFAULT_BACKEND_MODEL);
   if (backendModel === null) missing.push("OPENAI_LIVE_BACKEND_MODEL");
 
+  const reviewModel = allowlisted(read(env, "OPENAI_LIVE_REVIEW_MODEL"), AI_DEMO_ALLOWED_REVIEW_MODELS, AI_DEMO_DEFAULT_REVIEW_MODEL);
+  if (reviewModel === null) missing.push("OPENAI_LIVE_REVIEW_MODEL");
+
   const voice = allowlisted(read(env, "OPENAI_LIVE_VOICE"), AI_DEMO_ALLOWED_VOICES, AI_DEMO_DEFAULT_VOICE);
   if (voice === null) missing.push("OPENAI_LIVE_VOICE");
 
@@ -279,7 +296,7 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
    */
   const allowedRecipients = parseRecipients(read(env, "AI_DEMO_ALLOWED_RECIPIENTS")) ?? [];
 
-  if (missing.length > 0 || apiKey === null || projectId === null || webhookSecret === null || sipHost === null || model === null || backendModel === null || voice === null || "invalid" in from) {
+  if (missing.length > 0 || apiKey === null || projectId === null || webhookSecret === null || sipHost === null || model === null || backendModel === null || reviewModel === null || voice === null || "invalid" in from) {
     return { configured: false, missing };
   }
 
@@ -297,6 +314,7 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
     webhookUrl: aiDemoWebhookUrl(env),
     storeTranscript: read(env, "AI_DEMO_STORE_TRANSCRIPT")?.toLowerCase() === "true",
     listenUrl: aiDemoOwnUrl(env, "/api/telephony/ai-demo/listen"),
+    reviewModel,
     maxAttemptsPerDay: clampInt(read(env, "AI_DEMO_MAX_ATTEMPTS_PER_DAY"), 3, 0, 100),
     maxCallSeconds: clampInt(read(env, "AI_DEMO_MAX_CALL_SECONDS"), 300, 30, 300),
     ringTimeoutSeconds: clampInt(read(env, "AI_DEMO_RING_TIMEOUT_SECONDS"), AI_DEMO_LIMITS.sipRingSeconds, 5, 60),

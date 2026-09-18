@@ -88,11 +88,11 @@ export type AiDemoPreflight = {
   };
   db: { migrationApplied: boolean; activeAttempt: AiDemoAttemptView | null; attemptsToday: number };
   limits: { maxAttemptsPerDay: number; ringTimeoutSeconds: number; maxCallSeconds: number } | null;
-  model: { live: string; backend: string; voice: string; sipHost: string } | null;
+  model: { live: string; backend: string; review: string; voice: string; sipHost: string } | null;
   voices: { all: string[]; natural: string[] };
   probeBudgetMs: number;
   remote: {
-    models: { liveAvailable: boolean; error: string | null };
+    models: { liveAvailable: boolean; reviewAvailable: boolean; error: string | null };
     did: { phoneNumber: string | null; connectionId: string | null; onThisApp: boolean | null; status: string | null; error: string | null };
   } | null;
 };

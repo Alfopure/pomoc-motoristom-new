@@ -166,3 +166,27 @@ describe("the daily cap", () => {
     if (config.configured) expect(config.maxAttemptsPerDay).toBe(3);
   });
 });
+
+describe("the review model", () => {
+  it("is chosen separately from the in-call backend", () => {
+    // Different jobs: one must not make anybody wait on a telephone, the other
+    // runs afterwards and only has to read well.
+    const config = getAiDemoConfig({ ...FULL, OPENAI_LIVE_BACKEND_MODEL: "gpt-5.6-luna", OPENAI_LIVE_REVIEW_MODEL: "gpt-5.6-sol" });
+    expect(config.configured).toBe(true);
+    if (!config.configured) return;
+    expect(config.backendModel).toBe("gpt-5.6-luna");
+    expect(config.reviewModel).toBe("gpt-5.6-sol");
+  });
+
+  it("may be stronger than anything allowed in the call", () => {
+    const config = getAiDemoConfig({ ...FULL, OPENAI_LIVE_REVIEW_MODEL: "gpt-6-astra" });
+    if (config.configured) expect(config.reviewModel).toBe("gpt-6-astra");
+    else expect.unreachable("a stronger reviewer must be allowed");
+  });
+
+  it("refuses one outside the allowlist", () => {
+    const config = getAiDemoConfig({ ...FULL, OPENAI_LIVE_REVIEW_MODEL: "gpt-4o" });
+    if (!config.configured) expect(config.missing).toContain("OPENAI_LIVE_REVIEW_MODEL");
+    else expect.unreachable("review models must be allowlisted too");
+  });
+});

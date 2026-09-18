@@ -80,7 +80,7 @@ export async function runAiDemoPreflight(deps: AiDemoDeps, options: { remote: bo
     limits: config.configured
       ? { ...aiDemoBudgets(config), maxAttemptsPerDay: config.maxAttemptsPerDay, ringTimeoutSeconds: config.ringTimeoutSeconds, maxCallSeconds: config.maxCallSeconds }
       : null,
-    model: config.configured ? { live: config.model, backend: config.backendModel, voice: config.voice, sipHost: config.sipHost } : null,
+    model: config.configured ? { live: config.model, backend: config.backendModel, review: config.reviewModel, voice: config.voice, sipHost: config.sipHost } : null,
     voices: { all: AI_DEMO_ALLOWED_VOICES, natural: AI_DEMO_NATURAL_VOICES },
     probeBudgetMs: AI_DEMO_LIMITS.probeWindowMs,
     webhookUrl: config.configured ? config.webhookUrl : null,
@@ -92,7 +92,7 @@ export async function runAiDemoPreflight(deps: AiDemoDeps, options: { remote: bo
 }
 
 export type RemotePreflight = {
-  models: { liveAvailable: boolean; error: string | null };
+  models: { liveAvailable: boolean; reviewAvailable: boolean; error: string | null };
   did: { phoneNumber: string | null; connectionId: string | null; onThisApp: boolean | null; status: string | null; error: string | null };
 };
 
@@ -107,7 +107,7 @@ export type RemotePreflight = {
  */
 async function runRemotePreflight(deps: AiDemoDeps, config: Extract<ReturnType<typeof getAiDemoConfig>, { configured: true }>): Promise<RemotePreflight> {
   const result: RemotePreflight = {
-    models: { liveAvailable: false, error: null },
+    models: { liveAvailable: false, reviewAvailable: false, error: null },
     did: { phoneNumber: null, connectionId: null, onThisApp: null, status: null, error: null },
   };
 
@@ -117,7 +117,11 @@ async function runRemotePreflight(deps: AiDemoDeps, config: Extract<ReturnType<t
       signal: AbortSignal.timeout(8_000),
       ...(deps.openAIFetch ? { fetch: deps.openAIFetch } : {}),
     });
-    result.models.liveAvailable = (await client.listModels()).includes(config.model);
+    const available = await client.listModels();
+    result.models.liveAvailable = available.includes(config.model);
+    // A review model the key cannot see fails only when somebody presses the
+    // button, which is the worst moment to find out.
+    result.models.reviewAvailable = available.includes(config.reviewModel);
   } catch (error) {
     result.models.error = error instanceof OpenAILiveError ? error.code : "openai_unreachable";
   }

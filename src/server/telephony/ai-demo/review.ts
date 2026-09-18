@@ -1,4 +1,4 @@
-import { AI_DEMO_ALLOWED_BACKEND_MODELS } from "./config";
+import { AI_DEMO_ALLOWED_REVIEW_MODELS } from "./config";
 
 /**
  * Reading a demo call back and saying how it went.
@@ -183,7 +183,7 @@ export type ReviewOptions = { apiKey: string; model: string; fetch?: typeof fetc
 
 export async function reviewDemoCall(input: ReviewInput, options: ReviewOptions): Promise<AiDemoReview> {
   if (input.turns.length === 0) throw new AiDemoReviewError("review_no_transcript", 409);
-  if (!AI_DEMO_ALLOWED_BACKEND_MODELS.includes(options.model)) throw new AiDemoReviewError("review_model_not_allowed", 400);
+  if (!AI_DEMO_ALLOWED_REVIEW_MODELS.includes(options.model)) throw new AiDemoReviewError("review_model_not_allowed", 400);
 
   const transcript = renderDemoTranscript(input.turns);
   if (transcript.length > MAX_TRANSCRIPT_CHARS) throw new AiDemoReviewError("review_transcript_too_long", 413);
@@ -201,7 +201,8 @@ export async function reviewDemoCall(input: ReviewInput, options: ReviewOptions)
         model: options.model,
         instructions: buildReviewInstructions(input),
         input: [{ role: "user", content: [{ type: "input_text", text: `<<<PREPIS\n${transcript}\nPREPIS>>>` }] }],
-        reasoning: { effort: "low" },
+        // Nobody is on the line waiting for this, so it may think.
+        reasoning: { effort: "medium" },
         text: { format: { type: "json_schema", name: "ai_demo_review", strict: true, schema: SCHEMA } },
       }),
     });

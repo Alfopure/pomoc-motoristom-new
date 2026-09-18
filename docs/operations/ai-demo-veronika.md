@@ -175,6 +175,19 @@ Tlačidlo **„Vyhodnotiť hovor"** prečíta prepis modelom a uloží k hovoru:
 - **čo zmeniť v jej pokynoch** — konkrétne vety, nie všeobecné rady
 - **skóre** v piatich kritériách: jazyk, prirodzenosť, splnenie úlohy, bez vymýšľania, plynulosť
 
+**Modely, ktoré sú v tom zapojené** — sú tri a majú rôzne úlohy:
+
+| Čo | Model | Kto ho volí |
+|---|---|---|
+| Prepis reči na text | vnútri GPT-Live relácie | nikto, nedá sa nastaviť |
+| Hovor (hlas a počúvanie) | `gpt-live-1` | `OPENAI_LIVE_MODEL` |
+| Uvažovanie počas hovoru | `gpt-5.6-terra`, `reasoning.effort: none` | `OPENAI_LIVE_BACKEND_MODEL` |
+| Vyhodnotenie po hovore | `gpt-5.6-terra`, `reasoning.effort: medium` | `OPENAI_LIVE_REVIEW_MODEL` |
+
+Prepis vzniká vnútri relácie a OpenAI nezverejňuje, ktorý model ho robí; v zozname modelov účtu je `gpt-live-transcribe`, čo je pravdepodobne on, ale nie je to potvrdené a nedá sa to nastaviť.
+
+Posledné dva sú **zámerne oddelené**. Počas hovoru je každá sekunda uvažovania ticho v telefóne, preto je backend rýchly a uvažovanie vypnuté. Vyhodnotenie beží potom, nikto naň nečaká, a záleží len na kvalite čítania — tam sa oplatí silnejší model (`gpt-5.6-sol`, `gpt-6-astra`, ak ich účet má). Kontrola pripravenosti upozorní, keď kľúč nastavený model nevidí.
+
 Rubrika je písaná na AI operátorku, nie na dispečera — existujúca `DEFAULT_QA_RUBRIC` hodnotí prácu človeka a je tu nepoužiteľná. Spúšťa sa na požiadanie, nie automaticky: stojí to volanie modelu a po zmene rubriky sa oplatí pustiť znova.
 
 Prepis ide do modelu ako **údaje, nikdy ako pokyn**. Pokus o príkaz skrytý v reči volajúceho sa má zapísať ako nález, nie vykonať.

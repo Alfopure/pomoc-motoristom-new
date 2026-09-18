@@ -131,6 +131,9 @@ export function readinessMessages(preflight: AiDemoPreflight): Readiness[] {
         : "OpenAI kľúč nevidí model gpt-live-1.",
     });
   }
+  if (preflight.remote?.models.reviewAvailable === false && preflight.remote.models.error === null) {
+    messages.push({ tone: "warning", message: `Kľúč nevidí model na vyhodnotenie hovoru (${preflight.model?.review ?? "—"}). Rozbor zlyhá až pri kliknutí.` });
+  }
   if (preflight.remote?.did.onThisApp === false) {
     messages.push({ tone: "warning", message: "Číslo je na inej Call Control aplikácii. Odchádzajúci hovor môže Telnyx odmietnuť." });
   }

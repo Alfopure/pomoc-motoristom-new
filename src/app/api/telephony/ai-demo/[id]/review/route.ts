@@ -51,7 +51,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
             firstWordMs: typeof latency?.first_word_ms === "number" ? latency.first_word_ms : null,
             longestSilenceMs: typeof stats?.longestSilenceMs === "number" ? stats.longestSilenceMs : null,
           },
-          { apiKey: config.apiKey, model: config.backendModel },
+          { apiKey: config.apiKey, model: config.reviewModel },
         );
         const saved = await patchAttempt(deps.admin, attempt.id, { review, reviewed_at: new Date().toISOString() });
         return Response.json({ attempt: describeAttempt(saved ?? attempt, { includeTranscript: true }) });
