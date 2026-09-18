@@ -121,6 +121,18 @@ export type ProbeLimits = {
   /** How often the caller is offered a snapshot to save. */
   probeCheckpointMs?: number;
   /**
+   * Silence thresholds.
+   *
+   * They live here so a test can compress a whole call into a second without
+   * the logic knowing the difference; in production they come from
+   * `AI_DEMO_LIMITS`.
+   */
+  farewellSilenceMs?: number;
+  nudgeAfterMs?: number;
+  judgeAfterMs?: number;
+  judgeEveryMs?: number;
+  maxNudges?: number;
+  /**
    * Keep the words, not just the timings.
    *
    * Off by default: this is the only place in the system where what was said
@@ -131,8 +143,24 @@ export type ProbeLimits = {
   transcriptMaxEntries?: number;
 };
 
+/**
+ * What the probe can do besides listen.
+ *
+ * The sideband is open for the whole call, so it can also put a word in: the
+ * same instructions/commentary pair that makes her greet is what makes her
+ * check in when a line has gone quiet.
+ */
+export type ProbeControls = {
+  /** Milliseconds since anybody last said anything. */
+  silenceMs: number;
+  /** Nudge her to say something now. */
+  say: (instruction: string) => void;
+  /** How many times `say` has already been used on this call. */
+  saidCount: number;
+};
+
 /** A snapshot mid-probe, and whether there is any point carrying on. */
-export type ProbeProgress = (snapshot: GreetingResult) => Promise<boolean> | boolean;
+export type ProbeProgress = (snapshot: GreetingResult, controls: ProbeControls) => Promise<boolean> | boolean;
 
 export type RunGreetingParams = {
   sessionId: string;
@@ -235,6 +263,7 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
   let firstDeltaTimer: ReturnType<typeof setTimeout> | null = null;
   let checkpointTimer: ReturnType<typeof setInterval> | null = null;
+  let saidCount = 0;
 
   const result = await new Promise<GreetingResult>((resolve) => {
     const finish = (status: GreetingStatus) => {
@@ -350,11 +379,26 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
       // Save as we go, and stop as soon as the caller says the call is over.
       if (params.onProgress) {
         const every = limits.probeCheckpointMs ?? 10_000;
+        const say = (instruction: string) => {
+          if (settled) return;
+          try {
+            // The same pair that makes her greet: fresh instructions, then a
+            // nudge to act on them. `delegation_id` must be null.
+            saidCount += 1;
+            active.send(JSON.stringify({ type: "session.instructions.append", event_id: `nudge-${params.eventIdSeed}-${saidCount}`, delegation_id: null, content: instruction }));
+            active.send(JSON.stringify({ type: "session.commentary.append", event_id: `nudge-go-${params.eventIdSeed}-${saidCount}`, content: "Ozvi sa teraz podľa pokynu." }));
+          } catch {
+            // A nudge that cannot be sent is not worth failing a call over.
+          }
+        };
+
         checkpointTimer = setInterval(() => {
           if (settled) return;
-          void Promise.resolve(params.onProgress?.(snapshot(firstDeltaMs !== null ? "heard_started" : appendedMs !== null ? "appended" : "failed")))
+          const status = firstDeltaMs !== null ? "heard_started" : appendedMs !== null ? "appended" : "failed";
+          const lastSpeech = stretches[stretches.length - 1]?.endMs ?? 0;
+          void Promise.resolve(params.onProgress?.(snapshot(status), { silenceMs: since() - lastSpeech, say, saidCount }))
             .then((carryOn) => {
-              if (carryOn === false) finish(firstDeltaMs !== null ? "heard_started" : appendedMs !== null ? "appended" : "failed");
+              if (carryOn === false) finish(status);
             })
             .catch(() => undefined);
         }, every);

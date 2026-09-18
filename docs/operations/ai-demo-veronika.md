@@ -223,6 +223,22 @@ Samotná rozlúčka nestačí — „ďakujem za váš čas, ešte sa spýtam" j
 
 Zapisuje sa ako `end_reason: farewell`, bez chybového kódu — normálne ukončený rozhovor nie je zlyhanie.
 
+### Keď je ticho
+
+Pri `AI_DEMO_JUDGE_SILENCE=true` sa ticho posudzuje v troch krokoch, od najlacnejšieho:
+
+| Ticho | Čo sa stane |
+|---|---|
+| do 7 s | nič — bežná pauza v rozhovore |
+| 7–12 s | **ozve sa sama**: „ste tam?", „potrebujete chvíľu na rozmyslenie?" — najviac dvakrát za hovor |
+| nad 12 s | **model prečíta rozhovor** a povie, či sa skončil, či sa má ozvať, alebo nechať tak |
+
+Model rozumie kontextu, čo zoznam fráz nevie: „dobre, to ešte preberiem doma" je koniec hovoru, hoci tam slovo „dovidenia" nepadlo.
+
+**Latencia:** posudzovanie beží **iba počas ticha**, teda vtedy, keď nikto nehovorí a na nič sa nečaká. Do času do prvého slova ani do medzery po vašej vete nevstupuje. Preto je to v poriadku, hoci pôvodný plán to zamietal — ten princíp bol aplikovaný širšie, než bolo treba.
+
+Keď model neodpovie alebo zlyhá, odpoveď je vždy „pokračuj". Hovor, ktorý trvá o pár sekúnd dlhšie, je lepší než hovor useknutý kvôli vypršanému dopytu.
+
 ## Bezpečnostné hranice
 
 - **Brány pred vytočením:** `AI_DEMO_ENABLED`, `destination_allowlist` organizácie, voliteľný užší zoznam `AI_DEMO_ALLOWED_RECIPIENTS` a voliteľný denný limit. Ani jednu nevie ovplyvniť telo požiadavky. Posledné dve sa dajú vypnúť (prázdna hodnota, resp. `0`) — vtedy platí to isté pravidlo ako pre bežný odchádzajúci hovor dispečera a záložka to napíše.

@@ -16,7 +16,8 @@ import {
 } from "./attempts";
 import { AI_DEMO_ALLOWED_VOICES, AI_DEMO_LIMITS, aiDemoBudgets, aiDemoEnabled, buildSipUri, getAiDemoConfig, voiceGender, type AiDemoConfig, type EnvRecord } from "./config";
 import { callIsOver } from "./farewell";
-import { runGreeting, type GreetingResult, type ProbeLimits, type WebSocketFactory } from "./greeting";
+import { judgeCall } from "./judge";
+import { runGreeting, type GreetingResult, type ProbeControls, type ProbeLimits, type WebSocketFactory } from "./greeting";
 import type { AiDemoLeg } from "./flag";
 import { aiDemoClientState, aiDemoCommandId, aiDemoCorrelationToken, maskNumber } from "./identity";
 import {
@@ -412,6 +413,14 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
   const scenario: AiDemoScenario = isAiDemoScenario(attempt.scenario) ? attempt.scenario : AI_DEMO_DEFAULT_SCENARIO;
   const context = typeof (attempt.metadata as { context?: unknown })?.context === "string" ? ((attempt.metadata as { context?: string }).context ?? null) : null;
 
+  // The judge is asked about a silence, not about every tick of it.
+  const lastJudged = { at: 0 };
+  const probeLimits: ProbeLimits = deps.probeLimits ?? {
+    ...AI_DEMO_LIMITS,
+    keepTranscript: config.storeTranscript,
+    ...(options.inline ? { probeWindowMs: AI_DEMO_LIMITS.inlineProbeWindowMs } : {}),
+  };
+
   let result: GreetingResult;
   try {
     result = await runGreeting({
@@ -427,28 +436,12 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
        * not listen for longer — it gets the function killed, and before this
        * was checkpointed that lost the entire call.
        */
-      limits: deps.probeLimits ?? {
-        ...AI_DEMO_LIMITS,
-        keepTranscript: config.storeTranscript,
-        ...(options.inline ? { probeWindowMs: AI_DEMO_LIMITS.inlineProbeWindowMs } : {}),
-      },
-      onProgress: async (partial) => {
+      limits: probeLimits,
+      onProgress: async (partial, controls) => {
         await savePartial(deps, attempt, partial);
 
-        // She cannot hang up herself — the API has no such tool — but something
-        // is listening, so the end of the conversation can be noticed here and
-        // the call closed rather than left in silence until the time limit.
-        if (config.autoHangup && partial.transcript && partial.transcript.length > 0) {
-          const spoken = partial.transcript;
-          const lastSpeechMs = spoken[spoken.length - 1]?.ms ?? 0;
-          const nowMs = spoken.length > 0 ? Math.max(lastSpeechMs, elapsedSince(attempt)) : 0;
-          if (callIsOver({ turns: spoken, lastSpeechMs, nowMs, silenceMs: AI_DEMO_LIMITS.farewellSilenceMs })) {
-            deps.logger?.({ scope: "ai-demo", attemptId: attempt.id, message: "farewell heard, ending call" });
-            await requestEnding(deps, attempt.id, "farewell", null);
-            await endAttempt(deps, attempt.id, AI_DEMO_LIMITS.cleanupBudgetActionMs, "inline");
-            return false;
-          }
-        }
+        const ended = await watchSilence(deps, attempt, config, partial, controls, lastJudged, probeLimits);
+        if (ended) return false;
 
         // Stop as soon as the call is over rather than waiting out the window;
         // `session.closed` is not something we have ever seen proven to arrive.
@@ -750,6 +743,79 @@ function sliceTranscript(stored: unknown, since: number | undefined): Array<{ ms
   const usable = entries.filter((entry) => entry && typeof entry === "object" && typeof entry.text === "string");
   const wanted = typeof since === "number" && Number.isFinite(since) ? usable.filter((entry) => typeof entry.ms === "number" && entry.ms > since) : usable;
   return wanted as Array<{ ms: number; dir: string; text: string }>;
+}
+
+/**
+ * What to do about a line that has gone quiet.
+ *
+ * Three steps, cheapest first. A farewell followed by silence is unambiguous
+ * and decided here without asking anybody. A shorter silence gets her to check
+ * in — "ste tam?", "potrebujete chvíľu?" — which is what a person would do. A
+ * longer one is read by a model, because a phrase list cannot tell "dobre, to
+ * ešte preberiem doma" from a pause.
+ *
+ * Every step runs while nobody is speaking. None of it sits between a caller
+ * finishing a sentence and hearing an answer.
+ */
+async function watchSilence(
+  deps: AiDemoDeps,
+  attempt: AiDemoAttempt,
+  config: Extract<AiDemoConfig, { configured: true }>,
+  partial: GreetingResult,
+  controls: ProbeControls,
+  lastJudged: { at: number },
+  limits: ProbeLimits,
+): Promise<boolean> {
+  const farewellSilenceMs = limits.farewellSilenceMs ?? AI_DEMO_LIMITS.farewellSilenceMs;
+  const nudgeAfterMs = limits.nudgeAfterMs ?? AI_DEMO_LIMITS.nudgeAfterMs;
+  const judgeAfterMs = limits.judgeAfterMs ?? AI_DEMO_LIMITS.judgeAfterMs;
+  const judgeEveryMs = limits.judgeEveryMs ?? AI_DEMO_LIMITS.judgeEveryMs;
+  const maxNudges = limits.maxNudges ?? AI_DEMO_LIMITS.maxNudges;
+
+  const spoken = partial.transcript ?? [];
+  if (spoken.length === 0) return false;
+
+  const end = async (reason: string): Promise<boolean> => {
+    deps.logger?.({ scope: "ai-demo", attemptId: attempt.id, message: "ending call", reason });
+    await requestEnding(deps, attempt.id, reason, null);
+    await endAttempt(deps, attempt.id, AI_DEMO_LIMITS.cleanupBudgetActionMs, "inline");
+    return true;
+  };
+
+  if (config.autoHangup) {
+    const lastSpeechMs = spoken[spoken.length - 1]?.ms ?? 0;
+    const nowMs = Math.max(lastSpeechMs, elapsedSince(attempt));
+    if (callIsOver({ turns: spoken, lastSpeechMs, nowMs, silenceMs: farewellSilenceMs })) {
+      return end("farewell");
+    }
+  }
+
+  if (!config.judgeSilence) return false;
+  if (controls.silenceMs < nudgeAfterMs) return false;
+
+  // A short silence does not need a model: she simply checks in, once or twice.
+  if (controls.silenceMs < judgeAfterMs) {
+    if (controls.saidCount < maxNudges) {
+      controls.say('Volajúci chvíľu nič nepovedal. Ozvi sa krátko a prirodzene — spýtaj sa, či je tam, alebo či potrebuje chvíľu na rozmyslenie. Jedna veta, potom počúvaj.');
+    }
+    return false;
+  }
+
+  const now = Date.now();
+  if (now - lastJudged.at < judgeEveryMs) return false;
+  lastJudged.at = now;
+
+  const verdict = await judgeCall(
+    { turns: spoken, silenceMs: controls.silenceMs, nudges: controls.saidCount, maxNudges },
+    { apiKey: config.apiKey, model: config.judgeModel, ...(deps.openAIFetch ? { fetch: deps.openAIFetch } : {}) },
+  );
+  deps.logger?.({ scope: "ai-demo", attemptId: attempt.id, message: "silence judged", action: verdict.action, reason: verdict.reason });
+
+  if (verdict.action === "hangup" && config.autoHangup) return end("judged_over");
+  if (verdict.action === "nudge" && verdict.say !== null && controls.saidCount < maxNudges) {
+    controls.say(`${verdict.say} Povedz to po slovensky, jednou vetou, a potom počúvaj.`);
+  }
+  return false;
 }
 
 /** Milliseconds since the call was bridged. */

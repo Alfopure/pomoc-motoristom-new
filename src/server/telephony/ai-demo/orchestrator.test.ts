@@ -547,7 +547,7 @@ describe("ending the call when the conversation ends", () => {
     const deps: AiDemoDeps = {
       ...f.deps,
       webSocketFactory: sideband.factory,
-      probeLimits: { ...FAST_PROBE, probeWindowMs: 1_200, probeCheckpointMs: 120, keepTranscript: true },
+      probeLimits: { ...FAST_PROBE, probeWindowMs: 1_200, probeCheckpointMs: 120, keepTranscript: true, farewellSilenceMs: 200 },
     };
 
     const { attempt } = await start(f);
@@ -590,5 +590,101 @@ describe("ending the call when the conversation ends", () => {
     const row = await loadAttempt(f.deps.admin, ORG, attempt.id);
     expect(row?.end_reason).not.toBe("farewell");
     expect(f.h.telnyx.of("hangup")).toHaveLength(0);
+  });
+});
+
+describe("a line that has gone quiet", () => {
+  /** A call where she spoke, the caller answered, and then nothing. */
+  async function silentCall(env: Record<string, string | undefined>, judgeBody?: unknown) {
+    const openai = createFakeOpenAIFetch();
+    const f = fixture(env);
+    const sent: string[] = [];
+    const sideband = createFakeSideband({
+      onInstructions: [
+        { delayMs: 5, event: { type: "session.instructions.appended" } },
+        { delayMs: 20, event: { type: "session.output_transcript.delta", delta: "Kedy by ste vrátili náhradné vozidlo?" } },
+      ],
+    });
+    const wrapped = ((url: string, init: { headers: Record<string, string> }) => {
+      const socket = sideband.factory(url, init);
+      const send = socket.send.bind(socket);
+      socket.send = (data: string) => {
+        sent.push(data);
+        send(data);
+      };
+      return socket;
+    }) as typeof sideband.factory;
+
+    const deps: AiDemoDeps = {
+      ...f.deps,
+      webSocketFactory: wrapped,
+      probeLimits: { ...FAST_PROBE, probeWindowMs: 900, probeCheckpointMs: 100, keepTranscript: true, nudgeAfterMs: 120, judgeAfterMs: 300, judgeEveryMs: 150, maxNudges: 2, farewellSilenceMs: 200 },
+      openAIFetch: judgeBody
+        ? ((async (input: string | URL | Request, init?: RequestInit) => {
+            const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+            if (target.endsWith("/responses")) return new Response(JSON.stringify({ output_text: JSON.stringify(judgeBody) }), { status: 200 });
+            return openai.fetch(input, init);
+          }) as typeof fetch)
+        : openai.fetch,
+    };
+
+    const { attempt } = await start(f);
+    await transitionAttempt(f.deps.admin, attempt.id, ["sip_dialing"], {
+      state: "bridged",
+      openai_session_id: "live_running",
+      telnyx_mobile_call_control_id: "cc-mobile",
+      bridged_at: new Date(Date.now() - 30_000).toISOString(),
+      greeting_status: "requested",
+    });
+
+    const { runGreetingAndFinish } = await import("./orchestrator");
+    await runGreetingAndFinish(deps, attempt.id);
+    return { f, attempt, sent };
+  }
+
+  it("has her check in rather than sitting there", async () => {
+    const { sent } = await silentCall({ AI_DEMO_JUDGE_SILENCE: "true", AI_DEMO_AUTO_HANGUP: "true" });
+
+    const nudges = sent.map((raw) => JSON.parse(raw)).filter((command) => String(command.event_id ?? "").startsWith("nudge-"));
+    expect(nudges.length).toBeGreaterThan(0);
+    expect(String(nudges[0].content)).toContain("či je tam");
+  });
+
+  it("stops checking in rather than pestering", async () => {
+    const { sent } = await silentCall({ AI_DEMO_JUDGE_SILENCE: "true" });
+
+    const asked = sent
+      .map((raw) => JSON.parse(raw))
+      .filter((command) => command.type === "session.instructions.append" && String(command.event_id ?? "").startsWith("nudge-"));
+    expect(asked.length).toBeLessThanOrEqual(2);
+  });
+
+  it("ends the call when the model reads the silence as the end", async () => {
+    const { f, attempt } = await silentCall(
+      { AI_DEMO_JUDGE_SILENCE: "true", AI_DEMO_AUTO_HANGUP: "true" },
+      { action: "hangup", say: null, reason: "volajúci sa rozlúčil a položil" },
+    );
+
+    const row = await loadAttempt(f.deps.admin, ORG, attempt.id);
+    expect(row?.state).toBe("ended");
+    expect(row?.end_reason).toBe("judged_over");
+    expect(row?.error_code).toBeNull();
+  });
+
+  it("does not end the call on a verdict of carrying on", async () => {
+    const { f, attempt } = await silentCall(
+      { AI_DEMO_JUDGE_SILENCE: "true", AI_DEMO_AUTO_HANGUP: "true" },
+      { action: "continue", say: null, reason: "volajúci premýšľa" },
+    );
+
+    const row = await loadAttempt(f.deps.admin, ORG, attempt.id);
+    expect(row?.end_reason).not.toBe("judged_over");
+  });
+
+  it("says nothing and asks nobody while the switch is off", async () => {
+    const { f, attempt, sent } = await silentCall({ AI_DEMO_JUDGE_SILENCE: undefined, AI_DEMO_AUTO_HANGUP: "true" });
+
+    expect(sent.map((raw) => JSON.parse(raw)).filter((c) => String(c.event_id ?? "").startsWith("nudge-"))).toHaveLength(0);
+    expect((await loadAttempt(f.deps.admin, ORG, attempt.id))?.end_reason).not.toBe("judged_over");
   });
 });

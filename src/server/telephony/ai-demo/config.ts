@@ -71,6 +71,14 @@ export const AI_DEMO_LIMITS = {
    * short enough that nobody sits listening to nothing.
    */
   farewellSilenceMs: 4_000,
+  /** Quiet this long and she checks in — "ste tam?", "potrebujete chvíľu?". */
+  nudgeAfterMs: 7_000,
+  /** Quiet this long and the model is asked what the silence means. */
+  judgeAfterMs: 12_000,
+  /** How often the model may be asked; a silence does not need re-reading every tick. */
+  judgeEveryMs: 10_000,
+  /** She checks in at most this many times before it becomes pestering. */
+  maxNudges: 2,
   probeMaxEvents: 400,
   /** Shorter than this, an utterance of hers is an acknowledgement, not an answer. */
   backchannelMaxMs: 700,
@@ -121,6 +129,16 @@ export const AI_DEMO_ALLOWED_BACKEND_MODELS: readonly string[] = ["gpt-5.6-terra
  * runs afterwards against a ninety-second budget and nobody is waiting on the
  * line: there, only the quality of the reading matters.
  */
+/**
+ * The model that watches a silence during the call.
+ *
+ * It answers while nobody is speaking, but it still has to answer before the
+ * silence becomes uncomfortable, so this is the fast end of the range rather
+ * than the thorough one.
+ */
+export const AI_DEMO_ALLOWED_JUDGE_MODELS: readonly string[] = ["gpt-5.6-luna", "gpt-5.6-terra"];
+export const AI_DEMO_DEFAULT_JUDGE_MODEL = "gpt-5.6-luna";
+
 export const AI_DEMO_ALLOWED_REVIEW_MODELS: readonly string[] = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 export const AI_DEMO_DEFAULT_REVIEW_MODEL = "gpt-5.6-terra";
 /**
@@ -189,6 +207,9 @@ export type AiDemoConfig =
       storeTranscript: boolean;
       /** Hang up once she has said goodbye and the line has gone quiet. */
       autoHangup: boolean;
+      /** Ask a model what a longer silence means, and let her check in. */
+      judgeSilence: boolean;
+      judgeModel: string;
       /** Where the bridge webhook hands the call off to the listener. */
       listenUrl: string | null;
       /** Reads a finished call back; chosen for quality, not for latency. */
@@ -311,6 +332,9 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
   const reviewModel = allowlisted(read(env, "OPENAI_LIVE_REVIEW_MODEL"), AI_DEMO_ALLOWED_REVIEW_MODELS, AI_DEMO_DEFAULT_REVIEW_MODEL);
   if (reviewModel === null) missing.push("OPENAI_LIVE_REVIEW_MODEL");
 
+  const judgeModel = allowlisted(read(env, "OPENAI_LIVE_JUDGE_MODEL"), AI_DEMO_ALLOWED_JUDGE_MODELS, AI_DEMO_DEFAULT_JUDGE_MODEL);
+  if (judgeModel === null) missing.push("OPENAI_LIVE_JUDGE_MODEL");
+
   const voice = allowlisted(read(env, "OPENAI_LIVE_VOICE"), AI_DEMO_ALLOWED_VOICES, AI_DEMO_DEFAULT_VOICE);
   if (voice === null) missing.push("OPENAI_LIVE_VOICE");
 
@@ -328,7 +352,7 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
    */
   const allowedRecipients = parseRecipients(read(env, "AI_DEMO_ALLOWED_RECIPIENTS")) ?? [];
 
-  if (missing.length > 0 || apiKey === null || projectId === null || webhookSecret === null || sipHost === null || model === null || backendModel === null || reviewModel === null || voice === null || "invalid" in from) {
+  if (missing.length > 0 || apiKey === null || projectId === null || webhookSecret === null || sipHost === null || model === null || backendModel === null || reviewModel === null || judgeModel === null || voice === null || "invalid" in from) {
     return { configured: false, missing };
   }
 
@@ -346,6 +370,8 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
     webhookUrl: aiDemoWebhookUrl(env),
     storeTranscript: read(env, "AI_DEMO_STORE_TRANSCRIPT")?.toLowerCase() === "true",
     autoHangup: read(env, "AI_DEMO_AUTO_HANGUP")?.toLowerCase() === "true",
+    judgeSilence: read(env, "AI_DEMO_JUDGE_SILENCE")?.toLowerCase() === "true",
+    judgeModel,
     listenUrl: aiDemoOwnUrl(env, "/api/telephony/ai-demo/listen"),
     reviewModel,
     maxAttemptsPerDay: clampInt(read(env, "AI_DEMO_MAX_ATTEMPTS_PER_DAY"), 3, 0, 100),
