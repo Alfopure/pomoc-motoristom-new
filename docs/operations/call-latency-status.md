@@ -14,7 +14,7 @@ generation leases and the fenced provider journal).
 
 | action | before 17 Sep | after 17 Sep | true cost |
 | --- | --- | --- | --- |
-| inbound answer | 64 | 45 | **63** |
+| inbound answer | 64 | 45 | **61** |
 | hold | 40 | 35 | **44** |
 | unhold | 36 | 33 | **36** |
 | blind transfer | 47 | 41 | **50** |
@@ -32,9 +32,9 @@ after. Every number measured before then, including the reductions this repair
 claimed, understated production by roughly that much. The reductions are real;
 they were just measured against a smaller total than production pays.
 
-It also makes the shape of the remaining cost plain: the journal is 18 of the
-63 requests an inbound answer costs, close to a third, and it grows with every
-voice command rather than with the number of reads. That is what E2 exists to
+It also makes the shape of the remaining cost plain: the journal is the larger
+part of what an inbound answer costs, and it grows with every voice command
+rather than with the number of reads. That is what E2 exists to
 change, and no amount of read deduplication in the application will touch it.
 
 ## Measured on production calls
@@ -67,9 +67,9 @@ Cost of one database request, from production `request-performance`: **~95 ms**
 | **E1a.4** organisation cache | done — `call.active` poll 8 requests to 7, confirmed on live traffic |
 | **E1a.5** instrumentation | `db_count_at_dispatch` in the command audit; failed commands now record their error |
 | **E1a.6** one checkpoint per critical batch | done, critical phase only |
-| **E1b-1** low-risk concurrency | both points: parallel teardown, overlapping best-effort provider calls |
+| **E1b-1** low-risk concurrency | both points, and .2 in full: parallel teardown, overlapping best-effort provider calls, one checkpoint per overlapping run (9 session writes to 7 on an answer) |
 | **E1c** bounded webhook lease wait | done — 1200 ms, backoff 150/300/600 |
-| **E1b-2.4** parallel fan-out | done — a ring step claims, persists and dials its members together instead of one after another |
+| **E1b-2.4** parallel fan-out | done, with the plan's leaning and its full test list. An inbound call with three operators: 171 → 168 requests, one per operator rung |
 
 Outside the plan, from what the testing turned up:
 
@@ -89,7 +89,6 @@ Outside the plan, from what the testing turned up:
 | --- | --- |
 | **E0** permanent | done as the denylist; nothing left |
 | **E1a.3(d)** in full | maps a fenced PT409 refusal onto the superseded path for every command kind, not only `hangup`. Was blocked on the harness; writable now |
-| **E1b-1.2** group checkpoint | one checkpoint per overlapping group instead of one per command. No longer blocked |
 | **E1m** measurement | partly: cost per request and `db_count_at_dispatch` are in place; the 30-sample SQL A-J distributions are not |
 | **E1b-2** rest | .4 done; the rest superseded by E2 if E2 is approved |
 | **E2** migrations | not started. The step change: bridge chain to 5-6 requests, fanout to 6 + N |
@@ -144,6 +143,22 @@ and hold were all already correct — which is what left the caller's own hangup
 as the only remaining candidate. The conference parameters were never at fault
 either: `start_conference_on_create: true`, and `end_conference_on_exit`
 defaults to false.
+
+### One leaning the plan asked for, refused
+
+E1b-2.4 proposes taking the offer tombstones from the session snapshot when it
+shows none, instead of `cancelRevokedOffers` re-reading the row — a round trip
+per operator rung.
+
+`dispatch-pause-boundaries` refuses it, and it is right to. An operator can be
+paused while their own dial is still in flight, and the fresh row is what
+discovers that tombstone in time to hang the revoked leg up. The plan's
+backstop — the next event re-runs the pass — is not enough here, because the
+revoked leg can be answered before that event arrives.
+
+The read stays. The saving that did land is the journal lookup: it was gated on
+a continuation merely existing, and a first attempt has one, so every dial asked
+the journal about a command that could not be there.
 
 ## Known gaps that are not in the plan
 
