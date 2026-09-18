@@ -160,6 +160,22 @@ The read stays. The saving that did land is the journal lookup: it was gated on
 a continuation merely existing, and a first attempt has one, so every dial asked
 the journal about a command that could not be there.
 
+### The escalation is described, not yet configurable
+
+The user's decision on the queue escalation (18 Sep): keep it, but it belongs
+in settings rather than in the code — *"Ak si to nenastavil, tak je to jeho
+chyba a my by sme ho maximálne mali na to vedieť upozorniť"*. No forced
+behaviour; the dispatcher decides and the system says what the decision means.
+
+The saying-what-it-means half is done: the settings page reads the ring plans,
+the groups and the operators and states what a caller actually meets — whether
+any phone rings, which number the queue will dial after two minutes and that it
+is billed, who takes calls on their own phone, how long the caller waits.
+
+The setting itself needs a column on `motorist_telephony_settings`, so it needs
+a migration, which is the one thing this sandbox cannot apply. Until then the
+two minutes stay a constant in `transitions.ts` and the page says so.
+
 ## Known gaps that are not in the plan
 
 Found during testing on 17 Sep; none of them is a latency problem and the plan

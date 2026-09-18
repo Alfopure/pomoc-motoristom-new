@@ -1,10 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { AlertTriangle, Loader2, Save, ShieldAlert } from "lucide-react";
+import { AlertTriangle, Info, Loader2, Save, ShieldAlert } from "lucide-react";
 
 import type { RoutingDocument, TelephonySettingsDoc, ValidationIssue } from "@/server/telephony/config-service";
 
+import { callSetupAdvisories, type CallSetupAdvisory } from "@/lib/telephony/call-setup-advisories";
 import { ConfigRequestError, saveTelephonySettings } from "./config-client";
 import { SettingsField, SettingsIssueList, SettingsNotice, SettingsSectionHeader, settingsInputClass } from "./settings-ui";
 import {
@@ -51,6 +52,19 @@ export function TelephonySettingsPanel({
   const warnings = useMemo(
     () => settingsWarnings(draft, settings, { groups: document.groups, plans: document.plans }),
     [document.groups, document.plans, draft, settings],
+  );
+  // What the setup already does, as opposed to what this save would change.
+  // Nothing here is enforced: a configuration that leaves callers waiting is
+  // allowed, it just should not be a surprise.
+  const advisories = useMemo(
+    () => callSetupAdvisories({
+      groups: document.groups,
+      plans: document.plans,
+      operators: document.operators,
+      parkMaxMinutes: settings.parkMaxMinutes,
+      maxRingFanout: document.limits?.maxRingFanout ?? null,
+    }),
+    [document.groups, document.limits?.maxRingFanout, document.operators, document.plans, settings.parkMaxMinutes],
   );
   const dirty = settingsDirty(draft, settings);
   const issuesFor = (path: string) => issues.filter((issue) => issue.path === path);
@@ -138,6 +152,8 @@ export function TelephonySettingsPanel({
             {warning.text}
           </SettingsNotice>
         ))}
+
+        <CurrentCallBehaviour advisories={advisories} />
 
         <div className="grid gap-3 lg:grid-cols-2">
           <div className="lg:col-span-2">
@@ -233,6 +249,42 @@ export function TelephonySettingsPanel({
           {issues.length > 0 && <span className="text-xs font-medium text-red-700">Najprv oprav označené polia.</span>}
         </div>
       </div>
+    </section>
+  );
+}
+
+const ADVISORY_TONE: Record<CallSetupAdvisory["tone"], string> = {
+  info: "border-zinc-200 bg-zinc-50 text-zinc-800",
+  warning: "border-amber-200 bg-amber-50 text-amber-900",
+  error: "border-red-200 bg-red-50 text-red-900",
+};
+
+/**
+ * What a caller meets with the configuration as it stands.
+ *
+ * Every line is derived from rows the admin can change on the other tabs, so
+ * this is a reading of their own setup rather than advice: whether anybody's
+ * phone rings, what happens when nobody picks up, and which of it is billed.
+ */
+function CurrentCallBehaviour({ advisories }: { advisories: CallSetupAdvisory[] }) {
+  if (!advisories.length) return null;
+  return (
+    <section className="rounded-lg border border-zinc-200 bg-white p-3" aria-label="Čo robí súčasné nastavenie">
+      <h3 className="flex items-center gap-1.5 text-sm font-bold text-zinc-950">
+        <Info size={14} aria-hidden="true" />
+        Čo robí súčasné nastavenie
+      </h3>
+      <p className="mt-0.5 text-xs text-zinc-600">
+        Vychádza z plánov zvonenia, skupín a nastavení operátorov. Nič z toho nie je vynútené — je to len to, čo sa na hovore naozaj stane.
+      </p>
+      <ul className="mt-2 grid gap-1.5">
+        {advisories.map((advisory) => (
+          <li key={advisory.title} className={`rounded-md border px-2.5 py-2 text-xs ${ADVISORY_TONE[advisory.tone]}`}>
+            <span className="font-bold">{advisory.title}</span>
+            <span className="mt-0.5 block font-medium leading-5">{advisory.text}</span>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
