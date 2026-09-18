@@ -164,14 +164,19 @@ export function phoneBarCapabilities(input: {
   // `conference`, so the bar must not offer them either. What is left is the
   // participant list, adding one more, leaving and hanging up.
   const connectionPending = call.audioConnection != null && call.audioConnection.status !== "connected";
-  const twoParty = !connectionPending && (call.state === "talking" || call.state === "held");
+  // The caller can hang up out of a three-way and leave the operator talking to
+  // the numbers they added. Hold, park, transfer and consult all act on the
+  // caller, and the reducer refuses them without one, so offering them here is
+  // a button that can only fail.
+  const caller = call.participants.some((party) => party.kind === "caller");
+  const twoParty = caller && !connectionPending && (call.state === "talking" || call.state === "held");
   const conference = call.state === "conference";
   const advanced = !input.degraded && !connectionPending;
   return {
     answer: input.browserCallRinging,
     hangup: true,
-    hold: call.state === "talking" && advanced,
-    unhold: call.state === "held" && !connectionPending,
+    hold: caller && call.state === "talking" && advanced,
+    unhold: caller && call.state === "held" && !connectionPending,
     park: twoParty && call.answered,
     pickup: false,
     transfer: twoParty,
