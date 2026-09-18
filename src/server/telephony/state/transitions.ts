@@ -2487,15 +2487,20 @@ function appConsult(b: TransitionBuilder, customer: LegRow, event: AppEvent): Re
     b.cmd({ kind: "conference_hold", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:hold:consult"), legs: [ref(customer)], media: { key: "moh" } });
   }
   const target = event.target;
+  // A colleague who takes their calls on their own phone arrives here as a
+  // number, not as an operator. Naming them anyway is what makes
+  // `authorizeOperatorDispatch` occupy their presence: without it their phone
+  // rings while the ring plan is still free to offer them another call.
+  const targetProfileId = target.kind === "operator" ? target.profileId : target.ownerProfileId ?? null;
   const dial: DialCommand = {
     kind: "dial",
     commandId: b.cmdId(target.kind === "operator" ? target.profileId : target.number, "dial:consult"),
     to: target.kind === "operator" ? target.sipUri : target.number,
     from: b.ctx.fromNumber ?? b.session.called_number ?? "",
     role: "consult",
-    profileId: target.kind === "operator" ? target.profileId : null,
+    profileId: targetProfileId,
     externalNumber: target.kind === "number" ? target.number : null,
-    clientState: target.kind === "operator" ? { sid: b.session.id, role: "consult", operatorId: target.profileId, intent: "consult" } : { sid: b.session.id, role: "consult", intent: "consult" },
+    clientState: { sid: b.session.id, role: "consult", ...(targetProfileId ? { operatorId: targetProfileId } : {}), intent: "consult" },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: CONSULT_TIMEOUT_SECS,
   };
@@ -2552,7 +2557,8 @@ function appAddParty(b: TransitionBuilder, customer: LegRow, event: AppEvent): R
   if (openParties(b).length >= MAX_CONFERENCE_PARTIES) throw new CallActionRejected(`Do hovoru je možné pridať najviac ${MAX_CONFERENCE_PARTIES} účastníkov.`, 409);
   const operator = requireOperatorLeg(b);
   const target = event.target;
-  if (target.kind === "operator" && b.openLegs().some((leg) => leg.profile_id === target.profileId)) {
+  const targetProfileId = target.kind === "operator" ? target.profileId : target.ownerProfileId ?? null;
+  if (targetProfileId && b.openLegs().some((leg) => leg.profile_id === targetProfileId)) {
     throw new CallActionRejected("Kolega už je v hovore.", 409);
   }
   promoteToConference(b, customer, operator, event.actorProfileId);
@@ -2562,11 +2568,13 @@ function appAddParty(b: TransitionBuilder, customer: LegRow, event: AppEvent): R
     to: target.kind === "operator" ? target.sipUri : target.number,
     from: b.ctx.fromNumber ?? b.session.called_number ?? "",
     role: target.kind === "operator" ? "operator" : "external",
-    profileId: target.kind === "operator" ? target.profileId : null,
+    // Named here rather than rediscovered in `executeDial`, which reads every
+    // operator's settings to find the owner of a number it was handed.
+    profileId: targetProfileId,
     externalNumber: target.kind === "number" ? target.number : null,
     clientState:
-      target.kind === "operator"
-        ? { sid: b.session.id, role: "operator", operatorId: target.profileId, intent: PARTY_INTENT }
+      targetProfileId
+        ? { sid: b.session.id, role: target.kind === "operator" ? "operator" : "external", operatorId: targetProfileId, intent: PARTY_INTENT }
         : { sid: b.session.id, role: "external", intent: PARTY_INTENT },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: PARTY_TIMEOUT_SECS,
