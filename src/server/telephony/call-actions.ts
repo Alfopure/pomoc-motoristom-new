@@ -257,6 +257,34 @@ async function resolveFromLine(deps: CallActionDeps, profileId: string, lineId: 
   return { line, from };
 }
 
+/**
+ * The colleague's own mobile, when that is where their calls go.
+ *
+ * `delivery_mode: "personal_mobile"` is the setting an operator sets when they
+ * work from a phone rather than a browser; `resolvePersonalRingMembers` has
+ * honoured it in the ring plan for a while. Returning a number target here
+ * rather than an operator target is what makes a transfer follow the same
+ * rule. Null means "not that kind of colleague", and the caller falls back to
+ * requiring a live browser phone.
+ */
+async function personalMobileTarget(deps: CallActionDeps, profileId: string, label: string): Promise<TransferTarget | null> {
+  if (!telephonyStabilityEnabled()) return null;
+  const settings = await deps.admin.from("motorist_operator_telephony_settings")
+    .select("delivery_mode, default_mobile_number").eq("organization_id", deps.organizationId).eq("profile_id", profileId).maybeSingle();
+  if (settings.error) throw new CallActionError("Nastavenia kolegu sa nepodarilo načítať.", 500);
+  if (settings.data?.delivery_mode !== "personal_mobile") return null;
+  const number = normalizeE164(settings.data.default_mobile_number);
+  if (!number) throw new CallActionError("Kolega má mobilné doručovanie bez platného čísla.", 409, "target_unavailable");
+  const routing = await loadRoutingSettings(deps.admin, deps.organizationId);
+  if (!isDestinationAllowed(number, routing.raw?.destination_allowlist ?? null)) {
+    throw new CallActionError(`Číslo kolegu ${number} nie je povolené (allowlist).`, 403, "destination_not_allowed");
+  }
+  // Their own number, dialled as an outbound leg: the same budgets as any
+  // other PSTN transfer target apply.
+  await assertLegBudget(deps);
+  return { kind: "number", number, label, ownerProfileId: profileId };
+}
+
 async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, target: { profileId?: string | null; number?: string | null }): Promise<TransferTarget> {
   if (target.profileId) {
     if (target.profileId === actor.profileId) throw new CallActionError("Hovor nie je možné prepojiť na seba.", 400, "self_transfer");
@@ -268,6 +296,12 @@ async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, tar
       nowOf(deps),
     );
     if (!allowed.eligible) throw new CallActionError("Kolega nie je dostupný.", 409, "target_unavailable");
+    // A colleague who takes their calls on a personal mobile has no browser
+    // phone to hand the call to, and demanding one made them permanently
+    // untransferable — the ring plan has routed to them for a while, but every
+    // transfer, consult and add-party still insisted on a live web device.
+    const mobile = await personalMobileTarget(deps, target.profileId, profile.data.display_name);
+    if (mobile) return mobile;
     const device = await requireLiveDevice({ ...deps, deviceKind: "web" }, target.profileId, "Kolega nemá pripojený telefón.");
     return { kind: "operator", profileId: target.profileId, sipUri: device.sipUri, label: profile.data.display_name };
   }
@@ -949,6 +983,12 @@ export async function revokeCallMonitorInvitation(deps: CallActionDeps, actor: C
 
 export type TransferTargetOption = { profileId: string; displayName: string; role: AppRole; available: boolean; status: string;
   deviceLive: boolean;
+  /**
+   * Where a transfer would reach them: their browser phone, or their own
+   * mobile when that is how they take calls. A `personal_mobile` colleague has
+   * no browser phone and is reachable anyway.
+   */
+  reachVia?: "web" | "mobile";
   /** Newest heartbeat across the browser phone and the mobile app: how long since we saw them at all. */
   deviceSeenAt: string | null };
 
@@ -956,15 +996,22 @@ export type TransferTargetOption = { profileId: string; displayName: string; rol
 export async function listTransferTargets(deps: CallActionDeps, actor: CallActor): Promise<TransferTargetOption[]> {
   const { admin, organizationId } = deps;
   const now = nowOf(deps);
-  const [profiles, presence, devices, mobiles] = await Promise.all([
+  const [profiles, presence, devices, mobiles, routing] = await Promise.all([
     admin.from("motorist_profiles").select("id, display_name, role, active").eq("organization_id", organizationId).eq("active", true),
     admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId),
     admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment),
-    // Only a browser phone can take a transfer, but the mobile app is the other
-    // place a colleague can be seen. "When did we last see this person at all"
-    // is the honest answer to how long they have been away.
+    // The mobile app is the other place a colleague can be seen. "When did we
+    // last see this person at all" is the honest answer to how long they have
+    // been away.
     admin.from("motorist_operator_mobile_devices").select("profile_id, device_seen_at").eq("organization_id", organizationId).eq("environment", deps.environment),
+    admin.from("motorist_operator_telephony_settings").select("profile_id, delivery_mode, default_mobile_number").eq("organization_id", organizationId),
   ]);
+  // A colleague whose calls go to their own mobile is reachable without a
+  // browser phone; showing them as unavailable is what made them permanently
+  // untransferable.
+  const mobileRouted = new Set((routing.data ?? [])
+    .filter((row) => telephonyStabilityEnabled() && row.delivery_mode === "personal_mobile" && normalizeE164(row.default_mobile_number))
+    .map((row) => row.profile_id));
   const presenceById = new Map((presence.data ?? []).map((row) => [row.profile_id, row]));
   const deviceById = new Map((devices.data ?? []).map((row) => [row.profile_id, row]));
   const mobileSeenById = new Map((mobiles.data ?? []).map((row) => [row.profile_id, row.device_seen_at]));
@@ -980,8 +1027,10 @@ export async function listTransferTargets(deps: CallActionDeps, actor: CallActor
       const device = deviceById.get(profile.id) ?? null;
       const live = deviceIsLive(device, now);
       const allowed = row ? presenceAllowsOffer({ profileId: profile.id, status: effectivePresenceStatus(row, now), currentSessionId: row.current_session_id, wrapUpUntil: row.wrap_up_until }, now) : { eligible: false as const, reason: "no_presence" as const };
-      return { profileId: profile.id, displayName: profile.display_name, role: profile.role, available: allowed.eligible && live,
-        status: row ? effectivePresenceStatus(row, now) : "offline", deviceLive: live, deviceSeenAt: lastSeen(profile.id) };
+      const viaMobile = mobileRouted.has(profile.id);
+      return { profileId: profile.id, displayName: profile.display_name, role: profile.role, available: allowed.eligible && (live || viaMobile),
+        status: row ? effectivePresenceStatus(row, now) : "offline", deviceLive: live, deviceSeenAt: lastSeen(profile.id),
+        reachVia: (viaMobile ? "mobile" : "web") as "web" | "mobile" };
     })
     .sort((left, right) => Number(right.available) - Number(left.available) || left.displayName.localeCompare(right.displayName, "sk"));
 }

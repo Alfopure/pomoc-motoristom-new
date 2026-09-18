@@ -15,6 +15,7 @@ export type TransferTargetOption = {
   status: string;
   deviceLive: boolean;
   deviceSeenAt?: string | null;
+  reachVia?: "web" | "mobile";
 };
 
 export type TransferRequest = { profileId?: string; number?: string };

@@ -104,7 +104,6 @@ outright, and only two of the three phones ring.
 Request count is unchanged; this is latency, not cost. It should show up as the
 gap between the caller being answered and the first phone ringing, and it is
 worth one verification call to confirm.
-
 ## Known gaps that are not in the plan
 
 Found during testing on 17 Sep; none of them is a latency problem and the plan
@@ -122,10 +121,15 @@ does not address any of them.
    is the decision this leaves: when even the backup numbers have been tried,
    the caller still waits out the full `park_max_minutes` before the callback
    offer. Shortening that is a call behaviour change and wants a live test.
-3. **A colleague's mobile is unreachable.** Both the ring plan and every
-   transfer read `motorist_operator_devices` (web) only. Personal mobile numbers
-   are configured for one operator out of eight, and no ring group has one as a
-   member.
+3. **A colleague's mobile is unreachable.** Half closed. The ring plan already
+   honoured `delivery_mode: "personal_mobile"`; transfer, consult and add-party
+   did not, so a colleague who works from their phone was permanently
+   untransferable — refused with "Kolega nemá pripojený telefón" for a browser
+   phone they do not have by design. They are now reachable, and the picker
+   shows them as `Mobil` rather than green or absent.
+
+   What remains is configuration, not code: personal mobile numbers are set for
+   one operator out of eight, and no ring group has one as a member.
 4. ~~**A failed add-party leaves no trace.**~~ Closed. A blind transfer wrote
    no audit row at all and an add-party wrote one only when it worked, so a
    destination Telnyx refused left nothing behind. All three target actions now
