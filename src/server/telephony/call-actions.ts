@@ -217,10 +217,15 @@ async function assertOwnership(deps: CallActionDeps, session: SessionRow, actor:
 
 async function normalizeDestination(deps: CallActionDeps, raw: string, loadedSettings?: Awaited<ReturnType<typeof loadRoutingSettings>>): Promise<string> {
   const e164 = normalizeE164(raw);
-  if (!e164) throw new CallActionError("Neplatné telefónne číslo.", 400, "invalid_number");
+  // Both messages name the number, and the allowlist one names the number we
+  // arrived at rather than the one that was typed. National input carries no
+  // country, so "0776 123 456" becomes a Slovak +421776123456 — which is the
+  // one shape of this failure an operator cannot work out from the sentence
+  // alone. The console previews the same normalisation before the click.
+  if (!e164) throw new CallActionError(`Neplatné telefónne číslo: ${raw.trim()}`, 400, "invalid_number");
   const settings = loadedSettings ?? await loadRoutingSettings(deps.admin, deps.organizationId);
   if (!isDestinationAllowed(e164, settings.raw?.destination_allowlist ?? null)) {
-    throw new CallActionError("Cieľové číslo nie je povolené (allowlist).", 403, "destination_not_allowed");
+    throw new CallActionError(`Číslo ${e164} nie je povolené (allowlist).`, 403, "destination_not_allowed");
   }
   return e164;
 }
@@ -578,16 +583,68 @@ export async function hangupCall(deps: CallActionDeps, actor: CallActor, session
   return runAction(deps, session, appEvent("hangup", actor, deps), "Ukončenie hovoru zlyhalo.");
 }
 
+/**
+ * What a failed action should leave behind: the number as it was typed, the
+ * number it became, and the reason it came back.
+ *
+ * `requested` and `dialled` differ exactly when national input picked up the
+ * default country code, which is the case nobody could diagnose afterwards.
+ * When the target never resolved, `dialled` is still filled in from the raw
+ * input, because that is the interesting half.
+ */
+function targetAudit(target: { profileId?: string | null; number?: string | null }, resolved?: TransferTarget): Record<string, unknown> {
+  return {
+    kind: resolved?.kind ?? (target.number ? "number" : "operator"),
+    requested: target.number?.trim() ?? target.profileId ?? null,
+    dialled: resolved?.kind === "number" ? resolved.number : (target.number ? normalizeE164(target.number) : null),
+    target: resolved?.label ?? null,
+  };
+}
+
+function failureAudit(error: unknown): Record<string, unknown> {
+  if (error instanceof CallActionError) return { error: error.message, code: error.code ?? null, status: error.status };
+  return { error: error instanceof Error ? error.message : String(error), code: null, status: null };
+}
+
+/**
+ * Resolves a transfer/consult/add-party destination, runs the action, and
+ * writes an audit row whichever way it goes.
+ *
+ * Before this, a blind transfer wrote nothing at all and an add-party wrote
+ * only when it worked, so a destination the provider refused left no trace
+ * anywhere. A refused destination is the one failure an operator cannot
+ * reconstruct from the console afterwards, and it is the one we were asked
+ * about.
+ */
+async function transferAction(
+  deps: CallActionDeps,
+  actor: CallActor,
+  input: { action: string; session: SessionRow; target: { profileId?: string | null; number?: string | null }; event: AppEventType; failureMessage: string },
+): Promise<CallActionResult> {
+  let resolved: TransferTarget | undefined;
+  try {
+    resolved = await resolveTransferTarget(deps, actor, input.target);
+    const result = await runAction(deps, input.session, appEvent(input.event, actor, deps, { target: resolved }), input.failureMessage);
+    await auditAction(deps, actor, { action: input.action, sessionId: input.session.id, after: targetAudit(input.target, resolved) });
+    return result;
+  } catch (error) {
+    await auditAction(deps, actor, {
+      action: `${input.action}.failed`,
+      sessionId: input.session.id,
+      after: { ...targetAudit(input.target, resolved), ...failureAudit(error) },
+    });
+    throw error;
+  }
+}
+
 export async function blindTransfer(deps: CallActionDeps, actor: CallActor, sessionId: string, target: { profileId?: string | null; number?: string | null }): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
-  const resolved = await resolveTransferTarget(deps, actor, target);
-  return runAction(deps, session, appEvent("blind_transfer", actor, deps, { target: resolved }), "Prepojenie zlyhalo.");
+  return transferAction(deps, actor, { action: "telephony.call.blind_transfer", session, target, event: "blind_transfer", failureMessage: "Prepojenie zlyhalo." });
 }
 
 export async function startConsult(deps: CallActionDeps, actor: CallActor, sessionId: string, target: { profileId?: string | null; number?: string | null }): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
-  const resolved = await resolveTransferTarget(deps, actor, target);
-  return runAction(deps, session, appEvent("consult", actor, deps, { target: resolved }), "Konzultáciu sa nepodarilo začať.");
+  return transferAction(deps, actor, { action: "telephony.call.consult", session, target, event: "consult", failureMessage: "Konzultáciu sa nepodarilo začať." });
 }
 
 export async function completeTransfer(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
@@ -728,10 +785,7 @@ async function partyLabel(deps: CallActionDeps, leg: LegRow): Promise<string> {
 /** Adds a colleague or an external number to the live call as a third party. */
 export async function addCallParty(deps: CallActionDeps, actor: CallActor, sessionId: string, target: { profileId?: string | null; number?: string | null }): Promise<CallActionResult> {
   const session = await conferenceSession(deps, actor, sessionId);
-  const resolved = await resolveTransferTarget(deps, actor, target);
-  const result = await runAction(deps, session, appEvent("add_party", actor, deps, { target: resolved }), "Účastníka sa nepodarilo pridať.");
-  await auditAction(deps, actor, { action: "telephony.conference.add_party", sessionId, after: { target: resolved.label, kind: resolved.kind } });
-  return result;
+  return transferAction(deps, actor, { action: "telephony.conference.add_party", session, target, event: "add_party", failureMessage: "Účastníka sa nepodarilo pridať." });
 }
 
 /** Mutes or unmutes one added participant of the conference. */
