@@ -38,14 +38,22 @@ describe("overlapping provider calls", () => {
     const h = harness();
     const call = await ringingInbound(h);
     const winner = String(h.legFor(call.sessionId, PROFILES.o1)!.telnyx_call_control_id);
-    const seen = watchConcurrency(h, ["playbackStop", "hangup"]);
+    const runs: number[] = [];
+    const client = h.telnyx.client as unknown as Record<string, (input: never) => Promise<unknown>>;
+    const many = client.callActionMany.bind(h.telnyx.client);
+    client.callActionMany = async (list: never) => {
+      runs.push((list as unknown[]).length);
+      return many(list);
+    };
 
     await h.legEvent(winner, "call.answered");
 
     // One music stop and two losing operators: three best-effort calls that
-    // used to queue behind each other, each with its own provider timeout.
+    // used to queue behind each other, each with its own provider timeout and
+    // its own fence. They go as one run now, which is both the overlap and the
+    // single journal.
     expect(h.telnyx.of("hangup").length + h.telnyx.of("playbackStop").length).toBeGreaterThanOrEqual(3);
-    expect(seen.peak).toBeGreaterThan(1);
+    expect(runs.some((size) => size > 1)).toBe(true);
     expect(h.session(call.sessionId).state).toBe("talking");
     expect(h.telnyx.of("bridge")).toHaveLength(1);
   });
@@ -105,5 +113,21 @@ describe("overlapping provider calls", () => {
     // take the rest of the run with it, and the call is not ended.
     expect(h.telnyx.of("hangup").length).toBeGreaterThanOrEqual(2);
     expect((h.session(call.sessionId) as SessionRow).ended_at).toBeNull();
+  });
+
+  it("journals the teardown run once, not once per command", async () => {
+    const h = harness();
+    const call = await ringingInbound(h);
+    const winner = String(h.legFor(call.sessionId, PROFILES.o1)!.telnyx_call_control_id);
+    const from = h.db.log.length;
+
+    await h.legEvent(winner, "call.answered");
+
+    // A stop and two losing legs: three fences and three records, for commands
+    // that have no bookkeeping between them at all.
+    const rows = h.db.log.slice(from);
+    const batched = rows.filter((row) => /provider_command_(prepare|result)_batch_v2/.test(row.table)).length;
+    expect(batched).toBeGreaterThanOrEqual(2);
+    expect(h.session(call.sessionId).state).toBe("talking");
   });
 });
