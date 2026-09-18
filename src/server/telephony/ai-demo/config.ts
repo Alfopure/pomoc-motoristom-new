@@ -79,6 +79,8 @@ export const AI_DEMO_LIMITS = {
   judgeEveryMs: 10_000,
   /** She checks in at most this many times before it becomes pestering. */
   maxNudges: 2,
+  /** How long she gets to say goodbye once the call has been judged over. */
+  closingGraceMs: 6_000,
   probeMaxEvents: 400,
   /** Shorter than this, an utterance of hers is an acknowledgement, not an answer. */
   backchannelMaxMs: 700,

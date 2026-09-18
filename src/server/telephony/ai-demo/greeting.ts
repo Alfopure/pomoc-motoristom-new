@@ -132,6 +132,7 @@ export type ProbeLimits = {
   judgeAfterMs?: number;
   judgeEveryMs?: number;
   maxNudges?: number;
+  closingGraceMs?: number;
   /**
    * Keep the words, not just the timings.
    *

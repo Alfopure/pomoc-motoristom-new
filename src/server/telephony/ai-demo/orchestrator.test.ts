@@ -618,7 +618,7 @@ describe("a line that has gone quiet", () => {
     const deps: AiDemoDeps = {
       ...f.deps,
       webSocketFactory: wrapped,
-      probeLimits: { ...FAST_PROBE, probeWindowMs: 900, probeCheckpointMs: 100, keepTranscript: true, nudgeAfterMs: 120, judgeAfterMs: 300, judgeEveryMs: 150, maxNudges: 2, farewellSilenceMs: 200 },
+      probeLimits: { ...FAST_PROBE, probeWindowMs: 900, probeCheckpointMs: 100, keepTranscript: true, nudgeAfterMs: 120, judgeAfterMs: 300, judgeEveryMs: 150, maxNudges: 2, farewellSilenceMs: 200, closingGraceMs: 150 },
       openAIFetch: judgeBody
         ? ((async (input: string | URL | Request, init?: RequestInit) => {
             const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -659,11 +659,16 @@ describe("a line that has gone quiet", () => {
     expect(asked.length).toBeLessThanOrEqual(2);
   });
 
-  it("ends the call when the model reads the silence as the end", async () => {
-    const { f, attempt } = await silentCall(
+  it("has her say goodbye before the line drops", async () => {
+    // A call that simply stops is the one thing a listener notices, and she has
+    // no other way to close: she cannot hang up, so somebody has to ask her.
+    const { f, attempt, sent } = await silentCall(
       { AI_DEMO_JUDGE_SILENCE: "true", AI_DEMO_AUTO_HANGUP: "true" },
       { action: "hangup", say: null, reason: "volajúci sa rozlúčil a položil" },
     );
+
+    const asked = sent.map((raw) => JSON.parse(raw)).filter((command) => String(command.content ?? "").includes("rozlúč"));
+    expect(asked.length).toBeGreaterThan(0);
 
     const row = await loadAttempt(f.deps.admin, ORG, attempt.id);
     expect(row?.state).toBe("ended");

@@ -235,6 +235,8 @@ Pri `AI_DEMO_JUDGE_SILENCE=true` sa ticho posudzuje v troch krokoch, od najlacne
 
 Model rozumie kontextu, čo zoznam fráz nevie: „dobre, to ešte preberiem doma" je koniec hovoru, hoci tam slovo „dovidenia" nepadlo.
 
+**Keď model vyhodnotí, že je koniec, hovor sa nepoloží hneď.** Najprv sa jej povie, nech sa rozlúči, a až po šiestich sekundách sa vetvy zložia. Bez toho hovor jednoducho prestal — a to je jediná vec, ktorú si poslucháč všimne. Pri rýchlej ceste (rozlúčka + ticho) sa kladie hneď, lebo rozlúčka už odznela.
+
 **Latencia:** posudzovanie beží **iba počas ticha**, teda vtedy, keď nikto nehovorí a na nič sa nečaká. Do času do prvého slova ani do medzery po vašej vete nevstupuje. Preto je to v poriadku, hoci pôvodný plán to zamietal — ten princíp bol aplikovaný širšie, než bolo treba.
 
 Keď model neodpovie alebo zlyhá, odpoveď je vždy „pokračuj". Hovor, ktorý trvá o pár sekúnd dlhšie, je lepší než hovor useknutý kvôli vypršanému dopytu.

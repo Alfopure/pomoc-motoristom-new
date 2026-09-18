@@ -414,7 +414,7 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
   const context = typeof (attempt.metadata as { context?: unknown })?.context === "string" ? ((attempt.metadata as { context?: string }).context ?? null) : null;
 
   // The judge is asked about a silence, not about every tick of it.
-  const lastJudged = { at: 0 };
+  const silence = { lastJudgedAt: 0, askedToCloseAt: null as number | null };
   const probeLimits: ProbeLimits = deps.probeLimits ?? {
     ...AI_DEMO_LIMITS,
     keepTranscript: config.storeTranscript,
@@ -440,7 +440,7 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
       onProgress: async (partial, controls) => {
         await savePartial(deps, attempt, partial);
 
-        const ended = await watchSilence(deps, attempt, config, partial, controls, lastJudged, probeLimits);
+        const ended = await watchSilence(deps, attempt, config, partial, controls, silence, probeLimits);
         if (ended) return false;
 
         // Stop as soon as the call is over rather than waiting out the window;
@@ -763,7 +763,7 @@ async function watchSilence(
   config: Extract<AiDemoConfig, { configured: true }>,
   partial: GreetingResult,
   controls: ProbeControls,
-  lastJudged: { at: number },
+  silence: { lastJudgedAt: number; askedToCloseAt: number | null },
   limits: ProbeLimits,
 ): Promise<boolean> {
   const farewellSilenceMs = limits.farewellSilenceMs ?? AI_DEMO_LIMITS.farewellSilenceMs;
@@ -771,6 +771,7 @@ async function watchSilence(
   const judgeAfterMs = limits.judgeAfterMs ?? AI_DEMO_LIMITS.judgeAfterMs;
   const judgeEveryMs = limits.judgeEveryMs ?? AI_DEMO_LIMITS.judgeEveryMs;
   const maxNudges = limits.maxNudges ?? AI_DEMO_LIMITS.maxNudges;
+  const closingGraceMs = limits.closingGraceMs ?? AI_DEMO_LIMITS.closingGraceMs;
 
   const spoken = partial.transcript ?? [];
   if (spoken.length === 0) return false;
@@ -781,6 +782,13 @@ async function watchSilence(
     await endAttempt(deps, attempt.id, AI_DEMO_LIMITS.cleanupBudgetActionMs, "inline");
     return true;
   };
+
+  // Asked to close a moment ago: give her the words, then end it. Without this
+  // the call simply stopped, which is what "nerozlúčila sa" was.
+  if (silence.askedToCloseAt !== null) {
+    if (Date.now() - silence.askedToCloseAt >= closingGraceMs) return end("judged_over");
+    return false;
+  }
 
   if (config.autoHangup) {
     const lastSpeechMs = spoken[spoken.length - 1]?.ms ?? 0;
@@ -802,8 +810,8 @@ async function watchSilence(
   }
 
   const now = Date.now();
-  if (now - lastJudged.at < judgeEveryMs) return false;
-  lastJudged.at = now;
+  if (now - silence.lastJudgedAt < judgeEveryMs) return false;
+  silence.lastJudgedAt = now;
 
   const verdict = await judgeCall(
     { turns: spoken, silenceMs: controls.silenceMs, nudges: controls.saidCount, maxNudges },
@@ -811,7 +819,13 @@ async function watchSilence(
   );
   deps.logger?.({ scope: "ai-demo", attemptId: attempt.id, message: "silence judged", action: verdict.action, reason: verdict.reason });
 
-  if (verdict.action === "hangup" && config.autoHangup) return end("judged_over");
+  if (verdict.action === "hangup" && config.autoHangup) {
+    // Let her finish properly. A call that just stops is the one thing a
+    // listener notices, and she has no other way to say goodbye.
+    controls.say("Rozhovor sa skončil. Krátko sa rozlúč — poďakuj a popraj pekný deň. Jednou vetou, nič viac.");
+    silence.askedToCloseAt = Date.now();
+    return false;
+  }
   if (verdict.action === "nudge" && verdict.say !== null && controls.saidCount < maxNudges) {
     controls.say(`${verdict.say} Povedz to po slovensky, jednou vetou, a potom počúvaj.`);
   }
