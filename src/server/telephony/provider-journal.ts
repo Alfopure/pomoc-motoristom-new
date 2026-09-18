@@ -46,3 +46,49 @@ export async function recordProviderResponse(request: JournalRequest, status: nu
     await ownershipRpc(request.owner.admin, "motorist_provider_command_result_v2", args);
   });
 }
+
+/** What the provider layer sends back: the status, the body, and 429 backoff. */
+export type JournaledSend = { status: number; result: unknown; retryAfterMs?: number };
+export type JournaledResult<S> = { cached: true; result: unknown } | { cached: false; sent: S };
+
+/**
+ * The fenced-dispatch protocol, in one place: fence the command in the
+ * database, send it, record what came back.
+ *
+ * Both the real client and the test double go through here. That is the whole
+ * point — the branches below (a command already accepted, already rejected,
+ * already rate-limited, or dispatched with its outcome never recorded) are
+ * exactly the ones that decide whether a redelivered webhook re-dials an
+ * operator, and a test double with its own copy of them would be testing the
+ * copy.
+ *
+ * `error` reconstructs the caller's own error type from a replayed status and
+ * body, because this module must not depend on the provider client it serves.
+ * `invalid` reports a 2xx body that does not actually acknowledge the command:
+ * it is recorded as a 504, so the next attempt asks rather than assumes.
+ */
+export async function dispatchJournaled<S extends JournaledSend>(
+  journal: JournalRequest | null,
+  send: () => Promise<S>,
+  hooks: { error: (status: number, body: unknown, commandId: string | null) => Error; invalid?: (sent: S) => boolean },
+): Promise<JournaledResult<S>> {
+  if (journal) {
+    // Preparation renews ownership and fences the exact immutable command in
+    // the database immediately before dispatch. A second renewal here adds a
+    // database round trip to every answer, bridge and hangup.
+    const decision = await prepareProviderRequest(journal);
+    if (!decision.dispatch) {
+      if (decision.outcome === "accepted") return { cached: true, result: decision.result };
+      if (decision.outcome === "rejected") throw hooks.error(decision.http_status ?? 422, decision.result, journal.commandId);
+      if (decision.outcome === "rate_limited") throw hooks.error(429, decision.result, journal.commandId);
+      throw new ProviderOutcomeUnknownError(journal.commandId);
+    }
+  } else await assertOwnership();
+
+  const sent = await send();
+  if (journal) {
+    const invalid = hooks.invalid?.(sent) ?? false;
+    await recordProviderResponse(journal, invalid ? 504 : sent.status, sent.result, sent.retryAfterMs);
+  }
+  return { cached: false, sent };
+}

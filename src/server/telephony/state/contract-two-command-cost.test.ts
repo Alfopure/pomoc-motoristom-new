@@ -53,15 +53,24 @@ describe("contract 2 request cost", () => {
     const hangup = await measure(() => hangupCall(h.deps, actor, call.sessionId));
 
     // Measured on this path: 64 / 40 / 36 / 47 / 39 before the 17 Sep work,
-    // 45 / 35 / 33 / 41 / 32 after it. Bounds carry two requests of headroom
-    // because the throttled incident-recovery read fires or not depending on
-    // wall-clock; they still catch any regression of three or more. Guards, not
-    // targets — lower them when a change lowers the count.
-    expect(answer).toBeLessThanOrEqual(47);
-    expect(hold).toBeLessThanOrEqual(37);
-    expect(unhold).toBeLessThanOrEqual(35);
-    expect(transfer).toBeLessThanOrEqual(43);
-    expect(hangup).toBeLessThanOrEqual(34);
+    // 45 / 35 / 33 / 41 / 32 after it — and 63 / 44 / 36 / 50 / 42 once the
+    // double started going through the provider journal like the real client.
+    //
+    // The jump is not a regression. It is the cost that was always there and
+    // never counted: `prepare_v2` before every voice command and `result_v2`
+    // after it, two database round trips each. Everything measured before
+    // 18 Sep understates production by roughly that much, including the
+    // reductions this repair claimed.
+    //
+    // Bounds carry two requests of headroom because the throttled
+    // incident-recovery read fires or not depending on wall-clock; they still
+    // catch any regression of three or more. Guards, not targets — lower them
+    // when a change lowers the count.
+    expect(answer).toBeLessThanOrEqual(65);
+    expect(hold).toBeLessThanOrEqual(46);
+    expect(unhold).toBeLessThanOrEqual(38);
+    expect(transfer).toBeLessThanOrEqual(52);
+    expect(hangup).toBeLessThanOrEqual(44);
   });
 
   it("records why a command failed, not just that it did", async () => {

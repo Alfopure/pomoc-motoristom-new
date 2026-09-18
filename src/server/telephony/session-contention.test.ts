@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeQueryBuilder } from "@/test/fake-supabase";
+import { registerProviderJournalRpcs } from "@/test/fake-stability";
 import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { hangupCall, holdCall, unholdCall } from "./call-actions";
 import { ownedSessionWork } from "./session-runner";
@@ -32,10 +33,10 @@ function contractTwo(h: TelephonyHarness, sessionId: string) {
     token = null;
     return true;
   });
-  h.db.registerRpc("motorist_provider_pending_commands_v2", () => []);
+  // The leases above are hand-built so this test can stall and steal them; the
+  // journal is not, and the provider double goes through it.
+  registerProviderJournalRpcs(h.db);
   h.db.registerRpc("motorist_provider_observe_dial_v2", () => false);
-  h.db.registerRpc("motorist_provider_termination_legs_v2", () => []);
-  h.db.registerRpc("motorist_provider_termination_checkpoint_v2", () => ({ pending: false }));
   h.db.registerRpc("motorist_session_terminate_v2", () => {
     const row = h.db.storage("motorist_call_sessions").find(row => row.id === sessionId)!;
     row.termination_requested_at ??= h.db.nowIso();

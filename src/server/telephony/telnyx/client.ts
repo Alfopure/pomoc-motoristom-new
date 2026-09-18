@@ -1,7 +1,7 @@
 import "server-only";
 import { measureRequestStep } from "@/server/request-metrics";
-import { assertOwnership, sessionOwnership } from "../ownership";
-import { journalRequest, prepareProviderRequest, recordProviderResponse, ProviderOutcomeUnknownError } from "../provider-journal";
+import { sessionOwnership } from "../ownership";
+import { dispatchJournaled, journalRequest } from "../provider-journal";
 
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 
@@ -481,27 +481,26 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const deadline = Math.min(started + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS), owner?.deadline ?? Infinity);
     const journal = journalRequest(method, path, commandId, body);
     const dispatch = async () => {
-      if (journal) {
-        // Preparation renews ownership and fences the exact immutable command
-        // in the database immediately before dispatch. A second renewal here
-        // adds a database round trip to every answer, bridge and hangup.
-        const decision = await prepareProviderRequest(journal);
-        if (!decision.dispatch) {
-          if (decision.outcome === "accepted") return { cached: true as const, result: decision.result };
-          if (decision.outcome === "rejected") throw errorFromBody(decision.http_status ?? 422, decision.result, commandId);
-          if (decision.outcome === "rate_limited") throw errorFromBody(429, decision.result, commandId);
-          throw new ProviderOutcomeUnknownError(commandId!);
-        }
-      } else await assertOwnership();
-      const result = await measureRequestStep("provider", () => attempt(method, url.toString(), body, commandId, requestOptions.headers, deadline));
-      if (journal) {
-        const data = asRecord(asRecord(result.parsed).data);
-        const invalidAcknowledgement = result.response.ok && (path === "/calls" && !str(data.call_control_id) ||
-          path === "/conferences" && !str(data.id) || /\/actions\/record_(start|stop)$/.test(path) && data.result !== "ok");
-        await recordProviderResponse(journal, invalidAcknowledgement ? 504 : result.response.status, result.parsed,
-          result.response.status === 429 ? parseRetryAfterMs(result.response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS : undefined);
-      }
-      return { cached: false as const, ...result };
+      const journaled = await dispatchJournaled(
+        journal,
+        async () => {
+          const result = await measureRequestStep("provider", () => attempt(method, url.toString(), body, commandId, requestOptions.headers, deadline));
+          return { status: result.response.status, result: result.parsed, raw: result,
+            retryAfterMs: result.response.status === 429 ? parseRetryAfterMs(result.response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS : undefined };
+        },
+        {
+          error: (status, result) => errorFromBody(status, result, commandId),
+          // A 2xx that does not carry the identifier it promised has not
+          // acknowledged anything, whatever the status line says.
+          invalid: ({ status, result }) => {
+            const data = asRecord(asRecord(result).data);
+            return status < 400 && (path === "/calls" && !str(data.call_control_id) ||
+              path === "/conferences" && !str(data.id) || /\/actions\/record_(start|stop)$/.test(path) && data.result !== "ok");
+          },
+        },
+      );
+      if (journaled.cached) return { cached: true as const, result: journaled.result };
+      return { cached: false as const, ...journaled.sent.raw };
     };
     let retried = false;
     let response: Response;
