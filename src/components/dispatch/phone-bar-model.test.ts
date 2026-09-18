@@ -18,6 +18,10 @@ import {
   PHONE_ACTION_LABELS,
 } from "./phone-bar-model";
 
+/** Every live call has one, and hold, park and transfer all act on them. */
+const caller = { legId: "leg-caller", kind: "caller" as const, profileId: null, name: "+421 900 111 222",
+  detail: null, answered: true, muted: false, supervisorMode: null, self: false, controllable: false };
+
 function call(overrides: Partial<PhoneBarCall> = {}): PhoneBarCall {
   return {
     sessionId: "sess-1",
@@ -32,7 +36,7 @@ function call(overrides: Partial<PhoneBarCall> = {}): PhoneBarCall {
     caseId: null,
     match: null,
     matchCount: 0,
-    participants: [],
+    participants: [caller],
     timerSince: "2026-09-03T08:00:00.000Z",
     answered: true,
     held: false,
@@ -215,6 +219,18 @@ describe("presentation helpers", () => {
 describe("conference capabilities", () => {
   const party = { legId: "leg-party", kind: "party" as const, profileId: null, name: "+421 900 000 000", detail: null, answered: true, muted: false, supervisorMode: null, self: false, controllable: true };
 
+  it("drops the caller-only actions once the caller has hung up out of a three-way", () => {
+    // The operator is still talking to the number they added. Hold, park,
+    // transfer and consult all act on the caller, and the reducer refuses them
+    // without one — a button that can only fail is worse than no button.
+    const orphaned = call({ state: "talking", participants: [party] });
+    const capabilities = phoneBarCapabilities({ call: orphaned, browserCallActive: true, browserCallRinging: false });
+
+    expect(capabilities).toMatchObject({ hold: false, park: false, transfer: false, consult: false });
+    // Ending it is still the operator's to do, and still the way out.
+    expect(capabilities.hangup).toBe(true);
+  });
+
   it("offers adding a participant on a live or held call, but not while degraded", () => {
     expect(phoneBarCapabilities({ call: call({ state: "talking" }), browserCallActive: true, browserCallRinging: false }).addParty).toBe(true);
     expect(phoneBarCapabilities({ call: call({ state: "held" }), browserCallActive: true, browserCallRinging: false }).addParty).toBe(true);
@@ -224,13 +240,13 @@ describe("conference capabilities", () => {
   });
 
   it("offers leaving only once another participant is actually in the conference", () => {
-    expect(phoneBarCapabilities({ call: call({ state: "conference", participants: [party] }), browserCallActive: true, browserCallRinging: false }).leaveConference).toBe(true);
-    expect(phoneBarCapabilities({ call: call({ state: "conference", participants: [{ ...party, answered: false }] }), browserCallActive: true, browserCallRinging: false }).leaveConference).toBe(false);
-    expect(phoneBarCapabilities({ call: call({ state: "talking", participants: [party] }), browserCallActive: true, browserCallRinging: false }).leaveConference).toBe(false);
+    expect(phoneBarCapabilities({ call: call({ state: "conference", participants: [caller, party] }), browserCallActive: true, browserCallRinging: false }).leaveConference).toBe(true);
+    expect(phoneBarCapabilities({ call: call({ state: "conference", participants: [caller, { ...party, answered: false }] }), browserCallActive: true, browserCallRinging: false }).leaveConference).toBe(false);
+    expect(phoneBarCapabilities({ call: call({ state: "talking", participants: [caller, party] }), browserCallActive: true, browserCallRinging: false }).leaveConference).toBe(false);
   });
 
   it("narrows the two-party controls while a three-way is running", () => {
-    const three = call({ state: "conference", participants: [party] });
+    const three = call({ state: "conference", participants: [caller, party] });
     expect(phoneBarCapabilities({ call: three, browserCallActive: true, browserCallRinging: false })).toMatchObject({
       hold: false,
       park: false,

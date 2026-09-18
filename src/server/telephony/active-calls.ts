@@ -146,6 +146,16 @@ function audioConnectionView(session: SessionRow, legs: LegRow[], now: Date): Au
   // Customer answer changes the session to talking before that bridge finishes;
   // require both current legs' provider confirmations before claiming audio.
   if (!connection && session.direction === "outbound" && session.state === "talking") {
+    // An answered call with no customer leg left open is a three-way the caller
+    // has hung up out of, with the rest still talking. Only open legs are
+    // loaded here, so their absence is the signal.
+    //
+    // The bridge this gate confirms is over, and the conference that replaced
+    // it is not something the gate can speak for: it would report "audio not
+    // confirmed" and grey out hold, transfer and add for a call that is
+    // working, telling the operator to hang up on a conversation they are in
+    // the middle of.
+    if (session.answered_at && !legs.some(leg => leg.role === "customer")) return null;
     const customer = legs.find(leg => leg.role === "customer" && isOpenLeg(leg) && leg.answered_at);
     const operator = legs.find(leg => leg.role === "operator" && leg.profile_id === session.answered_by_profile_id && isOpenLeg(leg) && leg.answered_at);
     const confirmedAt = customer?.bridged_at && operator?.bridged_at
