@@ -118,6 +118,11 @@ export function readinessMessages(preflight: AiDemoPreflight): Readiness[] {
   if (!preflight.telnyx.liveCallsEnv || !preflight.telnyx.liveCallsDb) {
     messages.push({ tone: "warning", message: "Živé hovory sú vypnuté. Bez nich sa hovor nevytočí.", action: "settings" });
   }
+  if (preflight.recipientCount === 0) {
+    // Not an error — a deliberate setting — but the admin typing a number
+    // should know that only the organisation's allowlist stands behind it.
+    messages.push({ tone: "warning", message: "Server neobmedzuje príjemcov. Zavolá sa na akékoľvek číslo povolené v cieľoch organizácie." });
+  }
   if (preflight.remote?.models.liveAvailable === false) {
     messages.push({
       tone: "warning",

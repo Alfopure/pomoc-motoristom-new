@@ -149,7 +149,7 @@ Ponechané zostali pravidlá, ktoré samy osebe slúžia prirodzenosti — napr�
 
 ## Bezpečnostné hranice
 
-- **Štyri nezávislé brány** pred vytočením: `AI_DEMO_ENABLED`, `destination_allowlist` organizácie, `AI_DEMO_ALLOWED_RECIPIENTS` (server, povinné) a denný limit. Ani jednu nevie ovplyvniť telo požiadavky.
+- **Brány pred vytočením:** `AI_DEMO_ENABLED`, `destination_allowlist` organizácie, voliteľný užší zoznam `AI_DEMO_ALLOWED_RECIPIENTS` a voliteľný denný limit. Ani jednu nevie ovplyvniť telo požiadavky. Posledné dve sa dajú vypnúť (prázdna hodnota, resp. `0`) — vtedy platí to isté pravidlo ako pre bežný odchádzajúci hovor dispečera a záložka to napíše.
 - **Model nikdy nevidí telefónne číslo** a nemá nástroj, ktorým by hovor vytvoril, prepojil alebo ukončil.
 - **Caller ID je fail-closed:** iba neutrálna linka (alebo `+421232408718` na výslovný pokyn) a iba ak je v tejto organizácii aktívna. Záznam `…8700` je zakázaný v oboch tvaroch, ktoré Telnyx ukladá.
 - **Podpis webhooku nie je oprávnenie.** Platný podpis dokazuje, že udalosť je od OpenAI — nie že za ňou stojí náš hovor. Autoritou je riadok, ktorý vznikol kliknutím admina. Nespárovanú reláciu potvrdíme a ignorujeme; SIP 603 by znamenal rozhodovať za cudzí hovor.

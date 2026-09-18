@@ -152,7 +152,10 @@ export async function startAiDemo(deps: AiDemoDeps, input: StartAiDemoInput): Pr
   if (!isDestinationAllowed(target, allowlist)) {
     throw new AiDemoError("Toto číslo nie je v povolených cieľoch organizácie.", 403, "destination_not_allowed");
   }
-  if (!config.allowedRecipients.includes(target)) {
+  // The shortlist is a second, tighter gate over the organisation's own
+  // allowlist. Empty means the demo may call whatever an ordinary outbound
+  // call may call — which is a deliberate setting, not an oversight.
+  if (config.allowedRecipients.length > 0 && !config.allowedRecipients.includes(target)) {
     throw new AiDemoError("Toto číslo nie je v serverovom zozname povolených príjemcov dema.", 403, "ai_demo_recipient_not_allowed");
   }
 

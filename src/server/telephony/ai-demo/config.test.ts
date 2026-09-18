@@ -26,7 +26,7 @@ describe("getAiDemoConfig", () => {
     const config = getAiDemoConfig({});
     expect(config.configured).toBe(false);
     if (config.configured) return;
-    expect(config.missing).toEqual(["OPENAI_API_KEY", "OPENAI_LIVE_PROJECT_ID", "OPENAI_WEBHOOK_SECRET", "AI_DEMO_ALLOWED_RECIPIENTS"]);
+    expect(config.missing).toEqual(["OPENAI_API_KEY", "OPENAI_LIVE_PROJECT_ID", "OPENAI_WEBHOOK_SECRET"]);
   });
 
   it("does not accept the .env.example placeholder as a key", () => {
@@ -41,10 +41,12 @@ describe("getAiDemoConfig", () => {
     else expect.unreachable("a project id without the proj_ prefix must be refused");
   });
 
-  it("requires the recipient allowlist; the organisation allowlist alone is a country rule", () => {
+  it("treats an unset recipient shortlist as no extra restriction", () => {
+    // The organisation's own destination allowlist still applies; this list is
+    // an optional second, tighter gate.
     const config = getAiDemoConfig({ ...FULL, AI_DEMO_ALLOWED_RECIPIENTS: "" });
-    if (!config.configured) expect(config.missing).toEqual(["AI_DEMO_ALLOWED_RECIPIENTS"]);
-    else expect.unreachable("the demo must not run without an explicit recipient list");
+    expect(config.configured).toBe(true);
+    if (config.configured) expect(config.allowedRecipients).toEqual([]);
   });
 
   it("normalises the recipients so a national spelling still matches", () => {

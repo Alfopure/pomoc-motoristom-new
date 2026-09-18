@@ -129,6 +129,7 @@ export type AiDemoConfig =
       backendModel: string;
       voice: string;
       fromNumber: string;
+      /** Empty means no per-number restriction; the organisation's allowlist still applies. */
       allowedRecipients: readonly string[];
       /** `0` removes the daily cap; the other guards are unaffected. */
       maxAttemptsPerDay: number;
@@ -247,18 +248,17 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
   if ("invalid" in from) missing.push("AI_DEMO_FROM_NUMBER");
 
   /**
-   * Required, not optional.
+   * Optional: a shortlist of numbers the demo may call, narrower than the
+   * organisation's own allowlist.
    *
-   * The organisation's `destination_allowlist` is a country-level rule — "SK" —
-   * which is the right control for dispatchers calling customers and the wrong
-   * one for an experiment that dials a number a model was told about. With the
-   * recipient list mandatory, the set of phones this feature can ever reach is
-   * a deployment decision, made once, by whoever holds the environment.
+   * Left unset, the demo may reach anything the organisation's
+   * `destination_allowlist` permits — the same rule that governs a dispatcher
+   * placing an ordinary outbound call. Set, it is a second, tighter gate, which
+   * is what you want while a feature is new.
    */
-  const allowedRecipients = parseRecipients(read(env, "AI_DEMO_ALLOWED_RECIPIENTS"));
-  if (allowedRecipients === null) missing.push("AI_DEMO_ALLOWED_RECIPIENTS");
+  const allowedRecipients = parseRecipients(read(env, "AI_DEMO_ALLOWED_RECIPIENTS")) ?? [];
 
-  if (missing.length > 0 || apiKey === null || projectId === null || webhookSecret === null || sipHost === null || model === null || backendModel === null || voice === null || allowedRecipients === null || "invalid" in from) {
+  if (missing.length > 0 || apiKey === null || projectId === null || webhookSecret === null || sipHost === null || model === null || backendModel === null || voice === null || "invalid" in from) {
     return { configured: false, missing };
   }
 
