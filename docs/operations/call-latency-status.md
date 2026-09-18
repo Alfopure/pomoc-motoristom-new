@@ -14,7 +14,7 @@ generation leases and the fenced provider journal).
 
 | action | before 17 Sep | after 17 Sep | true cost |
 | --- | --- | --- | --- |
-| inbound answer | 64 | 45 | **51** |
+| inbound answer | 64 | 45 | **47** |
 | hold | 40 | 35 | **44** |
 | unhold | 36 | 33 | **36** |
 | blind transfer | 47 | 41 | **50** |
@@ -300,6 +300,30 @@ against a fifteen-second TTL. An answer costs **55** requests instead of 61 and
 a whole inbound call 159 instead of 168; a stale owner is refused by the fence,
 which three new tests assert directly — taken lease, expired lease, and the new
 owner going through.
+
+### E2.2, the half of it that is row writes
+
+The phase that holds the caller waiting for audio wrote the session, then
+looked up and updated each answered leg, then updated each ring attempt — every
+one its own round trip, to a database that takes the same session lock each
+time. `motorist_apply_critical_v2` writes them together: an answer costs **47**
+requests instead of 51.
+
+**Presence is deliberately not in it.** Its guards read an application feature
+flag and an operator's wrap-up setting, and deciding those in SQL would move
+policy out of the reducer that owns it — the thing that decides whether an
+operator is offered calls at all. The plan folds presence in too; that half is
+not attempted here and should not be, without a way to test the policy where it
+would then live.
+
+The fold runs only from the start of an entry. A resumed one has a cursor
+partway through the batch and takes the per-effect path, which knows how to
+carry on from there — and the cursor still advances effect by effect either
+way, so an entry staged by one writer stays resumable by the other.
+
+Patching follows `motorist_stage_transition_v1`: `jsonb_populate_record` over
+the existing row, so an absent key keeps its value and a present one is applied
+with the column's own type.
 
 ## Known gaps that are not in the plan
 
