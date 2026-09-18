@@ -188,6 +188,11 @@ export async function loadRoutingSettings(admin: AdminClient, organizationId: st
     maxRingFanout: data.max_ring_fanout,
     maxConcurrentLegs: data.max_concurrent_legs,
     wrapUpSecondsDefault: DEFAULT_ROUTING_SETTINGS.wrapUpSecondsDefault,
+    // A deployment that runs ahead of its migration reads no column at all,
+    // and must keep the behaviour it had rather than silently stop escalating.
+    queueEscalateAfterSeconds: typeof data.queue_escalate_after_seconds === "number"
+      ? data.queue_escalate_after_seconds
+      : DEFAULT_ROUTING_SETTINGS.queueEscalateAfterSeconds,
     raw: data,
   };
 }

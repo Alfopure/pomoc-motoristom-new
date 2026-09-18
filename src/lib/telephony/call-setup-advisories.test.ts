@@ -58,6 +58,27 @@ describe("callSetupAdvisories", () => {
     expect(advisories.find((item) => item.title.startsWith("Niektorí operátori"))!.text).toContain("Jana");
   });
 
+  it("says the backup number is out of play when escalation is turned off", () => {
+    const advisories = callSetupAdvisories(setup({
+      groups: [{ id: "g1", name: "Denná", active: true, members: [operator("p1"), number("+421900000000")] }],
+      escalateAfterSeconds: 0,
+    }));
+
+    // A configured number that will never be dialled is exactly the kind of
+    // thing that looks fine on the ring-group tab and is not.
+    expect(advisories.find((item) => item.title === "Keď nikto nedvíha, skúsi sa záložné číslo")).toBeUndefined();
+    expect(advisories.find((item) => item.title === "Záložné číslo sa nikdy nevytočí")).toMatchObject({ tone: "warning" });
+  });
+
+  it("uses the configured delay, not the built-in one", () => {
+    const advisory = callSetupAdvisories(setup({
+      groups: [{ id: "g1", name: "Denná", active: true, members: [operator("p1"), number("+421900000000")] }],
+      escalateAfterSeconds: 300,
+    })).find((item) => item.title.startsWith("Keď nikto nedvíha"))!;
+
+    expect(advisory.text).toContain("5 min");
+  });
+
   it("says when a step cannot ring everyone it lists", () => {
     const advisory = callSetupAdvisories(setup({
       groups: [{ id: "g1", name: "Denná", active: true, members: [operator("p1"), operator("p2"), operator("p3")] }],

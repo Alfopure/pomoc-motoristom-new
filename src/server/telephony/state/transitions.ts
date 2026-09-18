@@ -41,6 +41,7 @@ import {
   type CallbackPlan,
   type Command,
   type Compensation,
+  DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS,
   type DialCommand,
   type FrozenRingMember,
   type FrozenRingPlan,
@@ -101,16 +102,22 @@ const QUEUE_RECHECK_MS = 5_000;
 const QUEUE_OPERATOR_RETRY_MS = 60_000;
 /**
  * How long the queue keeps finding nobody to ring before it tries the numbers
- * it otherwise never redials.
+ * it otherwise never redials — zero when the organisation has turned it off.
  *
  * The queue only re-offers browser operators, so a call whose operators are
  * all on other calls or all logged out places no offers at all — silently,
  * for as long as the waiting room allows. Three callers once waited seven and
- * eight minutes that way. Two minutes is long enough for an operator to finish
- * a call and come out of wrap-up, and short enough that the caller is not
- * listening to music while nothing is happening.
+ * eight minutes that way.
+ *
+ * The escalation dials a real number and is billed, so how long to wait — and
+ * whether to do it at all — is the organisation's setting, not a constant
+ * here. `DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS` is what it was before anybody
+ * could choose.
  */
-export const QUEUE_ESCALATE_AFTER_MS = 120_000;
+function queueEscalateAfterMs(b: TransitionBuilder): number {
+  const seconds = b.ctx.settings.queueEscalateAfterSeconds;
+  return typeof seconds === "number" && seconds >= 0 ? seconds * 1_000 : DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS * 1_000;
+}
 
 // ---------------------------------------------------------------------------
 // Builder
@@ -1123,7 +1130,10 @@ function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
   // working, and must not escalate.
   const idleSince = Date.parse(queue.idle_since ?? b.nowIso);
   const idleFor = Number.isNaN(idleSince) ? 0 : b.ctx.now.getTime() - idleSince;
-  const escalating = !queue.escalated_at && idleFor >= QUEUE_ESCALATE_AFTER_MS;
+  const escalateAfterMs = queueEscalateAfterMs(b);
+  // Zero is the organisation saying "never ring the backup numbers", not "ring
+  // them immediately".
+  const escalating = escalateAfterMs > 0 && !queue.escalated_at && idleFor >= escalateAfterMs;
 
   const index = b.session.current_step;
   const planQueueStep = (members: FrozenRingMember[]) => planRingStep(
