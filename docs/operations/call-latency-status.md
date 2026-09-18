@@ -226,6 +226,47 @@ One second is the whole exposure: the poll floor is three seconds and Realtime
 pushes changes as they happen, so a console can be at most a second behind
 something it did not do itself.
 
+### Where the 61 requests of an answer actually are
+
+Measured on the contract-2 harness, 18 Sep, inbound `call.answered` with three
+operators and recording off. Counted by table and operation, so the next round
+starts from evidence rather than from reading code.
+
+| n | request |
+| --- | --- |
+| 7 | `motorist_call_legs` select |
+| 7 | `motorist_call_sessions` update |
+| 6 | `motorist_session_lease_renew_v2` |
+| 6 | `motorist_provider_command_prepare_v2` |
+| 6 | `motorist_provider_command_result_v2` |
+| 4 | `motorist_call_sessions` select |
+| 3 | `motorist_ring_attempts` update |
+| 2 each | attempts select, presence select, `presence_transition_v1`, `motorist_calls` select, webhook events select |
+| 1 each | claim, acquire, pending commands, observe dial, settings, stage transition, legs update, member touch, call update, event insert, finish, release |
+
+No single item dominates any more, which is itself the finding: the easy
+deduplications are spent. The two largest are the journal (12, two per voice
+command) and the leases (6, one per command).
+
+**Two things were tried and are not here.**
+
+The journal batches only if `prepare`/`result` move out of the HTTP client,
+which is where they live today — every command journals itself inside
+`request()`. Batching a group means hoisting that out for grouped commands,
+which is E2.3 and an architectural change, not a tidy-up. Half-doing it would
+be worse than not starting.
+
+The six lease renewals look like pure duplication — `prepare_v2` fences on its
+own, so the renew is about keeping the lease alive rather than guarding the
+write — and throttling them to one per five seconds does cut them. But
+`provider-journal.test.ts` refuses it: it holds the guarantee that after a
+takeover the old owner's *next* command is refused, and today that refusal
+comes from the renew. In production the database fence would still catch it on
+the header check; the harness does not model that fence, so the replacement
+guarantee cannot be verified here. That is the same assumption that made the
+pre-18-Sep measurements wrong, so the renewals stay until the fence is
+reproducible in a test.
+
 ## Known gaps that are not in the plan
 
 Found during testing on 17 Sep; none of them is a latency problem and the plan
