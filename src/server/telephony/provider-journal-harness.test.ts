@@ -13,6 +13,17 @@ function harness() {
 
 const journal = (h: TelephonyHarness) => h.db.storage("motorist_provider_commands");
 
+/** An owner the fence will accept: the lease this session actually holds. */
+function holdLease(h: TelephonyHarness, sessionId: string): Ownership {
+  h.db.registerRpc("motorist_session_lease_renew_v2", () => true);
+  const row = h.db.storage("motorist_call_sessions").find((entry) => entry.id === sessionId)!;
+  row.lease_token = "replay-owner";
+  row.lease_generation = 1;
+  row.lease_until = new Date(h.now().getTime() + 30_000).toISOString();
+  return { admin: h.admin, organizationId: h.deps.organizationId, sessionId,
+    token: "replay-owner", generation: 1, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
+}
+
 /**
  * The double implements `TelnyxClient` method by method rather than over HTTP,
  * so for a long time nothing in it ever reached `prepare_v2` or `result_v2`.
@@ -40,9 +51,7 @@ describe("the provider journal, on the test double", () => {
     const call = await h.inbound({ to: NUMBERS.allianz });
     const first = h.telnyx.of("dial")[0].params;
     const dials = h.telnyx.of("dial").length;
-    h.db.registerRpc("motorist_session_lease_renew_v2", () => true);
-    const owner: Ownership = { admin: h.admin, organizationId: h.deps.organizationId, sessionId: call.sessionId,
-      token: "replay-owner", generation: 1, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
+    const owner = holdLease(h, call.sessionId);
 
     // What a redelivered webhook looks like from below: the same command, the
     // same payload, arriving after the first one was accepted.
@@ -67,9 +76,7 @@ describe("the provider journal, on the test double", () => {
     rejected.http_status = 422;
     rejected.result = { errors: [{ code: "call_not_found" }] };
 
-    h.db.registerRpc("motorist_session_lease_renew_v2", () => true);
-    const owner: Ownership = { admin: h.admin, organizationId: h.deps.organizationId, sessionId: call.sessionId,
-      token: "replay-owner", generation: 1, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
+    const owner = holdLease(h, call.sessionId);
     const hangups = h.telnyx.of("hangup").length;
     const params = h.telnyx.of("hangup").find((entry) => entry.params.commandId === rejected.command_id)!.params;
 
@@ -115,5 +122,55 @@ describe("the provider journal, on the test double", () => {
     // next attempt has to ask rather than assume either way.
     expect(journal(lost).filter((entry) => entry.outcome === null)).toHaveLength(1);
     expect(journal(lost).find((entry) => entry.outcome === null)?.path).toMatch(/playback_stop$/);
+  });
+
+  it("refuses a command from an owner whose lease was taken", async () => {
+    const h = harness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const owner = holdLease(h, call.sessionId);
+
+    // Somebody else takes the lease: a new token, a new generation.
+    const row = h.db.storage("motorist_call_sessions").find((entry) => entry.id === call.sessionId)!;
+    row.lease_token = "the-new-owner";
+    row.lease_generation = 2;
+
+    const error = await sessionOwnership.run(owner, () =>
+      h.telnyx.client.hangup({ callControlId: call.callControlId, commandId: "after-takeover" })).catch((thrown: Error) => thrown);
+
+    // The fence refuses it, not the lease renew. That distinction is the whole
+    // point: the renew is one round trip per command and the fence is free,
+    // and until the double modelled the fence there was no way to show it.
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe("SessionLeaseLostError");
+  });
+
+  it("lets the new owner through on the same session", async () => {
+    const h = harness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    holdLease(h, call.sessionId);
+    const row = h.db.storage("motorist_call_sessions").find((entry) => entry.id === call.sessionId)!;
+    row.lease_token = "the-new-owner";
+    row.lease_generation = 2;
+    const taken: Ownership = { admin: h.admin, organizationId: h.deps.organizationId, sessionId: call.sessionId,
+      token: "the-new-owner", generation: 2, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
+    const before = h.telnyx.of("hangup").length;
+
+    await sessionOwnership.run(taken, () => h.telnyx.client.hangup({ callControlId: call.callControlId, commandId: "by-new-owner" }));
+
+    expect(h.telnyx.of("hangup").length).toBeGreaterThan(before);
+  });
+
+  it("refuses an owner whose lease has simply expired", async () => {
+    const h = harness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const owner = holdLease(h, call.sessionId);
+
+    // Nobody took it; it just ran out.
+    h.advance(31_000);
+
+    const error = await sessionOwnership.run(owner, () =>
+      h.telnyx.client.hangup({ callControlId: call.callControlId, commandId: "after-expiry" })).catch((thrown: Error) => thrown);
+
+    expect((error as Error).name).toBe("SessionLeaseLostError");
   });
 });

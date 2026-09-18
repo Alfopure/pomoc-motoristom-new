@@ -22,15 +22,24 @@ function contractTwo(h: TelephonyHarness, sessionId: string) {
   let token: unknown = null;
   let generation = 0;
   h.db.storage("motorist_call_sessions").find(row => row.id === sessionId)!.writer_contract = 2;
+  const row = () => h.db.storage("motorist_call_sessions").find(entry => entry.id === sessionId)!;
+  const stamp = () => {
+    row().lease_token = token === null ? null : String(token);
+    row().lease_generation = generation;
+    row().lease_until = new Date(h.db.now().getTime() + 30_000).toISOString();
+  };
   h.db.registerRpc("motorist_session_lease_acquire_v2", args => {
     if (token !== null) return null;
     token = args.p_token;
-    return { generation: ++generation, contract: 2 };
+    generation += 1;
+    stamp();
+    return { generation, contract: 2 };
   });
   h.db.registerRpc("motorist_session_lease_renew_v2", args => args.p_token === token && args.p_generation === generation);
   h.db.registerRpc("motorist_session_lease_release_v2", args => {
     if (args.p_token !== token || args.p_generation !== generation) return false;
     token = null;
+    stamp();
     return true;
   });
   // The leases above are hand-built so this test can stall and steal them; the

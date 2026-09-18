@@ -24,6 +24,8 @@ export type Ownership = {
   deadline: number;
   /** `Date.now()` of the acquisition, for `OWNERSHIP_RENEW_SKIP_MS`. */
   acquiredAt: number;
+  /** `Date.now()` of the last renew, so a burst of commands renews once rather than each. */
+  renewedAt?: number;
   terminationPending?: boolean;
   /** Includes acquisition by an outer webhook owner, before the reducer starts. */
   leaseWaitMs?: number;
@@ -71,8 +73,22 @@ export async function ownershipRpc<T>(admin: SupabaseClient<Database>, name: str
 export async function assertOwnership(owner = sessionOwnership.getStore()): Promise<void> {
   if (!owner) return;
   if (Date.now() >= owner.deadline) throw new SessionLeaseLostError();
+  // A lease renewed this recently cannot expire before the next check: the TTL
+  // is `SESSION_LEASE_MS` and the window is a third of it.
+  //
+  // Skipping the renew is not skipping a guard. Every owned request carries
+  // the token and the generation, and `motorist_telephony_fence` refuses a
+  // stale writer on the write itself — a lease taken by somebody else is
+  // noticed at that write instead of a moment earlier. The double models the
+  // fence now, so that is a tested claim rather than an argument.
+  //
+  // The saving is per command: a burst — three journalled commands behind one
+  // answer, or a fan-out of N dials — renewed once each.
+  const since = Date.now() - (owner.renewedAt ?? owner.acquiredAt);
+  if (since >= 0 && since < OWNERSHIP_RENEW_SKIP_MS) return;
   const ok = await ownershipRpc<boolean>(owner.admin, "motorist_session_lease_renew_v2", {
     p_session_id: owner.sessionId, p_token: owner.token, p_generation: owner.generation, p_ttl_ms: SESSION_LEASE_MS,
   });
   if (!ok) throw new SessionLeaseLostError();
+  owner.renewedAt = Date.now();
 }
