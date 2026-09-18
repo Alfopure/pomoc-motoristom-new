@@ -297,3 +297,75 @@ describe("conversation statistics", () => {
     expect(result.responseGapsMs).toHaveLength(1);
   });
 });
+
+describe("saving as it goes", () => {
+  const LONG = {
+    onInstructions: [
+      { delayMs: 5, event: { type: "session.instructions.appended", client_event_id: "greet-1a2b3c4d" } },
+      { delayMs: 20, event: { type: "session.output_transcript.delta", delta: "Dobrý deň," } },
+      { delayMs: 120, event: { type: "session.output_transcript.delta", delta: " tu je Veronika" } },
+      { delayMs: 260, event: { type: "session.input_transcript.delta", delta: "áno" } },
+    ],
+  };
+
+  it("offers a snapshot before the window is over", async () => {
+    // Writing only at the end meant a probe killed by its host lost the call.
+    const snapshots: number[] = [];
+    const sideband = createFakeSideband(LONG);
+
+    await runGreeting({
+      ...BASE,
+      webSocketFactory: sideband.factory,
+      limits: { ...FAST, probeWindowMs: 500, probeCheckpointMs: 60, keepTranscript: true },
+      onProgress: (partial) => {
+        snapshots.push(partial.transcript?.length ?? 0);
+        return true;
+      },
+    });
+
+    expect(snapshots.length).toBeGreaterThan(1);
+    // Each snapshot is complete in itself, not a delta.
+    expect(snapshots[snapshots.length - 1]).toBeGreaterThanOrEqual(snapshots[0]);
+  });
+
+  it("stops when the caller says the call is over, without waiting out the window", async () => {
+    const sideband = createFakeSideband(LONG);
+    const started = Date.now();
+
+    const result = await runGreeting({
+      ...BASE,
+      webSocketFactory: sideband.factory,
+      // A window far longer than the test could afford to wait for.
+      limits: { ...FAST, probeWindowMs: 30_000, probeCheckpointMs: 60 },
+      onProgress: () => false,
+    });
+
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(result.status).not.toBe("failed");
+  });
+
+  it("keeps listening while the caller says the call is still going", async () => {
+    const sideband = createFakeSideband(LONG);
+    const result = await runGreeting({
+      ...BASE,
+      webSocketFactory: sideband.factory,
+      limits: { ...FAST, probeWindowMs: 400, probeCheckpointMs: 50, keepTranscript: true },
+      onProgress: () => true,
+    });
+    expect(result.transcript?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("survives a checkpoint that throws", async () => {
+    const sideband = createFakeSideband(LONG);
+    const result = await runGreeting({
+      ...BASE,
+      webSocketFactory: sideband.factory,
+      limits: { ...FAST, probeWindowMs: 400, probeCheckpointMs: 50 },
+      onProgress: () => {
+        throw new Error("database unavailable");
+      },
+    });
+    // A failed save must not cost the measurement.
+    expect(result.firstDeltaMs).not.toBeNull();
+  });
+});

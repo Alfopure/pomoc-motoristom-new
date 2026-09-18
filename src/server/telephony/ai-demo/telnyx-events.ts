@@ -82,7 +82,7 @@ async function handOffToListener(deps: AiDemoDeps, attemptId: string): Promise<v
   const { getAiDemoConfig } = await import("./config");
   const config = getAiDemoConfig(deps.env ?? process.env);
   if (!config.configured || !config.listenUrl) {
-    await runGreetingAndFinish(deps, attemptId);
+    await runGreetingAndFinish(deps, attemptId, { inline: true });
     return;
   }
 
@@ -100,7 +100,7 @@ async function handOffToListener(deps: AiDemoDeps, attemptId: string): Promise<v
     if (!response.ok) throw new Error(`listen_${response.status}`);
   } catch (error) {
     deps.logger?.({ level: "warn", scope: "ai-demo", attemptId, message: "listener unreachable, greeting inline", error: error instanceof Error ? error.message : String(error) });
-    await runGreetingAndFinish(deps, attemptId);
+    await runGreetingAndFinish(deps, attemptId, { inline: true });
   }
 }
 

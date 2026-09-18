@@ -55,6 +55,15 @@ export const AI_DEMO_LIMITS = {
    * backstop; in practice `session.closed` ends it when the call does.
    */
   probeWindowMs: 300_000,
+  /**
+   * The window when the probe has to run inside the Telnyx webhook.
+   *
+   * That route's budget belongs to the human call path and must not be widened
+   * for a demo, so the fallback listens for less rather than being killed.
+   */
+  inlineProbeWindowMs: 40_000,
+  /** Save what has been heard this often, so nothing is lost to a termination. */
+  probeCheckpointMs: 10_000,
   probeMaxEvents: 400,
   /** Shorter than this, an utterance of hers is an acknowledgement, not an answer. */
   backchannelMaxMs: 700,

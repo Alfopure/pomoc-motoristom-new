@@ -2,7 +2,10 @@ import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { openAILiveClient, OpenAILiveError } from "@/lib/integrations/ai/openai-live";
 
+import type { Json } from "@/lib/supabase/database.types";
+
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "../incidents";
+import { toJson } from "../state/types";
 import { CallActionError } from "../service-errors";
 import type { SessionRunnerDeps } from "../session-runner";
 import { createTelnyxClient, isCallGoneError, TelnyxCommandError, TelnyxLiveCallsDisabledError, type TelnyxClient } from "../telnyx/client";
@@ -396,7 +399,7 @@ export async function acceptSession(deps: AiDemoDeps, attempt: AiDemoAttempt, se
  * whether the caller heard her, and a demo that hangs up because it could not
  * measure itself would be absurd.
  */
-export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string): Promise<void> {
+export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, options: { inline?: boolean } = {}): Promise<void> {
   const attempt = await loadAttempt(deps.admin, deps.organizationId, attemptId);
   if (!attempt || attempt.state !== "bridged" || !attempt.openai_session_id) return;
 
@@ -413,7 +416,24 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string):
       commentaryText: AI_DEMO_COMMENTARY_TRIGGER,
       eventIdSeed: attempt.id.replace(/-/g, "").slice(0, 8),
       ...(deps.webSocketFactory ? { webSocketFactory: deps.webSocketFactory } : {}),
-      limits: deps.probeLimits ?? { ...AI_DEMO_LIMITS, keepTranscript: config.storeTranscript },
+      /**
+       * Inline means this is running inside the Telnyx webhook, whose budget is
+       * sized for the human call path. A window longer than that budget does
+       * not listen for longer — it gets the function killed, and before this
+       * was checkpointed that lost the entire call.
+       */
+      limits: deps.probeLimits ?? {
+        ...AI_DEMO_LIMITS,
+        keepTranscript: config.storeTranscript,
+        ...(options.inline ? { probeWindowMs: AI_DEMO_LIMITS.inlineProbeWindowMs } : {}),
+      },
+      onProgress: async (partial) => {
+        await savePartial(deps, attempt, partial);
+        // Stop as soon as the call is over rather than waiting out the window;
+        // `session.closed` is not something we have ever seen proven to arrive.
+        const current = await loadAttempt(deps.admin, deps.organizationId, attempt.id);
+        return current !== null && current.state !== "ended" && current.state !== "failed";
+      },
     });
   } catch (error) {
     deps.logger?.({ level: "warn", scope: "ai-demo", attemptId: attempt.id, message: "greeting failed", error: error instanceof Error ? error.message : String(error) });
@@ -421,27 +441,19 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string):
     return;
   }
 
-  const bridgedAt = attempt.bridged_at ? Date.parse(attempt.bridged_at) : null;
-  const at = (offset: number | null): string | null => (offset === null || bridgedAt === null ? null : new Date(bridgedAt + offset).toISOString());
+  const bridgedMs = attempt.bridged_at ? Date.parse(attempt.bridged_at) : null;
+  const finishedAt = (offset: number | null): string | null => (offset === null || bridgedMs === null ? null : new Date(bridgedMs + offset).toISOString());
 
   await transitionAttempt(deps.admin, attempt.id, ["bridged"], {
     state: "talking",
     talking_at: nowOf(deps).toISOString(),
     greeting_status: result.status,
-    greeting_appended_at: at(result.appendedMs),
-    first_transcript_at: at(result.firstDeltaMs),
-    latency_probe: result.probe,
-    transcript: result.transcript,
-    conversation_stats: result.stats,
-    metadata: {
-      ...(attempt.metadata as Record<string, unknown>),
-      latency: {
-        greeting_appended_ms: result.appendedMs,
-        first_word_ms: result.firstDeltaMs,
-        response_gaps_ms: result.responseGapsMs,
-        ...(result.error ? { probe_error: result.error } : {}),
-      },
-    },
+    greeting_appended_at: finishedAt(result.appendedMs),
+    first_transcript_at: finishedAt(result.firstDeltaMs),
+    latency_probe: toJson(result.probe),
+    transcript: toJson(result.transcript),
+    conversation_stats: toJson(result.stats),
+    metadata: toJson({ ...(attempt.metadata as Record<string, unknown>), latency: latencyOf(result) }),
   });
 
   deps.logger?.({
@@ -454,6 +466,39 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string):
     responseGapsMs: result.responseGapsMs,
     // Counts and durations only; the words stay in the database row.
     stats: result.stats,
+  });
+}
+
+/**
+ * Writes down what has been heard so far, without touching the state machine.
+ *
+ * The state moves once, at the end. This runs every few seconds so that a probe
+ * cut short — by a budget, a redeploy, anything — still leaves the part of the
+ * call it did hear.
+ */
+async function savePartial(deps: AiDemoDeps, attempt: AiDemoAttempt, result: GreetingResult): Promise<void> {
+  const bridgedAt = attempt.bridged_at ? Date.parse(attempt.bridged_at) : null;
+  const at = (offset: number | null): string | null => (offset === null || bridgedAt === null ? null : new Date(bridgedAt + offset).toISOString());
+  try {
+    await patchAttempt(deps.admin, attempt.id, {
+      greeting_appended_at: at(result.appendedMs),
+      first_transcript_at: at(result.firstDeltaMs),
+      latency_probe: toJson(result.probe),
+      transcript: toJson(result.transcript),
+      conversation_stats: toJson(result.stats),
+      metadata: toJson({ ...(attempt.metadata as Record<string, unknown>), latency: latencyOf(result) }),
+    });
+  } catch (error) {
+    deps.logger?.({ level: "warn", scope: "ai-demo", attemptId: attempt.id, message: "checkpoint failed", error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+function latencyOf(result: GreetingResult): Json {
+  return toJson({
+    greeting_appended_ms: result.appendedMs,
+    first_word_ms: result.firstDeltaMs,
+    response_gaps_ms: result.responseGapsMs,
+    ...(result.error ? { probe_error: result.error } : {}),
   });
 }
 

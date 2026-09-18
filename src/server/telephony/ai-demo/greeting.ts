@@ -118,6 +118,8 @@ export type ProbeLimits = {
   probeWindowMs: number;
   probeMaxEvents: number;
   backchannelMaxMs?: number;
+  /** How often the caller is offered a snapshot to save. */
+  probeCheckpointMs?: number;
   /**
    * Keep the words, not just the timings.
    *
@@ -129,6 +131,9 @@ export type ProbeLimits = {
   transcriptMaxEntries?: number;
 };
 
+/** A snapshot mid-probe, and whether there is any point carrying on. */
+export type ProbeProgress = (snapshot: GreetingResult) => Promise<boolean> | boolean;
+
 export type RunGreetingParams = {
   sessionId: string;
   apiKey: string;
@@ -138,6 +143,15 @@ export type RunGreetingParams = {
   webSocketFactory?: WebSocketFactory;
   now?: () => number;
   limits?: ProbeLimits;
+  /**
+   * Called every `probeCheckpointMs` with what has been heard so far.
+   *
+   * Writing only at the end meant that a probe killed by its host — a budget
+   * running out, a deployment cycling — lost the entire call. It also lets the
+   * caller stop the probe: returning `false` ends it, which is how a finished
+   * call stops us waiting out the rest of the window.
+   */
+  onProgress?: ProbeProgress;
 };
 
 /** The Node global takes an init object with headers (undici extension). */
@@ -220,6 +234,7 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
   let settled = false;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
   let firstDeltaTimer: ReturnType<typeof setTimeout> | null = null;
+  let checkpointTimer: ReturnType<typeof setInterval> | null = null;
 
   const result = await new Promise<GreetingResult>((resolve) => {
     const finish = (status: GreetingStatus) => {
@@ -227,19 +242,13 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
       settled = true;
       if (closeTimer) clearTimeout(closeTimer);
       if (firstDeltaTimer) clearTimeout(firstDeltaTimer);
+      if (checkpointTimer) clearInterval(checkpointTimer);
       try {
         socket?.close();
       } catch {
         // The probe is finished either way; a failing close is not a call failure.
       }
-      const gaps = summarise();
-      resolve({
-        status, appendedMs, firstDeltaMs, probe,
-        responseGapsMs: gaps,
-        transcript: keepTranscript ? transcript : null,
-        stats: describeConversation(),
-        error,
-      });
+      resolve(snapshot(status));
     };
 
     /**
@@ -289,6 +298,21 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
       return stats;
     };
 
+    /** The result as it stands right now; safe to call repeatedly. */
+    const snapshot = (status: GreetingStatus): GreetingResult => {
+      const gaps = summarise();
+      return {
+        status,
+        appendedMs,
+        firstDeltaMs,
+        probe: [...probe],
+        responseGapsMs: gaps,
+        transcript: keepTranscript ? [...transcript] : null,
+        stats: describeConversation(),
+        error,
+      };
+    };
+
     const openTimer = setTimeout(() => {
       error = error ?? "sideband_open_timeout";
       finish("failed");
@@ -322,6 +346,19 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
       }
       // Hard stop for the whole probe, and a shorter one for "did she start at all".
       closeTimer = setTimeout(() => finish(firstDeltaMs !== null ? "heard_started" : appendedMs !== null ? "appended" : "failed"), limits.probeWindowMs);
+
+      // Save as we go, and stop as soon as the caller says the call is over.
+      if (params.onProgress) {
+        const every = limits.probeCheckpointMs ?? 10_000;
+        checkpointTimer = setInterval(() => {
+          if (settled) return;
+          void Promise.resolve(params.onProgress?.(snapshot(firstDeltaMs !== null ? "heard_started" : appendedMs !== null ? "appended" : "failed")))
+            .then((carryOn) => {
+              if (carryOn === false) finish(firstDeltaMs !== null ? "heard_started" : appendedMs !== null ? "appended" : "failed");
+            })
+            .catch(() => undefined);
+        }, every);
+      }
       firstDeltaTimer = setTimeout(() => {
         if (firstDeltaMs === null) finish(appendedMs !== null ? "appended" : "failed");
       }, limits.probeFirstDeltaMs);
