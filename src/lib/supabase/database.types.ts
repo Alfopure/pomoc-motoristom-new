@@ -1436,6 +1436,8 @@ export type Database = {
         destination_allowlist: string[];
         max_ring_fanout: number;
         max_concurrent_legs: number;
+        /** Seconds the queue may find nobody to ring before trying the backup numbers once; 0 disables it. */
+        queue_escalate_after_seconds: number;
         routing_version: number;
         created_at: Timestamp;
         updated_at: Timestamp;

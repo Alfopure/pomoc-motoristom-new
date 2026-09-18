@@ -464,13 +464,33 @@ export type RoutingSettings = {
   maxRingFanout: number;
   maxConcurrentLegs: number;
   wrapUpSecondsDefault: number;
+  /**
+   * How long the waiting-room queue may find nobody to ring before it tries the
+   * backup numbers once. Zero disables it.
+   *
+   * It dials a real number and is billed, so it belongs to whoever pays for it.
+   */
+  queueEscalateAfterSeconds: number;
 };
+
+/**
+ * What the queue did before it was anybody's decision, and therefore what an
+ * organisation that has never touched the setting still does.
+ *
+ * Two minutes is long enough for an operator to finish a call and come out of
+ * wrap-up, and short enough that the caller is not listening to music while
+ * nothing is happening.
+ */
+export const DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS = 120;
+/** The longest the setting may be, matching the database check constraint. */
+export const MAX_QUEUE_ESCALATE_AFTER_SECONDS = 1_800;
 
 export const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
   parkMaxMinutes: 30,
   maxRingFanout: 8,
   maxConcurrentLegs: 9,
   wrapUpSecondsDefault: 30,
+  queueEscalateAfterSeconds: DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS,
 };
 
 export const MAX_RING_FANOUT = 8;

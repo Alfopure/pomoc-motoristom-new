@@ -160,7 +160,7 @@ The read stays. The saving that did land is the journal lookup: it was gated on
 a continuation merely existing, and a first attempt has one, so every dial asked
 the journal about a command that could not be there.
 
-### The escalation is described, not yet configurable
+### The escalation is now the dispatcher's setting
 
 The user's decision on the queue escalation (18 Sep): keep it, but it belongs
 in settings rather than in the code — *"Ak si to nenastavil, tak je to jeho
@@ -172,9 +172,16 @@ the groups and the operators and states what a caller actually meets — whether
 any phone rings, which number the queue will dial after two minutes and that it
 is billed, who takes calls on their own phone, how long the caller waits.
 
-The setting itself needs a column on `motorist_telephony_settings`, so it needs
-a migration, which is the one thing this sandbox cannot apply. Until then the
-two minutes stay a constant in `transitions.ts` and the page says so.
+Done. `20261002100000_queue_escalation_setting.sql` adds
+`queue_escalate_after_seconds`, applied 18 Sep through the Supabase MCP server;
+it is backfilled to 120, which is exactly the behaviour every row already had.
+The field sits on the telephony settings tab in minutes, `0` turns the
+escalation off, and the advisory block above it reads the value being typed
+rather than the saved one.
+
+`loadRoutingSettings` falls back to the built-in 120 when the column is absent,
+so a deployment that runs ahead of its migration keeps the behaviour it had
+instead of silently ceasing to escalate.
 
 ## Known gaps that are not in the plan
 
