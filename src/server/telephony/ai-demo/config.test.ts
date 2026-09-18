@@ -86,7 +86,7 @@ describe("getAiDemoConfig", () => {
     if (!config.configured) return;
     expect(config.maxCallSeconds).toBe(300);
     expect(config.ringTimeoutSeconds).toBe(5);
-    expect(config.maxAttemptsPerDay).toBe(10);
+    expect(config.maxAttemptsPerDay).toBe(100);
   });
 
   it("derives every other budget from the one call-length value", () => {
@@ -149,5 +149,18 @@ describe("aiDemoWebhookUrl", () => {
   it("refuses anything that is not HTTPS", () => {
     expect(aiDemoWebhookUrl({ AI_DEMO_WEBHOOK_BASE_URL: "http://demo.example.test" })).toBeNull();
     expect(aiDemoWebhookUrl({ AI_DEMO_WEBHOOK_BASE_URL: "not a url" })).toBeNull();
+  });
+});
+
+describe("the daily cap", () => {
+  it("treats 0 as no cap rather than as a cap of nothing", () => {
+    const config = getAiDemoConfig({ ...FULL, AI_DEMO_MAX_ATTEMPTS_PER_DAY: "0" });
+    expect(config.configured).toBe(true);
+    if (config.configured) expect(config.maxAttemptsPerDay).toBe(0);
+  });
+
+  it("still refuses a value it cannot make sense of", () => {
+    const config = getAiDemoConfig({ ...FULL, AI_DEMO_MAX_ATTEMPTS_PER_DAY: "nonsense" });
+    if (config.configured) expect(config.maxAttemptsPerDay).toBe(3);
   });
 });

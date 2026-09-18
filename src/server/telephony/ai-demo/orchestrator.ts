@@ -173,11 +173,17 @@ export async function startAiDemo(deps: AiDemoDeps, input: StartAiDemoInput): Pr
     if (existing) return { attempt: existing, reused: true };
   }
 
-  const midnight = new Date(now);
-  midnight.setUTCHours(0, 0, 0, 0);
-  const today = await countToday(deps.admin, deps.organizationId, midnight);
-  if (today >= config.maxAttemptsPerDay) {
-    throw new AiDemoError(`Denný limit dema je vyčerpaný (${config.maxAttemptsPerDay}).`, 429, "ai_demo_daily_limit");
+  // `0` is an explicit "no daily cap", for a session of back-to-back test
+  // calls. It removes one guard of four: one demo at a time, the server-held
+  // recipient list and the five-minute ceiling all still stand, and every call
+  // still costs money.
+  if (config.maxAttemptsPerDay > 0) {
+    const midnight = new Date(now);
+    midnight.setUTCHours(0, 0, 0, 0);
+    const today = await countToday(deps.admin, deps.organizationId, midnight);
+    if (today >= config.maxAttemptsPerDay) {
+      throw new AiDemoError(`Denný limit dema je vyčerpaný (${config.maxAttemptsPerDay}).`, 429, "ai_demo_daily_limit");
+    }
   }
 
   const scenario: AiDemoScenario = isAiDemoScenario(input.scenario) ? input.scenario : AI_DEMO_DEFAULT_SCENARIO;
@@ -393,13 +399,14 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string):
 
   const config = requireConfig(deps);
   const scenario: AiDemoScenario = isAiDemoScenario(attempt.scenario) ? attempt.scenario : AI_DEMO_DEFAULT_SCENARIO;
+  const context = typeof (attempt.metadata as { context?: unknown })?.context === "string" ? ((attempt.metadata as { context?: string }).context ?? null) : null;
 
   let result: GreetingResult;
   try {
     result = await runGreeting({
       sessionId: attempt.openai_session_id,
       apiKey: config.apiKey,
-      greetingText: buildGreetingAppend(scenario),
+      greetingText: buildGreetingAppend(scenario, context !== null),
       commentaryText: AI_DEMO_COMMENTARY_TRIGGER,
       eventIdSeed: attempt.id.replace(/-/g, "").slice(0, 8),
       ...(deps.webSocketFactory ? { webSocketFactory: deps.webSocketFactory } : {}),

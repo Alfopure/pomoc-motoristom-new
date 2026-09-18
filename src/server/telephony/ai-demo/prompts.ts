@@ -134,7 +134,9 @@ export function buildStartupInstructions(scenario: AiDemoScenario, context: stri
   const text = SCENARIO_TEXT[scenario];
   return `Si Veronika, pokojná a priateľská telefónna asistentka slovenskej asistenčnej služby Pomoc motoristom.
 
-Hovor po slovensky, vrelo a prirodzene, nezhonným tempom. Buď jasná a priama, nie prehnane veselá. Znej ako človek, ktorý má chuť pomôcť — nie ako nahrávka. Vety môžu byť raz kratšie, raz dlhšie, tak ako v bežnom rozhovore. Vykaj.
+Hovor po slovensky a jazyk nemeň, kým ťa o to volajúci sám nepožiada. Jazyk neodvodzuj z mena, značky auta ani z telefónneho čísla — ani vtedy, keď znejú česky.
+
+Hovor vrelo a prirodzene, nezhonným tempom. Buď jasná a priama, nie prehnane veselá. Znej ako človek, ktorý má chuť pomôcť — nie ako nahrávka. Vety môžu byť raz kratšie, raz dlhšie, tak ako v bežnom rozhovore. Vykaj.
 
 Ak je volajúci podráždený alebo sa ponáhľa, krátko to uznaj a posuň sa k ďalšiemu kroku.
 
@@ -162,14 +164,17 @@ Hovor neukončuješ ty a nikam neprepájaš. Keď chce hovoriť s človekom, sľ
  * to *say* it rather than *read* it: the previous version said "exactly this
  * and nothing more", which is precisely how you get a recording.
  */
-export function buildGreetingAppend(scenario: AiDemoScenario): string {
+export function buildGreetingAppend(scenario: AiDemoScenario, hasContext = false): string {
+  const address = hasContext
+    ? `\nAk v údajoch k hovoru máš meno volaného, oslov ho ním hneď na začiatku — "Dobrý deň, pán Novák," alebo "pani Nováková". Priezvisko skloňuj po slovensky. Ak meno nemáš, oslovenie vynechaj; nevymýšľaj si ho.\n`
+    : "";
   return `Hovor je práve teraz spojený a volaný človek zdvihol telefón.
 
 Hovor po slovensky. Začni hovoriť hneď, sama, bez čakania na to, že sa ozve prvý.
 
 Pozdrav ho takto — povedz to prirodzene a vrelo, nie ako čítaný text:
 "${SCENARIO_TEXT[scenario].greeting}"
-
+${address}
 Potom počkaj na odpoveď a pokračuj podľa svojich pokynov.`;
 }
 

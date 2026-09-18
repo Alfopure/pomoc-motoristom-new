@@ -132,10 +132,8 @@ export function readinessMessages(preflight: AiDemoPreflight): Readiness[] {
 
   if (messages.length === 0) {
     const limit = preflight.limits?.maxAttemptsPerDay ?? 0;
-    messages.push({
-      tone: "success",
-      message: `Pripravené · linka ${preflight.fromNumber ?? "—"} · dnes ${preflight.db.attemptsToday}/${limit} pokusov`,
-    });
+    const count = limit > 0 ? `dnes ${preflight.db.attemptsToday}/${limit} pokusov` : `dnes ${preflight.db.attemptsToday} pokusov, bez denného limitu`;
+    messages.push({ tone: "success", message: `Pripravené · linka ${preflight.fromNumber ?? "—"} · ${count}` });
   }
   return messages;
 }

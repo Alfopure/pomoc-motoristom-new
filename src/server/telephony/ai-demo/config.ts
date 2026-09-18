@@ -130,6 +130,7 @@ export type AiDemoConfig =
       voice: string;
       fromNumber: string;
       allowedRecipients: readonly string[];
+      /** `0` removes the daily cap; the other guards are unaffected. */
       maxAttemptsPerDay: number;
       maxCallSeconds: number;
       ringTimeoutSeconds: number;
@@ -273,7 +274,7 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
     fromNumber: from.number,
     allowedRecipients,
     webhookUrl: aiDemoWebhookUrl(env),
-    maxAttemptsPerDay: clampInt(read(env, "AI_DEMO_MAX_ATTEMPTS_PER_DAY"), 3, 1, 10),
+    maxAttemptsPerDay: clampInt(read(env, "AI_DEMO_MAX_ATTEMPTS_PER_DAY"), 3, 0, 100),
     maxCallSeconds: clampInt(read(env, "AI_DEMO_MAX_CALL_SECONDS"), 300, 30, 300),
     ringTimeoutSeconds: clampInt(read(env, "AI_DEMO_RING_TIMEOUT_SECONDS"), AI_DEMO_LIMITS.sipRingSeconds, 5, 60),
   };
