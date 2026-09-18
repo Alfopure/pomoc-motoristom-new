@@ -1,6 +1,6 @@
 # Plán ďalšej práce na AI demo „Veronika"
 
-Stav: **návrh**. Nadväzuje na `.context/ralplan-v2/drafts/plan-v4.md` (pôvodný plán) a na to, čo z neho reálne vzniklo — opísané v [`ai-demo-veronika.md`](./ai-demo-veronika.md).
+Stav: **fázy 0, 1 a 2 hotové** (okrem PR do `dev` a zneplatnenia kľúčov, ktoré čakajú na majiteľa). Fázy 3–6 sú návrh. Nadväzuje na `.context/ralplan-v2/drafts/plan-v4.md` (pôvodný plán) a na to, čo z neho reálne vzniklo — opísané v [`ai-demo-veronika.md`](./ai-demo-veronika.md).
 
 Formát je rovnaký ako pri pôvodnom pláne. Skill `ralplan` v tomto prostredí nainštalovaný nie je; aj pôvodný plán vznikol ručne.
 

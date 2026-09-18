@@ -532,3 +532,63 @@ describe("serving the transcript while the call runs", () => {
     expect(describeAttempt(row).hasTranscript).toBe(true);
   });
 });
+
+describe("ending the call when the conversation ends", () => {
+  async function callWithFarewell(env: Record<string, string | undefined>, closing: string) {
+    const f = fixture(env);
+    const sideband = createFakeSideband({
+      onInstructions: [
+        { delayMs: 5, event: { type: "session.instructions.appended" } },
+        { delayMs: 20, event: { type: "session.output_transcript.delta", delta: "Dobrý deň, tu je Veronika." } },
+        { delayMs: 60, event: { type: "session.input_transcript.delta", delta: "áno, dobre" } },
+        { delayMs: 100, event: { type: "session.output_transcript.delta", delta: closing } },
+      ],
+    });
+    const deps: AiDemoDeps = {
+      ...f.deps,
+      webSocketFactory: sideband.factory,
+      probeLimits: { ...FAST_PROBE, probeWindowMs: 1_200, probeCheckpointMs: 120, keepTranscript: true },
+    };
+
+    const { attempt } = await start(f);
+    await transitionAttempt(f.deps.admin, attempt.id, ["sip_dialing"], {
+      state: "bridged",
+      openai_session_id: "live_running",
+      telnyx_mobile_call_control_id: "cc-mobile",
+      telnyx_sip_call_control_id: "cc-sip",
+      bridged_at: new Date(Date.now() - 60_000).toISOString(),
+      greeting_status: "requested",
+    });
+
+    const { runGreetingAndFinish } = await import("./orchestrator");
+    await runGreetingAndFinish(deps, attempt.id);
+    return { f, attempt };
+  }
+
+  it("hangs up once she has said goodbye and the line is quiet", async () => {
+    const { f, attempt } = await callWithFarewell({ AI_DEMO_AUTO_HANGUP: "true" }, " Ďakujem, dovidenia.");
+
+    const row = await loadAttempt(f.deps.admin, ORG, attempt.id);
+    expect(row?.state).toBe("ended");
+    expect(row?.end_reason).toBe("farewell");
+    // Ending a conversation normally is not a failure.
+    expect(row?.error_code).toBeNull();
+    expect(f.h.telnyx.of("hangup").length).toBeGreaterThan(0);
+  });
+
+  it("leaves a call running when she has not said goodbye", async () => {
+    const { f, attempt } = await callWithFarewell({ AI_DEMO_AUTO_HANGUP: "true" }, " A kedy by vám to vyhovovalo?");
+
+    const row = await loadAttempt(f.deps.admin, ORG, attempt.id);
+    expect(row?.end_reason).not.toBe("farewell");
+    expect(["bridged", "talking"]).toContain(row?.state);
+  });
+
+  it("does nothing at all while the switch is off", async () => {
+    const { f, attempt } = await callWithFarewell({ AI_DEMO_AUTO_HANGUP: undefined }, " Ďakujem, dovidenia.");
+
+    const row = await loadAttempt(f.deps.admin, ORG, attempt.id);
+    expect(row?.end_reason).not.toBe("farewell");
+    expect(f.h.telnyx.of("hangup")).toHaveLength(0);
+  });
+});

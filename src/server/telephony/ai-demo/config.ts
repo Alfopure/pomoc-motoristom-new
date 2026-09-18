@@ -64,6 +64,13 @@ export const AI_DEMO_LIMITS = {
   inlineProbeWindowMs: 40_000,
   /** Save what has been heard this often, so nothing is lost to a termination. */
   probeCheckpointMs: 10_000,
+  /**
+   * Quiet for this long after she says goodbye, and the call is over.
+   *
+   * Long enough that "ďakujem za váš čas, ešte sa spýtam" does not end a call,
+   * short enough that nobody sits listening to nothing.
+   */
+  farewellSilenceMs: 4_000,
   probeMaxEvents: 400,
   /** Shorter than this, an utterance of hers is an acknowledgement, not an answer. */
   backchannelMaxMs: 700,
@@ -180,6 +187,8 @@ export type AiDemoConfig =
       webhookUrl: string | null;
       /** Keep what was said, not only when it was said. Off unless asked for. */
       storeTranscript: boolean;
+      /** Hang up once she has said goodbye and the line has gone quiet. */
+      autoHangup: boolean;
       /** Where the bridge webhook hands the call off to the listener. */
       listenUrl: string | null;
       /** Reads a finished call back; chosen for quality, not for latency. */
@@ -336,6 +345,7 @@ export function getAiDemoConfig(env: EnvRecord = process.env): AiDemoConfig {
     allowedRecipients,
     webhookUrl: aiDemoWebhookUrl(env),
     storeTranscript: read(env, "AI_DEMO_STORE_TRANSCRIPT")?.toLowerCase() === "true",
+    autoHangup: read(env, "AI_DEMO_AUTO_HANGUP")?.toLowerCase() === "true",
     listenUrl: aiDemoOwnUrl(env, "/api/telephony/ai-demo/listen"),
     reviewModel,
     maxAttemptsPerDay: clampInt(read(env, "AI_DEMO_MAX_ATTEMPTS_PER_DAY"), 3, 0, 100),

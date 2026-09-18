@@ -15,6 +15,7 @@ import {
   markLegGone, patchAttempt, transitionAttempt, type AiDemoAttempt,
 } from "./attempts";
 import { AI_DEMO_ALLOWED_VOICES, AI_DEMO_LIMITS, aiDemoBudgets, aiDemoEnabled, buildSipUri, getAiDemoConfig, voiceGender, type AiDemoConfig, type EnvRecord } from "./config";
+import { callIsOver } from "./farewell";
 import { runGreeting, type GreetingResult, type ProbeLimits, type WebSocketFactory } from "./greeting";
 import type { AiDemoLeg } from "./flag";
 import { aiDemoClientState, aiDemoCommandId, aiDemoCorrelationToken, maskNumber } from "./identity";
@@ -433,6 +434,22 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
       },
       onProgress: async (partial) => {
         await savePartial(deps, attempt, partial);
+
+        // She cannot hang up herself — the API has no such tool — but something
+        // is listening, so the end of the conversation can be noticed here and
+        // the call closed rather than left in silence until the time limit.
+        if (config.autoHangup && partial.transcript && partial.transcript.length > 0) {
+          const spoken = partial.transcript;
+          const lastSpeechMs = spoken[spoken.length - 1]?.ms ?? 0;
+          const nowMs = spoken.length > 0 ? Math.max(lastSpeechMs, elapsedSince(attempt)) : 0;
+          if (callIsOver({ turns: spoken, lastSpeechMs, nowMs, silenceMs: AI_DEMO_LIMITS.farewellSilenceMs })) {
+            deps.logger?.({ scope: "ai-demo", attemptId: attempt.id, message: "farewell heard, ending call" });
+            await requestEnding(deps, attempt.id, "farewell", null);
+            await endAttempt(deps, attempt.id, AI_DEMO_LIMITS.cleanupBudgetActionMs, "inline");
+            return false;
+          }
+        }
+
         // Stop as soon as the call is over rather than waiting out the window;
         // `session.closed` is not something we have ever seen proven to arrive.
         const current = await loadAttempt(deps.admin, deps.organizationId, attempt.id);
@@ -733,6 +750,12 @@ function sliceTranscript(stored: unknown, since: number | undefined): Array<{ ms
   const usable = entries.filter((entry) => entry && typeof entry === "object" && typeof entry.text === "string");
   const wanted = typeof since === "number" && Number.isFinite(since) ? usable.filter((entry) => typeof entry.ms === "number" && entry.ms > since) : usable;
   return wanted as Array<{ ms: number; dir: string; text: string }>;
+}
+
+/** Milliseconds since the call was bridged. */
+function elapsedSince(attempt: AiDemoAttempt): number {
+  const bridged = attempt.bridged_at ? Date.parse(attempt.bridged_at) : null;
+  return bridged === null ? 0 : Date.now() - bridged;
 }
 
 /** The voice actually used, from the attempt rather than from today's configuration. */

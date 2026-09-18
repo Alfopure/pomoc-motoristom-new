@@ -210,6 +210,19 @@ K bodu 1: rod sa odvodí z hlasu (`voiceGender`); nezdokumentovaný hlas sa beri
 
 Ak majú padnúť aj tieto, je to zmena v `prompts.ts` a vedomé rozhodnutie, nie preklep v jednom poli.
 
+## Ukončenie hovoru
+
+Sama hovor položiť nevie — GPT-Live na to nemá nástroj. Ale spojenie, ktoré zapisuje prepis, beží celý hovor, takže koniec rozhovoru sa dá rozpoznať a hovor ukončiť odtiaľ.
+
+Pri `AI_DEMO_AUTO_HANGUP=true` musia platiť **obe** podmienky:
+
+1. jej posledná reč obsahuje rozlúčku („dovidenia", „pekný deň", „ďakujem za váš čas"…), a
+2. **štyri sekundy** odvtedy nepovedal nič ani jeden z nich.
+
+Samotná rozlúčka nestačí — „ďakujem za váš čas, ešte sa spýtam" je uprostred hovoru. Samotné ticho tiež nie — človek, ktorý sa zamyslí, nezložil. A posudzovať to modelom by znamenalo tretiu vec, na ktorú sa počas hovoru čaká; to je jediný náklad, ktorý si táto funkcia nesmie dovoliť.
+
+Zapisuje sa ako `end_reason: farewell`, bez chybového kódu — normálne ukončený rozhovor nie je zlyhanie.
+
 ## Bezpečnostné hranice
 
 - **Brány pred vytočením:** `AI_DEMO_ENABLED`, `destination_allowlist` organizácie, voliteľný užší zoznam `AI_DEMO_ALLOWED_RECIPIENTS` a voliteľný denný limit. Ani jednu nevie ovplyvniť telo požiadavky. Posledné dve sa dajú vypnúť (prázdna hodnota, resp. `0`) — vtedy platí to isté pravidlo ako pre bežný odchádzajúci hovor dispečera a záložka to napíše.
