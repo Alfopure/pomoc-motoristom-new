@@ -80,6 +80,17 @@ export type ActiveCallView = {
   waitingReason: string | null;
   /** `park_max_minutes` frozen when the caller entered the waiting room. */
   waitingMaxMinutes: number | null;
+  /**
+   * Since when the queue has found nobody to ring, or null while it is still
+   * reaching people.
+   *
+   * A caller waiting because everybody declined and a caller waiting because
+   * nobody is there look identical on the board, and they need different
+   * things from whoever is watching it.
+   */
+  queueIdleSince: string | null;
+  /** When the queue spent its one round on the backup numbers. */
+  queueEscalatedAt: string | null;
   currentStep: number;
   ringMode: string | null;
   /** Operators with an open offer for this session (ringing right now). */
@@ -270,6 +281,8 @@ export async function loadActiveCalls(
       waitingSince: meta.waiting?.since ?? null,
       waitingReason: meta.waiting?.reason ?? null,
       waitingMaxMinutes: typeof meta.waiting?.max_minutes === "number" ? meta.waiting.max_minutes : null,
+      queueIdleSince: meta.queue?.idle_since ?? null,
+      queueEscalatedAt: meta.queue?.escalated_at ?? null,
       currentStep: session.current_step,
       ringMode: meta.ring?.mode ?? null,
       offeredProfileIds,

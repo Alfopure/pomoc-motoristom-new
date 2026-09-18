@@ -42,6 +42,7 @@ import {
   type Command,
   type Compensation,
   type DialCommand,
+  type FrozenRingMember,
   type FrozenRingPlan,
   type GatherSpec,
   type LegPatch,
@@ -98,6 +99,18 @@ const SUPERVISE_INTENT = "supervise";
 export const STALE_FINALISE_MS = 120_000;
 const QUEUE_RECHECK_MS = 5_000;
 const QUEUE_OPERATOR_RETRY_MS = 60_000;
+/**
+ * How long the queue keeps finding nobody to ring before it tries the numbers
+ * it otherwise never redials.
+ *
+ * The queue only re-offers browser operators, so a call whose operators are
+ * all on other calls or all logged out places no offers at all — silently,
+ * for as long as the waiting room allows. Three callers once waited seven and
+ * eight minutes that way. Two minutes is long enough for an operator to finish
+ * a call and come out of wrap-up, and short enough that the caller is not
+ * listening to music while nothing is happening.
+ */
+const QUEUE_ESCALATE_AFTER_MS = 120_000;
 
 // ---------------------------------------------------------------------------
 // Builder
@@ -1041,7 +1054,15 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
   if (queued && !previous) stopMoh(b, customer);
   b.setState(state).patchMeta({
     waiting: previous ?? { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso, max_minutes: b.ctx.settings.parkMaxMinutes },
-    queue: queued ? { next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString() } : null,
+    // A queue that already exists keeps its idle clock and its spent
+    // escalation; re-entering the waiting room after an offer rang out is the
+    // same queue, not a new one. A fresh queue starts idle, because the ring
+    // plan has just finished failing to reach anybody.
+    queue: queued
+      ? (b.meta.queue
+          ? { ...b.meta.queue, next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString() }
+          : { next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString(), idle_since: b.nowIso, escalated_at: null })
+      : null,
     ring: { ...b.meta.ring, active_step: null, step_deadline_at: null },
   });
   if (queued) {
@@ -1055,30 +1076,86 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
   b.note(`${state} (${reason})`);
 }
 
-function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
-  const queue = b.meta.queue;
-  const plan = b.ringPlan();
-  if (!queue || !plan?.steps[0] || b.session.answered_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return;
-  b.patchMeta({ queue: { next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString() } });
-  // Only browser operators are retried. An external backup/mobile gets its
-  // initial attempt, never a sequence of paid redials for a half-hour queue.
+/**
+ * Browser operators the queue may re-offer to, oldest offer first.
+ *
+ * `dueNow` applies the retry gate: an operator is only offered the call again
+ * a minute after their last offer, so a queue of one unresponsive operator
+ * rings them once a minute rather than every five seconds. Without the gate
+ * the same list answers a different question — is there anybody here at all —
+ * which is what decides whether the queue is idle.
+ */
+function queueOperatorMembers(b: TransitionBuilder, plan: FrozenRingPlan, opts: { dueNow: boolean }): FrozenRingMember[] {
   const lastOffered = new Map<string, number>();
   for (const attempt of b.attemptsView()) if (attempt.profile_id) {
     lastOffered.set(attempt.profile_id, Math.max(lastOffered.get(attempt.profile_id) ?? 0, Date.parse(attempt.offered_at ?? attempt.created_at)));
   }
-  const members = [...new Map([...(plan.queueMembers ?? []), ...plan.steps.flatMap((step) => step.members)]
+  return [...new Map([...(plan.queueMembers ?? []), ...plan.steps.flatMap((step) => step.members)]
     .filter((member) => member.kind === "operator" && member.profileId)
     .map((member) => [member.profileId, member])).values()]
-    .filter((member) => (lastOffered.get(member.profileId!) ?? 0) + QUEUE_OPERATOR_RETRY_MS <= b.ctx.now.getTime())
-    .sort((a, z) => (lastOffered.get(a.profileId!) ?? 0) - (lastOffered.get(z.profileId!) ?? 0) || a.position - z.position)
-    .map((member, position) => ({ ...member, position, ringSecs: Math.max(20, member.ringSecs) }));
+    .filter((member) => !opts.dueNow || (lastOffered.get(member.profileId!) ?? 0) + QUEUE_OPERATOR_RETRY_MS <= b.ctx.now.getTime())
+    .sort((a, z) => (lastOffered.get(a.profileId!) ?? 0) - (lastOffered.get(z.profileId!) ?? 0) || a.position - z.position);
+}
+
+/**
+ * The numbers the queue normally leaves alone: external backups and the
+ * personal mobiles resolved from the ring groups.
+ *
+ * These get their attempt when the ring plan runs and are then excluded, so
+ * that a half-hour queue does not become a sequence of paid redials. The
+ * escalation gives them exactly one more, which is why it is gated on
+ * `escalated_at` rather than on a timer.
+ */
+function queueBackupMembers(b: TransitionBuilder, plan: FrozenRingPlan): FrozenRingMember[] {
+  return [...new Map(plan.steps.flatMap((step) => step.members)
+    .filter((member) => member.kind === "external_number" && member.externalNumber)
+    .map((member) => [member.externalNumber, member])).values()]
+    .sort((a, z) => a.position - z.position);
+}
+
+function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
+  const queue = b.meta.queue;
+  const plan = b.ringPlan();
+  if (!queue || !plan?.steps[0] || b.session.answered_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return;
+
+  // How long the queue has been placing no offers at all. Not how long the
+  // caller has waited: a queue that keeps ringing an operator who declines is
+  // working, and must not escalate.
+  const idleSince = Date.parse(queue.idle_since ?? b.nowIso);
+  const idleFor = Number.isNaN(idleSince) ? 0 : b.ctx.now.getTime() - idleSince;
+  const escalating = !queue.escalated_at && idleFor >= QUEUE_ESCALATE_AFTER_MS;
+
   const index = b.session.current_step;
-  const planned = planRingStep({ index, groupId: plan.steps[0].groupId, groupName: "Čakáreň", strategy: "ordered", timeoutSecs: 20, members }, {
-    ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
-    sessionId: b.session.id, now: b.ctx.now, presence: toEligibilityPresence(b.ctx.presence), devices: toEligibilityDevices(b.ctx.devices),
-    openOffers: b.ctx.openOffers, attempted: new Set(), maxFanout: 1, maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, activeLegCount: b.ctx.activeLegCount,
-  });
-  if (planned.attempts.length) fanout(b, customer, index, planned, { expectedStep: index, setStep: index + 1 });
+  const planQueueStep = (members: FrozenRingMember[]) => planRingStep(
+    { index, groupId: plan.steps[0].groupId, groupName: "Čakáreň", strategy: "ordered", timeoutSecs: 20,
+      members: members.map((member, position) => ({ ...member, position, ringSecs: Math.max(20, member.ringSecs) })) },
+    { ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
+      sessionId: b.session.id, now: b.ctx.now, presence: toEligibilityPresence(b.ctx.presence), devices: toEligibilityDevices(b.ctx.devices),
+      openOffers: b.ctx.openOffers, attempted: new Set(), maxFanout: 1, maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, activeLegCount: b.ctx.activeLegCount },
+  );
+
+  const planned = planQueueStep(escalating ? queueBackupMembers(b, plan) : queueOperatorMembers(b, plan, { dueNow: true }));
+  // An operator sitting out the minute between offers is not "nobody to ring";
+  // with the gate at a minute and the escalation at two, counting them as idle
+  // would escalate every call that rings the same person twice.
+  const reachable = Boolean(planned.attempts.length) ||
+    (!escalating && planQueueStep(queueOperatorMembers(b, plan, { dueNow: false })).attempts.length > 0);
+
+  b.patchMeta({ queue: {
+    next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString(),
+    // The clock restarts as soon as somebody is reachable, and the escalation
+    // is spent whether or not it found a number to ring — one per call either
+    // way, so a half-hour queue cannot become a sequence of paid redials.
+    idle_since: reachable ? null : (queue.idle_since ?? b.nowIso),
+    escalated_at: escalating ? b.nowIso : (queue.escalated_at ?? null),
+  } });
+
+  if (planned.attempts.length) {
+    if (escalating) b.note(`queue escalated to backup numbers after ${Math.round(idleFor / 1000)} s with nobody to ring`);
+    fanout(b, customer, index, planned, { expectedStep: index, setStep: index + 1 });
+  } else if (escalating) {
+    b.note(`queue has nobody to ring and no backup number after ${Math.round(idleFor / 1000)} s`);
+  }
 }
 
 /** Outbound/internal: the far end answered → the bridge command placed at dial time completes. */

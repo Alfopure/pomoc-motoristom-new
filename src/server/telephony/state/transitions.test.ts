@@ -322,6 +322,13 @@ describe("inbound ring plan", () => {
     const tick = h.telnyx.of("gatherUsingAudio").at(-1)!;
     h.advance(6 * 60_000);
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
+    // Six minutes of nobody to ring also spends the queue escalation on the
+    // backup number, so the state here is `ringing` rather than `waiting`.
+    // Either way the caller is still on the call, which is the point: the
+    // lowered limit did not eject them.
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    const escalation = h.legs(call.sessionId).find((leg) => leg.to_number === NUMBERS.external && !leg.ended_at)!;
+    await h.legEvent(String(escalation.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
     expect(h.session(call.sessionId).state).toBe("waiting");
 
     // The limit they arrived with (30 min) still ends the wait.
