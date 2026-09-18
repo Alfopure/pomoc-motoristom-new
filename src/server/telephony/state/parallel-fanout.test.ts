@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { TelnyxCommandError } from "../telnyx/client";
+import { advanceRingStep } from "../routing/ring-plan";
 
 afterEach(() => { vi.unstubAllEnvs(); });
 
@@ -97,5 +98,57 @@ describe("ring fan-out", () => {
     expect(h.telnyx.of("dial")).toHaveLength(2);
     expect(offered(h, call.sessionId)).toHaveLength(2);
     expect(h.session(call.sessionId).state).toBe("ringing");
+  });
+
+  it("refuses a second advance of the step it has already rung", async () => {
+    const h = harness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+
+    // The group goes out under a compare-and-set on `current_step`. An
+    // invocation arriving with the old expectation has to lose it, or three
+    // more phones ring. (`transitions.test.ts` drives the whole race; this
+    // pins the guard on the parallel path.)
+    const step = Number(h.session(call.sessionId).current_step);
+    expect(await advanceRingStep(h.admin, call.sessionId, step - 1)).toBe(false);
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+  });
+
+  it("dials each member once, however the group is retried", async () => {
+    const h = harness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+
+    // The provider journal is what makes this true: a replayed command is
+    // answered from the recorded outcome, not sent again.
+    const perMember = new Map<string, number>();
+    for (const dial of h.telnyx.of("dial")) {
+      const to = String(dial.params.to);
+      perMember.set(to, (perMember.get(to) ?? 0) + 1);
+    }
+    expect([...perMember.values()].every((count) => count === 1)).toBe(true);
+    expect(offered(h, call.sessionId)).toHaveLength(3);
+  });
+
+  it("keeps one member's provider failure off the others", async () => {
+    const h = harness();
+    // A rate limit is not a refusal: the member is failed, the group is not.
+    h.telnyx.failNext("dial", new TelnyxCommandError({ code: "rate_limited", status: 429, detail: "slow down" }));
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+    expect(offered(h, call.sessionId).length).toBeGreaterThanOrEqual(2);
+    expect(h.session(call.sessionId).state).toBe("ringing");
+  });
+
+  it("asks the journal about a dial only when there is something to replay", async () => {
+    const h = harness();
+    await h.inbound({ to: NUMBERS.allianz });
+
+    // A first attempt carries a continuation, so a lookup keyed on its mere
+    // existence cost one round trip per operator rung and could never find
+    // anything.
+    const lookups = h.db.log.filter((row) => row.table === "motorist_provider_command_lookup_v2").length;
+    expect(lookups).toBe(0);
   });
 });

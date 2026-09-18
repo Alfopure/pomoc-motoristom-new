@@ -1133,7 +1133,11 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
   // mutable presence checks: a now-busy operator cannot turn accepted evidence
   // into a skipped dial or authorize a second dispatch. The real HTTP adapter
   // below verifies the original fingerprint and returns its cached result.
-  const journal = sessionOwnership.getStore()?.contract === 2 && ctx.continuation
+  // Only a replay can have dispatched this command before. A first attempt
+  // carries a continuation too — it is created before the commands run — so
+  // the attempt counter is what distinguishes them, and asking the journal on
+  // every first dial costs one round trip per operator rung.
+  const journal = sessionOwnership.getStore()?.contract === 2 && (ctx.continuation?.attempts ?? 0) > 0
     ? await ownershipRpc<{ outcome: string } | null>(deps.admin, "motorist_provider_command_lookup_v2", {
       p_session_id: ctx.session.id, p_command_id: command.commandId,
     }) : null;
@@ -1184,6 +1188,12 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
   });
   ctx.dialResults.set(command.commandId, result);
   await upsertDialedLeg(deps, ctx.session, command, result);
+  // This read stays fresh deliberately. The plan proposed taking the
+  // tombstones from the snapshot when it shows none, to save a round trip per
+  // operator rung; `dispatch-pause-boundaries` refuses it. An operator can be
+  // paused while their own dial is in flight, and the fresh row is what
+  // discovers that tombstone in time to hang the revoked leg up — waiting for
+  // the next event lets it be answered first.
   if (stable && command.profileId) await cancelRevokedOffers(deps, ctx.session, { callControlId: result.callControlId, clientState: command.clientState });
   return { skipped: false, detail: { callControlId: result.callControlId, to: command.to } };
 }
@@ -1329,7 +1339,6 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
 
   // One renew for the group: `assertOwnership` at the head of every dial and
   // the journal's own preparation renew it again anyway.
-  if (claimed.length) await deps.renewLease?.();
   // A frozen session for every member. `upsertDialedLeg` reads only identity
   // from it, and its `telnyx_session_id` write is conditional and idempotent,
   // so nothing here depends on a row that another member just rewrote.
