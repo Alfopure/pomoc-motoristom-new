@@ -1106,7 +1106,23 @@ async function createOrFindConference(telnyx: TelnyxClient, commandId: string, c
   }
 }
 
-async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
+/**
+ * Takes the operator's presence for this offer and stamps the token onto the
+ * command. Separate from the dial so a fan-out can claim its whole group before
+ * a single leg exists, and make all of those tokens durable in one write.
+ */
+async function claimOperatorForDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand): Promise<boolean> {
+  if (!command.profileId) return true;
+  const authorization = await authorizeOperatorDispatch(deps.admin, {
+    organizationId: deps.organizationId, profileId: command.profileId, sessionId: ctx.session.id,
+    expectedToken: command.clientState.offerToken, reason: `offer:${command.clientState.intent ?? command.role}`,
+  });
+  if (!authorization.applied || !authorization.offerToken) return false;
+  command.clientState.offerToken = authorization.offerToken;
+  return true;
+}
+
+async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, options?: { authorized?: boolean }): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   await assertOwnership();
   const telnyx = requireTelnyx(deps);
   const adopted = ctx.dialResults.get(command.commandId);
@@ -1138,13 +1154,11 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
       command.clientState.operatorId = owned.profileId;
     }
   }
-  if (!alreadyDispatched && stable && command.profileId && command.role !== "supervisor") {
-    const authorization = await authorizeOperatorDispatch(deps.admin, {
-      organizationId: deps.organizationId, profileId: command.profileId, sessionId: ctx.session.id,
-      expectedToken: command.clientState.offerToken, reason: `offer:${command.clientState.intent ?? command.role}`,
-    });
-    if (!authorization.applied || !authorization.offerToken) return { skipped: true, detail: { reason: "offer no longer authorized" } };
-    command.clientState.offerToken = authorization.offerToken;
+  if (!options?.authorized && !alreadyDispatched && stable && command.profileId && command.role !== "supervisor") {
+    if (!await claimOperatorForDial(deps, ctx, command)) return { skipped: true, detail: { reason: "offer no longer authorized" } };
+    // The token has to be durable before the leg exists, or a replay cannot
+    // recognise its own offer. A fan-out checkpoints the whole group at once
+    // instead; see `executeRingFanout`.
     if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
   const isSip = command.to.startsWith("sip:");
@@ -1257,11 +1271,16 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   const now = deps.now().toISOString();
   const dials: DialCommand[] = [];
   const skippedMembers: string[] = [];
-  for (const plan of command.attempts) {
-    const key = plan.profileId ?? plan.externalNumber ?? "";
-    const ok = await insertAttempt(deps, session, plan);
-    if (!ok) {
-      skippedMembers.push(key);
+  // One row each, together. The natural keys of `motorist_ring_attempts` are
+  // partial unique indexes, so a single multi-row insert cannot be used: one
+  // duplicate — a member already offered in another session — would take the
+  // whole statement down with it. Each member keeps its own duplicate verdict.
+  const inserted = await Promise.allSettled(command.attempts.map((plan) => insertAttempt(deps, session, plan)));
+  for (const [index, outcome] of inserted.entries()) {
+    const plan = command.attempts[index];
+    if (outcome.status === "rejected") throw outcome.reason;
+    if (!outcome.value) {
+      skippedMembers.push(plan.profileId ?? plan.externalNumber ?? "");
       continue;
     }
     const dial = command.dials.find((candidate) => candidate.attempt?.profileId === plan.profileId && candidate.attempt?.externalNumber === plan.externalNumber);
@@ -1283,12 +1302,43 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   let succeeded = 0;
   let retryPending = false;
   const failures: Array<{ to: string; error: string }> = [];
-  for (const dial of dials) {
+
+  // The third operator's phone used to start ringing only after the first two
+  // dials had each made their own eight-or-so database round trips and waited
+  // out their own provider call. They are independent legs; the caller is
+  // waiting for the first of them, not the last.
+  //
+  // Claim every operator first, then make all of those tokens durable in one
+  // write, then dial. The invariant that matters — a token is persisted before
+  // its leg can exist — is kept for the group rather than per member, and the
+  // single checkpoint avoids N fenced compare-and-sets racing on one row.
+  const stableFanout = telephonyStabilityEnabled() || hasStabilityContract(session);
+  const claimed: DialCommand[] = [];
+  if (stableFanout) {
+    const claims = await Promise.allSettled(dials.map(async (dial) =>
+      dial.profileId && dial.role !== "supervisor" ? claimOperatorForDial(deps, ctx, dial) : true));
+    for (const [index, claim] of claims.entries()) {
+      if (claim.status === "rejected") throw claim.reason;
+      if (claim.value) claimed.push(dials[index]);
+      else skippedMembers.push(dials[index].profileId ?? dials[index].externalNumber ?? "");
+    }
+    if (ctx.continuation && claimed.length) {
+      ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
+    }
+  } else claimed.push(...dials);
+
+  // One renew for the group: `assertOwnership` at the head of every dial and
+  // the journal's own preparation renew it again anyway.
+  if (claimed.length) await deps.renewLease?.();
+  // A frozen session for every member. `upsertDialedLeg` reads only identity
+  // from it, and its `telnyx_session_id` write is conditional and idempotent,
+  // so nothing here depends on a row that another member just rewrote.
+  const frozen: ExecutionContext = { ...ctx, session: ctx.session };
+  const dialled = await Promise.allSettled(claimed.map((dial) => executeDial(deps, frozen, dial, { authorized: stableFanout })));
+  for (const [index, outcome] of dialled.entries()) {
+    const dial = claimed[index];
     try {
-      // Keep the lease alive across a slow fan-out so a concurrent `call.answered`
-      // cannot start dialling the rest of the group behind our back.
-      await deps.renewLease?.();
-      const executed = await executeDial(deps, ctx, dial);
+      const executed = outcome.status === "fulfilled" ? outcome.value : (() => { throw outcome.reason; })();
       if (!executed.skipped) succeeded += 1;
       else {
         let attempt = admin.from("motorist_ring_attempts").update({ result: "cancelled", ended_at: now }).eq("session_id", session.id).eq("step_index", command.step).in("result", ["pending", "offered"]);

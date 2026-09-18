@@ -217,10 +217,15 @@ async function assertOwnership(deps: CallActionDeps, session: SessionRow, actor:
 
 async function normalizeDestination(deps: CallActionDeps, raw: string, loadedSettings?: Awaited<ReturnType<typeof loadRoutingSettings>>): Promise<string> {
   const e164 = normalizeE164(raw);
-  if (!e164) throw new CallActionError("Neplatné telefónne číslo.", 400, "invalid_number");
+  // Both messages name the number, and the allowlist one names the number we
+  // arrived at rather than the one that was typed. National input carries no
+  // country, so "0776 123 456" becomes a Slovak +421776123456 — which is the
+  // one shape of this failure an operator cannot work out from the sentence
+  // alone. The console previews the same normalisation before the click.
+  if (!e164) throw new CallActionError(`Neplatné telefónne číslo: ${raw.trim()}`, 400, "invalid_number");
   const settings = loadedSettings ?? await loadRoutingSettings(deps.admin, deps.organizationId);
   if (!isDestinationAllowed(e164, settings.raw?.destination_allowlist ?? null)) {
-    throw new CallActionError("Cieľové číslo nie je povolené (allowlist).", 403, "destination_not_allowed");
+    throw new CallActionError(`Číslo ${e164} nie je povolené (allowlist).`, 403, "destination_not_allowed");
   }
   return e164;
 }
@@ -252,6 +257,34 @@ async function resolveFromLine(deps: CallActionDeps, profileId: string, lineId: 
   return { line, from };
 }
 
+/**
+ * The colleague's own mobile, when that is where their calls go.
+ *
+ * `delivery_mode: "personal_mobile"` is the setting an operator sets when they
+ * work from a phone rather than a browser; `resolvePersonalRingMembers` has
+ * honoured it in the ring plan for a while. Returning a number target here
+ * rather than an operator target is what makes a transfer follow the same
+ * rule. Null means "not that kind of colleague", and the caller falls back to
+ * requiring a live browser phone.
+ */
+async function personalMobileTarget(deps: CallActionDeps, profileId: string, label: string): Promise<TransferTarget | null> {
+  if (!telephonyStabilityEnabled()) return null;
+  const settings = await deps.admin.from("motorist_operator_telephony_settings")
+    .select("delivery_mode, default_mobile_number").eq("organization_id", deps.organizationId).eq("profile_id", profileId).maybeSingle();
+  if (settings.error) throw new CallActionError("Nastavenia kolegu sa nepodarilo načítať.", 500);
+  if (settings.data?.delivery_mode !== "personal_mobile") return null;
+  const number = normalizeE164(settings.data.default_mobile_number);
+  if (!number) throw new CallActionError("Kolega má mobilné doručovanie bez platného čísla.", 409, "target_unavailable");
+  const routing = await loadRoutingSettings(deps.admin, deps.organizationId);
+  if (!isDestinationAllowed(number, routing.raw?.destination_allowlist ?? null)) {
+    throw new CallActionError(`Číslo kolegu ${number} nie je povolené (allowlist).`, 403, "destination_not_allowed");
+  }
+  // Their own number, dialled as an outbound leg: the same budgets as any
+  // other PSTN transfer target apply.
+  await assertLegBudget(deps);
+  return { kind: "number", number, label, ownerProfileId: profileId };
+}
+
 async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, target: { profileId?: string | null; number?: string | null }): Promise<TransferTarget> {
   if (target.profileId) {
     if (target.profileId === actor.profileId) throw new CallActionError("Hovor nie je možné prepojiť na seba.", 400, "self_transfer");
@@ -263,6 +296,12 @@ async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, tar
       nowOf(deps),
     );
     if (!allowed.eligible) throw new CallActionError("Kolega nie je dostupný.", 409, "target_unavailable");
+    // A colleague who takes their calls on a personal mobile has no browser
+    // phone to hand the call to, and demanding one made them permanently
+    // untransferable — the ring plan has routed to them for a while, but every
+    // transfer, consult and add-party still insisted on a live web device.
+    const mobile = await personalMobileTarget(deps, target.profileId, profile.data.display_name);
+    if (mobile) return mobile;
     const device = await requireLiveDevice({ ...deps, deviceKind: "web" }, target.profileId, "Kolega nemá pripojený telefón.");
     return { kind: "operator", profileId: target.profileId, sipUri: device.sipUri, label: profile.data.display_name };
   }
@@ -578,16 +617,68 @@ export async function hangupCall(deps: CallActionDeps, actor: CallActor, session
   return runAction(deps, session, appEvent("hangup", actor, deps), "Ukončenie hovoru zlyhalo.");
 }
 
+/**
+ * What a failed action should leave behind: the number as it was typed, the
+ * number it became, and the reason it came back.
+ *
+ * `requested` and `dialled` differ exactly when national input picked up the
+ * default country code, which is the case nobody could diagnose afterwards.
+ * When the target never resolved, `dialled` is still filled in from the raw
+ * input, because that is the interesting half.
+ */
+function targetAudit(target: { profileId?: string | null; number?: string | null }, resolved?: TransferTarget): Record<string, unknown> {
+  return {
+    kind: resolved?.kind ?? (target.number ? "number" : "operator"),
+    requested: target.number?.trim() ?? target.profileId ?? null,
+    dialled: resolved?.kind === "number" ? resolved.number : (target.number ? normalizeE164(target.number) : null),
+    target: resolved?.label ?? null,
+  };
+}
+
+function failureAudit(error: unknown): Record<string, unknown> {
+  if (error instanceof CallActionError) return { error: error.message, code: error.code ?? null, status: error.status };
+  return { error: error instanceof Error ? error.message : String(error), code: null, status: null };
+}
+
+/**
+ * Resolves a transfer/consult/add-party destination, runs the action, and
+ * writes an audit row whichever way it goes.
+ *
+ * Before this, a blind transfer wrote nothing at all and an add-party wrote
+ * only when it worked, so a destination the provider refused left no trace
+ * anywhere. A refused destination is the one failure an operator cannot
+ * reconstruct from the console afterwards, and it is the one we were asked
+ * about.
+ */
+async function transferAction(
+  deps: CallActionDeps,
+  actor: CallActor,
+  input: { action: string; session: SessionRow; target: { profileId?: string | null; number?: string | null }; event: AppEventType; failureMessage: string },
+): Promise<CallActionResult> {
+  let resolved: TransferTarget | undefined;
+  try {
+    resolved = await resolveTransferTarget(deps, actor, input.target);
+    const result = await runAction(deps, input.session, appEvent(input.event, actor, deps, { target: resolved }), input.failureMessage);
+    await auditAction(deps, actor, { action: input.action, sessionId: input.session.id, after: targetAudit(input.target, resolved) });
+    return result;
+  } catch (error) {
+    await auditAction(deps, actor, {
+      action: `${input.action}.failed`,
+      sessionId: input.session.id,
+      after: { ...targetAudit(input.target, resolved), ...failureAudit(error) },
+    });
+    throw error;
+  }
+}
+
 export async function blindTransfer(deps: CallActionDeps, actor: CallActor, sessionId: string, target: { profileId?: string | null; number?: string | null }): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
-  const resolved = await resolveTransferTarget(deps, actor, target);
-  return runAction(deps, session, appEvent("blind_transfer", actor, deps, { target: resolved }), "Prepojenie zlyhalo.");
+  return transferAction(deps, actor, { action: "telephony.call.blind_transfer", session, target, event: "blind_transfer", failureMessage: "Prepojenie zlyhalo." });
 }
 
 export async function startConsult(deps: CallActionDeps, actor: CallActor, sessionId: string, target: { profileId?: string | null; number?: string | null }): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
-  const resolved = await resolveTransferTarget(deps, actor, target);
-  return runAction(deps, session, appEvent("consult", actor, deps, { target: resolved }), "Konzultáciu sa nepodarilo začať.");
+  return transferAction(deps, actor, { action: "telephony.call.consult", session, target, event: "consult", failureMessage: "Konzultáciu sa nepodarilo začať." });
 }
 
 export async function completeTransfer(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
@@ -728,10 +819,7 @@ async function partyLabel(deps: CallActionDeps, leg: LegRow): Promise<string> {
 /** Adds a colleague or an external number to the live call as a third party. */
 export async function addCallParty(deps: CallActionDeps, actor: CallActor, sessionId: string, target: { profileId?: string | null; number?: string | null }): Promise<CallActionResult> {
   const session = await conferenceSession(deps, actor, sessionId);
-  const resolved = await resolveTransferTarget(deps, actor, target);
-  const result = await runAction(deps, session, appEvent("add_party", actor, deps, { target: resolved }), "Účastníka sa nepodarilo pridať.");
-  await auditAction(deps, actor, { action: "telephony.conference.add_party", sessionId, after: { target: resolved.label, kind: resolved.kind } });
-  return result;
+  return transferAction(deps, actor, { action: "telephony.conference.add_party", session, target, event: "add_party", failureMessage: "Účastníka sa nepodarilo pridať." });
 }
 
 /** Mutes or unmutes one added participant of the conference. */
@@ -895,6 +983,12 @@ export async function revokeCallMonitorInvitation(deps: CallActionDeps, actor: C
 
 export type TransferTargetOption = { profileId: string; displayName: string; role: AppRole; available: boolean; status: string;
   deviceLive: boolean;
+  /**
+   * Where a transfer would reach them: their browser phone, or their own
+   * mobile when that is how they take calls. A `personal_mobile` colleague has
+   * no browser phone and is reachable anyway.
+   */
+  reachVia?: "web" | "mobile";
   /** Newest heartbeat across the browser phone and the mobile app: how long since we saw them at all. */
   deviceSeenAt: string | null };
 
@@ -902,15 +996,22 @@ export type TransferTargetOption = { profileId: string; displayName: string; rol
 export async function listTransferTargets(deps: CallActionDeps, actor: CallActor): Promise<TransferTargetOption[]> {
   const { admin, organizationId } = deps;
   const now = nowOf(deps);
-  const [profiles, presence, devices, mobiles] = await Promise.all([
+  const [profiles, presence, devices, mobiles, routing] = await Promise.all([
     admin.from("motorist_profiles").select("id, display_name, role, active").eq("organization_id", organizationId).eq("active", true),
     admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId),
     admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment),
-    // Only a browser phone can take a transfer, but the mobile app is the other
-    // place a colleague can be seen. "When did we last see this person at all"
-    // is the honest answer to how long they have been away.
+    // The mobile app is the other place a colleague can be seen. "When did we
+    // last see this person at all" is the honest answer to how long they have
+    // been away.
     admin.from("motorist_operator_mobile_devices").select("profile_id, device_seen_at").eq("organization_id", organizationId).eq("environment", deps.environment),
+    admin.from("motorist_operator_telephony_settings").select("profile_id, delivery_mode, default_mobile_number").eq("organization_id", organizationId),
   ]);
+  // A colleague whose calls go to their own mobile is reachable without a
+  // browser phone; showing them as unavailable is what made them permanently
+  // untransferable.
+  const mobileRouted = new Set((routing.data ?? [])
+    .filter((row) => telephonyStabilityEnabled() && row.delivery_mode === "personal_mobile" && normalizeE164(row.default_mobile_number))
+    .map((row) => row.profile_id));
   const presenceById = new Map((presence.data ?? []).map((row) => [row.profile_id, row]));
   const deviceById = new Map((devices.data ?? []).map((row) => [row.profile_id, row]));
   const mobileSeenById = new Map((mobiles.data ?? []).map((row) => [row.profile_id, row.device_seen_at]));
@@ -926,8 +1027,10 @@ export async function listTransferTargets(deps: CallActionDeps, actor: CallActor
       const device = deviceById.get(profile.id) ?? null;
       const live = deviceIsLive(device, now);
       const allowed = row ? presenceAllowsOffer({ profileId: profile.id, status: effectivePresenceStatus(row, now), currentSessionId: row.current_session_id, wrapUpUntil: row.wrap_up_until }, now) : { eligible: false as const, reason: "no_presence" as const };
-      return { profileId: profile.id, displayName: profile.display_name, role: profile.role, available: allowed.eligible && live,
-        status: row ? effectivePresenceStatus(row, now) : "offline", deviceLive: live, deviceSeenAt: lastSeen(profile.id) };
+      const viaMobile = mobileRouted.has(profile.id);
+      return { profileId: profile.id, displayName: profile.display_name, role: profile.role, available: allowed.eligible && (live || viaMobile),
+        status: row ? effectivePresenceStatus(row, now) : "offline", deviceLive: live, deviceSeenAt: lastSeen(profile.id),
+        reachVia: (viaMobile ? "mobile" : "web") as "web" | "mobile" };
     })
     .sort((left, right) => Number(right.available) - Number(left.available) || left.displayName.localeCompare(right.displayName, "sk"));
 }

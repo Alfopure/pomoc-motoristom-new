@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Loader2, PhoneForwarded, UserRound, X } from "lucide-react";
 
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
-import { formatPhoneNumberForDisplay, isDialablePhoneInput } from "@/lib/telephony/phone";
+import { dialPreview } from "@/lib/telephony/dial-preview";
 import { colleagueBadge } from "@/lib/telephony/colleague-availability";
 
 export type TransferTargetOption = {
@@ -15,6 +15,7 @@ export type TransferTargetOption = {
   status: string;
   deviceLive: boolean;
   deviceSeenAt?: string | null;
+  reachVia?: "web" | "mobile";
 };
 
 export type TransferRequest = { profileId?: string; number?: string };
@@ -84,7 +85,11 @@ export function CallTransferPicker({
     return () => controller.abort();
   }, [sessionId]);
 
-  const externalValid = isDialablePhoneInput(externalNumber);
+  // The same normalisation the server will apply, so the number under the field
+  // is the number that gets dialled — including the country code the console
+  // fills in when none was typed.
+  const preview = dialPreview(externalNumber);
+  const dialled = preview.kind === "ready" ? preview.e164 : null;
   const title = PICKER_TITLES[mode];
 
   return (
@@ -143,7 +148,7 @@ export function CallTransferPicker({
         className="mt-3 border-t border-zinc-200 pt-2"
         onSubmit={(event) => {
           event.preventDefault();
-          if (!externalValid || busy) return;
+          if (!dialled || busy) return;
           onSubmit({ number: externalNumber.trim() });
         }}
       >
@@ -163,18 +168,20 @@ export function CallTransferPicker({
           />
           <button
             type="submit"
-            disabled={!externalValid || busy}
+            disabled={!dialled || busy}
             className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-zinc-950 px-2.5 text-xs font-bold text-white transition hover:bg-zinc-800 disabled:bg-zinc-300 disabled:text-zinc-600"
           >
             {busy ? <Loader2 size={13} className="motion-safe:animate-spin" aria-hidden="true" /> : <PhoneForwarded size={13} aria-hidden="true" />}
             {PICKER_SUBMIT_LABELS[mode]}
           </button>
         </div>
-        {externalNumber.trim() && !externalValid && (
+        {preview.kind === "invalid" && (
           <p className="mt-1 text-[11px] font-semibold text-red-700">Zadajte platné telefónne číslo.</p>
         )}
-        {externalValid && (
-          <p className="mt-1 text-[11px] font-medium text-zinc-500">{formatPhoneNumberForDisplay(externalNumber)}</p>
+        {preview.kind === "ready" && (
+          <p className={`mt-1 text-[11px] font-medium ${preview.countryAssumed ? "text-amber-700" : "text-zinc-500"}`}>
+            {preview.text}
+          </p>
         )}
       </form>
     </section>

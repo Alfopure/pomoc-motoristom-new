@@ -593,8 +593,14 @@ export type SessionMeta = {
   pickup?: { by: string; at: string } | null;
   /** `max_minutes` is `park_max_minutes` frozen when the caller entered the waiting room. */
   waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null; audio_phase?: "combined" | "prompt" | "music"; music_until?: string | null } | null;
-  /** Unanswered inbound queue only; parked/held conversations never auto-ring. */
-  queue?: { next_offer_at: string } | null;
+  /**
+   * Unanswered inbound queue only; parked/held conversations never auto-ring.
+   *
+   * `idle_since` is when the queue last placed an offer and found nobody —
+   * null while it is still reaching people. `escalated_at` records the one
+   * round in which it also rang the backup numbers.
+   */
+  queue?: { next_offer_at: string; idle_since?: string | null; escalated_at?: string | null } | null;
   previous_operator?: string | null;
   answered_external?: string | null;
   sdk_hold?: { leg: string; at: string } | null;
