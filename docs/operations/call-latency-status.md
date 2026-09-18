@@ -172,6 +172,14 @@ does not address any of them.
    phone they do not have by design. They are now reachable, and the picker
    shows them as `Mobil` rather than green or absent.
 
+   E3(a) came with it, and had to: making such a colleague reachable made an
+   old hole reachable too. `appConsult` left `profile_id` null for a number
+   target, so consulting a colleague on their mobile rang their phone without
+   taking them out of the ring plan — they could be offered another call at the
+   same moment. `appAddParty` was covered only because `executeDial` rediscovers
+   the owner by reading every operator's settings; both now name the owner in
+   the reducer, as the plan specifies.
+
    What remains is configuration, not code: personal mobile numbers are set for
    one operator out of eight, and no ring group has one as a member.
 4. ~~**A failed add-party leaves no trace.**~~ Closed. A blind transfer wrote
