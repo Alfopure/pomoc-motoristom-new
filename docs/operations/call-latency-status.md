@@ -92,7 +92,7 @@ Outside the plan, from what the testing turned up:
 | **E1b-2** rest | .4 done; the rest superseded by E2 if E2 is approved |
 | **E2** migrations | not started. The step change: bridge chain to 5-6 requests, fanout to 6 + N |
 | **E3** controls, mobile, transfer | not started. Includes making a colleague's mobile reachable at all |
-| **E4** polling | done. Auth half still open: measure the `auth` step's share before touching `getUser()` |
+| **E4** polling | done. Auth half: instrumented and waiting on production traffic, see below |
 | **E5** measurement rounds | not started |
 
 ### What parallel fan-out changes
@@ -324,6 +324,28 @@ way, so an entry staged by one writer stays resumable by the other.
 Patching follows `motorist_stage_transition_v1`: `jsonb_populate_record` over
 the existing row, so an absent key keeps its value and a present one is applied
 with the column's own type.
+
+### E4's auth half: what the answer depends on
+
+The project signs its tokens with **ES256 and publishes the public key**
+(verified 18 Sep through the Management API), so `getClaims()` can verify a
+token locally and the plan's hypothesis holds: the network call to GoTrue on
+every request is removable in principle.
+
+It is not removed, because the gain is unmeasured and the cost is not.
+`getUser()` asks GoTrue every time, so a revoked session is refused
+immediately; `getClaims()` would accept it until the token expires. The profile
+read keeps running either way, so a **deactivated operator** is still locked
+out at once — the exposure is narrower than it looks, and it is a revoked *auth
+session* on an operator whose profile is still active.
+
+Trading that for an unmeasured gain is the wrong order, and the plan agrees:
+measure the step's share first. So `auth` is now reported as its two halves,
+`auth.token` and `auth.profile`. Knowing the gate costs 120 ms does not say
+which half to attack, and the halves are different decisions — one about
+revoked sessions, the other about deactivated operators.
+
+The next production traffic answers it.
 
 ## Known gaps that are not in the plan
 

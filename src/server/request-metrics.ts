@@ -3,7 +3,19 @@ import "server-only";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 
-export type RequestStep = "auth" | "db" | "lease" | "provider" | "checkpoint" | "read" | "write";
+/**
+ * `auth` is the whole gate; `auth.token` and `auth.profile` are the two halves
+ * it is made of.
+ *
+ * Knowing the gate costs 120 ms does not say which half to attack, and the two
+ * are very different things: verifying the token is a network call to GoTrue
+ * that local verification could replace, while the profile lookup is a
+ * database read that also carries the "is this operator still active" check.
+ * Trading the first away is a decision about revoked sessions; trading the
+ * second away is a decision about deactivated operators. They should not be
+ * decided on one number.
+ */
+export type RequestStep = "auth" | "auth.token" | "auth.profile" | "db" | "lease" | "provider" | "checkpoint" | "read" | "write";
 export type MeasuredRoute = "case.get" | "case.save" | "call.start" | "call.action" | "call.webhook" | "call.active" | "dispatch.refresh" | "fleet.refresh";
 
 type Metric = { count: number; ms: number };
