@@ -347,6 +347,39 @@ revoked sessions, the other about deactivated operators.
 
 The next production traffic answers it.
 
+### Where the plan stands, and what each remaining piece costs
+
+An inbound answer went from 64 database requests to **47** and console polling
+from 12 800 to 1 600 over ten minutes. What is left is not a list of tasks so
+much as three decisions, each of which trades something the measurements cannot
+value on their own.
+
+**E2.1, the admit RPC.** Folding the webhook claim, the session resolution and
+the lease acquisition into one transaction saves roughly four requests of the
+forty-seven. It rewires the hottest and least forgiving path in the system:
+claim deduplication, deferred retry, three fallbacks for resolving a session,
+and a lease-busy answer that has to stay deferrable. The ratio is poor and the
+blast radius is the worst available. It is not started, and it should not be
+started for eight per cent.
+
+**The presence half of E2.2.** Its guards read an application feature flag and
+an operator's wrap-up setting. Folding them into SQL moves the decision about
+whether an operator is offered calls out of the reducer that owns it, into a
+place where it cannot be tested the way the rest of that policy is. The row
+writes are folded; this half should wait for a way to test policy where it
+would then live.
+
+**E4's auth half.** Verifiable as removable — the project signs with ES256 and
+publishes the key — and now instrumented as `auth.token` and `auth.profile`.
+Whether to trade immediate rejection of a revoked session for one fewer network
+call is a decision for the numbers the next production traffic produces, not for
+an argument.
+
+The pattern in all three is the same, and it is the lesson of this repair: the
+measurements were wrong for weeks because the harness could not reach the path
+production runs. Everything above is gated on evidence rather than on reasoning
+precisely because reasoning is what produced the wrong numbers.
+
 ## Known gaps that are not in the plan
 
 Found during testing on 17 Sep; none of them is a latency problem and the plan
