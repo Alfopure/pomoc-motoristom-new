@@ -2,7 +2,8 @@ import { completeAnnouncedAction } from "@/test/complete-call-announcements";
 import { describe, expect, it } from "vitest";
 
 import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
-import { addCallParty, blindTransfer, createRateLimiter, holdCall, type CallActionDeps, type CallActor } from "./call-actions";
+import { addCallParty, blindTransfer, createRateLimiter, hangupCall, holdCall, startOutboundCall, type CallActionDeps, type CallActor } from "./call-actions";
+import { loadActiveCalls } from "./active-calls";
 
 const o1: CallActor = { profileId: PROFILES.o1, role: "dispatcher", displayName: "Jana" };
 const o2: CallActor = { profileId: PROFILES.o2, role: "dispatcher", displayName: "Peter" };
@@ -163,5 +164,40 @@ describe("who can still hear whom after somebody leaves a three-way", () => {
 
     await hangup(h, operatorLeg);
     expect(h.telnyx.physical.connected(call.callControlId, party)).toBe(true);
+  });
+
+  it("does not call the audio broken once the caller leaves an outbound three-way", async () => {
+    const h = createTelephonyHarness();
+    const out = await startOutboundCall(deps(h), o1, { to: "+421910988882" });
+    h.telnyx.physical.answered(out.operatorLegCallControlId);
+    await h.legEvent(out.operatorLegCallControlId, "call.answered");
+    const customer = String(h.legs(out.sessionId).find((leg) => leg.role === "customer")!.telnyx_call_control_id);
+    await answer(h, customer);
+    const party = await addParty(h, o1, out.sessionId);
+
+    await hangup(h, customer);
+    // Two minutes later the confirmation window is long gone.
+    h.advance(2 * 60_000);
+
+    // The bridge this gate confirms is over; the conference that replaced it
+    // is working. Reporting a failure here greys out hold, transfer and add,
+    // and tells the operator to hang up on a live conversation.
+    const call = (await loadActiveCalls({ ...h.deps, configured: true }, { profileId: PROFILES.o1, canManageAssignments: false })).calls.find((row) => row.sessionId === out.sessionId)!;
+    expect(call.audioConnection ?? null).toBeNull();
+    expect(h.telnyx.physical.connected(out.operatorLegCallControlId, party)).toBe(true);
+  });
+
+  it("still ends cleanly when the operator hangs up after the caller left", async () => {
+    const h = createTelephonyHarness();
+    const { call, operatorLeg } = await talking(h);
+    const party = await addParty(h, o1, call.sessionId);
+    await hangup(h, call.callControlId);
+
+    const result = await hangupCall(deps(h), o1, call.sessionId);
+
+    expect(result.commands.every((command) => command.ok)).toBe(true);
+    for (const cc of [operatorLeg, party]) {
+      expect(h.telnyx.of("hangup").some((entry) => entry.params.callControlId === cc)).toBe(true);
+    }
   });
 });
