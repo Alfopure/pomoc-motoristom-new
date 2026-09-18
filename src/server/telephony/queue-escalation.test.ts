@@ -104,4 +104,35 @@ describe("a queue with nobody to ring", () => {
     expect(queueMeta(h, call.sessionId)?.idle_since ?? null).toBeNull();
     expect(pstnDials(h)).toHaveLength(1);
   });
+
+  it("never rings the backup number when the organisation turned escalation off", async () => {
+    const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
+    h.db.update("motorist_telephony_settings", { queue_escalate_after_seconds: 0 }, () => true);
+    const { call } = await queued(h);
+    expect(pstnDials(h)).toHaveLength(1);
+
+    // Ten minutes of nobody. Zero means never, not "immediately".
+    for (let minute = 0; minute < 10; minute++) {
+      await tick(h, call.callControlId, 60_000);
+      await sweep(h);
+    }
+
+    expect(pstnDials(h)).toHaveLength(1);
+    expect(queueMeta(h, call.sessionId)?.escalated_at ?? null).toBeNull();
+    expect(h.session(call.sessionId).state).toBe("waiting");
+  });
+
+  it("waits as long as the organisation asked before trying the backup number", async () => {
+    const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
+    h.db.update("motorist_telephony_settings", { queue_escalate_after_seconds: 300 }, () => true);
+    const { call } = await queued(h);
+
+    // Two minutes is the built-in default and must no longer decide anything.
+    await tick(h, call.callControlId, 120_000);
+    expect(pstnDials(h)).toHaveLength(1);
+
+    await tick(h, call.callControlId, 180_000);
+    expect(pstnDials(h)).toHaveLength(2);
+    expect(pstnDials(h).at(-1)?.params.to).toBe(NUMBERS.external);
+  });
 });

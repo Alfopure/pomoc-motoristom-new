@@ -20,7 +20,7 @@ import {
   type PauseRoutingMode,
 } from "@/lib/telephony/operator-settings";
 import { callbackConfirmationMedia, IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
-import type { TelephonyEnvironment } from "./state/types";
+import { DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS, MAX_QUEUE_ESCALATE_AFTER_SECONDS, type TelephonyEnvironment } from "./state/types";
 import { ConfigServiceError, type ValidationIssue } from "./service-errors";
 
 export { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS };
@@ -214,6 +214,7 @@ export type TelephonySettingsPatchInput = {
   destinationAllowlist?: string[];
   maxRingFanout?: number;
   maxConcurrentLegs?: number;
+  queueEscalateAfterSeconds?: number;
 };
 
 export type OperatorSettingsPatchInput = {
@@ -339,6 +340,8 @@ export type TelephonySettingsDoc = {
   destinationAllowlist: string[];
   maxRingFanout: number;
   maxConcurrentLegs: number;
+  /** Seconds the queue may find nobody to ring before trying the backup numbers once; 0 disables it. */
+  queueEscalateAfterSeconds: number;
 };
 
 export type RoutingDocument = {
@@ -378,6 +381,7 @@ export const DEFAULT_SETTINGS: TelephonySettingsDoc = {
   destinationAllowlist: ["SK", "CZ"],
   maxRingFanout: 8,
   maxConcurrentLegs: 9,
+  queueEscalateAfterSeconds: DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS,
 };
 
 // ---------------------------------------------------------------------------
@@ -661,6 +665,7 @@ export function parseSettingsPatch(value: unknown): TelephonySettingsPatchInput 
   if ("parkMaxMinutes" in row) patch.parkMaxMinutes = readInteger(row.parkMaxMinutes) ?? Number.NaN;
   if ("maxRingFanout" in row) patch.maxRingFanout = readInteger(row.maxRingFanout) ?? Number.NaN;
   if ("maxConcurrentLegs" in row) patch.maxConcurrentLegs = readInteger(row.maxConcurrentLegs) ?? Number.NaN;
+  if ("queueEscalateAfterSeconds" in row) patch.queueEscalateAfterSeconds = readInteger(row.queueEscalateAfterSeconds) ?? Number.NaN;
   if ("destinationAllowlist" in row) {
     patch.destinationAllowlist = Array.isArray(row.destinationAllowlist)
       ? row.destinationAllowlist
@@ -1180,6 +1185,12 @@ export function validateSettingsPatch(patch: TelephonySettingsPatchInput): Valid
   if (patch.parkMaxMinutes !== undefined && (!Number.isInteger(patch.parkMaxMinutes) || patch.parkMaxMinutes < 1 || patch.parkMaxMinutes > MAX_PARK_MINUTES)) {
     issues.push(issue("parkMaxMinutes", "park_invalid", `Maximálny čas v čakárni musí byť 1 až ${MAX_PARK_MINUTES} minút.`));
   }
+  // Zero is the organisation saying "never ring the backup numbers"; the upper
+  // bound matches the database check constraint.
+  if (patch.queueEscalateAfterSeconds !== undefined &&
+    (!Number.isInteger(patch.queueEscalateAfterSeconds) || patch.queueEscalateAfterSeconds < 0 || patch.queueEscalateAfterSeconds > MAX_QUEUE_ESCALATE_AFTER_SECONDS)) {
+    issues.push(issue("queueEscalateAfterSeconds", "escalate_invalid", `Čas do skúšania záložného čísla musí byť 0 (vypnuté) až ${MAX_QUEUE_ESCALATE_AFTER_SECONDS / 60} minút.`));
+  }
   if (patch.maxRingFanout !== undefined && (!Number.isInteger(patch.maxRingFanout) || patch.maxRingFanout < 1 || patch.maxRingFanout > MAX_RING_FANOUT_LIMIT)) {
     issues.push(issue("maxRingFanout", "fanout_invalid", `Počet súčasne zvoniacich zariadení musí byť 1 až ${MAX_RING_FANOUT_LIMIT}.`));
   }
@@ -1523,6 +1534,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
             destinationAllowlist: settings.destination_allowlist ?? [],
             maxRingFanout: settings.max_ring_fanout,
             maxConcurrentLegs: settings.max_concurrent_legs,
+            queueEscalateAfterSeconds: settings.queue_escalate_after_seconds ?? DEFAULT_SETTINGS.queueEscalateAfterSeconds,
           }
         : { ...DEFAULT_SETTINGS }
       : null,
@@ -2028,6 +2040,7 @@ export async function updateTelephonySettings(
         destinationAllowlist: existing.data.destination_allowlist ?? [],
         maxRingFanout: existing.data.max_ring_fanout,
         maxConcurrentLegs: existing.data.max_concurrent_legs,
+        queueEscalateAfterSeconds: existing.data.queue_escalate_after_seconds ?? DEFAULT_SETTINGS.queueEscalateAfterSeconds,
       }
     : { ...DEFAULT_SETTINGS };
 
@@ -2039,6 +2052,7 @@ export async function updateTelephonySettings(
     destinationAllowlist: input.patch.destinationAllowlist?.map((entry) => entry.trim().toUpperCase()) ?? current.destinationAllowlist,
     maxRingFanout: input.patch.maxRingFanout ?? current.maxRingFanout,
     maxConcurrentLegs: input.patch.maxConcurrentLegs ?? current.maxConcurrentLegs,
+    queueEscalateAfterSeconds: input.patch.queueEscalateAfterSeconds ?? current.queueEscalateAfterSeconds,
   };
 
   // The cross-field rules (`maxConcurrentLegs > maxRingFanout`) have to hold for
@@ -2070,6 +2084,7 @@ export async function updateTelephonySettings(
       destination_allowlist: next.destinationAllowlist,
       max_ring_fanout: next.maxRingFanout,
       max_concurrent_legs: next.maxConcurrentLegs,
+      queue_escalate_after_seconds: next.queueEscalateAfterSeconds,
     },
     { onConflict: "organization_id" },
   );

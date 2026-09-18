@@ -12,8 +12,8 @@
 
 import { formatPhoneNumberForDisplay } from "./phone";
 
-/** Mirrors `QUEUE_ESCALATE_AFTER_MS` in the reducer. */
-export const QUEUE_ESCALATE_AFTER_SECONDS = 120;
+/** What the queue does for an organisation that has never touched the setting. */
+export const DEFAULT_ESCALATE_AFTER_SECONDS = 120;
 
 export type CallSetupAdvisory = {
   tone: "info" | "warning" | "error";
@@ -33,6 +33,8 @@ export type CallSetupInput = {
   operators: readonly Operator[];
   parkMaxMinutes: number | null;
   maxRingFanout: number | null;
+  /** Seconds before the backup numbers are tried once; 0 means never. */
+  escalateAfterSeconds?: number | null;
 };
 
 const minutes = (value: number) => `${value} min`;
@@ -78,12 +80,23 @@ export function callSetupAdvisories(input: CallSetupInput): CallSetupAdvisory[] 
   }
 
   // The escalation is the one thing here that spends money on its own.
-  if (numbers.size) {
+  const escalateSeconds = typeof input.escalateAfterSeconds === "number" ? input.escalateAfterSeconds : DEFAULT_ESCALATE_AFTER_SECONDS;
+  if (numbers.size && escalateSeconds > 0) {
     const shown = [...numbers].map((number) => formatPhoneNumberForDisplay(number) || number).join(", ");
     advisories.push({
       tone: "info",
       title: "Keď nikto nedvíha, skúsi sa záložné číslo",
-      text: `Ak ${QUEUE_ESCALATE_AFTER_SECONDS / 60} min nie je voľný nikto z operátorov, systém raz vytočí ${shown}. Je to bežný hovor a účtuje sa. Raz za hovor, nie opakovane.`,
+      text: `Ak ${Math.round(escalateSeconds / 60)} min nie je voľný nikto z operátorov, systém raz vytočí ${shown}. Je to bežný hovor a účtuje sa. Raz za hovor, nie opakovane.`,
+    });
+  } else if (numbers.size) {
+    // Turned off deliberately: say so, rather than let the configured number
+    // look as if it were in play.
+    advisories.push({
+      tone: "warning",
+      title: "Záložné číslo sa nikdy nevytočí",
+      text: park
+        ? `Skúšanie záložného čísla je vypnuté (0 minút). Keď sa nikto z operátorov neuvoľní, volajúci dočaká ${minutes(park)} a dostane ponuku spätného volania. Nastavené záložné čísla sa v čakárni nepoužijú.`
+        : "Skúšanie záložného čísla je vypnuté (0 minút), takže sa v čakárni nepoužije.",
     });
   } else {
     advisories.push({

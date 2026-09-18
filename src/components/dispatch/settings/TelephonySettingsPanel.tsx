@@ -11,6 +11,7 @@ import { SettingsField, SettingsIssueList, SettingsNotice, SettingsSectionHeader
 import {
   ENV_GATE_NOTE,
   MAX_PARK_MINUTES,
+  MAX_QUEUE_ESCALATE_MINUTES,
   describeAllowlist,
   describeKillSwitches,
   settingsDirty,
@@ -63,8 +64,11 @@ export function TelephonySettingsPanel({
       operators: document.operators,
       parkMaxMinutes: settings.parkMaxMinutes,
       maxRingFanout: document.limits?.maxRingFanout ?? null,
+      // The draft, not the saved row: the point of reading this is to see what
+      // the number you are typing would do.
+      escalateAfterSeconds: settingsPayload(draft).queueEscalateAfterSeconds ?? null,
     }),
-    [document.groups, document.limits?.maxRingFanout, document.operators, document.plans, settings.parkMaxMinutes],
+    [document.groups, document.limits?.maxRingFanout, document.operators, document.plans, draft, settings.parkMaxMinutes],
   );
   const dirty = settingsDirty(draft, settings);
   const issuesFor = (path: string) => issues.filter((issue) => issue.path === path);
@@ -187,6 +191,22 @@ export function TelephonySettingsPanel({
               />
             </SettingsField>
             <SettingsIssueList issues={issuesFor("parkMaxMinutes")} />
+          </div>
+
+          <div>
+            <SettingsField
+              label="Skúsiť záložné číslo po (min)"
+              hint={`0 až ${MAX_QUEUE_ESCALATE_MINUTES}. Keď sa tak dlho neuvoľní žiadny operátor, systém raz vytočí záložné čísla zo skupín zvonenia — je to bežný, platený hovor. 0 znamená neskúšať vôbec a nechať volajúceho dočakať v čakárni.`}
+            >
+              <input
+                className={settingsInputClass}
+                disabled={!canEdit}
+                inputMode="numeric"
+                value={draft.queueEscalateAfterMinutes}
+                onChange={(event) => set({ queueEscalateAfterMinutes: event.target.value })}
+              />
+            </SettingsField>
+            <SettingsIssueList issues={issuesFor("queueEscalateAfterMinutes")} />
           </div>
 
           <div>
