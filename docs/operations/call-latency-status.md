@@ -63,7 +63,7 @@ Cost of one database request, from production `request-performance`: **~95 ms**
 | **E0** cron and firewall | hotfix, then the allowlist inverted to a denylist of the 291 pre-boundary deployments. A release no longer needs a manual edit. Runbook carries the post-deploy gate. |
 | **E1a.1** lean context | done — accepting an offer no longer loads the whole route |
 | **E1a.2** bridge first | done |
-| **E1a.3** read deduplication | (a) (b) (c) (e) (f) done; **(d) only for `hangup`** — no longer blocked, the harness reaches the fence now |
+| **E1a.3** read deduplication | all six done. (d) covers every command kind: the validity read is skipped under the whole `noContinuation` predicate, and a fenced PT409 refusal maps onto the superseded path for everything except teardown |
 | **E1a.4** organisation cache | done — `call.active` poll 8 requests to 7, confirmed on live traffic |
 | **E1a.5** instrumentation | `db_count_at_dispatch` in the command audit; failed commands now record their error |
 | **E1a.6** one checkpoint per critical batch | done, critical phase only |
@@ -88,12 +88,11 @@ Outside the plan, from what the testing turned up:
 | stage | why it is still open |
 | --- | --- |
 | **E0** permanent | done as the denylist; nothing left |
-| **E1a.3(d)** in full | maps a fenced PT409 refusal onto the superseded path for every command kind, not only `hangup`. Was blocked on the harness; writable now |
 | **E1m** measurement | partly: cost per request and `db_count_at_dispatch` are in place; the 30-sample SQL A-J distributions are not |
 | **E1b-2** rest | .4 done; the rest superseded by E2 if E2 is approved |
 | **E2** migrations | not started. The step change: bridge chain to 5-6 requests, fanout to 6 + N |
 | **E3** controls, mobile, transfer | not started. Includes making a colleague's mobile reachable at all |
-| **E4** polling and auth | not started |
+| **E4** polling | done. Auth half still open: measure the `auth` step's share before touching `getUser()` |
 | **E5** measurement rounds | not started |
 
 ### What parallel fan-out changes
@@ -202,6 +201,30 @@ combination is safe on purpose: the deployed build neither reads nor writes
 `queue_escalate_after_seconds`, so the queue keeps escalating after the
 built-in two minutes and the column sits at its default. There is no state
 where the database and the code disagree.
+
+### E4: one database pass per organisation per second
+
+Every console asked the database for the same rows. Eight screens on a
+three-second interval meant eight identical passes over sessions, presence,
+devices, lines and legs — the answer differing only in which call is "mine".
+
+The rows are now read once per organisation per second and the per-operator
+view is built from them. Measured over ten simulated minutes, eight consoles
+at the poll floor: **12 800 requests to 1 600**, an 87% reduction against a
+target of 50%.
+
+`loadActiveCalls` stays uncached and `loadActiveCallsCached` is what the route
+calls, following `stats.ts` — a test that builds a world, polls it, and builds
+another a millisecond later must not be served the first one's rows.
+
+The stale-owner repair went with it. It ran its own query on every poll to find
+out whether the polling operator was held by a call that had ended; the
+snapshot already knows, so `ownPresenceStale` is derived from rows already
+loaded and the repair runs only when there is something to repair.
+
+One second is the whole exposure: the poll floor is three seconds and Realtime
+pushes changes as they happen, so a console can be at most a second behind
+something it did not do itself.
 
 ## Known gaps that are not in the plan
 

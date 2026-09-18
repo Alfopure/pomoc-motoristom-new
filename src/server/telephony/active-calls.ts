@@ -118,6 +118,16 @@ export type ActiveCallsSnapshot = {
     pauseReasonId: string | null;
     statusSince: string;
   } | null;
+  /**
+   * The polling operator is held by a call this snapshot does not contain.
+   *
+   * Terminal sessions are absent here, so a presence row still pointing at one
+   * is the trace of a call that ended without releasing its owner. The poll
+   * used to look for that with its own query every single time; the rows are
+   * already loaded, so the question can be answered from them and the repair
+   * run only when there is something to repair.
+   */
+  ownPresenceStale: boolean;
 };
 
 export type ActiveCallsDeps = {
@@ -182,11 +192,77 @@ function audioConnectionView(session: SessionRow, legs: LegRow[], now: Date): Au
   return { status: "connected", startedAt: connection.startedAt, confirmedAt: connection.confirmedAt, error: null };
 }
 
-export async function loadActiveCalls(
+/**
+ * Everything the snapshot is built from that belongs to the organisation
+ * rather than to the operator asking.
+ *
+ * Split out because every console polls the same rows: eight screens on a
+ * three-second interval ask the database for the same sessions, presence and
+ * devices eight times, and the answer differs only in which call is "mine".
+ */
+export type ActiveCallRows = {
+  sessions: SessionRow[];
+  legs: LegRow[];
+  attempts: AttemptRow[];
+  presence: PresenceRow[];
+  devices: DeviceRow[];
+  lines: LineRow[];
+  operatorSettings: Array<{ profile_id: string; delivery_mode?: string | null; default_mobile_number?: string | null }>;
+  callIdBySession: Map<string, string>;
+};
+
+/**
+ * One second of sharing, per instance, per organisation.
+ *
+ * The entry holds the in-flight promise rather than the rows: without that,
+ * every console that polls in the same few milliseconds after the entry
+ * expires starts its own pass — the stampede the cache exists to prevent.
+ *
+ * A second is well inside what the console already tolerates (the poll floor
+ * is three seconds and Realtime pushes changes as they happen), and it is what
+ * turns N screens into one database pass.
+ */
+export const ACTIVE_CALLS_CACHE_TTL_MS = 1_000;
+type RowsCacheEntry = { at: number; rows: Promise<ActiveCallRows> };
+const rowsCache = new Map<string, RowsCacheEntry>();
+
+/** Test seam: drops the per-instance row cache. */
+export function resetActiveCallsCache(): void {
+  rowsCache.clear();
+}
+
+/**
+ * The polling entry point: one database pass per organisation per second,
+ * however many consoles are watching.
+ *
+ * Deliberately a separate function from `loadActiveCalls`, which stays
+ * uncached — a test that builds a world, polls it, and builds another world a
+ * millisecond later must not be served the first one's rows.
+ */
+export async function loadActiveCallsCached(
   deps: ActiveCallsDeps,
   actor: { profileId: string; canManageAssignments: boolean },
 ): Promise<ActiveCallsSnapshot> {
   const now = (deps.now ?? (() => new Date()))();
+  const key = `${deps.organizationId}:${deps.environment}`;
+  const at = now.getTime();
+  const hit = rowsCache.get(key);
+  if (!hit || at - hit.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < hit.at) {
+    const pending = readActiveCallRows(deps);
+    rowsCache.set(key, { at, rows: pending });
+    try {
+      await pending;
+    } catch (error) {
+      // A failed pass must not be cached: the next reader has to be allowed to
+      // try again rather than being served the same rejection for a second.
+      if (rowsCache.get(key)?.rows === pending) rowsCache.delete(key);
+      throw error;
+    }
+  }
+  return buildActiveCalls(deps, actor, now, await rowsCache.get(key)!.rows);
+}
+
+export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveCallRows> {
   const { admin, organizationId } = deps;
 
   const [sessionsResult, presenceResult, devicesResult, linesResult, operatorSettingsResult] = await Promise.all([
@@ -223,13 +299,37 @@ export async function loadActiveCalls(
   if (attemptsResult.error) throw new Error(`ring attempts load failed: ${attemptsResult.error.message}`);
   if (callRowsResult.error) throw new Error(`call rows load failed: ${callRowsResult.error.message}`);
 
-  const callIdBySession = new Map(
-    (callRowsResult.data ?? []).flatMap((row) => (row.session_id ? [[row.session_id, row.id] as const] : [])),
-  );
+  return {
+    sessions,
+    legs: (legsResult.data ?? []) as LegRow[],
+    attempts: (attemptsResult.data ?? []) as AttemptRow[],
+    presence: (presenceResult.data ?? []) as PresenceRow[],
+    devices: (devicesResult.data ?? []) as DeviceRow[],
+    lines: (linesResult.data ?? []) as LineRow[],
+    operatorSettings: operatorSettingsResult.data ?? [],
+    callIdBySession: new Map(
+      (callRowsResult.data ?? []).flatMap((row) => (row.session_id ? [[row.session_id, row.id] as const] : [])),
+    ),
+  };
+}
 
-  const legs = (legsResult.data ?? []) as LegRow[];
-  const attempts = (attemptsResult.data ?? []) as AttemptRow[];
-  const lines = new Map(((linesResult.data ?? []) as LineRow[]).map((line) => [line.id, line]));
+export async function loadActiveCalls(
+  deps: ActiveCallsDeps,
+  actor: { profileId: string; canManageAssignments: boolean },
+): Promise<ActiveCallsSnapshot> {
+  const now = (deps.now ?? (() => new Date()))();
+  return buildActiveCalls(deps, actor, now, await readActiveCallRows(deps));
+}
+
+function buildActiveCalls(
+  deps: ActiveCallsDeps,
+  actor: { profileId: string; canManageAssignments: boolean },
+  now: Date,
+  rows: ActiveCallRows,
+): ActiveCallsSnapshot {
+  const { organizationId } = deps;
+  const { sessions, legs, attempts, callIdBySession } = rows;
+  const lines = new Map(rows.lines.map((line) => [line.id, line]));
 
   const legsBySession = new Map<string, ActiveCallLegView[]>();
   for (const leg of legs) {
@@ -304,8 +404,8 @@ export async function loadActiveCalls(
     } satisfies ActiveCallView;
   });
 
-  const presenceRows = (presenceResult.data ?? []) as PresenceRow[];
-  const deviceRows = (devicesResult.data ?? []) as DeviceRow[];
+  const presenceRows = rows.presence;
+  const deviceRows = rows.devices;
   const ownPresence = presenceRows.find((row) => row.profile_id === actor.profileId);
 
   return {
@@ -316,7 +416,10 @@ export async function loadActiveCalls(
     actorProfileId: actor.profileId,
     calls,
     waiting: calls.filter((call) => WAITING_STATES.has(call.state)),
-    presence: buildPresenceSnapshot({ actor, now, presence: presenceRows, devices: deviceRows, personalMobileProfileIds: new Set((operatorSettingsResult.data ?? []).filter((row) => telephonyStabilityEnabled() && row.delivery_mode === "personal_mobile" && row.default_mobile_number).map((row) => row.profile_id)) }),
+    presence: buildPresenceSnapshot({ actor, now, presence: presenceRows, devices: deviceRows, personalMobileProfileIds: new Set(rows.operatorSettings.filter((row) => telephonyStabilityEnabled() && row.delivery_mode === "personal_mobile" && row.default_mobile_number).map((row) => row.profile_id)) }),
+    ownPresenceStale: Boolean(ownPresence?.current_session_id) &&
+      ["ringing", "on_call"].includes(effectivePresenceStatus(ownPresence!, now)) &&
+      !sessions.some((session) => session.id === ownPresence!.current_session_id),
     ownPresence: ownPresence ? {
       presenceRevision: ownPresence.presence_revision ?? 0,
       automaticOffersAllowed: !readPauseReturn(ownPresence.pause_return) && ["available", "ringing"].includes(effectivePresenceStatus(ownPresence, now)),
