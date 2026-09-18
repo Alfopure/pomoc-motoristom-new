@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
+import { resetActiveCallsCache } from "@/server/telephony/active-calls";
 
 let harness: ReturnType<typeof createTelephonyHarness>;
 let sweepClock = Date.now();
@@ -42,6 +43,9 @@ describe("GET /api/telephony/calls/active", () => {
   beforeEach(() => {
     process.env.TELNYX_API_KEY = "KEYtest";
     harness = createTelephonyHarness({ ivrOnNeutralLine: false });
+    // The row cache lives for the module, and every case here builds a new
+    // world a millisecond after the last one.
+    resetActiveCallsCache();
     background.after.mockReset();
     background.sweep.mockReset().mockResolvedValue({ checked: 0, swept: [], deferred: [], errors: [] });
     sweepClock += 10_000;

@@ -2,7 +2,7 @@ import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics
 import { after } from "next/server";
 
 import { requireDefaultMotoristActor } from "@/server/api-auth";
-import { loadActiveCalls } from "@/server/telephony/active-calls";
+import { loadActiveCalls, loadActiveCallsCached } from "@/server/telephony/active-calls";
 import { recoverOwnEndedSessionPresence } from "@/server/telephony/presence-recovery";
 import { sweepOverdueRingSteps } from "@/server/telephony/routing/ring-plan";
 import { createTelephonyDeps, TELEPHONY_ROUTE_ROLES, telephonyConfiguredOrResponse, telephonyErrorResponse, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
@@ -60,22 +60,29 @@ export async function GET() {
 
       const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
 
-      // Terminal sessions are absent from this snapshot, so browser-leg recovery
-      // cannot clear their stale owner. Repair the authenticated operator before
-      // returning presence, without waiting for cron or contacting Telnyx.
-      try {
-        const recovery = await recoverOwnEndedSessionPresence(deps, actor.profileId);
-        for (const failure of recovery.errors) {
-          deps.logger?.({ level: "warn", scope: "presence_recovery", source: "calls/active", ...failure });
-        }
-      } catch (error) {
-        deps.logger?.({ level: "warn", scope: "presence_recovery", source: "calls/active", error: error instanceof Error ? error.message : String(error) });
-      }
+      const view = { admin: deps.admin, organizationId: deps.organizationId, environment: deps.environment, configured: deps.config.configured, now: deps.now };
+      const who = { profileId: actor.profileId, canManageAssignments: actor.role === "manager" || actor.role === "admin" || actor.role === "senior_dispatcher" };
 
-      const snapshot = await loadActiveCalls(
-        { admin: deps.admin, organizationId: deps.organizationId, environment: deps.environment, configured: deps.config.configured, now: deps.now },
-        { profileId: actor.profileId, canManageAssignments: actor.role === "manager" || actor.role === "admin" || actor.role === "senior_dispatcher" },
-      );
+      // Shared with every other console polling this organisation: the rows are
+      // the same, only "mine" differs.
+      let snapshot = await loadActiveCallsCached(view, who);
+
+      // Terminal sessions are absent from the snapshot, so browser-leg recovery
+      // cannot clear their stale owner. This used to run a query of its own on
+      // every poll to find that out; the snapshot already knows, so the repair
+      // runs only when there is something to repair — and then the snapshot is
+      // re-read, because the repair has just changed what it says.
+      if (snapshot.ownPresenceStale) {
+        try {
+          const recovery = await recoverOwnEndedSessionPresence(deps, actor.profileId);
+          for (const failure of recovery.errors) {
+            deps.logger?.({ level: "warn", scope: "presence_recovery", source: "calls/active", ...failure });
+          }
+          if (recovery.released > 0) snapshot = await loadActiveCalls(view, who);
+        } catch (error) {
+          deps.logger?.({ level: "warn", scope: "presence_recovery", source: "calls/active", error: error instanceof Error ? error.message : String(error) });
+        }
+      }
       // A single session can outlast the sweep's start budget while waiting for
       // its lease or provider. Send the snapshot before any sweep work begins.
       after(() => maybeSweep(deps));
