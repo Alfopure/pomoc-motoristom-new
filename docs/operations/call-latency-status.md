@@ -118,6 +118,33 @@ outright, and only two of the three phones ring.
 Request count is unchanged; this is latency, not cost. It should show up as the
 gap between the caller being answered and the first phone ringing, and it is
 worth one verification call to confirm.
+### The conference silence, found
+
+Reported on 17 Sep: a third number added to a call, and after somebody left it
+the remaining parties heard nobody. Confirmed live on 18 Sep — the caller hung
+up out of a three-way and the added number kept working for a few seconds and
+then died.
+
+`onCustomerHangup` hung up **every** remaining leg. Right for a two-party call;
+wrong for a three-way, where the operator and the number they added were
+mid-conversation. It also contradicted the code beside it: when the *operator*
+leaves, `handOverConference` deliberately keeps the caller and the remaining
+party together.
+
+Now the caller leaving a three-way leaves the rest talking, and the added
+number is hung up only once the operator has gone too — a party alone on a
+live leg is a stranger holding a silent call.
+
+### What was checked before that
+
+`src/server/telephony/conference-departure.test.ts` drives every shape of the
+departure against the provider double's own model of who can hear whom. The
+operator dropping, the added party hanging up, the same after a blind transfer,
+and hold were all already correct — which is what left the caller's own hangup
+as the only remaining candidate. The conference parameters were never at fault
+either: `start_conference_on_create: true`, and `end_conference_on_exit`
+defaults to false.
+
 ## Known gaps that are not in the plan
 
 Found during testing on 17 Sep; none of them is a latency problem and the plan

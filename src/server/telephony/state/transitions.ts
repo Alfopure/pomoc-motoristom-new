@@ -1518,6 +1518,33 @@ function onHangup(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
   return onPartyHangup(b, leg, event, at);
 }
 
+/**
+ * The caller hung up out of a three-way; whoever is left keeps talking.
+ *
+ * Only the legs that were actually in the conversation survive: an unanswered
+ * offer or a half-dialled party has nobody to talk to and is torn down with
+ * the rest. The call record ends here — the call was the caller's — while the
+ * session stays open until the last of them hangs up.
+ */
+function keepParties(b: TransitionBuilder, customer: LegRow, at: string, cause: string): void {
+  const parties = answeredParties(b);
+  const operator = b.openLegs().find((other) => other.answered_at && !isCustomer(other) && !isPartyLeg(other) && other.role !== "supervisor");
+  const staying = new Set([...parties, ...(operator ? [operator] : [])].map((other) => other.telnyx_call_control_id));
+
+  for (const other of b.openLegs()) {
+    if (other.telnyx_call_control_id === customer.telnyx_call_control_id) continue;
+    if (staying.has(other.telnyx_call_control_id) || other.role === "supervisor") continue;
+    b.cmd(hangupCmd(b, other, "customer_left"));
+  }
+  cancelOpenAttempts(b, at, "customer left");
+
+  b.setState(staying.size > 2 ? "conference" : twoPartyState(b));
+  b.call.status = "ended";
+  b.call.end_reason = cause;
+  b.call.ended_at = at;
+  b.note(`customer left the conference (${cause}) → ${staying.size} remaining keep talking`);
+}
+
 function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent, at: string): ReduceResult {
   const state = b.session.state;
   const meta = b.meta;
@@ -1534,6 +1561,15 @@ function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEve
 
   if (TERMINAL_STATES.has(state) || state === "wrap_up" || state === "missed") {
     finishIfQuiet(b, at);
+    return b.result();
+  }
+
+  // The caller leaving a three-way does not end the conversation they left
+  // behind. The operator was mid-sentence with a number they added — a tow
+  // service, a partner — and that call is not the caller's to hang up, exactly
+  // as an operator leaving does not hang up the caller's.
+  if (state === "conference" && answeredParties(b).length > 0) {
+    keepParties(b, leg, at, cause);
     return b.result();
   }
 
@@ -1762,6 +1798,11 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
   if (b.state === "conference" && customerOpen && answeredParties(b).length === 0) {
     b.setState(twoPartyState(b));
     b.note("last participant left → two-party call");
+  }
+  // The caller has gone and now so has the operator. An added number alone on
+  // a live leg is a stranger holding a silent call.
+  if (!customerOpen && !b.openLegs().some((other) => other.answered_at && !isPartyLeg(other) && other.role !== "supervisor")) {
+    for (const party of answeredParties(b)) b.cmd(hangupCmd(b, party, "nobody_left"));
   }
   finishIfQuiet(b, at);
   return b.result();
