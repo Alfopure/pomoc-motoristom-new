@@ -70,6 +70,21 @@ export function registerContractTwoRpcs(db: FakeDatabase): void {
     return true;
   });
 
+  registerProviderJournalRpcs(db);
+}
+
+/**
+ * The fenced provider journal: `prepare_v2` before every voice command and
+ * `result_v2` after it.
+ *
+ * Split out from the lease RPCs because a test may want its own lease
+ * behaviour — contention tests hand-build theirs — and still needs the journal,
+ * since the provider double now goes through it exactly as the real client
+ * does. Registering the leases without these leaves every command failing on a
+ * missing function.
+ */
+export function registerProviderJournalRpcs(db: FakeDatabase): void {
+  const session = (id: unknown) => db.storage("motorist_call_sessions").find((row) => row.id === id);
   // `20260929200000:227-230`: once a termination is committed the journal
   // refuses every new provider command except teardown.
   const TEARDOWN = /\/(hangup|record_stop|leave|stop)$/;

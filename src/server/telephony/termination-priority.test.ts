@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, type TelephonyHarness } from "@/test/telephony-harness";
+import { registerProviderJournalRpcs } from "@/test/fake-stability";
 import { sessionOwnership, type Ownership } from "./ownership";
 import { loadRoutingContext, runSessionEvent } from "./session-runner";
 import { parseTelnyxEnvelope } from "./state/events";
@@ -9,9 +10,10 @@ afterEach(() => vi.restoreAllMocks());
 
 function owned(h: TelephonyHarness, sessionId: string): Ownership {
   h.db.registerRpc("motorist_session_lease_renew_v2", () => true);
-  h.db.registerRpc("motorist_provider_termination_legs_v2", () => []);
-  h.db.registerRpc("motorist_provider_termination_checkpoint_v2", () => ({ pending: false }));
-  h.db.registerRpc("motorist_provider_pending_commands_v2", () => []);
+  // Under contract 2 every provider command is fenced, teardown included — and
+  // the fence is what makes the hangup below the only command still allowed
+  // once termination is committed.
+  registerProviderJournalRpcs(h.db);
   h.db.registerRpc("motorist_provider_observe_dial_v2", () => false);
   const row = h.db.storage("motorist_call_sessions").find(row => row.id === sessionId)!;
   row.writer_contract = 2;

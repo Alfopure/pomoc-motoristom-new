@@ -8,6 +8,7 @@ import type {
 } from "@/server/telephony/telnyx/client";
 import { TelnyxCommandError, TelnyxLiveCallsDisabledError, TelnyxSmsDisabledError } from "@/server/telephony/telnyx/client";
 import { getTelnyxConfig, type TelnyxConfig } from "@/server/telephony/telnyx/env";
+import { dispatchJournaled, journalRequest } from "@/server/telephony/provider-journal";
 
 /**
  * Recording stand-in for `TelnyxClient`. Every command is appended to
@@ -60,6 +61,43 @@ export type FakeTelnyx = {
   nextId(prefix: string): string;
 };
 
+/**
+ * Where each command would have gone on the wire.
+ *
+ * The fake implements `TelnyxClient` method by method rather than over HTTP,
+ * so nothing here ever built a path — and `journalRequest` keys the provider
+ * journal on the method and path. Without them `prepare_v2` and `result_v2`
+ * never ran in a test, and every branch that depends on them was unreachable:
+ * a command already accepted, a command the fence refused, a command whose
+ * outcome was never recorded. Those branches decide whether a redelivered
+ * webhook re-dials an operator.
+ *
+ * The paths mirror the real client's. They do not have to match Telnyx byte
+ * for byte, but they do have to be stable and distinct, because the journal
+ * fingerprints them.
+ */
+const CALL_ACTIONS: Record<string, string> = {
+  answer: "answer", hangup: "hangup", bridge: "bridge", transfer: "transfer",
+  gather: "gather", gatherUsingAudio: "gather_using_audio", gatherUsingSpeak: "gather_using_speak",
+  gatherStop: "gather_stop", speak: "speak", playbackStart: "playback_start", playbackStop: "playback_stop",
+  sendDtmf: "send_dtmf", switchSupervisorRole: "switch_supervisor_role",
+  recordingStart: "record_start", recordingStop: "record_stop",
+};
+
+function wireRequest(method: string, params: Record<string, unknown>): { path: string; body: Record<string, unknown> } | null {
+  if (method === "dial") return { path: "/calls", body: params };
+  if (method === "createConference") return { path: "/conferences", body: params };
+  const conference = /^conference:(.+)$/.exec(method);
+  if (conference) {
+    const { conferenceId, ...rest } = params;
+    return { path: `/conferences/${encodeURIComponent(String(conferenceId))}/actions/${conference[1]}`, body: rest };
+  }
+  const action = CALL_ACTIONS[method];
+  if (!action) return null;
+  const { callControlId, ...rest } = params;
+  return { path: `/calls/${encodeURIComponent(String(callControlId))}/actions/${action}`, body: rest };
+}
+
 export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Partial<TelnyxLiveGate> } = {}): FakeTelnyx {
   const config = options.config ?? getTelnyxConfig(FAKE_TELNYX_ENV);
   if (!config.configured) throw new Error("fake telnyx needs a configured env");
@@ -98,19 +136,70 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     },
     connected(left, right) { return this.connections().some(([a, b]) => a === left && b === right || a === right && b === left); },
   };
-  function execute<T>(method: string, params: Record<string, unknown>, action: () => T): T {
-    record(method, params);
+  /**
+   * One voice command, through the same fenced-dispatch protocol the real
+   * client uses.
+   *
+   * The journal is only active for a contract-2 session (`journalRequest`
+   * returns null otherwise), so contract-1 tests are unaffected — but where it
+   * is active, `prepare_v2` decides whether this command reaches the double at
+   * all, and `result_v2` records what it answered.
+   */
+  async function execute<T>(method: string, params: Record<string, unknown>, action: () => T): Promise<T> {
     const commandId = params.commandId ?? params.command_id;
-    const key = typeof commandId === "string" ? `${method}:${commandId}` : null;
-    if (key && accepted.has(key)) return accepted.get(key) as T;
-    const result = action();
-    if (key) accepted.set(key, result);
-    const lost = lostResponses.get(method) ?? 0;
-    if (lost > 0) {
-      lostResponses.set(method, lost - 1);
-      throw new TelnyxCommandError({ code: "timeout", status: 504, retryable: true, detail: "Provider executed command; response lost", commandId: typeof commandId === "string" ? commandId : null });
-    }
-    return result;
+    const wire = wireRequest(method, params);
+    const journal = wire
+      ? journalRequest("POST", wire.path, typeof commandId === "string" ? commandId : null,
+          JSON.stringify(compactUndefined({ ...wire.body, command_id: commandId })))
+      : null;
+
+    const outcome = await dispatchJournaled(
+      journal,
+      async () => {
+        recordOnly(method, params);
+        const injected = takeFailure(method);
+        // A provider that answers 4xx has answered: the journal records the
+        // refusal, and a replay of the same command gets it back rather than
+        // dialling again. A transport failure has not, and must not be
+        // recorded — that is the difference between a rejection and an
+        // unknown outcome.
+        if (injected) {
+          if (injected instanceof TelnyxCommandError && injected.status >= 400) {
+            return { status: injected.status, result: { errors: [{ code: injected.code, detail: injected.message }] }, thrown: injected };
+          }
+          throw injected;
+        }
+
+        const key = typeof commandId === "string" ? `${method}:${commandId}` : null;
+        if (key && accepted.has(key)) return { status: 200, result: accepted.get(key) as T };
+        const result = action();
+        if (key) accepted.set(key, result);
+        const lost = lostResponses.get(method) ?? 0;
+        if (lost > 0) {
+          lostResponses.set(method, lost - 1);
+          // Executed, acknowledgement never arrived: nothing is recorded, so
+          // the next attempt has to ask rather than assume.
+          throw new TelnyxCommandError({ code: "timeout", status: 504, retryable: true, detail: "Provider executed command; response lost", commandId: typeof commandId === "string" ? commandId : null });
+        }
+        return { status: 200, result };
+      },
+      {
+        error: (status, body, replayedCommandId) => new TelnyxCommandError({
+          code: "journal_replay", status,
+          detail: `replayed provider outcome: ${JSON.stringify(body)}`,
+          commandId: replayedCommandId,
+        }),
+      },
+    );
+
+    if (outcome.cached) return outcome.result as T;
+    if (outcome.sent.thrown) throw outcome.sent.thrown;
+    return outcome.sent.result as T;
+  }
+
+  /** Drops `undefined` values the way the real client's `compact` does. */
+  function compactUndefined(value: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
   }
 
   // Any `Error` passes through untouched: the provider layer raises more than
@@ -123,12 +212,21 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     return new TelnyxCommandError({ code: "fake_failure", status: 422, detail: error ?? `${method} failed (injected)` });
   }
 
-  function record(method: string, params: Record<string, unknown>): void {
+  function recordOnly(method: string, params: Record<string, unknown>): void {
     calls.push({ method, params: JSON.parse(JSON.stringify(params ?? {})) as Record<string, unknown> });
+  }
+
+  /** The injected failure for this command, if one is queued. */
+  function takeFailure(method: string): Error | null {
     const queued = oneShot.get(method);
-    if (queued && queued.length > 0) throw queued.shift();
-    const permanent = always.get(method);
-    if (permanent) throw permanent;
+    if (queued && queued.length > 0) return queued.shift()!;
+    return always.get(method) ?? null;
+  }
+
+  function record(method: string, params: Record<string, unknown>): void {
+    recordOnly(method, params);
+    const failure = takeFailure(method);
+    if (failure) throw failure;
   }
 
   const nextId = (prefix: string) => `${prefix}-${++counter}`;
@@ -159,45 +257,45 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       });
     },
     async answer(params) {
-      execute("answer", params, () => physical.answered(params.callControlId));
+      await execute("answer", params, () => physical.answered(params.callControlId));
     },
     async hangup(params) {
-      execute("hangup", params, () => physical.ended(params.callControlId));
+      await execute("hangup", params, () => physical.ended(params.callControlId));
     },
     async bridge(params) {
-      execute("bridge", params, () => armBridge(params.callControlId, params.targetCallControlId));
+      await execute("bridge", params, () => armBridge(params.callControlId, params.targetCallControlId));
     },
     async recordingStart(params) { return execute("recordingStart", params, () => ({ recordingId: nextId("recording") })); },
-    async recordingStop(params) { record("recordingStop", params); },
+    async recordingStop(params) { await execute("recordingStop", params, () => undefined); },
     async transfer(params) {
       if (!liveGate.callsEnabled) throw new TelnyxLiveCallsDisabledError();
-      execute("transfer", params, () => {
+      await execute("transfer", params, () => {
         const target = nextId("transfer"); ensureLeg(target, params.to); armBridge(params.callControlId, target);
       });
     },
     async gather(params) {
-      record("gather", params);
+      await execute("gather", params, () => undefined);
     },
     async gatherUsingAudio(params) {
-      record("gatherUsingAudio", params);
+      await execute("gatherUsingAudio", params, () => undefined);
     },
     async gatherUsingSpeak(params) {
-      record("gatherUsingSpeak", params);
+      await execute("gatherUsingSpeak", params, () => undefined);
     },
     async gatherStop(params) {
-      record("gatherStop", params);
+      await execute("gatherStop", params, () => undefined);
     },
     async speak(params) {
-      record("speak", params);
+      await execute("speak", params, () => undefined);
     },
     async playbackStart(params) {
-      record("playbackStart", params);
+      await execute("playbackStart", params, () => undefined);
     },
     async playbackStop(params) {
-      record("playbackStop", params);
+      await execute("playbackStop", params, () => undefined);
     },
     async sendDtmf(params) {
-      record("sendDtmf", params);
+      await execute("sendDtmf", params, () => undefined);
     },
     async createConference(params): Promise<ConferenceResult> {
       return execute("createConference", params, () => {
@@ -207,7 +305,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       });
     },
     async conferenceAction(conferenceId: string, action: ConferenceAction, body) {
-      execute(`conference:${action}`, { conferenceId, ...body }, () => {
+      await execute(`conference:${action}`, { conferenceId, ...body }, () => {
       if (action === "join" && typeof body.call_control_id === "string") {
         const participants = conferenceParticipants.get(conferenceId) ?? new Set<string>();
         ensureLeg(body.call_control_id); participants.add(body.call_control_id); conferenceParticipants.set(conferenceId, participants);
@@ -230,7 +328,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       return { callControlId, known: verdict?.known ?? true, alive: verdict?.alive ?? true, callSessionId: null, raw: verdict ? { is_alive: verdict.alive } : null };
     },
     async switchSupervisorRole(params) {
-      record("switchSupervisorRole", { ...params });
+      await execute("switchSupervisorRole", { ...params }, () => undefined);
     },
     async listPhoneNumbers(params = {}) {
       record("listPhoneNumbers", params);
