@@ -78,6 +78,10 @@ export type ActiveCallPayload = {
   waitingSince: string | null;
   waitingReason: string | null;
   waitingMaxMinutes: number | null;
+  /** Since when the queue has found nobody to ring; null while it is reaching people. */
+  queueIdleSince?: string | null;
+  /** When the queue spent its one round on the backup numbers. */
+  queueEscalatedAt?: string | null;
   currentStep: number;
   ringMode: string | null;
   offeredProfileIds: string[];
@@ -486,12 +490,33 @@ export type WaitingRoomPark = {
    * plan had members and none of them could be reached. That is an operational
    * problem rather than ordinary traffic, and the queue should say so instead
    * of showing the same "waiting to be assigned" as everybody else.
+   *
+   * It also covers the same thing happening later: a caller who arrived while
+   * somebody was there, and for whom nobody has been reachable since, is in
+   * exactly the situation this badge exists for.
    */
   unreachable: boolean;
+  /**
+   * Seconds the queue has been finding nobody to ring, or null while it is
+   * still reaching people. This is not how long the caller has waited: a queue
+   * that keeps ringing an operator who declines is working.
+   */
+  idleSeconds: number | null;
+  /** The queue has spent its one round on the backup numbers. */
+  escalated: boolean;
 };
 
+/**
+ * How long the queue must find nobody before the board says so.
+ *
+ * Every queued caller starts idle by construction — the ring plan has just
+ * finished failing — so without a floor the badge would fire on every call in
+ * its first second and mean nothing.
+ */
+const QUEUE_IDLE_VISIBLE_SECS = 60;
+
 export function waitingRoomPark(
-  call: Pick<ActiveCallPayload, "state" | "parkedAt" | "parkedByProfileId" | "waitingSince" | "waitingMaxMinutes" | "waitingReason">,
+  call: Pick<ActiveCallPayload, "state" | "parkedAt" | "parkedByProfileId" | "waitingSince" | "waitingMaxMinutes" | "waitingReason" | "queueIdleSince" | "queueEscalatedAt">,
   options: { now: number; operatorName?: OperatorNameLookup },
 ): WaitingRoomPark {
   const parked = call.state === "parked";
@@ -502,6 +527,8 @@ export function waitingRoomPark(
   const seconds = Number.isFinite(started) ? Math.max(0, Math.floor((options.now - started) / 1_000)) : 0;
   const limitMinutes = call.waitingMaxMinutes && call.waitingMaxMinutes > 0 ? call.waitingMaxMinutes : null;
   const byProfileId = parked ? call.parkedByProfileId : null;
+  const idleFrom = call.queueIdleSince ? Date.parse(call.queueIdleSince) : Number.NaN;
+  const idleSeconds = Number.isFinite(idleFrom) ? Math.max(0, Math.floor((options.now - idleFrom) / 1_000)) : null;
   return {
     parked,
     byProfileId,
@@ -510,7 +537,9 @@ export function waitingRoomPark(
     seconds,
     secondsToLimit: limitMinutes === null || !Number.isFinite(started) ? null : Math.max(0, limitMinutes * 60 - seconds),
     limitMinutes,
-    unreachable: !parked && call.waitingReason === "no_operator_reachable",
+    unreachable: !parked && (call.waitingReason === "no_operator_reachable" || (idleSeconds !== null && idleSeconds >= QUEUE_IDLE_VISIBLE_SECS)),
+    idleSeconds,
+    escalated: Boolean(call.queueEscalatedAt),
   };
 }
 

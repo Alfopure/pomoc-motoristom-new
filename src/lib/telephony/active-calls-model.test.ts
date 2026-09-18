@@ -294,6 +294,8 @@ describe("waiting-room park info", () => {
       secondsToLimit: 26 * 60,
       limitMinutes: 30,
       unreachable: false,
+      idleSeconds: null,
+      escalated: false,
     });
   });
 
@@ -303,6 +305,39 @@ describe("waiting-room park info", () => {
     const overflow = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null, waitingReason: "no_operator_reachable" };
 
     expect(waitingRoomPark(overflow, { now: NOW })).toMatchObject({ parked: false, unreachable: true });
+  });
+
+  it("marks a caller the queue has since stopped finding anybody for", () => {
+    // They arrived while somebody was there — an ordinary overflow — and the
+    // queue has found nobody to ring for four minutes since. Same situation,
+    // arrived at later.
+    const stalled = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null,
+      waitingReason: "ring_exhausted", queueIdleSince: "2026-09-03T08:01:00.000Z" };
+
+    expect(waitingRoomPark(stalled, { now: NOW })).toMatchObject({ unreachable: true, idleSeconds: 4 * 60, escalated: false });
+  });
+
+  it("does not call a queue idle in the second it is created", () => {
+    // Every queued caller starts idle by construction: the ring plan has just
+    // finished failing. Firing the badge on all of them would mean nothing.
+    const fresh = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null,
+      waitingReason: "ring_exhausted", queueIdleSince: new Date(NOW - 5_000).toISOString() };
+
+    expect(waitingRoomPark(fresh, { now: NOW })).toMatchObject({ unreachable: false, idleSeconds: 5 });
+  });
+
+  it("reports a queue that is still reaching people as not idle at all", () => {
+    const working = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null,
+      waitingReason: "ring_exhausted", queueIdleSince: null };
+
+    expect(waitingRoomPark(working, { now: NOW })).toMatchObject({ unreachable: false, idleSeconds: null });
+  });
+
+  it("records that the backup numbers have been tried", () => {
+    const escalated = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null,
+      waitingReason: "ring_exhausted", queueIdleSince: "2026-09-03T08:01:00.000Z", queueEscalatedAt: "2026-09-03T08:03:00.000Z" };
+
+    expect(waitingRoomPark(escalated, { now: NOW })).toMatchObject({ unreachable: true, escalated: true });
   });
 
   it("leaves an ordinary overflow and a parked call unmarked", () => {

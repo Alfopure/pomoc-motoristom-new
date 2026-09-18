@@ -56,11 +56,15 @@ describe("thirty-minute inbound queue", () => {
     for (let minute = 1; minute < 30; minute++) {
       h.advance(60_000);
       await h.legEvent(call.callControlId, "call.gather.ended", { status: minute === 2 ? "invalid" : "timeout", digits: minute === 2 ? "9" : "", client_state: gather(h) });
-      expect(h.session(call.sessionId).state).toBe("waiting");
+      // The escalation rings the backup number a second time at minute two;
+      // the step is reaped on the next sweep and the caller is back in the
+      // queue, which is where they stay for the rest of the half hour.
+      await sweep(h);
+      expect(h.session(call.sessionId).state).toBe(minute === 2 ? "ringing" : "waiting");
       expect(h.rows("motorist_callback_requests")).toHaveLength(0);
     }
-    expect(h.telnyx.of("dial")).toHaveLength(1); // the one backup attempt
-    expect(h.telnyx.of("hangup")).toHaveLength(0);
+    expect(h.telnyx.of("dial")).toHaveLength(2); // the backup attempt, and the one escalation
+    expect(h.telnyx.of("hangup")).toHaveLength(1); // the escalation's unanswered leg
     expect(readMeta(h.session(call.sessionId) as SessionRow).waiting?.since).toBe(entered);
     h.advance(60_000);
     await sweep(h);

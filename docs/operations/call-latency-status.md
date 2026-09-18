@@ -116,9 +116,12 @@ does not address any of them.
    E1b-1.2 and all of E2.3. It should be closed before E2 is written.
 2. **Capacity is invisible.** Three simultaneous callers met one reachable
    operator; two waited seven and eight minutes. The ring plan behaved
-   correctly. What is missing is that "ring exhausted" is reported both when
-   everybody declined and when there was nobody to ring, and the queue re-offers
-   the same unresponsive operator indefinitely instead of escalating.
+   correctly. Both halves are now closed: "ring exhausted" and "nobody could be
+   rung" are reported separately, and a queue that finds nobody for two minutes
+   rings the backup numbers once and says so on the board. What is still open
+   is the decision this leaves: when even the backup numbers have been tried,
+   the caller still waits out the full `park_max_minutes` before the callback
+   offer. Shortening that is a call behaviour change and wants a live test.
 3. **A colleague's mobile is unreachable.** Both the ring plan and every
    transfer read `motorist_operator_devices` (web) only. Personal mobile numbers
    are configured for one operator out of eight, and no ring group has one as a
