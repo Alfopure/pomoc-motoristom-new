@@ -114,11 +114,6 @@ export function LiveCallsWorkspace(props: WorkspaceOverviewProps) {
             <p className="text-xs text-zinc-500">Celá ústredňa v jednom pohľade</p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <OverviewCount label="Zvoní" value={counts.ringing} tone={counts.ringing > 0 ? "urgent" : "neutral"} />
-          <OverviewCount label="Čaká" value={counts.waiting} tone={counts.waiting > 0 ? "warning" : "neutral"} />
-          <OverviewCount label="Prebieha" value={counts.active} tone={counts.active > 0 ? "success" : "neutral"} />
-        </div>
       </header>
 
       <div className="flex gap-1 overflow-x-auto border-b border-zinc-200 bg-zinc-50 px-3 py-2" role="tablist" aria-label="Filter živých hovorov">
@@ -136,7 +131,12 @@ export function LiveCallsWorkspace(props: WorkspaceOverviewProps) {
             onClick={() => setFilter(value)}
             className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-bold transition ${filter === value ? "bg-zinc-950 text-white" : "text-zinc-600 hover:bg-zinc-200"}`}
           >
-            {label}<span className={`rounded px-1.5 py-0.5 text-[10px] ${filter === value ? "bg-white/15" : "bg-zinc-200 text-zinc-700"}`}>{count}</span>
+            {label}<span className={`rounded px-1.5 py-0.5 text-[10px] ${
+              filter === value ? "bg-white/15"
+                : count === 0 ? "bg-zinc-200 text-zinc-700"
+                : value === "ringing" ? "bg-red-100 text-red-900"
+                : value === "waiting" ? "bg-amber-100 text-amber-900"
+                : "bg-zinc-200 text-zinc-700"}`}>{count}</span>
           </button>
         ))}
       </div>
@@ -246,8 +246,14 @@ function LiveCallRow({
   const isBusy = busyAction !== null;
   const canAnswer = !stale && phone?.status === "registered" && browserInviteSessionId === call.sessionId;
   const canPickup = (canPickUpCall(call) || (phone?.onDemand && Boolean(call.browserIncomingCallControlIds?.length))) && !canAnswer;
+  // "Finish the call first" was shown to an operator whose phone was merely
+  // ringing: nothing was running, and the sentence told them to end something
+  // that did not exist. Being rung and being on a call block the pickup for
+  // the same reason, but they are not the same thing to the person reading it.
+  const ringingHere = Boolean(phone?.call?.ringing) && !phone?.call?.active;
   const pickupBlockReason = stale ? "Obnovte stav hovoru"
     : isBusy || phone?.answering || (phone?.pendingOperatorLegs ?? 0) > 0 ? "Pripájanie hovoru…"
+    : ringingHere ? "Najprv prijmi alebo odmietni zvoniaci hovor"
     : model.active || phone?.call ? "Najprv dokonči hovor"
       : (phone?.status !== "registered" && !(phone?.onDemand && phone.status === "idle")) ? "Najprv pripoj telefón"
         : !canPickUpWithCurrentPresence(model, call) ? (call.offeredToMe ? "Čakám na zvonenie v tomto okne" : "Najprv sa nastav dostupný")
