@@ -451,7 +451,7 @@ operators; production figures are 18 Sep, the first full day carrying the work.
 | Cron on the immutable host | `401`, health `200` | `401` / `200` on the current production host | **met** |
 | Request count, `call.webhook` | ≤ 52 after E1a, ≤ 17 after E2 | **47** | **met for E1a**, E2 target open (E2.1/E2.4 not done) |
 | Chain before `bridge` | ≤ 23 after E1a, ≤ 10 after E2 | **17** | **met for E1a**, E2 target open |
-| Chain before the first hangup | ≤ 10 (E1a), ≤ 9 (E1b-1) | **12** | **not met** |
+| Chain before the first hangup | ≤ 10 (E1a), ≤ 9 (E1b-1) | **10** | **met** (was 12) |
 | Polling | ≥ 50 % fewer requests | **87 %** (12 800 → 1 600) | **met** |
 | Round-trip cost | document it; > 100 ms opens a gateway analysis first | ≈ **39 ms** (1 848 ms over ~47 requests) | **met** — and it retroactively justifies the refactoring direction |
 | Webhook handler p95 | < 5 s (E1c precondition) | **5.66 s** | **not met**, narrowly |
@@ -460,6 +460,24 @@ operators; production figures are 18 Sep, the first full day carrying the work.
 | Fan-out, last member ≤ 1 s after the first | ≥ 20 steps | not measured live; the harness proves the step leaves as one group | **open** |
 | Control click → first command p95 | ≤ 1.5 s | not measured | **open** |
 | Safety (no duplicate legs, no "200 without execution", no fenced write with stale headers, no silent waiting room) | 0 of each | 4 075 tests green, including the fence refusing a stale owner three ways | **met** |
+
+### The hangup chain, 12 to 10
+
+Three round trips stood between an operator pressing "Ukončiť" and the command
+leaving, each for nothing:
+
+- the session row was read **twice** before the lease — once to authorise the
+  action, once by the runner for a field (`writer_contract`) that terminating
+  never changes. The runner now takes the row the action already holds.
+- the offer-cancellation pass asked for its session and then, separately, for
+  its legs. They are independent reads and now go together. The session read
+  stays fresh on purpose: a tombstone written while a dial was in flight is
+  exactly what that pass exists to catch.
+- that same pass always finished with a checkpoint, and on a session with
+  nothing left waiting it wrote `null` over `null`.
+
+What is left is ten requests in six sequential steps, three of the groups being
+parallel. The test asserting it fails at twelve without the change.
 
 ### Where the work went, and whether that was right
 

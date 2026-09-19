@@ -150,20 +150,60 @@ describe("contract 2 request cost", () => {
   });
 
   it("keeps the fresh read while a call is being recorded", async () => {
-    const h = harness();
-    const call = await talking(h);
-    const session = h.session(call.sessionId) as SessionRow;
+    const recorded = harness();
+    const one = await talking(recorded);
+    const session = recorded.session(one.sessionId) as SessionRow;
     const meta = session.metadata as Record<string, unknown>;
     const recording = meta.recording as { policy: Record<string, unknown> };
-    h.db.update("motorist_call_sessions",
+    recorded.db.update("motorist_call_sessions",
       { metadata: { ...meta, recording: { ...recording, policy: { ...recording.policy, enabled: true } } } },
-      row => row.id === call.sessionId);
+      row => row.id === one.sessionId);
+    const recordedFrom = recorded.db.log.length;
+    await hangupCall(recorded.deps, actor, one.sessionId);
+
+    const plain = harness();
+    const two = await talking(plain);
+    const plainFrom = plain.db.log.length;
+    await hangupCall(plain.deps, actor, two.sessionId);
+
+    // Recording keeps its own live view of recorders and pending audio, so it
+    // reads the session more often than a call without it. A count of its own
+    // would only measure whatever the rest of the path costs this week.
+    expect(reads(recorded, recordedFrom)).toBeGreaterThan(reads(plain, plainFrom));
+  });
+
+
+  it("reaches the provider within ten requests when an operator ends the call", async () => {
+    const h = harness();
+    const call = await talking(h);
     const from = h.db.log.length;
+    let chain = -1;
+    const client = h.telnyx.client as unknown as Record<string, (input: never) => Promise<unknown>>;
+    const one = client.hangup.bind(h.telnyx.client);
+    const many = client.callActionMany.bind(h.telnyx.client);
+    const mark = () => { if (chain < 0) chain = h.db.log.length - from; };
+    client.hangup = async (input: never) => { mark(); return one(input); };
+    client.callActionMany = async (list: never) => { mark(); return many(list); };
 
     await hangupCall(h.deps, actor, call.sessionId);
 
-    // Recording keeps its own live view of recorders and pending audio.
-    expect(reads(h, from)).toBeGreaterThan(5);
+    // The plan's acceptance criterion for the one command an operator most
+    // wants to be instant. It was twelve: a session row read twice before the
+    // lease, the offer-cancellation pass asking for its session and its legs
+    // one after the other, and a checkpoint that wrote null over null.
+    expect(chain).toBeGreaterThan(0);
+    expect(chain).toBeLessThanOrEqual(10);
   });
 
+  it("still clears a pending offer cancellation rather than skipping the write", async () => {
+    const h = harness();
+    const call = await talking(h);
+    // A session that has something scheduled must still be written, or the
+    // retry would be scheduled for ever.
+    h.db.update("motorist_call_sessions", { cancellations_next_attempt_at: h.now().toISOString() }, (row) => row.id === call.sessionId);
+
+    await hangupCall(h.deps, actor, call.sessionId);
+
+    expect(h.session(call.sessionId).cancellations_next_attempt_at ?? null).toBeNull();
+  });
 });
