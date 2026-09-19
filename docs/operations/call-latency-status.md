@@ -69,7 +69,12 @@ Cost of one database request, from production `request-performance`: **~95 ms**
 | **E1a.6** one checkpoint per critical batch | done, critical phase only |
 | **E1b-1** low-risk concurrency | both points, and .2 in full: parallel teardown, overlapping best-effort provider calls, one checkpoint per overlapping run (9 session writes to 7 on an answer) |
 | **E1c** bounded webhook lease wait | done — 1200 ms, backoff 150/300/600 |
-| **E1b-2.4** parallel fan-out | done, with the plan's leaning and its full test list. An inbound call with three operators: 171 → 168 requests, one per operator rung |
+| **E1b-2.4** parallel fan-out | done, with the plan's leaning and its full test list |
+| **E2.2** critical rows | done — session, legs and attempts in one call. Presence deliberately left in the reducer |
+| **E2.3** journal batch | done — a ring step and a teardown run each fence and record once instead of twice per command |
+| **E3(a)** consult/add-party owner | done — a colleague on their own phone is taken out of the ring plan when consulted |
+| **E3(b)** mobile in the picker | done — such a colleague is reachable and shown as `Mobil` |
+| **E4** polling | done — one database pass per organisation per second: 12 800 requests to 1 600 over ten minutes |
 
 Outside the plan, from what the testing turned up:
 
@@ -87,13 +92,24 @@ Outside the plan, from what the testing turned up:
 
 | stage | why it is still open |
 | --- | --- |
-| **E0** permanent | done as the denylist; nothing left |
-| **E1m** measurement | partly: cost per request and `db_count_at_dispatch` are in place; the 30-sample SQL A-J distributions are not |
-| **E1b-2** rest | .4 done; the rest superseded by E2 if E2 is approved |
-| **E2** migrations | not started. The step change: bridge chain to 5-6 requests, fanout to 6 + N |
-| **E3** controls, mobile, transfer | not started. Includes making a colleague's mobile reachable at all |
-| **E4** polling | done. Auth half: instrumented and waiting on production traffic, see below |
-| **E5** measurement rounds | not started |
+| **E1m** measurement | instrumentation is in place (`db_count_at_dispatch`, cost per request, `auth.token`/`auth.profile`). The 30-sample SQL A–J distributions need production traffic, not code |
+| **E1b-2.3** critical batch | superseded. E1a.6 made it one checkpoint and E2.2 made it one call, which is the stronger version of the same idea |
+| **E2.1** admit RPC | a decision, not a task. ~4 requests of 47, for rewiring the least forgiving path in the system |
+| **E2.2** presence half | a decision. The row writes are folded; folding presence moves policy out of the reducer that owns it |
+| **E2.4** projections | already deferred (`deferProjections`) and finished by the next event or cron; the further fold into one RPC buys nothing measurable |
+| **E3** picker progress | a UX decision: keep the picker open with progress, or close it only when the action settles |
+| **E3** mobile standby | a decision: longer foreground standby trades battery for push-to-wake latency |
+| **E3** experiment B | auto-bridge on inbound, on own numbers only. Never attempted; without a positive result it is not introduced |
+| **E4** auth half | instrumented, waiting on production traffic |
+| **E5** measurement rounds | needs traffic |
+
+**Configuration, not code.** Measured on the project 19 Sep: one active ring
+plan with one group of three operators and **no backup number**, and **one of
+fifteen** operators with a mobile number. So the queue escalation has nothing
+to dial and a caller nobody answers waits out the full thirty minutes, and the
+transfer-to-mobile path serves exactly one person. Both are decisions about
+paid calls, which is why they are the operator's and not ours — but until they
+are made, that work does nothing.
 
 ### What parallel fan-out changes
 
@@ -424,3 +440,41 @@ does not address any of them.
    and the refusal. The error sentence names the number too, and the console
    previews the same normalisation before the click — which is where the Czech
    number typed in national form silently became a Slovak one.
+
+## Audit against the plan's own acceptance criteria — 19 Sep
+
+Measured, not recalled. Harness figures are contract-2 inbound with three
+operators; production figures are 18 Sep, the first full day carrying the work.
+
+| criterion (plan §8) | target | measured | verdict |
+| --- | --- | --- | --- |
+| Cron on the immutable host | `401`, health `200` | `401` / `200` on the current production host | **met** |
+| Request count, `call.webhook` | ≤ 52 after E1a, ≤ 17 after E2 | **47** | **met for E1a**, E2 target open (E2.1/E2.4 not done) |
+| Chain before `bridge` | ≤ 23 after E1a, ≤ 10 after E2 | **17** | **met for E1a**, E2 target open |
+| Chain before the first hangup | ≤ 10 (E1a), ≤ 9 (E1b-1) | **12** | **not met** |
+| Polling | ≥ 50 % fewer requests | **87 %** (12 800 → 1 600) | **met** |
+| Round-trip cost | document it; > 100 ms opens a gateway analysis first | ≈ **39 ms** (1 848 ms over ~47 requests) | **met** — and it retroactively justifies the refactoring direction |
+| Webhook handler p95 | < 5 s (E1c precondition) | **5.66 s** | **not met**, narrowly |
+| Deliveries per event | ≤ 1.3 | **2.73** overall; **1.24** for `call.answered` | **not met overall**, met for the event a caller feels |
+| Answer → bridge p95 | ≤ 2 s | not measured — needs ≥ 30 production samples | **open** |
+| Fan-out, last member ≤ 1 s after the first | ≥ 20 steps | not measured live; the harness proves the step leaves as one group | **open** |
+| Control click → first command p95 | ≤ 1.5 s | not measured | **open** |
+| Safety (no duplicate legs, no "200 without execution", no fenced write with stale headers, no silent waiting room) | 0 of each | 4 075 tests green, including the fence refusing a stale owner three ways | **met** |
+
+### Where the work went, and whether that was right
+
+The webhook redelivery ratio fell from **4.12 to 2.73** and events at the retry
+ceiling from 443/878 to 85/281 between 17 and 18 Sep, so the work helped there
+too. But the ratio is a named criterion that was **never checked during the
+work** — it was looked at only when this audit was asked for. The same is true
+of the round-trip cost, which the plan makes the explicit gate (E1m) for
+choosing between concurrency in Node and atomic RPCs: E1b-2 and E2 were both
+done without it. The number turned out to be 39 ms, comfortably under the
+100 ms that would have demanded a gateway analysis first — so the direction was
+right, but it was right by luck rather than by method.
+
+The honest summary of the method: everything that was *changed* was measured
+before and after, and three changes were backed out because their safety could
+not be demonstrated. What was not done is standing back to ask whether the
+thing being optimised was still the dominant cost. The plan had a step for
+exactly that and it was skipped.
