@@ -113,9 +113,16 @@ describe("processTelnyxEvent", () => {
   it("processes bookkeeping events without the reducer and returns 500 when the database fails", async () => {
     const h = createTelephonyHarness();
     const call = await h.inbound({ to: NUMBERS.allianz });
+    const from = h.db.log.length;
     const cost = await h.legEvent(call.callControlId, "call.cost", { cost: "0.01" });
-    expect(cost).toMatchObject({ status: 200, outcome: "processed", eventClass: "bookkeeping", notes: ["bookkeeping"] });
+    expect(cost).toMatchObject({ status: 200, outcome: "processed", eventClass: "bookkeeping", notes: ["bookkeeping", "lease-free"] });
     expect(h.rows("motorist_call_events").at(-1)).toMatchObject({ event_type: "call.cost", handled_status: "processed" });
+
+    // And without touching the session lease. This is where the redeliveries
+    // came from: a callback that arrives while our own invocation holds the
+    // lease is deferred, and the provider retries it up to six times — for an
+    // event whose whole handling is one row in an unfenced table.
+    expect(h.db.log.slice(from).filter((row) => row.table.includes("lease"))).toEqual([]);
 
     h.db.failNext("motorist_call_events", "insert", "disk full");
     const failed = await h.legEvent(call.callControlId, "call.speak.started", {});
