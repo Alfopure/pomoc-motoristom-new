@@ -440,3 +440,41 @@ does not address any of them.
    and the refusal. The error sentence names the number too, and the console
    previews the same normalisation before the click — which is where the Czech
    number typed in national form silently became a Slovak one.
+
+## Audit against the plan's own acceptance criteria — 19 Sep
+
+Measured, not recalled. Harness figures are contract-2 inbound with three
+operators; production figures are 18 Sep, the first full day carrying the work.
+
+| criterion (plan §8) | target | measured | verdict |
+| --- | --- | --- | --- |
+| Cron on the immutable host | `401`, health `200` | `401` / `200` on the current production host | **met** |
+| Request count, `call.webhook` | ≤ 52 after E1a, ≤ 17 after E2 | **47** | **met for E1a**, E2 target open (E2.1/E2.4 not done) |
+| Chain before `bridge` | ≤ 23 after E1a, ≤ 10 after E2 | **17** | **met for E1a**, E2 target open |
+| Chain before the first hangup | ≤ 10 (E1a), ≤ 9 (E1b-1) | **12** | **not met** |
+| Polling | ≥ 50 % fewer requests | **87 %** (12 800 → 1 600) | **met** |
+| Round-trip cost | document it; > 100 ms opens a gateway analysis first | ≈ **39 ms** (1 848 ms over ~47 requests) | **met** — and it retroactively justifies the refactoring direction |
+| Webhook handler p95 | < 5 s (E1c precondition) | **5.66 s** | **not met**, narrowly |
+| Deliveries per event | ≤ 1.3 | **2.73** overall; **1.24** for `call.answered` | **not met overall**, met for the event a caller feels |
+| Answer → bridge p95 | ≤ 2 s | not measured — needs ≥ 30 production samples | **open** |
+| Fan-out, last member ≤ 1 s after the first | ≥ 20 steps | not measured live; the harness proves the step leaves as one group | **open** |
+| Control click → first command p95 | ≤ 1.5 s | not measured | **open** |
+| Safety (no duplicate legs, no "200 without execution", no fenced write with stale headers, no silent waiting room) | 0 of each | 4 075 tests green, including the fence refusing a stale owner three ways | **met** |
+
+### Where the work went, and whether that was right
+
+The webhook redelivery ratio fell from **4.12 to 2.73** and events at the retry
+ceiling from 443/878 to 85/281 between 17 and 18 Sep, so the work helped there
+too. But the ratio is a named criterion that was **never checked during the
+work** — it was looked at only when this audit was asked for. The same is true
+of the round-trip cost, which the plan makes the explicit gate (E1m) for
+choosing between concurrency in Node and atomic RPCs: E1b-2 and E2 were both
+done without it. The number turned out to be 39 ms, comfortably under the
+100 ms that would have demanded a gateway analysis first — so the direction was
+right, but it was right by luck rather than by method.
+
+The honest summary of the method: everything that was *changed* was measured
+before and after, and three changes were backed out because their safety could
+not be demonstrated. What was not done is standing back to ask whether the
+thing being optimised was still the dominant cost. The plan had a step for
+exactly that and it was skipped.
