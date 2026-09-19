@@ -69,7 +69,12 @@ Cost of one database request, from production `request-performance`: **~95 ms**
 | **E1a.6** one checkpoint per critical batch | done, critical phase only |
 | **E1b-1** low-risk concurrency | both points, and .2 in full: parallel teardown, overlapping best-effort provider calls, one checkpoint per overlapping run (9 session writes to 7 on an answer) |
 | **E1c** bounded webhook lease wait | done — 1200 ms, backoff 150/300/600 |
-| **E1b-2.4** parallel fan-out | done, with the plan's leaning and its full test list. An inbound call with three operators: 171 → 168 requests, one per operator rung |
+| **E1b-2.4** parallel fan-out | done, with the plan's leaning and its full test list |
+| **E2.2** critical rows | done — session, legs and attempts in one call. Presence deliberately left in the reducer |
+| **E2.3** journal batch | done — a ring step and a teardown run each fence and record once instead of twice per command |
+| **E3(a)** consult/add-party owner | done — a colleague on their own phone is taken out of the ring plan when consulted |
+| **E3(b)** mobile in the picker | done — such a colleague is reachable and shown as `Mobil` |
+| **E4** polling | done — one database pass per organisation per second: 12 800 requests to 1 600 over ten minutes |
 
 Outside the plan, from what the testing turned up:
 
@@ -87,13 +92,24 @@ Outside the plan, from what the testing turned up:
 
 | stage | why it is still open |
 | --- | --- |
-| **E0** permanent | done as the denylist; nothing left |
-| **E1m** measurement | partly: cost per request and `db_count_at_dispatch` are in place; the 30-sample SQL A-J distributions are not |
-| **E1b-2** rest | .4 done; the rest superseded by E2 if E2 is approved |
-| **E2** migrations | not started. The step change: bridge chain to 5-6 requests, fanout to 6 + N |
-| **E3** controls, mobile, transfer | not started. Includes making a colleague's mobile reachable at all |
-| **E4** polling | done. Auth half: instrumented and waiting on production traffic, see below |
-| **E5** measurement rounds | not started |
+| **E1m** measurement | instrumentation is in place (`db_count_at_dispatch`, cost per request, `auth.token`/`auth.profile`). The 30-sample SQL A–J distributions need production traffic, not code |
+| **E1b-2.3** critical batch | superseded. E1a.6 made it one checkpoint and E2.2 made it one call, which is the stronger version of the same idea |
+| **E2.1** admit RPC | a decision, not a task. ~4 requests of 47, for rewiring the least forgiving path in the system |
+| **E2.2** presence half | a decision. The row writes are folded; folding presence moves policy out of the reducer that owns it |
+| **E2.4** projections | already deferred (`deferProjections`) and finished by the next event or cron; the further fold into one RPC buys nothing measurable |
+| **E3** picker progress | a UX decision: keep the picker open with progress, or close it only when the action settles |
+| **E3** mobile standby | a decision: longer foreground standby trades battery for push-to-wake latency |
+| **E3** experiment B | auto-bridge on inbound, on own numbers only. Never attempted; without a positive result it is not introduced |
+| **E4** auth half | instrumented, waiting on production traffic |
+| **E5** measurement rounds | needs traffic |
+
+**Configuration, not code.** Measured on the project 19 Sep: one active ring
+plan with one group of three operators and **no backup number**, and **one of
+fifteen** operators with a mobile number. So the queue escalation has nothing
+to dial and a caller nobody answers waits out the full thirty minutes, and the
+transfer-to-mobile path serves exactly one person. Both are decisions about
+paid calls, which is why they are the operator's and not ours — but until they
+are made, that work does nothing.
 
 ### What parallel fan-out changes
 
