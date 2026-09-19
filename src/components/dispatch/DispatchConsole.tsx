@@ -1,7 +1,7 @@
 "use client";
 import { mergeCaseDetail } from "@/data/case-detail";
 
-import { LayoutPreviewProvider, LayoutPreviewToolbar, useLayoutPreview } from "./LayoutPreview";
+import { LayoutPreviewProvider, useLayoutPreview } from "./LayoutPreview";
 import { CalendarWidget } from "./CalendarWidget";
 import { VehicleLookupSearch } from "./VehicleLookupSearch";
 import { CallMonitorInvitations } from "./CallMonitorInvitations";
@@ -2068,7 +2068,6 @@ function DispatchConsoleContent({
         initialTemplate={caseSmsComposer.template} open={caseSmsComposer.open} onClose={() => setCaseSmsComposer((current) => current ? { ...current, open: false } : null)}
         onCreateCase={() => startNewCase()} onSent={(result) => { if (result.dispatchData) setDispatchData(result.dispatchData); }} />}
       <div className="relative z-50 shrink-0" ref={topBarsRef}>
-      <LayoutPreviewToolbar live={source === "supabase"} />
       <header className="dispatch-app-header flex min-h-14 items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-950 px-3 py-2 text-white sm:px-4 sm:py-0">
         <AccountMenu
           displayName={signedInName}
