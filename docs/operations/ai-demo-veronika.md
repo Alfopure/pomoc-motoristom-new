@@ -212,6 +212,12 @@ K bodu 1: rod sa odvodí z hlasu (`voiceGender`); nezdokumentovaný hlas sa beri
 
 Ak majú padnúť aj tieto, je to zmena v `prompts.ts` a vedomé rozhodnutie, nie preklep v jednom poli.
 
+## Zvuky rozmýšľania
+
+`gpt-live-1` je speech-to-speech: zvuk vyrába priamo, nie text prehnaný cez hlas. Vokálne zvuky preto vie sama a prompt si ich pýta — „hmm", „takže", nádych, zaváhanie. Sú to tie isté prostriedky, ktorými už robí prikývnutia.
+
+Zvuky **prostredia** (klepot klávesnice) takto nevzniknú: hlasový model by ich musel imitovať hlasom. Dali by sa prehrať súborom cez Telnyx `playback_start` s `target_legs: "self"` a `overlay: true`, takže by ich počul iba volajúci a nerozhodili by rozpoznávanie reči — ale je to tvrdenie, že na druhej strane sedí človek, spravené bez slov. Zamyslieť sa nahlas takým tvrdením nie je, a rieši ten istý problém.
+
 ## Ukončenie hovoru
 
 Sama hovor položiť nevie — GPT-Live na to nemá nástroj. Ale spojenie, ktoré zapisuje prepis, beží celý hovor, takže koniec rozhovoru sa dá rozpoznať a hovor ukončiť odtiaľ.
