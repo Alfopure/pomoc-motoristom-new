@@ -163,6 +163,8 @@ Po hovore sa v záložke „AI" zobrazí rozbor úvodu hovoru:
 
 Pri zapnutom `AI_DEMO_STORE_TRANSCRIPT=true` pribudne aj **prepis s milisekundovými časmi** od momentu spojenia — tlačidlo „Zobraziť prepis" pri hovore alebo „Rozbor a prepis" v histórii. Prepis sa nikdy neposiela do zoznamu ani do priebežného načítavania, iba na vyžiadanie pre jeden konkrétny hovor.
 
+**Jeden hovor, jeden poslucháč.** Bridge webhook hovor odovzdá poslucháčovi a ak sa to nepodarí, počúva sám. Lenže odovzdanie, ktoré vyprší, nie je odovzdanie, ktoré zlyhalo — poslucháč už môže bežať, a potom pozdravia volajúceho obaja. Stalo sa to naživo. Právo počúvať sa preto nárokuje podmieneným zápisom do `probe_started_at`; kto ho získa, počúva, druhý sa vráti.
+
 **Prepis robí sám GPT-Live**, nie žiadna ďalšia služba: `session.input_transcript.delta` (volajúci) a `session.output_transcript.delta` (Veronika) prichádzajú po sidebande počas hovoru. Nie je v tom ElevenLabs ani prepis od Telnyxu, a neukladá sa žiadne audio.
 
 Počúvanie beží na vlastnej ceste `/api/telephony/ai-demo/listen` s vlastným stropom (320 s), nie vo webhooku Telnyxu — jeho rozpočet je nastavený pre ľudské hovory a kvôli demu sa rozširovať nesmie. Bridge webhook tam hovor iba odovzdá a vráti sa; autentifikáciou je HMAC token viazaný na jeden pokus, platný desať minút. Keď je cesta nedostupná, prepis beží priamo vo webhooku a skončí skôr — pozdrav sa tým nestratí.

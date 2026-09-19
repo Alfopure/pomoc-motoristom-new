@@ -1519,6 +1519,7 @@ export type Database = {
         conversation_stats: Json | null;
         review: Json | null;
         reviewed_at: Timestamp | null;
+        probe_started_at: Timestamp | null;
         cleanup_attempts: number;
         cleanup_next_attempt_at: Timestamp | null;
         metadata: Json;

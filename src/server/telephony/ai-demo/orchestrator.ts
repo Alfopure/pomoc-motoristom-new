@@ -11,7 +11,7 @@ import type { SessionRunnerDeps } from "../session-runner";
 import { createTelnyxClient, isCallGoneError, TelnyxCommandError, TelnyxLiveCallsDisabledError, type TelnyxClient } from "../telnyx/client";
 import type { ProcessorDeps } from "../telnyx/event-processor";
 import {
-  adoptLeg, casCounter, countToday, findByRequestId, findDue, insertAttempt, loadActive, loadAttempt,
+  adoptLeg, casCounter, claimProbe, countToday, findByRequestId, findDue, insertAttempt, loadActive, loadAttempt,
   markLegGone, patchAttempt, transitionAttempt, type AiDemoAttempt,
 } from "./attempts";
 import { AI_DEMO_ALLOWED_VOICES, AI_DEMO_LIMITS, aiDemoBudgets, aiDemoEnabled, buildSipUri, getAiDemoConfig, voiceGender, type AiDemoConfig, type EnvRecord } from "./config";
@@ -406,8 +406,17 @@ export async function acceptSession(deps: AiDemoDeps, attempt: AiDemoAttempt, se
  * measure itself would be absurd.
  */
 export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, options: { inline?: boolean } = {}): Promise<void> {
-  const attempt = await loadAttempt(deps.admin, deps.organizationId, attemptId);
-  if (!attempt || attempt.state !== "bridged" || !attempt.openai_session_id) return;
+  const existing = await loadAttempt(deps.admin, deps.organizationId, attemptId);
+  if (!existing || existing.state !== "bridged" || !existing.openai_session_id) return;
+
+  // Exactly one probe per call. The webhook hands off to the listener and
+  // listens itself if that fails; a hand-off that timed out may have started
+  // one anyway, and then the caller is greeted twice.
+  const attempt = await claimProbe(deps.admin, attemptId, nowOf(deps));
+  if (!attempt) {
+    deps.logger?.({ scope: "ai-demo", attemptId, message: "probe already claimed" });
+    return;
+  }
 
   const config = requireConfig(deps);
   const scenario: AiDemoScenario = isAiDemoScenario(attempt.scenario) ? attempt.scenario : AI_DEMO_DEFAULT_SCENARIO;
@@ -424,7 +433,8 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
   let result: GreetingResult;
   try {
     result = await runGreeting({
-      sessionId: attempt.openai_session_id,
+      // Checked on `existing` before the claim; the claim returns the same row.
+      sessionId: existing.openai_session_id,
       apiKey: config.apiKey,
       greetingText: buildGreetingAppend(scenario, context !== null, pickGreeting(scenario, deps.random)),
       commentaryText: AI_DEMO_COMMENTARY_TRIGGER,

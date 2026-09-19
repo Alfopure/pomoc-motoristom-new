@@ -182,6 +182,25 @@ export async function transitionAttempt(
   return (data as AiDemoAttempt | null) ?? null;
 }
 
+/**
+ * Claims the right to listen to this call.
+ *
+ * `null` means somebody else got there first. Both the listener route and the
+ * webhook's own fallback may try, because a hand-off that times out may still
+ * have started one — and two probes means the caller is greeted twice.
+ */
+export async function claimProbe(admin: AdminClient, id: string, at: Date): Promise<AiDemoAttempt | null> {
+  const { data, error } = await admin
+    .from(TABLE)
+    .update({ probe_started_at: at.toISOString() })
+    .eq("id", id)
+    .is("probe_started_at", null)
+    .select()
+    .maybeSingle();
+  raise(error);
+  return (data as AiDemoAttempt | null) ?? null;
+}
+
 /** An unconditional patch for facts that are true regardless of state (provider ids, timestamps). */
 export async function patchAttempt(admin: AdminClient, id: string, patch: AttemptPatch): Promise<AiDemoAttempt | null> {
   const { data, error } = await admin.from(TABLE).update(patch).eq("id", id).select().maybeSingle();

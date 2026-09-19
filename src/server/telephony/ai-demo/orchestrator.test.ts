@@ -693,3 +693,50 @@ describe("a line that has gone quiet", () => {
     expect((await loadAttempt(f.deps.admin, ORG, attempt.id))?.end_reason).not.toBe("judged_over");
   });
 });
+
+describe("one probe per call", () => {
+  it("greets once even when two invocations both try", async () => {
+    // The webhook hands off to the listener and listens itself if that fails.
+    // A hand-off that timed out may have started one anyway — and she said
+    // hello twice on a live call.
+    const f = fixture();
+    const sent: string[] = [];
+    const sideband = createFakeSideband({ onInstructions: [{ delayMs: 5, event: { type: "session.instructions.appended" } }] });
+    const wrapped = ((url: string, init: { headers: Record<string, string> }) => {
+      const socket = sideband.factory(url, init);
+      const send = socket.send.bind(socket);
+      socket.send = (data: string) => {
+        sent.push(data);
+        send(data);
+      };
+      return socket;
+    }) as typeof sideband.factory;
+
+    const deps: AiDemoDeps = { ...f.deps, webSocketFactory: wrapped, probeLimits: { ...FAST_PROBE, probeWindowMs: 200 } };
+    const { attempt } = await start(f);
+    await transitionAttempt(f.deps.admin, attempt.id, ["sip_dialing"], {
+      state: "bridged",
+      openai_session_id: "live_running",
+      bridged_at: f.h.now().toISOString(),
+      greeting_status: "requested",
+    });
+
+    const { runGreetingAndFinish } = await import("./orchestrator");
+    await Promise.all([runGreetingAndFinish(deps, attempt.id), runGreetingAndFinish(deps, attempt.id)]);
+
+    const greetings = sent.map((raw) => JSON.parse(raw)).filter((command) => String(command.event_id ?? "").startsWith("greet-"));
+    expect(greetings).toHaveLength(1);
+  });
+
+  it("records who took the call, so a later invocation can see it was taken", async () => {
+    const f = fixture();
+    const { attempt } = await start(f);
+    await transitionAttempt(f.deps.admin, attempt.id, ["sip_dialing"], {
+      state: "bridged", openai_session_id: "live_running", bridged_at: f.h.now().toISOString(), greeting_status: "requested",
+    });
+
+    const { claimProbe } = await import("./attempts");
+    expect(await claimProbe(f.deps.admin, attempt.id, f.h.now())).not.toBeNull();
+    expect(await claimProbe(f.deps.admin, attempt.id, f.h.now())).toBeNull();
+  });
+});
