@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createTelephonyHarness, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
 import {
-  adoptLeg, casCounter, countToday, findByRequestId, findDue, findPendingForIncoming, insertAttempt,
+  adoptLeg, casCounter, claimProbe, countToday, findByRequestId, findDue, findPendingForIncoming, insertAttempt,
   loadActive, loadAttempt, markLegGone, transitionAttempt,
 } from "./attempts";
 
@@ -211,5 +211,27 @@ describe("findDue and countToday", () => {
     expect(await findDue(h.deps.admin, ORG, 5)).toHaveLength(0);
     // A failed attempt still counts against the daily limit; it cost money.
     expect(await countToday(h.deps.admin, ORG, midnight)).toBe(1);
+  });
+});
+
+describe("claimProbe", () => {
+  it("lets exactly one caller through", async () => {
+    const h = createTelephonyHarness();
+    const created = await insertAttempt(h.deps.admin, input());
+    if (!("attempt" in created)) return expect.unreachable();
+
+    expect(await claimProbe(h.deps.admin, created.attempt.id, h.now())).not.toBeNull();
+    expect(await claimProbe(h.deps.admin, created.attempt.id, h.now())).toBeNull();
+  });
+
+  it("says so rather than throwing when there is nowhere to record the claim", async () => {
+    // Before the migration lands, a caller left in silence would be much worse
+    // than one greeted twice.
+    const h = createTelephonyHarness();
+    const created = await insertAttempt(h.deps.admin, input());
+    if (!("attempt" in created)) return expect.unreachable();
+    h.db.failNext("motorist_ai_demo_attempts", "update", { message: "column does not exist", code: "PGRST204", details: null, hint: null });
+
+    await expect(claimProbe(h.deps.admin, created.attempt.id, h.now())).resolves.toBe("unclaimable");
   });
 });

@@ -189,7 +189,7 @@ export async function transitionAttempt(
  * webhook's own fallback may try, because a hand-off that times out may still
  * have started one — and two probes means the caller is greeted twice.
  */
-export async function claimProbe(admin: AdminClient, id: string, at: Date): Promise<AiDemoAttempt | null> {
+export async function claimProbe(admin: AdminClient, id: string, at: Date): Promise<AiDemoAttempt | null | "unclaimable"> {
   const { data, error } = await admin
     .from(TABLE)
     .update({ probe_started_at: at.toISOString() })
@@ -197,6 +197,11 @@ export async function claimProbe(admin: AdminClient, id: string, at: Date): Prom
     .is("probe_started_at", null)
     .select()
     .maybeSingle();
+
+  // Before the migration is applied there is nowhere to record the claim. A
+  // caller left in silence is far worse than one greeted twice, so the answer
+  // is "carry on without the guarantee" rather than "do not speak".
+  if (error && error.code && MIGRATION_MISSING_CODES.has(error.code)) return "unclaimable";
   raise(error);
   return (data as AiDemoAttempt | null) ?? null;
 }

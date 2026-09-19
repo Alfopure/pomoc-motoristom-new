@@ -412,11 +412,15 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
   // Exactly one probe per call. The webhook hands off to the listener and
   // listens itself if that fails; a hand-off that timed out may have started
   // one anyway, and then the caller is greeted twice.
-  const attempt = await claimProbe(deps.admin, attemptId, nowOf(deps));
-  if (!attempt) {
+  const claimed = await claimProbe(deps.admin, attemptId, nowOf(deps));
+  if (claimed === null) {
     deps.logger?.({ scope: "ai-demo", attemptId, message: "probe already claimed" });
     return;
   }
+  if (claimed === "unclaimable") {
+    deps.logger?.({ level: "warn", scope: "ai-demo", attemptId, message: "probe claim column missing; greeting without the guarantee" });
+  }
+  const attempt = claimed === "unclaimable" ? existing : claimed;
 
   const config = requireConfig(deps);
   const scenario: AiDemoScenario = isAiDemoScenario(attempt.scenario) ? attempt.scenario : AI_DEMO_DEFAULT_SCENARIO;
