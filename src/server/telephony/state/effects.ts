@@ -965,6 +965,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         commandId: command.commandId,
         to: command.to,
         from: command.from ?? undefined,
+        fromDisplayName: command.fromDisplayName,
         targetLegClientState: encodeClientState(command.targetClientState),
         timeoutSecs: command.timeoutSecs,
         sipRegion: "Europe",
