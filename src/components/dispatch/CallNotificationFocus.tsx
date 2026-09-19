@@ -20,10 +20,17 @@ export function CallNotificationFocus(props: {
   onDismiss: () => void;
   onReconnect: () => void;
   onAnswer: () => void;
+  onAnswerOffer?: (sessionId: string, callControlId: string | null) => void;
   onPickup: (sessionId: string) => void;
 }) {
   const cardRef = useRef<HTMLElement>(null);
   const target = callNotificationTarget(props);
+  const renderedControlId = props.phone?.call?.telnyxCallControlId ?? null;
+  const answer = () => {
+    if (!target.canAnswer) return;
+    if (props.onAnswerOffer) props.onAnswerOffer(props.focus.sessionId, renderedControlId);
+    else props.onAnswer();
+  };
   useEffect(() => {
     cardRef.current?.focus({ preventScroll: true });
     cardRef.current?.scrollIntoView({ block: "nearest" });
@@ -38,7 +45,7 @@ export function CallNotificationFocus(props: {
       {target.call && <p className="truncate text-sm font-semibold text-zinc-900">{target.call.callerName ?? (formatPhoneNumberForDisplay(target.call.number) || "Neznáme číslo")} <span className="font-normal text-zinc-600">· {target.call.lineLabel}</span></p>}
       <p role="status" className="mt-1 text-xs leading-5 text-zinc-700">{target.message}</p>
       <div className="mt-2 flex flex-wrap gap-2">
-        {target.canAnswer && <button type="button" onClick={props.onAnswer} className="min-h-11 rounded-md bg-emerald-700 px-3 text-xs font-bold text-white">Prijať tento hovor</button>}
+        {target.canAnswer && <button type="button" onClick={answer} className="min-h-11 rounded-md bg-emerald-700 px-3 text-xs font-bold text-white">Prijať tento hovor</button>}
         {target.canPickup && <button type="button" aria-label={target.call?.kind === "waiting" ? "Prevziať čakajúci hovor" : "Prevziať prichádzajúci hovor"} onClick={() => props.onPickup(props.focus.sessionId)} className="min-h-11 rounded-md bg-emerald-700 px-3 text-xs font-bold text-white">{props.phone?.onDemand ? "Prijať hovor v appke" : "Prevziať hovor"}</button>}
         {target.canReconnect && <button type="button" onClick={props.onReconnect} className="min-h-11 rounded-md bg-zinc-900 px-3 text-xs font-bold text-white">Použiť tento telefón</button>}
         <button type="button" aria-label="Obnoviť stav" onClick={props.onRefresh} className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-amber-300 px-3 text-xs font-semibold text-zinc-800 hover:bg-amber-100"><RefreshCw size={14} aria-hidden="true" /> Obnoviť</button>

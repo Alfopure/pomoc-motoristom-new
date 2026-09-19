@@ -22,7 +22,7 @@ test.beforeEach(async ({ page }) => {
   await page.setContent('<!doctype html><div id="root"></div>');
   await page.addStyleTag({ content: appCss });
   await page.addScriptTag({ content: script });
-  await page.locator("summary").click();
+  await page.locator("summary[aria-label^=\"Hovory:\"]").click();
 });
 test.afterEach(async ({ page }) => { expect(failures.get(page)).toEqual([]); });
 
@@ -31,7 +31,9 @@ test("the external fallback has an accurate destination and a working pickup act
   await expect(page.getByText("Hľadá operátora", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Prevziať", exact: true }).click();
   await expect(page.getByRole("status", { name: "Akcie" })).toHaveText("pickup:incoming-session");
-  await expect(page.getByRole("button", { name: "Zrušiť", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ukončiť čakajúci hovor", exact: true })).toBeHidden();
+  await page.getByLabel("Ďalšie možnosti čakajúceho hovoru").click();
+  await expect(page.getByRole("button", { name: "Ukončiť čakajúci hovor", exact: true })).toBeVisible();
 });
 
 test("answer and reject belong only to the exact browser invite even with a stale offer first", async ({ page }) => {

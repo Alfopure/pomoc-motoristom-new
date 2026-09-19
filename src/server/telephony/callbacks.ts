@@ -108,20 +108,20 @@ export function toCallbackPayload(
 export async function loadCallbackQueue(
   deps: CallbackQueueDeps,
   actor: { profileId: string; role: CallbackActorRole },
-  options: { configured?: boolean } = {},
+  options: { configured?: boolean; cursor?: string | null } = {},
 ): Promise<CallbackQueuePayload> {
   const now = nowOf(deps);
   const { admin, organizationId } = deps;
   const since = new Date(now.getTime() - CALLBACK_RESOLVED_WINDOW_MS).toISOString();
 
-  const [openResult, resolvedResult] = await Promise.all([
-    admin
-      .from("motorist_callback_requests")
-      .select("*")
-      .eq("organization_id", organizationId)
-      .in("status", [...CALLBACK_LIVE_STATUSES])
-      .order("created_at", { ascending: true })
-      .limit(CALLBACK_QUEUE_LIMIT),
+  let openQuery = admin.from("motorist_callback_requests").select("*")
+    .eq("organization_id", organizationId).in("status", [...CALLBACK_LIVE_STATUSES]);
+  if (options.cursor) {
+    const cursor = decodeCallbackCursor(options.cursor);
+    openQuery = openQuery.or(`created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`);
+  }
+  const [openResult, resolvedResult, totalResult] = await Promise.all([
+    openQuery.order("created_at", { ascending: true }).order("id", { ascending: true }).limit(CALLBACK_QUEUE_LIMIT + 1),
     admin
       .from("motorist_callback_requests")
       .select("*")
@@ -130,11 +130,15 @@ export async function loadCallbackQueue(
       .gte("resolved_at", since)
       .order("resolved_at", { ascending: false })
       .limit(20),
+    admin.from("motorist_callback_requests").select("id", { count: "exact", head: true })
+      .eq("organization_id", organizationId).in("status", [...CALLBACK_LIVE_STATUSES]),
   ]);
   if (openResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${openResult.error.message}`, 500);
   if (resolvedResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${resolvedResult.error.message}`, 500);
 
-  const rows = [...(openResult.data ?? []), ...(resolvedResult.data ?? [])] as CallbackRow[];
+  if (totalResult.error) throw new CallActionError("Počet spätných volaní sa nepodarilo načítať.", 500);
+  const openRows = ((openResult.data ?? []) as CallbackRow[]).slice(0, CALLBACK_QUEUE_LIMIT);
+  const rows = [...openRows, ...(resolvedResult.data ?? [])] as CallbackRow[];
   const lineIds = [...new Set(rows.map((row) => row.line_id).filter((id): id is string => Boolean(id)))];
   const profileIds = [...new Set(rows.map((row) => row.claimed_by).filter((id): id is string => Boolean(id)))];
   const sessionIds = [...new Set(rows.map((row) => row.session_id).filter((id): id is string => Boolean(id)))];
@@ -169,9 +173,28 @@ export async function loadCallbackQueue(
     configured: options.configured ?? true,
     actorProfileId: actor.profileId,
     actorRole: actor.role,
-    open: ((openResult.data ?? []) as CallbackRow[]).map(toPayload),
+    openTotal: totalResult.count ?? openRows.length,
+    nextCursor: (openResult.data?.length ?? 0) > CALLBACK_QUEUE_LIMIT ? encodeCallbackCursor(openRows[openRows.length - 1]) : null,
+    open: openRows.map(toPayload),
     resolved: ((resolvedResult.data ?? []) as CallbackRow[]).map(toPayload),
   };
+}
+
+export function encodeCallbackCursor(row: { id: string; created_at: string }): string {
+  return Buffer.from(JSON.stringify({ id: row.id, createdAt: row.created_at })).toString("base64url");
+}
+
+export function decodeCallbackCursor(value: string): { id: string; createdAt: string } {
+  try {
+    if (value.length > 512) throw new Error("Invalid cursor");
+    const row = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (!isUuid(row.id) || typeof row.createdAt !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(row.createdAt) ||
+      !Number.isFinite(Date.parse(row.createdAt))) throw new Error("Invalid cursor");
+    // Preserve PostgreSQL microseconds. Date.toISOString() truncates them and
+    // would fetch the previous boundary row again on the next page.
+    return { id: row.id, createdAt: row.createdAt };
+  } catch { throw new CallActionError("Neplatná strana spätných volaní.", 400); }
 }
 
 // --- actions -----------------------------------------------------------------

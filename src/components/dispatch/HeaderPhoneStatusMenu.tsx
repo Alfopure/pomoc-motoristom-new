@@ -125,8 +125,8 @@ export function HeaderPhoneStatusMenu({
         ) : (
           <PhoneOff size={14} aria-hidden="true" />
         )}
-        <span className="hidden sm:inline">{summaryLabel}</span>
-        <ChevronDown size={13} className={`hidden transition-transform sm:block ${open ? "rotate-180" : ""}`} aria-hidden="true" />
+        <span className="hidden md:inline">{summaryLabel}</span>
+        <ChevronDown size={13} className={`hidden transition-transform md:block ${open ? "rotate-180" : ""}`} aria-hidden="true" />
       </button>
 
       {open && (

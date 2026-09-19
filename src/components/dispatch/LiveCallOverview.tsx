@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   Coffee,
@@ -8,6 +8,7 @@ import {
   Ear,
   Headphones,
   Loader2,
+  MoreHorizontal,
   PhoneCall,
   PhoneIncoming,
   PhoneOff,
@@ -18,7 +19,7 @@ import {
   X,
 } from "lucide-react";
 
-import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
+import { waitingRoomPark, type PhoneBarCall, type PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import { matchesIncomingBrowserInvite } from "@/lib/telephony/browser-invite";
 import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { canPickUpWithCurrentPresence } from "@/lib/telephony/call-pickup-presence";
@@ -49,7 +50,7 @@ export function liveBrowserInviteSessionId(model: Pick<PhoneBarModel, "teamCalls
 export function liveCallOverviewCounts(model: PhoneBarModel, presences: readonly TelephonyOperatorPresence[]): LiveCallOverviewCounts {
   return {
     total: model.teamCalls.length,
-    ringing: model.teamCalls.filter((call) => call.kind === "offer").length,
+    ringing: model.teamCalls.filter((call) => call.kind === "offer" && call.state === "ringing").length,
     waiting: model.teamCalls.filter((call) => call.kind === "waiting").length,
     active: model.teamCalls.filter((call) => call.kind === "active").length,
     onlineOperators: presences.filter((presence) => ["available", "ringing", "on_call"].includes(presence.state)).length,
@@ -80,6 +81,8 @@ type SharedOverviewProps = {
   phone: WebphoneSnapshot | null;
   stale?: boolean;
   onAnswer: () => void;
+  onAnswerOffer?: (sessionId: string, callControlId: string | null) => void;
+  onRejectOfferIdentity?: (sessionId: string, callControlId: string | null) => void;
   onRejectOffer: () => void;
   onCallAction: (action: PhoneCallAction, sessionId: string) => void;
   onSupervise: (sessionId: string, mode: SupervisorMode) => void;
@@ -170,17 +173,19 @@ export function HeaderLiveCallsMenu(props: SharedOverviewProps) {
   const online = props.presences.filter((presence) => ["available", "ringing", "on_call"].includes(presence.state));
   const paused = props.presences.filter((presence) => presence.state === "paused");
   const alerting = counts.ringing + counts.waiting > 0;
+  const menuRef = useRef<HTMLDetailsElement>(null);
 
   return (
-    <details className="group relative">
+    <details ref={menuRef} className="group relative" onKeyDown={(event) => { if (event.key === "Escape" && menuRef.current) { menuRef.current.open = false; menuRef.current.querySelector("summary")?.focus(); } }}>
       <summary
-        className={`flex h-9 cursor-pointer list-none items-center gap-1.5 rounded-md border px-2 text-xs font-bold outline-none transition focus-visible:ring-2 focus-visible:ring-yellow-300 [&::-webkit-details-marker]:hidden ${alerting ? "border-amber-400 bg-amber-500/15 text-amber-100" : counts.active > 0 ? "border-emerald-400/50 bg-emerald-500/15 text-emerald-100" : "border-white/15 bg-white/10 text-zinc-200"}`}
+        className={`flex h-9 cursor-pointer list-none items-center gap-1.5 rounded-md border px-2 text-xs font-bold outline-none transition focus-visible:ring-2 focus-visible:ring-yellow-300 [&::-webkit-details-marker]:hidden ${alerting ? "border-amber-300 bg-amber-50 text-amber-950" : counts.active > 0 ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-zinc-200 bg-zinc-50 text-zinc-700"}`}
         aria-label={`Hovory: ${counts.active} prebieha, ${counts.ringing} zvoní, ${counts.waiting} čaká`}
       >
         <PhoneCall size={14} aria-hidden="true" />
         <span className="hidden sm:inline">Hovory</span>
-        <span className="rounded bg-white/10 px-1.5 py-0.5" aria-live="polite">{counts.total}</span>
-        {alerting && <span className="size-1.5 rounded-full bg-amber-300 motion-safe:animate-pulse" aria-hidden="true" />}
+        <span className="rounded bg-black/5 px-1.5 py-0.5" aria-live="polite">{counts.total}</span>
+        {counts.waiting > 0 && <span className="inline-flex items-center gap-1 rounded-md bg-amber-200 px-1.5 py-1 text-xs font-bold text-amber-950 motion-safe:animate-pulse"><Clock3 size={15} /><span>{counts.waiting}</span><span className="hidden md:inline">čaká</span></span>}
+        {alerting && <span className="size-1.5 rounded-full bg-amber-600 motion-safe:animate-pulse" aria-hidden="true" />}
         <ChevronDown size={13} className="transition group-open:rotate-180" aria-hidden="true" />
       </summary>
 
@@ -226,10 +231,12 @@ function LiveCallRow({
   model,
   now,
   onAnswer,
+  onAnswerOffer,
   onCallAction,
   onNewCase,
   onOpenCase,
   onRejectOffer,
+  onRejectOfferIdentity,
   onStopSupervise,
   onSupervise,
   onMakeAvailable,
@@ -242,7 +249,8 @@ function LiveCallRow({
   onOpenCase?: (caseId: string) => void;
 }) {
   const state = phoneBarStateLabel(call);
-  const timer = formatCallTimer(callElapsedSeconds(call, now));
+  const waiting = call.kind === "waiting" ? waitingRoomPark(call, { now }) : null;
+  const timer = formatCallTimer(waiting?.seconds ?? callElapsedSeconds(call, now));
   const isBusy = busyAction !== null;
   const canAnswer = !stale && phone?.status === "registered" && browserInviteSessionId === call.sessionId;
   const canPickup = (canPickUpCall(call) || (phone?.onDemand && Boolean(call.browserIncomingCallControlIds?.length))) && !canAnswer;
@@ -289,8 +297,14 @@ function LiveCallRow({
           <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[11px] leading-4 text-zinc-500">
             {call.callerName && <span>{formatPhoneNumberForDisplay(call.number) || call.number}</span>}
             <span className="truncate">{call.lineLabel}</span>
-            <span className="font-mono font-bold tabular-nums text-zinc-700">{timer}</span>
+            <span className="font-mono font-bold tabular-nums text-zinc-700">{waiting ? `Čaká ${timer}` : timer}</span>
           </div>
+          {waiting && <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[11px] text-amber-900">
+            <span>{waiting.parked ? "Odložený prijatý hovor" : "Čakajúci volajúci"}</span>
+            <span>{waiting.secondsToLimit === null ? "Limit čakárne nie je známy" : waiting.secondsToLimit === 0 ? "Limit čakárne uplynul" : `Do limitu čakárne ${formatCallTimer(waiting.secondsToLimit)}`}</span>
+            {waiting.unreachable && <strong>Nikto dostupný{waiting.idleSeconds === null ? "" : ` · ${formatCallTimer(waiting.idleSeconds)}`}</strong>}
+            {waiting.escalated && <span>Výpomoc už bola oslovená</span>}
+          </div>}
         </div>
       </div>
 
@@ -300,8 +314,8 @@ function LiveCallRow({
       </div>
 
       <div className={`flex flex-wrap items-center gap-1.5 ${compact ? "pl-10" : "sm:justify-end"}`}>
-        {canAnswer && <ActionButton busy={phone?.answering} disabled={answerBlocked} icon={PhoneCall} label="Prijať" tone="accept" onClick={onAnswer} />}
-        {canAnswer && <ActionButton disabled={answerBlocked} icon={X} label="Odmietnuť" tone="danger-outline" onClick={onRejectOffer} />}
+        {canAnswer && <ActionButton busy={phone?.answering} disabled={answerBlocked} icon={PhoneCall} label="Prijať" tone="accept" onClick={() => { if (!matchesIncomingBrowserInvite(call, phone?.call)) return; if (onAnswerOffer) onAnswerOffer(call.sessionId, phone?.call?.telnyxCallControlId ?? null); else onAnswer(); }} />}
+        {canAnswer && <ActionButton disabled={answerBlocked} icon={X} label="Odmietnuť" tone="danger-outline" onClick={() => { if (!matchesIncomingBrowserInvite(call, phone?.call)) return; if (onRejectOfferIdentity) onRejectOfferIdentity(call.sessionId, phone?.call?.telnyxCallControlId ?? null); else onRejectOffer(); }} />}
         {canPickup && <ActionButton busy={busyAction === "pickup"} disabled={Boolean(pickupBlockReason)} icon={PhoneIncoming} label={pickupBlockReason ?? (phone?.onDemand ? "Prijať v appke" : "Prevziať")} tone="accept" onClick={() => onCallAction("pickup", call.sessionId)} />}
         {canPickup && pickupBlockReason === "Najprv sa nastav dostupný" && onMakeAvailable && <ActionButton disabled={isBusy} icon={PhoneCall} label="Som dostupný" tone="outline" onClick={onMakeAvailable} />}
         {call.kind === "active" && call.mine && <ActionButton busy={busyAction === "hangup"} icon={PhoneOff} label="Ukončiť" tone="danger" onClick={confirmAndEnd} />}
@@ -313,7 +327,7 @@ function LiveCallRow({
         )}
         {call.kind === "active" && !call.mine && Boolean(call.operatorProfileId) && canManageCalls && supervising && <ActionButton busy={busyAction === `stop-supervise:${call.sessionId}`} disabled={isBusy} icon={PhoneOff} label="Ukončiť dozor" tone="warning" onClick={() => onStopSupervise(call.sessionId)} />}
         {call.kind === "active" && !call.mine && !call.operatorProfileId && canManageCalls && <ActionButton busy={busyAction === "hangup"} disabled={isBusy} icon={PhoneOff} label="Ukončiť" tone="danger-outline" onClick={confirmAndEnd} />}
-        {canManageCalls && call.kind !== "active" && !call.offeredToMe && <ActionButton busy={busyAction === "hangup"} disabled={isBusy} icon={PhoneOff} label="Zrušiť" tone="danger-outline" onClick={confirmAndEnd} />}
+        {canManageCalls && call.kind !== "active" && !call.offeredToMe && <details className="relative" onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}><summary aria-label="Ďalšie možnosti čakajúceho hovoru" className="inline-flex min-h-9 cursor-pointer list-none items-center gap-1 rounded-md border border-zinc-200 px-2 text-[11px] font-semibold [&::-webkit-details-marker]:hidden"><MoreHorizontal size={14} />Viac</summary><div className="absolute right-0 top-full z-20 mt-1 w-56 rounded-lg border border-zinc-200 bg-white p-2 shadow-lg"><ActionButton busy={busyAction === "hangup"} disabled={isBusy} icon={PhoneOff} label="Ukončiť čakajúci hovor" tone="danger-outline" onClick={confirmAndEnd} /></div></details>}
         {!compact && call.caseId && onOpenCase && <ActionButton icon={PhoneCall} label="Prípad" tone="outline" onClick={() => onOpenCase(call.caseId as string)} />}
         {!compact && !call.caseId && onNewCase && <ActionButton icon={Plus} label="Nový prípad" tone="outline" onClick={() => onNewCase(call)} />}
       </div>
@@ -339,7 +353,7 @@ function ActionButton({ busy = false, disabled = false, icon: Icon, label, onCli
           ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
           : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100";
   return (
-    <button type="button" disabled={disabled} onClick={onClick} title={label} className={`inline-flex min-h-7 items-center justify-center gap-1 rounded-md border px-2 text-[11px] font-bold transition disabled:cursor-not-allowed disabled:border-zinc-200 disabled:bg-zinc-100 disabled:text-zinc-400 ${colors}`}>
+    <button type="button" disabled={disabled} onClick={onClick} title={label} className={`inline-flex min-h-9 items-center justify-center gap-1 rounded-md border px-2 text-[11px] font-bold transition disabled:cursor-not-allowed disabled:border-zinc-200 disabled:bg-zinc-100 disabled:text-zinc-400 ${colors}`}>
       {busy ? <Loader2 size={12} className="animate-spin" aria-hidden="true" /> : <Icon size={12} aria-hidden="true" />}
       <span className="text-left whitespace-normal">{label}</span>
     </button>
@@ -364,7 +378,7 @@ function OperatorMiniCount({ icon: Icon, label, names, tone, value }: { icon: ty
 function filterCalls(calls: readonly PhoneBarCall[], filter: LiveCallOverviewFilter): PhoneBarCall[] {
   if (filter === "all") return [...calls];
   const kind = filter === "ringing" ? "offer" : filter === "waiting" ? "waiting" : "active";
-  return calls.filter((call) => call.kind === kind);
+  return calls.filter((call) => call.kind === kind && (filter !== "ringing" || call.state === "ringing"));
 }
 
 function useLiveCallClock(active: boolean, setNow: (now: number) => void) {

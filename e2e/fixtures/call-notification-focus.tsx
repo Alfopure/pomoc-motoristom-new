@@ -4,7 +4,7 @@ import { CallNotificationFocus } from "../../src/components/dispatch/CallNotific
 import { buildPhoneBarModel, EMPTY_ACTIVE_CALLS, type PhoneBarCall } from "../../src/lib/telephony/active-calls-model";
 import type { WebphoneSnapshot } from "../../src/lib/telephony/telnyx-webphone";
 
-export type CallPushScenario = "waiting" | "incoming" | "taken" | "ended" | "stale" | "other-call" | "internal" | "consulting" | "conference" | "consulting-other-call" | "taken-stale-invite" | "incoming-recovery" | "own-offer-recovery" | "other-offer-recovery" | "pending-recovery";
+export type CallPushScenario = "waiting" | "incoming" | "incoming-legacy" | "taken" | "ended" | "stale" | "other-call" | "internal" | "consulting" | "conference" | "consulting-other-call" | "taken-stale-invite" | "incoming-recovery" | "own-offer-recovery" | "other-offer-recovery" | "pending-recovery";
 declare global { interface Window { callPushScenario: (value: CallPushScenario) => void; callPushEvents: string[] } }
 export const sessionId = "4d821f21-cf1c-4a12-aa04-36f64c3eab96";
 const focus = { sessionId, snapshotAtOpen: "old-snapshot" };
@@ -24,7 +24,7 @@ const record = (event: string) => window.callPushEvents.push(event);
 function Fixture() {
   const [scenario, setScenario] = useState<CallPushScenario>("waiting");
   useEffect(() => { window.callPushScenario = setScenario; }, []);
-  const incoming = ["incoming", "other-call", "internal", "consulting", "conference", "consulting-other-call", "taken-stale-invite"].includes(scenario);
+  const incoming = ["incoming", "incoming-legacy", "other-call", "internal", "consulting", "conference", "consulting-other-call", "taken-stale-invite"].includes(scenario);
   const recovery = scenario.endsWith("recovery");
   const reservedOffer = scenario === "own-offer-recovery" || scenario === "other-offer-recovery";
   const pending = { browserIncomingCallControlIds: ["own-operator-leg"] };
@@ -50,6 +50,7 @@ function Fixture() {
       configured={true} stale={scenario === "stale"} busy={false} outboundPending={false}
       onRefresh={() => record("refresh")} onDismiss={() => record("dismiss")}
       onReconnect={() => record("reconnect")} onAnswer={() => record("answer")}
+      onAnswerOffer={scenario === "incoming-legacy" ? undefined : (id, controlId) => record(`answer:${id}:${controlId}`)}
       onPickup={(id) => record(`pickup:${id}`)}
     />
   </main>;

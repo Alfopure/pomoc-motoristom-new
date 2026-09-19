@@ -75,6 +75,19 @@ function payload(overrides: Partial<ActiveCallsPayload> = {}): ActiveCallsPayloa
 }
 
 describe("snapshot contract", () => {
+  it("carries the session's frozen waiting policy into every shared overview", () => {
+    const waiting = call({ state: "waiting", answeredAt: null, answeredByProfileId: null,
+      waitingSince: "2026-09-03T08:01:00.000Z", waitingMaxMinutes: 7,
+      waitingReason: "no_operator_reachable", queueIdleSince: "2026-09-03T08:03:00.000Z",
+      queueEscalatedAt: "2026-09-03T08:04:00.000Z" });
+    const model = buildPhoneBarModel(payload({ waiting: [waiting] }));
+    for (const row of [model.waiting[0], model.teamCalls[0]]) {
+      expect(row).toMatchObject({ waitingSince: waiting.waitingSince, waitingMaxMinutes: 7,
+        waitingReason: waiting.waitingReason, queueIdleSince: waiting.queueIdleSince, queueEscalatedAt: waiting.queueEscalatedAt });
+      expect(waitingRoomPark(row, { now: NOW })).toMatchObject({ seconds: 240, secondsToLimit: 180, idleSeconds: 120, unreachable: true, escalated: true });
+    }
+  });
+
   it("accepts the server snapshot without importing server code at runtime", () => {
     // Compile-time only: the browser model must stay assignable from the shape
     // `GET /api/telephony/calls/active` actually returns.

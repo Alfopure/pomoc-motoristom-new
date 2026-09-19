@@ -1,6 +1,7 @@
 "use client";
 
 import { useLayoutPreview } from "./LayoutPreview";
+import { useCaseCollaboration } from "./CaseCollaborationProvider";
 import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Info, Loader2, MapPin, MessageSquareText, Send, X } from "lucide-react";
@@ -73,6 +74,7 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
   const [error, setError] = useState("");
   const [result, setResult] = useState<SmsComposerResult | null>(null);
   const { mode: layoutMode } = useLayoutPreview();
+  const { state: caseAccess } = useCaseCollaboration();
   const modernLayout = layoutMode === "modern";
   const [tab, setTab] = useState<"editor" | "history" | "inbox">(initialTab);
   const [reply, setReply] = useState<SmsInboxMessage | null>(null);
@@ -216,7 +218,7 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
   }
   const field = "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-950 outline-none focus:border-yellow-500 focus:ring-2 focus:ring-yellow-200 disabled:bg-zinc-100 disabled:text-zinc-600";
   const button = "rounded-lg border border-zinc-300 px-3 py-2 text-sm font-semibold disabled:opacity-40";
-  return createPortal(<div data-layout-preview={layoutMode} className="fixed inset-0 z-[2147483640] grid place-items-center bg-zinc-950/60 p-3 text-zinc-950 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget && !sending && !preparing && !closeDisabled) onClose(); }}>
+  return createPortal(<div data-layout-preview={layoutMode} inert={caseAccess.hidden} style={caseAccess.hidden ? { display: "none" } : undefined} className="fixed inset-0 z-[2147483640] grid place-items-center bg-zinc-950/60 p-3 text-zinc-950 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget && !sending && !preparing && !closeDisabled) onClose(); }}>
     <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby={locationMode ? "case-location-title" : "sms-title"} className={`flex max-h-[92dvh] w-full ${locationMode ? "max-w-xl" : "max-w-2xl"} flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl outline-none`}>
       <div className={`flex items-center gap-3 border-b p-4 ${locationMode ? "border-sky-100 bg-sky-50" : "border-yellow-200 bg-yellow-50"}`}>{locationMode ? <MapPin size={22} /> : <MessageSquareText size={24} />}<div className="min-w-0 flex-1"><h2 id={locationMode ? "case-location-title" : "sms-title"} className="text-base font-bold">{locationMode ? "Poloha klienta" : "SMS"}</h2><p className="truncate text-xs text-zinc-600">{locationMode ? `${caseNumber || "Prípad"} · ${initialPhone || "Telefón klienta nie je zadaný"}` : "Vlastné správy, šablóny a žiadosti o polohu"}</p></div><button type="button" aria-label={locationMode ? "Zavrieť polohu klienta" : "Zavrieť SMS"} disabled={sending || preparing || closeDisabled} onClick={onClose} className="rounded-lg p-2 hover:bg-white"><X size={20} /></button></div>
       <div className="live-sms-tabs flex flex-wrap gap-2 border-b px-4 py-2">

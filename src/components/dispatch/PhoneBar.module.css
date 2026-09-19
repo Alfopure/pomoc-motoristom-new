@@ -1,3 +1,27 @@
+.tray { position: relative; z-index: 40; flex-shrink: 0; min-width: 0; }
+.offerViewport { max-height: calc(var(--tray-visible-rows, 3) * 52px); overflow-y: auto; overscroll-behavior: contain; scrollbar-color: #71717a #18181b; }
+.offerViewport:focus-visible { outline: 2px solid #fcd703; outline-offset: -2px; }
+.offerRow { display: flex; align-items: center; gap: 10px; height: 52px; min-width: 0; padding: 6px 16px; border-bottom: 1px solid #3f3f46; background: #18181b; color: white; }
+.offerIdentity { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.offerIdentity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
+.offerIdentity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #d4d4d8; }
+.acceptOffer, .rejectOffer { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; flex-shrink: 0; border-radius: 7px; padding: 0 12px; font-size: 12px; font-weight: 650; }
+.acceptOffer { background: #059669; color: white; }
+.acceptOffer:hover { background: #047857; }
+.acceptOffer:disabled { background: #3f3f46; color: #d4d4d8; cursor: not-allowed; }
+.rejectOffer { border: 1px solid #71717a; padding: 0 10px; }
+.acceptOffer:focus-visible, .rejectOffer:focus-visible { outline: 2px solid #fcd703; outline-offset: 2px; }
+.mobileBlockReason { display: none; }
+.blockReason { max-width: 180px; font-size: 11px; line-height: 1.3; color: #d4d4d8; }
+.moreOffers { padding: 3px 16px; background: #fef3c7; color: #78350f; font-size: 11px; }
+@media (max-width: 639px) {
+  .offerViewport { max-height: calc(var(--tray-visible-rows, 3) * 64px); }
+  .offerRow { height: 64px; padding: 6px 8px; gap: 6px; }
+  .acceptOffer, .rejectOffer { min-height: 44px; padding: 0 9px; }
+  .blockReason { display: none; }
+  .mobileBlockReason { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: #fcd34d; }
+}
+
 .popup {
   position: absolute;
   top: calc(100% + 6px);

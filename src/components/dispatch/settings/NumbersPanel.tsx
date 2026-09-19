@@ -105,7 +105,7 @@ export function NumbersPanel({
           const saving = savingId === line.id;
 
           return (
-            <div key={line.id} className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+            <div key={line.id} id={line.id ? `routing-numbers-${line.id}` : undefined} tabIndex={-1} className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
               <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
                 <span className="text-sm font-semibold text-zinc-950">{describeLineTitle(line)}</span>
                 <span className="font-mono text-xs text-zinc-500">{line.phoneNumber}</span>

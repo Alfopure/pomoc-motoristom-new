@@ -454,13 +454,13 @@ function dateKeysInRange(from: string, to: string) {
   return keys;
 }
 
-function addLocalDays(dateLocal: string, days: number) {
+export function addLocalDays(dateLocal: string, days: number) {
   const [year, month, day] = dateLocal.split("-").map(Number);
   const date = new Date(Date.UTC(year, month - 1, day + days));
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
-function localMidnightToIso(dateLocal: string) {
+export function localMidnightToIso(dateLocal: string) {
   const [year, month, day] = dateLocal.split("-").map(Number);
   const target = Date.UTC(year, month - 1, day, 0, 0, 0);
   let guess = target;

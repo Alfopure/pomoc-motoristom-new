@@ -34,8 +34,9 @@ export { ConfigServiceError, type ValidationIssue } from "./service-errors";
  * One read (`getRoutingDocument`) returns everything the settings screens need
  * — ring groups with members, ring plans with steps, business hours with
  * intervals and exceptions, pause reasons, lines, IVR menus, operators and the
- * organisation settings — so the editors never have to stitch six responses
- * together and always validate against a consistent world.
+ * organisation settings — so legacy editors never have to stitch six responses
+ * together. The incoming editor and operational summary instead require
+ * `getCoherentRoutingDocument`: one SQL statement over one MVCC snapshot.
  *
  * Every write is validated as a whole document *before* it is applied
  * (`validateRoutingReplace`), then applied transactionally through the
@@ -353,6 +354,9 @@ export type RoutingDocument = {
    * draft can never delete rows a colleague added in the meantime.
    */
   routingVersion: number;
+  /** Present only for one-statement coherent reads. Not a CAS token. */
+  snapshotId?: string;
+  settingsConfigured?: boolean;
   groups: RingGroupDoc[];
   plans: RingPlanDoc[];
   businessHours: BusinessHoursDoc[];
@@ -1330,7 +1334,7 @@ export type RoutingDocumentInput = {
   viewerProfileId?: string | null;
 };
 
-export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumentInput): Promise<RoutingDocument> {
+async function loadLegacyRoutingRows(deps: ConfigDeps, input: RoutingDocumentInput) {
   const { organizationId } = input;
   const scoped = <T>(promise: PromiseLike<{ data: T | null; error: { message: string } | null }>, label: string) =>
     Promise.resolve(promise).then((result) => {
@@ -1338,11 +1342,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
       return (result.data ?? []) as T;
     });
 
-  const includeOperatorDetails = input.includeOperatorDetails ?? true;
-  const viewerProfileId = input.viewerProfileId ?? null;
-
-  const [groups, members, plans, steps, hours, intervals, exceptions, pauseReasons, presence, lines, ivrMenus, ivrOptions, profiles, operatorSettings, devices, settings] =
-    await Promise.all([
+  return await Promise.all([
     scoped<Tables["motorist_ring_groups"]["Row"][]>(deps.admin.from("motorist_ring_groups").select("*").eq("organization_id", organizationId).order("name"), "Skupiny"),
     scoped<Tables["motorist_ring_group_members"]["Row"][]>(deps.admin.from("motorist_ring_group_members").select("*").eq("organization_id", organizationId).order("position"), "Členovia skupín"),
     scoped<Tables["motorist_ring_plans"]["Row"][]>(deps.admin.from("motorist_ring_plans").select("*").eq("organization_id", organizationId).order("name"), "Plány zvonenia"),
@@ -1371,7 +1371,41 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
       if (result.error) throw new ConfigServiceError(`Nastavenia telefónie sa nepodarilo načítať: ${result.error.message}`, 500, "config_read_failed");
       return result.data;
     }),
-  ]);
+  ] as const);
+}
+
+export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumentInput): Promise<RoutingDocument> {
+  return routingDocumentFromRows(await loadLegacyRoutingRows(deps, input), input);
+}
+
+const SNAPSHOT_KEYS = ["groups", "members", "plans", "steps", "hours", "intervals", "exceptions", "pauseReasons", "presence", "lines", "ivrMenus", "ivrOptions", "profiles", "operatorSettings", "devices", "settings"] as const;
+export type RoutingSnapshot = Record<(typeof SNAPSHOT_KEYS)[number], unknown> & { snapshotId: string };
+
+export function routingDocumentFromSnapshot(snapshot: RoutingSnapshot, input: RoutingDocumentInput): RoutingDocument {
+  if (!snapshot || typeof snapshot.snapshotId !== "string" || SNAPSHOT_KEYS.some(key => key !== "settings" && !Array.isArray(snapshot[key]))) {
+    throw new ConfigServiceError("Nastavenia majú neúplný formát. Skús ich načítať znova.", 503, "config_snapshot_invalid");
+  }
+  const rows = SNAPSHOT_KEYS.map(key => snapshot[key]) as unknown as Awaited<ReturnType<typeof loadLegacyRoutingRows>>;
+  return { ...routingDocumentFromRows(rows, input), snapshotId: snapshot.snapshotId };
+}
+
+/** A single SQL statement sees one MVCC snapshot, including lines/settings which do not bump routingVersion. */
+export async function getCoherentRoutingDocument(deps: ConfigDeps, input: RoutingDocumentInput): Promise<RoutingDocument> {
+  const { data, error } = await deps.admin.rpc("motorist_routing_snapshot", { p_organization_id: input.organizationId });
+  if (error) {
+    if (/PGRST202|does not exist|schema cache|Could not find the function/i.test(`${error.code} ${error.message}`)) {
+      throw new ConfigServiceError("Spoločné nastavenie prichádzajúcich hovorov ešte nie je aktivované. Pôvodné nastavenia sú dostupné.", 503, "config_snapshot_missing");
+    }
+    throw new ConfigServiceError("Pravidlá hovorov sa nepodarilo načítať.", 503, "config_read_failed");
+  }
+  return routingDocumentFromSnapshot(data as unknown as RoutingSnapshot, input);
+}
+
+function routingDocumentFromRows(rows: Awaited<ReturnType<typeof loadLegacyRoutingRows>>, input: RoutingDocumentInput): RoutingDocument {
+  const { organizationId } = input;
+  const includeOperatorDetails = input.includeOperatorDetails ?? true;
+  const viewerProfileId = input.viewerProfileId ?? null;
+  const [groups, members, plans, steps, hours, intervals, exceptions, pauseReasons, presence, lines, ivrMenus, ivrOptions, profiles, operatorSettings, devices, settings] = rows;
 
   const membersByGroup = new Map<string, RingGroupDoc["members"]>();
   for (const member of [...members].sort((left, right) => left.position - right.position)) {
@@ -1417,6 +1451,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
   return {
     organizationId,
     routingVersion: settings?.routing_version ?? 0,
+    settingsConfigured: Boolean(settings),
     groups: groups.map((group) => ({
       id: group.id,
       name: group.name,
@@ -1769,6 +1804,42 @@ async function auditReplace(
     after: input.diff as unknown as Json,
   });
   return outcome.failed ? AUDIT_FAILED_WARNING : null;
+}
+
+/** Both sections commit once. Returned snapshots belong to this commit, never a later read. */
+export async function replaceIncomingRouting(
+  deps: ConfigDeps,
+  input: { organizationId: string; actor: ConfigActor; groups: RingGroupInput[]; plans: RingPlanInput[]; expectedVersion: number },
+): Promise<ReplaceResult> {
+  const readInput = { organizationId: input.organizationId, includeSettings: true };
+  const before = await getCoherentRoutingDocument(deps, readInput);
+  assertValid(validateRoutingReplace({ groups: input.groups, plans: input.plans }, contextFromDocument(before)));
+  if (!telephonyStabilityEnabled()) {
+    const owners = new Map(before.groups.flatMap(group => group.members.map(member => [member.id, member.ownerProfileId ?? null] as const)));
+    if (input.groups.some(group => group.members.some(member => member.ownerProfileId !== undefined && member.ownerProfileId !== (owners.get(member.id ?? "") ?? null)))) {
+      throw new ConfigServiceError("Priraďovanie osobných telefónov zatiaľ nie je zapnuté.", 409, "stability_disabled");
+    }
+  }
+  const { data, error } = await deps.admin.rpc("motorist_save_incoming_routing", {
+    p_organization_id: input.organizationId,
+    p_expected_version: input.expectedVersion,
+    p_document: { groups: groupsToRpc(input.groups), plans: plansToRpc(input.plans) },
+  });
+  if (error) {
+    const mapped = RPC_MESSAGES.find(entry => entry.match.test(`${error.code} ${error.message}`));
+    if (mapped) throw new ConfigServiceError(mapped.message, mapped.status, mapped.code);
+    throw new ConfigServiceError("Uloženie sa nepodarilo potvrdiť. Najprv over uložený stav.", 503, "config_save_uncertain");
+  }
+  const committed = data as unknown as { before: RoutingSnapshot; after: RoutingSnapshot };
+  const committedBefore = routingDocumentFromSnapshot(committed.before, readInput);
+  const after = routingDocumentFromSnapshot(committed.after, readInput);
+  const toRows = (document: RoutingDocument) => [
+    ...document.groups.map(group => ({ id: `group:${group.id}`, name: `Skupina ${group.name}`, content: groupToInput(group) })),
+    ...document.plans.map(plan => ({ id: `plan:${plan.id}`, name: `Plán ${plan.name}`, content: planToInput(plan) })),
+  ];
+  const diff = compactDiff(toRows(committedBefore), toRows(after), row => row.id, row => row.name, row => row.content);
+  const warning = await auditReplace(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.incoming_routing.replace", diff });
+  return { document: after, diff, warning };
 }
 
 export async function replaceRingGroups(

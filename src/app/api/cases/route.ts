@@ -2,6 +2,7 @@ import type { CreateCaseInput } from "@/data/case-inputs";
 import { loadDispatchData } from "@/data/dispatch-repository";
 import { createCase, MutationError } from "@/server/motorist-mutations";
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
+import { editorSessionId, finishCaseEditorDraft } from "@/server/case-collaboration";
 
 export const runtime = "nodejs";
 
@@ -9,8 +10,13 @@ export async function POST(request: Request) {
   try {
     assertSameOriginRequest(request);
     const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
-    const input = (await request.json()) as CreateCaseInput;
+    const input = (await request.json()) as CreateCaseInput & { editorSessionId?: string | null };
+    const sessionId = input.editorSessionId ? editorSessionId(input.editorSessionId) : null;
     const { caseRow, warnings } = await createCase(input, actor.profileId);
+    if (sessionId) {
+      try { await finishCaseEditorDraft(actor, sessionId, caseRow.id); }
+      catch { /* The case is committed; a disconnected placeholder expires within 60 seconds. */ }
+    }
     const dispatchData = await loadDispatchData();
 
     return Response.json({ caseId: caseRow.id, dispatchData, warnings });

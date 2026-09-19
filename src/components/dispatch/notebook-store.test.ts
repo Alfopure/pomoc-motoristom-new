@@ -6,6 +6,32 @@ const response = (value: unknown, status = 200) => new Response(JSON.stringify(v
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 
 describe("notebook in-memory access lifecycle", () => {
+  it("bounds initial directory visibility when the first notes read stays offline", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new NotebookStore(async url => {
+        if (url.endsWith("/colleagues")) return response({ colleagues: [{ id: "colleague", displayName: "Private colleague" }] });
+        throw new Error("offline");
+      });
+      await store.loadColleagues(); await store.refresh();
+      expect(store.getSnapshot().colleagues).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(24_999);
+      expect(store.getSnapshot().hidden).toBe(false);
+      await store.refresh(); await vi.advanceTimersByTimeAsync(1);
+      expect(store.getSnapshot().hidden).toBe(true);
+      store.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+  it("hides a private cached note after 25 seconds without network events and preserves its local draft until authorization fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetcher = vi.fn().mockResolvedValueOnce(response({ notes: [note] })).mockResolvedValueOnce(response({}, 403));
+      const store = new NotebookStore(fetcher); await store.refresh(); store.edit(note.id, { body: "Local unsaved" });
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(store.getSnapshot()).toMatchObject({ hidden: true, drafts: { [note.id]: { body: "Local unsaved" } } });
+      await store.refresh(); expect(store.getSnapshot()).toMatchObject({ hidden: true, notes: [], drafts: {} }); store.dispose();
+    } finally { vi.useRealTimers(); }
+  });
   it("clears revoked content and rejects an older delayed read", async () => {
     const old = deferred<Response>();
     const fetcher = vi.fn().mockResolvedValueOnce(response({ notes: [note] })).mockReturnValueOnce(old.promise).mockResolvedValueOnce(response({ notes: [] }));

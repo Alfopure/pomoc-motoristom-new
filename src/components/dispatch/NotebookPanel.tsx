@@ -34,10 +34,19 @@ function NotebookSession({ actorKey, viewerProfileId, onEditorStateChange, child
   }, [dirty, state.saving, store, onEditorStateChange]);
   useEffect(() => {
     if (!viewerProfileId || !enabled) return;
-    void store.refresh(); void store.loadColleagues();
-    const refresh = () => { if (document.visibilityState === "visible" && navigator.onLine) void store.refresh(); };
-    const resume = () => { if (document.visibilityState === "visible") { void store.reauthorize(); void store.loadColleagues(); } };
-    const interval = window.setInterval(refresh, NOTE_REVALIDATE_MS);
+    let stopped = false, inFlight = false, requested = false;
+    let broadcastTimer: number | undefined;
+    const refresh = async () => {
+      if (stopped || document.visibilityState !== "visible" || !navigator.onLine) return;
+      if (inFlight) { requested = true; return; }
+      inFlight = true;
+      try { await store.refresh(); }
+      finally { inFlight = false; if (requested && !stopped) { requested = false; schedule(); } }
+    };
+    const schedule = () => { if (broadcastTimer !== undefined || stopped) return; broadcastTimer = window.setTimeout(() => { broadcastTimer = undefined; void refresh(); }, 500); };
+    void refresh(); void store.loadColleagues();
+    const resume = () => { store.checkAuthorization(); if (document.visibilityState === "visible") { void store.reauthorize(); void store.loadColleagues(); } };
+    const interval = window.setInterval(refresh, Math.min(20_000, NOTE_REVALIDATE_MS));
     window.addEventListener("focus", resume);
     window.addEventListener("online", resume);
     document.addEventListener("visibilitychange", resume);
@@ -47,7 +56,7 @@ function NotebookSession({ actorKey, viewerProfileId, onEditorStateChange, child
       const client = createSupabaseBrowserClient();
       let sessionUserId: string | undefined;
       const { data } = client.auth.onAuthStateChange((event, session) => {
-        if (!session || event === "SIGNED_OUT" || (sessionUserId && session.user.id !== sessionUserId)) store.dispose();
+        if (!session || event === "SIGNED_OUT" || (sessionUserId && session.user.id !== sessionUserId)) { store.dispose(); cleanupChannel?.(); }
         if (session?.user.id) sessionUserId = session.user.id;
       });
       cleanupAuth = () => data.subscription.unsubscribe();
@@ -55,12 +64,13 @@ function NotebookSession({ actorKey, viewerProfileId, onEditorStateChange, child
       // against auth.uid(), active organization and profile membership.
       const organizationId = actorKey.split(":")[0];
       const channel = client.channel(`notebook:${organizationId}:${viewerProfileId}`, { config: { private: true } })
-        .on("broadcast", { event: "invalidate" }, () => { void store.refresh(); })
-        .subscribe();
+        .on("broadcast", { event: "invalidate" }, schedule)
+        .subscribe(status => { if (status === "SUBSCRIBED") schedule(); });
       cleanupChannel = () => { void client.removeChannel(channel); };
+      store.setOnAccessRevoked(cleanupChannel);
     } catch { /* 25-second ACL checks also work without Realtime configuration. */ }
     return () => {
-      window.clearInterval(interval); window.removeEventListener("focus", resume); window.removeEventListener("online", resume); document.removeEventListener("visibilitychange", resume);
+      stopped = true; window.clearTimeout(broadcastTimer); window.clearInterval(interval); window.removeEventListener("focus", resume); window.removeEventListener("online", resume); document.removeEventListener("visibilitychange", resume);
       cleanupAuth?.(); cleanupChannel?.(); store.clear();
     };
   }, [actorKey, viewerProfileId, store, enabled]);
