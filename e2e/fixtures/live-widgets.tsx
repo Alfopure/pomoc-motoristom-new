@@ -6,12 +6,12 @@ import { CalendarWidget } from "@/components/dispatch/CalendarWidget";
 import { NotebookPanel, NotebookProvider } from "@/components/dispatch/NotebookPanel";
 import { TaskWorkspaceProvider, useTaskWorkspace } from "@/components/dispatch/TaskWorkspaceProvider";
 import { defaultWorkspacePreferences } from "@/components/dispatch/workspace-preferences";
-import { LayoutPreviewProvider, useLayoutPreview } from "@/components/dispatch/LayoutPreview";
+import { LayoutPreviewProvider } from "@/components/dispatch/LayoutPreview";
+import type { LayoutPreviewMode } from "@/components/dispatch/layout-preview-policy";
 import { layoutPreviewEnabled } from "@/components/dispatch/layout-preview-policy";
 import "@/components/dispatch/workspace-tools.css";
 
-function Fixture() {
-  const { mode, setMode } = useLayoutPreview();
+function Fixture({ mode, setMode }: { mode: LayoutPreviewMode; setMode: (mode: LayoutPreviewMode) => void }) {
   const [settings, setSettings] = useState(false);
   const [preferences, setPreferences] = useState(() => ({ ...defaultWorkspacePreferences(), widgets: defaultWorkspacePreferences().widgets.map(widget => ({ ...widget, visible: ["calculator", "calendar", "notes"].includes(widget.id) })) }));
   const [opened, setOpened] = useState("");
@@ -33,8 +33,11 @@ function Fixture() {
   </main>;
 }
 
-createRoot(document.getElementById("root")!).render(
-  <LayoutPreviewProvider enabled={layoutPreviewEnabled({ VERCEL_ENV: new URLSearchParams(location.search).has("production") ? "production" : "preview", NODE_ENV: "production" })} actorKey="fixture:viewer"><NotebookProvider actorKey="fixture:viewer" viewerProfileId="viewer" enabled>
-    <TaskWorkspaceProvider actorKey="fixture:viewer" viewerProfileId="viewer" enabled><Fixture /></TaskWorkspaceProvider>
-  </NotebookProvider></LayoutPreviewProvider>,
-);
+function FixtureHost() {
+  const enabled = layoutPreviewEnabled({ VERCEL_ENV: new URLSearchParams(location.search).has("production") ? "production" : "preview", NODE_ENV: "production" });
+  const [mode, setMode] = useState<LayoutPreviewMode>(enabled ? "modern" : "classic");
+  return <LayoutPreviewProvider enabled={enabled} mode={mode}><NotebookProvider actorKey="fixture:viewer" viewerProfileId="viewer" enabled>
+    <TaskWorkspaceProvider actorKey="fixture:viewer" viewerProfileId="viewer" enabled><Fixture mode={mode} setMode={setMode} /></TaskWorkspaceProvider>
+  </NotebookProvider></LayoutPreviewProvider>;
+}
+createRoot(document.getElementById("root")!).render(<FixtureHost />);
