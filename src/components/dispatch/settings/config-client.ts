@@ -12,6 +12,7 @@ import { TELEPHONY_TIMEOUT_MS, telephonyJson } from "@/lib/telephony/client-requ
 import type { OperatorSettingsDoc, RoutingDocument, TelephonySettingsDoc, ValidationIssue } from "@/server/telephony/config-service";
 
 export const TELEPHONY_CONFIG_ENDPOINTS = {
+  incoming: "/api/telephony/config/incoming",
   ringGroups: "/api/telephony/config/ring-groups",
   ringPlans: "/api/telephony/config/ring-plans",
   businessHours: "/api/telephony/config/business-hours",
@@ -91,7 +92,9 @@ export async function saveRoutingConfig(
     },
     options.runtime,
   );
-  return unwrap(result, "Nastavenia telefónie sa nepodarilo uložiť.");
+  const response = unwrap(result, "Nastavenia telefónie sa nepodarilo uložiť.");
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("telephony-config-saved"));
+  return response;
 }
 
 /**
@@ -120,6 +123,7 @@ export async function saveTelephonySettings(
     const body = (result.body ?? {}) as ErrorBody;
     throw new ConfigRequestError(body.error ?? "Nastavenia telefónie sa nepodarilo uložiť.", result.status, body.code ?? "config_failed", body.issues ?? []);
   }
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("telephony-config-saved"));
   return { settings: result.body.settings, ...(typeof result.body.warning === "string" ? { warning: result.body.warning } : {}) };
 }
 

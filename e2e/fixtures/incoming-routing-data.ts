@@ -1,0 +1,9 @@
+import type { RoutingDocument } from "../../src/server/telephony/config-service";
+export const ids={ organization:"00000000-0000-4000-8000-000000000001", line:"00000000-0000-4000-8000-000000000201", plan:"00000000-0000-4000-8000-000000000301", group:"00000000-0000-4000-8000-000000000401", jana:"00000000-0000-4000-8000-000000000101", peter:"00000000-0000-4000-8000-000000000102" };
+export const routingFixture:RoutingDocument={
+ organizationId:ids.organization,routingVersion:5,snapshotId:"fixture-v5",settingsConfigured:true,
+ lines:[{id:ids.line,phoneNumber:"+421 232 408 700",label:"Hlavná linka",partnerName:null,telnyxNumberId:null,ringPlanId:ids.plan,ivrMenuId:null,businessHoursId:null,environment:"development",active:true}],
+ groups:[{id:ids.group,name:"Dispečeri",description:"Hlavný tím pomoci",active:true,members:[{id:"00000000-0000-4000-8000-000000000411",memberKind:"operator",profileId:ids.jana,externalNumber:null,position:0,ringSecs:null,lastOfferedAt:null,lastAnsweredAt:null},{id:"00000000-0000-4000-8000-000000000412",memberKind:"operator",profileId:ids.peter,externalNumber:null,position:1,ringSecs:30,lastOfferedAt:null,lastAnsweredAt:null}]}],
+ plans:[{id:ids.plan,name:"Bežné prichádzajúce hovory",fallbackKind:"waiting_room",fallbackNumber:null,active:true,steps:[{id:"00000000-0000-4000-8000-000000000311",stepIndex:0,ringGroupId:ids.group,timeoutSecs:20,strategy:"all"}]}],
+ businessHours:[],pauseReasons:[],pauseReasonsInUse:[],ivrMenus:[],operators:[{profileId:ids.jana,displayName:"Jana Nováková",role:"dispatcher",active:true,settings:null,device:null},{profileId:ids.peter,displayName:"Peter Kováč",role:"dispatcher",active:true,settings:null,device:null}],limits:{destinationAllowlist:["SK","CZ"],maxRingFanout:8,maxConcurrentLegs:9},settings:{liveCallsEnabled:true,smsLiveSends:false,dailyLegSoftCap:500,parkMaxMinutes:10,destinationAllowlist:["SK","CZ"],maxRingFanout:8,maxConcurrentLegs:9,queueEscalateAfterSeconds:120}
+};

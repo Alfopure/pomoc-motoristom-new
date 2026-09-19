@@ -15,7 +15,7 @@ declare global {
 const call: PhoneBarCall = {
   sessionId: "fixture-session", callId: "fixture-call", kind: "active", state: "talking", direction: "inbound",
   lineLabel: "Allianz Assistance", partnerName: "Allianz", number: "+421900111222", callerName: "Peter Novák",
-  caseId: "fixture-case", match: null, matchCount: 0, participants: [], timerSince: new Date().toISOString(),
+  caseId: "fixture-case", match: null, matchCount: 0, participants: [{ legId: "caller-leg", kind: "caller", profileId: null, name: "Peter Novák", detail: null, answered: true, muted: false, supervisorMode: null, self: false, controllable: false }], timerSince: new Date().toISOString(),
   answered: true, held: false, parked: false, consulting: false, conference: false, mine: true,
   operatorProfileId: "fixture-operator", operatorName: "Operátor", offeredProfileIds: [], offeredOperatorNames: [], offeredToMe: false,
 };
@@ -53,7 +53,7 @@ function Fixture() {
     <div className="flex h-dvh flex-col bg-zinc-50" style={{ paddingTop: "env(safe-area-inset-top)" }}>
       <header className="flex h-11 shrink-0 items-center px-3 text-xs font-bold">Dispečing</header>
       <PhoneBar
-        model={{ ...model, offers: scenario === "offer" ? [{ ...call, kind: "offer", state: "ringing", answered: false, browserCallControlIds: ["fixture-control"] }] : [], active: hasServer ? serverCall : scenario === "stale-server" ? { ...call, callerName: "Stará zákazníčka", sessionId: "stale-session" } : null }}
+        model={{ ...model, offers: scenario === "offer" ? [{ ...call, kind: "offer", state: "ringing", answered: false, mine: false, operatorProfileId: null, offeredToMe: true, browserIncomingCallControlIds: ["fixture-control"], browserCallControlIds: ["fixture-control"] }] : [], active: hasServer ? serverCall : scenario === "stale-server" ? { ...call, callerName: "Stará zákazníčka", sessionId: "stale-session" } : null }}
         phone={{ ...phone, call: scenario === "pending" ? null : { ...phone.call!, sessionId: hasServer ? call.sessionId : null, ringing: !isActive, active: isActive, state: isActive ? "active" : "ringing" }, answering: scenario === "answering", audioBlocked: scenario === "blocked-audio" }}
         outboundPending={scenario === "pending"}
         degradedSessionIds={new Set()}

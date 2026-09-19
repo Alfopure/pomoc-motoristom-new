@@ -44,6 +44,8 @@ const document = {
 };
 
 const getRoutingDocument = vi.fn(async () => document);
+const getCoherentRoutingDocument = vi.fn(async () => ({ ...document, snapshotId: "coherent" }));
+const replaceIncomingRouting = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
 const replaceRingGroups = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
 const replaceRingPlans = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
 const replaceBusinessHours = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
@@ -56,6 +58,8 @@ vi.mock("@/server/telephony/config-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/server/telephony/config-service")>();
   return {
     ...actual,
+    getCoherentRoutingDocument: (...args: unknown[]) => getCoherentRoutingDocument(...(args as [])),
+    replaceIncomingRouting: (...args: unknown[]) => replaceIncomingRouting(...(args as [])),
     getRoutingDocument: (...args: unknown[]) => getRoutingDocument(...(args as [])),
     replaceRingGroups: (...args: unknown[]) => replaceRingGroups(...(args as [])),
     replaceRingPlans: (...args: unknown[]) => replaceRingPlans(...(args as [])),
@@ -68,6 +72,9 @@ vi.mock("@/server/telephony/config-service", async (importOriginal) => {
 });
 
 import { ConfigServiceError } from "@/server/telephony/config-service";
+
+import { GET as getIncoming, PUT as putIncoming } from "./incoming/route";
+import { GET as getSummary } from "../routing-summary/route";
 
 import { GET as getGroups, PUT as putGroups } from "./ring-groups/route";
 import { GET as getPlans, PUT as putPlans } from "./ring-plans/route";
@@ -86,7 +93,7 @@ const VALID_GROUPS = [{ id: "00000000-0000-4000-8000-000000000001", name: "Dispe
 beforeEach(() => {
   state.role = "manager";
   assertSameOriginRequest.mockReset();
-  for (const mock of [getRoutingDocument, replaceRingGroups, replaceRingPlans, replaceBusinessHours, replacePauseReasons, replaceIvrMenus, updateTelephonyLine, updateTelephonySettings]) {
+  for (const mock of [getCoherentRoutingDocument, replaceIncomingRouting, getRoutingDocument, replaceRingGroups, replaceRingPlans, replaceBusinessHours, replacePauseReasons, replaceIvrMenus, updateTelephonyLine, updateTelephonySettings]) {
     mock.mockClear();
   }
 });
@@ -277,5 +284,44 @@ describe("PUT/PATCH /api/telephony/config/*", () => {
     expect(response.status).toBe(200);
     expect(updateTelephonySettings).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ patch: { liveCallsEnabled: false, destinationAllowlist: ["SK"] } }));
     await expect(response.json()).resolves.toMatchObject({ ok: true, settings: { liveCallsEnabled: true } });
+  });
+});
+
+
+const COMBINED_GROUPS = VALID_GROUPS.map(group => ({ ...group, members: group.members.map(member => ({ ...member, id: "00000000-0000-4000-8000-000000000401" })) }));
+
+describe("coherent incoming routes", () => {
+  it("reads one coherent document with the existing redaction contract", async () => {
+    state.role = "dispatcher";
+    const response = await getIncoming(); const body = await response.json();
+    expect(response.status).toBe(200); expect(body.document.snapshotId).toBe("coherent");
+    expect(body.document.settings).toBeNull(); expect(body.document.limits).toBeNull(); expect(body.document.operators[1].device).toBeNull();
+    expect(getRoutingDocument).not.toHaveBeenCalled();
+    expect(getCoherentRoutingDocument).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ organizationId: "org-1", viewerProfileId: "profile-1", includeOperatorDetails: false }));
+  });
+  it("exposes only the operational DTO to a dispatcher", async () => {
+    state.role = "dispatcher"; const response = await getSummary(); const body = await response.json();
+    expect(response.status).toBe(200); expect(body.canEdit).toBe(false);
+    expect(body).not.toHaveProperty("settings"); expect(body).not.toHaveProperty("operators"); expect(JSON.stringify(body)).not.toContain("gencred");
+  });
+  it("requires manager rights and verifies origin before combined save", async () => {
+    state.role = "dispatcher";
+    expect((await putIncoming(request("incoming", "PUT", { groups: COMBINED_GROUPS, plans: [], version: 7 }))).status).toBe(403);
+    expect(replaceIncomingRouting).not.toHaveBeenCalled(); expect(assertSameOriginRequest).toHaveBeenCalledOnce();
+    state.role = "manager";
+    assertSameOriginRequest.mockImplementationOnce(() => { throw new MutationError("Wrong origin", 403); });
+    expect((await putIncoming(request("incoming", "PUT", { groups: COMBINED_GROUPS, plans: [], version: 7 }))).status).toBe(403);
+    expect(replaceIncomingRouting).not.toHaveBeenCalled();
+  });
+  it("saves groups and plans in one scoped versioned service call", async () => {
+    const response=await putIncoming(request("incoming", "PUT", { groups: COMBINED_GROUPS, plans: [], version: 7 }));
+    expect(response.status).toBe(200); expect(replaceIncomingRouting).toHaveBeenCalledOnce();
+    expect(replaceIncomingRouting).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({organizationId:"org-1",expectedVersion:7,groups:expect.any(Array),plans:[]}));
+    expect(replaceRingGroups).not.toHaveBeenCalled(); expect(replaceRingPlans).not.toHaveBeenCalled();
+  });
+  it("rejects unknown sections and missing versions without committing",async()=>{
+    expect((await putIncoming(request("incoming", "PUT", { groups:[],plans:[],version:7,settings:{} }))).status).toBe(400);
+    expect((await putIncoming(request("incoming", "PUT", { groups:[],plans:[] }))).status).toBe(400);
+    expect(replaceIncomingRouting).not.toHaveBeenCalled();
   });
 });

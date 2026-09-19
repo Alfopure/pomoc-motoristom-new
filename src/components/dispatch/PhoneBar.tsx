@@ -12,7 +12,6 @@ import {
   Megaphone,
   Mic,
   MicOff,
-  Minimize2,
   MoreHorizontal,
   Pause,
   PauseCircle,
@@ -30,6 +29,9 @@ import {
   X,
 } from "lucide-react";
 
+import { callTrayOffers, callTrayCapacity } from "@/lib/telephony/call-tray";
+import { matchesIncomingBrowserInvite } from "@/lib/telephony/browser-invite";
+import { canPickUpWithCurrentPresence } from "@/lib/telephony/call-pickup-presence";
 import type { CallParticipant, PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import { SUPERVISOR_MODE_HINTS, SUPERVISOR_MODE_LABELS, SUPERVISOR_MODE_ORDER, type SupervisorMode } from "@/lib/telephony/supervisor-mode";
@@ -46,6 +48,7 @@ import {
   formatCallTimer,
   partyBusyKey,
   phoneBarCapabilities,
+  phoneBarCallMatchesBrowser,
   phoneBarFocusedCall,
   phoneBarStateLabel,
   phoneBarTimerLabel,
@@ -70,6 +73,9 @@ export type PhoneBarProps = {
   onSupervise: (sessionId: string, mode: SupervisorMode) => void;
   onStopSupervise: (sessionId: string) => void;
   onAnswer: () => void;
+  onAnswerOffer?: (sessionId: string, callControlId: string | null) => void;
+  onRejectOfferIdentity?: (sessionId: string, callControlId: string | null) => void;
+  stale?: boolean;
   onHangupBrowser: () => void;
   onToggleMute: () => void;
   onDtmf: (digit: string) => void;
@@ -97,10 +103,59 @@ const STATE_TONES: Record<"live" | "hold" | "ring" | "wait", string> = {
  * this file only renders them.
  */
 export function PhoneBar(props: PhoneBarProps) {
-  // A finished call must not leave its keypad or destination picker open for
-  // the next caller. Prefer the browser ID while the server catches up.
-  const callKey = props.phone.call?.id ?? props.model.active?.sessionId ?? props.model.offers[0]?.sessionId ?? "idle";
-  return <PhoneBarControls key={callKey} {...props} />;
+  const { model, phone } = props;
+  const offers = callTrayOffers(model);
+  const focus = phoneBarFocusedCall(model, phone.call);
+  // A browser invite is rendered against its own exact server row. A media
+  // leg arriving before the snapshot gets one temporary, pinned local row.
+  const pinned = model.active ?? (focus && !offers.some((offer) => offer.sessionId === focus.sessionId) ? focus : null);
+  const browserInOffers = offers.some((call) => matchesIncomingBrowserInvite(call, phone.call));
+  const browserMovedToWaiting = model.waiting.some((call) => phoneBarCallMatchesBrowser(call, phone.call));
+  const localOnly = Boolean(phone.call && !browserInOffers && !pinned && !browserMovedToWaiting);
+  const hasPinned = Boolean(pinned || localOnly || props.outboundPending || model.supervising);
+  const capacity = callTrayCapacity(hasPinned);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!offers.length) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [offers.length]);
+  if (!hasPinned && !offers.length) return null;
+  const pinnedModel = { ...model, active: pinned, offers: [] };
+  return <section aria-label="Lišty hovorov" data-testid="call-tray" className={styles.tray}>
+    {hasPinned && <PhoneBarControls key={phone.call?.id ?? pinned?.sessionId ?? "connecting"} {...props} model={pinnedModel} />}
+    {offers.length > 0 && <div className={styles.offerViewport} style={{ "--tray-visible-rows": capacity } as React.CSSProperties} tabIndex={offers.length > capacity ? 0 : undefined} aria-label={`Zvoniace hovory: ${offers.length}`}>
+      {offers.map((call) => <OfferBar key={call.sessionId} call={call} now={now} {...props} />)}
+    </div>}
+    {offers.length > capacity && <div className={styles.moreOffers}>Ďalšie zvoniace hovory: {offers.length - capacity}. Posuňte zoznam.</div>}
+  </section>;
+}
+
+function OfferBar({ call, now, ...props }: PhoneBarProps & { call: PhoneBarCall; now: number }) {
+  const exactInvite = matchesIncomingBrowserInvite(call, props.phone.call);
+  const busy = props.busyAction !== null || props.phone.answering || (props.phone.pendingOperatorLegs ?? 0) > 0;
+  const ready = props.phone.status === "registered" || (props.phone.onDemand && props.phone.status === "idle");
+  const blocked = props.stale ? "Stav sa obnovuje"
+    : busy ? "Pripájanie hovoru…"
+    : !exactInvite && (props.model.active || props.phone.call) ? "Najprv dokončite svoj hovor"
+    : !ready ? "Najprv pripojte telefón"
+    : !exactInvite && !canPickUpWithCurrentPresence(props.model, call) ? "Najprv nastavte dostupnosť"
+    : null;
+  function answer() {
+    if (blocked) return;
+    if (matchesIncomingBrowserInvite(call, props.phone.call)) {
+      if (props.onAnswerOffer) props.onAnswerOffer(call.sessionId, props.phone.call?.telnyxCallControlId ?? null);
+      else props.onAnswer();
+    } else props.onCallAction("pickup", call.sessionId);
+  }
+  return <article data-testid="call-tray-offer" data-session-id={call.sessionId} className={styles.offerRow}>
+    <PhoneIncoming size={18} className="shrink-0 text-yellow-300 motion-safe:animate-pulse" aria-hidden="true" />
+    <div className={styles.offerIdentity}><strong>{call.callerName || formatPhoneNumberForDisplay(call.number) || "Neznámy volajúci"}</strong><span>{call.lineLabel}{call.offeredOperatorNames.length ? ` · Zvoní: ${call.offeredOperatorNames.join(", ")}` : " · Zvoní"}</span>{blocked && <small className={styles.mobileBlockReason}>{blocked}</small>}</div>
+    <time className="shrink-0 text-xs tabular-nums text-zinc-300">{formatCallTimer(callElapsedSeconds(call, now))}</time>
+    <button type="button" onClick={answer} disabled={Boolean(blocked)} title={blocked ?? undefined} className={styles.acceptOffer}><PhoneCall size={15} />{busy && exactInvite ? "Prijímam…" : exactInvite ? "Prijať" : "Prevziať"}</button>
+    {blocked && <span className={styles.blockReason}>{blocked}</span>}
+    {exactInvite && <button type="button" onClick={() => { if (!matchesIncomingBrowserInvite(call, props.phone.call)) return; if (props.onRejectOfferIdentity) props.onRejectOfferIdentity(call.sessionId, props.phone.call?.telnyxCallControlId ?? null); else props.onHangupBrowser(); }} disabled={busy} className={styles.rejectOffer} aria-label="Odmietnuť tento hovor"><PhoneOff size={16} /></button>}
+  </article>;
 }
 
 function PhoneBarControls(props: PhoneBarProps) {
@@ -113,7 +168,6 @@ function PhoneBarControls(props: PhoneBarProps) {
   const [dtmfLog, setDtmfLog] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
   const [recordingOpen, setRecordingOpen] = useState(false);
-  const [minimizedOfferId, setMinimizedOfferId] = useState<string | null>(null);
   const secondaryId = useId();
   const keypadId = useId();
   const recordingId = useId();
@@ -364,27 +418,6 @@ function PhoneBarControls(props: PhoneBarProps) {
         </button>
       )}
 
-      {model.offers.length > 1 && (
-        <span className="rounded-md border border-yellow-300/40 bg-yellow-300/15 px-2 py-1 text-[11px] font-bold text-yellow-100">
-          Ďalšie zvoniace hovory: {model.offers.length - 1}
-        </span>
-      )}
-
-      {focus?.kind === "offer" && minimizedOfferId === focus.sessionId && (
-        <BarButton tone="default" icon={PhoneIncoming} label="Zobraziť prichádzajúci hovor" onClick={() => setMinimizedOfferId(null)} />
-      )}
-      {focus?.kind === "offer" && minimizedOfferId !== focus.sessionId && (
-        <RingingPanel
-          answerable={Boolean(phone.call?.ringing && !phone.answering)}
-          now={now}
-          offers={[focus]}
-          onAnswer={props.onAnswer}
-          onNewCase={props.onNewCase}
-          onOpenCase={props.onOpenCase}
-          onMinimize={() => setMinimizedOfferId(focus.sessionId)}
-        />
-      )}
-
       {focus?.audioConnection?.status === "failed" && <p role="alert" className="basis-full rounded-md bg-amber-100 px-3 py-2 text-xs text-amber-950">Spojenie zvuku sa nepodarilo potvrdiť. Ak sa hovor nespojí, ukončite ho a zavolajte znova.</p>}
 
       {props.notice && (
@@ -480,83 +513,6 @@ function PhoneBarControls(props: PhoneBarProps) {
  * them. `Prijať` answers the browser invite, not the server session: the ring
  * engine has already reserved the operator by then.
  */
-function RingingPanel({
-  answerable,
-  now,
-  offers,
-  onAnswer,
-  onNewCase,
-  onOpenCase,
-  onMinimize,
-}: {
-  answerable: boolean;
-  now: number;
-  offers: PhoneBarCall[];
-  onAnswer: () => void;
-  onNewCase: (call: PhoneBarCall) => void;
-  onOpenCase: (caseId: string) => void;
-  onMinimize: () => void;
-}) {
-  return (
-    <section
-      aria-label="Prichádzajúci hovor"
-      data-testid="phone-bar-ringing"
-      className="absolute left-3 top-[calc(100%+6px)] z-50 hidden w-80 max-w-[calc(100vw-24px)] rounded-xl border border-yellow-300 bg-white p-3 text-zinc-950 shadow-2xl lg:block"
-    >
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold text-zinc-600">Prichádzajúci hovor</span>
-        <button type="button" onClick={onMinimize} aria-label="Minimalizovať prichádzajúci hovor" className="inline-flex size-8 items-center justify-center rounded-md hover:bg-zinc-100"><Minimize2 size={16} aria-hidden="true" /></button>
-      </div>
-      {offers.map((call) => (
-        <div key={call.sessionId} className="border-b border-zinc-100 pb-2 last:border-0 last:pb-0 [&+&]:pt-2">
-          <div className="flex items-center gap-2">
-            <PhoneIncoming size={15} className="shrink-0 motion-safe:animate-pulse text-yellow-600" aria-hidden="true" />
-            <span className="min-w-0 flex-1 truncate text-sm font-bold">
-              {call.callerName ?? formatPhoneNumberForDisplay(call.number) ?? call.number}
-            </span>
-            <span className="shrink-0 font-mono text-xs font-semibold tabular-nums text-zinc-600">
-              {formatCallTimer(callElapsedSeconds(call, now))}
-            </span>
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-zinc-600">
-            <span className="rounded border border-zinc-200 px-1.5 py-0.5">{call.lineLabel}</span>
-            {call.callerName && <span className="truncate">{formatPhoneNumberForDisplay(call.number) || call.number}</span>}
-            {call.match?.caseNumber && (
-              <button
-                type="button"
-                onClick={() => call.match?.caseId && onOpenCase(call.match.caseId)}
-                className="rounded bg-[#FCD703] px-1.5 py-0.5 font-bold text-zinc-950"
-              >
-                {call.match.caseNumber}
-              </button>
-            )}
-          </div>
-          <div className="mt-2 flex gap-1.5">
-            <button
-              type="button"
-              onClick={onAnswer}
-              disabled={!answerable}
-              title={answerable ? undefined : "Hovor ešte len zvoní na telefóne."}
-              className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-md bg-emerald-500 text-xs font-bold text-emerald-950 transition hover:bg-emerald-400 disabled:bg-zinc-200 disabled:text-zinc-500"
-            >
-              <PhoneCall size={14} aria-hidden="true" />
-              Prijať
-            </button>
-            <button
-              type="button"
-              onClick={() => onNewCase(call)}
-              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md border border-zinc-300 px-2 text-xs font-bold text-zinc-800 transition hover:bg-zinc-50"
-            >
-              <Plus size={14} aria-hidden="true" />
-              Nový prípad
-            </button>
-          </div>
-        </div>
-      ))}
-    </section>
-  );
-}
-
 /**
  * Who is on the call right now.
  *
