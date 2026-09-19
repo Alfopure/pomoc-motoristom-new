@@ -911,6 +911,26 @@ function holdStepForCapacity(b: TransitionBuilder, stepIndex: number): void {
   b.note(`step ${stepIndex}: waiting for leg capacity`);
 }
 
+/**
+ * Who the operator's phone says is calling.
+ *
+ * Every leg to an operator is dialled from the DID line — it is the only
+ * verified origination number — so without this the SIP `From` display is the
+ * line itself. A colleague being transferred a call saw "Allianz Assistance
+ * +421 232 408 718" and read it as Allianz ringing them; one hung up a second
+ * after picking up.
+ *
+ * Telnyx puts the value in the display name, and the browser phone shows it in
+ * front of the number. The characters are the ones that survive a SIP display
+ * name; an internal call has no customer to present and keeps its own.
+ */
+function callerDisplay(b: TransitionBuilder): string | undefined {
+  if (b.session.direction === "internal") return undefined;
+  const number = b.session.caller_number ?? b.session.called_number;
+  const safe = (number ?? "").replace(/[^A-Za-z0-9 \-\_~!.+]/g, "").slice(0, 128);
+  return safe.length > 2 ? safe : undefined;
+}
+
 function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, planned: RingStepPlanResult, guard: RingFanout["guard"]): void {
   const devices = new Map(b.ctx.devices.map((device) => [device.profile_id, device]));
   const from = b.ctx.fromNumber ?? b.session.called_number ?? "";
@@ -938,6 +958,7 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
       clientState,
       linkTo: customer.telnyx_call_control_id,
       timeoutSecs: attempt.ringSecs,
+      fromDisplayName: callerDisplay(b),
       attempt: { stepIndex, profileId: attempt.profileId, externalNumber: attempt.externalNumber },
     });
     if (attempt.profileId) ringingProfileIds.push(attempt.profileId);
@@ -2439,7 +2460,8 @@ function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: T
     b.cmd({ kind: "dial", commandId: transferId, to: target.kind === "operator" ? target.sipUri : target.number,
       from: b.ctx.fromNumber ?? b.session.called_number ?? "", role: target.kind === "operator" ? "operator" : "external",
       profileId: ownerProfileId ?? null, externalNumber: target.kind === "number" ? target.number : null,
-      clientState: targetClientState, linkTo: customer.telnyx_call_control_id, timeoutSecs: DEFAULT_TRANSFER_TIMEOUT_SECS });
+      clientState: targetClientState, linkTo: customer.telnyx_call_control_id, timeoutSecs: DEFAULT_TRANSFER_TIMEOUT_SECS,
+      fromDisplayName: callerDisplay(b) });
   } else b.cmd({
     kind: "transfer",
     commandId: transferId,
@@ -2448,6 +2470,7 @@ function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: T
     from: b.ctx.fromNumber ?? b.session.called_number,
     targetClientState,
     timeoutSecs: DEFAULT_TRANSFER_TIMEOUT_SECS,
+    fromDisplayName: callerDisplay(b),
   });
   // Keep the existing conversation intact until the transfer/dial is accepted.
   stopMoh(b, customer);
@@ -2513,6 +2536,7 @@ function appConsult(b: TransitionBuilder, customer: LegRow, event: AppEvent): Re
     clientState: { sid: b.session.id, role: "consult", ...(targetProfileId ? { operatorId: targetProfileId } : {}), intent: "consult" },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: CONSULT_TIMEOUT_SECS,
+    fromDisplayName: callerDisplay(b),
   };
   b.cmd(dial);
   b.setState("consulting").patchSession({ hold_started_at: b.session.hold_started_at ?? b.nowIso });
@@ -2588,6 +2612,7 @@ function appAddParty(b: TransitionBuilder, customer: LegRow, event: AppEvent): R
         : { sid: b.session.id, role: "external", intent: PARTY_INTENT },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: PARTY_TIMEOUT_SECS,
+    fromDisplayName: callerDisplay(b),
   };
   b.cmd(dial);
   b.patchMeta({ party_pending: { target, by: event.actorProfileId, at: b.nowIso } });

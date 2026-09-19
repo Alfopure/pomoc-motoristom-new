@@ -316,6 +316,8 @@ export type Command = CommandBase &
       from: string | null;
       targetClientState: TelnyxClientState;
       timeoutSecs: number;
+      /** Who the receiving phone says is calling; the `from` is always the line. */
+      fromDisplayName?: string;
     }
   | { kind: "conference_create"; commandId: string; leg: LegRef; name: string }
   | {
