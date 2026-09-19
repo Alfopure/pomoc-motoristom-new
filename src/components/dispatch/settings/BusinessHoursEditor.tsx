@@ -126,7 +126,7 @@ export function BusinessHoursEditor({
           const week = describeWeek(schedule);
 
           return (
-            <div key={schedule.key} className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+            <div key={schedule.key} id={schedule.id ? `routing-hours-${schedule.id}` : undefined} tabIndex={-1} className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
               <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,220px)_auto_auto]">
                 <SettingsField label="Názov">
                   <input

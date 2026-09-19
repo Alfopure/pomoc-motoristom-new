@@ -217,6 +217,16 @@ export function callCenterCallFromActive(
 export type PhoneBarCallKind = "active" | "offer" | "waiting";
 
 export type PhoneBarCall = {
+  /** Frozen waiting-room policy and queue progress for this session. */
+  waitingSince?: string | null;
+  waitingMaxMinutes?: number | null;
+  waitingReason?: string | null;
+  queueIdleSince?: string | null;
+  queueEscalatedAt?: string | null;
+  parkedAt?: string | null;
+  parkedByProfileId?: string | null;
+  /** Stable ordering; conversation timers must never reorder offers. */
+  startedAt?: string;
   audioConnection?: AudioConnectionView | null;
   sessionId: string;
   callId: string | null;
@@ -352,6 +362,14 @@ function pendingIncomingLeg(call: ActiveCallPayload, leg: ActiveCallLegPayload, 
 
 function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorProfileId: string, options: PhoneBarModelOptions = {}): PhoneBarCall {
   return {
+    waitingSince: call.waitingSince,
+    waitingMaxMinutes: call.waitingMaxMinutes,
+    waitingReason: call.waitingReason,
+    queueIdleSince: call.queueIdleSince,
+    queueEscalatedAt: call.queueEscalatedAt,
+    parkedAt: call.parkedAt,
+    parkedByProfileId: call.parkedByProfileId,
+    startedAt: call.startedAt,
     audioConnection: call.audioConnection ?? null,
     sessionId: call.sessionId,
     callId: call.callId,
@@ -516,17 +534,17 @@ export type WaitingRoomPark = {
 const QUEUE_IDLE_VISIBLE_SECS = 60;
 
 export function waitingRoomPark(
-  call: Pick<ActiveCallPayload, "state" | "parkedAt" | "parkedByProfileId" | "waitingSince" | "waitingMaxMinutes" | "waitingReason" | "queueIdleSince" | "queueEscalatedAt">,
+  call: Pick<ActiveCallPayload, "state"> & Partial<Pick<ActiveCallPayload, "parkedAt" | "parkedByProfileId" | "waitingSince" | "waitingMaxMinutes" | "waitingReason" | "queueIdleSince" | "queueEscalatedAt">>,
   options: { now: number; operatorName?: OperatorNameLookup },
 ): WaitingRoomPark {
   const parked = call.state === "parked";
   // `parked_at` is stamped by the park action; the overflow path only has the
   // waiting-room timestamp.
-  const since = call.parkedAt ?? call.waitingSince;
+  const since = call.parkedAt ?? call.waitingSince ?? null;
   const started = since ? Date.parse(since) : Number.NaN;
   const seconds = Number.isFinite(started) ? Math.max(0, Math.floor((options.now - started) / 1_000)) : 0;
   const limitMinutes = call.waitingMaxMinutes && call.waitingMaxMinutes > 0 ? call.waitingMaxMinutes : null;
-  const byProfileId = parked ? call.parkedByProfileId : null;
+  const byProfileId = parked ? call.parkedByProfileId ?? null : null;
   const idleFrom = call.queueIdleSince ? Date.parse(call.queueIdleSince) : Number.NaN;
   const idleSeconds = Number.isFinite(idleFrom) ? Math.max(0, Math.floor((options.now - idleFrom) / 1_000)) : null;
   return {

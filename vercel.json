@@ -6,5 +6,6 @@
       "path": "/api/telephony/cron",
       "schedule": "*/5 * * * *"
     }
-  ]
+  ],
+  "buildCommand": "pnpm exec vitest run && pnpm typecheck && pnpm build"
 }

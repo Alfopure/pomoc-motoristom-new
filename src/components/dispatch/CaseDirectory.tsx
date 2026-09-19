@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { Archive, ListChecks, Plus, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
 import { CaseTable, type CaseSortState } from "./CaseTable";
 import type { CaseFilters } from "./CaseList";
+import { CaseAccessBoundary, CaseDraftActivity } from "./CaseCollaborationProvider";
 import type { CallCenterCall } from "@/data/dispatch-types";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
 import type { CasePriority, CaseStatus, DispatchCase, FleetAsset, Branch, Operator } from "@/domain/types";
@@ -96,7 +97,9 @@ export function CaseDirectory({
   );
 
   return (
+    <CaseAccessBoundary>
     <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-zinc-50 p-1.5 lg:p-3">
+      <CaseDraftActivity />
       <section className="mb-1.5 max-h-[70%] shrink-0 overflow-y-auto overscroll-contain rounded-md border border-zinc-200 bg-white p-2 lg:mb-3 lg:max-h-none lg:overflow-visible lg:p-3 lg:shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 lg:gap-3">
           <div className="hidden min-w-0 lg:block">
@@ -236,6 +239,7 @@ export function CaseDirectory({
         />
       </div>
     </main>
+    </CaseAccessBoundary>
   );
 }
 

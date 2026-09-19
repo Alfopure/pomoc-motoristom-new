@@ -8,6 +8,7 @@ import { isTaskOpen } from "@/domain/tasks";
 import { caseAssistanceServiceName, formatDateTime, formatTime } from "@/lib/dispatch-calculations";
 import type { CaseSortState } from "./CaseTable";
 import { useLayoutPreview } from "./LayoutPreview";
+import { CaseAccessBoundary, CaseDraftActivity } from "./CaseCollaborationProvider";
 
 type CenterView = "map" | "table" | "tasks" | "notes";
 
@@ -112,7 +113,9 @@ export function CaseList({
   }
 
   return (
+    <CaseAccessBoundary>
     <aside data-testid="dispatch-case-list" className="flex h-full min-h-0 min-w-0 flex-col bg-zinc-50 lg:w-full lg:border-r lg:border-zinc-200 lg:bg-white">
+      <CaseDraftActivity />
       <div className="case-list-controls max-h-[70%] shrink-0 overflow-y-auto overscroll-contain border-b border-zinc-200 bg-white p-2 lg:max-h-none lg:p-1.5">
         <div className="mb-1.5 hidden items-center gap-1.5 lg:flex">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#FCD703] text-zinc-950 lg:h-6 lg:w-6 lg:rounded-md">
@@ -361,6 +364,7 @@ export function CaseList({
         {cases.length === 0 && <div className="px-4 py-8 text-center text-sm font-medium text-zinc-500">Žiadne prípady nevyhovujú filtru.</div>}
       </div>
     </aside>
+    </CaseAccessBoundary>
   );
 }
 

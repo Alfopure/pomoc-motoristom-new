@@ -1760,6 +1760,14 @@ export type Database = {
         };
         Returns: boolean;
       };
+      motorist_routing_snapshot: {
+        Args: { p_organization_id: string };
+        Returns: Json;
+      };
+      motorist_save_incoming_routing: {
+        Args: { p_organization_id: string; p_document: Json; p_expected_version: number };
+        Returns: Json;
+      };
       motorist_replace_ring_plan: {
         Args: {
           p_organization_id: string;

@@ -1,4 +1,4 @@
-import type { PhoneBarCall } from "./active-calls-model";
+import type { PhoneBarCall, PhoneBarModel } from "./active-calls-model";
 import type { WebphoneCallView } from "./telnyx-webphone";
 
 /** A stale SDK invite cannot override a fresh snapshot showing no pending leg. */
@@ -12,4 +12,10 @@ export function matchesIncomingBrowserInvite(call: PhoneBarCall, browser: Webpho
   if (call.kind !== "offer" || !call.offeredToMe) return false;
   if (browser.telnyxCallControlId && call.browserCallControlIds?.length) return call.browserCallControlIds.includes(browser.telnyxCallControlId);
   return browser.sessionId === call.sessionId;
+}
+
+/** Use fresh SDK + server state at execution, for both accepting and rejecting. */
+export function matchesRequestedIncomingOffer(model: PhoneBarModel, sessionId: string, callControlId: string | null, browser: WebphoneCallView | null | undefined): boolean {
+  const call = [...model.offers, ...model.teamCalls, ...(model.active ? [model.active] : [])].find(item => item.sessionId === sessionId);
+  return Boolean(call && (!callControlId || browser?.telnyxCallControlId === callControlId) && matchesIncomingBrowserInvite(call, browser));
 }

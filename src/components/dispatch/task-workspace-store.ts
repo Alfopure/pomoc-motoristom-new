@@ -1,3 +1,4 @@
+import { AuthorizationLease } from "@/lib/authorization-lease";
 import type { CasePriority } from "@/domain/types";
 import { TASK_MESSAGE_LIMIT, type TaskMessage, type TaskMessageCursor, type WorkspaceTask } from "@/domain/task-workspace";
 import type { TaskWorkflowAction, TaskWorkflowCommand } from "@/domain/task-workflow";
@@ -27,10 +28,18 @@ export class TaskWorkspaceStore {
   private authoritativeList = false;
   private messageReads = new Map<string, Promise<void>>();
   private savePromise: Promise<boolean> | null = null;
+  private lease = new AuthorizationLease(() => this.update({ hidden: true }));
+  private requests = new Set<AbortController>();
+  checkAuthorization = () => this.lease.check();
   private onTasksChange?: (tasks: WorkspaceTask[]) => void;
+  private onAccessRevoked?: () => void;
+  setOnAccessRevoked = (callback?: () => void) => { this.onAccessRevoked = callback; };
   setOnTasksChange = (callback?: (tasks: WorkspaceTask[]) => void) => { this.onTasksChange = callback; };
   constructor(private featureEnabled: boolean, private viewer?: string, private fetcher: Fetcher = (url, init) => fetch(url, init), initialTasks: WorkspaceTask[] = []) {
     this.state = { tasks: featureEnabled ? initialTasks : [], selectedId: null, creating: false, createDraft: emptyTaskDraft(viewer), drafts: {}, chats: {}, chatDrafts: {}, pendingMessages: {}, workflowEnabled: featureEnabled && initialTasks.some(task => task.workflowVersion === 1), pendingWorkflow: {}, hidden: !featureEnabled, loading: false, saving: false, error: "", conflicts: [] };
+    // Server-rendered tasks have a bounded initial lease too: failed first reads
+    // must never leave that snapshot visible indefinitely.
+    if (featureEnabled) this.lease.renew(Date.now());
   }
   get enabled() { return this.featureEnabled; }
   setEnabled = (enabled: boolean) => {
@@ -42,7 +51,7 @@ export class TaskWorkspaceStore {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<TaskWorkspaceSnapshot>) { this.state = { ...this.state, ...patch }; this.listeners.forEach(listener => listener()); }
   get dirty() { return Boolean(!same(this.state.createDraft, emptyTaskDraft(this.viewer)) || Object.keys(this.state.drafts).length || Object.values(this.state.chatDrafts).some(value => value.trim()) || Object.keys(this.state.pendingMessages).length || Object.keys(this.state.pendingWorkflow).length); }
-  clear = () => { this.generation++; this.readSequence++; this.openSequence++; this.messageReads.clear(); this.savePromise = null; this.exactReads.clear(); this.authoritativeList = false; this.revokedIds.clear(); this.update({ tasks: [], selectedId: null, creating: false, createDraft: emptyTaskDraft(this.viewer), drafts: {}, chats: {}, chatDrafts: {}, pendingMessages: {}, workflowEnabled: false, pendingWorkflow: {}, hidden: true, loading: false, saving: false, conflicts: [], error: "Prístup k úlohám treba znovu overiť." }); };
+  clear = () => { this.lease.clear(); this.requests.forEach(controller => controller.abort()); this.requests.clear(); this.generation++; this.readSequence++; this.openSequence++; this.messageReads.clear(); this.savePromise = null; this.exactReads.clear(); this.authoritativeList = false; this.revokedIds.clear(); this.update({ tasks: [], selectedId: null, creating: false, createDraft: emptyTaskDraft(this.viewer), drafts: {}, chats: {}, chatDrafts: {}, pendingMessages: {}, workflowEnabled: false, pendingWorkflow: {}, hidden: true, loading: false, saving: false, conflicts: [], error: "Prístup k úlohám treba znovu overiť." }); };
   reauthorize = () => { this.update({ hidden: true }); return this.refresh(); };
   discard = () => { if (!this.state.saving) this.update({ drafts: {}, chatDrafts: {}, pendingMessages: {}, createDraft: emptyTaskDraft(this.viewer), conflicts: [], error: "" }); };
   select = (id: string | null) => { this.openSequence++; this.update({ selectedId: id, creating: false, error: "" }); if (id) void this.loadMessages(id); };
@@ -97,7 +106,7 @@ export class TaskWorkspaceStore {
     if (!same(merged, this.state.tasks)) this.update({ tasks: merged });
     if (needsAuthorization && !this.state.loading) void this.refresh();
   };
-  private applyAuthorizedList(tasks: WorkspaceTask[], workflowEnabled: boolean) {
+  private applyAuthorizedList(tasks: WorkspaceTask[], workflowEnabled: boolean, authorized = true) {
     const current = new Map(this.state.tasks.map(task => [task.id, task]));
     const merged = tasks.map(task => {
       this.revokedIds.delete(task.id);
@@ -115,7 +124,7 @@ export class TaskWorkspaceStore {
     const retain = <T,>(items: Record<string, T>) => Object.fromEntries(Object.entries(items).filter(([id]) => allowed.has(id)));
     this.authoritativeList = true;
     this.update({ tasks: merged, drafts: retain(this.state.drafts), chats: retain(this.state.chats), chatDrafts: retain(this.state.chatDrafts), pendingMessages: retain(this.state.pendingMessages), pendingWorkflow: retain(this.state.pendingWorkflow), workflowEnabled,
-      conflicts: this.state.conflicts.filter(id => allowed.has(id)), hidden: false, error: "", selectedId: this.state.selectedId && allowed.has(this.state.selectedId) ? this.state.selectedId : null });
+      conflicts: this.state.conflicts.filter(id => allowed.has(id)), hidden: !authorized, error: "", selectedId: this.state.selectedId && allowed.has(this.state.selectedId) ? this.state.selectedId : null });
     this.onTasksChange?.(merged);
   }
   private accept(task: WorkspaceTask) {
@@ -127,20 +136,23 @@ export class TaskWorkspaceStore {
   }
   private async request(url: string, init?: RequestInit) {
     const generation = this.generation;
-    const response = await this.fetcher(url, { cache: "no-store", signal: AbortSignal.timeout(15_000), ...init });
-    if (response.status === 401 || response.status === 403) { if (generation === this.generation) this.clear(); throw new Error("Prístup k úlohám treba znovu overiť."); }
+    const controller = new AbortController(); this.requests.add(controller);
+    let response: Response;
+    try { response = await this.fetcher(url, { cache: "no-store", ...init, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]) }); }
+    finally { this.requests.delete(controller); }
+    if (response.status === 401 || response.status === 403) { if (generation === this.generation) { this.clear(); this.onAccessRevoked?.(); } throw new Error("Prístup k úlohám treba znovu overiť."); }
     const result = await response.json().catch(() => ({}));
     if (!response.ok) { const error = new Error(result.error || "Zmeny nie sú uložené. Skontrolujte pripojenie a skúste znova."); Object.assign(error, { status: response.status }); throw error; }
     return result;
   }
   async refresh() {
     if (!this.enabled) return;
-    const sequence = ++this.readSequence, generation = this.generation;
+    const sequence = ++this.readSequence, generation = this.generation, started = Date.now();
     this.update({ loading: true });
     try {
       const { tasks, workflowEnabled } = await this.request("/api/tasks") as { tasks: WorkspaceTask[]; workflowEnabled?: boolean };
       if (sequence !== this.readSequence || generation !== this.generation) return;
-      this.applyAuthorizedList(tasks, workflowEnabled === true);
+      this.applyAuthorizedList(tasks, workflowEnabled === true, this.lease.renew(started));
     } catch (error) { if (generation === this.generation && sequence === this.readSequence) this.update({ error: error instanceof Error ? error.message : "Úlohy nie sú dostupné." }); }
     finally { if (sequence === this.readSequence) this.update({ loading: false }); }
   }

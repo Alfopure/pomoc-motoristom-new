@@ -156,15 +156,11 @@ async function events(page: Page) {
 }
 
 
-test("incoming panel minimizes without rejecting and reopens with answer available", async ({ page }) => {
+test("incoming offer uses the real call tray with no floating popup", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.evaluate(() => window.callBarScenario("offer"));
-  await expect(page.getByTestId("phone-bar-ringing")).toBeVisible();
-  await page.getByRole("button", { name: "Minimalizovať prichádzajúci hovor" }).click();
   await expect(page.getByTestId("phone-bar-ringing")).toHaveCount(0);
-  expect(await page.evaluate(() => window.callBarEvents)).toEqual([]);
-  await page.getByRole("button", { name: "Zobraziť prichádzajúci hovor" }).click();
-  await expect(page.getByTestId("phone-bar-ringing")).toBeVisible();
-  await page.getByTestId("phone-bar-ringing").getByRole("button", { name: "Prijať", exact: true }).click();
+  await expect(page.getByTestId("call-tray-offer")).toBeVisible();
+  await page.getByTestId("call-tray-offer").getByRole("button", { name: "Prijať", exact: true }).click();
   expect(await page.evaluate(() => window.callBarEvents)).toEqual(["answer"]);
 });

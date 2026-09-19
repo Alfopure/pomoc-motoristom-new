@@ -191,7 +191,7 @@ describe("callback route wiring", () => {
     expect(services.loadCallbackQueue).toHaveBeenCalledWith(
       QUEUE_DEPS,
       { profileId: "profile-1", role: "dispatcher" },
-      { configured: true },
+      { configured: true, cursor: null },
     );
   });
 });

@@ -55,6 +55,9 @@ export type CallbackQueuePayload = {
   actorProfileId: string;
   /** Role of the polling operator; decides who may take a request over. */
   actorRole: CallbackActorRole;
+  /** Total unresolved, independent of the loaded page or UI filter. */
+  openTotal?: number;
+  nextCursor?: string | null;
   /** Live queue: `open` + `scheduled`, oldest first. */
   open: CallbackRequestPayload[];
   /** Closed in the last 24 hours, newest first — context, not a work list. */

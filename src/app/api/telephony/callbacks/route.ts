@@ -14,14 +14,14 @@ export const dynamic = "force-dynamic";
  * telephony is not configured: the rows are ordinary database records and a
  * dispatcher must still be able to see (and cancel) them with the provider off.
  */
-export async function GET() {
+export async function GET(request?: Request) {
   try {
     const actor = await requireDefaultMotoristActor(TELEPHONY_ROUTE_ROLES);
     const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
     const queue = await loadCallbackQueue(
       callbackQueueDeps(deps),
       { profileId: actor.profileId, role: actor.role },
-      { configured: deps.config.configured },
+      { configured: deps.config.configured, cursor: request ? new URL(request.url).searchParams.get("cursor") : null },
     );
     return Response.json(queue, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {

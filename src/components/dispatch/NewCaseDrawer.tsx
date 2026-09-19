@@ -1,6 +1,7 @@
 "use client";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
+import { CaseAccessBoundary, useCaseEditorPresence, useCaseCollaboration } from "./CaseCollaborationProvider";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
 import { CASE_ATTACHMENT_ACCEPT, validateCaseAttachmentFiles } from "@/lib/case-attachments";
 import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
@@ -122,6 +123,8 @@ const driveTypeOptions = [
 ] as const;
 
 export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, onDirtyChange, onSaveDraftChange, onSavingChange, partnerDirectory }: NewCaseFormProps) {
+  const editorPresence = useCaseEditorPresence(null);
+  const { state: collaborationState } = useCaseCollaboration();
   // Predvyplň kontakt IBA z reálneho aktívneho hovoru. Bez neho (generická nová karta,
   // idle/mock hovor) štartuje formulár čistý — žiadne prenesené meno/číslo.
   const hasActiveCall = Boolean(call.callerNumber) && call.callerNumber !== "Bez aktívneho hovoru";
@@ -466,7 +469,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   }
 
   async function submitCase(): Promise<boolean> {
-    if (!canSubmit) {
+    if (!canSubmit || collaborationState.hidden) {
       return false;
     }
 
@@ -547,7 +550,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
       const response = await fetch("/api/cases", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, editorSessionId: editorPresence.sessionId() }),
       });
       const result = (await response.json()) as ApiMutationResponse;
 
@@ -556,6 +559,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
       }
 
       let nextDispatchData = result.dispatchData;
+      editorPresence.stop();
 
       if (pendingFiles.length > 0 && !attachmentValidationError) {
         try {
@@ -691,6 +695,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   }
 
   return (
+    <CaseAccessBoundary>
     <div
       className={`${styles.surface} ${styles.scrollRegion} h-full min-h-0 min-w-0 max-w-full flex-1 overflow-y-auto overflow-x-hidden overscroll-contain bg-zinc-50 @container`}
       data-testid="case-form-scroll-region"
@@ -1155,7 +1160,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
             <button
               type="button"
               onClick={() => void submitCase()}
-              disabled={!canSubmit}
+              disabled={!canSubmit || collaborationState.hidden}
               title={formReady ? "Uložiť kartu" : "Uložiť rozpracovanú kartu a doplniť ju neskôr"}
               className="inline-flex h-10 items-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-600"
             >
@@ -1166,6 +1171,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
         </div>
       </div>
     </div>
+    </CaseAccessBoundary>
   );
 }
 
@@ -1335,4 +1341,3 @@ function toOptionalNumber(value: string) {
   const number = Number(value);
   return Number.isFinite(number) && value.trim() ? number : undefined;
 }
-
