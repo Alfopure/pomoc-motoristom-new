@@ -207,9 +207,9 @@ export async function loadSession(deps: CallActionDeps, sessionId: string): Prom
   return data;
 }
 
-async function assertOwnership(deps: CallActionDeps, session: SessionRow, actor: CallActor): Promise<void> {
-  const legs = await deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", session.id).neq("role", "supervisor").is("ended_at", null);
-  const openLegProfileIds = (legs.data ?? []).map((leg) => leg.profile_id).filter((id): id is string => Boolean(id));
+async function assertOwnership(deps: CallActionDeps, session: SessionRow, actor: CallActor, known?: string[]): Promise<void> {
+  const legs = known ? { data: null } : await deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", session.id).neq("role", "supervisor").is("ended_at", null);
+  const openLegProfileIds = known ?? (legs.data ?? []).map((leg) => leg.profile_id).filter((id): id is string => Boolean(id));
   if (!canControlSession(session, actor, { openLegProfileIds })) {
     throw new CallActionError("Na tento hovor nemáš oprávnenie.", 403, "forbidden");
   }
@@ -552,7 +552,8 @@ async function runAction(deps: CallActionDeps, session: SessionRow, event: AppEv
   requireConfigured(deps);
   let run: SessionRunResult;
   try {
-    run = await runSessionEvent(deps, session.id, event);
+    // The row this action was authorised against is the row the runner wants.
+    run = await runSessionEvent(deps, session.id, event, { known: session });
   } catch (error) {
     if (error instanceof CallActionRejected) throw new CallActionError(error.message, error.status, error.code ?? "rejected");
     throw toActionError(error, failureMessage);
@@ -579,9 +580,14 @@ function appEvent(type: AppEventType, actor: CallActor | null, deps: CallActionD
 }
 
 async function ownedActiveSession(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<SessionRow> {
-  const session = await loadSession(deps, sessionId);
+  // The session and the legs that authorise the actor are independent reads,
+  // and both stand between the click and the command.
+  const [session, legs] = await Promise.all([
+    loadSession(deps, sessionId),
+    deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", sessionId).neq("role", "supervisor").is("ended_at", null),
+  ]);
   if (!ACTIVE_SESSION_STATES.has(session.state)) throw new CallActionError("Hovor už nie je aktívny.", 409, "not_active");
-  await assertOwnership(deps, session, actor);
+  await assertOwnership(deps, session, actor, legs.error ? undefined : (legs.data ?? []).map((leg) => leg.profile_id).filter((id): id is string => Boolean(id)));
   return session;
 }
 

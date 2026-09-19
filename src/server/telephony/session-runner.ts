@@ -539,10 +539,21 @@ export async function ownedSessionWork<T>(
   }
 }
 
-export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent): Promise<SessionRunResult> {
-  let known: SessionRow | undefined;
+export async function runSessionEvent(
+  deps: SessionRunnerDeps,
+  sessionId: string,
+  event: SessionEvent,
+  options?: { known?: SessionRow },
+): Promise<SessionRunResult> {
+  let known: SessionRow | undefined = options?.known;
   if (event.kind === "app" && event.type === "hangup") {
-    const target = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
+    // A console action has already loaded this row to authorise itself, and
+    // the only field wanted here is `writer_contract`, which terminating never
+    // changes — so re-reading it was a round trip in front of the one command
+    // an operator most wants to be instant.
+    const target = known
+      ? { data: known, error: null as null }
+      : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
     if (target.error) throw new SessionEventDeferredError(`Termination intent lookup failed: ${target.error.message}`);
     // Both this read and the ownership probe happen before the lease, and the
     // probe only inspects `writer_contract`, which terminating never changes.
