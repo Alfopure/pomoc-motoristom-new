@@ -5,6 +5,7 @@ import type { Database } from "@/lib/supabase/database.types";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 
 import { isDeviceLive } from "./routing/eligibility";
+import { deviceLastOnlineAt, LAST_ONLINE_METADATA_KEY, retainDeviceLastOnline } from "./device-online";
 import { OperatorDeviceError } from "./service-errors";
 import { telnyxSipUri, toJson, type DeviceRow, type TelephonyEnvironment } from "./state/types";
 import { TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
@@ -106,7 +107,10 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
     sip_username: credential.sipUsername,
     credential_expires_at: credential.expiresAt,
     registration_state: "unregistered" as const,
-    metadata: toJson({ ...(existing ? metadataOf(existing) : {}), credential_created_at: now.toISOString(), previous_credential_id: previousCredentialId }),
+    // The previous tab authenticated with the old credential. Its heartbeat
+    // cannot register the replacement while the provider deletion is pending.
+    ...(existing ? { device_session_id: `revoked:${randomUUID()}`, device_seen_at: null } : {}),
+    metadata: toJson({ ...(existing ? retainDeviceLastOnline(existing, now) : {}), credential_created_at: now.toISOString(), previous_credential_id: previousCredentialId }),
   };
   // Enrollment can race across requests. An upsert would overwrite the first
   // credential and leave an untracked SIP identity active at the provider.
@@ -115,11 +119,15 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
   // the winner, never the other way around.
   let saved;
   if (existing) {
-    let update = deps.admin.from(deviceTable(deps)).update(values).eq("id", existing.id);
-    update = previousCredentialId === null
-      ? update.is("telnyx_credential_id", null)
-      : update.eq("telnyx_credential_id", previousCredentialId);
-    saved = await update.select("*").maybeSingle();
+    try {
+      saved = { error: null, data: await updateCurrentDevice(deps, existing, current => ({
+        ...values,
+        metadata: toJson({ ...retainDeviceLastOnline(current, nowOf(deps)), credential_created_at: now.toISOString(), previous_credential_id: previousCredentialId }),
+      })) };
+    } catch (error) {
+      await deleteCredentialAtProvider(deps, credential.id, "Nepoužité prihlasovacie údaje sa nepodarilo zrušiť u operátora");
+      throw error;
+    }
   } else {
     saved = await deps.admin.from(deviceTable(deps)).insert(values).select("*").maybeSingle();
   }
@@ -163,8 +171,29 @@ async function deleteCredentialAtProvider(deps: DeviceDeps, credentialId: string
   }
 }
 
-function metadataOf(device: DeviceRow): Record<string, unknown> {
-  return device.metadata && typeof device.metadata === "object" && !Array.isArray(device.metadata) ? (device.metadata as Record<string, unknown>) : {};
+/** Merge against the current session snapshot so a heartbeat cannot discard
+ * concurrent token/audio metadata, or restore the metadata of a revoked tab. */
+async function updateCurrentDevice(
+  deps: DeviceDeps,
+  observed: DeviceRow,
+  values: (current: DeviceRow) => Database["public"]["Tables"]["motorist_operator_devices"]["Update"],
+): Promise<DeviceRow | null> {
+  let current = observed;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let update = deps.admin.from(deviceTable(deps)).update(values(current)).eq("id", observed.id)
+      .eq("metadata", JSON.stringify(current.metadata))
+      .eq("registration_state", current.registration_state);
+    update = observed.device_session_id === null ? update.is("device_session_id", null) : update.eq("device_session_id", observed.device_session_id);
+    update = observed.telnyx_credential_id === null ? update.is("telnyx_credential_id", null) : update.eq("telnyx_credential_id", observed.telnyx_credential_id);
+    update = current.device_seen_at === null ? update.is("device_seen_at", null) : update.eq("device_seen_at", current.device_seen_at);
+    const result = await update.select("*").maybeSingle();
+    if (result.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo aktualizovať: ${result.error.message}`, 500);
+    if (result.data) return result.data;
+    const latest = await getOperatorDevice(deps, { organizationId: observed.organization_id, profileId: observed.profile_id });
+    if (!latest || latest.id !== observed.id || latest.device_session_id !== observed.device_session_id || latest.telnyx_credential_id !== observed.telnyx_credential_id) return null;
+    current = latest;
+  }
+  throw new OperatorDeviceError("Stav zariadenia sa medzitým zmenil. Skúste to znova.", 409);
 }
 
 /** Reads `exp` from a JWT without verifying it (the token is Telnyx's, we only schedule its refresh). */
@@ -224,36 +253,28 @@ export async function issueWebphoneToken(
   // A heartbeat already in flight must remain valid across this tab's renewal.
   const renewing = sameTab && !input.handoff;
   const deviceSessionId = renewing ? device.device_session_id! : randomUUID();
-  const metadata = metadataOf(device);
-  const revoked = Array.isArray(metadata.revoked_sessions) ? (metadata.revoked_sessions as unknown[]).slice(-9) : [];
-  if (!renewing && device.device_session_id) revoked.push({ id: device.device_session_id, revoked_at: now.toISOString() });
 
   // A refresh for a phone that is already registered and still sending
   // heartbeats must not report it as registering: the ring engine skips any
   // operator who is not "registered", so downgrading here made the operator
   // invisible until the next heartbeat and inbound calls silently walked past
   // them. Only a genuinely new or stale registration starts as "registering".
-  const stillLive = renewing && deviceIsLive(device, now);
-
-  let update = deps.admin
-    .from(deviceTable(deps))
-    .update({
+  const updated = await updateCurrentDevice(deps, device, (current) => {
+    const metadata = retainDeviceLastOnline(current, nowOf(deps));
+    const revoked = Array.isArray(metadata.revoked_sessions) ? (metadata.revoked_sessions as unknown[]).slice(-9) : [];
+    if (!renewing && current.device_session_id) revoked.push({ id: current.device_session_id, revoked_at: now.toISOString() });
+    return {
       last_token_issued_at: now.toISOString(),
       token_expires_at: expiresAt.toISOString(),
       device_session_id: deviceSessionId,
-      registration_state: stillLive ? "registered" : "registering",
+      registration_state: renewing && deviceIsLive(current, now) ? "registered" : "registering",
       ...(!renewing ? { device_seen_at: null } : {}),
-      user_agent: input.userAgent ?? device.user_agent,
+      user_agent: input.userAgent ?? current.user_agent,
       metadata: toJson({ ...metadata, revoked_sessions: revoked }),
-    })
-    .eq("id", device.id);
+    };
+  });
   // A slow token response cannot overwrite a newer takeover or revocation.
-  update = device.device_session_id === null
-    ? update.is("device_session_id", null)
-    : update.eq("device_session_id", device.device_session_id);
-  const updated = await update.select("id").maybeSingle();
-  if (updated.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo aktualizovať: ${updated.error.message}`, 500);
-  if (!updated.data) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+  if (!updated) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
 
   return { token, expiresAt: expiresAt.toISOString(), deviceSessionId, sipUsername, credentialId };
 }
@@ -273,28 +294,32 @@ export async function touchDevice(
   // liveness stamp instead of refreshing it, or the ring plan keeps allocating
   // steps to a phone that is gone.
   const leaving = input.registrationState === "unregistered";
-  const values: Database["public"]["Tables"]["motorist_operator_devices"]["Update"] = { device_seen_at: leaving ? null : now };
-  if (input.registrationState) values.registration_state = input.registrationState;
-  if (input.userAgent) values.user_agent = input.userAgent;
-  // Kept on the device, not on the call: it describes this browser's ability to
-  // play what it is sent, which is the one thing the server cannot observe.
-  if (input.audio) values.metadata = toJson({ ...metadataOf(device), audio: { ...input.audio, at: now } });
-  const updated = await deps.admin.from(deviceTable(deps)).update(values).eq("id", device.id).eq("device_session_id", input.deviceSessionId).select("*").maybeSingle();
-  if (updated.error) throw new OperatorDeviceError(`Heartbeat sa nepodarilo uložiť: ${updated.error.message}`, 500);
-  if (!updated.data) return { ok: false, reason: "stale_session" };
-  return { ok: true, device: updated.data };
+  const updated = await updateCurrentDevice(deps, device, (current) => {
+    const snapshotNow = nowOf(deps);
+    const metadata = retainDeviceLastOnline(current, snapshotNow);
+    if (!leaving && (input.registrationState ?? current.registration_state) === "registered") {
+      const previous = deviceLastOnlineAt(current, snapshotNow);
+      metadata[LAST_ONLINE_METADATA_KEY] = previous && previous > now ? previous : now;
+    }
+    // Kept on the device, not on the call; retain other lifecycle metadata.
+    if (input.audio) metadata.audio = { ...input.audio, at: now };
+    return { device_seen_at: leaving ? null : now, metadata: toJson(metadata),
+      ...(input.registrationState ? { registration_state: input.registrationState } : {}),
+      ...(input.userAgent ? { user_agent: input.userAgent } : {}),
+    };
+  });
+  if (!updated) return { ok: false, reason: "stale_session" };
+  return { ok: true, device: updated };
 }
 
 /** Revokes the browser session id only (the tab's next heartbeat gets 409). */
 async function revokeDeviceSession(deps: DeviceDeps, device: DeviceRow): Promise<DeviceRow> {
-  const updated = await deps.admin
-    .from(deviceTable(deps))
-    .update({ device_session_id: `revoked:${randomUUID()}`, registration_state: "unregistered", device_seen_at: null })
-    .eq("id", device.id)
-    .select("*")
-    .single();
-  if (updated.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo odpojiť: ${updated.error.message}`, 500);
-  return updated.data;
+  const updated = await updateCurrentDevice(deps, device, (current) => ({
+    device_session_id: `revoked:${randomUUID()}`, registration_state: "unregistered", device_seen_at: null,
+    metadata: toJson(retainDeviceLastOnline(current, nowOf(deps))),
+  }));
+  if (!updated) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+  return updated;
 }
 
 export type DisconnectResult = { device: DeviceRow; deletedCredentialId: string | null };
@@ -328,23 +353,18 @@ export async function disconnectDevice(
 
   const credentialId = revoked.telnyx_credential_id;
   await deleteCredentialAtProvider(deps, credentialId, "Telefón sme odhlásili, ale prihlasovacie údaje sa nepodarilo zrušiť u operátora");
-  const cleared = await deps.admin
-    .from(deviceTable(deps))
-    .update({
+  const cleared = await updateCurrentDevice(deps, revoked, (current) => ({
       telnyx_credential_id: null,
       sip_username: null,
       credential_expires_at: null,
       token_expires_at: null,
-      metadata: toJson({ ...metadataOf(revoked), deleted_credential_id: credentialId, deleted_credential_at: nowOf(deps).toISOString() }),
-    })
-    .eq("id", revoked.id)
-    .select("*")
-    .single();
-  if (cleared.error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo odpojiť: ${cleared.error.message}`, 500);
-  return { device: cleared.data, deletedCredentialId: credentialId };
+      metadata: toJson({ ...retainDeviceLastOnline(current, nowOf(deps)), deleted_credential_id: credentialId, deleted_credential_at: nowOf(deps).toISOString() }),
+    }));
+  if (!cleared) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+  return { device: cleared, deletedCredentialId: credentialId };
 }
 
-export function deviceIsLive(device: DeviceRow | null, now: Date): boolean {
+export function deviceIsLive(device: Pick<DeviceRow, "device_seen_at" | "registration_state"> | null, now: Date): boolean {
   if (!device) return false;
   return isDeviceLive({ deviceSeenAt: device.device_seen_at, registrationState: device.registration_state }, now);
 }
