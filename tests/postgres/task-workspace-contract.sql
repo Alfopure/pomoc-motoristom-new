@@ -29,6 +29,21 @@ select pg_temp.expect_error(format('update public.motorist_case_tasks set title=
 select pg_temp.expect_error(format('delete from public.motorist_case_tasks where id=%L',:'legacy_id'),'55000');
 select pg_temp.expect_error($q$insert into public.motorist_case_tasks(organization_id,case_id,title) values('10000000-0000-0000-0000-000000000001','40000000-0000-0000-0000-000000000002','Blocked')$q$,'55000');
 reset role;
+-- A profile FK cascade is still an UPDATE of the task row. Account deletion
+-- must detect this history and anonymise the profile instead of weakening the
+-- workspace guard or relying on ON DELETE SET NULL.
+insert into public.motorist_profiles(id,organization_id,user_id,role,display_name) values
+ ('20000000-0000-0000-0000-000000000005','10000000-0000-0000-0000-000000000001','30000000-0000-0000-0000-000000000005','dispatcher','Historical operator');
+begin;
+select set_config('app.task_workspace_write','v1',true);
+insert into public.motorist_case_tasks(organization_id,case_id,title,status,assigned_to)
+ values('10000000-0000-0000-0000-000000000001',null,'Completed by departing operator','done','20000000-0000-0000-0000-000000000005');
+commit;
+select pg_temp.expect_error($q$delete from public.motorist_profiles where id='20000000-0000-0000-0000-000000000005'$q$,'55000');
+update public.motorist_profiles set display_name='Vymazaný používateľ',user_id=null,active=false
+ where id='20000000-0000-0000-0000-000000000005';
+select pg_temp.assert_true((select not active and user_id is null from public.motorist_profiles where id='20000000-0000-0000-0000-000000000005'),'task history keeps an identity-free profile tombstone');
+select pg_temp.assert_true((select count(*)=1 from public.motorist_case_tasks where assigned_to='20000000-0000-0000-0000-000000000005'),'profile anonymisation does not mutate task history');
 set role authenticated;
 select public.motorist_task_workspace('10000000-0000-0000-0000-000000000001','20000000-0000-0000-0000-000000000001','create',p_input=>'{"title":"Team task","caseIds":[]}')->>'id' as task_id \gset
 select pg_temp.assert_true((select case_id is null from public.motorist_case_tasks where id=:'task_id'),'zero-case task');

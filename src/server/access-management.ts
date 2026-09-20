@@ -267,6 +267,8 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string):
     throw new MutationError("Používateľ má pridelený hovor alebo dokončuje jeho spracovanie. Najprv uvoľnite hovor.", 409);
   }
 
+  await assertNoActiveTaskResponsibilities(supabase, profile);
+
   const keepHistory = await hasRecordedHistory(supabase, profile);
   const mode: DeleteAccessUserResult["mode"] = keepHistory ? "anonymised" : "deleted";
 
@@ -344,6 +346,8 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string):
  * calls) are the records a hard delete would destroy rather than anonymise.
  */
 async function hasRecordedHistory(supabase: ReturnType<typeof createSupabaseAdminClient>, profile: ProfileRow): Promise<boolean> {
+  if (await hasTaskHistory(supabase, profile)) return true;
+
   for (const table of PROFILE_HISTORY_TABLES) {
     const { count, error } = await supabase
       .from(table)
@@ -358,6 +362,121 @@ async function hasRecordedHistory(supabase: ReturnType<typeof createSupabaseAdmi
     if ((count ?? 0) > 0) return true;
   }
   return false;
+}
+
+/**
+ * An account must not disappear while it still owns live work. Apart from
+ * leaving an orphaned task, a profile delete would make PostgreSQL execute the
+ * task FKs' `ON DELETE SET NULL` updates outside the task workspace RPC. The
+ * workspace guard correctly rejects that as a legacy task write.
+ *
+ * Review columns were added later than assignments. Missing review columns are
+ * therefore an allowed older-schema condition; every other lookup failure is a
+ * fail-closed account-deletion error.
+ */
+async function assertNoActiveTaskResponsibilities(
+  supabase: ReturnType<typeof createSupabaseAdminClient>,
+  profile: ProfileRow,
+) {
+  const assignment = await supabase
+    .from("motorist_case_tasks")
+    .select("id")
+    .eq("organization_id", profile.organization_id)
+    .neq("status", "done")
+    .eq("assigned_to", profile.id)
+    .limit(1);
+  if (assignment.error) {
+    throw new MutationError("Pracovné úlohy používateľa sa nepodarilo overiť.", 500);
+  }
+
+  let hasResponsibility = (assignment.data ?? []).length > 0;
+  if (!hasResponsibility) {
+    const review = await supabase
+      .from("motorist_case_tasks")
+      .select("id")
+      .eq("organization_id", profile.organization_id)
+      .neq("status", "done")
+      .or(`reviewer_profile_id.eq.${profile.id},review_requested_by.eq.${profile.id}`)
+      .limit(1);
+    if (review.error && !isMissingTaskReviewSchema(review.error)) {
+      throw new MutationError("Pracovné úlohy používateľa sa nepodarilo overiť.", 500);
+    }
+    hasResponsibility = (review.data ?? []).length > 0;
+  }
+
+  if (hasResponsibility) {
+    throw new MutationError("Používateľ má otvorenú pridelenú úlohu alebo kontrolu. Najprv ju odovzdajte inému kolegovi.", 409);
+  }
+}
+
+/**
+ * Task authorship and completed work are retained as operational history. A
+ * deleted-profile tombstone carries no identity or access, but keeps every FK
+ * valid and prevents profile deletion from becoming an unauthorized task
+ * update. The explicit checks also cover task chat and workflow receipts whose
+ * FKs cannot be nulled by PostgreSQL.
+ */
+async function hasTaskHistory(
+  supabase: ReturnType<typeof createSupabaseAdminClient>,
+  profile: ProfileRow,
+): Promise<boolean> {
+  const task = await supabase
+    .from("motorist_case_tasks")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", profile.organization_id)
+    .or(`assigned_to.eq.${profile.id},created_by.eq.${profile.id},completed_by.eq.${profile.id}`)
+    .limit(1);
+  if (task.error || (task.count ?? 0) > 0) return true;
+
+  const review = await supabase
+    .from("motorist_case_tasks")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", profile.organization_id)
+    .or(`reviewer_profile_id.eq.${profile.id},review_requested_by.eq.${profile.id},reviewed_by.eq.${profile.id}`)
+    .limit(1);
+  if (review.error) {
+    if (!isMissingTaskReviewSchema(review.error)) return true;
+  } else if ((review.count ?? 0) > 0) {
+    return true;
+  }
+
+  const messages = await supabase
+    .from("motorist_task_messages")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", profile.organization_id)
+    .eq("author_profile_id", profile.id)
+    .limit(1);
+  if (messages.error) {
+    if (!isMissingRelation(messages.error, "motorist_task_messages")) return true;
+  } else if ((messages.count ?? 0) > 0) {
+    return true;
+  }
+
+  // Workflow receipts are deliberately private even from direct service-role
+  // table reads. The service-only RPC reveals just the existence bit. During a
+  // coordinated rollout, a missing/stale RPC fails safe to anonymisation.
+  const commands = await supabase.rpc("motorist_access_profile_has_task_workflow_history", {
+    p_organization_id: profile.organization_id,
+    p_profile_id: profile.id,
+  });
+  if (commands.error || commands.data) return true;
+
+  return false;
+}
+
+type DatabaseLookupError = { code?: string; message?: string; details?: string | null; hint?: string | null };
+
+function isMissingTaskReviewSchema(error: DatabaseLookupError): boolean {
+  const description = [error.message, error.details, error.hint].filter(Boolean).join(" ").toLowerCase();
+  return (
+    (error.code === "42703" || error.code === "PGRST204") &&
+    ["reviewer_profile_id", "review_requested_by", "reviewed_by"].some((column) => description.includes(column))
+  );
+}
+
+function isMissingRelation(error: DatabaseLookupError, relation: string): boolean {
+  const description = [error.message, error.details, error.hint].filter(Boolean).join(" ").toLowerCase();
+  return (error.code === "42P01" || error.code === "PGRST205") && description.includes(relation.toLowerCase());
 }
 
 /**
