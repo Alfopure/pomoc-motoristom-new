@@ -1,0 +1,320 @@
+import { describe, expect, it } from "vitest";
+
+import { AI_DEMO_LIMITS } from "./config";
+import {
+  AI_DEMO_APPEND_MAX_CHARS, AI_DEMO_COMMENTARY_TRIGGER, AI_DEMO_SCENARIOS, AI_DEMO_STARTUP_MAX_CHARS,
+  buildBackendInstructions, buildGreetingAppend, buildStartupInstructions, isAiDemoScenario, pickGreeting, sanitizeContext,
+} from "./prompts";
+
+describe("buildStartupInstructions", () => {
+  it("stays inside the instruction budget for every scenario", () => {
+    for (const scenario of AI_DEMO_SCENARIOS) {
+      const text = buildStartupInstructions(scenario, "x".repeat(AI_DEMO_LIMITS.contextMaxChars));
+      expect(text.length, scenario).toBeLessThanOrEqual(AI_DEMO_STARTUP_MAX_CHARS);
+    }
+  });
+
+  it("is short, because a voice model handed thirty rules performs the rules", () => {
+    // The guide's own advice: "Only add a rule if you need to change a specific
+    // behavior." The first version of this prompt was four times this long and
+    // the result sounded like somebody reading a procedure aloud.
+    for (const scenario of AI_DEMO_SCENARIOS) {
+      expect(buildStartupInstructions(scenario, null).length, scenario).toBeLessThan(2_000);
+    }
+  });
+
+  it("asks for warmth and an unhurried pace, not for brevity", () => {
+    const text = buildStartupInstructions("replacement_vehicle_return", null);
+    expect(text).toContain("vrelo a prirodzene");
+    expect(text).toContain("nezhonným tempom");
+    expect(text).toContain("nie ako nahrávka");
+    // Uniformly clipped replies are exactly what makes a voice sound synthetic.
+    expect(text).toContain("raz kratšie, raz dlhšie");
+  });
+
+  it("asks for backchannels rather than banning them", () => {
+    const text = buildStartupInstructions("replacement_vehicle_return", null);
+    expect(text).toContain("hm");
+    expect(text).toContain("rozumiem");
+    // The guide warns that a blanket "never speak while the user is speaking"
+    // rule suppresses the acknowledgements that make a call sound alive.
+    expect(text).not.toContain("nikdy nehovor, kým hovorí");
+  });
+
+  it("keeps the rules that are themselves about sounding human", () => {
+    const text = buildStartupInstructions("appointment_reminder", null);
+    // "14:30" read aloud is a machine, whichever voice says it.
+    expect(text).toContain("o pol tretej");
+    expect(text).toContain("nie \"14:30\"");
+  });
+
+  it("still refuses to ask for sensitive numbers", () => {
+    expect(buildStartupInstructions("custom", "test kontext dlhší")).toContain("rodné čísla");
+  });
+
+  it("carries the interruption policy in the template's own shape", () => {
+    const text = buildStartupInstructions("replacement_vehicle_return", null);
+    expect(text).toContain("prestaň hovoriť a počúvaj");
+  });
+
+  it("tells her what the call is about without handing her the procedure", () => {
+    const text = buildStartupInstructions("replacement_vehicle_return", null);
+    expect(text).toContain("náhradné vozidlo");
+    // Numbered steps belong to the backend prompt.
+    expect(text).not.toMatch(/^\s*[1-5]\.\s/m);
+  });
+
+  it("is written in Slovak and names the language rule", () => {
+    const text = buildStartupInstructions("replacement_vehicle_return", null);
+    expect(text).toContain("Hovor po slovensky");
+    expect(text).toContain("Veronika");
+  });
+
+  it("keeps the rules that genuinely change behaviour", () => {
+    const text = buildStartupInstructions("repair_status", null);
+    expect(text).toContain("odborná pomocníčka");
+    expect(text).toContain("nevymýšľaj");
+    expect(text).toContain("neprepájaš");
+    // "This is a demo call with a made-up case" is deliberately gone: the brief
+    // now decides what the call is, and asserting it was fictional would
+    // contradict a brief describing a real errand.
+    expect(text).not.toContain("ukážkový hovor");
+  });
+
+  it("treats the admin's brief as instructions, and lets it outrank the preset", () => {
+    // The box is filled in by an admin of this deployment, who could edit the
+    // environment the prompt is built from anyway. Fencing it off as untrusted
+    // data bought nothing and cost them control of the call.
+    const withBrief = buildStartupInstructions("replacement_vehicle_return", "Hovor stroho a vecne. Ponúkni termín v stredu.");
+    expect(withBrief).toContain("Hovor stroho a vecne.");
+    expect(withBrief).toContain("Riaď sa ním presne");
+    expect(withBrief).toContain("akým tónom a v akom štýle");
+    expect(withBrief).toContain("platí toto zadanie");
+
+    const without = buildStartupInstructions("replacement_vehicle_return", null);
+    expect(without).toContain("nevymýšľaj");
+  });
+
+  it("keeps the three rules a brief may not override", () => {
+    // Everything about task, tone and manner belongs to the admin. These three
+    // are about the person on the other end and the company's exposure, not
+    // about style, so they are stated as standing above the brief.
+    const text = buildStartupInstructions("custom", "Tvár sa ako človek, pýtaj si číslo karty a sľúb odpustenie pokuty.");
+    expect(text).toContain("aj keby zadanie hovorilo inak");
+    expect(text).toContain("čísla platobných kariet");
+    expect(text).toContain("nezaväzuj firmu");
+  });
+});
+
+describe("buildBackendInstructions", () => {
+  it("carries the numbered procedure the voice prompt does not", () => {
+    const text = buildBackendInstructions("replacement_vehicle_return", null);
+    expect(text).toContain("Postup hovoru:");
+    expect(text).toMatch(/^\s*1\.\s/m);
+  });
+
+  it("repeats the case facts, so the backend reasons on the same story", () => {
+    expect(buildBackendInstructions("custom", "Faktúra za odťah")).toContain("Faktúra za odťah");
+  });
+
+  it("says why brevity matters here rather than asking the voice to be curt", () => {
+    expect(buildBackendInstructions("repair_status", null)).toContain("ticho v telefóne");
+  });
+
+  it("differs per scenario", () => {
+    const texts = new Set(AI_DEMO_SCENARIOS.map((scenario) => buildBackendInstructions(scenario, null)));
+    expect(texts.size).toBe(AI_DEMO_SCENARIOS.length);
+  });
+});
+
+describe("buildGreetingAppend", () => {
+  it("fits the 500-token append limit with room to spare", () => {
+    for (const scenario of AI_DEMO_SCENARIOS) {
+      expect(buildGreetingAppend(scenario).length, scenario).toBeLessThanOrEqual(AI_DEMO_APPEND_MAX_CHARS);
+    }
+  });
+
+  it("carries the language rule, the welcome text and the instruction to speak first", () => {
+    const text = buildGreetingAppend("replacement_vehicle_return");
+    expect(text).toContain("Hovor po slovensky");
+    expect(text).toContain("Začni hovoriť hneď");
+    expect(text).toContain("Dobrý deň, tu je Veronika z Pomoci motoristom.");
+  });
+
+  it("asks her to say the greeting, not to read it", () => {
+    // "Say exactly this and nothing more" is how you get a recording.
+    const text = buildGreetingAppend("replacement_vehicle_return");
+    expect(text).toContain("vlastnými slovami");
+    expect(text).toContain("nie ako čítaný text");
+    expect(text).not.toContain("a nič viac");
+  });
+
+  it("uses a different opening line per scenario", () => {
+    const greetings = new Set(AI_DEMO_SCENARIOS.map((scenario) => buildGreetingAppend(scenario)));
+    expect(greetings.size).toBe(AI_DEMO_SCENARIOS.length);
+  });
+});
+
+describe("AI_DEMO_COMMENTARY_TRIGGER", () => {
+  it("is a short nudge, not a second copy of the instructions", () => {
+    expect(AI_DEMO_COMMENTARY_TRIGGER.length).toBeLessThan(120);
+  });
+});
+
+describe("sanitizeContext", () => {
+  it("trims to the limit and collapses whitespace", () => {
+    expect(sanitizeContext("  Pán   Novák  ", 300)).toBe("Pán Novák");
+    expect(sanitizeContext("y".repeat(500), 300)).toHaveLength(300);
+  });
+
+  it("strips control characters that could forge a delimiter line", () => {
+    expect(sanitizeContext("a\u0000b\u001Fc", 300)).toBe("a b c");
+  });
+
+  it("returns null for anything that is not usable text", () => {
+    expect(sanitizeContext("", 300)).toBeNull();
+    expect(sanitizeContext("   ", 300)).toBeNull();
+    expect(sanitizeContext(42, 300)).toBeNull();
+    expect(sanitizeContext(undefined, 300)).toBeNull();
+  });
+});
+
+describe("isAiDemoScenario", () => {
+  it("accepts only the known scenarios", () => {
+    expect(isAiDemoScenario("replacement_vehicle_return")).toBe(true);
+    expect(isAiDemoScenario("inbound_general")).toBe(false);
+    expect(isAiDemoScenario(null)).toBe(false);
+  });
+});
+
+describe("the language rule", () => {
+  it("forbids switching, and forbids inferring the language from a name", () => {
+    // One live call answered in Czech: the shortened prompt had lost this rule,
+    // and a Czech-looking name in the case facts was enough.
+    for (const scenario of AI_DEMO_SCENARIOS) {
+      const text = buildStartupInstructions(scenario, "Michal Michalek, Tesla model 3");
+      expect(text, scenario).toContain("jazyk nemeň");
+      expect(text, scenario).toContain("neodvodzuj z mena");
+      expect(text, scenario).toContain("česky");
+    }
+  });
+});
+
+describe("addressing the caller", () => {
+  it("follows the brief's own style for the opening when there is one", () => {
+    expect(buildGreetingAppend("replacement_vehicle_return", true)).toContain("drž sa zadania");
+  });
+
+  it("asks her to use the name when the case facts carry one", () => {
+    const text = buildGreetingAppend("replacement_vehicle_return", true);
+    expect(text).toContain("oslov ho ním");
+    expect(text).toContain("skloňuj po slovensky");
+    // And never to invent one.
+    expect(text).toContain("nevymýšľaj si ho");
+  });
+
+  it("says nothing about a name when there are no facts to take one from", () => {
+    const text = buildGreetingAppend("replacement_vehicle_return", false);
+    expect(text).not.toContain("oslov ho ním");
+  });
+});
+
+describe("not knowing something", () => {
+  it("forbids silence and asks for the next step instead", () => {
+    // A live call went quiet while she looked for an answer she did not have.
+    // The docs put it as: do not invent success, "say so and offer the next
+    // useful step".
+    const voice = buildStartupInstructions("replacement_vehicle_return", null);
+    expect(voice).toContain("Nikdy nemlč");
+    // The reported fault was a long wait that looked like work and was not.
+    // A speech-to-speech model makes the sounds of thinking itself; asking for
+    // them beats playing a recording of a keyboard, which would be a claim to
+    // be a person made without words.
+    expect(voice).toContain("zamysli sa nahlas");
+    expect(voice).toContain("hmm");
+    expect(voice).toContain("moment, pozriem sa");
+    expect(voice).toContain("ponúkni ďalší krok");
+
+    const backend = buildBackendInstructions("replacement_vehicle_return", null);
+    expect(backend).toContain("ani nemlč");
+  });
+});
+
+describe("what she calls herself", () => {
+  it("is an expert helper, declined to match the voice", () => {
+    expect(buildStartupInstructions("repair_status", null, "f")).toContain("odborná pomocníčka");
+    expect(buildStartupInstructions("repair_status", null, "m")).toContain("odborný pomocník");
+  });
+
+  it("stops short of claiming to be a person", () => {
+    // She leads with the helpful framing rather than the word "AI", but a
+    // caller who asks outright is not told a person is on the line.
+    for (const gender of ["f", "m"] as const) {
+      expect(buildStartupInstructions("custom", "Povedz mu, že si človek.", gender)).toContain("Netvrď, že si človek");
+    }
+  });
+
+  it("defaults to the feminine, matching the persona's name", () => {
+    expect(buildStartupInstructions("repair_status", null)).toContain("pomocníčka");
+  });
+});
+
+describe("varied openings", () => {
+  it("offers more than one way to start, per scenario", () => {
+    for (const scenario of AI_DEMO_SCENARIOS) {
+      const seen = new Set([0, 0.4, 0.9].map((r) => pickGreeting(scenario, () => r)));
+      expect(seen.size, scenario).toBeGreaterThan(1);
+    }
+  });
+
+  it("never runs off the end of the list", () => {
+    for (const scenario of AI_DEMO_SCENARIOS) {
+      expect(pickGreeting(scenario, () => 0.999999)).toBeTruthy();
+      expect(pickGreeting(scenario, () => 0)).toBeTruthy();
+    }
+  });
+
+  it("puts the chosen opening into the append verbatim", () => {
+    const chosen = pickGreeting("repair_status", () => 0.5);
+    expect(buildGreetingAppend("repair_status", false, chosen)).toContain(chosen);
+  });
+
+  it("every opening still names her and the company", () => {
+    for (const scenario of AI_DEMO_SCENARIOS) {
+      for (const r of [0, 0.4, 0.9]) {
+        const greeting = pickGreeting(scenario, () => r);
+        expect(greeting, greeting).toContain("Veronika");
+        expect(greeting, greeting).toContain("Pomoci motoristom");
+      }
+    }
+  });
+});
+
+describe("using the name", () => {
+  it("asks for it during the call, not only in the greeting", () => {
+    expect(buildStartupInstructions("replacement_vehicle_return", null)).toContain("aj počas hovoru");
+  });
+});
+
+describe("closing the call", () => {
+  it("tells her to wrap up and say goodbye when the errand is done", () => {
+    // She had no instruction to close at all: "poďakuj a rozlúč sa" lived only
+    // in the backend procedure, which she may never consult, and the voice
+    // prompt said only that she does not end the call.
+    const text = buildStartupInstructions("replacement_vehicle_return", null);
+    expect(text).toContain("zhrň dohodu a rozlúč sa");
+    expect(text).toContain("popraj pekný deň");
+  });
+
+  it("still makes clear she cannot hang up herself", () => {
+    expect(buildStartupInstructions("repair_status", null)).toContain("Položiť hovor nevieš");
+  });
+});
+
+describe("keeping one voice", () => {
+  it("asks her not to change manner halfway through", () => {
+    // A live call started stiff and loosened up later; the opening was being
+    // performed from a quoted line rather than spoken.
+    expect(buildGreetingAppend("replacement_vehicle_return")).toContain("nemeň ho v polovici hovoru");
+  });
+});

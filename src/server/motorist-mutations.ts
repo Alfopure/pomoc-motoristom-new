@@ -47,6 +47,7 @@ import type { Database, Json } from "@/lib/supabase/database.types";
 // Lives in its own module so that latency-sensitive routes (the Telnyx webhook)
 // can catch it without loading this file; re-exported for existing importers.
 import { MutationError } from "@/server/mutation-error";
+import { humansOnly } from "@/server/profile-kind";
 
 export { MutationError };
 import { cancelPendingTaskReminders, createDefaultTaskReminder, createTaskAssignmentNotification, latestTaskReminderChannels } from "./task-notifications";
@@ -2229,10 +2230,11 @@ async function resolveOrganization(supabase: AdminClient): Promise<OrganizationR
 }
 
 async function resolveDefaultOwnerId(supabase: AdminClient, organizationId: string) {
-  const result = await supabase
+  // The fallback owner of a case has to be someone who can open it.
+  const result = await humansOnly(supabase
     .from("motorist_profiles")
     .select("id")
-    .eq("organization_id", organizationId)
+    .eq("organization_id", organizationId))
     .eq("active", true)
     .order("created_at")
     .limit(1)

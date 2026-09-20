@@ -54,6 +54,21 @@ export type RingAttemptResult =
   | "failed";
 export type OperatorPresenceStatus = "available" | "ringing" | "on_call" | "after_call_work" | "paused" | "offline";
 
+/** AI demo ("Veronika"); `failed` is reachable only with an `error_code`, and only through `ending`. */
+export type AiDemoState =
+  | "requested"
+  | "sip_dialing"
+  | "ai_offered"
+  | "ai_accepted"
+  | "mobile_dialing"
+  | "bridged"
+  | "talking"
+  | "ending"
+  | "ended"
+  | "failed";
+export type AiDemoGreetingStatus = "none" | "requested" | "appended" | "heard_started" | "failed" | "skipped_replay";
+export type AiDemoDialOutcome = "none" | "unknown" | "accepted" | "rejected";
+
 export type Database = {
   public: {
     Tables: {
@@ -98,6 +113,7 @@ export type Database = {
         organization_id: string;
         user_id: string | null;
         email: string | null;
+        kind: "human" | "ai";
         display_name: string;
         role: "dispatcher" | "senior_dispatcher" | "manager" | "admin";
         phone_extension: string | null;
@@ -1398,6 +1414,24 @@ export type Database = {
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
+      motorist_ai_agent_settings: Table<{
+        id: string;
+        organization_id: string;
+        profile_id: string | null;
+        display_name: string;
+        voice: string;
+        intro_style: "expert_helper" | "assistant" | "custom";
+        intro_custom: string | null;
+        standing_rules: string | null;
+        reads_caller_cases: boolean;
+        requires_plate_check: boolean;
+        creates_draft_cases: boolean;
+        adds_case_notes: boolean;
+        sms_enabled: boolean;
+        sms_max_per_call: number;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
       motorist_pause_reasons: Table<{
         id: string;
         organization_id: string;
@@ -1449,6 +1483,67 @@ export type Database = {
         legs: number;
         minutes: number;
         sms_count: number;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_ai_demo_attempts: Table<{
+        id: string;
+        organization_id: string;
+        direction: "outbound";
+        request_id: string | null;
+        actor_profile_id: string | null;
+        environment: TelephonyEnvironment;
+        scenario: string;
+        target_number: string;
+        from_number: string;
+        correlation_token: string;
+        state: AiDemoState;
+        greeting_status: AiDemoGreetingStatus;
+        end_reason: string | null;
+        error_code: string | null;
+        sip_dial_command_id: string;
+        mobile_dial_command_id: string | null;
+        sip_dial_outcome: AiDemoDialOutcome;
+        mobile_dial_outcome: AiDemoDialOutcome;
+        telnyx_sip_call_control_id: string | null;
+        telnyx_sip_call_leg_id: string | null;
+        telnyx_mobile_call_control_id: string | null;
+        telnyx_mobile_call_leg_id: string | null;
+        telnyx_call_session_id: string | null;
+        openai_session_id: string | null;
+        sip_hangup_cause: string | null;
+        mobile_hangup_cause: string | null;
+        hangup_source: string | null;
+        sip_hangup_done_at: Timestamp | null;
+        mobile_hangup_done_at: Timestamp | null;
+        openai_hangup_done_at: Timestamp | null;
+        openai_hangup_attempts: number;
+        requested_at: Timestamp;
+        sip_dialed_at: Timestamp | null;
+        sip_initiated_at: Timestamp | null;
+        ai_offered_at: Timestamp | null;
+        accept_started_at: Timestamp | null;
+        ai_accepted_at: Timestamp | null;
+        sip_answered_at: Timestamp | null;
+        mobile_dialed_at: Timestamp | null;
+        mobile_initiated_at: Timestamp | null;
+        mobile_answered_at: Timestamp | null;
+        bridged_at: Timestamp | null;
+        greeting_appended_at: Timestamp | null;
+        first_transcript_at: Timestamp | null;
+        talking_at: Timestamp | null;
+        ending_requested_at: Timestamp | null;
+        ended_at: Timestamp | null;
+        deadline_at: Timestamp;
+        latency_probe: Json;
+        transcript: Json | null;
+        conversation_stats: Json | null;
+        review: Json | null;
+        reviewed_at: Timestamp | null;
+        probe_started_at: Timestamp | null;
+        cleanup_attempts: number;
+        cleanup_next_attempt_at: Timestamp | null;
+        metadata: Json;
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;

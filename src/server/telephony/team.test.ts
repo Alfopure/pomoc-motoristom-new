@@ -87,3 +87,17 @@ it("recognizes a legitimate heartbeat received during the asynchronous reads", a
   expect(payload.checkedAt).toBe(NOW.toISOString());
   expect(payload.operators[0]).toMatchObject({online:true,lastOnlineAt:heartbeatAt});
 });
+
+it("does not offer the AI account as a colleague", async () => {
+  // The helper being correct proves nothing about whether it was wired up here,
+  // and grepping the source for `humansOnly` proves only that somebody typed
+  // it. This seeds the account and asks the real query.
+  const fake = createFakeSupabase();
+  fake.db.seed("motorist_profiles", [
+    {id:"one",organization_id:"org",display_name:"Jana",active:true,access_status:"active",kind:"human"},
+    {id:"robot",organization_id:"org",display_name:"Veronika",active:true,access_status:"active",kind:"ai"},
+  ]);
+  const payload = await loadTelephonyTeam({admin:fake.admin,organizationId:"org",environment:"production",now:()=>NOW});
+  expect(payload.operators.map(x=>x.profileId)).toEqual(["one"]);
+  expect(JSON.stringify(payload)).not.toContain("Veronika");
+});

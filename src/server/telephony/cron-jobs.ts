@@ -439,9 +439,37 @@ export async function runAlertJob(deps: TelephonyCronDeps): Promise<TelephonyCro
   return { job: ALERT_JOB, status: result.status, detail: result.detail, ...(result.error ? { error: result.error } : {}) };
 }
 
+/**
+ * Releases AI-demo attempts whose webhooks never arrived.
+ *
+ * The demo has no worker of its own, so this is the only thing standing
+ * between a lost webhook and an attempt that stays open until somebody
+ * notices. It never starts anything: the only provider call it can make is a
+ * hangup. Its own deadline keeps it well inside the cron's `maxDuration`, and
+ * it runs before the alert mailer so a cleanup failure is visible in the same
+ * tick that it happened.
+ */
+export const AI_DEMO_CLEANUP_JOB = "telephony.ai-demo.cleanup";
+
+export async function runAiDemoCleanupJob(deps: TelephonyCronDeps, startedAt: number): Promise<TelephonyCronJobResult> {
+  const { aiDemoEnabled } = await import("./ai-demo/flag");
+  if (!aiDemoEnabled()) return { job: AI_DEMO_CLEANUP_JOB, status: "disabled", detail: {} };
+  try {
+    const { runAiDemoCleanup } = await import("./ai-demo/orchestrator");
+    const { AI_DEMO_LIMITS } = await import("./ai-demo/config");
+    const deadline = Math.min(startedAt + AI_DEMO_LIMITS.cronStartedCapMs, Date.now() + AI_DEMO_LIMITS.cronBudgetMs);
+    const detail = await runAiDemoCleanup(deps, { deadline });
+    return { job: AI_DEMO_CLEANUP_JOB, status: "ok", detail: { ...detail } };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    deps.logger?.({ level: "error", scope: "cron", job: AI_DEMO_CLEANUP_JOB, error: message });
+    return { job: AI_DEMO_CLEANUP_JOB, status: "failed", detail: {}, error: message };
+  }
+}
+
 export async function runTelephonyCronJobs(deps: TelephonyCronDeps): Promise<TelephonyCronSummary> {
   const started = nowOf(deps).getTime();
-  const jobs = [await runRingSweep(deps), await runPendingEffectRecovery(deps), await replayStalledWebhookEvents(deps), await reconcileWithTelnyx(deps), await detectStuckSessions(deps), await runAlertJob(deps), await pruneWebhookLedger(deps)];
+  const jobs = [await runRingSweep(deps), await runPendingEffectRecovery(deps), await replayStalledWebhookEvents(deps), await reconcileWithTelnyx(deps), await detectStuckSessions(deps), await runAiDemoCleanupJob(deps, Date.now()), await runAlertJob(deps), await pruneWebhookLedger(deps)];
   const checkedAt = nowOf(deps);
   return {
     status: jobs.some((job) => job.status === "failed") ? "degraded" : "ok",

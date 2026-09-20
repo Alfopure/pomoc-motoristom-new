@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   ACTIVE_CALL_POLL_MS,
-  activeCallPollDelayMs,
   POLL_BACKOFF_MAX_MS,
   REALTIME_ACTIVE_CALL_POLL_MS,
+  activeCallPollDelayMs,
+  aiDemoPollDelayMs,
   callbackPollDelayMs,
   supportPollDelayMs,
   takeoverPollDelayMs,
@@ -176,5 +177,27 @@ describe("steady-state request rate", () => {
       1 / (takeoverPollDelayMs({ hasOpenRequest: false, documentHidden: true }) / 1_000);
 
     expect(hidden).toBeLessThan(0.3);
+  });
+});
+
+describe("aiDemoPollDelayMs", () => {
+  it("watches an active call closely and an idle tab rarely", () => {
+    expect(aiDemoPollDelayMs({ hasActiveAttempt: true, documentHidden: false })).toBe(2_000);
+    expect(aiDemoPollDelayMs({ hasActiveAttempt: true, documentHidden: true })).toBe(10_000);
+    expect(aiDemoPollDelayMs({ hasActiveAttempt: false, documentHidden: false })).toBe(15_000);
+    expect(aiDemoPollDelayMs({ hasActiveAttempt: false, documentHidden: true })).toBe(60_000);
+  });
+
+  it("stays inside a sane request count for the longest possible call", () => {
+    // A demo is capped at five minutes; at two seconds that is 150 requests,
+    // which is the budget this interval was chosen against.
+    const perCall = 300_000 / aiDemoPollDelayMs({ hasActiveAttempt: true, documentHidden: false });
+    expect(perCall).toBeLessThanOrEqual(150);
+  });
+
+  it("backs off a failing endpoint rather than hammering it", () => {
+    const delay = aiDemoPollDelayMs({ hasActiveAttempt: true, documentHidden: false, consecutiveFailures: 3, random: () => 0.5 });
+    expect(delay).toBeGreaterThan(2_000);
+    expect(delay).toBeLessThanOrEqual(POLL_BACKOFF_MAX_MS);
   });
 });
