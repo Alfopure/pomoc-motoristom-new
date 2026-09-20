@@ -3,7 +3,7 @@ alter role service_role bypassrls;
 create table public.motorist_cases(id uuid primary key,organization_id uuid not null references public.motorist_organizations,case_number text,status text default 'new');
 create table public.motorist_case_tasks(
  id uuid primary key default gen_random_uuid(),organization_id uuid not null references public.motorist_organizations,
- case_id uuid not null references public.motorist_cases on delete cascade,title text not null,assigned_to uuid references public.motorist_profiles,
+ case_id uuid not null references public.motorist_cases on delete cascade,title text not null,assigned_to uuid references public.motorist_profiles on delete set null,
  due_at timestamptz,status text not null default 'open',priority text not null default 'normal',kind text not null default 'other',
  created_by uuid,completed_by uuid,completed_at timestamptz,created_at timestamptz not null default now(),updated_at timestamptz not null default now()
 );

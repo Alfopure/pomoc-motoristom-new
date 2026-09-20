@@ -39,6 +39,7 @@ class TaskReviewContract(unittest.TestCase):
         cls.db.execute(current[current.index("CREATE OR REPLACE FUNCTION public.motorist_task_workspace("):current.rindex("commit;")])
         cls.before = cls.db.execute("select id,revision,reminder_generation,assignment_generation,status,due_at from motorist_case_tasks order by id").fetchall()
         cls.db.execute(sql(ROOT / "supabase/migrations/20261001100000_task_review_workflow.sql"))
+        cls.db.execute(sql(ROOT / "supabase/migrations/20261006140000_access_profile_task_history.sql"))
         cls.db.execute("update motorist_task_workspace_settings set enabled=true,writer_inventory_verified_at=now(),writer_inventory_note='Disposable local review tests only'")
 
     @classmethod
@@ -369,6 +370,31 @@ class TaskReviewContract(unittest.TestCase):
         finally:
             self.db.execute("update motorist_task_workspace_settings set enabled=true where organization_id=%s", (ORG,))
         self.assertEqual(self.workspace("get", task["id"]), task)
+
+    def test_27_account_service_sees_only_the_workflow_history_bit(self):
+        actor = "20000000-0000-0000-0000-000000000099"
+        actor_user = "30000000-0000-0000-0000-000000000099"
+        self.db.execute(
+            "insert into motorist_profiles(id,organization_id,user_id,display_name,role) values(%s,%s,%s,'Workflow actor','dispatcher')",
+            (actor, ORG, actor_user),
+        )
+        task = self.create()
+        self.transition(task, self.command(task, "start"), actor=actor)
+
+        with psycopg.connect(dbname=self.name, autocommit=True, **LOCAL) as service:
+            service.execute("set role service_role")
+            self.assertTrue(service.execute(
+                "select motorist_access_profile_has_task_workflow_history(%s,%s)", (ORG, actor)
+            ).fetchone()[0])
+            self.assertFalse(service.execute(
+                "select motorist_access_profile_has_task_workflow_history(%s,%s)", (OTHER_ORG, actor)
+            ).fetchone()[0])
+            self.rejected("42501", lambda: service.execute("select * from motorist_task_workflow_commands"))
+
+        with self.actor() as authenticated:
+            self.rejected("42501", lambda: authenticated.execute(
+                "select motorist_access_profile_has_task_workflow_history(%s,%s)", (ORG, actor)
+            ))
 
     def wait_for_lock(self, pid):
         deadline = time.monotonic() + 5
