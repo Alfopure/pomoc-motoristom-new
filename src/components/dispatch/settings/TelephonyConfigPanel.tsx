@@ -11,7 +11,7 @@ import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
 import { RoutingUnsavedDialog } from "./RoutingUnsavedDialog";
 import { IncomingRoutingEditor, type IncomingEditorActions } from "./IncomingRoutingEditor";
 import { MyPhonePanel, type MyPhoneTestCall } from "../MyPhonePanel";
-import { AiDemoPanel } from "./AiDemoPanel";
+import { AiTab } from "./AiTab";
 import { AnnouncementsPanel } from "./AnnouncementsPanel";
 import { BusinessHoursEditor } from "./BusinessHoursEditor";
 import { IvrMenuEditor } from "./IvrMenuEditor";
@@ -257,7 +257,7 @@ export function TelephonyConfigPanel({ onTestCall, routingTarget, onRoutingDirty
       {tab === "operators" && state.canEdit && (
         <OperatorsTelephonyPanel key={`operators-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />
       )}
-      {tab === "ai" && state.canManageSettings && state.aiDemoEnabled && <AiDemoPanel onNavigateToSettings={() => setTab("settings")} />}
+      {tab === "ai" && state.canManageSettings && state.aiDemoEnabled && <AiTab onNavigateToSettings={() => setTab("settings")} />}
       {tab === "settings" && state.canManageSettings && state.document.settings && (
         <TelephonySettingsPanel
           key={`settings-${version}`}

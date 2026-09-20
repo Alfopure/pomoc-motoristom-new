@@ -3,6 +3,7 @@ import {
   AI_DEMO_INTRO_CUSTOM_MAX_CHARS, AI_DEMO_NAME_MAX_CHARS, AI_DEMO_NAME_MIN_CHARS,
   AI_DEMO_STANDING_RULES_MAX_CHARS, readAgentSettings, validateAgentPatch, writeAgentSettings,
 } from "@/server/telephony/ai-demo/agent-settings";
+import { AI_DEMO_ALLOWED_VOICES, AI_DEMO_NATURAL_VOICES } from "@/server/telephony/ai-demo/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,10 +23,13 @@ const LIMITS = {
   standingRulesMax: AI_DEMO_STANDING_RULES_MAX_CHARS,
 } as const;
 
+/** The panel renders these; sending them keeps the client off the server-only config. */
+const VOICES = { all: AI_DEMO_ALLOWED_VOICES, natural: AI_DEMO_NATURAL_VOICES } as const;
+
 export async function GET() {
   return handleAiDemoRead(async ({ deps }) => {
     const settings = await readAgentSettings(deps);
-    return Response.json({ settings, limits: LIMITS }, { headers: { "Cache-Control": "private, no-store" } });
+    return Response.json({ settings, limits: LIMITS, voices: VOICES }, { headers: { "Cache-Control": "private, no-store" } });
   }, "Nastavenia sa nepodarilo načítať.");
 }
 
@@ -33,6 +37,6 @@ export async function PATCH(request: Request) {
   return handleAiDemoWrite(request, async ({ deps, body }) => {
     const patch = validateAgentPatch(body);
     const settings = await writeAgentSettings(deps, patch);
-    return Response.json({ settings, limits: LIMITS });
+    return Response.json({ settings, limits: LIMITS, voices: VOICES });
   }, "Nastavenia sa nepodarilo uložiť.");
 }

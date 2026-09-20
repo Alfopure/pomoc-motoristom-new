@@ -5,6 +5,7 @@ import type { Database, Json } from "@/lib/supabase/database.types";
 import type { SmsActor, SmsConversationEntry, SmsInboxMessage } from "@/lib/sms/contracts";
 import { canReplyToSms, getSmsChannel } from "./sms-channel";
 import { normalizeSmsRecipient, SmsWorkflowError } from "./sms-errors";
+import { humansOnly } from "@/server/profile-kind";
 
 type Admin = SupabaseClient<Database>;
 type SmsRow = Database["public"]["Tables"]["motorist_sms_messages"]["Row"];
@@ -47,7 +48,7 @@ export async function loadSmsInbox(organizationId: string, filter: "all" | "unre
   const [result, summary, operators] = await Promise.all([
     query.order("created_at", { ascending: false }).order("id", { ascending: false }).range(offset, offset + PAGE_SIZE),
     loadSmsInboxSummary(organizationId),
-    admin.from("motorist_profiles").select("id, display_name").eq("organization_id", organizationId).eq("active", true).eq("access_status", "active"),
+    humansOnly(admin.from("motorist_profiles").select("id, display_name").eq("organization_id", organizationId).eq("active", true).eq("access_status", "active")),
   ]);
   if (result.error || operators.error) throw new SmsWorkflowError("Prijaté SMS sa nepodarilo načítať.");
   return {
