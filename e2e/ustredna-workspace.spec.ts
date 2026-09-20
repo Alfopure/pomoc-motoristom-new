@@ -68,7 +68,7 @@ test("server search survives exact routing navigation and browser back",async({p
 test("history quick filters preserve shared filters and reset pagination and advanced call state",async({page})=>{
  const evidence=await boot(page);const history=page.getByTestId("call-center-history");
  await history.getByRole("searchbox",{name:"Hľadať v celej histórii"}).fill("Stastny");
- await history.getByText("Filtre",{exact:true}).click();
+ const filtersSummary=history.locator("summary").filter({hasText:"Filtre"});await filtersSummary.click();
  await history.getByLabel("Od",{exact:true}).fill("2026-09-01");
  await history.getByLabel("Do",{exact:true}).fill("2026-09-20");
  await history.getByRole("combobox",{name:"Operátor",exact:true}).selectOption("operator-jana");
@@ -87,7 +87,7 @@ test("history quick filters preserve shared filters and reset pagination and adv
  expect(outbound.get("direction")).toBe("");expect(outbound.get("outcome")).toBe("");
  await expect(quickFilters.getByRole("button",{name:"Volané",exact:true})).toHaveAttribute("aria-pressed","true");
 
- await history.getByText("Filtre",{exact:true}).click();
+ await filtersSummary.click();
  await history.getByRole("combobox",{name:"Smer",exact:true}).selectOption("internal");
  const advanced=await waitForHistoryRequest(evidence,p=>p.get("direction")==="internal");
  expect(advanced.get("category")).toBe("all");expect(advanced.get("cursor")).toBe("");
