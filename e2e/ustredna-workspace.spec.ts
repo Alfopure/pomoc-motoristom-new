@@ -133,6 +133,7 @@ test("history quick filters and column chooser remain reachable on mobile",async
  const columns=history.locator("details").filter({has:page.getByText("Stĺpce",{exact:true})});const summary=columns.locator("summary");
  await summary.click();
  const panel=columns.locator(":scope > div");
+ await expect.poll(async()=>{const box=await panel.boundingBox();return box?box.y+box.height:Infinity;}).toBeLessThanOrEqual(844-76);
  const panelBox=await panel.boundingBox();expect(panelBox).not.toBeNull();
  const headerBox=await page.locator(".dispatch-app-header").boundingBox();expect(headerBox).not.toBeNull();
  expect(panelBox!.x).toBeGreaterThanOrEqual(0);expect(panelBox!.x+panelBox!.width).toBeLessThanOrEqual(390);
@@ -142,12 +143,12 @@ test("history quick filters and column chooser remain reachable on mobile",async
   const optionBox=await option.boundingBox();expect(optionBox!.y).toBeGreaterThanOrEqual(panelBox!.y);expect(optionBox!.y+optionBox!.height).toBeLessThanOrEqual(panelBox!.y+panelBox!.height);
  }
  const defaults=columns.getByRole("button",{name:"Predvolené stĺpce"});await defaults.scrollIntoViewIfNeeded();await expect(defaults).toBeVisible();
+ await page.screenshot({path:".context/history-mobile-quick-filters-columns.png"});
  await columns.getByRole("checkbox",{name:"Poznámka"}).focus();await page.keyboard.press("Escape");
  await expect(columns).not.toHaveAttribute("open","");await expect(summary).toBeFocused();
  await summary.click();await expect(columns).toHaveAttribute("open","");
  await page.getByRole("heading",{name:"Ústredňa",exact:true}).first().click();await expect(columns).not.toHaveAttribute("open","");
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
- await page.screenshot({path:".context/history-mobile-quick-filters-columns.png"});
  expect(evidence.errors).toEqual([]);
 });
 
@@ -199,7 +200,7 @@ test("200 percent equivalent viewport and reduced motion keep primary actions re
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
  await page.getByRole("searchbox",{name:"Hľadať v celej histórii"}).focus();await expect(page.getByRole("searchbox",{name:"Hľadať v celej histórii"})).toBeFocused();
  const columns=page.getByTestId("call-center-history").locator("details").filter({has:page.getByText("Stĺpce",{exact:true})});await columns.locator("summary").click();
- const panel=columns.locator(":scope > div");const panelBox=await panel.boundingBox();expect(panelBox).not.toBeNull();
+ const panel=columns.locator(":scope > div");await expect.poll(async()=>{const box=await panel.boundingBox();return box?box.y+box.height:Infinity;}).toBeLessThanOrEqual(450-76);const panelBox=await panel.boundingBox();expect(panelBox).not.toBeNull();
  const headerBox=await page.locator(".dispatch-app-header").boundingBox();expect(headerBox).not.toBeNull();
  expect(panelBox!.y).toBeGreaterThanOrEqual(headerBox!.y+headerBox!.height+8);expect(panelBox!.y+panelBox!.height,"column menu remains above fixed navigation at 200 percent equivalent viewport").toBeLessThanOrEqual(450-76);
  for(const control of[...(await columns.getByRole("checkbox").all()),columns.getByRole("button",{name:"Predvolené stĺpce"})]){await control.scrollIntoViewIfNeeded();const currentPanel=await panel.boundingBox();const box=await control.boundingBox();expect(currentPanel).not.toBeNull();expect(box).not.toBeNull();expect(currentPanel!.y+currentPanel!.height).toBeLessThanOrEqual(450-76);expect(box!.y).toBeGreaterThanOrEqual(currentPanel!.y);expect(box!.y+box!.height).toBeLessThanOrEqual(currentPanel!.y+currentPanel!.height);}
