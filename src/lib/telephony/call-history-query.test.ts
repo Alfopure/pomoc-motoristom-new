@@ -13,15 +13,24 @@ describe("history query boundaries", () => {
   it.each(["2026-02-30", "bad", "2026-13-01"])("rejects invalid dates %s", from => {
     expect(() => parseCallHistoryQuery(new URLSearchParams({ from }))).toThrow();
   });
-  it.each([{ from: "2026-09-20", to: "2026-09-19" }, { limit: "101" }, { limit: "NaN" }, { operatorId: "other" }, { direction: "bad" }, { q: "a".repeat(161) }])("rejects invalid filter %j", params => {
+  it.each([{ from: "2026-09-20", to: "2026-09-19" }, { limit: "101" }, { limit: "NaN" }, { operatorId: "other" }, { direction: "bad" }, {category:"unknown"}, { q: "a".repeat(161) }])("rejects invalid filter %j", params => {
     expect(() => parseCallHistoryQuery(new URLSearchParams(Object.entries(params).filter((entry): entry is [string, string] => typeof entry[1] === "string")))).toThrow();
   });
+  it("defaults to all and accepts the four quick categories without discarding advanced filters", () => {
+    expect(parseCallHistoryQuery(new URLSearchParams()).category).toBe("all");
+    for (const category of ["all","outbound","received","missed"]) {
+      expect(parseCallHistoryQuery(new URLSearchParams({category,direction:"internal",outcome:"failed"}))).toMatchObject({category,direction:"internal",outcome:"failed"});
+    }
+  });
   it("retains null timestamps and stable identity in the cursor", () => {
-    for (const startedAt of [null, "2026-09-19T12:00:00.000Z"]) {
+    for (const startedAt of [null, "2026-09-19T12:00:00.000Z", "2026-09-19T12:00:00.123456+00:00"]) {
       const cursor = { startedAt, id: "00000000-0000-4000-8000-000000000001" };
       expect(decodeHistoryCursor(encodeHistoryCursor(cursor))).toEqual(cursor);
     }
     expect(() => decodeHistoryCursor("malformed")).toThrow();
     expect(() => decodeHistoryCursor(encodeURIComponent('{"id":"bad","startedAt":null}'))).toThrow();
+  });
+  it.each(["09/19/2026", "2026-02-30T00:00:00Z", "2026-09-19T24:00:00Z", "2026-09-19T12:00:00Z,or(id.gt.0)"])("rejects malformed cursor timestamp %s", startedAt => {
+    expect(() => decodeHistoryCursor(encodeHistoryCursor({id:"00000000-0000-4000-8000-000000000001",startedAt}))).toThrow();
   });
 });

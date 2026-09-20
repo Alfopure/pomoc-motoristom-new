@@ -1,9 +1,12 @@
 "use client";
 
-import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   BookUser,
+  Columns3,
+  Headphones,
+  PhoneMissed,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -22,11 +25,11 @@ import {
 import type { CallCenterCall, CallOutcome, DispatchData } from "@/data/dispatch-types";
 import type { DispatchCase, DispatchMetrics, Operator } from "@/domain/types";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
-import { callStatusLabels } from "@/domain/statuses";
 import { CallbackQueuePanel } from "./CallbackQueuePanel";
 import { CallDetailDrawer } from "./CallDetailDrawer";
 import { CallNotificationFocus } from "./CallNotificationFocus";
 import { CallCenterTeam } from "./CallCenterTeam";
+import { HistoryMenu } from "./HistoryMenu";
 import { LiveCallsWorkspace } from "./LiveCallOverview";
 import type { PhoneCallAction } from "./phone-bar-model";
 import type {
@@ -46,6 +49,7 @@ import type {
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
+import { DEFAULT_HISTORY_COLUMNS, HISTORY_CATEGORIES, HISTORY_COLUMNS, historyCallbackLabel, historyResult, historySeconds, parseHistoryColumns, type HistoryCategory, type HistoryColumn } from "./history-display";
 import styles from "./CallCenterModule.module.css";
 
 type CallCenterModuleProps = {
@@ -456,9 +460,9 @@ function CompactDialer({ busy, configured, onDial }: { busy: boolean; configured
 }
 
 
-type HistoryView = { q: string; from: string; to: string; direction: string; outcome: string; operatorId: string; lineId: string; cursors: (string | null)[]; page: number };
-const DEFAULT_HISTORY_VIEW: HistoryView = { q: "", from: "", to: "", direction: "", outcome: "", operatorId: "", lineId: "", cursors: [null], page: 0 };
-type HistoryResponse = { searchAvailable?: boolean; calls: CallCenterCall[]; nextCursor: string | null; checkedAt?: string; error?: string; filters?: { lines: { id: string; label: string }[]; operators: { id: string; name: string }[] } };
+type HistoryView = { category: HistoryCategory; q: string; from: string; to: string; direction: string; outcome: string; operatorId: string; lineId: string; cursors: (string | null)[]; page: number };
+const DEFAULT_HISTORY_VIEW: HistoryView = { category: "all", q: "", from: "", to: "", direction: "", outcome: "", operatorId: "", lineId: "", cursors: [null], page: 0 };
+type HistoryResponse = { scanLimited?: boolean; searchAvailable?: boolean; calls: CallCenterCall[]; nextCursor: string | null; checkedAt?: string; error?: string; filters?: { lines: { id: string; label: string }[]; operators: { id: string; name: string }[] } };
 
 function HistoryPanel({ busyAction, cases, scopeKey, onCallBack, onLinkCall, onNewCase, onOpenCase, onOpenDetail, onAuthorizationLost, onAuthorized }: {
   busyAction: string | null; calls: CallCenterCall[]; cases: DispatchCase[]; scopeKey: string; onAuthorizationLost: () => void; onAuthorized: () => void;
@@ -469,6 +473,16 @@ function HistoryPanel({ busyAction, cases, scopeKey, onCallBack, onLinkCall, onN
     if (typeof window === "undefined") return DEFAULT_HISTORY_VIEW;
     try { const saved = JSON.parse(sessionStorage.getItem(`call-history-view:${scopeKey}`) ?? "null"); return saved && Array.isArray(saved.cursors) ? { ...DEFAULT_HISTORY_VIEW, ...saved } : DEFAULT_HISTORY_VIEW; } catch { return DEFAULT_HISTORY_VIEW; }
   });
+  const [columns, setColumns] = useState<HistoryColumn[]>(() => {
+    if (typeof window === "undefined") return DEFAULT_HISTORY_COLUMNS;
+    try { return parseHistoryColumns(JSON.parse(localStorage.getItem(`call-history-columns:${scopeKey}`) ?? "null")); } catch { return DEFAULT_HISTORY_COLUMNS; }
+  });
+  useEffect(() => { try { localStorage.setItem(`call-history-columns:${scopeKey}`, JSON.stringify(columns)); } catch { /* Storage may be disabled. */ } }, [columns, scopeKey]);
+  const enabledColumns = HISTORY_COLUMNS.filter(column => columns.includes(column.key));
+  const tableStyle = {
+    "--history-columns": `100px minmax(124px, 1.4fr) 86px minmax(96px, 1fr) ${enabledColumns.map(column => `${column.width}px`).join(" ")} 100px 60px`,
+    "--history-min-width": `${630 + enabledColumns.reduce((total, column) => total + column.width + 8, 0)}px`,
+  } as CSSProperties;
   const [query, setQuery] = useState(view.q);
   const [result, setResult] = useState<HistoryResponse>({ calls: [], nextCursor: null });
   const [loading, setLoading] = useState(true);
@@ -503,7 +517,7 @@ function HistoryPanel({ busyAction, cases, scopeKey, onCallBack, onLinkCall, onN
     return () => window.clearTimeout(timer);
   }, [query]);
   useEffect(() => { try { sessionStorage.setItem(`call-history-view:${scopeKey}`, JSON.stringify(view)); } catch { /* Storage can be unavailable in private browsing. */ } }, [scopeKey, view]);
-  const requestKey = JSON.stringify({ q: view.q, from: view.from, to: view.to, direction: view.direction, outcome: view.outcome, operatorId: view.operatorId, lineId: view.lineId, cursor: view.cursors[view.page] ?? "", limit: "25" });
+  const requestKey = JSON.stringify({ category: view.category, q: view.q, from: view.from, to: view.to, direction: view.direction, outcome: view.outcome, operatorId: view.operatorId, lineId: view.lineId, cursor: view.cursors[view.page] ?? "", limit: "25" });
   useEffect(() => {
     const controller = new AbortController();
     let stopped = false;
@@ -539,38 +553,61 @@ function HistoryPanel({ busyAction, cases, scopeKey, onCallBack, onLinkCall, onN
     return () => { stopped = true; controller.abort(); clearTimeout(poll); };
   }, [requestKey, retry, scrollKey, clearPrivateHistory, onAuthorized]);
   function filter(key: "from" | "to" | "direction" | "outcome" | "operatorId" | "lineId", value: string) {
-    setView((current) => ({ ...current, [key]: value, cursors: [null], page: 0 }));
+    setView((current) => ({ ...current, [key]: value, ...(["direction", "outcome"].includes(key) ? { category: "all" as const } : {}), cursors: [null], page: 0 }));
+  }
+  function category(value: HistoryCategory) {
+    if (listRef.current) listRef.current.scrollTop = 0;
+    try { sessionStorage.removeItem(scrollKey); } catch { /* Optional preference. */ }
+    setView(current => ({ ...current, category: value, direction: "", outcome: "", cursors: [null], page: 0 }));
   }
   const visibleCalls = result.calls;
   const searchAvailable = result.searchAvailable !== false;
   return <section data-testid="call-center-history" className={styles.historyPanel}>
-    <header className={styles.historyHeading}><h2><History size={16} />Prehľad hovorov</h2><span>{loading ? "Vyhľadávam…" : `Strana ${view.page + 1}`}</span></header>
+    <header className={styles.historyHeading}>
+      <h2><History size={16} />Prehľad hovorov</h2>
+      <div className={styles.historyCategories} role="group" aria-label="Typ hovorov">
+        {HISTORY_CATEGORIES.map((item, index) => {
+          const Icon = [History, PhoneOutgoing, PhoneIncoming, PhoneMissed][index];
+          return <button key={item.value} type="button" aria-pressed={view.category === item.value} disabled={!searchAvailable} onClick={() => category(item.value)}><Icon size={14} aria-hidden="true" />{item.label}</button>;
+        })}
+      </div>
+      <span className={styles.historyPageLabel} aria-live="polite">{loading ? "Vyhľadávam…" : `Strana ${view.page + 1}`}</span>
+    </header>
     <div className={styles.historySearch}>
       <label className={styles.historySearchInput}><Search size={16} /><span className="sr-only">Hľadať v celej histórii</span><input type="search" value={searchAvailable ? query : ""} disabled={!searchAvailable} maxLength={160} onChange={(event) => setQuery(event.target.value)} placeholder="Meno, zákazník, telefón, prípad alebo EČV" /></label>
-      {searchAvailable && <details className={styles.historyAdvanced}><summary>Filtre{Object.values({ from: view.from, to: view.to, direction: view.direction, outcome: view.outcome, operatorId: view.operatorId, lineId: view.lineId }).filter(Boolean).length ? " · aktívne" : ""}<ChevronDown size={13} /></summary><div>
+      {searchAvailable && <HistoryMenu className={styles.historyAdvanced} summary={<>Filtre{Object.values({ from: view.from, to: view.to, direction: view.direction, outcome: view.outcome, operatorId: view.operatorId, lineId: view.lineId }).filter(Boolean).length ? " · aktívne" : ""}<ChevronDown size={13} /></>}>
         <label>Od<input type="date" value={view.from} onChange={(event) => filter("from", event.target.value)} /></label>
         <label>Do<input type="date" value={view.to} onChange={(event) => filter("to", event.target.value)} /></label>
         <label>Smer<select value={view.direction} onChange={(event) => filter("direction", event.target.value)}><option value="">Všetky smery</option><option value="inbound">Prichádzajúce</option><option value="outbound">Odchádzajúce</option><option value="internal">Interné</option></select></label>
-        <label>Výsledok<select value={view.outcome} onChange={(event) => filter("outcome", event.target.value)}><option value="">Všetky výsledky</option><option value="answered">Prijaté</option><option value="missed">Zmeškané</option><option value="failed">Neúspešné</option><option value="callback">Spätné volanie</option></select></label>
+        <label>Výsledok<select value={view.outcome} onChange={(event) => filter("outcome", event.target.value)}><option value="">Všetky výsledky</option><option value="answered">Spojené</option><option value="missed">Zmeškané</option><option value="abandoned_queue">Zložené v čakárni</option><option value="failed">Neúspešné</option><option value="callback">Označené na spätné volanie</option></select></label>
         <label>Operátor<select value={view.operatorId} onChange={(event) => filter("operatorId", event.target.value)}><option value="">Všetci operátori</option>{result.filters?.operators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}</select></label>
         <label>Linka<select value={view.lineId} onChange={(event) => filter("lineId", event.target.value)}><option value="">Všetky linky</option>{result.filters?.lines.map((line) => <option key={line.id} value={line.id}>{line.label}</option>)}</select></label>
         <p>Dátumy zahŕňajú celý deň v časovom pásme Bratislavy.</p>
         <button type="button" onClick={() => { setView(DEFAULT_HISTORY_VIEW); setQuery(""); }}>Vymazať filtre</button>
-      </div></details>}
+      </HistoryMenu>}
+      <HistoryMenu className={styles.historyColumnsMenu} summary={<><Columns3 size={15} aria-hidden="true" />Stĺpce<ChevronDown size={13} aria-hidden="true" /></>}>
+        {HISTORY_COLUMNS.map(column => <label key={column.key}><input type="checkbox" checked={columns.includes(column.key)} onChange={event => setColumns(current => event.target.checked ? [...current, column.key] : current.filter(key => key !== column.key))} />{column.label}</label>)}
+          <button type="button" onClick={() => setColumns(DEFAULT_HISTORY_COLUMNS)}>Predvolené stĺpce</button>
+      </HistoryMenu>
     </div>
     {!searchAvailable && <p role="status" className="border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600">Vyhľadávanie v celej histórii zatiaľ nie je dostupné. Zobrazené sú posledné hovory.</p>}
     {error && <p role="status" className="border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">{error} <button type="button" className="underline" onClick={() => setRetry((value) => value + 1)}>Skúsiť znova</button></p>}
     {newResult && <button type="button" className="min-h-9 bg-sky-50 px-3 text-left text-xs font-semibold text-sky-900" onClick={() => { if (Date.now() >= authorizedUntil.current) { clearPrivateHistory("Prístup k histórii sa overuje."); return; } setResult(newResult); displayedIds.current = newResult.calls.map((call) => call.id).join(","); setNewResult(null); }}>Nové zmeny v histórii · zobraziť</button>}
-    <div className={styles.historyColumnHeadings}><span>Čas / výsledok</span><span>Volajúci / zákazník</span><span>Operátor / linka</span><span>Prípad</span><span>Akcie</span></div>
+    {result.scanLimited && <p role="status" className={styles.historyScanStatus}>Hľadanie pokračuje v starších hovoroch. Pokračujte na ďalšiu stranu.</p>}
+    <div className={styles.historyTable} style={tableStyle} tabIndex={0} role="region" aria-label="Zoznam hovorov">
+    <div className={styles.historyTableContent}>
+    <div className={styles.historyColumnHeadings}><span>Čas</span><span>Volajúci / zákazník</span><span>Výsledok</span><span>Operátor / linka</span>{enabledColumns.map(column => <span key={column.key} title={column.key === "waiting" ? "Čas pred spojením alebo zložením, vrátane hlasového menu." : column.label}>{column.heading}</span>)}<span>Prípad</span><span>Akcie</span></div>
     <div className={styles.historyRows} ref={listRef} aria-busy={loading} onScroll={(event) => { try { sessionStorage.setItem(scrollKey, String(event.currentTarget.scrollTop)); } catch {} }}>
-      {visibleCalls.map((call) => <HistoryCallRow key={call.id} busyAction={busyAction} call={call} cases={cases} onCallBack={onCallBack} onLinkCall={onLinkCall} onNewCase={onNewCase} onOpenCase={onOpenCase} onOpenDetail={onOpenDetail} />)}
-      {!visibleCalls.length && <EmptyState icon={History} title={loading ? "Načítavam hovory…" : "Žiadne nájdené hovory"} body={view.q || view.from || view.to || view.outcome ? "Skúste iný výraz alebo širšie obdobie." : "História sa zobrazí po prvom hovore."} />}
+      {visibleCalls.map((call) => <HistoryCallRow key={call.id} columns={columns} busyAction={busyAction} call={call} cases={cases} onCallBack={onCallBack} onLinkCall={onLinkCall} onNewCase={onNewCase} onOpenCase={onOpenCase} onOpenDetail={onOpenDetail} />)}
+      {!visibleCalls.length && <EmptyState icon={History} title={loading ? "Načítavam hovory…" : result.scanLimited ? "Hľadanie pokračuje" : "Žiadne nájdené hovory"} body={result.scanLimited ? "Ďalšie výsledky hľadajte na nasledujúcej strane." : view.q || view.from || view.to || view.outcome || view.category !== "all" || view.direction || view.lineId || view.operatorId ? "Skúste iný filter alebo širšie obdobie." : "História sa zobrazí po prvom hovore."} />}
     </div>
+    </div></div>
     <footer className={styles.historyPagination}><span>{visibleCalls.length} na strane · časy Bratislava</span><nav aria-label="Stránkovanie histórie hovorov"><button type="button" disabled={loading || !searchAvailable || view.page === 0} aria-label="Predchádzajúca strana" onClick={() => setView((current) => ({ ...current, page: Math.max(0, current.page - 1) }))}><ChevronLeft size={16} /></button><span>{view.page + 1}</span><button type="button" disabled={loading || !searchAvailable || !result.nextCursor} aria-label="Nasledujúca strana" onClick={() => setView((current) => ({ ...current, page: current.page + 1, cursors: [...current.cursors.slice(0, current.page + 1), result.nextCursor] }))}><ChevronRight size={16} /></button></nav></footer>
   </section>;
 }
 
 function HistoryCallRow({
+  columns,
   busyAction,
   call,
   cases,
@@ -580,6 +617,7 @@ function HistoryCallRow({
   onOpenCase,
   onOpenDetail,
 }: {
+  columns: HistoryColumn[];
   busyAction: string | null;
   call: CallCenterCall;
   cases: DispatchCase[];
@@ -615,8 +653,16 @@ function HistoryCallRow({
       : `Finálny cieľ ${employeeEndpoint}`;
   const DirectionIcon = call.direction === "outbound" ? PhoneOutgoing : call.direction === "internal" ? PhoneCall : PhoneIncoming;
   const displayedStartedAt = historyDisplayStartedAt(call);
-  const duration = Number.isFinite(call.durationSeconds) && (call.durationSeconds ?? 0) >= 0
-    ? `${Math.floor((call.durationSeconds ?? 0) / 60)}:${String(Math.floor((call.durationSeconds ?? 0) % 60)).padStart(2, "0")}` : null;
+  const result = historyResult(call);
+  const visibleColumns = HISTORY_COLUMNS.filter(column => columns.includes(column.key));
+  function extraValue(column: HistoryColumn, desktop = false) {
+    if (column === "duration") return <span className={styles.historyNumeric} aria-label={desktop ? `Dĺžka hovoru ${historySeconds(call.durationSeconds)}` : undefined}>{historySeconds(call.durationSeconds)}</span>;
+    if (column === "waiting") return <span className={styles.historyNumeric} title="Čas pred spojením alebo zložením, vrátane hlasového menu.">{historySeconds(call.waitSecondsKnown === false ? undefined : call.waitSeconds)}</span>;
+    if (column === "recording") return call.recordingId ? <button type="button" className={styles.historyRecording} onClick={() => onOpenDetail(call)} aria-label={`Otvoriť nahrávku hovoru ${formatPhoneNumberForDisplay(customerNumber)}`} title="Otvoriť nahrávku"><Headphones size={16} /></button> : <span title="Bez dostupnej nahrávky">—</span>;
+    if (column === "callback") return <span className={styles.historyCallback} title={call.callback?.dueAt ? `Termín: ${formatShortDate(call.callback.dueAt)} ${formatTime(call.callback.dueAt)}` : undefined}>{historyCallbackLabel(call)}{call.callback?.claimedByName && <small>{call.callback.claimedByName}</small>}</span>;
+    const note = call.outcomeNote?.trim();
+    return note ? <button type="button" className={styles.historyNote} onClick={() => onOpenDetail(call)} title={note}>{note}</button> : <span>—</span>;
+  }
 
   return (
     <div data-testid="call-history-row" className="min-w-0 hover:bg-zinc-50">
@@ -626,7 +672,7 @@ function HistoryCallRow({
           <time dateTime={displayedStartedAt} title={`${formatShortDate(displayedStartedAt)} ${formatTime(displayedStartedAt)}`}>
             <strong>{formatTime(displayedStartedAt)}</strong><span> · {formatShortDate(displayedStartedAt)}</span>
           </time>
-          <CallStatusPill status={call.status} />
+          <span className={styles.historyResult} data-tone={result.tone}>{result.label}</span>
         </div>
         <div className={styles.mobileIdentity}>
           <button type="button" onClick={() => onOpenDetail(call)} className={styles.customerButton} aria-label={`Otvoriť detail hovoru ${formatPhoneNumberForDisplay(customerNumber)}`}>
@@ -638,6 +684,7 @@ function HistoryCallRow({
             Volať
           </button>
         </div>
+        {visibleColumns.length > 0 && <dl className={styles.historyMobileExtras}>{visibleColumns.map(column => <div key={column.key}><dt>{column.label}</dt><dd>{extraValue(column.key)}</dd></div>)}</dl>}
         <div className={styles.mobileContext}>
           {call.caseId ? (
             <button type="button" onClick={() => onOpenCase(call.caseId!)} className={styles.caseButton} title={call.caseNumber ?? "Otvoriť prípad"}>
@@ -669,9 +716,11 @@ function HistoryCallRow({
         )}
       </div>
       <div className={styles.desktopHistoryRow}>
-        <div className={styles.historyTime}><strong title={call.endedAt ? `Ukončený ${formatShortDate(call.endedAt)} ${formatTime(call.endedAt)}` : undefined}><DirectionIcon size={12} aria-label={directionLabel[call.direction]} />{formatTime(displayedStartedAt)}{call.endedAt ? `–${formatTime(call.endedAt)}` : ""}{duration && <small aria-label={`Dĺžka hovoru ${duration}`}>{duration}</small>}</strong><span className={styles.historyTimeMeta}><time dateTime={displayedStartedAt}>{formatShortDate(displayedStartedAt)}</time><span className={styles.historyStatus} title={callCenterStatusLabel[call.status]}>{callCenterStatusLabel[call.status]}</span></span></div>
-        <button type="button" onClick={() => onOpenDetail(call)} className={styles.historyCustomer} title={`${customerName ?? ""} ${formatPhoneNumberForDisplay(customerNumber)}`}><strong>{customerSummary || formatPhoneNumberForDisplay(customerNumber) || "Neznáme číslo"}</strong><span>{customerSummary ? formatPhoneNumberForDisplay(customerNumber) : callCenterStatusLabel[call.status]}</span></button>
+        <div className={styles.historyTime}><strong title={call.endedAt ? `Ukončený ${formatShortDate(call.endedAt)} ${formatTime(call.endedAt)}` : undefined}><DirectionIcon size={12} aria-label={directionLabel[call.direction]} />{formatTime(displayedStartedAt)}{call.endedAt ? `–${formatTime(call.endedAt)}` : ""}</strong><time dateTime={displayedStartedAt}>{formatShortDate(displayedStartedAt)}</time></div>
+        <button type="button" onClick={() => onOpenDetail(call)} className={styles.historyCustomer} title={`${customerName ?? ""} ${formatPhoneNumberForDisplay(customerNumber)}`}><strong>{customerSummary || formatPhoneNumberForDisplay(customerNumber) || "Neznáme číslo"}</strong>{customerSummary && <span>{formatPhoneNumberForDisplay(customerNumber)}</span>}</button>
+        <span className={styles.historyResult} data-tone={result.tone}>{result.label}</span>
         <div className={styles.historyOperator}><strong title={operatorName}>{operatorName}</strong><span title={`${employeeEndpointLabel} · ${call.lineLabel}`}>{call.lineLabel}</span></div>
+        {visibleColumns.map(column => <div key={column.key} className={styles.historyExtra} data-column={column.key}>{extraValue(column.key, true)}</div>)}
         <div className={styles.historyCase}>{call.caseId ? <button type="button" onClick={() => onOpenCase(call.caseId!)} title={`Otvoriť prípad ${call.caseNumber ?? ""}`}><Link2 size={12} /><span>{call.caseNumber ?? "Otvoriť prípad"}</span></button> : <details onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}><summary><Plus size={12} />Prípad</summary><div><button type="button" onClick={() => onNewCase(call)}><Plus size={13} />Nový prípad</button><CaseLinkControl call={call} cases={cases} disabled={busyAction === `${call.id}:link`} onLink={(caseId) => onLinkCall(call, caseId)} /></div></details>}</div>
         <button type="button" onClick={() => onCallBack(call)} disabled={phoneScopeBusy(busyAction)} className={styles.historyCallAction} title="Volať späť">{busyAction === `${call.id}:call_back` ? <Loader2 size={14} className="animate-spin" /> : <PhoneOutgoing size={14} />}Volať</button>
       </div>
@@ -1096,10 +1145,6 @@ function StatusBadge({ label, tone }: { label: string; tone: "ok" | "warn" | "ne
   return <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${badgeClass[tone]}`}>{label}</span>;
 }
 
-function CallStatusPill({ status }: { status: CallCenterCall["status"] }) {
-  return <StatusBadge label={callCenterStatusLabel[status]} tone={callTone(status)} />;
-}
-
 function formatTime(value: string) {
   if (!Number.isFinite(Date.parse(value))) return "—";
   return new Intl.DateTimeFormat("sk-SK", {
@@ -1185,22 +1230,6 @@ function normalizeSearch(value: string) {
 
 
 
-function callTone(status: CallCenterCall["status"]): "ok" | "warn" | "neutral" | "bad" {
-  if (status === "answered" || status === "outbound") {
-    return "ok";
-  }
-
-  if (status === "incoming" || status === "ringing_agent") {
-    return "warn";
-  }
-
-  if (status === "missed" || status === "abandoned_queue" || status === "failed") {
-    return "bad";
-  }
-
-  return "neutral";
-}
-
 function looksLikeUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -1221,17 +1250,6 @@ const contactRoleLabel: Record<TelephonyDirectoryContact["role"], string> = {
   assistance: "Asistenčná služba",
   branch: "Pobočka",
   partner: "Partner",
-};
-
-const callCenterStatusLabel: Record<CallCenterCall["status"], string> = {
-  incoming: callStatusLabels.incoming,
-  ringing_agent: callStatusLabels.ringing_agent,
-  answered: callStatusLabels.answered,
-  missed: callStatusLabels.missed,
-  abandoned_queue: "opustený rad",
-  outbound: callStatusLabels.outbound,
-  ended: callStatusLabels.ended,
-  failed: "zlyhalo",
 };
 
 const directionLabel: Record<CallCenterCall["direction"], string> = {
