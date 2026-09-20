@@ -51,18 +51,30 @@ const WINDOW_CHARS = 120;
  * and digits together, so that is the bar for having tried.
  */
 /**
- * Whether one run of characters is shaped like a Slovak plate.
+ * The letter/digit silhouette of a plate: "BL123AB" becomes "LLDDDLL".
  *
- * Two letters, three digits, two letters — give or take one on each side. The
- * shape matters more than the size: earlier versions asked only for four
- * letters (so "prosím" was a wrong plate) and then for any digit (so "o 15
- * minút" was too). Both locked legitimate callers out of their own case by
- * spending their tries on ordinary speech.
- *
- * "JETO2026" has the letters and the digits but not the order, and is refused.
+ * Comparing silhouettes rather than a fixed pattern is what makes the counter
+ * work for a plate this office has never seen. An earlier version hard-coded
+ * the Slovak two-three-two shape, so a four-digit or foreign plate matched
+ * nothing, no guess was ever charged, and the gate could be hammered forever.
  */
-export function looksLikePlateShaped(text: string): boolean {
-  return /^[A-Z]{1,3}[0-9]{3}[A-Z]{1,3}$/.test(normalizePlate(text));
+function silhouette(text: string): string {
+  return normalizePlate(text).replace(/[A-Z]/g, "L").replace(/[0-9]/g, "D");
+}
+
+/**
+ * Whether a run of characters is a plausible guess at *this* plate.
+ *
+ * It has to look like the thing on file — same silhouette — which is narrow
+ * enough that ordinary speech never qualifies. Earlier attempts at this test
+ * asked for four letters (so "prosím" was a wrong plate) and then for any
+ * digit (so "o 15 minút" was too), and both spent the caller's tries on
+ * nothing.
+ */
+export function looksLikePlateShaped(text: string, storedPlate: string | null | undefined): boolean {
+  const shape = silhouette(storedPlate ?? "");
+  if (shape.length < 5) return false;
+  return silhouette(text) === shape;
 }
 
 export class PlateGate {
@@ -143,7 +155,7 @@ export class PlateGate {
     // all, and counting utterances let three guesses in one breath cost one.
     let spent = false;
     for (const candidate of plateCandidates(this.heard)) {
-      if (!looksLikePlateShaped(candidate)) continue;
+      if (!looksLikePlateShaped(candidate, this.found.plateOnFile)) continue;
       const normalized = normalizePlate(candidate);
       if (this.counted.has(normalized)) continue;
       this.counted.add(normalized);

@@ -158,13 +158,24 @@ describe("looksLikePlateShaped", () => {
   it("does not treat ordinary numbers in speech as an answer", () => {
     // "o 15 minút" and "je to 2026" both burned an attempt in an earlier version.
     for (const phrase of ["o 15 minút", "je to 2026", "pätnásť", "číslo 7", "bude to 20 eur"]) {
-      expect(looksLikePlateShaped(phrase), phrase).toBe(false);
+      expect(looksLikePlateShaped(phrase, "BL123AB"), phrase).toBe(false);
     }
   });
 
-  it("recognises something said in the shape of a plate", () => {
+  it("recognises a guess shaped like the plate on file", () => {
     for (const phrase of ["BL 123 AB", "ke456cd", "TT111AA"]) {
-      expect(looksLikePlateShaped(phrase), phrase).toBe(true);
+      expect(looksLikePlateShaped(phrase, "BL123AB"), phrase).toBe(true);
     }
+  });
+
+  it("follows the stored plate's own shape, not a Slovak template", () => {
+    // A four-digit or foreign plate used to match nothing, so no guess was ever
+    // charged and the gate could be hammered forever.
+    expect(looksLikePlateShaped("AB 1234 CD", "AB1234CD")).toBe(true);
+    expect(looksLikePlateShaped("BL 123 AB", "AB1234CD")).toBe(false);
+  });
+
+  it("charges nothing when there is no plate to be shaped like", () => {
+    expect(looksLikePlateShaped("BL123AB", null)).toBe(false);
   });
 });

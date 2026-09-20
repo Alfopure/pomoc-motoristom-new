@@ -154,8 +154,17 @@ export type ProbeLimits = {
 export type ProbeControls = {
   /** Milliseconds since anybody last said anything. */
   silenceMs: number;
-  /** Nudge her to say something now. */
+  /** Nudge her to say something now. Counts against the nudge budget. */
   say: (instruction: string) => void;
+  /**
+   * Give her a standing instruction without telling her to speak.
+   *
+   * `say` always follows the instruction with "answer now", which is right for
+   * breaking a silence and wrong for everything else — a rule that says *stay
+   * quiet about something* must not arrive with an order to talk, and it
+   * should not spend one of the two nudges the silence watcher is counting on.
+   */
+  tell: (instruction: string) => void;
   /** How many times `say` has already been used on this call. */
   saidCount: number;
 };
@@ -378,8 +387,18 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
       closeTimer = setTimeout(() => finish(firstDeltaMs !== null ? "heard_started" : appendedMs !== null ? "appended" : "failed"), limits.probeWindowMs);
 
       // Save as we go, and stop as soon as the caller says the call is over.
+      let toldCount = 0;
       if (params.onProgress) {
         const every = limits.probeCheckpointMs ?? 10_000;
+        const tell = (instruction: string) => {
+          if (settled) return;
+          try {
+            toldCount += 1;
+            active.send(JSON.stringify({ type: "session.instructions.append", event_id: `tell-${params.eventIdSeed}-${toldCount}`, delegation_id: null, content: instruction }));
+          } catch {
+            // An instruction that cannot be delivered is not worth a call.
+          }
+        };
         const say = (instruction: string) => {
           if (settled) return;
           try {
@@ -402,7 +421,7 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
           // and in a serverless function an uncaught one takes the listener
           // down with the transcript it was holding. The checkpoint is
           // bookkeeping; nothing it does is worth ending a call for.
-          void (async () => params.onProgress?.(snapshot(status), { silenceMs: since() - lastSpeech, say, saidCount }))()
+          void (async () => params.onProgress?.(snapshot(status), { silenceMs: since() - lastSpeech, say, tell, saidCount }))()
             .then((carryOn) => {
               if (carryOn === false) finish(status);
             })

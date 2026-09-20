@@ -454,6 +454,8 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
   // would be unhandled; this keeps it a resolved value either way.
   gatePromise.catch(() => undefined);
   let gate: PreparedGate | null | undefined;
+  // Two checkpoints can overlap; the opening is said once.
+  let openingTold = false;
 
   let result: GreetingResult;
   try {
@@ -478,8 +480,14 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
         // First checkpoint: collect the lookup started before the greeting and
         // tell her, once, that the caller has a case she must not raise first.
         if (gate === undefined) {
-          gate = await gatePromise;
-          if (gate?.opening) controls.say(gate.opening);
+          gate = await gatePromise.catch(() => null);
+          // `tell`, not `say`: this is a rule about staying quiet, and arriving
+          // with "answer now" attached would have her talk over the caller. It
+          // also must not spend one of the two nudges the silence watcher has.
+          if (gate?.opening && !openingTold) {
+            openingTold = true;
+            controls.tell(gate.opening);
+          }
         }
         await advanceVerification(deps, gate, partial, controls);
 
@@ -494,6 +502,9 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
     });
   } catch (error) {
     deps.logger?.({ level: "warn", scope: "ai-demo", attemptId: attempt.id, message: "greeting failed", error: error instanceof Error ? error.message : String(error) });
+    // A socket that dies mid-call must not hand back the guesses already made.
+    if (gate === undefined) gate = await gatePromise.catch(() => null);
+    await flushVerification(deps, gate, null);
     await transitionAttempt(deps.admin, attempt.id, ["bridged"], { state: "talking", greeting_status: "failed", talking_at: nowOf(deps).toISOString() });
     return;
   }
@@ -998,7 +1009,9 @@ async function preparePlateGate(deps: AiDemoDeps, attempt: AiDemoAttempt, transc
 async function advanceVerification(deps: AiDemoDeps, prepared: PreparedGate | null, partial: GreetingResult, controls: ProbeControls): Promise<void> {
   if (!prepared?.gate) return;
   const outcome = prepared.gate.observe(partial.transcript);
-  if (outcome.instruction) controls.say(outcome.instruction);
+  // Also `tell`: she is answering a caller who has just spoken, so she needs
+  // the facts, not an order to start talking.
+  if (outcome.instruction) controls.tell(outcome.instruction);
   if (outcome.attemptSpent || outcome.state === "verified") {
     await recordVerificationAttempts(deps, {
       caseId: prepared.caseId,
@@ -1011,9 +1024,9 @@ async function advanceVerification(deps: AiDemoDeps, prepared: PreparedGate | nu
 
 
 /** Records whatever the gate ended up knowing, once the call is over. */
-async function flushVerification(deps: AiDemoDeps, prepared: PreparedGate | null | undefined, result: GreetingResult): Promise<void> {
+async function flushVerification(deps: AiDemoDeps, prepared: PreparedGate | null | undefined, result: GreetingResult | null): Promise<void> {
   if (!prepared?.gate) return;
-  const outcome = prepared.gate.observe(result.transcript);
+  const outcome = prepared.gate.observe(result?.transcript ?? null);
   if (prepared.gate.attemptsUsed === 0 && outcome.state !== "verified") return;
   await recordVerificationAttempts(deps, {
     caseId: prepared.caseId,
