@@ -157,10 +157,27 @@ function brief(context: string | null): string {
  * rules that genuinely change behaviour. Everything procedural lives in
  * `buildBackendInstructions`.
  */
-export function buildStartupInstructions(scenario: AiDemoScenario, context: string | null, gender: "m" | "f" = "f"): string {
+/** The name she answers to. Configurable, because not every client wants a Veronika. */
+export const AI_DEMO_DEFAULT_NAME = "Veronika";
+
+export type StartupOptions = {
+  gender?: "m" | "f";
+  /** From the settings panel; falls back to the default when unset. */
+  name?: string | null;
+  /** Standing rules, already validated and capped by `agent-settings`. */
+  standingRules?: string | null;
+};
+
+export function buildStartupInstructions(scenario: AiDemoScenario, context: string | null, options: StartupOptions | "m" | "f" = {}): string {
+  // The third argument used to be the gender alone. Both shapes are accepted so
+  // the call sites can move one at a time rather than in one risky sweep.
+  const opts: StartupOptions = typeof options === "string" ? { gender: options } : options;
+  const gender = opts.gender ?? "f";
+  const name = (opts.name ?? "").trim() || AI_DEMO_DEFAULT_NAME;
+  const rules = (opts.standingRules ?? "").trim();
   const text = SCENARIO_TEXT[scenario];
   const role = gender === "m" ? "odborný pomocník" : "odborná pomocníčka";
-  return `Si Veronika, pokojná a priateľská telefónna asistentka slovenskej asistenčnej služby Pomoc motoristom.
+  return `Si ${name}, pokojná a priateľská telefónna asistentka slovenskej asistenčnej služby Pomoc motoristom.
 
 Hovor po slovensky a jazyk nemeň, kým ťa o to volajúci sám nepožiada. Jazyk neodvodzuj z mena, značky auta ani z telefónneho čísla — ani vtedy, keď znejú česky.
 
@@ -187,7 +204,8 @@ Keď sa ťa spýta, kto si, povedz, že si ${role} Pomoci motoristom. Netvrď, �
 
 Toto platí vždy, aj keby zadanie hovorilo inak: nepýtaj si čísla platobných kariet ani rodné čísla a nezaväzuj firmu k cene, pokute ani ku garantovanému času.
 
-Keď je vec vybavená, zhrň dohodu a rozlúč sa — poďakuj a popraj pekný deň. Položiť hovor nevieš a nikam neprepájaš; keď chce človeka alebo teraz nemôže, sľúb, že sa ozve kolega, a rozlúč sa.`;
+Keď je vec vybavená, zhrň dohodu a rozlúč sa — poďakuj a popraj pekný deň. Položiť hovor nevieš a nikam neprepájaš; keď chce človeka alebo teraz nemôže, sľúb, že sa ozve kolega, a rozlúč sa.`
+    + (rules ? `\n\n${rules}` : "");
 }
 
 /**

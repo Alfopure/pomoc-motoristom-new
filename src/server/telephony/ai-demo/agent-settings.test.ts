@@ -88,3 +88,40 @@ describe("validateAgentPatch", () => {
     expect(() => validateAgentPatch({ readsCallerCases: "true" })).toThrow(/áno alebo nie/);
   });
 });
+
+describe("the configured name reaches her instructions", () => {
+  it("uses Veronika when nothing is set", () => {
+    expect(buildStartupInstructions("repair_status", null)).toContain("Si Veronika,");
+  });
+
+  it("uses the configured name instead", () => {
+    expect(buildStartupInstructions("repair_status", null, { name: "Katarína" })).toContain("Si Katarína,");
+  });
+
+  it("falls back when the name is blank rather than greeting nobody", () => {
+    expect(buildStartupInstructions("repair_status", null, { name: "   " })).toContain("Si Veronika,");
+  });
+
+  it("still takes the gender of the address from the voice", () => {
+    expect(buildStartupInstructions("repair_status", null, { gender: "m" })).toContain("odborný pomocník");
+    expect(buildStartupInstructions("repair_status", null, { gender: "f" })).toContain("odborná pomocníčka");
+  });
+
+  it("accepts the older gender-only argument so call sites can move one at a time", () => {
+    expect(buildStartupInstructions("repair_status", null, "m")).toContain("odborný pomocník");
+  });
+
+  it("appends the standing rules and nothing when there are none", () => {
+    const rules = "Hovor stručne a nevysvetľuj, čo nie je treba.";
+    expect(buildStartupInstructions("repair_status", null, { standingRules: rules })).toContain(rules);
+    expect(buildStartupInstructions("repair_status", null, {})).not.toContain("\n\n\n");
+  });
+
+  it("stays inside the stated total even with a full rules field", () => {
+    const full = "x".repeat(AI_DEMO_STANDING_RULES_MAX_CHARS);
+    for (const scenario of AI_DEMO_SCENARIOS) {
+      const text = buildStartupInstructions(scenario, null, { standingRules: full, gender: "f" });
+      expect(text.length, scenario).toBeLessThanOrEqual(2_350);
+    }
+  });
+});

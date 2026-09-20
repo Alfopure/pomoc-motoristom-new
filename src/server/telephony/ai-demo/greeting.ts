@@ -397,7 +397,12 @@ export async function runGreeting(params: RunGreetingParams): Promise<GreetingRe
           if (settled) return;
           const status = firstDeltaMs !== null ? "heard_started" : appendedMs !== null ? "appended" : "failed";
           const lastSpeech = stretches[stretches.length - 1]?.endMs ?? 0;
-          void Promise.resolve(params.onProgress?.(snapshot(status), { silenceMs: since() - lastSpeech, say, saidCount }))
+          // `Promise.resolve(f())` does not catch a *synchronous* throw from
+          // `f` — the exception escapes before there is a promise to reject,
+          // and in a serverless function an uncaught one takes the listener
+          // down with the transcript it was holding. The checkpoint is
+          // bookkeeping; nothing it does is worth ending a call for.
+          void (async () => params.onProgress?.(snapshot(status), { silenceMs: since() - lastSpeech, say, saidCount }))()
             .then((carryOn) => {
               if (carryOn === false) finish(status);
             })
