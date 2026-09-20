@@ -212,6 +212,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "telephony/ai-demo/[id]/review": { class: "session", role: ["admin"], note: "Prečíta prepis hovoru modelom a uloží súhrn, chyby a návrhy na úpravu pokynov." },
   "telephony/ai-demo/[id]/stop": { class: "session", role: ["admin"], note: "Ukončí demo; zámerne nekontroluje vypínače, aby vypnutie nových hovorov neblokovalo ukončenie bežiaceho." },
   "telephony/ai-demo/listen": { class: "public", note: "Volá ju bridge webhook, ktorý nemôže čakať celý hovor. Autentifikáciou je HMAC token viazaný na jeden konkrétny pokus, nie session — drží sideband a zaznamená prepis." },
+  "telephony/ai-demo/settings": { class: "session", role: ["admin"], note: "Ako sa AI správa: meno, hlas, stále pravidlá a oprávnenia. Čítanie je tiež admin-only — kto smie vidieť, čo má dovolené, je tá istá otázka ako kto to smie meniť." },
   "telephony/ai-demo/preflight": { class: "session", role: ["admin"], note: "Read-only kontrola pripravenosti; `?remote=1` pridá tri GET dopyty k poskytovateľom. Nič nevytvára hovor." },
   "telephony/operators/[id]/credential": { class: "session", role: ["manager", "admin"], note: "Vytvorí alebo pregeneruje Telnyx SIP credential operátora; pri pregenerovaní zmaže pôvodný credential u Telnyxu (neúspech = 502)." },
   "telephony/operators/[id]/disconnect": { class: "session", role: ["manager", "admin"], note: "Odpojí prehliadačový telefón operátora (ďalší heartbeat dostane 409) a zmaže jeho Telnyx credential, aby sa starým tokenom nedalo znova zaregistrovať (neúspech = 502)." },

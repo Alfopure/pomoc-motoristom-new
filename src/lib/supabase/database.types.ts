@@ -113,6 +113,7 @@ export type Database = {
         organization_id: string;
         user_id: string | null;
         email: string | null;
+        kind: "human" | "ai";
         display_name: string;
         role: "dispatcher" | "senior_dispatcher" | "manager" | "admin";
         phone_extension: string | null;
@@ -1410,6 +1411,24 @@ export type Database = {
         pause_reason_id: string | null;
         wrap_up_until: Timestamp | null;
         status_since: Timestamp;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
+      motorist_ai_agent_settings: Table<{
+        id: string;
+        organization_id: string;
+        profile_id: string | null;
+        display_name: string;
+        voice: string;
+        intro_style: "expert_helper" | "assistant" | "custom";
+        intro_custom: string | null;
+        standing_rules: string | null;
+        reads_caller_cases: boolean;
+        requires_plate_check: boolean;
+        creates_draft_cases: boolean;
+        adds_case_notes: boolean;
+        sms_enabled: boolean;
+        sms_max_per_call: number;
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
