@@ -111,7 +111,7 @@ DB_URL="postgresql://postgres.${PROJECT_REF}:${SUPABASE_DB_PASSWORD}@aws-0-${SUP
   supabase link --project-ref "$PROJECT_REF" --password "$SUPABASE_DB_PASSWORD" >/dev/null
   supabase db push --password "$SUPABASE_DB_PASSWORD"
 )
-echo "  migrations applied (including 20261002100000_ai_demo.sql)"
+echo "  migrations applied (including 20261007100000_ai_demo.sql)"
 
 if [ "${SEED_DEMO_DATA:-true}" = "true" ]; then
   PGPASSWORD="$SUPABASE_DB_PASSWORD" psql \

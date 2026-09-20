@@ -27,9 +27,9 @@ create table if not exists public.motorist_ai_agent_settings (
     check (intro_style in ('expert_helper', 'assistant', 'custom')),
   intro_custom text,
 
-  -- Appended to the voice prompt on every call. The cap is asserted in the
-  -- prompt tests, not here: a CHECK cannot know how much room the rest of the
-  -- prompt is using this week.
+  -- Appended to the voice prompt on every call. The cap is asserted in
+  -- agent-settings.test.ts, not here: a CHECK cannot know how much room the rest
+  -- of the prompt is using this week.
   standing_rules text,
 
   -- Permissions. Each one is read by the server before a tool is registered,

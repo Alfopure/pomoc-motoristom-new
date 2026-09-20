@@ -448,3 +448,17 @@ Test existuje od začiatku (`prompts.test.ts:22`) a prechádza spolu s ďalším
 **Opravené:** surové riadiace bajty nahradené escape sekvenciami (`\u0000`, `\u001F`). Hodnota reťazca je rovnaká, test overuje to isté, a súbor je opäť viditeľný pre nástroje.
 
 **Poučenie pre zvyšok plánu:** negatívny nález z greppu („toto nikde nie je") je dôkaz len vtedy, keď je istota, že súbor bol prečítaný. Ostatné negatívne nálezy v §0 sa týkajú súborov bez riadiacich bajtov — prekontrolované, jediný taký súbor v `src`, `supabase`, `tests` a `e2e` bol tento.
+
+---
+
+## 19. Brána pred nasadením fázy 1
+
+`humansOnly()` filtruje na `motorist_profiles.kind`. Kým ten stĺpec neexistuje, PostgREST vráti 42703 a dopyty, ktoré ho používajú, zlyhajú — vrátane zoznamu cieľov prepojenia, ktorý by sa vrátil ako prázdny a dispečer by nemal koho vybrať.
+
+**Preto platí poradie: najprv migrácia, potom kód.** Nie ako poznámka, ale ako podmienka merge.
+
+| Prostredie | Stav |
+|---|---|
+| Supabase `ifpaeegaesdmljfkdvcn` (jediná databáza tejto kópie — dev, preview aj produkcia) | **Aplikované 2026-09-20**, overené dotazom |
+
+Druhá vec, ktorá sa pritom našla: po merge z `dev` zdieľalo päť migrácií verziu s inou migráciou (napr. `20261006100000` mali `ai_agent_profile_kind` aj `call_history_search`). `supabase db push` kľúčuje na verziu, takže by jednu z každej dvojice ticho preskočil. Migrácie AI sú prečíslované na `20261007100000`–`20261007105000` a história v databáze je zosúladená.

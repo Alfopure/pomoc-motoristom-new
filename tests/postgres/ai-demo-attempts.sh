@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Applies `20261002100000_ai_demo.sql` to a disposable PostgreSQL cluster and
+# Applies `20261007100000_ai_demo.sql` to a disposable PostgreSQL cluster and
 # checks the guarantees the application relies on.
 #
 # The fixture contains only what this one migration references — the two
@@ -52,11 +52,11 @@ insert into public.motorist_organizations (id) values ('00000000-0000-4000-8000-
 insert into public.motorist_profiles (id) values ('00000000-0000-4000-8000-000000000005');
 SQL
 
-run -f "$ROOT/supabase/migrations/20261002100000_ai_demo.sql" >/dev/null
+run -f "$ROOT/supabase/migrations/20261007100000_ai_demo.sql" >/dev/null
 echo "migration applied"
 
 # Applying it twice must be a no-op: a preview redeploy must not break a push.
-run -f "$ROOT/supabase/migrations/20261002100000_ai_demo.sql" >/dev/null
+run -f "$ROOT/supabase/migrations/20261007100000_ai_demo.sql" >/dev/null
 echo "migration is idempotent"
 
 insert_attempt() {
