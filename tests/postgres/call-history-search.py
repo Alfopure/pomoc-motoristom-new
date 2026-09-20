@@ -10,6 +10,7 @@ ORG='00000000-0000-4000-8000-000000000001'
 OTHER='00000000-0000-4000-8000-000000000002'
 ACTOR='00000000-0000-4000-8000-000000000011'
 CASE='00000000-0000-4000-8000-000000000021'
+CONTACT='00000000-0000-4000-8000-000000000031'
 with psycopg.connect(DSN+' dbname=postgres',autocommit=True) as c:
     c.execute('drop database if exists history_contract with (force)')
     c.execute('create database history_contract')
@@ -21,7 +22,9 @@ with psycopg.connect(DSN+' dbname=history_contract',autocommit=True) as c:
     end $$;
     create table motorist_organizations(id uuid primary key,active boolean);
     create table motorist_profiles(id uuid primary key,organization_id uuid,active boolean,access_status text,role text);
-    create table motorist_contacts(id uuid primary key,organization_id uuid,name text);
+    -- Include the production phone column even though the RPC only reads name:
+    -- PL/pgSQL resolves unqualified variables against every joined column.
+    create table motorist_contacts(id uuid primary key,organization_id uuid,name text,phone text);
     create table motorist_vehicles(id uuid primary key,organization_id uuid,license_plate text);
     create table motorist_cases(id uuid primary key,organization_id uuid,case_number text,contact_id uuid,vehicle_id uuid,customer_details jsonb,vehicle_details jsonb);
     create table motorist_calls(id uuid primary key,organization_id uuid,case_id uuid,started_at timestamptz,
@@ -31,8 +34,10 @@ with psycopg.connect(DSN+' dbname=history_contract',autocommit=True) as c:
     c.execute((ROOT/'supabase/migrations/20261006100000_call_history_search.sql').read_text())
     c.execute('insert into motorist_organizations values(%s,true),(%s,true)',(ORG,OTHER))
     c.execute("insert into motorist_profiles values(%s,%s,true,'active','dispatcher')",(ACTOR,ORG))
-    c.execute('''insert into motorist_cases(id,organization_id,case_number,customer_details,vehicle_details)
-      values(%s,%s,'PM-2026-0001','{"firstName":"Ľudovít","lastName":"Šťastný","companyName":"Žltý motor"}','{"licensePlate":"BA123XY"}')''',(CASE,ORG))
+    c.execute('insert into motorist_contacts(id,organization_id,name,phone) values(%s,%s,%s,%s)',
+      (CONTACT,ORG,'Kontakt spoločnosti','+421900123456'))
+    c.execute('''insert into motorist_cases(id,organization_id,case_number,customer_details,vehicle_details,contact_id)
+      values(%s,%s,'PM-2026-0001','{"firstName":"Ľudovít","lastName":"Šťastný","companyName":"Žltý motor"}','{"licensePlate":"BA123XY"}',%s)''',(CASE,ORG,CONTACT))
     c.execute('''insert into motorist_calls(id,organization_id,started_at,direction,status,caller_number)
       select md5(i::text)::uuid,%s,'2026-09-19 12:00:00+00'::timestamptz-(i/2)*interval '1 second','inbound','ended','+421 900 123 456'
       from generate_series(1,10000) i''',(ORG,))
@@ -44,9 +49,22 @@ with psycopg.connect(DSN+' dbname=history_contract',autocommit=True) as c:
     def search(q='',limit=101,at=None,id=None,actor=ACTOR):
         return c.execute('select id,started_at from motorist_search_call_history(%s,%s,%s,null,null,null,null,null,null,%s,%s,%s)',(ORG,actor,q,at,id,limit)).fetchall()
     c.execute('set role service_role')
+    for query in ['', '421900123456', 'Stastny']:
+        try:
+            search(query)
+        except psycopg.errors.AmbiguousColumn as error:
+            assert error.sqlstate=='42702'
+            assert 'phone' in error.diag.message_primary
+        else:
+            raise AssertionError(f'original migration must reproduce ambiguous phone, query={query!r}')
+    print('PASS production-schema regression: original migration raises 42702 for empty, phone and name queries with motorist_contacts.phone present')
+    c.execute('reset role')
+    c.execute((ROOT/'supabase/migrations/20261006130000_call_history_search_variable_scope.sql').read_text())
+    c.execute('set role service_role')
+    assert len(search())==101, 'fixed RPC must load the unfiltered first page with contact.phone present'
     answered=c.execute("select count(*) from motorist_search_call_history(%s,%s,'',null,null,null,'answered')",(ORG,ACTOR)).fetchone()[0]
     assert answered==1, 'ended answered calls must remain in Prijaté filter'
-    for q in ['Cenek Stastny','Ludovit Stastny','Zlty motor','PM-2026-0001','BA123XY']:
+    for q in ['Cenek Stastny','Ludovit Stastny','Zlty motor','Kontakt spolocnosti','PM-2026-0001','BA123XY']:
         assert len(search(q))==1,q
     for phone in ['421900123456','0900 123 456','00421 900 123456','900123']:
         assert len(search(phone))==101,phone
