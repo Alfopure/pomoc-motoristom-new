@@ -3,7 +3,7 @@ import "server-only";
 import type { CallerCase } from "./caller-case";
 import { describeAfterVerification } from "./caller-case";
 import type { TranscriptEntry } from "./greeting";
-import { speechMatchesPlate } from "./plate";
+import { normalizePlate, plateCandidates, speechMatchesPlate } from "./plate";
 
 /**
  * The plate gate, as a small machine fed by the transcript.
@@ -35,25 +35,52 @@ export type VerificationLimits = {
 export const VERIFICATION_DEFAULTS: VerificationLimits = { maxAttempts: 3 };
 
 /**
+ * How much of the caller's speech is kept for matching.
+ *
+ * Long enough to hold a plate spelled out one character at a time with filler
+ * around it; short enough that two different plates said minutes apart cannot
+ * be spliced into a third.
+ */
+const WINDOW_CHARS = 120;
+
+/**
  * Anything that looks like an attempt at an answer.
  *
  * Without this every "áno", "prosím" and "moment" would burn an attempt and a
  * caller would be locked out by politeness. A plate has at least four letters
  * and digits together, so that is the bar for having tried.
  */
-function looksLikeAnAttempt(text: string): boolean {
-  const plain = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  // A digit is what separates a plate from a spoken word: ordinary Slovak has
-  // none, every Slovak plate has three. An earlier version counted any four
-  // letters, so "prosím" burned an attempt and politeness locked people out.
-  if (!/[0-9]/.test(plain)) return false;
-  return (plain.match(/[A-Za-z0-9]/g) ?? []).length >= 4;
+/**
+ * Whether one run of characters is shaped like a Slovak plate.
+ *
+ * Two letters, three digits, two letters — give or take one on each side. The
+ * shape matters more than the size: earlier versions asked only for four
+ * letters (so "prosím" was a wrong plate) and then for any digit (so "o 15
+ * minút" was too). Both locked legitimate callers out of their own case by
+ * spending their tries on ordinary speech.
+ *
+ * "JETO2026" has the letters and the digits but not the order, and is refused.
+ */
+export function looksLikePlateShaped(text: string): boolean {
+  return /^[A-Z]{1,3}[0-9]{3}[A-Z]{1,3}$/.test(normalizePlate(text));
 }
 
 export class PlateGate {
   private state: VerificationState = "waiting";
   private consumed = 0;
   private readonly seen = new Set<string>();
+  /** Plate-shaped guesses already charged for, so the same wrong answer costs once. */
+  private readonly counted = new Set<string>();
+  /**
+   * Everything the caller has said, joined.
+   *
+   * The transcript arrives as raw deltas — "BL", " 123", " AB" are three
+   * entries — so matching them one at a time would never find a plate and
+   * would spend an attempt on every fragment that happened to carry a digit.
+   * The words are therefore glued back together and the window is matched as
+   * a whole.
+   */
+  private heard = "";
 
   constructor(
     private readonly found: CallerCase,
@@ -77,41 +104,49 @@ export class PlateGate {
   /**
    * Feeds everything heard so far and reports what changed.
    *
-   * Takes the whole transcript rather than the newest line because the probe
-   * checkpoints on a timer, not per utterance — several turns can arrive at
-   * once. Entries already examined are skipped, so an attempt is counted once.
+   * Takes the whole transcript because the probe checkpoints on a timer, not
+   * per utterance. Fragments already folded into the window are remembered by
+   * content, so being handed the growing list repeatedly costs nothing.
    */
   observe(transcript: readonly TranscriptEntry[] | null): VerificationOutcome {
     if (this.state !== "waiting" || !transcript) {
       return { state: this.state, instruction: null, attemptSpent: false };
     }
 
-    // The probe hands over the whole transcript at every checkpoint, so the
-    // same utterance arrives again and again. Remembering what has been looked
-    // at by its content rather than by a position makes the counting correct
-    // whether the caller passes the growing list or only the newest lines —
-    // an index would have quietly stopped counting on the second style.
-    const fresh = transcript.filter((entry) => {
-      const key = `${entry.ms}|${entry.dir}|${entry.text}`;
-      if (this.seen.has(key)) return false;
-      this.seen.add(key);
-      return true;
-    });
-    let spent = false;
-
-    for (const entry of fresh) {
+    const fresh: string[] = [];
+    for (const entry of transcript) {
       if (entry.dir !== "in") continue;
+      const key = `${entry.ms}|${entry.text}`;
+      if (this.seen.has(key)) continue;
+      this.seen.add(key);
+      fresh.push(entry.text);
+    }
+    if (fresh.length === 0) return { state: this.state, instruction: null, attemptSpent: false };
 
-      if (speechMatchesPlate(entry.text, this.found.plateOnFile)) {
-        this.state = "verified";
-        return {
-          state: "verified",
-          instruction: describeAfterVerification(this.found, this.fullDisclosure),
-          attemptSpent: spent,
-        };
-      }
+    const added = fresh.join(" ");
+    this.heard = `${this.heard} ${added}`.trim().slice(-WINDOW_CHARS);
 
-      if (!looksLikeAnAttempt(entry.text)) continue;
+    // The window, not the fragment: a plate spelled across several deltas is
+    // one answer, and it is only found once the last piece has arrived.
+    if (speechMatchesPlate(this.heard, this.found.plateOnFile)) {
+      this.state = "verified";
+      return {
+        state: "verified",
+        instruction: describeAfterVerification(this.found, this.fullDisclosure),
+        attemptSpent: false,
+      };
+    }
+
+    // An attempt is a *candidate*, not an utterance and not a fragment. The
+    // window is searched for runs shaped like a plate; each new one costs one
+    // try. Counting fragments let a wrong plate spelled slowly cost nothing at
+    // all, and counting utterances let three guesses in one breath cost one.
+    let spent = false;
+    for (const candidate of plateCandidates(this.heard)) {
+      if (!looksLikePlateShaped(candidate)) continue;
+      const normalized = normalizePlate(candidate);
+      if (this.counted.has(normalized)) continue;
+      this.counted.add(normalized);
       this.consumed += 1;
       spent = true;
       if (this.attemptsUsed >= this.limits.maxAttempts) {

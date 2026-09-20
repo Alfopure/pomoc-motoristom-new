@@ -17,15 +17,22 @@ function today(now: Date): string {
 }
 
 export async function readVerificationAttempts(deps: AiDemoDeps, caseId: string, now: Date): Promise<number> {
-  const { data, error } = await deps.admin
-    .from("motorist_ai_verification_attempts")
-    .select("attempts")
-    .eq("organization_id", deps.organizationId)
-    .eq("case_id", caseId)
-    .eq("day", today(now))
-    .maybeSingle();
-  if (error || !data) return 0;
-  return typeof data.attempts === "number" ? data.attempts : 0;
+  try {
+    const { data, error } = await deps.admin
+      .from("motorist_ai_verification_attempts")
+      .select("attempts")
+      .eq("organization_id", deps.organizationId)
+      .eq("case_id", caseId)
+      .eq("day", today(now))
+      .maybeSingle();
+    if (error || !data) return 0;
+    return typeof data.attempts === "number" ? data.attempts : 0;
+  } catch {
+    // The comment above is the contract: an unreadable count reads as none.
+    // The plate still has to match, so the worst this costs is that somebody
+    // gets their three tries back during an outage.
+    return 0;
+  }
 }
 
 export async function recordVerificationAttempts(
@@ -33,6 +40,11 @@ export async function recordVerificationAttempts(
   input: { caseId: string; attempts: number; verified: boolean; now: Date },
 ): Promise<void> {
   try {
+    // Two calls about one case would otherwise race and the slower writer would
+    // hand tries back. Whoever writes last writes the larger number; a counter
+    // that only ever climbs cannot be reset by losing a race.
+    const stored = await readVerificationAttempts(deps, input.caseId, input.now);
+    const attempts = Math.max(stored, input.attempts);
     await deps.admin
       .from("motorist_ai_verification_attempts")
       .upsert(
@@ -40,7 +52,7 @@ export async function recordVerificationAttempts(
           organization_id: deps.organizationId,
           case_id: input.caseId,
           day: today(input.now),
-          attempts: input.attempts,
+          attempts,
           ...(input.verified ? { succeeded_at: input.now.toISOString() } : {}),
         },
         { onConflict: "case_id,day" },

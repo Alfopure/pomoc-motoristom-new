@@ -83,3 +83,18 @@ describe("speechMatchesPlate", () => {
     expect(speechMatchesPlate("čokoľvek", "")).toBe(false);
   });
 });
+
+describe("the fold is narrow on purpose", () => {
+  it("does not collapse plates that differ only by letters an ear never swaps", () => {
+    // These were all accepted by an earlier, OCR-shaped confusable map.
+    expect(plateMatches("BA123DO", "BA123OD")).toBe(false);
+    expect(plateMatches("DS123AA", "OS123AA")).toBe(false);
+    expect(plateMatches("BL123IL", "BL123LI")).toBe(false);
+    expect(plateMatches("ZA123BB", "2A12388")).toBe(false);
+  });
+
+  it("still forgives the two swaps a transcript really makes", () => {
+    expect(plateMatches("BA1O3AB", "BA103AB")).toBe(true);
+    expect(plateMatches("BA1I3AB", "BA113AB")).toBe(true);
+  });
+});

@@ -12,8 +12,16 @@
  * confusable map absorbs the rest.
  */
 
-/** Characters a transcript routinely swaps. Both directions fold to one form. */
-const CONFUSABLE: Record<string, string> = { O: "0", Q: "0", D: "0", I: "1", L: "1", S: "5", Z: "2", B: "8" };
+/**
+ * The two swaps a *speech* transcript actually makes: the letter O for a zero
+ * and the letter I for a one. Both sides fold to one form before comparing.
+ *
+ * An earlier version also folded Q, D, S, Z and B — those are what an OCR
+ * confuses, not an ear, and they collapsed genuinely different plates into
+ * each other: BA123DO and BA123OD became the same string, and so did ZA123BB
+ * and 2A12388. One guess would have covered about nine real plates.
+ */
+const CONFUSABLE: Record<string, string> = { O: "0", I: "1" };
 
 /**
  * Strips everything that is not a letter or a digit, removes diacritics and

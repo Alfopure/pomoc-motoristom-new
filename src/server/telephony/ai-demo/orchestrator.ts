@@ -444,7 +444,16 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
   // the plate checks out. That is the whole protection: not a sentence in the
   // instructions asking her to be careful, but the fact that there is nothing
   // to be careless with.
-  const gate = await preparePlateGate(deps, attempt);
+  //
+  // Started, not awaited. Up to five queries sit between the bridge and her
+  // first word if this is waited on here, and the one measurement this system
+  // is judged by is exactly that gap. Nothing needs the answer until the first
+  // checkpoint ten seconds later, by which time it has long since arrived.
+  const gatePromise = preparePlateGate(deps, attempt, probeLimits.keepTranscript === true);
+  // Nobody awaits the promise before the checkpoint, so an early rejection
+  // would be unhandled; this keeps it a resolved value either way.
+  gatePromise.catch(() => undefined);
+  let gate: PreparedGate | null | undefined;
 
   let result: GreetingResult;
   try {
@@ -452,9 +461,7 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
       // Checked on `existing` before the claim; the claim returns the same row.
       sessionId: existing.openai_session_id,
       apiKey: config.apiKey,
-      greetingText: [buildGreetingAppend(scenario, context !== null, pickGreeting(scenario, deps.random)), gate?.opening]
-        .filter(Boolean)
-        .join(" "),
+      greetingText: buildGreetingAppend(scenario, context !== null, pickGreeting(scenario, deps.random)),
       commentaryText: AI_DEMO_COMMENTARY_TRIGGER,
       eventIdSeed: attempt.id.replace(/-/g, "").slice(0, 8),
       ...(deps.webSocketFactory ? { webSocketFactory: deps.webSocketFactory } : {}),
@@ -467,6 +474,13 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
       limits: probeLimits,
       onProgress: async (partial, controls) => {
         await savePartial(deps, attempt, partial);
+
+        // First checkpoint: collect the lookup started before the greeting and
+        // tell her, once, that the caller has a case she must not raise first.
+        if (gate === undefined) {
+          gate = await gatePromise;
+          if (gate?.opening) controls.say(gate.opening);
+        }
         await advanceVerification(deps, gate, partial, controls);
 
         const ended = await watchSilence(deps, attempt, config, partial, controls, silence, probeLimits);
@@ -483,6 +497,13 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
     await transitionAttempt(deps.admin, attempt.id, ["bridged"], { state: "talking", greeting_status: "failed", talking_at: nowOf(deps).toISOString() });
     return;
   }
+
+  // One last look before the call is written off. A caller who guessed and hung
+  // up inside the checkpoint window would otherwise have nothing recorded, and
+  // redialling would hand them their three tries back — the very oracle the
+  // per-case counter exists to close.
+  if (gate === undefined) gate = await gatePromise.catch(() => null);
+  await flushVerification(deps, gate, result);
 
   const bridgedMs = attempt.bridged_at ? Date.parse(attempt.bridged_at) : null;
   const finishedAt = (offset: number | null): string | null => (offset === null || bridgedMs === null ? null : new Date(bridgedMs + offset).toISOString());
@@ -942,14 +963,27 @@ type PreparedGate = {
  * simply does not know about any case, which is exactly how she behaved before
  * this existed.
  */
-async function preparePlateGate(deps: AiDemoDeps, attempt: AiDemoAttempt): Promise<PreparedGate | null> {
+async function preparePlateGate(deps: AiDemoDeps, attempt: AiDemoAttempt, transcriptAvailable: boolean): Promise<PreparedGate | null> {
   try {
     const settings = await readAgentSettings(deps);
     if (!settings.readsCallerCases) return null;
 
+    // The gate reads the caller's words out of the transcript. With transcripts
+    // off there are no words, so it would sit open-mouthed for the whole call
+    // and never verify anybody. Better to refuse to arm and say why than to
+    // look enabled and do nothing.
+    if (!transcriptAvailable) {
+      deps.logger?.({ level: "warn", scope: "ai-demo", attemptId: attempt.id, message: "caller lookup skipped: transcripts are off" });
+      return null;
+    }
+
     const lookup = await lookupCallerCase(deps, attempt.target_number);
     const opening = describeBeforeVerification(lookup);
     if (lookup.outcome !== "found") return opening ? { gate: null, caseId: "", opening } : null;
+
+    // With the plate check switched off there is nothing to verify against, so
+    // the case stays shut rather than opening to anyone who calls.
+    if (!settings.requiresPlateCheck) return { gate: null, caseId: lookup.caseFound.before.caseId, opening };
 
     const used = await readVerificationAttempts(deps, lookup.caseFound.before.caseId, nowOf(deps));
     const gate = new PlateGate(lookup.caseFound, fullDisclosureEnabled(), used);
@@ -973,4 +1007,18 @@ async function advanceVerification(deps: AiDemoDeps, prepared: PreparedGate | nu
       now: nowOf(deps),
     });
   }
+}
+
+
+/** Records whatever the gate ended up knowing, once the call is over. */
+async function flushVerification(deps: AiDemoDeps, prepared: PreparedGate | null | undefined, result: GreetingResult): Promise<void> {
+  if (!prepared?.gate) return;
+  const outcome = prepared.gate.observe(result.transcript);
+  if (prepared.gate.attemptsUsed === 0 && outcome.state !== "verified") return;
+  await recordVerificationAttempts(deps, {
+    caseId: prepared.caseId,
+    attempts: prepared.gate.attemptsUsed,
+    verified: prepared.gate.current === "verified",
+    now: nowOf(deps),
+  });
 }
