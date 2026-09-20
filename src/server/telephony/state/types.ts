@@ -316,6 +316,8 @@ export type Command = CommandBase &
       from: string | null;
       targetClientState: TelnyxClientState;
       timeoutSecs: number;
+      /** Who the receiving phone says is calling; the `from` is always the line. */
+      fromDisplayName?: string;
     }
   | { kind: "conference_create"; commandId: string; leg: LegRef; name: string }
   | {
@@ -464,13 +466,33 @@ export type RoutingSettings = {
   maxRingFanout: number;
   maxConcurrentLegs: number;
   wrapUpSecondsDefault: number;
+  /**
+   * How long the waiting-room queue may find nobody to ring before it tries the
+   * backup numbers once. Zero disables it.
+   *
+   * It dials a real number and is billed, so it belongs to whoever pays for it.
+   */
+  queueEscalateAfterSeconds: number;
 };
+
+/**
+ * What the queue did before it was anybody's decision, and therefore what an
+ * organisation that has never touched the setting still does.
+ *
+ * Two minutes is long enough for an operator to finish a call and come out of
+ * wrap-up, and short enough that the caller is not listening to music while
+ * nothing is happening.
+ */
+export const DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS = 120;
+/** The longest the setting may be, matching the database check constraint. */
+export const MAX_QUEUE_ESCALATE_AFTER_SECONDS = 1_800;
 
 export const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
   parkMaxMinutes: 30,
   maxRingFanout: 8,
   maxConcurrentLegs: 9,
   wrapUpSecondsDefault: 30,
+  queueEscalateAfterSeconds: DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS,
 };
 
 export const MAX_RING_FANOUT = 8;
@@ -537,6 +559,12 @@ export type RoutingContext = {
   recordingPolicy?: RecordingRoutingPolicy;
   /** Execution permission only; false must never be treated as policy revocation. */
   recordingLeaseHeld?: boolean;
+  /**
+   * Loaded for one transition that needs almost none of this. Anything that
+   * plans a further ring step must reload the full context first: presence,
+   * devices and open offers are empty here, not absent.
+   */
+  lean?: true;
 };
 
 // --- session metadata -------------------------------------------------------
@@ -587,8 +615,14 @@ export type SessionMeta = {
   pickup?: { by: string; at: string } | null;
   /** `max_minutes` is `park_max_minutes` frozen when the caller entered the waiting room. */
   waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null; audio_phase?: "combined" | "prompt" | "music"; music_until?: string | null } | null;
-  /** Unanswered inbound queue only; parked/held conversations never auto-ring. */
-  queue?: { next_offer_at: string } | null;
+  /**
+   * Unanswered inbound queue only; parked/held conversations never auto-ring.
+   *
+   * `idle_since` is when the queue last placed an offer and found nobody —
+   * null while it is still reaching people. `escalated_at` records the one
+   * round in which it also rang the backup numbers.
+   */
+  queue?: { next_offer_at: string; idle_since?: string | null; escalated_at?: string | null } | null;
   previous_operator?: string | null;
   answered_external?: string | null;
   sdk_hold?: { leg: string; at: string } | null;

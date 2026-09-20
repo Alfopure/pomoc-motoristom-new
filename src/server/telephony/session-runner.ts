@@ -188,6 +188,11 @@ export async function loadRoutingSettings(admin: AdminClient, organizationId: st
     maxRingFanout: data.max_ring_fanout,
     maxConcurrentLegs: data.max_concurrent_legs,
     wrapUpSecondsDefault: DEFAULT_ROUTING_SETTINGS.wrapUpSecondsDefault,
+    // A deployment that runs ahead of its migration reads no column at all,
+    // and must keep the behaviour it had rather than silently stop escalating.
+    queueEscalateAfterSeconds: typeof data.queue_escalate_after_seconds === "number"
+      ? data.queue_escalate_after_seconds
+      : DEFAULT_ROUTING_SETTINGS.queueEscalateAfterSeconds,
     raw: data,
   };
 }
@@ -235,6 +240,38 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     ["call.playback.ended", "call.speak.ended"].includes(event.type) &&
       ["talking", "held", "consulting", "conference", "ended"].includes(session.state) && !meta.gather
   );
+  // An offer being accepted connects two legs that already exist. The reducer
+  // reads `settings.parkMaxMinutes` (the waiting room the compensation falls
+  // back to), `mediaAvailable`, `now` and the frozen recording policy — nothing
+  // about the line, the IVR, capacity or who else is free. Loading those cost
+  // three parallel rounds on the one transition the caller is waiting through.
+  //
+  // Conditioned on `noContinuation` like every other lean branch: `reduce` runs
+  // `reduceRecording`, whose eligibility and lease decisions read the live
+  // policy, so a frozen one may only be handed over when recording is frozen
+  // off. `internal` is excluded on purpose — it branches to
+  // `onInternalCalleeAnswered`, a different path with its own bridge.
+  const answeredOffer = noContinuation && event?.kind === "telnyx" &&
+    ["call.answered", "call.bridged"].includes(event.type) &&
+    ["ring", "pickup", "transfer", "transfer_safe"].includes(event.clientState?.intent ?? "") &&
+    Boolean(meta.ring?.plan) && ["ringing", "waiting", "parked"].includes(session.state) &&
+    snapshotLegs?.some(leg => leg.telnyx_call_control_id === event.callControlId && leg.role !== "customer");
+  if (answeredOffer) {
+    const settings = await loadRoutingSettings(admin, organizationId);
+    const config = deps.config;
+    return {
+      now, organizationId, environment: deps.environment, line: null,
+      businessHours: null, ivr: null, ringPlan: null, ringPlans: {}, presence: [], devices: [],
+      openOffers: [], activeLegCount: 0, settings,
+      fromNumber: (config.configured ? config.defaultFromNumber : null) ?? null,
+      // Not `false`: `mohIsPlaying` would then never see the waiting-room loop
+      // and the answer would bridge the caller with a playback still running.
+      mediaAvailable: config.configured ? Boolean(config.mediaBaseUrl) : false,
+      announcements: meta.announcements ? readAnnouncementConfig(meta.announcements) : undefined,
+      recordingPolicy: meta.recording?.policy,
+      lean: true,
+    };
+  }
   if (event?.kind === "app" && event.type === "hangup" || bridgeObservation || passiveObservation) {
     // Ending a call needs only its already authenticated session/legs. New
     // IVR, capacity, media and recording settings cannot authorize a hangup
@@ -502,10 +539,21 @@ export async function ownedSessionWork<T>(
   }
 }
 
-export async function runSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent): Promise<SessionRunResult> {
-  let known: SessionRow | undefined;
+export async function runSessionEvent(
+  deps: SessionRunnerDeps,
+  sessionId: string,
+  event: SessionEvent,
+  options?: { known?: SessionRow },
+): Promise<SessionRunResult> {
+  let known: SessionRow | undefined = options?.known;
   if (event.kind === "app" && event.type === "hangup") {
-    const target = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
+    // A console action has already loaded this row to authorise itself, and
+    // the only field wanted here is `writer_contract`, which terminating never
+    // changes — so re-reading it was a round trip in front of the one command
+    // an operator most wants to be instant.
+    const target = known
+      ? { data: known, error: null as null }
+      : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
     if (target.error) throw new SessionEventDeferredError(`Termination intent lookup failed: ${target.error.message}`);
     // Both this read and the ownership probe happen before the lease, and the
     // probe only inspects `writer_contract`, which terminating never changes.
@@ -672,6 +720,11 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
         }
         // Complete only bounded internal continuations while retaining this event's lease.
         // These are command acknowledgements, never fabricated provider webhooks.
+        // A follow `sweep` after a failed gather plans the next ring step, and a
+        // lean context carries an empty presence and device list rather than an
+        // absent one — it would step over everybody. Pay for the full context
+        // once, here, where it is rare, instead of on the answer itself.
+        let followContext = context;
         for (let continuation = 0; continuation < 2; continuation += 1) {
           const meta = readMeta(apply.session);
           const sequence = meta.announcement_sequence;
@@ -681,7 +734,8 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
           if ((!stopReady && !mediaFailed) || stopReady && !leaseAcquired) break;
           const fresh = await loadSessionSnapshot(deps, sessionId);
           const followEvent: SessionEvent = { kind: "app", type: stopReady ? "recording_continue" : "sweep", id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };
-          const follow = reduce(fresh.session, fresh.legs, fresh.attempts, followEvent, { ...context, now: nowOf(deps)() });
+          if (followContext.lean) followContext = await loadRoutingContext(deps, fresh.session, followEvent, fresh.legs);
+          const follow = reduce(fresh.session, fresh.legs, fresh.attempts, followEvent, { ...followContext, now: nowOf(deps)() });
           if (follow.ignored) break;
           attachContactOperations(fresh, follow, followEvent, durable);
           const nextApply = await applyReduceResult(effects, { session: fresh.session, result: follow, event: followEvent, expectedVersion: fresh.session.version });

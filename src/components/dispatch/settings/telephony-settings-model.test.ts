@@ -76,8 +76,24 @@ describe("parsing", () => {
       parkMaxMinutes: 15,
       maxRingFanout: 8,
       maxConcurrentLegs: 9,
+      queueEscalateAfterSeconds: 120,
       destinationAllowlist: ["SK"],
     });
+  });
+
+  it("carries the escalation as seconds, and zero as off", () => {
+    const base = settingsDraftFromDocument(settings());
+    expect(base.queueEscalateAfterMinutes).toBe("2");
+    expect(settingsPayload(updateSettingsDraft(base, { queueEscalateAfterMinutes: "5" })).queueEscalateAfterSeconds).toBe(300);
+    // Zero is the organisation saying "never ring the backup numbers".
+    expect(settingsPayload(updateSettingsDraft(base, { queueEscalateAfterMinutes: "0" })).queueEscalateAfterSeconds).toBe(0);
+  });
+
+  it("refuses an escalation outside the allowed range", () => {
+    const base = settingsDraftFromDocument(settings());
+    expect(validateSettingsDraft(updateSettingsDraft(base, { queueEscalateAfterMinutes: "-1" })).map((item) => item.path)).toContain("queueEscalateAfterMinutes");
+    expect(validateSettingsDraft(updateSettingsDraft(base, { queueEscalateAfterMinutes: "31" })).map((item) => item.path)).toContain("queueEscalateAfterMinutes");
+    expect(validateSettingsDraft(updateSettingsDraft(base, { queueEscalateAfterMinutes: "0" }))).toEqual([]);
   });
 });
 

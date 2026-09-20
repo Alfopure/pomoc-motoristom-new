@@ -71,6 +71,29 @@ describe("deriveTelephonyOperatorPresences", () => {
   });
 
   it.each([
+    // Measured from the snapshot's own `checkedAt`, never the wall clock.
+    ["2026-09-02T09:40:00.000Z", "Telefón operátora nie je pripojený (20 min)."],
+    ["2026-09-02T06:08:00.000Z", "Telefón operátora nie je pripojený (3 h)."],
+    ["2026-09-02T09:59:40.000Z", "Telefón operátora nie je pripojený."],
+  ])("says how long the phone has been gone (last seen %s)", (seenAt, detail) => {
+    const entry = stateOf(snapshot({
+      devices: [{ profileId: "op-1", registered: false, seenAt }],
+      presence: [{ profileId: "op-1", status: "available" }],
+    }));
+
+    // "Dostupný" is what the operator last chose; the phone is what rings, and
+    // how long it has been silent is what tells a closed laptop from a blink.
+    expect(entry).toMatchObject({ state: "unregistered", seenAt, detail });
+  });
+
+  it("says nothing about duration when the phone never reported at all", () => {
+    const entry = stateOf(snapshot({ devices: [{ profileId: "op-1", registered: false }], presence: [{ profileId: "op-1", status: "available" }] }));
+
+    expect(entry.detail).toBe("Telefón operátora nie je pripojený.");
+    expect(entry.seenAt).toBeUndefined();
+  });
+
+  it.each([
     ["ringing", "ringing"],
     ["on_call", "on_call"],
   ] as const)("keeps the live call state %s even when the device heartbeat lapsed", (status, expected) => {

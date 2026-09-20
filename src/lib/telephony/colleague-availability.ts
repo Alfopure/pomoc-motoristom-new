@@ -7,10 +7,12 @@
  * one could be reached. A green badge next to a disabled button is worse than
  * no badge, so when the browser phone is gone the badge says so instead.
  *
- * Only the browser phone can take a transfer. The elapsed time, though, is the
- * newest heartbeat across the browser phone and the mobile app — "when did we
- * last see this person at all" — because a colleague working on their phone with
- * a closed laptop is not away, they are merely unreachable by a transfer.
+ * A colleague who takes their calls on their own mobile is the exception: they
+ * have no browser phone by design, and a transfer reaches them anyway. For
+ * everybody else the elapsed time is the newest heartbeat across the browser
+ * phone and the mobile app — "when did we last see this person at all" —
+ * because a colleague working on their phone with a closed laptop is not away,
+ * they are merely unreachable by a transfer.
  *
  * No claim is made about where anybody is: a closed laptop and a dropped
  * connection look identical from here, and a backgrounded mobile app
@@ -29,6 +31,8 @@ export type ColleagueDeviceState = {
   status: string;
   deviceLive: boolean;
   deviceSeenAt?: string | null;
+  /** `mobile` when the colleague's calls go to their own phone, not a browser. */
+  reachVia?: "web" | "mobile";
 };
 
 /** `2 min`, `20 min`, `4 h`. Nothing under a minute: a blink is not a number. */
@@ -44,6 +48,10 @@ function awayFor(seenAt: string | null | undefined, now: Date): string | null {
 export function colleagueBadge(target: ColleagueDeviceState, now: Date): string {
   // Logging out is the operator's own decision and says more than the phone does.
   if (target.status === "offline") return COLLEAGUE_STATUS_LABELS.offline;
+  // No browser phone by design. "Nepripojený" would be true and useless.
+  if (target.reachVia === "mobile" && !target.deviceLive) {
+    return target.status === "available" ? "Mobil" : `${COLLEAGUE_STATUS_LABELS[target.status] ?? target.status} · mobil`;
+  }
   if (target.deviceLive) return COLLEAGUE_STATUS_LABELS[target.status] ?? target.status;
   const away = awayFor(target.deviceSeenAt, now);
   return away ? `Nepripojený · ${away}` : "Nepripojený";

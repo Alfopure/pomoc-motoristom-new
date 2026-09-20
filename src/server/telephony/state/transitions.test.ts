@@ -267,6 +267,45 @@ describe("inbound ring plan", () => {
     expect(h.telnyx.of("playbackStop").length).toBeGreaterThan(0);
   });
 
+  it("tells a caller nobody could be rung apart from a plan that rang and got no answer", async () => {
+    const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
+    // Operators only, as in the plan that met three callers on 17 Sep.
+    h.db.delete("motorist_ring_group_members", row => row.member_kind === "external_number");
+    for (const profileId of Object.values(PROFILES)) h.setPresence(profileId, { status: "offline" });
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+
+    // Nobody's phone rang: the plan had members and none of them was reachable.
+    // Eight seconds into the waiting room on 17 Sep, this was indistinguishable
+    // from a plan that had simply run out.
+    expect(h.session(call.sessionId).state).toBe("waiting");
+    expect(h.attempts(call.sessionId)).toEqual([]);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).waiting?.reason).toBe("no_operator_reachable");
+  });
+
+  it("still calls it ring_exhausted once somebody has actually been rung", async () => {
+    const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
+    const call = await ringingInbound(h);
+    for (const leg of [call.o1, call.o2, call.o5]) await h.legEvent(leg, "call.hangup", { hangup_cause: "timeout" });
+    const external = h.legByNumber(call.sessionId, NUMBERS.external)!;
+    await h.legEvent(String(external.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
+
+    expect(h.session(call.sessionId).state).toBe("waiting");
+    expect(h.attempts(call.sessionId).length).toBeGreaterThan(0);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).waiting?.reason).toBe("ring_exhausted");
+  });
+
+  it("queues both kinds of exhaustion for automatic offers", async () => {
+    const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
+    h.db.delete("motorist_ring_group_members", row => row.member_kind === "external_number");
+    for (const profileId of Object.values(PROFILES)) h.setPresence(profileId, { status: "offline" });
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+
+    // The console is told something different; the caller is treated the same.
+    expect(readMeta(h.session(call.sessionId) as SessionRow).queue).toBeTruthy();
+  });
+
   it("keeps a caller who is already waiting on the limit that applied when they entered", async () => {
     const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
     const call = await ringingInbound(h);
@@ -283,6 +322,13 @@ describe("inbound ring plan", () => {
     const tick = h.telnyx.of("gatherUsingAudio").at(-1)!;
     h.advance(6 * 60_000);
     await h.legEvent(call.callControlId, "call.gather.ended", { status: "timeout", client_state: tick.params.clientState });
+    // Six minutes of nobody to ring also spends the queue escalation on the
+    // backup number, so the state here is `ringing` rather than `waiting`.
+    // Either way the caller is still on the call, which is the point: the
+    // lowered limit did not eject them.
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    const escalation = h.legs(call.sessionId).find((leg) => leg.to_number === NUMBERS.external && !leg.ended_at)!;
+    await h.legEvent(String(escalation.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
     expect(h.session(call.sessionId).state).toBe("waiting");
 
     // The limit they arrived with (30 min) still ends the wait.

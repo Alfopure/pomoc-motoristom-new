@@ -1,11 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AudioLines, CalendarClock, Coffee, Hash, ListOrdered, ListTree, Loader2, PhoneCall, RefreshCw, ShieldAlert, Smartphone, Sparkles, Users, UserCog } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import type { TelephonySettingsDoc } from "@/server/telephony/config-service";
 
+import type { DraftEditorState } from "../useDraftEditors";
+import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
+import { RoutingUnsavedDialog } from "./RoutingUnsavedDialog";
+import { IncomingRoutingEditor, type IncomingEditorActions } from "./IncomingRoutingEditor";
 import { MyPhonePanel, type MyPhoneTestCall } from "../MyPhonePanel";
 import { AiDemoPanel } from "./AiDemoPanel";
 import { AnnouncementsPanel } from "./AnnouncementsPanel";
@@ -14,7 +18,7 @@ import { IvrMenuEditor } from "./IvrMenuEditor";
 import { NumbersPanel } from "./NumbersPanel";
 import { OperatorsTelephonyPanel } from "./OperatorsTelephonyPanel";
 import { PauseReasonsEditor } from "./PauseReasonsEditor";
-import { configErrorMessage, loadRoutingConfig, type RoutingConfigResponse } from "./config-client";
+import { ConfigRequestError, configErrorMessage, loadRoutingConfig, type RoutingConfigResponse } from "./config-client";
 import { RingGroupsEditor } from "./RingGroupsEditor";
 import { RingPlanEditor } from "./RingPlanEditor";
 import { SettingsNotice, SettingsSectionHeader } from "./settings-ui";
@@ -29,10 +33,10 @@ import { RecordingPolicyPanel } from "./RecordingPolicyPanel";
  * back so the neighbouring screens see the new world without a reload.
  */
 
-type TelephonyConfigTab = "phone" | "groups" | "plans" | "ivr" | "announcements" | "hours" | "pauses" | "numbers" | "operators" | "recording" | "settings" | "ai";
+type TelephonyConfigTab = "incoming" | "phone" | "groups" | "plans" | "ivr" | "announcements" | "hours" | "pauses" | "numbers" | "operators" | "recording" | "settings" | "ai";
 
 const GUIDE_CHAPTERS: Record<TelephonyConfigTab, string> = {
-  phone: "moj-telefon", groups: "skupiny-zvonenia", plans: "plany-zvonenia",
+  incoming: "plany-zvonenia", phone: "moj-telefon", groups: "skupiny-zvonenia", plans: "plany-zvonenia",
   ivr: "cisla-hodiny-a-ivr", announcements: "hlasky-a-nahravanie", hours: "cisla-hodiny-a-ivr",
   pauses: "pauza-a-zastupovanie", numbers: "cisla-hodiny-a-ivr", operators: "moj-telefon",
   recording: "hlasky-a-nahravanie", settings: "riesenie-problemov", ai: "riesenie-problemov",
@@ -42,6 +46,7 @@ const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; 
   // "Môj telefón" is first and open to every operator; everything after it is
   // configuration a manager owns.
   { icon: Smartphone, label: "Môj telefón", value: "phone" },
+  { icon: ListOrdered, label: "Prichádzajúce hovory", value: "incoming" },
   { icon: Users, label: "Skupiny", value: "groups" },
   { icon: ListOrdered, label: "Plány zvonenia", value: "plans" },
   { icon: ListTree, label: "IVR menu", value: "ivr" },
@@ -57,9 +62,21 @@ const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; 
   { icon: Sparkles, label: "AI", value: "ai", adminOnly: true, requiresAiDemo: true },
 ];
 
-export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestCall } = {}) {
-  const [tab, setTab] = useState<TelephonyConfigTab>("phone");
-  const [focusPlanId, setFocusPlanId] = useState<string | null>(null);
+export function TelephonyConfigPanel({ onTestCall, routingTarget, onRoutingDirtyChange, onRoutingEditorStateChange }: { onTestCall?: MyPhoneTestCall; routingTarget?: RoutingNavigationTarget | null; onRoutingDirtyChange?: (dirty: boolean) => void; onRoutingEditorStateChange?: (state: DraftEditorState | null) => void } = {}) {
+  const [tab, setTab] = useState<TelephonyConfigTab>(routingTarget?.tab ?? "phone");
+  const [focusPlanId, setFocusPlanId] = useState<string | null>(routingTarget?.planId ?? null);
+  const [target, setTarget] = useState(routingTarget);
+  const [coherent, setCoherent] = useState<boolean | null>(null);
+  const [routingDirty, setRoutingDirty] = useState(false);
+  const [pendingTarget, setPendingTarget] = useState<{ tab: TelephonyConfigTab; target?: RoutingNavigationTarget } | null>(null);
+  const actions = useRef<IncomingEditorActions | null>(null);
+  const actionsChanged = useCallback((value: IncomingEditorActions | null) => { actions.current = value; }, []);
+  const dirtyChanged = useCallback((dirty: boolean) => { setRoutingDirty(dirty); onRoutingDirtyChange?.(dirty); }, [onRoutingDirtyChange]);
+  const [previousRoutingTarget, setPreviousRoutingTarget] = useState(routingTarget);
+  if (routingTarget !== previousRoutingTarget) {
+    setPreviousRoutingTarget(routingTarget);
+    if (routingTarget) { setTarget(routingTarget); setFocusPlanId(routingTarget.planId ?? null); setTab(routingTarget.tab === "incoming" && coherent === false ? "plans" : routingTarget.tab); }
+  }
   const [announcementsOpened, setAnnouncementsOpened] = useState(false);
   const [state, setState] = useState<RoutingConfigResponse | null>(null);
   // Bumped on every fresh document so the editors re-key and drop their drafts
@@ -81,13 +98,19 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
   // never widens its response), so its result is merged into the document the
   // panel already holds.
   const applySettings = useCallback((settings: TelephonySettingsDoc) => {
-    setState((current) => (current ? { ...current, document: { ...current.document, settings } } : current));
+    setState((current) => (current ? { ...current, document: { ...current.document, settings, snapshotId: undefined } } : current));
     setVersion((current) => current + 1);
   }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    loadRoutingConfig("ringGroups", { signal: controller.signal })
+    loadRoutingConfig("incoming", { signal: controller.signal })
+      .then(response => { if (!controller.signal.aborted) setCoherent(true); return response; })
+      .catch((caught: unknown) => {
+        if (!(caught instanceof ConfigRequestError) || caught.code !== "config_snapshot_missing") throw caught;
+        if (!controller.signal.aborted) { setCoherent(false); setTab(current => current === "incoming" ? "plans" : current); }
+        return loadRoutingConfig("ringGroups", { signal: controller.signal });
+      })
       .then((response) => {
         if (controller.signal.aborted) return;
         applyResponse(response);
@@ -102,6 +125,29 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
       });
     return () => controller.abort();
   }, [applyResponse, reloadToken]);
+
+  async function navigate(next: TelephonyConfigTab, nextTarget?: RoutingNavigationTarget, confirmed = false) {
+    if (routingDirty && !confirmed && next !== tab) { setPendingTarget({ tab: next, target: nextTarget }); return; }
+    if (next === "incoming" && coherent && !state?.document.snapshotId) {
+      try { applyResponse(await loadRoutingConfig("incoming")); } catch (caught) { setError(configErrorMessage(caught, "Nastavenie sa nepodarilo overiť.")); return; }
+    }
+    if (next === "announcements") setAnnouncementsOpened(true);
+    if (nextTarget) { setTarget(nextTarget); setFocusPlanId(nextTarget.planId ?? null); }
+    setTab(next === "incoming" && !coherent ? "plans" : next);
+  }
+  useEffect(() => {
+    if (tab !== "incoming" || coherent !== true || !state || state.document.snapshotId) return;
+    const controller = new AbortController();
+    loadRoutingConfig("incoming", { signal: controller.signal }).then(response => { if (!controller.signal.aborted) applyResponse(response); }).catch(caught => { if (!controller.signal.aborted) setError(configErrorMessage(caught, "Nastavenie sa nepodarilo overiť.")); });
+    return () => controller.abort();
+  }, [tab, coherent, state, applyResponse]);
+  useEffect(() => {
+    if (!state || !target) return;
+    const id = tab === "numbers" ? target.lineId : tab === "ivr" ? target.ivrMenuId : tab === "hours" ? target.businessHoursId : null;
+    if (!id) return;
+    const frame = requestAnimationFrame(() => { const element = window.document.getElementById(`routing-${tab}-${id}`); element?.scrollIntoView({ block: "center" }); element?.focus({ preventScroll: true }); });
+    return () => cancelAnimationFrame(frame);
+  }, [state, target, tab]);
 
   if (loading && !state) {
     return (
@@ -140,27 +186,26 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
   }
 
   return (
-    <div className="grid gap-3">
+    <div className="grid min-w-0 gap-4 lg:grid-cols-[190px_minmax(0,1fr)]">
+      <div className="min-w-0 lg:col-start-2">
       {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
 
       <a href={`/navod/${GUIDE_CHAPTERS[tab]}`} target="_blank" rel="noopener noreferrer" className="justify-self-end rounded-md px-2 py-2 text-sm font-semibold text-zinc-600 underline decoration-zinc-300 underline-offset-4 hover:text-zinc-950">
         Návod k tejto časti <span className="sr-only">(otvorí sa v novej karte)</span>
       </a>
+      </div>
 
-      <nav className="flex flex-wrap gap-2" aria-label="Nastavenia telefónie">
-        {TABS.filter((entry) => (!entry.adminOnly || state.canManageSettings) && (!entry.managerOnly || state.canEdit) && (!entry.requiresAiDemo || state.aiDemoEnabled)).map(({ icon: Icon, label, value }) => {
+      <nav className="flex flex-wrap content-start gap-1 lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:flex-col" aria-label="Nastavenia telefónie">
+        {TABS.filter((entry) => (coherent ? entry.value !== "groups" && entry.value !== "plans" : entry.value !== "incoming") && (!entry.adminOnly || state.canManageSettings) && (!entry.managerOnly || state.canEdit) && (!entry.requiresAiDemo || state.aiDemoEnabled)).map(({ icon: Icon, label, value }) => {
           const active = tab === value;
           return (
             <button
               key={value}
               type="button"
-              onClick={() => {
-                if (value === "announcements") setAnnouncementsOpened(true);
-                setTab(value);
-              }}
+              onClick={() => void navigate(value)}
               aria-current={active ? "page" : undefined}
-              className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-semibold transition-colors ${
-                active ? "border-yellow-400 bg-[#FCD703] text-zinc-950" : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100"
+              className={`inline-flex min-h-10 items-center gap-2 rounded-lg border px-3 text-left text-[13px] font-medium transition-colors ${
+                active ? "border-zinc-200 bg-white text-zinc-950 shadow-sm" : "border-transparent bg-transparent text-zinc-600 hover:bg-white/70"
               }`}
             >
               <Icon size={16} aria-hidden="true" />
@@ -169,7 +214,12 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
           );
         })}
       </nav>
+      <div className="grid min-w-0 gap-3 lg:col-start-2">
+      {pendingTarget && <RoutingUnsavedDialog onCancel={() => setPendingTarget(null)} onSave={async () => { const next = pendingTarget; const saved = await actions.current?.save(); setPendingTarget(null); if (saved) await navigate(next.tab, next.target, true); }} onDiscard={() => { actions.current?.discard(); const next = pendingTarget; setPendingTarget(null); void navigate(next.tab, next.target, true); }} />}
 
+      {target?.lineId && !state.document.lines.some(line => line.id === target.lineId) && <SettingsNotice tone="warning">Vybraná linka už neexistuje alebo k nej nemáš prístup.</SettingsNotice>}
+      {tab === "incoming" && coherent && !state.document.snapshotId && <SettingsNotice tone="info">Overujem aktuálne nastavenie skupín a plánov…</SettingsNotice>}
+      {tab === "incoming" && coherent && state.document.snapshotId && <IncomingRoutingEditor document={state.document} canEdit={state.canEdit} target={target} onSaved={applyResponse} onNavigate={next => void navigate(next.tab, next)} onDirtyChange={dirtyChanged} onActionsChange={actionsChanged} onEditorStateChange={onRoutingEditorStateChange} />}
       {tab === "phone" && <MyPhonePanel key={`phone-${version}`} document={state.document} onSaved={applyResponse} onTestCall={onTestCall} />}
       {tab === "groups" && (
         <RingGroupsEditor
@@ -217,6 +267,7 @@ export function TelephonyConfigPanel({ onTestCall }: { onTestCall?: MyPhoneTestC
           onSaved={applySettings}
         />
       )}
+      </div>
     </div>
   );
 }

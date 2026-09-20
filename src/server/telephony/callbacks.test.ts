@@ -8,6 +8,8 @@ import { CallActionError, createRateLimiter, parkCall, type CallActionDeps, type
 import {
   callBackRequest,
   claimCallbackRequest,
+  decodeCallbackCursor,
+  encodeCallbackCursor,
   loadCallbackQueue,
   resolveCallbackRequest,
   type CallbackQueueDeps,
@@ -53,6 +55,31 @@ async function fail(promise: Promise<unknown>): Promise<CallActionError> {
 }
 
 describe("loadCallbackQueue", () => {
+  it("preserves PostgreSQL cursor microseconds", () => {
+    const row = { id: "00000000-0000-4000-8000-000000000001", created_at: "2026-09-19T12:00:00.123456+00:00" };
+    expect(decodeCallbackCursor(encodeCallbackCursor(row))).toEqual({ id: row.id, createdAt: row.created_at });
+  });
+  it("counts the complete unresolved queue and pages tied timestamps without omissions", async () => {
+    const h = createTelephonyHarness();
+    const ids = Array.from({ length: 125 }, () => seedRequest(h));
+    seedRequest(h, { organization_id: "another-org" });
+    seedRequest(h, { status: "done", resolved_at: h.now().toISOString() });
+    const first = await loadCallbackQueue(queueDeps(h), o1);
+    expect(first.openTotal).toBe(125);
+    expect(first.open).toHaveLength(100);
+    expect(first.nextCursor).toBeTruthy();
+    const second = await loadCallbackQueue(queueDeps(h), o1, { cursor: first.nextCursor });
+    expect(second.openTotal).toBe(125);
+    expect(second.open).toHaveLength(25);
+    expect(second.nextCursor).toBeNull();
+    expect(new Set([...first.open, ...second.open].map((row) => row.id))).toEqual(new Set(ids));
+  });
+
+  it("rejects malformed cursors instead of interpolating them into a query", async () => {
+    const h = createTelephonyHarness();
+    await expect(loadCallbackQueue(queueDeps(h), o1, { cursor: "invalid" })).rejects.toMatchObject({ status: 400 });
+  });
+
   it("recovers legacy confirmed requests stored as missed, without inventing a digit", async () => {
     const h = createTelephonyHarness();
     const call = await h.inbound({ to: NUMBERS.allianz });

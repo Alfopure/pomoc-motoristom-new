@@ -46,10 +46,16 @@ test("waiting push stays passive until an explicit pickup and fits a narrow mobi
 test("incoming push answers only its browser invite and never another call with the same number", async ({ page }) => {
   await page.evaluate(() => window.callPushScenario("incoming"));
   await page.getByRole("button", { name: "Prijať tento hovor" }).click();
-  expect(await page.evaluate(() => window.callPushEvents)).toEqual(["answer"]);
+  expect(await page.evaluate(() => window.callPushEvents)).toEqual([`answer:${sessionId}:own-operator-leg`]);
   await page.evaluate(() => window.callPushScenario("other-call"));
   await expect(page.getByRole("button", { name: "Prijať tento hovor" })).toHaveCount(0);
   await expect(page.getByRole("status")).toContainText("iný hovor");
+});
+
+test("legacy isolated callers without an identity callback retain their answer action", async ({ page }) => {
+  await page.evaluate(() => window.callPushScenario("incoming-legacy"));
+  await page.getByRole("button", { name: "Prijať tento hovor" }).click();
+  expect(await page.evaluate(() => window.callPushEvents)).toEqual(["answer"]);
 });
 
 test("taken, ended and stale calls remove actions while preserving refresh", async ({ page }) => {
@@ -69,7 +75,7 @@ test("internal, consultation and conference invites remain answerable without a 
     await expect(page.getByRole("status")).toContainText("zvoní na tomto telefóne");
     await page.getByRole("button", { name: "Prijať tento hovor" }).click();
   }
-  expect(await page.evaluate(() => window.callPushEvents)).toEqual(["answer", "answer", "answer"]);
+  expect(await page.evaluate(() => window.callPushEvents)).toEqual(Array(3).fill(`answer:${sessionId}:own-operator-leg`));
   await page.evaluate(() => window.callPushScenario("consulting-other-call"));
   await expect(page.getByRole("button", { name: "Prijať tento hovor" })).toHaveCount(0);
   await expect(page.getByRole("status")).toContainText("iný hovor");

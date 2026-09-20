@@ -5,6 +5,30 @@ const task = (overrides: Partial<WorkspaceTask> = {}): WorkspaceTask => ({ id: "
 const reply = (body: unknown, status = 200) => Promise.resolve(Response.json(body, { status }));
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(fn => { resolve = fn; }); return { resolve, promise }; }
 describe("shared task workspace", () => {
+  it("expires the initial server snapshot even when every initial read fails offline", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new TaskWorkspaceStore(true, undefined, vi.fn().mockRejectedValue(new Error("offline")), [task()]);
+      store.edit("task-1", { title: "Initial unsent draft" });
+      await store.refresh();
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(store.getSnapshot().hidden).toBe(false);
+      await store.refresh();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(store.getSnapshot()).toMatchObject({ hidden: true, tasks: [task()], drafts: { "task-1": { value: { title: "Initial unsent draft" } } } });
+      store.clear();
+    } finally { vi.useRealTimers(); }
+  });
+  it("expires an offline task and chat lease at 30 seconds without throwing away an authorized local draft", async () => {
+    vi.useFakeTimers();
+    try {
+      const read = vi.fn().mockResolvedValueOnce(Response.json({ tasks: [task()] })).mockResolvedValueOnce(new Response(null, { status: 403 }));
+      const store = new TaskWorkspaceStore(true, undefined, read); await store.refresh(); store.edit("task-1", { title: "Unsent" });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(store.getSnapshot()).toMatchObject({ hidden: true, drafts: { "task-1": { value: { title: "Unsent" } } } });
+      await store.refresh(); expect(store.getSnapshot()).toMatchObject({ hidden: true, tasks: [], drafts: {}, chats: {} }); store.clear();
+    } finally { vi.useRealTimers(); }
+  });
   it("does no network work before capability activation", async () => {
     const fetcher = vi.fn(); const store = new TaskWorkspaceStore(false, undefined, fetcher);
     await store.refresh(); await store.create(); await store.loadMessages("task-1");

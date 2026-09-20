@@ -79,9 +79,17 @@ export function CallQueuePanel({
                 {callerName ? call.callerNumber : call.lineLabel ?? "Prichádzajúci hovor"}
               </span>
               <span className={`shrink-0 rounded-full px-2 py-0.5 font-bold ${
-                station ? "bg-yellow-100 text-yellow-900" : park?.parked ? "bg-sky-100 text-sky-900" : "bg-zinc-100 text-zinc-700"
+                station ? "bg-yellow-100 text-yellow-900"
+                  : park?.parked ? "bg-sky-100 text-sky-900"
+                  // Nobody's phone rang: the plan had members and none of them
+                  // could be reached. Worth telling apart from an ordinary wait.
+                  : park?.unreachable ? "bg-red-100 text-red-900"
+                  : "bg-zinc-100 text-zinc-700"
               }`}>
-                {station ? `Zvoní: ${station.name}` : park?.parked ? "Odložený hovor" : "Čaká na pridelenie"}
+                {station ? `Zvoní: ${station.name}`
+                  : park?.parked ? "Odložený hovor"
+                  : park?.unreachable ? unreachableLabel(park)
+                  : "Čaká na pridelenie"}
               </span>
             </div>
             {park && <ParkedNote park={park} />}
@@ -228,6 +236,21 @@ function QueueRail({
  * they still have before the state machine stops waiting for a rescue and
  * offers them a callback instead (`park_max_minutes`, frozen on entry).
  */
+/**
+ * What the red badge says.
+ *
+ * "Nobody was available" is true of the moment the caller arrived; a queue
+ * that has since found nobody for four minutes is a different, worse fact, and
+ * the number is what makes somebody pick up the phone. Once the backup numbers
+ * have been rung there is nothing left to try automatically, and the badge
+ * says that instead of a growing count.
+ */
+function unreachableLabel(park: WaitingRoomPark): string {
+  if (park.escalated) return "Aj záložné číslo skúšané";
+  if (park.idleSeconds !== null && park.idleSeconds >= 60) return `Nikto dostupný · ${Math.floor(park.idleSeconds / 60)} min`;
+  return "Nikto nebol dostupný";
+}
+
 function ParkedNote({ park }: { park: WaitingRoomPark }) {
   const limit = park.secondsToLimit;
   if (!park.parked && limit === null) return null;

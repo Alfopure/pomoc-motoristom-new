@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, type TelephonyHarness } from "@/test/telephony-harness";
+import { registerCriticalWriteRpcs, registerProviderJournalRpcs } from "@/test/fake-stability";
 import { sessionOwnership, type Ownership } from "./ownership";
 import { loadRoutingContext, runSessionEvent } from "./session-runner";
 import { parseTelnyxEnvelope } from "./state/events";
@@ -9,13 +10,20 @@ afterEach(() => vi.restoreAllMocks());
 
 function owned(h: TelephonyHarness, sessionId: string): Ownership {
   h.db.registerRpc("motorist_session_lease_renew_v2", () => true);
-  h.db.registerRpc("motorist_provider_termination_legs_v2", () => []);
-  h.db.registerRpc("motorist_provider_termination_checkpoint_v2", () => ({ pending: false }));
-  h.db.registerRpc("motorist_provider_pending_commands_v2", () => []);
+  // Under contract 2 every provider command is fenced, teardown included — and
+  // the fence is what makes the hangup below the only command still allowed
+  // once termination is committed.
+  registerProviderJournalRpcs(h.db);
+  registerCriticalWriteRpcs(h.db);
   h.db.registerRpc("motorist_provider_observe_dial_v2", () => false);
   const row = h.db.storage("motorist_call_sessions").find(row => row.id === sessionId)!;
   row.writer_contract = 2;
   row.termination_requested_at = h.now().toISOString();
+  // The fence compares the owner against this row, so an owner that does not
+  // hold it is not an owner at all.
+  row.lease_token = "termination-owner";
+  row.lease_generation = 1;
+  row.lease_until = new Date(h.now().getTime() + 30_000).toISOString();
   return { admin: h.admin, organizationId: h.deps.organizationId, sessionId,
     token: "termination-owner", generation: 1, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 };
 }

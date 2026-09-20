@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeQueryBuilder } from "@/test/fake-supabase";
+import { registerCriticalWriteRpcs, registerProviderJournalRpcs } from "@/test/fake-stability";
 import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { hangupCall, holdCall, unholdCall } from "./call-actions";
 import { ownedSessionWork } from "./session-runner";
@@ -21,21 +22,31 @@ function contractTwo(h: TelephonyHarness, sessionId: string) {
   let token: unknown = null;
   let generation = 0;
   h.db.storage("motorist_call_sessions").find(row => row.id === sessionId)!.writer_contract = 2;
+  const row = () => h.db.storage("motorist_call_sessions").find(entry => entry.id === sessionId)!;
+  const stamp = () => {
+    row().lease_token = token === null ? null : String(token);
+    row().lease_generation = generation;
+    row().lease_until = new Date(h.db.now().getTime() + 30_000).toISOString();
+  };
   h.db.registerRpc("motorist_session_lease_acquire_v2", args => {
     if (token !== null) return null;
     token = args.p_token;
-    return { generation: ++generation, contract: 2 };
+    generation += 1;
+    stamp();
+    return { generation, contract: 2 };
   });
   h.db.registerRpc("motorist_session_lease_renew_v2", args => args.p_token === token && args.p_generation === generation);
   h.db.registerRpc("motorist_session_lease_release_v2", args => {
     if (args.p_token !== token || args.p_generation !== generation) return false;
     token = null;
+    stamp();
     return true;
   });
-  h.db.registerRpc("motorist_provider_pending_commands_v2", () => []);
+  // The leases above are hand-built so this test can stall and steal them; the
+  // journal is not, and the provider double goes through it.
+  registerProviderJournalRpcs(h.db);
+  registerCriticalWriteRpcs(h.db);
   h.db.registerRpc("motorist_provider_observe_dial_v2", () => false);
-  h.db.registerRpc("motorist_provider_termination_legs_v2", () => []);
-  h.db.registerRpc("motorist_provider_termination_checkpoint_v2", () => ({ pending: false }));
   h.db.registerRpc("motorist_session_terminate_v2", () => {
     const row = h.db.storage("motorist_call_sessions").find(row => row.id === sessionId)!;
     row.termination_requested_at ??= h.db.nowIso();

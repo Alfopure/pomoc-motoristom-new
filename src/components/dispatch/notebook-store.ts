@@ -1,3 +1,4 @@
+import { AuthorizationLease } from "@/lib/authorization-lease";
 import { sameNoteDraft, type NoteColleague, type NoteDraft, type PersonalNote } from "@/domain/notes";
 export type NotebookSnapshot = {
   notes: PersonalNote[]; colleagues: NoteColleague[]; drafts: Record<string, NoteDraft>;
@@ -11,8 +12,23 @@ export class NotebookStore {
   private generation = 0;
   private readSequence = 0;
   private disposed = false;
+  private lease = new AuthorizationLease(() => this.update({ hidden: true }), 25_000);
+  private requests = new Set<AbortController>();
+  private onAccessRevoked?: () => void;
+  setOnAccessRevoked = (callback?: () => void) => { this.onAccessRevoked = callback; };
+  checkAuthorization = () => this.lease.check();
+  private async request(url: string, init?: RequestInit) {
+    const controller = new AbortController(); this.requests.add(controller);
+    try { return await this.fetcher(url, { ...init, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]) }); }
+    finally { this.requests.delete(controller); }
+  }
   private savePromise: Promise<boolean> | null = null;
-  constructor(private fetcher: Fetcher = (url, init) => fetch(url, init), private featureEnabled = true) {}
+  constructor(private fetcher: Fetcher = (url, init) => fetch(url, init), private featureEnabled = true) {
+    // The colleague directory may arrive before the first notes list. Bound
+    // initial visibility even when that first list never succeeds.
+    if (featureEnabled) this.lease.renew(Date.now());
+    else this.state.hidden = true;
+  }
   get enabled() { return this.featureEnabled; }
   setEnabled = (enabled: boolean) => {
     if (enabled === this.featureEnabled) return;
@@ -23,7 +39,7 @@ export class NotebookStore {
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<NotebookSnapshot>) { if (this.disposed) return; this.state = { ...this.state, ...patch }; this.listeners.forEach(fn => fn()); }
-  clear = () => { this.generation++; this.readSequence++; this.savePromise = null; this.update({ notes: [], colleagues: [], drafts: {}, selectedId: null, saving: false, loading: false, hidden: false, conflicts: [], error: "Prístup k poznámkam treba znovu overiť." }); };
+  clear = () => { this.lease.clear(); this.requests.forEach(controller => controller.abort()); this.requests.clear(); this.generation++; this.readSequence++; this.savePromise = null; this.update({ notes: [], colleagues: [], drafts: {}, selectedId: null, saving: false, loading: false, hidden: true, conflicts: [], error: "Prístup k poznámkam treba znovu overiť." }); };
   dispose = () => { this.clear(); this.disposed = true; this.listeners.clear(); };
   /** Hide all previously displayed content before requesting online authorization. */
   reauthorize = () => { this.readSequence++; this.update({ hidden: true }); return this.refresh(); };
@@ -39,12 +55,12 @@ export class NotebookStore {
   discard = () => this.update({ drafts: {}, conflicts: [], error: "" });
   async refresh() {
     if (this.disposed || !this.enabled) return;
-    const generation = this.generation, sequence = ++this.readSequence;
+    const generation = this.generation, sequence = ++this.readSequence, started = Date.now();
     this.update({ loading: true });
     try {
-      const response = await this.fetcher("/api/notes", { cache: "no-store" });
+      const response = await this.request("/api/notes", { cache: "no-store" });
       if (generation !== this.generation || sequence !== this.readSequence || this.disposed) return;
-      if (response.status === 401 || response.status === 403) { this.clear(); return; }
+      if (response.status === 401 || response.status === 403) { this.clear(); this.onAccessRevoked?.(); return; }
       if (!response.ok) throw new Error("Poznámky sa nepodarilo overiť. Neuložené zmeny zostávajú v tomto okne.");
       const payload = await response.json() as { notes: PersonalNote[] };
       if (generation !== this.generation || sequence !== this.readSequence || this.disposed) return;
@@ -53,7 +69,7 @@ export class NotebookStore {
       const conflicts = payload.notes.filter(note => drafts[note.id] && this.state.notes.find(old => old.id === note.id)?.revision !== note.revision).map(note => note.id);
       // Removed notes and drafts are discarded atomically. New readSequence prevents
       // an older read from restoring revoked content after this authorized response.
-      this.update({ notes: payload.notes, drafts, conflicts: [...new Set([...this.state.conflicts.filter(id => allowed.has(id)), ...conflicts])], hidden: false, error: "", selectedId: this.state.selectedId && allowed.has(this.state.selectedId) ? this.state.selectedId : null });
+      this.update({ notes: payload.notes, drafts, conflicts: [...new Set([...this.state.conflicts.filter(id => allowed.has(id)), ...conflicts])], hidden: !this.lease.renew(started), error: "", selectedId: this.state.selectedId && allowed.has(this.state.selectedId) ? this.state.selectedId : null });
     } catch (error) {
       if (generation === this.generation && sequence === this.readSequence) this.update({ error: error instanceof Error ? error.message : "Poznámky nie sú dostupné." });
     } finally { if (generation === this.generation && sequence === this.readSequence) this.update({ loading: false }); }
@@ -62,7 +78,7 @@ export class NotebookStore {
     if (!this.enabled || this.disposed) return;
     const generation = this.generation;
     try {
-      const response = await this.fetcher("/api/notes/colleagues", { cache: "no-store" });
+      const response = await this.request("/api/notes/colleagues", { cache: "no-store" });
       if (response.status === 401 || response.status === 403) { if (generation === this.generation) this.clear(); return; }
       if (!response.ok) return;
       const payload = await response.json() as { colleagues: NoteColleague[] };
@@ -74,11 +90,11 @@ export class NotebookStore {
     const generation = this.generation;
     this.update({ saving: true, error: "" });
     try {
-      const response = await this.fetcher("/api/notes", { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "", body: "", recipientProfileIds: [] }) });
+      const response = await this.request("/api/notes", { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "", body: "", recipientProfileIds: [] }) });
       // A capability/identity change invalidates this mutation before handling
       // authorization failures too: its old 401 must not clear a new draft.
       if (generation !== this.generation || this.disposed) return;
-      if (!response.ok) { if (response.status === 401 || response.status === 403) { this.clear(); return; } throw new Error("Novú poznámku sa nepodarilo vytvoriť."); }
+      if (!response.ok) { if (response.status === 401 || response.status === 403) { this.clear(); this.onAccessRevoked?.(); return; } throw new Error("Novú poznámku sa nepodarilo vytvoriť."); }
       const { note } = await response.json() as { note: PersonalNote };
       if (generation === this.generation) { this.readSequence++; this.update({ notes: [note, ...this.state.notes.filter(item => item.id !== note.id)], selectedId: note.id, loading: false }); }
     } catch (error) { if (generation === this.generation) this.update({ error: error instanceof Error ? error.message : "Poznámku sa nepodarilo vytvoriť." }); }
@@ -100,9 +116,9 @@ export class NotebookStore {
         const note = this.state.notes.find(note => note.id === id), draft = this.state.drafts[id];
         if (!note?.canEdit || !draft) continue;
         if (this.state.conflicts.includes(id)) { this.update({ selectedId: id, error: "Poznámka sa zmenila v inom okne. Skopírujte si rozpracovaný text alebo načítajte aktuálnu verziu." }); return false; }
-        const response = await this.fetcher(`/api/notes/${id}`, { method: "PATCH", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...draft, expectedRevision: note.revision }) });
+        const response = await this.request(`/api/notes/${id}`, { method: "PATCH", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...draft, expectedRevision: note.revision }) });
         if (generation !== this.generation || this.disposed) return false;
-        if (response.status === 401 || response.status === 403) { this.clear(); return false; }
+        if (response.status === 401 || response.status === 403) { this.clear(); this.onAccessRevoked?.(); return false; }
         if (response.status === 404) { this.readSequence++; this.removeLocal(id); return false; }
         if (response.status === 409) { this.update({ conflicts: [...new Set([...this.state.conflicts, id])], selectedId: id }); throw new Error("Poznámka sa zmenila v inom okne. Načítajte aktuálnu verziu."); }
         if (!response.ok) throw new Error("Zmeny nie sú uložené. Skontrolujte pripojenie a skúste to znova.");
@@ -132,9 +148,9 @@ export class NotebookStore {
     const generation = this.generation;
     this.update({ saving: true, error: "" });
     try {
-      const response = await this.fetcher(`/api/notes/${note.id}`, { method: "DELETE", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedRevision: note.revision }) });
+      const response = await this.request(`/api/notes/${note.id}`, { method: "DELETE", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedRevision: note.revision }) });
       if (generation !== this.generation || this.disposed) return;
-      if (response.status === 401 || response.status === 403) { this.clear(); return; }
+      if (response.status === 401 || response.status === 403) { this.clear(); this.onAccessRevoked?.(); return; }
       if (!response.ok && response.status !== 404) throw new Error(response.status === 409 ? "Poznámka sa zmenila. Pred vymazaním načítajte aktuálnu verziu." : "Poznámku sa nepodarilo vymazať.");
       this.readSequence++; this.removeLocal(note.id);
     } catch (error) { if (generation === this.generation) this.update({ error: error instanceof Error ? error.message : "Poznámku sa nepodarilo vymazať." }); }

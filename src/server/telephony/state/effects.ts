@@ -17,7 +17,7 @@ import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
-import { isCallGoneError, TelnyxCommandError, type DialResult, type TelnyxClient } from "../telnyx/client";
+import { isCallGoneError, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
 import { pendingAudioStillOwned, recordingCommandOutcome, recordingIntent } from "./recording";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
@@ -199,7 +199,32 @@ export async function persistTransition(
   const patch = { ...input.transition.session };
   let session: SessionRow;
 
-  if (Object.keys(patch).length > 0 || input.expectedVersion !== null) {
+  // The critical phase in one round trip: the session, the legs it patches and
+  // the attempts it closes, written together. Presence stays out of it — its
+  // guards read a feature flag and an operator's wrap-up setting, and deciding
+  // those in SQL would move policy out of the reducer that owns it.
+  //
+  // Only from the start of an entry. A resumed one has a cursor partway
+  // through the batch, and the per-effect path below is what knows how to
+  // carry on from there. The cursor still advances effect by effect either
+  // way, so an entry staged by one writer stays resumable by the other.
+  const folded = input.phase === "critical" && sessionOwnership.getStore()?.contract === 2 &&
+    (input.continuation?.databaseCursor ?? 0) === 0 &&
+    input.transition.legs.length + input.transition.attempts.length > 0;
+  if (folded) {
+    const applied = await ownershipRpc<{ applied: boolean; session?: SessionRow } | null>(admin, "motorist_apply_critical_v2", {
+      p_session_id: input.session.id,
+      p_expected_version: input.expectedVersion,
+      p_patch: Object.keys(patch).length ? patch : null,
+      p_legs: input.transition.legs.map((leg) => ({ callControlId: leg.callControlId, values: leg.values })),
+      p_attempts: input.transition.attempts.map((attempt) => ({
+        id: attempt.id, values: attempt.values,
+        openOnly: Boolean(input.continuation) && ["pending", "offered", "answered"].includes(attempt.values.result ?? ""),
+      })),
+    });
+    if (!applied?.applied || !applied.session) throw new SessionConflictError(input.session.id, input.expectedVersion ?? input.session.version);
+    session = applied.session;
+  } else if (Object.keys(patch).length > 0 || input.expectedVersion !== null) {
     let query = admin
       .from("motorist_call_sessions")
       .update({ ...patch, version: (input.expectedVersion ?? input.session.version) + 1 })
@@ -244,16 +269,20 @@ export async function persistTransition(
     if (batched) batchPending = true;
     else session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
   };
-  for (const legPatch of input.transition.legs) await effect(() => applyLegPatch(deps, session, legPatch), true, true);
+  // Folded above, but still walked here so the cursor lands where a resuming
+  // writer expects it.
+  for (const legPatch of input.transition.legs) await effect(() => folded ? Promise.resolve() : applyLegPatch(deps, session, legPatch), true, true);
 
   for (const attempt of input.transition.attempts) {
     await effect(async () => {
+      if (folded) return;
       let query = admin.from("motorist_ring_attempts").update(attempt.values).eq("id", attempt.id).eq("session_id", session.id);
       if (input.continuation && ["pending", "offered", "answered"].includes(attempt.values.result ?? "")) query = query.is("ended_at", null);
       const result = await query;
       if (result.error) fail("attempt update failed", result.error);
     }, true, true);
   }
+
 
   for (const change of input.transition.presence) {
     if (input.continuation && change.afterCommandId) continue;
@@ -671,23 +700,32 @@ function commandMayOverlap(command: Command, session: SessionRow, transition: Tr
     !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence;
 }
 
+/** `prepare_v2` lets these through after a termination; everything else it refuses. */
+const TEARDOWN_KINDS = new Set(["hangup", "recording_stop", "conference_leave"]);
+
+/**
+ * The fenced refusal `prepare_v2` raises once a termination is committed
+ * (`20260929200000:227-230`). It is the authority on that fact, so a command it
+ * refuses is superseded, not failed.
+ */
+function isTerminationBlocked(error: unknown): boolean {
+  return error instanceof Error && (error as { code?: string }).code === "PT409" &&
+    error.message.includes("telephony termination blocks new provider command");
+}
+
 /**
  * Whether the validity read before this command can be skipped.
  *
- * Only for a `hangup`. `commandStillApplies` returns true for it without
- * looking at the session at all, and `prepare_v2` keeps letting teardown
- * through after a termination — so there is nothing the fresh row could say
- * that would change the outcome. Every other kind keeps its read: a
- * termination committed by another invocation (`app.hangup` commits it without
- * the lease) is exactly what that read is there to catch, and the fenced
- * refusal that would replace it is not reachable in any test we have.
+ * The row this invocation holds came back from a fenced write under this lease,
+ * and only the lease holder can change the state, generation or `ended_at` that
+ * `commandStillApplies` reads. Termination is the one fact another invocation
+ * commits without the lease — `app.hangup` does, before it waits for the lease —
+ * and `prepare_v2` refuses those commands itself, mapped above.
  *
- * The row itself is ours either way: it came back from a fenced write under
- * this lease. Recording is excluded — it keeps its own live view of
- * `pendingAudio` and of recorder state.
+ * Recording is excluded: it keeps its own live view of `pendingAudio` and
+ * `commandStillApplies` inspects live recorder state for `recording_start`.
  */
-function providerReadCanReuseSession(session: SessionRow, command: Command): boolean {
-  if (command.kind !== "hangup") return false;
+function providerReadCanReuseSession(session: SessionRow): boolean {
   const owner = sessionOwnership.getStore();
   if (owner?.contract !== 2 || owner.sessionId !== session.id) return false;
   const meta = readMeta(session);
@@ -927,6 +965,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         commandId: command.commandId,
         to: command.to,
         from: command.from ?? undefined,
+        fromDisplayName: command.fromDisplayName,
         targetLegClientState: encodeClientState(command.targetClientState),
         timeoutSecs: command.timeoutSecs,
         sipRegion: "Europe",
@@ -1097,7 +1136,23 @@ async function createOrFindConference(telnyx: TelnyxClient, commandId: string, c
   }
 }
 
-async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
+/**
+ * Takes the operator's presence for this offer and stamps the token onto the
+ * command. Separate from the dial so a fan-out can claim its whole group before
+ * a single leg exists, and make all of those tokens durable in one write.
+ */
+async function claimOperatorForDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand): Promise<boolean> {
+  if (!command.profileId) return true;
+  const authorization = await authorizeOperatorDispatch(deps.admin, {
+    organizationId: deps.organizationId, profileId: command.profileId, sessionId: ctx.session.id,
+    expectedToken: command.clientState.offerToken, reason: `offer:${command.clientState.intent ?? command.role}`,
+  });
+  if (!authorization.applied || !authorization.offerToken) return false;
+  command.clientState.offerToken = authorization.offerToken;
+  return true;
+}
+
+async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, options?: { authorized?: boolean; planOnly?: boolean }): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   await assertOwnership();
   const telnyx = requireTelnyx(deps);
   const adopted = ctx.dialResults.get(command.commandId);
@@ -1108,7 +1163,11 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
   // mutable presence checks: a now-busy operator cannot turn accepted evidence
   // into a skipped dial or authorize a second dispatch. The real HTTP adapter
   // below verifies the original fingerprint and returns its cached result.
-  const journal = sessionOwnership.getStore()?.contract === 2 && ctx.continuation
+  // Only a replay can have dispatched this command before. A first attempt
+  // carries a continuation too — it is created before the commands run — so
+  // the attempt counter is what distinguishes them, and asking the journal on
+  // every first dial costs one round trip per operator rung.
+  const journal = sessionOwnership.getStore()?.contract === 2 && (ctx.continuation?.attempts ?? 0) > 0
     ? await ownershipRpc<{ outcome: string } | null>(deps.admin, "motorist_provider_command_lookup_v2", {
       p_session_id: ctx.session.id, p_command_id: command.commandId,
     }) : null;
@@ -1129,17 +1188,22 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
       command.clientState.operatorId = owned.profileId;
     }
   }
-  if (!alreadyDispatched && stable && command.profileId && command.role !== "supervisor") {
-    const authorization = await authorizeOperatorDispatch(deps.admin, {
-      organizationId: deps.organizationId, profileId: command.profileId, sessionId: ctx.session.id,
-      expectedToken: command.clientState.offerToken, reason: `offer:${command.clientState.intent ?? command.role}`,
-    });
-    if (!authorization.applied || !authorization.offerToken) return { skipped: true, detail: { reason: "offer no longer authorized" } };
-    command.clientState.offerToken = authorization.offerToken;
+  if (!options?.authorized && !alreadyDispatched && stable && command.profileId && command.role !== "supervisor") {
+    if (!await claimOperatorForDial(deps, ctx, command)) return { skipped: true, detail: { reason: "offer no longer authorized" } };
+    // The token has to be durable before the leg exists, or a replay cannot
+    // recognise its own offer. A fan-out checkpoints the whole group at once
+    // instead; see `executeRingFanout`.
     if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
+  if (options?.planOnly) return { skipped: false, detail: { planned: true, stable } };
+  const result = await telnyx.dial(dialParams(command));
+  return settleDial(deps, ctx, command, result, stable);
+}
+
+/** Exactly what `dial` is called with, apart so a whole ring step can be sent at once. */
+function dialParams(command: DialCommand): DialParams {
   const isSip = command.to.startsWith("sip:");
-  const result = await telnyx.dial({
+  return {
     commandId: command.commandId,
     to: command.to,
     from: command.from,
@@ -1158,9 +1222,19 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     // never touched. `supervisor_role` is only meaningful together with it.
     superviseCallControlId: command.superviseCallControlId,
     supervisorRole: command.superviseCallControlId ? command.supervisorRole : undefined,
-  });
+  };
+}
+
+/** The bookkeeping behind one dial, whether it was sent alone or as part of a step. */
+async function settleDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, result: DialResult, stable: boolean): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   ctx.dialResults.set(command.commandId, result);
   await upsertDialedLeg(deps, ctx.session, command, result);
+  // This read stays fresh deliberately. The plan proposed taking the
+  // tombstones from the snapshot when it shows none, to save a round trip per
+  // operator rung; `dispatch-pause-boundaries` refuses it. An operator can be
+  // paused while their own dial is in flight, and the fresh row is what
+  // discovers that tombstone in time to hang the revoked leg up — waiting for
+  // the next event lets it be answered first.
   if (stable && command.profileId) await cancelRevokedOffers(deps, ctx.session, { callControlId: result.callControlId, clientState: command.clientState });
   return { skipped: false, detail: { callControlId: result.callControlId, to: command.to } };
 }
@@ -1234,6 +1308,43 @@ async function insertAttempt(deps: EffectsDeps, session: SessionRow, plan: Attem
   return true;
 }
 
+/** The wire action and body behind an overlappable command, apart so a run can be sent at once. */
+function overlappedAction(ctx: ExecutionContext, command: Command): { callControlId: string; action: string; commandId: string; body: Record<string, unknown> } | null {
+  if (!("commandId" in command)) return null;
+  if (command.kind === "hangup") return { callControlId: resolveLeg(ctx, command.leg), action: "hangup", commandId: command.commandId, body: {} };
+  if (command.kind === "playback_stop") return { callControlId: resolveLeg(ctx, command.leg), action: "playback_stop", commandId: command.commandId, body: { stop: "all" } };
+  if (command.kind === "gather_stop") return { callControlId: resolveLeg(ctx, command.leg), action: "gather_stop", commandId: command.commandId, body: {} };
+  return null;
+}
+
+/**
+ * A run of best-effort teardown, sent and journalled as one group.
+ *
+ * These kinds have no post-dispatch bookkeeping — that is why they may overlap
+ * at all — so the only per-member work left is the tolerance a hangup owes a
+ * leg that is already gone, which is the outcome it asked for rather than a
+ * failure.
+ */
+async function executeOverlappedRun(deps: EffectsDeps, ctx: ExecutionContext, run: readonly Command[]): Promise<Map<string, Promise<{ skipped: boolean; detail?: Record<string, unknown> }>>> {
+  const actions = run.map((command) => overlappedAction(ctx, command));
+  const results = await requireTelnyx(deps).callActionMany(actions.filter((action): action is NonNullable<typeof action> => Boolean(action)));
+  const out = new Map<string, Promise<{ skipped: boolean; detail?: Record<string, unknown> }>>();
+  for (const [index, command] of run.entries()) {
+    const outcome = results[index];
+    const reason = command.kind === "hangup" ? (command as { reason?: string }).reason : undefined;
+    if (!outcome) continue;
+    if (outcome.status === "fulfilled") {
+      out.set(commandKey(command), Promise.resolve({ skipped: false, ...(reason ? { detail: { reason } } : {}) }));
+    } else if (command.kind === "hangup" && isLegAlreadyGone(outcome.reason)) {
+      out.set(commandKey(command), Promise.resolve({ skipped: true, detail: { reason, alreadyGone: true } }));
+    } else {
+      out.set(commandKey(command), Promise.reject(outcome.reason));
+    }
+  }
+  for (const promise of out.values()) promise.catch(() => undefined);
+  return out;
+}
+
 async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, command: RingFanout): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   const { admin } = deps;
   const session = ctx.session;
@@ -1248,11 +1359,16 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   const now = deps.now().toISOString();
   const dials: DialCommand[] = [];
   const skippedMembers: string[] = [];
-  for (const plan of command.attempts) {
-    const key = plan.profileId ?? plan.externalNumber ?? "";
-    const ok = await insertAttempt(deps, session, plan);
-    if (!ok) {
-      skippedMembers.push(key);
+  // One row each, together. The natural keys of `motorist_ring_attempts` are
+  // partial unique indexes, so a single multi-row insert cannot be used: one
+  // duplicate — a member already offered in another session — would take the
+  // whole statement down with it. Each member keeps its own duplicate verdict.
+  const inserted = await Promise.allSettled(command.attempts.map((plan) => insertAttempt(deps, session, plan)));
+  for (const [index, outcome] of inserted.entries()) {
+    const plan = command.attempts[index];
+    if (outcome.status === "rejected") throw outcome.reason;
+    if (!outcome.value) {
+      skippedMembers.push(plan.profileId ?? plan.externalNumber ?? "");
       continue;
     }
     const dial = command.dials.find((candidate) => candidate.attempt?.profileId === plan.profileId && candidate.attempt?.externalNumber === plan.externalNumber);
@@ -1274,12 +1390,64 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   let succeeded = 0;
   let retryPending = false;
   const failures: Array<{ to: string; error: string }> = [];
-  for (const dial of dials) {
+
+  // The third operator's phone used to start ringing only after the first two
+  // dials had each made their own eight-or-so database round trips and waited
+  // out their own provider call. They are independent legs; the caller is
+  // waiting for the first of them, not the last.
+  //
+  // Claim every operator first, then make all of those tokens durable in one
+  // write, then dial. The invariant that matters — a token is persisted before
+  // its leg can exist — is kept for the group rather than per member, and the
+  // single checkpoint avoids N fenced compare-and-sets racing on one row.
+  const stableFanout = telephonyStabilityEnabled() || hasStabilityContract(session);
+  const claimed: DialCommand[] = [];
+  if (stableFanout) {
+    const claims = await Promise.allSettled(dials.map(async (dial) =>
+      dial.profileId && dial.role !== "supervisor" ? claimOperatorForDial(deps, ctx, dial) : true));
+    for (const [index, claim] of claims.entries()) {
+      if (claim.status === "rejected") throw claim.reason;
+      if (claim.value) claimed.push(dials[index]);
+      else skippedMembers.push(dials[index].profileId ?? dials[index].externalNumber ?? "");
+    }
+    if (ctx.continuation && claimed.length) {
+      ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
+    }
+  } else claimed.push(...dials);
+
+  // One renew for the group: `assertOwnership` at the head of every dial and
+  // the journal's own preparation renew it again anyway.
+  // A frozen session for every member. `upsertDialedLeg` reads only identity
+  // from it, and its `telnyx_session_id` write is conditional and idempotent,
+  // so nothing here depends on a row that another member just rewrote.
+  const frozen: ExecutionContext = { ...ctx, session: ctx.session };
+
+  // The preconditions of every member, then the whole step on the wire under
+  // one journal, then each member's bookkeeping. Two database round trips for
+  // the group instead of two for each of them — and the members are fenced
+  // together, so a termination committed meanwhile stops all of them rather
+  // than the ones that had not gone out yet.
+  const planned = await Promise.allSettled(claimed.map((dial) => executeDial(deps, frozen, dial, { authorized: stableFanout, planOnly: true })));
+  const sendable: Array<{ index: number; dial: DialCommand }> = [];
+  const dialled: Array<PromiseSettledResult<{ skipped: boolean; detail?: Record<string, unknown> }>> = planned.map((outcome, index) => {
+    if (outcome.status === "rejected" || outcome.value.skipped) return outcome;
+    sendable.push({ index, dial: claimed[index] });
+    return outcome;
+  });
+  const results = await requireTelnyx(deps).dialMany(sendable.map(({ dial }) => dialParams(dial)));
+  for (const [position, result] of results.entries()) {
+    const { index, dial } = sendable[position];
+    if (result.status === "rejected") { dialled[index] = result; continue; }
     try {
-      // Keep the lease alive across a slow fan-out so a concurrent `call.answered`
-      // cannot start dialling the rest of the group behind our back.
-      await deps.renewLease?.();
-      const executed = await executeDial(deps, ctx, dial);
+      dialled[index] = { status: "fulfilled", value: await settleDial(deps, frozen, dial, result.value, stableFanout || hasStabilityContract(frozen.session)) };
+    } catch (error) {
+      dialled[index] = { status: "rejected", reason: error };
+    }
+  }
+  for (const [index, outcome] of dialled.entries()) {
+    const dial = claimed[index];
+    try {
+      const executed = outcome.status === "fulfilled" ? outcome.value : (() => { throw outcome.reason; })();
       if (!executed.skipped) succeeded += 1;
       else {
         let attempt = admin.from("motorist_ring_attempts").update({ result: "cancelled", ended_at: now }).eq("session_id", session.id).eq("step_index", command.step).in("result", ["pending", "offered"]);
@@ -1460,11 +1628,29 @@ async function executeReduceResult(
   // branch below run exactly as they did when each call waited its turn.
   const overlapped = new Map<string, ReturnType<typeof executeCommand>>();
 
-  const checkpointCommand = async (key: string) => {
+  // Keys banked by an overlapping run, written once when the run ends.
+  //
+  // Each of those commands has already happened at the provider; checkpointing
+  // them one by one is N fenced compare-and-sets on one session row to record
+  // N facts that are all equally true. If the invocation dies before the
+  // write, the replay re-issues them and `prepare_v2` answers every one from
+  // its recorded outcome — zero provider calls, same results.
+  let banked = 0;
+  const rememberCommand = (key: string) => {
     if (!input.continuation) return;
     if (!input.continuation.completedCommands.includes(key)) input.continuation.completedCommands.push(key);
+    banked += 1;
+  };
+  const writeCheckpoint = async () => {
+    if (!input.continuation || banked === 0) return;
+    banked = 0;
     ctx.session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, ctx.session);
     session = ctx.session;
+  };
+  const checkpointCommand = async (key: string) => {
+    if (!input.continuation) return;
+    rememberCommand(key);
+    await writeCheckpoint();
   };
   const dispatchList = input.databaseOnly ? [] : commands;
   for (const [index, command] of dispatchList.entries()) {
@@ -1475,7 +1661,7 @@ async function executeReduceResult(
     let providerExecuted = false;
     try {
       if (input.continuation) {
-        if (!providerReadCanReuseSession(ctx.session, command)) {
+        if (!providerReadCanReuseSession(ctx.session)) {
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
           if (fresh.error) throw new EffectsError("effect validity read failed");
           ctx.session = fresh.data;
@@ -1513,16 +1699,18 @@ async function executeReduceResult(
       // Contract 2 only: `prepare_v2` fences each command on its own
       // generation, so a lease lost while the run is in flight cannot let a
       // stale command through. Contract 1 has no journal to do that.
-      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition)) {
+      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition) && !overlapped.has(key)) {
+        const run: Command[] = [command];
         for (let next = index + 1; next < dispatchList.length; next += 1) {
           const sibling = dispatchList[next];
           if (!commandMayOverlap(sibling, ctx.session, transition)) break;
-          const siblingKey = commandKey(sibling);
-          if (overlapped.has(siblingKey) || input.continuation?.completedCommands.includes(siblingKey)) continue;
-          const started = executeCommand(deps, ctx, sibling);
-          // Awaited when its turn comes; this only silences an early exit.
-          started.catch(() => undefined);
-          overlapped.set(siblingKey, started);
+          if (input.continuation?.completedCommands.includes(commandKey(sibling))) continue;
+          run.push(sibling);
+        }
+        // One fence and one record for the run, not one of each per command.
+        // The teardown behind a bridge is three or four of these.
+        if (run.length > 1 && run.every((member) => overlappedAction(ctx, member))) {
+          for (const [memberKey, settled] of await executeOverlappedRun(deps, ctx, run)) overlapped.set(memberKey, settled);
         }
       }
       const executed = await (overlapped.get(key) ?? executeCommand(deps, ctx, command));
@@ -1611,9 +1799,27 @@ async function executeReduceResult(
         catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "participant_observation_failed" }); }
       }
       outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: executed.skipped, bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: executed.detail });
-      await checkpointCommand(key);
+      rememberCommand(key);
+      // Mid-run the key is only banked: the run's own last member writes for
+      // all of them. Any other branch below writes immediately, and so does
+      // the end of the loop.
+      const following = index + 1 < dispatchList.length ? commandKey(dispatchList[index + 1]) : null;
+      if (!following || !overlapped.has(following)) await writeCheckpoint();
     } catch (error) {
       if (error instanceof SessionLeaseLostError) throw error;
+      if (input.continuation && !providerExecuted && !TEARDOWN_KINDS.has(command.kind) && isTerminationBlocked(error)) {
+        // A termination committed by another invocation — the one fact the
+        // reused row can be stale about. The validity read would have skipped
+        // this command *and every one behind it*, so retiring only this one
+        // would leave a dependent successor (a `conference_join` whose
+        // `conference_create` never ran) to fail on its own preconditions and
+        // open an incident. Retire the entry, which is what the read achieved.
+        outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: true,
+          bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: { reason: "superseded continuation" } });
+        input.continuation.completedCommands = commands.map(commandKey);
+        await checkpointCommand(key);
+        break;
+      }
       if (input.continuation && providerExecuted) {
         // The provider accepted this stable command. A database checkpoint
         // failure must leave it replayable, never compensate a working bridge.
@@ -1759,6 +1965,8 @@ async function executeReduceResult(
       }
     }
   }
+  // Anything still banked belongs to a run that ended with the list.
+  await writeCheckpoint();
 
   if (deferProjections && !failure) {
     try {

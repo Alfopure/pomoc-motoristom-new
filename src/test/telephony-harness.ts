@@ -116,6 +116,8 @@ export function createTelephonyHarness(options: HarnessOptions = {}): TelephonyH
       destination_allowlist: ["SK", "CZ"],
       max_ring_fanout: 8,
       max_concurrent_legs: 9,
+      // The database default, so the harness ages the same way production does.
+      queue_escalate_after_seconds: 120,
     },
   ]);
   db.seed("motorist_business_hours", [{ id: BUSINESS_HOURS_ID, organization_id: ORG, name: "Pracovný čas", timezone: "Europe/Bratislava", active: true }]);

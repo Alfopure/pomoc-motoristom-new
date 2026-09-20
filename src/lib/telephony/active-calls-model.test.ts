@@ -75,6 +75,19 @@ function payload(overrides: Partial<ActiveCallsPayload> = {}): ActiveCallsPayloa
 }
 
 describe("snapshot contract", () => {
+  it("carries the session's frozen waiting policy into every shared overview", () => {
+    const waiting = call({ state: "waiting", answeredAt: null, answeredByProfileId: null,
+      waitingSince: "2026-09-03T08:01:00.000Z", waitingMaxMinutes: 7,
+      waitingReason: "no_operator_reachable", queueIdleSince: "2026-09-03T08:03:00.000Z",
+      queueEscalatedAt: "2026-09-03T08:04:00.000Z" });
+    const model = buildPhoneBarModel(payload({ waiting: [waiting] }));
+    for (const row of [model.waiting[0], model.teamCalls[0]]) {
+      expect(row).toMatchObject({ waitingSince: waiting.waitingSince, waitingMaxMinutes: 7,
+        waitingReason: waiting.waitingReason, queueIdleSince: waiting.queueIdleSince, queueEscalatedAt: waiting.queueEscalatedAt });
+      expect(waitingRoomPark(row, { now: NOW })).toMatchObject({ seconds: 240, secondsToLimit: 180, idleSeconds: 120, unreachable: true, escalated: true });
+    }
+  });
+
   it("accepts the server snapshot without importing server code at runtime", () => {
     // Compile-time only: the browser model must stay assignable from the shape
     // `GET /api/telephony/calls/active` actually returns.
@@ -293,7 +306,59 @@ describe("waiting-room park info", () => {
       seconds: 4 * 60,
       secondsToLimit: 26 * 60,
       limitMinutes: 30,
+      unreachable: false,
+      idleSeconds: null,
+      escalated: false,
     });
+  });
+
+  it("marks a caller who reached the waiting room without a single phone ringing", () => {
+    // Different from an ordinary wait: the plan had members and none of them
+    // could be reached, which is an operational problem, not traffic.
+    const overflow = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null, waitingReason: "no_operator_reachable" };
+
+    expect(waitingRoomPark(overflow, { now: NOW })).toMatchObject({ parked: false, unreachable: true });
+  });
+
+  it("marks a caller the queue has since stopped finding anybody for", () => {
+    // They arrived while somebody was there — an ordinary overflow — and the
+    // queue has found nobody to ring for four minutes since. Same situation,
+    // arrived at later.
+    const stalled = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null,
+      waitingReason: "ring_exhausted", queueIdleSince: "2026-09-03T08:01:00.000Z" };
+
+    expect(waitingRoomPark(stalled, { now: NOW })).toMatchObject({ unreachable: true, idleSeconds: 4 * 60, escalated: false });
+  });
+
+  it("does not call a queue idle in the second it is created", () => {
+    // Every queued caller starts idle by construction: the ring plan has just
+    // finished failing. Firing the badge on all of them would mean nothing.
+    const fresh = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null,
+      waitingReason: "ring_exhausted", queueIdleSince: new Date(NOW - 5_000).toISOString() };
+
+    expect(waitingRoomPark(fresh, { now: NOW })).toMatchObject({ unreachable: false, idleSeconds: 5 });
+  });
+
+  it("reports a queue that is still reaching people as not idle at all", () => {
+    const working = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null,
+      waitingReason: "ring_exhausted", queueIdleSince: null };
+
+    expect(waitingRoomPark(working, { now: NOW })).toMatchObject({ unreachable: false, idleSeconds: null });
+  });
+
+  it("records that the backup numbers have been tried", () => {
+    const escalated = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null,
+      waitingReason: "ring_exhausted", queueIdleSince: "2026-09-03T08:01:00.000Z", queueEscalatedAt: "2026-09-03T08:03:00.000Z" };
+
+    expect(waitingRoomPark(escalated, { now: NOW })).toMatchObject({ unreachable: true, escalated: true });
+  });
+
+  it("leaves an ordinary overflow and a parked call unmarked", () => {
+    const overflow = { ...parked(), state: "waiting" as const, parkedAt: null, parkedByProfileId: null, waitingReason: "ring_exhausted" };
+
+    expect(waitingRoomPark(overflow, { now: NOW }).unreachable).toBe(false);
+    // Parking is a decision somebody made; it is never "nobody was reachable".
+    expect(waitingRoomPark({ ...parked(), waitingReason: "no_operator_reachable" }, { now: NOW }).unreachable).toBe(false);
   });
 
   it("keeps an unknown operator nameless rather than guessing", () => {

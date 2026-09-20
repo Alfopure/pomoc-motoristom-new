@@ -30,6 +30,13 @@ export const MAX_DAILY_LEG_SOFT_CAP = 100_000;
 export const MAX_ALLOWLIST_ENTRIES = 100;
 /** One concurrent leg is always the caller's own, so a fan-out needs at least one more. */
 export const MIN_CONCURRENT_LEGS = 2;
+/**
+ * The escalation is stored in seconds and edited in minutes: minutes are what
+ * the admin thinks in, and the only values the field can produce are whole
+ * ones. A value set outside this screen that is not a whole minute shows
+ * rounded and is normalised by the next save.
+ */
+export const MAX_QUEUE_ESCALATE_MINUTES = 30;
 
 export type SettingsDraft = {
   liveCallsEnabled: boolean;
@@ -39,6 +46,8 @@ export type SettingsDraft = {
   parkMaxMinutes: string;
   maxRingFanout: string;
   maxConcurrentLegs: string;
+  /** Minutes; `0` means the queue never tries the backup numbers. */
+  queueEscalateAfterMinutes: string;
   /** Free text, comma or whitespace separated: `SK, CZ, +43`. */
   destinationAllowlist: string;
 };
@@ -55,6 +64,7 @@ export function settingsDraftFromDocument(settings: TelephonySettingsDoc): Setti
     parkMaxMinutes: String(settings.parkMaxMinutes),
     maxRingFanout: String(settings.maxRingFanout),
     maxConcurrentLegs: String(settings.maxConcurrentLegs),
+    queueEscalateAfterMinutes: String(Math.round(settings.queueEscalateAfterSeconds / 60)),
     destinationAllowlist: settings.destinationAllowlist.join(", "),
   };
 }
@@ -96,6 +106,7 @@ export function settingsPayload(draft: SettingsDraft): TelephonySettingsPatchInp
     parkMaxMinutes: parseCount(draft.parkMaxMinutes),
     maxRingFanout: parseCount(draft.maxRingFanout),
     maxConcurrentLegs: parseCount(draft.maxConcurrentLegs),
+    queueEscalateAfterSeconds: parseCount(draft.queueEscalateAfterMinutes) * 60,
     destinationAllowlist: parseAllowlist(draft.destinationAllowlist),
   };
 }
@@ -129,6 +140,13 @@ export function validateSettingsDraft(draft: SettingsDraft): ValidationIssue[] {
   const maxRingFanout = parseCount(draft.maxRingFanout);
   if (!Number.isInteger(maxRingFanout) || maxRingFanout < 1 || maxRingFanout > MAX_RING_FANOUT_LIMIT) {
     issues.push(issue("maxRingFanout", "fanout_invalid", `Počet súčasne zvoniacich zariadení musí byť 1 až ${MAX_RING_FANOUT_LIMIT}.`));
+  }
+
+  // Zero is a decision, not an empty field: it means the queue never rings the
+  // backup numbers and the caller waits out the park limit instead.
+  const escalateMinutes = parseCount(draft.queueEscalateAfterMinutes);
+  if (!Number.isInteger(escalateMinutes) || escalateMinutes < 0 || escalateMinutes > MAX_QUEUE_ESCALATE_MINUTES) {
+    issues.push(issue("queueEscalateAfterMinutes", "escalate_invalid", `Čas do skúšania záložného čísla musí byť 0 (vypnuté) až ${MAX_QUEUE_ESCALATE_MINUTES} minút.`));
   }
 
   // The organisation-wide leg count includes the caller's own leg, so

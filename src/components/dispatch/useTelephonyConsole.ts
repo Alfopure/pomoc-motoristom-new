@@ -14,6 +14,7 @@ import {
   type PhoneBarModel,
   type WaitingRoomRow,
 } from "@/lib/telephony/active-calls-model";
+import { matchesRequestedIncomingOffer } from "@/lib/telephony/browser-invite";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { prepareCallStartRequest, type PendingCallStartRequest } from "@/lib/telephony/call-start-request";
 import { beginBrowserCallStep } from "@/lib/telephony/call-timing";
@@ -103,6 +104,8 @@ export type TelephonyConsole = {
   refreshPauseReasons: () => void;
   availabilityAction: (action: TelephonyAvailabilityAction) => void;
   answer: () => void;
+  answerOffer: (sessionId: string, callControlId: string | null) => void;
+  rejectOffer: (sessionId: string, callControlId: string | null) => void;
   /** Explicit confirmation after a 409: take the phone over from another tab. */
   takeoverPhone: () => void;
   hangupBrowser: () => void;
@@ -925,6 +928,19 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       setAnswerRequestCallId((pending) => pending === callId ? null : pending);
     });
   }, []);
+  const answerOffer = useCallback((sessionId: string, callControlId: string | null) => {
+    // Validate at execution time against the SDK and newest authoritative snapshot.
+    // A rendered row can outlive its invite; never answer whichever call replaced it.
+    const browser = webphoneRef.current?.getSnapshot().call;
+    const model = buildPhoneBarModel(snapshotRef.current);
+    if (!matchesRequestedIncomingOffer(model, sessionId, callControlId, browser)) return;
+    answer();
+  }, [answer]);
+  const rejectOffer = useCallback((sessionId: string, callControlId: string | null) => {
+    const webphone = webphoneRef.current;
+    if (!matchesRequestedIncomingOffer(buildPhoneBarModel(snapshotRef.current), sessionId, callControlId, webphone?.getSnapshot().call)) return;
+    void webphone?.hangup();
+  }, []);
   const takeoverPhone = useCallback(() => webphoneRef.current?.takeover(), []);
   const hangupBrowser = useCallback(() => void webphoneRef.current?.hangup(), []);
   const toggleMute = useCallback(() => webphoneRef.current?.toggleMute(), []);
@@ -966,6 +982,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     refreshPauseReasons,
     availabilityAction,
     answer,
+    answerOffer,
+    rejectOffer,
     takeoverPhone,
     hangupBrowser,
     toggleMute,

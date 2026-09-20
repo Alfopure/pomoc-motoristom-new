@@ -2,10 +2,11 @@
 import type { CaseDetailData } from "@/data/case-detail";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
+import { CaseAccessBoundary, CaseEditorActivity, useCaseEditorPresence, useCaseCollaboration } from "./CaseCollaborationProvider";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
 import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   CarFront,
@@ -682,7 +683,9 @@ export function CaseDetail({
   }
 
   return (
+    <CaseAccessBoundary>
     <div data-case-detail-root className={`${styles.surface} ${styles.detail} grid min-w-0 max-w-full overflow-x-clip @container`}>
+      <CaseEditorActivity caseId={caseItem.id} />
       {!embedded && <div className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2.5">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -1074,6 +1077,7 @@ export function CaseDetail({
         open={smsComposerOpen}
       />
     </div>
+    </CaseAccessBoundary>
   );
 }
 
@@ -1273,6 +1277,10 @@ function EditCaseForm({
   partnerDirectory: PartnerDirectoryEntry[];
 }) {
   const [selectedJobTypes, setSelectedJobTypes] = useState<JobType[]>(caseItem.jobTypes);
+  useCaseEditorPresence(caseItem.id);
+  const { state: collaborationState } = useCaseCollaboration();
+  const collaborationAccessRef = useRef(collaborationState.hidden);
+  useLayoutEffect(() => { collaborationAccessRef.current = collaborationState.hidden || (collaborationState.available === true && !collaborationState.cases.some(item => item.id === caseItem.id)); }, [collaborationState, caseItem.id]);
   const [priority, setPriority] = useState<CasePriority>(caseItem.priority);
   const [sourceType, setSourceType] = useState<NonNullable<DispatchCase["sourceType"]> | "">(caseItem.sourceType ?? "");
   const [contacts, setContacts] = useState<ContactDraft[]>(() => contactsFromCase(caseItem));
@@ -1525,7 +1533,93 @@ function EditCaseForm({
   };
   const serializedDraft = JSON.stringify(draftPayload);
   const [acceptedDraft, setAcceptedDraft] = useState(serializedDraft);
-  const isDirty = serializedDraft !== acceptedDraft;
+  const [adoptingRemote, setAdoptingRemote] = useState(false);
+  const isDirty = !adoptingRemote && serializedDraft !== acceptedDraft;
+
+  // Reconcile only a clean editor. Dirty values and its input nodes keep their identity.
+  useEffect(() => {
+    if (caseItem.updatedAt === serverRevisionRef.current || savePhase === "saving" || collaborationState.hidden) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronizes an external authorized snapshot without remounting the user's input nodes.
+    if (isDirty) { conflictRef.current = true; setConflict(true); return; }
+    if (conflictRef.current) return;
+    serverRevisionRef.current = caseItem.updatedAt;
+    setAdoptingRemote(true);
+    setSelectedJobTypes(caseItem.jobTypes);
+    setPriority(caseItem.priority);
+    setSourceType(caseItem.sourceType ?? "");
+    setContacts(contactsFromCase(caseItem));
+    setCustomerType(caseItem.customerDetails.type ?? "private_person");
+    setCompanyName(caseItem.customerDetails.companyName ?? "");
+    setCompanyIdNumber(caseItem.customerDetails.companyIdNumber ?? "");
+    setAssistanceServiceName(caseItem.customerDetails.assistanceServiceName ?? "");
+    setAssistanceReference(caseItem.customerDetails.assistanceReference ?? "");
+    setPartnerDirectoryId(caseItem.customerDetails.partnerDirectoryId ?? "");
+    setCustomerNote(caseItem.customerDetails.note ?? "");
+    setLicensePlate(caseItem.vehicle.licensePlate);
+    setVin(caseItem.vehicle.vin ?? "");
+    setVehicleLookup(caseItem.vehicle.vehicleLookup ?? null);
+    setVehicleMake(caseItem.vehicle.make);
+    setVehicleModel(caseItem.vehicle.model);
+    setVehicleCategory(caseItem.vehicle.category);
+    setVehicleType(caseItem.vehicle.vehicleType ?? "");
+    setTransmission(caseItem.vehicle.transmission ?? "");
+    setDriveType(caseItem.vehicle.driveType ?? "");
+    setWeightKg(caseItem.vehicle.weightKg ? String(caseItem.vehicle.weightKg) : "");
+    setProductionYear(caseItem.vehicle.productionYear ? String(caseItem.vehicle.productionYear) : "");
+    setVehicleColor(caseItem.vehicle.color ?? "");
+    setVehicleIssue(caseItem.vehicle.issue || caseItem.incidentDetails.description || "");
+    setVehicleFlags(caseItem.vehicle.conditionFlags);
+    setVehicleNote(caseItem.vehicle.note ?? "");
+    setIncidentType(caseItem.incidentDetails.type ?? "");
+    setParticipantsCount(caseItem.incidentDetails.participantsCount ? String(caseItem.incidentDetails.participantsCount) : "");
+    setPassengersCount(caseItem.incidentDetails.passengersCount ? String(caseItem.incidentDetails.passengersCount) : "");
+    setSelectedDamageAreas(caseItem.incidentDetails.damageAreas);
+    setDamageNote(caseItem.incidentDetails.damageNote ?? caseItem.incidentDetails.damages ?? "");
+    setPickup(placeFromLocation(caseItem.pickup));
+    setDestination(placeFromDestination(caseItem.destination));
+    setManualPickupAddress(caseItem.locationDetails.manualPickupAddress ?? "");
+    setManualDestinationAddress(caseItem.locationDetails.manualDestinationAddress ?? "");
+    setRoadName(caseItem.locationDetails.roadName ?? "");
+    setKilometerSection(caseItem.locationDetails.kilometerSection ?? "");
+    setDrivingDirection(caseItem.locationDetails.drivingDirection ?? "");
+    setPlaceType(caseItem.locationDetails.placeType ?? "");
+    setLocationComplications(caseItem.locationDetails.complications ?? "");
+    setSelectedAccessComplications(caseItem.locationDetails.accessComplications);
+    setDestinationNote(caseItem.locationDetails.destinationNote ?? "");
+    setReplacementVehicleNeeded(caseItem.replacementVehicle.needed);
+    setReplacementVehicleType(caseItem.replacementVehicle.requestedType ?? "");
+    setSelectedReplacementPreferences(caseItem.replacementVehicle.preferences);
+    setReplacementVehicleNote(caseItem.replacementVehicle.note ?? "");
+    setReplacementProvisionStatus(caseItem.replacementVehicle.provisionStatus ?? "");
+    setReplacementProvisionReason(caseItem.replacementVehicle.provisionReason ?? "");
+    setReplacementCategory(caseItem.replacementVehicle.category ?? "");
+    setReplacementDeliveryPlace(caseItem.replacementVehicle.deliveryPlace ?? "");
+    setReplacementEntitlement(caseItem.replacementVehicle.entitlement ?? "");
+    setReplacementMaxDays(caseItem.replacementVehicle.maxDays ? String(caseItem.replacementVehicle.maxDays) : "");
+    setPaymentMethod(caseItem.paymentDetails.method ?? "");
+    setPaymentStatus(caseItem.paymentDetails.status ?? "");
+    setClosureType(caseItem.closureDetails.type ?? "");
+    setClosureStatus(caseItem.closureDetails.status ?? "");
+    setInsurancePortalUrl(caseItem.closureDetails.insurancePortalUrl ?? "");
+    setClosureNote(caseItem.closureDetails.note ?? "");
+    setNote(caseItem.mainNote);
+    setVehicleDriveable(caseItem.vehicle.conditionFlags.includes("driveable") ? true : caseItem.vehicle.conditionFlags.includes("immobile") ? false : null);
+    setReplacementExtension(caseItem.replacementVehicle.extensionPossible === undefined ? "" : caseItem.replacementVehicle.extensionPossible ? "yes" : "no");
+    setAttachments(caseItem.attachments.map(attachment => ({ category: attachment.category, createdAt: attachment.createdAt, fileName: attachment.fileName,
+      id: attachment.id, mimeType: attachment.mimeType, note: attachment.note, sizeBytes: attachment.sizeBytes, storageBucket: attachment.storageBucket, storagePath: attachment.storagePath })));
+    setCaseClosureStatus("");
+  // The incoming server revision is the trigger; a local keystroke is never a refresh.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caseItem, savePhase, collaborationState.hidden]);
+  useLayoutEffect(() => {
+    if (!adoptingRemote) return;
+    acceptedDraftRef.current = serializedDraft;
+    latestDraftRef.current = serializedDraft;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Commit the adopted baseline before paint and before autosave can observe these server values as local edits.
+    setAcceptedDraft(serializedDraft);
+    setAdoptingRemote(false);
+  }, [adoptingRemote, serializedDraft]);
+
   const currentError = conflict ? "Prípad medzitým zmenil iný používateľ. Rozpracované údaje zostávajú v editore." : saveError?.payload === serializedDraft ? saveError.message : null;
   const displayedSavePhase: CaseSavePhase =
     savePhase === "saving" ? "saving" : currentError ? "error" : isDirty ? "waiting" : savePhase;
@@ -1808,7 +1902,7 @@ function EditCaseForm({
   }
 
   async function persistDraft(serializedPayload: string, revision: number) {
-    if (conflictRef.current) return false;
+    if (conflictRef.current || collaborationAccessRef.current) return false;
     const unresolved = pendingMutationRef.current;
     if (unresolved && unresolved.payload !== serializedPayload) {
       if (!await persistDraft(unresolved.payload, unresolved.revision)) return false;
@@ -2002,7 +2096,7 @@ function EditCaseForm({
   }
 
   useEffect(() => {
-    if (!isDirty) {
+    if (!isDirty || adoptingRemote || collaborationState.hidden || conflict) {
       return;
     }
 
@@ -2021,7 +2115,7 @@ function EditCaseForm({
     return () => window.clearTimeout(timerId);
     // persistDraft is intentionally captured with the exact serialized revision queued above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDirty, retryToken, serializedDraft]);
+  }, [isDirty, retryToken, serializedDraft, adoptingRemote, collaborationState.hidden, conflict]);
 
   return (
     <section className="grid min-w-0 gap-2 lg:gap-3 @container" aria-busy={savePhase === "saving"}>
@@ -2078,6 +2172,7 @@ function EditCaseForm({
 
       {conflict && <div role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
         Prípad medzitým zmenil iný používateľ. Vaše údaje zostávajú v editore. Načítaním aktuálneho stavu nahradíte tento draft uloženými údajmi.
+        <details className="mt-2"><summary className="cursor-pointer font-semibold">Porovnať s uloženými údajmi</summary><dl className="mt-2 grid grid-cols-2 gap-2 text-xs"><dt>Uložený kontakt</dt><dd>{caseItem.contact.name} · {caseItem.contact.phone}</dd><dt>Uložené vozidlo</dt><dd>{caseItem.vehicle.licensePlate} · {caseItem.vehicle.issue}</dd><dt>Uložená poznámka</dt><dd className="whitespace-pre-wrap">{caseItem.mainNote || "—"}</dd><dt>Uložené</dt><dd>{formatDateTime(caseItem.updatedAt)}</dd></dl><p className="mt-2 text-xs">Vlastné rozpracované údaje zostávajú vo formulári nižšie.</p></details>
         <button type="button" onClick={() => void reloadConflictingCase()} className="mt-2 flex min-h-11 items-center rounded-md border border-amber-400 bg-white px-3 font-semibold">Načítať aktuálny stav prípadu</button>
       </div>}
       <div className="m-0 min-w-0 border-0 p-0 @container">

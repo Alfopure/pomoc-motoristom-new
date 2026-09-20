@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { Loader2, Plus, Save, Trash2, Users } from "lucide-react";
 
 import type { RoutingDocument, ValidationIssue } from "@/server/telephony/config-service";
@@ -46,13 +46,19 @@ export function RingGroupsEditor({
   document,
   onNavigateToPlan,
   onSaved,
+  controlled,
+  onlyGroupId,
 }: {
+  controlled?: { groups: GroupDraft[]; onChange: Dispatch<SetStateAction<GroupDraft[]>> };
+  onlyGroupId?: string;
   canEdit: boolean;
   document: RoutingDocument;
   onNavigateToPlan?: (planId: string) => void;
   onSaved: (response: RoutingConfigResponse) => void;
 }) {
-  const [groups, setGroups] = useState<GroupDraft[]>(() => groupDraftsFromDocument(document.groups));
+  const [localGroups, setLocalGroups] = useState<GroupDraft[]>(() => groupDraftsFromDocument(document.groups));
+  const groups = controlled?.groups ?? localGroups;
+  const setGroups = controlled?.onChange ?? setLocalGroups;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [serverIssues, setServerIssues] = useState<ValidationIssue[]>([]);
@@ -102,11 +108,11 @@ export function RingGroupsEditor({
 
   return (
     <section className="rounded-md border border-zinc-200 bg-white" aria-labelledby="ring-groups-heading">
-      <SettingsSectionHeader
+      {!onlyGroupId && <SettingsSectionHeader
         icon={Users}
         title="Skupiny zvonenia"
         description="Kto zvoní pri prichádzajúcom hovore. Poradie členov sa dá ťahať myšou alebo klávesnicou."
-      />
+      />}
 
       <div className="grid gap-4 p-4">
         <h3 id="ring-groups-heading" className="sr-only">
@@ -124,7 +130,7 @@ export function RingGroupsEditor({
 
         {groups.length === 0 && <SettingsNotice tone="warning">Zatiaľ nie je vytvorená žiadna skupina zvonenia.</SettingsNotice>}
 
-        {groups.map((group) => {
+        {groups.filter(group => !onlyGroupId || group.id === onlyGroupId).map((group) => {
           // The full draft list is what lets the note tell "one step is skipped"
           // apart from "this plan has no runnable step left".
           const usageNote = groupUsageNote(group, document.plans, groups);
@@ -202,7 +208,7 @@ export function RingGroupsEditor({
               {ringSecsNote && <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">{ringSecsNote}</p>}
               {timings.length > 0 && (
                 <div className="mt-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-950">
-                  <p className="font-semibold">Účinné časy v uložených plánoch</p>
+                  <p className="font-semibold">Účinné časy v plánoch</p>
                   <ul className="mt-1 grid gap-1" aria-label={`Účinné časy skupiny ${group.name}`}>
                     {timings.map((timing) => (
                       <li key={`${timing.planId}:${timing.stepIndex}`}>
@@ -226,7 +232,7 @@ export function RingGroupsEditor({
 
               <div className="mt-3">
                 <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="text-xs font-semibold uppercase text-zinc-500">Členovia ({group.members.length})</span>
+                  <span className="text-xs font-semibold text-zinc-500">Členovia ({group.members.length})</span>
                   <div className="flex gap-2">
                     <AddButton disabled={!canEdit} label="Operátor" onClick={() => setGroups((current) => addMember(current, group.key, "operator"))} />
                     <AddButton disabled={!canEdit} label="Externé číslo" onClick={() => setGroups((current) => addMember(current, group.key, "external_number"))} />
@@ -314,9 +320,9 @@ export function RingGroupsEditor({
           );
         })}
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-zinc-200 pt-3">
+        {!onlyGroupId && <div className="flex flex-wrap items-center gap-2 border-t border-zinc-200 pt-3">
           <AddButton disabled={!canEdit} label="Pridať skupinu" onClick={() => setGroups((current) => addGroup(current))} />
-          <button
+          {!controlled && <button
             type="button"
             disabled={!canEdit || saving || !dirty || issues.length > 0}
             onClick={() => void save()}
@@ -324,10 +330,10 @@ export function RingGroupsEditor({
           >
             {saving ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Save size={15} aria-hidden="true" />}
             Uložiť skupiny
-          </button>
-          {dirty && issues.length === 0 && <span className="text-xs font-medium text-amber-700">Neuložené zmeny.</span>}
+          </button>}
+          {!controlled && dirty && issues.length === 0 && <span className="text-xs font-medium text-amber-700">Neuložené zmeny.</span>}
           {issues.length > 0 && <span className="text-xs font-medium text-red-700">Najprv oprav označené polia.</span>}
-        </div>
+        </div>}
       </div>
     </section>
   );

@@ -1,13 +1,13 @@
 "use client";
 
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Clock3, Loader2, PhoneOutgoing, RefreshCw, UserRound, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Check, Clock3, Loader2, PhoneOutgoing, UserRound, X } from "lucide-react";
 
 import { TELEPHONY_TIMEOUT_MS, telephonyJson } from "@/lib/telephony/client-request";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
-import { callbackPollDelayMs } from "@/lib/telephony/poll-schedule";
+import { useCallbackQueue } from "@/lib/telephony/callback-queue-store";
 import { callbackOrigin, callbackOriginDetail, CALLBACK_ORIGIN_LABELS, type CallbackOrigin } from "@/lib/telephony/callback-origin";
 import {
   callbackPermissions,
@@ -19,11 +19,9 @@ import {
   CALLBACK_QUEUE_ORDERS,
   CALLBACK_SOURCE_LABELS,
   CALLBACK_STATUS_LABELS,
-  EMPTY_CALLBACK_QUEUE,
   formatCallbackWait,
   sortCallbackQueue,
   type CallbackQueueOrder,
-  type CallbackQueuePayload,
   type CallbackRequestPayload,
   type CallbackUrgency,
 } from "@/lib/telephony/callback-queue";
@@ -39,15 +37,10 @@ import { useTickingClock } from "./settings/settings-ui";
  * panel is the dispatcher's half of that promise: who is waiting, from which
  * line, how long, and the four actions that settle a request.
  *
- * It polls the queue itself rather than riding the 1 s/5 s `calls/active` loop:
- * these rows change on the scale of minutes, and the console's poll is sized
- * for live call control. The cadence comes from `poll-schedule.ts` like every
- * other telephony reader, so a console left open behind another window all
- * night drops to one poll every two minutes and a failing endpoint backs off
- * instead of being hit at full rate forever. The one action that touches the
- * phone (ringing the caller back) is delegated to the console through
- * `onCallBack`, so the browser answers its own leg exactly as it does for the
- * dialer.
+ * The header and panel share one authorized store, realtime invalidation and
+ * fallback polling chain. Loaded-page counts are labelled separately from the
+ * organization's unresolved total. Phone actions remain console-owned so the
+ * browser media leg follows the same guarded path as the dialer.
  */
 
 const URGENCY_ROW_CLASS: Record<CallbackUrgency, string> = {
@@ -66,6 +59,8 @@ type CallbackAction = "claim" | "call" | "done" | "cancel";
 
 export function CallbackQueuePanel({
   configured,
+  scopeKey = "legacy",
+  organizationId,
   onCallBack,
   onChanged,
   onSchedulingEnabled,
@@ -73,6 +68,8 @@ export function CallbackQueuePanel({
   refreshToken = 0,
 }: {
   configured: boolean;
+  scopeKey?: string;
+  organizationId?: string;
   /** Console-owned outbound path: rings the caller and arms the browser phone. */
   onCallBack?: (requestId: string, verificationId?: string) => Promise<void>;
   /** Lets the console refresh its own surfaces once a request changed. */
@@ -81,15 +78,11 @@ export function CallbackQueuePanel({
   onLiveCount?: (count: number) => void;
   refreshToken?: number;
 }) {
-  const [queue, setQueue] = useState<CallbackQueuePayload>(EMPTY_CALLBACK_QUEUE);
-  const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { queue, loaded, loading, error, reload, loadMore } = useCallbackQueue(scopeKey, organizationId);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
   const [originFilter, setOriginFilter] = useState<"all" | CallbackOrigin["kind"]>("all");
   const [order, setOrder] = useState<CallbackQueueOrder>("oldest");
-  const failures = useRef(0);
   // Ageing is re-derived against the browser's own clock: the answer on screen
   // is up to a poll interval old, and a request must not look fresher than it
   // is just because the last poll was 29 seconds ago.
@@ -99,72 +92,16 @@ export function CallbackQueuePanel({
   const checkedAt = Date.parse(queue.checkedAt);
   const now = clock?.getTime() ?? (Number.isFinite(checkedAt) ? checkedAt : 0);
 
-  const reload = useCallback(() => setReloadToken((token) => token + 1), []);
-
+  useEffect(() => { if (refreshToken) reload(); }, [refreshToken, reload]);
   useEffect(() => {
-    let cancelled = false;
-    let timeoutId: number | undefined;
-    const controller = new AbortController();
-
-    const load = async () => {
-      const result = await telephonyJson<CallbackQueuePayload & { error?: string }>("/api/telephony/callbacks", {
-        label: "fronta spätných volaní",
-        signal: controller.signal,
-        timeoutMs: TELEPHONY_TIMEOUT_MS.read,
-      }).catch(() => null);
-      if (cancelled) return;
-      if (!result?.ok || !result.body) {
-        failures.current += 1;
-        setError(result?.body?.error ?? "Frontu spätných volaní sa nepodarilo načítať.");
-        setLoaded(true);
-        return;
-      }
-      failures.current = 0;
-      onSchedulingEnabled?.(result.body.schedulingEnabled === true);
-      onLiveCount?.(result.body.open.length);
-      setQueue(result.body);
-      setError(null);
-      setLoaded(true);
-    };
-
-    // One chain at a time, generation-counted: a tab that becomes visible while
-    // the previous tick is still awaiting its response would otherwise leave
-    // that tick to schedule a second chain, and every hide/show cycle would
-    // double the poll rate.
-    let chain = 0;
-
-    const schedule = (generation: number) => {
-      if (cancelled || generation !== chain) return;
-      timeoutId = window.setTimeout(async () => {
-        await load();
-        schedule(generation);
-      }, callbackPollDelayMs({ documentHidden: document.visibilityState === "hidden", consecutiveFailures: failures.current }));
-    };
-
-    const restart = () => {
-      if (cancelled) return;
-      chain += 1;
-      const generation = chain;
-      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
-      void load().then(() => schedule(generation));
-    };
-
-    const onVisibility = () => {
-      if (cancelled || document.visibilityState !== "visible") return;
-      restart();
-    };
-
-    restart();
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      cancelled = true;
-      controller.abort();
-      document.removeEventListener("visibilitychange", onVisibility);
-      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
-    };
-  }, [reloadToken, refreshToken, onSchedulingEnabled, onLiveCount]);
+    if (!loaded) return;
+    onSchedulingEnabled?.(queue.schedulingEnabled === true);
+    onLiveCount?.(queue.openTotal ?? queue.open.length);
+  }, [loaded, queue, onSchedulingEnabled, onLiveCount]);
 
   const open = useMemo(() => sortCallbackQueue(queue.open, order), [order, queue.open]);
+  const totalOpen = queue.openTotal ?? open.length;
+  const partialQueue = totalOpen > open.length;
   const visible = open.filter((request) => originFilter === "all" || originOf(request).kind === originFilter);
   const summary = useMemo(
     () => callbackQueueSummary(open, { now, actorProfileId: queue.actorProfileId }),
@@ -211,35 +148,28 @@ export function CallbackQueuePanel({
   }
 
   return (
-    <section className="rounded-md border border-zinc-200 bg-white">
+    <section data-testid="callback-queue" className="overflow-hidden rounded-xl border border-amber-200 bg-white shadow-sm">
       <div className="flex items-center justify-between gap-2 border-b border-zinc-200 p-3">
         <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950">
           <Clock3 size={17} />
-          Fronta spätných volaní
+          Spätné volania
         </div>
         <div className="flex items-center gap-1.5">
           {summary.overdue > 0 && (
             <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-800">
-              {summary.overdue} po termíne
+              {summary.overdue} {partialQueue ? "zo zobrazených po termíne" : "po termíne"}
             </span>
           )}
-          <span className="rounded-full bg-zinc-950 px-2 py-0.5 text-[11px] font-bold text-white" aria-live="polite">
-            {summary.total}
+          <span data-testid="callback-total" className="rounded-md bg-amber-100 px-2.5 py-1 text-sm font-bold text-amber-950" aria-live="polite">
+            {totalOpen}
           </span>
-          <button
-            type="button"
-            onClick={reload}
-            aria-label="Obnoviť frontu spätných volaní"
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-600 transition hover:bg-zinc-100"
-          >
-            <RefreshCw size={13} />
-          </button>
+
         </div>
       </div>
 
       {summary.total > 0 && (
         <p className="border-b border-zinc-100 bg-zinc-50 px-3 py-1.5 text-[11px] font-medium text-zinc-600">
-          {summary.unclaimed} voľných · {summary.mine} mojich · najdlhšie čaká {formatCallbackWait(summary.longestWaitSeconds)}
+          {partialQueue ? `Zobrazených ${open.length} z ${totalOpen}: ` : ""}{summary.unclaimed} voľných · {summary.mine} mojich · najdlhšie čaká {formatCallbackWait(summary.longestWaitSeconds)}
           {" · interný termín "}
           {CALLBACK_OVERDUE_MINUTES} min
         </p>
@@ -253,10 +183,11 @@ export function CallbackQueuePanel({
               if (!count && kind !== "all" && kind !== "requested" && kind !== "missed") return null;
               return <button key={kind} type="button" aria-pressed={originFilter === kind} onClick={() => setOriginFilter(kind)}
                 className={`rounded-md border px-2 py-1 text-[11px] font-semibold ${originFilter === kind ? "border-zinc-950 bg-zinc-950 text-white" : "border-zinc-200 text-zinc-700"}`}>
-                {kind === "all" ? "Všetky" : CALLBACK_ORIGIN_LABELS[kind]} ({count})
+                {kind === "all" ? partialQueue ? "Zobrazené" : "Všetky" : CALLBACK_ORIGIN_LABELS[kind]} ({count})
               </button>;
             })}
           </div>
+          {partialQueue && <p className="text-[11px] text-zinc-500">Filtre a poradie sa vzťahujú na načítané požiadavky. Ďalšie nájdete pod zoznamom.</p>}
           <label className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-[11px] font-semibold text-zinc-600">
             Zoradiť
             <select
@@ -271,7 +202,7 @@ export function CallbackQueuePanel({
       )}
 
       {notice && <p className="border-b border-blue-100 bg-blue-50 px-3 py-1.5 text-[11px] font-medium text-blue-900">{notice}</p>}
-      {error && <p className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] font-medium text-amber-900">{error}</p>}
+      {error && <p role="status" className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-900">{error} <button type="button" onClick={reload} className="underline">Skúsiť znova</button></p>}
       {loaded && !queue.configured && !error && (
         <p className="border-b border-zinc-100 bg-zinc-50 px-3 py-1.5 text-[11px] font-medium text-zinc-600">
           {TELEPHONY_NOT_CONFIGURED_MESSAGE} Požiadavky sa dajú uzavrieť, volať sa z nich nedá.
@@ -299,6 +230,8 @@ export function CallbackQueuePanel({
           ))
         )}
       </div>
+
+      {queue.nextCursor && <button type="button" disabled={loading} onClick={loadMore} className="mx-3 mb-3 min-h-9 rounded-md border border-zinc-200 px-3 text-xs font-semibold">{loading ? "Načítavam…" : `Ďalšie požiadavky (${Math.max(0, (queue.openTotal ?? open.length) - open.length)})`}</button>}
 
       {queue.resolved.length > 0 && (
         <details className="border-t border-zinc-100">
@@ -362,7 +295,7 @@ function CallbackQueueRow({
   // actions on one row. The old six-line card made a queue of a few callers
   // run far down the page.
   return (
-    <article className={`rounded-md border px-2.5 py-2 ${URGENCY_ROW_CLASS[urgency]}`}>
+    <article data-callback-id={request.id} className={`rounded-lg border px-3 py-3 ${URGENCY_ROW_CLASS[urgency]}`}>
       <div className="flex min-w-0 items-center justify-between gap-2">
         <span className="truncate text-sm font-bold text-zinc-950">
           {request.callerName ?? formatPhoneNumberForDisplay(request.callerNumber)}
@@ -401,7 +334,7 @@ function CallbackQueueRow({
                 icon={UserRound}
                 label="Prevziať"
                 onClick={() => onAction("claim")}
-                tone="primary"
+                tone="ghost"
               />
             )}
             <ActionButton
@@ -465,9 +398,9 @@ function ActionButton({
       disabled={disabled || busy}
       title={title ?? (iconOnly ? label : undefined)}
       aria-label={iconOnly ? label : undefined}
-      className={`inline-flex min-h-8 items-center gap-1.5 rounded-md text-[11px] font-bold outline-none transition focus-visible:ring-2 focus-visible:ring-yellow-400 disabled:cursor-not-allowed ${iconOnly ? "w-8 justify-center" : "px-2.5"} ${
+      className={`inline-flex min-h-11 sm:min-h-9 items-center gap-1.5 rounded-md text-[11px] font-bold outline-none transition focus-visible:ring-2 focus-visible:ring-yellow-400 disabled:cursor-not-allowed ${iconOnly ? "w-11 sm:w-9 justify-center" : "px-2.5"} ${
         tone === "primary"
-          ? "bg-zinc-950 text-white hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-500"
+          ? "bg-emerald-700 text-white hover:bg-emerald-600 disabled:bg-zinc-200 disabled:text-zinc-500"
           : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100 disabled:text-zinc-400"
       }`}
     >

@@ -41,7 +41,9 @@ import {
   type CallbackPlan,
   type Command,
   type Compensation,
+  DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS,
   type DialCommand,
+  type FrozenRingMember,
   type FrozenRingPlan,
   type GatherSpec,
   type LegPatch,
@@ -98,6 +100,24 @@ const SUPERVISE_INTENT = "supervise";
 export const STALE_FINALISE_MS = 120_000;
 const QUEUE_RECHECK_MS = 5_000;
 const QUEUE_OPERATOR_RETRY_MS = 60_000;
+/**
+ * How long the queue keeps finding nobody to ring before it tries the numbers
+ * it otherwise never redials — zero when the organisation has turned it off.
+ *
+ * The queue only re-offers browser operators, so a call whose operators are
+ * all on other calls or all logged out places no offers at all — silently,
+ * for as long as the waiting room allows. Three callers once waited seven and
+ * eight minutes that way.
+ *
+ * The escalation dials a real number and is billed, so how long to wait — and
+ * whether to do it at all — is the organisation's setting, not a constant
+ * here. `DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS` is what it was before anybody
+ * could choose.
+ */
+function queueEscalateAfterMs(b: TransitionBuilder): number {
+  const seconds = b.ctx.settings.queueEscalateAfterSeconds;
+  return typeof seconds === "number" && seconds >= 0 ? seconds * 1_000 : DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS * 1_000;
+}
 
 // ---------------------------------------------------------------------------
 // Builder
@@ -891,6 +911,26 @@ function holdStepForCapacity(b: TransitionBuilder, stepIndex: number): void {
   b.note(`step ${stepIndex}: waiting for leg capacity`);
 }
 
+/**
+ * Who the operator's phone says is calling.
+ *
+ * Every leg to an operator is dialled from the DID line — it is the only
+ * verified origination number — so without this the SIP `From` display is the
+ * line itself. A colleague being transferred a call saw "Allianz Assistance
+ * +421 232 408 718" and read it as Allianz ringing them; one hung up a second
+ * after picking up.
+ *
+ * Telnyx puts the value in the display name, and the browser phone shows it in
+ * front of the number. The characters are the ones that survive a SIP display
+ * name; an internal call has no customer to present and keeps its own.
+ */
+function callerDisplay(b: TransitionBuilder): string | undefined {
+  if (b.session.direction === "internal") return undefined;
+  const number = b.session.caller_number ?? b.session.called_number;
+  const safe = (number ?? "").replace(/[^A-Za-z0-9 \-\_~!.+]/g, "").slice(0, 128);
+  return safe.length > 2 ? safe : undefined;
+}
+
 function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, planned: RingStepPlanResult, guard: RingFanout["guard"]): void {
   const devices = new Map(b.ctx.devices.map((device) => [device.profile_id, device]));
   const from = b.ctx.fromNumber ?? b.session.called_number ?? "";
@@ -918,6 +958,7 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
       clientState,
       linkTo: customer.telnyx_call_control_id,
       timeoutSecs: attempt.ringSecs,
+      fromDisplayName: callerDisplay(b),
       attempt: { stepIndex, profileId: attempt.profileId, externalNumber: attempt.externalNumber },
     });
     if (attempt.profileId) ringingProfileIds.push(attempt.profileId);
@@ -931,6 +972,19 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
     if (member.memberId) b.memberTouches.push({ memberId: member.memberId, field: "last_offered_at" });
   }
   b.note(`step ${stepIndex}: ${dials.length} dial(s)`);
+}
+
+/**
+ * "Nobody answered" and "there was nobody to ring" are different facts and the
+ * second one is an operational problem, not ordinary traffic. On 17 Sep three
+ * callers arrived within four minutes and met one reachable operator: two of
+ * them were in the waiting room eight seconds later, having never made a phone
+ * ring, and the console could not tell that from a plan that had simply run
+ * out. The reasons are already known here — `planStep` returns them — they were
+ * just collapsed into one word on the way out.
+ */
+function exhaustionReason(b: TransitionBuilder): "ring_exhausted" | "no_operator_reachable" {
+  return b.attemptsView().length === 0 ? "no_operator_reachable" : "ring_exhausted";
 }
 
 function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPlan): void {
@@ -952,9 +1006,13 @@ function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
     return;
   }
   stopMoh(b, customer);
+  const exhaustion = exhaustionReason(b);
   b.patchMeta({ ring: { ...ring, exhausted: true, fallback: kind } });
+  if (exhaustion === "no_operator_reachable") {
+    b.note(`no operator could be rung: ${plan.steps.map((step, index) => `step ${index} (${step.groupName})`).join(", ") || "empty plan"}`);
+  }
   if (kind === "waiting_room") {
-    enterWaiting(b, customer, "ring_exhausted");
+    enterWaiting(b, customer, exhaustion);
     return;
   }
   if (kind === "hangup_message") {
@@ -1016,12 +1074,23 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
   // settings row on every event, so an admin lowering `park_max_minutes` used to
   // eject callers who were already waiting — a configuration change disturbing a
   // call in progress.
-  const queued = state === "waiting" && b.session.direction === "inbound" && !b.session.answered_at && (reason === "ring_exhausted" || reason === "ivr" || Boolean(b.meta.queue));
+  // Both exhaustions queue the caller for automatic offers; they differ only in
+  // what the console is told about why nobody picked up.
+  const queued = state === "waiting" && b.session.direction === "inbound" && !b.session.answered_at &&
+    (reason === "ring_exhausted" || reason === "no_operator_reachable" || reason === "ivr" || Boolean(b.meta.queue));
   const previous = queued && b.meta.queue ? b.meta.waiting : null;
   if (queued && !previous) stopMoh(b, customer);
   b.setState(state).patchMeta({
     waiting: previous ?? { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso, max_minutes: b.ctx.settings.parkMaxMinutes },
-    queue: queued ? { next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString() } : null,
+    // A queue that already exists keeps its idle clock and its spent
+    // escalation; re-entering the waiting room after an offer rang out is the
+    // same queue, not a new one. A fresh queue starts idle, because the ring
+    // plan has just finished failing to reach anybody.
+    queue: queued
+      ? (b.meta.queue
+          ? { ...b.meta.queue, next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString() }
+          : { next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString(), idle_since: b.nowIso, escalated_at: null })
+      : null,
     ring: { ...b.meta.ring, active_step: null, step_deadline_at: null },
   });
   if (queued) {
@@ -1035,30 +1104,89 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
   b.note(`${state} (${reason})`);
 }
 
-function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
-  const queue = b.meta.queue;
-  const plan = b.ringPlan();
-  if (!queue || !plan?.steps[0] || b.session.answered_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return;
-  b.patchMeta({ queue: { next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString() } });
-  // Only browser operators are retried. An external backup/mobile gets its
-  // initial attempt, never a sequence of paid redials for a half-hour queue.
+/**
+ * Browser operators the queue may re-offer to, oldest offer first.
+ *
+ * `dueNow` applies the retry gate: an operator is only offered the call again
+ * a minute after their last offer, so a queue of one unresponsive operator
+ * rings them once a minute rather than every five seconds. Without the gate
+ * the same list answers a different question — is there anybody here at all —
+ * which is what decides whether the queue is idle.
+ */
+function queueOperatorMembers(b: TransitionBuilder, plan: FrozenRingPlan, opts: { dueNow: boolean }): FrozenRingMember[] {
   const lastOffered = new Map<string, number>();
   for (const attempt of b.attemptsView()) if (attempt.profile_id) {
     lastOffered.set(attempt.profile_id, Math.max(lastOffered.get(attempt.profile_id) ?? 0, Date.parse(attempt.offered_at ?? attempt.created_at)));
   }
-  const members = [...new Map([...(plan.queueMembers ?? []), ...plan.steps.flatMap((step) => step.members)]
+  return [...new Map([...(plan.queueMembers ?? []), ...plan.steps.flatMap((step) => step.members)]
     .filter((member) => member.kind === "operator" && member.profileId)
     .map((member) => [member.profileId, member])).values()]
-    .filter((member) => (lastOffered.get(member.profileId!) ?? 0) + QUEUE_OPERATOR_RETRY_MS <= b.ctx.now.getTime())
-    .sort((a, z) => (lastOffered.get(a.profileId!) ?? 0) - (lastOffered.get(z.profileId!) ?? 0) || a.position - z.position)
-    .map((member, position) => ({ ...member, position, ringSecs: Math.max(20, member.ringSecs) }));
+    .filter((member) => !opts.dueNow || (lastOffered.get(member.profileId!) ?? 0) + QUEUE_OPERATOR_RETRY_MS <= b.ctx.now.getTime())
+    .sort((a, z) => (lastOffered.get(a.profileId!) ?? 0) - (lastOffered.get(z.profileId!) ?? 0) || a.position - z.position);
+}
+
+/**
+ * The numbers the queue normally leaves alone: external backups and the
+ * personal mobiles resolved from the ring groups.
+ *
+ * These get their attempt when the ring plan runs and are then excluded, so
+ * that a half-hour queue does not become a sequence of paid redials. The
+ * escalation gives them exactly one more, which is why it is gated on
+ * `escalated_at` rather than on a timer.
+ */
+function queueBackupMembers(b: TransitionBuilder, plan: FrozenRingPlan): FrozenRingMember[] {
+  return [...new Map(plan.steps.flatMap((step) => step.members)
+    .filter((member) => member.kind === "external_number" && member.externalNumber)
+    .map((member) => [member.externalNumber, member])).values()]
+    .sort((a, z) => a.position - z.position);
+}
+
+function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
+  const queue = b.meta.queue;
+  const plan = b.ringPlan();
+  if (!queue || !plan?.steps[0] || b.session.answered_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return;
+
+  // How long the queue has been placing no offers at all. Not how long the
+  // caller has waited: a queue that keeps ringing an operator who declines is
+  // working, and must not escalate.
+  const idleSince = Date.parse(queue.idle_since ?? b.nowIso);
+  const idleFor = Number.isNaN(idleSince) ? 0 : b.ctx.now.getTime() - idleSince;
+  const escalateAfterMs = queueEscalateAfterMs(b);
+  // Zero is the organisation saying "never ring the backup numbers", not "ring
+  // them immediately".
+  const escalating = escalateAfterMs > 0 && !queue.escalated_at && idleFor >= escalateAfterMs;
+
   const index = b.session.current_step;
-  const planned = planRingStep({ index, groupId: plan.steps[0].groupId, groupName: "Čakáreň", strategy: "ordered", timeoutSecs: 20, members }, {
-    ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
-    sessionId: b.session.id, now: b.ctx.now, presence: toEligibilityPresence(b.ctx.presence), devices: toEligibilityDevices(b.ctx.devices),
-    openOffers: b.ctx.openOffers, attempted: new Set(), maxFanout: 1, maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, activeLegCount: b.ctx.activeLegCount,
-  });
-  if (planned.attempts.length) fanout(b, customer, index, planned, { expectedStep: index, setStep: index + 1 });
+  const planQueueStep = (members: FrozenRingMember[]) => planRingStep(
+    { index, groupId: plan.steps[0].groupId, groupName: "Čakáreň", strategy: "ordered", timeoutSecs: 20,
+      members: members.map((member, position) => ({ ...member, position, ringSecs: Math.max(20, member.ringSecs) })) },
+    { ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
+      sessionId: b.session.id, now: b.ctx.now, presence: toEligibilityPresence(b.ctx.presence), devices: toEligibilityDevices(b.ctx.devices),
+      openOffers: b.ctx.openOffers, attempted: new Set(), maxFanout: 1, maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, activeLegCount: b.ctx.activeLegCount },
+  );
+
+  const planned = planQueueStep(escalating ? queueBackupMembers(b, plan) : queueOperatorMembers(b, plan, { dueNow: true }));
+  // An operator sitting out the minute between offers is not "nobody to ring";
+  // with the gate at a minute and the escalation at two, counting them as idle
+  // would escalate every call that rings the same person twice.
+  const reachable = Boolean(planned.attempts.length) ||
+    (!escalating && planQueueStep(queueOperatorMembers(b, plan, { dueNow: false })).attempts.length > 0);
+
+  b.patchMeta({ queue: {
+    next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString(),
+    // The clock restarts as soon as somebody is reachable, and the escalation
+    // is spent whether or not it found a number to ring — one per call either
+    // way, so a half-hour queue cannot become a sequence of paid redials.
+    idle_since: reachable ? null : (queue.idle_since ?? b.nowIso),
+    escalated_at: escalating ? b.nowIso : (queue.escalated_at ?? null),
+  } });
+
+  if (planned.attempts.length) {
+    if (escalating) b.note(`queue escalated to backup numbers after ${Math.round(idleFor / 1000)} s with nobody to ring`);
+    fanout(b, customer, index, planned, { expectedStep: index, setStep: index + 1 });
+  } else if (escalating) {
+    b.note(`queue has nobody to ring and no backup number after ${Math.round(idleFor / 1000)} s`);
+  }
 }
 
 /** Outbound/internal: the far end answered → the bridge command placed at dial time completes. */
@@ -1421,6 +1549,33 @@ function onHangup(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
   return onPartyHangup(b, leg, event, at);
 }
 
+/**
+ * The caller hung up out of a three-way; whoever is left keeps talking.
+ *
+ * Only the legs that were actually in the conversation survive: an unanswered
+ * offer or a half-dialled party has nobody to talk to and is torn down with
+ * the rest. The call record ends here — the call was the caller's — while the
+ * session stays open until the last of them hangs up.
+ */
+function keepParties(b: TransitionBuilder, customer: LegRow, at: string, cause: string): void {
+  const parties = answeredParties(b);
+  const operator = b.openLegs().find((other) => other.answered_at && !isCustomer(other) && !isPartyLeg(other) && other.role !== "supervisor");
+  const staying = new Set([...parties, ...(operator ? [operator] : [])].map((other) => other.telnyx_call_control_id));
+
+  for (const other of b.openLegs()) {
+    if (other.telnyx_call_control_id === customer.telnyx_call_control_id) continue;
+    if (staying.has(other.telnyx_call_control_id) || other.role === "supervisor") continue;
+    b.cmd(hangupCmd(b, other, "customer_left"));
+  }
+  cancelOpenAttempts(b, at, "customer left");
+
+  b.setState(staying.size > 2 ? "conference" : twoPartyState(b));
+  b.call.status = "ended";
+  b.call.end_reason = cause;
+  b.call.ended_at = at;
+  b.note(`customer left the conference (${cause}) → ${staying.size} remaining keep talking`);
+}
+
 function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent, at: string): ReduceResult {
   const state = b.session.state;
   const meta = b.meta;
@@ -1437,6 +1592,15 @@ function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEve
 
   if (TERMINAL_STATES.has(state) || state === "wrap_up" || state === "missed") {
     finishIfQuiet(b, at);
+    return b.result();
+  }
+
+  // The caller leaving a three-way does not end the conversation they left
+  // behind. The operator was mid-sentence with a number they added — a tow
+  // service, a partner — and that call is not the caller's to hang up, exactly
+  // as an operator leaving does not hang up the caller's.
+  if (state === "conference" && answeredParties(b).length > 0) {
+    keepParties(b, leg, at, cause);
     return b.result();
   }
 
@@ -1665,6 +1829,11 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
   if (b.state === "conference" && customerOpen && answeredParties(b).length === 0) {
     b.setState(twoPartyState(b));
     b.note("last participant left → two-party call");
+  }
+  // The caller has gone and now so has the operator. An added number alone on
+  // a live leg is a stranger holding a silent call.
+  if (!customerOpen && !b.openLegs().some((other) => other.answered_at && !isPartyLeg(other) && other.role !== "supervisor")) {
+    for (const party of answeredParties(b)) b.cmd(hangupCmd(b, party, "nobody_left"));
   }
   finishIfQuiet(b, at);
   return b.result();
@@ -2291,7 +2460,8 @@ function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: T
     b.cmd({ kind: "dial", commandId: transferId, to: target.kind === "operator" ? target.sipUri : target.number,
       from: b.ctx.fromNumber ?? b.session.called_number ?? "", role: target.kind === "operator" ? "operator" : "external",
       profileId: ownerProfileId ?? null, externalNumber: target.kind === "number" ? target.number : null,
-      clientState: targetClientState, linkTo: customer.telnyx_call_control_id, timeoutSecs: DEFAULT_TRANSFER_TIMEOUT_SECS });
+      clientState: targetClientState, linkTo: customer.telnyx_call_control_id, timeoutSecs: DEFAULT_TRANSFER_TIMEOUT_SECS,
+      fromDisplayName: callerDisplay(b) });
   } else b.cmd({
     kind: "transfer",
     commandId: transferId,
@@ -2300,6 +2470,7 @@ function blindTransferCustomer(b: TransitionBuilder, customer: LegRow, target: T
     from: b.ctx.fromNumber ?? b.session.called_number,
     targetClientState,
     timeoutSecs: DEFAULT_TRANSFER_TIMEOUT_SECS,
+    fromDisplayName: callerDisplay(b),
   });
   // Keep the existing conversation intact until the transfer/dial is accepted.
   stopMoh(b, customer);
@@ -2349,17 +2520,23 @@ function appConsult(b: TransitionBuilder, customer: LegRow, event: AppEvent): Re
     b.cmd({ kind: "conference_hold", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:hold:consult"), legs: [ref(customer)], media: { key: "moh" } });
   }
   const target = event.target;
+  // A colleague who takes their calls on their own phone arrives here as a
+  // number, not as an operator. Naming them anyway is what makes
+  // `authorizeOperatorDispatch` occupy their presence: without it their phone
+  // rings while the ring plan is still free to offer them another call.
+  const targetProfileId = target.kind === "operator" ? target.profileId : target.ownerProfileId ?? null;
   const dial: DialCommand = {
     kind: "dial",
     commandId: b.cmdId(target.kind === "operator" ? target.profileId : target.number, "dial:consult"),
     to: target.kind === "operator" ? target.sipUri : target.number,
     from: b.ctx.fromNumber ?? b.session.called_number ?? "",
     role: "consult",
-    profileId: target.kind === "operator" ? target.profileId : null,
+    profileId: targetProfileId,
     externalNumber: target.kind === "number" ? target.number : null,
-    clientState: target.kind === "operator" ? { sid: b.session.id, role: "consult", operatorId: target.profileId, intent: "consult" } : { sid: b.session.id, role: "consult", intent: "consult" },
+    clientState: { sid: b.session.id, role: "consult", ...(targetProfileId ? { operatorId: targetProfileId } : {}), intent: "consult" },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: CONSULT_TIMEOUT_SECS,
+    fromDisplayName: callerDisplay(b),
   };
   b.cmd(dial);
   b.setState("consulting").patchSession({ hold_started_at: b.session.hold_started_at ?? b.nowIso });
@@ -2414,7 +2591,8 @@ function appAddParty(b: TransitionBuilder, customer: LegRow, event: AppEvent): R
   if (openParties(b).length >= MAX_CONFERENCE_PARTIES) throw new CallActionRejected(`Do hovoru je možné pridať najviac ${MAX_CONFERENCE_PARTIES} účastníkov.`, 409);
   const operator = requireOperatorLeg(b);
   const target = event.target;
-  if (target.kind === "operator" && b.openLegs().some((leg) => leg.profile_id === target.profileId)) {
+  const targetProfileId = target.kind === "operator" ? target.profileId : target.ownerProfileId ?? null;
+  if (targetProfileId && b.openLegs().some((leg) => leg.profile_id === targetProfileId)) {
     throw new CallActionRejected("Kolega už je v hovore.", 409);
   }
   promoteToConference(b, customer, operator, event.actorProfileId);
@@ -2424,14 +2602,17 @@ function appAddParty(b: TransitionBuilder, customer: LegRow, event: AppEvent): R
     to: target.kind === "operator" ? target.sipUri : target.number,
     from: b.ctx.fromNumber ?? b.session.called_number ?? "",
     role: target.kind === "operator" ? "operator" : "external",
-    profileId: target.kind === "operator" ? target.profileId : null,
+    // Named here rather than rediscovered in `executeDial`, which reads every
+    // operator's settings to find the owner of a number it was handed.
+    profileId: targetProfileId,
     externalNumber: target.kind === "number" ? target.number : null,
     clientState:
-      target.kind === "operator"
-        ? { sid: b.session.id, role: "operator", operatorId: target.profileId, intent: PARTY_INTENT }
+      targetProfileId
+        ? { sid: b.session.id, role: target.kind === "operator" ? "operator" : "external", operatorId: targetProfileId, intent: PARTY_INTENT }
         : { sid: b.session.id, role: "external", intent: PARTY_INTENT },
     linkTo: customer.telnyx_call_control_id,
     timeoutSecs: PARTY_TIMEOUT_SECS,
+    fromDisplayName: callerDisplay(b),
   };
   b.cmd(dial);
   b.patchMeta({ party_pending: { target, by: event.actorProfileId, at: b.nowIso } });

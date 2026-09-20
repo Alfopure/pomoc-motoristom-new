@@ -1,38 +1,36 @@
 "use client";
 
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   BookUser,
-  Check,
-  CheckCircle2,
+  Columns3,
+  Headphones,
+  PhoneMissed,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   History,
   Link2,
   Loader2,
-  LogOut,
-  Pause,
   PhoneCall,
-  PhoneForwarded,
   PhoneIncoming,
   PhoneOutgoing,
   Plus,
   Search,
   Star,
   UserRound,
-  Users,
   X,
 } from "lucide-react";
 import type { CallCenterCall, CallOutcome, DispatchData } from "@/data/dispatch-types";
 import type { DispatchCase, DispatchMetrics, Operator } from "@/domain/types";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
-import { callStatusLabels } from "@/domain/statuses";
 import { CallbackQueuePanel } from "./CallbackQueuePanel";
 import { CallDetailDrawer } from "./CallDetailDrawer";
 import { CallNotificationFocus } from "./CallNotificationFocus";
-import { LiveCallsWorkspace, liveCallOverviewCounts } from "./LiveCallOverview";
+import { CallCenterTeam } from "./CallCenterTeam";
+import { HistoryMenu } from "./HistoryMenu";
+import { LiveCallsWorkspace } from "./LiveCallOverview";
 import type { PhoneCallAction } from "./phone-bar-model";
 import type {
   TelephonyDirectoryContact,
@@ -44,18 +42,20 @@ import type {
 import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import type { WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 import type { CallNotificationFocus as NotificationFocus } from "@/lib/telephony/call-notification-target";
-import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import type {
   TelephonyAvailabilityAction,
   TelephonyOperatorPresence,
-  TelephonyOperatorPresenceState,
 } from "@/lib/telephony/presence";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
+import { DEFAULT_HISTORY_COLUMNS, HISTORY_CATEGORIES, HISTORY_COLUMNS, historyCallbackLabel, historyResult, historySeconds, parseHistoryColumns, type HistoryCategory, type HistoryColumn } from "./history-display";
 import styles from "./CallCenterModule.module.css";
 
 type CallCenterModuleProps = {
+  callbackScopeKey?: string;
+  organizationId?: string;
+  routingSummary?: ReactNode;
   notificationFocus?: NotificationFocus | null;
   notificationStateStale?: boolean;
   outboundPending?: boolean;
@@ -69,6 +69,8 @@ type CallCenterModuleProps = {
   busyCallAction?: string | null;
   onCallAction: (action: PhoneCallAction, sessionId: string) => void;
   onAnswer: () => void;
+  onAnswerOffer?: (sessionId: string, callControlId: string | null) => void;
+  onRejectOfferIdentity?: (sessionId: string, callControlId: string | null) => void;
   onRejectOffer: () => void;
   canManageCalls: boolean;
   onSupervise: (sessionId: string, mode: SupervisorMode) => void;
@@ -91,8 +93,6 @@ type CallCenterModuleProps = {
   onTelephonyChanged: () => void;
 };
 
-type HistoryFilter = "all" | "inbound" | "outbound" | "answered" | "missed" | "callback";
-const HISTORY_PAGE_SIZE = 8;
 
 /**
  * Scopes for the module's "an action is running" lock. Only actions that
@@ -156,6 +156,9 @@ export function customerNumberForCall(call: Pick<CallCenterCall, "calledNumber" 
 }
 
 export function CallCenterModule({
+  callbackScopeKey,
+  organizationId,
+  routingSummary,
   notificationFocus,
   notificationStateStale = false,
   outboundPending = false,
@@ -167,7 +170,9 @@ export function CallCenterModule({
   busyCallAction = null,
   onCallAction,
   onAnswer,
+  onAnswerOffer,
   onRejectOffer,
+  onRejectOfferIdentity,
   canManageCalls,
   onSupervise,
   onStopSupervise,
@@ -175,7 +180,6 @@ export function CallCenterModule({
   cases,
   dataSource,
   currentOperatorId,
-  metrics,
   operatorPresences,
   onDataChange,
   onDial,
@@ -187,10 +191,13 @@ export function CallCenterModule({
   onTelephonyChanged,
   operators,
 }: CallCenterModuleProps) {
-  const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
+  const [phonebookOpen, setPhonebookOpen] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [detailCall, setDetailCall] = useState<CallCenterCall | null>(null);
+  const [historyAuthorized, setHistoryAuthorized] = useState(false);
+  const clearCallDetail = useCallback(() => { setDetailCall(null); setHistoryAuthorized(false); }, []);
+  const authorizeHistory = useCallback(() => setHistoryAuthorized(true), []);
   // Status is the authoritative lifecycle marker. Without a provider nothing
   // is live, but a stale row must still not be mistaken for history.
   const partitionedCalls = useMemo(() => partitionLiveCalls(calls), [calls]);
@@ -201,16 +208,8 @@ export function CallCenterModule({
   const [callbackSchedulingEnabled, setCallbackSchedulingEnabled] = useState(false);
   const [scheduledCallId, setScheduledCallId] = useState("");
   const [callbackRefresh, setCallbackRefresh] = useState(0);
-  const [liveCallbackCount, setLiveCallbackCount] = useState(0);
   const callbackActions = useRef(new Map<string, string>());
   const callbackInFlight = useRef(new Set<string>());
-  const filteredHistoryCalls = filterHistoryCalls(storedCalls, historyFilter);
-  const currentPresence = currentOperatorId
-    ? operatorPresences.find((presence) => presence.profileId === currentOperatorId)
-    : undefined;
-  const currentOperator = currentOperatorId
-    ? operators.find((operator) => operator.id === currentOperatorId)
-    : undefined;
   useEffect(() => {
     if (!busyAction) return;
     // Every lock surrenders eventually. Without this, one action whose promise
@@ -365,23 +364,20 @@ export function CallCenterModule({
         onDismiss={() => onDismissCallNotification?.()}
         onReconnect={() => onReconnectPhone?.()}
         onAnswer={onAnswer}
+        onAnswerOffer={onAnswerOffer}
         onPickup={(sessionId) => onCallAction("pickup", sessionId)}
       />}
-      <CallCenterCommandDeck
-        activeSnapshot={activeSnapshot}
-        busy={phoneScopeBusy(busyAction)}
-        configured={telephonyConfigured}
-        phone={phone}
-        currentOperatorName={currentPresence?.operatorName ?? currentOperator?.name}
-        myPresence={currentPresence}
-        metrics={metrics}
-        missedCount={liveCallbackCount}
-        operatorPresences={operatorPresences}
-        onAction={onAvailabilityAction}
-        onDial={(phoneNumber) => startQuickCall({ id: "manual", detail: phoneNumber, label: phoneNumber, phone: phoneNumber, type: "contact" })}
-      />
+      <header className={styles.moduleHeading}>
+        <div><h1>Ústredňa</h1></div>
+        <div className={styles.headingActions}><button type="button" aria-expanded={phonebookOpen} onClick={() => setPhonebookOpen((value) => !value)}><BookUser size={15} />Adresár</button>
+          <CompactDialer busy={phoneScopeBusy(busyAction)} configured={telephonyConfigured} onDial={(phoneNumber) => startQuickCall({ id: "manual", detail: phoneNumber, label: phoneNumber, phone: phoneNumber, type: "contact" })} />
+        </div>
+      </header>
+      {routingSummary}
+      <CallCenterTeam operators={operators} presences={operatorPresences} />
+      {phonebookOpen && <div className={styles.phonebookPopover}><PhonebookPanel busyAction={busyAction} onQuickCall={(entry) => void startQuickCall(entry)} /><button type="button" onClick={() => setPhonebookOpen(false)} className="mt-2 min-h-9 px-3 text-xs font-semibold">Zavrieť adresár</button></div>}
 
-      {telephonyConfigured && activeSnapshot && (
+      {telephonyConfigured && activeSnapshot && activeSnapshot.waiting.length > 0 && (
         <div className="mb-3">
         <LiveCallsWorkspace
           busyAction={busyCallAction}
@@ -391,7 +387,9 @@ export function CallCenterModule({
           phone={phone ?? null}
           stale={notificationStateStale}
           onAnswer={onAnswer}
+          onAnswerOffer={onAnswerOffer}
           onRejectOffer={onRejectOffer}
+          onRejectOfferIdentity={onRejectOfferIdentity}
           onCallAction={onCallAction}
           onSupervise={onSupervise}
           onStopSupervise={onStopSupervise}
@@ -405,41 +403,32 @@ export function CallCenterModule({
       {actionNotice && <div className="mb-3 shrink-0 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900">{actionNotice}</div>}
 
       <div>
-        {/* Between lg and xl (typical 125 %-scaled laptops) the queue sits under
-            the phonebook next to the history instead of at the very bottom of a
-            single column. */}
-        <div className={`${styles.contentGrid} grid min-w-0 max-w-full gap-3 lg:grid-cols-[minmax(240px,290px)_minmax(0,1fr)] xl:grid-cols-[minmax(240px,290px)_minmax(0,1fr)_minmax(270px,320px)] 2xl:grid-cols-[minmax(270px,320px)_minmax(0,1fr)_minmax(290px,340px)]`}>
-          <aside className={`${styles.phonebookArea} grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0 lg:col-start-1 lg:row-start-1`}>
-            <PhonebookPanel
-              busyAction={busyAction}
-              onQuickCall={(entry) => void startQuickCall(entry)}
-            />
-          </aside>
-
+        <div className={styles.contentGrid}>
           <HistoryPanel
             busyAction={busyAction}
-            calls={filteredHistoryCalls}
+            calls={storedCalls}
             cases={cases}
-            filter={historyFilter}
+            scopeKey={callbackScopeKey ?? currentOperatorId ?? "legacy"}
             onCallBack={callBack}
-            onFilterChange={setHistoryFilter}
             onLinkCall={linkCallToCase}
             onNewCase={onNewCase}
             onOpenCase={onOpenCase}
             onOpenDetail={setDetailCall}
-            totalCalls={storedCalls.length}
+            onAuthorizationLost={clearCallDetail}
+            onAuthorized={authorizeHistory}
           />
 
-          <aside className={`${styles.callbackArea} grid min-w-0 max-w-full content-start gap-3 overflow-hidden [&>*]:min-w-0 lg:col-start-1 lg:row-start-2 xl:col-start-3 xl:row-start-1`}>
+          <aside className={`${styles.callbackArea} grid min-w-0 max-w-full content-start gap-3 [&>*]:min-w-0`}>
             <CallbackQueuePanel
               configured={telephonyConfigured}
+              scopeKey={callbackScopeKey ?? currentOperatorId ?? "legacy"}
+              organizationId={organizationId}
               onCallBack={onCallbackCall}
               onChanged={onTelephonyChanged}
               onSchedulingEnabled={setCallbackSchedulingEnabled}
-              onLiveCount={setLiveCallbackCount}
               refreshToken={callbackRefresh}
             />
-            {callbackSchedulingEnabled && <div className="rounded-md border border-zinc-200 bg-white p-3">
+            {callbackSchedulingEnabled && historyAuthorized && <div className="rounded-md border border-zinc-200 bg-white p-3">
               <label className="block text-xs font-semibold" htmlFor="schedule-callback-call">Naplánovať spätné volanie</label>
               <select id="schedule-callback-call" value={scheduledCallId} onChange={(event) => setScheduledCallId(event.target.value)} className="my-2 w-full rounded border border-zinc-300 p-2 text-xs">
                 <option value="">Vyber hovor z histórie</option>
@@ -460,248 +449,165 @@ export function CallCenterModule({
   );
 }
 
-/** Compact command deck: personal state, outbound call and team coverage. */
-function CallCenterCommandDeck({
-  activeSnapshot,
-  busy,
-  configured,
-  currentOperatorName,
-  metrics,
-  missedCount,
-  myPresence,
-  onAction,
-  onDial,
-  operatorPresences,
-  phone,
-}: {
-  activeSnapshot?: PhoneBarModel;
-  busy: boolean;
-  configured: boolean;
-  currentOperatorName?: string;
-  metrics: DispatchMetrics;
-  missedCount: number;
-  myPresence?: TelephonyOperatorPresence;
-  onAction: (action: TelephonyAvailabilityAction) => void;
-  onDial: (phone: string) => Promise<boolean>;
-  operatorPresences: TelephonyOperatorPresence[];
-  phone?: WebphoneSnapshot;
-}) {
-  const [toNumber, setToNumber] = useState("");
-  const state: TelephonyOperatorPresenceState = myPresence?.state ?? "unassigned";
-  const controlsEnabled = configured && state !== "ringing" && state !== "on_call";
-  const counts = activeSnapshot
-    ? liveCallOverviewCounts(activeSnapshot, operatorPresences)
-    : { total: 0, ringing: 0, waiting: 0, active: 0, onlineOperators: 0, pausedOperators: 0, callingOperators: 0 };
-  const stateSurface = state === "available"
-    ? "bg-emerald-100 text-emerald-700"
-    : state === "on_call" || state === "ringing"
-      ? "bg-sky-100 text-sky-700"
-      : state === "paused"
-        ? "bg-amber-100 text-amber-800"
-        : "bg-zinc-100 text-zinc-500";
-
-  function submitCall(event: FormEvent<HTMLFormElement>) {
+function CompactDialer({ busy, configured, onDial }: { busy: boolean; configured: boolean; onDial: (phone: string) => Promise<boolean> }) {
+  const [number, setNumber] = useState("");
+  function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const number = toNumber.trim();
-    if (!configured || busy || !number) return;
-    void onDial(number).then((accepted) => {
-      if (accepted) setToNumber("");
-    });
+    if (busy || !configured || !number.trim()) return;
+    void onDial(number.trim()).then((accepted) => { if (accepted) setNumber(""); });
   }
-
-  return (
-    <section className={`${styles.commandDeck} mb-3 overflow-hidden rounded-lg border border-zinc-200 bg-white`} aria-label="Ovládanie ústredne">
-      <div className="grid min-w-0 divide-y divide-zinc-200 lg:grid-cols-[minmax(17rem,0.9fr)_minmax(24rem,1.35fr)_minmax(18rem,1fr)] lg:divide-x lg:divide-y-0">
-        <div className={`${styles.operatorControls} flex min-w-0 items-center gap-3 p-3`}>
-          <span className={`flex size-10 shrink-0 items-center justify-center rounded-full ${stateSurface}`}>
-            {state === "available" ? <CheckCircle2 size={18} /> : state === "paused" ? <Pause size={17} /> : state === "ringing" ? <PhoneIncoming size={17} /> : state === "on_call" ? <PhoneCall size={17} /> : <LogOut size={16} />}
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <h1 className="truncate text-sm font-bold text-zinc-950">{currentOperatorName ?? "Prihlásený operátor"}</h1>
-              <StatusBadge label={configured ? presenceStateLabel[state] : "Mimo prevádzky"} tone={state === "available" ? "ok" : state === "offline" ? "neutral" : "warn"} />
-            </div>
-            <p className="mt-0.5 truncate text-[11px] text-zinc-500" title={myPresence?.detail}>{myPresence?.detail ?? TELEPHONY_NOT_CONFIGURED_MESSAGE}</p>
-            <div className="mt-2 grid grid-cols-3 gap-1 rounded-md bg-zinc-100 p-1">
-              <AvailabilityButton active={configured && state === "available"} disabled={!controlsEnabled} icon={Check} label="Dostupný" pending={false} onClick={() => onAction("available")} />
-              <AvailabilityButton active={configured && state === "paused"} disabled={!controlsEnabled} icon={Pause} label="Pauza" pending={false} onClick={() => onAction("pause")} />
-              <AvailabilityButton active={configured && state === "offline"} disabled={!controlsEnabled} icon={LogOut} label="Mimo radu" pending={false} onClick={() => onAction("offline")} />
-            </div>
-          </div>
-        </div>
-
-        <form className={`${styles.dialForm} flex min-w-0 items-center gap-2 p-3`} onSubmit={submitCall}>
-          <span className={`flex size-9 shrink-0 items-center justify-center rounded-md ${configured ? "bg-zinc-950 text-yellow-300" : "bg-zinc-100 text-zinc-400"}`}>
-            <PhoneOutgoing size={17} aria-hidden="true" />
-          </span>
-          <label className="min-w-0 flex-1">
-            <span className="sr-only">Číslo pre nový odchádzajúci hovor</span>
-            <input type="tel" inputMode="tel" autoComplete="off" value={toNumber} onChange={(event) => setToNumber(event.target.value)} placeholder="Telefónne číslo…" disabled={!configured} className="h-10 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-yellow-300 disabled:bg-zinc-50 disabled:text-zinc-400" />
-          </label>
-          <button type="submit" disabled={!configured || busy || !toNumber.trim()} className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md bg-zinc-950 px-3 text-xs font-bold text-white hover:bg-zinc-800 disabled:bg-zinc-300 disabled:text-zinc-600">
-            {busy ? <Loader2 size={14} className="animate-spin" /> : <PhoneOutgoing size={14} />}
-            Volať
-          </button>
-        </form>
-
-        <div className={`${styles.teamOverview} min-w-0 p-3`}>
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-bold text-zinc-800"><Users size={15} className="text-zinc-500" /> Operátori</div>
-            {phone && <StatusBadge label={phone.registration.label} tone={phone.registration.tone === "ok" ? "ok" : phone.registration.tone === "error" ? "warn" : "neutral"} />}
-          </div>
-          <div className={`${styles.teamMetrics} mt-2 grid grid-cols-4 gap-1.5`}>
-            <CommandMetric icon={Users} label="Online" value={configured ? String(counts.onlineOperators) : "—"} tone={counts.onlineOperators > 0 ? "ok" : "bad"} />
-            <CommandMetric icon={PhoneCall} label="Volajú" value={configured ? String(counts.callingOperators) : "—"} tone={counts.callingOperators > 0 ? "warn" : "neutral"} />
-            <CommandMetric icon={Pause} label="Pauza" value={configured ? String(counts.pausedOperators) : "—"} tone={counts.pausedOperators > 0 ? "warn" : "neutral"} />
-            <CommandMetric icon={CheckCircle2} label="Úspešnosť" value={`${metrics.answerRate}%`} tone="neutral" />
-          </div>
-          <details className="group mt-2">
-            <summary className="flex cursor-pointer list-none items-center justify-between text-[11px] font-semibold text-zinc-500 [&::-webkit-details-marker]:hidden">
-              <span>{missedCount > 0 ? `${missedCount} čaká na spätné volanie` : "Detail stavu tímu"}</span>
-              <ChevronDown size={13} className="transition group-open:rotate-180" />
-            </summary>
-            <div className="mt-2 flex max-h-28 flex-wrap gap-1 overflow-y-auto">
-              {operatorPresences.map((presence) => (
-                <span key={presence.profileId} title={presence.detail} className="inline-flex max-w-full items-center gap-1 rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-[10px] font-semibold text-zinc-700">
-                  <span className={`size-1.5 shrink-0 rounded-full ${presence.state === "available" ? "bg-emerald-500" : presence.state === "on_call" || presence.state === "ringing" ? "bg-sky-500" : presence.state === "paused" ? "bg-amber-500" : "bg-zinc-400"}`} />
-                  <span className="truncate">{presence.operatorName}</span>
-                  <span className="text-zinc-400">{presenceStateLabel[presence.state]}</span>
-                </span>
-              ))}
-            </div>
-          </details>
-        </div>
-      </div>
-    </section>
-  );
+  return <form className={styles.compactDialer} onSubmit={submit}><label className="sr-only" htmlFor="call-center-dial-number">Telefónne číslo</label><input id="call-center-dial-number" type="tel" value={number} onChange={(event) => setNumber(event.target.value)} placeholder="Telefónne číslo" disabled={!configured} /><button type="submit" disabled={!configured || busy || !number.trim()}>{busy ? <Loader2 size={15} className="animate-spin" /> : <PhoneOutgoing size={15} />}Volať</button></form>;
 }
 
 
-function HistoryPanel({
-  busyAction,
-  calls,
-  cases,
-  filter,
-  onCallBack,
-  onFilterChange,
-  onLinkCall,
-  onNewCase,
-  onOpenCase,
-  onOpenDetail,
-  totalCalls,
-}: {
-  busyAction: string | null;
-  calls: CallCenterCall[];
-  cases: DispatchCase[];
-  filter: HistoryFilter;
-  onCallBack: (call: CallCenterCall) => void;
-  onFilterChange: (filter: HistoryFilter) => void;
-  onLinkCall: (call: CallCenterCall, caseId: string) => void;
-  onNewCase: (call: CallCenterCall) => void;
-  onOpenCase: (caseId: string) => void;
-  onOpenDetail: (call: CallCenterCall) => void;
-  totalCalls: number;
+type HistoryView = { category: HistoryCategory; q: string; from: string; to: string; direction: string; outcome: string; operatorId: string; lineId: string; cursors: (string | null)[]; page: number };
+const DEFAULT_HISTORY_VIEW: HistoryView = { category: "all", q: "", from: "", to: "", direction: "", outcome: "", operatorId: "", lineId: "", cursors: [null], page: 0 };
+type HistoryResponse = { scanLimited?: boolean; searchAvailable?: boolean; calls: CallCenterCall[]; nextCursor: string | null; checkedAt?: string; error?: string; filters?: { lines: { id: string; label: string }[]; operators: { id: string; name: string }[] } };
+
+function HistoryPanel({ busyAction, cases, scopeKey, onCallBack, onLinkCall, onNewCase, onOpenCase, onOpenDetail, onAuthorizationLost, onAuthorized }: {
+  busyAction: string | null; calls: CallCenterCall[]; cases: DispatchCase[]; scopeKey: string; onAuthorizationLost: () => void; onAuthorized: () => void;
+  onCallBack: (call: CallCenterCall) => void; onLinkCall: (call: CallCenterCall, caseId: string) => void;
+  onNewCase: (call: CallCenterCall) => void; onOpenCase: (caseId: string) => void; onOpenDetail: (call: CallCenterCall) => void;
 }) {
-  const [page, setPage] = useState(1);
-  const pageCount = Math.max(1, Math.ceil(calls.length / HISTORY_PAGE_SIZE));
-  const currentPage = Math.min(page, pageCount);
-  const firstVisibleIndex = (currentPage - 1) * HISTORY_PAGE_SIZE;
-  const visibleCalls = calls.slice(firstVisibleIndex, firstVisibleIndex + HISTORY_PAGE_SIZE);
-
-  function selectFilter(nextFilter: HistoryFilter) {
-    setPage(1);
-    onFilterChange(nextFilter);
+  const [view, setView] = useState<HistoryView>(() => {
+    if (typeof window === "undefined") return DEFAULT_HISTORY_VIEW;
+    try { const saved = JSON.parse(sessionStorage.getItem(`call-history-view:${scopeKey}`) ?? "null"); return saved && Array.isArray(saved.cursors) ? { ...DEFAULT_HISTORY_VIEW, ...saved } : DEFAULT_HISTORY_VIEW; } catch { return DEFAULT_HISTORY_VIEW; }
+  });
+  const [columns, setColumns] = useState<HistoryColumn[]>(() => {
+    if (typeof window === "undefined") return DEFAULT_HISTORY_COLUMNS;
+    try { return parseHistoryColumns(JSON.parse(localStorage.getItem(`call-history-columns:${scopeKey}`) ?? "null")); } catch { return DEFAULT_HISTORY_COLUMNS; }
+  });
+  useEffect(() => { try { localStorage.setItem(`call-history-columns:${scopeKey}`, JSON.stringify(columns)); } catch { /* Storage may be disabled. */ } }, [columns, scopeKey]);
+  const enabledColumns = HISTORY_COLUMNS.filter(column => columns.includes(column.key));
+  const tableStyle = {
+    "--history-columns": `100px minmax(124px, 1.4fr) 86px minmax(96px, 1fr) ${enabledColumns.map(column => `${column.width}px`).join(" ")} 100px 60px`,
+    "--history-min-width": `${630 + enabledColumns.reduce((total, column) => total + column.width + 8, 0)}px`,
+  } as CSSProperties;
+  const [query, setQuery] = useState(view.q);
+  const [result, setResult] = useState<HistoryResponse>({ calls: [], nextCursor: null });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [newResult, setNewResult] = useState<HistoryResponse | null>(null);
+  const [retry, setRetry] = useState(0);
+  const listRef = useRef<HTMLDivElement>(null);
+  const displayedIds = useRef("");
+  const historyLease = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const authorizedUntil = useRef(0);
+  const privateGeneration = useRef(0);
+  const clearPrivateHistory = useCallback((reason: string) => {
+    privateGeneration.current += 1;
+    authorizedUntil.current = 0;
+    if (historyLease.current) clearTimeout(historyLease.current);
+    historyLease.current = null;
+    displayedIds.current = "";
+    setResult({ calls: [], nextCursor: null });
+    setNewResult(null);
+    setError(reason);
+    onAuthorizationLost();
+  }, [onAuthorizationLost]);
+  // This authorization lease belongs to the mounted reader, not to one query.
+  // Changing a filter or retrying must never extend private data's lifetime.
+  useEffect(() => () => {
+    privateGeneration.current += 1;
+    if (historyLease.current) clearTimeout(historyLease.current);
+  }, []);
+  const scrollKey = `call-history-scroll:${scopeKey}`;
+  useEffect(() => {
+    const timer = window.setTimeout(() => setView((current) => current.q === query.trim() ? current : { ...current, q: query.trim(), cursors: [null], page: 0 }), 300);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+  useEffect(() => { try { sessionStorage.setItem(`call-history-view:${scopeKey}`, JSON.stringify(view)); } catch { /* Storage can be unavailable in private browsing. */ } }, [scopeKey, view]);
+  const requestKey = JSON.stringify({ category: view.category, q: view.q, from: view.from, to: view.to, direction: view.direction, outcome: view.outcome, operatorId: view.operatorId, lineId: view.lineId, cursor: view.cursors[view.page] ?? "", limit: "25" });
+  useEffect(() => {
+    const controller = new AbortController();
+    let stopped = false;
+    let poll: ReturnType<typeof setTimeout>;
+    let initial = true;
+    const load = async () => {
+      const startedAt = Date.now();
+      const requestGeneration = privateGeneration.current;
+      let denied = false;
+      if (initial) { setLoading(true); setNewResult(null); }
+      try {
+        const params = new URLSearchParams(JSON.parse(requestKey) as Record<string, string>);
+        const response = await telephonyFetch(`/api/telephony/calls/history?${params}`, { label: "história hovorov", signal: controller.signal, timeoutMs: TELEPHONY_TIMEOUT_MS.read });
+        const body = await response.json() as HistoryResponse;
+        if (stopped || requestGeneration !== privateGeneration.current) return;
+        if (!response.ok || !Array.isArray(body.calls)) {
+          if (response.status === 401 || response.status === 403) { denied = true; clearPrivateHistory("Prístup k histórii už nie je dostupný."); }
+          throw new Error(body.error ?? "Históriu sa nepodarilo načítať.");
+        }
+        onAuthorized();
+        const ids = body.calls.map((call) => call.id).join(",");
+        if (!initial && ids !== displayedIds.current) setNewResult(body);
+        else { setResult(body); setNewResult(null); displayedIds.current = ids; }
+        if (initial) requestAnimationFrame(() => { if (!stopped && listRef.current) { try { listRef.current.scrollTop = Number(sessionStorage.getItem(scrollKey) ?? 0); } catch {} } });
+        setError(null);
+        if (historyLease.current) clearTimeout(historyLease.current);
+        authorizedUntil.current = startedAt + 30_000;
+        historyLease.current = setTimeout(() => clearPrivateHistory("Prístup k histórii sa overuje. Údaje sa obnovia po spojení."), Math.max(0, authorizedUntil.current - Date.now()));
+      } catch (loadError) { if (!stopped) setError(messageFromError(loadError, "Históriu sa nepodarilo načítať.")); }
+      finally { if (!stopped) { initial = false; setLoading(false); poll = setTimeout(() => void load(), !denied && requestGeneration !== privateGeneration.current ? 0 : 25_000); } }
+    };
+    void load();
+    return () => { stopped = true; controller.abort(); clearTimeout(poll); };
+  }, [requestKey, retry, scrollKey, clearPrivateHistory, onAuthorized]);
+  function filter(key: "from" | "to" | "direction" | "outcome" | "operatorId" | "lineId", value: string) {
+    setView((current) => ({ ...current, [key]: value, ...(["direction", "outcome"].includes(key) ? { category: "all" as const } : {}), cursors: [null], page: 0 }));
   }
-
-  return (
-    <section data-testid="call-center-history" className={`${styles.historyPanel} min-w-0 overflow-hidden rounded-md border border-zinc-200 bg-white @container lg:col-start-2 lg:row-start-1 lg:row-span-2 xl:row-span-1 xl:flex xl:h-full xl:min-h-0 xl:flex-col`}>
-      <div className={`${styles.historyHeading} flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 p-3`}>
-        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-950">
-          <History size={17} />
-          Prehľad hovorov
-        </div>
-        <span className="text-xs font-semibold text-zinc-500">{totalCalls} záznamov</span>
+  function category(value: HistoryCategory) {
+    if (listRef.current) listRef.current.scrollTop = 0;
+    try { sessionStorage.removeItem(scrollKey); } catch { /* Optional preference. */ }
+    setView(current => ({ ...current, category: value, direction: "", outcome: "", cursors: [null], page: 0 }));
+  }
+  const visibleCalls = result.calls;
+  const searchAvailable = result.searchAvailable !== false;
+  return <section data-testid="call-center-history" className={styles.historyPanel}>
+    <header className={styles.historyHeading}>
+      <h2><History size={16} />Prehľad hovorov</h2>
+      <div className={styles.historyCategories} role="group" aria-label="Typ hovorov">
+        {HISTORY_CATEGORIES.map((item, index) => {
+          const Icon = [History, PhoneOutgoing, PhoneIncoming, PhoneMissed][index];
+          return <button key={item.value} type="button" aria-pressed={view.category === item.value} disabled={!searchAvailable} onClick={() => category(item.value)}><Icon size={14} aria-hidden="true" />{item.label}</button>;
+        })}
       </div>
-      <div className={`${styles.historyFilterBar} border-b border-zinc-200 p-3`}>
-        <div className={`${styles.historyFilters} flex flex-wrap gap-1`}>
-          {historyFilterOptions.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              onClick={() => selectFilter(option.value)}
-              aria-label={option.label}
-              aria-pressed={filter === option.value}
-              className={`inline-flex h-8 shrink-0 items-center rounded-md px-2 text-xs font-semibold transition ${
-                filter === option.value ? "bg-zinc-950 text-white" : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
-              }`}
-            >
-              <span className={styles.desktopFilterLabel}>{option.label}</span>
-              <span className={styles.mobileFilterLabel}>{option.shortLabel ?? option.label}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-      {calls.length > 0 ? (
-        <div className="xl:flex xl:min-h-0 xl:flex-1 xl:flex-col">
-          <div className="hidden grid-cols-[100px_minmax(150px,1fr)_minmax(140px,1fr)_130px_170px] gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 @4xl:grid">
-            <div>Hovor</div>
-            <div>Zákazník / volajúci</div>
-            <div>Operátor / linka</div>
-            <div>Prípad</div>
-            <div className="text-right">Akcie</div>
-          </div>
-          <div className="divide-y divide-zinc-100 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain">
-            {visibleCalls.map((call) => (
-              <HistoryCallRow
-                key={call.id}
-                busyAction={busyAction}
-                call={call}
-                cases={cases}
-                onCallBack={onCallBack}
-                onLinkCall={onLinkCall}
-                onNewCase={onNewCase}
-                onOpenCase={onOpenCase}
-                onOpenDetail={onOpenDetail}
-              />
-            ))}
-          </div>
-          <div className={`${styles.historyPagination} flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 bg-zinc-50 px-3 py-2.5`}>
-            <span className="text-xs font-medium text-zinc-600">
-              {firstVisibleIndex + 1}–{Math.min(firstVisibleIndex + HISTORY_PAGE_SIZE, calls.length)} z {calls.length}
-            </span>
-            <nav className="flex items-center gap-1" aria-label="Stránkovanie histórie hovorov">
-              <button
-                type="button"
-                onClick={() => setPage(Math.max(1, currentPage - 1))}
-                disabled={currentPage === 1}
-                aria-label="Predchádzajúca strana"
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-300"
-              >
-                <ChevronLeft size={15} />
-              </button>
-              <span className="min-w-16 text-center text-xs font-semibold text-zinc-700">
-                {currentPage} / {pageCount}
-              </span>
-              <button
-                type="button"
-                onClick={() => setPage(Math.min(pageCount, currentPage + 1))}
-                disabled={currentPage === pageCount}
-                aria-label="Nasledujúca strana"
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-300"
-              >
-                <ChevronRight size={15} />
-              </button>
-            </nav>
-          </div>
-        </div>
-      ) : (
-        <EmptyState icon={History} title="Zatiaľ žiadne hovory" body="História čaká na prvý zapísaný hovor." />
-      )}
-    </section>
-  );
+      <span className={styles.historyPageLabel} aria-live="polite">{loading ? "Vyhľadávam…" : `Strana ${view.page + 1}`}</span>
+    </header>
+    <div className={styles.historySearch}>
+      <label className={styles.historySearchInput}><Search size={16} /><span className="sr-only">Hľadať v celej histórii</span><input type="search" value={searchAvailable ? query : ""} disabled={!searchAvailable} maxLength={160} onChange={(event) => setQuery(event.target.value)} placeholder="Meno, zákazník, telefón, prípad alebo EČV" /></label>
+      {searchAvailable && <HistoryMenu className={styles.historyAdvanced} summary={<>Filtre{Object.values({ from: view.from, to: view.to, direction: view.direction, outcome: view.outcome, operatorId: view.operatorId, lineId: view.lineId }).filter(Boolean).length ? " · aktívne" : ""}<ChevronDown size={13} /></>}>
+        <label>Od<input type="date" value={view.from} onChange={(event) => filter("from", event.target.value)} /></label>
+        <label>Do<input type="date" value={view.to} onChange={(event) => filter("to", event.target.value)} /></label>
+        <label>Smer<select value={view.direction} onChange={(event) => filter("direction", event.target.value)}><option value="">Všetky smery</option><option value="inbound">Prichádzajúce</option><option value="outbound">Odchádzajúce</option><option value="internal">Interné</option></select></label>
+        <label>Výsledok<select value={view.outcome} onChange={(event) => filter("outcome", event.target.value)}><option value="">Všetky výsledky</option><option value="answered">Spojené</option><option value="missed">Zmeškané</option><option value="abandoned_queue">Zložené v čakárni</option><option value="failed">Neúspešné</option><option value="callback">Označené na spätné volanie</option></select></label>
+        <label>Operátor<select value={view.operatorId} onChange={(event) => filter("operatorId", event.target.value)}><option value="">Všetci operátori</option>{result.filters?.operators.map((operator) => <option key={operator.id} value={operator.id}>{operator.name}</option>)}</select></label>
+        <label>Linka<select value={view.lineId} onChange={(event) => filter("lineId", event.target.value)}><option value="">Všetky linky</option>{result.filters?.lines.map((line) => <option key={line.id} value={line.id}>{line.label}</option>)}</select></label>
+        <p>Dátumy zahŕňajú celý deň v časovom pásme Bratislavy.</p>
+        <button type="button" onClick={() => { setView(DEFAULT_HISTORY_VIEW); setQuery(""); }}>Vymazať filtre</button>
+      </HistoryMenu>}
+      <HistoryMenu className={styles.historyColumnsMenu} summary={<><Columns3 size={15} aria-hidden="true" />Stĺpce<ChevronDown size={13} aria-hidden="true" /></>}>
+        {HISTORY_COLUMNS.map(column => <label key={column.key}><input type="checkbox" checked={columns.includes(column.key)} onChange={event => setColumns(current => event.target.checked ? [...current, column.key] : current.filter(key => key !== column.key))} />{column.label}</label>)}
+          <button type="button" onClick={() => setColumns(DEFAULT_HISTORY_COLUMNS)}>Predvolené stĺpce</button>
+      </HistoryMenu>
+    </div>
+    {!searchAvailable && <p role="status" className="border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600">Vyhľadávanie v celej histórii zatiaľ nie je dostupné. Zobrazené sú posledné hovory.</p>}
+    {error && <p role="status" className="border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">{error} <button type="button" className="underline" onClick={() => setRetry((value) => value + 1)}>Skúsiť znova</button></p>}
+    {newResult && <button type="button" className="min-h-9 bg-sky-50 px-3 text-left text-xs font-semibold text-sky-900" onClick={() => { if (Date.now() >= authorizedUntil.current) { clearPrivateHistory("Prístup k histórii sa overuje."); return; } setResult(newResult); displayedIds.current = newResult.calls.map((call) => call.id).join(","); setNewResult(null); }}>Nové zmeny v histórii · zobraziť</button>}
+    {result.scanLimited && <p role="status" className={styles.historyScanStatus}>Hľadanie pokračuje v starších hovoroch. Pokračujte na ďalšiu stranu.</p>}
+    <div className={styles.historyTable} style={tableStyle} tabIndex={0} role="region" aria-label="Zoznam hovorov">
+    <div className={styles.historyTableContent}>
+    <div className={styles.historyColumnHeadings}><span>Čas</span><span>Volajúci / zákazník</span><span>Výsledok</span><span>Operátor / linka</span>{enabledColumns.map(column => <span key={column.key} title={column.key === "waiting" ? "Čas pred spojením alebo zložením, vrátane hlasového menu." : column.label}>{column.heading}</span>)}<span>Prípad</span><span>Akcie</span></div>
+    <div className={styles.historyRows} ref={listRef} aria-busy={loading} onScroll={(event) => { try { sessionStorage.setItem(scrollKey, String(event.currentTarget.scrollTop)); } catch {} }}>
+      {visibleCalls.map((call) => <HistoryCallRow key={call.id} columns={columns} busyAction={busyAction} call={call} cases={cases} onCallBack={onCallBack} onLinkCall={onLinkCall} onNewCase={onNewCase} onOpenCase={onOpenCase} onOpenDetail={onOpenDetail} />)}
+      {!visibleCalls.length && <EmptyState icon={History} title={loading ? "Načítavam hovory…" : result.scanLimited ? "Hľadanie pokračuje" : "Žiadne nájdené hovory"} body={result.scanLimited ? "Ďalšie výsledky hľadajte na nasledujúcej strane." : view.q || view.from || view.to || view.outcome || view.category !== "all" || view.direction || view.lineId || view.operatorId ? "Skúste iný filter alebo širšie obdobie." : "História sa zobrazí po prvom hovore."} />}
+    </div>
+    </div></div>
+    <footer className={styles.historyPagination}><span>{visibleCalls.length} na strane · časy Bratislava</span><nav aria-label="Stránkovanie histórie hovorov"><button type="button" disabled={loading || !searchAvailable || view.page === 0} aria-label="Predchádzajúca strana" onClick={() => setView((current) => ({ ...current, page: Math.max(0, current.page - 1) }))}><ChevronLeft size={16} /></button><span>{view.page + 1}</span><button type="button" disabled={loading || !searchAvailable || !result.nextCursor} aria-label="Nasledujúca strana" onClick={() => setView((current) => ({ ...current, page: current.page + 1, cursors: [...current.cursors.slice(0, current.page + 1), result.nextCursor] }))}><ChevronRight size={16} /></button></nav></footer>
+  </section>;
 }
 
 function HistoryCallRow({
+  columns,
   busyAction,
   call,
   cases,
@@ -711,6 +617,7 @@ function HistoryCallRow({
   onOpenCase,
   onOpenDetail,
 }: {
+  columns: HistoryColumn[];
   busyAction: string | null;
   call: CallCenterCall;
   cases: DispatchCase[];
@@ -746,6 +653,16 @@ function HistoryCallRow({
       : `Finálny cieľ ${employeeEndpoint}`;
   const DirectionIcon = call.direction === "outbound" ? PhoneOutgoing : call.direction === "internal" ? PhoneCall : PhoneIncoming;
   const displayedStartedAt = historyDisplayStartedAt(call);
+  const result = historyResult(call);
+  const visibleColumns = HISTORY_COLUMNS.filter(column => columns.includes(column.key));
+  function extraValue(column: HistoryColumn, desktop = false) {
+    if (column === "duration") return <span className={styles.historyNumeric} aria-label={desktop ? `Dĺžka hovoru ${historySeconds(call.durationSeconds)}` : undefined}>{historySeconds(call.durationSeconds)}</span>;
+    if (column === "waiting") return <span className={styles.historyNumeric} title="Čas pred spojením alebo zložením, vrátane hlasového menu.">{historySeconds(call.waitSecondsKnown === false ? undefined : call.waitSeconds)}</span>;
+    if (column === "recording") return call.recordingId ? <button type="button" className={styles.historyRecording} onClick={() => onOpenDetail(call)} aria-label={`Otvoriť nahrávku hovoru ${formatPhoneNumberForDisplay(customerNumber)}`} title="Otvoriť nahrávku"><Headphones size={16} /></button> : <span title="Bez dostupnej nahrávky">—</span>;
+    if (column === "callback") return <span className={styles.historyCallback} title={call.callback?.dueAt ? `Termín: ${formatShortDate(call.callback.dueAt)} ${formatTime(call.callback.dueAt)}` : undefined}>{historyCallbackLabel(call)}{call.callback?.claimedByName && <small>{call.callback.claimedByName}</small>}</span>;
+    const note = call.outcomeNote?.trim();
+    return note ? <button type="button" className={styles.historyNote} onClick={() => onOpenDetail(call)} title={note}>{note}</button> : <span>—</span>;
+  }
 
   return (
     <div data-testid="call-history-row" className="min-w-0 hover:bg-zinc-50">
@@ -755,7 +672,7 @@ function HistoryCallRow({
           <time dateTime={displayedStartedAt} title={`${formatShortDate(displayedStartedAt)} ${formatTime(displayedStartedAt)}`}>
             <strong>{formatTime(displayedStartedAt)}</strong><span> · {formatShortDate(displayedStartedAt)}</span>
           </time>
-          <CallStatusPill status={call.status} />
+          <span className={styles.historyResult} data-tone={result.tone}>{result.label}</span>
         </div>
         <div className={styles.mobileIdentity}>
           <button type="button" onClick={() => onOpenDetail(call)} className={styles.customerButton} aria-label={`Otvoriť detail hovoru ${formatPhoneNumberForDisplay(customerNumber)}`}>
@@ -767,6 +684,7 @@ function HistoryCallRow({
             Volať
           </button>
         </div>
+        {visibleColumns.length > 0 && <dl className={styles.historyMobileExtras}>{visibleColumns.map(column => <div key={column.key}><dt>{column.label}</dt><dd>{extraValue(column.key)}</dd></div>)}</dl>}
         <div className={styles.mobileContext}>
           {call.caseId ? (
             <button type="button" onClick={() => onOpenCase(call.caseId!)} className={styles.caseButton} title={call.caseNumber ?? "Otvoriť prípad"}>
@@ -788,6 +706,7 @@ function HistoryCallRow({
               <dt>{operatorLabel}</dt><dd>{operatorName}</dd>
               <dt>{call.direction === "outbound" ? "Volané z" : call.direction === "internal" ? "Volaná klapka" : "Finálny cieľ"}</dt><dd>{employeeEndpoint}</dd>
               <dt>Linka</dt><dd>{call.lineLabel}</dd>
+              {call.endedAt && <><dt>Ukončený</dt><dd>{formatShortDate(call.endedAt)} {formatTime(call.endedAt)}</dd></>}
               {call.receivedNumber && <><dt>Volané číslo</dt><dd>{call.receivedNumber}</dd></>}
               {call.queueLabel && <><dt>Rad</dt><dd>{call.queueLabel}</dd></>}
             </dl>
@@ -796,79 +715,14 @@ function HistoryCallRow({
           </div>
         )}
       </div>
-      <div className={`${styles.desktopHistoryRow} grid min-w-0 grid-cols-1 gap-x-3 gap-y-3 p-3 text-sm @md:grid-cols-2 @4xl:grid-cols-[100px_minmax(150px,1fr)_minmax(140px,1fr)_130px_170px] @4xl:items-center`}>
-        <div className="flex min-w-0 items-center justify-between gap-3 @md:col-span-2 @4xl:col-span-1 @4xl:block">
-          <div className="min-w-0">
-            <div className="font-semibold tabular-nums text-zinc-950">{formatTime(displayedStartedAt)}</div>
-            <div className="mt-0.5 text-xs tabular-nums text-zinc-500">{formatShortDate(displayedStartedAt)}</div>
-            <div className="mt-1 inline-flex max-w-full items-center gap-1 text-xs font-medium text-zinc-600">
-              <DirectionIcon size={12} className="shrink-0" />
-              <span className="truncate">{directionLabel[call.direction]}</span>
-            </div>
-          </div>
-          <div className="shrink-0 @4xl:mt-2">
-            <CallStatusPill status={call.status} />
-          </div>
-        </div>
-
-        <button type="button" onClick={() => onOpenDetail(call)} className="min-w-0 rounded-md text-left outline-none ring-yellow-300 focus-visible:ring-2" title="Otvoriť detail hovoru">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 @4xl:hidden">{customerLabel}</div>
-          <div className="break-all font-semibold text-zinc-950 hover:underline">{formatPhoneNumberForDisplay(customerNumber)}</div>
-          <div className="mt-0.5 break-words text-xs leading-5 text-zinc-500">{customerName ?? "Meno nezistené"}</div>
-        </button>
-
-        <div className="min-w-0">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 @4xl:hidden">{operatorLabel}</div>
-          <div className="break-words font-semibold text-zinc-950">{operatorName}</div>
-          <div className="mt-0.5 break-words text-xs leading-5 text-zinc-500">
-            {employeeEndpointLabel}
-            {` · ${call.lineLabel}`}
-            {call.receivedNumber ? ` · volané ${call.receivedNumber}` : ""}
-            {call.queueLabel ? ` · rad ${call.queueLabel}` : ""}
-          </div>
-        </div>
-
-        <div className="min-w-0">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 @4xl:hidden">Prípad</div>
-          {call.caseId ? (
-            <button
-              type="button"
-              onClick={() => onOpenCase(call.caseId!)}
-              className="inline-flex h-8 max-w-full items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
-            >
-              <Link2 size={13} className="shrink-0" />
-              <span className="truncate">{call.caseNumber ?? "Otvoriť"}</span>
-            </button>
-          ) : (
-            <div className="grid min-w-0 gap-1.5">
-              <button
-                type="button"
-                onClick={() => onNewCase(call)}
-                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-yellow-300 px-2 text-xs font-semibold text-zinc-950 hover:bg-yellow-200"
-              >
-                <PhoneForwarded size={13} className="shrink-0" />
-                Nový prípad
-              </button>
-              <CaseLinkControl call={call} cases={cases} disabled={busyAction === `${call.id}:link`} onLink={(caseId) => onLinkCall(call, caseId)} />
-            </div>
-          )}
-        </div>
-
-        <div className="min-w-0 @md:col-span-2 @4xl:col-span-1">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 @4xl:hidden">Akcie</div>
-          <div className="flex min-w-0 flex-wrap gap-1.5 @4xl:justify-end">
-            <button
-              type="button"
-              onClick={() => onCallBack(call)}
-              disabled={phoneScopeBusy(busyAction)}
-              title="Volať späť"
-              className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-zinc-200 bg-white px-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 disabled:text-zinc-300"
-            >
-              {busyAction === `${call.id}:call_back` ? <Loader2 size={13} className="animate-spin" /> : <PhoneOutgoing size={13} />}
-              Volať
-            </button>
-          </div>
-        </div>
+      <div className={styles.desktopHistoryRow}>
+        <div className={styles.historyTime}><strong title={call.endedAt ? `Ukončený ${formatShortDate(call.endedAt)} ${formatTime(call.endedAt)}` : undefined}><DirectionIcon size={12} aria-label={directionLabel[call.direction]} />{formatTime(displayedStartedAt)}{call.endedAt ? `–${formatTime(call.endedAt)}` : ""}</strong><time dateTime={displayedStartedAt}>{formatShortDate(displayedStartedAt)}</time></div>
+        <button type="button" onClick={() => onOpenDetail(call)} className={styles.historyCustomer} title={`${customerName ?? ""} ${formatPhoneNumberForDisplay(customerNumber)}`}><strong>{customerSummary || formatPhoneNumberForDisplay(customerNumber) || "Neznáme číslo"}</strong>{customerSummary && <span>{formatPhoneNumberForDisplay(customerNumber)}</span>}</button>
+        <span className={styles.historyResult} data-tone={result.tone}>{result.label}</span>
+        <div className={styles.historyOperator}><strong title={operatorName}>{operatorName}</strong><span title={`${employeeEndpointLabel} · ${call.lineLabel}`}>{call.lineLabel}</span></div>
+        {visibleColumns.map(column => <div key={column.key} className={styles.historyExtra} data-column={column.key}>{extraValue(column.key, true)}</div>)}
+        <div className={styles.historyCase}>{call.caseId ? <button type="button" onClick={() => onOpenCase(call.caseId!)} title={`Otvoriť prípad ${call.caseNumber ?? ""}`}><Link2 size={12} /><span>{call.caseNumber ?? "Otvoriť prípad"}</span></button> : <details onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}><summary><Plus size={12} />Prípad</summary><div><button type="button" onClick={() => onNewCase(call)}><Plus size={13} />Nový prípad</button><CaseLinkControl call={call} cases={cases} disabled={busyAction === `${call.id}:link`} onLink={(caseId) => onLinkCall(call, caseId)} /></div></details>}</div>
+        <button type="button" onClick={() => onCallBack(call)} disabled={phoneScopeBusy(busyAction)} className={styles.historyCallAction} title="Volať späť">{busyAction === `${call.id}:call_back` ? <Loader2 size={14} className="animate-spin" /> : <PhoneOutgoing size={14} />}Volať</button>
       </div>
     </div>
   );
@@ -1215,17 +1069,6 @@ function PhonebookTab({
   );
 }
 
-function CommandMetric({ icon: Icon, label, tone, value }: { icon: LucideIcon; label: string; tone: "ok" | "warn" | "neutral" | "bad"; value: string }) {
-  return (
-    <div className="min-w-0 rounded-md bg-zinc-50 px-2 py-1.5">
-      <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-normal text-zinc-500">
-        <Icon size={13} className={tone === "warn" ? "text-amber-600" : tone === "ok" ? "text-emerald-600" : tone === "bad" ? "text-red-600" : "text-zinc-500"} />
-        <span className="truncate">{label}</span>
-      </div>
-      <div className="mt-0.5 truncate text-sm font-semibold text-zinc-950">{value}</div>
-    </div>
-  );
-}
 
 function EmptyState({
   body,
@@ -1297,49 +1140,13 @@ function CaseLinkControl({
   );
 }
 
-function AvailabilityButton({
-  active,
-  disabled,
-  icon: Icon,
-  label,
-  pending,
-  onClick,
-}: {
-  active: boolean;
-  disabled: boolean;
-  icon: LucideIcon;
-  label: string;
-  pending: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      disabled={disabled}
-      onClick={onClick}
-      className={`inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-semibold transition ${
-        active
-          ? "bg-[#FCD703] text-zinc-950 shadow-sm"
-          : "bg-white text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
-      }`}
-    >
-      {pending ? <Loader2 size={14} className="motion-safe:animate-spin" /> : <Icon size={14} />}
-      {label}
-    </button>
-  );
-}
-
 
 function StatusBadge({ label, tone }: { label: string; tone: "ok" | "warn" | "neutral" | "bad" }) {
   return <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${badgeClass[tone]}`}>{label}</span>;
 }
 
-function CallStatusPill({ status }: { status: CallCenterCall["status"] }) {
-  return <StatusBadge label={callCenterStatusLabel[status]} tone={callTone(status)} />;
-}
-
 function formatTime(value: string) {
+  if (!Number.isFinite(Date.parse(value))) return "—";
   return new Intl.DateTimeFormat("sk-SK", {
     hour: "2-digit",
     minute: "2-digit",
@@ -1348,6 +1155,7 @@ function formatTime(value: string) {
 }
 
 function formatShortDate(value: string) {
+  if (!Number.isFinite(Date.parse(value))) return "Neznámy čas";
   return new Intl.DateTimeFormat("sk-SK", {
     day: "2-digit",
     month: "2-digit",
@@ -1356,29 +1164,6 @@ function formatShortDate(value: string) {
   }).format(new Date(value));
 }
 
-function filterHistoryCalls(calls: CallCenterCall[], filter: HistoryFilter) {
-  if (filter === "all") {
-    return calls;
-  }
-
-  if (filter === "inbound") {
-    return calls.filter((call) => call.direction === "inbound");
-  }
-
-  if (filter === "outbound") {
-    return calls.filter((call) => call.direction === "outbound");
-  }
-
-  if (filter === "answered") {
-    return calls.filter((call) => call.status === "answered" || call.status === "ended" || call.outcome === "reached");
-  }
-
-  if (filter === "missed") {
-    return calls.filter((call) => call.status === "missed" || call.status === "abandoned_queue" || call.status === "failed" || call.outcome === "not_reached");
-  }
-
-  return calls.filter((call) => call.outcome === "callback" || call.callbackMinutes);
-}
 
 function phonebookEntryFromContact(contact: TelephonyDirectoryContact): PhonebookEntry {
   return {
@@ -1443,33 +1228,7 @@ function normalizeSearch(value: string) {
     .toLowerCase();
 }
 
-const presenceStateLabel: Record<TelephonyOperatorPresenceState, string> = {
-  available: "dostupný",
-  ringing: "zvoní",
-  on_call: "na hovore",
-  paused: "pauza",
-  unregistered: "neregistrovaný",
-  offline: "mimo radu",
-  unassigned: "bez pracoviska",
-  stale: "zastarané",
-  error: "chyba",
-};
 
-function callTone(status: CallCenterCall["status"]): "ok" | "warn" | "neutral" | "bad" {
-  if (status === "answered" || status === "outbound") {
-    return "ok";
-  }
-
-  if (status === "incoming" || status === "ringing_agent") {
-    return "warn";
-  }
-
-  if (status === "missed" || status === "abandoned_queue" || status === "failed") {
-    return "bad";
-  }
-
-  return "neutral";
-}
 
 function looksLikeUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
@@ -1493,28 +1252,8 @@ const contactRoleLabel: Record<TelephonyDirectoryContact["role"], string> = {
   partner: "Partner",
 };
 
-const callCenterStatusLabel: Record<CallCenterCall["status"], string> = {
-  incoming: callStatusLabels.incoming,
-  ringing_agent: callStatusLabels.ringing_agent,
-  answered: callStatusLabels.answered,
-  missed: callStatusLabels.missed,
-  abandoned_queue: "opustený rad",
-  outbound: callStatusLabels.outbound,
-  ended: callStatusLabels.ended,
-  failed: "zlyhalo",
-};
-
 const directionLabel: Record<CallCenterCall["direction"], string> = {
   inbound: "Prichádzajúci",
   outbound: "Odchádzajúci",
   internal: "Interný",
 };
-
-const historyFilterOptions: Array<{ label: string; shortLabel?: string; value: HistoryFilter }> = [
-  { label: "Všetky", value: "all" },
-  { label: "Prichádzajúce", shortLabel: "Prichádz.", value: "inbound" },
-  { label: "Odchádzajúce", shortLabel: "Odchádz.", value: "outbound" },
-  { label: "Prijaté", value: "answered" },
-  { label: "Zmeškané", value: "missed" },
-  { label: "Spätné volanie", shortLabel: "Zavolať späť", value: "callback" },
-];

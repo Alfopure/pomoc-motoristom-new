@@ -122,7 +122,7 @@ export function IvrMenuEditor({
           const usedBy = document.lines.filter((line) => line.ivrMenuId === menu.id);
 
           return (
-            <div key={menu.key} className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+            <div key={menu.key} id={menu.id ? `routing-ivr-${menu.id}` : undefined} tabIndex={-1} className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
               <div className="grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,110px)_minmax(0,110px)_auto_auto]">
                 <SettingsField label="Názov menu">
                   <input

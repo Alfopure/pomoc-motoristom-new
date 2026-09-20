@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction, type ReactNode } from "react";
 import { ListOrdered, Loader2, Plus, Save, Trash2 } from "lucide-react";
 
 import type { RoutingDocument, ValidationIssue } from "@/server/telephony/config-service";
@@ -47,18 +47,26 @@ export function RingPlanEditor({
   canEdit,
   document,
   focusPlanId,
+  focusGroupId,
   onNavigateToIvr,
   onNavigateToNumbers,
   onSaved,
+  controlled,
+  renderGroupEditor,
 }: {
+  controlled?: { plans: PlanDraft[]; onChange: Dispatch<SetStateAction<PlanDraft[]>> };
+  renderGroupEditor?: (groupId: string) => ReactNode;
   canEdit: boolean;
   document: RoutingDocument;
   focusPlanId?: string | null;
+  focusGroupId?: string | null;
   onNavigateToIvr?: () => void;
   onNavigateToNumbers?: () => void;
   onSaved: (response: RoutingConfigResponse) => void;
 }) {
-  const [plans, setPlans] = useState<PlanDraft[]>(() => planDraftsFromDocument(document.plans));
+  const [localPlans, setLocalPlans] = useState<PlanDraft[]>(() => planDraftsFromDocument(document.plans));
+  const plans = controlled?.plans ?? localPlans;
+  const setPlans = controlled?.onChange ?? setLocalPlans;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [serverIssues, setServerIssues] = useState<ValidationIssue[]>([]);
@@ -122,16 +130,16 @@ export function RingPlanEditor({
   }
 
   return (
-    <section className="rounded-md border border-zinc-200 bg-white" aria-labelledby="ring-plans-heading">
-      <SettingsSectionHeader
+    <section className={controlled ? "min-w-0 rounded-xl border border-zinc-200 bg-white" : "rounded-md border border-zinc-200 bg-white"} aria-labelledby="ring-plans-heading">
+      {!controlled && <SettingsSectionHeader
         icon={ListOrdered}
         title="Plány zvonenia"
         description="Poradie skupín, čas každého kroku a čo sa stane, keď nikto nezdvihne."
-      />
+      />}
 
       <div className="grid gap-4 p-4">
-        <h3 id="ring-plans-heading" className="sr-only">
-          Plány zvonenia
+        <h3 id="ring-plans-heading" className={controlled ? "text-sm font-semibold text-zinc-900" : "sr-only"}>
+          {controlled ? "Poradie zvonenia" : "Plány zvonenia"}
         </h3>
 
         {!canEdit && <SettingsNotice tone="info">Nastavenia vidíš len na čítanie. Zmeny môže uložiť manažér alebo admin.</SettingsNotice>}
@@ -143,7 +151,7 @@ export function RingPlanEditor({
           </div>
         )}
         {document.groups.length === 0 && (
-          <SettingsNotice tone="warning">Najprv vytvor a ulož skupinu zvonenia v záložke „Skupiny“, až potom sa dá poskladať plán.</SettingsNotice>
+          <SettingsNotice tone="warning">Najprv pridaj skupinu s členmi. Potom ju vyber v kroku plánu.</SettingsNotice>
         )}
 
         {plans.map((plan) => {
@@ -153,7 +161,7 @@ export function RingPlanEditor({
             key={plan.key}
             id={plan.id ? `ring-plan-${plan.id}` : undefined}
             tabIndex={-1}
-            className={`scroll-mt-4 rounded-md border bg-zinc-50 p-3 outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${focusPlanId === plan.id ? "border-yellow-400 ring-2 ring-yellow-200" : "border-zinc-200"}`}
+            className={controlled ? "scroll-mt-4 rounded-lg outline-none focus-visible:ring-1 focus-visible:ring-zinc-300" : `scroll-mt-4 rounded-md border bg-zinc-50 p-3 outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${focusPlanId === plan.id ? "border-yellow-400 ring-2 ring-yellow-200" : "border-zinc-200"}`}
           >
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
               <SettingsField label="Názov plánu">
@@ -189,10 +197,10 @@ export function RingPlanEditor({
               </div>
             </div>
 
-            <p className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+            <p className={controlled ? "mt-3 text-[13px] leading-5 text-zinc-600" : "mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900"}>
               {describeRingPlan(plan, document.groups, maxRingFanout)}
               {plan.active && plan.steps.length > 0 && (
-                <span className="mt-1 block text-xs text-blue-800">Najdlhšie zvonenie spolu: {ringPlanSeconds(plan, document.groups)} s.</span>
+                <span className="mt-1 block text-xs text-zinc-500">Nastavené maximum zvonenia (skutočný čas môže byť kratší): {ringPlanSeconds(plan, document.groups)} s.</span>
               )}
             </p>
 
@@ -211,8 +219,9 @@ export function RingPlanEditor({
             })()}
 
             {references.length > 0 && (
-              <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">
-                <p className="font-semibold">Plán nemožno odobrať, kým ho používajú tieto väzby:</p>
+              <details className="mt-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
+                <summary className="cursor-pointer font-medium">Použitie plánu a súvisiace nastavenia ({references.length})</summary>
+                <p className="mt-2">Plán nemožno odobrať, kým ho používajú tieto väzby:</p>
                 <ul className="mt-1 grid gap-1">
                   {references.map((reference) => (
                     <li key={`${reference.kind}:${reference.id}`} className="flex flex-wrap items-center justify-between gap-2">
@@ -232,14 +241,14 @@ export function RingPlanEditor({
                     </li>
                   ))}
                 </ul>
-              </div>
+              </details>
             )}
 
             <SettingsIssueList issues={issuesFor.get(plan.key) ?? []} />
 
             <div className="mt-3">
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs font-semibold uppercase text-zinc-500">Kroky ({plan.steps.length})</span>
+                <span className="text-xs font-semibold text-zinc-500">Kroky ({plan.steps.length})</span>
                 <button
                   type="button"
                   disabled={!canEdit || document.groups.length === 0}
@@ -253,7 +262,7 @@ export function RingPlanEditor({
 
               {plan.steps.length === 0 ? (
                 <p className="rounded-md border border-dashed border-zinc-300 px-3 py-3 text-xs text-zinc-600">
-                  Plán potrebuje aspoň jeden krok. Bez kroku by hovor rovno skončil na náhradnom riešení.
+                  Plán potrebuje aspoň jeden krok. Bez kroku systém rovno ponúkne spätné volanie; nastavený koniec plánu sa nepoužije.
                 </p>
               ) : (
                 <SortableList
@@ -269,7 +278,7 @@ export function RingPlanEditor({
                         <span className="text-sm font-semibold text-zinc-500">{index + 1}.</span>
 
                         <SettingsField label="Skupina">
-                          <select
+                          <select aria-label="Skupina"
                             className={settingsInputClass}
                             disabled={!canEdit}
                             value={step.ringGroupId}
@@ -297,7 +306,7 @@ export function RingPlanEditor({
                         </SettingsField>
 
                         <SettingsField label="Ako zvoní">
-                          <select
+                          <select aria-label="Ako zvoní"
                             className={settingsInputClass}
                             disabled={!canEdit}
                             value={step.strategy}
@@ -322,7 +331,7 @@ export function RingPlanEditor({
                         </button>
                       </div>
                       {timing && (
-                        <p className="mt-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-950">
+                        <p className={controlled ? "mt-2 text-xs leading-5 text-zinc-500" : "mt-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-950"}>
                           <span className="font-semibold">Účinný čas kroku:</span>{" "}
                           {timing.strategy === "all"
                             ? `${timing.stepSecs} s pre každého naraz podľa času kroku.${timing.members.some((member) => member.memberOverrideIgnored) ? " Vlastné časy členov sa v tomto kroku nepoužijú." : ""}`
@@ -335,6 +344,10 @@ export function RingPlanEditor({
                               }).join("; ") + "."}
                         </p>
                       )}
+                      {group && renderGroupEditor && <details open={focusGroupId === group.id || undefined} className="mt-2 rounded-lg border border-zinc-200 bg-white">
+                        <summary className="cursor-pointer px-3 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-yellow-400">Členovia skupiny: {group.members.map(member => member.memberKind === "operator" ? operatorNames.get(member.profileId ?? "") ?? "Operátor" : member.externalNumber ?? "Externé číslo").join(", ") || "Zatiaľ bez členov"} · Upraviť členov</summary>
+                        {renderGroupEditor(group.id)}
+                      </details>}
                       <SettingsIssueList issues={issuesFor.get(step.key) ?? []} />
                     </SortableRow>
                     );
@@ -345,7 +358,7 @@ export function RingPlanEditor({
 
             <div className="mt-3 grid gap-3 border-t border-zinc-200 pt-3 sm:grid-cols-2">
               <SettingsField label="Keď nikto nezdvihne">
-                <select
+                <select aria-label="Keď nikto nezdvihne"
                   className={settingsInputClass}
                   disabled={!canEdit}
                   value={plan.fallbackKind}
@@ -388,7 +401,7 @@ export function RingPlanEditor({
             <Plus size={15} aria-hidden="true" />
             Pridať plán
           </button>
-          <button
+          {!controlled && <button
             type="button"
             disabled={!canEdit || saving || !dirty || issues.length > 0}
             onClick={() => void save()}
@@ -396,8 +409,8 @@ export function RingPlanEditor({
           >
             {saving ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Save size={15} aria-hidden="true" />}
             Uložiť plány
-          </button>
-          {dirty && issues.length === 0 && <span className="text-xs font-medium text-amber-700">Neuložené zmeny.</span>}
+          </button>}
+          {!controlled && dirty && issues.length === 0 && <span className="text-xs font-medium text-amber-700">Neuložené zmeny.</span>}
           {issues.length > 0 && <span className="text-xs font-medium text-red-700">Najprv oprav označené polia.</span>}
         </div>
       </div>

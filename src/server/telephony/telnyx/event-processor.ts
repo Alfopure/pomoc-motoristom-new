@@ -328,6 +328,33 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     }
 
     const ownedSession = session;
+
+    // Bookkeeping that writes nothing fenced does not take the session lease.
+    //
+    // Every webhook used to, and that is where the redeliveries come from: a
+    // callback arriving while our own invocation still holds the lease is
+    // deferred, and Telnyx retries it up to six times. On 18 Sep, 66
+    // `conference.floor.changed` events cost 163 deliveries — a fifth of all
+    // webhook traffic — for an event whose entire handling is one audit row in
+    // `motorist_call_events`, a table no write guard covers.
+    //
+    // The recording callbacks are the exception: they write `motorist_calls`,
+    // which is fenced, and may run a session event of their own.
+    const leaseFree = eventClass === "bookkeeping" &&
+      event.type !== "call.recording.saved" && event.type !== "conference.recording.saved";
+    if (leaseFree) {
+      processingStarted = true;
+      await recordCallEvent(effectsDeps(deps), { session: ownedSession, event, handledStatus: "processed",
+        stateBefore: ownedSession.state, stateAfter: ownedSession.state, notes: ["bookkeeping"], commands: [] });
+      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+      const bookkeeping = done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", notes: ["bookkeeping", "lease-free"] });
+      if (deps.deferMaintenance) {
+        try { deps.deferMaintenance(() => maybeSweep(deps, started)); }
+        catch { await maybeSweep(deps, started); }
+      } else await maybeSweep(deps, started);
+      return bookkeeping;
+    }
+
     // The durable webhook ledger owns retry. Do not have every simultaneous
     // provider callback poll the same database lease while a control is waiting.
     const result = await ownedSessionWork({ ...deps, leaseWaitMs: WEBHOOK_LEASE_WAIT_MS }, ownedSession.id, async () => {

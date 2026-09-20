@@ -1451,6 +1451,8 @@ export type Database = {
         destination_allowlist: string[];
         max_ring_fanout: number;
         max_concurrent_legs: number;
+        /** Seconds the queue may find nobody to ring before trying the backup numbers once; 0 disables it. */
+        queue_escalate_after_seconds: number;
         routing_version: number;
         created_at: Timestamp;
         updated_at: Timestamp;
@@ -1632,6 +1634,7 @@ export type Database = {
       };
       motorist_task_workflow_enabled: { Args: { p_organization_id: string; p_actor_profile_id: string }; Returns: boolean };
       motorist_task_workflow: { Args: { p_organization_id: string; p_actor_profile_id: string; p_task_id: string; p_input: Json }; Returns: Json };
+      motorist_access_profile_has_task_workflow_history: { Args: { p_organization_id: string; p_profile_id: string }; Returns: boolean };
       motorist_resolve_callback_target: { Args: { p_organization_id: string; p_number: string }; Returns: Json };
       motorist_contact_callback_policy: { Args: { p_organization_id: string; p_actor_id: string; p_contact_id: string; p_action: string; p_non_callback?: boolean; p_target_contact_id?: string | null; p_expected_revision?: number; p_verified?: boolean }; Returns: Json };
       motorist_approve_callback_target: { Args: { p_organization_id: string; p_actor_id: string; p_request_id: string; p_verification_id: string }; Returns: Json };
@@ -1834,6 +1837,14 @@ export type Database = {
         };
         Returns: boolean;
       };
+      motorist_routing_snapshot: {
+        Args: { p_organization_id: string };
+        Returns: Json;
+      };
+      motorist_save_incoming_routing: {
+        Args: { p_organization_id: string; p_document: Json; p_expected_version: number };
+        Returns: Json;
+      };
       motorist_replace_ring_plan: {
         Args: {
           p_organization_id: string;
@@ -1851,6 +1862,26 @@ export type Database = {
           p_sms?: number;
         };
         Returns: number;
+      };
+      /** The critical row writes of a transition in one call; presence stays in the reducer. */
+      motorist_apply_critical_v2: {
+        Args: {
+          p_session_id: string;
+          p_expected_version: number | null;
+          p_patch: Json | null;
+          p_legs: Json;
+          p_attempts: Json;
+        };
+        Returns: Json;
+      };
+      /** The provider journal for a whole group: one fence, a decision per command. */
+      motorist_provider_command_prepare_batch_v2: {
+        Args: { p_session_id: string; p_commands: Json };
+        Returns: Json;
+      };
+      motorist_provider_command_result_batch_v2: {
+        Args: { p_session_id: string; p_generation: number; p_token: string; p_results: Json };
+        Returns: Json;
       };
     };
     Enums: { [_ in never]: never };

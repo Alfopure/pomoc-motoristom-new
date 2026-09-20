@@ -30,6 +30,11 @@ export type RouteAuthEntry = {
 };
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
+  "telephony/team": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Narrow operational DTO; report and device secrets excluded." },
+  "telephony/routing-summary": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "telephony/config/incoming": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read scoped configuration; PUT manager/admin plus same-origin and atomic CAS." },
+  "cases/live": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read-only POST for version manifest; actor-derived audience, no-store." },
+  "cases/presence": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Server-derived actor and expiring lease, same-origin mutation." },
   "guide/knowledge": { class: "session", note: "Versioned documentation only; no live telephony or organization data." },
   "telephony/callback-target": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   "directory/contacts/[id]/callback-policy": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "GET directory policy; PUT manager/admin only with same-origin guard." },
