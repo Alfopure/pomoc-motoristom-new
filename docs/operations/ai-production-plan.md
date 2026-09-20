@@ -462,3 +462,16 @@ Test existuje od začiatku (`prompts.test.ts:22`) a prechádza spolu s ďalším
 | Supabase `ifpaeegaesdmljfkdvcn` (jediná databáza tejto kópie — dev, preview aj produkcia) | **Aplikované 2026-09-20**, overené dotazom |
 
 Druhá vec, ktorá sa pritom našla: po merge z `dev` zdieľalo päť migrácií verziu s inou migráciou (napr. `20261006100000` mali `ai_agent_profile_kind` aj `call_history_search`). `supabase db push` kľúčuje na verziu, takže by jednu z každej dvojice ticho preskočil. Migrácie AI sú prečíslované na `20261007100000`–`20261007105000` a história v databáze je zosúladená.
+
+**Doložený stav histórie (2026-09-20, dotaz proti `ifpaeegaesdmljfkdvcn`):**
+
+```
+20261007100000 ai_demo
+20261007101000 ai_demo_transcript
+20261007102000 ai_demo_review
+20261007103000 ai_demo_probe_claim
+20261007104000 ai_agent_profile_kind
+20261007105000 ai_agent_settings
+```
+
+Pôvodné verzie `20261002100000`, `20261003100000`, `20261004100000`, `20261006100000` a `20261006110000` v histórii **nie sú** — a neboli tam ani pred prečíslovaním. Patria migráciám z `dev`, ktoré do histórie nikdy zapísané neboli; je to časť staršej medzery pätnástich nezapísaných migrácií, ktorá s touto prácou nesúvisí a rieši sa samostatne.
