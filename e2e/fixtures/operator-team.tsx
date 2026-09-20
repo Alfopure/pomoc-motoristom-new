@@ -1,0 +1,10 @@
+import React from "react";
+import { createRoot } from "react-dom/client";
+import { CallCenterTeam } from "../../src/components/dispatch/CallCenterTeam";
+import type { Operator } from "../../src/domain/types";
+import type { TelephonyOperatorPresence } from "../../src/lib/telephony/presence";
+import styles from "../../src/components/dispatch/CallCenterModule.module.css";
+const names = ["Alexandra Nováková", "Ján Ondrejčík", "Lucia Kováčová", "Martin Horváth", "Matej Novotný", "Michal Michálek", "Natália Kováčová", "Tester 2"];
+const operators = names.map((name, index) => ({ id: String(index), name })) as Operator[];
+const presences = [{ profileId: "4", state: "available", registered: true, available: true, detail: "Stará dostupnosť", checkedAt: "2020-01-01T00:00:00Z" }] as TelephonyOperatorPresence[];
+createRoot(document.getElementById("root")!).render(<main className={styles.module}><CallCenterTeam operators={operators} presences={presences} /></main>);

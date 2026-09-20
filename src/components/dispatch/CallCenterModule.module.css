@@ -168,22 +168,24 @@
 .compactDialer button:disabled { opacity: .45; }
 .phonebookPopover { max-width: 480px; margin-bottom: 12px; }
 .contentGrid { display: grid; grid-template-columns: minmax(0, 2.1fr) minmax(290px, 1fr); align-items: start; gap: 12px; }
-.teamStrip { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 7px 10px; border: 1px solid #dfe3ec; border-radius: 12px; background: #fff; box-shadow: 0 1px 2px #26314d05; }
+.teamStrip { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; padding: 7px 10px; border: 1px solid #dfe3ec; border-radius: 12px; background: #fff; box-shadow: 0 1px 2px #26314d05; }
 .teamStripHeading { display: flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 12px; margin-bottom: 0; color: #687186; }
 .teamStripHeading h2 { font-size: 13px; font-weight: 650; color: #292d38; }
 .teamMembers { display: flex; flex: 1; min-width: 0; flex-wrap: wrap; gap: 6px; }
-.teamMember { position: relative; flex: 1 1 130px; max-width: 240px; min-width: 0; }
-.teamMember summary { display: flex; min-height: 40px; align-items: center; gap: 7px; padding: 4px 8px; border: 1px solid #e7eaf0; border-radius: 8px; list-style: none; cursor: pointer; }
+.teamMember { position: relative; flex: 1 0 230px; max-width: 300px; min-width: 0; }
+.teamMember summary { display: flex; min-height: 40px; height: 100%; align-items: center; gap: 7px; padding: 2px 8px; border: 1px solid #e7eaf0; border-radius: 8px; list-style: none; cursor: pointer; }
 .teamMember summary::-webkit-details-marker, .historyAdvanced summary::-webkit-details-marker, .historyCase summary::-webkit-details-marker { display: none; }
-.teamMember summary > span:nth-child(2) { min-width: 0; flex: 1; }
-.teamMember strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
+.teamIdentity { min-width: 0; flex: 1; }
+.teamMember strong { display: block; overflow-wrap: anywhere; font-size: 12px; font-weight: 650; line-height: 1.3; }
 .teamMember small { display: block; font-size: 10px; color: #687186; }
-.teamToday { text-align: right; font-size: 13px; font-weight: 650; }
+.teamMeta { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0 8px; margin-top: 2px; }
+.teamMeta small { white-space: nowrap; }
+.teamMeta .teamOnline { color: #047857; }
 .presenceDot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: #a0a6b2; }
 .availableDot { background: #059669; }.callingDot { background: #0284c7; }.pausedDot { background: #d97706; }
-.teamDetail { position: absolute; z-index: 30; top: calc(100% + 5px); left: 0; width: min(320px, calc(100vw - 40px)); padding: 12px; border: 1px solid #dfe3ec; border-radius: 10px; background: white; box-shadow: 0 8px 24px #26314d1a; font-size: 12px; }
+.teamDetail { position: absolute; z-index: 30; top: calc(100% + 5px); left: 0; width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow-y: auto; padding: 12px; border: 1px solid #dfe3ec; border-radius: 10px; background: white; box-shadow: 0 8px 24px #26314d1a; font-size: 12px; }
 .teamDetail p { margin: 5px 0; color: #687186; }
-.teamDetail dl { display: grid; gap: 4px 8px; grid-template-columns: 1fr auto; }.teamDetail dd { margin: 0; text-align: right; }
+.teamDetail dl { display: grid; gap: 5px 12px; grid-template-columns: minmax(0, 1fr) auto; }.teamDetail dd { margin: 0; text-align: right; }.teamDetail dt { min-width: 0; overflow-wrap: anywhere; }
 .historyPanel { min-width: 0; background: white; border: 1px solid #dfe3ec; border-radius: 12px; box-shadow: 0 1px 2px #26314d05; }
 .historyHeading { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #e7eaf0; }
 .historyHeading h2 { display: inline-flex; align-items: center; gap: 7px; font-size: 14px; font-weight: 650; }.historyHeading > span { font-size: 11px; color: #687186; }
@@ -199,7 +201,7 @@
 .historyColumnHeadings, .desktopHistoryRow { display: grid; grid-template-columns: 132px minmax(120px, 1.4fr) minmax(100px, 1fr) 124px 64px; align-items: center; gap: 10px; }
 .historyColumnHeadings { padding: 5px 12px; border-bottom: 1px solid #e7eaf0; background: #fafbfc; color: #687186; font-size: 10px; font-weight: 600; }
 .historyRows { max-height: 560px; min-height: 260px; overflow-y: auto; overscroll-behavior: contain; }
-.desktopHistoryRow { min-height: 44px; padding: 4px 12px; border-bottom: 1px solid #eef0f4; font-size: 12px; }
+.desktopHistoryRow { min-height: 40px; padding: 2px 12px; border-bottom: 1px solid #eef0f4; font-size: 12px; }
 .historyTime, .historyCustomer, .historyOperator { display: grid; min-width: 0; gap: 2px; text-align: left; }
 .historyTime strong { display: flex; align-items: center; gap: 4px; font-weight: 600; font-size: 11px; font-variant-numeric: tabular-nums; }
 .historyTime > span, .historyCustomer > span, .historyOperator > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; color: #687186; }
@@ -213,7 +215,7 @@
 .module button:focus-visible, .module summary:focus-visible, .module input:focus-visible, .module select:focus-visible { outline: 2px solid #eab308; outline-offset: 2px; }
 @media (max-width: 1150px) { .contentGrid { grid-template-columns: minmax(0, 1fr) 290px; }.historyColumnHeadings, .desktopHistoryRow { grid-template-columns: 124px minmax(105px,1fr) minmax(90px,.8fr) 110px 55px; gap: 6px; } }
 @media (max-width: 1023px) { .contentGrid { grid-template-columns: minmax(0,1fr); }.desktopHistoryRow, .historyColumnHeadings { display: none; }.moduleHeading { align-items: start; }.moduleHeading p { display: none; }.teamStrip { display: block; padding: 8px; }.teamStripHeading { margin-bottom: 6px; }.teamMember { max-width: none; }.historyRows { max-height: 620px; }.mobileHistoryRow { border-bottom: 1px solid #e7eaf0; }.mobileHistoryRow button { min-height: 36px; }.historyPanel { order: 0; }.callbackArea { order: 1; } }
-@media (max-width: 639px) { .moduleHeading { flex-wrap: wrap; gap: 8px; }.moduleHeading > div:first-child { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }.headingActions { width: 100%; }.headingActions > button, .compactDialer button { min-height: 44px; }.compactDialer { flex: 1; min-width: 0; }.compactDialer input { min-width: 0; flex: 1; width: 100px; height: 44px; font-size: 16px; }.teamMember { flex-basis: calc(50% - 4px); }.teamMember summary { min-height: 44px; }.teamMember:nth-child(even) .teamDetail { left: auto; right: 0; }.historySearch { padding: 8px; }.historySearchInput input { font-size: 16px; height: 44px; }.historyAdvanced summary { min-height: 44px; }.historyAdvanced input, .historyAdvanced select { font-size: 16px; height: 44px; }.historyPagination nav button { height: 44px; width: 44px; }.mobileHistoryRow button { min-height: 44px; } }
+@media (max-width: 639px) { .moduleHeading { flex-wrap: wrap; gap: 8px; }.moduleHeading > div:first-child { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }.headingActions { width: 100%; }.headingActions > button, .compactDialer button { min-height: 44px; }.compactDialer { flex: 1; min-width: 0; }.compactDialer input { min-width: 0; flex: 1; width: 100px; height: 44px; font-size: 16px; }.teamMember { flex-basis: calc(50% - 4px); }.teamMember summary { min-height: 44px; }.historySearch { padding: 8px; }.historySearchInput input { font-size: 16px; height: 44px; }.historyAdvanced summary { min-height: 44px; }.historyAdvanced input, .historyAdvanced select { font-size: 16px; height: 44px; }.historyPagination nav button { height: 44px; width: 44px; }.mobileHistoryRow button { min-height: 44px; } }
 
 .historyTime strong small { margin-left: auto; color: #687186; font-size: 10px; font-weight: 500; }
 .historyTimeMeta { display: flex; align-items: center; gap: 5px; font-size: 10px !important; }
