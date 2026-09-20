@@ -29,6 +29,8 @@ export type RoutingConfigResponse = {
   document: RoutingDocument;
   canEdit: boolean;
   canManageSettings: boolean;
+  /** Present and true only for an admin on a deployment with the AI demo on. */
+  aiDemoEnabled: boolean;
   /** Non-fatal note about a save that landed (today: the audit row was lost). */
   warning?: string;
 };
@@ -62,6 +64,7 @@ function unwrap(result: { ok: boolean; status: number; body: (RoutingConfigRespo
     document: result.body.document,
     canEdit: Boolean(result.body.canEdit),
     canManageSettings: Boolean(result.body.canManageSettings),
+    aiDemoEnabled: result.body.aiDemoEnabled === true,
     ...(typeof result.body.warning === "string" ? { warning: result.body.warning } : {}),
   };
 }

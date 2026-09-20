@@ -106,6 +106,14 @@ export const DEFAULT_UNIQUE_KEYS: Record<string, UniqueKeySpec[]> = {
   motorist_call_events: [["id"], ["event_fingerprint"]],
   motorist_job_incidents: [["incident_id"], { columns: ["job_name"], where: (row) => row.status === "open" }],
   motorist_job_controls: [["job_name"]],
+  motorist_ai_demo_attempts: [
+    ["id"],
+    { columns: ["organization_id"], where: (row) => row.state !== "ended" && row.state !== "failed" },
+    { columns: ["organization_id", "actor_profile_id", "request_id"], where: (row) => !isNil(row.request_id) },
+    { columns: ["telnyx_sip_call_control_id"], where: (row) => !isNil(row.telnyx_sip_call_control_id) },
+    { columns: ["telnyx_mobile_call_control_id"], where: (row) => !isNil(row.telnyx_mobile_call_control_id) },
+    { columns: ["openai_session_id"], where: (row) => !isNil(row.openai_session_id) },
+  ],
 };
 
 /** Column defaults of the telephony schema that production code relies on (mirrors the migrations). */
@@ -119,6 +127,20 @@ export const TABLE_DEFAULTS: Record<string, FakeRow> = {
   motorist_calls: { recording_status: "not_requested", transcript_status: "not_requested", raw_payload: {}, raw_latest_payload: {} },
   motorist_callback_requests: { status: "open", metadata: {}, caller_name: null, session_id: null, line_id: null, case_id: null, claimed_by: null, claimed_at: null, due_at: null, resolved_at: null, notes: null },
   motorist_job_incidents: { status: "open", consecutive_failures: 0 },
+  motorist_ai_demo_attempts: {
+    direction: "outbound", state: "requested", greeting_status: "none", scenario: "replacement_vehicle_return",
+    sip_dial_outcome: "none", mobile_dial_outcome: "none", openai_hangup_attempts: 0, cleanup_attempts: 0,
+    latency_probe: [], transcript: null, conversation_stats: null, review: null, reviewed_at: null, probe_started_at: null, metadata: {},
+    request_id: null, actor_profile_id: null, end_reason: null, error_code: null, mobile_dial_command_id: null,
+    telnyx_sip_call_control_id: null, telnyx_sip_call_leg_id: null, telnyx_mobile_call_control_id: null,
+    telnyx_mobile_call_leg_id: null, telnyx_call_session_id: null, openai_session_id: null,
+    sip_hangup_cause: null, mobile_hangup_cause: null, hangup_source: null,
+    sip_hangup_done_at: null, mobile_hangup_done_at: null, openai_hangup_done_at: null,
+    sip_dialed_at: null, sip_initiated_at: null, ai_offered_at: null, accept_started_at: null, ai_accepted_at: null,
+    sip_answered_at: null, mobile_dialed_at: null, mobile_initiated_at: null, mobile_answered_at: null,
+    bridged_at: null, greeting_appended_at: null, first_transcript_at: null, talking_at: null,
+    ending_requested_at: null, ended_at: null, cleanup_next_attempt_at: null,
+  },
 };
 
 export function fakeError(message: string, code = "FAKE", details: string | null = null): FakeError {
@@ -348,10 +370,19 @@ export class FakeDatabase {
     const updated: FakeRow[] = [];
     for (const row of this.storage(table)) {
       if (!filter(row)) continue;
+      // Postgres rolls the statement back on a unique violation. Without the
+      // snapshot the fake left the rejected value in the row, so code that
+      // treats 23505 as "not mine, nothing recorded" looked wrong in tests
+      // while being right in production.
+      const before = clone(row);
       Object.assign(row, clone(values), presenceRevisionPatch(table, row, values));
       if ("updated_at" in row && !("updated_at" in values)) row.updated_at = this.nowIso();
       const conflict = this.findConflict(table, row, row);
-      if (conflict) throw fakeError(`duplicate key value violates unique constraint (${conflict.key.join(", ")})`, "23505");
+      if (conflict) {
+        for (const key of Object.keys(row)) delete row[key];
+        Object.assign(row, before);
+        throw fakeError(`duplicate key value violates unique constraint (${conflict.key.join(", ")})`, "23505");
+      }
       updated.push(clone(row));
     }
     return updated;

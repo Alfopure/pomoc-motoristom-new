@@ -89,6 +89,7 @@ import {
 } from "@/server/integrations/swhouse/occupancy-snapshot";
 import type { CallCenterCall, CallOutcome, CommanderVehicleConnection, DispatchData, FleetProviderVehicle, IntegrationConnection } from "./dispatch-types";
 import { deriveEffectiveIntegrationStatus } from "./integration-status";
+import { humansOnly } from "@/server/profile-kind";
 
 type Tables = Database["public"]["Tables"];
 type Row<TableName extends keyof Tables> = Tables[TableName]["Row"];
@@ -247,7 +248,7 @@ async function loadSupabaseDispatchData(viewer: DispatchViewer, options: { atten
     recordingsResult,
   ] = await Promise.all([
     supabase.from("motorist_organization_profiles").select("*").abortSignal(readAbort).eq("organization_id", organizationId).limit(1),
-    supabase.from("motorist_profiles").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("display_name"),
+    humansOnly(supabase.from("motorist_profiles").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("display_name")),
     supabase.from("motorist_operator_statuses").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("started_at", { ascending: false }),
     options.attendance === false ? { data: [], error: null } : supabase.from("motorist_attendance_shift_templates").select("*").abortSignal(readAbort).eq("organization_id", organizationId).eq("active", true).order("sort_order"),
     options.attendance === false ? { data: [], error: null } : supabase.from("motorist_attendance_shifts").select("*").abortSignal(readAbort).eq("organization_id", organizationId).order("planned_start_at", { ascending: true }).limit(200),

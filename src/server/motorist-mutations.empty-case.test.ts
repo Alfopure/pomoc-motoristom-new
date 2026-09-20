@@ -83,6 +83,7 @@ function makeQuery(table: string) {
   const query = {
     select: () => query,
     eq: () => query,
+    neq: () => query,
     like: () => query,
     order: () => query,
     limit: () => query,

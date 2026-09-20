@@ -22,6 +22,7 @@ import {
 import { callbackConfirmationMedia, IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
 import { DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS, MAX_QUEUE_ESCALATE_AFTER_SECONDS, type TelephonyEnvironment } from "./state/types";
 import { ConfigServiceError, type ValidationIssue } from "./service-errors";
+import { humansOnly } from "@/server/profile-kind";
 
 export { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS };
 export { IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction };
@@ -1362,7 +1363,7 @@ async function loadLegacyRoutingRows(deps: ConfigDeps, input: RoutingDocumentInp
       "Voľby IVR",
     ),
     scoped<Array<Pick<Tables["motorist_profiles"]["Row"], "id" | "display_name" | "role" | "active" | "access_status">>>(
-      deps.admin.from("motorist_profiles").select("id, display_name, role, active, access_status").eq("organization_id", organizationId).order("display_name"),
+      humansOnly(deps.admin.from("motorist_profiles").select("id, display_name, role, active, access_status").eq("organization_id", organizationId).order("display_name")),
       "Operátori",
     ),
     scoped<Tables["motorist_operator_telephony_settings"]["Row"][]>(deps.admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId), "Nastavenia operátorov"),

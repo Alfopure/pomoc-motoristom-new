@@ -6,6 +6,7 @@ import type { CaseTask } from "@/domain/types";
 import type { Database } from "@/lib/supabase/database.types";
 import { buildAppUrl, escapeHtml, sendEmail } from "./email-delivery";
 import { sendTaskPush } from "./web-push";
+import { humansOnly } from "@/server/profile-kind";
 
 type AdminClient = SupabaseClient<Database>;
 type Tables = Database["public"]["Tables"];
@@ -409,7 +410,7 @@ async function loadProfilesById(supabase: AdminClient, organizationId: string, p
     return new Map<string, ProfileRow>();
   }
 
-  const query = supabase.from("motorist_profiles").select("*").eq("organization_id", organizationId).eq("active", true).in("role", ["dispatcher", "senior_dispatcher", "manager", "admin"]);
+  const query = humansOnly(supabase.from("motorist_profiles").select("*").eq("organization_id", organizationId).eq("active", true).in("role", ["dispatcher", "senior_dispatcher", "manager", "admin"]));
   const result = await (includeTeam ? query : query.in("id", ids));
   throwOnSupabaseError(result);
 

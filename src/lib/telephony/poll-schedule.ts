@@ -108,6 +108,21 @@ export const TAKEOVER_POLL_MS = {
   idleHidden: 60_000,
 } as const;
 
+/**
+ * AI demo timeline.
+ *
+ * A demo call is at most five minutes long and the interesting part is the
+ * first ten seconds, so an active attempt is polled fast; with nothing running
+ * the tab is only asking "has somebody started one?". Two seconds for at most
+ * five minutes is well under 150 requests per call.
+ */
+export const AI_DEMO_POLL_MS = {
+  activeVisible: 2_000,
+  activeHidden: 10_000,
+  idleVisible: 15_000,
+  idleHidden: 60_000,
+} as const;
+
 /** Failing endpoints back off to this ceiling rather than hammering. */
 export const POLL_BACKOFF_MAX_MS = 30_000;
 
@@ -193,4 +208,16 @@ function withBackoff(baseMs: number, consecutiveFailures = 0, random?: () => num
     maxMs: Math.max(baseMs, POLL_BACKOFF_MAX_MS),
     random,
   });
+}
+
+export function aiDemoPollDelayMs(input: {
+  hasActiveAttempt: boolean;
+  documentHidden: boolean;
+  consecutiveFailures?: number;
+  random?: () => number;
+}) {
+  const base = input.hasActiveAttempt
+    ? (input.documentHidden ? AI_DEMO_POLL_MS.activeHidden : AI_DEMO_POLL_MS.activeVisible)
+    : (input.documentHidden ? AI_DEMO_POLL_MS.idleHidden : AI_DEMO_POLL_MS.idleVisible);
+  return withBackoff(base, input.consecutiveFailures, input.random);
 }

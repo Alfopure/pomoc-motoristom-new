@@ -51,6 +51,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // tolerancia 300 s) overený PRED akoukoľvek prácou; neplatný podpis → 400, cudzí `connection_id` → 200 ignored.
   "telephony/telnyx/webhook": { class: "public", note: "Telnyx Call Control webhook; Ed25519 signature verification namiesto session." },
   "telephony/webhooks/scribe": { class: "public", note: "ElevenLabs HMAC signature and five-minute replay window, verified before database access." },
+  "telephony/webhooks/openai": { class: "public", note: "OpenAI GPT-Live webhook; Standard Webhooks HMAC podpis a 5-minútové okno namiesto session. Podpis nie je oprávnenie — reláciu musí potvrdiť riadok pokusu dema." },
   "sms/telnyx/webhook": { class: "public", note: "Telnyx messaging delivery-status webhook; Ed25519 signature verification." },
 
   // ── bearer (4) — zdieľané tajomstvo (cron/stroj) ────────────────────────
@@ -204,6 +205,15 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "telephony/config/ring-groups": { class: "session", role: ["manager", "admin"], note: "GET je member-level (redigovaný); PUT manager/admin (transakčná výmena cez motorist_replace_ring_plan)." },
   "telephony/config/ring-plans": { class: "session", role: ["manager", "admin"], note: "GET je member-level (redigovaný); PUT manager/admin (transakčná výmena cez motorist_replace_ring_plan)." },
   "telephony/config/settings": { class: "session", role: ["admin"], note: "Kill switche, allowlist cieľov a limit čakárne — GET aj PATCH len admin; rovnaké polia sú redigované aj v ostatných config GET." },
+  // ── AI demo „Veronika" (admin-only, vrátane čítania) ────────────────────
+  "telephony/ai-demo": { class: "session", role: ["admin"], note: "História pokusov dema s maskovanými číslami a meraniami latencie." },
+  "telephony/ai-demo/start": { class: "session", role: ["admin"], note: "Spustí jeden demo hovor; okrem role aj env prepínač, allowlist cieľov organizácie, serverový zoznam príjemcov a denný limit." },
+  "telephony/ai-demo/[id]": { class: "session", role: ["admin"], note: "Stav jedného pokusu pre časovú os." },
+  "telephony/ai-demo/[id]/review": { class: "session", role: ["admin"], note: "Prečíta prepis hovoru modelom a uloží súhrn, chyby a návrhy na úpravu pokynov." },
+  "telephony/ai-demo/[id]/stop": { class: "session", role: ["admin"], note: "Ukončí demo; zámerne nekontroluje vypínače, aby vypnutie nových hovorov neblokovalo ukončenie bežiaceho." },
+  "telephony/ai-demo/listen": { class: "public", note: "Volá ju bridge webhook, ktorý nemôže čakať celý hovor. Autentifikáciou je HMAC token viazaný na jeden konkrétny pokus, nie session — drží sideband a zaznamená prepis." },
+  "telephony/ai-demo/settings": { class: "session", role: ["admin"], note: "Ako sa AI správa: meno, hlas, stále pravidlá a oprávnenia. Čítanie je tiež admin-only — kto smie vidieť, čo má dovolené, je tá istá otázka ako kto to smie meniť." },
+  "telephony/ai-demo/preflight": { class: "session", role: ["admin"], note: "Read-only kontrola pripravenosti; `?remote=1` pridá tri GET dopyty k poskytovateľom. Nič nevytvára hovor." },
   "telephony/operators/[id]/credential": { class: "session", role: ["manager", "admin"], note: "Vytvorí alebo pregeneruje Telnyx SIP credential operátora; pri pregenerovaní zmaže pôvodný credential u Telnyxu (neúspech = 502)." },
   "telephony/operators/[id]/disconnect": { class: "session", role: ["manager", "admin"], note: "Odpojí prehliadačový telefón operátora (ďalší heartbeat dostane 409) a zmaže jeho Telnyx credential, aby sa starým tokenom nedalo znova zaregistrovať (neúspech = 502)." },
   "telephony/operators/[id]/settings": { class: "session", note: "PATCH vlastných nastavení (self) alebo cudzích (manager/admin)." },
