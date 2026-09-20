@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 
-import { credentialName, decodeJwtExpiry, disconnectDevice, ensureOperatorCredential, issueWebphoneToken, OperatorDeviceError, touchDevice, type DeviceDeps } from "./operator-devices";
+import { credentialName, decodeJwtExpiry, disconnectDevice, ensureOperatorCredential, getOperatorDevice, issueWebphoneToken, OperatorDeviceError, touchDevice, type DeviceDeps } from "./operator-devices";
 import { TelnyxCommandError } from "./telnyx/client";
+import { deviceLastOnlineAt } from "./device-online";
 
 function deps(h: ReturnType<typeof createTelephonyHarness>, overrides: Partial<DeviceDeps> = {}): DeviceDeps {
   return { admin: h.admin, telnyx: h.telnyx.client, environment: "development", now: () => h.now(), ...overrides };
@@ -278,5 +279,125 @@ describe("concurrent device enrollment", () => {
     await expect(ensureOperatorCredential(deps(h, { deviceKind: "mobile" }), { organizationId: ORG, profileId: PROFILES.o3 })).rejects.toMatchObject({ status: 500 });
     expect(h.telnyx.of("deleteTelephonyCredential")[0].params).toEqual({ credentialId: "cred-1" });
     expect(h.rows("motorist_operator_mobile_devices")).toHaveLength(0);
+  });
+});
+
+describe("retained last online contact", () => {
+  it.each(["web", "mobile"] as const)("keeps the last verified %s contact across logout, token issue and forced disconnection", async (deviceKind) => {
+    const h = createTelephonyHarness();
+    const deviceDeps = deps(h, { deviceKind });
+    const input = { organizationId: ORG, profileId: PROFILES.o3 };
+    const issued = await issueWebphoneToken(deviceDeps, input);
+    const read = async () => (await getOperatorDevice(deviceDeps,input))!;
+    expect(deviceLastOnlineAt(await read(), h.now())).toBeNull();
+    const registeredAt = h.now().toISOString();
+    await touchDevice(deviceDeps, { ...input, deviceSessionId: issued.deviceSessionId, registrationState: "registered", audio: {blocked:true,remoteMedia:false} });
+    h.advance(25_000);
+    const left = await touchDevice(deviceDeps, { ...input, deviceSessionId: issued.deviceSessionId, registrationState: "unregistered" });
+    expect(left).toMatchObject({ok:true,device:{device_seen_at:null,registration_state:"unregistered",metadata:{last_online_at:registeredAt,audio:{blocked:true}}}});
+    h.advance(60_000);
+    await touchDevice(deviceDeps, { ...input, deviceSessionId: issued.deviceSessionId, registrationState: "unregistered" });
+    expect(deviceLastOnlineAt(await read(), h.now())).toBe(registeredAt);
+    const replacement = await issueWebphoneToken(deviceDeps, {...input,takeover:true});
+    expect(await read()).toMatchObject({device_seen_at:null,registration_state:"registering",metadata:{last_online_at:registeredAt,audio:{blocked:true},revoked_sessions:[{id:issued.deviceSessionId,revoked_at:h.now().toISOString()}]}});
+    expect(await touchDevice(deviceDeps,{...input,deviceSessionId:issued.deviceSessionId,registrationState:"registered"})).toEqual({ok:false,reason:"stale_session"});
+    expect(deviceLastOnlineAt(await read(), h.now())).toBe(registeredAt);
+    await disconnectDevice(deviceDeps, input);
+    expect(await read()).toMatchObject({device_seen_at:null,registration_state:"unregistered",metadata:{last_online_at:registeredAt,audio:{blocked:true}}});
+    expect(await touchDevice(deviceDeps,{...input,deviceSessionId:replacement.deviceSessionId,registrationState:"registered"})).toEqual({ok:false,reason:"stale_session"});
+  });
+
+  it("retains a legacy registered heartbeat before takeover without using token time as online time", async () => {
+    const h = createTelephonyHarness();
+    const previous = h.rows("motorist_operator_devices").find(row=>row.profile_id===PROFILES.o1)!.device_seen_at;
+    h.advance(600_000);
+    await issueWebphoneToken(deps(h), {organizationId:ORG,profileId:PROFILES.o1,takeover:true});
+    const row = (await getOperatorDevice(deps(h),{organizationId:ORG,profileId:PROFILES.o1}))!;
+    expect(row).toMatchObject({device_seen_at:null,registration_state:"registering",metadata:{last_online_at:previous}});
+    expect(row.last_token_issued_at).not.toBe(previous);
+    expect(deviceLastOnlineAt(row,h.now())).toBe(previous);
+  });
+
+  it("does not count registering, error or unregistered reports as an online contact", async () => {
+    const h = createTelephonyHarness();
+    const input = {organizationId:ORG,profileId:PROFILES.o3};
+    const issued = await issueWebphoneToken(deps(h),input);
+    for (const registrationState of ["registering","error","unregistered"] as const) {
+      h.advance(30_000);
+      const result = await touchDevice(deps(h),{...input,deviceSessionId:issued.deviceSessionId,registrationState});
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(deviceLastOnlineAt(result.device,h.now())).toBeNull();
+    }
+  });
+
+  it("merges a heartbeat arriving during token renewal instead of losing contact/audio metadata", async () => {
+    const h = createTelephonyHarness();
+    const input = {organizationId:ORG,profileId:PROFILES.o1,deviceSessionId:"dev-1"};
+    h.db.update("motorist_operator_devices",{metadata:{revoked_sessions:[{id:"old",revoked_at:"2026-09-01T00:00:00Z"}],unrelated:"keep"}},row=>row.profile_id===PROFILES.o1);
+    const mint = h.telnyx.client.mintCredentialToken.bind(h.telnyx.client);
+    let latestContact = "";
+    h.telnyx.client.mintCredentialToken = async id => {
+      const token = await mint(id);
+      h.advance(20_000); latestContact = h.now().toISOString();
+      await touchDevice(deps(h),{...input,registrationState:"registered",audio:{blocked:false,remoteMedia:true}});
+      return token;
+    };
+    await issueWebphoneToken(deps(h),input);
+    expect(h.rows("motorist_operator_devices").find(row=>row.profile_id===PROFILES.o1)).toMatchObject({
+      device_seen_at:latestContact,registration_state:"registered",metadata:{last_online_at:latestContact,audio:{remoteMedia:true},unrelated:"keep",revoked_sessions:[{id:"old"}]},
+    });
+  });
+
+  it("retains contact and audio updated while a replacement credential is being created", async () => {
+    const h = createTelephonyHarness();
+    const input = {organizationId:ORG,profileId:PROFILES.o1};
+    const create = h.telnyx.client.createTelephonyCredential.bind(h.telnyx.client);
+    let latestContact = "";
+    h.telnyx.client.createTelephonyCredential = async params => {
+      const credential = await create(params);
+      h.advance(20_000); latestContact = h.now().toISOString();
+      await touchDevice(deps(h),{...input,deviceSessionId:"dev-1",registrationState:"registered",audio:{blocked:true,remoteMedia:false}});
+      return credential;
+    };
+    const rotated = await ensureOperatorCredential(deps(h),{...input,force:true});
+    expect(rotated).toMatchObject({registration_state:"unregistered",device_seen_at:null,metadata:{last_online_at:latestContact,audio:{blocked:true}}});
+    expect(await touchDevice(deps(h),{...input,deviceSessionId:"dev-1",registrationState:"registered"})).toEqual({ok:false,reason:"stale_session"});
+    expect((await getOperatorDevice(deps(h),input))?.metadata).toMatchObject({last_online_at:latestContact});
+  });
+
+  it("does not clear a newer credential or roll back contact history after a slow provider disconnect", async () => {
+    const h = createTelephonyHarness();
+    const remove = h.telnyx.client.deleteTelephonyCredential.bind(h.telnyx.client);
+    let winnerTime = "";
+    h.telnyx.client.deleteTelephonyCredential = async id => {
+      await remove(id);
+      h.advance(25_000); winnerTime = h.now().toISOString();
+      h.db.update("motorist_operator_devices",{
+        device_session_id:"new-session",telnyx_credential_id:"new-credential",sip_username:"new-phone",registration_state:"registered",device_seen_at:winnerTime,
+        metadata:{last_online_at:winnerTime,audio:{blocked:false,remoteMedia:true},revoked_sessions:[{id:"older-session"}]},
+      },row=>row.profile_id===PROFILES.o1);
+    };
+    await expect(disconnectDevice(deps(h),{organizationId:ORG,profileId:PROFILES.o1})).rejects.toMatchObject({status:409});
+    expect(await getOperatorDevice(deps(h),{organizationId:ORG,profileId:PROFILES.o1})).toMatchObject({
+      device_session_id:"new-session",telnyx_credential_id:"new-credential",sip_username:"new-phone",registration_state:"registered",device_seen_at:winnerTime,
+      metadata:{last_online_at:winnerTime,audio:{remoteMedia:true},revoked_sessions:[{id:"older-session"}]},
+    });
+  });
+
+  it("rejects a heartbeat whose session is revoked after its initial read", async () => {
+    const h = createTelephonyHarness();
+    const update = h.db.update.bind(h.db);
+    const retainedAt = h.now().toISOString();
+    let switched = false;
+    h.db.update = (table,patch,predicate) => {
+      if (table === "motorist_operator_devices" && !switched && patch.device_seen_at) {
+        switched = true;
+        update(table,{device_session_id:"winner-session",registration_state:"unregistered",device_seen_at:null,metadata:{last_online_at:retainedAt,revoked_sessions:[{id:"dev-1"}]}},row=>row.profile_id===PROFILES.o1);
+      }
+      return update(table,patch,predicate);
+    };
+    h.advance(25_000);
+    expect(await touchDevice(deps(h),{organizationId:ORG,profileId:PROFILES.o1,deviceSessionId:"dev-1",registrationState:"registered"})).toEqual({ok:false,reason:"stale_session"});
+    expect(await getOperatorDevice(deps(h),{organizationId:ORG,profileId:PROFILES.o1})).toMatchObject({device_session_id:"winner-session",device_seen_at:null,metadata:{last_online_at:retainedAt,revoked_sessions:[{id:"dev-1"}]}});
   });
 });

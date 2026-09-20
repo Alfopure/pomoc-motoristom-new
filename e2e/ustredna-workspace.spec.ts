@@ -23,7 +23,7 @@ async function boot(page:Page,width=1440,height=900){
  if(u.pathname==="/api/cases/live")return send({available:false});
  if(u.pathname==="/api/telephony/callbacks")return send({configured:true,checkedAt:new Date().toISOString(),actorProfileId:"00000000-0000-4000-8000-000000000002",actorRole:"manager",openTotal:125,nextCursor:null,open:[{id:"callback-1",callerNumber:"+421900000040",callerName:"Čakajúci klient",source:"missed",status:"open",createdAt:new Date(Date.now()-720000).toISOString(),dueAt:null,claimedByProfileId:null}],resolved:[]});
  if(u.pathname==="/api/telephony/calls/history"){queries.push(u.searchParams.get("q")??"");return send({calls:u.searchParams.get("q")?calls.slice(0,2):calls,nextCursor:null,filters:{lines:[],operators:[]}});}
- if(u.pathname==="/api/telephony/team")return send({checkedAt:new Date().toISOString(),operators:[{profileId:"1",name:"Jana Nováková",status:"available",statusSince:new Date(Date.now()-180000).toISOString(),answeredToday:12},{profileId:"2",name:"Peter Veselý",status:"on_call",statusSince:new Date(Date.now()-90000).toISOString(),answeredToday:8,call:{callerNumber:"+421900000031",sessionId:"colleague"}},{profileId:"3",name:"Eva Tichá",status:"offline",statusSince:new Date(Date.now()-3600000).toISOString(),answeredToday:0}]});
+ if(u.pathname==="/api/telephony/team")return send({checkedAt:new Date().toISOString(),operators:[{profileId:"1",name:"Jana Nováková",status:"available",statusSince:new Date(Date.now()-180000).toISOString(),answeredToday:12,online:true,lastOnlineAt:new Date().toISOString()},{profileId:"2",name:"Peter Veselý",status:"on_call",statusSince:new Date(Date.now()-90000).toISOString(),answeredToday:8,online:true,lastOnlineAt:new Date().toISOString(),call:{callerNumber:"+421900000031",sessionId:"colleague"}},{profileId:"3",name:"Eva Tichá",status:"offline",statusSince:new Date(Date.now()-3600000).toISOString(),answeredToday:0,online:false,lastOnlineAt:new Date(Date.now()-3600000).toISOString()}]});
  if(u.pathname==="/api/telephony/routing-summary")return send({snapshotId:"fixture",checkedAt:new Date().toISOString(),validUntil:new Date(Date.now()+60000).toISOString(),canEdit:true,lines:[{id:"00000000-0000-4000-8000-000000000030",label:"Asistencia",phoneNumber:"+421900000000",status:"open",sentence:"Dostupným členom Dispečingu zvoní naraz najviac 20 s. Ak nikto nezdvihne, hovor prejde do čakárne.",branches:[],notes:[],target:{section:"telephony",tab:"incoming",lineId:"00000000-0000-4000-8000-000000000030"}}]});
  if(u.pathname==="/api/notifications")return send({notifications:[]});
  if(u.pathname==="/api/telephony/directory/favorites")return send({favorites:[]});
@@ -82,4 +82,19 @@ test("200 percent equivalent viewport and reduced motion keep primary actions re
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
  await page.getByRole("searchbox",{name:"Hľadať v celej histórii"}).focus();await expect(page.getByRole("searchbox",{name:"Hľadať v celej histórii"})).toBeFocused();
  await page.screenshot({path:".context/ustredna-app-zoom200.png"});expect(evidence.errors).toEqual([]);
+});
+
+test("eight operators retain readable last-online cards and busy history space", async ({page}) => {
+  const evidence=await boot(page,1280,800);
+  const names=["Alexandra Nováková","Ján Ondrejčík","Lucia Kováčová","Martin Horváth","Matej Novotný","Michal Michálek","Natália Kováčová","Tester 2"];
+  await page.route("**/api/telephony/team",route=>route.fulfill({json:{checkedAt:new Date().toISOString(),operators:names.map((name,index)=>({profileId:String(index),name,status:"available",statusSince:new Date(Date.now()-13*3600000).toISOString(),online:index<2,lastOnlineAt:new Date(Date.now()-(index<2?0:12*60000)).toISOString(),answeredToday:0,talkSecondsToday:0,lastDeviceContactAt:new Date().toISOString(),lastMobileContactAt:null}))}}));
+  await page.evaluate(()=>window.dispatchEvent(new Event("focus")));
+  await expect(page.getByTestId("operator-card")).toHaveCount(8);
+  await page.evaluate(()=>window.dispatchEvent(new CustomEvent("fixture-calls",{detail:"busy"})));
+  const visibleRows=await page.getByTestId("call-history-row").evaluateAll(nodes=>nodes.filter(node=>{const r=node.getBoundingClientRect();return r.height>0&&r.top>=0&&r.bottom<=innerHeight;}).length);
+  await page.screenshot({path:".context/ustredna-operators-eight-busy.png"});
+  expect(visibleRows,"five history rows remain with eight operators and three call bars").toBeGreaterThanOrEqual(5);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+
+  expect(evidence.errors).toEqual([]);
 });

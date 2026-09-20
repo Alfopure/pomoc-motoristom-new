@@ -1558,6 +1558,7 @@ export type Database = {
       };
       motorist_task_workflow_enabled: { Args: { p_organization_id: string; p_actor_profile_id: string }; Returns: boolean };
       motorist_task_workflow: { Args: { p_organization_id: string; p_actor_profile_id: string; p_task_id: string; p_input: Json }; Returns: Json };
+      motorist_access_profile_has_task_workflow_history: { Args: { p_organization_id: string; p_profile_id: string }; Returns: boolean };
       motorist_resolve_callback_target: { Args: { p_organization_id: string; p_number: string }; Returns: Json };
       motorist_contact_callback_policy: { Args: { p_organization_id: string; p_actor_id: string; p_contact_id: string; p_action: string; p_non_callback?: boolean; p_target_contact_id?: string | null; p_expected_revision?: number; p_verified?: boolean }; Returns: Json };
       motorist_approve_callback_target: { Args: { p_organization_id: string; p_actor_id: string; p_request_id: string; p_verification_id: string }; Returns: Json };

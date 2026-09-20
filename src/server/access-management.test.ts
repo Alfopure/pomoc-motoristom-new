@@ -38,6 +38,11 @@ const actor = { profileId: ADMIN, organizationId: ORG, role: "admin" as const, d
 
 function seed(overrides: Record<string, unknown> = {}) {
   fake = createFakeSupabase();
+  fake.db.registerRpc("motorist_access_profile_has_task_workflow_history", (args, db) =>
+    db.rows("motorist_task_workflow_commands").some(
+      (row) => row.organization_id === args.p_organization_id && row.actor_profile_id === args.p_profile_id,
+    ),
+  );
   fake.db.seed("motorist_profiles", [
     { id: ADMIN, organization_id: ORG, display_name: "Admin", email: "admin@test.sk", role: "admin", active: true, access_status: "active", user_id: "auth-admin" },
     { id: TARGET, organization_id: ORG, display_name: "Natália", email: "natalia@test.sk", role: "dispatcher", active: true, access_status: "active", user_id: "auth-target", ...overrides },
@@ -123,6 +128,83 @@ describe("deleteAccessUser", () => {
     });
     expect(fake.db.rows(table)).toHaveLength(1);
     expect(deleteUser).toHaveBeenCalledWith("auth-target");
+  });
+
+  it.each(["assigned_to", "reviewer_profile_id", "review_requested_by"])(
+    "refuses deletion while an open task still references the user through %s",
+    async (column) => {
+      fake.db.seed("motorist_case_tasks", [{ id: `task-${column}`, organization_id: ORG, status: "open", [column]: TARGET }]);
+
+      expect(await fails(deleteAccessUser(actor, TARGET))).toMatchObject({
+        status: 409,
+        message: expect.stringContaining("otvorenú pridelenú úlohu alebo kontrolu"),
+      });
+      expect(fake.db.find("motorist_profiles", (row) => row.id === TARGET)).toMatchObject({
+        display_name: "Natália",
+        active: true,
+        user_id: "auth-target",
+      });
+      expect(fake.db.rows("motorist_audit_log")).toHaveLength(0);
+      expect(deleteUser).not.toHaveBeenCalled();
+      expect(deleteTelephonyCredential).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["assigned_to", "created_by", "completed_by", "reviewer_profile_id", "review_requested_by", "reviewed_by"])(
+    "anonymises a profile referenced by completed task column %s",
+    async (column) => {
+      fake.db.seed("motorist_case_tasks", [{ id: `task-${column}`, organization_id: ORG, status: "done", [column]: TARGET }]);
+
+      const result = await deleteAccessUser(actor, TARGET);
+
+      expect(result.mode).toBe("anonymised");
+      expect(fake.db.find("motorist_profiles", (row) => row.id === TARGET)).toMatchObject({
+        display_name: "Vymazaný používateľ",
+        active: false,
+        user_id: null,
+      });
+      expect(fake.db.rows("motorist_case_tasks")).toHaveLength(1);
+      expect(deleteUser).toHaveBeenCalledWith("auth-target");
+    },
+  );
+
+  it.each([
+    ["motorist_task_messages", "author_profile_id"],
+    ["motorist_task_workflow_commands", "actor_profile_id"],
+  ] as const)("anonymises a profile referenced by %s", async (table, column) => {
+    fake.db.seed(table, [{ id: `history-${table}`, task_id: "task-1", organization_id: ORG, [column]: TARGET }]);
+
+    const result = await deleteAccessUser(actor, TARGET);
+
+    expect(result.mode).toBe("anonymised");
+    expect(fake.db.find("motorist_profiles", (row) => row.id === TARGET)).toMatchObject({
+      display_name: "Vymazaný používateľ",
+      active: false,
+      user_id: null,
+    });
+    expect(fake.db.rows(table)).toHaveLength(1);
+  });
+
+  it("anonymises conservatively when private workflow history cannot be checked", async () => {
+    fake.db.failNext("motorist_access_profile_has_task_workflow_history", "rpc", "workflow history unavailable");
+
+    const result = await deleteAccessUser(actor, TARGET);
+
+    expect(result.mode).toBe("anonymised");
+    expect(fake.db.find("motorist_profiles", (row) => row.id === TARGET)).toMatchObject({
+      display_name: "Vymazaný používateľ",
+      active: false,
+      user_id: null,
+    });
+  });
+
+  it("fails closed before auditing when active task responsibilities cannot be checked", async () => {
+    fake.db.failNext("motorist_case_tasks", "select", "task lookup unavailable");
+
+    expect(await fails(deleteAccessUser(actor, TARGET))).toMatchObject({ status: 500, message: "Pracovné úlohy používateľa sa nepodarilo overiť." });
+    expect(fake.db.find("motorist_profiles", (row) => row.id === TARGET)).toMatchObject({ active: true, user_id: "auth-target" });
+    expect(fake.db.rows("motorist_audit_log")).toHaveLength(0);
+    expect(deleteUser).not.toHaveBeenCalled();
   });
 
   it("anonymises conservatively when history cannot be checked", async () => {
