@@ -56,9 +56,18 @@ create table if not exists public.motorist_ai_agent_settings (
 comment on table public.motorist_ai_agent_settings is
   'One row per organisation. Every permission defaults to false; an unset switch means the tool is never registered with the model.';
 
-create trigger motorist_ai_agent_settings_touch
-  before update on public.motorist_ai_agent_settings
-  for each row execute function public.motorist_set_updated_at();
+do $$
+begin
+  if not exists (
+    select 1 from pg_trigger
+    where tgrelid = 'public.motorist_ai_agent_settings'::regclass
+      and tgname = 'motorist_ai_agent_settings_touch'
+  ) then
+    create trigger motorist_ai_agent_settings_touch
+      before update on public.motorist_ai_agent_settings
+      for each row execute function public.motorist_set_updated_at();
+  end if;
+end $$;
 
 alter table public.motorist_ai_agent_settings enable row level security;
 

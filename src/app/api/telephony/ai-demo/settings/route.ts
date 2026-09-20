@@ -1,7 +1,8 @@
 import { handleAiDemoRead, handleAiDemoWrite } from "@/server/telephony/ai-demo/http";
 import {
   AI_DEMO_INTRO_CUSTOM_MAX_CHARS, AI_DEMO_NAME_MAX_CHARS, AI_DEMO_NAME_MIN_CHARS,
-  AI_DEMO_STANDING_RULES_MAX_CHARS, readAgentSettings, validateAgentPatch, writeAgentSettings,
+  AI_DEMO_STANDING_RULES_MAX_CHARS, assertCoherentSettings, mergeAgentSettings, readAgentSettings,
+  validateAgentPatch, writeAgentSettings,
 } from "@/server/telephony/ai-demo/agent-settings";
 import { AI_DEMO_ALLOWED_VOICES, AI_DEMO_NATURAL_VOICES } from "@/server/telephony/ai-demo/config";
 
@@ -36,6 +37,8 @@ export async function GET() {
 export async function PATCH(request: Request) {
   return handleAiDemoWrite(request, async ({ deps, body }) => {
     const patch = validateAgentPatch(body);
+    // Cross-field rules need the row as it will be, not the fragment that came in.
+    assertCoherentSettings(mergeAgentSettings(await readAgentSettings(deps), patch));
     const settings = await writeAgentSettings(deps, patch);
     return Response.json({ settings, limits: LIMITS, voices: VOICES });
   }, "Nastavenia sa nepodarilo uložiť.");

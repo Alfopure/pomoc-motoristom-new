@@ -18,7 +18,7 @@ export type AgentSettingsRow = Database["public"]["Tables"]["motorist_ai_agent_s
  * word.
  *
  * 350 buys a usable field while keeping the total inside 2 350, which
- * `prompts.test.ts` asserts. That total is above the range verified on live
+ * `agent-settings.test.ts` asserts for a prompt with no free-text brief. That total is above the range verified on live
  * calls (1 500–1 981), so the first call with a full field is a measurement,
  * not a formality — if the pause before her first word grows, this number
  * comes down, not up.
@@ -168,13 +168,30 @@ export function validateAgentPatch(body: Record<string, unknown>): Partial<Agent
     patch.smsMaxPerCall = count;
   }
 
-  // A custom introduction that is empty is not a custom introduction.
-  const style = patch.introStyle;
-  if (style === "custom" && patch.introCustom === null) {
+  return patch;
+}
+
+/**
+ * The one rule that cannot be checked field by field.
+ *
+ * A patch carrying only `introStyle: "custom"` is individually valid and
+ * individually useless: the table's CHECK refuses the row, the save returns
+ * 500, and the panel never renders the sentence field because the style never
+ * saved. So the rule is applied to the *result* of the patch, not the patch —
+ * which also catches the mirror case, clearing the sentence on a row that is
+ * already `custom`.
+ */
+export function assertCoherentSettings(settings: AgentSettings): void {
+  if (settings.introStyle !== "custom") return;
+  const custom = (settings.introCustom ?? "").trim();
+  if (!custom) {
     throw new AiDemoError("Pri vlastnom predstavení treba napísať, ako sa má predstaviť.", 400, "intro_custom_missing");
   }
+}
 
-  return patch;
+/** The patch as the row would look once it is written. */
+export function mergeAgentSettings(current: AgentSettings, patch: Partial<AgentSettings>): AgentSettings {
+  return { ...current, ...patch };
 }
 
 const COLUMNS = "id, organization_id, profile_id, display_name, voice, intro_style, intro_custom, standing_rules, reads_caller_cases, requires_plate_check, creates_draft_cases, adds_case_notes, sms_enabled, sms_max_per_call, created_at, updated_at";

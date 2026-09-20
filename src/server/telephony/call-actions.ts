@@ -43,6 +43,7 @@ import { TelnyxCommandError, TelnyxLiveCallsDisabledError } from "./telnyx/clien
 import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
 import { CallActionError, SessionLeaseLostError } from "./service-errors";
+import { humansOnly } from "@/server/profile-kind";
 
 export { CallActionError } from "./service-errors";
 
@@ -960,7 +961,9 @@ export async function stopSupervisingCall(deps: CallActionDeps, actor: CallActor
 
 async function requireActiveMonitorProfile(deps: CallActionDeps, profileId: string) {
   if (!isUuid(profileId)) throw new CallActionError("Operátor sa nenašiel.", 404);
-  const { data, error } = await deps.admin.from("motorist_profiles").select("id, display_name, role, active, access_status")
+  // Excluded here too: monitoring means listening to a colleague's call, and
+  // an account with no device is not a colleague you can listen to.
+  const { data, error } = await humansOnly(deps.admin.from("motorist_profiles").select("id, display_name, role, active, access_status, kind"))
     .eq("organization_id", deps.organizationId).eq("id", profileId).maybeSingle();
   if (error || !data?.active || data.access_status !== "active" || !["dispatcher", "senior_dispatcher", "manager", "admin"].includes(data.role)) {
     throw new CallActionError("Operátor nie je aktívny v tejto organizácii.", 403, "recipient_unavailable");
@@ -1003,7 +1006,7 @@ export async function listTransferTargets(deps: CallActionDeps, actor: CallActor
   const { admin, organizationId } = deps;
   const now = nowOf(deps);
   const [profiles, presence, devices, mobiles, routing] = await Promise.all([
-    admin.from("motorist_profiles").select("id, display_name, role, active").eq("organization_id", organizationId).eq("active", true),
+    humansOnly(admin.from("motorist_profiles").select("id, display_name, role, active").eq("organization_id", organizationId).eq("active", true)),
     admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId),
     admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment),
     // The mobile app is the other place a colleague can be seen. "When did we

@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   AI_DEMO_AGENT_DEFAULTS, AI_DEMO_DEFAULT_STANDING_RULES, AI_DEMO_INTRO_CUSTOM_MAX_CHARS,
-  AI_DEMO_NAME_MAX_CHARS, AI_DEMO_STANDING_RULES_MAX_CHARS, toAgentSettings, validateAgentPatch,
+  AI_DEMO_NAME_MAX_CHARS, AI_DEMO_STANDING_RULES_MAX_CHARS, assertCoherentSettings,
+  mergeAgentSettings, toAgentSettings, validateAgentPatch,
 } from "./agent-settings";
 import { AI_DEMO_SCENARIOS, buildStartupInstructions } from "./prompts";
 
@@ -70,11 +71,39 @@ describe("validateAgentPatch", () => {
     expect(validateAgentPatch({ standingRules: "   " }).standingRules).toBeNull();
   });
 
-  it("will not accept a custom introduction with nothing in it", () => {
-    expect(() => validateAgentPatch({ introStyle: "custom", introCustom: "  " }))
-      .toThrow(/treba napísať/);
+  it("holds the custom sentence to a length somebody would say", () => {
     expect(() => validateAgentPatch({ introStyle: "custom", introCustom: "x".repeat(AI_DEMO_INTRO_CUSTOM_MAX_CHARS + 1) }))
       .toThrow(/najviac/);
+  });
+});
+
+describe("a custom introduction without a sentence", () => {
+  // This is the shape the panel sent: choosing "custom" in the dropdown with
+  // no sentence yet. Field-by-field it is valid, and the table then refuses
+  // the row — so the save returned 500 and the field that would have let you
+  // fix it never rendered, because the style never saved.
+  const base = { ...AI_DEMO_AGENT_DEFAULTS };
+
+  it("is refused when the patch carries only the style", () => {
+    const patch = validateAgentPatch({ introStyle: "custom" });
+    expect(() => assertCoherentSettings(mergeAgentSettings(base, patch)))
+      .toThrow(/treba napísať/);
+  });
+
+  it("is refused when the sentence is cleared on a row already set to custom", () => {
+    const stored = { ...base, introStyle: "custom" as const, introCustom: "Som tu pre vás." };
+    const patch = validateAgentPatch({ introCustom: "   " });
+    expect(() => assertCoherentSettings(mergeAgentSettings(stored, patch)))
+      .toThrow(/treba napísať/);
+  });
+
+  it("is accepted when style and sentence travel together", () => {
+    const patch = validateAgentPatch({ introStyle: "custom", introCustom: "Som tu, aby som vám pomohla." });
+    expect(() => assertCoherentSettings(mergeAgentSettings(base, patch))).not.toThrow();
+  });
+
+  it("leaves the other styles alone", () => {
+    expect(() => assertCoherentSettings({ ...base, introStyle: "assistant", introCustom: null })).not.toThrow();
   });
 
   it("keeps the SMS ceiling inside what the table allows", () => {

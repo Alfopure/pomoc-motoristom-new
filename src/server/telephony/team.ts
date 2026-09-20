@@ -5,6 +5,7 @@ import { deviceIsLive } from "./operator-devices";
 import { deviceLastOnlineAt } from "./device-online";
 import { telephonyEnvironment } from "./runtime";
 import { TALKING_STATES, type DeviceRow, type TelephonyEnvironment } from "./state/types";
+import { humansOnly } from "@/server/profile-kind";
 
 /** Extra data stays on the server; never serialize device/settings rows. */
 export async function loadTelephonyTeam(deps: TelephonyStatsDeps & { environment?: TelephonyEnvironment }): Promise<TelephonyTeamPayload> {
@@ -13,7 +14,7 @@ export async function loadTelephonyTeam(deps: TelephonyStatsDeps & { environment
   const environment = deps.environment ?? telephonyEnvironment();
   const [stats, profiles, devices, mobile, sessions, lines] = await Promise.all([
     loadTelephonyStatsCached(deps),
-    admin.from("motorist_profiles").select("id,display_name").eq("organization_id", organizationId).eq("active", true).eq("access_status", "active"),
+    humansOnly(admin.from("motorist_profiles").select("id,display_name").eq("organization_id", organizationId).eq("active", true).eq("access_status", "active")),
     admin.from("motorist_operator_devices").select("profile_id,device_seen_at,registration_state,metadata").eq("organization_id", organizationId).eq("environment", environment),
     admin.from("motorist_operator_mobile_devices").select("profile_id,device_seen_at,registration_state,metadata").eq("organization_id", organizationId).eq("environment", environment),
     admin.from("motorist_call_sessions").select("id,answered_by_profile_id,caller_number,line_id,state,metadata").eq("organization_id", organizationId).in("state", [...TALKING_STATES]),

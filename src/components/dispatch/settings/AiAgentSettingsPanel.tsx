@@ -56,6 +56,8 @@ export function AiAgentSettingsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  // The counter must follow the keyboard, not the last save.
+  const [rulesDraft, setRulesDraft] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -66,9 +68,9 @@ export function AiAgentSettingsPanel() {
         if (!alive) return;
         if (!response.ok) { setError(body?.error ?? "Nastavenia sa nepodarilo načítať."); return; }
         setSettings(body.settings);
+        setRulesDraft(body.settings?.standingRules ?? "");
         setLimits(body.limits);
       if (body.voices) setVoices(body.voices);
-        if (body.voices) setVoices(body.voices);
       } catch {
         if (alive) setError("Nastavenia sa nepodarilo načítať.");
       }
@@ -102,7 +104,7 @@ export function AiAgentSettingsPanel() {
     return <p className="flex items-center gap-2 text-sm text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" aria-hidden />Načítavam…</p>;
   }
 
-  const rulesLength = (settings.standingRules ?? "").length;
+  const rulesLength = rulesDraft.length;
   const rulesOver = rulesLength > limits.standingRulesMax;
 
   return (
@@ -145,7 +147,15 @@ export function AiAgentSettingsPanel() {
         <select
           className={settingsInputClass}
           value={settings.introStyle}
-          onChange={(event) => void patch({ introStyle: event.target.value as Settings["introStyle"] })}
+          onChange={(event) => {
+            const style = event.target.value as Settings["introStyle"];
+            // The table refuses `custom` without a sentence, so the two travel
+            // together — otherwise the save fails and the field that would let
+            // you fix it never appears.
+            if (style !== "custom") { void patch({ introStyle: style }); return; }
+            const sentence = (settings.introCustom ?? "").trim() || "Som tu, aby som vám pomohla.";
+            void patch({ introStyle: style, introCustom: sentence });
+          }}
         >
           {(Object.keys(INTRO_LABELS) as Array<Settings["introStyle"]>).map((style) => (
             <option key={style} value={style}>{INTRO_LABELS[style]}</option>
@@ -172,9 +182,12 @@ export function AiAgentSettingsPanel() {
         <textarea
           rows={4}
           className={settingsInputClass}
-          defaultValue={settings.standingRules ?? ""}
+          value={rulesDraft}
           maxLength={limits.standingRulesMax}
-          onBlur={(event) => void patch({ standingRules: event.target.value })}
+          onChange={(event) => setRulesDraft(event.target.value)}
+          onBlur={(event) => {
+            if (event.target.value !== (settings.standingRules ?? "")) void patch({ standingRules: event.target.value });
+          }}
         />
         <p className={`mt-1 text-xs ${rulesOver ? "font-semibold text-red-600" : "text-zinc-500"}`}>
           {rulesLength} / {limits.standingRulesMax} znakov
