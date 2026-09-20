@@ -1414,6 +1414,16 @@ export type Database = {
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;
+      motorist_ai_verification_attempts: Table<{
+        id: string;
+        organization_id: string;
+        case_id: string;
+        day: string;
+        attempts: number;
+        succeeded_at: Timestamp | null;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+      }>;
       motorist_ai_agent_settings: Table<{
         id: string;
         organization_id: string;

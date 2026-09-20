@@ -740,3 +740,84 @@ describe("one probe per call", () => {
     expect(await claimProbe(f.deps.admin, attempt.id, f.h.now())).toBeNull();
   });
 });
+
+describe("reading the caller's case", () => {
+  const PLATE = "BL123AB";
+
+  function seedCase(f: Fixture, settings: Record<string, unknown>) {
+    f.h.db.seed("motorist_ai_agent_settings", [{
+      id: "settings", organization_id: ORG, profile_id: null, display_name: "Veronika", voice: "gleam",
+      intro_style: "expert_helper", intro_custom: null, standing_rules: null,
+      reads_caller_cases: false, requires_plate_check: true, creates_draft_cases: false,
+      adds_case_notes: false, sms_enabled: false, sms_max_per_call: 1, ...settings,
+    }]);
+    f.h.db.seed("motorist_contacts", [{ id: "contact", organization_id: ORG, name: "Jana", phone: TARGET }]);
+    f.h.db.seed("motorist_vehicles", [{ id: "vehicle", organization_id: ORG, license_plate: PLATE, make: "Škoda", model: "Octavia" }]);
+    f.h.db.seed("motorist_cases", [{
+      id: "case", organization_id: ORG, case_number: "2026-0042", status: "in_progress",
+      created_at: "2026-09-12T08:00:00Z", summary: "Porucha", main_note: "Čaká",
+      contact_id: "contact", vehicle_id: "vehicle",
+    }]);
+  }
+
+  async function callSaying(settings: Record<string, unknown>, spoken: string, opts: { transcripts?: boolean } = {}) {
+    const f = fixture({ AI_DEMO_STORE_TRANSCRIPT: "true" });
+    seedCase(f, settings);
+    const sideband = createFakeSideband({
+      onInstructions: [
+        { delayMs: 5, event: { type: "session.instructions.appended" } },
+        { delayMs: 20, event: { type: "session.output_transcript.delta", delta: "Dobrý deň." } },
+        { delayMs: 60, event: { type: "session.input_transcript.delta", delta: spoken } },
+      ],
+    });
+    const deps: AiDemoDeps = {
+      ...f.deps,
+      webSocketFactory: sideband.factory,
+      probeLimits: { ...FAST_PROBE, probeWindowMs: 900, probeCheckpointMs: 90, keepTranscript: opts.transcripts !== false },
+    };
+    const { attempt } = await start(f);
+    await transitionAttempt(f.deps.admin, attempt.id, ["sip_dialing"], {
+      state: "bridged", openai_session_id: "live_running",
+      telnyx_mobile_call_control_id: "cc-mobile", telnyx_sip_call_control_id: "cc-sip",
+      bridged_at: new Date(Date.now() - 60_000).toISOString(), greeting_status: "requested",
+    });
+    const { runGreetingAndFinish } = await import("./orchestrator");
+    await runGreetingAndFinish(deps, attempt.id);
+    const attempts = await f.deps.admin.from("motorist_ai_verification_attempts").select("*").eq("case_id", "case");
+    return { f, rows: attempts.data ?? [] };
+  }
+
+  it("does not look the caller up at all while the switch is off", async () => {
+    const { rows } = await callSaying({ reads_caller_cases: false }, " je to BL 123 AB");
+    expect(rows).toHaveLength(0);
+  });
+
+  it("keeps the case shut when the plate check is switched off", async () => {
+    // No check means nothing to verify against, so the answer is no, not yes.
+    const { rows } = await callSaying({ reads_caller_cases: true, requires_plate_check: false }, " je to BL 123 AB");
+    expect(rows).toHaveLength(0);
+  });
+
+  it("will not arm without transcripts, because it reads the caller's words from them", async () => {
+    const { rows } = await callSaying({ reads_caller_cases: true }, " je to BL 123 AB", { transcripts: false });
+    expect(rows).toHaveLength(0);
+  });
+
+  it("records the success when the caller says the right plate", async () => {
+    const { rows } = await callSaying({ reads_caller_cases: true }, " je to BL 123 AB");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.succeeded_at).toBeTruthy();
+  });
+
+  it("spends a try on a wrong plate and does not open the case", async () => {
+    const { rows } = await callSaying({ reads_caller_cases: true }, " je to KE 456 CD");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.attempts).toBe(1);
+    expect(rows[0]?.succeeded_at).toBeFalsy();
+  });
+
+  it("spends nothing on a caller who never mentions a plate", async () => {
+    const { rows } = await callSaying({ reads_caller_cases: true }, " dobrý deň, o 15 minút tam budem");
+    expect(rows).toHaveLength(0);
+  });
+});
