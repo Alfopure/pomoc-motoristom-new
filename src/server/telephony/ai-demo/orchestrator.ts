@@ -18,6 +18,10 @@ import { AI_DEMO_ALLOWED_VOICES, AI_DEMO_LIMITS, aiDemoBudgets, aiDemoEnabled, b
 import { callIsOver } from "./farewell";
 import { judgeCall } from "./judge";
 import { runGreeting, type GreetingResult, type ProbeControls, type ProbeLimits, type WebSocketFactory } from "./greeting";
+import { readAgentSettings } from "./agent-settings";
+import { describeBeforeVerification, fullDisclosureEnabled, lookupCallerCase } from "./caller-case";
+import { PlateGate } from "./verification";
+import { readVerificationAttempts, recordVerificationAttempts } from "./verification-store";
 import type { AiDemoLeg } from "./flag";
 import { aiDemoClientState, aiDemoCommandId, aiDemoCorrelationToken, maskNumber } from "./identity";
 import {
@@ -434,13 +438,23 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
     ...(options.inline ? { probeWindowMs: AI_DEMO_LIMITS.inlineProbeWindowMs } : {}),
   };
 
+  // Who is on the line, and what of their case she may know.
+  //
+  // The record is held here, in the server, and never reaches the model until
+  // the plate checks out. That is the whole protection: not a sentence in the
+  // instructions asking her to be careful, but the fact that there is nothing
+  // to be careless with.
+  const gate = await preparePlateGate(deps, attempt);
+
   let result: GreetingResult;
   try {
     result = await runGreeting({
       // Checked on `existing` before the claim; the claim returns the same row.
       sessionId: existing.openai_session_id,
       apiKey: config.apiKey,
-      greetingText: buildGreetingAppend(scenario, context !== null, pickGreeting(scenario, deps.random)),
+      greetingText: [buildGreetingAppend(scenario, context !== null, pickGreeting(scenario, deps.random)), gate?.opening]
+        .filter(Boolean)
+        .join(" "),
       commentaryText: AI_DEMO_COMMENTARY_TRIGGER,
       eventIdSeed: attempt.id.replace(/-/g, "").slice(0, 8),
       ...(deps.webSocketFactory ? { webSocketFactory: deps.webSocketFactory } : {}),
@@ -453,6 +467,7 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
       limits: probeLimits,
       onProgress: async (partial, controls) => {
         await savePartial(deps, attempt, partial);
+        await advanceVerification(deps, gate, partial, controls);
 
         const ended = await watchSilence(deps, attempt, config, partial, controls, silence, probeLimits);
         if (ended) return false;
@@ -909,3 +924,53 @@ export function describeAttempt(attempt: AiDemoAttempt, options: { includeTransc
 }
 
 export { loadActive, loadAttempt };
+
+
+/** The gate plus the sentence that tells her to ask, prepared before the call opens. */
+type PreparedGate = {
+  /** Null when there is something to say about the caller but no case to open — several cases, for instance. */
+  gate: PlateGate | null;
+  caseId: string;
+  opening: string | null;
+};
+
+/**
+ * Looks up the caller's case and arms the plate gate.
+ *
+ * Returns null whenever the feature is off, the caller is unknown or anything
+ * fails. A lookup that cannot be done is not a reason to lose a call — she
+ * simply does not know about any case, which is exactly how she behaved before
+ * this existed.
+ */
+async function preparePlateGate(deps: AiDemoDeps, attempt: AiDemoAttempt): Promise<PreparedGate | null> {
+  try {
+    const settings = await readAgentSettings(deps);
+    if (!settings.readsCallerCases) return null;
+
+    const lookup = await lookupCallerCase(deps, attempt.target_number);
+    const opening = describeBeforeVerification(lookup);
+    if (lookup.outcome !== "found") return opening ? { gate: null, caseId: "", opening } : null;
+
+    const used = await readVerificationAttempts(deps, lookup.caseFound.before.caseId, nowOf(deps));
+    const gate = new PlateGate(lookup.caseFound, fullDisclosureEnabled(), used);
+    return { gate, caseId: lookup.caseFound.before.caseId, opening };
+  } catch (error) {
+    deps.logger?.({ level: "warn", scope: "ai-demo", attemptId: attempt.id, message: "caller lookup failed", error: error instanceof Error ? error.message : String(error) });
+    return null;
+  }
+}
+
+/** Feeds the transcript to the gate and passes on whatever it decides. */
+async function advanceVerification(deps: AiDemoDeps, prepared: PreparedGate | null, partial: GreetingResult, controls: ProbeControls): Promise<void> {
+  if (!prepared?.gate) return;
+  const outcome = prepared.gate.observe(partial.transcript);
+  if (outcome.instruction) controls.say(outcome.instruction);
+  if (outcome.attemptSpent || outcome.state === "verified") {
+    await recordVerificationAttempts(deps, {
+      caseId: prepared.caseId,
+      attempts: prepared.gate.attemptsUsed,
+      verified: outcome.state === "verified",
+      now: nowOf(deps),
+    });
+  }
+}
