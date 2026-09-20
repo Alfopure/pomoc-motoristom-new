@@ -118,7 +118,10 @@ export type CallCenterCall = {
   startedAt: string;
   answeredAt?: string;
   endedAt?: string;
+  endReason?: string;
   waitSeconds: number;
+  /** False when no valid persisted waiting interval exists; zero is otherwise meaningful. */
+  waitSecondsKnown?: boolean;
   durationSeconds?: number;
   recordingStatus: "not_requested" | "pending" | "available" | "failed" | "deleted";
   recordingId?: string;
@@ -127,6 +130,7 @@ export type CallCenterCall = {
   outcome?: CallOutcome;
   outcomeNote?: string;
   callbackMinutes?: number;
+  callback?: { status: "open" | "scheduled" | "done" | "cancelled"; claimedByName?: string; dueAt?: string };
   history: string[];
 };
 
