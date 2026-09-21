@@ -861,6 +861,6 @@ describe("a conversation in progress must not look abandoned", () => {
     // nothing once a checkpoint had moved the row to `talking`.
     const { cleanupVerdict } = await import("./orchestrator");
     const talking = { state: "talking", bridged_at: new Date(Date.now() - 600_000).toISOString(), deadline_at: new Date(Date.now() + 60_000).toISOString() };
-    expect(cleanupVerdict(talking as never, new Date())).toBeNull();
+    expect(cleanupVerdict(talking as never, Date.now())).toBeNull();
   });
 });
