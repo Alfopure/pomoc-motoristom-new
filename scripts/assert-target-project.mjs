@@ -8,14 +8,18 @@
  * `next build` and can be invoked manually: `node scripts/assert-target-project.mjs`.
  */
 
-// Identifiers of the original production project. They are listed here only so
-// that they can be refused; nothing in this repository may use them otherwise.
+// Identifiers of the retired VIPTel project. They are listed here only so that
+// they can be refused; nothing in this repository may use them otherwise.
 const FORBIDDEN_FRAGMENTS = [
   "sjcsrygkkmersoczpunh",
   "pomoc-motoristom-dispecing.vercel.app",
+  "pomoc-motoristom-dispatching-old.vercel.app",
 ];
-const ORIGINAL_APP_DOMAIN = "dispecing.linkapomoci.sk";
-const COPY_APP_HOSTNAME = "test.dispecing.linkapomoci.sk";
+
+// Hostnames the retired application still answers on. Matched on the parsed
+// hostname rather than as a substring, because `dev.dispecing.linkapomoci.sk`
+// contains this project's own domain and a substring test would refuse it.
+const RETIRED_HOSTNAMES = ["dev.dispecing.linkapomoci.sk"];
 
 const INSPECTED_KEYS = [
   "SUPABASE_PROJECT_REF",
@@ -49,13 +53,19 @@ export function assertTargetProject(env = process.env) {
         problems.push(`${key} points at the original production project (${fragment})`);
       }
     }
-    // The copy's exact hostname is inside the original domain. Exempt only
-    // that parsed hostname, never a substring in credentials or another host.
-    const domainValue = url?.hostname.toLowerCase() === COPY_APP_HOSTNAME
-      ? [url.username, url.password, url.pathname, url.search, url.hash].join(" ").toLowerCase()
-      : normalizedValue;
-    if (domainValue.includes(ORIGINAL_APP_DOMAIN)) {
-      problems.push(`${key} points at the original production project (${ORIGINAL_APP_DOMAIN})`);
+    // `dispecing.linkapomoci.sk` used to be refused here. The owner moved it to
+    // this project on 2026-09-21, so refusing it would now fail the build for
+    // pointing at our own production domain.
+    // Checked twice: as a parsed hostname, and as a substring so the name
+    // cannot be smuggled through user-info or a redirect parameter. A
+    // substring test is safe in this direction because the retired hostname
+    // contains this project's domain and never the other way round.
+    const hostname = url?.hostname.toLowerCase();
+    for (const retired of RETIRED_HOSTNAMES) {
+      if (hostname === retired || normalizedValue.includes(retired)) {
+        problems.push(`${key} points at the retired VIPTel project (${retired})`);
+        break;
+      }
     }
   }
 
