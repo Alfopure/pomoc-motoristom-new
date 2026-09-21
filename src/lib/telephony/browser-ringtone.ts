@@ -17,6 +17,7 @@ export class BrowserIncomingRingtone {
   private context: AudioContext | null = null;
   private buffer: AudioBuffer | null = null;
   private source: AudioBufferSourceNode | null = null;
+  private generation = 0;
 
   async unlock() {
     const context = this.getOrCreateContext();
@@ -29,11 +30,14 @@ export class BrowserIncomingRingtone {
 
   async start() {
     if (this.source) return true;
+    const generation = this.generation;
     const context = this.context;
     if (!context || context.state === "closed") return false;
     if (context.state === "suspended") {
       await context.resume().catch(() => undefined);
     }
+    // A resume can settle after hangup/answer stopped the ringing request.
+    if (generation !== this.generation || context !== this.context) return false;
     if (context.state !== "running" || this.source) return Boolean(this.source);
 
     const source = context.createBufferSource();
@@ -46,6 +50,7 @@ export class BrowserIncomingRingtone {
   }
 
   stop() {
+    this.generation += 1;
     const source = this.source;
     this.source = null;
     if (!source) return;

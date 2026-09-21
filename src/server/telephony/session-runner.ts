@@ -12,7 +12,8 @@ import { announcementConfigFromMetadata, readAnnouncementConfig } from "@/lib/te
 import { writeCallAudit } from "./audit";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { buildBusinessHoursSchedule, type BusinessHoursSchedule } from "@/lib/telephony/business-hours";
-import { materialiseRingPlan } from "./routing/ring-plan";
+import { materialiseRingPlan, materialiseRingPlanRows } from "./routing/ring-plan";
+import { readRuntimeRoutingSnapshot, RoutingSnapshotCompatibilityError, type RuntimeRoutingSnapshot } from "./routing/snapshot";
 import { applyReduceResult, auditCommandOutcomes, recordCallEvent, resumePendingEffects, SessionConflictError, type ApplyResult, type CommandOutcome, type EffectsDeps } from "./state/effects";
 import { hasStabilityContract, telephonyStabilityEnabled } from "./stability";
 import { attachContactOperations, collectContactProof, readContactHistory } from "./contact-proof";
@@ -182,6 +183,10 @@ export async function loadSessionSnapshot(deps: SessionRunnerDeps, sessionId: st
 export async function loadRoutingSettings(admin: AdminClient, organizationId: string): Promise<RoutingSettings & { raw: Database["public"]["Tables"]["motorist_telephony_settings"]["Row"] | null }> {
   const { data, error } = await admin.from("motorist_telephony_settings").select("*").eq("organization_id", organizationId).maybeSingle();
   if (error) throw new Error(`telephony settings load failed: ${error.message}`);
+  return routingSettingsFromRow(data);
+}
+
+function routingSettingsFromRow(data: Database["public"]["Tables"]["motorist_telephony_settings"]["Row"] | null): RoutingSettings & { raw: typeof data } {
   if (!data) return { ...DEFAULT_ROUTING_SETTINGS, raw: null };
   return {
     parkMaxMinutes: data.park_max_minutes,
@@ -224,6 +229,123 @@ async function loadIvr(admin: AdminClient, organizationId: string, menuId: strin
 }
 
 const ROUTING_STATES = new Set(["received", "greeting", "ivr", "ringing", "waiting", "parked", "after_hours", "callback_offered"]);
+
+async function loadRoutingConfiguration(deps: SessionRunnerDeps, session: SessionRow, now: Date, noContinuation: boolean, event?: SessionEvent, snapshotLegs?: LegRow[]) {
+  const { admin, organizationId } = deps;
+  const meta = readMeta(session);
+  let entrySnapshot: RuntimeRoutingSnapshot | null = null;
+  let currentRecordingPolicy: RoutingContext["recordingPolicy"];
+  // Only the first ordinary customer answer opts into the new read path. A
+  // frozen plan or unfinished voice sequence must keep its existing reader.
+  const initialCustomerAnswer = noContinuation && session.writer_contract === 2 &&
+    session.direction === "inbound" && session.state === "received" && !session.ended_at &&
+    !session.termination_requested_at && !meta.hangup && !meta.greeting && !meta.gather &&
+    !meta.ring && !meta.queue && !meta.ivr && !meta.greeting_call_gone_at &&
+    event?.kind === "telnyx" && event.type === "call.answered" &&
+    (!meta.announcements || readAnnouncementConfig(meta.announcements).inboundStartAnnouncements !== true) &&
+    snapshotLegs?.some((leg) => leg.id === session.customer_leg_id && leg.role === "customer" &&
+      leg.telnyx_call_control_id === event.callControlId && !leg.ended_at);
+  if (initialCustomerAnswer) {
+    try {
+      const [raw, policy] = await Promise.all([
+        measureRequestStep("routing.snapshot", () => readRuntimeRoutingSnapshot(admin, organizationId)),
+        resolveSessionRecordingPolicy(admin, organizationId),
+      ]);
+      currentRecordingPolicy = policy;
+      const line = raw.lines.find((row) => row.id === session.line_id) ?? null;
+      const announcements = meta.announcements ? readAnnouncementConfig(meta.announcements) : announcementConfigFromMetadata(line?.metadata);
+      if (!policy.enabled && !line?.ivr_menu_id && announcements.inboundStartAnnouncements !== true) entrySnapshot = raw;
+    } catch (error) {
+      if (!(error instanceof RoutingSnapshotCompatibilityError)) throw error;
+      // Fall back once, before effects, using a whole legacy configuration.
+      // A broken log sink must not turn compatibility recovery into call loss.
+      try { deps.logger?.({ scope: "routing", code: "routing_snapshot_fallback", reason: error.reason }); } catch { /* best effort */ }
+    }
+  }
+  const [line, settings, recordingPolicy] = entrySnapshot
+    ? [entrySnapshot.lines.find((row) => row.id === session.line_id) ?? null, routingSettingsFromRow(entrySnapshot.settings), currentRecordingPolicy] as const
+    : await Promise.all([
+    session.line_id
+      ? admin
+        .from("motorist_telephony_lines")
+        .select("*")
+        .eq("organization_id", organizationId)
+        .eq("id", session.line_id)
+        .maybeSingle()
+        .then((result) => {
+          if (result.error) throw new Error(`line load failed: ${result.error.message}`);
+          return result.data;
+        })
+      : null,
+    loadRoutingSettings(admin, organizationId),
+    currentRecordingPolicy ?? resolveSessionRecordingPolicy(admin, organizationId),
+  ]);
+  // An initiated leg only needs to be registered/answered. Its answered event
+  // selects the route. Do not put IVR, ring-plan materialisation and operator
+  // availability reads ahead of answer (or repeat them for every fanout leg).
+  // Recovery work can still need the full context on an initiated event.
+  const initiationOnly = event?.kind === "telnyx" && event.type === "call.initiated" &&
+    !meta.announcement_sequence && !meta.gather && !meta.recording?.barrier &&
+    !meta.recording?.pendingAudio && !readPendingEffects(session).entries.length;
+  const routing = !initiationOnly && ROUTING_STATES.has(session.state);
+  // An outgoing call already has an explicit recipient. Loading the line's
+  // inbound IVR and ring groups on every setup webhook delays that recipient
+  // and makes unrelated inbound configuration failures block the call.
+  // Retain saved plans/queues for resumed routing, and count capacity below
+  // for every routing state, including parked outgoing and internal calls.
+  const inboundRouting = routing && (session.direction === "inbound" || Boolean(meta.ring?.plan) || meta.ring?.mode === "plan" || Boolean(meta.queue));
+
+  // Once a caller has left the introduction/menu, routing uses the frozen plan.
+  // Re-reading every IVR branch while operators answer or hang up holds the
+  // session lease for unrelated configuration work and delays those events.
+  const needsEntryRouting = inboundRouting && ["received", "greeting", "ivr"].includes(session.state);
+  const hours = entrySnapshot?.hours.find((row) => row.id === line?.business_hours_id);
+  const snapshotHours = hours?.active && entrySnapshot ? buildBusinessHoursSchedule({
+    timezone: hours.timezone,
+    intervals: entrySnapshot.intervals.filter((row) => row.business_hours_id === hours.id),
+    exceptions: entrySnapshot.exceptions.filter((row) => row.business_hours_id === hours.id),
+  }) : null;
+  const [businessHours, ivr] = entrySnapshot ? [snapshotHours, null] : needsEntryRouting
+    ? await Promise.all([loadBusinessHours(admin, organizationId, line?.business_hours_id ?? null), loadIvr(admin, organizationId, line?.ivr_menu_id ?? null)]) : [null, null];
+
+  let ringPlan: FrozenRingPlan | null = meta.ring?.plan ?? null;
+  const ringPlans: Record<string, FrozenRingPlan> = {};
+  if (inboundRouting) {
+    const planIds = new Set<string>();
+    if (!ringPlan && line?.ring_plan_id) planIds.add(line.ring_plan_id);
+    for (const option of ivr?.options ?? []) if (option.target_ring_plan_id) planIds.add(option.target_ring_plan_id);
+    // The RPC's abbreviated presence is not availability. Resolve paused
+    // substitutes freshly, then the shared eligibility phase rereads targets.
+    const paused = entrySnapshot && planIds.size > 0
+      ? await admin.from("motorist_operator_presence").select("profile_id").eq("organization_id", organizationId).eq("status", "paused") : null;
+    if (paused?.error) throw new Error(`operator routing load failed: ${paused.error.message}`);
+    const pausedProfileIds = new Set((paused?.data ?? []).map((row) => row.profile_id));
+    await Promise.all([...planIds].map(async (planId) => {
+      const frozen = entrySnapshot ? materialiseRingPlanRows({
+        plan: entrySnapshot.plans.find((row) => row.id === planId) ?? null,
+        steps: entrySnapshot.steps, groups: entrySnapshot.groups, members: entrySnapshot.members,
+        operatorRouting: entrySnapshot.operatorSettings, pausedProfileIds,
+        destinationAllowlist: entrySnapshot.settings?.destination_allowlist ?? ["SK", "CZ"],
+        personalMobileEnabled: telephonyStabilityEnabled(), now,
+      }) : await materialiseRingPlan(admin, { organizationId, ringPlanId: planId, now });
+      if (frozen) ringPlans[planId] = frozen;
+    }));
+    if (!ringPlan && line?.ring_plan_id) ringPlan = ringPlans[line.ring_plan_id] ?? null;
+    if (ringPlan) ringPlans[ringPlan.planId] = ringPlan;
+  }
+
+  if (inboundRouting) {
+    const personal = entrySnapshot ? { data: entrySnapshot.operatorSettings, error: null }
+      : await admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId);
+    if (personal.error) throw new Error(`personal routing load failed: ${personal.error.message}`);
+    for (const [id, plan] of Object.entries(ringPlans)) {
+      ringPlans[id] = { ...plan, steps: plan.steps.map((step) => ({ ...step, members: resolvePersonalRingMembers(step.members, personal.data ?? [], settings.raw?.destination_allowlist ?? ["SK", "CZ"]) })) };
+    }
+    if (ringPlan) ringPlan = ringPlans[ringPlan.planId] ?? ringPlan;
+  }
+
+  return { line, settings, recordingPolicy, routing, businessHours, ivr, ringPlan, ringPlans };
+}
 
 export async function loadRoutingContext(deps: SessionRunnerDeps, session: SessionRow, event?: SessionEvent, snapshotLegs?: LegRow[]): Promise<RoutingContext> {
   const { admin, organizationId } = deps;
@@ -290,65 +412,8 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
       recordingPolicy: meta.recording?.policy,
     };
   }
-  const [line, settings, recordingPolicy] = await Promise.all([
-    session.line_id
-      ? admin
-        .from("motorist_telephony_lines")
-        .select("*")
-        .eq("organization_id", organizationId)
-        .eq("id", session.line_id)
-        .maybeSingle()
-        .then((result) => {
-          if (result.error) throw new Error(`line load failed: ${result.error.message}`);
-          return result.data;
-        })
-      : null,
-    loadRoutingSettings(admin, organizationId),
-    resolveSessionRecordingPolicy(admin, organizationId),
-  ]);
-  // An initiated leg only needs to be registered/answered. Its answered event
-  // selects the route. Do not put IVR, ring-plan materialisation and operator
-  // availability reads ahead of answer (or repeat them for every fanout leg).
-  // Recovery work can still need the full context on an initiated event.
-  const initiationOnly = event?.kind === "telnyx" && event.type === "call.initiated" &&
-    !meta.announcement_sequence && !meta.gather && !meta.recording?.barrier &&
-    !meta.recording?.pendingAudio && !readPendingEffects(session).entries.length;
-  const routing = !initiationOnly && ROUTING_STATES.has(session.state);
-  // An outgoing call already has an explicit recipient. Loading the line's
-  // inbound IVR and ring groups on every setup webhook delays that recipient
-  // and makes unrelated inbound configuration failures block the call.
-  // Retain saved plans/queues for resumed routing, and count capacity below
-  // for every routing state, including parked outgoing and internal calls.
-  const inboundRouting = routing && (session.direction === "inbound" || Boolean(meta.ring?.plan) || meta.ring?.mode === "plan" || Boolean(meta.queue));
-
-  // Once a caller has left the introduction/menu, routing uses the frozen plan.
-  // Re-reading every IVR branch while operators answer or hang up holds the
-  // session lease for unrelated configuration work and delays those events.
-  const needsEntryRouting = inboundRouting && ["received", "greeting", "ivr"].includes(session.state);
-  const [businessHours, ivr] = needsEntryRouting ? await Promise.all([loadBusinessHours(admin, organizationId, line?.business_hours_id ?? null), loadIvr(admin, organizationId, line?.ivr_menu_id ?? null)]) : [null, null];
-
-  let ringPlan: FrozenRingPlan | null = meta.ring?.plan ?? null;
-  const ringPlans: Record<string, FrozenRingPlan> = {};
-  if (inboundRouting) {
-    const planIds = new Set<string>();
-    if (!ringPlan && line?.ring_plan_id) planIds.add(line.ring_plan_id);
-    for (const option of ivr?.options ?? []) if (option.target_ring_plan_id) planIds.add(option.target_ring_plan_id);
-    await Promise.all([...planIds].map(async (planId) => {
-      const frozen = await materialiseRingPlan(admin, { organizationId, ringPlanId: planId, now });
-      if (frozen) ringPlans[planId] = frozen;
-    }));
-    if (!ringPlan && line?.ring_plan_id) ringPlan = ringPlans[line.ring_plan_id] ?? null;
-    if (ringPlan) ringPlans[ringPlan.planId] = ringPlan;
-  }
-
-  if (inboundRouting) {
-    const personal = await admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId);
-    if (personal.error) throw new Error(`personal routing load failed: ${personal.error.message}`);
-    for (const [id, plan] of Object.entries(ringPlans)) {
-      ringPlans[id] = { ...plan, steps: plan.steps.map((step) => ({ ...step, members: resolvePersonalRingMembers(step.members, personal.data ?? [], settings.raw?.destination_allowlist ?? ["SK", "CZ"]) })) };
-    }
-    if (ringPlan) ringPlan = ringPlans[ringPlan.planId] ?? ringPlan;
-  }
+  const { line, settings, recordingPolicy, routing, businessHours, ivr, ringPlan, ringPlans } =
+    await measureRequestStep("routing.configuration", () => loadRoutingConfiguration(deps, session, now, noContinuation, event, snapshotLegs));
 
   let presence: PresenceRow[] = [];
   let devices: DeviceRow[] = [];
@@ -359,7 +424,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     for (const plan of Object.values(ringPlans)) for (const step of plan.steps) for (const member of step.members) if (member.profileId) profileIds.add(member.profileId);
     for (const plan of Object.values(ringPlans)) for (const member of plan.queueMembers ?? []) if (member.profileId) profileIds.add(member.profileId);
     const ids = [...profileIds];
-    const [presenceResult, devicesResult, offersResult, legsResult] = await Promise.all([
+    const [presenceResult, devicesResult, offersResult, legsResult] = await measureRequestStep("routing.eligibility", () => Promise.all([
       ids.length > 0 ? admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId).in("profile_id", ids) : Promise.resolve({ data: [] as PresenceRow[], error: null }),
       ids.length > 0 ? admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment).in("profile_id", ids) : Promise.resolve({ data: [] as DeviceRow[], error: null }),
       ids.length > 0
@@ -373,7 +438,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
         // Bounded: a leg orphaned by a lost `call.hangup` webhook must not eat the
         // org-wide capacity forever (the sweep closes them, see `closeOrphanLegs`).
         .gte("initiated_at", new Date(now.getTime() - ACTIVE_LEG_WINDOW_MS).toISOString()),
-    ]);
+    ]));
     if (presenceResult.error) throw new Error(`presence load failed: ${presenceResult.error.message}`);
     if (devicesResult.error) throw new Error(`devices load failed: ${devicesResult.error.message}`);
     if (offersResult.error) throw new Error(`open offers load failed: ${offersResult.error.message}`);

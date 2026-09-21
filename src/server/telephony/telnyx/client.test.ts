@@ -107,7 +107,8 @@ describe("createTelnyxClient", () => {
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer KEYtest");
     expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
     expect(calls[0].body).toEqual({ call_control_id: "v3:xyz", play_ringtone: true, ringtone: "cz", command_id: "cmd-1" });
-    expect(logs).toEqual([{ method: "POST", path: "/calls/v3%3Aabc%2Fdef/actions/bridge", status: 200, ms: expect.any(Number), commandId: "cmd-1", retried: false, error: null }]);
+    expect(logs).toEqual([{ method: "POST", path: "/calls/v3%3Aabc%2Fdef/actions/bridge", status: 200, ms: expect.any(Number), commandId: "cmd-1", retried: false, error: null,
+      cached: false, attempts: [{ startedAtMs: expect.any(Number), dispatchAfterMs: expect.any(Number), headersMs: expect.any(Number), ms: expect.any(Number), status: 200 }] }]);
   });
 
   it("dials with the configured connection id and parses the leg identifiers", async () => {
@@ -195,6 +196,28 @@ describe("createTelnyxClient", () => {
     expect(calls).toHaveLength(2);
     expect(sleeps).toEqual([1000]);
     expect(logs[0]).toMatchObject({ status: 200, retried: true });
+    expect(logs[0].attempts?.map((attempt) => attempt.status)).toEqual([429, 200]);
+  });
+
+  it("distinguishes arrival of response headers from consumption of its body", async () => {
+    let now = 1_790_000_000_000;
+    const start = now;
+    const response = jsonResponse(200, { data: { result: "ok" } });
+    const body = response.text.bind(response);
+    vi.spyOn(response, "text").mockImplementation(async () => { now += 75; return body(); });
+    const { impl } = makeFetch([() => { now += 25; return response; }]);
+    const { client, logs } = makeClient(impl, { now: () => now });
+    await client.answer({ callControlId: "cc-1", commandId: "cmd-a" });
+    expect(logs[0].attempts).toEqual([{ startedAtMs: start, dispatchAfterMs: 0, headersMs: 25, ms: 100, status: 200 }]);
+  });
+
+  it.each([false, true])("does not change command acceptance if a logger fails (async=%s)", async (asyncFailure) => {
+    const { impl, calls } = makeFetch([jsonResponse(200, { data: { result: "ok" } })]);
+    const error = new Error("log sink failed");
+    const { client } = makeClient(impl, { onRequest: asyncFailure ? async () => { throw error; } : () => { throw error; } });
+    await expect(client.answer({ callControlId: "cc-1", commandId: "cmd-a" })).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(calls).toHaveLength(1);
   });
 
   it("defers a long retry-after without shortening it and defaults a missing interval", async () => {
@@ -272,6 +295,7 @@ describe("createTelnyxClient", () => {
       expect(failure).toMatchObject({ code: "timeout", status: 504, retryable: true, commandId: "answer-stalled" });
       await pending;
       expect(logs).toEqual([expect.objectContaining({ status: 504, ms: 50, retried: false })]);
+      expect(logs[0].attempts).toEqual([{ startedAtMs: expect.any(Number), dispatchAfterMs: 0, headersMs: 0, ms: 50, status }]);
       expect(sleeps).toEqual([]);
       expect(vi.getTimerCount()).toBe(0);
     } finally {

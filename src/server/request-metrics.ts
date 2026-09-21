@@ -15,7 +15,8 @@ import { randomUUID } from "node:crypto";
  * second away is a decision about deactivated operators. They should not be
  * decided on one number.
  */
-export type RequestStep = "auth" | "auth.token" | "auth.profile" | "db" | "lease" | "provider" | "checkpoint" | "read" | "write";
+export type RequestStep = "auth" | "auth.token" | "auth.profile" | "db" | "lease" | "provider" | "checkpoint" | "read" | "write"
+  | "routing.snapshot" | "routing.configuration" | "routing.eligibility";
 export type MeasuredRoute = "case.get" | "case.save" | "call.start" | "call.action" | "call.webhook" | "call.active" | "dispatch.refresh" | "fleet.refresh";
 
 type Metric = { count: number; ms: number };

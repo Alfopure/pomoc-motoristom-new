@@ -776,6 +776,23 @@ export function registerTelephonyRpcs(db: FakeDatabase): void {
   registerWebhookRpcs(db);
   registerPresenceRpcs(db);
   registerStabilityRpcs(db);
+  // Existing SQL read RPC: one organization-scoped MVCC configuration result.
+  // Presence deliberately contains no eligibility status, matching production.
+  db.registerRpc("motorist_routing_snapshot", (args) => {
+    const tables = {
+      groups: "motorist_ring_groups", members: "motorist_ring_group_members", plans: "motorist_ring_plans", steps: "motorist_ring_plan_steps",
+      hours: "motorist_business_hours", intervals: "motorist_business_hours_intervals", exceptions: "motorist_business_hours_exceptions",
+      pauseReasons: "motorist_pause_reasons", lines: "motorist_telephony_lines", ivrMenus: "motorist_ivr_menus", ivrOptions: "motorist_ivr_options",
+      profiles: "motorist_profiles", operatorSettings: "motorist_operator_telephony_settings", devices: "motorist_operator_devices",
+    };
+    const scoped = (table: string) => db.rows(table).filter(row => row.organization_id === args.p_organization_id);
+    return {
+      ...Object.fromEntries(Object.entries(tables).map(([key, table]) => [key, scoped(table)])),
+      presence: scoped("motorist_operator_presence").map(row => ({ pause_reason_id: row.pause_reason_id })),
+      settings: scoped("motorist_telephony_settings")[0] ?? null,
+      snapshotId: "fake-fresh-snapshot",
+    };
+  });
   // Default harness models a deployment before the optional directory migration.
   // Target-policy tests override this RPC with the migrated contract.
   db.registerRpc("motorist_resolve_callback_target", () => { db.failNext("motorist_contact_callback_policies", "select", fakeError("Table absent from schema cache", "PGRST205")); throw fakeError("Could not find public.motorist_resolve_callback_target in schema cache", "PGRST202"); });

@@ -1,4 +1,7 @@
+import { after } from "next/server";
+import { readBrowserCallObservations } from "@/lib/telephony/browser-call-telemetry";
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
+import { logBrowserCallObservations } from "@/server/telephony/browser-call-telemetry";
 import { touchDevice } from "@/server/telephony/operator-devices";
 import {
   createTelephonyDeps,
@@ -35,7 +38,7 @@ export async function POST(request: Request) {
     const notConfigured = telephonyConfiguredOrResponse();
     if (notConfigured) return notConfigured;
 
-    const body = await readJsonBody<{ deviceKind?: unknown; deviceSessionId?: unknown; registrationState?: unknown; audio?: unknown }>(request);
+    const body = await readJsonBody<{ deviceKind?: unknown; deviceSessionId?: unknown; registrationState?: unknown; audio?: unknown; callTimings?: unknown }>(request);
     const deviceSessionId = readString(body.deviceSessionId);
     if (!deviceSessionId) {
       return Response.json({ error: "Chýba identifikátor relácie zariadenia." }, { status: 400 });
@@ -66,6 +69,12 @@ export async function POST(request: Request) {
       );
     }
 
+    const observations = readBrowserCallObservations(body.callTimings);
+    if (observations.length) {
+      try {
+        after(() => logBrowserCallObservations(deps, actor.profileId, observations));
+      } catch { /* Scheduling diagnostics must not fail a successful heartbeat. */ }
+    }
     return Response.json({ ok: true, seenAt: result.device.device_seen_at, registrationState: result.device.registration_state });
   } catch (error) {
     return telephonyErrorResponse(error, "Heartbeat sa nepodarilo uložiť.");

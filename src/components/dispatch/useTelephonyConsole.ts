@@ -18,6 +18,7 @@ import { matchesRequestedIncomingOffer } from "@/lib/telephony/browser-invite";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { prepareCallStartRequest, type PendingCallStartRequest } from "@/lib/telephony/call-start-request";
 import { beginBrowserCallStep } from "@/lib/telephony/call-timing";
+import { browserCallTelemetry } from "@/lib/telephony/browser-call-telemetry";
 import { browserCallStartError, checkMicrophone, type PhoneReadiness } from "@/lib/telephony/call-preflight";
 import { acquireCallWakeLock } from "@/lib/telephony/call-wake-lock";
 import { isTelephonyNotConfigured, TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
@@ -870,6 +871,10 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     [operators],
   );
   const phoneBar = useMemo(() => buildPhoneBarModel(snapshot, { operatorName }), [operatorName, snapshot]);
+  useEffect(() => {
+    try { browserCallTelemetry().observeVisible(phoneBar.teamCalls); }
+    catch { /* Diagnostics must not interrupt the operator's console. */ }
+  }, [phoneBar]);
   // The snapshot's own timestamp is the clock for derived durations: it keeps
   // every row consistent with the data it was computed from and keeps this
   // memo pure across re-renders.

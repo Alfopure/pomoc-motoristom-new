@@ -80,7 +80,10 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
 // dependencies. The built route imported in 167–178ms (median 174ms), five fresh
 // Node processes with fetch disabled on 2026-09-11. This is local import time,
 // not Vercel cold-start or provider latency; the forbidden-dependency guard stays.
-const MAX_MODULES = 53;
+// Reviewed increase 53 → 54: routing/snapshot validates the existing JSON RPC
+// with no new runtime dependency beyond server-only. All DB eligibility and
+// dispatch guards stay shared; the forbidden-dependency checks still apply.
+const MAX_MODULES = 54;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);
@@ -109,6 +112,7 @@ describe("telnyx webhook cold path", () => {
     expect(graph).toContain("src/server/telephony/telnyx/event-processor.ts");
     expect(graph).toContain("src/server/telephony/state/transitions.ts");
     expect(graph).toContain("src/server/telephony/telnyx/request-telemetry.ts");
+    expect(graph).toContain("src/server/telephony/routing/snapshot.ts");
     expect(graph).toContain("src/lib/telephony/uuid.ts");
     expect(graph.length).toBeGreaterThan(20);
   });
