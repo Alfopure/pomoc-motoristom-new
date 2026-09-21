@@ -47,31 +47,31 @@ test("refuses a project ref that differs from the expected one", () => {
   assert.equal(problems.length, 1);
 });
 
-test("accepts only the copy's exact application hostname, including an explicit port", () => {
+test("accepts this project's own production hostname", () => {
+  // It used to be refused: while the VIPTel original served it, pointing here
+  // at `dispecing.linkapomoci.sk` really did mean reaching the other project.
+  // The owner moved the hostname on 2026-09-21, so refusing it now would fail
+  // the build for naming our own production domain.
   for (const value of [
+    "https://dispecing.linkapomoci.sk",
+    "https://dispecing.linkapomoci.sk:443/dispatch",
+    "https://DISPECING.LINKAPOMOCI.SK:8443/dispatch?view=tasks",
     "https://test.dispecing.linkapomoci.sk",
-    "https://test.dispecing.linkapomoci.sk:443/dispatch",
-    "https://TEST.DISPECING.LINKAPOMOCI.SK:8443/dispatch?view=tasks",
   ]) {
     assert.deepEqual(assertTargetProject({ APP_BASE_URL: value }), [], value);
   }
-  const result = run({ APP_BASE_URL: "https://test.dispecing.linkapomoci.sk" });
+  const result = run({ APP_BASE_URL: "https://dispecing.linkapomoci.sk" });
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("the copy hostname cannot disguise an original or unapproved target", () => {
+test("still refuses the hostname the retired application answers on", () => {
   for (const value of [
-    "https://dispecing.linkapomoci.sk:443",
-    "https://DISPECING.LINKAPOMOCI.SK",
-    "https://dispecing.linkapomoci.sk.",
     "https://dev.dispecing.linkapomoci.sk",
-    "https://other.test.dispecing.linkapomoci.sk",
-    "https://test.dispecing.linkapomoci.sk.evil.example",
-    "https://test.dispecing.linkapomoci.sk@dispecing.linkapomoci.sk:8443",
-    "https://dispecing.linkapomoci.sk@test.dispecing.linkapomoci.sk",
-    "https://test.dispecing.linkapomoci.sk/?next=https://dispecing.linkapomoci.sk",
-    "https://%64ispecing.linkapomoci.sk",
-    "dispecing.linkapomoci.sk:443",
+    "https://DEV.DISPECING.LINKAPOMOCI.SK",
+    "https://dev.dispecing.linkapomoci.sk:8443/dispatch",
+    // Smuggled through user-info or a redirect rather than as the host.
+    "https://dispecing.linkapomoci.sk@dev.dispecing.linkapomoci.sk",
+    "https://dispecing.linkapomoci.sk/?next=https://dev.dispecing.linkapomoci.sk",
   ]) {
     assert.equal(assertTargetProject({ APP_BASE_URL: value }).length, 1, value);
   }
