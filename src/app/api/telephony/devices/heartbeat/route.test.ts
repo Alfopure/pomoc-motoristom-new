@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const touchDevice = vi.fn();
+const scheduled: Array<() => Promise<void>> = [];
+const logBrowserCallObservations = vi.fn();
+vi.mock("next/server", () => ({ after: (callback: () => Promise<void>) => { scheduled.push(callback); } }));
+vi.mock("@/server/telephony/browser-call-telemetry", () => ({ logBrowserCallObservations: (...args: unknown[]) => logBrowserCallObservations(...args) }));
 
 vi.mock("@/server/api-auth", () => ({
   requireDefaultMotoristActor: async () => ({ userId: "user-1", profileId: "profile-1", organizationId: "org-1", displayName: "Jana", role: "dispatcher" as const }),
@@ -27,6 +31,8 @@ describe("POST /api/telephony/devices/heartbeat", () => {
   beforeEach(() => {
     process.env.TELNYX_API_KEY = "KEYtest";
     touchDevice.mockReset();
+    scheduled.length = 0;
+    logBrowserCallObservations.mockReset();
   });
 
   afterEach(() => {
@@ -53,6 +59,19 @@ describe("POST /api/telephony/devices/heartbeat", () => {
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({ error: "Telefón bol prihlásený v inom okne.", reason: "stale_session" });
+  });
+
+  it("validates browser timings and schedules only after a current-device heartbeat succeeds", async () => {
+    const timing = { id: "11111111-1111-4111-8111-111111111111", pageId: "22222222-2222-4222-8222-222222222222", callControlId: "opaque", phase: "sdk_invite", atMs: 123, token: "discard" };
+    touchDevice.mockResolvedValue({ ok: false, reason: "stale_session" });
+    expect((await POST(request({ deviceSessionId: "stale", callTimings: [timing] }))).status).toBe(409);
+    expect(scheduled).toHaveLength(0);
+    touchDevice.mockResolvedValue({ ok: true, device: { device_seen_at: null, registration_state: "registered" } });
+    expect((await POST(request({ deviceSessionId: "current", callTimings: [timing] }))).status).toBe(200);
+    expect(scheduled).toHaveLength(1);
+    expect(logBrowserCallObservations).not.toHaveBeenCalled();
+    await scheduled[0]();
+    expect(logBrowserCallObservations).toHaveBeenCalledWith(expect.objectContaining({ organizationId: "org-1", environment: "development" }), "profile-1", [{ id: timing.id, pageId: timing.pageId, callControlId: "opaque", phase: "sdk_invite", atMs: 123 }]);
   });
 
   it("answers 409 when no device row exists yet", async () => {

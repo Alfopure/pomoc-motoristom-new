@@ -106,6 +106,19 @@ export function applyPausedOperatorRouting(
 
 export type PersonalRoutingRow = { profile_id: string; default_mobile_number: string | null; delivery_mode?: "web" | "personal_mobile" };
 
+type Tables = Database["public"]["Tables"];
+export type RingPlanRows = {
+  plan: Tables["motorist_ring_plans"]["Row"] | null;
+  steps: readonly Tables["motorist_ring_plan_steps"]["Row"][];
+  groups: readonly Tables["motorist_ring_groups"]["Row"][];
+  members: readonly Tables["motorist_ring_group_members"]["Row"][];
+  operatorRouting: readonly Tables["motorist_operator_telephony_settings"]["Row"][];
+  pausedProfileIds: ReadonlySet<string>;
+  destinationAllowlist: readonly string[];
+  personalMobileEnabled: boolean;
+  now: Date;
+};
+
 /** Re-evaluated for frozen plans too; a typed external number cannot evade pause. */
 export function resolvePersonalRingMembers(members: readonly FrozenRingMember[], rows: readonly PersonalRoutingRow[], allowlist: readonly string[], createMobile = false): FrozenRingMember[] {
   return members.map((member) => {
@@ -167,22 +180,31 @@ export async function materialiseRingPlan(
     admin.from("motorist_telephony_settings").select("destination_allowlist").eq("organization_id", input.organizationId).maybeSingle(),
   ]);
   if (paused.error || operatorRouting.error || telephonySettings.error) throw new Error("operator routing load failed");
-  const routingRows = operatorRouting.data ?? [];
-  const pausedProfileIds = new Set((paused.data ?? []).map((row) => row.profile_id));
+  return materialiseRingPlanRows({
+    plan: plan.data, steps: stepRows, groups: groups.data ?? [], members: members.data ?? [],
+    operatorRouting: operatorRouting.data ?? [],
+    pausedProfileIds: new Set((paused.data ?? []).map((row) => row.profile_id)),
+    destinationAllowlist: telephonySettings.data?.destination_allowlist ?? ["SK", "CZ"],
+    personalMobileEnabled: telephonyStabilityEnabled(), now: input.now ?? new Date(),
+  });
+}
+
+/** Shared by the legacy queries and the fresh, event-local routing snapshot. */
+export function materialiseRingPlanRows(input: RingPlanRows): FrozenRingPlan | null {
+  const { plan, pausedProfileIds, destinationAllowlist, operatorRouting: routingRows } = input;
+  if (!plan?.active) return null;
   const pausedRouting: PausedOperatorRouting[] = routingRows.map((row) => ({
     profileId: row.profile_id, mode: row.pause_routing_mode, defaultMobileNumber: row.default_mobile_number,
     forwardProfileId: row.pause_forward_profile_id, forwardNumber: row.pause_forward_number,
   }));
-  const destinationAllowlist = telephonySettings.data?.destination_allowlist ?? ["SK", "CZ"];
-
-  const groupById = new Map((groups.data ?? []).map((group) => [group.id, group]));
+  const groupById = new Map(input.groups.map((group) => [group.id, group]));
   const frozenSteps: FrozenRingStep[] = [];
   const queueMembers: FrozenRingMember[] = [];
-  for (const step of stepRows) {
+  for (const step of input.steps.filter((row) => row.ring_plan_id === plan.id).sort((left, right) => left.step_index - right.step_index)) {
     const group = groupById.get(step.ring_group_id);
     if (!group || !group.active) continue;
     const timeoutSecs = clampRingSecs(step.timeout_secs, DEFAULT_STEP_TIMEOUT_SECS);
-    const configuredMembers: FrozenRingMember[] = (members.data ?? [])
+    const configuredMembers: FrozenRingMember[] = input.members
       .filter((member) => member.ring_group_id === group.id)
       .map((member) => ({
         kind: member.member_kind,
@@ -195,7 +217,7 @@ export async function materialiseRingPlan(
       }))
       .filter((member) => (member.kind === "operator" ? Boolean(member.profileId) : Boolean(member.externalNumber)))
       .sort((left, right) => left.position - right.position);
-    const stepMembers = resolvePersonalRingMembers(applyPausedOperatorRouting(configuredMembers, { pausedProfileIds, routing: pausedRouting, destinationAllowlist }), routingRows, destinationAllowlist, telephonyStabilityEnabled());
+    const stepMembers = resolvePersonalRingMembers(applyPausedOperatorRouting(configuredMembers, { pausedProfileIds, routing: pausedRouting, destinationAllowlist }), routingRows, destinationAllowlist, input.personalMobileEnabled);
     queueMembers.push(...configuredMembers.filter((member) => member.kind === "operator"));
     frozenSteps.push({
       index: frozenSteps.length,
@@ -208,12 +230,12 @@ export async function materialiseRingPlan(
   }
 
   return {
-    planId: plan.data.id,
-    name: plan.data.name,
-    fallback: { kind: plan.data.fallback_kind, number: plan.data.fallback_number ?? null },
+    planId: plan.id,
+    name: plan.name,
+    fallback: { kind: plan.fallback_kind, number: plan.fallback_number ?? null },
     steps: frozenSteps,
     queueMembers,
-    frozenAt: (input.now ?? new Date()).toISOString(),
+    frozenAt: input.now.toISOString(),
   };
 }
 

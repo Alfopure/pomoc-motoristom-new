@@ -20,7 +20,7 @@ describe("provider HTTP telemetry", () => {
     const logger = vi.fn();
     createTelnyxRequestLogger(logger)({ ...request, path });
     expect(logger).toHaveBeenCalledExactlyOnceWith({ scope: "telnyx-http", level: "info", method: "POST", path: expected,
-      commandId, status: 200, ms: 128, retried: false, errorCode: null });
+      commandId, status: 200, ms: 128, retried: false, errorCode: null, cached: false, attempts: [] });
   });
 
   it.each([
@@ -34,7 +34,7 @@ describe("provider HTTP telemetry", () => {
     const logger = vi.fn();
     createTelnyxRequestLogger(logger)({ ...request, error, commandId: "API_KEY", status: 502, retried: true });
     expect(logger).toHaveBeenCalledExactlyOnceWith({ scope: "telnyx-http", level: "warn", method: "POST", path: "/calls/:id/actions/bridge",
-      commandId: null, status: 502, ms: 128, retried: true, errorCode: code });
+      commandId: null, status: 502, ms: 128, retried: true, errorCode: code, cached: false, attempts: [] });
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/API_KEY|private-token|421905123456/);
   });
 
@@ -46,5 +46,17 @@ describe("provider HTTP telemetry", () => {
     await Promise.resolve();
     expect(throwing).toHaveBeenCalledTimes(1);
     expect(rejecting).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds transport attempts and only emits explicitly selected numeric fields", () => {
+    const logger = vi.fn();
+    const attempt = { startedAtMs: 1_790_000_000_000, dispatchAfterMs: 225.4, headersMs: 37.7, ms: 42.2, status: 200,
+      token: "API_KEY", phone: "+421905123456" };
+    createTelnyxRequestLogger(logger)({ ...request, attempts: [attempt, { ...attempt, headersMs: Infinity, status: 999 }, attempt] });
+    expect(logger.mock.calls[0][0].attempts).toEqual([
+      { startedAtMs: attempt.startedAtMs, dispatchAfterMs: 225, headersMs: 38, ms: 42, status: 200 },
+      { startedAtMs: attempt.startedAtMs, dispatchAfterMs: 225, headersMs: null, ms: 42, status: null },
+    ]);
+    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/API_KEY|421905123456|token|phone/);
   });
 });

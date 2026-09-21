@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { SessionLeaseLostError } from "./service-errors";
 import { sessionOwnership, type Ownership } from "./ownership";
-import { createTelnyxClient } from "./telnyx/client";
+import { createTelnyxClient, type TelnyxRequestLog } from "./telnyx/client";
 import { createTelephonyHarness, NUMBERS } from "@/test/telephony-harness";
 import { effectsDeps, runSessionEvent } from "./session-runner";
 import { applyReduceResult } from "./state/effects";
@@ -12,7 +12,7 @@ import { emptyTransition, readMeta, type Command, type SessionRow } from "./stat
 import { getTelnyxConfig } from "./telnyx/env";
 import { journalRequest, payloadFingerprint, ProviderOutcomeUnknownError } from "./provider-journal";
 
-function harness() {
+function harness(options: { now?: () => number } = {}) {
   let generation = 1;
   let failEvidence = false;
   const journal = new Map<string, { fingerprint: string; generation: number; outcome: string; result?: unknown }>();
@@ -50,12 +50,46 @@ function harness() {
   const admin = { rpc } as unknown as SupabaseClient<Database>;
   const owner = (): Ownership => ({ admin, sessionId: "session", organizationId: "org", token: `token-${generation}`, generation, contract: 2, deadline: Date.now() + 24_000, acquiredAt: 0 });
   const fetch = vi.fn(async () => new Response(JSON.stringify({ data: { call_control_id: "exact-leg", call_leg_id: "leg", call_session_id: "provider-session", is_alive: true } }), { status: 200 }));
-  const client = createTelnyxClient({ config: getTelnyxConfig({ TELNYX_API_KEY: "test", TELNYX_CALL_CONTROL_APP_ID: "app", TELNYX_API_BASE_URL: "https://telnyx.test/v2" }), liveGate: { callsEnabled: true, smsEnabled: false }, fetch });
+  const logs: TelnyxRequestLog[] = [];
+  const client = createTelnyxClient({ config: getTelnyxConfig({ TELNYX_API_KEY: "test", TELNYX_CALL_CONTROL_APP_ID: "app", TELNYX_API_BASE_URL: "https://telnyx.test/v2" }), liveGate: { callsEnabled: true, smsEnabled: false }, fetch,
+    now: options.now, onRequest: (entry) => { logs.push(entry); } });
   const dial = () => client.dial({ commandId: "dial", to: "+421900000001", from: "+421900000002" });
-  return { client, dial, owner, fetch, journal, rpc, takeover: () => { generation++; }, failEvidence: () => { failEvidence = true; } };
+  return { client, dial, owner, fetch, journal, rpc, logs, takeover: () => { generation++; }, failEvidence: () => { failEvidence = true; } };
 }
 
 describe("provider HTTP journal recovery", () => {
+  it("times HTTP dispatch after the durable prepare and reports zero sends for journal adoption", async () => {
+    let now = Date.now();
+    const started = now;
+    const h = harness({ now: () => now });
+    const rpc = h.rpc.getMockImplementation()!;
+    h.rpc.mockImplementation(async (name, args) => {
+      if (name === "motorist_provider_command_prepare_v2") now += 250;
+      if (name === "motorist_provider_command_result_v2") now += 100;
+      return rpc(name, args);
+    });
+    await sessionOwnership.run(h.owner(), h.dial);
+    expect(h.logs[0]).toMatchObject({ ms: 350, cached: false, attempts: [
+      { startedAtMs: started + 250, dispatchAfterMs: 250, headersMs: 0, ms: 0, status: 200 },
+    ] });
+    await sessionOwnership.run(h.owner(), h.dial);
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+    expect(h.logs[1]).toMatchObject({ cached: true, attempts: [], status: null, error: null });
+  });
+
+  it("does not report a network send when journal preparation exhausts the operation deadline", async () => {
+    let now = Date.now();
+    const h = harness({ now: () => now });
+    const rpc = h.rpc.getMockImplementation()!;
+    h.rpc.mockImplementation(async (name, args) => {
+      if (name === "motorist_provider_command_prepare_v2") now += 12_001;
+      return rpc(name, args);
+    });
+    await expect(sessionOwnership.run(h.owner(), h.dial)).rejects.toMatchObject({ code: "deadline" });
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(h.logs[0]).toMatchObject({ cached: false, attempts: [], status: 504 });
+  });
+
   it("renews once before the fenced prepare and retains the exact response checkpoint", async () => {
     const h = harness();
     const order: string[] = [];

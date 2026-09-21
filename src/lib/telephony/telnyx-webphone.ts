@@ -21,6 +21,7 @@
 
 import { applyStoredAudioOutput, REMOTE_AUDIO_ELEMENT_ID } from "@/lib/telephony/audio-output";
 import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
+import { browserCallMonotonicNow, browserCallTelemetry, prepareBrowserCallHeartbeat, type BrowserCallPhase, type BrowserCallObservation } from "@/lib/telephony/browser-call-telemetry";
 import { beginBrowserCallStep, type CallTimingContext } from "@/lib/telephony/call-timing";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS, type TelephonyJsonResult } from "@/lib/telephony/client-request";
 import type { IClientOptions } from "@telnyx/webrtc";
@@ -340,6 +341,7 @@ export class TelnyxWebphone {
     const id = call.telnyxIDs?.telnyxCallControlId || call.id;
     const exact = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now());
     if (!this.withdrawnInvites.has(id) && (this.incomingPolicy.automaticAllowed || exact || this.callSessionId)) return false;
+    this.recordCallObservation(call, "ringtone_start", { outcome: "suppressed" });
     this.stopRinging();
     // A pickup response may arrive after its invite. Keep it silent until its
     // exact identity is known; an auto-answer header is never permission.
@@ -368,7 +370,7 @@ export class TelnyxWebphone {
   async unlockAudio(): Promise<void> {
     if (this.options.silent) return;
     await this.getRingtone().unlock();
-    if (this.started && this.ringing) await this.getRingtone().start();
+    if (this.started && this.ringing && this.call) await this.startRingtone(this.call);
   }
 
   /** Call from a tap: both audio APIs start before awaiting, preserving the gesture. */
@@ -659,9 +661,15 @@ export class TelnyxWebphone {
     // await that same acknowledgement instead of adding another HTTP roundtrip.
     // Leaving/unregistered reports and new socket generations remain distinct.
     if (!leaving && pending?.body === body && pending.generation === generation) return pending.promise;
+    // Attach observations only at transport: changing diagnostics must not
+    // invalidate confirmRegistration's device-state comparison or deduplication.
+    const transport = prepareBrowserCallHeartbeat(body, browserCallTelemetry);
     const promise = this.requestJson<{ error?: string; reason?: string }>(HEARTBEAT_URL, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body,
+      method: "POST", headers: { "Content-Type": "application/json" }, body: transport.body,
       keepalive: leaving, label: "heartbeat telefónu", timeoutMs: TELEPHONY_TIMEOUT_MS.read,
+    }).then((result) => {
+      if (result.ok) transport.acknowledge();
+      return result;
     });
     if (!leaving) {
       const request = { body, generation, promise };
@@ -689,9 +697,10 @@ export class TelnyxWebphone {
   private beaconHeartbeat(options: { leaving?: boolean } = {}): void {
     const body = this.heartbeatBody(options);
     if (!body) return;
+    const transport = prepareBrowserCallHeartbeat(body, browserCallTelemetry);
     try {
       if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function"
-        && navigator.sendBeacon(HEARTBEAT_URL, new Blob([body], { type: "application/json" }))) return;
+        && navigator.sendBeacon(HEARTBEAT_URL, new Blob([transport.body], { type: "application/json" }))) return;
     } catch {
       // A browser may refuse a beacon; preserve the leaving state in fallback.
     }
@@ -1037,6 +1046,7 @@ export class TelnyxWebphone {
     if (this.confirmedEndedCallIds.has(call.id)) return;
 
     if (DEAD_STATES.has(state)) {
+      this.recordCallObservation(call, "sdk_ended");
       this.rememberEndedOperatorLeg(call.telnyxIDs?.telnyxCallControlId);
       if (this.call?.id === call.id) this.clearCurrentCall();
       this.publish();
@@ -1071,6 +1081,10 @@ export class TelnyxWebphone {
     }
     this.call = call;
 
+    if (RINGING_STATES.has(state) && String(call.direction ?? "").toLowerCase() === "inbound") {
+      this.recordCallObservation(call, "sdk_invite");
+    }
+
     if (state === "recovering") {
       this.mediaRecovering = true;
       this.stopRinging();
@@ -1095,6 +1109,7 @@ export class TelnyxWebphone {
       }
       // SDK "early" and "answering" are not evidence of an active media call.
       if (state === "active" && this.timedActiveCallId !== call.id) {
+        this.recordCallObservation(call, "sdk_active");
         this.timedActiveCallId = call.id;
         this.finishInviteTiming?.();
         this.finishInviteTiming = null;
@@ -1131,14 +1146,15 @@ export class TelnyxWebphone {
     this.callSessionId = expected.sessionId;
     if (expected.timingOperationId) this.callTiming.operationId = expected.timingOperationId;
 
-    void this.answerCall(call);
+    void this.answerCall(call, "automatic");
     return true;
   }
 
-  private async answerCall(call: WebphoneSdkCall): Promise<void> {
+  private async answerCall(call: WebphoneSdkCall, answerMode: "manual" | "automatic" = "manual"): Promise<void> {
     if (!this.started || this.call !== call || !RINGING_STATES.has(String(call.state).toLowerCase()) ||
       this.answeringCallId === call.id || this.answeredCallId === call.id) return;
     if (this.suppressAutomaticInvite(call)) return;
+    this.recordCallObservation(call, "answer_requested", { answerMode });
     const generation = this.clientGeneration;
     this.answeringCallId = call.id;
     this.callError = null;
@@ -1180,10 +1196,34 @@ export class TelnyxWebphone {
   }
 
   private startRinging(call: WebphoneSdkCall): void {
-    if (this.ringing || this.options.silent) return;
+    if (this.ringing) return;
+    if (this.options.silent) {
+      this.recordCallObservation(call, "ringtone_start", { outcome: "suppressed" });
+      return;
+    }
     this.ringing = true;
-    void this.getRingtone().start();
+    void this.startRingtone(call);
     this.showNotification(call);
+  }
+
+  private async startRingtone(call: WebphoneSdkCall): Promise<void> {
+    const started = browserCallMonotonicNow();
+    const duration = () => {
+      const ended = browserCallMonotonicNow();
+      return started !== undefined && ended !== undefined ? { durationMs: ended - started } : {};
+    };
+    try {
+      const played = await this.getRingtone().start();
+      const current = this.call === call && this.ringing;
+      this.recordCallObservation(call, "ringtone_start", { outcome: current ? (played ? "ok" : "failed") : "cancelled", ...duration() });
+    } catch {
+      this.recordCallObservation(call, "ringtone_start", { outcome: this.call === call && this.ringing ? "failed" : "cancelled", ...duration() });
+    }
+  }
+
+  private recordCallObservation(call: WebphoneSdkCall, phase: BrowserCallPhase, details: Pick<BrowserCallObservation, "outcome" | "durationMs" | "answerMode"> = {}): void {
+    try { browserCallTelemetry().record(call.telnyxIDs?.telnyxCallControlId, phase, details); }
+    catch { /* Diagnostics are optional and cannot interrupt SDK handling. */ }
   }
 
   private stopRinging(): void {

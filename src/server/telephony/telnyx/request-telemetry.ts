@@ -29,6 +29,14 @@ function errorCode(error: string | null): string | null {
   return /^TelnyxCommandError: Telnyx (\d{5}|timeout|network|http_[1-5]\d{2}) \([1-5]\d{2}\)(?::|$)/.exec(error)?.[1] ?? "provider_error";
 }
 
+function duration(value: number | null): number | null {
+  return value !== null && Number.isFinite(value) ? Math.max(0, Math.round(value)) : null;
+}
+
+function status(value: number | null): number | null {
+  return Number.isInteger(value) && value! >= 100 && value! <= 599 ? value : null;
+}
+
 export function createTelnyxRequestLogger(logger: (entry: Record<string, unknown>) => unknown): (entry: TelnyxRequestLog) => void {
   return (entry) => {
     try {
@@ -36,9 +44,14 @@ export function createTelnyxRequestLogger(logger: (entry: Record<string, unknown
       const safe = { scope: "telnyx-http", level: code ? "warn" : "info",
         method: METHODS.has(entry.method) ? entry.method : "OTHER", path: resourcePath(entry.path),
         commandId: isUuid(entry.commandId) ? entry.commandId : null,
-        ms: Number.isFinite(entry.ms) ? Math.max(0, Math.round(entry.ms)) : null,
-        status: Number.isInteger(entry.status) && entry.status! >= 100 && entry.status! <= 599 ? entry.status : null,
-        retried: entry.retried === true, errorCode: code };
+        ms: duration(entry.ms), status: status(entry.status),
+        retried: entry.retried === true, errorCode: code,
+        cached: entry.cached === true,
+        attempts: (entry.attempts ?? []).slice(0, 2).map((attempt) => ({
+          startedAtMs: Number.isSafeInteger(attempt.startedAtMs) && attempt.startedAtMs > 0 ? attempt.startedAtMs : null,
+          dispatchAfterMs: duration(attempt.dispatchAfterMs), headersMs: duration(attempt.headersMs),
+          ms: duration(attempt.ms), status: status(attempt.status),
+        })) };
       // Logging is outside the call's success contract, including injected
       // asynchronous loggers that reject after the provider response returns.
       void Promise.resolve(logger(safe)).catch(() => undefined);
