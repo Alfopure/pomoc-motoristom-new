@@ -35,8 +35,18 @@ export async function POST(request: Request) {
 
   const config = getAiDemoConfig();
   if (!config.configured) {
+    // Acknowledged, not accepted. A 503 asks the provider to try again, and
+    // this is not a blip it can outlast: a missing signing secret stays missing
+    // until somebody types it in, so the retries would run for the full 72-hour
+    // window and change nothing. It also makes the endpoint impossible to
+    // register in the first place, because the secret only exists *after*
+    // registration — the chicken-and-egg that sent us looking here.
+    //
+    // Nothing is acted on: without the secret there is no way to tell a real
+    // event from a forged one, so this is the same posture as switched off,
+    // with a warning naming exactly what is missing.
     telephonyLogger({ level: "warn", scope: "ai-demo", message: "openai webhook not configured", missing: config.missing });
-    return Response.json({ error: "not_configured" }, { status: 503 });
+    return Response.json({ ok: true, outcome: "not_configured", missing: config.missing }, { status: 200 });
   }
 
   const length = request.headers.get("content-length");
