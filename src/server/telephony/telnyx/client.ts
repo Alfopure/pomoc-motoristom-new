@@ -107,6 +107,14 @@ export class TelnyxSmsDisabledError extends TelnyxCommandError {
   }
 }
 
+export type TelnyxHttpAttempt = {
+  startedAtMs: number;
+  dispatchAfterMs: number;
+  headersMs: number | null;
+  ms: number;
+  status: number | null;
+};
+
 export type TelnyxRequestLog = {
   method: string;
   path: string;
@@ -115,6 +123,9 @@ export type TelnyxRequestLog = {
   commandId: string | null;
   retried: boolean;
   error: string | null;
+  /** Actual fetches only; journal preflight and replay are not network sends. */
+  attempts?: TelnyxHttpAttempt[];
+  cached?: boolean;
 };
 
 export type TelnyxClientOptions = {
@@ -422,11 +433,16 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     commandId: string | null,
     extraHeaders: Record<string, string | undefined> = {},
     deadline = now() + TELNYX_OPERATION_TIMEOUT_MS,
+    telemetry?: { started: number; attempts: TelnyxHttpAttempt[] },
   ): Promise<{ response: Response; parsed: unknown }> {
     const controller = new AbortController();
     const remaining = Math.min(timeoutMs, deadline - now());
     if (remaining <= 0) throw new TelnyxCommandError({ code: "deadline", status: 504, retryable: false, commandId });
     const timer = setTimeout(() => controller.abort(), remaining);
+    const sentAt = now();
+    const timing: TelnyxHttpAttempt = { startedAtMs: sentAt, dispatchAfterMs: Math.max(0, sentAt - (telemetry?.started ?? sentAt)),
+      headersMs: null, ms: 0, status: null };
+    telemetry?.attempts.push(timing);
     try {
       const response = await fetchImpl(url, {
         method,
@@ -439,6 +455,8 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         body,
         signal: controller.signal,
       });
+      timing.headersMs = Math.max(0, now() - sentAt);
+      timing.status = response.status;
       // fetch resolves when headers arrive. Keep the deadline alive through
       // body consumption, including a 429 response, so a stalled stream cannot
       // retain the call's session lease indefinitely.
@@ -456,6 +474,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         commandId,
       });
     } finally {
+      timing.ms = Math.max(0, now() - sentAt);
       clearTimeout(timer);
     }
   }
@@ -485,6 +504,14 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const body = payload ? JSON.stringify(payload) : undefined;
 
     const started = now();
+    const attempts: TelnyxHttpAttempt[] = [];
+    const log = (status: number | null, retried: boolean, error: string | null, cached = false) => {
+      // Even a custom failing logger must not change the accepted command outcome.
+      try {
+        void Promise.resolve(options.onRequest?.({ method, path, status, ms: now() - started,
+          commandId, retried, error, attempts, cached })).catch(() => undefined);
+      } catch { /* Telemetry is not part of command execution. */ }
+    };
     const owner = sessionOwnership.getStore();
     const deadline = Math.min(started + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS), owner?.deadline ?? Infinity);
     const journal = requestOptions.skipJournal ? null : journalRequest(method, path, commandId, body);
@@ -492,7 +519,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       const journaled = await dispatchJournaled(
         journal,
         async () => {
-          const result = await measureRequestStep("provider", () => attempt(method, url.toString(), body, commandId, requestOptions.headers, deadline));
+          const result = await measureRequestStep("provider", () => attempt(method, url.toString(), body, commandId, requestOptions.headers, deadline, { started, attempts }));
           const sent = { status: result.response.status, result: result.parsed, raw: result,
             retryAfterMs: result.response.status === 429 ? parseRetryAfterMs(result.response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS : undefined };
           // A batch member records its own answer, and records it whether the
@@ -520,7 +547,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
 
     try {
       const first = await dispatch();
-      if (first.cached) return first.result as T;
+      if (first.cached) { log(null, false, null, true); return first.result as T; }
       ({ response, parsed } = first);
       if (response.status === 429) {
         const retryAfter = parseRetryAfterMs(response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS;
@@ -530,26 +557,19 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         await sleep(retryAfter);
         retried = true;
         const second = await dispatch();
-        if (second.cached) return second.result as T;
+        if (second.cached) { log(null, retried, null, true); return second.result as T; }
         ({ response, parsed } = second);
       }
       if (!response.ok) {
         throw errorFromBody(response.status, parsed, commandId);
       }
     } catch (error) {
-      options.onRequest?.({
-        method,
-        path,
-        status: error instanceof TelnyxCommandError ? error.status : null,
-        ms: now() - started,
-        commandId,
-        retried,
-        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      });
+      log(error instanceof TelnyxCommandError ? error.status : null, retried,
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error));
       throw error;
     }
 
-    options.onRequest?.({ method, path, status: response.status, ms: now() - started, commandId, retried, error: null });
+    log(response.status, retried, null);
     return parsed as T;
   }
 

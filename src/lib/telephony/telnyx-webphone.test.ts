@@ -1,10 +1,16 @@
-import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { Call, IClientOptions, TelnyxRTC } from "@telnyx/webrtc";
 
 import { TelnyxWebphone, isAuthFailure, type TelnyxWebphoneOptions, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
 import type { TelephonyJsonResult } from "./client-request";
 import { EXPECTED_LEG_TTL_MS, TOKEN_REFRESH_MIN_MS, WEBPHONE_RECOVERY_TIMEOUT_MS } from "./webphone-model";
 import { isDeviceLive } from "./device-liveness";
+import * as browserTiming from "./browser-call-telemetry";
+import { BrowserIncomingRingtone } from "./browser-ringtone";
+
+beforeEach(() => {
+  vi.spyOn(browserTiming, "browserCallTelemetry").mockReturnValue(new browserTiming.BrowserCallTelemetry());
+});
 
 /**
  * The controller is exercised through its injected seams only: no jsdom, no
@@ -97,14 +103,14 @@ function fakeCall(overrides: Partial<WebphoneSdkCall> = {}): WebphoneSdkCall & {
 
 type Request = { url: string; body: unknown };
 
-function harness(options: { token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"] } = {}) {
+function harness(options: { silent?: boolean; token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"] } = {}) {
   const requests: Request[] = [];
   const timers: Array<{ id: number; handler: () => void; delayMs: number }> = [];
   let nextTimer = 1;
   const client = new FakeClient();
 
   const phone = new TelnyxWebphone({
-    silent: true,
+    silent: options.silent ?? true,
     now: options.now ?? (() => Date.parse("2026-09-03T08:00:00.000Z")),
     createClient: options.createClient ?? (options.loadSdk ? undefined : credentials => { client.options.login_token = credentials.token; return client; }),
     loadSdk: options.loadSdk,
@@ -150,7 +156,7 @@ function harness(options: { token?: TelephonyJsonResult<unknown> | Promise<Telep
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -203,6 +209,74 @@ function heartbeatWorkers() {
 }
 
 describe("TelnyxWebphone", () => {
+  it.each([true, false])("records the actual ringtone start result %s without sending a request on the invite path", async (played) => {
+    vi.spyOn(BrowserIncomingRingtone.prototype, "start").mockResolvedValue(played);
+    const h = harness({ silent: false });
+    h.phone.start();
+    await flush();
+    h.client.emit("telnyx.ready");
+    await flush();
+    const requestCount = h.requests.length;
+    const call = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+    expect(h.requests).toHaveLength(requestCount);
+    expect(browserTiming.browserCallTelemetry().batch()).toEqual([
+      expect.objectContaining({ callControlId: "cc-1", phase: "sdk_invite" }),
+      expect.objectContaining({ callControlId: "cc-1", phase: "ringtone_start", outcome: played ? "ok" : "failed", durationMs: expect.any(Number) }),
+    ]);
+    h.phone.answer();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(browserTiming.browserCallTelemetry().batch()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: "answer_requested", answerMode: "manual" }), expect.objectContaining({ phase: "sdk_active" }),
+    ]));
+    h.phone.stop();
+  });
+
+  it("records a cancelled ringtone resume when the call is answered before it settles", async () => {
+    const audio = deferred<boolean>();
+    vi.spyOn(BrowserIncomingRingtone.prototype, "start").mockReturnValue(audio.promise);
+    const h = harness({ silent: false });
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready"); await flush();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: fakeCall() });
+    h.phone.answer();
+    audio.resolve(false);
+    await flush();
+    expect(browserTiming.browserCallTelemetry().batch()).toEqual(expect.arrayContaining([expect.objectContaining({ phase: "ringtone_start", outcome: "cancelled" })]));
+    h.phone.stop();
+  });
+
+  it("keeps timings after a failed heartbeat and piggybacks them on the next ordinary pulse", async () => {
+    let fail = false;
+    const h = harness({ heartbeat: () => ({ ok: !fail, status: fail ? 500 : 200, body: {} }) });
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready"); await flush();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: fakeCall() });
+    const batch = browserTiming.browserCallTelemetry().batch();
+    fail = true;
+    h.runTimer(timer => timer.delayMs === 30_000); await flush();
+    expect(JSON.parse(h.requests.at(-1)!.body as string).callTimings).toEqual(batch);
+    expect(browserTiming.browserCallTelemetry().batch()).toEqual(batch);
+    fail = false;
+    h.runTimer(timer => timer.delayMs === 30_000); await flush();
+    expect(JSON.parse(h.requests.at(-1)!.body as string).callTimings).toEqual(batch);
+    expect(browserTiming.browserCallTelemetry().batch()).toEqual([]);
+    h.phone.stop();
+  });
+
+  it("new timings while registration is pending cannot invalidate its acknowledgement", async () => {
+    const heartbeat = deferred<TelephonyJsonResult<unknown>>();
+    const h = harness({ heartbeat: () => heartbeat.promise });
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    const confirmation = h.phone.confirmRegistration();
+    browserTiming.browserCallTelemetry().record("cc-1", "sdk_invite");
+    heartbeat.resolve({ ok: true, status: 200, body: {} });
+    await expect(confirmation).resolves.toBeUndefined();
+    expect(h.requests.filter(request => request.url.includes("heartbeat"))).toHaveLength(1);
+    expect(browserTiming.browserCallTelemetry().batch()).toHaveLength(1);
+    h.phone.stop();
+  });
+
   it("keeps the SDK call seam compatible with its asynchronous answer API", () => {
     expectTypeOf<Call>().toMatchTypeOf<WebphoneSdkCall>();
     expectTypeOf<TelnyxRTC>().toMatchTypeOf<WebphoneSdkClient>();

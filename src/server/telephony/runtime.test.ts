@@ -74,7 +74,8 @@ describe("telephony runtime", () => {
     const commandId = "bb824028-87c9-442f-bfac-ac527f733493";
     await deps.telnyx!.bridge({ callControlId: "PRIVATE_CALL_CONTROL_TOKEN", targetCallControlId: "PRIVATE_TARGET_TOKEN", commandId });
     expect(logger).toHaveBeenCalledExactlyOnceWith({ scope: "telnyx-http", level: "info", method: "POST", path: "/calls/:id/actions/bridge",
-      commandId, status: 200, ms: expect.any(Number), retried: false, errorCode: null });
+      commandId, status: 200, ms: expect.any(Number), retried: false, errorCode: null, cached: false,
+      attempts: [{ startedAtMs: expect.any(Number), dispatchAfterMs: expect.any(Number), headersMs: expect.any(Number), ms: expect.any(Number), status: 200 }] });
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/PRIVATE_|KEYtest/);
   });
 

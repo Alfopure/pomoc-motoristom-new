@@ -89,10 +89,18 @@ describe("POST /api/telephony/webhooks/openai", () => {
     expect(handleOpenAIIncoming).not.toHaveBeenCalled();
   });
 
-  it("answers 503 when the demo is on but not configured", async () => {
+  it("acknowledges rather than asking the provider to retry when it is not configured", async () => {
+    // A missing signing secret does not heal itself, so 503 would buy 72 hours
+    // of retries and no progress — and the endpoint cannot even be registered,
+    // because the secret is only issued once registration succeeds.
     delete process.env.OPENAI_WEBHOOK_SECRET;
     const response = await POST(openaiSignedRequest({ secret: SECRET, payload: PAYLOAD }));
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.outcome).toBe("not_configured");
+    // Naming what is missing is the difference between acknowledged and ignored.
+    expect(body.missing).toContain("OPENAI_WEBHOOK_SECRET");
+    // Acknowledged is not accepted: nothing was acted on.
     expect(handleOpenAIIncoming).not.toHaveBeenCalled();
   });
 
