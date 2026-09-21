@@ -1,5 +1,7 @@
 # Vercel deployment runbook
 
+> **Aktualizácia 2026-09-21:** názvy projektov, domény a zdieľaná databáza opísané nižšie sú historické. Aktuálne hranice určuje [AGENTS.md](../AGENTS.md) a [runbook oddeleného testovacieho prostredia](operations/test-environment.md). Nové Preview a `dev` používajú test `nzpnqdstvkfncflgqlny`; produkcia `dispecing.linkapomoci.sk` používa `ifpaeegaesdmljfkdvcn`. Nenasleduj staré pokyny na zmenu DNS, webhookov ani databázového cieľa.
+
 ## Cieľ a hranice
 
 Táto kópia dispečingu sa nasadzuje cez vlastný Vercel projekt `pomoc-motoristom-new` (tím `alfopures-projects`, región funkcií `fra1`, Fluid Compute) napojený na GitHub repozitár `alfopure/pomoc-motoristom-new`. Beží proti vlastnému Supabase projektu `pomoc-motoristom-telnyx` (ref `ifpaeegaesdmljfkdvcn`, región `eu-central-1`, Frankfurt). Trvalá vývojová vetva je `dev`; `main` je výhradne produkčný release branch.
