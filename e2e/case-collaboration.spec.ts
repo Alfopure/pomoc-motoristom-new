@@ -78,7 +78,7 @@ test("new-case activity carries no unsaved PII and cancellation removes it", asy
   const server = backend(); await boot(page, server, "author"); const second = await context.newPage(); await boot(second, server);
   await page.getByRole("button", { name: "Vytvoriť nový prípad", exact: true }).click();
   await expect.poll(() => server.editors.some(item => item.profileId === "author" && item.caseId === null)).toBe(true);
-  await broadcast(server); await expect(second.getByLabel("Rozpracované nové prípady")).toContainText("Jana pripravuje nový prípad");
+  await broadcast(server); await expect(second.getByLabel("Rozpracované nové prípady")).toContainText("Jana má otvorený návrh prípadu");
   await page.getByRole("button", { name: "Zrušiť", exact: true }).click();
   await expect.poll(() => server.editors.some(item => item.profileId === "author" && item.caseId === null)).toBe(false);
   await broadcast(server); await expect(second.getByLabel("Rozpracované nové prípady")).toHaveCount(0);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { BellRing, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Edit3, Inbox, ListTodo, Loader2, Plus, Save, SlidersHorizontal, Trash2, UserRound, X } from "lucide-react";
 import type { CasePriority, CaseTask, DispatchCase, DispatchNotification, NotificationStatus, Operator, TaskReminderChannel } from "@/domain/types";
 import { isNotificationForProfile, isNotificationReady } from "@/domain/notifications";
@@ -76,6 +76,7 @@ const PAGE_TASK_LIMIT = 8;
 const SIDEBAR_TASK_LIMIT = 6;
 
 type TaskPanelProps = {
+  headerStatus?: ReactNode;
   taskWorkspaceEnabled?: boolean;
   compact?: boolean;
   tasks?: WorkspaceTask[];
@@ -103,11 +104,12 @@ type TaskPanelProps = {
 };
 
 export function TaskPanel(props: TaskPanelProps) {
-  if (props.taskWorkspaceEnabled) return <TaskWorkspacePanel tasks={props.tasks} cases={props.cases} operators={props.operators} viewerProfileId={props.viewerProfileId} variant={props.variant} compact={props.compact} onOpenCase={props.onOpenCase} />;
+  if (props.taskWorkspaceEnabled) return <TaskWorkspacePanel headerStatus={props.headerStatus} tasks={props.tasks} cases={props.cases} operators={props.operators} viewerProfileId={props.viewerProfileId} variant={props.variant} compact={props.compact} onOpenCase={props.onOpenCase} />;
   return <LegacyTaskPanel {...props} />;
 }
 
 function LegacyTaskPanel({
+  headerStatus,
   activeTaskId,
   cases,
   isNotificationSyncing,
@@ -396,6 +398,7 @@ function LegacyTaskPanel({
                 <ListTodo size={16} strokeWidth={2.4} />
               </span>
               <h2 className="text-base font-semibold tracking-tight text-zinc-950">Úlohy</h2>
+              {headerStatus}
               <span className="rounded-full bg-zinc-950 px-2 py-0.5 text-xs font-semibold text-white">{allOpenTaskCount}</span>
             </div>
             <p className="mt-1 hidden text-xs leading-5 text-zinc-500 lg:block">Naplánujte prácu tímu a sledujte, čo treba vybaviť.</p>

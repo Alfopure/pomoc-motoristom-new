@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, ClipboardCheck, Filter, ListTodo, Plus, RefreshCw, Search, UserRoundCheck } from "lucide-react";
 import type { DispatchCase, Operator } from "@/domain/types";
 import type { WorkspaceTask } from "@/domain/task-workspace";
@@ -15,7 +15,8 @@ import { TaskWorkflowBoard } from "./TaskWorkflowBoard";
 import { TaskReviewDialog } from "./TaskReviewDialog";
 import { groupWorkflowBoard, taskWorkflowCardActions, workflowActionLabels } from "./task-workflow-board";
 import styles from "./TaskWorkspacePanel.module.css";
-export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, variant = "sidebar", compact = false, onOpenCase }: {
+export function TaskWorkspacePanel({ headerStatus, tasks, cases, operators, viewerProfileId, variant = "sidebar", compact = false, onOpenCase }: {
+  headerStatus?: ReactNode;
   tasks?: WorkspaceTask[]; cases: DispatchCase[]; operators: Operator[]; viewerProfileId?: string;
   variant?: "page" | "sidebar"; compact?: boolean; onOpenCase?: (caseId: string) => void;
 }) {
@@ -178,9 +179,10 @@ export function TaskWorkspacePanel({ tasks, cases, operators, viewerProfileId, v
     dirty: Boolean(snapshot.drafts[task.id]), disabled: snapshot.saving || Boolean(snapshot.drafts[task.id]) || snapshot.conflicts.includes(task.id) || Boolean(snapshot.pendingWorkflow[task.id]),
     saving: snapshot.saving && statusTaskId === task.id, onSelect: store.select, onStatusChange: changeStatus,
     workflowEnabled, viewerProfileId, onWorkflowAction: workflowAction });
-  if (snapshot.hidden) return <section className={styles.panel} aria-label="Pracovný priestor úloh"><p>Overujem prístup k úlohám…</p>{snapshot.error && <p role="alert">{snapshot.error}</p>}<button type="button" onClick={() => void store.reauthorize()}>Overiť prístup znova</button></section>;
+  if (snapshot.hidden) return <section className={styles.panel} aria-label="Pracovný priestor úloh">{headerStatus}<p>Overujem prístup k úlohám…</p>{snapshot.error && <p role="alert">{snapshot.error}</p>}<button type="button" onClick={() => void store.reauthorize()}>Overiť prístup znova</button></section>;
   return <section ref={panelRef} className={`${styles.panel} ${variant === "page" ? styles.page : styles.sidebar} ${workflowEnabled ? styles.workflowPanel : ""} ${compactWorkflow ? styles.compactWorkflow : ""}`} aria-label={variant === "sidebar" ? "Widget úloh" : "Pracovný priestor úloh"} style={{ containerType: "inline-size" }}>
     <header className={styles.header}>
+      {headerStatus}
       <div className={styles.heading}>{workflowEnabled && <span className={styles.headingIcon}><ListTodo size={19} aria-hidden="true" /></span>}<div>{!(compactWorkflow && variant === "sidebar") && <h2>Úlohy</h2>}<span>{snapshot.tasks.filter(task => task.status !== "done").length} otvorených{workflowEnabled && reviewsForMe > 0 && !compactWorkflow ? ` · ${reviewsForMe} na vašu kontrolu` : ""}</span></div></div>
       <div className={styles.actions}>{snapshot.error && <button type="button" className={styles.refresh} aria-label="Skúsiť načítať úlohy znova" title="Skúsiť znova" disabled={snapshot.loading} onClick={() => void store.refresh()}><RefreshCw size={15} aria-hidden="true" /></button>}{compactWorkflow && <button type="button" className={styles.filterToggle} aria-label={`Filtre úloh${activeFilterCount ? ` · ${activeFilterCount} aktívne` : ""}`} aria-expanded={filtersOpen} aria-controls={filtersId} onClick={() => setFiltersOpen(open => !open)}><Filter size={14} aria-hidden="true" />Filtre{activeFilterCount > 0 && <span>{activeFilterCount}</span>}</button>}<button type="button" aria-label="Nová úloha" className={styles.primary} onClick={store.openCreate}><Plus size={15} aria-hidden="true" />{compactWorkflow && variant === "sidebar" ? "Nová" : "Nová úloha"}</button></div>
     </header>

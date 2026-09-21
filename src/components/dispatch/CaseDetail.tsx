@@ -142,6 +142,8 @@ import { CaseHandoffPanel } from "./CaseHandoffPanel";
 import { useLayoutPreview } from "./LayoutPreview";
 
 type CaseDetailProps = {
+  /** Visibility of the mounted content; does not control its draft lifetime. */
+  active?: boolean;
   renderTaskWorkflow?: (taskId: string) => ReactNode;
   onEditorControlsChange?: (controls: CaseHeaderControls | null) => void;
   caseItem: DispatchCase;
@@ -264,6 +266,7 @@ const closureTypeLabels: Record<ClosureType, string> = {
 };
 
 export function CaseDetail({
+  active = true,
   renderTaskWorkflow,
   caseItem,
   branches,
@@ -723,7 +726,7 @@ export function CaseDetail({
 
       <CaseSummary caseItem={caseItem} assets={assets} operators={operators} identityInHeader={compactEditor && embedded && Boolean(onEditorControlsChange)} />
       <CaseSectionNavigation editing={isEditing} />
-      <CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} />
+      <CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} active={active} />
 
       {notice && <div role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{notice}</div>}
 
@@ -873,6 +876,7 @@ export function CaseDetail({
       {isEditing ? (
         <>
           <EditCaseForm
+            active={active}
             onEditorControlsChange={setEditorControls}
             key={`${caseItem.id}:${editorRevision}`}
             caseItem={caseItem}
@@ -1250,6 +1254,7 @@ function actorInitials(actor: string) {
 }
 
 function EditCaseForm({
+  active,
   onEditorControlsChange,
   caseItem,
   commanderVehicles,
@@ -1263,6 +1268,7 @@ function EditCaseForm({
   onSavingChange,
   partnerDirectory,
 }: {
+  active: boolean;
   onEditorControlsChange?: (controls: CaseEditorControls | null) => void;
   caseItem: DispatchCase;
   commanderVehicles: CommanderVehicleConnection[];
@@ -1277,7 +1283,7 @@ function EditCaseForm({
   partnerDirectory: PartnerDirectoryEntry[];
 }) {
   const [selectedJobTypes, setSelectedJobTypes] = useState<JobType[]>(caseItem.jobTypes);
-  useCaseEditorPresence(caseItem.id);
+  useCaseEditorPresence(caseItem.id, active);
   const { state: collaborationState } = useCaseCollaboration();
   const collaborationAccessRef = useRef(collaborationState.hidden);
   useLayoutEffect(() => { collaborationAccessRef.current = collaborationState.hidden || (collaborationState.available === true && !collaborationState.cases.some(item => item.id === caseItem.id)); }, [collaborationState, caseItem.id]);

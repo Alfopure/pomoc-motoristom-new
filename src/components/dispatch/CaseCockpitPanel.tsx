@@ -19,6 +19,7 @@ import styles from "./case-detail.module.css";
 type WorkspaceMode = "collapsed" | "split" | "expanded";
 
 type CaseCockpitPanelProps = {
+  active?: boolean;
   renderTaskWorkflow?: (taskId: string) => ReactNode;
   assets: FleetAsset[];
   branches: Branch[];
@@ -47,6 +48,7 @@ type CaseCockpitPanelProps = {
 };
 
 export function CaseCockpitPanel({
+  active = true,
   renderTaskWorkflow,
   assets,
   branches,
@@ -232,6 +234,7 @@ export function CaseCockpitPanel({
       {editorControls && <div className={`${styles.headerControlRow} shrink-0`}><CaseEditorHeader controls={editorControls} showLocation={false} /></div>}
       <div data-case-detail-scroll-region className={`${styles.scrollRegion} min-h-0 flex-1 overflow-y-auto overscroll-contain bg-zinc-50`}>
         <CaseDetail
+          active={active && mode !== "collapsed"}
           renderTaskWorkflow={renderTaskWorkflow}
           onEditorControlsChange={setEditorControls}
           key={caseItem.id}

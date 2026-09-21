@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CaseCollaborationStore } from "./case-collaboration-store";
+import { caseSyncPresentation } from "./case-sync-status";
 import { activeCaseEditors, type CaseLiveSnapshot } from "@/domain/case-collaboration";
 import type { DispatchCase } from "@/domain/types";
 const card = { id: "case-a", updatedAt: "2026-09-19T10:00:00.000001Z", mainNote: "original", tasks: [{ id: "task-a" }] } as DispatchCase;
@@ -72,5 +73,86 @@ describe("case collaboration contract", () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(read.mock.calls.length).toBeLessThanOrEqual(80);
     stores.forEach(store => store.stop());
+  });
+});
+
+describe("isolated case sync metadata", () => {
+  it("publishes loading without notifying case subscribers or changing data identity", async () => {
+    let finish!: (response: Response) => void;
+    const read = vi.fn(() => new Promise<Response>(resolve => { finish = resolve; }));
+    const store = new CaseCollaborationStore([card], read);
+    const originalState = store.getSnapshot();
+    const dataListener = vi.fn(), syncListener = vi.fn();
+    store.subscribe(dataListener); store.subscribeSync(syncListener);
+    const pending = store.refresh();
+    expect(store.getSyncSnapshot().inFlight).toBe(true);
+    expect(syncListener).toHaveBeenCalledTimes(1); expect(dataListener).not.toHaveBeenCalled();
+    expect(store.getSnapshot()).toBe(originalState); expect(store.getSnapshot().cases).toBe(originalState.cases);
+    finish(Response.json(snapshot())); await pending;
+    expect(dataListener).toHaveBeenCalledTimes(1);
+    expect(store.getSyncSnapshot()).toMatchObject({ inFlight: false, incomplete: false, connected: false, error: "" });
+    expect(caseSyncPresentation(store.getSyncSnapshot()).kind).toBe("current");
+    expect(read).toHaveBeenCalledTimes(1); store.stop();
+  });
+  it("keeps continuation gaps incomplete and updates verification only after the final page", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(1000);
+    const read = vi.fn().mockResolvedValueOnce(Response.json(snapshot({ more: true }))).mockResolvedValueOnce(Response.json(snapshot()));
+    const store = new CaseCollaborationStore([card], read); store.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.getSyncSnapshot()).toMatchObject({ inFlight: false, incomplete: true, lastVerifiedAt: null });
+    expect(caseSyncPresentation(store.getSyncSnapshot()).kind).toBe("updating");
+    await vi.advanceTimersByTimeAsync(499); expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(store.getSyncSnapshot()).toMatchObject({ inFlight: false, incomplete: false, lastVerifiedAt: 1500 });
+    expect(read).toHaveBeenCalledTimes(2); store.stop();
+  });
+  it("does not clear a read failure on reconnect or the first partial recovery page", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(1000);
+    const read = vi.fn().mockResolvedValueOnce(Response.json(snapshot()))
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(Response.json(snapshot({ more: true })))
+      .mockResolvedValueOnce(Response.json(snapshot()));
+    const store = new CaseCollaborationStore([card], read);
+    await store.refresh(); await store.refresh();
+    store.setConnected(true);
+    expect(caseSyncPresentation(store.getSyncSnapshot()).kind).toBe("error");
+    await store.refresh(); expect(caseSyncPresentation(store.getSyncSnapshot()).kind).toBe("error");
+    expect(store.getSyncSnapshot().lastVerifiedAt).toBe(1000);
+    vi.setSystemTime(2000); await store.refresh();
+    expect(caseSyncPresentation(store.getSyncSnapshot()).kind).toBe("current");
+    expect(store.getSyncSnapshot().lastVerifiedAt).toBe(2000); store.stop();
+  });
+  it("revokes metadata immediately and ignores a previous generation's response and finally", async () => {
+    let finish!: (response: Response) => void;
+    const read = vi.fn().mockResolvedValueOnce(Response.json(snapshot()));
+    const store = new CaseCollaborationStore([card], read); await store.refresh();
+    read.mockImplementationOnce(() => new Promise<Response>(resolve => { finish = resolve; }));
+    const pending = store.refresh(); store.revoke();
+    const revoked = store.getSyncSnapshot();
+    expect(revoked).toMatchObject({ inFlight: false, denied: true, lastVerifiedAt: null });
+    finish(Response.json(snapshot())); await pending;
+    expect(store.getSyncSnapshot()).toBe(revoked);
+    expect(caseSyncPresentation(revoked).kind).toBe("denied"); store.stop();
+  });
+  it("expires metadata through the existing lease timer without another polling timer", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(1000);
+    const read = vi.fn().mockResolvedValue(Response.json(snapshot()));
+    const store = new CaseCollaborationStore([card], read); await store.refresh();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(store.getSyncSnapshot().hidden).toBe(true);
+    expect(caseSyncPresentation(store.getSyncSnapshot()).kind).toBe("expired");
+    expect(read).toHaveBeenCalledTimes(1); store.stop();
+  });
+  it("denies on 403, keeps unavailable capability neutral, and never verifies a partial failed series", async () => {
+    const read = vi.fn().mockResolvedValueOnce(Response.json(snapshot({ available: false })))
+      .mockResolvedValueOnce(Response.json(snapshot({ more: true })))
+      .mockRejectedValueOnce(new Error("failed second page"))
+      .mockResolvedValueOnce(new Response(null, { status: 403 }));
+    const store = new CaseCollaborationStore([], read);
+    await store.refresh(); expect(caseSyncPresentation(store.getSyncSnapshot()).kind).toBe("unavailable");
+    await store.refresh(); await store.refresh();
+    expect(store.getSyncSnapshot().lastVerifiedAt).toBeNull();
+    expect(caseSyncPresentation(store.getSyncSnapshot()).kind).toBe("error");
+    await store.refresh(); expect(caseSyncPresentation(store.getSyncSnapshot()).kind).toBe("denied"); store.stop();
   });
 });

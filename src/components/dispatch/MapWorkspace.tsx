@@ -1,7 +1,7 @@
 "use client";
 import type { CaseDetailData } from "@/data/case-detail";
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { Columns3, GripHorizontal, Map, PanelLeftClose, PanelsTopLeft, StickyNote, Table2, Wrench } from "lucide-react";
 import type { CallCenterCall, CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
@@ -13,6 +13,16 @@ import { DispatchMap, type CustomerLocationMapFocus } from "./DispatchMap";
 import { ExpandedCasePanel } from "./ExpandedCasePanel";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { useLayoutPreview } from "./LayoutPreview";
+import { isCasePanelVisible } from "./case-panel-visibility";
+
+const desktopQuery = "(min-width: 1024px)";
+function subscribeDesktop(listener: () => void) {
+  const media = window.matchMedia(desktopQuery);
+  media.addEventListener("change", listener);
+  return () => media.removeEventListener("change", listener);
+}
+const getDesktop = () => window.matchMedia(desktopQuery).matches;
+const getServerDesktop = () => false;
 
 export type WorkspaceKind = "cockpit" | "detail" | "new";
 export type WorkspaceMode = "collapsed" | "split" | "expanded";
@@ -21,6 +31,8 @@ export type CenterView = "map" | "table" | "tasks" | "notes";
 type MapWorkspaceProps = {
   renderTaskWorkflow?: (taskId: string) => ReactNode;
   active?: boolean;
+  caseWorkspaceActive?: boolean;
+  mobilePane?: "cases" | "workspace";
   actorKey?: string;
   centerContent?: ReactNode;
   onCenterViewChange?: (view: CenterView) => void;
@@ -94,6 +106,8 @@ type StoredWorkspaceLayout = { desktopPanelPercent?: number };
 export function MapWorkspace({
   renderTaskWorkflow,
   active = true,
+  caseWorkspaceActive = active,
+  mobilePane = "workspace",
   actorKey,
   centerContent,
   onCenterViewChange,
@@ -152,6 +166,8 @@ export function MapWorkspace({
   const hasCockpitCase = Boolean(caseItem && mapModel);
   const showWorkspacePanel = workspaceKind !== "cockpit" || hasCockpitCase;
   const showExpandedPanel = workspaceKind !== "cockpit";
+  const desktop = useSyncExternalStore(subscribeDesktop, getDesktop, getServerDesktop);
+  const caseContentActive = isCasePanelVisible({ workspaceActive: caseWorkspaceActive, desktop, mobilePane, mode: workspaceMode, toolsOpen });
   const shellClassName = `dispatch-workspace-shell relative h-full min-h-0 ${showWorkspacePanel && workspaceMode === "split" ? `lg:grid lg:gap-2 ${desktopRows[workspaceMode]}` : ""}`;
   const upperAreaClassName = `dispatch-workspace-upper h-full min-h-0 overflow-hidden ${showWorkspacePanel && workspaceMode === "split" ? "lg:h-auto lg:min-h-[260px]" : ""} ${showWorkspacePanel && workspaceMode === "collapsed" && centerView !== "map" ? "lg:pb-16" : ""}`;
   // Mobile CSS displays either the full map or the full case, never a partial sheet.
@@ -373,6 +389,7 @@ export function MapWorkspace({
           )}
           {showExpandedPanel ? (
             <ExpandedCasePanel
+              active={caseContentActive}
               renderTaskWorkflow={renderTaskWorkflow}
               key={`${workspaceKind}:${caseItem?.id ?? "empty"}:${caseEditorRevision}`}
               assets={assets}
@@ -400,6 +417,7 @@ export function MapWorkspace({
             />
           ) : caseItem && mapModel ? (
             <CaseCockpitPanel
+              active={caseContentActive}
               renderTaskWorkflow={renderTaskWorkflow}
               key={caseEditorRevision}
               assets={assets}

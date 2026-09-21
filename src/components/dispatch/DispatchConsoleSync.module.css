@@ -1,0 +1,10 @@
+.accountGroup { display: flex; min-width: 0; flex-shrink: 1; align-items: center; gap: 4px; }
+@media (min-width: 1024px) { .accountGroup { flex-shrink: 0; } }
+/* Keep the phone controls intact when the desktop header is compact. */
+@media (min-width: 1024px) and (max-width: 1439px) {
+  .accountGroup :global(.dispatch-account-identity) { display: none; }
+}
+@media (max-width: 479px) {
+  .accountGroup :global(.dispatch-account-identity),
+  .accountGroup :global(.dispatch-account-trigger) > svg { display: none; }
+}

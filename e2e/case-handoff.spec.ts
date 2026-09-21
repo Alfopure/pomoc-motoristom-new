@@ -16,43 +16,47 @@ test.beforeAll(async () => {
   css = bundle.outputFiles.find(file => file.path.endsWith(".css"))?.text ?? "";
   css += (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css;
 });
-async function boot(page: Page, options: { sender?: boolean; existing?: boolean; lostDecision?: boolean; lostIssue?: boolean; width?: number } = {}) {
+async function boot(page: Page, options: { sender?: boolean; existing?: boolean; lostDecision?: boolean; lostIssue?: boolean; width?: number; sessionStatus?: number; frozen?: boolean; server?: { grant: CaseHandoff; active: boolean } } = {}) {
   const errors: string[] = [], external: string[] = [], decisions: Record<string, unknown>[] = [], internal: Record<string, unknown>[] = [], prepares: Record<string, unknown>[] = [], sends: string[] = [], reads: string[] = [];
-  let grant = structuredClone(base), active = Boolean(options.existing), lost = false, otherSession = false, denyInternal = false;
+  const server = options.server ?? { grant: structuredClone(base), active: Boolean(options.existing) };
+  let lost = false, otherSession = false, denyInternal = false, publicDenied = 0;
+  const sessions: string[] = [];
   const receipts = new Map<string, unknown>();
   await page.setViewportSize({ width: options.width ?? 390, height: 844 });
-  await page.clock.setFixedTime(new Date("2026-09-12T08:00:00Z"));
+  await page.clock.install({ time: new Date("2026-09-12T08:00:00Z") });
+  if (options.frozen) await page.clock.pauseAt(new Date("2026-09-12T08:00:01Z"));
   page.on("pageerror", error => errors.push(error.message));
   await page.route("**/*", async route => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== "https://handoff.test") { external.push(url.origin); return route.abort(); }
     if (!url.pathname.startsWith("/api/")) return route.fulfill({ contentType: "text/html", body: `<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style><body><div id="root"></div><script>${script}</script></body></html>` });
     if (request.method() === "GET") reads.push(url.pathname);
-    if (url.pathname === "/api/public/handoffs/session") return route.fulfill({ json: { handoff: grant } });
+    if (url.pathname === "/api/public/handoffs/session") { sessions.push(request.method()); return options.sessionStatus ? route.fulfill({ status: options.sessionStatus, json: { error: "Dočasne nedostupné" } }) : route.fulfill({ json: { handoff: server.grant } }); }
     if (url.pathname === "/api/public/handoffs/current") {
       expect(url.searchParams.get("handoff")).toBe(id);
-      return otherSession ? route.fulfill({ status: 404, json: { error: "Odkaz nie je dostupný." } }) : route.fulfill({ json: { handoff: grant } });
+      if (publicDenied) return route.fulfill({ status: publicDenied, json: { error: "Odkaz už nie je dostupný." } });
+      return otherSession ? route.fulfill({ status: 404, json: { error: "Odkaz nie je dostupný." } }) : route.fulfill({ json: { handoff: server.grant } });
     }
     if (url.pathname === "/api/public/handoffs/commands") {
       const data = request.postDataJSON(); decisions.push(data); expect(data.handoffId).toBe(id);
       if (otherSession) return route.fulfill({ status: 404, json: { error: "Odkaz nie je dostupný." } });
       if (!receipts.has(data.commandId)) {
-        const status = ({ accept: "accepted", reject: "rejected", en_route: "en_route", arrived: "arrived", complete: "completed" } as const)[data.action as "accept"] || grant.status;
-        grant = { ...grant, revision: grant.revision + 1, status, published: ["completed", "rejected"].includes(status) ? null : grant.published, events: [], ...(data.eta !== undefined ? { eta: data.eta } : {}) };
-        receipts.set(data.commandId, { handoff: grant, commandId: data.commandId, committedRevision: grant.revision });
+        const status = ({ accept: "accepted", reject: "rejected", en_route: "en_route", arrived: "arrived", complete: "completed" } as const)[data.action as "accept"] || server.grant.status;
+        server.grant = { ...server.grant, revision: server.grant.revision + 1, status, published: ["completed", "rejected"].includes(status) ? null : server.grant.published, events: [], ...(data.eta !== undefined ? { eta: data.eta } : {}) };
+        receipts.set(data.commandId, { handoff: server.grant, commandId: data.commandId, committedRevision: server.grant.revision });
       }
       if (options.lostDecision && !lost) { lost = true; return route.abort("failed"); }
       return route.fulfill({ json: receipts.get(data.commandId) });
     }
     if (url.pathname === `/api/cases/${caseId}/handoffs`) {
       if (denyInternal) return route.fulfill({ status: 403, json: { error: "Prístup k prípadu bol zrušený." } });
-      if (request.method() === "GET") return route.fulfill({ json: { preview: published, previewVersion: "c".repeat(64), handoffs: active ? [grant] : [] } });
+      if (request.method() === "GET") return route.fulfill({ json: { preview: published, previewVersion: "c".repeat(64), handoffs: server.active ? [server.grant] : [] } });
       const data = request.postDataJSON(); internal.push(data);
       const replay = receipts.has(data.commandId);
       if (!receipts.has(data.commandId)) {
-        if (data.action === "issue") { active = true; grant = { ...base, recipientName: data.recipientName, recipientPhone: data.recipientPhone, published: { ...published, instructions: data.instructions, scheduledAt: data.scheduledAt } }; }
-        else grant = { ...grant, revision: grant.revision + 1, published: data.action === "publish" ? { ...published, instructions: data.instructions, scheduledAt: data.scheduledAt } : grant.published };
-        receipts.set(data.commandId, { handoff: grant, commandId: data.commandId, committedRevision: grant.revision, ...(data.action === "issue" || data.action === "renew" ? { url: `https://handoff.test/handoff#token=${String.fromCharCode(97 + grant.revision).repeat(43)}` } : {}) });
+        if (data.action === "issue") { server.active = true; server.grant = { ...base, recipientName: data.recipientName, recipientPhone: data.recipientPhone, published: { ...published, instructions: data.instructions, scheduledAt: data.scheduledAt } }; }
+        else server.grant = { ...server.grant, revision: server.grant.revision + 1, published: data.action === "publish" ? { ...published, instructions: data.instructions, scheduledAt: data.scheduledAt } : server.grant.published };
+        receipts.set(data.commandId, { handoff: server.grant, commandId: data.commandId, committedRevision: server.grant.revision, ...(data.action === "issue" || data.action === "renew" ? { url: `https://handoff.test/handoff#token=${String.fromCharCode(97 + server.grant.revision).repeat(43)}` } : {}) });
       }
       if (options.lostIssue && !lost) { lost = true; return route.abort("failed"); }
       const receipt = { ...(receipts.get(data.commandId) as Record<string, unknown>) }; if (replay) delete receipt.url;
@@ -67,7 +71,7 @@ async function boot(page: Page, options: { sender?: boolean; existing?: boolean;
     return route.fulfill({ status: 503, json: { error: "Neobslúžená testovacia cesta" } });
   });
   await page.goto(`https://handoff.test/handoff${options.sender ? "?sender=1" : `#token=${secret}`}`);
-  return { errors, external, decisions, internal, prepares, sends, reads, substituteSession: () => { otherSession = true; }, revokeInternal: () => { denyInternal = true; } };
+  return { errors, external, decisions, internal, prepares, sends, reads, sessions, server, denyPublic: (status: number) => { publicDenied = status; }, substituteSession: () => { otherSession = true; }, revokeInternal: () => { denyInternal = true; } };
 }
 
 test("recipient sees one mobile case, explicitly accepts and progresses, preserving grant binding on reload", async ({ page }, info) => {
@@ -144,7 +148,9 @@ test("existing publication fields survive refresh and local edits survive reload
   await expect(instructions).toHaveValue(published.instructions!);
   await expect(page.getByLabel("Dohodnutý čas", { exact: true })).not.toHaveValue("");
   await instructions.fill("Môj rozpracovaný pokyn");
-  await page.getByRole("button", { name: "Obnoviť odovzdania" }).click();
+  await page.clock.runFor(1000);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(() => trace.reads.length).toBe(2);
   await expect(instructions).toHaveValue("Môj rozpracovaný pokyn");
   await page.getByRole("button", { name: "Zverejniť tento výber údajov" }).click();
   expect(trace.internal[0]).toMatchObject({ action: "publish", instructions: "Môj rozpracovaný pokyn", scheduledAt: new Date(published.scheduledAt!).toISOString() });
@@ -169,7 +175,11 @@ test("renewing a link keeps the existing SMS draft and requires explicit append"
   expect(trace.sends).toHaveLength(0); expect(trace.errors).toEqual([]);
 });
 
-test("a pending context refresh serializes later panel opens and forbids stale publication", async ({ page }) => {
+test("background read never blocks a command and its delayed response cannot replace the receipt", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = window.fetch;
+    window.fetch = (input, init) => original(input, String(input).endsWith("/handoffs") && (!init?.method || init.method === "GET") ? { ...init, signal: undefined } : init);
+  });
   const trace = await boot(page, { sender: true, existing: true });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
   await expect(page.getByLabel("Pokyny pre kolegu", { exact: true })).toHaveValue(published.instructions!);
@@ -177,15 +187,16 @@ test("a pending context refresh serializes later panel opens and forbids stale p
   await page.route(`https://handoff.test/api/cases/${caseId}/handoffs`, async route => {
     if (route.request().method() !== "GET") return route.fallback();
     count++;
-    await new Promise<void>(resolve => { release = async () => { await route.fulfill({ json: { preview: published, previewVersion: "c".repeat(64), handoffs: [{ ...base, revision: 3 }] } }); resolve(); }; });
+    await new Promise<void>(resolve => { release = async () => { await route.fulfill({ json: { preview: published, previewVersion: "c".repeat(64), handoffs: [{ ...base, revision: 99, publishedVersion: 99 }] } }).catch(() => {}); resolve(); }; });
   });
-  await page.getByRole("button", { name: "Obnoviť odovzdania" }).click();
-  await expect(page.getByRole("button", { name: "Zverejniť tento výber údajov" })).toBeDisabled();
-  await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
-  await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
-  await expect.poll(() => count).toBe(1); await release!();
+  await page.clock.runFor(33_100);
+  await expect.poll(() => count).toBe(1);
+  await expect(page.getByRole("button", { name: "Zverejniť tento výber údajov" })).toBeEnabled();
   await page.getByRole("button", { name: "Zverejniť tento výber údajov" }).click();
-  expect(trace.internal[0].expectedRevision).toBe(3);
+  await expect.poll(() => trace.internal.length).toBe(1);
+  await release!();
+  await expect(page.getByText(/verzia údajov 99/)).toHaveCount(0);
+  expect(trace.internal[0].expectedRevision).toBe(1);
   expect(trace.errors).toEqual([]);
 });
 
@@ -208,4 +219,273 @@ for (const width of [360, 390, 768, 1366]) test(`public card preserves readable 
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   const size = await page.getByRole("button", { name: "Prijať prípad" }).boundingBox(); expect(size!.height).toBeGreaterThanOrEqual(44);
   expect(trace.errors).toEqual([]); expect(trace.external).toEqual([]);
+});
+
+
+test("two clients see an accepted handoff automatically while preserving sender drafts within the read budget", async ({ page, browser }) => {
+  const server = { grant: structuredClone(base), active: true };
+  const sender = await boot(page, { sender: true, server });
+  await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  const instructions = page.getByLabel("Pokyny pre kolegu", { exact: true });
+  await expect(instructions).toHaveValue(published.instructions!);
+  await instructions.fill("Rozpracovaný miestny pokyn");
+  await page.getByLabel("Dohodnutý čas", { exact: true }).fill("2026-09-12T16:30");
+  await page.getByRole("textbox", { name: "Dôvod zrušenia", exact: true }).fill("Rozpracovaný dôvod");
+  const recipientPage = await browser.newPage();
+  const recipient = await boot(recipientPage, { server });
+  await recipientPage.getByRole("button", { name: "Prijať prípad" }).click();
+  await expect(recipientPage.getByRole("button", { name: "Vyrážam na cestu" })).toBeVisible();
+  await page.clock.runFor(33_100);
+  await expect(page.locator(".handoff-status")).toHaveText("Prijaté");
+  await expect(instructions).toHaveValue("Rozpracovaný miestny pokyn");
+  await expect(page.getByLabel("Dohodnutý čas", { exact: true })).toHaveValue("2026-09-12T16:30");
+  await expect(page.getByRole("textbox", { name: "Dôvod zrušenia", exact: true })).toHaveValue("Rozpracovaný dôvod");
+  await page.clock.runFor(26_000);
+  expect(sender.reads.length).toBeLessThanOrEqual(3);
+  expect(sender.internal).toHaveLength(0);
+  expect(recipient.decisions).toHaveLength(1);
+  expect(recipient.sessions).toEqual(["POST"]);
+  expect([...sender.external, ...recipient.external, ...sender.errors, ...recipient.errors]).toEqual([]);
+  await recipientPage.close();
+});
+
+test("recipient GET refresh preserves ETA and comment and never repeats the session exchange", async ({ page }) => {
+  const trace = await boot(page);
+  await page.getByRole("button", { name: "Prijať prípad" }).click();
+  await page.getByLabel("Nový odhad príchodu (voliteľné)").fill("2026-09-12T11:15");
+  await page.getByLabel("Poznámka k priebehu").fill("Miestny rozpracovaný komentár");
+  trace.server.grant = { ...trace.server.grant, publishedVersion: 2, published: { ...published, instructions: "Nové zverejnené pokyny" } };
+  await page.clock.runFor(33_100);
+  await expect(page.getByText("Nové zverejnené pokyny", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Nový odhad príchodu (voliteľné)")).toHaveValue("2026-09-12T11:15");
+  await expect(page.getByLabel("Poznámka k priebehu")).toHaveValue("Miestny rozpracovaný komentár");
+  expect(trace.sessions).toEqual(["POST"]);
+  expect(trace.decisions).toHaveLength(1);
+  expect(trace.reads).toEqual(["/api/public/handoffs/current"]);
+  expect(trace.external).toEqual([]);
+});
+
+test("successful automatic GET preserves an uncertain command error and its original idempotency payload", async ({ page }) => {
+  const trace = await boot(page, { lostDecision: true });
+  await page.getByRole("button", { name: "Prijať prípad" }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  const originalError = await page.getByRole("alert").textContent();
+  await page.clock.runFor(33_100);
+  await expect.poll(() => trace.reads.length).toBe(1);
+  await expect(page.getByRole("alert")).toHaveText(originalError!);
+  await page.getByRole("button", { name: "Overiť výsledok tej istej požiadavky" }).click();
+  expect(trace.decisions).toHaveLength(2);
+  expect(trace.decisions[1]).toEqual(trace.decisions[0]);
+  expect(trace.sessions).toHaveLength(1);
+});
+
+for (const status of [401, 403, 404, 410]) test(`public GET ${status} clears private data and stops reads without exchanging a new session`, async ({ page }) => {
+  const trace = await boot(page);
+  await expect(page.getByText("Klient Juraj", { exact: true })).toBeVisible();
+  trace.denyPublic(status);
+  await page.clock.runFor(33_100);
+  await expect(page.getByRole("alert")).toContainText("Odkaz už nie je dostupný");
+  await expect(page.getByText("Klient Juraj", { exact: true })).toHaveCount(0);
+  await page.clock.runFor(130_000);
+  expect(trace.reads).toHaveLength(1);
+  expect(trace.sessions).toHaveLength(1);
+  expect(trace.decisions).toHaveLength(0);
+});
+
+test("recipient expiry clears the card and stops polling", async ({ page }) => {
+  const trace = await boot(page);
+  await expect(page.getByText("Klient Juraj", { exact: true })).toBeVisible();
+  trace.server.grant = { ...trace.server.grant, expiresAt: "2026-09-12T08:00:20Z" };
+  await page.clock.runFor(33_100);
+  await expect(page.getByText("Klient Juraj", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("alert")).toContainText("Platnosť odkazu skončila");
+  await page.clock.runFor(130_000);
+  expect(trace.reads).toHaveLength(1);
+});
+
+test("hidden sender stops reads and coalesces a burst on return while keeping its draft", async ({ page }) => {
+  const trace = await boot(page, { sender: true, existing: true });
+  await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await expect(page.getByLabel("Pokyny pre kolegu", { exact: true })).toHaveValue(published.instructions!);
+  await page.getByLabel("Pokyny pre kolegu", { exact: true }).fill("Zachovaný pokyn");
+  await page.getByRole("button", { name: "Prepnúť aktívny panel" }).click();
+  await page.clock.runFor(130_000);
+  expect(trace.reads).toHaveLength(1);
+  await page.getByRole("button", { name: "Prepnúť aktívny panel" }).click();
+  await page.evaluate(() => { for (let i = 0; i < 20; i++) { window.dispatchEvent(new Event("focus")); window.dispatchEvent(new Event("online")); document.dispatchEvent(new Event("visibilitychange")); } });
+  await page.clock.runFor(250);
+  await expect.poll(() => trace.reads.length).toBe(2);
+  await expect(page.getByLabel("Pokyny pre kolegu", { exact: true })).toHaveValue("Zachovaný pokyn");
+  await page.evaluate(() => { Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" }); document.dispatchEvent(new Event("visibilitychange")); });
+  await page.clock.runFor(130_000);
+  expect(trace.reads).toHaveLength(2);
+  await page.evaluate(() => { Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" }); document.dispatchEvent(new Event("visibilitychange")); });
+  await page.clock.runFor(250);
+  await expect.poll(() => trace.reads.length).toBe(3);
+  expect(trace.internal).toHaveLength(0);
+});
+
+test("read failures back off to 60 then 120 seconds without blocking commands", async ({ page }) => {
+  const trace = await boot(page, { sender: true, existing: true });
+  await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await expect(page.getByLabel("Pokyny pre kolegu", { exact: true })).toHaveValue(published.instructions!);
+  let failedReads = 0;
+  await page.route(`https://handoff.test/api/cases/${caseId}/handoffs`, async route => {
+    if (route.request().method() !== "GET") return route.fallback();
+    failedReads++;
+    return route.fulfill({ status: 503, json: { error: "Dočasná chyba čítania" } });
+  });
+  await page.clock.runFor(33_100);
+  await expect(page.getByRole("alert")).toContainText("Dočasná chyba čítania");
+  await expect(page.getByRole("button", { name: "Zverejniť tento výber údajov" })).toBeEnabled();
+  await page.clock.runFor(59_000); expect(failedReads).toBe(1);
+  await page.clock.runFor(2_000); await expect.poll(() => failedReads).toBe(2);
+  await page.clock.runFor(119_000); expect(failedReads).toBe(2);
+  await page.clock.runFor(2_000); await expect.poll(() => failedReads).toBe(3);
+  expect(trace.internal).toHaveLength(0);
+});
+
+
+test("late ignored-abort response cannot restore recipient data after a newer revoked read", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = window.fetch;
+    window.fetch = (input, init) => original(input, String(input).includes("/api/public/handoffs/current") ? { ...init, signal: undefined } : init);
+  });
+  const trace = await boot(page);
+  await expect(page.getByText("Klient Juraj", { exact: true })).toBeVisible();
+  let reads = 0, release: (() => Promise<void>) | undefined;
+  await page.route("https://handoff.test/api/public/handoffs/current?**", async route => {
+    if (++reads > 1) return route.fulfill({ status: 403, json: { error: "Prístup bol odobratý" } });
+    await new Promise<void>(resolve => { release = async () => { await route.fulfill({ json: { handoff: base } }).catch(() => {}); resolve(); }; });
+  });
+  await page.clock.runFor(33_100);
+  await expect.poll(() => reads).toBe(1);
+  await page.evaluate(() => { Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" }); document.dispatchEvent(new Event("visibilitychange")); });
+  await page.evaluate(() => { Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" }); document.dispatchEvent(new Event("visibilitychange")); });
+  await page.clock.runFor(250);
+  await expect(page.getByRole("alert")).toContainText("Prístup bol odobratý");
+  await release!();
+  await expect(page.getByText("Klient Juraj", { exact: true })).toHaveCount(0);
+  await page.clock.runFor(130_000);
+  expect(reads).toBe(2);
+  expect(trace.sessions).toHaveLength(1);
+  expect(trace.decisions).toHaveLength(0);
+});
+
+test("failed initial session exchange is never replayed automatically", async ({ page }) => {
+  const trace = await boot(page, { sessionStatus: 503 });
+  await expect(page.getByRole("alert")).toContainText("Otvorte znovu pôvodný odkaz");
+  await page.clock.runFor(180_000);
+  expect(trace.sessions).toEqual(["POST"]);
+  expect(trace.decisions).toHaveLength(0);
+  expect(trace.reads).toHaveLength(0);
+});
+
+test("sender keeps an uncertain issue error and command intact after successful context polling", async ({ page }) => {
+  const trace = await boot(page, { sender: true, lostIssue: true });
+  await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByLabel("Stredisko alebo kolega").fill("Peter");
+  await page.getByLabel("Telefón príjemcu odkazu").fill("+421907987654");
+  await page.getByLabel("Pokyny pre kolegu", { exact: true }).fill("Miestne pokyny");
+  await page.getByRole("button", { name: "Vytvoriť odkaz pre kolegu" }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  const issueError = await page.getByRole("alert").textContent();
+  await page.clock.runFor(33_100);
+  await expect.poll(() => trace.reads.length).toBe(2);
+  await expect(page.getByRole("alert")).toHaveText(issueError!);
+  await expect(page.getByLabel("Pokyny pre kolegu", { exact: true })).toHaveValue("Miestne pokyny");
+  await page.getByRole("button", { name: "Overiť výsledok tej istej požiadavky" }).click();
+  expect(trace.internal).toHaveLength(2);
+  expect(trace.internal[1]).toEqual(trace.internal[0]);
+});
+
+test("next background read is scheduled after completion and concurrent resume events do not duplicate it", async ({ page }) => {
+  await boot(page, { sender: true, existing: true });
+  await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await expect(page.getByLabel("Pokyny pre kolegu", { exact: true })).toHaveValue(published.instructions!);
+  let reads = 0, release: (() => Promise<void>) | undefined;
+  await page.route(`https://handoff.test/api/cases/${caseId}/handoffs`, async route => {
+    if (route.request().method() !== "GET") return route.fallback();
+    reads++;
+    const reply = () => route.fulfill({ json: { preview: published, previewVersion: "c".repeat(64), handoffs: [{ ...base, publishedVersion: 3 }] } });
+    if (reads > 1) return reply();
+    await new Promise<void>(resolve => { release = async () => { await reply(); resolve(); }; });
+  });
+  await page.clock.runFor(33_100); await expect.poll(() => reads).toBe(1);
+  await page.clock.runFor(10_000);
+  await page.evaluate(() => { for (let i = 0; i < 20; i++) window.dispatchEvent(new Event("focus")); });
+  await page.clock.runFor(250); expect(reads).toBe(1);
+  await release!(); await expect(page.getByText(/verzia údajov 3/)).toBeVisible();
+  await page.clock.runFor(29_000); expect(reads).toBe(1);
+  await page.clock.runFor(4_100); await expect.poll(() => reads).toBe(2);
+});
+
+test("a command receipt arriving after local expiry cannot restore private data", async ({ page }) => {
+  const server = { grant: { ...structuredClone(base), expiresAt: "2026-09-12T08:00:06Z" }, active: true };
+  await boot(page, { server });
+  await expect(page.getByText("Klient Juraj", { exact: true })).toBeVisible();
+  let release: (() => Promise<void>) | undefined;
+  await page.route("https://handoff.test/api/public/handoffs/commands", async route => {
+    const command = route.request().postDataJSON();
+    await new Promise<void>(resolve => { release = async () => { await route.fulfill({ json: { handoff: { ...server.grant, revision: 2, status: "accepted" }, commandId: command.commandId, committedRevision: 2 } }); resolve(); }; });
+  });
+  await page.getByRole("button", { name: "Prijať prípad" }).click();
+  await expect.poll(() => Boolean(release)).toBe(true);
+  await page.clock.runFor(7_000);
+  await expect(page.getByRole("alert")).toContainText("Platnosť odkazu skončila");
+  await release!();
+  await expect(page.getByText("Klient Juraj", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Vyrážam na cestu" })).toHaveCount(0);
+});
+
+
+test("a hide and return within the read cooldown re-arms both refresh and the next poll", async ({ page }) => {
+  const trace = await boot(page, { frozen: true });
+  await page.clock.runFor(250);
+  await expect(page.getByText("Klient Juraj", { exact: true })).toBeVisible();
+  trace.server.grant = { ...trace.server.grant, publishedVersion: 2 };
+  // The clock stays frozen at the successful exchange, deterministically inside 500 ms.
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    for (let i = 0; i < 20; i++) { window.dispatchEvent(new Event("focus")); window.dispatchEvent(new Event("online")); }
+  });
+  await page.clock.runFor(750);
+  await expect(page.getByText(/verzia údajov 2/)).toBeVisible();
+  expect(trace.reads).toHaveLength(1);
+  trace.server.grant = { ...trace.server.grant, publishedVersion: 3 };
+  await page.clock.runFor(33_100);
+  await expect(page.getByText(/verzia údajov 3/)).toBeVisible();
+  expect(trace.reads).toHaveLength(2);
+  expect(trace.sessions).toHaveLength(1);
+  expect(trace.decisions).toHaveLength(0);
+});
+
+test("focus and online bursts while a command pauses reading do not lose the post-command timer", async ({ page }) => {
+  const trace = await boot(page);
+  await expect(page.getByText("Klient Juraj", { exact: true })).toBeVisible();
+  let release: (() => Promise<void>) | undefined;
+  await page.route("https://handoff.test/api/public/handoffs/commands", async route => {
+    const command = route.request().postDataJSON();
+    await new Promise<void>(resolve => { release = async () => {
+      trace.server.grant = { ...trace.server.grant, status: "accepted", revision: 2 };
+      await route.fulfill({ json: { handoff: trace.server.grant, commandId: command.commandId, committedRevision: 2 } }); resolve();
+    }; });
+  });
+  await page.getByRole("button", { name: "Prijať prípad" }).click();
+  await expect.poll(() => Boolean(release)).toBe(true);
+  await page.evaluate(() => { for (let i = 0; i < 20; i++) { window.dispatchEvent(new Event("focus")); window.dispatchEvent(new Event("online")); document.dispatchEvent(new Event("visibilitychange")); } });
+  await page.clock.runFor(1000);
+  expect(trace.reads).toHaveLength(0);
+  await release!();
+  await expect(page.getByRole("button", { name: "Vyrážam na cestu" })).toBeVisible();
+  trace.server.grant = { ...trace.server.grant, publishedVersion: 2 };
+  await page.clock.runFor(33_100);
+  await expect(page.getByText(/verzia údajov 2/)).toBeVisible();
+  expect(trace.reads).toHaveLength(1);
+  await page.clock.runFor(33_100);
+  await expect.poll(() => trace.reads.length).toBe(2);
+  expect(trace.sessions).toHaveLength(1);
 });

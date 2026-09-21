@@ -14,6 +14,7 @@ type Props = {
   editor: DirectoryEditor;
   entries: DirectoryEntry[];
   canEdit: boolean;
+  accessHidden?: boolean;
   onClose: () => void;
   onEdit: (entry: DirectoryEntry) => void;
   onOpen: (entry: DirectoryEntry) => void;
@@ -23,7 +24,7 @@ type Props = {
 };
 const inputClass = "min-h-11 w-full min-w-0 rounded-lg border border-zinc-200 bg-white px-3 py-2.5 text-base text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-100 disabled:bg-zinc-50 disabled:text-zinc-500 sm:text-sm";
 
-export function DirectoryEntryDialog({ editor, entries, canEdit, onClose, onEdit, onOpen, onNewContact, onSave, onDial }: Props) {
+export function DirectoryEntryDialog({ editor, entries, canEdit, accessHidden = false, onClose, onEdit, onOpen, onNewContact, onSave, onDial }: Props) {
   const entry = editor.mode === "create" ? undefined : editor.entry;
   const viewing = editor.mode === "view";
   const [initial] = useState<DirectoryDraft>(() => entry ? directoryDraft(entry) : { ...emptyDirectoryDraft(editor.mode === "create" ? editor.kind : "company"), ...(editor.mode === "create" && editor.owner ? { role: editor.owner.kind === "branch" ? "branch" as const : editor.owner.kind === "assistance" ? "assistance" as const : "partner" as const } : {}) });
@@ -39,13 +40,14 @@ export function DirectoryEntryDialog({ editor, entries, canEdit, onClose, onEdit
   const title = viewing ? entry!.name : editor.mode === "create" ? "Nový záznam" : `Upraviť: ${entry!.name}`;
 
   useEffect(() => {
+    if (accessHidden) return;
     const node = dialog.current;
     const focused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const overflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     node?.showModal();
     return () => { node?.close(); document.body.style.overflow = overflow; if (focused?.isConnected) focused.focus(); };
-  }, []);
+  }, [accessHidden]);
   useEffect(() => {
     if (!dirty) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
@@ -55,7 +57,7 @@ export function DirectoryEntryDialog({ editor, entries, canEdit, onClose, onEdit
 
   function close() { if (!busy) { if (dirty) setDiscard(true); else onClose(); } }
   async function submit(next = draft) {
-    if (busy) return;
+    if (busy || accessHidden || !canEdit) return;
     setBusy(true); setError(null);
     try { await onSave(next, entry); }
     catch (caught) { setError(caught instanceof Error ? caught.message : "Záznam sa nepodarilo uložiť."); }
@@ -63,7 +65,7 @@ export function DirectoryEntryDialog({ editor, entries, canEdit, onClose, onEdit
   }
 
   return (
-    <dialog ref={dialog} aria-labelledby={titleId} onCancel={event => { event.preventDefault(); close(); }} onClick={event => { if (event.target === event.currentTarget) close(); }} className="fixed inset-y-0 left-auto right-0 m-0 h-dvh max-h-dvh w-full max-w-[640px] border-0 bg-white p-0 text-zinc-900 shadow-2xl backdrop:bg-zinc-950/35">
+    <dialog ref={dialog} hidden={accessHidden} inert={accessHidden} aria-labelledby={titleId} onCancel={event => { event.preventDefault(); close(); }} onClick={event => { if (event.target === event.currentTarget) close(); }} className="fixed inset-y-0 left-auto right-0 m-0 h-dvh max-h-dvh w-full max-w-[640px] border-0 bg-white p-0 text-zinc-900 shadow-2xl backdrop:bg-zinc-950/35">
       <div className="flex h-full min-h-0 flex-col" onClick={event => event.stopPropagation()}>
         <header className="flex shrink-0 items-start justify-between gap-4 border-b border-zinc-200 px-5 py-5 sm:px-7">
           <div className="min-w-0"><div className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-500"><BookUser size={14} />Adresár<span>/</span>{DIRECTORY_LABELS[draft.kind]}</div><h2 id={titleId} className="break-words text-xl font-bold tracking-tight">{title}</h2>{editor.mode === "create" && editor.owner && <p className="mt-1 text-sm text-zinc-500">Kontaktná osoba pre {editor.owner.name}</p>}</div>
@@ -72,7 +74,7 @@ export function DirectoryEntryDialog({ editor, entries, canEdit, onClose, onEdit
         {discard && <div role="alert" className="shrink-0 border-b border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><p className="font-semibold">Máte neuložené zmeny.</p><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => setDiscard(false)} className="min-h-10 rounded-lg border border-amber-300 bg-white px-3 font-medium">Pokračovať v úprave</button><button type="button" onClick={onClose} className="min-h-10 rounded-lg px-3 font-medium underline">Zahodiť zmeny</button></div></div>}
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 sm:p-7">
           {viewing && entry ? <EntryDetails entry={entry} entries={entries} canEdit={canEdit} onOpen={onOpen} onEdit={onEdit} onNewContact={onNewContact} onDial={onDial ? async phone => { await onDial(phone); onClose(); } : undefined} /> : <form id={formId} onSubmit={event => { event.preventDefault(); void submit(); }}>
-            <fieldset disabled={busy} className="min-w-0 space-y-6">
+            <fieldset disabled={busy || !canEdit} className="min-w-0 space-y-6">
               {editor.mode === "create" && !editor.owner && <div><p className="mb-2 text-xs font-semibold text-zinc-500">Čo chcete pridať?</p><div className="grid grid-cols-2 gap-2">{DIRECTORY_KINDS.map(kind => <button type="button" key={kind} aria-pressed={draft.kind === kind} onClick={() => { setDraft({ ...emptyDirectoryDraft(kind), name: draft.name, phone: draft.phone, email: draft.email, note: draft.note }); setError(null); }} className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${draft.kind === kind ? "border-yellow-400 bg-yellow-50 text-zinc-950 ring-1 ring-yellow-400" : "border-zinc-200 text-zinc-500 hover:bg-zinc-50"}`}>{DIRECTORY_LABELS[kind]}</button>)}</div></div>}
               <div className="space-y-4">
                 <TextField label={draft.kind === "contact" ? "Meno a priezvisko" : "Názov"} value={draft.name} onChange={name => setDraft({ ...draft, name })} required maxLength={180} placeholder={draft.kind === "contact" ? "Napr. Ján Novák" : draft.kind === "branch" ? "Napr. Pobočka Žilina" : "Názov spoločnosti"} />
@@ -92,7 +94,7 @@ export function DirectoryEntryDialog({ editor, entries, canEdit, onClose, onEdit
           {error && <p role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p>}
           {archiveConfirm && entry && <div role="alert" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><p>Archivovať {entry.name}? Záznam ostane v histórii a môžete ho neskôr obnoviť.</p><div className="mt-2 flex gap-2"><button type="button" disabled={busy} onClick={() => void submit({ ...directoryDraft(entry), active: false })} className="min-h-10 rounded-lg bg-zinc-900 px-3 font-semibold text-white">{busy ? "Archivujem…" : "Archivovať"}</button><button type="button" disabled={busy} onClick={() => setArchiveConfirm(false)} className="min-h-10 px-3 font-medium">Ponechať aktívny</button></div></div>}
           <div className="flex flex-wrap items-center justify-between gap-3">
-            {viewing && entry ? <><div>{canEdit && (entry.kind === "company" || entry.kind === "assistance") && <button type="button" disabled={busy} onClick={() => entry.active ? setArchiveConfirm(true) : void submit({ ...directoryDraft(entry), active: true })} className="inline-flex min-h-11 items-center gap-2 rounded-lg px-2 text-sm font-medium text-zinc-500 hover:bg-zinc-200 disabled:opacity-50">{entry.active ? <Archive size={16} /> : <RotateCcw size={16} />}{entry.active ? "Do archívu" : "Obnoviť z archívu"}</button>}</div>{canEdit ? <button type="button" disabled={busy} onClick={() => onEdit(entry)} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-[#FCD703] px-5 text-sm font-semibold text-zinc-950 hover:bg-yellow-400 disabled:opacity-50"><Edit3 size={16} />Upraviť záznam</button> : <button type="button" onClick={close} className="min-h-11 rounded-lg border border-zinc-200 bg-white px-5 text-sm font-semibold">Zavrieť</button>}</> : <><button type="button" disabled={busy} onClick={close} className="min-h-11 rounded-lg border border-zinc-200 bg-white px-4 text-sm font-semibold text-zinc-700">Zrušiť</button><button type="submit" form={formId} disabled={busy || !draft.name.trim() || (draft.kind === "contact" && !draft.phone.trim() && !draft.email.trim()) || (draft.kind === "branch" && !entry && !draft.location)} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-[#FCD703] px-5 text-sm font-semibold text-zinc-950 hover:bg-yellow-400 disabled:bg-zinc-200 disabled:text-zinc-500">{busy ? <Loader2 size={17} className="animate-spin" /> : <Save size={17} />}{busy ? "Ukladám…" : "Uložiť záznam"}</button></>}
+            {viewing && entry ? <><div>{canEdit && (entry.kind === "company" || entry.kind === "assistance") && <button type="button" disabled={busy} onClick={() => entry.active ? setArchiveConfirm(true) : void submit({ ...directoryDraft(entry), active: true })} className="inline-flex min-h-11 items-center gap-2 rounded-lg px-2 text-sm font-medium text-zinc-500 hover:bg-zinc-200 disabled:opacity-50">{entry.active ? <Archive size={16} /> : <RotateCcw size={16} />}{entry.active ? "Do archívu" : "Obnoviť z archívu"}</button>}</div>{canEdit ? <button type="button" disabled={busy} onClick={() => onEdit(entry)} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-[#FCD703] px-5 text-sm font-semibold text-zinc-950 hover:bg-yellow-400 disabled:opacity-50"><Edit3 size={16} />Upraviť záznam</button> : <button type="button" onClick={close} className="min-h-11 rounded-lg border border-zinc-200 bg-white px-5 text-sm font-semibold">Zavrieť</button>}</> : <><button type="button" disabled={busy} onClick={close} className="min-h-11 rounded-lg border border-zinc-200 bg-white px-4 text-sm font-semibold text-zinc-700">Zrušiť</button><button type="submit" form={formId} disabled={busy || !canEdit || !draft.name.trim() || (draft.kind === "contact" && !draft.phone.trim() && !draft.email.trim()) || (draft.kind === "branch" && !entry && !draft.location)} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-[#FCD703] px-5 text-sm font-semibold text-zinc-950 hover:bg-yellow-400 disabled:bg-zinc-200 disabled:text-zinc-500">{busy ? <Loader2 size={17} className="animate-spin" /> : <Save size={17} />}{busy ? "Ukladám…" : "Uložiť záznam"}</button></>}
           </div>
         </footer>
       </div>

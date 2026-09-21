@@ -1,9 +1,10 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Copy, Link2, MessageSquareText, RefreshCw, Send, ShieldCheck } from "lucide-react";
 import { isHandoffReceipt, handoffEventLabels, handoffIsActive, handoffLabels, type CaseHandoff, type HandoffCommand, type HandoffContext, type HandoffReceipt } from "@/domain/case-handoff";
 import { HandoffSummary } from "./HandoffSummary";
 import { SmsComposerDialog } from "./SmsComposerDialog";
+import { readHandoff, useHandoffRead } from "./use-handoff-read";
 import "./case-handoff.css";
 
 export function CaseHandoffPanel(props: { caseId: string; caseNumber: string; active?: boolean }) {
@@ -16,43 +17,42 @@ function CaseHandoffSession({ caseId, caseNumber, active = true }: { caseId: str
   const [link, setLink] = useState<{ id: string; url: string; phone: string; name: string } | null>(null), [smsOpen, setSmsOpen] = useState(false);
 const [smsIntent, setSmsIntent] = useState<{ phone: string; message: string } | null>(null);
   const inFlight = useRef(false), detailsDirty = useRef(false), sectionRef = useRef<HTMLElement>(null);
-  const load = useCallback(async () => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setBusy(true); setError("");
-    try {
-      const response = await fetch(`/api/cases/${encodeURIComponent(caseId)}/handoffs`, { cache: "no-store", signal: AbortSignal.timeout(20_000) });
-      const data = await response.json();
-      if (!response.ok) { if ([401, 403, 404].includes(response.status)) { setContext(null); setLink(null); } throw new Error(data.error || "Odovzdania sa nepodarilo načítať."); }
+  const reader = useHandoffRead({
+    enabled: active && expanded,
+    read: signal => readHandoff<HandoffContext>(`/api/cases/${encodeURIComponent(caseId)}/handoffs`, signal),
+    accept: data => {
       setContext(data);
-      const activeGrant = (data as HandoffContext).handoffs.find(handoffIsActive);
+      const activeGrant = data.handoffs.find(handoffIsActive);
       if (!detailsDirty.current) {
         setInstructions(activeGrant?.published?.instructions || "");
         const value = activeGrant?.published?.scheduledAt;
         if (value) { const date = new Date(value); setScheduled(new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)); } else setScheduled("");
       }
-    } catch (caught) { setError(caught instanceof Error ? caught.message : "Odovzdania sa nepodarilo načítať."); }
-    finally { inFlight.current = false; setBusy(false); }
-  }, [caseId]);
-  useEffect(() => { if (!active || !expanded) return; const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [active, expanded, load]);
+      // An inactive grant must not keep offering a cached bearer link.
+      setLink(current => current && data.handoffs.some(grant => grant.id === current.id && handoffIsActive(grant)) ? current : null);
+    },
+    onDenied: () => { setContext(null); setLink(null); setSmsOpen(false); setSmsIntent(null); },
+  });
   useEffect(() => {
     if (!pending) return;
     const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); };
     window.addEventListener("beforeunload", guard); return () => window.removeEventListener("beforeunload", guard);
   }, [pending]);
   async function command(action: string, grant?: CaseHandoff) {
-    if (!context || inFlight.current) return;
+    if (!context || inFlight.current || reader.halted) return;
     const payload: HandoffCommand = pending ?? {
       action, commandId: crypto.randomUUID(), ...(grant ? { handoffId: grant.id, expectedRevision: grant.revision } : {}),
       ...(["issue", "publish"].includes(action) ? { previewVersion: context.previewVersion, instructions, scheduledAt: scheduled ? new Date(scheduled).toISOString() : null } : {}),
       ...(action === "issue" ? { recipientName: name, recipientPhone: phone } : {}), ...(["issue", "renew"].includes(action) ? { hours } : {}), ...(action === "revoke" ? { comment } : {}),
     };
+    reader.pause();
     setPending(payload); inFlight.current = true; setBusy(true); setError(""); setNotice("");
     if (["issue", "renew", "revoke"].includes(payload.action)) setLink(null);
     try {
       const response = await fetch(`/api/cases/${encodeURIComponent(caseId)}/handoffs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(20_000) });
-      const data = await response.json() as HandoffReceipt & { error?: string };
-      if (!response.ok) { if ([401, 403, 404].includes(response.status)) { setContext(null); setLink(null); setSmsOpen(false); } if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) setPending(null); throw new Error(data.error || "Zmenu sa nepodarilo potvrdiť."); }
+      const data = await response.json().catch(() => ({})) as HandoffReceipt & { error?: string };
+      if (!response.ok) { if ([401, 403, 404, 410].includes(response.status)) reader.stop(); if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) setPending(null); throw new Error(data.error || "Zmenu sa nepodarilo potvrdiť."); }
+      if (reader.isHalted()) return;
       if (!isHandoffReceipt(data, payload)) throw new Error("Potvrdenie sa nepodarilo overiť. Zopakujte tú istú požiadavku.");
       setPending(null); setContext(current => current ? { ...current, handoffs: [data.handoff, ...current.handoffs.filter(item => item.id !== data.handoff.id)] } : current);
       if (["issue", "publish"].includes(payload.action)) detailsDirty.current = false;
@@ -60,7 +60,7 @@ const [smsIntent, setSmsIntent] = useState<{ phone: string; message: string } | 
       if (data.url) { setLink({ id: data.handoff.id, url: data.url, phone: data.handoff.recipientPhone || phone, name: data.handoff.recipientName }); setNotice("Odkaz je pripravený. Môžete ho skopírovať alebo otvoriť SMS pre kolegu."); }
       else setNotice(["issue", "renew"].includes(payload.action) ? "Odovzdanie je uložené. Tajný odkaz sa z prvej odpovede nepodarilo obnoviť; použite Obnoviť odkaz." : "Zmena odovzdania je uložená.");
     } catch (caught) { setError(caught instanceof Error ? caught.message : "Výsledok nie je overený. Zopakujte tú istú požiadavku."); }
-    finally { inFlight.current = false; setBusy(false); }
+    finally { inFlight.current = false; setBusy(false); reader.resume(); }
   }
   const current = context?.handoffs.find(handoffIsActive);
   const disabled = busy || !!pending;
@@ -84,8 +84,10 @@ const [smsIntent, setSmsIntent] = useState<{ phone: string; message: string } | 
         </article>)}
       </>}
       {notice && <p role="status" className="handoff-notice">{notice}</p>}{error && <p role="alert" className="handoff-error">{error}</p>}
-      {pending ? <button type="button" disabled={busy} onClick={() => void command(pending.action)}>{busy ? "Overujem výsledok…" : "Overiť výsledok tej istej požiadavky"}</button> : <button type="button" className="handoff-refresh" disabled={busy} onClick={() => void load()}><RefreshCw size={14} />{busy ? "Načítavam…" : "Obnoviť odovzdania"}</button>}
+      {reader.loading && !context && <p role="status">Načítavam odovzdania…</p>}
+      {reader.error && <p role="alert" className="handoff-error">{reader.error}{!reader.halted && <button type="button" disabled={reader.loading || busy} onClick={reader.retry}>Skúsiť znova načítať</button>}</p>}
+      {pending && !reader.halted && <button type="button" disabled={busy} onClick={() => void command(pending.action)}>{busy ? "Overujem výsledok…" : "Overiť výsledok tej istej požiadavky"}</button>}
     </div>
-    <SmsComposerDialog externalRecipientLabel={`SMS pre kolegu · ${caseNumber}`} initialPhone={smsIntent?.phone ?? ""} initialMessage={smsIntent?.message ?? ""} initialTemplate="custom" open={smsOpen} onClose={() => setSmsOpen(false)} />
+    {!reader.halted && <SmsComposerDialog externalRecipientLabel={`SMS pre kolegu · ${caseNumber}`} initialPhone={smsIntent?.phone ?? ""} initialMessage={smsIntent?.message ?? ""} initialTemplate="custom" open={smsOpen} onClose={() => setSmsOpen(false)} />}
   </section>;
 }
