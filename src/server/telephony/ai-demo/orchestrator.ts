@@ -505,7 +505,7 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
     // A socket that dies mid-call must not hand back the guesses already made.
     if (gate === undefined) gate = await gatePromise.catch(() => null);
     await flushVerification(deps, gate, null);
-    await transitionAttempt(deps.admin, attempt.id, ["bridged"], { state: "talking", greeting_status: "failed", talking_at: nowOf(deps).toISOString() });
+    await transitionAttempt(deps.admin, attempt.id, ["bridged", "talking"], { state: "talking", greeting_status: "failed", talking_at: nowOf(deps).toISOString() });
     return;
   }
 
@@ -519,7 +519,9 @@ export async function runGreetingAndFinish(deps: AiDemoDeps, attemptId: string, 
   const bridgedMs = attempt.bridged_at ? Date.parse(attempt.bridged_at) : null;
   const finishedAt = (offset: number | null): string | null => (offset === null || bridgedMs === null ? null : new Date(bridgedMs + offset).toISOString());
 
-  await transitionAttempt(deps.admin, attempt.id, ["bridged"], {
+  // `talking` is accepted as well: a checkpoint may already have moved it there
+  // the moment she started speaking.
+  await transitionAttempt(deps.admin, attempt.id, ["bridged", "talking"], {
     state: "talking",
     talking_at: nowOf(deps).toISOString(),
     greeting_status: result.status,
@@ -565,6 +567,25 @@ async function savePartial(deps: AiDemoDeps, attempt: AiDemoAttempt, result: Gre
     });
   } catch (error) {
     deps.logger?.({ level: "warn", scope: "ai-demo", attemptId: attempt.id, message: "checkpoint failed", error: error instanceof Error ? error.message : String(error) });
+  }
+
+  // Once she has spoken, the call is a conversation and the row has to say so.
+  //
+  // `bridged` used to hold for the entire call, because only the finished probe
+  // moved it on — and the cron ends a `bridged` attempt after thirty seconds,
+  // on the assumption that a probe which has not reported is a probe that died.
+  // The result was that the cleanup job hung up healthy conversations mid
+  // sentence, which is exactly what it exists to prevent.
+  if (result.firstDeltaMs !== null) {
+    try {
+      await transitionAttempt(deps.admin, attempt.id, ["bridged"], {
+        state: "talking",
+        talking_at: nowOf(deps).toISOString(),
+        greeting_status: "heard_started",
+      });
+    } catch {
+      // A checkpoint is bookkeeping; failing one is not worth ending a call.
+    }
   }
 }
 
