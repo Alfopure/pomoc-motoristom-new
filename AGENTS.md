@@ -8,7 +8,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 This repository **is** the dispatch application. It was once a side copy built to try Telnyx without disturbing the VIPTel original; on 2026-09-21 the owner retired that original and moved the production hostname here.
 
-It has its own Supabase project (Frankfurt) and its own Vercel project (region `fra1`).
+It has separate production and test Supabase projects (Frankfurt) and its own Vercel project (region `fra1`).
 
 Prefer the custom domain over any `*.vercel.app` address when configuring
 anything external — a webhook, a callback, a bookmark. Renaming a Vercel
@@ -19,9 +19,13 @@ pointed at the old one; a custom domain survives the rename.
 
 | | |
 |---|---|
-| Supabase | `ifpaeegaesdmljfkdvcn` |
+| Supabase production (`main`) | `ifpaeegaesdmljfkdvcn` |
+| Supabase test (Preview and `dev`) | `nzpnqdstvkfncflgqlny` — Free organization `AlfoSystems` (`rwhghkvusmdnaexjvrum`) |
 | Vercel | `pomoc-motoristom-dispatching` (`fra1`) |
 | Hostnames | **`dispecing.linkapomoci.sk`** (production), `dispecing-test.vercel.app` |
+| Current `dev` branch alias | `pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app` |
+
+Despite its name, `dispecing-test.vercel.app` is a production alias, not the isolated test environment. No custom test domain is currently configured; use the verified `dev` branch alias for testing and do not register real provider webhooks against it.
 
 `dispecing.linkapomoci.sk` belongs here. An earlier version of this file forbade touching it, which was correct while the original served it and is wrong now — the hostname moved with the owner's explicit instruction. If an agent reports it as an unexpected alias, that report is out of date, not the configuration.
 
@@ -40,5 +44,6 @@ Use the dev-first deployment workflow:
 5. After merge, verify the `dev` branch alias of this Vercel project.
 6. Release production only through a pull request from `dev` into `main`. The production domain is `https://dispecing.linkapomoci.sk`.
    **Never publish by redeploying an older deployment.** `vercel redeploy <url>` rebuilds *that deployment's source*, not current `main` — on 2026-09-21 this silently rolled production back three commits while picking up an environment variable. To apply new environment variables, deploy `main` afresh.
-7. Telephony (Telnyx) Supabase migrations and seed changes are in scope for this copy, but apply them only when the user explicitly requests it and only against this copy's Supabase project. Do not deploy workers, schedulers, or listeners. The single allowed Vercel cron is `*/5 * * * *` -> `/api/telephony/cron` guarded by `CRON_SECRET`.
-8. Development and Preview deployments use this copy's Supabase project, so every write is real for everyone testing on it.
+7. Telephony (Telnyx) Supabase migrations and seed changes are in scope for this application, but apply them only when the user explicitly requests them and only against the explicitly authorized project: test `nzpnqdstvkfncflgqlny` or production `ifpaeegaesdmljfkdvcn`. Authorization to change test does not authorize production changes. Do not apply seed data on top of a copied snapshot. Do not deploy workers, schedulers, or listeners. The single allowed Vercel cron is `*/5 * * * *` -> `/api/telephony/cron` guarded by `CRON_SECRET`.
+8. Newly built Preview deployments, including the `dev` branch, use test Supabase `nzpnqdstvkfncflgqlny`; production (`main`) uses `ifpaeegaesdmljfkdvcn`. The Vercel Development target was not changed by this isolation work: local developers must explicitly use test credentials and verify their effective project before writing. Test data is shared by all Preview branches. Existing deployment URLs retain their original environment until replaced; do not assume an old Preview is isolated.
+9. The Free test project may pause after 7 days of low activity and requires manual restoration in the Supabase Dashboard. Follow [the test-environment runbook](docs/operations/test-environment.md) for restoration and data refresh. Keep live calls, SMS, email, AI and external integrations disabled in test; do not reconnect Preview to production as a fallback when test is unavailable.
