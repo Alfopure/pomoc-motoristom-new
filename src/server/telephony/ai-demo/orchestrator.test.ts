@@ -821,3 +821,46 @@ describe("reading the caller's case", () => {
     expect(rows).toHaveLength(0);
   });
 });
+
+describe("a conversation in progress must not look abandoned", () => {
+  it("leaves `bridged` as soon as she speaks, so the cleanup job does not hang up a live call", async () => {
+    // The cleanup job ends a `bridged` attempt after thirty seconds, because a
+    // probe that has not reported is assumed dead. Only the *finished* probe
+    // used to move the state on, so a five-minute conversation sat in
+    // `bridged` the whole time and the cron cut it off mid sentence.
+    const f = fixture({ AI_DEMO_STORE_TRANSCRIPT: "true" });
+    const sideband = createFakeSideband({
+      onInstructions: [
+        { delayMs: 5, event: { type: "session.instructions.appended" } },
+        { delayMs: 20, event: { type: "session.output_transcript.delta", delta: "Dobrý deň, tu je Veronika." } },
+      ],
+    });
+    const deps: AiDemoDeps = {
+      ...f.deps,
+      webSocketFactory: sideband.factory,
+      probeLimits: { ...FAST_PROBE, probeWindowMs: 700, probeCheckpointMs: 60, keepTranscript: true },
+    };
+
+    const { attempt } = await start(f);
+    await transitionAttempt(f.deps.admin, attempt.id, ["sip_dialing"], {
+      state: "bridged", openai_session_id: "live_running",
+      telnyx_mobile_call_control_id: "cc-mobile", telnyx_sip_call_control_id: "cc-sip",
+      bridged_at: new Date(Date.now() - 60_000).toISOString(), greeting_status: "requested",
+    });
+
+    const { runGreetingAndFinish } = await import("./orchestrator");
+    await runGreetingAndFinish(deps, attempt.id);
+
+    const row = await loadAttempt(f.deps.admin, ORG, attempt.id);
+    expect(row?.state).toBe("talking");
+    expect(row?.talking_at).toBeTruthy();
+  });
+
+  it("still records the final greeting status after a checkpoint already moved the state", async () => {
+    // The closing transition used to demand `bridged` and would silently do
+    // nothing once a checkpoint had moved the row to `talking`.
+    const { cleanupVerdict } = await import("./orchestrator");
+    const talking = { state: "talking", bridged_at: new Date(Date.now() - 600_000).toISOString(), deadline_at: new Date(Date.now() + 60_000).toISOString() };
+    expect(cleanupVerdict(talking as never, new Date())).toBeNull();
+  });
+});
