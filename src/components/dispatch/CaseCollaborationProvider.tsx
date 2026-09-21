@@ -60,6 +60,8 @@ function Session({ children, actorKey, viewerProfileId, enabled, initialCases, o
 }
 const fallback: CaseCollaborationState = { cases: [], notifications: [], editors: [], available: false, hidden: false, denied: false, stale: false, connected: false, authorizedUntil: 0, error: "" };
 const emptySubscribe = () => () => {};
+/** Status-only consumers subscribe to metadata, not every case snapshot. */
+export function useCaseCollaborationStore() { return useContext(Context)?.store ?? null; }
 export function useCaseCollaboration() {
   const context = useContext(Context);
   const state = useSyncExternalStore(context?.store.subscribe ?? emptySubscribe, context?.store.getSnapshot ?? (() => fallback), () => fallback);
@@ -70,21 +72,13 @@ export function CaseAccessBoundary({ children }: { children: ReactNode }) {
   const { state } = useCaseCollaboration();
   return <>{state.hidden && <p role="status" className="p-3 text-sm text-zinc-600">{state.denied ? "Prístup k prípadom už nie je dostupný." : "Overujem prístup k aktuálnym údajom…"}</p>}<div hidden={state.hidden} style={{ display: state.hidden ? "none" : "contents" }}>{children}</div></>;
 }
-export function CaseCollaborationStatus() {
-  const { state, store } = useCaseCollaboration();
-  if (!state.available || (!state.stale && !state.error)) return null;
-  return <div role="status" className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-900">
-    {state.hidden ? "Prístup sa overuje. Údaje sú dočasne skryté." : "Aktualizácie sa overujú na pozadí."}
-    {state.error && <button type="button" className="ml-2 underline" onClick={() => store?.resume()}>Skúsiť znova</button>}
-  </div>;
-}
 function usePresenceNow() { const [now, setNow] = useState(Date.now); useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(id); }, []); return now; }
 export function CaseDraftActivity() {
   const { state, viewerProfileId } = useCaseCollaboration(); const now = usePresenceNow();
   if (state.hidden) return null;
   const drafts = activeCaseEditors(state.editors, now, null, viewerProfileId);
   return drafts.length ? <div className="space-y-1 border-b border-sky-200 bg-sky-50 p-2" aria-label="Rozpracované nové prípady">
-    {drafts.map(entry => <div key={entry.draftId} className="flex items-center gap-2 text-xs text-sky-900"><span className="size-2 shrink-0 rounded-full bg-sky-500 motion-safe:animate-pulse" aria-hidden="true"/><span><strong>{entry.displayName}</strong> pripravuje nový prípad</span></div>)}
+    {drafts.map(entry => <div key={entry.draftId} className="flex items-center gap-2 text-xs text-sky-900"><span className="size-2 shrink-0 rounded-full bg-sky-500 motion-safe:animate-pulse" aria-hidden="true"/><span><strong>{entry.displayName}</strong> má otvorený návrh prípadu</span></div>)}
   </div> : null;
 }
 export function CaseEditorActivity({ caseId }: { caseId: string }) {
@@ -120,9 +114,12 @@ export function useCaseEditorPresence(caseId: string | null, active = true) {
     void heartbeat(); const timer = window.setInterval(() => void heartbeat(), EDITOR_HEARTBEAT_MS);
     const leave = () => stop();
     const resume = () => { if (!session.current && document.visibilityState === "visible") setResumeSession(value => value + 1); };
+    const visibility = () => { if (document.visibilityState === "visible") resume(); else leave(); };
+    // Existing editors describe visible work; a new draft still describes its existence.
+    if (caseId) document.addEventListener("visibilitychange", visibility);
     window.addEventListener("pagehide", leave);
     window.addEventListener("pageshow", resume);
-    return () => { stopped = true; window.clearInterval(timer); window.removeEventListener("pagehide", leave); window.removeEventListener("pageshow", resume); stop(); };
+    return () => { stopped = true; window.clearInterval(timer); window.removeEventListener("pagehide", leave); window.removeEventListener("pageshow", resume); document.removeEventListener("visibilitychange", visibility); stop(); };
   }, [active, caseId, state.available, state.denied, stop, store, resumeSession]);
   return { sessionId: () => session.current, stop };
 }

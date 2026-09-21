@@ -1,6 +1,7 @@
 import { CASE_ACL_LEASE_MS, CASE_REVALIDATE_MS, type CaseLiveSnapshot, type CaseEditorPresence } from "@/domain/case-collaboration";
 import { compareCaseRevisions } from "@/data/case-detail";
 import type { DispatchCase, DispatchNotification } from "@/domain/types";
+import { EMPTY_CASE_SYNC_SNAPSHOT, type CaseSyncSnapshot } from "./case-sync-status";
 
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 export type CaseCollaborationState = {
@@ -12,6 +13,8 @@ export type CaseCollaborationState = {
 export class CaseCollaborationStore {
   private state: CaseCollaborationState;
   private listeners = new Set<() => void>();
+  private syncState: CaseSyncSnapshot = { ...EMPTY_CASE_SYNC_SNAPSHOT };
+  private syncListeners = new Set<() => void>();
   private versions: Record<string, number> = {};
   private deletedIds = new Set<string>();
   private localEpoch = 0;
@@ -29,7 +32,18 @@ export class CaseCollaborationStore {
   }
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
-  private update(patch: Partial<CaseCollaborationState>) { this.state = { ...this.state, ...patch }; this.listeners.forEach(fn => fn()); }
+  getSyncSnapshot = () => this.syncState;
+  subscribeSync = (listener: () => void) => { this.syncListeners.add(listener); return () => { this.syncListeners.delete(listener); }; };
+  private updateSync(patch: Partial<CaseSyncSnapshot>) {
+    if (Object.entries(patch).every(([key, value]) => this.syncState[key as keyof CaseSyncSnapshot] === value)) return;
+    this.syncState = { ...this.syncState, ...patch }; this.syncListeners.forEach(fn => fn());
+  }
+  private update(patch: Partial<CaseCollaborationState>) {
+    this.state = { ...this.state, ...patch };
+    const { available, hidden, denied, connected, authorizedUntil } = this.state;
+    this.updateSync({ available, hidden, denied, connected, authorizedUntil });
+    this.listeners.forEach(fn => fn());
+  }
   setConnected = (connected: boolean) => { this.update({ connected, stale: !connected || this.state.hidden }); if (connected) this.invalidate(); };
   start = () => { this.running = true; void this.refresh(); };
   stop = () => { this.running = false; this.revoke(); };
@@ -39,6 +53,7 @@ export class CaseCollaborationStore {
     this.versions = {};
     this.deletedIds.clear(); this.localChanges.clear();
     this.update({ cases: [], notifications: [], editors: [], hidden: true, denied: true, stale: true, connected: false, authorizedUntil: 0 });
+    this.updateSync({ inFlight: false, incomplete: false, lastVerifiedAt: null, error: "" });
   };
   /** Expiry hides existing editors without destroying local draft state. */
   checkLease = () => {
@@ -79,6 +94,7 @@ export class CaseCollaborationStore {
     const started = this.now();
     const epoch = this.localEpoch;
     clearTimeout(this.refreshTimer);
+    this.updateSync({ inFlight: true });
     try {
       const response = await this.fetcher("/api/cases/live", { method: "POST", cache: "no-store", credentials: "same-origin",
         headers: { "Content-Type": "application/json" }, body: JSON.stringify({ versions: this.versions }),
@@ -91,7 +107,8 @@ export class CaseCollaborationStore {
       // Compatibility before the additive migration. Never downgrade after activation.
       if (!snapshot.available) {
         if (this.state.available === true) throw new Error("Aktualizácie sú dočasne nedostupné.");
-        this.update({ available: false, hidden: false, stale: false }); return;
+        this.update({ available: false, hidden: false, stale: false });
+        this.updateSync({ incomplete: false, lastVerifiedAt: null, error: "" }); return;
       }
       const changes = new Map(snapshot.changes.map(item => [item.id, item]));
       const allowed = new Set(snapshot.ids);
@@ -105,12 +122,18 @@ export class CaseCollaborationStore {
       const authorizedUntil = started + CASE_ACL_LEASE_MS;
       this.update({ cases, notifications: snapshot.notifications, editors: snapshot.editors, available: true,
         authorizedUntil, hidden: this.now() >= authorizedUntil, denied: false, stale: !this.state.connected, error: "" });
+      this.updateSync({ incomplete: snapshot.more,
+        ...(!snapshot.more ? { error: "", ...(this.now() < authorizedUntil ? { lastVerifiedAt: this.now() } : {}) } : {}) });
       clearTimeout(this.leaseTimer);
       this.leaseTimer = setTimeout(this.checkLease, Math.max(0, authorizedUntil - this.now()));
       if (snapshot.more) this.again = true;
     } catch {
-      if (generation === this.generation && !controller.signal.aborted) { this.checkLease(); this.update({ stale: true, error: "Spojenie sa obnovuje. Zobrazujú sa posledné overené údaje." }); }
+      if (generation === this.generation && !controller.signal.aborted) {
+        this.checkLease(); this.update({ stale: true, error: "Spojenie sa obnovuje. Zobrazujú sa posledné overené údaje." });
+        this.updateSync({ error: this.state.error });
+      }
     } finally {
+      if (generation === this.generation) this.updateSync({ inFlight: false });
       if (generation === this.generation && this.running && !this.state.denied) this.refreshTimer = setTimeout(() => void this.refresh(), CASE_REVALIDATE_MS);
       if (this.controller === controller) this.controller = null;
     }
