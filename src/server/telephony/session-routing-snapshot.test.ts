@@ -17,6 +17,9 @@ afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.useRealTimers(); 
 
 async function prepared(options: { hours?: boolean; to?: string; now?: string } = {}) {
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+  // This baseline measures recording-disabled routing. Vercel's build process
+  // inherits project env flags; policy-enabled cases explicitly opt back in.
+  for (const key of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED"]) vi.stubEnv(key, "false");
   const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false, now: options.now });
   h.db.update("motorist_telephony_lines", {
     metadata: { announcements: defaultAnnouncementConfig() },
@@ -257,6 +260,18 @@ describe("fresh initial inbound routing snapshot", () => {
     expect(context.recordingPolicy?.enabled).toBe(true);
     expect(input.h.db.log.filter(row => row.table === "motorist_call_recording_policies")).toHaveLength(1);
     expect(input.h.db.log.some(row => row.table === "motorist_ring_plans")).toBe(true);
+  });
+
+  it("retains the separate policy read when recording is enabled in env but disabled by policy", async () => {
+    const input = await prepared();
+    for (const key of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED"]) vi.stubEnv(key, "true");
+    input.h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: false, approved_at: input.h.now().toISOString(), inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
+    input.h.db.log.length = 0;
+    await loadRoutingContext(input.h.deps, input.session);
+    expect(contextReads(input.h)).toHaveLength(15);
+    expect((await parity(input)).recordingPolicy?.enabled).toBe(false);
+    expect(contextReads(input.h)).toHaveLength(7);
+    expect(input.h.db.log.filter(row => row.table === "motorist_call_recording_policies")).toHaveLength(1);
   });
 
   it.each(["gather", "announcement_sequence", "recording_barrier", "pending_effects", "unknown_customer", "contract_one"])("keeps %s on the original reader", async kind => {
