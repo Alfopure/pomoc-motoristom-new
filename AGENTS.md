@@ -10,19 +10,24 @@ This repository **is** the dispatch application. It was once a side copy built t
 
 It has its own Supabase project (Frankfurt) and its own Vercel project (region `fra1`).
 
+Prefer the custom domain over any `*.vercel.app` address when configuring
+anything external — a webhook, a callback, a bookmark. Renaming a Vercel
+project changes its generated `*.vercel.app` alias and silently breaks whatever
+pointed at the old one; a custom domain survives the rename.
+
 ### What this project owns
 
 | | |
 |---|---|
 | Supabase | `ifpaeegaesdmljfkdvcn` |
-| Vercel | `pomoc-motoristom-new` (`fra1`) |
-| Hostnames | **`dispecing.linkapomoci.sk`**, `dispecing-test.vercel.app`, `pomoc-motoristom-new.vercel.app` |
+| Vercel | `pomoc-motoristom-dispatching` (`fra1`) |
+| Hostnames | **`dispecing.linkapomoci.sk`** (production), `dispecing-test.vercel.app` |
 
 `dispecing.linkapomoci.sk` belongs here. An earlier version of this file forbade touching it, which was correct while the original served it and is wrong now — the hostname moved with the owner's explicit instruction. If an agent reports it as an unexpected alias, that report is out of date, not the configuration.
 
 ### What this project must never touch
 
-The retired VIPTel original: Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispecing`, `dev.dispecing.linkapomoci.sk`, and the previous telephony provider with its listener host.
+The retired VIPTel original: Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispatching-old`, `dev.dispecing.linkapomoci.sk`, and the previous telephony provider with its listener host.
 
 That Supabase project is **not** dormant. It also holds the Watchdog vehicle-handover application — 10 254 `rental_photos` rows and 10 320 files in storage — so it is somebody's live database, not an old copy waiting to be deleted.
 
