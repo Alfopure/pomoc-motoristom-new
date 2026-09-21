@@ -12,7 +12,7 @@ import {
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/database.types";
 import { resolveDefaultOrganizationId } from "./default-organization";
-import { MutationError } from "./motorist-mutations";
+import { MutationError } from "./mutation-error";
 
 type AdminClient = SupabaseClient<Database>;
 type Tables = Database["public"]["Tables"];
@@ -54,16 +54,21 @@ export type WebdispecinkSyncSummary = {
 };
 
 export async function syncWebdispecinkFleet(input: WebdispecinkSyncInput = {}): Promise<WebdispecinkSyncSummary> {
+  const enabled = process.env.WEBDISPECINK_SYNC_ENABLED?.trim().toLowerCase();
+  if (enabled && ["0", "false", "off", "disabled"].includes(enabled)) {
+    throw new MutationError("WebDispečink sync je vypnutý cez WEBDISPECINK_SYNC_ENABLED.", 503);
+  }
+
   const mode = input.mode ?? "positions";
   validateSyncMode(mode);
 
+  const config = getWebdispecinkConfig();
   const supabase = createSupabaseAdminClient();
   const organizationId = await resolveDefaultOrganizationId();
   const syncedAt = new Date().toISOString();
   let summary: WebdispecinkSyncSummary | null = null;
 
   try {
-    const config = getWebdispecinkConfig();
     const client = createWebdispecinkClient(config);
     await client.login();
 

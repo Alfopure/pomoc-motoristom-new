@@ -127,6 +127,7 @@ Všetky nasledujúce hodnoty patria do Vercel cieľa **Preview**, vrátane príp
 | `SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | príslušné verejné kľúče testovacieho projektu |
 | `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_SECRET_KEY` | príslušné serverové kľúče testovacieho projektu |
 | `TELNYX_LIVE_CALLS_ENABLED`, `TELNYX_SMS_LIVE_SENDS` | `false` |
+| `WEBDISPECINK_SYNC_ENABLED` | `false`; platí aj pre obnovu vozidiel vyvolanú používateľským rozhraním |
 | `AI_DEMO_ENABLED` | vypnuté alebo nenastavené |
 | `MOTORIST_DEV_AUTH_BYPASS` | `false` |
 
