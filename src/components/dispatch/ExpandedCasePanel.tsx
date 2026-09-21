@@ -12,6 +12,7 @@ import styles from "./case-detail.module.css";
 import { NewCaseForm, type SaveCaseDraft } from "./NewCaseDrawer";
 
 type ExpandedCasePanelProps = {
+  active?: boolean;
   renderTaskWorkflow?: (taskId: string) => ReactNode;
   assets: FleetAsset[];
   branches: Branch[];
@@ -39,6 +40,7 @@ type ExpandedCasePanelProps = {
 };
 
 export function ExpandedCasePanel({
+  active = true,
   renderTaskWorkflow,
   assets,
   branches,
@@ -114,6 +116,7 @@ export function ExpandedCasePanel({
         ) : caseItem ? (
           <div className={`${styles.scrollRegion} h-full min-w-0 overflow-y-auto overscroll-contain`} data-case-detail-scroll-region>
             <CaseDetail
+              active={active}
               renderTaskWorkflow={renderTaskWorkflow}
               onEditorControlsChange={setEditorControls}
               key={caseItem.id}

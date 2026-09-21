@@ -195,8 +195,12 @@ function deviceDeps(deps: CallActionDeps): DeviceDeps {
 
 async function requireLiveDevice(deps: CallActionDeps, profileId: string, message = "Telefón operátora nie je pripojený."): Promise<DeviceRow & { sipUri: string }> {
   const device = await getOperatorDevice(deviceDeps(deps), { organizationId: deps.organizationId, profileId });
+  return validateLiveDevice(device, nowOf(deps), message);
+}
+
+function validateLiveDevice(device: DeviceRow | null, now: Date, message = "Telefón operátora nie je pripojený."): DeviceRow & { sipUri: string } {
   const sipUri = device ? deviceSipUri(device) : null;
-  if (!device || !sipUri || !deviceIsLive(device, nowOf(deps))) throw new CallActionError(message, 409, "device_offline");
+  if (!device || !sipUri || !deviceIsLive(device, now)) throw new CallActionError(message, 409, "device_offline");
   return { ...device, sipUri };
 }
 
@@ -711,9 +715,18 @@ async function pickupWaitingCallOwned(deps: CallActionDeps, actor: CallActor, se
   if (deps.deviceKind !== "mobile" && !resumingOwnPickup && !canPickUpCall({ state: session.state, direction: session.direction, answered: Boolean(session.answered_at), operatorProfileId: session.answered_by_profile_id })) {
     throw new CallActionError("Hovor už nie je možné prevziať.", 409, "not_waiting");
   }
-  const presence = await deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", session.organization_id).eq("profile_id", actor.profileId).maybeSingle();
+  // Only the raw reads overlap. Settle both to handle an early device failure
+  // while retaining presence-query, device, then presence-admission error order.
+  const [presenceResult, deviceResult] = await Promise.allSettled([
+    deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", session.organization_id).eq("profile_id", actor.profileId).maybeSingle(),
+    getOperatorDevice(deviceDeps(deps), { organizationId: deps.organizationId, profileId: actor.profileId }),
+  ]);
+  if (presenceResult.status === "rejected") throw presenceResult.reason;
+  const presence = presenceResult.value;
   if (presence.error) throw new CallActionError(`Prezenciu sa nepodarilo overiť: ${presence.error.message}`, 500);
-  const device = await requireLiveDevice(deps, actor.profileId);
+  if (deviceResult.status === "rejected") throw deviceResult.reason;
+  // A device read that finished first may have expired during a slow presence read.
+  const device = validateLiveDevice(deviceResult.value, nowOf(deps));
   const continuingOwnership = presence.data?.current_session_id === sessionId && Boolean(presence.data?.pause_return || presence.data?.offer_token);
   // Schema compatibility is independent of new-feature admission. In particular,
   // creation-off still requires availability; it must nevertheless retain the

@@ -1,0 +1,49 @@
+.trigger.trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: #69717e;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+.trigger:hover, .trigger[aria-expanded="true"] { background: #f0f2f5; border-color: #e0e3ea; }
+.trigger:focus-visible, .retry:focus-visible { outline: 2px solid #9b8100; outline-offset: 2px; }
+.trigger[data-state="current"] { color: #17613d; }
+.trigger[data-state="error"], .trigger[data-state="expired"], .trigger[data-state="offline"], .trigger[data-state="denied"] { color: #79500b; }
+.panel {
+  position: fixed;
+  z-index: 2147482900;
+  box-sizing: border-box;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 14px 15px;
+  border: 1px solid #e0e3ea;
+  border-radius: 12px;
+  background: #fcfcfd;
+  color: #242833;
+  box-shadow: 0 8px 24px #24283316, 0 2px 5px #24283309;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.heading { display: block; font-size: 13px; font-weight: 650; }
+.status { display: flex; align-items: flex-start; gap: 8px; margin: 10px 0 4px; font-weight: 550; }
+.status > svg { flex-shrink: 0; margin-top: 1px; }
+.panel[data-state="current"] .status > svg { color: #17613d; }
+.panel[data-state="error"] .status > svg, .panel[data-state="expired"] .status > svg, .panel[data-state="offline"] .status > svg, .panel[data-state="denied"] .status > svg { color: #79500b; }
+.verified { margin: 0; color: #69717e; font-size: 11px; }
+.detail { margin: 10px 0 0; padding-top: 9px; border-top: 1px solid #e0e3ea; color: #69717e; }
+.retry { display: block; min-height: 44px; margin-top: 8px; padding: 6px 10px; border: 1px solid #e0e3ea; border-radius: 7px; background: white; color: #242833; font: inherit; font-weight: 600; cursor: pointer; }
+.retry:disabled { cursor: wait; opacity: .65; }
+.spinning { animation: case-sync-spin 1.1s linear infinite; }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+@media (min-width: 1024px) { .trigger.trigger { width: 36px; height: 36px; } }
+@media (prefers-reduced-motion: reduce) { .spinning { animation: none; } }
+@keyframes case-sync-spin { to { transform: rotate(360deg); } }

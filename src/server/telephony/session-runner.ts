@@ -28,6 +28,7 @@ import {
   DEFAULT_ROUTING_SETTINGS,
   ACTIVE_SESSION_STATES,
   emptyTransition,
+  isOpenLeg,
   readMeta,
   toJson,
   type AttemptRow,
@@ -43,6 +44,7 @@ import {
   type TelephonyEnvironment,
 } from "./state/types";
 import type { TelnyxClient } from "./telnyx/client";
+import type { TelnyxClientState } from "./telnyx/client-state";
 import type { TelnyxConfig } from "./telnyx/env";
 
 /**
@@ -378,7 +380,36 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     ["ring", "pickup", "transfer", "transfer_safe"].includes(event.clientState?.intent ?? "") &&
     Boolean(meta.ring?.plan) && ["ringing", "waiting", "parked"].includes(session.state) &&
     snapshotLegs?.some(leg => leg.telnyx_call_control_id === event.callControlId && leg.role !== "customer");
-  if (answeredOffer) {
+  // Outbound parking has no inbound ring plan. Select the same lean context
+  // only for an exact, persisted pickup; this is not event admission. Early
+  // events and conflicting hints retain the full path's correlation/recovery.
+  const pickupLeg = snapshotLegs?.find(leg => leg.telnyx_call_control_id === (event?.kind === "telnyx" ? event.callControlId : null));
+  const savedPickup = pickupLeg?.client_state as TelnyxClientState | null | undefined;
+  // Outbound setup can leave customer_leg_id unset. The reducer then selects
+  // by role; require exactly one saved customer so that fallback is unambiguous.
+  const customers = snapshotLegs?.filter(leg => leg.role === "customer") ?? [];
+  const pickupCustomer = customers.length === 1 ? customers[0] : undefined;
+  const outboundPickup = noContinuation && session.writer_contract === 2 &&
+    session.direction === "outbound" && ["waiting", "parked"].includes(session.state) &&
+    !session.ended_at && !session.termination_requested_at && !meta.hangup &&
+    !meta.ring?.plan && meta.ring?.mode === "outbound" && Boolean(meta.pickup?.by) &&
+    !session.conference_id && !meta.conference && !meta.consult && !meta.transfer && !meta.queue &&
+    !meta.internal && !meta.party_pending && !meta.supervise &&
+    Boolean(meta.announcements) &&
+    !meta.greeting && !meta.greeting_call_gone_at && !meta.closing_message && !meta.ivr && !meta.callback &&
+    (!meta.gather || meta.gather.spec?.purpose === "moh_tick" && !meta.gather.failed && !meta.gather.call_gone) &&
+    event?.kind === "telnyx" && ["call.answered", "call.bridged"].includes(event.type) &&
+    event.clientState?.sid === session.id && event.clientState.role === "operator" && event.clientState.intent === "pickup" &&
+    pickupLeg?.organization_id === organizationId && pickupLeg.session_id === session.id &&
+    pickupLeg.role === "operator" && isOpenLeg(pickupLeg) && !pickupLeg.answered_at &&
+    pickupLeg.profile_id === meta.pickup?.by && savedPickup?.sid === session.id &&
+    savedPickup.role === "operator" && savedPickup.intent === "pickup" &&
+    savedPickup.operatorId === pickupLeg.profile_id && event.clientState.operatorId === pickupLeg.profile_id &&
+    savedPickup.offerToken === event.clientState.offerToken &&
+    pickupCustomer?.organization_id === organizationId && pickupCustomer.session_id === session.id &&
+    (!session.customer_leg_id || session.customer_leg_id === pickupCustomer.id) &&
+    Boolean(pickupCustomer.telnyx_call_control_id) && isOpenLeg(pickupCustomer);
+  if (answeredOffer || outboundPickup) {
     const settings = await loadRoutingSettings(admin, organizationId);
     const config = deps.config;
     return {

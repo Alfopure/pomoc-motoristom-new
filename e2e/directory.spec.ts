@@ -24,21 +24,30 @@ function fixtures(): DirectoryEntry[] {
 
 test.beforeAll(async () => {
   await mkdir(".context/directory-browser", { recursive: true });
-  const result = await build({ entryPoints: ["e2e/fixtures/directory.tsx"], bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic", define: { "process.env": JSON.stringify({ NODE_ENV: "production" }) } });
-  script = result.outputFiles[0].text;
+  const result = await build({ entryPoints: ["e2e/fixtures/directory.tsx"], outfile: ".context/directory-browser/fixture.js", bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic", define: { "process.env": JSON.stringify({ NODE_ENV: "production" }) } });
+  script = result.outputFiles.find(file => file.path.endsWith(".js"))!.text;
   const resultCss = await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") });
-  css = resultCss.css;
+  css = resultCss.css + result.outputFiles.filter(file => file.path.endsWith(".css")).map(file => file.text).join("\n");
 });
 
-async function boot(page: Page, options: { canEdit?: boolean; entries?: DirectoryEntry[]; width?: number; failPatch?: number; delay?: number } = {}) {
-  const state = { entries: options.entries ?? fixtures(), writes: [] as { method: string; path: string; body: Record<string, unknown> }[], failures: options.failPatch ?? 0, postCount: 0, errors: [] as string[] };
+async function boot(page: Page, options: { canEdit?: boolean; entries?: DirectoryEntry[]; width?: number; failPatch?: number; delay?: number; getStatus?: number } = {}) {
+  const state = { entries: options.entries ?? fixtures(), writes: [] as { method: string; path: string; body: Record<string, unknown> }[], failures: options.failPatch ?? 0, postCount: 0, errors: [] as string[], reads: 0, activeReads: 0, maxActiveReads: 0, getStatus: options.getStatus ?? 200, readGate: null as Promise<void> | null, canEdit: options.canEdit ?? true };
   page.on("pageerror", error => state.errors.push(error.message));
   await page.setViewportSize({ width: options.width ?? 1440, height: 1000 });
   await page.route("**/*", async route => {
     const request = route.request(); const url = new URL(request.url());
     if (url.origin !== "http://directory.test") { state.errors.push(`External request blocked: ${url.origin}`); return route.abort(); }
     if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<!doctype html><html lang="sk"><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div></body></html>' });
-    if (url.pathname === "/api/directory" && request.method() === "GET") return route.fulfill({ json: { canEdit: options.canEdit ?? true, entries: state.entries } });
+    if (url.pathname === "/api/directory" && request.method() === "GET") {
+      state.reads += 1; state.activeReads += 1; state.maxActiveReads = Math.max(state.maxActiveReads, state.activeReads);
+      const snapshot = structuredClone({ canEdit: state.canEdit, entries: state.entries });
+      const responseStatus = state.getStatus;
+      try {
+        if (state.readGate) await state.readGate;
+        await route.fulfill({ status: responseStatus, json: responseStatus === 200 ? snapshot : { error: "Kontrolovaná chyba adresára." } }).catch(() => {});
+      } finally { state.activeReads -= 1; }
+      return;
+    }
     if (url.pathname.startsWith("/api/directory") && ["POST", "PATCH"].includes(request.method())) {
       const body = request.postDataJSON(); state.writes.push({ method: request.method(), path: url.pathname, body });
       if (options.delay) await new Promise(resolve => setTimeout(resolve, options.delay));
@@ -63,7 +72,8 @@ async function boot(page: Page, options: { canEdit?: boolean; entries?: Director
   await page.goto("http://directory.test/"); await page.addStyleTag({ content: css }); await page.addScriptTag({ content: script });
   await page.getByRole("button", { name: "Adresár", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Adresár", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Otvoriť / }).first()).toBeVisible();
+  if ((options.getStatus ?? 200) === 200) await expect(page.getByRole("button", { name: /Otvoriť / }).first()).toBeVisible();
+  else await expect(page.getByRole("alert")).toBeVisible();
   return state;
 }
 
@@ -125,7 +135,8 @@ test("company create, edit, existing contact link, archive and restore persist a
   await expect(dialog.getByText("Aktívny záznam", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await page.getByLabel("Stav záznamov").selectOption("active");
-  await page.getByRole("button", { name: "Obnoviť adresár" }).click();
+  await page.getByRole("button", { name: "Upozornenia", exact: true }).click();
+  await page.getByRole("button", { name: "Adresár", exact: true }).click();
   await expect(page.getByRole("button", { name: "Otvoriť Nový servis" })).toBeVisible();
   expect(state.errors).toEqual([]);
 });
@@ -230,4 +241,157 @@ test("pagination, archived search, import and hostile labels stay usable", async
   await page.getByLabel("Hľadať v adresári").fill("Importovaná");
   await expect(page.getByRole("button", { name: "Otvoriť Importovaná asistencia" })).toBeVisible();
   expect(state.writes).toHaveLength(1); expect(state.errors).toEqual([]);
+});
+
+async function resumeDirectory(page: Page) {
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("online"));
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.runFor(150);
+}
+
+test("an initial failure does not claim older verified data and keeps an explicit retry", async ({ page }) => {
+  const state = await boot(page, { getStatus: 503 });
+  await expect(page.getByRole("alert")).toContainText("Adresár sa nepodarilo načítať");
+  await expect(page.getByRole("alert")).not.toContainText("posledné načítané údaje");
+  state.getStatus = 200;
+  await page.getByRole("button", { name: "Skúsiť znova", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Otvoriť Sever Assistance" })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(state.reads).toBe(2); expect(state.errors).toEqual([]);
+});
+
+test("a continuously open directory refreshes once per minute and preserves page, filters and scroll", async ({ page }) => {
+  await page.clock.install();
+  const entries = Array.from({ length: 31 }, (_, index) => ({ ...fixtures()[0], id: `live-${index}`, name: `Firma ${index + 1}`, contactIds: [] }));
+  const state = await boot(page, { entries });
+  await expect(page.getByRole("button", { name: "Obnoviť adresár" })).toHaveCount(0);
+  await page.getByLabel("Hľadať v adresári").fill("Firma");
+  await page.getByRole("button", { name: "Nasledujúca strana adresára" }).click();
+  await expect(page.getByText("2 / 2", { exact: true })).toBeVisible();
+  const marker = await page.getByRole("textbox", { name: "Hľadať v adresári" }).elementHandle();
+  const target = state.entries[30];
+  state.entries = state.entries.map(entry => entry.id === target.id ? { ...entry, phone: "+421 902 999 888" } : entry);
+  const scroll = await page.evaluate(() => { window.scrollTo(0, 150); return scrollY; });
+  await page.clock.runFor(60_100);
+  await expect.poll(() => state.reads).toBe(2);
+  await expect(page.getByRole("button", { name: `Otvoriť ${target.name}` })).toContainText("+421 902 999 888");
+  await expect(page.getByText("2 / 2", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Hľadať v adresári")).toHaveValue("Firma");
+  expect(await marker!.evaluate(node => node.isConnected)).toBe(true);
+  expect(await page.evaluate(() => scrollY)).toBe(scroll);
+  expect(state.maxActiveReads).toBe(1); expect(state.writes).toHaveLength(0); expect(state.errors).toEqual([]);
+});
+
+test("background reads update a viewed entry without reopening it and preserve a dirty edit with its original revision", async ({ page }) => {
+  await page.clock.install();
+  const state = await boot(page);
+  await page.getByRole("button", { name: "Otvoriť Sever Assistance" }).click();
+  const dialog = page.getByRole("dialog");
+  const dialogNode = await dialog.elementHandle();
+  const later = "2026-09-07T09:00:00.000Z";
+  state.entries = state.entries.map(entry => entry.id === ids.firm ? { ...entry, phone: "+421 902 123 456", updatedAt: later } : entry);
+  await resumeDirectory(page);
+  await expect(dialog.getByText("+421 902 123 456", { exact: true })).toBeVisible();
+  expect(await dialogNode!.evaluate(node => node.isConnected)).toBe(true);
+  await dialog.getByRole("button", { name: "Upraviť záznam" }).click();
+  const name = dialog.getByRole("textbox", { name: "Názov", exact: true });
+  await name.fill("Rozpísaný servis");
+  await name.evaluate(node => { (node as HTMLInputElement).setSelectionRange(4, 8); (node as HTMLInputElement).dataset.marker = "draft"; });
+  state.entries = state.entries.map(entry => entry.id === ids.firm ? { ...entry, name: "Kolegov názov", updatedAt: "2026-09-07T10:00:00.000Z" } : entry);
+  await resumeDirectory(page);
+  await expect(name).toHaveValue("Rozpísaný servis");
+  expect(await name.evaluate(node => [(node as HTMLInputElement).selectionStart, (node as HTMLInputElement).selectionEnd, (node as HTMLInputElement).dataset.marker])).toEqual([4, 8, "draft"]);
+  await dialog.getByRole("button", { name: "Uložiť záznam", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("aktuálna verzia");
+  expect(state.writes).toHaveLength(1); expect(state.writes[0].body.expectedUpdatedAt).toBe(later);
+  await expect(name).toHaveValue("Rozpísaný servis");
+  expect(state.errors).toEqual([]);
+});
+
+test("a transient failure keeps known data, backs off, and coalesces recovery signals without parallel reads", async ({ page }) => {
+  await page.clock.install();
+  const state = await boot(page);
+  state.getStatus = 503;
+  await page.clock.runFor(60_100);
+  await expect(page.getByRole("alert")).toContainText("posledné načítané údaje");
+  await expect(page.getByRole("button", { name: "Otvoriť Sever Assistance" })).toBeVisible();
+  await page.clock.runFor(60_100); expect(state.reads).toBe(2);
+  state.getStatus = 200;
+  let release!: () => void;
+  state.readGate = new Promise<void>(resolve => { release = resolve; });
+  await resumeDirectory(page); await expect.poll(() => state.reads).toBe(3);
+  for (let index = 0; index < 20; index += 1) await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.clock.runFor(200); expect(state.reads).toBe(3);
+  state.readGate = null; release();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(state.maxActiveReads).toBe(1); expect(state.errors).toEqual([]);
+});
+
+for (const responseStatus of [401, 403]) test(`permission ${responseStatus} hides the native dialog and list, restoring the same draft only after an authorised read`, async ({ page }) => {
+  await page.clock.install();
+  const state = await boot(page);
+  await page.getByRole("button", { name: "Pridať záznam", exact: true }).click();
+  const name = page.getByRole("dialog").getByRole("textbox", { name: "Názov", exact: true });
+  await name.fill("Zachovaný návrh");
+  const draftNode = await name.elementHandle();
+  state.getStatus = responseStatus;
+  await resumeDirectory(page);
+  await expect(page.getByRole("alert")).toContainText("Prístup k adresáru nie je dostupný");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Otvoriť / })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Pridať záznam", exact: true })).toHaveCount(0);
+  expect(await draftNode!.evaluate(node => node.isConnected && (node as HTMLInputElement).value === "Zachovaný návrh")).toBe(true);
+  expect(await page.evaluate(() => document.querySelector("dialog")?.open)).toBe(false);
+  state.getStatus = 503; await resumeDirectory(page);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "Skúsiť znova", exact: true }).focus();
+  state.getStatus = 200; await resumeDirectory(page);
+  await expect(page.getByRole("button", { name: "Pokračovať v rozpracovanom zázname", exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(await page.evaluate(() => document.querySelector("dialog")?.open)).toBe(false);
+  expect(await page.evaluate(() => document.activeElement?.closest("dialog") === null)).toBe(true);
+  await expect(page.getByRole("button", { name: "Pridať záznam", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Pokračovať v rozpracovanom zázname", exact: true }).click();
+  await expect(name).toHaveValue("Zachovaný návrh");
+  expect(await draftNode!.evaluate(node => node.isConnected)).toBe(true);
+  expect(state.writes).toHaveLength(0); expect(state.errors).toEqual([]);
+});
+
+test("hidden or unmounted directory stops polling and one visible return refreshes it", async ({ page }) => {
+  await page.clock.install();
+  const state = await boot(page);
+  await page.evaluate(() => { Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" }); document.dispatchEvent(new Event("visibilitychange")); });
+  await page.clock.runFor(180_100); expect(state.reads).toBe(1);
+  state.entries = state.entries.map(entry => entry.id === ids.firm ? { ...entry, name: "Po návrate" } : entry);
+  await page.evaluate(() => { Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" }); });
+  await resumeDirectory(page);
+  await expect(page.getByRole("button", { name: "Otvoriť Po návrate" })).toBeVisible();
+  expect(state.reads).toBe(2);
+  await page.getByRole("button", { name: "Upozornenia", exact: true }).click();
+  await page.clock.runFor(180_100); expect(state.reads).toBe(2);
+  expect(state.errors).toEqual([]);
+});
+
+test("saving preempts a pending background read and its late old snapshot cannot overwrite the confirmed entry", async ({ page }) => {
+  await page.clock.install();
+  const state = await boot(page);
+  await page.getByRole("button", { name: "Otvoriť Sever Assistance" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "Upraviť záznam" }).click();
+  await dialog.getByRole("textbox", { name: "Názov", exact: true }).fill("Potvrdený nový názov");
+  let release!: () => void;
+  state.readGate = new Promise<void>(resolve => { release = resolve; });
+  await resumeDirectory(page); await expect.poll(() => state.reads).toBe(2);
+  await dialog.getByRole("button", { name: "Uložiť záznam", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "Potvrdený nový názov", exact: true })).toBeVisible();
+  expect(state.writes).toHaveLength(1);
+  state.readGate = null; release();
+  await expect.poll(() => state.activeReads).toBe(0);
+  await expect(dialog.getByRole("heading", { name: "Potvrdený nový názov", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Otvoriť Potvrdený nový názov" })).toBeVisible();
+  expect(state.errors).toEqual([]);
 });

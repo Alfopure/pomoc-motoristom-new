@@ -41,7 +41,9 @@ import {
   X,
 } from "lucide-react";
 import { AttendanceModule } from "./AttendanceModule";
-import { CaseCollaborationProvider, CaseCollaborationStatus } from "./CaseCollaborationProvider";
+import { CaseCollaborationProvider } from "./CaseCollaborationProvider";
+import { CaseSyncIndicator } from "./CaseSyncIndicator";
+import syncStyles from "./DispatchConsoleSync.module.css";
 import type { CaseCollaborationState } from "./case-collaboration-store";
 import { RoutingSummaryPanel } from "./RoutingSummaryPanel";
 import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
@@ -2079,6 +2081,7 @@ function DispatchConsoleContent({
 
   function renderTasks(variant: "page" | "sidebar", compact = false) {
     return <TaskPanel
+                headerStatus={variant === "page" && !compact && activeView === "tasks" ? <span className="lg:hidden"><CaseSyncIndicator topBarsRef={topBarsRef} /></span> : undefined}
                 compact={compact}
                 taskWorkspaceEnabled={capabilities.tasks}
                 tasks={collaborationState.hidden ? [] : dispatchData.tasks}
@@ -2142,6 +2145,7 @@ function DispatchConsoleContent({
         onCreateCase={() => startNewCase()} onSent={(result) => { if (result.dispatchData) setDispatchData(result.dispatchData); }} />}
       <div className="relative z-50 shrink-0" ref={topBarsRef}>
       <header className="dispatch-app-header flex min-h-14 items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-950 px-3 py-2 text-white sm:px-4 sm:py-0">
+        <div className={syncStyles.accountGroup}>
         <AccountMenu
           displayName={signedInName}
           email={viewerEmail}
@@ -2152,6 +2156,8 @@ function DispatchConsoleContent({
           refreshBlocked={appRefreshBlocked}
           updateAvailable={updateAvailable}
         />
+        <div className="hidden shrink-0 lg:block"><CaseSyncIndicator topBarsRef={topBarsRef} /></div>
+        </div>
         <nav className="dispatch-primary-navigation hidden min-w-0 flex-1 items-center justify-center gap-1 lg:flex" aria-label="Hlavná navigácia">
           <NavButton
             active={activeView === dashboardNavItem.view}
@@ -2287,6 +2293,7 @@ function DispatchConsoleContent({
               {activeView === "dispatch" && mobilePane === "cases" ? <span className="ml-1.5 font-medium text-zinc-500">{activeCasesTotal}</span> : null}
             </h1>
           </div>
+          <CaseSyncIndicator topBarsRef={topBarsRef} />
         </div>
         {activeView === "dispatch" && mobilePane === "cases" ? (
           <button type="button" onClick={() => startNewCase()} className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl bg-[#FCD703] px-3 text-sm font-semibold text-zinc-950">
@@ -2342,7 +2349,6 @@ function DispatchConsoleContent({
         </div>
       )}
 
-      <CaseCollaborationStatus />
       {removedOpenCase?.id === activeCaseId && !collaborationState.hidden && <div role="alert" className="border-b border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">Otvorený prípad už v zozname nie je. Rozpracovaný text zostáva v karte; pred odchodom si ho skopírujte.</div>}
       {visibleWarning && (
         <div role="alert" className="relative z-40 flex min-h-[42px] shrink-0 items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 sm:px-4">
@@ -2466,6 +2472,8 @@ function DispatchConsoleContent({
           </div>
           <div className="mobile-dispatch-workspace lg:contents">
           <MapWorkspace
+            caseWorkspaceActive={activeView === "dispatch" && !collaborationState.hidden}
+            mobilePane={mobilePane}
             renderTaskWorkflow={capabilities.tasks ? taskId => <TaskCaseWorkflowActions taskId={taskId} viewerProfileId={viewerProfileId} onOpenTask={id => openTask(id, "")} /> : undefined}
             active={activeView === "dispatch" && !toolsOpen}
             actorKey={actorKey}
