@@ -2,6 +2,7 @@
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
 import { CaseAccessBoundary, useCaseEditorPresence, useCaseCollaboration } from "./CaseCollaborationProvider";
+import { useCaseDraftPublisher } from "./use-case-draft-preview";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
 import { CASE_ATTACHMENT_ACCEPT, validateCaseAttachmentFiles } from "@/lib/case-attachments";
 import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
@@ -221,6 +222,39 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   const contactPhone = fullPhone(primaryContact);
   const contactEmail = primaryContact?.email ?? "";
   const caseType = caseTypeFromJobTypes(selectedJobTypes);
+  const previewStatus = useCaseDraftPublisher(editorPresence.readySessionId, { version: 1, fields: {
+    jobTypes: selectedJobTypes.map(value => jobTypeLabels[value]).join(", "), priority: casePriorityLabels[priority],
+    sourceType: sourceType ? ({ client: "Klient", assistance: "Asistenčka", samoplatca: "Samoplatca", partner: "Partner", internal: "Interné" })[sourceType] : "",
+    note,
+    customerType: customerType ? customerTypeLabels[customerType] : "",
+    contacts: contacts.map(contact => {
+      const value = [contactDisplayName(contact), contact.phoneNational ? fullPhone(contact) : "", contact.email, contact.note].filter(Boolean).join(" · ");
+      return value ? `${contact.isPrimary ? "Hlavný kontakt · " : ""}${customerContactRoleLabels[contact.role]}: ${value}` : "";
+    }).filter(Boolean).join("\n"),
+    companyName: customerType === "company" ? companyName : "", companyIdNumber: customerType === "company" ? companyIdNumber : "",
+    assistance: customerType === "insurance" ? assistanceServiceName : "", assistanceReference: customerType === "insurance" ? assistanceReference : "", customerNote,
+    plate: licensePlate, vin, make: vehicleMake, model: vehicleModel, year: productionYear, color: vehicleColor, category: vehicleCategory,
+    vehicleType: vehicleType ? clientVehicleTypeLabels[vehicleType] : "", transmission: transmission ? transmissionLabels[transmission] : "", transmissionNote,
+    driveType: driveTypeOptions.find(([value]) => value === driveType && value !== "unknown")?.[1] ?? "", weight: weightKg, issue: vehicleIssue, vehicleNote,
+    ...(!replacementOnly ? {
+      driveable: vehicleDriveable === null ? "" : vehicleDriveable ? "Áno" : "Nie", conditions: vehicleFlags.map(value => vehicleConditionFlagLabels[value]).join(", "),
+      incidentType: incidentType ? incidentTypeLabels[incidentType] : "", participants: participantsCount, passengers: passengersCount,
+      damageAreas: selectedDamageAreas.map(value => damageAreaLabels[value]).join(", "), damageNote,
+    } : {}),
+    pickup: manualPickupAddress || pickup?.address || "", destination: needsDestination ? manualDestinationAddress || destination?.address || "" : "",
+    road: roadName, kilometer: kilometerSection, direction: drivingDirection, placeType: placeType ? placeTypeLabels[placeType] : "", complications: locationComplications,
+    access: selectedAccessComplications.map(value => accessComplicationLabels[value]).join(", "), destinationNote: needsDestination ? destinationNote : "",
+    replacementNeeded: replacementVehicleNeeded === null ? "" : replacementVehicleNeeded ? "Áno" : "Nie",
+    ...(replacementVehicleNeeded ? {
+      replacementType: replacementVehicleType, replacementCategory: replacementCategory ? replacementCategoryLabels[replacementCategory] : "",
+      replacementPreferences: selectedReplacementPreferences.map(value => replacementPreferenceLabels[value]).join(", "), replacementDelivery: replacementDeliveryPlace,
+      replacementEntitlement: replacementEntitlement ? replacementEntitlementLabels[replacementEntitlement] : "", replacementExtension: replacementExtension ? replacementExtension === "yes" ? "Áno" : "Nie" : "",
+      replacementDays: replacementMaxDays, replacementNote: replacementVehicleNote,
+    } : {}),
+    paymentMethod: paymentMethod ? paymentMethodLabels[paymentMethod] : "", paymentStatus: paymentStatus ? paymentStatusLabels[paymentStatus] : "",
+    closureType: closureType ? ({ insurance_portal: "Asistenčná služba", self_payer: "Samoplatca", internal: "Interné" })[closureType] : "", closureStatus,
+    insurancePortal: insurancePortalUrl, closureNote, attachments: pendingFiles.length ? `${pendingFiles.length} · obsah príloh bude dostupný po uložení prípadu` : "", attachmentNote,
+  } }, collaborationState.available === true && !collaborationState.hidden && !collaborationState.denied, editorPresence.readyGeneration);
   const directoryOptions = directoryEntries.filter((entry) =>
     customerType === "insurance" ? entry.kind === "assistance" && entry.active : customerType === "company" ? entry.kind === "company" && entry.active : false,
   );
@@ -703,6 +737,9 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
     >
       <div className="grid gap-3">
         <div className={`${styles.formMain} grid min-w-0 [&>section]:min-w-0`} data-testid="case-form-main">
+          {(previewStatus === "current" || previewStatus === "sharing" || previewStatus === "error") && <p className={`text-xs ${previewStatus === "error" ? "text-amber-800" : "text-zinc-500"}`}>
+            {previewStatus === "error" ? "Priebežný náhľad sa nepodarilo zdieľať. Rozpísané údaje zostávajú v tomto formulári." : "Kolegovia môžu sledovať vypĺňanie. Prípad ešte nie je uložený."}
+          </p>}
           <p className="text-right text-xs font-medium text-zinc-500">
             <span className="font-bold text-red-600" aria-hidden="true">*</span> Povinné údaje
           </p>

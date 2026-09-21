@@ -1,9 +1,10 @@
 "use client";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
-import { activeCaseEditors, EDITOR_HEARTBEAT_MS } from "@/domain/case-collaboration";
+import { activeCaseEditors, EDITOR_HEARTBEAT_MS, EDITOR_TTL_MS } from "@/domain/case-collaboration";
 import type { DispatchCase, DispatchNotification } from "@/domain/types";
 import { CaseCollaborationStore, type CaseCollaborationState } from "./case-collaboration-store";
+import { CaseDraftPreviewItem } from "./CaseDraftPreview";
 
 type ContextValue = { store: CaseCollaborationStore; viewerProfileId?: string };
 const Context = createContext<ContextValue | null>(null);
@@ -76,9 +77,9 @@ function usePresenceNow() { const [now, setNow] = useState(Date.now); useEffect(
 export function CaseDraftActivity() {
   const { state, viewerProfileId } = useCaseCollaboration(); const now = usePresenceNow();
   if (state.hidden) return null;
-  const drafts = activeCaseEditors(state.editors, now, null, viewerProfileId);
+  const drafts = state.editors.filter(entry => !entry.caseId && entry.profileId !== viewerProfileId && Date.parse(entry.expiresAt) > now);
   return drafts.length ? <div className="space-y-1 border-b border-sky-200 bg-sky-50 p-2" aria-label="Rozpracované nové prípady">
-    {drafts.map(entry => <div key={entry.draftId} className="flex items-center gap-2 text-xs text-sky-900"><span className="size-2 shrink-0 rounded-full bg-sky-500 motion-safe:animate-pulse" aria-hidden="true"/><span><strong>{entry.displayName}</strong> má otvorený návrh prípadu</span></div>)}
+    {drafts.map(entry => <CaseDraftPreviewItem key={entry.sessionId} editor={entry} />)}
   </div> : null;
 }
 export function CaseEditorActivity({ caseId }: { caseId: string }) {
@@ -89,37 +90,74 @@ export function CaseEditorActivity({ caseId }: { caseId: string }) {
 export function useCaseEditorPresence(caseId: string | null, active = true) {
   const { store, state } = useCaseCollaboration();
   const session = useRef<string | null>(null);
+  const [readySessionId, setReadySessionId] = useState<string | null>(null);
+  const [readyGeneration, setReadyGeneration] = useState(0);
+  const heartbeatRequest = useRef<(() => void) | null>(null);
   const [resumeSession, setResumeSession] = useState(0);
   const latest = useRef({ state, active });
   useEffect(() => { latest.current = { state, active }; }, [state, active]);
   const stop = useCallback(() => {
     const sessionId = session.current; session.current = null;
+    setReadySessionId(null);
     if (sessionId) void fetch("/api/cases/presence", { method: "POST", keepalive: true, credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "leave", sessionId, caseId }) }).catch(() => {});
     store?.invalidate();
   }, [caseId, store]);
   useEffect(() => {
     if (!store || !state.available || state.denied || !active) return;
     const sessionId = crypto.randomUUID(); session.current = sessionId;
-    let running = false; let stopped = false;
+    let running = false; let stopped = false; let acknowledgedUntil = 0;
     const heartbeat = async () => {
-      if (stopped || running || session.current !== sessionId || latest.current.state.hidden || document.visibilityState !== "visible") return;
+      if (stopped || running || session.current !== sessionId || latest.current.state.hidden || document.visibilityState !== "visible" || !navigator.onLine) return;
+      if (acknowledgedUntil && Date.now() >= acknowledgedUntil) setReadySessionId(null);
       running = true;
       try {
         const response = await fetch("/api/cases/presence", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "heartbeat", sessionId, caseId }), signal: AbortSignal.timeout(8000) });
         if (response.status === 401 || response.status === 403) store.revoke();
-      } catch { /* Server expiry handles disconnected editors. */ }
+        if (response.ok) {
+          const result = await response.json();
+          if (!stopped && session.current === sessionId) {
+            const ready = document.visibilityState === "visible" && navigator.onLine && result.available === true && !result.ended;
+            // A suspended visible tab may miss every browser lifecycle event.
+            // Renewing an expired server session clears its old preview; use a
+            // generation so even batched state updates force republication.
+            if (ready && !caseId && acknowledgedUntil && Date.now() >= acknowledgedUntil) setReadyGeneration(value => value + 1);
+            if (ready) acknowledgedUntil = Number.isFinite(Date.parse(result.expiresAt)) ? Date.parse(result.expiresAt) : Date.now() + EDITOR_TTL_MS;
+            setReadySessionId(ready ? sessionId : null);
+          }
+        } else if (!stopped && session.current === sessionId) setReadySessionId(null);
+      } catch {
+        // Do not publish to a session whose heartbeat was not acknowledged.
+        if (!stopped && session.current === sessionId) setReadySessionId(null);
+      }
       finally { running = false; }
     };
+    heartbeatRequest.current = () => void heartbeat();
     void heartbeat(); const timer = window.setInterval(() => void heartbeat(), EDITOR_HEARTBEAT_MS);
     const leave = () => stop();
     const resume = () => { if (!session.current && document.visibilityState === "visible") setResumeSession(value => value + 1); };
-    const visibility = () => { if (document.visibilityState === "visible") resume(); else leave(); };
+    const visibility = () => {
+      if (caseId) { if (document.visibilityState === "visible") resume(); else leave(); }
+      else {
+        // A draft still exists while hidden, but content is shared only after a
+        // fresh heartbeat has acknowledged its session on return.
+        setReadySessionId(null);
+        if (document.visibilityState === "visible") void heartbeat();
+      }
+    };
+    const reconnect = () => { if (!caseId) { setReadySessionId(null); void heartbeat(); } };
+    const disconnect = () => { if (!caseId) setReadySessionId(null); };
     // Existing editors describe visible work; a new draft still describes its existence.
-    if (caseId) document.addEventListener("visibilitychange", visibility);
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("online", reconnect); window.addEventListener("offline", disconnect);
     window.addEventListener("pagehide", leave);
     window.addEventListener("pageshow", resume);
-    return () => { stopped = true; window.clearInterval(timer); window.removeEventListener("pagehide", leave); window.removeEventListener("pageshow", resume); document.removeEventListener("visibilitychange", visibility); stop(); };
+    return () => { stopped = true; heartbeatRequest.current = null; window.clearInterval(timer); window.removeEventListener("pagehide", leave); window.removeEventListener("pageshow", resume); document.removeEventListener("visibilitychange", visibility); window.removeEventListener("online", reconnect); window.removeEventListener("offline", disconnect); stop(); };
   }, [active, caseId, state.available, state.denied, stop, store, resumeSession]);
-  return { sessionId: () => session.current, stop };
+  useEffect(() => {
+    // On reconnect the collaboration ACL read may finish after the online
+    // event. A newly authorized draft should not wait for the next interval.
+    if (!caseId && !state.hidden) heartbeatRequest.current?.();
+  }, [caseId, state.hidden]);
+  return { sessionId: () => session.current, readySessionId, readyGeneration, stop };
 }
