@@ -194,17 +194,17 @@ export function AiAgentSettingsPanel() {
         </p>
       </SettingsField>
 
-      <SettingsSectionHeader icon={ShieldCheck} title="Prípady" description="Každé je predvolene vypnuté. Čo je vypnuté, o tom model ani nevie." />
+      <SettingsSectionHeader icon={ShieldCheck} title="Prípady" description="Čo je vypnuté, o tom model ani nevie. Označené položky sú navrhnuté, ale ešte nepostavené." />
       <div className="grid gap-2">
         <Toggle label="Vidí prípady volajúceho" checked={settings.readsCallerCases} onChange={(value) => void patch({ readsCallerCases: value })} />
         <Toggle label="Pýta si EČV pred detailmi" checked={settings.requiresPlateCheck} onChange={(value) => void patch({ requiresPlateCheck: value })} />
-        <Toggle label="Zakladá prípady ako návrh na potvrdenie" checked={settings.createsDraftCases} onChange={(value) => void patch({ createsDraftCases: value })} />
-        <Toggle label="Pridáva poznámku k prípadu" checked={settings.addsCaseNotes} onChange={(value) => void patch({ addsCaseNotes: value })} />
+        <Toggle pending label="Zakladá prípady ako návrh na potvrdenie" checked={settings.createsDraftCases} onChange={(value) => void patch({ createsDraftCases: value })} />
+        <Toggle pending label="Pridáva poznámku k prípadu" checked={settings.addsCaseNotes} onChange={(value) => void patch({ addsCaseNotes: value })} />
       </div>
 
-      <SettingsSectionHeader icon={ShieldCheck} title="SMS" description="Len schválené správy a len na číslo, z ktorého sa volá." />
+      <SettingsSectionHeader icon={ShieldCheck} title="SMS" description="Navrhnuté, ešte nepostavené. Keď to bude hotové, pôjdu len schválené správy a len na číslo, z ktorého sa volá." />
       <div className="grid gap-2">
-        <Toggle label="Smie poslať SMS" checked={settings.smsEnabled} onChange={(value) => void patch({ smsEnabled: value })} />
+        <Toggle pending label="Smie poslať SMS" checked={settings.smsEnabled} onChange={(value) => void patch({ smsEnabled: value })} />
         <SettingsField label="Najviac za hovor">
           <select
             className={settingsInputClass}
@@ -232,11 +232,27 @@ export function AiAgentSettingsPanel() {
   );
 }
 
-function Toggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (value: boolean) => void }) {
+/**
+ * A permission switch.
+ *
+ * `pending` marks a capability that is designed but not built. It is shown
+ * rather than hidden so the shape of the thing is visible, but it cannot be
+ * switched on: a box that ticks and does nothing is worse than no box, and the
+ * one for sending SMS is the reason this matters — somebody would reasonably
+ * believe she could text a customer.
+ */
+function Toggle({ checked, label, onChange, pending }: { checked: boolean; label: string; onChange: (value: boolean) => void; pending?: boolean }) {
   return (
-    <label className="flex items-center gap-2 text-sm text-zinc-800">
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-4 w-4" />
+    <label className={`flex items-center gap-2 text-sm ${pending ? "text-zinc-400" : "text-zinc-800"}`}>
+      <input
+        type="checkbox"
+        checked={pending ? false : checked}
+        disabled={pending}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-4 w-4"
+      />
       {label}
+      {pending && <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-xs font-medium text-zinc-600">zatiaľ nie je hotové</span>}
     </label>
   );
 }
