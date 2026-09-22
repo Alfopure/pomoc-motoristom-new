@@ -10,6 +10,7 @@ import { memberKey, planRingStep, stepDeadline, toEligibilityDevices, toEligibil
 import type { TelnyxClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
 import { reduceRecording } from "./recording";
+import { readPendingEffects } from "./continuation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { contactOperationIntent } from "../contact-proof";
 import {
@@ -375,6 +376,57 @@ function gatherStopCmd(b: TransitionBuilder, leg: LegRow): Command {
 function hangupOrphanLeg(b: TransitionBuilder, callControlId: string, role: CallLegRole): void {
   b.cmd({ kind: "hangup", commandId: b.cmdId(callControlId, "hangup:terminal_session"), leg: { callControlId }, reason: "terminal_session", bestEffort: true });
   b.leg(callControlId, { role, state: "ended", ended_at: b.nowIso, hangup_cause: "terminal_session" }, true);
+}
+
+/**
+ * `call.gather.ended` / `call.playback.ended` with `status: "call_hangup"` is the
+ * provider saying the customer leg is already gone while its `call.hangup` has
+ * not applied yet (it lost the lease race, M12/M13). Record only that fact:
+ * no leg write, no state, no command, no callback — the exact hangup does all
+ * of that when it lands. Every dial path reads the marker.
+ */
+function markCustomerGone(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent, source: "gather" | "playback"): ReduceResult {
+  if (!isCustomer(leg) || !b.session.customer_leg_id || leg.id !== b.session.customer_leg_id) return ignoredResult(`${source} call_hangup`);
+  if (b.meta.customer_gone_at) return ignoredResult(`${source} call_hangup: customer already gone at provider`);
+  b.patchMeta({ customer_gone_at: event.occurredAt ?? b.nowIso });
+  return b.note("customer gone at provider").result();
+}
+
+/** Causes our own closers stamp with `nowIso` instead of the provider's clock. */
+const SYNTHETIC_HANGUP_CAUSES: ReadonlySet<string> = new Set(["stale_finalise", "reconciled", "terminal_session", "step_timeout", "orphan_sweep"]);
+
+/**
+ * A late exact `call.hangup` for a leg one of our fallback closers already
+ * ended (M22). The provider's `occurred_at` is the truth; the synthetic stamp
+ * was a guess made minutes later. Rewrites only timestamps and provenance:
+ * no command, no presence, no state — the close already happened. Skipped
+ * while effects are pending (an `ended_at` change bumps the effect generation)
+ * and for our own reconcile probe, which carries no provider clock.
+ */
+function correctProviderEnd(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent): ReduceResult | null {
+  if (!leg.ended_at || !leg.hangup_cause || !SYNTHETIC_HANGUP_CAUSES.has(leg.hangup_cause)) return null;
+  if (!event.occurredAt || event.hangupCause === "reconciled") return null;
+  const exact = Date.parse(event.occurredAt), stored = Date.parse(leg.ended_at);
+  if (!Number.isFinite(exact) || !Number.isFinite(stored) || exact >= stored) return null;
+  if (readPendingEffects(b.session).entries.length > 0) return null;
+  b.leg(leg.telnyx_call_control_id, { ended_at: event.occurredAt, hangup_cause: event.hangupCause, hangup_source: event.hangupSource });
+  const state = b.session.state;
+  const terminal = TERMINAL_STATES.has(state) || state === "wrap_up" || state === "missed";
+  // The stored session end came from the same synthetic close when it equals
+  // the leg's stamp (`onStaleFinalise` stamps both with one `nowIso`); the
+  // customer's end always bounds the session end from below.
+  if (terminal && b.session.ended_at && (isCustomer(leg) || b.session.ended_at === leg.ended_at)) {
+    const end = latestIso(event.occurredAt, ...b.legs.filter((other) => other.telnyx_call_control_id !== leg.telnyx_call_control_id).map((other) => other.ended_at));
+    if (end !== b.session.ended_at) b.patchSession({ ended_at: end });
+    if (isCustomer(leg)) b.call.ended_at = end; // `upsertCallRow` recomputes `duration_seconds`
+  }
+  return b.note("provider end corrected").result();
+}
+
+function latestIso(first: string, ...rest: Array<string | null | undefined>): string {
+  let latest = first;
+  for (const value of rest) if (value && Number.isFinite(Date.parse(value)) && Date.parse(value) > Date.parse(latest)) latest = value;
+  return latest;
 }
 
 function gatherCmd(b: TransitionBuilder, leg: LegRow, spec: GatherSpec, intentSuffix = ""): Command {
@@ -932,6 +984,9 @@ function callerDisplay(b: TransitionBuilder): string | undefined {
 }
 
 function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, planned: RingStepPlanResult, guard: RingFanout["guard"]): void {
+  // The single choke point for every `POST /calls` of a ring step: never dial
+  // for a caller the provider already reported gone (M12).
+  if (b.meta.customer_gone_at) { b.note("customer gone at provider → no dial"); return; }
   const devices = new Map(b.ctx.devices.map((device) => [device.profile_id, device]));
   const from = b.ctx.fromNumber ?? b.session.called_number ?? "";
   const dials: DialCommand[] = [];
@@ -1144,7 +1199,7 @@ function queueBackupMembers(b: TransitionBuilder, plan: FrozenRingPlan): FrozenR
 function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
   const queue = b.meta.queue;
   const plan = b.ringPlan();
-  if (!queue || !plan?.steps[0] || b.session.answered_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return;
+  if (!queue || !plan?.steps[0] || b.session.answered_at || b.meta.customer_gone_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return;
 
   // How long the queue has been placing no offers at all. Not how long the
   // caller has waited: a queue that keeps ringing an operator who declines is
@@ -1314,6 +1369,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
     customer !== undefined &&
     !b.legEnded(customer) &&
     !b.meta.gather?.call_gone &&
+    !b.meta.customer_gone_at &&
     ((b.session.state === "ringing" && !b.session.answered_by_profile_id) ||
       (WAITING_STATES.has(b.session.state) && intent === "pickup") ||
       (b.session.state === "ringing" && b.meta.ring?.mode !== "plan" && intent !== "ring"));
@@ -1541,7 +1597,7 @@ function onHangup(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
     leg = syntheticLeg(b, event, state);
     b.leg(leg.telnyx_call_control_id, { ...legValuesFromSynthetic(leg), state: "ended", ended_at: at, hangup_cause: event.hangupCause, hangup_source: event.hangupSource }, true);
   } else {
-    if (leg.ended_at) return ignoredResult("duplicate hangup");
+    if (leg.ended_at) return correctProviderEnd(b, leg, event) ?? ignoredResult("duplicate hangup");
     b.leg(leg.telnyx_call_control_id, { state: "ended", ended_at: at, hangup_cause: event.hangupCause, hangup_source: event.hangupSource });
   }
 
@@ -1699,15 +1755,17 @@ function releaseTalkingOperators(b: TransitionBuilder, wrapUp: boolean): void {
   }
 }
 
-/** Moves the session to `ended` once every leg is terminal. */
+/** Moves the session to `ended` once every leg is terminal. The session end is
+ *  the latest leg end, never an earlier out-of-order hangup (64ccfab6, M22). */
 function finishIfQuiet(b: TransitionBuilder, at: string): void {
   if (b.openLegs().length > 0) return;
+  const end = latestIso(at, ...b.legs.map((leg) => leg.ended_at));
   if (b.state === "ended" || b.state === "failed") {
-    if (!b.session.ended_at) b.patchSession({ ended_at: at });
+    if (!b.session.ended_at) b.patchSession({ ended_at: end });
     return;
   }
-  b.setState("ended").patchSession({ ended_at: at });
-  if (!b.call.ended_at) b.call.ended_at = at;
+  b.setState("ended").patchSession({ ended_at: end });
+  if (!b.call.ended_at) b.call.ended_at = end;
   b.note("all legs ended → ended");
 }
 
@@ -1939,7 +1997,8 @@ function onGatherEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceResul
   const leg = b.findLeg(event.callControlId);
   if (!leg || !isCustomer(leg)) return ignoredResult("gather on a non-customer leg");
   if (b.legEnded(leg)) return ignoredResult("customer leg ended");
-  if (event.status === "call_hangup" || event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`gather ${event.status}`);
+  if (event.status === "call_hangup") return markCustomerGone(b, leg, event, "gather");
+  if (event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`gather ${event.status}`);
   const purpose = event.clientState?.intent ?? null;
   // `invalid` means the caller pressed a key that is not on the menu; the menu
   // has to re-prompt for it, so it must not be flattened into "nothing pressed"
@@ -2157,7 +2216,8 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
     return b.result();
   }
   if (event.clientState?.intent === "greeting" || event.clientState?.intent === "greeting_retry") return ignoredResult("introduction already finished");
-  if (event.status === "call_hangup" || event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`playback ${event.status}`);
+  if (event.status === "call_hangup") return markCustomerGone(b, leg, event, "playback");
+  if (event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`playback ${event.status}`);
   const state = b.session.state;
   if (state === "missed" && b.meta.closing_message && event.clientState?.intent === "closing_message") {
     b.cmd(hangupCmd(b, leg, "closing_message", false));
@@ -2925,6 +2985,7 @@ function onSweep(b: TransitionBuilder): ReduceResult {
   const meta = b.meta;
 
   if (meta.gather?.call_gone) return ignoredResult("sweep: gather customer already gone at provider");
+  if (meta.customer_gone_at) return ignoredResult("sweep: customer already gone at provider");
   if (meta.queue && meta.waiting) {
     const deadline = Date.parse(meta.waiting.since) + (meta.waiting.max_minutes ?? b.ctx.settings.parkMaxMinutes) * 60_000;
     if (b.ctx.now.getTime() >= deadline) return onWaitingTick(b, customer);
@@ -2989,7 +3050,7 @@ function onSweep(b: TransitionBuilder): ReduceResult {
 
 /** Recover only the current interaction; ordinary IVR never proves a recording notice. */
 function recoverGather(b: TransitionBuilder, customer: LegRow): ReduceResult {
-  if (b.meta.gather?.call_gone || b.meta.hangup || b.session.ended_at || b.legEnded(customer)) return ignoredResult("gather recovery: caller gone");
+  if (b.meta.gather?.call_gone || b.meta.customer_gone_at || b.meta.hangup || b.session.ended_at || b.legEnded(customer)) return ignoredResult("gather recovery: caller gone");
   const choice = b.meta.callback;
   const retryConfirmation = Boolean(choice?.confirmed && !choice.closing_at && !choice.confirmation_retry && choice.event_id && choice.digit);
   // A failed insert may have persisted the closing/retry marker first. Every

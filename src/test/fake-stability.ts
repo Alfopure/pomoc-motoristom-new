@@ -67,7 +67,10 @@ export function registerContractTwoRpcs(db: FakeDatabase): void {
   db.registerRpc("motorist_session_terminate_v2", (args) => {
     const row = session(args.p_session_id);
     if (!row) return false;
+    // The SQL (`20260929200000:184`) sets both columns in one UPDATE: the
+    // intent and the first due compensation pass.
     row.termination_requested_at = row.termination_requested_at ?? db.nowIso();
+    row.termination_next_attempt_at = db.nowIso();
     return true;
   });
 
@@ -140,7 +143,13 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
   db.registerRpc("motorist_provider_pending_commands_v2", () => []);
   db.registerRpc("motorist_provider_observe_dial_v2", () => true);
   db.registerRpc("motorist_provider_termination_legs_v2", () => []);
-  db.registerRpc("motorist_provider_termination_checkpoint_v2", () => ({ pending: false }));
+  db.registerRpc("motorist_provider_termination_checkpoint_v2", (args) => {
+    // The double journals no `/calls` dials, so nothing is ever pending: mirror
+    // the SQL's "clear" branch (`20260929200000:329`).
+    const row = session(args.p_session_id);
+    if (row?.termination_requested_at) row.termination_next_attempt_at = null;
+    return { pending: false };
+  });
   db.registerRpc("motorist_provider_command_lookup_v2", (args) => {
     const entry = db.storage("motorist_provider_commands").find((row) => row.command_id === args.p_command_id);
     return entry?.outcome ? { outcome: String(entry.outcome) } : null;

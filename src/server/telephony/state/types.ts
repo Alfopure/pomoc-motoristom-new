@@ -581,6 +581,15 @@ export type SessionMeta = {
   greeting?: { started_at: string; deadline_at?: string; speech_retry?: boolean; completed_at?: string; closing?: boolean;
     recording_notice?: "recordingNotice" | "recordingServiceNotice" } | null;
   gather?: { id: string; started_at: string; deadline_at: string; spec: GatherSpec; failed?: boolean; call_gone?: boolean } | null;
+  /**
+   * The provider reported the customer leg gone (`call.gather.ended` /
+   * `call.playback.ended` with `status: "call_hangup"`) before its `call.hangup`
+   * applied. Written under the lease by the reducer only; it stops every dial
+   * path (`onSweep`, `offerQueuedCall`, `fanout`, `recoverGather`,
+   * `isGatherOverdue`) and nothing else: the exact hangup still closes the leg,
+   * runs `onCustomerHangup` and creates the missed callback. Inert for older code.
+   */
+  customer_gone_at?: string | null;
   closing_message?: boolean;
   match?: { top: CallerMatch | null; count: number; degraded: boolean } | null;
   ring?: {
@@ -722,7 +731,7 @@ export function gatherTimeoutMs(session: SessionRow, spec: GatherSpec): number {
 export function isGatherOverdue(session: SessionRow, now: Date): boolean {
   if (session.ended_at || !["ivr", "after_hours", "callback_offered", "waiting", "ringing"].includes(session.state)) return false;
   const meta = readMeta(session);
-  if (meta.gather?.call_gone) return false;
+  if (meta.gather?.call_gone || meta.customer_gone_at) return false;
   if (meta.callback?.closing_at) return Date.parse(meta.callback.closing_at) + 30_000 <= now.getTime();
   const deadline = Date.parse(meta.callback?.confirmed ? meta.callback.deadline_at ?? "" : meta.gather?.deadline_at ?? "");
   if (Number.isFinite(deadline)) return deadline <= now.getTime();

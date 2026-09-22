@@ -4,7 +4,7 @@ import { runTelephonyAlerts, type TelephonyAlertDeps } from "./alerts";
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { closeOrphanLegs, closeStaleRingAttempts, sweepOverdueRingSteps } from "./routing/ring-plan";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
-import { processTelnyxEvent, storedWebhookEnvelope } from "./telnyx/event-processor";
+import { drainCustomerTerminal, processTelnyxEvent, storedWebhookEnvelope } from "./telnyx/event-processor";
 import { ACTIVE_SESSION_STATES, type SessionEvent, type SessionRow } from "./state/types";
 import { telephonyStabilityEnabled } from "./stability";
 import { readPendingEffects } from "./state/continuation";
@@ -176,7 +176,10 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
       limit: RING_SWEEP_LIMIT,
       budgetMs: RING_SWEEP_BUDGET_MS,
       clock: deps.clock,
+      // E4.2: the cron has the budget (20 s) for one bounded customer-hangup drain per pass.
+      drainCustomerTerminal: (session) => drainCustomerTerminal({ ...deps, ledgerReplay: "cron", replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, session),
     });
+    if (result.yielded.length > 0) deps.logger?.({ level: "warn", scope: "cron", job: RING_SWEEP_JOB, sweepYielded: result.yielded.length });
     if (result.errors.length > 0) {
       await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error: new Error(result.errors[0].error), context: { job: RING_SWEEP_JOB, sessionId: result.errors[0].sessionId } });
     }
@@ -198,6 +201,8 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
         checked: result.checked,
         swept: result.swept.length,
         deferred: result.deferred.length,
+        yielded: result.yielded.length,
+        drained: result.drained.length,
         orphanLegsClosed: orphans.closed.length,
         orphanLegsAwaitingHangup: orphans.awaitingHangup.length,
         staleAttemptsClosed: attempts.length,

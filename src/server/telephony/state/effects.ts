@@ -1527,7 +1527,7 @@ function compensationWouldReopenCall(next: Transition | null | undefined, curren
 
 async function executeReduceResult(
   deps: EffectsDeps,
-  input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean },
+  input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean; urgentStamps?: UrgentDispatchStamps },
 ): Promise<ApplyResult> {
   const { result } = input;
   let branch: "main" | "rejected" = "main";
@@ -1957,8 +1957,15 @@ async function executeReduceResult(
     } finally {
       const outcome = outcomes.findLast((item) => item.key === key);
       if (outcome) {
-        outcome.startedAt = new Date(started).toISOString();
-        if (dbCountAtDispatch !== null) outcome.dbCountAtDispatch = dbCountAtDispatch;
+        // A command the urgent teardown already sent keeps the moment it was
+        // sent (M21): the journal-cache replay here runs 1.7-3.3 s later, and
+        // `effect_ms` is only ever read next to `started_at`.
+        const urgent = input.urgentStamps?.get(key);
+        outcome.startedAt = urgent?.startedAt ?? new Date(started).toISOString();
+        if (urgent) {
+          outcome.ms = urgent.ms;
+          if (urgent.dbCountAtDispatch !== null) outcome.dbCountAtDispatch = urgent.dbCountAtDispatch;
+        } else if (dbCountAtDispatch !== null) outcome.dbCountAtDispatch = dbCountAtDispatch;
         const announcement = command.kind === "playback_start" ? announcementKeyForMedia(command.media) : null;
         outcome.phase = command.kind === "playback_start" ? `announcement:${announcement ?? "custom"}${announcement === "greeting" && readMeta(ctx.session).greeting?.recording_notice ? `+${readMeta(ctx.session).greeting!.recording_notice}` : ""}`
           : command.kind === "dial" ? `dial:${command.role}` : command.kind;
@@ -2026,9 +2033,15 @@ async function executeReduceResult(
     ...(projectionError ? { projectionPending: true } : {}), notes: transition.notes };
 }
 
-async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): Promise<void> {
+/** What the urgent dispatch measured for a command, so the audit does not restate it from the journal-cache replay (M21: 1.7-3.3 s later). */
+type UrgentDispatchStamp = { startedAt: string; ms: number; dbCountAtDispatch: number | null };
+/** Keyed by `commandKey(command)`. */
+type UrgentDispatchStamps = Map<string, UrgentDispatchStamp>;
+
+async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): Promise<UrgentDispatchStamps> {
   // A committed hangup/privacy decision must reach the provider even when an
   // unrelated historical callback or projection write is still unavailable.
+  const stamps: UrgentDispatchStamps = new Map();
   for (const entry of readPendingEffects(session).entries) {
     const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: entry.previousConferenceId };
     const ending = entry.event.kind === "app" ? entry.event.type === "hangup" : entry.event.type === "call.hangup";
@@ -2050,13 +2063,22 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
       else runs.push([command]);
     }
     const warn = (kind: string) => deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "teardown_pending", command: kind });
+    // A send that fails gets no stamp; the replay retries and stamps it itself.
+    // A send the provider answered (accepted, or the leg already gone) is
+    // fulfilled and stamped: the provider heard about it then.
+    const send = async (command: Command) => {
+      const started = deps.now();
+      const dbCountAtDispatch = requestStepCount("db");
+      await executeCommand(deps, ctx, command);
+      stamps.set(commandKey(command), { startedAt: started.toISOString(), ms: deps.now().getTime() - started.getTime(), dbCountAtDispatch });
+    };
     for (const run of runs) {
       // Contract 1 has no provider journal to fence a command issued after the
       // lease was lost, so it keeps stopping at the first one.
       if (sessionOwnership.getStore()?.contract !== 2) {
         await deps.renewLease?.();
         for (const command of run) {
-          try { await executeCommand(deps, ctx, command); }
+          try { await send(command); }
           catch (error) {
             if (error instanceof SessionLeaseLostError) throw error;
             warn(command.kind);
@@ -2064,7 +2086,7 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
         }
         continue;
       }
-      const settled = await Promise.allSettled(run.map((command) => executeCommand(deps, ctx, command)));
+      const settled = await Promise.allSettled(run.map(send));
       for (const [index, result] of settled.entries()) {
         if (result.status === "fulfilled") continue;
         if (result.reason instanceof SessionLeaseLostError) throw result.reason;
@@ -2072,12 +2094,16 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
       }
     }
   }
+  return stamps;
 }
 
-export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean } = {}): Promise<ApplyResult | null> {
+export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean; urgentStamps?: UrgentDispatchStamps } = {}): Promise<ApplyResult | null> {
   let latest: ApplyResult | null = null;
   let requested: ApplyResult | null = null;
-  if (!options.databaseOnly && !options.teardownPrepared) await dispatchUrgentTeardown(deps, session);
+  const stamps: UrgentDispatchStamps = new Map(options.urgentStamps ?? []);
+  if (!options.databaseOnly && !options.teardownPrepared) {
+    for (const [key, stamp] of await dispatchUrgentTeardown(deps, session)) stamps.set(key, stamp);
+  }
   const queued = readPendingEffects(session).entries;
   const seen = new Set(queued.map((entry) => entry.id));
   const enqueue = (current: SessionRow) => {
@@ -2154,7 +2180,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     try {
       latest = await executeReduceResult(deps, { session: fresh.data, expectedVersion: fresh.data.version, event: current.event,
         result: { next: current.transition, commands: current.commands, compensations: current.compensations, guard: null, ignored: null },
-        continuation: current, databaseOnly: options.databaseOnly });
+        continuation: current, databaseOnly: options.databaseOnly, urgentStamps: stamps });
     } catch (error) {
       current.attempts += 1;
       current.lastError = describeError(error);
@@ -2178,8 +2204,9 @@ export async function applyReduceResult(deps: EffectsDeps, input: { session: Ses
   if (input.session.writer_contract !== 2 && !telephonyStabilityEnabled() && !hasStabilityContract(input.session)) return executeReduceResult(deps, input);
   let staged = await stageEffects(deps, input);
   const prepareFacts = input.event.kind === "telnyx" && readPendingEffects(staged).entries.length > 1;
+  let urgentStamps: UrgentDispatchStamps | undefined;
   if (prepareFacts) {
-    await dispatchUrgentTeardown(deps, staged);
+    urgentStamps = await dispatchUrgentTeardown(deps, staged);
     // Provider observations must reach the leg/attempt state even if an older
     // command has an unknown outcome. Only provider commands remain in FIFO.
     const current = readPendingEffects(staged).entries.find((entry) => entry.id === input.event.id);
@@ -2187,7 +2214,7 @@ export async function applyReduceResult(deps: EffectsDeps, input: { session: Ses
     staged = await persistTransition(deps, { session: staged, transition: current.transition, expectedVersion: null,
       event: current.event, continuation: current, phase: "critical" });
   }
-  const result = await resumePendingEffects(deps, staged, { priorityEntryId: input.event.id, teardownPrepared: prepareFacts });
+  const result = await resumePendingEffects(deps, staged, { priorityEntryId: input.event.id, teardownPrepared: prepareFacts, urgentStamps });
   if (!result) throw new EffectsError("staged transition missing its continuation");
   return result;
 }
