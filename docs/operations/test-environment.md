@@ -7,7 +7,7 @@ Konfigurácia od 2026-09-21 oddeľuje nové Preview nasadenia vrátane vetvy `de
 | Prostredie | Supabase | Organizácia | Aplikácia |
 | --- | --- | --- | --- |
 | Production, vetva `main` | `ifpaeegaesdmljfkdvcn` | AlfoPure, `reqzkjhaquxbbhhalcmm` | `https://dispecing.linkapomoci.sk` |
-| Preview, vetva `dev` a pracovné vetvy | `nzpnqdstvkfncflgqlny` | AlfoSystems, `rwhghkvusmdnaexjvrum`, Free | `https://test.dispecing.linkapomoci.sk` (čaká na DNS), zatiaľ [generovaný dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) a nové Preview URL pracovných vetiev |
+| Preview, vetva `dev` a pracovné vetvy | `nzpnqdstvkfncflgqlny` | AlfoSystems, `rwhghkvusmdnaexjvrum`, Free | [Testovacie prostredie (`dev`)](https://test.dispecing.linkapomoci.sk), [záložný dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) a nové Preview URL pracovných vetiev |
 
 Obe databázy sú vo Frankfurte (`eu-central-1`). Vercel projekt je `pomoc-motoristom-dispatching` (`prj_DN3smSO1EbGowAmw3nHLQUYoSVJG`, tím `team_56GjBnBw6zGSG83LJAnQCB8T`, región `fra1`).
 
@@ -17,15 +17,17 @@ Vercel cieľ **Development** sa pri oddelení nemenil. Lokálny `.env.local` mus
 
 ## Doména testovacieho `dev`
 
-Stav k 2026-09-22: Vercel už priraďuje `test.dispecing.linkapomoci.sk` k aktuálnemu Preview deploymentu vetvy `dev` a doména je pridaná do testovacieho Auth redirect allowlistu. Autoritatívne DNS ešte vracia `NXDOMAIN`; aktivácia čaká na DNS CNAME vo Websupporte. Testovacia Auth Site URL preto zostáva na generovanom dev aliase a verejná dostupnosť novej domény cez DNS a HTTPS zatiaľ nie je potvrdená. Dovtedy používaj generovaný dev alias. DNS záznam pre `test.dispecing` nastav podľa aktuálneho odporúčania Vercelu pre túto doménu. Produkčné záznamy `dispecing.linkapomoci.sk` ani cudzí `dev.dispecing.linkapomoci.sk` sa nemenia.
+Stav k 2026-09-22: `test.dispecing.linkapomoci.sk` je aktívna kanonická doména testu. Vercel ju priraďuje výhradne k aktuálnemu Preview deploymentu vetvy `dev` a doména je v testovacom Auth redirect allowliste. Vo Websupporte je pridaný CNAME `test.dispecing` → `f9c23ecf19e30b83.vercel-dns-016.com` s TTL 600. Všetky tri autoritatívne nameservery vracajú nový záznam; 33 pôvodných DNS záznamov zostalo bez zmeny. Vercel vydal platný TLS certifikát a `/api/health/ready` správneho dev deploymentu vrátilo `200` aj priamo z používateľovho Macu cez bežné DNS rozlíšenie.
 
-Pri príprave domény Vercel odporučil v zóne `linkapomoci.sk` nový záznam `test.dispecing` typu `CNAME` s cieľom `f9c23ecf19e30b83.vercel-dns-016.com.`; použi TTL 600. Pred budúcou zmenou tento cieľ znova over vo Verceli.
+Niektoré resolvery môžu dočasne používať skoršiu negatívnu DNS cache. Ide o dobehnutie cache po aktivácii, nie o chýbajúce nastavenie domény; dovtedy zostáva dostupný generovaný dev alias. Pri budúcej zmene DNS preber aktuálny cieľ z odporúčania Vercelu pre túto doménu. Produkčné záznamy `dispecing.linkapomoci.sk` ani cudzí `dev.dispecing.linkapomoci.sk` sa nemenia.
 
 Aplikácia používa origin aktuálnej požiadavky. Kvôli pridaniu domény nepridávaj branch overrides `APP_BASE_URL` ani `NEXT_PUBLIC_APP_URL`; nie sú nastavené a samotné mapovanie domény nevyžaduje rebuild. Pracovné vetvy naďalej používajú svoje Preview URL.
 
-V testovacom Supabase `nzpnqdstvkfncflgqlny` zachovaj fungujúcu Auth Site URL generovaného dev aliasu, kým sa nepotvrdí DNS a platné HTTPS novej domény. Až potom nastav Site URL na `https://test.dispecing.linkapomoci.sk`; v testovacom allowliste povoľ `https://test.dispecing.linkapomoci.sk/**` a zachovaj potrebné redirecty generovaného dev aliasu, pracovných Preview a lokálneho vývoja. Produkčná Auth konfigurácia sa nemení.
+V testovacom Supabase `nzpnqdstvkfncflgqlny` je Auth Site URL `https://test.dispecing.linkapomoci.sk`. Testovací allowlist povoľuje `https://test.dispecing.linkapomoci.sk/**` a zachováva potrebné redirecty generovaného dev aliasu, pracovných Preview a lokálneho vývoja. Produkčná Auth konfigurácia zostáva bez zmeny.
 
-Pred označením domény za pripravenú over DNS, platný HTTPS certifikát, mapovanie na správny READY deployment vetvy `dev`, `GET /api/health/ready`, prihlásenie a použitie testovacieho Supabase ref v aplikácii. Samotný názov hosta izoláciu nedokazuje. Telefónia a externé integrácie zostávajú vypnuté; nová doména nie je dôvod registrovať reálne provider webhooky.
+Overenie vlastnej domény 2026-09-22 zahŕňalo vratnú úpravu testovacieho kontaktu cez prihlásené aplikačné API. Zápis sa prejavil iba v teste; dočasný záznam v produkcii nevznikol a produkčná kontrolná hodnota zostala nezmenená. Testovací záznam bol po kontrole uprataný. Prehliadač načítal prihlásenie aj autentifikovaný dashboard bez chýb stránky alebo neočakávaných požiadaviek na Supabase. Readiness vrátilo `200`, webphone `503 not_configured`; v testovacej Auth konfigurácii pribudol redirect novej domény a nastavila sa jej Site URL; produkčná Auth konfigurácia zostala zhodná s pôvodným stavom.
+
+Po každej budúcej zmene doménového mapovania over DNS, platný HTTPS certifikát, mapovanie na správny READY deployment vetvy `dev`, `GET /api/health/ready`, prihlásenie a použitie testovacieho Supabase ref v aplikácii. Samotný názov hosta izoláciu nedokazuje. Telefónia a externé integrácie zostávajú vypnuté; vlastná doména nie je dôvod registrovať reálne provider webhooky.
 
 ## Obnova po pozastavení
 

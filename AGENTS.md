@@ -23,12 +23,12 @@ pointed at the old one; a custom domain survives the rename.
 | Supabase test (Preview and `dev`) | `nzpnqdstvkfncflgqlny` — Free organization `AlfoSystems` (`rwhghkvusmdnaexjvrum`) |
 | Vercel | `pomoc-motoristom-dispatching` (`fra1`) |
 | Hostnames | **`dispecing.linkapomoci.sk`** (production), `dispecing-test.vercel.app` |
-| Canonical TEST hostname (`dev` Preview; DNS activation pending) | **`test.dispecing.linkapomoci.sk`** |
+| Canonical TEST hostname (`dev` Preview) | **`test.dispecing.linkapomoci.sk`** |
 | Generated `dev` branch alias (fallback) | `pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app` |
 
 Despite its name, `dispecing-test.vercel.app` is a production alias, not the isolated test environment. Use `https://test.dispecing.linkapomoci.sk` as the canonical TEST address and bind it exclusively to the `dev` branch's Preview deployment. Keep the generated `dev` alias as a fallback. Verify DNS, TLS, branch routing and the test database ref before treating a new domain mapping as ready; do not register real provider webhooks against test.
 
-As of 2026-09-22, Vercel maps the new TEST hostname to `dev`, but DNS activation is pending. Use the generated `dev` alias until DNS and HTTPS are verified. Domain mapping does not require `APP_BASE_URL`/`NEXT_PUBLIC_APP_URL` overrides or an application rebuild; switch only the TEST Supabase Auth Site URL after the custom domain works.
+As of 2026-09-22, the canonical TEST hostname is active: authoritative DNS points to Vercel, TLS is valid, and Vercel maps it exclusively to the `dev` Preview deployment. The TEST Supabase Auth Site URL is `https://test.dispecing.linkapomoci.sk`; Production Auth remains unchanged. Domain mapping does not require `APP_BASE_URL`/`NEXT_PUBLIC_APP_URL` overrides or an application rebuild. Resolvers with an earlier negative DNS cache may need time to expire; the generated `dev` alias remains available meanwhile.
 
 `dispecing.linkapomoci.sk` belongs here. An earlier version of this file forbade touching it, which was correct while the original served it and is wrong now — the hostname moved with the owner's explicit instruction. If an agent reports it as an unexpected alias, that report is out of date, not the configuration.
 

@@ -2,7 +2,7 @@
 
 > **Aktualizácia 2026-09-22:** názvy projektov a zdieľaná databáza opísané nižšie sú historické. Aktuálne hranice určuje [AGENTS.md](../AGENTS.md) a [runbook oddeleného testovacieho prostredia](operations/test-environment.md). Kanonická adresa testu `test.dispecing.linkapomoci.sk` je určená pre Preview vetvy `dev` s databázou `nzpnqdstvkfncflgqlny`; generovaný dev alias zostáva záložnou adresou. Produkcia `dispecing.linkapomoci.sk` aj alias `dispecing-test.vercel.app` používajú `ifpaeegaesdmljfkdvcn`. Nenasleduj staré pokyny na zmenu DNS, webhookov ani databázového cieľa; overenie novej testovacej domény popisuje aktuálny runbook.
 
-> Mapovanie testovacej domény na `dev` je vo Verceli pripravené; aktivácia DNS ešte čaká. Do overenia DNS a HTTPS používaj generovaný dev alias.
+> Testovacia doména je aktívna: autoritatívne DNS smeruje na Vercel, TLS je platné a mapovanie vedie výhradne na Preview vetvy `dev`. Generovaný dev alias zostáva dostupný aj pri dobiehaní skoršej negatívnej DNS cache.
 
 ## Cieľ a hranice
 
@@ -84,7 +84,7 @@ Premenné s prefixom `NEXT_PUBLIC_` Next.js vloží do klientského bundle poča
 
 ## Supabase Auth redirects
 
-Test a produkcia majú samostatnú Auth konfiguráciu. V testovacom projekte `nzpnqdstvkfncflgqlny` zachovaj Site URL generovaného dev aliasu až do overenia DNS a HTTPS vlastnej domény; potom ju nastav na `https://test.dispecing.linkapomoci.sk`. Testovací redirect allowlist obsahuje vlastnú doménu, generovaný dev alias, Preview hosty a lokálny vývoj:
+Test a produkcia majú samostatnú Auth konfiguráciu. V testovacom projekte `nzpnqdstvkfncflgqlny` je Site URL `https://test.dispecing.linkapomoci.sk`. Testovací redirect allowlist obsahuje vlastnú doménu, generovaný dev alias, Preview hosty a lokálny vývoj:
 
 ```text
 https://test.dispecing.linkapomoci.sk/**
