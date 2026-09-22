@@ -152,7 +152,7 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
   });
   db.registerRpc("motorist_provider_command_lookup_v2", (args) => {
     const entry = db.storage("motorist_provider_commands").find((row) => row.command_id === args.p_command_id);
-    return entry?.outcome ? { outcome: String(entry.outcome) } : null;
+    return entry?.outcome ? { outcome: String(entry.outcome), result: entry.result } : null;
   });
 
   // The same two functions over an array: one fence, one pass, a decision per

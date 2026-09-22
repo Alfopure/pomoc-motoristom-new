@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { assertOwnership, DATABASE_REQUEST_MS, ownershipRpc, sessionOwnership, type Ownership } from "./ownership";
+import { assertOwnership, DATABASE_REQUEST_MS, ownershipRpc, recordProviderDispatch, sessionOwnership, type Ownership } from "./ownership";
 
 export class ProviderOutcomeUnknownError extends Error {
   constructor(readonly commandId: string) {
@@ -70,7 +70,7 @@ export type JournaledResult<S> = { cached: true; result: unknown } | { cached: f
 export async function dispatchJournaled<S extends JournaledSend>(
   journal: JournalRequest | null,
   send: () => Promise<S>,
-  hooks: { error: (status: number, body: unknown, commandId: string | null) => Error; invalid?: (sent: S) => boolean },
+  hooks: { error: (status: number, body: unknown, commandId: string | null) => Error; invalid?: (sent: S) => boolean; trackDispatch?: boolean },
 ): Promise<JournaledResult<S>> {
   if (journal) {
     // Preparation renews ownership and fences the exact immutable command in
@@ -85,6 +85,7 @@ export async function dispatchJournaled<S extends JournaledSend>(
     }
   } else await assertOwnership();
 
+  if (hooks.trackDispatch !== false) recordProviderDispatch();
   const sent = await send();
   if (journal) {
     const invalid = hooks.invalid?.(sent) ?? false;
@@ -147,7 +148,7 @@ export async function recordProviderBatch(
  */
 export async function dispatchJournaledBatch<S extends JournaledSend>(
   members: ReadonlyArray<{ journal: JournalRequest; send: () => Promise<S> }>,
-  hooks: { error: (status: number, body: unknown, commandId: string | null) => Error; invalid?: (sent: S) => boolean },
+  hooks: { error: (status: number, body: unknown, commandId: string | null) => Error; invalid?: (sent: S) => boolean; trackDispatch?: boolean },
 ): Promise<Array<PromiseSettledResult<JournaledResult<S>>>> {
   const owner = sessionOwnership.getStore();
   if (!owner || owner.contract !== 2 || !members.length) {
@@ -172,7 +173,10 @@ export async function dispatchJournaledBatch<S extends JournaledSend>(
     else outcomes.push({ status: "rejected", reason: new ProviderOutcomeUnknownError(member.journal.commandId) });
   }
 
-  const sent = await Promise.allSettled(dispatched.map(({ member }) => member.send()));
+  const sent = await Promise.allSettled(dispatched.map(({ member }) => {
+    if (hooks.trackDispatch !== false) recordProviderDispatch();
+    return member.send();
+  }));
   const record: Array<{ journal: JournalRequest; status: number; result: unknown; retryAfterMs?: number }> = [];
   for (const [position, settled] of sent.entries()) {
     const { index, member } = dispatched[position];

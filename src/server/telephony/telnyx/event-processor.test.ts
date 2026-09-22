@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { withRequestMetrics } from "@/server/request-metrics";
 
 import { CONNECTION_ID, createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
@@ -16,6 +17,33 @@ vi.mock("../routing/ring-plan", async (importOriginal) => {
 });
 
 describe("processTelnyxEvent", () => {
+  it("audits claim, ownership and actual dispatch under the HTTP request identity", async () => {
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    const envelope = h.envelope("call.initiated", { call_control_id: "timed-call", call_session_id: "timed-provider-session", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "timed-delivery");
+    envelope.meta = { attempt: 2, delivered_to: "https://example.test/webhook?private=secret" };
+    const response = await withRequestMetrics("call.webhook", async () => Response.json(await h.process(envelope)), { logger: () => {} });
+    const result = await response.json();
+    expect(result.outcome).toBe("processed");
+    const audit = h.rows("motorist_call_events").find(row => row.event_fingerprint === "timed-delivery");
+    expect(audit?.normalized_payload).toMatchObject({ timing: { request_id: response.headers.get("x-request-id"), ingress_at: expect.any(String),
+      claimed_at: expect.any(String), lease_acquired_at: expect.any(String), first_command_at: h.now().toISOString(),
+      meta: { attempt: 2, delivered_to: "https://example.test/webhook" } } });
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "lease-timing", outcome: "finished", release_confirmed: true, request_id: response.headers.get("x-request-id") }));
+    await h.process(envelope);
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook-delivery", outcome: "duplicate", meta: { attempt: 2, delivered_to: "https://example.test/webhook" } }));
+  });
+  it("finishes a successful inbox claim only after releasing ownership", async () => {
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    const rpc = h.client.rpc.bind(h.client);
+    const owners: unknown[] = [];
+    vi.spyOn(h.client, "rpc").mockImplementation((name, args) => {
+      if (name === "motorist_telnyx_finish_webhook_event_v2" && (args as { p_result?: string })?.p_result === "processed") owners.push(sessionOwnership.getStore());
+      return rpc(name, args);
+    });
+    await h.inbound({ to: NUMBERS.allianz });
+    expect(owners.length).toBeGreaterThan(0);
+    expect(owners.every(owner => owner === undefined)).toBe(true);
+  });
   it("acknowledges durable call work before maintenance, with the session lease released", async () => {
     const h = createTelephonyHarness();
     const queued: Array<() => Promise<void>> = [];
@@ -104,6 +132,7 @@ describe("processTelnyxEvent", () => {
     h.db.seed("motorist_telnyx_webhook_events", [{ event_id: "evt-busy", event_type: "call.answered", status: "queued", attempts: 1, claimed_at: h.now().toISOString(), payload: {} }]);
     const busy = h.envelope("call.answered", { call_control_id: "cc-1", call_session_id: "tsess-1" }, "evt-busy");
     expect(await h.process(busy)).toMatchObject({ status: 500, outcome: "busy" });
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook-delivery", outcome: "busy", timing: expect.objectContaining({ ingress_at: expect.any(String) }), meta: { attempt: 1, delivered_to: null } }));
     expect(h.session(String(h.rows("motorist_call_sessions")[0].id)).state).toBe("received");
 
     // A stale claim (older than 30 s) is taken over and processed.
@@ -250,7 +279,7 @@ describe("processTelnyxEvent", () => {
     const result = await processTelnyxEvent(h.deps, h.envelope("call.initiated", { call_control_id: "cc-9", call_session_id: "tsess-9", connection_id: CONNECTION_ID, direction: "incoming", to: "+4210232408718", from: "0905123456" }));
     expect(result).toMatchObject({ status: 200, outcome: "processed", type: "call.initiated", eventClass: "control" });
     expect(h.rows("motorist_call_sessions")[0]).toMatchObject({ caller_number: "+421905123456", called_number: NUMBERS.allianz, state: "received" });
-    expect(h.logs.at(-1)).toMatchObject({ scope: "webhook", outcome: "processed", verified: true });
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook", outcome: "processed", verified: true }));
   });
   it("replays an early answer when its exact incoming control ID becomes known", async () => {
     const h = createTelephonyHarness();
@@ -354,6 +383,8 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
     // The 500 contract is kept: the fact is not applied yet.
     expect(result).toMatchObject({ status: 500, outcome: "failed", sessionId: call.sessionId });
     expect(ledgerRow(h, "deferred-hangup")).toMatchObject({ retry_state: "deferred", delivery_count: 1, deferral_count: 1, attempts: 1 });
+    expect(ledgerRow(h, "deferred-hangup").error).toContain("deferral=lease_busy");
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook", eventId: "deferred-hangup", deferral: "lease_busy", polls: expect.any(Number), lease_wait_ms: expect.any(Number) }));
     expect(acquires(h) - beforeDeferral).toBeGreaterThan(1);
     expect(acquires(h) - beforeDeferral).toBeLessThanOrEqual(WEBHOOK_LEASE_POLL_MS.length + 1);
     expect(customerLeg(h, call.sessionId, call.callControlId).ended_at).toBeNull();

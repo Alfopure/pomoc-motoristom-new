@@ -4,6 +4,15 @@ import { encodeClientState } from "../telnyx/client-state";
 import { buildTelnyxEnvelope, classifyEventType, parseTelnyxEnvelope } from "./events";
 
 describe("parseTelnyxEnvelope", () => {
+  it("keeps delivery attempts and a destination without credentials or URL parameters", () => {
+    const base = buildTelnyxEnvelope({ id: "delivery", type: "call.answered", payload: {} });
+    expect(parseTelnyxEnvelope({ ...base, meta: { attempt: 3, delivered_to: "https://user:password@example.test/webhook?secret=key#fragment" } }))
+      .toMatchObject({ deliveryAttempt: 3, deliveredTo: "https://example.test/webhook" });
+    for (const attempt of [-1, 0, 1.5, "3", NaN]) {
+      expect(parseTelnyxEnvelope({ ...base, meta: { attempt, delivered_to: "invalid" } }))
+        .toMatchObject({ deliveryAttempt: null, deliveredTo: null });
+    }
+  });
   it("normalises the Telnyx envelope and decodes client_state", () => {
     const clientState = encodeClientState({ sid: "00000000-0000-4000-8000-000000000001", role: "operator", operatorId: "op-1", step: 2, intent: "ring" });
     const envelope = buildTelnyxEnvelope({

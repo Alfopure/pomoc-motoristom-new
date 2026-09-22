@@ -36,6 +36,8 @@ export type SessionLeaseBusyDetails = {
   leaseWaitMs: number;
   /** Acquire RPCs issued before giving up. */
   polls: number;
+  /** Actual elapsed acquisition time, including RPC time. */
+  waitedMs?: number;
   /** `app.hangup`, `app.pickup`, `call.playback.ended`, ... when known. */
   eventType?: string;
 };
@@ -59,9 +61,10 @@ export function describeServiceError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   const base = `${error.name}: ${error.message}`;
   if (error instanceof SessionLeaseBusyError && error.details) {
-    const { leaseWaitMs, polls, eventType } = error.details;
-    return `${base} [lease_wait_ms=${leaseWaitMs} polls=${polls}${eventType ? ` event=${eventType}` : ""}]`;
+    const { leaseWaitMs, polls, eventType, waitedMs } = error.details;
+    return `${base} [deferral=lease_busy lease_wait_ms=${leaseWaitMs} polls=${polls}${waitedMs === undefined ? "" : ` waited_ms=${waitedMs}`}${eventType ? ` event=${eventType}` : ""}]`;
   }
+  if (error instanceof SessionEventDeferredError) return `${base} [deferral=${error instanceof SessionLeaseBusyError ? "lease_busy" : error.code}]`;
   return base;
 }
 

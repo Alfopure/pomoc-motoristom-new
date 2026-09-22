@@ -1,6 +1,6 @@
 import "server-only";
 import { measureRequestStep } from "@/server/request-metrics";
-import { sessionOwnership } from "../ownership";
+import { recordProviderDispatch, sessionOwnership } from "../ownership";
 import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../provider-journal";
 
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
@@ -444,6 +444,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       headersMs: null, ms: 0, status: null };
     telemetry?.attempts.push(timing);
     try {
+      if (method !== "GET") recordProviderDispatch();
       const response = await fetchImpl(url, {
         method,
         headers: compact({
@@ -528,6 +529,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
           return sent;
         },
         {
+          trackDispatch: false,
           error: (status, result) => errorFromBody(status, result, commandId),
           // A 2xx that does not carry the identifier it promised has not
           // acknowledged anything, whatever the status line says.
@@ -688,7 +690,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
             }
           },
         })),
-        { error: (status, result, commandId) => errorFromBody(status, result, commandId) },
+        { trackDispatch: false, error: (status, result, commandId) => errorFromBody(status, result, commandId) },
       );
       return settled.map((outcome) => {
         if (outcome.status === "rejected") return outcome as PromiseRejectedResult;
@@ -729,6 +731,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
           },
         })),
         {
+          trackDispatch: false,
           error: (status, result, commandId) => errorFromBody(status, result, commandId),
           invalid: (sent) => sent.status < 400 && !str(asRecord(asRecord(sent.result).data).call_control_id),
         },

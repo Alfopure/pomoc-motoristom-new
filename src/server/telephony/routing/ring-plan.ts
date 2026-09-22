@@ -3,8 +3,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
-import { telephonyStabilityEnabled } from "../stability";
+import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { SessionLeaseBusyError } from "../service-errors";
+import { readPendingEffects } from "../state/continuation";
 import type { PauseRoutingMode } from "@/lib/telephony/operator-settings";
 
 import {
@@ -13,9 +14,11 @@ import {
   RING_STEP_GRACE_SECS,
   WAITING_TICK_STALE_MS,
   GREETING_TIMEOUT_MS,
+  DEFAULT_ROUTING_SETTINGS,
   readMeta,
   isGatherOverdue,
   type AppEvent,
+  type AttemptRow,
   type AttemptPlan,
   type DeviceRow,
   type FrozenRingMember,
@@ -23,6 +26,7 @@ import {
   type FrozenRingStep,
   type PresenceRow,
   type SessionRow,
+  type TelephonyEnvironment,
   TERMINAL_STATES,
 } from "../state/types";
 import { evaluateMemberEligibility, type EligibilityDevice, type EligibilityPresence, type IneligibilityReason } from "./eligibility";
@@ -48,6 +52,25 @@ type AdminClient = SupabaseClient<Database>;
 export const MIN_MEMBER_RING_SECS = 5;
 export const MAX_MEMBER_RING_SECS = 120;
 export const DEFAULT_STEP_TIMEOUT_SECS = 20;
+export const ACTIVE_LEG_WINDOW_MS = 4 * 60 * 60 * 1000;
+export const QUEUE_OPERATOR_RETRY_MS = 60_000;
+
+/** Shared by the leased reducer and the advisory queue prefilter. */
+export function queueOperatorMembers(plan: FrozenRingPlan, attempts: AttemptRow[], now: Date, dueNow: boolean): FrozenRingMember[] {
+  const lastOffered = new Map<string, number>();
+  for (const attempt of attempts) if (attempt.profile_id) {
+    lastOffered.set(attempt.profile_id, Math.max(lastOffered.get(attempt.profile_id) ?? 0, Date.parse(attempt.offered_at ?? attempt.created_at)));
+  }
+  return [...new Map([...(plan.queueMembers ?? []), ...plan.steps.flatMap(step => step.members)]
+    .filter(member => member.kind === "operator" && member.profileId).map(member => [member.profileId, member])).values()]
+    .filter(member => !dueNow || (lastOffered.get(member.profileId!) ?? 0) + QUEUE_OPERATOR_RETRY_MS <= now.getTime())
+    .sort((a, z) => (lastOffered.get(a.profileId!) ?? 0) - (lastOffered.get(z.profileId!) ?? 0) || a.position - z.position);
+}
+
+export function planQueueStep(plan: FrozenRingPlan, index: number, members: FrozenRingMember[], input: RingStepPlanInput): RingStepPlanResult {
+  return planRingStep({ index, groupId: plan.steps[0].groupId, groupName: "Čakáreň", strategy: "ordered", timeoutSecs: 20,
+    members: members.map((member, position) => ({ ...member, position, ringSecs: Math.max(20, member.ringSecs) })) }, { ...input, maxFanout: 1 });
+}
 
 export function clampRingSecs(value: number | null | undefined, fallback: number): number {
   const base = typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -606,9 +629,11 @@ async function pendingCustomerHangups(admin: AdminClient, organizationId: string
 export type SweepDeps = {
   admin: AdminClient;
   organizationId: string;
+  /** Required for the advisory device/presence prefilter. */
+  environment?: TelephonyEnvironment;
   now?: () => Date;
   /** Runs one session through lease → reducer → effects (provided by the session runner). */
-  runSessionEvent: (sessionId: string, event: AppEvent) => Promise<unknown>;
+  runSessionEvent: (sessionId: string, event: AppEvent, options?: { known?: SessionRow }) => Promise<unknown>;
   eventId?: () => string;
   /** Maximum number of sessions re-driven in this pass (unbounded by default). */
   limit?: number;
@@ -625,6 +650,8 @@ export type SweepDeps = {
   drainCustomerTerminal?: (session: SessionRow) => Promise<void>;
   /** Wall budget the caller can spend on that one drain, measured from the sweep start (defaults to `budgetMs`). */
   drainBudgetMs?: number;
+  /** A released operator should go to the oldest due waiting caller first. */
+  waitingFirst?: boolean;
 };
 
 export type SweepResult = {
@@ -646,6 +673,8 @@ export type SweepResult = {
 export const CUSTOMER_DRAIN_MIN_BUDGET_MS = 10_000;
 
 export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResult> {
+  const clock = deps.clock ?? (() => Date.now());
+  const started = clock();
   const now = (deps.now ?? (() => new Date()))();
   const overdue = await findOverdueSessions(deps.admin, { organizationId: deps.organizationId, now });
   // Ringing sessions first: a caller is listening to them right now. The stale
@@ -659,6 +688,7 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
     ...overdue.media.map((session) => ({ session, stale: false })),
   ];
   const targets = candidates.filter(({ session }, index) => candidates.findIndex((entry) => entry.session.id === session.id) === index);
+  if (deps.waitingFirst) targets.sort((a, b) => Number(b.session.state === "waiting") - Number(a.session.state === "waiting"));
   // E4.2 — yield to an unprocessed customer `call.hangup` (M12/M15). One legs
   // read + one ledger read per pass with candidates; the verdict is taken
   // before any lease. Greeting and stale candidates are exempt: the stale
@@ -666,17 +696,19 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
   const yieldable = [...overdue.ringing, ...overdue.waiting, ...overdue.media].filter((session) => session.customer_leg_id);
   const yieldTo = await pendingCustomerHangups(deps.admin, deps.organizationId, yieldable);
   const result: SweepResult = { checked: targets.length, swept: [], deferred: [], errors: [], yielded: [], drained: [] };
-  const clock = deps.clock ?? (() => Date.now());
-  const started = clock();
+  const noOffer = await idleQueueCandidates(deps, overdue.waiting.filter(session => !yieldTo.has(session.id)), now);
   const limit = deps.limit ?? targets.length;
-  for (const [index, { session, stale }] of targets.entries()) {
+  let attempted = 0;
+  for (const { session, stale } of targets) {
     // Bounded at the loop head so no caller is killed mid-processing: the
     // webhook route by its inline budget, the cron pass by `RING_SWEEP_LIMIT`
     // and `RING_SWEEP_BUDGET_MS` (cron-jobs.ts).
-    if (index >= limit || (deps.budgetMs !== undefined && clock() - started >= deps.budgetMs)) {
+    if (attempted >= limit || (deps.budgetMs !== undefined && clock() - started >= deps.budgetMs)) {
       result.deferred.push(session.id);
       continue;
     }
+    if (noOffer.has(session.id)) { result.deferred.push(session.id); continue; }
+    attempted += 1;
     if (yieldTo.has(session.id)) {
       // Never sweep over a pending customer hangup (every caller). The
       // candidate stays for the next pass; the hangup is applied by its own
@@ -695,7 +727,7 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
     }
     const id = deps.eventId ? deps.eventId() : `sweep:${session.id}:${now.getTime()}`;
     try {
-      await deps.runSessionEvent(session.id, { kind: "app", id, type: "sweep", actorProfileId: null, occurredAt: now.toISOString(), stale });
+      await deps.runSessionEvent(session.id, { kind: "app", id, type: "sweep", actorProfileId: null, occurredAt: now.toISOString(), stale }, { known: session });
       result.swept.push(session.id);
     } catch (error) {
       if (error instanceof SessionLeaseBusyError) result.deferred.push(session.id);
@@ -703,4 +735,51 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
     }
   }
   return result;
+}
+
+/** Advisory only. A possible change always goes through the leased reducer. */
+async function idleQueueCandidates(deps: SweepDeps, sessions: SessionRow[], now: Date): Promise<Set<string>> {
+  const candidates = sessions.filter(session => {
+    const meta = readMeta(session);
+    return session.state === "waiting" && isQueueOfferDue(session, now) && !isWaitingTickStale(session, now) &&
+      !isQueueExpired(session, now) && !isSessionStale(session, now) && !isGatherOverdue(session, now) &&
+      !session.termination_requested_at && !session.cancellations_next_attempt_at && !readPendingEffects(session).entries.length &&
+      !meta.customer_gone_at && !meta.gather?.call_gone && !meta.hangup && !meta.pickup &&
+      !meta.recording?.recorders.length && !meta.recording?.barrier && !meta.recording?.pendingAudio &&
+      !meta.announcement_sequence && Boolean(meta.ring?.plan?.steps[0]);
+  });
+  if (!deps.environment || !candidates.length) return new Set();
+  const { admin, organizationId } = deps;
+  const ids = [...new Set(candidates.flatMap(session => queueOperatorMembers(readMeta(session).ring!.plan!, [], now, false).map(member => member.profileId!)))];
+  const [settings, presence, devices, offers, legs, attempts, personal] = await Promise.all([
+    admin.from("motorist_telephony_settings").select("*").eq("organization_id", organizationId).maybeSingle(),
+    ids.length ? admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId).in("profile_id", ids) : { data: [], error: null },
+    ids.length ? admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment).in("profile_id", ids) : { data: [], error: null },
+    ids.length ? admin.from("motorist_ring_attempts").select("profile_id, session_id").eq("organization_id", organizationId).eq("result", "offered").in("profile_id", ids) : { data: [], error: null },
+    admin.from("motorist_call_legs").select("id", { count: "exact", head: true }).eq("organization_id", organizationId)
+      .is("ended_at", null).gte("initiated_at", new Date(now.getTime() - ACTIVE_LEG_WINDOW_MS).toISOString()),
+    admin.from("motorist_ring_attempts").select("*").eq("organization_id", organizationId).in("session_id", candidates.map(session => session.id)),
+    admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId),
+  ]);
+  // On an unavailable advisory snapshot take the normal leased path, whose
+  // reads and error handling remain authoritative.
+  if ([settings, presence, devices, offers, legs, attempts, personal].some(result => result.error)) return new Set();
+  const quiet = new Set<string>();
+  for (const session of candidates) {
+    const meta = readMeta(session), queue = meta.queue!, frozen = meta.ring!.plan!;
+    const plan = { ...frozen, steps: frozen.steps.map(step => ({ ...step,
+      members: resolvePersonalRingMembers(step.members, personal.data ?? [], settings.data?.destination_allowlist ?? ["SK", "CZ"]),
+    })) };
+    const escalation = settings.data?.queue_escalate_after_seconds ?? DEFAULT_ROUTING_SETTINGS.queueEscalateAfterSeconds;
+    if (escalation > 0 && !queue.escalated_at && queue.idle_since && Date.parse(queue.idle_since) + escalation * 1000 <= now.getTime()) continue;
+    const input: RingStepPlanInput = { sessionId: session.id, now, ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(session),
+      presence: toEligibilityPresence(presence.data ?? []), devices: toEligibilityDevices(devices.data ?? []),
+      openOffers: (offers.data ?? []).filter(offer => offer.session_id !== session.id).map(offer => offer.profile_id).filter((id): id is string => Boolean(id)),
+      attempted: new Set(), activeLegCount: legs.count ?? 0, maxConcurrentLegs: settings.data?.max_concurrent_legs ?? DEFAULT_ROUTING_SETTINGS.maxConcurrentLegs };
+    const ownAttempts = (attempts.data ?? []).filter(attempt => attempt.session_id === session.id);
+    const planned = planQueueStep(plan, session.current_step, queueOperatorMembers(plan, ownAttempts, now, true), input);
+    const reachable = planned.attempts.length > 0 || planQueueStep(plan, session.current_step, queueOperatorMembers(plan, ownAttempts, now, false), input).attempts.length > 0;
+    if (!planned.attempts.length && (reachable ? null : queue.idle_since ?? now.toISOString()) === (queue.idle_since ?? null)) quiet.add(session.id);
+  }
+  return quiet;
 }

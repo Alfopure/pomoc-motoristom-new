@@ -111,6 +111,9 @@ export type FrozenRingPlan = {
 
 export type TelephonyEvent = {
   kind: "telnyx";
+  deliveryAttempt?: number | null;
+  deliveredTo?: string | null;
+  timing?: { request_id?: string; ingress_at: string; claimed_at?: string | null; source: "delivery" | "ledger_replay" };
   /** Telnyx event id (`data.id`), used as `event_fingerprint`. */
   id: string;
   type: string;

@@ -61,6 +61,9 @@ export async function GET(request: Request) {
     const { runRecordingProcessing } = await import("@/server/telephony/recording-processing");
     const recordings = await timedCronJob(() => runRecordingProcessing({ admin: deps.admin, organizationId: deps.organizationId, cronStartedAt }));
 
+    console.info(JSON.stringify({ scope: "telephony-cron-runtime", node: process.version, undici: process.versions.undici ?? null,
+      ms: Date.now() - cronStartedAt, status: summary.status }));
+
     return Response.json(
       { ...summary, status: reminders.status === "failed" || pauseWarnings.status === "failed" || recordings.status === "failed" ? "degraded" : summary.status, jobs: [...summary.jobs, reminders, pauseWarnings, recordings] },
       { headers: { "Cache-Control": "no-store" } },

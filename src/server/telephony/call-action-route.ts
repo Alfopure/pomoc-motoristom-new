@@ -1,7 +1,7 @@
 import "server-only";
 import { after } from "next/server";
 
-import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
+import { measureRequestStep, withRequestMetrics, withBackgroundRequestMetrics } from "@/server/request-metrics";
 
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
 
@@ -74,12 +74,12 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
           catch { /* Optional diagnostics cannot invalidate the completed action. */ }
         };
         try {
-          after(async () => {
+          after(withBackgroundRequestMetrics(async () => {
             try {
               const { replayDeferredSessionEvents } = await import("./telnyx/event-processor");
               await replayDeferredSessionEvents(deps, params.id);
             } catch { reportDeferred(); }
-          });
+          }));
         } catch { reportDeferred(); }
       }
 

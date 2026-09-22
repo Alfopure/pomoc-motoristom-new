@@ -1,8 +1,8 @@
-import { reconcileProviderEvent } from "./provider-event-evidence";
-import { measureRequestStep } from "@/server/request-metrics";
+import { loadPendingProviderCommands, reconcileProviderEvent, type PendingProviderCommand } from "./provider-event-evidence";
+import { measureRequestStep, requestTimingContext } from "@/server/request-metrics";
 import { reconcileTermination } from "./termination";
-import { sessionOwnership, ownershipRpc, assertOwnership, OWNERSHIP_RENEW_SKIP_MS, SESSION_WORK_MS, SESSION_LEASE_MS, DATABASE_REQUEST_MS, type Ownership } from "./ownership";
-import { resolvePersonalRingMembers } from "./routing/ring-plan";
+import { sessionOwnership, ownershipRpc, assertOwnership, firstProviderDispatchAt, withProviderDispatchTiming, OWNERSHIP_RENEW_SKIP_MS, SESSION_WORK_MS, SESSION_LEASE_MS, DATABASE_REQUEST_MS, type Ownership } from "./ownership";
+import { ACTIVE_LEG_WINDOW_MS, resolvePersonalRingMembers } from "./routing/ring-plan";
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -42,6 +42,7 @@ import {
   type SessionEvent,
   type SessionRow,
   type TelephonyEnvironment,
+  type TelephonyEvent,
 } from "./state/types";
 import type { TelnyxClient } from "./telnyx/client";
 import type { TelnyxClientState } from "./telnyx/client-state";
@@ -115,7 +116,7 @@ export const LEASE_JITTER_MIN_MS = 50;
 export const LEASE_JITTER_MAX_MS = 150;
 export const MAX_CONFLICT_RETRIES = 20;
 /** Legs older than this no longer count against `max_concurrent_legs`. */
-export const ACTIVE_LEG_WINDOW_MS = 4 * 60 * 60 * 1000;
+export { ACTIVE_LEG_WINDOW_MS } from "./routing/ring-plan";
 
 export type SessionRunResult =
   | { outcome: "ignored"; reason: string; session: SessionRow; leaseAcquired: boolean; retries: number }
@@ -194,17 +195,18 @@ export async function releaseSessionLease(deps: SessionRunnerDeps, sessionId: st
   if (error) deps.logger?.({ level: "warn", scope: "lease", sessionId, error: error.message });
 }
 
-export async function loadSessionSnapshot(deps: SessionRunnerDeps, sessionId: string): Promise<{ session: SessionRow; legs: LegRow[]; attempts: AttemptRow[] }> {
-  const [session, legs, attempts] = await Promise.all([
+export async function loadSessionSnapshot(deps: SessionRunnerDeps, sessionId: string, providerEvent?: TelephonyEvent): Promise<{ session: SessionRow; legs: LegRow[]; attempts: AttemptRow[]; pendingCommands?: PendingProviderCommand[] }> {
+  const [session, legs, attempts, pendingCommands] = await Promise.all([
     deps.admin.from("motorist_call_sessions").select("*").eq("id", sessionId).maybeSingle(),
     deps.admin.from("motorist_call_legs").select("*").eq("session_id", sessionId).order("initiated_at", { ascending: true }),
     deps.admin.from("motorist_ring_attempts").select("*").eq("session_id", sessionId).order("step_index", { ascending: true }).order("position", { ascending: true }),
+    providerEvent ? loadPendingProviderCommands(deps.admin, sessionId, providerEvent) : undefined,
   ]);
   if (session.error) throw new Error(`session load failed: ${session.error.message}`);
   if (!session.data) throw new SessionNotFoundError(sessionId);
   if (legs.error) throw new Error(`legs load failed: ${legs.error.message}`);
   if (attempts.error) throw new Error(`attempts load failed: ${attempts.error.message}`);
-  return { session: session.data, legs: legs.data ?? [], attempts: attempts.data ?? [] };
+  return { session: session.data, legs: legs.data ?? [], attempts: attempts.data ?? [], ...(pendingCommands ? { pendingCommands } : {}) };
 }
 
 export async function loadRoutingSettings(admin: AdminClient, organizationId: string): Promise<RoutingSettings & { raw: Database["public"]["Tables"]["motorist_telephony_settings"]["Row"] | null }> {
@@ -389,6 +391,9 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     ["call.playback.ended", "call.speak.ended"].includes(event.type) &&
       ["talking", "held", "consulting", "conference", "ended"].includes(session.state) && !meta.gather
   );
+  const initiatedObservation = noContinuation && event?.kind === "telnyx" && event.type === "call.initiated" &&
+    !session.ended_at && !session.termination_requested_at && !meta.hangup && ACTIVE_SESSION_STATES.has(session.state) &&
+    snapshotLegs?.some(leg => leg.telnyx_call_control_id === event.callControlId && leg.role !== "customer");
   // An offer being accepted connects two legs that already exist. The reducer
   // reads `settings.parkMaxMinutes` (the waiting room the compensation falls
   // back to), `mediaAvailable`, `now` and the frozen recording policy — nothing
@@ -434,13 +439,32 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     pickupCustomer?.organization_id === organizationId && pickupCustomer.session_id === session.id &&
     (!session.customer_leg_id || session.customer_leg_id === pickupCustomer.id) &&
     Boolean(pickupCustomer.telnyx_call_control_id) && isOpenLeg(pickupCustomer);
-  if (answeredOffer || outboundPickup) {
-    const settings = await loadRoutingSettings(admin, organizationId);
+  const inboundPickup = noContinuation && session.direction === "inbound" &&
+    !session.ended_at && !session.termination_requested_at && !meta.hangup && !meta.customer_gone_at &&
+    event?.kind === "app" && event.type === "pickup" &&
+    snapshotLegs?.some(leg => leg.id === session.customer_leg_id && leg.role === "customer" && isOpenLeg(leg));
+  const outboundOwnLegAnswer = noContinuation && session.writer_contract === 2 &&
+    session.direction === "outbound" && session.state === "received" && !session.ended_at &&
+    !session.termination_requested_at && !meta.hangup && Boolean(meta.outbound) && Boolean(meta.announcements) &&
+    event?.kind === "telnyx" && ["call.answered", "call.bridged"].includes(event.type) &&
+    event.clientState?.sid === session.id && event.clientState.role === "operator" && event.clientState.intent === "outbound" &&
+    pickupLeg?.role === "operator" && isOpenLeg(pickupLeg) && !pickupLeg.answered_at &&
+    pickupLeg.profile_id === session.answered_by_profile_id && savedPickup?.sid === session.id &&
+    savedPickup.role === "operator" && savedPickup.intent === "outbound" &&
+    savedPickup.operatorId === event.clientState.operatorId && savedPickup.offerToken === event.clientState.offerToken;
+  if (answeredOffer || outboundPickup || inboundPickup || outboundOwnLegAnswer) {
+    const [settings, capacity] = await Promise.all([
+      loadRoutingSettings(admin, organizationId),
+      inboundPickup ? admin.from("motorist_call_legs").select("id", { count: "exact", head: true })
+        .eq("organization_id", organizationId).is("ended_at", null)
+        .gte("initiated_at", new Date(now.getTime() - ACTIVE_LEG_WINDOW_MS).toISOString()) : null,
+    ]);
+    if (capacity?.error) throw new Error(`leg count failed: ${capacity.error.message}`);
     const config = deps.config;
     return {
       now, organizationId, environment: deps.environment, line: null,
       businessHours: null, ivr: null, ringPlan: null, ringPlans: {}, presence: [], devices: [],
-      openOffers: [], activeLegCount: 0, settings,
+      openOffers: [], activeLegCount: capacity?.count ?? 0, settings,
       fromNumber: (config.configured ? config.defaultFromNumber : null) ?? null,
       // Not `false`: `mohIsPlaying` would then never see the waiting-room loop
       // and the answer would bridge the caller with a playback still running.
@@ -450,7 +474,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
       lean: true,
     };
   }
-  if (event?.kind === "app" && event.type === "hangup" || bridgeObservation || passiveObservation) {
+  if (event?.kind === "app" && event.type === "hangup" || bridgeObservation || passiveObservation || initiatedObservation) {
     // Top-level and the nested `termination:<sid>:<ts>` run alike (E3): the
     // hangup reduce reads nothing from configuration.
     // Ending a call needs only its already authenticated session/legs. New
@@ -468,6 +492,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
       fromNumber: null, mediaAvailable: false,
       announcements: meta.announcements ? readAnnouncementConfig(meta.announcements) : undefined,
       recordingPolicy: meta.recording?.policy,
+      ...(initiatedObservation ? { lean: true } : {}),
     };
   }
   const { line, settings, recordingPolicy, routing, businessHours, ivr, ringPlan, ringPlans } =
@@ -556,6 +581,7 @@ export function effectsDeps(deps: SessionRunnerDeps): EffectsDeps {
     now,
     sleep: sleepOf(deps),
     logger: deps.logger,
+    callIds: new Map(),
     wrapUpSecondsFor: async (profileId) => {
       const { data } = await deps.admin.from("motorist_operator_telephony_settings").select("wrap_up_seconds").eq("profile_id", profileId).maybeSingle();
       return data?.wrap_up_seconds ?? DEFAULT_ROUTING_SETTINGS.wrapUpSecondsDefault;
@@ -630,7 +656,7 @@ export async function ownedSessionWork<T>(
     options.known.writer_contract !== undefined ? options.known : null;
   const probe = known ? { data: known, error: null }
     : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
-  if (probe.error) throw new SessionEventDeferredError(`Session ownership lookup failed: ${probe.error.message}`);
+  if (probe.error) throw new SessionEventDeferredError(`Session ownership lookup failed: ${probe.error.message}`, "snapshot_unavailable");
   if (!probe.data) throw new SessionNotFoundError(sessionId);
   if (probe.data.writer_contract === undefined) return work();
   const token = randomUUID();
@@ -649,10 +675,10 @@ export async function ownedSessionWork<T>(
       claim = await measureRequestStep("lease", () => ownershipRpc<{ generation: number; contract: number } | null>(deps.admin, "motorist_session_lease_acquire_v2", { p_session_id: sessionId, p_token: token, p_ttl_ms: leaseTtl(deps) }));
       if (claim) break;
       const remaining = budget - (Date.now() - started);
-      if (remaining <= 0) throw new SessionLeaseBusyError({ leaseWaitMs: budget, polls, eventType: options.eventType });
+      if (remaining <= 0) throw new SessionLeaseBusyError({ leaseWaitMs: budget, polls, waitedMs: Date.now() - started, eventType: options.eventType });
       // Give the active writer room to finish. A fixed 50 ms retry made each
       // contending webhook/control issue up to 17 RPCs during one busy call.
-      if (flat && attempt >= WEBHOOK_LEASE_POLL_MS.length) throw new SessionLeaseBusyError({ leaseWaitMs: budget, polls, eventType: options.eventType });
+      if (flat && attempt >= WEBHOOK_LEASE_POLL_MS.length) throw new SessionLeaseBusyError({ leaseWaitMs: budget, polls, waitedMs: Date.now() - started, eventType: options.eventType });
       const step = flat ? WEBHOOK_LEASE_POLL_MS[attempt++] : Math.min(800, 150 * 2 ** Math.min(attempt++, 3));
       await sleepOf(deps)(Math.min(remaining, step + Math.floor((deps.random ?? Math.random)() * 75)));
     }
@@ -663,11 +689,18 @@ export async function ownedSessionWork<T>(
   const owner: Ownership = { admin: deps.admin, sessionId, organizationId: deps.organizationId, token,
     generation: claim.generation, contract: claim.contract, deadline: Date.now() + SESSION_WORK_MS,
     acquiredAt: Date.now(), leaseWaitMs: Math.max(0, Date.now() - started) };
+  const leaseLog = { scope: "lease-timing", sessionId, generation: owner.generation,
+    eventType: options.eventType ?? null, ...requestTimingContext(), lease_acquired_at: new Date(owner.acquiredAt).toISOString(),
+    lease_wait_ms: owner.leaseWaitMs, polls };
+  try { deps.logger?.({ ...leaseLog, outcome: "acquired" }); } catch { /* Diagnostic only. */ }
   try { return await sessionOwnership.run(owner, work); }
   finally {
+    let released = false;
     // Release failure cannot rewrite a completed operation into a safe retry.
-    try { await ownershipRpc(deps.admin, "motorist_session_lease_release_v2", { p_session_id: sessionId, p_token: token, p_generation: owner.generation }); }
+    try { released = Boolean(await ownershipRpc(deps.admin, "motorist_session_lease_release_v2", { p_session_id: sessionId, p_token: token, p_generation: owner.generation })); }
     catch (error) { deps.logger?.({ level: "warn", scope: "lease", sessionId, message: "lease release pending expiry", error: error instanceof Error ? error.message : String(error) }); }
+    try { deps.logger?.({ ...leaseLog, outcome: "finished", release_confirmed: released,
+      finished_at: new Date().toISOString(), held_ms: Math.max(0, Date.now() - owner.acquiredAt) }); } catch { /* Diagnostic only. */ }
   }
 }
 
@@ -705,6 +738,10 @@ export async function runSessionEvent(
 }
 
 async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership): Promise<SessionRunResult> {
+  return withProviderDispatchTiming(nowOf(deps), () => processOwnedSessionEvent(deps, sessionId, event, owner));
+}
+
+async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership): Promise<SessionRunResult> {
   const runnerStarted = nowOf(deps)();
   const token = owner?.token ?? randomUUID();
   let leaseAcquired: boolean;
@@ -714,6 +751,8 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
   const timing = (effectsStarted?: Date) => {
     const completed = nowOf(deps)();
     return { runner_started_at: runnerStarted.toISOString(), lease_wait_ms: Math.max(0, leaseWaitMs),
+      ...requestTimingContext(), lease_acquired_at: owner ? new Date(owner.acquiredAt).toISOString() : leaseAcquired ? new Date(runnerStarted.getTime() + leaseWaitMs).toISOString() : null,
+      first_command_at: firstProviderDispatchAt(),
       ...(effectsStarted ? { effects_started_at: effectsStarted.toISOString() } : {}),
       completed_at: completed.toISOString(), processing_ms: Math.max(0, completed.getTime() - runnerStarted.getTime()) };
   };
@@ -725,10 +764,10 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
     for (let retries = 0; ; retries += 1) {
       let snapshot: Awaited<ReturnType<typeof loadSessionSnapshot>>;
       try {
-        snapshot = await loadSessionSnapshot(deps, sessionId);
+        snapshot = await loadSessionSnapshot(deps, sessionId, event.kind === "telnyx" ? event : undefined);
       } catch (error) {
         if (error instanceof SessionNotFoundError || effectsMayHaveStarted) throw error;
-        throw new SessionEventDeferredError(error instanceof Error ? error.message : "session snapshot unavailable");
+        throw new SessionEventDeferredError(error instanceof Error ? error.message : "session snapshot unavailable", "snapshot_unavailable");
       }
       const durable = snapshot.session.writer_contract === 2 || telephonyStabilityEnabled() || hasStabilityContract(snapshot.session);
       if (owner?.contract === 2 && snapshot.session.termination_requested_at &&
@@ -746,9 +785,9 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
         if (event.kind === "app" && event.type === "sweep") return termination;
         // Preserve the original provider fact after applying the stop intent;
         // never acknowledge a hangup webhook without closing its exact leg.
-        snapshot = await loadSessionSnapshot(deps, sessionId);
+        snapshot = await loadSessionSnapshot(deps, sessionId, event.kind === "telnyx" ? event : undefined);
       }
-      if (owner?.contract === 2 && event.kind === "telnyx") await reconcileProviderEvent(deps.admin, sessionId, event, deps.telnyx);
+      if (owner?.contract === 2 && event.kind === "telnyx") await reconcileProviderEvent(deps.admin, sessionId, event, deps.telnyx, snapshot.pendingCommands);
       if (owner?.contract === 2 && event.kind === "telnyx" && event.rawClientState && event.callControlId && ["call.initiated", "call.answered", "call.hangup"].includes(event.type)) {
         await ownershipRpc(deps.admin, "motorist_provider_observe_dial_v2", { p_session_id: sessionId,
           p_client_state: event.rawClientState, p_call_control_id: event.callControlId, p_call_leg_id: event.callLegId,
@@ -781,7 +820,7 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
         if (effectsMayHaveStarted) throw error;
         // A failed read has not applied this event or run compensation. Keep
         // its claim retryable just like a contended lease, not an HTTP 200 loss.
-        throw new SessionEventDeferredError(error instanceof Error ? error.message : "routing context unavailable");
+        throw new SessionEventDeferredError(error instanceof Error ? error.message : "routing context unavailable", "routing_context");
       }
       context.recordingLeaseHeld = leaseAcquired;
       const recordingLeaseRequired = requiresRecordingLease(snapshot.session, context);
@@ -865,20 +904,32 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
         // absent one — it would step over everybody. Pay for the full context
         // once, here, where it is rare, instead of on the answer itself.
         let followContext = context;
+        const emptyFanout = (result: ApplyResult) => !result.failed && !result.projectionPending &&
+          !result.session.ended_at && !readMeta(result.session).customer_gone_at
+          ? result.commands.findLast(command => command.kind === "ring_fanout" && command.ok && command.detail?.dialed === 0)
+          : undefined;
+        let ringFollow = emptyFanout(apply);
         for (let continuation = 0; continuation < 2; continuation += 1) {
           const meta = readMeta(apply.session);
           const sequence = meta.announcement_sequence;
           const stopReady = needsRecordingContinuation(apply.session);
           const mediaFailed = sequence && Date.parse(sequence.deadlineAt) <= nowOf(deps)().getTime() ||
             meta.gather?.failed && !meta.gather.call_gone && Date.parse(meta.gather.deadline_at) <= nowOf(deps)().getTime();
-          if ((!stopReady && !mediaFailed) || stopReady && !leaseAcquired) break;
+          if ((!stopReady && !mediaFailed && !ringFollow) || stopReady && !leaseAcquired) break;
           const fresh = await loadSessionSnapshot(deps, sessionId);
           const followEvent: SessionEvent = { kind: "app", type: stopReady ? "recording_continue" : "sweep", id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };
-          if (followContext.lean) followContext = await loadRoutingContext(deps, fresh.session, followEvent, fresh.legs);
+          if (followContext.lean || ringFollow) followContext = await loadRoutingContext(deps, fresh.session, followEvent, fresh.legs);
+          if (ringFollow) {
+            const skipped = ringFollow.detail?.skippedMembers;
+            if (Array.isArray(skipped)) followContext = { ...followContext, openOffers: [...new Set([
+              ...followContext.openOffers, ...skipped.filter((id): id is string => typeof id === "string"),
+            ])] };
+          }
           const follow = reduce(fresh.session, fresh.legs, fresh.attempts, followEvent, { ...followContext, now: nowOf(deps)() });
           if (follow.ignored) break;
           attachContactOperations(fresh, follow, followEvent, durable);
           const nextApply = await applyReduceResult(effects, { session: fresh.session, result: follow, event: followEvent, expectedVersion: fresh.session.version });
+          ringFollow = emptyFanout(nextApply);
           apply = { ...nextApply, commands: [...apply.commands, ...nextApply.commands], notes: [...apply.notes, ...nextApply.notes] };
         }
         if (apply.session.cancellations_next_attempt_at && Date.parse(apply.session.cancellations_next_attempt_at) <= nowOf(deps)().getTime()) {
