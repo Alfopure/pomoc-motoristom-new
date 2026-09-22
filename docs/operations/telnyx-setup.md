@@ -61,10 +61,12 @@ and recheck the ratio afterwards: `sum(delivery_count)` against the row count of
 
 | Environment | Voice | SMS |
 |---|---|---|
-| Production (`main`) | `https://dispecing-test.vercel.app/api/telephony/telnyx/webhook` (failover: the project's default `*.vercel.app` alias) | `https://dispecing-test.vercel.app/api/sms/telnyx/webhook` |
-| Development (`dev` branch alias) | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/telephony/telnyx/webhook` | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/sms/telnyx/webhook` |
+| Production (`main`) | `https://dispecing.linkapomoci.sk/api/telephony/telnyx/webhook` (failover: `https://dispecing-test.vercel.app/...`) | `https://dispecing.linkapomoci.sk/api/sms/telnyx/webhook` |
+| Development (`dev` branch alias) | `https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app/api/telephony/telnyx/webhook` | `https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app/api/sms/telnyx/webhook` |
 
-Once the `test.dispecing.linkapomoci.sk` CNAME exists, the production URLs move to that domain and the `*.vercel.app` alias stays the failover.
+Prefer the custom domain over any `*.vercel.app` address: renaming the Vercel project changes the generated alias and silently breaks whatever pointed at the old one.
+
+> **Open task (2026-09-22):** the development row used to read `pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app`, which now returns 404 after the project rename. Repoint the dev Call Control application and messaging profile in the Telnyx portal; editing this file does not change them.
 
 The production outbound voice profile whitelists all EU27 destinations; the development profile only SK and CZ. Both keep a daily spend cap and a per-minute destination price ceiling.
 

@@ -4,7 +4,8 @@ Operational procedures for the telephony stack of this copy of the dispatch app.
 
 Rules that apply to every procedure below:
 
-- Never touch the original production project (Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispecing`, `dispecing.linkapomoci.sk`).
+- Production is `https://dispecing.linkapomoci.sk` (Vercel `pomoc-motoristom-dispatching`, Supabase `ifpaeegaesdmljfkdvcn`). The owner moved that hostname here on 2026-09-21; an older instruction to avoid it is out of date.
+- Never touch the retired VIPTel original: Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispatching-old`, `dev.dispecing.linkapomoci.sk`. That Supabase project is still somebody's live database.
 - Secrets stay in Vercel environment variables and the owner's private notes. Never paste an API key, SIP password or WebRTC token into a document, a commit or a ticket.
 - Live calls and live SMS cost money and reach real people. Both kill switches are `false` by default; flip them on immediately before a test and back off afterwards.
 - Applying a Supabase migration or seed is a separate, explicitly requested operation against this copy's project (`ifpaeegaesdmljfkdvcn`) only.

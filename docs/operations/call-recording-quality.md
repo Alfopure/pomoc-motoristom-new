@@ -52,7 +52,7 @@ Zmazanie zneprístupní obsah ihneď a ponechá trvalý záznam odstránenia, ab
 
 ## Nasadenie tejto kópie
 
-Výhradne Supabase `ifpaeegaesdmljfkdvcn`, Vercel `pomoc-motoristom-new`, Frankfurt/fra1. Postup: pracovná vetva→Preview→PR do dev→kontrola dev aliasu→PR dev do main→kontrola produkcie. Produkčný alias je `https://pomoc-motoristom-new.vercel.app`; požadovaná vlastná doména sa použije po platnom DNS.
+Výhradne Supabase `ifpaeegaesdmljfkdvcn`, Vercel `pomoc-motoristom-dispatching`, Frankfurt/fra1. Postup: pracovná vetva→Preview→PR do dev→kontrola dev aliasu→PR dev do main→kontrola produkcie. Produkčná doména je **https://dispecing.linkapomoci.sk**.
 
 Dve samostatne preskúmané migrácie vytvoria zdrojové metadáta, súkromné úlohy a pravidlá, intervaly účastníkov, verzie prepisov, analýzy a kontroly s RLS/RPC. Pred ich aplikovaním platí výslovný súhlas podľa AGENTS.md. Nepoužívať plošné `db push --include-all`: existujúca história migrácie vehicle_lookup má iný identifikátor než súbor v repozitári. Aplikovať iba dve konkrétne nahrávacie migrácie na uvedený projekt; žiadna oprava cudzej histórie nie je súčasťou vydania.
 

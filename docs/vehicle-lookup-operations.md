@@ -1,6 +1,6 @@
 # Prevádzka dohľadania vozidiel
 
-Táto funkcia patrí výlučne projektu `pomoc-motoristom-new`, Supabase `ifpaeegaesdmljfkdvcn` vo Frankfurte. Nevyužíva starý VPS ani pôvodnú produkčnú databázu. Nasadzuje sa cez work branch → Preview → PR do `dev` → overenie dev aliasu → PR `dev` do `main`. Produkčný alias kópie je `https://dispecing-test.vercel.app`.
+Táto funkcia patrí výlučne projektu `pomoc-motoristom-dispatching` (skôr `pomoc-motoristom-new`), Supabase `ifpaeegaesdmljfkdvcn` vo Frankfurte. Nevyužíva starý VPS ani pôvodnú produkčnú databázu. Nasadzuje sa cez work branch → Preview → PR do `dev` → overenie dev aliasu → PR `dev` do `main`. Produkčná doména je **https://dispecing.linkapomoci.sk**.
 
 ## Používanie a význam údajov
 

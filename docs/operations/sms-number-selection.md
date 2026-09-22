@@ -18,7 +18,8 @@ values were printed, copied into this workspace, or committed.
 - `GET /v2/messaging_phone_numbers`: all eight have `sms: null` and `mms: null`.
 - Production messaging profile `4001a062-20cf-44ea-a956-6f272163907f` is enabled,
   uses alpha sender `PomocMotor`, allows destination `SK`, and posts to
-  `https://dispecing-test.vercel.app/api/sms/telnyx/webhook`.
+  `https://dispecing.linkapomoci.sk/api/sms/telnyx/webhook` (production also answers on
+  `https://dispecing-test.vercel.app`, which is a production alias despite its name).
 - Dev profile `4001a062-7f1b-45cc-9daf-5e110f66db17` is also enabled, uses the
   same alpha sender and SK allowlist, and posts to the dev branch alias.
 - `GET /v2/country_coverage/countries/SK` lists voice/fax/emergency/local-calling
