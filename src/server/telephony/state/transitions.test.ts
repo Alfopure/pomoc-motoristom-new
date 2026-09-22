@@ -881,6 +881,24 @@ describe("customer gone at provider and ended_at provenance (E4)", () => {
     expect(customerLeg(h, call).ended_at).toBeNull();
   });
 
+  it("rejects a manual pickup for a gone caller before reserving or dialling the operator", async () => {
+    const { h, call } = await waitingQueued();
+    await h.legEvent(call.callControlId, "call.gather.ended", { status: "call_hangup", client_state: gather(h) });
+    h.setPresence(PROFILES.o1, { status: "available" });
+    h.touchDevice(PROFILES.o1);
+    const dials = h.telnyx.of("dial").length;
+    await expect(pickupWaitingCall(h.deps, actor, call.sessionId)).rejects.toMatchObject({ status: 409, code: "not_waiting" });
+    // Also protect the reducer, including internal callers bypassing the action preflight.
+    await expect(runSessionEvent(h.deps, call.sessionId, {
+      kind: "app", type: "pickup", id: "pickup-after-customer-gone", actorProfileId: PROFILES.o1,
+      occurredAt: h.now().toISOString(), picker: { profileId: PROFILES.o1, sipUri: "sip:gencred001@sip.telnyx.com" },
+    })).rejects.toMatchObject({ status: 409 });
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
+    expect(h.presence(PROFILES.o1)).toMatchObject({ status: "available", current_session_id: null });
+    expect(customerLeg(h, call).ended_at).toBeNull();
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+  });
+
   it("gather cancelled stays a plain ignore", async () => {
     for (const status of ["cancelled", "cancelled_amd"]) {
       const { h, call } = await waitingQueued();

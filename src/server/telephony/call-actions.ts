@@ -28,6 +28,7 @@ import {
   ACTIVE_SESSION_STATES,
   emptyTransition,
   LEG_TIME_LIMIT_SECS,
+  readMeta,
   TALKING_STATES,
   toJson,
   type AppEvent,
@@ -727,6 +728,9 @@ async function pickupWaitingCallOwned(deps: CallActionDeps, actor: CallActor, se
   await assertLegBudget(deps);
   const session = await loadSession(deps, sessionId);
   const priorPickup = session.presence_pickup as { profileId?: string } | null;
+  if (readMeta(session).customer_gone_at || readMeta(session).gather?.call_gone) {
+    throw new CallActionError("Volajúci už ukončil hovor.", 409, "not_waiting");
+  }
   const resumingOwnPickup = priorPickup?.profileId === actor.profileId && (!session.answered_by_profile_id || session.answered_by_profile_id === actor.profileId);
   if (deps.deviceKind !== "mobile" && !resumingOwnPickup && !canPickUpCall({ state: session.state, direction: session.direction, answered: Boolean(session.answered_at), operatorProfileId: session.answered_by_profile_id })) {
     throw new CallActionError("Hovor už nie je možné prevziať.", 409, "not_waiting");

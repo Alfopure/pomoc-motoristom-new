@@ -2471,6 +2471,9 @@ function appMobileOffer(b: TransitionBuilder, customer: LegRow, event: AppEvent)
 }
 
 function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): ReduceResult {
+  if (b.meta.customer_gone_at || b.meta.gather?.call_gone || b.legEnded(customer)) {
+    throw new CallActionRejected("Volajúci už ukončil hovor.", 409);
+  }
   if (b.ctx.activeLegCount >= b.ctx.settings.maxConcurrentLegs) throw new CallActionRejected("Kapacita hovorov je obsadená. Skúste to o chvíľu.", 409);
   if (event.picker?.mobile && !canPickUpCall({ state: b.session.state, direction: b.session.direction, answered: Boolean(b.session.answered_at), operatorProfileId: b.session.answered_by_profile_id })) return appMobileOffer(b, customer, event);
   if (!canPickUpCall({ state: b.session.state, direction: b.session.direction, answered: Boolean(b.session.answered_at), operatorProfileId: b.session.answered_by_profile_id })) {
