@@ -7,13 +7,27 @@ Konfigurácia od 2026-09-21 oddeľuje nové Preview nasadenia vrátane vetvy `de
 | Prostredie | Supabase | Organizácia | Aplikácia |
 | --- | --- | --- | --- |
 | Production, vetva `main` | `ifpaeegaesdmljfkdvcn` | AlfoPure, `reqzkjhaquxbbhhalcmm` | `https://dispecing.linkapomoci.sk` |
-| Preview, vetva `dev` a pracovné vetvy | `nzpnqdstvkfncflgqlny` | AlfoSystems, `rwhghkvusmdnaexjvrum`, Free | [Aktuálny dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) a nové Preview URL |
+| Preview, vetva `dev` a pracovné vetvy | `nzpnqdstvkfncflgqlny` | AlfoSystems, `rwhghkvusmdnaexjvrum`, Free | [Testovacie prostredie (`dev`)](https://test.dispecing.linkapomoci.sk), [záložný dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) a nové Preview URL pracovných vetiev |
 
 Obe databázy sú vo Frankfurte (`eu-central-1`). Vercel projekt je `pomoc-motoristom-dispatching` (`prj_DN3smSO1EbGowAmw3nHLQUYoSVJG`, tím `team_56GjBnBw6zGSG83LJAnQCB8T`, región `fra1`).
 
-`dispecing-test.vercel.app` je napriek názvu produkčný alias. Vlastná testovacia doména zatiaľ nie je nakonfigurovaná. `dev.dispecing.linkapomoci.sk` patrí odstavenému VIPTel projektu a nesmie sa použiť. Rovnako sa nesmie čítať ani meniť Supabase `sjcsrygkkmersoczpunh`: obsahuje inú živú aplikáciu.
+Kanonická adresa testu je `https://test.dispecing.linkapomoci.sk`, určená výhradne pre Preview vetvy `dev`. [Generovaný dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) zostáva záložnou adresou. `dispecing-test.vercel.app` je napriek názvu produkčný alias. `dev.dispecing.linkapomoci.sk` patrí odstavenému VIPTel projektu a nesmie sa použiť. Rovnako sa nesmie čítať ani meniť Supabase `sjcsrygkkmersoczpunh`: obsahuje inú živú aplikáciu.
 
 Vercel cieľ **Development** sa pri oddelení nemenil. Lokálny `.env.local` musí vývojár výslovne naplniť testovacími URL a kľúčmi; staré súbory ani `vercel env pull` bez správneho cieľa nedokazujú izoláciu. Všetky Preview zdieľajú jednu testovaciu databázu, takže ich zápisy vidia ostatní testujúci.
+
+## Doména testovacieho `dev`
+
+Stav k 2026-09-22: `test.dispecing.linkapomoci.sk` je aktívna kanonická doména testu. Vercel ju priraďuje výhradne k aktuálnemu Preview deploymentu vetvy `dev` a doména je v testovacom Auth redirect allowliste. Vo Websupporte je pridaný CNAME `test.dispecing` → `f9c23ecf19e30b83.vercel-dns-016.com` s TTL 600. Všetky tri autoritatívne nameservery vracajú nový záznam; 33 pôvodných DNS záznamov zostalo bez zmeny. Vercel vydal platný TLS certifikát a `/api/health/ready` správneho dev deploymentu vrátilo `200` aj priamo z používateľovho Macu cez bežné DNS rozlíšenie.
+
+Niektoré resolvery môžu dočasne používať skoršiu negatívnu DNS cache. Ide o dobehnutie cache po aktivácii, nie o chýbajúce nastavenie domény; dovtedy zostáva dostupný generovaný dev alias. Pri budúcej zmene DNS preber aktuálny cieľ z odporúčania Vercelu pre túto doménu. Produkčné záznamy `dispecing.linkapomoci.sk` ani cudzí `dev.dispecing.linkapomoci.sk` sa nemenia.
+
+Aplikácia používa origin aktuálnej požiadavky. Kvôli pridaniu domény nepridávaj branch overrides `APP_BASE_URL` ani `NEXT_PUBLIC_APP_URL`; nie sú nastavené a samotné mapovanie domény nevyžaduje rebuild. Pracovné vetvy naďalej používajú svoje Preview URL.
+
+V testovacom Supabase `nzpnqdstvkfncflgqlny` je Auth Site URL `https://test.dispecing.linkapomoci.sk`. Testovací allowlist povoľuje `https://test.dispecing.linkapomoci.sk/**` a zachováva potrebné redirecty generovaného dev aliasu, pracovných Preview a lokálneho vývoja. Produkčná Auth konfigurácia zostáva bez zmeny.
+
+Overenie vlastnej domény 2026-09-22 zahŕňalo vratnú úpravu testovacieho kontaktu cez prihlásené aplikačné API. Zápis sa prejavil iba v teste; dočasný záznam v produkcii nevznikol a produkčná kontrolná hodnota zostala nezmenená. Testovací záznam bol po kontrole uprataný. Prehliadač načítal prihlásenie aj autentifikovaný dashboard bez chýb stránky alebo neočakávaných požiadaviek na Supabase. Readiness vrátilo `200`, webphone `503 not_configured`; v testovacej Auth konfigurácii pribudol redirect novej domény a nastavila sa jej Site URL; produkčná Auth konfigurácia zostala zhodná s pôvodným stavom.
+
+Po každej budúcej zmene doménového mapovania over DNS, platný HTTPS certifikát, mapovanie na správny READY deployment vetvy `dev`, `GET /api/health/ready`, prihlásenie a použitie testovacieho Supabase ref v aplikácii. Samotný názov hosta izoláciu nedokazuje. Telefónia a externé integrácie zostávajú vypnuté; vlastná doména nie je dôvod registrovať reálne provider webhooky.
 
 ## Obnova po pozastavení
 
@@ -21,7 +35,7 @@ Supabase môže Free projekt pozastaviť po siedmich dňoch nízkej aktivity. Ob
 
 1. Otvor [Dashboard testovacieho projektu](https://supabase.com/dashboard/project/nzpnqdstvkfncflgqlny) a over názov `Pomoc motoristom dispatching TEST`, ref a organizáciu AlfoSystems.
 2. Vyber **Restore project** a počkaj na zdravý stav projektu (`ACTIVE_HEALTHY`). Nevytváraj náhradný projekt, kým prebieha obnova.
-3. Over testovaciu databázu a `GET /api/health/ready` na aktuálnom dev aliase. Produkciu kontroluj iba čítaním `https://dispecing.linkapomoci.sk/api/health/ready`.
+3. Over testovaciu databázu a `https://test.dispecing.linkapomoci.sk/api/health/ready`, prípadne aj generovaný dev alias. Produkciu kontroluj iba čítaním `https://dispecing.linkapomoci.sk/api/health/ready`.
 4. Over vypnutú telefóniu a ostatné odchádzajúce integrácie podľa kontrol nižšie. Ak sa pri obnove nezmenili URL ani kľúče, samotná obnova nevyžaduje nový build.
 
 Ak Dashboard už priamu obnovu neponúka, postupuj podľa aktuálnej dokumentácie Supabase a dostupnej zálohy. Preview nechaj nedostupné, kým nie je test obnovený; neprepínaj ho späť na produkčnú databázu. Nepridávaj cron ani službu na umelé udržiavanie aktivity.
@@ -135,12 +149,12 @@ Pri zmene URL alebo kľúčov vytvor nový Preview deployment z aktuálneho comm
 
 Po overení nového dev deploymentu treba odstaviť staré neprodukčné deploymenty s pôvodnou konfiguráciou. Pri inventarizácii a odstraňovaní zachovaj aktuálny dev a nové overené Preview, všetky produkčné deploymenty aj produkčné aliasy. Počet skutočne odstránených deploymentov a výsledok overenia starých URL zaznamenaj až po dokončení operácie.
 
-Pri Auth redirectoch upravuj iba testovací Supabase projekt. Povolené musia byť aktuálne testovacie Preview hosty a prípadne lokálny vývoj; nezapisuj ich do produkčného Auth nastavenia a nepoužívaj doménu odstaveného projektu. Zmena názvu Vercel projektu môže zmeniť generovaný alias, preto pri budúcej konfigurácii vlastnej testovacej domény aktualizuj tento runbook aj testovacie redirecty.
+Pri Auth redirectoch upravuj iba testovací Supabase projekt. Povolené musia byť `test.dispecing.linkapomoci.sk`, aktuálne testovacie Preview hosty a prípadne lokálny vývoj; nezapisuj ich do produkčného Auth nastavenia a nepoužívaj doménu odstaveného projektu. Zmena názvu Vercel projektu môže zmeniť generovaný alias; vlastná testovacia doména zostáva kanonickou adresou, aktualizovať treba záložný alias a jeho testovacie redirecty.
 
 ### 4. Dôkaz oddelenia
 
 1. Nový Preview build musí prejsť rovnakými bránami ako produkcia: Vitest, typecheck a build vrátane `scripts/assert-target-project.mjs`. Over Git SHA, vetvu a stav READY.
-2. `GET /api/health/ready` na novom Preview a na dev aliase musí vrátiť `200`; následne over prihlásenie a čítanie skopírovaných dát.
+2. `GET /api/health/ready` na novom Preview, `https://test.dispecing.linkapomoci.sk` aj generovanom dev aliase musí vrátiť `200`; následne over prihlásenie a čítanie skopírovaných dát.
 3. Zaznamenaj pôvodnú hodnotu jedného dohodnutého testovacieho záznamu v oboch databázach. Cez prihlásenú Preview aplikáciu vykonaj jedinečnú vratnú zmenu. Read-only dotazmi potvrď zmenu iba v teste a nezmenenú produkčnú hodnotu; potom testovaciu hodnotu vráť. Zápis priamo do testovacej DB sám osebe nedokazuje správne smerovanie aplikácie.
 4. Skontroluj vypnuté odchádzajúce kanály bez odoslania skutočného hovoru, SMS, emailu či požiadavky na platenú integráciu. Neprenášaj produkčné sessions na overenie prihlásenia.
 5. Produkčný `https://dispecing.linkapomoci.sk/api/health/ready` musí zostať `200`. Porovnaj ref a konfiguráciu Production s hodnotami pred zásahom; produkčný deployment sa pri samotnom oddelení nevydáva znova.

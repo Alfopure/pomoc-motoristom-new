@@ -23,9 +23,12 @@ pointed at the old one; a custom domain survives the rename.
 | Supabase test (Preview and `dev`) | `nzpnqdstvkfncflgqlny` — Free organization `AlfoSystems` (`rwhghkvusmdnaexjvrum`) |
 | Vercel | `pomoc-motoristom-dispatching` (`fra1`) |
 | Hostnames | **`dispecing.linkapomoci.sk`** (production), `dispecing-test.vercel.app` |
-| Current `dev` branch alias | `pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app` |
+| Canonical TEST hostname (`dev` Preview) | **`test.dispecing.linkapomoci.sk`** |
+| Generated `dev` branch alias (fallback) | `pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app` |
 
-Despite its name, `dispecing-test.vercel.app` is a production alias, not the isolated test environment. No custom test domain is currently configured; use the verified `dev` branch alias for testing and do not register real provider webhooks against it.
+Despite its name, `dispecing-test.vercel.app` is a production alias, not the isolated test environment. Use `https://test.dispecing.linkapomoci.sk` as the canonical TEST address and bind it exclusively to the `dev` branch's Preview deployment. Keep the generated `dev` alias as a fallback. Verify DNS, TLS, branch routing and the test database ref before treating a new domain mapping as ready; do not register real provider webhooks against test.
+
+As of 2026-09-22, the canonical TEST hostname is active: authoritative DNS points to Vercel, TLS is valid, and Vercel maps it exclusively to the `dev` Preview deployment. The TEST Supabase Auth Site URL is `https://test.dispecing.linkapomoci.sk`; Production Auth remains unchanged. Domain mapping does not require `APP_BASE_URL`/`NEXT_PUBLIC_APP_URL` overrides or an application rebuild. Resolvers with an earlier negative DNS cache may need time to expire; the generated `dev` alias remains available meanwhile.
 
 `dispecing.linkapomoci.sk` belongs here. An earlier version of this file forbade touching it, which was correct while the original served it and is wrong now — the hostname moved with the owner's explicit instruction. If an agent reports it as an unexpected alias, that report is out of date, not the configuration.
 
@@ -41,7 +44,7 @@ Use the dev-first deployment workflow:
 2. Create a dedicated work branch.
 3. Push the work branch and inspect its Vercel Preview URL. Preview runs the same build gate as production (`vitest run`, `typecheck`, `build`).
 4. Open a pull request from the work branch into `dev`.
-5. After merge, verify the `dev` branch alias of this Vercel project.
+5. After merge, verify `https://test.dispecing.linkapomoci.sk` and the generated `dev` branch alias of this Vercel project.
 6. Release production only through a pull request from `dev` into `main`. The production domain is `https://dispecing.linkapomoci.sk`.
    **Never publish by redeploying an older deployment.** `vercel redeploy <url>` rebuilds *that deployment's source*, not current `main` — on 2026-09-21 this silently rolled production back three commits while picking up an environment variable. To apply new environment variables, deploy `main` afresh.
 7. Telephony (Telnyx) Supabase migrations and seed changes are in scope for this application, but apply them only when the user explicitly requests them and only against the explicitly authorized project: test `nzpnqdstvkfncflgqlny` or production `ifpaeegaesdmljfkdvcn`. Authorization to change test does not authorize production changes. Do not apply seed data on top of a copied snapshot. Do not deploy workers, schedulers, or listeners. The single allowed Vercel cron is `*/5 * * * *` -> `/api/telephony/cron` guarded by `CRON_SECRET`.
