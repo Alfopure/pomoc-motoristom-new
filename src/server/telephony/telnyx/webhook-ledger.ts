@@ -3,6 +3,8 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database, Json } from "@/lib/supabase/database.types";
+import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "../incidents";
+import { describeServiceError } from "../service-errors";
 
 /**
  * Webhook claim ledger (`motorist_telnyx_webhook_events`).
@@ -117,16 +119,38 @@ export async function claimWebhookEvent(client: AdminClient, input: ClaimWebhook
 
 type FinishOptions = { now?: () => Date; claimedAt?: string | null; logger?: (entry: Record<string, unknown>) => void };
 
+/** One takeover storm must not become a storm of incident writes in front of the next webhook. */
+export const CLAIM_LOST_INCIDENT_INTERVAL_MS = 60_000;
+let lastClaimLostIncidentAt = Number.NEGATIVE_INFINITY;
+/** Test seam: clears the per-instance takeover-incident throttle. */
+export function resetClaimLostIncidentThrottle(): void { lastClaimLostIncidentAt = Number.NEGATIVE_INFINITY; }
+
+/**
+ * `finish` returning false means another invocation took this claim over
+ * (stale after `WEBHOOK_CLAIM_STALE_AFTER_MS`) and re-ran the event: the
+ * first run's work is then duplicated or contradicted. It was only a warn log
+ * (M05); an incident makes it visible on the health surface. The CAS itself
+ * stays the sole arbiter — nothing here changes ownership.
+ */
+async function reportClaimLost(client: AdminClient, eventId: string, result: string, now: Date): Promise<void> {
+  if (now.getTime() - lastClaimLostIncidentAt < CLAIM_LOST_INCIDENT_INTERVAL_MS) return;
+  lastClaimLostIncidentAt = now.getTime();
+  await recordTelephonyIncident(client, { job: TELEPHONY_INCIDENT_JOBS.webhook, error: new Error("webhook_claim_lost"), context: { eventId, result }, now });
+}
+
 async function finish(client: AdminClient, eventId: string, result: "processed" | "deferred" | "awaiting_correlation" | "failed", failure: unknown, options: FinishOptions): Promise<boolean> {
   // Never issue an unscoped release: a missing stamp is not proof of ownership.
   if (!options.claimedAt) throw new WebhookLedgerError("Owned claim stamp is required", eventId);
-  const message = failure instanceof Error ? `${failure.name}: ${failure.message}` : failure == null ? null : String(failure);
+  const message = failure == null ? null : describeServiceError(failure);
   const { data, error } = await client.rpc("motorist_telnyx_finish_webhook_event_v2", {
     p_event_id: eventId, p_claimed_at: options.claimedAt, p_result: result, p_error: message?.slice(0, 2000) ?? null,
   });
   if (error) throw new WebhookLedgerError(`Could not finish event: ${error.message}`, eventId, error);
   const owned = data === true;
-  if (!owned) options.logger?.({ level: "warn", scope: "webhook", eventId, message: "claim lost before finish", result });
+  if (!owned) {
+    options.logger?.({ level: "warn", scope: "webhook", eventId, message: "claim lost before finish", result });
+    await reportClaimLost(client, eventId, result, options.now?.() ?? new Date());
+  }
   return owned;
 }
 

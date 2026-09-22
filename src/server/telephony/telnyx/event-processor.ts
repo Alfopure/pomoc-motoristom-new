@@ -7,6 +7,7 @@ import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_I
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { effectsDeps, ownedSessionWork, runSessionEvent, SessionEventDeferredError, WEBHOOK_LEASE_WAIT_MS, type SessionRunnerDeps } from "../session-runner";
+import { describeServiceError } from "../service-errors";
 import { recordCallEvent, type CommandOutcome } from "../state/effects";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
 import { toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
@@ -27,6 +28,9 @@ import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, t
  * Response policy: compensated command failures keep their existing 200 path.
  * Events blocked before applying a transition request provider redelivery;
  * acknowledging those would strand an answer/hangup until a later cron replay.
+ * A deferral schedules its own drain after the response (E2.1); audio
+ * completions for an ended customer leg are acknowledged without the lease
+ * (E2.4).
  */
 
 type AdminClient = SupabaseClient<Database>;
@@ -48,6 +52,26 @@ export type ProcessorDeps = SessionRunnerDeps & {
 /** Keep SIP processing fast; the larger route duration also covers after-response push. */
 export const INLINE_SWEEP_LIMIT = 2;
 export const INLINE_SWEEP_BUDGET_MS = 4_000;
+
+/**
+ * Session-inbox drain order for deferred control facts: a terminal fact must win
+ * over a leg patch or an audio no-op that is queued in front of it. E1b's cron
+ * replay uses the same ranks. Only these types are drained in-process; the
+ * customer-terminal (failed-owner) path stays hangup-only.
+ */
+export const DEFERRED_EVENT_RANK: Readonly<Record<string, number>> = {
+  "call.hangup": 0, "call.answered": 1, "call.bridged": 2, "call.initiated": 3,
+  "call.hold": 4, "call.unhold": 4,
+  "call.gather.ended": 5, "call.playback.ended": 5, "call.speak.ended": 5,
+};
+const DEFERRED_DRAIN_TYPES = Object.keys(DEFERRED_EVENT_RANK);
+/** Wide enough that low-ranked audio rows cannot push a later hangup out of the page. */
+const DEFERRED_DRAIN_LIMIT = 40;
+
+/** Audio facts whose reducer branch is a pure ignore once the customer leg is gone. */
+const LEASE_FREE_IGNORE_TYPES: ReadonlySet<string> = new Set(["call.gather.ended", "call.playback.ended", "call.speak.ended"]);
+/** `wrap_up` only ever advances to `ended` (transitions.ts `TERMINAL_STATES || wrap_up` / stale finalise), so it is monotone like the terminal states. */
+const LEASE_FREE_IGNORE_STATES: ReadonlySet<string> = new Set(["ended", "wrap_up", "failed"]);
 
 export type ProcessorOutcome = "processed" | "ignored" | "duplicate" | "busy" | "failed" | "malformed" | "unverified_connection" | "unknown_session" | "awaiting_correlation" | "unresolved";
 
@@ -104,6 +128,32 @@ async function findSession(admin: AdminClient, organizationId: string, event: Te
     const conference = await admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).eq("conference_id", event.conferenceId).maybeSingle();
     if (conference.error) throw new Error("conference session lookup failed");
     if (conference.data) return conference.data;
+  }
+  return null;
+}
+
+/**
+ * A gather/playback/speak completion for a customer leg that has already
+ * ended is `ignoredResult("customer leg ended")` in the reducer
+ * (`onGatherEnded`/`onPlaybackEnded`); in `ended`/`wrap_up`/`failed` the same
+ * handlers fall through to `gather in <state>` / `playback ended in <state>`.
+ * Both facts are monotone (`ended_at` never clears, those states never
+ * revive), so acknowledging without the lease cannot become wrong later, and
+ * it keeps the lease free for the answer/hangup queued behind it (M03/M16: 8
+ * such rows cost 48 deliveries and 8 cron slots on 21 Sep). Returns the
+ * reducer's reason, or null when the reducer must decide. The `role` check
+ * uses the leg row, never client_state; `ended_at` is used rather than
+ * `leg.state`, which `onSdkHold` rewrites even on an ended leg.
+ */
+async function leaseFreeIgnoreReason(deps: ProcessorDeps, session: SessionRow, event: TelephonyEvent): Promise<string | null> {
+  if (!LEASE_FREE_IGNORE_TYPES.has(event.type) || !event.callControlId) return null;
+  const leg = await deps.admin.from("motorist_call_legs").select("role, ended_at")
+    .eq("organization_id", deps.organizationId).eq("session_id", session.id)
+    .eq("telnyx_call_control_id", event.callControlId).maybeSingle();
+  if (leg.error || !leg.data || leg.data.role !== "customer") return null;
+  if (leg.data.ended_at) return "customer leg ended";
+  if (LEASE_FREE_IGNORE_STATES.has(session.state)) {
+    return event.type === "call.gather.ended" ? `gather in ${session.state}` : `playback ended in ${session.state}`;
   }
   return null;
 }
@@ -213,7 +263,7 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
       }
     }
     return session;
-  }, { known: session });
+  }, { known: session, eventType: event.type });
 }
 
 export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown): Promise<ProcessorResult> {
@@ -355,6 +405,29 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
       return bookkeeping;
     }
 
+    // Lease-free acknowledgement of pure reducer ignores (E2.4). Never for
+    // call.initiated/call.answered (orphan hangup, leg insert) nor for
+    // hold/unhold/conference.* (they write leg state and `sdk_hold` even on
+    // wrap_up/ended sessions — D1 B7). The cron replays through this same
+    // function, so it gets the same short-circuit.
+    const ignoreReason = eventClass === "control" ? await leaseFreeIgnoreReason(deps, ownedSession, event) : null;
+    if (ignoreReason) {
+      processingStarted = true;
+      await recordCallEvent(effects, { session: ownedSession, event, handledStatus: "ignored",
+        stateBefore: ownedSession.state, stateAfter: ownedSession.state, notes: [ignoreReason, "lease-free"], commands: [] });
+      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+      logResult(deps, event, claim, ownedSession.id, "ignored", [], started, now);
+      const ignored = done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "ignored", notes: [ignoreReason, "lease-free"] });
+      // Same after-response work as a reducer ignore: this host may drain the
+      // session's deferred rows and sweep, exactly as the leased path did.
+      const ignoredMaintenance = async () => { await replayCorrelatedEvents(deps, event, ownedSession); await maybeSweep(deps, started); };
+      if (deps.deferMaintenance) {
+        try { deps.deferMaintenance(ignoredMaintenance); }
+        catch { await ignoredMaintenance(); }
+      } else await ignoredMaintenance();
+      return ignored;
+    }
+
     // The durable webhook ledger owns retry. Do not have every simultaneous
     // provider callback poll the same database lease while a control is waiting.
     let failedOwnerReplayEligible = false;
@@ -405,7 +478,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
       await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
       logResult(deps, event, claim, ownedSession.id, "processed", run.commands, started, now);
       return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", commands: run.commands, notes: run.apply.notes });
-    }, { known: ownedSession });
+    }, { known: ownedSession, eventType: event.type });
     // The owned scope has exited before optional maintenance. A failed apply
     // may still have durable effects pending; its ledger failure stays truthful.
     // Release can warn without failing the operation; replay must acquire a
@@ -432,7 +505,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     } else await maintenance();
     return result;
   } catch (error) {
-    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    const message = describeServiceError(error);
     const deferred = error instanceof SessionEventDeferredError || !processingStarted;
     try {
       await markWebhookEventFailed(deps.admin, event.id, error, { claimedAt: claim.claimedAt, logger: deps.logger, releaseForRetry: deferred });
@@ -443,6 +516,30 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // must not delay releasing an unexecuted answer for immediate redelivery.
     if (!deferred) await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.webhook, error, context: { eventId: event.id, type: event.type, sessionId: session?.id ?? null } });
     deps.logger?.({ level: deferred ? "warn" : "error", scope: "webhook", eventId: event.id, type: event.type, sessionId: session?.id ?? null, outcome: "failed", error: message, retryable: deferred, ms: now().getTime() - started });
+    // E2.1: a deferred row used to wait for provider redelivery (which collides
+    // with the same holder, M01) or for a later webhook of the same call that
+    // happened to answer 200 (17 of 58 in the 22 Sep recheck); the rest waited
+    // for the cron. The deferring host drains it itself once the response is
+    // out and the holder has released, honouring the ledger's SQL backoff. The
+    // HTTP answer stays 500: the fact is not applied yet. Without a host
+    // (cron/replay callers pass no `deferMaintenance`) nothing is scheduled,
+    // and the drain is never run inline: the 500 must go out at once so the
+    // redelivery is not delayed, and an inline drain would sit on the lease it
+    // competes for.
+    if (deferred && session && deps.deferMaintenance) {
+      const deferredSessionId = session.id;
+      try {
+        deps.deferMaintenance(async () => {
+          try { await replayDeferredSessionEvents(deps, deferredSessionId); }
+          catch (drainError) {
+            deps.logger?.({ level: "warn", scope: "webhook", sessionId: deferredSessionId, message: "deferred drain failed", error: drainError instanceof Error ? drainError.message : String(drainError) });
+          }
+        });
+      } catch {
+        // No request scope to retain the drain: provider redelivery and the cron remain.
+        deps.logger?.({ level: "warn", scope: "webhook", sessionId: deferredSessionId, message: "deferred drain scheduling unavailable" });
+      }
+    }
     // Preserve the existing compensation policy for ambiguous command failures.
     // A lease deferral has not applied the main transition; neither it nor a
     // failure resolving the session may be acknowledged as completed work.
@@ -536,11 +633,15 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
     // A shared provider session ID is never enough to select another leg.
     const deferred = controlIds.size ? await deps.admin.from("motorist_telnyx_webhook_events").select("*")
       .eq("organization_id", deps.organizationId).eq("retry_state", "deferred")
-      .in("call_control_id", [...controlIds]).in("event_type", customerTerminalOnly ? ["call.hangup"] : ["call.hangup", "call.answered", "call.bridged"])
+      .in("call_control_id", [...controlIds]).in("event_type", customerTerminalOnly ? ["call.hangup"] : DEFERRED_DRAIN_TYPES)
       .lte("next_attempt_at", new Date(nowOf(deps)().getTime() + 5_000).toISOString()).neq("event_id", current?.id ?? "")
-      .order("event_type", { ascending: false }).order("received_at", { ascending: true }).limit(20) : { data: [], error: null };
+      .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null };
     if (deferred.error) throw new Error(deferred.error.message);
-    const rows = [...(deferred.data ?? []).sort((a, b) => Number(b.event_type === "call.hangup") - Number(a.event_type === "call.hangup")), ...(correlation.data ?? [])];
+    const occurredAt = (row: { occurred_at: string | null; received_at: string | null }) => Date.parse(row.occurred_at ?? row.received_at ?? "") || 0;
+    const rows = [
+      ...(deferred.data ?? []).sort((a, b) => (DEFERRED_EVENT_RANK[a.event_type] ?? 9) - (DEFERRED_EVENT_RANK[b.event_type] ?? 9) || occurredAt(a) - occurredAt(b)),
+      ...(correlation.data ?? []),
+    ];
     let replayed = 0;
     for (const row of rows) {
       const envelope = storedWebhookEnvelope(row);

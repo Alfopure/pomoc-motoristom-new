@@ -26,7 +26,8 @@ export const ACTIVE_SWEEP_INTERVAL_MS = 5_000;
  * The poll must answer fast, so this trigger is bounded: after an outage there
  * can be up to 200 overdue sessions and driving them all through a lease + a
  * reducer + Telnyx commands would blow the function limit and take the
- * operator's snapshot down with it. The cron pass runs unbounded.
+ * operator's snapshot down with it. The cron pass has its own, larger bound
+ * (`RING_SWEEP_LIMIT` / `RING_SWEEP_BUDGET_MS` in cron-jobs.ts).
  */
 export const ACTIVE_SWEEP_LIMIT = 4;
 export const ACTIVE_SWEEP_BUDGET_MS = 2_000;

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEVICE_LIVENESS_WINDOW_MS } from "@/lib/telephony/device-liveness";
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
-import { pickupWaitingCall } from "./call-actions";
+import { PICKUP_LEASE_WAIT_MS, pickupWaitingCall } from "./call-actions";
 
 const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
 const presenceTable = "motorist_operator_presence";
@@ -231,5 +231,30 @@ describe("pickup preflight with local fake DB/provider", () => {
     ]);
     expect(h.db.log.some(entry => entry.table === (deviceKind === "mobile" ? deviceTable : mobileTable))).toBe(false);
     expectNoDispatch(h);
+  });
+
+  it("waits the pickup budget for a held lease and reads neither presence nor device", async () => {
+    const { h, sessionId } = await fixture();
+    h.db.registerRpc("motorist_session_lease_acquire_v2", () => null);
+    h.deps.random = () => 0;
+    // The harness sleep only moves the harness clock; the v2 wait loop reads
+    // `Date.now()`, so it needs real timers driven under fake time.
+    h.deps.sleep = ms => new Promise<void>(resolve => setTimeout(resolve, ms));
+    vi.useFakeTimers();
+    try {
+      const started = Date.now();
+      const pending = pickupWaitingCall(h.deps, actor, sessionId).catch(error => error);
+      await vi.runAllTimersAsync();
+      const error = await pending;
+      expect(error).toMatchObject({ name: "SessionLeaseBusyError", code: "session_busy", details: { leaseWaitMs: PICKUP_LEASE_WAIT_MS, eventType: "app.pickup" } });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(PICKUP_LEASE_WAIT_MS);
+      const polls = h.db.log.filter(entry => entry.table === "motorist_session_lease_acquire_v2").length;
+      expect(polls).toBeGreaterThan(7);
+      expect(polls).toBeLessThanOrEqual(13);
+      expect(error.details.polls).toBe(polls);
+      // The preflight never left the lease: no reads while waiting, nothing dispatched.
+      expect(h.db.log.filter(entry => [presenceTable, deviceTable, mobileTable].includes(entry.table))).toEqual([]);
+      expectNoDispatch(h);
+    } finally { vi.useRealTimers(); }
   });
 });

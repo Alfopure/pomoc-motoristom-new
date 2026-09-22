@@ -40,7 +40,9 @@ export type CallActionRouteInput<P extends CallActionRouteParams = CallActionRou
 export type CallActionRouteOptions<P extends CallActionRouteParams = CallActionRouteParams> = {
   fallback: string;
   run: (input: CallActionRouteInput<P>) => Promise<unknown>;
-  /** Read-only reconciliation must not enqueue more work while the call is busy. */
+  /** Read-only reconciliation must not enqueue more work while the call is busy;
+   *  a reconciliation that did apply a transition (`reconciled: true`) drains
+   *  the session's deferred facts after release like any other action. */
   replayDeferred?: boolean;
 };
 
@@ -64,8 +66,9 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
       // A customer hangup/answer can arrive while this action owns the call.
       // Once the action has completed and released ownership, recover its exact
       // queued facts without waiting for provider redelivery or the cron.
-      if (options.replayDeferred !== false && result && typeof result === "object" &&
-        "sessionId" in result && result.sessionId === params.id) {
+      const applied = result && typeof result === "object" && "sessionId" in result && result.sessionId === params.id;
+      const reconciled = applied && "reconciled" in result && result.reconciled === true;
+      if (applied && (options.replayDeferred !== false || reconciled)) {
         const reportDeferred = () => {
           try { deps.logger?.({ level: "warn", scope: "call-action", sessionId: params.id, code: "event_replay_deferred" }); }
           catch { /* Optional diagnostics cannot invalidate the completed action. */ }

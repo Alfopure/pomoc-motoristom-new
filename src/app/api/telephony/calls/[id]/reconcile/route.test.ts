@@ -5,6 +5,13 @@ import { SessionEventDeferredError } from "@/server/telephony/service-errors";
 const { requireActor, sameOrigin, reconcile, createDeps } = vi.hoisted(() => ({
   requireActor: vi.fn(), sameOrigin: vi.fn(), reconcile: vi.fn(), createDeps: vi.fn(),
 }));
+const maintenance = vi.hoisted(() => ({ after: vi.fn(), replay: vi.fn() }));
+vi.mock("next/server", async importOriginal => ({
+  ...await importOriginal<typeof import("next/server")>(), after: maintenance.after,
+}));
+vi.mock("@/server/telephony/telnyx/event-processor", async importOriginal => ({
+  ...await importOriginal<typeof import("@/server/telephony/telnyx/event-processor")>(), replayDeferredSessionEvents: maintenance.replay,
+}));
 vi.mock("@/server/api-auth", () => ({ requireDefaultMotoristActor: requireActor, assertSameOriginRequest: sameOrigin }));
 vi.mock("@/server/telephony/call-reconciliation", () => ({ reconcileBrowserCall: reconcile }));
 vi.mock("@/server/telephony/runtime", async importOriginal => ({
@@ -25,6 +32,8 @@ beforeEach(() => {
   sameOrigin.mockReset();
   reconcile.mockReset().mockResolvedValue({ sessionId: "sess-1", state: "waiting", reconciled: true });
   createDeps.mockReset().mockResolvedValue({ marker: "deps" });
+  maintenance.after.mockReset();
+  maintenance.replay.mockReset().mockResolvedValue(undefined);
 });
 afterEach(() => vi.unstubAllEnvs());
 
@@ -52,6 +61,22 @@ describe("POST /api/telephony/calls/[id]/reconcile", () => {
       ok: true, sessionId: "sess-1", state: "talking", reconciled: false, reason: "session_busy", retryAfterMs: 1_000,
     });
     expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(maintenance.after).not.toHaveBeenCalled();
+  });
+
+  it("schedules the deferred-event replay only when reconciliation applied a transition", async () => {
+    expect((await POST(request(), context)).status).toBe(200);
+    expect(maintenance.after).toHaveBeenCalledTimes(1);
+    expect(maintenance.replay).not.toHaveBeenCalled();
+    await maintenance.after.mock.calls[0][0]();
+    expect(maintenance.replay).toHaveBeenCalledExactlyOnceWith({ marker: "deps" }, "sess-1");
+
+    for (const outcome of [{ reconciled: false, reason: "session_busy", retryAfterMs: 1_000 }, { reconciled: false, reason: "alive" }]) {
+      maintenance.after.mockClear();
+      reconcile.mockResolvedValue({ sessionId: "sess-1", state: "talking", ...outcome });
+      expect((await POST(request(), context)).status).toBe(200);
+      expect(maintenance.after).not.toHaveBeenCalled();
+    }
   });
 
   it("does not turn an ownership database failure into an internal error or a successful reconciliation", async () => {

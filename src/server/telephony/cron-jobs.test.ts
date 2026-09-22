@@ -1,9 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
+import { CONNECTION_ID, createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
 
+import { encodeClientState } from "./telnyx/client-state";
+import { processTelnyxEvent } from "./telnyx/event-processor";
 import { AI_DEMO_CLEANUP_JOB, ALERT_JOB, detectStuckSessions, EFFECTS_RECOVERY_JOB, LEDGER_PRUNE_JOB,
-  LEDGER_REPLAY_JOB, pruneWebhookLedger, RECONCILE_JOB, reconcileWithTelnyx, replayStalledWebhookEvents, runRingSweep, runTelephonyCronJobs, RING_SWEEP_JOB, STUCK_SESSION_JOB } from "./cron-jobs";
+  LEDGER_REPLAY_JOB, pruneWebhookLedger, RECONCILE_JOB, reconcileWithTelnyx, replayStalledWebhookEvents, REPLAY_BATCH_SIZE, RING_SWEEP_LIMIT, runRingSweep, runTelephonyCronJobs, RING_SWEEP_JOB, STUCK_SESSION_JOB } from "./cron-jobs";
+
+// A pass-through spy: every replay still runs the real processor, the cron's
+// call shape is just observable.
+vi.mock("./telnyx/event-processor", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./telnyx/event-processor")>();
+  return { ...actual, processTelnyxEvent: vi.fn(actual.processTelnyxEvent) };
+});
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -144,7 +153,148 @@ describe("telephony cron jobs", () => {
     expect(summary.status).toBe("ok");
     expect(summary.configured).toBe(true);
     expect(summary.organizationId).toBe(ORG);
-    expect(summary.jobs.map((job) => job.job)).toEqual([RING_SWEEP_JOB, EFFECTS_RECOVERY_JOB, LEDGER_REPLAY_JOB, RECONCILE_JOB, STUCK_SESSION_JOB, AI_DEMO_CLEANUP_JOB, ALERT_JOB, LEDGER_PRUNE_JOB]);
+    // Replay first: terminal facts already in the ledger are applied before
+    // the sweep dials anybody or closes a leg synthetically.
+    expect(summary.jobs.map((job) => job.job)).toEqual([LEDGER_REPLAY_JOB, RING_SWEEP_JOB, EFFECTS_RECOVERY_JOB, RECONCILE_JOB, STUCK_SESSION_JOB, AI_DEMO_CLEANUP_JOB, ALERT_JOB, LEDGER_PRUNE_JOB]);
+  });
+
+  it("reports per-job timings", async () => {
+    const h = createTelephonyHarness();
+    seedLedger(h);
+    h.db.seed("motorist_job_controls", [{ job_name: LEDGER_PRUNE_JOB, enabled: true }]);
+    h.setPresence(PROFILES.o1, { status: "available" });
+    let clock = 0;
+
+    const summary = await runTelephonyCronJobs({ ...h.deps, runSession: vi.fn(async () => ({})), clock: () => (clock += 5) });
+    expect(summary.jobs).toHaveLength(8);
+    expect(summary.jobs[0].job).toBe(LEDGER_REPLAY_JOB);
+    for (const job of summary.jobs) {
+      expect(typeof job.ms).toBe("number");
+      expect(job.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    }
+  });
+
+  it("runs replay before the ring sweep", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    await h.inbound({ to: "+421232408718" });
+    h.advance(60_000);
+    const at = new Date(h.now().getTime() - 5 * 60_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{ organization_id: ORG, event_id: "stalled-hangup", event_type: "call.hangup", status: "queued", attempts: 1, received_at: at, occurred_at: at, payload: { call_control_id: "cc-1" } }]);
+    const order: string[] = [];
+    const runSession = vi.fn(async () => { order.push("sweep"); return { outcome: "applied" }; });
+    const replayEvent = vi.fn(async () => { order.push("replay"); return { outcome: "processed" }; });
+
+    await runTelephonyCronJobs({ ...h.deps, runSession, replayEvent });
+    expect(order[0]).toBe("replay");
+    expect(order).toContain("sweep");
+  });
+
+  it("bounds the cron ring sweep by RING_SWEEP_LIMIT and reports the rest as deferred", async () => {
+    const h = createTelephonyHarness();
+    const overdue = new Date(h.now().getTime() - 1_000).toISOString();
+    h.db.seed("motorist_call_sessions", Array.from({ length: RING_SWEEP_LIMIT + 2 }, () => ({ organization_id: ORG, direction: "inbound" as const, state: "ringing", metadata: { ring: { step_deadline_at: overdue } } })));
+    const runSession = vi.fn(async () => ({ outcome: "applied" }));
+
+    const result = await runRingSweep({ ...h.deps, runSession });
+    expect(runSession).toHaveBeenCalledTimes(RING_SWEEP_LIMIT);
+    expect(result.detail).toMatchObject({ checked: RING_SWEEP_LIMIT + 2, swept: RING_SWEEP_LIMIT, deferred: 2 });
+  });
+
+  it("stops at the deadline and reports the rest as deferred", async () => {
+    const h = createTelephonyHarness();
+    const at = new Date(h.now().getTime() - 5 * 60_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", ["a", "b", "c"].map((id) => ({ organization_id: ORG, event_id: id,
+      event_type: "call.hangup", status: "queued", attempts: 1, received_at: at, occurred_at: at, payload: {} })));
+    let clock = 0;
+    const replayEvent = vi.fn(async () => { clock += 30_000; return { outcome: "processed" }; });
+
+    const result = await replayStalledWebhookEvents({ ...h.deps, replayEvent, clock: () => clock }, { deadline: 60_000 });
+    // Checked at the loop head only: the second row started at 30 s and finished; the third never started.
+    expect(replayEvent).toHaveBeenCalledTimes(2);
+    expect(result.status).toBe("ok");
+    expect(result.detail).toMatchObject({ stalled: 3, attempted: 2, replayed: 2, remaining: 1, deadlineReached: true });
+    expect(h.db.find("motorist_telnyx_webhook_events", (row) => row.event_id === "c")).toMatchObject({ status: "queued" });
+  });
+
+  it("orders hangup before initiated and replays only one batch of the doubled selection", async () => {
+    const h = createTelephonyHarness();
+    const at = (ms: number) => new Date(h.now().getTime() - ms).toISOString();
+    const row = (id: string, type: string, ageMs: number) => ({ organization_id: ORG, event_id: id, event_type: type, status: "queued", attempts: 1, received_at: at(ageMs), occurred_at: at(ageMs), payload: {} });
+    h.db.seed("motorist_telnyx_webhook_events", [
+      ...Array.from({ length: 25 }, (_, index) => row(`init-${index}`, "call.initiated", 10 * 60_000 - index * 1_000)),
+      row("playback", "call.playback.ended", 5 * 60_000),
+      row("answered", "call.answered", 4 * 60_000),
+      row("hangup-1", "call.hangup", 3 * 60_000),
+      row("hangup-2", "call.hangup", 2 * 60_000),
+    ]);
+    const types: string[] = [];
+    const replayEvent = vi.fn(async (envelope: unknown) => { types.push((envelope as { data: { event_type: string } }).data.event_type); return { outcome: "processed" }; });
+
+    const result = await replayStalledWebhookEvents({ ...h.deps, replayEvent });
+    expect(replayEvent).toHaveBeenCalledTimes(REPLAY_BATCH_SIZE);
+    expect(types.slice(0, 4)).toEqual(["call.hangup", "call.hangup", "call.answered", "call.initiated"]);
+    expect(types).not.toContain("call.playback.ended");
+    expect(result.detail).toMatchObject({ stalled: 29, attempted: REPLAY_BATCH_SIZE, replayed: REPLAY_BATCH_SIZE });
+  });
+
+  it("replays a deferred row younger than 60 s but never a fresh claim", async () => {
+    const h = createTelephonyHarness();
+    const at = (ms: number) => new Date(h.now().getTime() - ms).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [
+      // A handler already decided to defer it and its retry is due: age is irrelevant.
+      { organization_id: ORG, event_id: "young-deferred", event_type: "call.answered", status: "failed", attempts: 1, retry_state: "deferred", next_attempt_at: at(1_000), received_at: at(10_000), occurred_at: at(10_000), payload: {} },
+      { organization_id: ORG, event_id: "young-not-due", event_type: "call.answered", status: "failed", attempts: 1, retry_state: "deferred", next_attempt_at: at(-30_000), received_at: at(10_000), occurred_at: at(10_000), payload: {} },
+      // Default retry state within the grace window: the webhook host may still finish it.
+      { organization_id: ORG, event_id: "fresh", event_type: "call.answered", status: "queued", attempts: 1, next_attempt_at: null, received_at: at(5_000), occurred_at: at(5_000), payload: {} },
+    ]);
+    const replayEvent = vi.fn(async () => ({ outcome: "processed" }));
+
+    const result = await replayStalledWebhookEvents({ ...h.deps, replayEvent });
+    expect(replayEvent).toHaveBeenCalledTimes(1);
+    expect(replayEvent).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ id: "young-deferred" }) }));
+    expect(result.detail).toMatchObject({ stalled: 1, attempted: 1, replayed: 1 });
+  });
+
+  it("replays a row through the processor without nested drain, inline sweep or after() scheduling", async () => {
+    // The incident mechanism (E1b): each cron row nested an 8 s correlated
+    // drain and a sweep. The cron is a backstop, so the processor runs the row
+    // alone and the row's own host keeps the maintenance.
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const now = h.now().toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{
+      organization_id: ORG, event_id: "deferred-audio", event_type: "call.playback.ended", call_session_id: call.telnyxSessionId, call_control_id: call.callControlId, connection_id: CONNECTION_ID,
+      status: "failed", retry_state: "deferred", attempts: 1, delivery_count: 1, deferral_count: 1, effect_failure_count: 0, contract_version: 2,
+      claimed_at: null, next_attempt_at: now, received_at: now, occurred_at: now,
+      payload: { status: "completed", client_state: encodeClientState(h.clientStateOf(call.callControlId)) },
+    }]);
+    // A host scheduler on the shared deps must not reach the cron's replays.
+    const deferMaintenance = vi.fn();
+    h.deps.deferMaintenance = deferMaintenance;
+    const spy = vi.mocked(processTelnyxEvent);
+    spy.mockClear();
+
+    const result = await replayStalledWebhookEvents(h.deps);
+    expect(result).toMatchObject({ status: "ok", detail: { attempted: 1, replayed: 1 } });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toMatchObject({ ledgerReplay: "cron", replayCorrelated: false, sweepAfterEvent: false });
+    expect(spy.mock.calls[0][0]).toHaveProperty("deferMaintenance", undefined);
+    expect(spy.mock.calls[0][1]).toMatchObject({ data: expect.objectContaining({ id: "deferred-audio" }) });
+    expect(deferMaintenance).not.toHaveBeenCalled();
+    expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-audio")).toMatchObject({ status: "processed" });
+  });
+
+  it("counts a lease-deferred cron replay as deferred, not failed", async () => {
+    const h = createTelephonyHarness();
+    const at = new Date(h.now().getTime() - 120_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{ organization_id: ORG, event_id: "contended", event_type: "call.answered", status: "failed", attempts: 1, received_at: at, occurred_at: at, payload: {} }]);
+    const incidentsBefore = h.rows("motorist_job_incidents").length;
+    const replayEvent = vi.fn(async () => ({ outcome: "failed", status: 500, error: "SessionLeaseBusyError: Prebieha iná zmena hovoru." }));
+
+    const result = await replayStalledWebhookEvents({ ...h.deps, replayEvent });
+    expect(result.status).toBe("ok");
+    expect(result.detail).toMatchObject({ deferred: 1, failed: 0 });
+    expect(h.rows("motorist_job_incidents")).toHaveLength(incidentsBefore);
   });
 
   it("skips reconciliation when telephony is not configured", async () => {

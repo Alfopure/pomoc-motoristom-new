@@ -90,14 +90,26 @@ export const LEASE_WAIT_MS = 3_000;
  * 23 of 55 events failing outright, 5.2 deliveries per event, and provider
  * facts landing minutes late through the cron.
  *
- * The holder finishes in 1.7 s at the median, so a short wait converts most of
- * those into a first-delivery success. It stays well under the operator's own
- * budget (`LEASE_WAIT_MS`) so a click still outlasts a callback competing for
- * the same lease, and well under the provider's 30 s webhook timeout. Waiting
- * holds nothing: the invocation is only retrying the acquire RPC. Sweeps keep
- * giving up at once — they are opportunistic by design.
+ * Two seconds cover the initiated/answered collision (the customer
+ * `call.answered` lands 0.17-0.32 s after `answer` and the holder keeps the
+ * lease ~1.3 s after it) and stay at most 2/3 of the operator's own budget
+ * (`LEASE_WAIT_MS`, asserted in `session-contention.test.ts`), so
+ * hold/unhold/transfer/consult keep a 1 s reserve and a click still outlasts a
+ * callback competing for the same lease. It is also well under the provider's
+ * 30 s webhook timeout. Waiting holds nothing: the invocation is only retrying
+ * the acquire RPC. Sweeps keep giving up at once — they are opportunistic by
+ * design.
  */
-export const WEBHOOK_LEASE_WAIT_MS = 1_200;
+export const WEBHOOK_LEASE_WAIT_MS = 2_000;
+/**
+ * Flat poll ladder for that wait. The adaptive ladder (150·2^n capped at 800)
+ * slept 800 ms after a release and gave up at 1.2 s, so a lease freed between
+ * 0.55 and 1.2 s was noticed late and one freed after 1.25 s became an HTTP
+ * 500 (M15: 15 of 173 runner rows with lease_wait_ms 1300-1600). Seven flat
+ * steps + jitter are at most 8 acquire RPCs (the 50 ms retry once produced 17)
+ * inside a hard 2 s wall cap; with real RPC latency the cap is what ends it.
+ */
+export const WEBHOOK_LEASE_POLL_MS: readonly number[] = [100, 150, 200, 250, 250, 250, 250];
 export const LEASE_TTL_MS = SESSION_LEASE_MS;
 export const LEASE_JITTER_MIN_MS = 50;
 export const LEASE_JITTER_MAX_MS = 150;
@@ -582,7 +594,8 @@ async function auditSupervisionEnd(deps: SessionRunnerDeps, before: SessionRow, 
 export type SessionOwnershipDeps = Pick<SessionRunnerDeps, "admin" | "organizationId" | "leaseTtlMs" | "leaseWaitMs" | "sleep" | "random" | "logger">;
 
 export async function ownedSessionWork<T>(
-  deps: SessionOwnershipDeps, sessionId: string, work: () => Promise<T>, options: { known?: SessionRow } = {},
+  deps: SessionOwnershipDeps, sessionId: string, work: () => Promise<T>,
+  options: { known?: SessionRow; /** Diagnostics only: names the waiting event in the busy error. */ eventType?: string } = {},
 ): Promise<T> {
   const existing = sessionOwnership.getStore();
   if (existing) {
@@ -607,18 +620,26 @@ export async function ownedSessionWork<T>(
   if (probe.data.writer_contract === undefined) return work();
   const token = randomUUID();
   const started = Date.now();
+  const budget = deps.leaseWaitMs ?? LEASE_WAIT_MS;
+  // Callbacks (and any waiter with a budget that short) poll the flat ladder;
+  // operator controls keep the adaptive one so `LEASE_WAIT_MS` still means the
+  // same number of RPCs (session-contention.test.ts "bounds an interactive acquisition").
+  const flat = budget <= WEBHOOK_LEASE_WAIT_MS;
   let attempt = 0;
+  let polls = 0;
   let claim: { generation: number; contract: number } | null;
   try {
     for (;;) {
+      polls += 1;
       claim = await measureRequestStep("lease", () => ownershipRpc<{ generation: number; contract: number } | null>(deps.admin, "motorist_session_lease_acquire_v2", { p_session_id: sessionId, p_token: token, p_ttl_ms: leaseTtl(deps) }));
       if (claim) break;
-      const remaining = (deps.leaseWaitMs ?? LEASE_WAIT_MS) - (Date.now() - started);
-      if (remaining <= 0) throw new SessionLeaseBusyError();
+      const remaining = budget - (Date.now() - started);
+      if (remaining <= 0) throw new SessionLeaseBusyError({ leaseWaitMs: budget, polls, eventType: options.eventType });
       // Give the active writer room to finish. A fixed 50 ms retry made each
       // contending webhook/control issue up to 17 RPCs during one busy call.
-      const delay = Math.min(800, 150 * 2 ** Math.min(attempt++, 3)) + Math.floor((deps.random ?? Math.random)() * 75);
-      await sleepOf(deps)(Math.min(remaining, delay));
+      if (flat && attempt >= WEBHOOK_LEASE_POLL_MS.length) throw new SessionLeaseBusyError({ leaseWaitMs: budget, polls, eventType: options.eventType });
+      const step = flat ? WEBHOOK_LEASE_POLL_MS[attempt++] : Math.min(800, 150 * 2 ** Math.min(attempt++, 3));
+      await sleepOf(deps)(Math.min(remaining, step + Math.floor((deps.random ?? Math.random)() * 75)));
     }
   } catch (error) {
     if (error instanceof SessionEventDeferredError) throw error;
@@ -665,7 +686,7 @@ export async function runSessionEvent(
     const result = await runOwnedSessionEvent(deps, sessionId, event, owner);
     if (owner?.terminationPending && event.kind === "app") throw new SessionTerminationPendingError();
     return result;
-  }, { known });
+  }, { known, eventType: `${event.kind}.${event.type}` });
 }
 
 async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership): Promise<SessionRunResult> {
@@ -728,7 +749,8 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
         if (event.kind === "app" && event.type === "sweep") {
           return { outcome: "ignored", reason: "sweep deferred while another event owns the session", session: snapshot.session, leaseAcquired, retries };
         }
-        throw new SessionLeaseBusyError();
+        // Contract 1 only: the poll count lives in `ownedSessionWork`, not here.
+        throw new SessionLeaseBusyError({ leaseWaitMs: deps.leaseWaitMs ?? LEASE_WAIT_MS, polls: 0, eventType: `${event.kind}.${event.type}` });
       }
       let context: RoutingContext;
       try {

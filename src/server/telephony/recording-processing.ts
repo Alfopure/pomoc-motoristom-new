@@ -6,7 +6,14 @@ import { deleteRecordingStorage, processRecordingImport } from './recording-stor
 import { processRecordingAsrJob, processScribeCleanupJob } from './recording-asr';
 
 export const RECORDING_PROCESSING_BUDGET_MS = 15_000;
-export function recordingProcessingDeadline(startedAt: number, now = Date.now()) { return Math.min(now + RECORDING_PROCESSING_BUDGET_MS, startedAt + 50_000); }
+/**
+ * Hard cutoff measured from the cron start: `maxDuration` 120 s of
+ * `/api/telephony/cron` minus the 10 s reserve (plan E1b budget table). The
+ * job runs in the tail slot after the ledger replay (<= 60 s) and the ring
+ * sweep (<= 20 s), so it may legitimately start ~95 s into the tick.
+ */
+export const RECORDING_PROCESSING_CUTOFF_MS = 110_000;
+export function recordingProcessingDeadline(startedAt: number, now = Date.now()) { return Math.min(now + RECORDING_PROCESSING_BUDGET_MS, startedAt + RECORDING_PROCESSING_CUTOFF_MS); }
 export function recordingJobEnabled(kind: string, policy: RecordingPolicy | null, env: Readonly<Record<string, string | undefined>> = process.env) {
   if (kind === 'delete' || kind === 'reconcile') return true;
   if (env.RECORDING_PROCESSING_ENABLED !== 'true' || !policy?.approved_at || !policy.recording_enabled) return false;

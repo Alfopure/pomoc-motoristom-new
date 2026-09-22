@@ -14,6 +14,14 @@ export const SESSION_LEASE_MS = 15_000;
  */
 export const OWNERSHIP_RENEW_SKIP_MS = 5_000;
 export const DATABASE_REQUEST_MS = 4_000;
+/**
+ * Cap for un-owned PostgREST reads (GET/HEAD on `/rest/v1/`): bounds a hung
+ * socket or a silent postgrest-js GET retry without touching writes, storage
+ * or auth admin calls, which share this transport app-wide. Larger than
+ * `DATABASE_REQUEST_MS` on purpose: owned reads run under a lease deadline and
+ * are small by construction; un-owned reads include reports and exports.
+ */
+export const UNOWNED_READ_MS = 10_000;
 export type Ownership = {
   admin: SupabaseClient<Database>;
   sessionId: string;
@@ -32,6 +40,30 @@ export type Ownership = {
 };
 export const sessionOwnership = new AsyncLocalStorage<Ownership>();
 
+/** The read cap for an un-owned PostgREST GET/HEAD, or null when the request is not one. */
+function unownedReadCap(input: RequestInfo | URL, init?: RequestInit): AbortSignal | null {
+  const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  if (method !== "GET" && method !== "HEAD") return null;
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.includes("/rest/v1/")) return null;
+  return AbortSignal.timeout(UNOWNED_READ_MS);
+}
+
+/**
+ * `AbortSignal.timeout` aborts a fetch with a `TimeoutError`, which
+ * postgrest-js does not recognise as an abort: it would retry a GET up to
+ * three more times with 1/2/4 s sleeps, each attempt under a fresh cap
+ * (~47 s for one hung read). Only `AbortError`/`ABORT_ERR` escapes that
+ * retry, so the cap is surfaced as one: it then bounds the whole read, not
+ * each attempt.
+ */
+function abortInsteadOfTimeout(error: unknown): never {
+  if ((error as { name?: unknown } | null)?.name === "TimeoutError") {
+    throw new DOMException(`un-owned read exceeded ${UNOWNED_READ_MS} ms`, "AbortError");
+  }
+  throw error;
+}
+
 /** The headers belong to this async invocation, never to a shared client. */
 export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
@@ -42,7 +74,12 @@ export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: Re
     headers.set("x-telephony-token", owner.token);
     headers.set("x-telephony-generation", String(owner.generation));
   }
-  if (!owner) return measureRequestStep("db", () => fetch(input, { ...init, headers }));
+  if (!owner) {
+    const cap = unownedReadCap(input, init);
+    if (!cap) return measureRequestStep("db", () => fetch(input, { ...init, headers }));
+    const signal = init?.signal ? AbortSignal.any([init.signal, cap]) : cap;
+    return measureRequestStep("db", () => fetch(input, { ...init, headers, signal }).catch(abortInsteadOfTimeout));
+  }
   const remaining = owner.deadline - Date.now();
   if (remaining <= 0) throw new SessionLeaseLostError();
   const timeout = AbortSignal.timeout(Math.max(1, Math.min(DATABASE_REQUEST_MS, remaining)));
