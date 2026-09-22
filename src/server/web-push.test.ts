@@ -61,7 +61,7 @@ const callMessage = () => ({ organizationId: actor.organizationId, recipientProf
 beforeEach(() => {
   vi.stubEnv("VAPID_PUBLIC_KEY", key.getPublicKey().toString("base64url"));
   vi.stubEnv("VAPID_PRIVATE_KEY", key.getPrivateKey().toString("base64url"));
-  vi.stubEnv("VAPID_SUBJECT", "https://test.dispecing.linkapomoci.sk");
+  vi.stubEnv("VAPID_SUBJECT", "https://dispecing.linkapomoci.sk");
   sendNotification.mockReset().mockResolvedValue({ statusCode: 201 });
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
@@ -293,7 +293,7 @@ describe("server-only Vault configuration", () => {
   const config = {
     publicKey: key.getPublicKey().toString("base64url"),
     privateKey: key.getPrivateKey().toString("base64url"),
-    subject: "https://test.dispecing.linkapomoci.sk",
+    subject: "https://dispecing.linkapomoci.sk",
   };
   function clearVapidEnvironment() {
     vi.stubEnv("VAPID_PUBLIC_KEY", undefined);

@@ -29,7 +29,7 @@ pnpm run typecheck
 pnpm run build
 ```
 
-Vercel priradí produkčnú doménu tejto kópie (`test.dispecing.linkapomoci.sk`, prípadne produkčný `*.vercel.app` alias) až úspešnému produkčnému deploymentu; pri zlyhaní ostáva aktívny predchádzajúci deployment. Aplikačnú prácu neposielaj priamo do `main`. Ak sa však direct push stane omylom, rovnaká produkčná gate sa spustí aj preň.
+Vercel priradí produkčnú doménu (`dispecing.linkapomoci.sk`) až úspešnému produkčnému deploymentu; pri zlyhaní ostáva aktívny predchádzajúci deployment. Aplikačnú prácu neposielaj priamo do `main`. Ak sa však direct push stane omylom, rovnaká produkčná gate sa spustí aj preň.
 
 ## Dátová a integračná bezpečnosť
 

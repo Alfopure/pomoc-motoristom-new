@@ -27,7 +27,7 @@ pnpm build
 
 Trvalá vývojová vetva je `dev`. Každá bežná zmena začína z aktuálneho `dev`, pokračuje samostatnou pracovnou vetvou a pull requestom späť do `dev`. Push pracovnej vetvy automaticky vytvorí verejne dostupný Vercel Preview; aplikácia na ňom naďalej vyžaduje Supabase prihlásenie.
 
-Po merge sa `dev` automaticky nasadí na branch alias vetvy `dev` v tomto Vercel projekte. Produkcia tejto kópie je `test.dispecing.linkapomoci.sk` na vetve `main` (kým neexistuje CNAME, slúži produkčný `*.vercel.app` alias projektu) a vydáva sa iba pull requestom `dev -> main`. Preview, `dev` aj `main` spúšťajú rovnakú build gate: Vitest aplikačné testy, TypeScript check a Next.js build.
+Po merge sa `dev` automaticky nasadí na branch alias vetvy `dev` v tomto Vercel projekte. Produkcia je **https://dispecing.linkapomoci.sk** na vetve `main` a vydáva sa iba pull requestom `dev -> main`. Preview, `dev` aj `main` spúšťajú rovnakú build gate: Vitest aplikačné testy, TypeScript check a Next.js build.
 
 Preview aj `dev` používajú Supabase projekt tejto kópie, nie pôvodné produkčné dáta; zápisy sú napriek tomu reálne pre každého, kto na nich testuje. Telefónne migrácie a seed tejto kópie sú v rozsahu, spúšťajú sa však iba na výslovnú žiadosť a iba proti Supabase projektu tejto kópie. Jediný povolený Vercel cron je `*/5 * * * *` na `/api/telephony/cron`. Podrobný postup je v [CONTRIBUTING.md](CONTRIBUTING.md) a [docs/deployment-vercel.md](docs/deployment-vercel.md).
 

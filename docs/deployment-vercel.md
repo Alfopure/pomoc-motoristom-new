@@ -6,7 +6,7 @@
 
 Táto kópia dispečingu sa nasadzuje cez vlastný Vercel projekt `pomoc-motoristom-new` (tím `alfopures-projects`, región funkcií `fra1`, Fluid Compute) napojený na GitHub repozitár `alfopure/pomoc-motoristom-new`. Beží proti vlastnému Supabase projektu `pomoc-motoristom-telnyx` (ref `ifpaeegaesdmljfkdvcn`, región `eu-central-1`, Frankfurt). Trvalá vývojová vetva je `dev`; `main` je výhradne produkčný release branch.
 
-Pôvodný produkčný projekt (Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispecing`, doména `dispecing.linkapomoci.sk`) sa z tohto repozitára nikdy nečíta ani nemení. Vercel projekt bol založený nový, nie importom cez pôvodný projekt. Vo Fáze 1 pribudne `scripts/assert-target-project.mjs`, ktorý v pre-hookoch aj vo Vercel builde zlyhá, ak env obsahuje pôvodný project ref.
+Odstavený VIPTel projekt (Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispatching-old`, doména `dev.dispecing.linkapomoci.sk`) sa z tohto repozitára nikdy nečíta ani nemení. Doména `dispecing.linkapomoci.sk` naopak patrí **tomuto** projektu; majiteľ ju sem presunul 21. 9. 2026. Vercel projekt bol založený nový, nie importom cez pôvodný projekt. Vo Fáze 1 pribudne `scripts/assert-target-project.mjs`, ktorý v pre-hookoch aj vo Vercel builde zlyhá, ak env obsahuje pôvodný project ref.
 
 Frontend workflow nespúšťa workery, schedulery ani samostatné listener procesy. Supabase migrácie a seed sú pre túto kópiu v rozsahu, ale sú to samostatné, výslovne vyžiadané operácie proti Supabase projektu tejto kópie.
 
@@ -15,9 +15,9 @@ Frontend workflow nespúšťa workery, schedulery ani samostatné listener proce
 - Vercel project: `pomoc-motoristom-new` (`prj_DN3smSO1EbGowAmw3nHLQUYoSVJG`).
 - Framework preset: `Next.js`; install command sa deteguje podľa `pnpm-lock.yaml`.
 - Production branch: `main`.
-- Produkčná doména: `https://test.dispecing.linkapomoci.sk` (CNAME vo Websupporte na `cname.vercel-dns.com`; kým neexistuje, produkciu obsluhuje alias `https://dispecing-test.vercel.app`).
-- Predvolená URL projektu: `https://pomoc-motoristom-new.vercel.app` (slúži aj ako failover URL pre Telnyx webhooky).
-- Trvalý vývoj: vetva `dev` na branch aliase `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app`.
+- Produkčná doména: **https://dispecing.linkapomoci.sk**. Používaj ju pri každom externom nastavení (webhook, callback, záložka) — pri premenovaní Vercel projektu sa `*.vercel.app` alias zmení, vlastná doména prežije.
+- Produkcia odpovedá aj na `https://dispecing-test.vercel.app` a `https://pomoc-motoristom-new.vercel.app`. Napriek názvom sú to **produkčné** aliasy, nie testovacie prostredie (overené 22. 9. 2026: oba vracajú ten istý deployment).
+- Trvalý vývoj: vetva `dev` na branch aliase `https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app`. Starší alias `pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app` po premenovaní projektu **zanikol** a vracia 404.
 - Work branch: automatický Vercel Preview s branch aliasom a immutable deployment URL.
 - Vercel Preview Authentication je vypnutá, aby Preview URL vedela otvoriť aj kolegyňa alebo kolega bez Vercel účtu. Supabase autentifikácia aplikácie zostáva povinná.
 - Jediný povolený cron: `*/5 * * * *` na `/api/telephony/cron` (bearer `CRON_SECRET`), definovaný vo `vercel.json` spolu s `regions: ["fra1"]`. Spúšťa ring sweep, detekciu zaseknutých relácií a prune webhook ledgera (`telephony.ledger.prune` je v `motorist_job_controls` predvolene vypnutý). Bez hlavičky vracia `401`, odpoveď obsahuje súhrn jednotlivých jobov a `status: "degraded"`, ak niektorý zlyhal. Iné cron definície sa nepridávajú.
@@ -69,12 +69,14 @@ TELNYX_SMS_LIVE_SENDS=false
 Branch-specific Preview overrides musia zostať:
 
 ```env
-APP_BASE_URL=https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app
-NEXT_PUBLIC_APP_URL=https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app
+APP_BASE_URL=https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app
+NEXT_PUBLIC_APP_URL=https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app
 MOTORIST_DEV_AUTH_BYPASS=false
 ```
 
 Tieto overrides majú prednosť pred general Preview iba na vetve `dev`. Supabase credentials sa dedia z general Preview.
+
+Po premenovaní Vercel projektu sa branch alias zmenil; hodnoty vyššie sú overené 22. 9. 2026. Ak sa projekt premenuje znova, tieto dve premenné treba prepísať — preto sa na `*.vercel.app` nespolieha nič externé.
 
 ### Production
 
@@ -93,11 +95,11 @@ Premenné s prefixom `NEXT_PUBLIC_` Next.js vloží do klientského bundle poča
 Používa sa iba Supabase projekt tejto kópie. Registrácie sú vypnuté, SMTP ide cez Resend. Auth allow list musí obsahovať:
 
 ```text
-https://test.dispecing.linkapomoci.sk/**
+https://dispecing.linkapomoci.sk/**
 https://dispecing-test.vercel.app/**
 https://pomoc-motoristom-new.vercel.app/**
-https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/**
-https://pomoc-motoristom-new-*-alfopures-projects.vercel.app/**
+https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app/**
+https://pomoc-motoristom-dispatching-*-alfopures-projects.vercel.app/**
 http://localhost:3000/**
 ```
 
@@ -109,7 +111,7 @@ http://localhost:3000/**
 
 ## DNS a domény
 
-`linkapomoci.sk` beží na nameserveroch Websupportu, nie na Vercel DNS. Pre produkciu tejto kópie treba vo Websupporte záznam `test.dispecing` CNAME `cname.vercel-dns.com` s TTL 600 a následné overenie domény vo Verceli. Iné záznamy (najmä produkčný `dispecing.linkapomoci.sk`) sa nemenia.
+`linkapomoci.sk` beží na nameserveroch Websupportu, nie na Vercel DNS. Produkčný záznam `dispecing` už na tento projekt mieri a je overený (22. 9. 2026 sa rozlišuje na `08d426193a08e403.vercel-dns-017.com`). Samostatná doména `test.dispecing.linkapomoci.sk` sa **nikdy nesprevádzkovala** a v DNS neexistuje — nepoužívaj ju.
 
 ## Telnyx webhooky
 
@@ -117,8 +119,10 @@ Call Control aplikácie a messaging profily posielajú webhooky na dve verejné 
 
 | Prostredie | Voice | SMS |
 |---|---|---|
-| Production (`main`) | `https://dispecing-test.vercel.app/api/telephony/telnyx/webhook` (failover: predvolený `*.vercel.app` alias projektu) | `https://dispecing-test.vercel.app/api/sms/telnyx/webhook` |
-| `dev` branch alias | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/telephony/telnyx/webhook` | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/sms/telnyx/webhook` |
+| Production (`main`) | `https://dispecing.linkapomoci.sk/api/telephony/telnyx/webhook` (failover: `https://dispecing-test.vercel.app/...`) | `https://dispecing.linkapomoci.sk/api/sms/telnyx/webhook` |
+| `dev` branch alias | `https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app/api/telephony/telnyx/webhook` | `https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app/api/sms/telnyx/webhook` |
+
+> **Otvorená úloha (22. 9. 2026):** dev riadok bol donedávna nastavený na `pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app`, ktorý po premenovaní Vercel projektu vracia 404. Skontroluj a prepíš dev Call Control aplikáciu aj messaging profil v Telnyx portáli; samotná zmena tohto dokumentu ich neprenastaví.
 
 Failover URL zámerne ukazuje na tú istú route cez `*.vercel.app` alias: claim ledger robí dvojité doručenie bezpečným. Podpis sa overuje cez `TELNYX_PUBLIC_KEY` (tolerancia 300 s); pri chýbajúcom kľúči routa vráti `503`, nie `400`. Udalosti s cudzím `connection_id` sa ignorujú s `200`, takže webhook z produkčnej Call Control aplikácie nesmie mieriť na dev deployment a naopak.
 

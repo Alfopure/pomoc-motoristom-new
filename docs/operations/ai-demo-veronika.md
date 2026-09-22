@@ -59,12 +59,12 @@ Zvyšok — Telnyx aplikácia a OpenAI webhook — vypíše skript na konci. Ru�
 
 **A. Kópia databázy**
 
-1. Nový Supabase projekt (Frankfurt), napríklad `pomoc-motoristom-aidemo`. Nesmie to byť pôvodná produkcia `sjcsrygkkmersoczpunh` — `scripts/assert-target-project.mjs` ju odmietne.
+1. Nový Supabase projekt (Frankfurt), napríklad `pomoc-motoristom-aidemo`. Nesmie to byť odstavená VIPTel databáza `sjcsrygkkmersoczpunh` — `scripts/assert-target-project.mjs` ju odmietne.
 2. Aplikovať doňho migrácie z `supabase/migrations/` a `supabase/seed.sql`. Tým vznikne prázdna kópia schémy s demo dátami; žiadne reálne prípady.
 
 **B. Kópia aplikácie**
 
-3. Nový Vercel projekt nad tým istým repozitárom, región `fra1`, produkčná vetva nastavená na pracovnú vetvu `feat/ai-demo-veronika`. Takto má vlastnú URL a vlastné env premenné a nezasahuje do `dev` ani do `test.dispecing.linkapomoci.sk`.
+3. Nový Vercel projekt nad tým istým repozitárom, región `fra1`, produkčná vetva nastavená na pracovnú vetvu `feat/ai-demo-veronika`. Takto má vlastnú URL a vlastné env premenné a nezasahuje do `dev` ani do produkčnej `dispecing.linkapomoci.sk`.
 4. Premenné: Supabase kľúče z bodu 1, `TELNYX_*` (pozri nižšie), blok `AI_DEMO_*` a `OPENAI_LIVE_*` z `.env.example`. `EXPECTED_SUPABASE_PROJECT_REF` nastav na ref novej databázy.
 5. **Cron:** nový projekt zdedí `vercel.json`, takže by bežal druhý `/api/telephony/cron`. Buď mu nenastav `CRON_SECRET` (cron potom vracia 401 a nič nerobí), alebo cron v projekte vypni. Čistenie dema si viem spustiť aj ručne.
 
