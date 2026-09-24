@@ -4,7 +4,7 @@ import { runTelephonyAlerts, type TelephonyAlertDeps } from "./alerts";
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { closeOrphanLegs, closeStaleRingAttempts, sweepOverdueRingSteps } from "./routing/ring-plan";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
-import { processTelnyxEvent, storedWebhookEnvelope } from "./telnyx/event-processor";
+import { allowedConnectionIds, processTelnyxEvent, storedWebhookEnvelope } from "./telnyx/event-processor";
 import { ACTIVE_SESSION_STATES, type SessionEvent, type SessionRow } from "./state/types";
 import { telephonyStabilityEnabled } from "./stability";
 import { readPendingEffects } from "./state/continuation";
@@ -249,16 +249,21 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promi
 
   const now = nowOf(deps);
   const cutoff = new Date(now.getTime() - (deps.stalledEventMs ?? STALLED_EVENT_MS)).toISOString();
-  const { data, error } = await deps.admin
+  let query = deps.admin
     .from("motorist_telnyx_webhook_events")
     .select("event_id, event_type, payload, occurred_at, attempts, call_control_id, call_session_id, call_leg_id, connection_id, next_attempt_at, retry_state")
     .eq("organization_id", deps.organizationId)
     .in("status", ["queued", "failed"])
     .lt("received_at", cutoff)
     .neq("retry_state", "dead_letter")
-    .or(`next_attempt_at.is.null,next_attempt_at.lte.${now.toISOString()}`)
-    .order("received_at", { ascending: true })
-    .limit(REPLAY_BATCH_SIZE);
+    .or(`next_attempt_at.is.null,next_attempt_at.lte.${now.toISOString()}`);
+  // A row written through another environment's connection (a Preview that
+  // still shared this database) is rejected as `unverified_connection` on every
+  // replay. It never terminalizes, so it would re-open the webhook incident
+  // every tick and hold a batch slot forever.
+  const ownConnections = ownConnectionFilter(deps);
+  if (ownConnections) query = query.or(ownConnections);
+  const { data, error } = await query.order("received_at", { ascending: true }).limit(REPLAY_BATCH_SIZE);
   if (error) return { job: LEDGER_REPLAY_JOB, status: "failed", detail: {}, error: error.message };
 
   const rows = data ?? [];
@@ -311,6 +316,17 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promi
     detail: { stalled: rows.length, attempted: rows.length, replayed: replayed.length, ignored: ignored.length, deferred: deferred.length, duplicate: duplicate.length, unknownSession: unknownSession.length, failed: errors.length, errors },
     error: errors.length > 0 ? errors[0].error : undefined,
   };
+}
+
+/**
+ * PostgREST `or` filter matching the rows the processor would accept from this
+ * environment, or null when it accepts every connection (no allowlist
+ * configured) or an id cannot be expressed safely in the filter syntax.
+ */
+function ownConnectionFilter(deps: TelephonyCronDeps): string | null {
+  const allowed = [...allowedConnectionIds(deps)];
+  if (allowed.length === 0 || allowed.some((id) => !/^[\w-]+$/.test(id))) return null;
+  return ["connection_id.is.null", ...allowed.map((id) => `connection_id.eq.${id}`)].join(",");
 }
 
 export async function pruneWebhookLedger(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {

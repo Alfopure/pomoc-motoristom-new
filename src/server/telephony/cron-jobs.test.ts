@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
+import { CONNECTION_ID, createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 
 import { AI_DEMO_CLEANUP_JOB, ALERT_JOB, detectStuckSessions, EFFECTS_RECOVERY_JOB, LEDGER_PRUNE_JOB,
   LEDGER_REPLAY_JOB, pruneWebhookLedger, RECONCILE_JOB, reconcileWithTelnyx, replayStalledWebhookEvents, runRingSweep, runTelephonyCronJobs, RING_SWEEP_JOB, STUCK_SESSION_JOB } from "./cron-jobs";
@@ -220,6 +220,32 @@ describe("telephony cron jobs", () => {
     const replayEvent = vi.fn(async () => ({ outcome: "processed" }));
     expect(await replayStalledWebhookEvents({ ...h.deps, replayEvent })).toMatchObject({ status: "ok", detail: { attempted: 1, replayed: 1 } });
     expect(replayEvent.mock.calls[0]).toEqual([expect.objectContaining({ data: expect.objectContaining({ id: "many-deferrals" }) })]);
+  });
+
+  it("leaves rows written through another environment's connection out of the replay", async () => {
+    const h = createTelephonyHarness();
+    const old = new Date(h.now().getTime() - 120_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [
+      { event_id: "other-environment", connection_id: "dev-app" },
+      { event_id: "own-connection", connection_id: CONNECTION_ID },
+      { event_id: "no-connection", connection_id: null },
+    ].map(row => ({ ...row, organization_id: ORG, status: "failed", event_type: "call.answered", attempts: 1, payload: {}, occurred_at: old, received_at: old })));
+    const attempted: string[] = [];
+    const replayEvent = vi.fn(async (envelope: unknown) => {
+      attempted.push((envelope as { data: { id: string } }).data.id);
+      return { outcome: "processed" };
+    });
+    expect(await replayStalledWebhookEvents({ ...h.deps, replayEvent })).toMatchObject({ status: "ok", detail: { attempted: 2, replayed: 2, failed: 0 } });
+    expect(attempted.sort()).toEqual(["no-connection", "own-connection"]);
+  });
+
+  it("does not re-open the webhook incident for a row the processor would reject as foreign", async () => {
+    const h = createTelephonyHarness();
+    const old = new Date(h.now().getTime() - 120_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{ event_id: "other-environment", connection_id: "dev-app", organization_id: ORG,
+      status: "failed", event_type: "call.answered", attempts: 1, payload: {}, occurred_at: old, received_at: old }]);
+    expect(await replayStalledWebhookEvents(h.deps)).toMatchObject({ status: "ok", detail: { attempted: 0, failed: 0 } });
+    expect(h.rows("motorist_job_incidents")).toHaveLength(0);
   });
 
 });
