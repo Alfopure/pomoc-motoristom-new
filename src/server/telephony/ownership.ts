@@ -1,4 +1,4 @@
-import { measureRequestStep } from "@/server/request-metrics";
+import { measureRequestStep, observeDatabaseTimeout, registerDatabaseOrigin } from "@/server/request-metrics";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/database.types";
@@ -66,6 +66,7 @@ function abortInsteadOfTimeout(error: unknown): never {
 
 /** The headers belong to this async invocation, never to a shared client. */
 export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  registerDatabaseOrigin(input);
   const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
   headers.set("x-telephony-writer", "2");
   const owner = sessionOwnership.getStore();
@@ -78,12 +79,16 @@ export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: Re
     const cap = unownedReadCap(input, init);
     if (!cap) return measureRequestStep("db", () => fetch(input, { ...init, headers }));
     const signal = init?.signal ? AbortSignal.any([init.signal, cap]) : cap;
-    return measureRequestStep("db", () => fetch(input, { ...init, headers, signal }).catch(abortInsteadOfTimeout));
+    const detach = observeDatabaseTimeout(cap);
+    try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal }).catch(abortInsteadOfTimeout)); }
+    finally { detach(); }
   }
   const remaining = owner.deadline - Date.now();
   if (remaining <= 0) throw new SessionLeaseLostError();
   const timeout = AbortSignal.timeout(Math.max(1, Math.min(DATABASE_REQUEST_MS, remaining)));
-  return measureRequestStep("db", () => fetch(input, { ...init, headers, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout }));
+  const detach = observeDatabaseTimeout(timeout);
+  try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout })); }
+  finally { detach(); }
 }
 
 export async function ownershipRpc<T>(admin: SupabaseClient<Database>, name: string, args: Record<string, unknown>): Promise<T> {
@@ -128,4 +133,34 @@ export async function assertOwnership(owner = sessionOwnership.getStore()): Prom
   });
   if (!ok) throw new SessionLeaseLostError();
   owner.renewedAt = Date.now();
+}
+
+
+const timings = new AsyncLocalStorage<{ now: () => Date; firstCommandAt: string | null; guard_ms: number; guard_stage_ms: number }>();
+
+/** A nested teardown gets its own timing and restores its parent's scope. */
+export function withProviderDispatchTiming<T>(now: () => Date, work: () => Promise<T>): Promise<T> {
+  return timings.run({ now, firstCommandAt: null, guard_ms: 0, guard_stage_ms: 0 }, work);
+}
+
+/** Called after journal admission, immediately before the actual provider send. */
+export function recordProviderDispatch(): void {
+  const scope = timings.getStore();
+  if (scope && scope.firstCommandAt === null) scope.firstCommandAt = scope.now().toISOString();
+}
+
+export function firstProviderDispatchAt(): string | null {
+  return timings.getStore()?.firstCommandAt ?? null;
+}
+
+export async function measureGuard<T>(kind: "guard_ms" | "guard_stage_ms", work: () => PromiseLike<T>): Promise<T> {
+  const scope = timings.getStore();
+  const started = performance.now();
+  try { return await work(); }
+  finally { if (scope) scope[kind] += Math.max(0, performance.now() - started); }
+}
+
+export function guardTiming(): { guard_ms: number; guard_stage_ms: number } | null {
+  const scope = timings.getStore();
+  return scope ? { guard_ms: Math.round(scope.guard_ms * 10) / 10, guard_stage_ms: Math.round(scope.guard_stage_ms * 10) / 10 } : null;
 }

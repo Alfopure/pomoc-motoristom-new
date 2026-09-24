@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { requestTimingContext } from "@/server/request-metrics";
 
 import type { Database } from "@/lib/supabase/database.types";
 import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
@@ -7,7 +8,7 @@ import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_I
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { effectsDeps, ownedSessionWork, runSessionEvent, SessionEventDeferredError, WEBHOOK_LEASE_WAIT_MS, type SessionRunnerDeps } from "../session-runner";
-import { describeServiceError } from "../service-errors";
+import { describeServiceError, SessionLeaseBusyError } from "../service-errors";
 import { recordCallEvent, type CommandOutcome } from "../state/effects";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
 import { toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
@@ -51,7 +52,7 @@ export type ProcessorDeps = SessionRunnerDeps & {
 
 /** Keep SIP processing fast; the larger route duration also covers after-response push. */
 export const INLINE_SWEEP_LIMIT = 2;
-export const INLINE_SWEEP_BUDGET_MS = 4_000;
+export const INLINE_SWEEP_BUDGET_MS = 8_000;
 /** Room for one E4.2 customer-hangup drain inside the webhook's retained maintenance (route `maxDuration` 60 s:
  *  event + correlated replay ≤ 8 s + this drain ≤ 10 s + inline sweep 4 s + push 15 s leave > 20 s reserve). */
 export const INLINE_DRAIN_BUDGET_MS = 20_000;
@@ -274,11 +275,21 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
 export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown): Promise<ProcessorResult> {
   const now = nowOf(deps);
   const started = now().getTime();
-  const done = (partial: Omit<ProcessorResult, "ms">): ProcessorResult => ({ ...partial, ms: now().getTime() - started });
+  const done = (partial: Omit<ProcessorResult, "ms">): ProcessorResult => {
+    const result = { ...partial, ms: now().getTime() - started };
+    if (event) {
+      try { deps.logger?.({ scope: "webhook-delivery", eventId: event.id, type: event.type,
+        outcome: result.outcome, sessionId: result.sessionId, status: result.status, ms: result.ms,
+        timing: event.timing, meta: { attempt: event.deliveryAttempt, delivered_to: event.deliveredTo } }); }
+      catch { /* Telemetry cannot change acknowledgement policy. */ }
+    }
+    return result;
+  };
   const base = { eventId: null, type: null, eventClass: null, sessionId: null, claim: null, commands: [], notes: [], error: null } satisfies Omit<ProcessorResult, "status" | "outcome" | "ms">;
 
   const event = parseTelnyxEnvelope(envelope);
   if (!event) return done({ ...base, status: 400, outcome: "malformed" });
+  event.timing = { ingress_at: new Date(started).toISOString(), ...requestTimingContext(), source: deps.ledgerReplay ? "ledger_replay" : "delivery" };
   const eventClass = classifyEventType(event.type);
   const identity = { ...base, eventId: event.id, type: event.type, eventClass };
 
@@ -301,6 +312,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     occurredAt: event.occurredAt,
     replay: deps.ledgerReplay,
   });
+  event.timing.claimed_at = claim.claimedAt ?? null;
   if (claim.outcome === "terminal") {
     await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.webhook, error: new Error(claim.terminalReason ?? "Webhook dead letter"), context: { eventId: event.id, type: event.type, terminalReason: claim.terminalReason } });
     return done({ ...identity, claim, status: 200, outcome: "unresolved", error: claim.terminalReason });
@@ -459,7 +471,6 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
         }
         if (event.type === "call.recording.saved" || event.type === "call.recording.error") await runSessionEvent(deps, ownedSession.id, event);
         await recordCallEvent(effects, { session: ownedSession, event, handledStatus: "processed", stateBefore: ownedSession.state, stateAfter: ownedSession.state, notes: ["bookkeeping"], commands: [] });
-        await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
         return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", notes: ["bookkeeping"] });
       }
 
@@ -469,7 +480,6 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
         catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: ownedSession.id, code: "participant_observation_failed" }); }
       }
       if (run.outcome === "ignored") {
-        await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
         logResult(deps, event, claim, ownedSession.id, "ignored", [], started, now);
         return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "ignored", notes: [run.reason] });
       }
@@ -480,10 +490,15 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
         return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "failed", commands: run.commands, notes: run.apply.notes, error: run.apply.failure?.error ?? null });
       }
 
-      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
       logResult(deps, event, claim, ownedSession.id, "processed", run.commands, started, now);
       return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", commands: run.commands, notes: run.apply.notes });
     }, { known: ownedSession, eventType: event.type });
+    // The fenced transition and audit are complete. Finishing the unfenced
+    // inbox claim must not keep the next answer behind one more DB round trip.
+    // Failed-owner bookkeeping stays in the scope above for terminal recovery.
+    if (result.outcome === "processed" || result.outcome === "ignored") {
+      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+    }
     // The owned scope has exited before optional maintenance. A failed apply
     // may still have durable effects pending; its ledger failure stays truthful.
     // Release can warn without failing the operation; replay must acquire a
@@ -499,7 +514,12 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
       if (eventClass === "control" && result.outcome === "processed") {
         await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.webhook, now());
       }
-      await maybeSweep(deps, started);
+      // Give released reservations a bounded sweep after this session's inbox
+      // drain. A slow host used to consume the whole sweep budget before the
+      // maintenance even began. Retain route time for notifications/cleanup.
+      if (now().getTime() - started < 35_000) {
+        await maybeSweep(deps, now().getTime(), ["call.hangup", "call.bridged"].includes(event.type));
+      }
     };
     if (deps.deferMaintenance) {
       try { deps.deferMaintenance(maintenance); }
@@ -520,7 +540,11 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // Expected contention is observable in the log/ledger. Incident bookkeeping
     // must not delay releasing an unexecuted answer for immediate redelivery.
     if (!deferred) await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.webhook, error, context: { eventId: event.id, type: event.type, sessionId: session?.id ?? null } });
-    deps.logger?.({ level: deferred ? "warn" : "error", scope: "webhook", eventId: event.id, type: event.type, sessionId: session?.id ?? null, outcome: "failed", error: message, retryable: deferred, ms: now().getTime() - started });
+    deps.logger?.({ level: deferred ? "warn" : "error", scope: "webhook", eventId: event.id, type: event.type, sessionId: session?.id ?? null, outcome: "failed", error: message, retryable: deferred, ms: now().getTime() - started,
+      deferral: error instanceof SessionLeaseBusyError ? "lease_busy" : error instanceof SessionEventDeferredError ? error.code : null,
+      ...(error instanceof SessionLeaseBusyError ? { lease_wait_ms: error.details?.waitedMs ?? null, polls: error.details?.polls ?? null } : {}),
+      finished_at: new Date().toISOString(),
+      timing: event.timing, meta: { attempt: event.deliveryAttempt, delivered_to: event.deliveredTo } });
     // E2.1: a deferred row used to wait for provider redelivery (which collides
     // with the same holder, M01) or for a later webhook of the same call that
     // happened to answer 200 (17 of 58 in the 22 Sep recheck); the rest waited
@@ -553,7 +577,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
   }
 }
 
-async function maybeSweep(deps: ProcessorDeps, startedAt: number): Promise<void> {
+async function maybeSweep(deps: ProcessorDeps, startedAt: number, waitingFirst = false): Promise<void> {
   if (deps.sweepAfterEvent === false) return;
   // Keep the original short inline budget even though the route also reserves
   // time for after-response push. Sweep a couple of sessions and leave the exhaustive pass
@@ -565,12 +589,14 @@ async function maybeSweep(deps: ProcessorDeps, startedAt: number): Promise<void>
     await sweepOverdueRingSteps({
       admin: deps.admin,
       organizationId: deps.organizationId,
+      environment: deps.environment,
+      waitingFirst,
       now: nowOf(deps),
       limit: deps.sweepLimit ?? INLINE_SWEEP_LIMIT,
       budgetMs,
       // The current session is included on purpose: when every dial of a step failed the fan-out
       // backdates `step_deadline_at` and no Telnyx event will ever arrive to advance it.
-      runSessionEvent: (sessionId, event) => runSessionEvent(deps, sessionId, event),
+      runSessionEvent: (sessionId, event, options) => runSessionEvent(deps, sessionId, event, options),
       // E4.2: one bounded customer-hangup drain per pass, on its own budget (the
       // loop budget alone never reaches `CUSTOMER_DRAIN_MIN_BUDGET_MS`).
       drainCustomerTerminal: (session) => drainCustomerTerminal(deps, session),
@@ -589,6 +615,8 @@ function logResult(deps: ProcessorDeps, event: TelephonyEvent, claim: WebhookCla
     sessionId,
     legId: event.callLegId,
     verified: true,
+    timing: event.timing,
+    meta: { attempt: event.deliveryAttempt, delivered_to: event.deliveredTo },
     claim: `${claim.outcome}#${claim.attempts}`,
     outcome,
     ms: now().getTime() - started,

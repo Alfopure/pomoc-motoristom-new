@@ -60,10 +60,10 @@ export function commandEvidenceCandidate(command: PendingProviderCommand, sessio
  * under the current owner, BEFORE pending-effect replay. It never sends a POST.
  */
 export async function reconcileProviderEvent(admin: SupabaseClient<Database>, sessionId: string, event: TelephonyEvent,
-  telnyx?: Pick<TelnyxClient, "request"> | null): Promise<number> {
+  telnyx?: Pick<TelnyxClient, "request"> | null, snapshotCommands?: PendingProviderCommand[]): Promise<number> {
   const owner = sessionOwnership.getStore();
   if (owner?.contract !== 2 || owner.sessionId !== sessionId || !ELIGIBLE.has(event.type)) return 0;
-  const pending = await ownershipRpc<PendingProviderCommand[]>(admin, "motorist_provider_pending_commands_v2", { p_session_id: sessionId });
+  const pending = snapshotCommands ?? await loadPendingProviderCommands(admin, sessionId, event);
   const candidates = pending.filter(command => commandEvidenceCandidate(command, sessionId, event));
   // A later join/answer event cannot distinguish two earlier unknown attempts.
   if (candidates.length !== 1) return 0;
@@ -83,4 +83,11 @@ export async function reconcileProviderEvent(admin: SupabaseClient<Database>, se
     p_generation: command.dispatchGeneration, p_token: command.dispatchToken, p_status: 200, p_result: result,
   });
   return changed ? 1 : 0;
+}
+
+/** Same fenced read as reconciliation, issued alongside the session snapshot. */
+export async function loadPendingProviderCommands(admin: SupabaseClient<Database>, sessionId: string, event?: TelephonyEvent): Promise<PendingProviderCommand[]> {
+  const owner = sessionOwnership.getStore();
+  if (!event || owner?.contract !== 2 || owner.sessionId !== sessionId || !ELIGIBLE.has(event.type)) return [];
+  return ownershipRpc<PendingProviderCommand[]>(admin, "motorist_provider_pending_commands_v2", { p_session_id: sessionId });
 }

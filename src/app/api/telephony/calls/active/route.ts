@@ -1,4 +1,4 @@
-import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
+import { measureRequestStep, withRequestMetrics, withBackgroundRequestMetrics } from "@/server/request-metrics";
 import { after } from "next/server";
 
 import { requireDefaultMotoristActor } from "@/server/api-auth";
@@ -45,7 +45,8 @@ async function maybeSweep(deps: TelephonyRuntimeDeps): Promise<void> {
     await sweepOverdueRingSteps({
       admin: deps.admin,
       organizationId: deps.organizationId,
-      runSessionEvent: (sessionId, event) => runSessionEvent(deps, sessionId, event),
+      environment: deps.environment,
+      runSessionEvent: (sessionId, event, options) => runSessionEvent(deps, sessionId, event, options),
       limit: ACTIVE_SWEEP_LIMIT,
       budgetMs: ACTIVE_SWEEP_BUDGET_MS,
     });
@@ -88,7 +89,7 @@ export async function GET() {
       }
       // A single session can outlast the sweep's start budget while waiting for
       // its lease or provider. Send the snapshot before any sweep work begins.
-      after(() => maybeSweep(deps));
+      after(withBackgroundRequestMetrics(() => maybeSweep(deps)));
 
       return Response.json(snapshot, { headers: { "Cache-Control": "private, no-store" } });
     } catch (error) {

@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { requestStepCount } from "@/server/request-metrics";
-import { assertOwnership, ownershipRpc, sessionOwnership } from "../ownership";
+import { requestStepCount, requestTimingContext } from "@/server/request-metrics";
+import { assertOwnership, firstProviderDispatchAt, guardTiming, measureGuard, ownershipRpc, sessionOwnership } from "../ownership";
 import { payloadFingerprint } from "../provider-journal";
 import { isDeepStrictEqual } from "node:util";
 
@@ -121,6 +121,8 @@ export type EffectsDeps = {
    */
   renewLease?: () => Promise<void>;
   eventTiming?: () => EventTiming;
+  /** Request-local identity returned by the fenced call projection. Never caches call state. */
+  callIds?: Map<string, string>;
 };
 
 export type CommandOutcome = {
@@ -144,6 +146,10 @@ export function auditCommandOutcomes(commands: CommandOutcome[]) {
   return commands.map((command) => ({ kind: command.kind, ok: command.ok, command_id: command.commandId, skipped: command.skipped,
     ...(command.startedAt ? { started_at: command.startedAt, effect_ms: command.ms, phase: command.phase ?? command.kind } : {}),
     ...(command.dbCountAtDispatch === undefined ? {} : { db_count_at_dispatch: command.dbCountAtDispatch }),
+    ...(command.kind === "ring_fanout" && command.detail ? { fanout: {
+      step: command.detail.step, attempted: command.detail.attempts, dialed: command.detail.dialed,
+      skipped: Array.isArray(command.detail.skippedMembers) ? command.detail.skippedMembers.length : 0,
+    } } : {}),
     // Without this a failed command is a bare `ok: false` in the audit and the
     // only way to learn why is to catch it happening again.
     ...(command.ok || !command.error ? {} : { error: command.error.slice(0, 300) }) }));
@@ -572,6 +578,7 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
   if (current) {
     const updated = await admin.from("motorist_calls").update(values).eq("id", current.id);
     if (updated.error) fail("call update failed", updated.error);
+    deps.callIds?.set(session.id, current.id);
     return;
   }
   const inserted = await admin.from("motorist_calls").insert({
@@ -583,8 +590,9 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
     recording_status: values.recording_status ?? "not_requested",
     transcript_status: "not_requested",
     raw_payload: toJson({ session_id: session.id }),
-  });
+  }).select("id").maybeSingle();
   if (inserted.error && !isDuplicate(inserted.error)) fail("call insert failed", inserted.error);
+  if (inserted.data) deps.callIds?.set(session.id, inserted.data.id);
 }
 
 /**
@@ -605,7 +613,7 @@ function safeEventTarget(target: AppEvent["target"] | null | undefined): Json {
 
 /** Audit row per processed event (`event_fingerprint` = event id → idempotent). */
 export async function recordCallEvent(
-  deps: Pick<EffectsDeps, "admin" | "organizationId" | "now" | "eventTiming">,
+  deps: Pick<EffectsDeps, "admin" | "organizationId" | "now" | "eventTiming" | "callIds">,
   input: {
     session: SessionRow | null;
     event: SessionEvent;
@@ -619,8 +627,8 @@ export async function recordCallEvent(
   },
 ): Promise<void> {
   const { admin } = deps;
-  let callId: string | null = null;
-  if (input.session) {
+  let callId: string | null = input.session ? deps.callIds?.get(input.session.id) ?? null : null;
+  if (input.session && !callId) {
     const call = await admin.from("motorist_calls").select("id").eq("session_id", input.session.id).maybeSingle();
     callId = call.data?.id ?? null;
   }
@@ -650,7 +658,12 @@ export async function recordCallEvent(
       notes: input.notes,
       commands: input.commands,
       error: input.error ?? null,
-      ...(measuredTiming ? { timing: measuredTiming } : {}),
+      ...(measuredTiming || event.kind === "telnyx" ? { timing: {
+        ...requestTimingContext(), ...guardTiming(), first_command_at: firstProviderDispatchAt(),
+        lease_acquired_at: sessionOwnership.getStore() ? new Date(sessionOwnership.getStore()!.acquiredAt).toISOString() : null,
+        ...measuredTiming,
+        ...(event.kind === "telnyx" ? { ...event.timing, meta: { attempt: event.deliveryAttempt ?? null, delivered_to: event.deliveredTo ?? null } } : {}),
+      } } : {}),
       ...(input.session && readMeta(input.session).recording?.coverageUnconfirmed
         ? { recording_coverage_unconfirmed: readMeta(input.session).recording!.coverageUnconfirmed } : {}),
     }),
@@ -1265,7 +1278,7 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
   if (command.attempt) {
     let query = admin
       .from("motorist_ring_attempts")
-      .update({ leg_id: leg.id, result: "offered", offered_at: now })
+      .update({ leg_id: leg.id, result: "offered" })
       .eq("session_id", session.id)
       .eq("step_index", command.attempt.stepIndex)
       .in("result", ["pending", "offered"]);
@@ -1435,15 +1448,15 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     return outcome;
   });
   const results = await requireTelnyx(deps).dialMany(sendable.map(({ dial }) => dialParams(dial)));
-  for (const [position, result] of results.entries()) {
+  await Promise.all(results.map(async (result, position) => {
     const { index, dial } = sendable[position];
-    if (result.status === "rejected") { dialled[index] = result; continue; }
+    if (result.status === "rejected") { dialled[index] = result; return; }
     try {
       dialled[index] = { status: "fulfilled", value: await settleDial(deps, frozen, dial, result.value, stableFanout || hasStabilityContract(frozen.session)) };
     } catch (error) {
       dialled[index] = { status: "rejected", reason: error };
     }
-  }
+  }));
   for (const [index, outcome] of dialled.entries()) {
     const dial = claimed[index];
     try {
@@ -1491,7 +1504,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     const meta = readMeta(ctx.session);
     const updated = await admin
       .from("motorist_call_sessions")
-      .update({ metadata: toJson({ ...meta, ring: { ...(meta.ring ?? {}), step_deadline_at: now } }) })
+      .update({ metadata: toJson({ ...meta, ring: { ...(meta.ring ?? {}), step_deadline_at: new Date(Date.parse(now) - 1).toISOString() } }) })
       .eq("id", session.id);
     if (updated.error) fail("deadline update failed", updated.error);
   }
@@ -1536,7 +1549,7 @@ async function executeReduceResult(
   let compensations = result.compensations;
 
   if (result.guard && !input.continuation) {
-    const reserved = await reserveAnsweredOperator(deps.admin, { profileId: result.guard.profileId, sessionId: input.session.id, organizationId: deps.organizationId, expectedToken: result.guard.offerToken });
+    const reserved = await measureGuard("guard_ms", () => reserveAnsweredOperator(deps.admin, { profileId: result.guard!.profileId, sessionId: input.session.id, organizationId: deps.organizationId, expectedToken: result.guard!.offerToken }));
     if (!reserved.applied) {
       branch = "rejected";
       transition = result.guard.onRejected.next;

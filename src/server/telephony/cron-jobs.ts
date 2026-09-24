@@ -157,8 +157,8 @@ function nowOf(deps: TelephonyCronDeps): Date {
   return (deps.now ?? (() => new Date()))();
 }
 
-function sessionRunner(deps: TelephonyCronDeps): (sessionId: string, event: SessionEvent) => Promise<unknown> {
-  return deps.runSession ?? ((sessionId, event) => runSessionEvent(deps, sessionId, event));
+function sessionRunner(deps: TelephonyCronDeps): (sessionId: string, event: SessionEvent, options?: { known?: SessionRow }) => Promise<unknown> {
+  return deps.runSession ?? ((sessionId, event, options) => runSessionEvent(deps, sessionId, event, options));
 }
 
 export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
@@ -173,6 +173,7 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
       organizationId: deps.organizationId,
       now: deps.now ?? (() => new Date()),
       runSessionEvent: sessionRunner(deps),
+      environment: deps.environment,
       limit: RING_SWEEP_LIMIT,
       budgetMs: RING_SWEEP_BUDGET_MS,
       clock: deps.clock,

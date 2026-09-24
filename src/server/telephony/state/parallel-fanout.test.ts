@@ -4,11 +4,11 @@ import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from
 import { TelnyxCommandError } from "../telnyx/client";
 import { advanceRingStep } from "../routing/ring-plan";
 
-afterEach(() => { vi.unstubAllEnvs(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
-function harness() {
+function harness(options: Parameters<typeof createTelephonyHarness>[0] = {}) {
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
-  return createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+  return createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false, ...options });
 }
 
 const offered = (h: TelephonyHarness, sessionId: string) =>
@@ -32,6 +32,54 @@ function watchDials(h: TelephonyHarness) {
 }
 
 describe("ring fan-out", () => {
+  it("settles all accepted legs concurrently and preserves the original offer time", async () => {
+    const h = harness();
+    let release!: () => void;
+    const gate = new Promise<void>(done => { release = done; });
+    let first!: () => void;
+    const started = new Promise<void>(done => { first = done; });
+    let count = 0;
+    const from = h.client.from.bind(h.client);
+    vi.spyOn(h.client, "from").mockImplementation(table => {
+      const query = from(table);
+      if (table === "motorist_call_legs") {
+        const upsert = query.upsert.bind(query);
+        query.upsert = (...args) => {
+          const write = upsert(...args);
+          if ((args[0] as { role?: string }).role !== "operator") return write;
+          const then = write.then.bind(write);
+          write.then = (resolve, reject) => {
+            count += 1;
+            first();
+            return gate.then(() => then()).then(resolve, reject);
+          };
+          return write;
+        };
+      }
+      return query;
+    });
+    const call = h.inbound({ to: NUMBERS.allianz });
+    await started;
+    await new Promise<void>(done => setImmediate(done));
+    const concurrent = count;
+    const offeredAt = offered(h, String(h.rows("motorist_call_sessions")[0].id)).map(row => row.offered_at);
+    h.advance(1_000);
+    release();
+    const completed = await call;
+    expect(concurrent).toBe(3);
+    expect(offered(h, completed.sessionId).map(row => row.offered_at)).toEqual(offeredAt);
+    expect(h.legs(completed.sessionId).filter(leg => leg.role === "operator")).toHaveLength(3);
+  });
+
+  it("enters the waiting room in the same invocation when every dial is refused", async () => {
+    const h = harness({ fallbackKind: "waiting_room" });
+    for (let i = 0; i < 4; i++) h.telnyx.failNext("dial", new TelnyxCommandError({ code: "rejected", status: 422, detail: "dial refused" }));
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    expect(h.session(call.sessionId).state).toBe("waiting");
+    expect(offered(h, call.sessionId)).toHaveLength(0);
+    const fanouts = call.results.flatMap(result => result.commands).filter(command => command.kind === "ring_fanout");
+    expect(fanouts.some(command => command.detail?.dialed === 0)).toBe(true);
+  });
   it("hands the whole step to the provider at once", async () => {
     const h = harness();
     const seen = watchDials(h);

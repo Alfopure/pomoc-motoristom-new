@@ -44,6 +44,14 @@ function str(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function deliveryDestination(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return ["https:", "http:"].includes(url.protocol) ? `${url.origin}${url.pathname}`.slice(0, 512) : null;
+  } catch { return null; }
+}
+
 export function parseTelnyxEnvelope(envelope: unknown): TelephonyEvent | null {
   const root = asRecord(envelope);
   const data = asRecord(root?.data) ?? (root && typeof root.event_type === "string" ? root : null);
@@ -52,6 +60,7 @@ export function parseTelnyxEnvelope(envelope: unknown): TelephonyEvent | null {
   const type = str(data.event_type);
   if (!id || !type) return null;
   const payload = asRecord(data.payload) ?? {};
+  const meta = asRecord(root?.meta);
 
   const direction = payload.direction === "incoming" || payload.direction === "outgoing" ? payload.direction : null;
   const rawClientState = str(payload.client_state);
@@ -67,6 +76,8 @@ export function parseTelnyxEnvelope(envelope: unknown): TelephonyEvent | null {
 
   return {
     kind: "telnyx",
+    deliveryAttempt: typeof meta?.attempt === "number" && Number.isSafeInteger(meta.attempt) && meta.attempt > 0 ? meta.attempt : null,
+    deliveredTo: deliveryDestination(meta?.delivered_to),
     id,
     type,
     occurredAt: str(data.occurred_at) ?? str(payload.occurred_at),

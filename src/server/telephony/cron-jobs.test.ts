@@ -43,7 +43,7 @@ describe("telephony cron jobs", () => {
     const result = await runRingSweep({ ...h.deps, runSession });
     expect(result.status).toBe("ok");
     expect(result.detail).toMatchObject({ swept: 1 });
-    expect(runSession).toHaveBeenCalledWith(sessionId, expect.objectContaining({ kind: "app", type: "sweep" }));
+    expect(runSession).toHaveBeenCalledWith(sessionId, expect.objectContaining({ kind: "app", type: "sweep" }), { known: expect.objectContaining({ id: sessionId }) });
   });
 
   it("reports an active session untouched for longer than the stuck threshold", async () => {
