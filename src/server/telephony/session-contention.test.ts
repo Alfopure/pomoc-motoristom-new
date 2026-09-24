@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeQueryBuilder } from "@/test/fake-supabase";
 import { registerCriticalWriteRpcs, registerProviderJournalRpcs } from "@/test/fake-stability";
 import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
-import { hangupCall, holdCall, unholdCall } from "./call-actions";
-import { ownedSessionWork } from "./session-runner";
+import { MIN_REMAINING_FOR_RETRY_MS } from "@/lib/telephony/call-control-retry";
+import { TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
+import { HANGUP_LEASE_WAIT_MS, hangupCall, holdCall, PICKUP_LEASE_WAIT_MS, unholdCall } from "./call-actions";
+import { LEASE_WAIT_MS, ownedSessionWork, WEBHOOK_LEASE_POLL_MS, WEBHOOK_LEASE_WAIT_MS } from "./session-runner";
 import { replayDeferredSessionEvents } from "./telnyx/event-processor";
 import { sessionOwnership } from "./ownership";
 import { encodeClientState } from "./telnyx/client-state";
@@ -128,7 +130,8 @@ describe("contract-2 session contention", () => {
     const facts = ["call.playback.ended", "call.speak.ended", "conference.participant.joined", "conference.participant.left", "call.bridged"];
     const storm = await Promise.all(facts.map((type, index) => h.legEvent(call.callControlId, type, {}, `storm-${index}`)));
     expect(storm.every(result => result.status === 500 && result.outcome === "failed")).toBe(true);
-    // Each callback now retries inside `WEBHOOK_LEASE_WAIT_MS` instead of
+    // Each callback now polls the flat ladder inside `WEBHOOK_LEASE_WAIT_MS`
+    // (at most `WEBHOOK_LEASE_POLL_MS.length + 1` acquire RPCs) instead of
     // yielding on its first refusal. Giving up at once meant Telnyx redelivered
     // every one of them: 23 of 55 events failed outright on the heaviest test
     // call of 17 Sep, and their provider facts reached the session minutes late
@@ -138,7 +141,7 @@ describe("contract-2 session contention", () => {
     // lease never comes free.
     const attempts = lease.acquisitions().length - beforeStorm;
     expect(attempts).toBeGreaterThan(facts.length);
-    expect(attempts).toBeLessThanOrEqual(facts.length * 6);
+    expect(attempts).toBeLessThanOrEqual(facts.length * (WEBHOOK_LEASE_POLL_MS.length + 1));
     expect(h.rows("motorist_telnyx_webhook_events").filter(row => String(row.event_id).startsWith("storm-")))
       .toEqual(facts.map((_, index) => expect.objectContaining({ event_id: `storm-${index}`, retry_state: "deferred", effect_failure_count: 0 })));
 
@@ -234,6 +237,25 @@ describe("contract-2 session contention", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("gives up a callback wait after the flat ladder, well inside the wall cap", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ answer: false });
+    contractTwo(h, call.sessionId);
+    h.db.registerRpc("motorist_session_lease_acquire_v2", () => null);
+    vi.useFakeTimers();
+    try {
+      const work = vi.fn(async () => "must not execute");
+      const started = Date.now();
+      const pending = expect(ownedSessionWork({ ...h.deps, leaseWaitMs: WEBHOOK_LEASE_WAIT_MS }, call.sessionId, work))
+        .rejects.toMatchObject({ name: "SessionLeaseBusyError", status: 503, code: "session_busy", retryAfterMs: 1000 });
+      await vi.runAllTimersAsync();
+      await pending;
+      expect(work).not.toHaveBeenCalled();
+      expect(h.db.log.filter(entry => entry.table === "motorist_session_lease_acquire_v2")).toHaveLength(WEBHOOK_LEASE_POLL_MS.length + 1);
+      expect(Date.now() - started).toBeLessThan(WEBHOOK_LEASE_WAIT_MS);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("never retries an ownership database outage as normal contention", async () => {
     const h = createTelephonyHarness();
     const call = await h.inbound({ answer: false });
@@ -242,5 +264,23 @@ describe("contract-2 session contention", () => {
     await expect(ownedSessionWork(h.deps, call.sessionId, async () => undefined))
       .rejects.toMatchObject({ name: "SessionEventDeferredError", code: "session_event_deferred" });
     expect(h.db.log.filter(entry => entry.table === "motorist_session_lease_acquire_v2")).toHaveLength(1);
+  });
+});
+
+describe("lease budgets", () => {
+  it("keeps the webhook wait well under every operator budget", () => {
+    expect(LEASE_WAIT_MS).toBe(3_000);
+    // A hold/unhold click on the global budget keeps >= 1 s over a competing callback.
+    expect(WEBHOOK_LEASE_WAIT_MS).toBeLessThanOrEqual((LEASE_WAIT_MS * 2) / 3);
+    expect(PICKUP_LEASE_WAIT_MS).toBeGreaterThan(LEASE_WAIT_MS);
+    expect(HANGUP_LEASE_WAIT_MS).toBeGreaterThan(LEASE_WAIT_MS);
+    // Wait + preflight + handler must fit one control request with a replay still admissible.
+    expect(Math.max(PICKUP_LEASE_WAIT_MS, HANGUP_LEASE_WAIT_MS)).toBeLessThan(TELEPHONY_TIMEOUT_MS.control - MIN_REMAINING_FOR_RETRY_MS);
+  });
+
+  it("keeps the callback wait well under the operator budget", () => {
+    expect(WEBHOOK_LEASE_WAIT_MS).toBeLessThanOrEqual((2 / 3) * LEASE_WAIT_MS);
+    // The flat ladder fits its own wall cap, so the RPC count — not the clock — ends the wait.
+    expect(WEBHOOK_LEASE_POLL_MS.reduce((total, step) => total + step, 0)).toBeLessThanOrEqual(WEBHOOK_LEASE_WAIT_MS);
   });
 });

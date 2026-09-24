@@ -4,8 +4,8 @@ import { completeAnnouncedAction, completeCallAnnouncements } from "@/test/compl
 import { fakeError } from "@/test/fake-supabase";
 import { createTelephonyHarness, LINES, NUMBERS, ORG, PLAN_ID, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
-import { callColleague, createRateLimiter, parkCall, pickupWaitingCall, startOutboundCall } from "./call-actions";
-import { loadRoutingContext, loadSessionSnapshot } from "./session-runner";
+import { callColleague, createRateLimiter, HANGUP_LEASE_WAIT_MS, hangupCall, parkCall, pickupWaitingCall, startOutboundCall } from "./call-actions";
+import { loadRoutingContext, loadSessionSnapshot, WEBHOOK_LEASE_POLL_MS, WEBHOOK_LEASE_WAIT_MS } from "./session-runner";
 import { parseTelnyxEnvelope } from "./state/events";
 import { readMeta, type SessionRow } from "./state/types";
 
@@ -177,5 +177,71 @@ describe("session routing setup", () => {
     expect((await loadRoutingContext(h.deps, session)).recordingPolicy).toMatchObject({ enabled: true, outbound: true });
     h.db.update("motorist_call_recording_policies", { recording_enabled: false }, () => true);
     expect((await loadRoutingContext(h.deps, session)).recordingPolicy?.enabled).toBe(false);
+  });
+});
+
+describe("per-action lease budget", () => {
+  const acquires = (h: TelephonyHarness, from = 0) => h.db.log.slice(from).filter(entry => entry.table === "motorist_session_lease_acquire_v2").length;
+
+  /** Contract 2, operator o1 talking to the customer, and a lease nobody can take. */
+  async function talkingBehindHeldLease() {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const winner = String(h.legFor(call.sessionId, PROFILES.o1)!.telnyx_call_control_id);
+    await h.legEvent(winner, "call.answered");
+    for (const leg of h.legs(call.sessionId)) {
+      if (leg.role !== "customer" && leg.profile_id !== PROFILES.o1 && !leg.ended_at) await h.legEvent(String(leg.telnyx_call_control_id), "call.hangup");
+    }
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", writer_contract: 2 });
+    h.db.registerRpc("motorist_session_lease_acquire_v2", () => null);
+    h.deps.random = () => 0;
+    // The harness sleep only moves the harness clock; the v2 wait loop reads
+    // `Date.now()`, so it needs real timers driven under fake time.
+    h.deps.sleep = ms => new Promise<void>(resolve => setTimeout(resolve, ms));
+    h.db.log.length = 0;
+    h.telnyx.calls.length = 0;
+    return { h, sid: call.sessionId, customerCc: call.callControlId };
+  }
+
+  it("hangup waits longer than a webhook for the lease and keeps its durable intent", async () => {
+    const { h, sid, customerCc } = await talkingBehindHeldLease();
+    vi.useFakeTimers();
+    try {
+      const started = Date.now();
+      const pending = hangupCall(h.deps, actor, sid).catch((error: unknown) => error);
+      await vi.runAllTimersAsync();
+      const error = await pending;
+      expect(error).toMatchObject({
+        name: "SessionLeaseBusyError", status: 503, code: "session_busy", retryAfterMs: 1000,
+        details: { leaseWaitMs: HANGUP_LEASE_WAIT_MS, eventType: "app.hangup" },
+      });
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(HANGUP_LEASE_WAIT_MS);
+      expect(elapsed).toBeLessThan(9_000);
+      // More polls than the 3 s interactive budget (7), bounded by the ladder.
+      const hangupPolls = acquires(h);
+      expect(hangupPolls).toBeGreaterThan(7);
+      expect(hangupPolls).toBeLessThanOrEqual(13);
+      expect((error as { details: { polls: number } }).details.polls).toBe(hangupPolls);
+      // The intent is committed before the wait, so the longer wait loses nothing.
+      expect(h.db.log.filter(entry => entry.table === "motorist_session_terminate_v2")).toHaveLength(1);
+      expect(h.session(sid).termination_requested_at).toBeTruthy();
+      expect(h.telnyx.of("hangup")).toEqual([]);
+
+      // A provider fact on the same held session still gives up well before the operator does.
+      const from = h.db.log.length;
+      const factStarted = Date.now();
+      const factPending = h.legEvent(customerCc, "call.playback.ended", {}, "busy-fact");
+      await vi.runAllTimersAsync();
+      const fact = await factPending;
+      expect(fact).toMatchObject({ status: 500, outcome: "failed" });
+      expect(acquires(h, from)).toBeLessThanOrEqual(WEBHOOK_LEASE_POLL_MS.length + 1);
+      expect(Date.now() - factStarted).toBeLessThan(HANGUP_LEASE_WAIT_MS);
+      const ledger = h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "busy-fact");
+      expect(ledger?.error).toContain("SessionLeaseBusyError");
+      expect(ledger?.error).toContain(`lease_wait_ms=${WEBHOOK_LEASE_WAIT_MS}`);
+      expect(ledger?.error).toContain("event=call.playback.ended");
+    } finally { vi.useRealTimers(); }
   });
 });

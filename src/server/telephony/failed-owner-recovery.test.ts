@@ -57,13 +57,18 @@ async function failedOwner(options: { customer?: boolean; recording?: boolean; r
   if (options.customer !== false) h.telnyx.physical.ended(call.callControlId);
   const owner = h.legEvent(operator, "call.hangup", {}, "failed-operator");
   await entered.promise;
+  // The deferred customer hangup retains its own drain from its host (E2.1);
+  // it is kept apart so `retained` stays the failed owner's maintenance only.
+  let customerSelfDrain: (() => Promise<void>) | null = null;
   if (options.customer !== false) {
     const customer = await h.legEvent(call.callControlId, "call.hangup", {}, "deferred-customer");
     expect(customer).toMatchObject({ status: 500, outcome: "failed" });
     expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-customer"))
       .toMatchObject({ retry_state: "deferred", delivery_count: 1 });
+    expect(retained).toHaveLength(1);
+    customerSelfDrain = retained.shift()!;
   }
-  return { h, call, operator, retained, finish, owner };
+  return { h, call, operator, retained, finish, owner, customerSelfDrain };
 }
 
 describe("failed owner customer terminal recovery", () => {
@@ -116,7 +121,7 @@ describe("failed owner replay boundaries", () => {
   });
 
   it.each(["lost", "throws"])("does not replay when the failure ledger write %s", async mode => {
-    const { h, call, retained, finish, owner } = await failedOwner();
+    const { h, call, retained, finish, owner, customerSelfDrain } = await failedOwner();
     const finishRpc = h.db.rpcHandlers.get("motorist_telnyx_finish_webhook_event_v2")!;
     h.db.registerRpc("motorist_telnyx_finish_webhook_event_v2", (args, db) => {
       if (args.p_event_id === "failed-operator") {
@@ -130,6 +135,10 @@ describe("failed owner replay boundaries", () => {
     for (const work of retained) await work();
     expect(h.session(call.sessionId).state).toBe("waiting");
     expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-customer")?.attempts).toBe(1);
+    // The failed owner is not eligible; the deferring host's own drain still is.
+    await customerSelfDrain!();
+    expect(h.session(call.sessionId).state).toBe("ended");
+    expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-customer")).toMatchObject({ status: "processed", attempts: 2, delivery_count: 1 });
   });
 
   it("falls back inline if host scheduling throws, retaining the owner's failed HTTP result", async () => {

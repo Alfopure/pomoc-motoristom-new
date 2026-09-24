@@ -8,7 +8,7 @@ import { telephonyDatabaseFetch } from "@/server/telephony/ownership";
 
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
-it("uses the ownership-aware transport without adding an unrequested read deadline", async () => {
+it("uses the ownership-aware transport without adding a deadline to an un-owned write", async () => {
   const fetch = vi.fn().mockResolvedValue(new Response("ok"));
   vi.stubGlobal("fetch", fetch);
   createSupabaseAdminClient();

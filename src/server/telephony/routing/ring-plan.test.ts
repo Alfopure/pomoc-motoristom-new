@@ -313,9 +313,34 @@ describe("advanceRingStep and sweep", () => {
 
     const closed = await closeOrphanLegs(h.admin, { organizationId: ORG, now: h.now() });
 
-    expect(closed.sort()).toEqual([String(orphanBySession.id), String(orphanByAge.id)].sort());
+    expect(closed.closed.sort()).toEqual([String(orphanBySession.id), String(orphanByAge.id)].sort());
+    expect(closed.awaitingHangup).toEqual([]);
     expect(h.db.find("motorist_call_legs", (row) => row.id === fresh.id)).toMatchObject({ ended_at: null });
     expect(h.db.find("motorist_call_legs", (row) => row.id === orphanBySession.id)).toMatchObject({ state: "ended", hangup_cause: "orphan_sweep" });
+  });
+
+  it("leaves a leg alone while its exact call.hangup still waits in the ledger", async () => {
+    const h = createTelephonyHarness();
+    const [dead] = h.db.seed("motorist_call_sessions", [{ organization_id: ORG, direction: "inbound", state: "failed" }]);
+    const [pendingLeg, doneLeg, deadLetterLeg] = h.db.seed("motorist_call_legs", ["cc-pending", "cc-done", "cc-deadletter"].map((id) => ({
+      organization_id: ORG, session_id: dead.id, telnyx_call_control_id: id, role: "operator", state: "ringing", initiated_at: h.now().toISOString(),
+    })));
+    const now = h.now().toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [
+      // The provider fact exists and is still to be applied: the replay owns this leg.
+      { organization_id: ORG, event_id: "h-pending", event_type: "call.hangup", status: "failed", retry_state: "deferred", call_control_id: "cc-pending", received_at: now, occurred_at: now, payload: {} },
+      // Already applied: nothing is waiting, the synthetic close is the right thing.
+      { organization_id: ORG, event_id: "h-done", event_type: "call.hangup", status: "processed", retry_state: "ready", call_control_id: "cc-done", received_at: now, occurred_at: now, payload: {} },
+      // Dead letter: no exact hangup will ever apply.
+      { organization_id: ORG, event_id: "h-dead", event_type: "call.hangup", status: "failed", retry_state: "dead_letter", call_control_id: "cc-deadletter", received_at: now, occurred_at: now, payload: {} },
+    ]);
+
+    const result = await closeOrphanLegs(h.admin, { organizationId: ORG, now: h.now() });
+
+    expect(result.closed.sort()).toEqual([String(doneLeg.id), String(deadLetterLeg.id)].sort());
+    expect(result.awaitingHangup).toEqual([String(pendingLeg.id)]);
+    expect(h.db.find("motorist_call_legs", (row) => row.id === pendingLeg.id)).toMatchObject({ ended_at: null });
+    expect(h.db.find("motorist_call_legs", (row) => row.id === doneLeg.id)).toMatchObject({ state: "ended", hangup_cause: "orphan_sweep" });
   });
 
   it("terminalises leaked open ring offers so their operator can be rung again", async () => {

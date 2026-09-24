@@ -11,32 +11,48 @@ import { readPendingEffects } from "./state/continuation";
 import { sweepExpiredWrapUp } from "./presence-service";
 import { sweepEndedSessionPresence } from "./presence-recovery";
 import { reconciledHangupEvent } from "./call-reconciliation";
+import { DATABASE_REQUEST_MS } from "./ownership";
 
 /**
  * Jobs behind the single allowed Vercel cron (every 5 minutes →
- * `/api/telephony/cron`, guarded by `CRON_SECRET`).
+ * `/api/telephony/cron`, guarded by `CRON_SECRET`), in the order they run.
  *
- * 1. `telephony.ring.sweep` — re-drives sessions whose ring step, waiting-room
+ * 1. `telephony.ledger.replay` — re-drives webhook events that were claimed but
+ *    never finished (the function died mid-processing, so Telnyx will not send
+ *    them again) and deferred rows whose retry is due. Without this a single
+ *    lost invocation leaves a leg open and its session hanging until the
+ *    15-minute stuck sweep, and any effect the event carried is simply lost.
+ *    It runs first, hangups first (`replayRank`), so that a provider fact that
+ *    is already in the ledger is applied before any job below closes a leg
+ *    synthetically or dials anybody. Bounded by `REPLAY_DEADLINE_MS` from the
+ *    cron start; a row in flight is never interrupted.
+ * 2. `telephony.ring.sweep` — re-drives sessions whose ring step, waiting-room
  *    MOH tick or wrap-up finalisation deadline passed without the expected
  *    webhook (the primary sweeper is the webhook itself; this is the safety net
- *    for calls where every Telnyx delivery was lost).
- * 2. `telephony.sessions.stuck` — detection only: active sessions untouched for
- *    `stuckAfterMs` are reported (and swept when a provider is configured) so
- *    the health surface and the runbook have a number to look at.
- * 3. `telephony.ledger.replay` — re-drives webhook events that were claimed but
- *    never finished (the function died mid-processing, so Telnyx will not send
- *    them again). Without this a single lost invocation leaves a leg open and
- *    its session hanging until the 15-minute stuck sweep, and any effect the
- *    event carried is simply lost.
+ *    for calls where every Telnyx delivery was lost). Bounded by
+ *    `RING_SWEEP_LIMIT` / `RING_SWEEP_BUDGET_MS` (loop-head only).
+ * 3. `telephony.effects.recovery` — pending effects, cancellations, presence
+ *    pickups and terminations that are due.
  * 4. `telephony.telnyx.reconcile` — asks Telnyx about the legs of sessions that
  *    have gone quiet. Every job above reasons from our own rows; this is the
  *    only one that can tell "the call is still up and nothing happened" apart
  *    from "the hangup webhook never arrived", and it closes the second case.
- * 5. `telephony.alerts` — the only path that reaches a human: it mails the
- *    failing health checks to `ALERT_EMAIL_TO`, once per problem per day.
- * 6. `telephony.ledger.prune` — 30-day retention of processed webhook ledger
+ * 5. `telephony.sessions.stuck` — detection only: active sessions untouched for
+ *    `stuckAfterMs` are reported (and swept when a provider is configured) so
+ *    the health surface and the runbook have a number to look at.
+ * 6. `telephony.ai-demo.cleanup`, then `telephony.alerts` — the only path that
+ *    reaches a human: it mails the failing health checks to `ALERT_EMAIL_TO`,
+ *    once per problem per day.
+ * 7. `telephony.ledger.prune` — 30-day retention of processed webhook ledger
  *    rows plus 7-day payload nulling for the noisy bookkeeping event types.
  *    Gated by the `motorist_job_controls` row so it can be switched off.
+ *
+ * Budget inside the route's `maxDuration` of 120 s: replay ≤ 60 s from the cron
+ * start, ring sweep ≤ 20 s, jobs 3–7 together ≤ 15 s, the route's tail jobs
+ * (reminders, pause warnings, recordings) ≤ 15 s, 10 s reserve. Every job
+ * result carries `startedAt`/`ms` so the split can be checked from the
+ * response; if the tail exceeds its row the replay deadline is shortened, the
+ * `maxDuration` is not raised.
  */
 
 export const LEDGER_PRUNE_JOB = "telephony.ledger.prune";
@@ -53,6 +69,35 @@ export const STALLED_EVENT_MS = 60_000;
 export const MAX_EVENT_ATTEMPTS = 5;
 /** Upper bound per cron tick, so one backlog cannot exhaust the function budget. */
 export const REPLAY_BATCH_SIZE = 20;
+/**
+ * Cron replay stops starting new rows this long after the cron began
+ * (`maxDuration` 120 s minus the sweep and tail budgets). Checked at the head
+ * of every iteration only; a row in flight is never interrupted.
+ */
+export const REPLAY_DEADLINE_MS = 60_000;
+/** Cron ring sweep bounds — loop-head only, never a mid-run abort (see `sweepOverdueRingSteps`). */
+export const RING_SWEEP_LIMIT = 25;
+export const RING_SWEEP_BUDGET_MS = 20_000;
+/**
+ * Terminal facts first: a hangup applied late is the worst outcome of a
+ * backlog (it keeps a leg counted against `max_concurrent_legs` and an
+ * operator pinned to a call that ended), so the batch is ranked by event type
+ * before `received_at`. Unknown types rank last.
+ */
+const REPLAY_RANK: Record<string, number> = {
+  "call.hangup": 0,
+  "call.answered": 1,
+  "call.bridged": 2,
+  "call.initiated": 3,
+  "call.hold": 4,
+  "call.unhold": 4,
+  "call.gather.ended": 5,
+  "call.playback.ended": 5,
+  "call.speak.ended": 5,
+};
+export function replayRank(eventType: string): number {
+  return REPLAY_RANK[eventType] ?? 6;
+}
 
 export const LEDGER_RETENTION_DAYS = 30;
 export const LEDGER_PAYLOAD_RETENTION_DAYS = 7;
@@ -78,6 +123,9 @@ export type TelephonyCronJobResult = {
   status: TelephonyCronJobStatus;
   detail: Record<string, unknown>;
   error?: string;
+  /** Additive timings: wall clock of the job inside this tick (see `timedCronJob`). */
+  startedAt?: string;
+  ms?: number;
 };
 
 export type TelephonyCronSummary = {
@@ -101,6 +149,8 @@ export type TelephonyCronDeps = SessionRunnerDeps & {
   stalledEventMs?: number;
   /** Injection seam for tests; defaults to the real webhook processor. */
   replayEvent?: (envelope: unknown) => Promise<unknown>;
+  /** Monotonic clock for deadlines/budgets (defaults to `Date.now`; `now` may be a frozen test clock). */
+  clock?: () => number;
 };
 
 function nowOf(deps: TelephonyCronDeps): Date {
@@ -116,19 +166,27 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
     return { job: RING_SWEEP_JOB, status: "skipped", detail: { reason: "not_configured" } };
   }
   try {
+    // Bounded at the loop head only (never mid-run): what does not fit is
+    // reported as deferred and picked up by the next tick.
     const result = await sweepOverdueRingSteps({
       admin: deps.admin,
       organizationId: deps.organizationId,
       now: deps.now ?? (() => new Date()),
       runSessionEvent: sessionRunner(deps),
+      limit: RING_SWEEP_LIMIT,
+      budgetMs: RING_SWEEP_BUDGET_MS,
+      clock: deps.clock,
     });
     if (result.errors.length > 0) {
       await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error: new Error(result.errors[0].error), context: { job: RING_SWEEP_JOB, sessionId: result.errors[0].sessionId } });
     }
     // Legs whose `call.hangup` never arrived would otherwise count against
-    // `max_concurrent_legs` forever and silently stop inbound ringing.
+    // `max_concurrent_legs` forever and silently stop inbound ringing. A leg
+    // whose exact hangup is still waiting in the ledger is left to the replay
+    // (it ran first in this tick; the next tick drains what was busy).
     const orphans = await closeOrphanLegs(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) });
-    if (orphans.length > 0) deps.logger?.({ level: "warn", scope: "cron", job: RING_SWEEP_JOB, orphanLegsClosed: orphans.length });
+    if (orphans.closed.length > 0) deps.logger?.({ level: "warn", scope: "cron", job: RING_SWEEP_JOB, orphanLegsClosed: orphans.closed.length });
+    if (orphans.awaitingHangup.length > 0) deps.logger?.({ level: "warn", scope: "cron", job: RING_SWEEP_JOB, orphanLegsAwaitingHangup: orphans.awaitingHangup.length });
     // A leaked `offered` attempt keeps its operator out of every ring plan
     // (global partial unique index), so it must be terminalised too.
     const attempts = await closeStaleRingAttempts(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) });
@@ -140,7 +198,8 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
         checked: result.checked,
         swept: result.swept.length,
         deferred: result.deferred.length,
-        orphanLegsClosed: orphans.length,
+        orphanLegsClosed: orphans.closed.length,
+        orphanLegsAwaitingHangup: orphans.awaitingHangup.length,
         staleAttemptsClosed: attempts.length,
         errors: result.errors,
       },
@@ -237,40 +296,87 @@ export async function detectStuckSessions(deps: TelephonyCronDeps): Promise<Tele
 }
 
 /**
- * Re-drives webhook events that were claimed but never finished.
+ * Re-drives webhook events that were claimed but never finished, and deferred
+ * rows whose retry is due.
  *
  * Telnyx only redelivers on a 5xx, and the webhook route answers 200 for every
  * control event once compensation has run — so an invocation that dies between
  * the claim and the final `processed` mark takes that event's effect with it.
  * The ledger row is the record that it happened, and this job replays it.
+ *
+ * Selection: rows older than `STALLED_EVENT_MS` (any retry state but dead
+ * letter) plus rows in `retry_state = 'deferred'` whose `next_attempt_at` has
+ * passed, whatever their age — a deferral is a decision already taken by a
+ * handler, not a claim that may still finish. Fresh rows with the default
+ * `ready` state are never touched. Both reads are over-fetched
+ * (`REPLAY_BATCH_SIZE * 2`), ranked by `replayRank` then `received_at`, and only
+ * `REPLAY_BATCH_SIZE` rows are handed to the processor. The deadline is
+ * checked at the head of every iteration only.
+ *
+ * Cron replays run the processor without its nested correlated replay and
+ * inline sweep (`replayCorrelated: false`, `sweepAfterEvent: false`): the cron
+ * has its own ring sweep, and a nested drain of up to 8 s per row is what made
+ * the old pass run out of function budget.
  */
-export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
+export async function replayStalledWebhookEvents(deps: TelephonyCronDeps, options: { deadline?: number } = {}): Promise<TelephonyCronJobResult> {
   if (!deps.telnyx) return { job: LEDGER_REPLAY_JOB, status: "skipped", detail: { reason: "telephony_not_configured" } };
 
+  const clock = deps.clock ?? (() => Date.now());
+  const deadline = options.deadline ?? clock() + REPLAY_DEADLINE_MS;
   const now = nowOf(deps);
+  const nowIso = now.toISOString();
   const cutoff = new Date(now.getTime() - (deps.stalledEventMs ?? STALLED_EVENT_MS)).toISOString();
-  const { data, error } = await deps.admin
-    .from("motorist_telnyx_webhook_events")
-    .select("event_id, event_type, payload, occurred_at, attempts, call_control_id, call_session_id, call_leg_id, connection_id, next_attempt_at, retry_state")
-    .eq("organization_id", deps.organizationId)
-    .in("status", ["queued", "failed"])
-    .lt("received_at", cutoff)
-    .neq("retry_state", "dead_letter")
-    .or(`next_attempt_at.is.null,next_attempt_at.lte.${now.toISOString()}`)
-    .order("received_at", { ascending: true })
-    .limit(REPLAY_BATCH_SIZE);
+  const columns = "event_id, event_type, payload, occurred_at, received_at, attempts, call_control_id, call_session_id, call_leg_id, connection_id, next_attempt_at, retry_state";
+  const [stalled, dueDeferred] = await Promise.all([
+    deps.admin
+      .from("motorist_telnyx_webhook_events")
+      .select(columns)
+      .eq("organization_id", deps.organizationId)
+      .in("status", ["queued", "failed"])
+      .lt("received_at", cutoff)
+      .neq("retry_state", "dead_letter")
+      .or(`next_attempt_at.is.null,next_attempt_at.lte.${nowIso}`)
+      .order("received_at", { ascending: true })
+      .limit(REPLAY_BATCH_SIZE * 2),
+    deps.admin
+      .from("motorist_telnyx_webhook_events")
+      .select(columns)
+      .eq("organization_id", deps.organizationId)
+      .in("status", ["queued", "failed"])
+      .eq("retry_state", "deferred")
+      .lte("next_attempt_at", nowIso)
+      .order("next_attempt_at", { ascending: true })
+      .limit(REPLAY_BATCH_SIZE * 2),
+  ]);
+  const error = stalled.error ?? dueDeferred.error;
   if (error) return { job: LEDGER_REPLAY_JOB, status: "failed", detail: {}, error: error.message };
 
-  const rows = data ?? [];
+  const rows = [...new Map([...(stalled.data ?? []), ...(dueDeferred.data ?? [])].map((row) => [row.event_id, row])).values()];
+  const receivedAt = (row: { received_at: string | null }) => row.received_at ?? "";
+  // `Array.prototype.sort` is stable: equal rank and `received_at` keep the query order.
+  const ranked = [...rows].sort((a, b) => replayRank(a.event_type) - replayRank(b.event_type) || (receivedAt(a) < receivedAt(b) ? -1 : receivedAt(a) > receivedAt(b) ? 1 : 0));
+  const batch = ranked.slice(0, REPLAY_BATCH_SIZE);
+
   const replayed: string[] = [];
   const ignored: string[] = [];
   const deferred: string[] = [];
   const duplicate: string[] = [];
   const unknownSession: string[] = [];
   const errors: Array<{ eventId: string; error: string }> = [];
-  const process = deps.replayEvent ?? ((envelope: unknown) => processTelnyxEvent({ ...deps, ledgerReplay: "cron" }, envelope));
+  const process = deps.replayEvent ?? ((envelope: unknown) => processTelnyxEvent(
+    { ...deps, ledgerReplay: "cron", replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, envelope));
 
-  for (const row of rows) {
+  let attempted = 0;
+  let remaining = 0;
+  let deadlineReached = false;
+  for (const [index, row] of batch.entries()) {
+    // Loop-head bound only: the row in flight always finishes.
+    if (clock() >= deadline) {
+      deadlineReached = true;
+      remaining = batch.length - index;
+      break;
+    }
+    attempted += 1;
     // The ledger stores the inner payload; rebuild the envelope the processor parses.
     const envelope = storedWebhookEnvelope(row);
     try {
@@ -286,6 +392,10 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promi
         replayed.push(row.event_id);
       } else if (result?.outcome === "processed") {
         replayed.push(row.event_id);
+      } else if (result?.outcome === "failed" && /^(SessionEventDeferredError|SessionLeaseBusyError):/.test(result.error ?? "")) {
+        // Expected contention with a live webhook host: the ledger row was
+        // released for retry, so it is observable there, not an incident.
+        deferred.push(row.event_id);
       } else {
         errors.push({ eventId: row.event_id, error: result?.error ?? `webhook replay rejected: ${result?.outcome ?? "missing outcome"}` });
       }
@@ -295,7 +405,7 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promi
   }
 
   if (rows.length > 0) {
-    deps.logger?.({ level: "warn", scope: "cron", job: LEDGER_REPLAY_JOB, stalled: rows.length, replayed: replayed.length, failed: errors.length });
+    deps.logger?.({ level: "warn", scope: "cron", job: LEDGER_REPLAY_JOB, stalled: rows.length, attempted, replayed: replayed.length, failed: errors.length, remaining, deadlineReached });
   }
   if (errors.length > 0) {
     await recordTelephonyIncident(deps.admin, {
@@ -308,13 +418,15 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps): Promi
   return {
     job: LEDGER_REPLAY_JOB,
     status: errors.length > 0 ? "failed" : "ok",
-    detail: { stalled: rows.length, attempted: rows.length, replayed: replayed.length, ignored: ignored.length, deferred: deferred.length, duplicate: duplicate.length, unknownSession: unknownSession.length, failed: errors.length, errors },
+    detail: { stalled: rows.length, attempted, replayed: replayed.length, ignored: ignored.length, deferred: deferred.length, duplicate: duplicate.length, unknownSession: unknownSession.length, failed: errors.length, remaining, deadlineReached, errors },
     error: errors.length > 0 ? errors[0].error : undefined,
   };
 }
 
 export async function pruneWebhookLedger(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
-  const control = await deps.admin.from("motorist_job_controls").select("enabled").eq("job_name", LEDGER_PRUNE_JOB).maybeSingle();
+  // Builder-level signal: it also cuts the postgrest-js retry sleeps short.
+  const control = await deps.admin.from("motorist_job_controls").select("enabled").eq("job_name", LEDGER_PRUNE_JOB)
+    .abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
   if (control.error) return { job: LEDGER_PRUNE_JOB, status: "failed", detail: {}, error: control.error.message };
   if (control.data && control.data.enabled === false) {
     return { job: LEDGER_PRUNE_JOB, status: "disabled", detail: { reason: "job_control_disabled" } };
@@ -467,9 +579,31 @@ export async function runAiDemoCleanupJob(deps: TelephonyCronDeps, startedAt: nu
   }
 }
 
-export async function runTelephonyCronJobs(deps: TelephonyCronDeps): Promise<TelephonyCronSummary> {
+/** Adds `startedAt`/`ms` to a job result so the response shows how the tick's budget was spent. */
+export async function timedCronJob(run: () => Promise<TelephonyCronJobResult>, clock: () => number = () => Date.now()): Promise<TelephonyCronJobResult> {
+  const startedAt = clock();
+  const result = await run();
+  return { ...result, startedAt: new Date(startedAt).toISOString(), ms: clock() - startedAt };
+}
+
+export async function runTelephonyCronJobs(deps: TelephonyCronDeps, options: { cronStartedAt?: number } = {}): Promise<TelephonyCronSummary> {
+  const clock = deps.clock ?? (() => Date.now());
+  const cronStartedAt = options.cronStartedAt ?? clock();
   const started = nowOf(deps).getTime();
-  const jobs = [await runRingSweep(deps), await runPendingEffectRecovery(deps), await replayStalledWebhookEvents(deps), await reconcileWithTelnyx(deps), await detectStuckSessions(deps), await runAiDemoCleanupJob(deps, Date.now()), await runAlertJob(deps), await pruneWebhookLedger(deps)];
+  const timed = (run: () => Promise<TelephonyCronJobResult>) => timedCronJob(run, clock);
+  // Sequential on purpose: one cron run per tick, every promise awaited before
+  // the response. Terminal facts from the ledger go first, before anything that
+  // could close a leg synthetically or dial anybody.
+  const jobs = [
+    await timed(() => replayStalledWebhookEvents(deps, { deadline: cronStartedAt + REPLAY_DEADLINE_MS })),
+    await timed(() => runRingSweep(deps)),
+    await timed(() => runPendingEffectRecovery(deps)),
+    await timed(() => reconcileWithTelnyx(deps)),
+    await timed(() => detectStuckSessions(deps)),
+    await timed(() => runAiDemoCleanupJob(deps, clock())),
+    await timed(() => runAlertJob(deps)),
+    await timed(() => pruneWebhookLedger(deps)),
+  ];
   const checkedAt = nowOf(deps);
   return {
     status: jobs.some((job) => job.status === "failed") ? "degraded" : "ok",

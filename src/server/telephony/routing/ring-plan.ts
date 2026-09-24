@@ -431,23 +431,26 @@ export const ORPHAN_LEG_SCAN_LIMIT = 200;
 /**
  * Closes leg rows that can no longer belong to a live call: their session is
  * terminal, or the leg is older than `ORPHAN_LEG_MAX_AGE_MS`. Bookkeeping only —
- * the Telnyx side of such a leg is long gone.
+ * the Telnyx side of such a leg is long gone. A leg whose provider
+ * `call.hangup` still sits unprocessed in the ledger (exact `call_control_id`)
+ * is skipped and reported as `awaitingHangup`, so the exact event — not the
+ * sweep timestamp — closes it (the cron replay runs before this sweep).
  */
 export async function closeOrphanLegs(
   admin: AdminClient,
   input: { organizationId: string; now: Date; maxAgeMs?: number; limit?: number },
-): Promise<string[]> {
+): Promise<{ closed: string[]; awaitingHangup: string[] }> {
   const cutoff = new Date(input.now.getTime() - (input.maxAgeMs ?? ORPHAN_LEG_MAX_AGE_MS)).toISOString();
   const open = await admin
     .from("motorist_call_legs")
-    .select("id, session_id, initiated_at")
+    .select("id, session_id, initiated_at, telnyx_call_control_id")
     .eq("organization_id", input.organizationId)
     .is("ended_at", null)
     .order("initiated_at", { ascending: true })
     .limit(input.limit ?? ORPHAN_LEG_SCAN_LIMIT);
   if (open.error) throw new Error(`orphan leg scan failed: ${open.error.message}`);
   const rows = open.data ?? [];
-  if (rows.length === 0) return [];
+  if (rows.length === 0) return { closed: [], awaitingHangup: [] };
 
   const sessionIds = [...new Set(rows.map((row) => row.session_id))];
   const sessions = await admin.from("motorist_call_sessions").select("id, state").eq("organization_id", input.organizationId).in("id", sessionIds);
@@ -463,13 +466,35 @@ export async function closeOrphanLegs(
       return initiated !== null && initiated < Date.parse(cutoff);
     })
     .map((row) => row.id);
-  if (orphans.length === 0) return [];
+  if (orphans.length === 0) return { closed: [], awaitingHangup: [] };
+
+  // One pre-lease ledger read: an unprocessed exact `call.hangup` for the leg
+  // means the provider fact exists and the replay owns it — drain, not close.
+  // Dead-letter and processed rows do not protect a leg: no exact hangup will
+  // ever apply, so the synthetic close remains right.
+  const orphanRows = rows.filter((row) => orphans.includes(row.id));
+  const controlIds = orphanRows.map((row) => row.telnyx_call_control_id).filter((id): id is string => Boolean(id));
+  const pending = controlIds.length
+    ? await admin
+      .from("motorist_telnyx_webhook_events")
+      .select("call_control_id")
+      .eq("organization_id", input.organizationId)
+      .eq("event_type", "call.hangup")
+      .in("status", ["queued", "failed"])
+      .neq("retry_state", "dead_letter")
+      .in("call_control_id", controlIds)
+    : { data: [] as Array<{ call_control_id: string | null }>, error: null };
+  if (pending.error) throw new Error(`orphan leg ledger check failed: ${pending.error.message}`);
+  const awaiting = new Set((pending.data ?? []).map((row) => row.call_control_id));
+  const awaitingHangup = orphanRows.filter((row) => row.telnyx_call_control_id && awaiting.has(row.telnyx_call_control_id)).map((row) => row.id);
+  const closable = orphans.filter((id) => !awaitingHangup.includes(id));
+  if (closable.length === 0) return { closed: [], awaitingHangup };
 
   {
     const { ownedSessionWork } = await import("../session-runner");
     const closedIds: string[] = [];
     for (const sessionId of sessionIds) {
-      const candidateIds = rows.filter(row => row.session_id === sessionId && orphans.includes(row.id)).map(row => row.id);
+      const candidateIds = rows.filter(row => row.session_id === sessionId && closable.includes(row.id)).map(row => row.id);
       // Real child rows have cascading session FKs. Missing parents cannot be leased.
       if (candidateIds.length === 0 || !stateById.has(sessionId)) continue;
       await ownedSessionWork({ admin, organizationId: input.organizationId, leaseWaitMs: 0 }, sessionId, async () => {
@@ -488,7 +513,7 @@ export async function closeOrphanLegs(
         closedIds.push(...(closed.data ?? []).map(row => row.id));
       });
     }
-    return closedIds;
+    return { closed: closedIds, awaitingHangup };
   }
 
 }
@@ -597,8 +622,9 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
   const started = clock();
   const limit = deps.limit ?? targets.length;
   for (const [index, { session, stale }] of targets.entries()) {
-    // Bounded so the caller (the webhook route, `maxDuration = 10`) can never be
-    // killed mid-processing; the cron pass runs unbounded.
+    // Bounded at the loop head so no caller is killed mid-processing: the
+    // webhook route by its inline budget, the cron pass by `RING_SWEEP_LIMIT`
+    // and `RING_SWEEP_BUDGET_MS` (cron-jobs.ts).
     if (index >= limit || (deps.budgetMs !== undefined && clock() - started >= deps.budgetMs)) {
       result.deferred.push(session.id);
       continue;

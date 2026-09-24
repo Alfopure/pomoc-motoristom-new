@@ -69,6 +69,21 @@ export type CallActionDeps = SessionRunnerDeps & {
 
 export const OUTBOUND_RATE_LIMIT = { limit: 10, windowMs: 60_000 } as const;
 
+/**
+ * Lease budget for the two clicks an operator cannot re-issue safely by hand.
+ *
+ * The global `LEASE_WAIT_MS` (3 s) is tuned so a hold/unhold click outlasts a
+ * webhook waiting `WEBHOOK_LEASE_WAIT_MS`; it is not tuned for the median
+ * command-bearing handler (7 s on 21 Sep) that a pickup or hangup lands on.
+ * Hangup has already committed its durable intent before it waits, so a
+ * longer wait loses nothing; pickup has reserved nothing yet, so waiting is
+ * free of side effects. Both stay far inside the 30 s control budget of the
+ * browser (`TELEPHONY_TIMEOUT_MS.control`) and do not consume `SESSION_WORK_MS`,
+ * which starts at acquisition.
+ */
+export const PICKUP_LEASE_WAIT_MS = 8_000;
+export const HANGUP_LEASE_WAIT_MS = 8_000;
+
 export type RateLimiter = {
   /** Returns true when the call is allowed; counts it. */
   hit(key: string, limit: number, windowMs: number): boolean;
@@ -625,7 +640,8 @@ export async function parkCall(deps: CallActionDeps, actor: CallActor, sessionId
 
 export async function hangupCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
-  return runAction(deps, session, appEvent("hangup", actor, deps), "Ukončenie hovoru zlyhalo.");
+  // Per-action budget, the same mechanism sweeps use to wait 0 ms (`runSessionEvent`).
+  return runAction({ ...deps, leaseWaitMs: HANGUP_LEASE_WAIT_MS }, session, appEvent("hangup", actor, deps), "Ukončenie hovoru zlyhalo.");
 }
 
 /**
@@ -703,7 +719,7 @@ export async function cancelConsult(deps: CallActionDeps, actor: CallActor, sess
 }
 
 export async function pickupWaitingCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
-  return ownedSessionWork(deps, sessionId, () => pickupWaitingCallOwned(deps, actor, sessionId));
+  return ownedSessionWork({ ...deps, leaseWaitMs: PICKUP_LEASE_WAIT_MS }, sessionId, () => pickupWaitingCallOwned(deps, actor, sessionId), { eventType: "app.pickup" });
 }
 
 async function pickupWaitingCallOwned(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {

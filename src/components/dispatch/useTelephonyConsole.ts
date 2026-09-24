@@ -31,7 +31,7 @@ import {
 } from "@/lib/telephony/presence";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import { type IncomingOfferPolicy, type WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
-import { retryUnstartedCallControl } from "@/lib/telephony/call-control-retry";
+import { callControlRetryPolicy, retryUnstartedCallControl } from "@/lib/telephony/call-control-retry";
 import { BrowserReconciliationGate } from "@/lib/telephony/browser-reconciliation";
 import { CoordinatedWebphone } from "@/lib/telephony/coordinated-webphone";
 import { isMobileApp } from "@/lib/telephony/phone-platform";
@@ -607,9 +607,15 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
               onSlow: () => { if (busyCommandRef.current === command) setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."); },
             },
           );
+          let progressShown = false;
           const result = await retryUnstartedCallControl({
             request: send,
-            enabled: action !== "pickup",
+            ...callControlRetryPolicy(action),
+            onRetry: () => {
+              // The server proved the call is owned by another handler and the
+              // click will be replayed; say so instead of leaving the bar silent.
+              if (action === "hangup" && busyCommandRef.current === command) { progressShown = true; setNotice("Ukončuje sa…"); }
+            },
             isCurrent: () => {
               const currentCall = browser?.getSnapshot().call;
               return busyCommandRef.current === command && browser === webphoneRef.current &&
@@ -640,6 +646,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             throw new Error(result.body?.error ?? PHONE_ACTION_ERRORS[action]);
           }
           if (action === "hangup") confirmEndedBrowserCall();
+          if (progressShown && busyCommandRef.current === command) setNotice(null);
           // A pickup dials this operator's own leg server-side: remember its
           // call-control id so the browser answers exactly that invite.
           if (result.body?.operatorLegCallControlId && webphone === webphoneRef.current) {

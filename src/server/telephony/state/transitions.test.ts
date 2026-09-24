@@ -8,7 +8,7 @@ import { advanceRingStep } from "../routing/ring-plan";
 import { loadRoutingContext, loadSessionSnapshot, effectsDeps, runSessionEvent } from "../session-runner";
 import { applyReduceResult, SessionConflictError } from "./effects";
 import { reduce } from "./transitions";
-import { readMeta, type RingFanout, type SessionRow } from "./types";
+import { emptyTransition, readMeta, type RingFanout, type SessionRow } from "./types";
 
 /**
  * End-to-end reducer tests through the real pipeline (claim ledger → lease →
@@ -732,5 +732,56 @@ describe("bridge before the best-effort audio stops", () => {
     expect(methods).toEqual(["bridge", "hangup"]);
     expect(h.session(call.sessionId)).toMatchObject({ state: "waiting", answered_by_profile_id: null });
     expect(readMeta(h.session(call.sessionId) as SessionRow).queue).toBeTruthy();
+  });
+});
+
+describe("late audio completions on a terminal or wrap-up session", () => {
+  // The event processor acknowledges these without a lease (E2.4, state-only
+  // branch: the customer leg is still open). That is only sound while the
+  // reducer has nothing to do for them: no command, no patch, no guard.
+  it.each(["ended", "wrap_up", "failed"] as const)("is a pure ignore in %s for gather/playback/speak.ended with an open customer leg", async (state) => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const snapshot = await loadSessionSnapshot(h.deps, call.sessionId);
+    const customer = snapshot.legs.find((leg) => leg.telnyx_call_control_id === call.callControlId)!;
+    expect(customer.ended_at).toBeNull();
+    const session = { ...snapshot.session, state };
+    const context = await loadRoutingContext(h.deps, session);
+    for (const [type, reason] of [
+      ["call.gather.ended", `gather in ${state}`],
+      ["call.playback.ended", `playback ended in ${state}`],
+      ["call.speak.ended", `playback ended in ${state}`],
+    ] as const) {
+      const event = {
+        kind: "telnyx" as const,
+        id: `evt-late-${type}`,
+        type,
+        occurredAt: h.now().toISOString(),
+        callControlId: call.callControlId,
+        callLegId: null,
+        callSessionId: call.telnyxSessionId,
+        connectionId: "app-test",
+        clientState: h.clientStateOf(call.callControlId),
+        rawClientState: null,
+        from: null,
+        to: null,
+        direction: null,
+        state: null,
+        hangupCause: null,
+        hangupSource: null,
+        sipHangupCause: null,
+        digits: null,
+        status: "completed",
+        conferenceId: null,
+        customHeaders: [],
+        payload: {},
+      };
+      const result = reduce(session, snapshot.legs, snapshot.attempts, event, context);
+      expect(result.ignored).toBe(reason);
+      expect(result.commands).toEqual([]);
+      expect(result.compensations).toEqual([]);
+      expect(result.guard).toBeNull();
+      expect(result.next).toEqual(emptyTransition());
+    }
   });
 });
