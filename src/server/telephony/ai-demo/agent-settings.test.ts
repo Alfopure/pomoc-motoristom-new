@@ -154,3 +154,22 @@ describe("the configured name reaches her instructions", () => {
     }
   });
 });
+
+describe("a permission whose capability does not exist yet", () => {
+  // The panel showed these as ordinary switches. They saved, they looked on,
+  // and nothing read them — the SMS one especially, where somebody could
+  // reasonably believe she was allowed to text a customer.
+  const UNBUILT = ["createsDraftCases", "addsCaseNotes", "smsEnabled"] as const;
+
+  it("is still accepted by the API, so the setting survives until the feature lands", () => {
+    for (const key of UNBUILT) {
+      expect(validateAgentPatch({ [key]: true })[key]).toBe(true);
+    }
+  });
+
+  it("is off by default, so shipping the feature never switches it on by surprise", () => {
+    for (const key of UNBUILT) {
+      expect(AI_DEMO_AGENT_DEFAULTS[key], key).toBe(false);
+    }
+  });
+});

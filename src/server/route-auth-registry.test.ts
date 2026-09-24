@@ -43,6 +43,13 @@ describe("route-auth-registry", () => {
     expect(ROUTE_AUTH_REGISTRY["integrations/commander/import-all"].class).toBe("bearer");
   });
 
+  it("keeps unsaved draft contents behind the collaboration session role gate", () => {
+    expect(ROUTE_AUTH_REGISTRY["cases/drafts/[sessionId]"]).toMatchObject({
+      class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"],
+    });
+    expect(PUBLIC_ROUTES).not.toContain("cases/drafts/[sessionId]");
+  });
+
   it("PUBLIC_ROUTES contains exactly the intentional public routes", () => {
     expect([...PUBLIC_ROUTES].sort()).toEqual([
       "auth/forgot-password",
