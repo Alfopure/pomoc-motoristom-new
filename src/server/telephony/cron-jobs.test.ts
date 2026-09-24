@@ -255,6 +255,37 @@ describe("telephony cron jobs", () => {
     expect(result.detail).toMatchObject({ stalled: 1, attempted: 1, replayed: 1 });
   });
 
+  it("drains the customer's pending hangup before sweeping the queue", async () => {
+    const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
+    for (const id of Object.values(PROFILES)) h.setPresence(id, { status: "offline" });
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const backup = h.legByNumber(call.sessionId, NUMBERS.external)!;
+    await h.legEvent(String(backup.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
+    expect(h.session(call.sessionId).state).toBe("waiting");
+    // The customer's exact hangup lost a lease race earlier and waits in the ledger.
+    const now = h.now().toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{
+      organization_id: ORG, event_id: "deferred-customer-hangup", event_type: "call.hangup", call_session_id: call.telnyxSessionId, call_control_id: call.callControlId, connection_id: CONNECTION_ID,
+      status: "failed", retry_state: "deferred", attempts: 1, delivery_count: 1, deferral_count: 1, effect_failure_count: 0, contract_version: 2,
+      claimed_at: null, next_attempt_at: now, received_at: now, occurred_at: now,
+      payload: { hangup_cause: "normal_clearing", hangup_source: "caller", client_state: encodeClientState(h.clientStateOf(call.callControlId)) },
+    }]);
+    h.setPresence(PROFILES.o1, { status: "available" });
+    h.touchDevice(PROFILES.o1);
+    h.advance(6_000);
+    const dials = h.telnyx.of("dial").length;
+
+    const result = await runRingSweep(h.deps);
+    expect(result.status).toBe("ok");
+    expect(result.detail).toMatchObject({ checked: 1, swept: 0, deferred: 1, yielded: 1, drained: 1 });
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
+    expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-customer-hangup")).toMatchObject({ status: "processed" });
+    expect(h.session(call.sessionId).state).toBe("ended");
+    expect(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === call.callControlId)).toMatchObject({ ended_at: now, hangup_cause: "normal_clearing" });
+    expect(h.rows("motorist_callback_requests")).toHaveLength(1);
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "cron", job: RING_SWEEP_JOB, sweepYielded: 1 }));
+  });
+
   it("replays a row through the processor without nested drain, inline sweep or after() scheduling", async () => {
     // The incident mechanism (E1b): each cron row nested an 8 s correlated
     // drain and a sweep. The cron is a backstop, so the processor runs the row

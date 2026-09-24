@@ -4,8 +4,16 @@ import { CONNECTION_ID, createTelephonyHarness, NUMBERS, ORG, PROFILES, type Tel
 
 import { sessionOwnership } from "../ownership";
 import { WEBHOOK_LEASE_POLL_MS } from "../session-runner";
+import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { encodeClientState } from "./client-state";
-import { processTelnyxEvent, replayDeferredSessionEvents } from "./event-processor";
+import { INLINE_DRAIN_BUDGET_MS, processTelnyxEvent, replayDeferredSessionEvents } from "./event-processor";
+
+// A pass-through spy: every inline sweep still runs the real sweep, its call
+// shape is just observable.
+vi.mock("../routing/ring-plan", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../routing/ring-plan")>();
+  return { ...actual, sweepOverdueRingSteps: vi.fn(actual.sweepOverdueRingSteps) };
+});
 
 describe("processTelnyxEvent", () => {
   it("acknowledges durable call work before maintenance, with the session lease released", async () => {
@@ -219,6 +227,22 @@ describe("processTelnyxEvent", () => {
     const attempts = h.attempts(stuck.sessionId).filter((attempt) => attempt.step_index === 0);
     expect(attempts.every((attempt) => attempt.result === "no_answer")).toBe(true);
     expect(h.rows("motorist_call_events").some((row) => row.event_type === "app.sweep")).toBe(true);
+  });
+
+  it("inline sweep passes the drain with its own budget", async () => {
+    const h = createTelephonyHarness({ sweepAfterEvent: true });
+    const sweep = vi.mocked(sweepOverdueRingSteps);
+    sweep.mockClear();
+    const queued: Array<() => Promise<void>> = [];
+    const event = h.envelope("call.initiated", { call_control_id: "drain-webhook", call_session_id: "drain-session", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "drain-event");
+    expect(await processTelnyxEvent({ ...h.deps, deferMaintenance: work => queued.push(work) }, event)).toMatchObject({ status: 200, outcome: "processed" });
+    expect(queued).toHaveLength(1);
+    await queued[0]();
+    expect(sweep).toHaveBeenCalled();
+    const deps = sweep.mock.calls.at(-1)![0];
+    expect(deps).toMatchObject({ organizationId: ORG, limit: 2, drainCustomerTerminal: expect.any(Function) });
+    expect(deps.drainBudgetMs).toBeLessThanOrEqual(INLINE_DRAIN_BUDGET_MS);
+    expect(deps.drainBudgetMs).toBeGreaterThan(deps.budgetMs!);
   });
 
   it("uses the injected deps end to end with a plain call", async () => {

@@ -39,6 +39,8 @@ async function maybeSweep(deps: TelephonyRuntimeDeps): Promise<void> {
   const now = Date.now();
   if (now - lastSweepAt < ACTIVE_SWEEP_INTERVAL_MS) return;
   lastSweepAt = now;
+  // Never passes `drainCustomerTerminal`: a poll-cadence caller must only skip
+  // a candidate whose customer hangup is pending (plan §7.5, M36).
   try {
     await sweepOverdueRingSteps({
       admin: deps.admin,

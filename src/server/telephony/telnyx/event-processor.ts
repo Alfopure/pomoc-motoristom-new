@@ -52,6 +52,11 @@ export type ProcessorDeps = SessionRunnerDeps & {
 /** Keep SIP processing fast; the larger route duration also covers after-response push. */
 export const INLINE_SWEEP_LIMIT = 2;
 export const INLINE_SWEEP_BUDGET_MS = 4_000;
+/** Room for one E4.2 customer-hangup drain inside the webhook's retained maintenance (route `maxDuration` 60 s:
+ *  event + correlated replay ≤ 8 s + this drain ≤ 10 s + inline sweep 4 s + push 15 s leave > 20 s reserve). */
+export const INLINE_DRAIN_BUDGET_MS = 20_000;
+/** Wall deadline of one session-inbox drain (`replayReadySessionEvents`); `CUSTOMER_DRAIN_MIN_BUDGET_MS` is built on it. */
+export const DEFERRED_DRAIN_DEADLINE_MS = 8_000;
 
 /**
  * Session-inbox drain order for deferred control facts: a terminal fact must win
@@ -552,7 +557,7 @@ async function maybeSweep(deps: ProcessorDeps, startedAt: number): Promise<void>
   if (deps.sweepAfterEvent === false) return;
   // Keep the original short inline budget even though the route also reserves
   // time for after-response push. Sweep a couple of sessions and leave the exhaustive pass
-  // to `/api/telephony/cron` (unbounded) and the throttled `calls/active` trigger.
+  // to `/api/telephony/cron` (`RING_SWEEP_LIMIT` / `RING_SWEEP_BUDGET_MS`) and the throttled `calls/active` trigger.
   const spent = nowOf(deps)().getTime() - startedAt;
   const budgetMs = Math.max(0, (deps.sweepBudgetMs ?? INLINE_SWEEP_BUDGET_MS) - spent);
   if (budgetMs <= 0) return;
@@ -566,6 +571,10 @@ async function maybeSweep(deps: ProcessorDeps, startedAt: number): Promise<void>
       // The current session is included on purpose: when every dial of a step failed the fan-out
       // backdates `step_deadline_at` and no Telnyx event will ever arrive to advance it.
       runSessionEvent: (sessionId, event) => runSessionEvent(deps, sessionId, event),
+      // E4.2: one bounded customer-hangup drain per pass, on its own budget (the
+      // loop budget alone never reaches `CUSTOMER_DRAIN_MIN_BUDGET_MS`).
+      drainCustomerTerminal: (session) => drainCustomerTerminal(deps, session),
+      drainBudgetMs: Math.max(0, INLINE_DRAIN_BUDGET_MS - spent),
     });
   } catch (error) {
     deps.logger?.({ level: "warn", scope: "sweep", error: error instanceof Error ? error.message : String(error) });
@@ -612,8 +621,18 @@ export async function replayDeferredSessionEvents(deps: ProcessorDeps, sessionId
   if (session.data) await replayReadySessionEvents(deps, session.data);
 }
 
+/**
+ * E4.2 — the sweep's customer-terminal drain: hangup only, exact customer leg
+ * (`customerTerminalOnly`), `WEBHOOK_LEASE_WAIT_MS`, 8 s deadline, no nested
+ * maintenance. Called from retained after-response work or the cron, never
+ * from inside an ownership scope and never from `calls/active`.
+ */
+export async function drainCustomerTerminal(deps: ProcessorDeps, session: SessionRow): Promise<void> {
+  await replayReadySessionEvents({ ...deps, replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, session, undefined, true);
+}
+
 async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow, current?: TelephonyEvent, customerTerminalOnly = false): Promise<void> {
-  const deadline = Date.now() + 8_000;
+  const deadline = Date.now() + DEFERRED_DRAIN_DEADLINE_MS;
   try {
     if (customerTerminalOnly && !session.customer_leg_id) return;
     let legQuery = deps.admin.from("motorist_call_legs").select("telnyx_call_control_id")

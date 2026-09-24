@@ -474,18 +474,7 @@ export async function closeOrphanLegs(
   // ever apply, so the synthetic close remains right.
   const orphanRows = rows.filter((row) => orphans.includes(row.id));
   const controlIds = orphanRows.map((row) => row.telnyx_call_control_id).filter((id): id is string => Boolean(id));
-  const pending = controlIds.length
-    ? await admin
-      .from("motorist_telnyx_webhook_events")
-      .select("call_control_id")
-      .eq("organization_id", input.organizationId)
-      .eq("event_type", "call.hangup")
-      .in("status", ["queued", "failed"])
-      .neq("retry_state", "dead_letter")
-      .in("call_control_id", controlIds)
-    : { data: [] as Array<{ call_control_id: string | null }>, error: null };
-  if (pending.error) throw new Error(`orphan leg ledger check failed: ${pending.error.message}`);
-  const awaiting = new Set((pending.data ?? []).map((row) => row.call_control_id));
+  const awaiting = await pendingHangupControlIds(admin, input.organizationId, controlIds);
   const awaitingHangup = orphanRows.filter((row) => row.telnyx_call_control_id && awaiting.has(row.telnyx_call_control_id)).map((row) => row.id);
   const closable = orphans.filter((id) => !awaitingHangup.includes(id));
   if (closable.length === 0) return { closed: [], awaitingHangup };
@@ -586,6 +575,34 @@ export async function closeStaleRingAttempts(
 
 }
 
+/**
+ * Exact-leg ledger consult shared by `closeOrphanLegs` (E1b) and the sweep
+ * yield (E4): a `call.hangup` row that is not `processed` — fresh, claimed by
+ * another host, or deferred — means the provider fact exists and its owner
+ * (the deferring host, the correlated replay, the cron) will apply it.
+ * Dead-letter rows do not count: no exact hangup will ever apply.
+ */
+async function pendingHangupControlIds(admin: AdminClient, organizationId: string, controlIds: string[]): Promise<Set<string>> {
+  if (controlIds.length === 0) return new Set();
+  const pending = await admin.from("motorist_telnyx_webhook_events").select("call_control_id")
+    .eq("organization_id", organizationId).eq("event_type", "call.hangup")
+    .neq("status", "processed").neq("retry_state", "dead_letter").in("call_control_id", controlIds);
+  if (pending.error) throw new Error(`pending hangup ledger check failed: ${pending.error.message}`);
+  return new Set((pending.data ?? []).map((row) => row.call_control_id).filter((id): id is string => Boolean(id)));
+}
+
+/** Sessions (by id) whose verified customer leg has an unprocessed `call.hangup` in the ledger. */
+async function pendingCustomerHangups(admin: AdminClient, organizationId: string, sessions: SessionRow[]): Promise<Set<string>> {
+  const legIds = [...new Set(sessions.map((session) => session.customer_leg_id).filter((id): id is string => Boolean(id)))];
+  if (legIds.length === 0) return new Set();
+  const legs = await admin.from("motorist_call_legs").select("id, session_id, telnyx_call_control_id")
+    .eq("organization_id", organizationId).eq("role", "customer").in("id", legIds);
+  if (legs.error) throw new Error(`sweep customer leg load failed: ${legs.error.message}`);
+  const rows = (legs.data ?? []).filter((leg) => leg.telnyx_call_control_id);
+  const pending = await pendingHangupControlIds(admin, organizationId, rows.map((leg) => leg.telnyx_call_control_id as string));
+  return new Set(rows.filter((leg) => pending.has(leg.telnyx_call_control_id as string)).map((leg) => leg.session_id));
+}
+
 export type SweepDeps = {
   admin: AdminClient;
   organizationId: string;
@@ -599,9 +616,34 @@ export type SweepDeps = {
   budgetMs?: number;
   /** Monotonic clock for the budget (defaults to `Date.now`; `now` may be a frozen test clock). */
   clock?: () => number;
+  /**
+   * Applies the customer's own unprocessed `call.hangup` (exact leg, hangup
+   * only, `WEBHOOK_LEASE_WAIT_MS`, outside any ownership scope) instead of
+   * sweeping the session. Only callers that can pay for it pass it: the webhook
+   * inline sweep and the cron. `calls/active` never does (plan §7.5, M36).
+   */
+  drainCustomerTerminal?: (session: SessionRow) => Promise<void>;
+  /** Wall budget the caller can spend on that one drain, measured from the sweep start (defaults to `budgetMs`). */
+  drainBudgetMs?: number;
 };
 
-export type SweepResult = { checked: number; swept: string[]; deferred: string[]; errors: Array<{ sessionId: string; error: string }> };
+export type SweepResult = {
+  checked: number;
+  swept: string[];
+  deferred: string[];
+  errors: Array<{ sessionId: string; error: string }>;
+  /** Sessions skipped because their customer's `call.hangup` is still unprocessed (also counted in `deferred`). */
+  yielded: string[];
+  /** The session (at most one per pass) whose pending customer hangup this pass drained. */
+  drained: string[];
+};
+
+/**
+ * `WEBHOOK_LEASE_WAIT_MS` (2 000) + the 8 s drain deadline of the customer-terminal
+ * replay (`DEFERRED_DRAIN_DEADLINE_MS`); checked before the acquire, never mid-run
+ * (M17). A literal because this module must not import the event processor.
+ */
+export const CUSTOMER_DRAIN_MIN_BUDGET_MS = 10_000;
 
 export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResult> {
   const now = (deps.now ?? (() => new Date()))();
@@ -617,7 +659,13 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
     ...overdue.media.map((session) => ({ session, stale: false })),
   ];
   const targets = candidates.filter(({ session }, index) => candidates.findIndex((entry) => entry.session.id === session.id) === index);
-  const result: SweepResult = { checked: targets.length, swept: [], deferred: [], errors: [] };
+  // E4.2 — yield to an unprocessed customer `call.hangup` (M12/M15). One legs
+  // read + one ledger read per pass with candidates; the verdict is taken
+  // before any lease. Greeting and stale candidates are exempt: the stale
+  // path is how a marked session gets finalised.
+  const yieldable = [...overdue.ringing, ...overdue.waiting, ...overdue.media].filter((session) => session.customer_leg_id);
+  const yieldTo = await pendingCustomerHangups(deps.admin, deps.organizationId, yieldable);
+  const result: SweepResult = { checked: targets.length, swept: [], deferred: [], errors: [], yielded: [], drained: [] };
   const clock = deps.clock ?? (() => Date.now());
   const started = clock();
   const limit = deps.limit ?? targets.length;
@@ -627,6 +675,22 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
     // and `RING_SWEEP_BUDGET_MS` (cron-jobs.ts).
     if (index >= limit || (deps.budgetMs !== undefined && clock() - started >= deps.budgetMs)) {
       result.deferred.push(session.id);
+      continue;
+    }
+    if (yieldTo.has(session.id)) {
+      // Never sweep over a pending customer hangup (every caller). The
+      // candidate stays for the next pass; the hangup is applied by its own
+      // host (E2.1), the next webhook's inline sweep or the cron — or right
+      // here when this caller has the budget for one bounded drain.
+      result.deferred.push(session.id);
+      result.yielded.push(session.id);
+      const drainBudget = deps.drainBudgetMs ?? deps.budgetMs;
+      if (deps.drainCustomerTerminal && result.drained.length === 0 &&
+        (drainBudget === undefined || drainBudget - (clock() - started) >= CUSTOMER_DRAIN_MIN_BUDGET_MS)) {
+        result.drained.push(session.id);
+        try { await deps.drainCustomerTerminal(session); }
+        catch (error) { result.errors.push({ sessionId: session.id, error: error instanceof Error ? error.message : String(error) }); }
+      }
       continue;
     }
     const id = deps.eventId ? deps.eventId() : `sweep:${session.id}:${now.getTime()}`;

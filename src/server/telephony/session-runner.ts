@@ -139,6 +139,19 @@ function nowOf(deps: SessionRunnerDeps): () => Date {
   return deps.now ?? (() => new Date());
 }
 
+/**
+ * The compensation pass is armed by the database — `terminate_v2` seeds
+ * `termination_next_attempt_at`, `result_v2`/`observe_dial_v2` re-arm it when a
+ * late dial acceptance lands, the checkpoint clears it or pushes it 30 s out
+ * (migration 20260929200000:184,:260,:284,:329). Null means nothing is
+ * outstanding; a future value means a pass already ran and re-armed. Either
+ * way a host event owes no pass. This is the app-side form of the M19 SQL gate.
+ */
+function terminationDue(session: SessionRow, now: Date): boolean {
+  const at = session.termination_next_attempt_at ?? null;
+  return at !== null && Date.parse(at) <= now.getTime();
+}
+
 function sleepOf(deps: Pick<SessionRunnerDeps, "sleep">): (ms: number) => Promise<void> {
   return deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 }
@@ -438,6 +451,8 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     };
   }
   if (event?.kind === "app" && event.type === "hangup" || bridgeObservation || passiveObservation) {
+    // Top-level and the nested `termination:<sid>:<ts>` run alike (E3): the
+    // hangup reduce reads nothing from configuration.
     // Ending a call needs only its already authenticated session/legs. New
     // IVR, capacity, media and recording settings cannot authorize a hangup
     // more strongly, and a slow/broken settings read must not hold it hostage.
@@ -739,7 +754,14 @@ async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, 
           p_client_state: event.rawClientState, p_call_control_id: event.callControlId, p_call_leg_id: event.callLegId,
           p_call_session_id: event.callSessionId, p_alive: event.type !== "call.hangup" });
       }
-      if (owner?.contract === 2 && snapshot.session.termination_requested_at && !(event.kind === "app" && event.type === "hangup")) {
+      // One termination pass per host: the nested `termination:*` run above
+      // already ran its post-apply pass and re-read the row, so this fires only
+      // when the database says a pass is still due. Every later webhook of an
+      // ended call used to pay the two termination RPCs here (M19: 5024c4af at
+      // 17:21:19.7, 17:21:24.1, 17:25:26.9, 17:25:32.5); the cron's recovery
+      // job is the later pass.
+      if (owner?.contract === 2 && snapshot.session.termination_requested_at && !(event.kind === "app" && event.type === "hangup") &&
+        terminationDue(snapshot.session, nowOf(deps)())) {
         effectsMayHaveStarted = true;
         owner.terminationPending = await reconcileTermination(deps, sessionId);
       }
