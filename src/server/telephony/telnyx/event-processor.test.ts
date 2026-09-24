@@ -1,10 +1,49 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { withRequestMetrics } from "@/server/request-metrics";
 
-import { CONNECTION_ID, createTelephonyHarness, NUMBERS, PROFILES } from "@/test/telephony-harness";
+import { CONNECTION_ID, createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
-import { processTelnyxEvent } from "./event-processor";
+import { sessionOwnership } from "../ownership";
+import { WEBHOOK_LEASE_POLL_MS } from "../session-runner";
+import { sweepOverdueRingSteps } from "../routing/ring-plan";
+import { encodeClientState } from "./client-state";
+import { INLINE_DRAIN_BUDGET_MS, processTelnyxEvent, replayDeferredSessionEvents } from "./event-processor";
+
+// A pass-through spy: every inline sweep still runs the real sweep, its call
+// shape is just observable.
+vi.mock("../routing/ring-plan", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../routing/ring-plan")>();
+  return { ...actual, sweepOverdueRingSteps: vi.fn(actual.sweepOverdueRingSteps) };
+});
 
 describe("processTelnyxEvent", () => {
+  it("audits claim, ownership and actual dispatch under the HTTP request identity", async () => {
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    const envelope = h.envelope("call.initiated", { call_control_id: "timed-call", call_session_id: "timed-provider-session", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "timed-delivery");
+    envelope.meta = { attempt: 2, delivered_to: "https://example.test/webhook?private=secret" };
+    const response = await withRequestMetrics("call.webhook", async () => Response.json(await h.process(envelope)), { logger: () => {} });
+    const result = await response.json();
+    expect(result.outcome).toBe("processed");
+    const audit = h.rows("motorist_call_events").find(row => row.event_fingerprint === "timed-delivery");
+    expect(audit?.normalized_payload).toMatchObject({ timing: { request_id: response.headers.get("x-request-id"), ingress_at: expect.any(String),
+      claimed_at: expect.any(String), lease_acquired_at: expect.any(String), first_command_at: h.now().toISOString(),
+      meta: { attempt: 2, delivered_to: "https://example.test/webhook" } } });
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "lease-timing", outcome: "finished", release_confirmed: true, request_id: response.headers.get("x-request-id") }));
+    await h.process(envelope);
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook-delivery", outcome: "duplicate", meta: { attempt: 2, delivered_to: "https://example.test/webhook" } }));
+  });
+  it("finishes a successful inbox claim only after releasing ownership", async () => {
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    const rpc = h.client.rpc.bind(h.client);
+    const owners: unknown[] = [];
+    vi.spyOn(h.client, "rpc").mockImplementation((name, args) => {
+      if (name === "motorist_telnyx_finish_webhook_event_v2" && (args as { p_result?: string })?.p_result === "processed") owners.push(sessionOwnership.getStore());
+      return rpc(name, args);
+    });
+    await h.inbound({ to: NUMBERS.allianz });
+    expect(owners.length).toBeGreaterThan(0);
+    expect(owners.every(owner => owner === undefined)).toBe(true);
+  });
   it("acknowledges durable call work before maintenance, with the session lease released", async () => {
     const h = createTelephonyHarness();
     const queued: Array<() => Promise<void>> = [];
@@ -93,6 +132,7 @@ describe("processTelnyxEvent", () => {
     h.db.seed("motorist_telnyx_webhook_events", [{ event_id: "evt-busy", event_type: "call.answered", status: "queued", attempts: 1, claimed_at: h.now().toISOString(), payload: {} }]);
     const busy = h.envelope("call.answered", { call_control_id: "cc-1", call_session_id: "tsess-1" }, "evt-busy");
     expect(await h.process(busy)).toMatchObject({ status: 500, outcome: "busy" });
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook-delivery", outcome: "busy", timing: expect.objectContaining({ ingress_at: expect.any(String) }), meta: { attempt: 1, delivered_to: null } }));
     expect(h.session(String(h.rows("motorist_call_sessions")[0].id)).state).toBe("received");
 
     // A stale claim (older than 30 s) is taken over and processed.
@@ -218,12 +258,28 @@ describe("processTelnyxEvent", () => {
     expect(h.rows("motorist_call_events").some((row) => row.event_type === "app.sweep")).toBe(true);
   });
 
+  it("inline sweep passes the drain with its own budget", async () => {
+    const h = createTelephonyHarness({ sweepAfterEvent: true });
+    const sweep = vi.mocked(sweepOverdueRingSteps);
+    sweep.mockClear();
+    const queued: Array<() => Promise<void>> = [];
+    const event = h.envelope("call.initiated", { call_control_id: "drain-webhook", call_session_id: "drain-session", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "drain-event");
+    expect(await processTelnyxEvent({ ...h.deps, deferMaintenance: work => queued.push(work) }, event)).toMatchObject({ status: 200, outcome: "processed" });
+    expect(queued).toHaveLength(1);
+    await queued[0]();
+    expect(sweep).toHaveBeenCalled();
+    const deps = sweep.mock.calls.at(-1)![0];
+    expect(deps).toMatchObject({ organizationId: ORG, limit: 2, drainCustomerTerminal: expect.any(Function) });
+    expect(deps.drainBudgetMs).toBeLessThanOrEqual(INLINE_DRAIN_BUDGET_MS);
+    expect(deps.drainBudgetMs).toBeGreaterThan(deps.budgetMs!);
+  });
+
   it("uses the injected deps end to end with a plain call", async () => {
     const h = createTelephonyHarness();
     const result = await processTelnyxEvent(h.deps, h.envelope("call.initiated", { call_control_id: "cc-9", call_session_id: "tsess-9", connection_id: CONNECTION_ID, direction: "incoming", to: "+4210232408718", from: "0905123456" }));
     expect(result).toMatchObject({ status: 200, outcome: "processed", type: "call.initiated", eventClass: "control" });
     expect(h.rows("motorist_call_sessions")[0]).toMatchObject({ caller_number: "+421905123456", called_number: NUMBERS.allianz, state: "received" });
-    expect(h.logs.at(-1)).toMatchObject({ scope: "webhook", outcome: "processed", verified: true });
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook", outcome: "processed", verified: true }));
   });
   it("replays an early answer when its exact incoming control ID becomes known", async () => {
     const h = createTelephonyHarness();
@@ -264,4 +320,198 @@ describe("processTelnyxEvent", () => {
     expect(h.telnyx.of("answer")).toHaveLength(0);
   });
 
+});
+
+describe("deferred-event self-drain and lease-free ignores (E2)", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  const acquires = (h: TelephonyHarness) => h.db.log.filter(entry => entry.table === "motorist_session_lease_acquire_v2").length;
+  const ledgerSelects = (h: TelephonyHarness) => h.db.log.filter(entry => entry.table === "motorist_telnyx_webhook_events" && entry.operation === "select").length;
+  const customerLeg = (h: TelephonyHarness, sessionId: string, callControlId: string) => h.legs(sessionId).find(leg => leg.telnyx_call_control_id === callControlId)!;
+  const ledgerRow = (h: TelephonyHarness, eventId: string) => h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === eventId)!;
+  const deferredTemplate = (h: TelephonyHarness, call: { telnyxSessionId: string; callControlId: string }) => ({
+    organization_id: ORG, call_session_id: call.telnyxSessionId, call_control_id: call.callControlId, connection_id: CONNECTION_ID,
+    status: "failed", retry_state: "deferred", attempts: 1, delivery_count: 1, deferral_count: 1, effect_failure_count: 0, contract_version: 2,
+    claimed_at: null, next_attempt_at: h.now().toISOString(), received_at: h.now().toISOString(), occurred_at: h.now().toISOString(),
+  });
+
+  async function talkingCall(options: Parameters<typeof createTelephonyHarness>[0] = {}) {
+    vi.stubEnv("TELNYX_CALL_ACTION_ANNOUNCEMENTS_ENABLED", "false");
+    vi.stubEnv("TELNYX_RECORDING_ENABLED", "false");
+    const h = createTelephonyHarness(options);
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const operator = String(h.legFor(call.sessionId, PROFILES.o1)!.telnyx_call_control_id);
+    await h.legEvent(operator, "call.answered");
+    for (const leg of h.legs(call.sessionId)) {
+      if (leg.role !== "customer" && leg.profile_id !== PROFILES.o1 && !leg.ended_at) await h.legEvent(String(leg.telnyx_call_control_id), "call.hangup");
+    }
+    expect(h.session(call.sessionId).state).toBe("talking");
+    return { h, call, operator };
+  }
+
+  async function endedCall() {
+    const { h, call, operator } = await talkingCall();
+    await h.legEvent(call.callControlId, "call.hangup");
+    await h.legEvent(operator, "call.hangup");
+    expect(h.session(call.sessionId).state).toBe("ended");
+    return { h, call, operator };
+  }
+
+  it("drains its own deferred row after the holder releases", async () => {
+    // A talking call under the fenced contract; the customer's hangup is the deferred fact.
+    const { h, call } = await talkingCall({ writerContract: 2, sweepAfterEvent: false });
+    // The poll loop measures `Date.now()`, so a clock-only sleep would spin.
+    let draining = false;
+    let drainSleeps = 0;
+    h.deps.sleep = async ms => {
+      if (draining) { drainSleeps += 1; expect(sessionOwnership.getStore()).toBeUndefined(); }
+      h.advance(ms);
+      await new Promise(resolve => setTimeout(resolve, ms));
+    };
+    h.deps.random = () => 0;
+    // Another invocation holds the lease for the whole callback wait.
+    const lease = (name: string, args: Record<string, unknown>) => h.db.rpcHandlers.get(name)!(args, h.db);
+    const held = lease("motorist_session_lease_acquire_v2", { p_session_id: call.sessionId, p_token: "holder", p_ttl_ms: 30_000 }) as { generation: number } | null;
+    const generation = Number(held?.generation);
+    expect(generation).toBeGreaterThan(0);
+
+    const queued: Array<() => Promise<void>> = [];
+    const beforeDeferral = acquires(h);
+    const result = await processTelnyxEvent({ ...h.deps, deferMaintenance: work => { queued.push(work); } }, h.envelope("call.hangup", {
+      call_control_id: call.callControlId, call_session_id: call.telnyxSessionId, hangup_cause: "normal_clearing",
+      client_state: encodeClientState(h.clientStateOf(call.callControlId)),
+    }, "deferred-hangup"));
+    // The 500 contract is kept: the fact is not applied yet.
+    expect(result).toMatchObject({ status: 500, outcome: "failed", sessionId: call.sessionId });
+    expect(ledgerRow(h, "deferred-hangup")).toMatchObject({ retry_state: "deferred", delivery_count: 1, deferral_count: 1, attempts: 1 });
+    expect(ledgerRow(h, "deferred-hangup").error).toContain("deferral=lease_busy");
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook", eventId: "deferred-hangup", deferral: "lease_busy", polls: expect.any(Number), lease_wait_ms: expect.any(Number) }));
+    expect(acquires(h) - beforeDeferral).toBeGreaterThan(1);
+    expect(acquires(h) - beforeDeferral).toBeLessThanOrEqual(WEBHOOK_LEASE_POLL_MS.length + 1);
+    expect(customerLeg(h, call.sessionId, call.callControlId).ended_at).toBeNull();
+    // The deferring host retained its own drain and ran nothing inline.
+    expect(queued).toHaveLength(1);
+    const selectsAfterResponse = ledgerSelects(h);
+
+    expect(lease("motorist_session_lease_release_v2", { p_session_id: call.sessionId, p_token: "holder", p_generation: generation })).toBe(true);
+    expect(ledgerSelects(h)).toBe(selectsAfterResponse);
+    const before = acquires(h);
+    draining = true;
+    await queued[0]();
+    // One acquire with the webhook budget (the lease was free), after the SQL backoff, outside any ownership scope.
+    expect(drainSleeps).toBeGreaterThan(0);
+    expect(acquires(h) - before).toBe(1);
+    expect(ledgerRow(h, "deferred-hangup").error).toBeNull();
+    expect(ledgerRow(h, "deferred-hangup")).toMatchObject({ status: "processed", attempts: 2, delivery_count: 1, deferral_count: 1 });
+    expect(customerLeg(h, call.sessionId, call.callControlId).ended_at).toBe(ledgerRow(h, "deferred-hangup").occurred_at);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "wrap_up", lease_token: null });
+  });
+
+  it("replays gather/playback/initiated after hangup/answered/bridged", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const now = h.now().getTime();
+    const customerState = encodeClientState(h.clientStateOf(call.callControlId));
+    h.db.seed("motorist_telnyx_webhook_events", [
+      { ...deferredTemplate(h, call), event_id: "deferred-playback", event_type: "call.playback.ended",
+        occurred_at: new Date(now - 2_000).toISOString(), payload: { status: "completed", client_state: customerState } },
+      { ...deferredTemplate(h, call), event_id: "deferred-hangup", event_type: "call.hangup",
+        occurred_at: new Date(now - 1_000).toISOString(), payload: { hangup_cause: "normal_clearing", client_state: customerState } },
+    ]);
+    const mark = h.db.log.length;
+    await replayDeferredSessionEvents(h.deps, call.sessionId);
+    // Rank beats occurred_at: the terminal fact goes first even though the audio row is older.
+    expect(h.db.log.slice(mark).filter(entry => entry.table === "motorist_telnyx_claim_webhook_event_v2").map(entry => (entry.payload as { p_event_id: string }).p_event_id))
+      .toEqual(["deferred-hangup", "deferred-playback"]);
+    expect(ledgerRow(h, "deferred-hangup")).toMatchObject({ status: "processed", delivery_count: 1 });
+    expect(ledgerRow(h, "deferred-playback")).toMatchObject({ status: "processed", delivery_count: 1 });
+    expect(customerLeg(h, call.sessionId, call.callControlId).ended_at).toBe(ledgerRow(h, "deferred-hangup").occurred_at);
+    expect(h.rows("motorist_call_events").filter(row => row.event_type === "call.playback.ended").at(-1)).toMatchObject({ handled_status: "ignored" });
+  });
+
+  it("drains a deferred operator call.initiated on a terminal session into an orphan hangup", async () => {
+    const { h, call } = await endedCall();
+    // The dial wrote this leg row before the session ended; its `call.initiated`
+    // was deferred behind the terminating holder. Only exact leg ids are drained.
+    h.db.insert("motorist_call_legs", { organization_id: ORG, session_id: call.sessionId, role: "operator", profile_id: PROFILES.o1,
+      telnyx_call_control_id: "late-operator", state: "initiated", client_state: { sid: call.sessionId, role: "operator", operatorId: PROFILES.o1 } });
+    h.db.seed("motorist_telnyx_webhook_events", [{ ...deferredTemplate(h, call), call_control_id: "late-operator", event_id: "late-operator-initiated", event_type: "call.initiated",
+      payload: { direction: "outgoing", client_state: encodeClientState({ sid: call.sessionId, role: "operator", operatorId: PROFILES.o1 }) } }]);
+    await replayDeferredSessionEvents(h.deps, call.sessionId);
+    expect(ledgerRow(h, "late-operator-initiated")).toMatchObject({ status: "processed", delivery_count: 1 });
+    expect(h.telnyx.of("hangup").some(command => command.params.callControlId === "late-operator")).toBe(true);
+    expect(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === "late-operator")).toMatchObject({ hangup_cause: "terminal_session" });
+  });
+
+  it.each(["call.playback.ended", "call.speak.ended", "call.gather.ended"])("acknowledges %s for an ended customer leg without a lease", async type => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    await h.legEvent(call.callControlId, "call.hangup");
+    expect(customerLeg(h, call.sessionId, call.callControlId).ended_at).toBeTruthy();
+    const mark = h.db.log.length;
+    const queued: Array<() => Promise<void>> = [];
+    h.deps.deferMaintenance = work => { queued.push(work); };
+    const result = await h.legEvent(call.callControlId, type, { status: "completed" }, "late-audio");
+    expect(result).toMatchObject({ status: 200, outcome: "ignored", notes: ["customer leg ended", "lease-free"] });
+    expect(h.db.log.slice(mark).filter(entry => entry.table.includes("lease"))).toEqual([]);
+    expect(ledgerRow(h, "late-audio")).toMatchObject({ status: "processed" });
+    expect(h.rows("motorist_call_events").at(-1)).toMatchObject({ event_type: type, handled_status: "ignored" });
+    // Maintenance is retained for the host, not run inline.
+    expect(queued).toHaveLength(1);
+  });
+
+  it("acknowledges late audio lease-free while the operator is still in wrap-up", async () => {
+    const { h, call } = await talkingCall();
+    await h.legEvent(call.callControlId, "call.hangup");
+    expect(h.session(call.sessionId).state).toBe("wrap_up");
+    const mark = h.db.log.length;
+    const result = await h.legEvent(call.callControlId, "call.playback.ended", { status: "completed" }, "late-audio");
+    expect(result).toMatchObject({ status: 200, outcome: "ignored", notes: ["customer leg ended", "lease-free"] });
+    expect(h.db.log.slice(mark).filter(entry => entry.table.includes("lease"))).toEqual([]);
+    expect(ledgerRow(h, "late-audio")).toMatchObject({ status: "processed" });
+  });
+
+  // The state-only branch: the customer leg is still open, the session is
+  // already terminal or in wrap-up. The reducer would ignore the audio anyway
+  // (`transitions.test.ts` pins that), so no lease is taken for it.
+  it.each([
+    ["failed", "call.playback.ended", "playback ended in failed"],
+    ["failed", "call.gather.ended", "gather in failed"],
+    ["ended", "call.speak.ended", "playback ended in ended"],
+    ["wrap_up", "call.gather.ended", "gather in wrap_up"],
+  ])("acknowledges late audio lease-free in %s with the customer leg still open (%s)", async (state, type, reason) => {
+    const { h, call } = await talkingCall();
+    h.db.update("motorist_call_sessions", { state }, row => row.id === call.sessionId);
+    expect(customerLeg(h, call.sessionId, call.callControlId).ended_at).toBeNull();
+    const before = acquires(h);
+    const mark = h.db.log.length;
+    const result = await h.legEvent(call.callControlId, type, { status: "completed" }, "late-audio");
+    expect(result).toMatchObject({ status: 200, outcome: "ignored", notes: [reason, "lease-free"] });
+    expect(acquires(h)).toBe(before);
+    expect(h.db.log.slice(mark).filter(entry => entry.table.includes("lease"))).toEqual([]);
+    expect(ledgerRow(h, "late-audio")).toMatchObject({ status: "processed" });
+    expect(h.rows("motorist_call_events").at(-1)).toMatchObject({ event_type: type, handled_status: "ignored" });
+    expect(h.session(call.sessionId).state).toBe(state);
+  });
+
+  // The boundary of the lease-free path: initiated/answered need the reducer's
+  // orphan hangup and leg insert; hold/unhold write leg state and `sdk_hold`.
+  it("never acknowledges call.initiated lease-free on an ended call", async () => {
+    const { h, call } = await endedCall();
+    const mark = h.db.log.length;
+    const result = await h.process(h.envelope("call.initiated", { call_control_id: "late-operator", call_session_id: call.telnyxSessionId, direction: "outgoing",
+      client_state: encodeClientState({ sid: call.sessionId, role: "operator", operatorId: PROFILES.o1 }) }, "late-init"));
+    expect(result).toMatchObject({ status: 200, outcome: "processed" });
+    expect(result.notes).not.toContain("lease-free");
+    expect(h.db.log.slice(mark).some(entry => entry.table.includes("lease"))).toBe(true);
+    expect(h.telnyx.of("hangup").some(command => command.params.callControlId === "late-operator")).toBe(true);
+  });
+
+  it("never acknowledges call.hold lease-free on an ended customer leg", async () => {
+    const { h, call } = await endedCall();
+    const mark = h.db.log.length;
+    const result = await h.legEvent(call.callControlId, "call.hold", {}, "late-hold");
+    expect(result).toMatchObject({ status: 200, outcome: "processed" });
+    expect(result.notes).not.toContain("lease-free");
+    expect(h.db.log.slice(mark).some(entry => entry.table.includes("lease"))).toBe(true);
+  });
 });

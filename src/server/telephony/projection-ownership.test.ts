@@ -88,7 +88,7 @@ describe("standalone projection ownership", () => {
       }
       return update(table, patch, filter);
     });
-    expect(await closeOrphanLegs(h.admin, { organizationId: ORG, now: h.now() })).toHaveLength(2);
+    expect((await closeOrphanLegs(h.admin, { organizationId: ORG, now: h.now() })).closed).toHaveLength(2);
     expect(await closeStaleRingAttempts(h.admin, { organizationId: ORG, now: h.now() })).toHaveLength(2);
     expect(writtenOwners).toEqual([...ids, ...ids]);
     expect(h.claims).toEqual([...ids, ...ids]);

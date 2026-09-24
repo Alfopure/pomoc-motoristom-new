@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { SessionLeaseLostError } from "./service-errors";
-import { sessionOwnership, type Ownership } from "./ownership";
+import { firstProviderDispatchAt, sessionOwnership, withProviderDispatchTiming, type Ownership } from "./ownership";
 import { createTelnyxClient, type TelnyxRequestLog } from "./telnyx/client";
 import { createTelephonyHarness, NUMBERS } from "@/test/telephony-harness";
 import { effectsDeps, runSessionEvent } from "./session-runner";
@@ -58,6 +58,23 @@ function harness(options: { now?: () => number } = {}) {
 }
 
 describe("provider HTTP journal recovery", () => {
+  it("stamps a real mutation after admission, excluding provider GET and cached journal adoption", async () => {
+    const h = harness();
+    const now = () => new Date("2026-09-22T10:00:00.000Z");
+    await withProviderDispatchTiming(now, async () => {
+      await h.client.retrieveCall("exact-leg");
+      expect(firstProviderDispatchAt()).toBeNull();
+      await sessionOwnership.run(h.owner(), h.dial);
+      expect(firstProviderDispatchAt()).toBe(now().toISOString());
+      await withProviderDispatchTiming(now, async () => {
+        await sessionOwnership.run(h.owner(), h.dial);
+        expect(firstProviderDispatchAt()).toBeNull();
+      });
+      expect(firstProviderDispatchAt()).toBe(now().toISOString());
+    });
+    expect(firstProviderDispatchAt()).toBeNull();
+    expect(h.fetch).toHaveBeenCalledTimes(2);
+  });
   it("times HTTP dispatch after the durable prepare and reports zero sends for journal adoption", async () => {
     let now = Date.now();
     const started = now;

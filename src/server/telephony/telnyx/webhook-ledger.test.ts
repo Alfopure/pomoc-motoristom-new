@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { createFakeSupabase } from "@/test/fake-supabase";
 
-import { claimWebhookEvent, describeWebhookClaim, markWebhookEventFailed, markWebhookEventProcessed, WebhookLedgerError } from "./webhook-ledger";
+import { claimWebhookEvent, describeWebhookClaim, markWebhookEventFailed, markWebhookEventProcessed, resetClaimLostIncidentThrottle, WebhookLedgerError } from "./webhook-ledger";
 
 const START = Date.parse("2026-09-03T10:00:00.000Z");
+
+afterEach(() => resetClaimLostIncidentThrottle());
 
 function harness() {
   const fake = createFakeSupabase({ now: () => new Date(START) });
@@ -145,6 +147,24 @@ describe("claimWebhookEvent", () => {
     expect(db.rows("motorist_telnyx_webhook_events")[0]).toMatchObject({ attempts: 8, delivery_count: 8, deferral_count: 8, effect_failure_count: 0, retry_state: "deferred" });
     expect(await claimWebhookEvent(admin, { ...input, replay: "cron" })).toMatchObject({ outcome: "claimed", attempts: 9 });
     expect(db.rows("motorist_telnyx_webhook_events")[0].delivery_count).toBe(8);
+  });
+
+  it("records a throttled incident when the finish CAS loses to a takeover", async () => {
+    const { admin, db, input } = harness();
+    const first = await claimWebhookEvent(admin, input);
+    db.setNow(new Date(START + 31_000));
+    expect(await claimWebhookEvent(admin, input)).toMatchObject({ outcome: "claimed", attempts: 2 });
+    expect(await markWebhookEventProcessed(admin, "evt-1", { claimedAt: first.claimedAt, now: () => new Date(START + 31_500) })).toBe(false);
+    expect(db.rows("motorist_job_incidents")).toEqual([expect.objectContaining({
+      job_name: "telephony.telnyx.webhook", status: "open", consecutive_failures: 1, last_error_safe: expect.stringContaining("webhook_claim_lost"),
+    })]);
+    expect(db.rows("motorist_job_incidents")[0].last_error_safe).toContain("evt-1");
+    // A second lost finish inside the throttle window is not another write.
+    expect(await markWebhookEventProcessed(admin, "evt-1", { claimedAt: first.claimedAt, now: () => new Date(START + 41_500) })).toBe(false);
+    expect(db.rows("motorist_job_incidents")[0]).toMatchObject({ consecutive_failures: 1 });
+    resetClaimLostIncidentThrottle();
+    expect(await markWebhookEventFailed(admin, "evt-1", "late", { claimedAt: first.claimedAt, now: () => new Date(START + 41_600) })).toBe(false);
+    expect(db.rows("motorist_job_incidents")).toEqual([expect.objectContaining({ consecutive_failures: 2 })]);
   });
 
   it("terminalizes actual effect failures explicitly and cannot claim the dead letter", async () => {

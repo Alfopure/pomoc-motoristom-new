@@ -1,22 +1,32 @@
 import { timingSafeEqual } from "node:crypto";
 
-import { runTelephonyCronJobs, type TelephonyCronJobResult } from "@/server/telephony/cron-jobs";
+import { runTelephonyCronJobs, timedCronJob, type TelephonyCronJobResult } from "@/server/telephony/cron-jobs";
+import { DATABASE_REQUEST_MS } from "@/server/telephony/ownership";
 import { createTelephonyDeps } from "@/server/telephony/runtime";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+/**
+ * 120 s stays well under the 5-minute schedule, so at most one run is ever in
+ * flight without a lock. The budget is split: ledger replay ≤ 60 s from the
+ * cron start, ring sweep ≤ 20 s, the remaining telephony jobs ≤ 15 s,
+ * reminders/pause warnings/recordings ≤ 15 s, 10 s reserve. Every job in the
+ * response carries `startedAt`/`ms` so the split can be checked.
+ */
+export const maxDuration = 120;
 
 /**
  * Vercel cron entrypoint (every 5 minutes, see vercel.json) — the only cron of
  * this project.
  *
  * Vercel sends `Authorization: Bearer <CRON_SECRET>`; anything else is rejected
- * before any work happens. It runs the overdue ring-step sweep (safety net for
- * lost webhooks), the ledger replay, reconciliation against Telnyx, stuck-session
- * detection, the alert mailer and the webhook-ledger prune, and answers with a
- * per-job summary. When telephony is not configured the jobs that need a
- * provider report `skipped` instead of failing.
+ * before any work happens. It runs the ledger replay first (hangups first —
+ * terminal facts before anything dials or closes a leg), then the overdue
+ * ring-step sweep (safety net for lost webhooks), pending-effect recovery,
+ * reconciliation against Telnyx, stuck-session detection, the alert mailer and
+ * the webhook-ledger prune, and answers with a per-job summary. When telephony
+ * is not configured the jobs that need a provider report `skipped` instead of
+ * failing.
  *
  * It also materialises due task reminders and acts as a strict-window fallback
  * for pause-ending warnings. Those jobs are not telephony state transitions,
@@ -45,11 +55,14 @@ export async function GET(request: Request) {
 
   try {
     const deps = await createTelephonyDeps({ sweepAfterEvent: false });
-    const summary = await runTelephonyCronJobs(deps);
-    const reminders = await runReminderMaterialisation(deps.organizationId);
-    const pauseWarnings = await runPauseEndingWarningMaterialisation(deps.organizationId);
+    const summary = await runTelephonyCronJobs(deps, { cronStartedAt });
+    const reminders = await timedCronJob(() => runReminderMaterialisation(deps.organizationId));
+    const pauseWarnings = await timedCronJob(() => runPauseEndingWarningMaterialisation(deps.organizationId));
     const { runRecordingProcessing } = await import("@/server/telephony/recording-processing");
-    const recordings = await runRecordingProcessing({ admin: deps.admin, organizationId: deps.organizationId, cronStartedAt });
+    const recordings = await timedCronJob(() => runRecordingProcessing({ admin: deps.admin, organizationId: deps.organizationId, cronStartedAt }));
+
+    console.info(JSON.stringify({ scope: "telephony-cron-runtime", node: process.version, undici: process.versions.undici ?? null,
+      ms: Date.now() - cronStartedAt, status: summary.status }));
 
     return Response.json(
       { ...summary, status: reminders.status === "failed" || pauseWarnings.status === "failed" || recordings.status === "failed" ? "degraded" : summary.status, jobs: [...summary.jobs, reminders, pauseWarnings, recordings] },
@@ -72,7 +85,9 @@ async function runReminderMaterialisation(organizationId: string): Promise<Telep
   try {
     const { createSupabaseAdminClient } = await import("@/lib/supabase/admin");
     const admin = createSupabaseAdminClient();
-    const control = await admin.from("motorist_job_controls").select("enabled").eq("job_name", job).maybeSingle();
+    // Builder-level signal: bounds the read and cuts postgrest-js retry sleeps short.
+    const control = await admin.from("motorist_job_controls").select("enabled").eq("job_name", job)
+      .abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
     if (control.data && control.data.enabled === false) {
       return { job, status: "disabled", detail: { reason: "job_control_disabled" } };
     }

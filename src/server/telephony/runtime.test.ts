@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { sessionOwnership } from "./ownership";
 
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 import { MutationError } from "@/server/motorist-mutations";
@@ -34,6 +36,19 @@ import {
 } from "./runtime";
 
 describe("telephony runtime", () => {
+  it("drops the completed lease from Next's retained notification context", async () => {
+    let retained!: () => Promise<void>;
+    notifications.after.mockImplementation(work => { retained = AsyncLocalStorage.bind(work); });
+    notifications.notify.mockImplementation(async () => {
+      expect(sessionOwnership.getStore()).toBeUndefined();
+      return { sent: 0, failed: 0 };
+    });
+    const deps = await createTelephonyDeps();
+    sessionOwnership.run({ admin: harness.admin, sessionId: "ended-owner", organizationId: ORG, token: "released",
+      generation: 1, contract: 2, deadline: 0, acquiredAt: 0 }, () => deps.onCallTransition!("ended-owner"));
+    await retained();
+    expect(notifications.notify).toHaveBeenCalledOnce();
+  });
   beforeEach(() => {
     harness = createTelephonyHarness();
     notifications.after.mockReset();

@@ -1,5 +1,7 @@
 import "server-only";
 import { after } from "next/server";
+import { withBackgroundRequestMetrics } from "@/server/request-metrics";
+import { sessionOwnership } from "./ownership";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { TELEPHONY_NOT_CONFIGURED_CODE, TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
@@ -92,7 +94,10 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
       // Web Push runs after Telnyx has its response and every session lease has
       // been released. One queue also bounds a cron/sweep backlog across calls.
       try {
-        after(async () => {
+        // Next retains AsyncLocalStorage at registration, which can happen
+        // inside the reducer's lease. Notifications must not inherit that
+        // released generation or its expired database deadline.
+        after(withBackgroundRequestMetrics(() => sessionOwnership.exit(async () => {
           const logger = options.logger ?? telephonyLogger;
           const sessions = [...pendingCallNotifications];
           const deadlineAt = Date.now() + CALL_PUSH_QUEUE_BUDGET_MS;
@@ -117,7 +122,7 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
           // No claim has been made for skipped sessions: their next ordinary
           // webhook/poll sweep can retry them without losing a notification.
           if (cursor < sessions.length) logger({ level: "warn", scope: "call-push", message: "notification queue budget reached", skipped: sessions.length - cursor });
-        });
+        })));
       } catch {
         callNotificationsScheduled = false;
         (options.logger ?? telephonyLogger)({ level: "warn", scope: "call-push", sessionId, message: "notification scheduling unavailable" });

@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEVICE_LIVENESS_WINDOW_MS } from "@/lib/telephony/device-liveness";
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
-import { pickupWaitingCall } from "./call-actions";
+import { PICKUP_LEASE_WAIT_MS, pickupWaitingCall } from "./call-actions";
+import { sessionOwnership } from "./ownership";
 
 const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
 const presenceTable = "motorist_operator_presence";
@@ -18,7 +19,7 @@ function deferred() {
 
 // Pause execution of the first real fake-DB read, not construction of its
 // thenable. All production lookup filters and query errors still run normally.
-function controlRead(h: TelephonyHarness, tableName: string, rejection?: Error) {
+function controlRead(h: TelephonyHarness, tableName: string, rejection?: Error, ownedOnly = false) {
   const gate = deferred();
   const started = deferred();
   const finished = deferred();
@@ -27,7 +28,7 @@ function controlRead(h: TelephonyHarness, tableName: string, rejection?: Error) 
   const from = vi.isMockFunction(h.client.from) ? vi.mocked(h.client.from).getMockImplementation()! : h.client.from.bind(h.client);
   vi.spyOn(h.client, "from").mockImplementation(table => {
     const query = from(table);
-    if (table === tableName && !intercepted) {
+    if (table === tableName && !intercepted && (!ownedOnly || sessionOwnership.getStore())) {
       intercepted = true;
       const then = query.then.bind(query);
       query.then = (fulfilled, rejected) => {
@@ -67,6 +68,24 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe("pickup preflight with local fake DB/provider", () => {
+  it("starts budget, session, presence and device reads together under ownership", async () => {
+    const { h, sessionId } = await fixture();
+    const budget = controlRead(h, "motorist_telephony_settings");
+    const session = controlRead(h, "motorist_call_sessions", undefined, true);
+    const presence = controlRead(h, presenceTable);
+    const device = controlRead(h, deviceTable);
+    const result = pickupWaitingCall(h.deps, actor, sessionId);
+    await budget.started;
+    await tick();
+    const allStarted = [session, presence, device].every(read => read.didStart());
+    const leaseHeld = Boolean(h.session(sessionId).lease_token);
+    expectNoDispatch(h);
+    for (const read of [budget, session, presence, device]) read.release();
+    await result;
+    expect(allStarted).toBe(true);
+    expect(leaseHeld).toBe(true);
+    expect(h.telnyx.of("dial")).toHaveLength(1);
+  });
   it("starts the device read while presence is pending, inside the lease, and waits for both before reservation", async () => {
     const { h, sessionId } = await fixture();
     const presence = controlRead(h, presenceTable);
@@ -200,12 +219,13 @@ describe("pickup preflight with local fake DB/provider", () => {
     expectNoDispatch(h);
   });
 
-  it.each(["budget", "session"])("rejects failed %s admission before either preflight read", async failure => {
+  it.each(["budget", "session"])("keeps failed %s admission ahead of concurrent device failure without reserving", async failure => {
     const { h, sessionId } = await fixture();
     if (failure === "budget") h.db.update("motorist_telephony_settings", { daily_leg_soft_cap: 1 }, () => true);
     else h.db.update("motorist_call_sessions", { state: "ended", ended_at: h.now().toISOString() }, row => row.id === sessionId);
+    h.db.failNext(deviceTable, "select", "device failure must not mask admission");
     await expect(pickupWaitingCall(h.deps, actor, sessionId)).rejects.toMatchObject({ code: failure === "budget" ? "daily_cap_reached" : "not_waiting" });
-    expect(h.db.log.filter(entry => [presenceTable, deviceTable, mobileTable].includes(entry.table))).toEqual([]);
+    expect(h.db.log.filter(entry => [presenceTable, deviceTable, mobileTable].includes(entry.table)).every(entry => entry.operation === "select")).toBe(true);
     expectNoDispatch(h);
   });
 
@@ -231,5 +251,30 @@ describe("pickup preflight with local fake DB/provider", () => {
     ]);
     expect(h.db.log.some(entry => entry.table === (deviceKind === "mobile" ? deviceTable : mobileTable))).toBe(false);
     expectNoDispatch(h);
+  });
+
+  it("waits the pickup budget for a held lease and reads neither presence nor device", async () => {
+    const { h, sessionId } = await fixture();
+    h.db.registerRpc("motorist_session_lease_acquire_v2", () => null);
+    h.deps.random = () => 0;
+    // The harness sleep only moves the harness clock; the v2 wait loop reads
+    // `Date.now()`, so it needs real timers driven under fake time.
+    h.deps.sleep = ms => new Promise<void>(resolve => setTimeout(resolve, ms));
+    vi.useFakeTimers();
+    try {
+      const started = Date.now();
+      const pending = pickupWaitingCall(h.deps, actor, sessionId).catch(error => error);
+      await vi.runAllTimersAsync();
+      const error = await pending;
+      expect(error).toMatchObject({ name: "SessionLeaseBusyError", code: "session_busy", details: { leaseWaitMs: PICKUP_LEASE_WAIT_MS, eventType: "app.pickup" } });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(PICKUP_LEASE_WAIT_MS);
+      const polls = h.db.log.filter(entry => entry.table === "motorist_session_lease_acquire_v2").length;
+      expect(polls).toBeGreaterThan(7);
+      expect(polls).toBeLessThanOrEqual(13);
+      expect(error.details.polls).toBe(polls);
+      // The preflight never left the lease: no reads while waiting, nothing dispatched.
+      expect(h.db.log.filter(entry => [presenceTable, deviceTable, mobileTable].includes(entry.table))).toEqual([]);
+      expectNoDispatch(h);
+    } finally { vi.useRealTimers(); }
   });
 });

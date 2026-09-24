@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { completeAnnouncedAction } from "@/test/complete-call-announcements";
-import { parkCall, pickupWaitingCall } from "../call-actions";
+import { hangupCall, parkCall, pickupWaitingCall } from "../call-actions";
 
-import { advanceRingStep } from "../routing/ring-plan";
+import { advanceRingStep, sweepOverdueRingSteps } from "../routing/ring-plan";
 import { loadRoutingContext, loadSessionSnapshot, effectsDeps, runSessionEvent } from "../session-runner";
 import { applyReduceResult, SessionConflictError } from "./effects";
 import { reduce } from "./transitions";
-import { readMeta, type RingFanout, type SessionRow } from "./types";
+import { emptyTransition, readMeta, type RingFanout, type SessionRow } from "./types";
 
 /**
  * End-to-end reducer tests through the real pipeline (claim ledger → lease →
@@ -732,5 +732,288 @@ describe("bridge before the best-effort audio stops", () => {
     expect(methods).toEqual(["bridge", "hangup"]);
     expect(h.session(call.sessionId)).toMatchObject({ state: "waiting", answered_by_profile_id: null });
     expect(readMeta(h.session(call.sessionId) as SessionRow).queue).toBeTruthy();
+  });
+});
+
+describe("late audio completions on a terminal or wrap-up session", () => {
+  // The event processor acknowledges these without a lease (E2.4, state-only
+  // branch: the customer leg is still open). That is only sound while the
+  // reducer has nothing to do for them: no command, no patch, no guard.
+  it.each(["ended", "wrap_up", "failed"] as const)("is a pure ignore in %s for gather/playback/speak.ended with an open customer leg", async (state) => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const snapshot = await loadSessionSnapshot(h.deps, call.sessionId);
+    const customer = snapshot.legs.find((leg) => leg.telnyx_call_control_id === call.callControlId)!;
+    expect(customer.ended_at).toBeNull();
+    const session = { ...snapshot.session, state };
+    const context = await loadRoutingContext(h.deps, session);
+    for (const [type, reason] of [
+      ["call.gather.ended", `gather in ${state}`],
+      ["call.playback.ended", `playback ended in ${state}`],
+      ["call.speak.ended", `playback ended in ${state}`],
+    ] as const) {
+      const event = {
+        kind: "telnyx" as const,
+        id: `evt-late-${type}`,
+        type,
+        occurredAt: h.now().toISOString(),
+        callControlId: call.callControlId,
+        callLegId: null,
+        callSessionId: call.telnyxSessionId,
+        connectionId: "app-test",
+        clientState: h.clientStateOf(call.callControlId),
+        rawClientState: null,
+        from: null,
+        to: null,
+        direction: null,
+        state: null,
+        hangupCause: null,
+        hangupSource: null,
+        sipHangupCause: null,
+        digits: null,
+        status: "completed",
+        conferenceId: null,
+        customHeaders: [],
+        payload: {},
+      };
+      const result = reduce(session, snapshot.legs, snapshot.attempts, event, context);
+      expect(result.ignored).toBe(reason);
+      expect(result.commands).toEqual([]);
+      expect(result.compensations).toEqual([]);
+      expect(result.guard).toBeNull();
+      expect(result.next).toEqual(emptyTransition());
+    }
+  });
+});
+
+describe("customer gone at provider and ended_at provenance (E4)", () => {
+  const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
+  const meta = (h: TelephonyHarness, sessionId: string) => readMeta(h.session(sessionId) as SessionRow);
+  const customerLeg = (h: TelephonyHarness, call: { sessionId: string; callControlId: string }) => h.legs(call.sessionId).find((leg) => leg.telnyx_call_control_id === call.callControlId)!;
+  const gather = (h: TelephonyHarness) => h.telnyx.of("gatherUsingAudio").at(-1)!.params.clientState;
+  const sweepEvents = (h: TelephonyHarness, sessionId: string) => h.callEvents(sessionId).filter((row) => row.event_type === "app.sweep");
+  async function sweep(h: TelephonyHarness) {
+    const result = await sweepOverdueRingSteps({ admin: h.admin, organizationId: ORG, now: h.now, runSessionEvent: (id, event) => runSessionEvent(h.deps, id, event) });
+    expect(result.errors).toEqual([]);
+    return result;
+  }
+  /** Inbound call parked in the waiting room after the backup number did not answer (same as queue-callback-reliability). */
+  async function waitingQueued() {
+    const h = createTelephonyHarness({ fallbackKind: "waiting_room" });
+    for (const id of Object.values(PROFILES)) h.setPresence(id, { status: "offline" });
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const backup = h.legByNumber(call.sessionId, NUMBERS.external)!;
+    await h.legEvent(String(backup.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
+    expect(h.session(call.sessionId).state).toBe("waiting");
+    expect(meta(h, call.sessionId).queue).toBeTruthy();
+    return { h, call };
+  }
+  async function talkingCall(h: TelephonyHarness) {
+    const call = await ringingInbound(h);
+    await h.legEvent(call.o1, "call.answered");
+    for (const loser of [call.o2, call.o5]) await h.legEvent(loser, "call.hangup", { hangup_cause: "originator_cancel" });
+    await h.legEvent(call.o1, "call.bridged");
+    await h.legEvent(call.callControlId, "call.bridged");
+    expect(h.session(call.sessionId).state).toBe("talking");
+    return call;
+  }
+  const plus = (h: TelephonyHarness, ms: number) => new Date(h.now().getTime() + ms).toISOString();
+
+  it("gather call_hangup on the customer leg records customer_gone_at and stops the sweep from dialling", async () => {
+    const { h, call } = await waitingQueued();
+    const dials = h.telnyx.of("dial").length;
+    const hangups = h.telnyx.of("hangup").length;
+    const goneAt = h.now().toISOString();
+
+    const marked = await h.legEvent(call.callControlId, "call.gather.ended", { status: "call_hangup", client_state: gather(h) });
+    expect(marked).toMatchObject({ status: 200, outcome: "processed", notes: ["customer gone at provider"] });
+    expect(meta(h, call.sessionId).customer_gone_at).toBe(goneAt);
+    // Only the fact is recorded: no leg write, no state, no command, no callback.
+    expect(customerLeg(h, call)).toMatchObject({ ended_at: null, hangup_cause: null });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "waiting", ended_at: null });
+    expect(h.telnyx.of("hangup")).toHaveLength(hangups);
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+
+    // The second provider report of the same fact is a cheap ignore.
+    const again = await h.legEvent(call.callControlId, "call.playback.ended", { status: "call_hangup" });
+    expect(again).toMatchObject({ outcome: "ignored", notes: ["playback call_hangup: customer already gone at provider"] });
+    expect(meta(h, call.sessionId).customer_gone_at).toBe(goneAt);
+
+    // An operator becomes available and the queue offer is due: no dial for a gone caller.
+    h.setPresence(PROFILES.o1, { status: "available" });
+    h.touchDevice(PROFILES.o1);
+    h.advance(6_000);
+    await sweep(h);
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
+    expect(h.session(call.sessionId).state).toBe("waiting");
+    expect(sweepEvents(h, call.sessionId).at(-1)).toMatchObject({ handled_status: "ignored", normalized_payload: { notes: ["sweep: customer already gone at provider"] } });
+    expect(meta(h, call.sessionId).queue?.next_offer_at).toBeDefined();
+
+    // The exact hangup still does everything: leg end from the provider clock,
+    // `onCustomerHangup`, exactly one missed callback.
+    h.advance(1_000);
+    const hungUpAt = h.now().toISOString();
+    const hangup = await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "caller" });
+    expect(hangup).toMatchObject({ outcome: "processed" });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: hungUpAt });
+    expect(customerLeg(h, call)).toMatchObject({ ended_at: hungUpAt, hangup_cause: "normal_clearing" });
+    expect(h.rows("motorist_callback_requests").map((row) => row.source)).toEqual(["missed"]);
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
+  });
+
+  it("hangs up a late operator answer for a gone caller instead of bridging a dead leg", async () => {
+    const { h, call } = await waitingQueued();
+    h.setPresence(PROFILES.o1, { status: "available" });
+    h.touchDevice(PROFILES.o1);
+    h.advance(6_000);
+    await sweep(h);
+    const offer = h.openLegFor(call.sessionId, PROFILES.o1)!;
+    expect(h.session(call.sessionId).state).toBe("ringing");
+
+    await h.legEvent(call.callControlId, "call.gather.ended", { status: "call_hangup", client_state: gather(h) });
+    expect(meta(h, call.sessionId).customer_gone_at).toBeTruthy();
+    const bridges = h.telnyx.of("bridge").length;
+    await h.legEvent(String(offer.telnyx_call_control_id), "call.answered");
+    expect(h.telnyx.of("bridge")).toHaveLength(bridges);
+    expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(offer.telnyx_call_control_id);
+    expect(h.session(call.sessionId).state).not.toBe("talking");
+    expect(customerLeg(h, call).ended_at).toBeNull();
+  });
+
+  it("rejects a manual pickup for a gone caller before reserving or dialling the operator", async () => {
+    const { h, call } = await waitingQueued();
+    await h.legEvent(call.callControlId, "call.gather.ended", { status: "call_hangup", client_state: gather(h) });
+    h.setPresence(PROFILES.o1, { status: "available" });
+    h.touchDevice(PROFILES.o1);
+    const dials = h.telnyx.of("dial").length;
+    await expect(pickupWaitingCall(h.deps, actor, call.sessionId)).rejects.toMatchObject({ status: 409, code: "not_waiting" });
+    // Also protect the reducer, including internal callers bypassing the action preflight.
+    await expect(runSessionEvent(h.deps, call.sessionId, {
+      kind: "app", type: "pickup", id: "pickup-after-customer-gone", actorProfileId: PROFILES.o1,
+      occurredAt: h.now().toISOString(), picker: { profileId: PROFILES.o1, sipUri: "sip:gencred001@sip.telnyx.com" },
+    })).rejects.toMatchObject({ status: 409 });
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
+    expect(h.presence(PROFILES.o1)).toMatchObject({ status: "available", current_session_id: null });
+    expect(customerLeg(h, call).ended_at).toBeNull();
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+  });
+
+  it("gather cancelled stays a plain ignore", async () => {
+    for (const status of ["cancelled", "cancelled_amd"]) {
+      const { h, call } = await waitingQueued();
+      const dials = h.telnyx.of("dial").length;
+      const result = await h.legEvent(call.callControlId, "call.gather.ended", { status, client_state: gather(h) });
+      expect(result).toMatchObject({ outcome: "ignored", notes: [`gather ${status}`] });
+      expect(meta(h, call.sessionId).customer_gone_at).toBeUndefined();
+      h.setPresence(PROFILES.o1, { status: "available" });
+      h.touchDevice(PROFILES.o1);
+      h.advance(6_000);
+      await sweep(h);
+      expect(h.telnyx.of("dial")).toHaveLength(dials + 1);
+    }
+  });
+
+  it("greeting branch unchanged", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ completeGreeting: false });
+    expect(h.session(call.sessionId).state).toBe("greeting");
+    const greeting = h.telnyx.of("playbackStart").find((entry) => entry.params.callControlId === call.callControlId)!;
+    const result = await h.legEvent(call.callControlId, "call.playback.ended", { status: "call_hangup", client_state: greeting.params.clientState });
+    expect(result).toMatchObject({ outcome: "ignored", notes: ["introduction interrupted by hangup"] });
+    expect(meta(h, call.sessionId).customer_gone_at).toBeUndefined();
+    expect(h.session(call.sessionId).state).toBe("greeting");
+  });
+
+  it("a late exact hangup corrects a synthetic close without commands", async () => {
+    const h = createTelephonyHarness();
+    const call = await talkingCall(h);
+    const t0 = h.now().toISOString();
+    await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "caller" });
+    expect(h.session(call.sessionId).state).toBe("wrap_up");
+    h.advance(3 * 60_000);
+    const staleAt = h.now().toISOString();
+    await sweep(h);
+    const operator = () => h.legs(call.sessionId).find((leg) => leg.telnyx_call_control_id === call.o1)!;
+    expect(operator()).toMatchObject({ hangup_cause: "stale_finalise", ended_at: staleAt });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: staleAt });
+
+    const commands = h.telnyx.calls.length;
+    const presence = { ...h.presence(PROFILES.o1) };
+    h.setNow(plus(h, 5_000 - 3 * 60_000));
+    const exactAt = h.now().toISOString();
+    expect(Date.parse(exactAt)).toBe(Date.parse(t0) + 5_000);
+    const late = await h.legEvent(call.o1, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "callee" });
+    expect(late).toMatchObject({ outcome: "processed", notes: ["provider end corrected"] });
+    expect(operator()).toMatchObject({ state: "ended", ended_at: exactAt, hangup_cause: "normal_clearing", hangup_source: "callee" });
+    // The stored session end came from the same synthetic close: max(customer T0, operator T+5).
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: exactAt });
+    expect(h.call(call.sessionId)?.ended_at).toBe(exactAt);
+    expect(h.telnyx.calls).toHaveLength(commands);
+    expect(h.presence(PROFILES.o1)).toEqual(presence);
+  });
+
+  it("a genuine duplicate is still ignored", async () => {
+    const h = createTelephonyHarness();
+    const call = await talkingCall(h);
+    h.advance(10_000);
+    const endedAt = h.now().toISOString();
+    await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "caller" });
+    expect(customerLeg(h, call)).toMatchObject({ ended_at: endedAt, hangup_cause: "normal_clearing" });
+    const session = { ...h.session(call.sessionId) };
+
+    h.setNow(plus(h, -5_000));
+    const duplicate = await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "caller" });
+    expect(duplicate).toMatchObject({ outcome: "ignored", notes: ["duplicate hangup"] });
+    expect(customerLeg(h, call)).toMatchObject({ ended_at: endedAt, hangup_cause: "normal_clearing", hangup_source: "caller" });
+    expect(h.session(call.sessionId)).toMatchObject({ state: session.state, ended_at: session.ended_at });
+  });
+
+  it("session end never precedes the customer's end", async () => {
+    const h = createTelephonyHarness();
+    const call = await talkingCall(h);
+    const t0 = h.now().getTime();
+    await hangupCall(h.deps, actor, call.sessionId);
+    expect(h.session(call.sessionId).state).toBe("wrap_up");
+    expect(h.telnyx.of("hangup").map((entry) => entry.params.callControlId)).toEqual(expect.arrayContaining([call.callControlId, call.o1]));
+
+    h.setNow(new Date(t0 + 20_000).toISOString());
+    const operatorEnd = h.now().toISOString();
+    await h.legEvent(call.o1, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "callee" });
+    expect(h.legs(call.sessionId).find((leg) => leg.telnyx_call_control_id === call.o1)).toMatchObject({ ended_at: operatorEnd });
+    // The customer's hangup is lost; the stale sweep closes the leg minutes later.
+    h.setNow(new Date(t0 + 200_000).toISOString());
+    const staleAt = h.now().toISOString();
+    await sweep(h);
+    expect(customerLeg(h, call)).toMatchObject({ hangup_cause: "stale_finalise", ended_at: staleAt });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: staleAt });
+
+    const commands = h.telnyx.calls.length;
+    h.setNow(new Date(t0 + 10_000).toISOString());
+    const customerEnd = h.now().toISOString();
+    const late = await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "caller" });
+    expect(late).toMatchObject({ outcome: "processed", notes: ["provider end corrected"] });
+    expect(customerLeg(h, call)).toMatchObject({ ended_at: customerEnd, hangup_cause: "normal_clearing" });
+    // Corrected downwards to the latest leg end, never below the customer's end.
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: operatorEnd });
+    expect(h.call(call.sessionId)).toMatchObject({ ended_at: operatorEnd, duration_seconds: 20 });
+    expect(h.telnyx.calls).toHaveLength(commands);
+  });
+
+  it("session ended_at is the latest leg end after an out-of-order operator hangup", async () => {
+    const h = createTelephonyHarness();
+    const call = await talkingCall(h);
+    const t0 = h.now().getTime();
+    h.setNow(new Date(t0 + 10_000).toISOString());
+    const customerEnd = h.now().toISOString();
+    await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "caller" });
+    expect(h.session(call.sessionId).state).toBe("wrap_up");
+    expect(h.call(call.sessionId)?.ended_at).toBe(customerEnd);
+
+    // The operator's hangup happened first at the provider but applied later.
+    h.setNow(new Date(t0 + 5_000).toISOString());
+    await h.legEvent(call.o1, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "callee" });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: customerEnd });
+    expect(h.call(call.sessionId)?.ended_at).toBe(customerEnd);
   });
 });

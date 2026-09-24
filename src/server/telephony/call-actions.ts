@@ -28,6 +28,7 @@ import {
   ACTIVE_SESSION_STATES,
   emptyTransition,
   LEG_TIME_LIMIT_SECS,
+  readMeta,
   TALKING_STATES,
   toJson,
   type AppEvent,
@@ -68,6 +69,21 @@ export type CallActionDeps = SessionRunnerDeps & {
 // --- rate limit --------------------------------------------------------------
 
 export const OUTBOUND_RATE_LIMIT = { limit: 10, windowMs: 60_000 } as const;
+
+/**
+ * Lease budget for the two clicks an operator cannot re-issue safely by hand.
+ *
+ * The global `LEASE_WAIT_MS` (3 s) is tuned so a hold/unhold click outlasts a
+ * webhook waiting `WEBHOOK_LEASE_WAIT_MS`; it is not tuned for the median
+ * command-bearing handler (7 s on 21 Sep) that a pickup or hangup lands on.
+ * Hangup has already committed its durable intent before it waits, so a
+ * longer wait loses nothing; pickup has reserved nothing yet, so waiting is
+ * free of side effects. Both stay far inside the 30 s control budget of the
+ * browser (`TELEPHONY_TIMEOUT_MS.control`) and do not consume `SESSION_WORK_MS`,
+ * which starts at acquisition.
+ */
+export const PICKUP_LEASE_WAIT_MS = 8_000;
+export const HANGUP_LEASE_WAIT_MS = 8_000;
 
 export type RateLimiter = {
   /** Returns true when the call is allowed; counts it. */
@@ -439,7 +455,12 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
       // returning accepted HTTP identity. Cron consumes this same obligation.
       return completeDurableInitialDial(deps, session, id, plan);
     }
-    const recovered = await recoverInitialDial(deps, session, id, plan);
+    // Read the snapshot under the lease even for a fresh POST: an identical
+    // retry may have acquired it between INSERT and this acquisition. Only an
+    // untouched new row can have no earlier dispatch to recover.
+    const fresh = !recovering && session.version === original.version && session.state === "received" &&
+      !session.ended_at && !session.termination_requested_at && !readPendingEffects(session).entries.length;
+    const recovered = fresh ? null : await recoverInitialDial(deps, session, id, plan);
     if (recovered) return recovered;
     if (plan.callbackRequestId) {
       const linked = await deps.admin.rpc("motorist_link_callback_outbound_v1", { p_organization_id: deps.organizationId,
@@ -467,7 +488,7 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
       refused.call = { status: "failed", end_reason: "dial_failed" };
       refused.presence = [{ profileId: actor.profileId, status: "available", sessionId: null,
         onlyIfSession: session.id, onlyIfToken: reservation.offerToken ?? undefined, reason: "initial dial refused" }];
-      const beforeStage = await loadSession(deps, session.id);
+      const beforeStage = plan.callbackRequestId ? await loadSession(deps, session.id) : session;
       const staged = await stageEffects(effectsFor(deps), { session: beforeStage, expectedVersion: beforeStage.version,
         event: { kind: "app", type: "sweep", id: startupEntryId, actorProfileId: actor.profileId, occurredAt: nowOf(deps).toISOString() },
         result: { next, commands: [dial], compensations: [{ forCommand: id, description: "release refused initial dial", commands: [], next: refused }], guard: null, ignored: null } });
@@ -488,7 +509,7 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
       await releaseOperator(deps.admin, { profileId: actor.profileId, sessionId: session.id, status: "available", now: nowOf(deps), expectedToken: reservation.offerToken ?? undefined, expectedRevision: reservation.revision });
       throw toActionError(error, "Hovor sa nepodarilo vytočiť.");
     }
-  });
+  }, { known: original });
 }
 
 async function completeDurableInitialDial(deps: CallActionDeps, session: SessionRow, id: string,
@@ -625,7 +646,8 @@ export async function parkCall(deps: CallActionDeps, actor: CallActor, sessionId
 
 export async function hangupCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
-  return runAction(deps, session, appEvent("hangup", actor, deps), "Ukončenie hovoru zlyhalo.");
+  // Per-action budget, the same mechanism sweeps use to wait 0 ms (`runSessionEvent`).
+  return runAction({ ...deps, leaseWaitMs: HANGUP_LEASE_WAIT_MS }, session, appEvent("hangup", actor, deps), "Ukončenie hovoru zlyhalo.");
 }
 
 /**
@@ -703,24 +725,30 @@ export async function cancelConsult(deps: CallActionDeps, actor: CallActor, sess
 }
 
 export async function pickupWaitingCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
-  return ownedSessionWork(deps, sessionId, () => pickupWaitingCallOwned(deps, actor, sessionId));
+  return ownedSessionWork({ ...deps, leaseWaitMs: PICKUP_LEASE_WAIT_MS }, sessionId, () => pickupWaitingCallOwned(deps, actor, sessionId), { eventType: "app.pickup" });
 }
 
 async function pickupWaitingCallOwned(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   requireConfigured(deps);
-  await assertLegBudget(deps);
-  const session = await loadSession(deps, sessionId);
+  // All reads remain inside ownership. Settle them together, then retain the
+  // original error priority: budget, session/admission, presence, device.
+  const [budgetResult, sessionResult, presenceResult, deviceResult] = await Promise.allSettled([
+    assertLegBudget(deps),
+    loadSession(deps, sessionId),
+    deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", deps.organizationId).eq("profile_id", actor.profileId).maybeSingle(),
+    getOperatorDevice(deviceDeps(deps), { organizationId: deps.organizationId, profileId: actor.profileId }),
+  ]);
+  if (budgetResult.status === "rejected") throw budgetResult.reason;
+  if (sessionResult.status === "rejected") throw sessionResult.reason;
+  const session = sessionResult.value;
   const priorPickup = session.presence_pickup as { profileId?: string } | null;
+  if (readMeta(session).customer_gone_at || readMeta(session).gather?.call_gone) {
+    throw new CallActionError("Volajúci už ukončil hovor.", 409, "not_waiting");
+  }
   const resumingOwnPickup = priorPickup?.profileId === actor.profileId && (!session.answered_by_profile_id || session.answered_by_profile_id === actor.profileId);
   if (deps.deviceKind !== "mobile" && !resumingOwnPickup && !canPickUpCall({ state: session.state, direction: session.direction, answered: Boolean(session.answered_at), operatorProfileId: session.answered_by_profile_id })) {
     throw new CallActionError("Hovor už nie je možné prevziať.", 409, "not_waiting");
   }
-  // Only the raw reads overlap. Settle both to handle an early device failure
-  // while retaining presence-query, device, then presence-admission error order.
-  const [presenceResult, deviceResult] = await Promise.allSettled([
-    deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", session.organization_id).eq("profile_id", actor.profileId).maybeSingle(),
-    getOperatorDevice(deviceDeps(deps), { organizationId: deps.organizationId, profileId: actor.profileId }),
-  ]);
   if (presenceResult.status === "rejected") throw presenceResult.reason;
   const presence = presenceResult.value;
   if (presence.error) throw new CallActionError(`Prezenciu sa nepodarilo overiť: ${presence.error.message}`, 500);

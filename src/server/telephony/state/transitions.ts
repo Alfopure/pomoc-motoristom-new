@@ -6,10 +6,11 @@ import { announcementConfigFromMetadata, resolveAnnouncement, resolveCombinedInb
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { classifyRingHangup } from "../routing/eligibility";
 import { decideIvr, describeIvrDecision, ivrGatherSpec, type IvrGatherOutcome } from "../routing/ivr";
-import { memberKey, planRingStep, stepDeadline, toEligibilityDevices, toEligibilityPresence, type RingStepPlanResult } from "../routing/ring-plan";
+import { memberKey, planQueueStep, queueOperatorMembers, planRingStep, stepDeadline, toEligibilityDevices, toEligibilityPresence, type RingStepPlanResult } from "../routing/ring-plan";
 import type { TelnyxClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
 import { reduceRecording } from "./recording";
+import { readPendingEffects } from "./continuation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { contactOperationIntent } from "../contact-proof";
 import {
@@ -99,7 +100,6 @@ const PARTY_INTENT = "party";
 const SUPERVISE_INTENT = "supervise";
 export const STALE_FINALISE_MS = 120_000;
 const QUEUE_RECHECK_MS = 5_000;
-const QUEUE_OPERATOR_RETRY_MS = 60_000;
 /**
  * How long the queue keeps finding nobody to ring before it tries the numbers
  * it otherwise never redials — zero when the organisation has turned it off.
@@ -377,6 +377,57 @@ function hangupOrphanLeg(b: TransitionBuilder, callControlId: string, role: Call
   b.leg(callControlId, { role, state: "ended", ended_at: b.nowIso, hangup_cause: "terminal_session" }, true);
 }
 
+/**
+ * `call.gather.ended` / `call.playback.ended` with `status: "call_hangup"` is the
+ * provider saying the customer leg is already gone while its `call.hangup` has
+ * not applied yet (it lost the lease race, M12/M13). Record only that fact:
+ * no leg write, no state, no command, no callback — the exact hangup does all
+ * of that when it lands. Every dial path reads the marker.
+ */
+function markCustomerGone(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent, source: "gather" | "playback"): ReduceResult {
+  if (!isCustomer(leg) || !b.session.customer_leg_id || leg.id !== b.session.customer_leg_id) return ignoredResult(`${source} call_hangup`);
+  if (b.meta.customer_gone_at) return ignoredResult(`${source} call_hangup: customer already gone at provider`);
+  b.patchMeta({ customer_gone_at: event.occurredAt ?? b.nowIso });
+  return b.note("customer gone at provider").result();
+}
+
+/** Causes our own closers stamp with `nowIso` instead of the provider's clock. */
+const SYNTHETIC_HANGUP_CAUSES: ReadonlySet<string> = new Set(["stale_finalise", "reconciled", "terminal_session", "step_timeout", "orphan_sweep"]);
+
+/**
+ * A late exact `call.hangup` for a leg one of our fallback closers already
+ * ended (M22). The provider's `occurred_at` is the truth; the synthetic stamp
+ * was a guess made minutes later. Rewrites only timestamps and provenance:
+ * no command, no presence, no state — the close already happened. Skipped
+ * while effects are pending (an `ended_at` change bumps the effect generation)
+ * and for our own reconcile probe, which carries no provider clock.
+ */
+function correctProviderEnd(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent): ReduceResult | null {
+  if (!leg.ended_at || !leg.hangup_cause || !SYNTHETIC_HANGUP_CAUSES.has(leg.hangup_cause)) return null;
+  if (!event.occurredAt || event.hangupCause === "reconciled") return null;
+  const exact = Date.parse(event.occurredAt), stored = Date.parse(leg.ended_at);
+  if (!Number.isFinite(exact) || !Number.isFinite(stored) || exact >= stored) return null;
+  if (readPendingEffects(b.session).entries.length > 0) return null;
+  b.leg(leg.telnyx_call_control_id, { ended_at: event.occurredAt, hangup_cause: event.hangupCause, hangup_source: event.hangupSource });
+  const state = b.session.state;
+  const terminal = TERMINAL_STATES.has(state) || state === "wrap_up" || state === "missed";
+  // The stored session end came from the same synthetic close when it equals
+  // the leg's stamp (`onStaleFinalise` stamps both with one `nowIso`); the
+  // customer's end always bounds the session end from below.
+  if (terminal && b.session.ended_at && (isCustomer(leg) || b.session.ended_at === leg.ended_at)) {
+    const end = latestIso(event.occurredAt, ...b.legs.filter((other) => other.telnyx_call_control_id !== leg.telnyx_call_control_id).map((other) => other.ended_at));
+    if (end !== b.session.ended_at) b.patchSession({ ended_at: end });
+    if (isCustomer(leg)) b.call.ended_at = end; // `upsertCallRow` recomputes `duration_seconds`
+  }
+  return b.note("provider end corrected").result();
+}
+
+function latestIso(first: string, ...rest: Array<string | null | undefined>): string {
+  let latest = first;
+  for (const value of rest) if (value && Number.isFinite(Date.parse(value)) && Date.parse(value) > Date.parse(latest)) latest = value;
+  return latest;
+}
+
 function gatherCmd(b: TransitionBuilder, leg: LegRow, spec: GatherSpec, intentSuffix = ""): Command {
   const id = b.cmdId(leg.telnyx_call_control_id, `gather:${spec.purpose}${intentSuffix}`);
   const gatherId = id.replaceAll("-", "").slice(0, 12);
@@ -606,6 +657,9 @@ function onInitiated(b: TransitionBuilder, event: TelephonyEvent): ReduceResult 
   if (!leg.to_number && event.to) values.to_number = event.to;
   if (!leg.from_number && event.from) values.from_number = event.from;
   if (leg.state === "initiated" && event.direction === "outgoing") values.state = "ringing";
+  if (b.ctx.lean && !isCustomer(leg) && Object.entries(values).every(([key, value]) => leg[key as keyof LegRow] === value)) {
+    return ignoredResult("initiated leg already recorded");
+  }
   b.leg(leg.telnyx_call_control_id, values);
 
   if (isCustomer(leg) && b.session.direction === "inbound" && b.session.state === "received" && !leg.answered_at) {
@@ -932,6 +986,9 @@ function callerDisplay(b: TransitionBuilder): string | undefined {
 }
 
 function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, planned: RingStepPlanResult, guard: RingFanout["guard"]): void {
+  // The single choke point for every `POST /calls` of a ring step: never dial
+  // for a caller the provider already reported gone (M12).
+  if (b.meta.customer_gone_at) { b.note("customer gone at provider → no dial"); return; }
   const devices = new Map(b.ctx.devices.map((device) => [device.profile_id, device]));
   const from = b.ctx.fromNumber ?? b.session.called_number ?? "";
   const dials: DialCommand[] = [];
@@ -1105,27 +1162,6 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
 }
 
 /**
- * Browser operators the queue may re-offer to, oldest offer first.
- *
- * `dueNow` applies the retry gate: an operator is only offered the call again
- * a minute after their last offer, so a queue of one unresponsive operator
- * rings them once a minute rather than every five seconds. Without the gate
- * the same list answers a different question — is there anybody here at all —
- * which is what decides whether the queue is idle.
- */
-function queueOperatorMembers(b: TransitionBuilder, plan: FrozenRingPlan, opts: { dueNow: boolean }): FrozenRingMember[] {
-  const lastOffered = new Map<string, number>();
-  for (const attempt of b.attemptsView()) if (attempt.profile_id) {
-    lastOffered.set(attempt.profile_id, Math.max(lastOffered.get(attempt.profile_id) ?? 0, Date.parse(attempt.offered_at ?? attempt.created_at)));
-  }
-  return [...new Map([...(plan.queueMembers ?? []), ...plan.steps.flatMap((step) => step.members)]
-    .filter((member) => member.kind === "operator" && member.profileId)
-    .map((member) => [member.profileId, member])).values()]
-    .filter((member) => !opts.dueNow || (lastOffered.get(member.profileId!) ?? 0) + QUEUE_OPERATOR_RETRY_MS <= b.ctx.now.getTime())
-    .sort((a, z) => (lastOffered.get(a.profileId!) ?? 0) - (lastOffered.get(z.profileId!) ?? 0) || a.position - z.position);
-}
-
-/**
  * The numbers the queue normally leaves alone: external backups and the
  * personal mobiles resolved from the ring groups.
  *
@@ -1141,10 +1177,10 @@ function queueBackupMembers(b: TransitionBuilder, plan: FrozenRingPlan): FrozenR
     .sort((a, z) => a.position - z.position);
 }
 
-function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
+function offerQueuedCall(b: TransitionBuilder, customer: LegRow): boolean {
   const queue = b.meta.queue;
   const plan = b.ringPlan();
-  if (!queue || !plan?.steps[0] || b.session.answered_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return;
+  if (!queue || !plan?.steps[0] || b.session.answered_at || b.meta.customer_gone_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return false;
 
   // How long the queue has been placing no offers at all. Not how long the
   // caller has waited: a queue that keeps ringing an operator who declines is
@@ -1157,27 +1193,27 @@ function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
   const escalating = escalateAfterMs > 0 && !queue.escalated_at && idleFor >= escalateAfterMs;
 
   const index = b.session.current_step;
-  const planQueueStep = (members: FrozenRingMember[]) => planRingStep(
-    { index, groupId: plan.steps[0].groupId, groupName: "Čakáreň", strategy: "ordered", timeoutSecs: 20,
-      members: members.map((member, position) => ({ ...member, position, ringSecs: Math.max(20, member.ringSecs) })) },
+  const choose = (members: FrozenRingMember[]) => planQueueStep(plan, index, members,
     { ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
       sessionId: b.session.id, now: b.ctx.now, presence: toEligibilityPresence(b.ctx.presence), devices: toEligibilityDevices(b.ctx.devices),
-      openOffers: b.ctx.openOffers, attempted: new Set(), maxFanout: 1, maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, activeLegCount: b.ctx.activeLegCount },
-  );
+      openOffers: b.ctx.openOffers, attempted: new Set(), maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, activeLegCount: b.ctx.activeLegCount });
 
-  const planned = planQueueStep(escalating ? queueBackupMembers(b, plan) : queueOperatorMembers(b, plan, { dueNow: true }));
+  const planned = choose(escalating ? queueBackupMembers(b, plan) : queueOperatorMembers(plan, b.attemptsView(), b.ctx.now, true));
   // An operator sitting out the minute between offers is not "nobody to ring";
   // with the gate at a minute and the escalation at two, counting them as idle
   // would escalate every call that rings the same person twice.
   const reachable = Boolean(planned.attempts.length) ||
-    (!escalating && planQueueStep(queueOperatorMembers(b, plan, { dueNow: false })).attempts.length > 0);
+    (!escalating && choose(queueOperatorMembers(plan, b.attemptsView(), b.ctx.now, false)).attempts.length > 0);
+
+  const nextIdle = reachable ? null : (queue.idle_since ?? b.nowIso);
+  if (!planned.attempts.length && !escalating && nextIdle === (queue.idle_since ?? null)) return false;
 
   b.patchMeta({ queue: {
     next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString(),
     // The clock restarts as soon as somebody is reachable, and the escalation
     // is spent whether or not it found a number to ring — one per call either
     // way, so a half-hour queue cannot become a sequence of paid redials.
-    idle_since: reachable ? null : (queue.idle_since ?? b.nowIso),
+    idle_since: nextIdle,
     escalated_at: escalating ? b.nowIso : (queue.escalated_at ?? null),
   } });
 
@@ -1187,6 +1223,7 @@ function offerQueuedCall(b: TransitionBuilder, customer: LegRow): void {
   } else if (escalating) {
     b.note(`queue has nobody to ring and no backup number after ${Math.round(idleFor / 1000)} s`);
   }
+  return true;
 }
 
 /** Outbound/internal: the far end answered → the bridge command placed at dial time completes. */
@@ -1314,6 +1351,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
     customer !== undefined &&
     !b.legEnded(customer) &&
     !b.meta.gather?.call_gone &&
+    !b.meta.customer_gone_at &&
     ((b.session.state === "ringing" && !b.session.answered_by_profile_id) ||
       (WAITING_STATES.has(b.session.state) && intent === "pickup") ||
       (b.session.state === "ringing" && b.meta.ring?.mode !== "plan" && intent !== "ring"));
@@ -1541,7 +1579,7 @@ function onHangup(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
     leg = syntheticLeg(b, event, state);
     b.leg(leg.telnyx_call_control_id, { ...legValuesFromSynthetic(leg), state: "ended", ended_at: at, hangup_cause: event.hangupCause, hangup_source: event.hangupSource }, true);
   } else {
-    if (leg.ended_at) return ignoredResult("duplicate hangup");
+    if (leg.ended_at) return correctProviderEnd(b, leg, event) ?? ignoredResult("duplicate hangup");
     b.leg(leg.telnyx_call_control_id, { state: "ended", ended_at: at, hangup_cause: event.hangupCause, hangup_source: event.hangupSource });
   }
 
@@ -1699,15 +1737,17 @@ function releaseTalkingOperators(b: TransitionBuilder, wrapUp: boolean): void {
   }
 }
 
-/** Moves the session to `ended` once every leg is terminal. */
+/** Moves the session to `ended` once every leg is terminal. The session end is
+ *  the latest leg end, never an earlier out-of-order hangup (64ccfab6, M22). */
 function finishIfQuiet(b: TransitionBuilder, at: string): void {
   if (b.openLegs().length > 0) return;
+  const end = latestIso(at, ...b.legs.map((leg) => leg.ended_at));
   if (b.state === "ended" || b.state === "failed") {
-    if (!b.session.ended_at) b.patchSession({ ended_at: at });
+    if (!b.session.ended_at) b.patchSession({ ended_at: end });
     return;
   }
-  b.setState("ended").patchSession({ ended_at: at });
-  if (!b.call.ended_at) b.call.ended_at = at;
+  b.setState("ended").patchSession({ ended_at: end });
+  if (!b.call.ended_at) b.call.ended_at = end;
   b.note("all legs ended → ended");
 }
 
@@ -1939,7 +1979,8 @@ function onGatherEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceResul
   const leg = b.findLeg(event.callControlId);
   if (!leg || !isCustomer(leg)) return ignoredResult("gather on a non-customer leg");
   if (b.legEnded(leg)) return ignoredResult("customer leg ended");
-  if (event.status === "call_hangup" || event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`gather ${event.status}`);
+  if (event.status === "call_hangup") return markCustomerGone(b, leg, event, "gather");
+  if (event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`gather ${event.status}`);
   const purpose = event.clientState?.intent ?? null;
   // `invalid` means the caller pressed a key that is not on the menu; the menu
   // has to re-prompt for it, so it must not be flattened into "nothing pressed"
@@ -2157,7 +2198,8 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
     return b.result();
   }
   if (event.clientState?.intent === "greeting" || event.clientState?.intent === "greeting_retry") return ignoredResult("introduction already finished");
-  if (event.status === "call_hangup" || event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`playback ${event.status}`);
+  if (event.status === "call_hangup") return markCustomerGone(b, leg, event, "playback");
+  if (event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`playback ${event.status}`);
   const state = b.session.state;
   if (state === "missed" && b.meta.closing_message && event.clientState?.intent === "closing_message") {
     b.cmd(hangupCmd(b, leg, "closing_message", false));
@@ -2411,6 +2453,9 @@ function appMobileOffer(b: TransitionBuilder, customer: LegRow, event: AppEvent)
 }
 
 function appPickup(b: TransitionBuilder, customer: LegRow, event: AppEvent): ReduceResult {
+  if (b.meta.customer_gone_at || b.meta.gather?.call_gone || b.legEnded(customer)) {
+    throw new CallActionRejected("Volajúci už ukončil hovor.", 409);
+  }
   if (b.ctx.activeLegCount >= b.ctx.settings.maxConcurrentLegs) throw new CallActionRejected("Kapacita hovorov je obsadená. Skúste to o chvíľu.", 409);
   if (event.picker?.mobile && !canPickUpCall({ state: b.session.state, direction: b.session.direction, answered: Boolean(b.session.answered_at), operatorProfileId: b.session.answered_by_profile_id })) return appMobileOffer(b, customer, event);
   if (!canPickUpCall({ state: b.session.state, direction: b.session.direction, answered: Boolean(b.session.answered_at), operatorProfileId: b.session.answered_by_profile_id })) {
@@ -2925,6 +2970,7 @@ function onSweep(b: TransitionBuilder): ReduceResult {
   const meta = b.meta;
 
   if (meta.gather?.call_gone) return ignoredResult("sweep: gather customer already gone at provider");
+  if (meta.customer_gone_at) return ignoredResult("sweep: customer already gone at provider");
   if (meta.queue && meta.waiting) {
     const deadline = Date.parse(meta.waiting.since) + (meta.waiting.max_minutes ?? b.ctx.settings.parkMaxMinutes) * 60_000;
     if (b.ctx.now.getTime() >= deadline) return onWaitingTick(b, customer);
@@ -2976,7 +3022,7 @@ function onSweep(b: TransitionBuilder): ReduceResult {
     const last = Date.parse(meta.waiting?.last_tick_at ?? meta.waiting?.since ?? b.session.parked_at ?? b.session.updated_at);
     if (!Number.isNaN(last) && last + WAITING_TICK_STALE_MS >= b.ctx.now.getTime()) {
       if (meta.queue && b.ctx.now.getTime() >= Date.parse(meta.queue.next_offer_at)) {
-        offerQueuedCall(b, customer);
+        if (!offerQueuedCall(b, customer)) return ignoredResult("sweep: queue has no new offer");
         return b.note("sweep: queued offer rechecked").result();
       }
       return ignoredResult("sweep: tick fresh");
@@ -2989,7 +3035,7 @@ function onSweep(b: TransitionBuilder): ReduceResult {
 
 /** Recover only the current interaction; ordinary IVR never proves a recording notice. */
 function recoverGather(b: TransitionBuilder, customer: LegRow): ReduceResult {
-  if (b.meta.gather?.call_gone || b.meta.hangup || b.session.ended_at || b.legEnded(customer)) return ignoredResult("gather recovery: caller gone");
+  if (b.meta.gather?.call_gone || b.meta.customer_gone_at || b.meta.hangup || b.session.ended_at || b.legEnded(customer)) return ignoredResult("gather recovery: caller gone");
   const choice = b.meta.callback;
   const retryConfirmation = Boolean(choice?.confirmed && !choice.closing_at && !choice.confirmation_retry && choice.event_id && choice.digit);
   // A failed insert may have persisted the closing/retry marker first. Every

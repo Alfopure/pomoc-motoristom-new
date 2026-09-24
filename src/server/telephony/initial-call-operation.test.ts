@@ -56,6 +56,20 @@ function prepared() {
 }
 
 describe("initial call operation recovery", () => {
+  it("skips journal recovery only for a newly created, untouched session", async () => {
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ data: { call_control_id: "new-own-leg", call_leg_id: "new-leg-id", call_session_id: "new-provider-session" } }), { status: 200 }));
+    const telnyx = createTelnyxClient({ config: h.deps.config, fetch, liveGate: { callsEnabled: true, smsEnabled: false } });
+    const deps = { ...h.deps, telnyx, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) };
+    const input = { to: NUMBERS.customer, requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
+    const first = await startOutboundCall(deps, actor, input);
+    expect(h.db.log.filter(row => row.table === "motorist_provider_command_lookup_v2")).toHaveLength(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const retried = await startOutboundCall(deps, actor, input);
+    expect(retried.operatorLegCallControlId).toBe(first.operatorLegCallControlId);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(h.db.log.some(row => row.table === "motorist_provider_command_lookup_v2")).toBe(true);
+  });
   it("returns completed startup evidence without rereading the accepted journal", async () => {
     const t = prepared();
     t.h.db.registerRpc("motorist_provider_command_lookup_v2", args => {

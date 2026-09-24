@@ -1,4 +1,4 @@
-import { measureRequestStep } from "@/server/request-metrics";
+import { measureRequestStep, observeDatabaseTimeout, registerDatabaseOrigin } from "@/server/request-metrics";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/database.types";
@@ -14,6 +14,14 @@ export const SESSION_LEASE_MS = 15_000;
  */
 export const OWNERSHIP_RENEW_SKIP_MS = 5_000;
 export const DATABASE_REQUEST_MS = 4_000;
+/**
+ * Cap for un-owned PostgREST reads (GET/HEAD on `/rest/v1/`): bounds a hung
+ * socket or a silent postgrest-js GET retry without touching writes, storage
+ * or auth admin calls, which share this transport app-wide. Larger than
+ * `DATABASE_REQUEST_MS` on purpose: owned reads run under a lease deadline and
+ * are small by construction; un-owned reads include reports and exports.
+ */
+export const UNOWNED_READ_MS = 10_000;
 export type Ownership = {
   admin: SupabaseClient<Database>;
   sessionId: string;
@@ -32,8 +40,33 @@ export type Ownership = {
 };
 export const sessionOwnership = new AsyncLocalStorage<Ownership>();
 
+/** The read cap for an un-owned PostgREST GET/HEAD, or null when the request is not one. */
+function unownedReadCap(input: RequestInfo | URL, init?: RequestInit): AbortSignal | null {
+  const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  if (method !== "GET" && method !== "HEAD") return null;
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.includes("/rest/v1/")) return null;
+  return AbortSignal.timeout(UNOWNED_READ_MS);
+}
+
+/**
+ * `AbortSignal.timeout` aborts a fetch with a `TimeoutError`, which
+ * postgrest-js does not recognise as an abort: it would retry a GET up to
+ * three more times with 1/2/4 s sleeps, each attempt under a fresh cap
+ * (~47 s for one hung read). Only `AbortError`/`ABORT_ERR` escapes that
+ * retry, so the cap is surfaced as one: it then bounds the whole read, not
+ * each attempt.
+ */
+function abortInsteadOfTimeout(error: unknown): never {
+  if ((error as { name?: unknown } | null)?.name === "TimeoutError") {
+    throw new DOMException(`un-owned read exceeded ${UNOWNED_READ_MS} ms`, "AbortError");
+  }
+  throw error;
+}
+
 /** The headers belong to this async invocation, never to a shared client. */
 export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  registerDatabaseOrigin(input);
   const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
   headers.set("x-telephony-writer", "2");
   const owner = sessionOwnership.getStore();
@@ -42,11 +75,20 @@ export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: Re
     headers.set("x-telephony-token", owner.token);
     headers.set("x-telephony-generation", String(owner.generation));
   }
-  if (!owner) return measureRequestStep("db", () => fetch(input, { ...init, headers }));
+  if (!owner) {
+    const cap = unownedReadCap(input, init);
+    if (!cap) return measureRequestStep("db", () => fetch(input, { ...init, headers }));
+    const signal = init?.signal ? AbortSignal.any([init.signal, cap]) : cap;
+    const detach = observeDatabaseTimeout(cap);
+    try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal }).catch(abortInsteadOfTimeout)); }
+    finally { detach(); }
+  }
   const remaining = owner.deadline - Date.now();
   if (remaining <= 0) throw new SessionLeaseLostError();
   const timeout = AbortSignal.timeout(Math.max(1, Math.min(DATABASE_REQUEST_MS, remaining)));
-  return measureRequestStep("db", () => fetch(input, { ...init, headers, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout }));
+  const detach = observeDatabaseTimeout(timeout);
+  try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout })); }
+  finally { detach(); }
 }
 
 export async function ownershipRpc<T>(admin: SupabaseClient<Database>, name: string, args: Record<string, unknown>): Promise<T> {
@@ -91,4 +133,34 @@ export async function assertOwnership(owner = sessionOwnership.getStore()): Prom
   });
   if (!ok) throw new SessionLeaseLostError();
   owner.renewedAt = Date.now();
+}
+
+
+const timings = new AsyncLocalStorage<{ now: () => Date; firstCommandAt: string | null; guard_ms: number; guard_stage_ms: number }>();
+
+/** A nested teardown gets its own timing and restores its parent's scope. */
+export function withProviderDispatchTiming<T>(now: () => Date, work: () => Promise<T>): Promise<T> {
+  return timings.run({ now, firstCommandAt: null, guard_ms: 0, guard_stage_ms: 0 }, work);
+}
+
+/** Called after journal admission, immediately before the actual provider send. */
+export function recordProviderDispatch(): void {
+  const scope = timings.getStore();
+  if (scope && scope.firstCommandAt === null) scope.firstCommandAt = scope.now().toISOString();
+}
+
+export function firstProviderDispatchAt(): string | null {
+  return timings.getStore()?.firstCommandAt ?? null;
+}
+
+export async function measureGuard<T>(kind: "guard_ms" | "guard_stage_ms", work: () => PromiseLike<T>): Promise<T> {
+  const scope = timings.getStore();
+  const started = performance.now();
+  try { return await work(); }
+  finally { if (scope) scope[kind] += Math.max(0, performance.now() - started); }
+}
+
+export function guardTiming(): { guard_ms: number; guard_stage_ms: number } | null {
+  const scope = timings.getStore();
+  return scope ? { guard_ms: Math.round(scope.guard_ms * 10) / 10, guard_stage_ms: Math.round(scope.guard_stage_ms * 10) / 10 } : null;
 }

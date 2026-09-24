@@ -1,4 +1,4 @@
-import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
+import { measureRequestStep, withRequestMetrics, withBackgroundRequestMetrics } from "@/server/request-metrics";
 import { after } from "next/server";
 
 import { requireDefaultMotoristActor } from "@/server/api-auth";
@@ -26,7 +26,8 @@ export const ACTIVE_SWEEP_INTERVAL_MS = 5_000;
  * The poll must answer fast, so this trigger is bounded: after an outage there
  * can be up to 200 overdue sessions and driving them all through a lease + a
  * reducer + Telnyx commands would blow the function limit and take the
- * operator's snapshot down with it. The cron pass runs unbounded.
+ * operator's snapshot down with it. The cron pass has its own, larger bound
+ * (`RING_SWEEP_LIMIT` / `RING_SWEEP_BUDGET_MS` in cron-jobs.ts).
  */
 export const ACTIVE_SWEEP_LIMIT = 4;
 export const ACTIVE_SWEEP_BUDGET_MS = 2_000;
@@ -38,11 +39,14 @@ async function maybeSweep(deps: TelephonyRuntimeDeps): Promise<void> {
   const now = Date.now();
   if (now - lastSweepAt < ACTIVE_SWEEP_INTERVAL_MS) return;
   lastSweepAt = now;
+  // Never passes `drainCustomerTerminal`: a poll-cadence caller must only skip
+  // a candidate whose customer hangup is pending (plan §7.5, M36).
   try {
     await sweepOverdueRingSteps({
       admin: deps.admin,
       organizationId: deps.organizationId,
-      runSessionEvent: (sessionId, event) => runSessionEvent(deps, sessionId, event),
+      environment: deps.environment,
+      runSessionEvent: (sessionId, event, options) => runSessionEvent(deps, sessionId, event, options),
       limit: ACTIVE_SWEEP_LIMIT,
       budgetMs: ACTIVE_SWEEP_BUDGET_MS,
     });
@@ -85,7 +89,7 @@ export async function GET() {
       }
       // A single session can outlast the sweep's start budget while waiting for
       // its lease or provider. Send the snapshot before any sweep work begins.
-      after(() => maybeSweep(deps));
+      after(withBackgroundRequestMetrics(() => maybeSweep(deps)));
 
       return Response.json(snapshot, { headers: { "Cache-Control": "private, no-store" } });
     } catch (error) {

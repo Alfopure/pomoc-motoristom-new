@@ -2,9 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeQueryBuilder } from "@/test/fake-supabase";
 import { registerCriticalWriteRpcs, registerProviderJournalRpcs } from "@/test/fake-stability";
 import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
-import { hangupCall, holdCall, unholdCall } from "./call-actions";
-import { ownedSessionWork } from "./session-runner";
-import { replayDeferredSessionEvents } from "./telnyx/event-processor";
+import { MIN_REMAINING_FOR_RETRY_MS } from "@/lib/telephony/call-control-retry";
+import { TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
+import { HANGUP_LEASE_WAIT_MS, hangupCall, holdCall, PICKUP_LEASE_WAIT_MS, unholdCall } from "./call-actions";
+import { LEASE_WAIT_MS, ownedSessionWork, WEBHOOK_LEASE_POLL_MS, WEBHOOK_LEASE_WAIT_MS } from "./session-runner";
+import { DEFERRED_DRAIN_DEADLINE_MS, drainCustomerTerminal, INLINE_DRAIN_BUDGET_MS, replayDeferredSessionEvents } from "./telnyx/event-processor";
+import { CUSTOMER_DRAIN_MIN_BUDGET_MS, sweepOverdueRingSteps } from "./routing/ring-plan";
+import { runSessionEvent } from "./session-runner";
+import { readMeta, toJson, type SessionRow } from "./state/types";
 import { sessionOwnership } from "./ownership";
 import { encodeClientState } from "./telnyx/client-state";
 
@@ -128,7 +133,8 @@ describe("contract-2 session contention", () => {
     const facts = ["call.playback.ended", "call.speak.ended", "conference.participant.joined", "conference.participant.left", "call.bridged"];
     const storm = await Promise.all(facts.map((type, index) => h.legEvent(call.callControlId, type, {}, `storm-${index}`)));
     expect(storm.every(result => result.status === 500 && result.outcome === "failed")).toBe(true);
-    // Each callback now retries inside `WEBHOOK_LEASE_WAIT_MS` instead of
+    // Each callback now polls the flat ladder inside `WEBHOOK_LEASE_WAIT_MS`
+    // (at most `WEBHOOK_LEASE_POLL_MS.length + 1` acquire RPCs) instead of
     // yielding on its first refusal. Giving up at once meant Telnyx redelivered
     // every one of them: 23 of 55 events failed outright on the heaviest test
     // call of 17 Sep, and their provider facts reached the session minutes late
@@ -138,7 +144,7 @@ describe("contract-2 session contention", () => {
     // lease never comes free.
     const attempts = lease.acquisitions().length - beforeStorm;
     expect(attempts).toBeGreaterThan(facts.length);
-    expect(attempts).toBeLessThanOrEqual(facts.length * 6);
+    expect(attempts).toBeLessThanOrEqual(facts.length * (WEBHOOK_LEASE_POLL_MS.length + 1));
     expect(h.rows("motorist_telnyx_webhook_events").filter(row => String(row.event_id).startsWith("storm-")))
       .toEqual(facts.map((_, index) => expect.objectContaining({ event_id: `storm-${index}`, retry_state: "deferred", effect_failure_count: 0 })));
 
@@ -234,6 +240,25 @@ describe("contract-2 session contention", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("gives up a callback wait after the flat ladder, well inside the wall cap", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ answer: false });
+    contractTwo(h, call.sessionId);
+    h.db.registerRpc("motorist_session_lease_acquire_v2", () => null);
+    vi.useFakeTimers();
+    try {
+      const work = vi.fn(async () => "must not execute");
+      const started = Date.now();
+      const pending = expect(ownedSessionWork({ ...h.deps, leaseWaitMs: WEBHOOK_LEASE_WAIT_MS }, call.sessionId, work))
+        .rejects.toMatchObject({ name: "SessionLeaseBusyError", status: 503, code: "session_busy", retryAfterMs: 1000 });
+      await vi.runAllTimersAsync();
+      await pending;
+      expect(work).not.toHaveBeenCalled();
+      expect(h.db.log.filter(entry => entry.table === "motorist_session_lease_acquire_v2")).toHaveLength(WEBHOOK_LEASE_POLL_MS.length + 1);
+      expect(Date.now() - started).toBeLessThan(WEBHOOK_LEASE_WAIT_MS);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("never retries an ownership database outage as normal contention", async () => {
     const h = createTelephonyHarness();
     const call = await h.inbound({ answer: false });
@@ -242,5 +267,109 @@ describe("contract-2 session contention", () => {
     await expect(ownedSessionWork(h.deps, call.sessionId, async () => undefined))
       .rejects.toMatchObject({ name: "SessionEventDeferredError", code: "session_event_deferred" });
     expect(h.db.log.filter(entry => entry.table === "motorist_session_lease_acquire_v2")).toHaveLength(1);
+  });
+});
+
+describe("sweep yield and drain over a pending customer hangup (E4)", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  const acquires = (h: TelephonyHarness) => h.db.log.filter(entry => entry.table === "motorist_session_lease_acquire_v2").length;
+  const ledgerRow = (h: TelephonyHarness, eventId: string) => h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === eventId)!;
+
+  it("never dials over the caller's pending hangup (0d048f36)", async () => {
+    vi.stubEnv("TELNYX_CALL_ACTION_ANNOUNCEMENTS_ENABLED", "false");
+    vi.stubEnv("TELNYX_RECORDING_ENABLED", "false");
+    const h = createTelephonyHarness({ writerContract: 2, fallbackKind: "waiting_room", sweepAfterEvent: false });
+    // The contract-2 fake registers no callback RPC; the missed callback of the final hangup needs one.
+    h.db.registerRpc("motorist_create_callback_obligation_v1", async args => {
+      const plan = args.p_plan as { callerNumber: string; source: "missed" };
+      const inserted = await h.admin.from("motorist_callback_requests").insert({ organization_id: String(args.p_organization_id), session_id: String(args.p_session_id),
+        caller_number: plan.callerNumber, source: plan.source, status: "open", created_at: String(args.p_now), metadata: toJson({ callback_obligation_version: 1 }) }).select("*").single();
+      if (inserted.error) throw new Error(inserted.error.message);
+      return inserted.data;
+    });
+    for (const id of Object.values(PROFILES)) h.setPresence(id, { status: "offline" });
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const backup = h.legByNumber(call.sessionId, NUMBERS.external)!;
+    await h.legEvent(String(backup.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
+    expect(h.session(call.sessionId).state).toBe("waiting");
+    const customerLeg = () => h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === call.callControlId)!;
+    // The poll loop measures `Date.now()`, so a clock-only sleep would spin.
+    let draining = false;
+    h.deps.sleep = async ms => {
+      if (draining) expect(sessionOwnership.getStore()).toBeUndefined();
+      h.advance(ms);
+      await new Promise(resolve => setTimeout(resolve, ms));
+    };
+    h.deps.random = () => 0;
+
+    // (1) The provider says the caller is gone while the queue audio was playing.
+    const marked = await h.legEvent(call.callControlId, "call.playback.ended", { status: "call_hangup" });
+    expect(marked).toMatchObject({ status: 200, outcome: "processed" });
+    expect(readMeta(h.session(call.sessionId) as SessionRow).customer_gone_at).toBe(h.now().toISOString());
+    expect(customerLeg().ended_at).toBeNull();
+
+    // (2) The exact hangup loses the lease race and is deferred.
+    const lease = (name: string, args: Record<string, unknown>) => h.db.rpcHandlers.get(name)!(args, h.db);
+    const held = lease("motorist_session_lease_acquire_v2", { p_session_id: call.sessionId, p_token: "holder", p_ttl_ms: 30_000 }) as { generation: number } | null;
+    const generation = Number(held?.generation);
+    expect(generation).toBeGreaterThan(0);
+    const hangup = await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "caller" }, "cust-hangup");
+    expect(hangup).toMatchObject({ status: 500, outcome: "failed" });
+    expect(ledgerRow(h, "cust-hangup")).toMatchObject({ retry_state: "deferred", deferral_count: 1 });
+    const hangupOccurredAt = String(ledgerRow(h, "cust-hangup").occurred_at);
+    expect(lease("motorist_session_lease_release_v2", { p_session_id: call.sessionId, p_token: "holder", p_generation: generation })).toBe(true);
+
+    // (3) An operator becomes available and the queue offer is due; the sweep yields and dials nobody.
+    h.setPresence(PROFILES.o1, { status: "available" });
+    h.touchDevice(PROFILES.o1);
+    h.advance(6_000);
+    const dials = h.telnyx.of("dial").length;
+    const before = acquires(h);
+    const yielded = await sweepOverdueRingSteps({ admin: h.admin, organizationId: h.deps.organizationId, now: h.now, runSessionEvent: (id, event) => runSessionEvent(h.deps, id, event) });
+    expect(yielded).toMatchObject({ checked: 1, swept: [], deferred: [call.sessionId], yielded: [call.sessionId], drained: [], errors: [] });
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
+    expect(acquires(h)).toBe(before);
+    expect(h.session(call.sessionId).state).toBe("waiting");
+
+    // (4) A caller with the budget drains the hangup instead of sweeping: still no dial.
+    draining = true;
+    const drained = await sweepOverdueRingSteps({ admin: h.admin, organizationId: h.deps.organizationId, now: h.now, budgetMs: 20_000,
+      runSessionEvent: (id, event) => runSessionEvent(h.deps, id, event), drainCustomerTerminal: session => drainCustomerTerminal(h.deps, session) });
+    draining = false;
+    expect(drained).toMatchObject({ checked: 1, swept: [], deferred: [call.sessionId], yielded: [call.sessionId], drained: [call.sessionId], errors: [] });
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
+    expect(ledgerRow(h, "cust-hangup")).toMatchObject({ status: "processed", attempts: 2, delivery_count: 1 });
+    expect(customerLeg()).toMatchObject({ ended_at: hangupOccurredAt, hangup_cause: "normal_clearing" });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", lease_token: null });
+    expect(h.rows("motorist_callback_requests")).toHaveLength(1);
+
+    // (5) The ended session is no longer a candidate.
+    const next = await sweepOverdueRingSteps({ admin: h.admin, organizationId: h.deps.organizationId, now: h.now, runSessionEvent: (id, event) => runSessionEvent(h.deps, id, event) });
+    expect(next).toMatchObject({ checked: 0, yielded: [], drained: [] });
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
+  });
+});
+
+describe("lease budgets", () => {
+  it("keeps one customer-hangup drain inside the budgets that may pay for it", () => {
+    // A drain is one webhook-budget lease wait plus the 8 s inbox deadline; checked before the acquire (M17).
+    expect(CUSTOMER_DRAIN_MIN_BUDGET_MS).toBeGreaterThanOrEqual(WEBHOOK_LEASE_WAIT_MS + DEFERRED_DRAIN_DEADLINE_MS);
+    expect(INLINE_DRAIN_BUDGET_MS).toBeGreaterThanOrEqual(CUSTOMER_DRAIN_MIN_BUDGET_MS);
+  });
+
+  it("keeps the webhook wait well under every operator budget", () => {
+    expect(LEASE_WAIT_MS).toBe(3_000);
+    // A hold/unhold click on the global budget keeps >= 1 s over a competing callback.
+    expect(WEBHOOK_LEASE_WAIT_MS).toBeLessThanOrEqual((LEASE_WAIT_MS * 2) / 3);
+    expect(PICKUP_LEASE_WAIT_MS).toBeGreaterThan(LEASE_WAIT_MS);
+    expect(HANGUP_LEASE_WAIT_MS).toBeGreaterThan(LEASE_WAIT_MS);
+    // Wait + preflight + handler must fit one control request with a replay still admissible.
+    expect(Math.max(PICKUP_LEASE_WAIT_MS, HANGUP_LEASE_WAIT_MS)).toBeLessThan(TELEPHONY_TIMEOUT_MS.control - MIN_REMAINING_FOR_RETRY_MS);
+  });
+
+  it("keeps the callback wait well under the operator budget", () => {
+    expect(WEBHOOK_LEASE_WAIT_MS).toBeLessThanOrEqual((2 / 3) * LEASE_WAIT_MS);
+    // The flat ladder fits its own wall cap, so the RPC count — not the clock — ends the wait.
+    expect(WEBHOOK_LEASE_POLL_MS.reduce((total, step) => total + step, 0)).toBeLessThanOrEqual(WEBHOOK_LEASE_WAIT_MS);
   });
 });

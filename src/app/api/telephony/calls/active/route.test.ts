@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 import { resetActiveCallsCache } from "@/server/telephony/active-calls";
+import { CUSTOMER_DRAIN_MIN_BUDGET_MS } from "@/server/telephony/routing/ring-plan";
 
 let harness: ReturnType<typeof createTelephonyHarness>;
 let sweepClock = Date.now();
@@ -25,7 +26,7 @@ vi.mock("@/server/telephony/runtime", async (importOriginal) => {
   return { ...actual, createTelephonyDeps: async () => harness.deps };
 });
 
-import { GET } from "./route";
+import { ACTIVE_SWEEP_BUDGET_MS, GET } from "./route";
 
 function leaveEndedCallPresence() {
   const sessionId = String(harness.db.insert("motorist_call_sessions", {
@@ -138,6 +139,20 @@ describe("GET /api/telephony/calls/active", () => {
       finishSweep();
       await pendingSweep;
     }
+  });
+
+  it("never hands the poll sweep a drain", async () => {
+    // Plan §7.5 / M36: the poll-cadence caller only skips a candidate whose
+    // customer hangup is pending; it can never pay for the drain.
+    const response = await GET();
+    expect(response.status).toBe(200);
+    await background.after.mock.calls[0][0]();
+    expect(background.sweep).toHaveBeenCalledTimes(1);
+    const deps = background.sweep.mock.calls[0][0] as Record<string, unknown>;
+    expect(deps).toMatchObject({ organizationId: ORG, budgetMs: ACTIVE_SWEEP_BUDGET_MS });
+    expect(deps).not.toHaveProperty("drainCustomerTerminal");
+    expect(deps).not.toHaveProperty("drainBudgetMs");
+    expect(ACTIVE_SWEEP_BUDGET_MS).toBeLessThan(CUSTOMER_DRAIN_MIN_BUDGET_MS);
   });
 
   it("logs a failed background sweep without changing the successful snapshot", async () => {

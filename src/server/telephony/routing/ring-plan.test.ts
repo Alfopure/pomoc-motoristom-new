@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, GROUPS, NUMBERS, ORG, PLAN_ID, PROFILES } from "@/test/telephony-harness";
 
@@ -17,6 +17,7 @@ import {
   stepDeadline,
   closeOrphanLegs,
   closeStaleRingAttempts,
+  CUSTOMER_DRAIN_MIN_BUDGET_MS,
   sweepOverdueRingSteps,
 } from "./ring-plan";
 
@@ -313,9 +314,34 @@ describe("advanceRingStep and sweep", () => {
 
     const closed = await closeOrphanLegs(h.admin, { organizationId: ORG, now: h.now() });
 
-    expect(closed.sort()).toEqual([String(orphanBySession.id), String(orphanByAge.id)].sort());
+    expect(closed.closed.sort()).toEqual([String(orphanBySession.id), String(orphanByAge.id)].sort());
+    expect(closed.awaitingHangup).toEqual([]);
     expect(h.db.find("motorist_call_legs", (row) => row.id === fresh.id)).toMatchObject({ ended_at: null });
     expect(h.db.find("motorist_call_legs", (row) => row.id === orphanBySession.id)).toMatchObject({ state: "ended", hangup_cause: "orphan_sweep" });
+  });
+
+  it("leaves a leg alone while its exact call.hangup still waits in the ledger", async () => {
+    const h = createTelephonyHarness();
+    const [dead] = h.db.seed("motorist_call_sessions", [{ organization_id: ORG, direction: "inbound", state: "failed" }]);
+    const [pendingLeg, doneLeg, deadLetterLeg] = h.db.seed("motorist_call_legs", ["cc-pending", "cc-done", "cc-deadletter"].map((id) => ({
+      organization_id: ORG, session_id: dead.id, telnyx_call_control_id: id, role: "operator", state: "ringing", initiated_at: h.now().toISOString(),
+    })));
+    const now = h.now().toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [
+      // The provider fact exists and is still to be applied: the replay owns this leg.
+      { organization_id: ORG, event_id: "h-pending", event_type: "call.hangup", status: "failed", retry_state: "deferred", call_control_id: "cc-pending", received_at: now, occurred_at: now, payload: {} },
+      // Already applied: nothing is waiting, the synthetic close is the right thing.
+      { organization_id: ORG, event_id: "h-done", event_type: "call.hangup", status: "processed", retry_state: "ready", call_control_id: "cc-done", received_at: now, occurred_at: now, payload: {} },
+      // Dead letter: no exact hangup will ever apply.
+      { organization_id: ORG, event_id: "h-dead", event_type: "call.hangup", status: "failed", retry_state: "dead_letter", call_control_id: "cc-deadletter", received_at: now, occurred_at: now, payload: {} },
+    ]);
+
+    const result = await closeOrphanLegs(h.admin, { organizationId: ORG, now: h.now() });
+
+    expect(result.closed.sort()).toEqual([String(doneLeg.id), String(deadLetterLeg.id)].sort());
+    expect(result.awaitingHangup).toEqual([String(pendingLeg.id)]);
+    expect(h.db.find("motorist_call_legs", (row) => row.id === pendingLeg.id)).toMatchObject({ ended_at: null });
+    expect(h.db.find("motorist_call_legs", (row) => row.id === doneLeg.id)).toMatchObject({ state: "ended", hangup_cause: "orphan_sweep" });
   });
 
   it("terminalises leaked open ring offers so their operator can be rung again", async () => {
@@ -370,4 +396,96 @@ it("MG-03 blocks new owned PSTN with the creation gate off while admitting expli
   const step = { ...stepAll, members };
   expect(planRingStep(step, input({ ownedPstnEnabled: false })).attempts).toHaveLength(0);
   expect(planRingStep(step, input({ ownedPstnEnabled: true, devices: [] })).attempts).toHaveLength(1);
+});
+
+describe("sweep yield to a pending customer hangup (E4)", () => {
+  type Harness = ReturnType<typeof createTelephonyHarness>;
+  /** A waiting-room session whose queue offer is due, with its verified customer leg. */
+  function seedWaiting(h: Harness, controlId: string) {
+    const since = new Date(h.now().getTime() - 200_000).toISOString();
+    const fresh = new Date(h.now().getTime() - 1_000).toISOString();
+    const past = new Date(h.now().getTime() - 10_000).toISOString();
+    const [session] = h.db.seed("motorist_call_sessions", [{ organization_id: ORG, direction: "inbound", state: "waiting",
+      metadata: { queue: { next_offer_at: past }, waiting: { since, last_tick_at: fresh } } }]);
+    const [leg] = h.db.seed("motorist_call_legs", [{ organization_id: ORG, session_id: session.id, telnyx_call_control_id: controlId, role: "customer", state: "answered", initiated_at: h.now().toISOString() }]);
+    h.db.update("motorist_call_sessions", { customer_leg_id: leg.id }, (row) => row.id === session.id);
+    return { sessionId: String(session.id), legId: String(leg.id) };
+  }
+  function seedHangupRow(h: Harness, controlId: string, values: Record<string, unknown>) {
+    const now = h.now().toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{ organization_id: ORG, event_id: `h-${controlId}`, event_type: "call.hangup", call_control_id: controlId,
+      received_at: now, occurred_at: now, payload: {}, claimed_at: null, ...values }]);
+  }
+  const acquires = (h: Harness) => h.db.log.filter((entry) => entry.table.startsWith("motorist_session_lease_acquire"));
+
+  it("drains a pending customer hangup instead of sweeping (webhook/cron caller)", async () => {
+    const h = createTelephonyHarness();
+    const deferred = seedWaiting(h, "cc-deferred");
+    const claimed = seedWaiting(h, "cc-claimed");
+    const processed = seedWaiting(h, "cc-processed");
+    const deadLetter = seedWaiting(h, "cc-deadletter");
+    const operatorRow = seedWaiting(h, "cc-operator-session");
+    h.db.seed("motorist_call_legs", [{ organization_id: ORG, session_id: operatorRow.sessionId, telnyx_call_control_id: "cc-operator-leg", role: "operator", state: "ringing", initiated_at: h.now().toISOString() }]);
+    // Deferred by a busy lease, or claimed by another host right now: both are the provider fact still to be applied.
+    seedHangupRow(h, "cc-deferred", { status: "failed", retry_state: "deferred" });
+    seedHangupRow(h, "cc-claimed", { status: "queued", retry_state: "ready", claimed_at: h.now().toISOString() });
+    // Applied, dead-lettered, or belonging to an operator leg of the session: no yield.
+    seedHangupRow(h, "cc-processed", { status: "processed", retry_state: "ready" });
+    seedHangupRow(h, "cc-deadletter", { status: "failed", retry_state: "dead_letter" });
+    seedHangupRow(h, "cc-operator-leg", { status: "failed", retry_state: "deferred" });
+
+    const runSessionEvent = vi.fn(async () => null);
+    const drainCustomerTerminal = vi.fn<(session: { id: string }) => Promise<void>>(async () => undefined);
+    let clock = 0;
+    const result = await sweepOverdueRingSteps({ admin: h.admin, organizationId: ORG, now: () => h.now(), runSessionEvent, drainCustomerTerminal, budgetMs: 20_000, clock: () => clock++ });
+
+    const swept = runSessionEvent.mock.calls.map((call) => (call as unknown[])[0]);
+    expect(swept.sort()).toEqual([processed.sessionId, deadLetter.sessionId, operatorRow.sessionId].sort());
+    expect([...result.yielded].sort()).toEqual([deferred.sessionId, claimed.sessionId].sort());
+    expect([...result.deferred].sort()).toEqual([deferred.sessionId, claimed.sessionId].sort());
+    expect(result).toMatchObject({ checked: 5, errors: [] });
+    expect([...result.swept].sort()).toEqual(swept.sort());
+    // At most one drain per pass, for the first yielding candidate, with its session row.
+    expect(drainCustomerTerminal).toHaveBeenCalledTimes(1);
+    expect(result.drained).toEqual([result.yielded[0]]);
+    expect(drainCustomerTerminal.mock.calls[0][0]).toMatchObject({ id: result.yielded[0], state: "waiting" });
+    expect(acquires(h)).toEqual([]);
+  });
+
+  it("skips the candidate without draining when the caller has no drain budget (calls/active)", async () => {
+    const h = createTelephonyHarness();
+    const { sessionId } = seedWaiting(h, "cc-yield");
+    seedHangupRow(h, "cc-yield", { status: "failed", retry_state: "deferred" });
+    const row = () => h.rows("motorist_telnyx_webhook_events").find((entry) => entry.call_control_id === "cc-yield")!;
+    const before = { ...row() };
+    const runSessionEvent = vi.fn(async () => null);
+    const base = { admin: h.admin, organizationId: ORG, now: () => h.now(), runSessionEvent };
+
+    // (a) No drain callback at all: skipped, nothing touched, no lease.
+    const skipped = await sweepOverdueRingSteps({ ...base, budgetMs: 2_000 });
+    expect(skipped).toMatchObject({ checked: 1, swept: [], deferred: [sessionId], yielded: [sessionId], drained: [], errors: [] });
+    expect(runSessionEvent).not.toHaveBeenCalled();
+    expect(row()).toEqual(before);
+    expect(acquires(h)).toEqual([]);
+
+    // (b) The poll shape: a drain callback but only the 2 s loop budget.
+    const drain = vi.fn(async () => undefined);
+    const poll = await sweepOverdueRingSteps({ ...base, budgetMs: 2_000, drainCustomerTerminal: drain });
+    expect(poll).toMatchObject({ yielded: [sessionId], drained: [] });
+    expect(drain).not.toHaveBeenCalled();
+
+    // (c) The webhook shape: the 4 s loop budget with its own 20 s drain bound.
+    const webhook = await sweepOverdueRingSteps({ ...base, budgetMs: 4_000, drainBudgetMs: 20_000, drainCustomerTerminal: drain });
+    expect(webhook).toMatchObject({ yielded: [sessionId], drained: [sessionId] });
+    expect(drain).toHaveBeenCalledTimes(1);
+
+    // (d) The budget is checked before the drain, never mid-run: 12 s already spent leaves less than the minimum.
+    let ticks = 0;
+    const late = await sweepOverdueRingSteps({ ...base, budgetMs: 20_000, drainBudgetMs: 20_000, drainCustomerTerminal: drain, clock: () => (ticks++ === 0 ? 0 : 12_000) });
+    expect(late).toMatchObject({ yielded: [sessionId], drained: [] });
+    expect(drain).toHaveBeenCalledTimes(1);
+    expect(20_000 - 12_000).toBeLessThan(CUSTOMER_DRAIN_MIN_BUDGET_MS);
+    expect(runSessionEvent).not.toHaveBeenCalled();
+    expect(acquires(h)).toEqual([]);
+  });
 });

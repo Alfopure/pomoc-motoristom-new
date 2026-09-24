@@ -11,7 +11,7 @@ vi.mock("@/server/telephony/recording-processing", () => ({ runRecordingProcessi
 vi.mock("@/lib/supabase/admin", () => ({
   createSupabaseAdminClient: () => ({
     from: () => ({
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: jobControl, error: null }) }) }),
+      select: () => ({ eq: () => ({ abortSignal: () => ({ maybeSingle: async () => ({ data: jobControl, error: null }) }) }) }),
     }),
   }),
 }));
@@ -34,7 +34,7 @@ vi.mock("@/server/telephony/runtime", async (importOriginal) => {
   return { ...actual, createTelephonyDeps: (...args: unknown[]) => createTelephonyDeps(...(args as [])) };
 });
 
-import { GET } from "./route";
+import { GET, maxDuration } from "./route";
 
 const SECRET = "test-cron-secret";
 
@@ -56,6 +56,11 @@ const SUMMARY = {
 };
 
 describe("GET /api/telephony/cron", () => {
+  it("declares the 120 s budget", () => {
+    // Under the 5-minute schedule by a wide margin: one run in flight, no lock.
+    expect(maxDuration).toBe(120);
+  });
+
   beforeEach(() => {
     process.env.CRON_SECRET = SECRET;
     runTelephonyCronJobs.mockReset().mockResolvedValue(SUMMARY);
@@ -93,12 +98,16 @@ describe("GET /api/telephony/cron", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     // The telephony summary plus the reminder job this deployment has nowhere
     // else to run (no worker, one allowed cron).
-    await expect(response.json()).resolves.toEqual({
+    const body = await response.json();
+    expect(body).toMatchObject({
       ...SUMMARY,
       jobs: [...SUMMARY.jobs, { job: "notifications.materialize", status: "ok", detail: { materialized: 0, skipped: 0 } }, { job: "notifications.pause-ending", status: "ok", detail: { checked: 0, delivered: 0 } }, { job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } }],
     });
+    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 3);
+    // The tail jobs are timed too, so the budget split is visible in the response.
+    for (const job of body.jobs.slice(-3)) expect(job).toMatchObject({ ms: expect.any(Number), startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
     expect(createTelephonyDeps).toHaveBeenCalledWith({ sweepAfterEvent: false });
-    expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps", organizationId: "org-1" });
+    expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps", organizationId: "org-1" }, { cronStartedAt: expect.any(Number) });
     expect(materializeDueTaskReminders).toHaveBeenCalledTimes(1);
     expect(materializeDuePauseEndingNotifications).toHaveBeenCalledTimes(1);
   });
@@ -106,12 +115,12 @@ describe("GET /api/telephony/cron", () => {
   it("materialises due reminders, and honours the job control switch", async () => {
     materializeDueTaskReminders.mockResolvedValue({ materialized: 3, skipped: 1 });
     const ran = await (await GET(cronRequest(SECRET))).json();
-    expect(ran.jobs.at(-3)).toEqual({ job: "notifications.materialize", status: "ok", detail: { materialized: 3, skipped: 1 } });
+    expect(ran.jobs.at(-3)).toMatchObject({ job: "notifications.materialize", status: "ok", detail: { materialized: 3, skipped: 1 } });
 
     jobControl = { enabled: false };
     materializeDueTaskReminders.mockClear();
     const off = await (await GET(cronRequest(SECRET))).json();
-    expect(off.jobs.at(-3)).toEqual({ job: "notifications.materialize", status: "disabled", detail: { reason: "job_control_disabled" } });
+    expect(off.jobs.at(-3)).toMatchObject({ job: "notifications.materialize", status: "disabled", detail: { reason: "job_control_disabled" } });
     expect(materializeDueTaskReminders).not.toHaveBeenCalled();
   });
 

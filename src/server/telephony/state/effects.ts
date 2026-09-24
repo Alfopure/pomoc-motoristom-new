@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { requestStepCount } from "@/server/request-metrics";
-import { assertOwnership, ownershipRpc, sessionOwnership } from "../ownership";
+import { requestStepCount, requestTimingContext } from "@/server/request-metrics";
+import { assertOwnership, firstProviderDispatchAt, guardTiming, measureGuard, ownershipRpc, sessionOwnership } from "../ownership";
 import { payloadFingerprint } from "../provider-journal";
 import { isDeepStrictEqual } from "node:util";
 
@@ -121,6 +121,8 @@ export type EffectsDeps = {
    */
   renewLease?: () => Promise<void>;
   eventTiming?: () => EventTiming;
+  /** Request-local identity returned by the fenced call projection. Never caches call state. */
+  callIds?: Map<string, string>;
 };
 
 export type CommandOutcome = {
@@ -144,6 +146,10 @@ export function auditCommandOutcomes(commands: CommandOutcome[]) {
   return commands.map((command) => ({ kind: command.kind, ok: command.ok, command_id: command.commandId, skipped: command.skipped,
     ...(command.startedAt ? { started_at: command.startedAt, effect_ms: command.ms, phase: command.phase ?? command.kind } : {}),
     ...(command.dbCountAtDispatch === undefined ? {} : { db_count_at_dispatch: command.dbCountAtDispatch }),
+    ...(command.kind === "ring_fanout" && command.detail ? { fanout: {
+      step: command.detail.step, attempted: command.detail.attempts, dialed: command.detail.dialed,
+      skipped: Array.isArray(command.detail.skippedMembers) ? command.detail.skippedMembers.length : 0,
+    } } : {}),
     // Without this a failed command is a bare `ok: false` in the audit and the
     // only way to learn why is to catch it happening again.
     ...(command.ok || !command.error ? {} : { error: command.error.slice(0, 300) }) }));
@@ -572,6 +578,7 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
   if (current) {
     const updated = await admin.from("motorist_calls").update(values).eq("id", current.id);
     if (updated.error) fail("call update failed", updated.error);
+    deps.callIds?.set(session.id, current.id);
     return;
   }
   const inserted = await admin.from("motorist_calls").insert({
@@ -583,8 +590,9 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
     recording_status: values.recording_status ?? "not_requested",
     transcript_status: "not_requested",
     raw_payload: toJson({ session_id: session.id }),
-  });
+  }).select("id").maybeSingle();
   if (inserted.error && !isDuplicate(inserted.error)) fail("call insert failed", inserted.error);
+  if (inserted.data) deps.callIds?.set(session.id, inserted.data.id);
 }
 
 /**
@@ -605,7 +613,7 @@ function safeEventTarget(target: AppEvent["target"] | null | undefined): Json {
 
 /** Audit row per processed event (`event_fingerprint` = event id → idempotent). */
 export async function recordCallEvent(
-  deps: Pick<EffectsDeps, "admin" | "organizationId" | "now" | "eventTiming">,
+  deps: Pick<EffectsDeps, "admin" | "organizationId" | "now" | "eventTiming" | "callIds">,
   input: {
     session: SessionRow | null;
     event: SessionEvent;
@@ -619,8 +627,8 @@ export async function recordCallEvent(
   },
 ): Promise<void> {
   const { admin } = deps;
-  let callId: string | null = null;
-  if (input.session) {
+  let callId: string | null = input.session ? deps.callIds?.get(input.session.id) ?? null : null;
+  if (input.session && !callId) {
     const call = await admin.from("motorist_calls").select("id").eq("session_id", input.session.id).maybeSingle();
     callId = call.data?.id ?? null;
   }
@@ -650,7 +658,12 @@ export async function recordCallEvent(
       notes: input.notes,
       commands: input.commands,
       error: input.error ?? null,
-      ...(measuredTiming ? { timing: measuredTiming } : {}),
+      ...(measuredTiming || event.kind === "telnyx" ? { timing: {
+        ...requestTimingContext(), ...guardTiming(), first_command_at: firstProviderDispatchAt(),
+        lease_acquired_at: sessionOwnership.getStore() ? new Date(sessionOwnership.getStore()!.acquiredAt).toISOString() : null,
+        ...measuredTiming,
+        ...(event.kind === "telnyx" ? { ...event.timing, meta: { attempt: event.deliveryAttempt ?? null, delivered_to: event.deliveredTo ?? null } } : {}),
+      } } : {}),
       ...(input.session && readMeta(input.session).recording?.coverageUnconfirmed
         ? { recording_coverage_unconfirmed: readMeta(input.session).recording!.coverageUnconfirmed } : {}),
     }),
@@ -1265,7 +1278,7 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
   if (command.attempt) {
     let query = admin
       .from("motorist_ring_attempts")
-      .update({ leg_id: leg.id, result: "offered", offered_at: now })
+      .update({ leg_id: leg.id, result: "offered" })
       .eq("session_id", session.id)
       .eq("step_index", command.attempt.stepIndex)
       .in("result", ["pending", "offered"]);
@@ -1435,15 +1448,15 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     return outcome;
   });
   const results = await requireTelnyx(deps).dialMany(sendable.map(({ dial }) => dialParams(dial)));
-  for (const [position, result] of results.entries()) {
+  await Promise.all(results.map(async (result, position) => {
     const { index, dial } = sendable[position];
-    if (result.status === "rejected") { dialled[index] = result; continue; }
+    if (result.status === "rejected") { dialled[index] = result; return; }
     try {
       dialled[index] = { status: "fulfilled", value: await settleDial(deps, frozen, dial, result.value, stableFanout || hasStabilityContract(frozen.session)) };
     } catch (error) {
       dialled[index] = { status: "rejected", reason: error };
     }
-  }
+  }));
   for (const [index, outcome] of dialled.entries()) {
     const dial = claimed[index];
     try {
@@ -1491,7 +1504,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     const meta = readMeta(ctx.session);
     const updated = await admin
       .from("motorist_call_sessions")
-      .update({ metadata: toJson({ ...meta, ring: { ...(meta.ring ?? {}), step_deadline_at: now } }) })
+      .update({ metadata: toJson({ ...meta, ring: { ...(meta.ring ?? {}), step_deadline_at: new Date(Date.parse(now) - 1).toISOString() } }) })
       .eq("id", session.id);
     if (updated.error) fail("deadline update failed", updated.error);
   }
@@ -1527,7 +1540,7 @@ function compensationWouldReopenCall(next: Transition | null | undefined, curren
 
 async function executeReduceResult(
   deps: EffectsDeps,
-  input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean },
+  input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean; urgentStamps?: UrgentDispatchStamps },
 ): Promise<ApplyResult> {
   const { result } = input;
   let branch: "main" | "rejected" = "main";
@@ -1536,7 +1549,7 @@ async function executeReduceResult(
   let compensations = result.compensations;
 
   if (result.guard && !input.continuation) {
-    const reserved = await reserveAnsweredOperator(deps.admin, { profileId: result.guard.profileId, sessionId: input.session.id, organizationId: deps.organizationId, expectedToken: result.guard.offerToken });
+    const reserved = await measureGuard("guard_ms", () => reserveAnsweredOperator(deps.admin, { profileId: result.guard!.profileId, sessionId: input.session.id, organizationId: deps.organizationId, expectedToken: result.guard!.offerToken }));
     if (!reserved.applied) {
       branch = "rejected";
       transition = result.guard.onRejected.next;
@@ -1957,8 +1970,15 @@ async function executeReduceResult(
     } finally {
       const outcome = outcomes.findLast((item) => item.key === key);
       if (outcome) {
-        outcome.startedAt = new Date(started).toISOString();
-        if (dbCountAtDispatch !== null) outcome.dbCountAtDispatch = dbCountAtDispatch;
+        // A command the urgent teardown already sent keeps the moment it was
+        // sent (M21): the journal-cache replay here runs 1.7-3.3 s later, and
+        // `effect_ms` is only ever read next to `started_at`.
+        const urgent = input.urgentStamps?.get(key);
+        outcome.startedAt = urgent?.startedAt ?? new Date(started).toISOString();
+        if (urgent) {
+          outcome.ms = urgent.ms;
+          if (urgent.dbCountAtDispatch !== null) outcome.dbCountAtDispatch = urgent.dbCountAtDispatch;
+        } else if (dbCountAtDispatch !== null) outcome.dbCountAtDispatch = dbCountAtDispatch;
         const announcement = command.kind === "playback_start" ? announcementKeyForMedia(command.media) : null;
         outcome.phase = command.kind === "playback_start" ? `announcement:${announcement ?? "custom"}${announcement === "greeting" && readMeta(ctx.session).greeting?.recording_notice ? `+${readMeta(ctx.session).greeting!.recording_notice}` : ""}`
           : command.kind === "dial" ? `dial:${command.role}` : command.kind;
@@ -2026,9 +2046,15 @@ async function executeReduceResult(
     ...(projectionError ? { projectionPending: true } : {}), notes: transition.notes };
 }
 
-async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): Promise<void> {
+/** What the urgent dispatch measured for a command, so the audit does not restate it from the journal-cache replay (M21: 1.7-3.3 s later). */
+type UrgentDispatchStamp = { startedAt: string; ms: number; dbCountAtDispatch: number | null };
+/** Keyed by `commandKey(command)`. */
+type UrgentDispatchStamps = Map<string, UrgentDispatchStamp>;
+
+async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): Promise<UrgentDispatchStamps> {
   // A committed hangup/privacy decision must reach the provider even when an
   // unrelated historical callback or projection write is still unavailable.
+  const stamps: UrgentDispatchStamps = new Map();
   for (const entry of readPendingEffects(session).entries) {
     const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: entry.previousConferenceId };
     const ending = entry.event.kind === "app" ? entry.event.type === "hangup" : entry.event.type === "call.hangup";
@@ -2050,13 +2076,22 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
       else runs.push([command]);
     }
     const warn = (kind: string) => deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "teardown_pending", command: kind });
+    // A send that fails gets no stamp; the replay retries and stamps it itself.
+    // A send the provider answered (accepted, or the leg already gone) is
+    // fulfilled and stamped: the provider heard about it then.
+    const send = async (command: Command) => {
+      const started = deps.now();
+      const dbCountAtDispatch = requestStepCount("db");
+      await executeCommand(deps, ctx, command);
+      stamps.set(commandKey(command), { startedAt: started.toISOString(), ms: deps.now().getTime() - started.getTime(), dbCountAtDispatch });
+    };
     for (const run of runs) {
       // Contract 1 has no provider journal to fence a command issued after the
       // lease was lost, so it keeps stopping at the first one.
       if (sessionOwnership.getStore()?.contract !== 2) {
         await deps.renewLease?.();
         for (const command of run) {
-          try { await executeCommand(deps, ctx, command); }
+          try { await send(command); }
           catch (error) {
             if (error instanceof SessionLeaseLostError) throw error;
             warn(command.kind);
@@ -2064,7 +2099,7 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
         }
         continue;
       }
-      const settled = await Promise.allSettled(run.map((command) => executeCommand(deps, ctx, command)));
+      const settled = await Promise.allSettled(run.map(send));
       for (const [index, result] of settled.entries()) {
         if (result.status === "fulfilled") continue;
         if (result.reason instanceof SessionLeaseLostError) throw result.reason;
@@ -2072,12 +2107,16 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
       }
     }
   }
+  return stamps;
 }
 
-export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean } = {}): Promise<ApplyResult | null> {
+export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean; urgentStamps?: UrgentDispatchStamps } = {}): Promise<ApplyResult | null> {
   let latest: ApplyResult | null = null;
   let requested: ApplyResult | null = null;
-  if (!options.databaseOnly && !options.teardownPrepared) await dispatchUrgentTeardown(deps, session);
+  const stamps: UrgentDispatchStamps = new Map(options.urgentStamps ?? []);
+  if (!options.databaseOnly && !options.teardownPrepared) {
+    for (const [key, stamp] of await dispatchUrgentTeardown(deps, session)) stamps.set(key, stamp);
+  }
   const queued = readPendingEffects(session).entries;
   const seen = new Set(queued.map((entry) => entry.id));
   const enqueue = (current: SessionRow) => {
@@ -2154,7 +2193,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     try {
       latest = await executeReduceResult(deps, { session: fresh.data, expectedVersion: fresh.data.version, event: current.event,
         result: { next: current.transition, commands: current.commands, compensations: current.compensations, guard: null, ignored: null },
-        continuation: current, databaseOnly: options.databaseOnly });
+        continuation: current, databaseOnly: options.databaseOnly, urgentStamps: stamps });
     } catch (error) {
       current.attempts += 1;
       current.lastError = describeError(error);
@@ -2178,8 +2217,9 @@ export async function applyReduceResult(deps: EffectsDeps, input: { session: Ses
   if (input.session.writer_contract !== 2 && !telephonyStabilityEnabled() && !hasStabilityContract(input.session)) return executeReduceResult(deps, input);
   let staged = await stageEffects(deps, input);
   const prepareFacts = input.event.kind === "telnyx" && readPendingEffects(staged).entries.length > 1;
+  let urgentStamps: UrgentDispatchStamps | undefined;
   if (prepareFacts) {
-    await dispatchUrgentTeardown(deps, staged);
+    urgentStamps = await dispatchUrgentTeardown(deps, staged);
     // Provider observations must reach the leg/attempt state even if an older
     // command has an unknown outcome. Only provider commands remain in FIFO.
     const current = readPendingEffects(staged).entries.find((entry) => entry.id === input.event.id);
@@ -2187,7 +2227,7 @@ export async function applyReduceResult(deps: EffectsDeps, input: { session: Ses
     staged = await persistTransition(deps, { session: staged, transition: current.transition, expectedVersion: null,
       event: current.event, continuation: current, phase: "critical" });
   }
-  const result = await resumePendingEffects(deps, staged, { priorityEntryId: input.event.id, teardownPrepared: prepareFacts });
+  const result = await resumePendingEffects(deps, staged, { priorityEntryId: input.event.id, teardownPrepared: prepareFacts, urgentStamps });
   if (!result) throw new EffectsError("staged transition missing its continuation");
   return result;
 }
