@@ -475,3 +475,69 @@ Druhá vec, ktorá sa pritom našla: po merge z `dev` zdieľalo päť migrácií
 ```
 
 Pôvodné verzie `20261002100000`, `20261003100000`, `20261004100000`, `20261006100000` a `20261006110000` v histórii **nie sú** — a neboli tam ani pred prečíslovaním. Patria migráciám z `dev`, ktoré do histórie nikdy zapísané neboli; je to časť staršej medzery pätnástich nezapísaných migrácií, ktorá s touto prácou nesúvisí a rieši sa samostatne.
+
+
+---
+
+## 20. Stav k 24. 9. 2026 a čo zostáva
+
+Kontrola skutočného stavu, nie výpis z pamäte. Overené dopytmi do databázy, do Vercelu a do OpenAI.
+
+### Nastavenie je hotové celé
+
+| | |
+|---|---|
+| Kľúče OpenAI (API, projekt, podpis webhooku) | ✅ |
+| Webhook zaregistrovaný na produkčnej doméne, udalosť `live.transport.incoming` | ✅ |
+| Telnyx kľúč, aplikácia, živé hovory | ✅ |
+| Databázový vypínač `live_calls_enabled` | ✅ |
+| Linka `+421 2 3240 8774`, aktívna | ✅ |
+| Prepis, vyhodnotenie, automatické zloženie, sudca na ticho | ✅ zapnuté |
+
+### Fázy
+
+| Fáza | Stav |
+|---|---|
+| 1 — účet, prítomnosť, obrazovka nastavení | ✅ na produkcii |
+| 2 — číta prípad volajúceho po overení EČV | ✅ na produkcii |
+| 3 — zakladá prípady ako návrh, píše poznámky | ❌ |
+| 4 — SMS | ❌ |
+| 5 — prichádzajúce hovory a ring skupina | ❌ |
+| 6 — prepojenie dispečerom (plný prístup) | ❌ |
+
+### Čo sa medzitým vyriešilo mimo tohto plánu
+
+**Testovacie prostredie je oddelené.** Preview a `dev` píšu do `nzpnqdstvkfncflgqlny` („Pomoc motoristom dispatching TEST", bezplatná organizácia AlfoSystems), produkcia do `ifpaeegaesdmljfkdvcn`. Vrátane `EXPECTED_SUPABASE_PROJECT_REF`, bez ktorého by build padal. Tým je `docs/operations/test-environment-plan.md` vybavený a bod 8 v `AGENTS.md` už neplatí.
+
+**Cron prestal ukončovať živé hovory.** Pravidlo čistenia ukončovalo pokus, ktorý bol v stave `bridged` viac než 30 sekúnd — a ten stav tam držal celý hovor. Checkpoint teraz posunie stav na `talking`, len čo prehovorí.
+
+### Čo treba spraviť ako prvé
+
+**Jeden overovací hovor.** Od opravy crona sa netelefonovalo, takže oprava nie je potvrdená naživo. Posledný hovor pred ňou spadol na 54. sekunde uprostred vety. Kým neprebehne hovor dlhší než dve minúty s úplným prepisom, považuj to za neoverené.
+
+Čo pri ňom sledovať:
+- vydrží dlhšie než 2 minúty (cron beží každých 5 minút, takže hovor musí prežiť aspoň jeden jeho prechod)
+- `end_reason` **nie je** `cleanup`
+- `greeting_status` je `heard_started`, nie `requested`
+- prepis nekončí uprostred vety
+
+### Poradie zvyšku
+
+| Poradie | Čo | Prečo tak |
+|---|---|---|
+| 1 | Overovací hovor | Bez neho nevieme, či posledná oprava zabrala |
+| 2 | Fáza 3 — návrhy prípadov a poznámky | Najväčšia hodnota na jednotku práce; hovor konečne niečo zanechá |
+| 3 | Fáza 6 — prepojenie dispečerom | Bezpečnejšia než 4 aj 5: na linke je overený človek, takže odpadá celá otázka identity |
+| 4 | Fáza 4 — SMS | Malá, ale odchádza menom firmy; až po fáze 3, lebo šablóny potrebujú prípad |
+| 5 | Fáza 5 — prichádzajúce hovory | Najväčšia a jediná, ktorá sa dotkne cesty ľudských hovorov |
+
+Oproti pôvodnému poradiu je fáza 6 vytiahnutá pred 4 a 5. Dôvod: pri prepojení dispečerom je na linke overený zamestnanec, takže nepotrebuje ani kontrolu EČV, ani obmedzenia na zápis — a je to zároveň scenár, ktorý ušetrí najviac času.
+
+### Dlh, ktorý sa nazbieral
+
+| Čo | Kde |
+|---|---|
+| Prepínače pre fázy 3 a 4 sú v paneli viditeľné, ale nefunkčné | Označené ako nehotové; zapnú sa, keď fázy vzniknú |
+| AI profil (`kind='ai'`) ešte nikto nezaložil | Netreba ho do fázy 3; potom áno |
+| Linka `…8774` má plán zvonenia a IVR | Pred fázou 5 treba rozhodnúť, či ju AI prevezme celú, alebo len ako zálohu |
+| Či linka vie originovať hovory | Stále neoverené; ukáže sa na prvom hovore |
