@@ -12,7 +12,7 @@ import { MutationError } from "@/server/mutation-error";
 import type { CallActionDeps, CallActor } from "./call-actions";
 import { CallActionError, OperatorDeviceError, PresenceServiceError, SessionEventDeferredError, SessionLeaseBusyError } from "./service-errors";
 import type { TelephonyEnvironment } from "./state/types";
-import { createTelnyxClient, resolveTelnyxLiveGate, TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
+import { createTelnyxClient, resolveTelnyxLiveGate, TelnyxCommandError, type TelnyxClient, type TelnyxSettingsSwitches } from "./telnyx/client";
 import { getTelnyxConfig, type EnvRecord, type TelnyxConfig } from "./telnyx/env";
 import { createTelnyxRequestLogger } from "./telnyx/request-telemetry";
 import type { ProcessorDeps } from "./telnyx/event-processor";
@@ -59,6 +59,42 @@ export function telephonyLogger(entry: Record<string, unknown>): void {
   else console.log(line);
 }
 
+type LiveGateSettings = TelnyxSettingsSwitches | null;
+/**
+ * The live-call switch is read on every request that builds telephony deps —
+ * every console poll, webhook and action — and changes a few times a year. A
+ * five-second per-instance reuse turns ~1 request per poll into ~0 while a
+ * switched-off gate still takes effect within seconds.
+ */
+export const LIVE_GATE_CACHE_TTL_MS = 5_000;
+const liveGateCache = new Map<string, { at: number; value: Promise<LiveGateSettings> }>();
+
+/** Test seam. */
+export function clearLiveGateCache() { liveGateCache.clear(); }
+
+async function readLiveGateSettings(admin: ReturnType<typeof createSupabaseAdminClient>, organizationId: string): Promise<LiveGateSettings> {
+  const now = Date.now();
+  const hit = liveGateCache.get(organizationId);
+  if (hit && now - hit.at < LIVE_GATE_CACHE_TTL_MS && now >= hit.at) return hit.value;
+  const value = (async () => {
+    const { data, error } = await admin
+      .from("motorist_telephony_settings")
+      .select("live_calls_enabled, sms_live_sends")
+      .eq("organization_id", organizationId)
+      .maybeSingle();
+    if (error) throw error;
+    return (data ?? null) as LiveGateSettings;
+  })();
+  liveGateCache.set(organizationId, { at: now, value });
+  try {
+    return await value;
+  } catch {
+    // Same as before: a failed read resolves the gate from config alone, and is not reused.
+    if (liveGateCache.get(organizationId)?.value === value) liveGateCache.delete(organizationId);
+    return null;
+  }
+}
+
 export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = {}): Promise<TelephonyRuntimeDeps> {
   const admin = createSupabaseAdminClient();
   const organizationId = options.organizationId ?? (await resolveDefaultOrganizationId());
@@ -69,12 +105,8 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
 
   let telnyx: TelnyxClient | null = null;
   if (config.configured) {
-    const { data } = await admin
-      .from("motorist_telephony_settings")
-      .select("live_calls_enabled, sms_live_sends")
-      .eq("organization_id", organizationId)
-      .maybeSingle();
-    telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data ?? null),
+    const data = await readLiveGateSettings(admin, organizationId);
+    telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data),
       onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger) });
   }
 
