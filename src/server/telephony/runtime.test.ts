@@ -24,6 +24,7 @@ vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => harnes
 vi.mock("@/server/default-organization", () => ({ resolveDefaultOrganizationId: async () => ORG }));
 
 import {
+  clearLiveGateCache,
   createTelephonyDeps,
   isProductionDeployment,
   notConfiguredResponse,
@@ -51,6 +52,7 @@ describe("telephony runtime", () => {
   });
   beforeEach(() => {
     harness = createTelephonyHarness();
+    clearLiveGateCache();
     notifications.after.mockReset();
     notifications.notify.mockReset().mockResolvedValue({ sent: 0, failed: 0 });
     process.env.TELNYX_API_KEY = "KEYtest";
@@ -98,6 +100,13 @@ describe("telephony runtime", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('{"data":{"result":"ok"}}', { status: 200 })));
     const deps = await createTelephonyDeps({ logger: () => { throw new Error("logger failed"); } });
     await expect(deps.telnyx!.answer({ callControlId: "PRIVATE_CALL_CONTROL_TOKEN", commandId: "bb824028-87c9-442f-bfac-ac527f733493" })).resolves.toBeUndefined();
+  });
+
+  it("reuses the live-gate settings read for a few seconds per organisation", async () => {
+    const from = vi.spyOn(harness.admin, "from");
+    await createTelephonyDeps();
+    await createTelephonyDeps();
+    expect(from.mock.calls.filter((call) => String(call[0]) === "motorist_telephony_settings")).toHaveLength(1);
   });
 
   it("fails the live gate closed when the settings row switches calls off", async () => {

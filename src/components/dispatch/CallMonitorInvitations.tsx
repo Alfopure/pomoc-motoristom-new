@@ -31,7 +31,8 @@ export function CallMonitorInvitations({ sessionId, listeningSessionId, onStop, 
     alive.current = true;
     const requestCounter = sequence.current;
     const initial = window.setTimeout(() => void refresh(), 0);
-    const timer = setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 8_000);
+    // An invitation stays open for minutes; 30 s instead of 8 s (7-13 Supabase requests per poll).
+    const timer = setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 30_000);
     const focus = () => { setInbox(empty); void refresh(); };
     window.addEventListener("focus", focus);
     return () => { alive.current = false; requestCounter.value++; clearTimeout(initial); clearInterval(timer); window.removeEventListener("focus", focus); };
