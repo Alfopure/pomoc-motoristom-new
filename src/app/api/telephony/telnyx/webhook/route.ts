@@ -19,8 +19,10 @@ export const maxDuration = 60;
  * never `request.json()`, the signature is over the exact bytes), signature
  * second (400), then the claim ledger and the per-session pipeline inside
  * `processTelnyxEvent`, which owns the 200/500 policy: completed or compensated
- * events answer 200; busy claims and pre-effect lease deferrals answer 500 so
- * Telnyx can retry immediately. Bookkeeping failures also request redelivery.
+ * events answer 200; so does a lease-busy deferral of a control fact that is
+ * durably in the ledger and finished by this invocation after the response
+ * (`drainDeferredDelivery`, outcome `deferred`). Busy claims, other pre-effect
+ * deferrals and bookkeeping failures answer 500 so Telnyx redelivers.
  *
  * Foreign `connection_id` values (another environment sharing the account) are
  * acknowledged with 200 and ignored.
