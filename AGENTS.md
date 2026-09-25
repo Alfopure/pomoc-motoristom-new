@@ -36,7 +36,16 @@ As of 2026-09-22, the canonical TEST hostname is active: authoritative DNS point
 
 The retired VIPTel original: Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispatching-old`, `dev.dispecing.linkapomoci.sk`, and the previous telephony provider with its listener host.
 
-That Supabase project is **not** dormant. It also holds the Watchdog vehicle-handover application — 10 254 `rental_photos` rows and 10 320 files in storage — so it is somebody's live database, not an old copy waiting to be deleted.
+That Supabase project is **not** dormant and must not be deleted. Alongside the
+retired dispatch tables it holds a **live vehicle handover application** —
+`rentals`, `rental_photos`, `vehicles`, with a `country` column and Polish
+users — 1 385 handovers, 10 254 photo rows and 10 320 files in storage, last
+written to on the day this was checked.
+
+It is *not* the Watchdog application. Watchdog is a separate Supabase project
+(`nkhrzdftvskgcwzenfnr`) holding feed scraping, alerts and notifications, and
+nothing about vehicles. The two were confused once already; the names now say
+which is which.
 
 Use the dev-first deployment workflow:
 
