@@ -62,7 +62,8 @@ async function failedOwner(options: { customer?: boolean; recording?: boolean; r
   let customerSelfDrain: (() => Promise<void>) | null = null;
   if (options.customer !== false) {
     const customer = await h.legEvent(call.callControlId, "call.hangup", {}, "deferred-customer");
-    expect(customer).toMatchObject({ status: 500, outcome: "failed" });
+    // Durably deferred with its own drain retained: acknowledged, not redelivered.
+    expect(customer).toMatchObject({ status: 200, outcome: "deferred" });
     expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-customer"))
       .toMatchObject({ retry_state: "deferred", delivery_count: 1 });
     expect(retained).toHaveLength(1);
