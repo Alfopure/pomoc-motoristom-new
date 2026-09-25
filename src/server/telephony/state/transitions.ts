@@ -249,6 +249,14 @@ class TransitionBuilder {
     return this.legs.filter((leg) => !this.legEnded(leg));
   }
 
+  /** The stored legs with this transition's patches applied. */
+  legsAfter(): LegRow[] {
+    return this.legs.map((leg) => {
+      const patch = this.legPatches.get(leg.telnyx_call_control_id);
+      return patch ? { ...leg, ...patch.values } : leg;
+    });
+  }
+
   customerLeg(): LegRow | undefined {
     const byId = this.session.customer_leg_id ? this.legs.find((leg) => leg.id === this.session.customer_leg_id) : undefined;
     const byRole = byId ?? this.legs.find((leg) => leg.role === "customer");
@@ -417,9 +425,24 @@ function correctProviderEnd(b: TransitionBuilder, leg: LegRow, event: TelephonyE
   if (terminal && b.session.ended_at && (isCustomer(leg) || b.session.ended_at === leg.ended_at)) {
     const end = latestIso(event.occurredAt, ...b.legs.filter((other) => other.telnyx_call_control_id !== leg.telnyx_call_control_id).map((other) => other.ended_at));
     if (end !== b.session.ended_at) b.patchSession({ ended_at: end });
-    if (isCustomer(leg)) b.call.ended_at = end; // `upsertCallRow` recomputes `duration_seconds`
+    const callEnd = conversationEnd(b);
+    if (callEnd) b.call.ended_at = callEnd; // `upsertCallRow` recomputes `duration_seconds`
   }
   return b.note("provider end corrected").result();
+}
+
+/**
+ * When the call record ends: the last real end of the caller or of a leg that
+ * joined the conversation. The session end is the last leg end of any kind,
+ * so an unanswered offer our stale sweep closed minutes later once stretched a
+ * one-minute call to 247 s of talk time. `null` when no such end is known.
+ */
+function conversationEnd(b: TransitionBuilder): string | null {
+  const ends = b.legsAfter()
+    .filter((leg) => (isCustomer(leg) || leg.answered_at) && leg.ended_at && Number.isFinite(Date.parse(leg.ended_at))
+      && !SYNTHETIC_HANGUP_CAUSES.has(leg.hangup_cause ?? ""))
+    .map((leg) => leg.ended_at!);
+  return ends.length > 0 ? latestIso(ends[0], ...ends.slice(1)) : null;
 }
 
 function latestIso(first: string, ...rest: Array<string | null | undefined>): string {
@@ -1747,7 +1770,7 @@ function finishIfQuiet(b: TransitionBuilder, at: string): void {
     return;
   }
   b.setState("ended").patchSession({ ended_at: end });
-  if (!b.call.ended_at) b.call.ended_at = end;
+  if (!b.call.ended_at) b.call.ended_at = conversationEnd(b) ?? end;
   b.note("all legs ended → ended");
 }
 
@@ -3104,6 +3127,10 @@ function onStaleFinalise(b: TransitionBuilder): ReduceResult {
   // A leaked `offered` attempt keeps its operator out of every future ring plan
   // (the cross-session partial unique index), so terminalise them here too.
   cancelOpenAttempts(b, b.nowIso, "stale finalise");
+  // The stamps below are a guess made minutes later; the call record keeps
+  // the conversation's real end when one is known.
+  const callEnd = conversationEnd(b);
+  if (callEnd) b.call.ended_at = callEnd;
   for (const leg of b.openLegs()) {
     b.cmd(hangupCmd(b, leg, "stale_finalise"));
     b.leg(leg.telnyx_call_control_id, { state: "ended", ended_at: b.nowIso, hangup_cause: "stale_finalise" });
