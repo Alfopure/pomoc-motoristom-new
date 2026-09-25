@@ -1000,6 +1000,33 @@ describe("customer gone at provider and ended_at provenance (E4)", () => {
     expect(h.telnyx.calls).toHaveLength(commands);
   });
 
+  it("an unanswered offer closed by the stale sweep does not stretch the call", async () => {
+    // Production 2026-09-25 10:18: one minute of talk shown as 247 s because a
+    // losing offer's hangup never arrived and the sweep closed it minutes later.
+    const h = createTelephonyHarness();
+    const call = await ringingInbound(h);
+    await h.legEvent(call.o1, "call.answered");
+    await h.legEvent(call.o2, "call.hangup", { hangup_cause: "originator_cancel" });
+    await h.legEvent(call.o1, "call.bridged");
+    await h.legEvent(call.callControlId, "call.bridged");
+    expect(h.session(call.sessionId).state).toBe("talking");
+    const answeredAt = String(h.call(call.sessionId)!.answered_at);
+
+    h.setNow(new Date(Date.parse(answeredAt) + 60_000).toISOString());
+    const customerEnd = h.now().toISOString();
+    await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "caller" });
+    await h.legEvent(call.o1, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "callee" });
+    expect(h.session(call.sessionId).state).toBe("wrap_up");
+    expect(h.call(call.sessionId)).toMatchObject({ ended_at: customerEnd, duration_seconds: 60 });
+
+    h.advance(3 * 60_000);
+    const staleAt = h.now().toISOString();
+    await sweep(h);
+    expect(h.legs(call.sessionId).find((leg) => leg.telnyx_call_control_id === call.o5)).toMatchObject({ hangup_cause: "stale_finalise", ended_at: staleAt });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: staleAt });
+    expect(h.call(call.sessionId)).toMatchObject({ ended_at: customerEnd, duration_seconds: 60 });
+  });
+
   it("session ended_at is the latest leg end after an out-of-order operator hangup", async () => {
     const h = createTelephonyHarness();
     const call = await talkingCall(h);

@@ -533,7 +533,9 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
   const current = existing.data;
   const meta = readMeta(session);
   const answeredAt = overrides.answered_at ?? session.answered_at ?? current?.answered_at ?? null;
-  const endedAt = overrides.ended_at ?? session.ended_at ?? current?.ended_at ?? null;
+  // A recorded call end outlives a later session end: the session closes only
+  // with its last leg, which may be a stale offer finalised minutes later.
+  const endedAt = overrides.ended_at ?? current?.ended_at ?? session.ended_at ?? null;
   const status = overrides.status && (!session.ended_at || TERMINAL_CALL_STATUSES.has(overrides.status)) ? overrides.status :
     current && TERMINAL_CALL_STATUSES.has(current.status) ? current.status : callStatusForSession({ state: session.state, direction: session.direction, answered_at: answeredAt });
 
