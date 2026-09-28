@@ -1482,6 +1482,7 @@ export type Database = {
         max_concurrent_legs: number;
         /** Seconds the queue may find nobody to ring before trying the backup numbers once; 0 disables it. */
         queue_escalate_after_seconds: number;
+        inbound_call_mode: "ring_first" | "queue_first";
         routing_version: number;
         created_at: Timestamp;
         updated_at: Timestamp;

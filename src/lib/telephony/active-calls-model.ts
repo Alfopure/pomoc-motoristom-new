@@ -352,7 +352,8 @@ export type PhoneBarModel = {
 export type PhoneBarModelOptions = { operatorName?: OperatorNameLookup };
 
 function pendingIncomingLeg(call: ActiveCallPayload, leg: ActiveCallLegPayload, actorProfileId: string): boolean {
-  if (leg.profileId !== actorProfileId || (leg.role !== "operator" && leg.role !== "consult") ||
+  const ownedRingLeg = leg.role === "external" && leg.intent === "ring";
+  if (leg.profileId !== actorProfileId || (leg.role !== "operator" && leg.role !== "consult" && !ownedRingLeg) ||
     leg.answeredAt || leg.bridgedAt || !["initiated", "ringing"].includes(leg.state) || !leg.callControlId) return false;
   if (leg.intent === "ring") return call.state === "ringing" && !call.answeredByProfileId && call.offeredProfileIds.includes(actorProfileId);
   if (leg.intent === "internal" || leg.intent === "transfer" || leg.intent === "transfer_recorded" || leg.intent === "transfer_safe") return call.state === "ringing";

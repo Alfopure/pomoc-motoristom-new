@@ -1,0 +1,9 @@
+# Overovacie scenáre k plánu čakárne
+
+1. **Nastavenie:** stará aj nová organizácia číta `ring_first`; `queue_first` sa uloží a vráti; neplatná hodnota API odmietne; obyčajný operátor nastavenie nezmení.
+2. **Režim čakárne:** po introduction/hours/IVR vznikne waiting stav bez dialu, s queue audiom; dva súbežné hovory majú oddelené session a oba možno ručne prevziať. To isté platí pri prázdnom/chýbajúcom ring pláne a pri explicitnej IVR voľbe `waiting_room`. Po vyčerpaní limitu nasleduje callback. `ring_first` bez plánu naďalej ponúkne callback okamžite a jeho IVR čakáreň si zachová automatické ponúkanie.
+3. **Odloženie zvonenia:** aktér + presné `callControlId` platnej otvorenej WebRTC/SIP alebo jeho osobnej mobilnej ponuky presunie iba jednu session do waiting; všetky jej offer legs sú zrušené; zákazník zostáva na audiu. Osobný mobil smie byť iba actor-owned `external` leg s `intent:ring` a aktívnym attempt. Cudzí actor, záložné externé číslo, transfer/consult/party, cudzí/stale `callControlId`, už prijatý či ukončený hovor vráti 409 alebo 403 bez zmeny stavu.
+4. **Ručná čakáreň:** ani tick, ani cron nevytvorí automatickú ponuku alebo záložný PSTN dial. Existujúca fallback čakáreň sa naďalej automaticky ponúka/eskaluje podľa nastavenia.
+5. **Upozornenie:** prvý snapshot je tichý; nový session má jediný chime aj pri pollingu a dvoch kartách; zvuk je tichý pri priamej ponuke, zakázanom zvuku alebo aktívnom push. Trvalý počet zostáva čitateľný aj bez audia či pohybu.
+6. **Push audience:** manual_only oznámenie ide dostupnému oprávnenému operátorovi rovnakej organizácie podľa pravidiel pickup, nie nedostupnému/cudziemu. Bežná fallback vetva si zachová terajšie audience.
+7. **Nasadenie:** cielená migrácia v teste a produkcii po read-only kontrole schémy; Preview, dev test doména a produkcia vracajú readiness 200 so správnym Supabase ref a release SHA. Žiadne živé volanie v testovacom prostredí.

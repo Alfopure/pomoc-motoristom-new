@@ -14,9 +14,14 @@ describe("notification sound readiness", () => {
       createOscillator: vi.fn(() => oscillator),
       createGain: () => ({ gain: { setValueAtTime: vi.fn(), linearRampToValueAtTime: vi.fn(), exponentialRampToValueAtTime: vi.fn() }, connect: vi.fn() }),
     };
-    vi.stubGlobal("window", { AudioContext: class { constructor() { return context; } } });
+    const storage = new Map<string, string>();
+    vi.stubGlobal("window", {
+      AudioContext: class { constructor() { return context; } },
+      localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
+    });
     vi.stubGlobal("document", { visibilityState: "visible" });
-    return { context, oscillator, resume: () => resume(), reject: () => reject(new Error("audio unavailable")) };
+    vi.stubGlobal("navigator", { locks: { request: async (_name: string, run: () => boolean) => run() } });
+    return { context, oscillator, storage, resume: () => resume(), reject: () => reject(new Error("audio unavailable")) };
   }
 
   it("waits for a slow resume before scheduling preview audio", async () => {
@@ -47,5 +52,50 @@ describe("notification sound readiness", () => {
     expect(h.context.resume).toHaveBeenCalledOnce();
     h.resume();
     await expect(preview).resolves.toBe(true);
+  });
+
+  it("plays one distinct waiting-room cue and remembers the session across tabs or refreshes", async () => {
+    const h = audio("running");
+    const sound = await import("./notification-sound");
+    await sound.unlockNotificationSound();
+    await expect(sound.playWaitingRoomChimeOnce("waiting-1")).resolves.toBe(true);
+    await expect(sound.playWaitingRoomChimeOnce("waiting-1")).resolves.toBe(false);
+    expect(h.context.createOscillator).toHaveBeenCalledTimes(2);
+
+    vi.resetModules();
+    const secondTab = await import("./notification-sound");
+    await secondTab.unlockNotificationSound();
+    await expect(secondTab.playWaitingRoomChimeOnce("waiting-1")).resolves.toBe(false);
+    expect(h.context.createOscillator).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not add a queue cue when native available-call push owns the sound", async () => {
+    const h = audio("running");
+    const sound = await import("./notification-sound");
+    await sound.unlockNotificationSound();
+    sound.setNativeAvailableCallPushActive(true);
+    await expect(sound.playWaitingRoomChimeOnce("waiting-2")).resolves.toBe(false);
+    expect(h.context.createOscillator).not.toHaveBeenCalled();
+  });
+
+  it("keeps the queue cue when an older subscription cannot deliver call push", async () => {
+    const h = audio("running");
+    const sound = await import("./notification-sound");
+    await sound.unlockNotificationSound();
+    const legacyPush = { configured: true, callNotificationsConfigured: false, subscribed: true, availableCallsEnabled: true };
+    sound.setNativeAvailableCallPushActive(sound.hasNativeAvailableCallPush(legacyPush));
+    await expect(sound.playWaitingRoomChimeOnce("waiting-legacy-push")).resolves.toBe(true);
+    expect(sound.hasNativeAvailableCallPush({ ...legacyPush, callNotificationsConfigured: true })).toBe(true);
+    expect(sound.hasNativeAvailableCallPush({ ...legacyPush, configured: false, callNotificationsConfigured: true })).toBe(false);
+    expect(h.context.createOscillator).toHaveBeenCalledTimes(2);
+  });
+
+  it("respects the saved sound setting for the waiting room", async () => {
+    const h = audio("running");
+    h.storage.set("pm:notification-sound:v1", "off");
+    const sound = await import("./notification-sound");
+    await sound.unlockNotificationSound();
+    await expect(sound.playWaitingRoomChimeOnce("waiting-3")).resolves.toBe(false);
+    expect(h.context.createOscillator).not.toHaveBeenCalled();
   });
 });

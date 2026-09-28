@@ -905,6 +905,12 @@ function startIvr(b: TransitionBuilder, leg: LegRow, tries: number): void {
 
 function startRingPlan(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPlan | null): void {
   b.patchMeta({ gather: null });
+  if (b.session.direction === "inbound" && b.ctx.settings.inboundCallMode === "queue_first") {
+    b.patchMeta({ ring: { ...(b.meta.ring ?? {}), plan, mode: "plan", exhausted: false, fallback: null } });
+    if (plan) b.patchSession({ ring_plan_id: plan.planId });
+    enterWaiting(b, customer, "queue_first", "waiting", true);
+    return;
+  }
   if (!plan || plan.steps.length === 0) {
     b.note("no ring plan → callback offer");
     offerCallback(b, customer, { key: "callbackOffer" }, "missed");
@@ -1147,18 +1153,22 @@ function offerCallback(b: TransitionBuilder, customer: LegRow, media: MediaRef, 
   b.note(`callback offer (${source})`);
 }
 
-function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, state: "waiting" | "parked" = "waiting"): void {
+function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, state: "waiting" | "parked" = "waiting", manualOnly = false): void {
   const musicRunning = mohIsPlaying(b);
   // The waiting-room limit is frozen the moment the caller enters it, like the
   // ring plan is frozen at call start: `loadRoutingSettings` re-reads the
   // settings row on every event, so an admin lowering `park_max_minutes` used to
   // eject callers who were already waiting — a configuration change disturbing a
   // call in progress.
-  // Both exhaustions queue the caller for automatic offers; they differ only in
-  // what the console is told about why nobody picked up.
+  // Ring exhaustion keeps its automatic offers. An explicit queue choice is
+  // manual, so its caller stays available for pickup without another dial.
   const queued = state === "waiting" && b.session.direction === "inbound" && !b.session.answered_at &&
-    (reason === "ring_exhausted" || reason === "no_operator_reachable" || reason === "ivr" || Boolean(b.meta.queue));
+    (reason === "ring_exhausted" || reason === "no_operator_reachable" || reason === "ivr" || reason === "queue_first" || reason === "operator_deferred" || Boolean(b.meta.queue));
   const previous = queued && b.meta.queue ? b.meta.waiting : null;
+  const manual = manualOnly || b.meta.queue?.manual_only === true;
+  const nextOfferAt = manual
+    ? new Date(Date.parse(previous?.since ?? b.nowIso) + (previous?.max_minutes ?? b.ctx.settings.parkMaxMinutes) * 60_000).toISOString()
+    : new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString();
   if (queued && !previous) stopMoh(b, customer);
   b.setState(state).patchMeta({
     waiting: previous ?? { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso, max_minutes: b.ctx.settings.parkMaxMinutes },
@@ -1168,14 +1178,14 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
     // plan has just finished failing to reach anybody.
     queue: queued
       ? (b.meta.queue
-          ? { ...b.meta.queue, next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString() }
-          : { next_offer_at: new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString(), idle_since: b.nowIso, escalated_at: null })
+          ? { ...b.meta.queue, next_offer_at: nextOfferAt, manual_only: manual }
+          : { next_offer_at: nextOfferAt, idle_since: manual ? null : b.nowIso, escalated_at: null, manual_only: manual })
       : null,
     ring: { ...b.meta.ring, active_step: null, step_deadline_at: null },
   });
   if (queued) {
     if (!previous) startQueuePrompt(b, customer);
-    b.note(`${state} (${reason}, automatic offers)`);
+    b.note(`${state} (${reason}, ${manual ? "manual pickup" : "automatic offers"})`);
     return;
   }
   // The ring plan already started the loop; restarting it would jump the audio.
@@ -1203,7 +1213,7 @@ function queueBackupMembers(b: TransitionBuilder, plan: FrozenRingPlan): FrozenR
 function offerQueuedCall(b: TransitionBuilder, customer: LegRow): boolean {
   const queue = b.meta.queue;
   const plan = b.ringPlan();
-  if (!queue || !plan?.steps[0] || b.session.answered_at || b.meta.customer_gone_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return false;
+  if (!queue || queue.manual_only || !plan?.steps[0] || b.session.answered_at || b.meta.customer_gone_at || b.ctx.now.getTime() < Date.parse(queue.next_offer_at)) return false;
 
   // How long the queue has been placing no offers at all. Not how long the
   // caller has waited: a queue that keeps ringing an operator who declines is
@@ -2069,7 +2079,7 @@ function onIvrChoice(b: TransitionBuilder, leg: LegRow, outcome: IvrGatherOutcom
       blindTransferCustomer(b, leg, { kind: "number", number: decision.number, label: decision.option.label }, null);
       return b.result();
     case "waiting_room":
-      enterWaiting(b, leg, "ivr");
+      enterWaiting(b, leg, "ivr", "waiting", b.ctx.settings.inboundCallMode === "queue_first");
       return b.result();
     case "retry":
       startIvr(b, leg, decision.tries);
@@ -2305,6 +2315,8 @@ function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
       return appUnhold(b, customer);
     case "park":
       return appPark(b, customer, event);
+    case "defer":
+      return appDefer(b, customer, event);
     case "pickup":
       return appPickup(b, customer, event);
     case "blind_transfer":
@@ -2435,6 +2447,37 @@ function appPark(b: TransitionBuilder, customer: LegRow, event: AppEvent): Reduc
   b.leg(customer.telnyx_call_control_id, { state: "answered" });
   if (operator.profile_id) b.presenceChange({ profileId: operator.profile_id, status: "after_call_work", sessionId: null, startWrapUp: true, onlyIfSession: b.session.id, reason: "parked" });
   return b.result();
+}
+
+/** The operator defers this exact unanswered offer; every parallel offer stops. */
+function appDefer(b: TransitionBuilder, customer: LegRow, event: AppEvent): ReduceResult {
+  if (b.session.direction !== "inbound" || b.session.state !== "ringing" || b.meta.ring?.mode !== "plan" ||
+    b.session.answered_at || b.session.answered_by_profile_id || !event.actorProfileId || !event.offeredCallControlId) {
+    throw new CallActionRejected("Tento hovor už nie je možné odložiť do čakárne.", 409, "offer_unavailable");
+  }
+  const ownOffer = b.openLegs().find((leg) => leg.telnyx_call_control_id === event.offeredCallControlId &&
+    leg.profile_id === event.actorProfileId && (leg.role === "operator" || leg.role === "external") &&
+    legIntent(leg) === "ring" && !leg.answered_at);
+  const attempt = ownOffer ? b.attemptForLeg(ownOffer) : null;
+  if (!ownOffer || !attempt || attempt.profile_id !== event.actorProfileId || attempt.result !== "offered") {
+    throw new CallActionRejected("Ponuka už nie je aktívna.", 409, "offer_unavailable");
+  }
+  const stepDeadline = Date.parse(b.meta.ring.step_deadline_at ?? "");
+  const offeredAt = Date.parse(attempt.offered_at ?? "");
+  if (attempt.ended_at || attempt.step_index !== b.activeRingStep() ||
+    !Number.isFinite(stepDeadline) || !Number.isFinite(offeredAt) ||
+    b.ctx.now.getTime() >= Math.min(stepDeadline, offeredAt + attempt.ring_secs * 1_000)) {
+    throw new CallActionRejected("Ponuka už vypršala.", 409, "offer_expired");
+  }
+  cancelOpenAttempts(b, b.nowIso, "offered call deferred");
+  for (const leg of b.openLegs()) {
+    if (isCustomer(leg)) continue;
+    // Keep the leg open until Telnyx confirms termination. A failed required
+    // command remains in the durable effects queue and fails the API request.
+    b.cmd(hangupCmd(b, leg, "offer_deferred", false));
+  }
+  enterWaiting(b, customer, "operator_deferred", "waiting", true);
+  return b.note(`offer deferred by ${event.actorProfileId}`).result();
 }
 
 function rememberAcceptedDeviceLeg(b: TransitionBuilder, leg: LegRow) {

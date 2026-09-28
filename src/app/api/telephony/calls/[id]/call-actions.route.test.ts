@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const actions = {
   unholdCall: vi.fn(),
   parkCall: vi.fn(),
+  deferRingingCall: vi.fn(),
   hangupCall: vi.fn(),
   pickupWaitingCall: vi.fn(),
   startConsult: vi.fn(),
@@ -33,6 +34,7 @@ vi.mock("@/server/telephony/call-actions", async (importOriginal) => {
     ...actual,
     unholdCall: (...args: unknown[]) => actions.unholdCall(...args),
     parkCall: (...args: unknown[]) => actions.parkCall(...args),
+    deferRingingCall: (...args: unknown[]) => actions.deferRingingCall(...args),
     hangupCall: (...args: unknown[]) => actions.hangupCall(...args),
     pickupWaitingCall: (...args: unknown[]) => actions.pickupWaitingCall(...args),
     startConsult: (...args: unknown[]) => actions.startConsult(...args),
@@ -62,6 +64,7 @@ type Case = {
 const CASES: Case[] = [
   { path: "unhold", action: "unholdCall", fallback: "Obnovenie hovoru zlyhalo.", args: [DEPS, EXPECTED_ACTOR, "sess-1"], load: () => import("./unhold/route") },
   { path: "park", action: "parkCall", fallback: "Zaparkovanie hovoru zlyhalo.", args: [DEPS, EXPECTED_ACTOR, "sess-1"], load: () => import("./park/route") },
+  { path: "defer", action: "deferRingingCall", fallback: "Odloženie hovoru do čakárne zlyhalo.", body: { callControlId: "cc-offer-1" }, args: [DEPS, EXPECTED_ACTOR, "sess-1", "cc-offer-1"], load: () => import("./defer/route") },
   { path: "hangup", action: "hangupCall", fallback: "Ukončenie hovoru zlyhalo.", args: [DEPS, EXPECTED_ACTOR, "sess-1"], load: () => import("./hangup/route") },
   { path: "pickup", action: "pickupWaitingCall", fallback: "Prevzatie hovoru zlyhalo.", args: [DEPS, EXPECTED_ACTOR, "sess-1"], load: () => import("./pickup/route") },
   {
@@ -93,6 +96,14 @@ describe("call-action route wiring", () => {
     assertSameOriginRequest.mockReset();
     createTelephonyDeps.mockClear();
     for (const action of Object.values(actions)) action.mockReset();
+  });
+
+  it("defer refuses a missing exact call identity before running the action", async () => {
+    const { POST } = await import("./defer/route");
+    const response = await POST(request("defer"), context());
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ code: "offer_required" });
+    expect(actions.deferRingingCall).not.toHaveBeenCalled();
   });
 
   for (const entry of CASES) {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
+import { createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
 import type { CallNotificationDeps } from "./call-notifications";
 import { callPushCandidates, loadCallPushCandidates, notifyCallState } from "./call-notifications";
@@ -241,6 +241,19 @@ describe("call push audience", () => {
     expect(rows.every((row) => row.category === "available_call")).toBe(true);
     expect(rows.some((row) => row.recipientProfileId === PROFILES.o5)).toBe(false);
     expect(Date.parse(rows[0].expiresAt) - h.now().getTime()).toBe(30_000);
+  });
+
+  it("notifies any eligible operator about a manual queue, even without a ring plan", async () => {
+    const h = world();
+    h.db.update("motorist_telephony_settings", { inbound_call_mode: "queue_first" }, () => true);
+    h.db.update("motorist_telephony_lines", { ring_plan_id: null }, (row) => row.phone_number === NUMBERS.allianz);
+    const call = await h.inbound();
+    expect(h.session(call.sessionId).state).toBe("waiting");
+    const recipients = (await loadCallPushCandidates(deps(h), call.sessionId)).map((row) => row.recipientProfileId).sort();
+    expect(recipients).toEqual([PROFILES.o1, PROFILES.o2, PROFILES.o5].sort());
+    h.setPresence(PROFILES.o5, { status: "paused" });
+    expect((await loadCallPushCandidates(deps(h), call.sessionId)).map((row) => row.recipientProfileId).sort())
+      .toEqual([PROFILES.o1, PROFILES.o2].sort());
   });
 
   it.each(["offline", "paused", "on_call", "ringing", "after_call_work"])("excludes a waiting recipient whose status is %s", async (status) => {

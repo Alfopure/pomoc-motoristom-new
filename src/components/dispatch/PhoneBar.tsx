@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 
 import { callTrayOffers, callTrayCapacity } from "@/lib/telephony/call-tray";
-import { matchesIncomingBrowserInvite } from "@/lib/telephony/browser-invite";
+import { deferOfferCallControlId, matchesIncomingBrowserInvite } from "@/lib/telephony/browser-invite";
 import { canPickUpWithCurrentPresence } from "@/lib/telephony/call-pickup-presence";
 import type { CallParticipant, PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-model";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
@@ -74,6 +74,7 @@ export type PhoneBarProps = {
   onStopSupervise: (sessionId: string) => void;
   onAnswer: () => void;
   onAnswerOffer?: (sessionId: string, callControlId: string | null) => void;
+  onDeferOfferIdentity?: (sessionId: string, callControlId: string) => void;
   onRejectOfferIdentity?: (sessionId: string, callControlId: string | null) => void;
   stale?: boolean;
   onHangupBrowser: () => void;
@@ -133,6 +134,7 @@ export function PhoneBar(props: PhoneBarProps) {
 
 function OfferBar({ call, now, ...props }: PhoneBarProps & { call: PhoneBarCall; now: number }) {
   const exactInvite = matchesIncomingBrowserInvite(call, props.phone.call);
+  const offerCallControlId = deferOfferCallControlId(call, props.phone.call);
   const busy = props.busyAction !== null || props.phone.answering || (props.phone.pendingOperatorLegs ?? 0) > 0;
   const ready = props.phone.status === "registered" || (props.phone.onDemand && props.phone.status === "idle");
   const blocked = props.stale ? "Stav sa obnovuje"
@@ -153,6 +155,10 @@ function OfferBar({ call, now, ...props }: PhoneBarProps & { call: PhoneBarCall;
     <div className={styles.offerIdentity}><strong>{call.callerName || formatPhoneNumberForDisplay(call.number) || "Neznámy volajúci"}</strong><span>{call.lineLabel}{call.offeredOperatorNames.length ? ` · Zvoní: ${call.offeredOperatorNames.join(", ")}` : " · Zvoní"}</span>{blocked && <small className={styles.mobileBlockReason}>{blocked}</small>}</div>
     <time className="shrink-0 text-xs tabular-nums text-zinc-300">{formatCallTimer(callElapsedSeconds(call, now))}</time>
     <button type="button" onClick={answer} disabled={Boolean(blocked)} title={blocked ?? undefined} className={styles.acceptOffer}><PhoneCall size={15} />{busy && exactInvite ? "Prijímam…" : exactInvite ? "Prijať" : "Prevziať"}</button>
+    {offerCallControlId && call.direction === "inbound" && props.onDeferOfferIdentity && <button type="button" onClick={() => {
+      if (deferOfferCallControlId(call, props.phone.call) !== offerCallControlId) return;
+      props.onDeferOfferIdentity?.(call.sessionId, offerCallControlId);
+    }} disabled={busy || Boolean(props.stale)} title="Presunúť tento hovor do čakárne" aria-label="Presunúť tento zvoniaci hovor do čakárne" className={styles.deferOffer}><Pause size={15} aria-hidden="true" /><span>{props.busyAction === "defer" ? "Presúvam…" : "Do čakárne"}</span></button>}
     {blocked && <span className={styles.blockReason}>{blocked}</span>}
     {exactInvite && <button type="button" onClick={() => { if (!matchesIncomingBrowserInvite(call, props.phone.call)) return; if (props.onRejectOfferIdentity) props.onRejectOfferIdentity(call.sessionId, props.phone.call?.telnyxCallControlId ?? null); else props.onHangupBrowser(); }} disabled={busy} className={styles.rejectOffer} aria-label="Odmietnuť tento hovor"><PhoneOff size={16} /></button>}
   </article>;
