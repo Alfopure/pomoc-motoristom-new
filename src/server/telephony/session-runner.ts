@@ -29,6 +29,7 @@ import {
   ACTIVE_SESSION_STATES,
   emptyTransition,
   isOpenLeg,
+  lineModeBehaviour,
   readMeta,
   toJson,
   type AttemptRow,
@@ -36,6 +37,7 @@ import {
   type FrozenRingPlan,
   type IvrOptionRow,
   type LegRow,
+  type LineInboundMode,
   type PresenceRow,
   type RoutingContext,
   type RoutingSettings,
@@ -374,7 +376,19 @@ async function loadRoutingConfiguration(deps: SessionRunnerDeps, session: Sessio
     if (ringPlan) ringPlan = ringPlans[ringPlan.planId] ?? ringPlan;
   }
 
-  return { line, settings, recordingPolicy, routing, businessHours, ivr, ringPlan, ringPlans };
+  const frozenLineMode: LineInboundMode | null =
+    session.direction === "inbound" &&
+    (meta.line_inbound_mode === "ring_first" || meta.line_inbound_mode === "ring_all" || meta.line_inbound_mode === "ring_ordered" || meta.line_inbound_mode === "queue_first")
+      ? meta.line_inbound_mode : null;
+  const behaviour = lineModeBehaviour(frozenLineMode, settings.inboundCallMode);
+  if (behaviour.strategyOverride && inboundRouting) {
+    for (const [id, plan] of Object.entries(ringPlans)) {
+      ringPlans[id] = { ...plan, steps: plan.steps.map(step => ({ ...step, strategy: behaviour.strategyOverride! })) };
+    }
+    if (ringPlan) ringPlan = ringPlans[ringPlan.planId] ?? ringPlan;
+  }
+
+  return { line, settings: { ...settings, inboundCallMode: behaviour.inboundCallMode }, recordingPolicy, routing, businessHours, ivr, ringPlan, ringPlans };
 }
 
 export async function loadRoutingContext(deps: SessionRunnerDeps, session: SessionRow, event?: SessionEvent, snapshotLegs?: LegRow[]): Promise<RoutingContext> {

@@ -7,15 +7,17 @@ import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
 import { ConfigRequestError, loadRoutingConfig, saveRoutingConfig, type RoutingConfigResponse } from "./config-client";
 import { FALLBACK_DESTINATION_ALLOWLIST, validateRingGroupDrafts, type GroupDraft } from "./ring-groups-model";
 import { describeRingPlan, ringPlanIdsInUse, validateRingPlanDrafts, type PlanDraft } from "./ring-plan-model";
-import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingMatches, incomingPayload } from "./incoming-routing-model";
+import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingMatches, incomingPayload, mergeSavedLine } from "./incoming-routing-model";
 import { RingGroupsEditor } from "./RingGroupsEditor";
 import { RingPlanEditor } from "./RingPlanEditor";
+import { LineInboundModeControl } from "./LineInboundModeControl";
 import { SettingsIssueList, SettingsNotice, settingsInputClass } from "./settings-ui";
 
 export type IncomingEditorActions = { save: () => Promise<boolean>; discard: () => void };
-export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onNavigate, onDirtyChange, onActionsChange, onEditorStateChange }: {
+export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLineSaved, onNavigate, onDirtyChange, onActionsChange, onEditorStateChange }: {
   document: RoutingDocument; canEdit: boolean; target?: RoutingNavigationTarget | null;
   onSaved: (response: RoutingConfigResponse) => void;
+  onLineSaved: (response: RoutingConfigResponse) => void;
   onNavigate: (target: RoutingNavigationTarget) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onActionsChange?: (actions: IncomingEditorActions | null) => void;
@@ -54,6 +56,12 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
   function accept(response: RoutingConfigResponse) {
     pendingChanges.current = false;
     setBaseline(response.document); setDraft(incomingDraft(response.document)); setRemote(null); setUncertain(false); onSaved(response);
+  }
+  function acceptLineMode(response: RoutingConfigResponse) {
+    // This PATCH saves one number independently. Keep unsaved group/plan drafts
+    // and their original comparison baseline intact.
+    setBaseline(current => mergeSavedLine(current, response.document));
+    onLineSaved(response);
   }
   function discard() { pendingChanges.current = false; setDraft(incomingDraft(remote ?? baseline)); if (remote) setBaseline(remote); setRemote(null); setUncertain(false); setError(null); }
   async function verify(): Promise<boolean> {
@@ -95,13 +103,14 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
   return <section className="grid min-w-0 gap-3 [&_label>span]:font-medium [&_label>span]:normal-case" aria-label="Prichádzajúce hovory">
     <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-[0_1px_3px_rgba(20,30,50,0.04)]">
       <h2 className="text-base font-semibold text-zinc-900">Prichádzajúce hovory</h2>
-      <p className="mt-1 text-sm text-zinc-600">Nastav, kto zvoní, ako dlho a čo sa stane, keď nikto nezdvihne. Členov upravíš priamo pri kroku. Všetky zmeny sa uložia naraz.</p>
+      <p className="mt-1 text-sm text-zinc-600">Nastav režim pre vybrané číslo, kto zvoní a čo sa stane, keď nikto nezdvihne. Režim čísla sa uloží hneď po výbere; skupiny a plány uložíš tlačidlom dole.</p>
       <div className="mt-3 flex flex-wrap items-end gap-3">
         <label className="grid min-w-0 gap-1 text-xs font-medium text-zinc-600">Linka<select className={settingsInputClass} value={lineId} onChange={event => { const chosen = working.lines.find(row => row.id === event.target.value); const effective = chosen?.returnLineId ? working.lines.find(row => row.id === chosen.returnLineId) : chosen; setLineId(event.target.value); setFocusPlanId(effective?.ringPlanId ?? null); }}><option value="">Všetky plány vrátane nepoužitých</option>{working.lines.map(row => <option key={row.id} value={row.id}>{row.label} · {row.phoneNumber}{row.active ? "" : " (neaktívna)"}</option>)}</select></label>
         {line && <button type="button" className="min-h-10 rounded-lg border border-zinc-200 px-3 text-sm font-medium" onClick={() => onNavigate({ section: "telephony", tab: "numbers", lineId: line.id })}>Priradenie linky</button>}
         {effectiveLine?.businessHoursId && <button type="button" className="min-h-10 rounded-lg border border-zinc-200 px-3 text-sm font-medium" onClick={() => onNavigate({ section: "telephony", tab: "hours", lineId: effectiveLine.id, businessHoursId: effectiveLine.businessHoursId! })}>Otváracie hodiny</button>}
         {effectiveLine?.ivrMenuId && <button type="button" className="min-h-10 rounded-lg border border-zinc-200 px-3 text-sm font-medium" onClick={() => onNavigate({ section: "telephony", tab: "ivr", lineId: effectiveLine.id, ivrMenuId: effectiveLine.ivrMenuId! })}>Hlasové menu</button>}
       </div>
+      {line && <LineInboundModeControl key={line.id} line={line} defaultMode={baseline.settings?.inboundCallMode ?? null} canEdit={canEdit} onSaved={acceptLineMode} />}
       {line?.returnLineId && <p className="mt-2 text-xs text-zinc-600">Návratové číslo používa smerovanie linky {effectiveLine?.label ?? "(nedostupná)"}.</p>}
       {target?.planId && !working.plans.some(plan => plan.id === target.planId) && <SettingsNotice tone="warning">Vybraný plán už neexistuje alebo k nemu nemáš prístup. Zobrazuje sa dostupná konfigurácia.</SettingsNotice>}
     </div>

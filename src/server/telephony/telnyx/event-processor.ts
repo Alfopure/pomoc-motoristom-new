@@ -12,7 +12,7 @@ import { sessionOwnership } from "../ownership";
 import { describeServiceError, SessionLeaseBusyError } from "../service-errors";
 import { recordCallEvent, type CommandOutcome } from "../state/effects";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
-import { toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
+import { lineInboundMode, toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
 import { readMeta } from "../state/types";
 import { loadParticipantManifest, observeParticipants } from "../state/participants";
 import { enqueueSavedRecording } from "../recording-jobs";
@@ -221,6 +221,9 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
   const line = hasReturnRoute
     ? await (await import("../return-line")).resolveInboundReturnLine(admin, organizationId, sourceLine)
     : sourceLine;
+  // The dialled number wins even when it reuses another line's routing plan.
+  // Freeze the override when the call begins so later edits affect new calls.
+  const lineMode = lineInboundMode(sourceLine?.metadata);
   const callerNumber = event.from ? (normalizeE164(event.from) ?? event.from) : null;
   const calledNumber = event.to ? (normalizeE164(event.to) ?? event.to) : null;
 
@@ -241,7 +244,7 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
       caller_number: callerNumber,
       called_number: calledNumber,
       started_at: event.occurredAt ?? now.toISOString(),
-      metadata: toJson({ line_label: sourceLine?.label ?? null, partner_name: sourceLine?.partner_name ?? null, environment: deps.environment, announcements: announcementConfigFromMetadata(line?.metadata), ...(sourceLine && line && sourceLine.id !== line.id ? { return_routing: { source_line_id: sourceLine.id, target_line_id: line.id, original_called_number: calledNumber } } : {}) }),
+      metadata: toJson({ line_label: sourceLine?.label ?? null, partner_name: sourceLine?.partner_name ?? null, environment: deps.environment, announcements: announcementConfigFromMetadata(line?.metadata), ...(lineMode ? { line_inbound_mode: lineMode } : {}), ...(sourceLine && line && sourceLine.id !== line.id ? { return_routing: { source_line_id: sourceLine.id, target_line_id: line.id, original_called_number: calledNumber } } : {}) }),
     })
     .select("*")
     .single();
