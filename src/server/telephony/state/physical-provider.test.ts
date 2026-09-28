@@ -20,7 +20,7 @@ async function providerAnswer(h: TelephonyHarness, id: string) {
 }
 
 describe("PA-04 physical topology before owned answer arbitration", () => {
-  it.each([[false, false], [false, true], [true, false], [true, true]])("internal callee requires guarded answer (recording=%s, pause=%s)", async (recording, pause) => {
+  it.each([[false, false], [false, true], [true, false], [true, true]])("internal callee connects only after the guarded answer (recording=%s, pause=%s)", async (recording, pause) => {
     const h = world(recording);
     const call = await callColleague(h.deps, actor, { targetProfileId: PROFILES.o2 });
     const caller = call.operatorLegCallControlId!;
@@ -33,7 +33,9 @@ describe("PA-04 physical topology before owned answer arbitration", () => {
     expect(h.telnyx.physical.connected(caller, callee)).toBe(false);
     await h.legEvent(callee, "call.answered");
     await completeCallAnnouncements(h, call.sessionId);
-    expect(h.telnyx.physical.connected(caller, callee)).toBe(!pause);
+    // A colleague call reaches a colleague on pause (owner, 28 Sep 2026). They
+    // answer unreserved and stay paused, so no customer offer reaches them.
+    expect(h.telnyx.physical.connected(caller, callee)).toBe(true);
     expect(h.presence(PROFILES.o2).status).toBe(pause ? "paused" : "on_call");
   });
   it.each([[false, false, false], [false, true, false], [true, false, false], [true, true, false], [false, false, true], [false, true, true], [true, false, true], [true, true, true]])("owned blind transfer requires guarded answer (recording=%s, pause=%s, PSTN=%s)", async (recording, pause, mobile) => {

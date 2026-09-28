@@ -12,7 +12,7 @@ import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { addTelephonyUsage } from "../usage";
 import { advanceRingStep, resolvePersonalRingMembers } from "../routing/ring-plan";
-import { authorizeOperatorDispatch, reserveAnsweredOperator, transitionPresence } from "../routing/reservation";
+import { authorizeOperatorDispatch, isPausedWithoutCall, reserveAnsweredOperator, transitionPresence } from "../routing/reservation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
@@ -548,7 +548,8 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
     status,
     end_reason: overrides.end_reason ?? current?.end_reason ?? null,
     caller_number: session.caller_number,
-    caller_name: meta.match?.top?.label ?? current?.caller_name ?? null,
+    // A colleague call's caller is a colleague, never a customer match.
+    caller_name: session.direction === "internal" ? meta.internal?.caller_name ?? current?.caller_name ?? null : meta.match?.top?.label ?? current?.caller_name ?? null,
     called_number: session.called_number,
     received_number: session.direction === "inbound" ? session.called_number : current?.received_number ?? null,
     destination_number: session.direction === "inbound" ? current?.destination_number ?? null : session.called_number,
@@ -574,6 +575,7 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
       line_label: meta.line_label ?? null,
       partner_name: meta.partner_name ?? null,
       match: meta.match ?? null,
+      ...(meta.internal ? { internal: { caller_name: meta.internal.caller_name ?? null, target_name: meta.internal.target_name ?? null } } : {}),
     }),
   };
 
@@ -1203,7 +1205,12 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
       command.clientState.operatorId = owned.profileId;
     }
   }
-  if (!options?.authorized && !alreadyDispatched && stable && command.profileId && command.role !== "supervisor") {
+  // A colleague call reaches an operator on pause without claiming them: they
+  // stay paused, so no customer offer reaches them, and nothing is restored.
+  const pausedColleague = !options?.authorized && !alreadyDispatched && stable && Boolean(command.profileId) &&
+    (command.clientState.intent === "internal" || command.clientState.intent === "internal_caller") &&
+    await isPausedWithoutCall(deps.admin, { organizationId: deps.organizationId, profileId: command.profileId!, now: deps.now() });
+  if (!options?.authorized && !alreadyDispatched && stable && command.profileId && command.role !== "supervisor" && !pausedColleague) {
     if (!await claimOperatorForDial(deps, ctx, command)) return { skipped: true, detail: { reason: "offer no longer authorized" } };
     // The token has to be durable before the leg exists, or a replay cannot
     // recognise its own offer. A fan-out checkpoints the whole group at once
@@ -1214,6 +1221,9 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
   const result = await telnyx.dial(dialParams(command));
   return settleDial(deps, ctx, command, result, stable);
 }
+
+/** Tells the browser an invite is a colleague call; see `inviteIsColleagueCall`. */
+const COLLEAGUE_CALL_HEADER = "X-PM-Colleague-Call";
 
 /** Exactly what `dial` is called with, apart so a whole ring step can be sent at once. */
 function dialParams(command: DialCommand): DialParams {
@@ -1231,7 +1241,8 @@ function dialParams(command: DialCommand): DialParams {
     timeLimitSecs: LEG_TIME_LIMIT_SECS,
     sipRegion: "Europe",
     mediaEncryption: isSip ? "SRTP" : undefined,
-    customHeaders: command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" }] : undefined,
+    customHeaders: command.colleagueCall ? [{ name: COLLEAGUE_CALL_HEADER, value: "1" }]
+      : command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" }] : undefined,
     fromDisplayName: command.fromDisplayName,
     // Supervision attaches to a live call at dial time; the caller's bridge is
     // never touched. `supervisor_role` is only meaningful together with it.
@@ -1551,7 +1562,12 @@ async function executeReduceResult(
   let compensations = result.compensations;
 
   if (result.guard && !input.continuation) {
-    const reserved = await measureGuard("guard_ms", () => reserveAnsweredOperator(deps.admin, { profileId: result.guard!.profileId, sessionId: input.session.id, organizationId: deps.organizationId, expectedToken: result.guard!.offerToken }));
+    let reserved = await measureGuard("guard_ms", () => reserveAnsweredOperator(deps.admin, { profileId: result.guard!.profileId, sessionId: input.session.id, organizationId: deps.organizationId, expectedToken: result.guard!.offerToken }));
+    // Colleague calls only: a colleague on pause answers unreserved and stays paused.
+    if (!reserved.applied && result.guard.allowPaused &&
+      await isPausedWithoutCall(deps.admin, { organizationId: deps.organizationId, profileId: result.guard.profileId, now: deps.now() })) {
+      reserved = { applied: true };
+    }
     if (!reserved.applied) {
       branch = "rejected";
       transition = result.guard.onRejected.next;

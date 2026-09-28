@@ -503,3 +503,54 @@ describe("supervision in the phone bar model", () => {
     expect(buildPhoneBarModel(payload({ calls: [ringing] })).supervising).toEqual({ sessionId: "sess-theirs", mode: null, pending: true });
   });
 });
+
+describe("colleague calls", () => {
+  const names: Record<string, string> = { [ME]: "Jana Nováková", [COLLEAGUE]: "Peter Kováč", "profile-third": "Eva Szabová" };
+  const operatorName = (profileId: string) => names[profileId];
+  function colleagueCall(state: "ringing" | "talking", callee = ME, caller = COLLEAGUE): ActiveCallPayload {
+    return call({
+      direction: "internal", state, callerNumber: "+421232408718", calledNumber: "sip:gencred002@sip.telnyx.com",
+      lineLabel: "Allianz Assistance", partnerName: null, answeredByProfileId: caller, offeredProfileIds: [],
+      answeredAt: state === "talking" ? "2026-09-03T08:01:00.000Z" : null,
+      legs: [
+        leg({ id: "caller", profileId: caller, intent: "internal_caller", callControlId: caller === ME ? "my-own-leg" : null }),
+        leg({ id: "callee", profileId: callee, intent: "internal", callControlId: callee === ME ? "colleague-invite" : null,
+          state: state === "ringing" ? "ringing" : "bridged", answeredAt: state === "ringing" ? null : "2026-09-03T08:01:00.000Z", bridgedAt: null }),
+      ],
+    });
+  }
+
+  it("rings the called colleague as an offer that names the caller, not the company line", () => {
+    const model = buildPhoneBarModel(payload({ calls: [colleagueCall("ringing")] }), { operatorName });
+    expect(model.active).toBeNull();
+    expect(model.offers).toEqual([expect.objectContaining({
+      sessionId: "sess-1", kind: "offer", callerName: "Peter Kováč", number: "", lineLabel: "Interný hovor",
+      offeredToMe: true, browserIncomingCallControlIds: ["colleague-invite"],
+    })]);
+  });
+
+  it("gives the colleague who answered an active call they can hang up", () => {
+    const model = buildPhoneBarModel(payload({ calls: [colleagueCall("talking")] }), { operatorName });
+    expect(model.active).toMatchObject({ sessionId: "sess-1", callerName: "Peter Kováč", mine: true, number: "" });
+    expect(model.offers).toEqual([]);
+    expect(model.others).toEqual([]);
+  });
+
+  it("shows the caller whom they are calling", () => {
+    const model = buildPhoneBarModel(payload({ calls: [colleagueCall("ringing", COLLEAGUE, ME)] }), { operatorName });
+    expect(model.active).toMatchObject({ callerName: "Peter Kováč", lineLabel: "Interný hovor", mine: true });
+    expect(model.offers).toEqual([]);
+  });
+
+  it("names both colleagues for onlookers and never offers the call for supervision", () => {
+    const model = buildPhoneBarModel(payload({ calls: [colleagueCall("talking", "profile-third", COLLEAGUE)] }), { operatorName });
+    expect(model.active).toBeNull();
+    expect(model.others).toEqual([]);
+    expect(model.teamCalls[0]).toMatchObject({ callerName: "Peter Kováč → Eva Szabová", mine: false });
+  });
+
+  it("names caller and colleague in the Ústredňa list", () => {
+    const row = callCenterCallFromActive(colleagueCall("talking"), { now: NOW, operatorName });
+    expect(row).toMatchObject({ direction: "internal", callerName: "Peter Kováč", colleagueName: "Jana Nováková", lineLabel: "Interný hovor" });
+  });
+});

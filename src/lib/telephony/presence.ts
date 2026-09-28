@@ -63,6 +63,8 @@ export type TelephonyOperatorPresence = {
   paused: boolean;
   inUse: boolean;
   registered: boolean;
+  /** Where their calls go; `personal_mobile` has no application phone to ring. */
+  deliveryMode?: "web" | "personal_mobile";
   /** Last heartbeat of this operator's browser phone, when one was ever reported. */
   seenAt?: string;
   detail: string;
@@ -103,6 +105,7 @@ export function deriveTelephonyOperatorPresences(input: {
       paused,
       inUse,
       registered,
+      ...(presence?.deliveryMode ? { deliveryMode: presence.deliveryMode } : {}),
       ...(device?.seenAt ? { seenAt: device.seenAt } : {}),
       detail: presenceDetail({ health, presence, state, seenAt: device?.seenAt, checkedAt }),
       checkedAt,

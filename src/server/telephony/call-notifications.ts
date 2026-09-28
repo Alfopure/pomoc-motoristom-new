@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { sendCallPush } from "@/server/web-push";
+import { effectivePresenceStatus } from "@/lib/telephony/presence-policy";
 import { presenceAllowsOffer } from "./routing/eligibility";
 import { DEFAULT_ROUTING_SETTINGS, isOpenLeg, readMeta, type AttemptRow, type LegRow, type PresenceRow, type SessionRow, type TelephonyEnvironment } from "./state/types";
 
@@ -88,6 +89,8 @@ export function callPushCandidates(input: {
   const hasCaller = legs.some((leg) => session.direction === "internal" ? intentOf(leg) === "internal_caller" : leg.role === "customer");
   if (!hasCaller) return [];
 
+  // A colleague call also rings a colleague on pause (owner, 28 Sep 2026).
+  const colleagueTarget = session.direction === "internal" ? meta.internal?.target_profile_id ?? null : null;
   const available = new Map<string, ProfileRow>();
   for (const profile of input.profiles) {
     if (profile.organization_id !== input.organizationId || !profile.active || profile.access_status === "disabled" || !TELEPHONY_ROLES.has(profile.role) || input.busyProfileIds.has(profile.id)) continue;
@@ -96,10 +99,13 @@ export function callPushCandidates(input: {
     if (presenceAllowsOffer(presence ? {
       profileId: profile.id, status: presence.status, currentSessionId: presence.current_session_id, wrapUpUntil: presence.wrap_up_until, pauseReturn: presence.pause_return,
     } : undefined, now, session.id).eligible) available.set(profile.id, profile);
+    else if (profile.id === colleagueTarget && presence && !presence.current_session_id && effectivePresenceStatus(presence, now) === "paused") available.set(profile.id, profile);
   }
 
   const number = session.caller_number?.trim() || "Neznáme číslo";
   const line = typeof meta.line_label === "string" && meta.line_label.trim() ? ` · ${meta.line_label.trim()}` : "";
+  // A colleague is told who is calling, not the company line the call leaves from.
+  const colleague = session.direction === "internal" ? meta.internal?.caller_name?.trim() || "Kolega" : null;
   const candidates = new Map<string, CallPushCandidate>();
   for (const leg of legs) {
     if (!isPendingIncoming(leg) || !available.has(leg.profile_id!)) continue;
@@ -124,7 +130,8 @@ export function callPushCandidates(input: {
     if (expires <= now.getTime()) continue;
     candidates.set(leg.profile_id!, {
       organizationId: input.organizationId, sessionId: session.id, recipientProfileId: leg.profile_id!, category: "incoming_call",
-      title: "Prichádzajúci hovor", body: `${number}${line} · Otvorte aplikáciu a prijmite hovor.`, expiresAt: new Date(expires).toISOString(),
+      title: colleague ? "Volá kolega" : "Prichádzajúci hovor",
+      body: colleague ? `${colleague} · Otvorte aplikáciu a prijmite hovor.` : `${number}${line} · Otvorte aplikáciu a prijmite hovor.`, expiresAt: new Date(expires).toISOString(),
     });
   }
 

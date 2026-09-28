@@ -168,9 +168,20 @@ export function callCenterStatusFor(call: Pick<ActiveCallPayload, "state" | "dir
 
 export type OperatorNameLookup = (profileId: string) => string | undefined;
 
+export const COLLEAGUE_CALL_LABEL = "Interný hovor";
+
 /** Number of the far end (customer), whichever direction the call has. */
 export function counterpartNumber(call: Pick<ActiveCallPayload, "direction" | "callerNumber" | "calledNumber">): string {
   return (call.direction === "inbound" ? call.callerNumber : call.calledNumber) ?? "";
+}
+
+/** Caller and called colleague of an internal call, for the Ústredňa rows. */
+function colleagueCallNames(call: ActiveCallPayload, operatorName?: OperatorNameLookup): Pick<CallCenterCall, "callerName" | "colleagueName"> {
+  const parties = colleagueCallParties(call);
+  if (!parties) return {};
+  const caller = parties.callerId ? operatorName?.(parties.callerId) : undefined;
+  const callee = parties.calleeId ? operatorName?.(parties.calleeId) : undefined;
+  return { ...(caller ? { callerName: caller } : {}), ...(callee ? { colleagueName: callee } : {}) };
 }
 
 export function callCenterCallFromActive(
@@ -195,8 +206,9 @@ export function callCenterCallFromActive(
     direction: call.direction,
     callerNumber: call.callerNumber ?? "",
     calledNumber: call.calledNumber ?? "",
+    ...colleagueCallNames(call, options.operatorName),
     ...(call.lineId ? { lineId: call.lineId } : {}),
-    lineLabel: call.lineLabel ?? call.partnerName ?? "Neznáma linka",
+    lineLabel: call.direction === "internal" ? COLLEAGUE_CALL_LABEL : call.lineLabel ?? call.partnerName ?? "Neznáma linka",
     ...(call.partnerName ? { queueLabel: call.partnerName } : {}),
     ...(operatorId ? { operatorId } : {}),
     ...(operatorId && options.operatorName?.(operatorId) ? { operatorName: options.operatorName(operatorId) } : {}),
@@ -361,7 +373,40 @@ function pendingIncomingLeg(call: ActiveCallPayload, leg: ActiveCallLegPayload, 
   return leg.intent === "party" && ["talking", "held", "consulting", "conference"].includes(call.state);
 }
 
+/** Colleague call: the caller owns the session, the colleague holds the `internal` leg. */
+export function colleagueCallParties(call: Pick<ActiveCallPayload, "direction" | "answeredByProfileId" | "legs">): { callerId: string | null; calleeId: string | null } | null {
+  if (call.direction !== "internal") return null;
+  return {
+    callerId: call.legs.find((leg) => leg.intent === "internal_caller")?.profileId ?? call.answeredByProfileId ?? null,
+    calleeId: call.legs.find((leg) => leg.intent === "internal")?.profileId ?? null,
+  };
+}
+
+/** A colleague's call still ringing at this operator's phone. */
+function colleagueInvitation(call: ActiveCallPayload, actorProfileId: string): boolean {
+  return call.direction === "internal" && call.state === "ringing" && call.legs.some((leg) =>
+    leg.profileId === actorProfileId && leg.intent === "internal" && !leg.answeredAt && ["initiated", "ringing"].includes(leg.state));
+}
+
+/** This operator answered a colleague's call; the session stays owned by the caller. */
+function colleagueCallAnswered(call: ActiveCallPayload, actorProfileId: string): boolean {
+  return call.direction === "internal" && isTalkingState(call.state) && call.legs.some((leg) =>
+    leg.profileId === actorProfileId && leg.intent === "internal" && Boolean(leg.answeredAt) && !["ended", "failed"].includes(leg.state));
+}
+
+/** Who the other person is, from this operator's side; both names for onlookers. */
+function colleagueCallTitle(call: ActiveCallPayload, actorProfileId: string, operatorName?: OperatorNameLookup): string | null {
+  const parties = colleagueCallParties(call);
+  if (!parties) return null;
+  const name = (profileId: string | null) => (profileId ? operatorName?.(profileId) : undefined) ?? "Kolega";
+  if (parties.callerId === actorProfileId) return name(parties.calleeId);
+  if (parties.calleeId === actorProfileId) return name(parties.callerId);
+  return `${name(parties.callerId)} → ${name(parties.calleeId)}`;
+}
+
 function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorProfileId: string, options: PhoneBarModelOptions = {}): PhoneBarCall {
+  // A colleague call has no customer number: it shows the colleague's name.
+  const colleague = colleagueCallTitle(call, actorProfileId, options.operatorName);
   return {
     waitingSince: call.waitingSince,
     waitingMaxMinutes: call.waitingMaxMinutes,
@@ -385,10 +430,10 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
     kind,
     state: call.state,
     direction: call.direction,
-    lineLabel: call.lineLabel ?? call.partnerName ?? (formatPhoneNumberForDisplay(call.direction === "outbound" ? call.callerNumber : call.calledNumber) || "Neznáma linka"),
+    lineLabel: colleague ? COLLEAGUE_CALL_LABEL : call.lineLabel ?? call.partnerName ?? (formatPhoneNumberForDisplay(call.direction === "outbound" ? call.callerNumber : call.calledNumber) || "Neznáma linka"),
     partnerName: call.partnerName,
-    number: counterpartNumber(call),
-    callerName: null,
+    number: colleague ? "" : counterpartNumber(call),
+    callerName: colleague,
     caseId: call.caseId,
     match: null,
     matchCount: 0,
@@ -398,12 +443,12 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
     parked: call.state === "parked" || call.state === "waiting",
     consulting: call.state === "consulting",
     conference: call.state === "conference",
-    mine: call.answeredByProfileId === actorProfileId,
+    mine: call.answeredByProfileId === actorProfileId || colleagueCallAnswered(call, actorProfileId),
     operatorProfileId: call.answeredByProfileId,
     operatorName: call.answeredByProfileId ? options.operatorName?.(call.answeredByProfileId) ?? null : null,
     offeredProfileIds: [...call.offeredProfileIds],
     offeredOperatorNames: call.offeredProfileIds.map((profileId) => options.operatorName?.(profileId)).filter((name): name is string => Boolean(name)),
-    offeredToMe: call.offeredProfileIds.includes(actorProfileId),
+    offeredToMe: call.offeredProfileIds.includes(actorProfileId) || colleagueInvitation(call, actorProfileId),
     participants: callParticipants(call, { actorProfileId, operatorName: options.operatorName }),
   };
 }
@@ -429,19 +474,21 @@ function teamCallPriority(call: PhoneBarCall): number {
  */
 export function buildPhoneBarModel(payload: ActiveCallsPayload, options: PhoneBarModelOptions = {}): PhoneBarModel {
   const actorProfileId = payload.actorProfileId;
+  // A colleague who answered an internal call talks on it without owning it.
   const active =
-    payload.calls.find((call) => call.answeredByProfileId === actorProfileId && !WAITING_STATES.has(call.state)) ?? null;
+    payload.calls.find((call) => (call.answeredByProfileId === actorProfileId || colleagueCallAnswered(call, actorProfileId)) && !WAITING_STATES.has(call.state)) ?? null;
   const offers = payload.calls.filter(
-    (call) => call.offeredProfileIds.includes(actorProfileId) && call.sessionId !== active?.sessionId,
+    (call) => (call.offeredProfileIds.includes(actorProfileId) || colleagueInvitation(call, actorProfileId)) && call.sessionId !== active?.sessionId,
   );
   const waiting = payload.waiting;
-  const others = payload.calls.filter((call) => isTalkingState(call.state) && call.answeredByProfileId !== actorProfileId);
+  const others = payload.calls.filter((call) => isTalkingState(call.state) && call.answeredByProfileId !== actorProfileId && !colleagueCallAnswered(call, actorProfileId));
   // Supervision whispers into the leg that answered the caller. A three-way the
   // operator already left has no colleague on it any more (`answered_by_profile_id`
   // is null and the remaining leg is the outside party), so it is not a target:
   // the server refuses it with 409 and offering the buttons would only teach the
   // manager to press a button that never works.
-  const supervisable = others.filter((call) => call.answeredByProfileId !== null);
+  // Colleague calls are private conversations, not supervision targets.
+  const supervisable = others.filter((call) => call.answeredByProfileId !== null && call.direction !== "internal");
   // The supervisor's own leg on somebody else's call: it is what tells the bar
   // to offer "ukončiť dozor" and which mode is currently in force.
   const supervisedCall = payload.calls.find((call) =>

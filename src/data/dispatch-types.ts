@@ -107,6 +107,8 @@ export type CallCenterCall = {
   calledNumber: string;
   receivedNumber?: string;
   destinationNumber?: string;
+  /** Colleague call: the colleague who was called (the caller is `callerName`). */
+  colleagueName?: string;
   operatorId?: string;
   lineId?: string;
   lineLabel: string;

@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronDown, Users } from "lucide-react";
+import { ChevronDown, Loader2, Phone, Users } from "lucide-react";
 import type { Operator } from "@/domain/types";
 import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
 import type { TelephonyTeamOperator, TelephonyTeamPayload } from "@/lib/telephony/team";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
-import { lastOnlineLabel } from "./team-display";
+import { colleagueCallView, lastOnlineLabel } from "./team-display";
 import styles from "./CallCenterModule.module.css";
 
 const LABELS: Record<string, string> = { available: "Dostupný", ringing: "Zvoní", on_call: "Telefonuje", paused: "Pauza", after_call_work: "Dokončuje hovor", offline: "Mimo radu", unassigned: "Nezaradený", unregistered: "Offline", stale: "Overuje sa", error: "Chyba spojenia" };
@@ -21,10 +21,15 @@ function talkTime(seconds: number) {
   return seconds > 0 && seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min`;
 }
 
-function OperatorCard({ operator, presence, verified, now }: { operator: TelephonyTeamOperator; presence?: TelephonyOperatorPresence; verified: boolean; now: number }) {
+/** A colleague call from the strip; absent for oneself or without telephony. */
+type ColleagueCallControl = { onCall: () => Promise<void>; blockedReason: string | null };
+
+function OperatorCard({ operator, presence, verified, now, call }: { operator: TelephonyTeamOperator; presence?: TelephonyOperatorPresence; verified: boolean; now: number; call?: ColleagueCallControl }) {
   const ref = useRef<HTMLDetailsElement>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
+  const [calling, setCalling] = useState(false);
+  const [callError, setCallError] = useState<string | null>(null);
   const presenceAge = now - Date.parse(presence?.checkedAt ?? "");
   const freshPresence = presence && presenceAge >= -1_000 && presenceAge < TEAM_LEASE_MS ? presence : undefined;
   const online = verified && operator.online;
@@ -32,6 +37,22 @@ function OperatorCard({ operator, presence, verified, now }: { operator: Telepho
   if (!online && status === "available") status = "unregistered";
   const stateLabel = LABELS[status] ?? "Neznámy stav";
   const recency = lastOnlineLabel(online, operator.lastOnlineAt, now, verified);
+  const callView = colleagueCallView({ presenceState: freshPresence?.state, teamStatus: operator.status, inCall: freshPresence?.inUse ?? Boolean(operator.call),
+    registered: freshPresence?.registered ?? false, deliveryMode: freshPresence?.deliveryMode, verified: verified && Boolean(freshPresence) });
+  const callBlocked = !callView.callable ? callView.reason : call?.blockedReason ?? null;
+  async function startCall() {
+    if (!call || callBlocked || calling) return;
+    setCalling(true);
+    setCallError(null);
+    try {
+      await call.onCall();
+      if (ref.current) ref.current.open = false;
+    } catch (error) {
+      setCallError(error instanceof Error ? error.message : "Interný hovor sa nepodarilo vytočiť.");
+    } finally {
+      setCalling(false);
+    }
+  }
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -61,7 +82,7 @@ function OperatorCard({ operator, presence, verified, now }: { operator: Telepho
     };
   }, [open, operator, verified]);
 
-  return <details ref={ref} className={styles.teamMember} data-testid="operator-card" onToggle={(event) => setOpen(event.currentTarget.open)} onKeyDown={(event) => {
+  return <div className={`${styles.teamMember} ${call ? styles.teamMemberCallable : ""}`}><details ref={ref} className={styles.teamMemberDetails} data-testid="operator-card" onToggle={(event) => setOpen(event.currentTarget.open)} onKeyDown={(event) => {
     if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); }
   }}>
     <summary>
@@ -80,11 +101,31 @@ function OperatorCard({ operator, presence, verified, now }: { operator: Telepho
         <dt>Naposledy online cez počítač</dt><dd>{verified ? contactTime(operator.lastDeviceContactAt) : "Overuje sa"}</dd>
         <dt>Naposledy online cez mobil</dt><dd>{verified ? contactTime(operator.lastMobileContactAt) : "Overuje sa"}</dd>
       </dl>
+      {call && <div className={styles.teamCall} data-testid="colleague-call">
+        <p className={styles.teamCallRoute} data-tone={callView.callable ? callView.paused ? "paused" : "app" : "off"}>{callView.callable ? callView.route : callView.reason}</p>
+        <button type="button" className={styles.teamCallButton} disabled={Boolean(callBlocked) || calling} onClick={() => void startCall()}>
+          {calling ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Phone size={14} aria-hidden="true" />}
+          {callView.callable ? "Zavolať – interný hovor" : "Nedá sa zavolať"}
+        </button>
+        {callView.callable && call.blockedReason && <p className={styles.teamCallNote}>{call.blockedReason}</p>}
+        {callError && <p className={styles.teamCallError} role="alert">{callError}</p>}
+      </div>}
     </div>
-  </details>;
+  </details>
+  {call && <button type="button" className={styles.teamQuickCall} data-testid="colleague-quick-call" disabled={Boolean(callBlocked) || calling}
+    aria-label={`Zavolať kolegovi ${operator.name}`} title={callBlocked ?? `Zavolať – ${callView.callable ? callView.route : ""}`} onClick={() => void startCall()}>
+    {calling ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Phone size={14} aria-hidden="true" />}
+  </button>}
+  </div>;
 }
 
-export function CallCenterTeam({ operators, presences }: { operators: Operator[]; presences: TelephonyOperatorPresence[] }) {
+export function CallCenterTeam({ operators, presences, currentOperatorId, onCallColleague, callUnavailableReason = null }: {
+  operators: Operator[]; presences: TelephonyOperatorPresence[];
+  /** Colleague calls: the viewer (no button for oneself) and the action. */
+  currentOperatorId?: string; onCallColleague?: (profileId: string) => Promise<void>;
+  /** Why the viewer's own phone cannot start a call right now. */
+  callUnavailableReason?: string | null;
+}) {
   const [payload, setPayload] = useState<TelephonyTeamPayload | null>(null);
   const [error, setError] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -123,7 +164,9 @@ export function CallCenterTeam({ operators, presences }: { operators: Operator[]
   return <section className={styles.teamStrip} aria-label="Operátori">
     <div className={styles.teamStripHeading}><Users size={16} /><h2>Operátori</h2><span>{rows.length}</span>{error && <span className="text-amber-800">Spojenie sa overuje</span>}</div>
     <div className={styles.teamMembers}>
-      {rows.map(operator => <OperatorCard key={operator.profileId} operator={operator} presence={presences.find(item => item.profileId === operator.profileId)} verified={payload !== null} now={now} />)}
+      {rows.map(operator => <OperatorCard key={operator.profileId} operator={operator} presence={presences.find(item => item.profileId === operator.profileId)} verified={payload !== null} now={now}
+        call={onCallColleague && currentOperatorId && operator.profileId !== currentOperatorId
+          ? { onCall: () => onCallColleague(operator.profileId), blockedReason: callUnavailableReason } : undefined} />)}
       {!rows.length && <p className="text-xs text-zinc-500">Zatiaľ nie sú priradení žiadni operátori.</p>}
     </div>
   </section>;

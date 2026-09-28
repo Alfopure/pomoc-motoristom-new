@@ -270,3 +270,19 @@ describe("conference capabilities", () => {
     expect(partyBusyKey("kick", "sess-1", "leg-a")).not.toBe(partyBusyKey("kick", "sess-1", "leg-b"));
   });
 });
+
+describe("colleague call capabilities", () => {
+  const colleague = (overrides: Partial<PhoneBarCall> = {}) => call({ direction: "internal", number: "", callerName: "Peter Kováč", lineLabel: "Interný hovor", participants: [], ...overrides });
+
+  it("offers only answer and decline while the colleague's call rings", () => {
+    expect(phoneBarCapabilities({ call: colleague({ kind: "offer", state: "ringing", answered: false }), browserCallActive: false, browserCallRinging: true }))
+      .toMatchObject({ answer: true, hangup: true, hold: false, park: false, transfer: false, consult: false, addParty: false, newCase: false, linkCase: false });
+  });
+
+  it("keeps hang up and the browser's own media controls during the conversation, nothing about a customer", () => {
+    expect(phoneBarCapabilities({ call: colleague(), browserCallActive: true, browserCallRinging: false })).toEqual({
+      answer: false, hangup: true, hold: false, unhold: false, park: false, pickup: false, transfer: false, consult: false,
+      completeTransfer: false, cancelConsult: false, addParty: false, leaveConference: false, mute: true, dtmf: true, newCase: false, linkCase: false,
+    });
+  });
+});

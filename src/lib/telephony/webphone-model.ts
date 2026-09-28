@@ -394,6 +394,18 @@ export function matchExpectedLeg(
   return pruneExpectedLegs(expected, now).find((entry) => entry.callControlId === callControlId) ?? null;
 }
 
+/**
+ * A colleague's call (server header on the colleague's leg only). It may ring
+ * while the operator is paused — the owner's decision of 28 Sep 2026 — but,
+ * like any invite without an exact expected identity, it is never answered
+ * automatically.
+ */
+export function inviteIsColleagueCall(invite: InviteIdentity): boolean {
+  return (invite.customHeaders ?? []).some(
+    (header) => header?.name?.toLowerCase() === "x-pm-colleague-call" && header?.value === "1",
+  );
+}
+
 export function inviteHasAutoAnswerHeader(invite: InviteIdentity): boolean {
   return (invite.customHeaders ?? []).some(
     (header) => header?.name?.toLowerCase() === "x-pm-auto-answer" && header?.value === "1",

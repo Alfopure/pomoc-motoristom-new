@@ -1836,6 +1836,17 @@ function DispatchConsoleContent({
     setMutationNotice(`Volanie na ${target.dialNumber} bolo spustené.`);
   }
 
+  /** Colleague call from Ústredňa → Operátori: rings their application phone, never a number. */
+  async function callColleague(profileId: string): Promise<void> {
+    if (!telephonyConfigured) {
+      setMutationNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+      throw new TelephonyNotConfiguredError();
+    }
+    await telephony.callColleague(profileId);
+    const name = effectiveOperators.find((operator) => operator.id === profileId)?.name;
+    setMutationNotice(name ? `Interný hovor – volám: ${name}.` : "Interný hovor bol spustený.");
+  }
+
   /** "Môj telefón" test call: a normal outbound dial from a chosen line. */
   async function testCall(input: { to: string; lineId: string | null }): Promise<void> {
     if (!telephonyConfigured) {
@@ -2569,6 +2580,7 @@ function DispatchConsoleContent({
           metrics={metrics}
           onDataChange={setDispatchData}
           onDial={dialNumber}
+          onCallColleague={callColleague}
           operatorPresences={operatorPresences}
           operators={effectiveOperators}
           onNewCase={startNewCaseFromCall}

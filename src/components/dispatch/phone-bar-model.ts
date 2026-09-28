@@ -147,6 +147,18 @@ export function phoneBarCapabilities(input: {
     return { ...NO_CAPABILITIES, pickup: true, newCase: true, linkCase: true };
   }
 
+  // A colleague call has no customer: no case, hold, park or transfer — only
+  // answering, hanging up and the browser's own media controls.
+  if (call.direction === "internal") {
+    return {
+      ...NO_CAPABILITIES,
+      answer: input.browserCallRinging,
+      hangup: call.kind === "offer" ? input.browserCallRinging || input.browserCallActive : true,
+      mute: input.browserCallActive,
+      dtmf: input.browserCallActive,
+    };
+  }
+
   if (call.kind === "offer") {
     return {
       ...NO_CAPABILITIES,

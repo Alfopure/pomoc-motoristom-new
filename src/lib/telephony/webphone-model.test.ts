@@ -8,6 +8,7 @@ import {
   heartbeatRegistrationState,
   matchExpectedLeg,
   inviteHasAutoAnswerHeader,
+  inviteIsColleagueCall,
   reduceWebphone,
   rememberExpectedLeg,
   tokenRefreshDelayMs,
@@ -198,6 +199,9 @@ describe("auto-answer correlation", () => {
   it("treats the custom header as a hint only", () => {
     expect(inviteHasAutoAnswerHeader({ customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] })).toBe(true);
     expect(inviteHasAutoAnswerHeader({ customHeaders: [{ name: "X-Other", value: "1" }] })).toBe(false);
+    expect(inviteIsColleagueCall({ customHeaders: [{ name: "x-pm-colleague-call", value: "1" }] })).toBe(true);
+    expect(inviteIsColleagueCall({ customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] })).toBe(false);
+    expect(inviteIsColleagueCall({})).toBe(false);
     // The header alone never identifies a session, so it cannot match a leg.
     expect(matchExpectedLeg([], { customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] }, NOW)).toBeNull();
   });
