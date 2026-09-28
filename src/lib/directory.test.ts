@@ -39,6 +39,12 @@ describe("shared directory browsing", () => {
     expect(draft).not.toHaveProperty("updatedAt");
     expect(draft).not.toHaveProperty("id");
   });
+  it("opens legacy stored international phones in an editable form", () => {
+    const legacy = { ...contact, phone: "420777123456" };
+    expect(directoryDraft(legacy).phone).toBe("+420777123456");
+    expect(legacy.phone).toBe("420777123456");
+    expect(directoryDraft({ ...contact, phone: "1234" }).phone).toBe("1234");
+  });
   it("makes website links safe, including malicious legacy values", () => {
     expect(safeDirectoryWebsite("firma.sk/kontakt")).toBe("https://firma.sk/kontakt");
     expect(safeDirectoryWebsite("http://www.firma.sk")).toBe("http://www.firma.sk/");

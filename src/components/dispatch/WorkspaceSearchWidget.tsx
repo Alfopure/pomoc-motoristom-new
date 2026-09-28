@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { DispatchCase, FleetAsset, PartnerDirectoryEntry } from "@/domain/types";
+import { storedPhoneForDial } from "@/lib/telephony/phone-entry";
 import { searchWorkspace } from "./workspace-search";
 
 export function WorkspaceSearchWidget({ cases, contacts, fleet, onOpenCase, onOpenFleet, onDial, places }: {
@@ -20,7 +21,7 @@ export function WorkspaceSearchWidget({ cases, contacts, fleet, onOpenCase, onOp
       <label className="block text-sm">Prípad, meno, telefón alebo EČV<input value={query} onChange={event => setQuery(event.target.value)} className="mt-1 min-h-11 w-full rounded-lg border border-zinc-300 px-3 text-base" placeholder="Hľadať vo vlastných údajoch" /></label>
       {results.map(result => <div key={`${result.kind}:${result.id}`} className="rounded-lg border border-zinc-200 p-2 text-sm">
         <span className="text-xs text-zinc-500">{({ case: "Prípad", contact: "Kontakt", fleet: "Flotila" })[result.kind]}</span><p className="break-words font-medium">{result.label}</p><p className="break-words text-zinc-600">{result.detail}</p>
-        {result.kind !== "contact" ? <button type="button" className="min-h-11 text-sm font-semibold" onClick={() => result.kind === "case" ? onOpenCase(result.id) : onOpenFleet(result.id)}>Otvoriť</button> : result.phone && onDial && <button type="button" className="min-h-11 text-sm font-semibold" onClick={() => void onDial(result.phone!).catch(() => setNotice("Hovor sa nepodarilo spustiť."))}>Zavolať</button>}
+        {result.kind !== "contact" ? <button type="button" className="min-h-11 text-sm font-semibold" onClick={() => result.kind === "case" ? onOpenCase(result.id) : onOpenFleet(result.id)}>Otvoriť</button> : result.phone && onDial && <button type="button" className="min-h-11 text-sm font-semibold" onClick={() => void onDial(storedPhoneForDial(result.phone!)).catch(() => setNotice("Hovor sa nepodarilo spustiť."))}>Zavolať</button>}
       </div>)}
       {query && !results.length && <p className="text-sm text-zinc-500">Žiadny výsledok vo vlastných údajoch.</p>}
       <button type="button" className="min-h-11 text-left text-sm underline" onClick={() => onOpenFleet()}>Otvoriť flotilu a overenie vozidla</button>

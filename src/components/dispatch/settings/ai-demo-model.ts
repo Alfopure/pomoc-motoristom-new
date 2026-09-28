@@ -1,5 +1,5 @@
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
-import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 
 import type { AiDemoAttemptView, AiDemoConversationStats, AiDemoPreflight, AiDemoReview, AiDemoTranscriptEntry } from "./ai-demo-client";
 
@@ -159,7 +159,9 @@ export type TargetValidation = { ok: true; e164: string } | { ok: false; message
 
 /** The same three checks the server makes, so the button can explain itself. */
 export function validateTarget(raw: string, preflight: AiDemoPreflight): TargetValidation {
-  const e164 = normalizeE164(raw, { defaultCountryCode: "421" });
+  let e164: string | null;
+  try { e164 = normalizeEditablePhone(raw); }
+  catch { e164 = null; }
   if (e164 === null || !/^\+[1-9]\d{6,14}$/.test(e164)) return { ok: false, message: "Zadaj platné telefónne číslo, napríklad 0910 988 882." };
   if (preflight.fromNumber && e164 === preflight.fromNumber) return { ok: false, message: "Toto je naša vlastná linka. Zadaj mobilné číslo." };
   if (!isDestinationAllowed(e164, preflight.telnyx.destinationAllowlist)) return { ok: false, message: "Toto číslo nie je v povolených cieľoch organizácie." };

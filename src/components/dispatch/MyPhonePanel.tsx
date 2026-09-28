@@ -49,6 +49,7 @@ import {
   type MyPresenceResponse,
 } from "./my-phone-model";
 import { PauseRoutingDialog } from "./PauseRoutingDialog";
+import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
 
 /**
  * "Môj telefón" (plan "Fáza 3"): the operator's own view of the telephony
@@ -425,16 +426,16 @@ export function MyPhonePanel({
 
           <div className="mt-3 grid gap-3 lg:grid-cols-2">
             <SettingsField label="Číslo na skúšku" hint="Skúšobný hovor je skutočný a je spoplatnený.">
-              <input
+              <PhoneNumberInput
                 className={settingsInputClass}
                 disabled={testBusy || !onTestCall}
                 value={effectiveTestNumber}
-                onChange={(event) => {
+                onChange={(value) => {
                   setTestNumberTouched(true);
-                  setTestNumber(event.target.value);
+                  setTestNumber(value);
                 }}
-                placeholder="+421900123456"
               />
+              <PhoneNumberHint value={effectiveTestNumber} />
             </SettingsField>
 
             <div className="flex items-end">
@@ -501,15 +502,13 @@ export function MyPhonePanel({
               </SettingsField>
 
               <SettingsField label="Môj mobil" hint="Osobné číslo na prijímanie počas práce. Uloženie nemení dostupnosť; počas pauzy nezvoní.">
-                <input
+                <PhoneNumberInput
                   className={settingsInputClass}
                   disabled={settingsBusy}
-                  type="tel"
-                  inputMode="tel"
                   value={draft.defaultMobileNumber ?? ""}
-                  placeholder="+421 900 000 000"
-                  onChange={(event) => setDraft({ ...draft, defaultMobileNumber: event.target.value || null })}
+                  onChange={(value) => setDraft({ ...draft, defaultMobileNumber: value || null })}
                 />
+                <PhoneNumberHint value={draft.defaultMobileNumber ?? ""} />
               </SettingsField>
             </div>
 

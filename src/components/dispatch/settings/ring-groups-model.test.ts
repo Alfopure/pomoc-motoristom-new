@@ -65,6 +65,13 @@ describe("groupDraftsFromDocument", () => {
     expect(draft.members[0].ringSecs).toBe("15");
     expect(draft.members[1].ringSecs).toBe("");
   });
+  it("loads a stored bare international external number for unrelated edits", () => {
+    const stored = group({ members: [{ id: "legacy", memberKind: "external_number", profileId: null, externalNumber: "420777123456", position: 0, ringSecs: null, lastOfferedAt: null, lastAnsweredAt: null }] });
+    const [draft] = groupDraftsFromDocument([stored]);
+    expect(draft.members[0].externalNumber).toBe("+420777123456");
+    expect(validateRingGroupDrafts([draft], context()).map((issue) => issue.code)).not.toContain("number_invalid");
+    expect(stored.members[0].externalNumber).toBe("420777123456");
+  });
 });
 
 describe("moveMember", () => {

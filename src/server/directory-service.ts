@@ -2,7 +2,8 @@ import "server-only";
 import type { Database, Json } from "@/lib/supabase/database.types";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { CONTACT_ROLES, DIRECTORY_FOCUS, DIRECTORY_KINDS, emptyDirectoryDraft, safeDirectoryWebsite, type DirectoryData, type DirectoryDraft, type DirectoryEntry, type DirectoryKind } from "@/lib/directory";
-import { cleanPhoneInput, sameDialNumber } from "@/lib/telephony/phone";
+import { sameDialNumber } from "@/lib/telephony/phone";
+import { normalizeEditablePhone, storedPhoneForDial } from "@/lib/telephony/phone-entry";
 import type { MotoristActor } from "./api-auth";
 import { MutationError } from "./mutation-error";
 
@@ -40,8 +41,14 @@ export function parseDirectoryDraft(value: unknown, kind: DirectoryKind, current
   }
   const name = text("name", 180).replace(/\s+/g, " ");
   if (!name) invalid("Zadajte názov alebo meno.");
-  const phone = text("phone", 40);
-  if (phone) try { cleanPhoneInput(phone); } catch { invalid("Zadajte platný telefón alebo internú klapku."); }
+  const rawPhone = text("phone", 40);
+  let phone: string;
+  try {
+    // An omitted phone belongs to the stored record, which may use a legacy
+    // digits-only international form. Explicit operator input stays strict.
+    phone = normalizeEditablePhone(input.phone === undefined && current ? storedPhoneForDial(rawPhone) : rawPhone, { allowExtension: true }) ?? "";
+  }
+  catch { invalid("Zadajte platný telefón alebo internú klapku."); }
   const email = text("email", 254);
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) invalid("Zadajte platnú e-mailovú adresu.");
   if (kind === "contact" && !phone && !email) invalid("Kontakt potrebuje telefón alebo e-mail.");

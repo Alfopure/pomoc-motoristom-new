@@ -104,6 +104,14 @@ describe("drafting", () => {
     expect(draft.timeoutSecs).toBe("5");
     expect(draft.maxTries).toBe("2");
   });
+  it("loads a stored bare international IVR target for unrelated edits", () => {
+    const option = { ...menu().options[0], action: "external_number" as const, targetNumber: "421905123456" };
+    const stored = menu({ options: [option] });
+    const [draft] = ivrMenuDraftsFromDocument([stored]);
+    expect(draft.options[0].targetNumber).toBe("+421905123456");
+    expect(validateIvrMenuDrafts([draft], CONTEXT).map((issue) => issue.code)).not.toContain("number_invalid");
+    expect(stored.options[0].targetNumber).toBe("421905123456");
+  });
 
   it("suggests the next free key, in the order a prompt announces them", () => {
     const [draft] = ivrMenuDraftsFromDocument([menu()]);

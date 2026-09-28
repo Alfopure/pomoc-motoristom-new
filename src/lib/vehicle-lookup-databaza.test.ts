@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { readVerifiedVehicleLookup, sealVehicleLookup, verifyVehicleLookup } from "@/server/vehicle-lookup/snapshot";
 import {
   emptyVehicleFieldPatch, lookupIdentityConflict, preferredVehicleFacts, readVehicleLookupSnapshot,
-  vehicleFactConflicts, type VehicleFacts, type VehicleLookupResult, type VehicleSource, type VehicleSourceResult,
+  vehicleFactConflicts, vinLinkedSkpPlateDifference, type VehicleFacts, type VehicleLookupResult, type VehicleSource, type VehicleSourceResult,
 } from "./vehicle-lookup";
 
 const vin = "TESTTESTTEST00001";
@@ -182,12 +182,42 @@ describe("expanded signed vehicle observations", () => {
   });
 });
 
-it("requires manual resolution when SKP reports an older plate for the same VIN", () => {
+it("accepts VIN-linked PZP with an older SKP plate while keeping the technical plate", () => {
   const lookup = result([
     source("databazavozidiel", { vin: { value: vin, quality: "reported" }, plate: { value: plate, quality: "reported" }, ...technicalFacts }),
     source("skp", { vin: { value: vin, quality: "reported" }, plate: { value: "XX000XY", quality: "reported" }, insurer: { value: "Synthetic insurer", quality: "reported" } }),
   ]);
-  expect(lookupIdentityConflict(lookup, { plate, vin })).toContain("EČV");
-  expect(emptyVehicleFieldPatch(lookup, { plate, vin, fuel: "", insurer: "" })).toEqual({});
-  expect(() => verifyVehicleLookup(sealVehicleLookup(lookup, organization, key), organization, { plate, vin }, key)).toThrow("EČV");
+  expect(vinLinkedSkpPlateDifference(lookup)).toEqual({ technicalPlate: plate, skpPlate: "XX000XY" });
+  expect(lookupIdentityConflict(lookup, { plate, vin })).toBeUndefined();
+  expect(preferredVehicleFacts(lookup).plate?.value).toBe(plate);
+  expect(emptyVehicleFieldPatch(lookup, { plate, vin, fuel: "", insurer: "" })).toEqual({ fuel: "Nafta", insurer: "Synthetic insurer" });
+  expect(verifyVehicleLookup(sealVehicleLookup(lookup, organization, key), organization, { plate, vin }, key)).not.toBeNull();
+  expect(lookupIdentityConflict(lookup, { plate: "XX000XZ", vin })).toBeTruthy();
+});
+
+it("requires verified technical identity before accepting SKP's different plate", () => {
+  const skp = source("skp", { vin: { value: vin, quality: "reported" }, plate: { value: "XX000XY", quality: "reported" }, insurer: { value: "Synthetic insurer", quality: "reported" } });
+  const technical = source("stkonline", { vin: { value: vin, quality: "reported" }, plate: { value: plate, quality: "reported" } });
+  for (const sources of [[skp], [source("stkonline", { plate: technical.facts.plate }), skp],
+    [source("stkonline", { ...technical.facts, vin: { value: "TESTTESTTEST00002", quality: "reported" } }), skp],
+    [source("stkonline", { ...technical.facts, plate: { value: "XX000XZ", quality: "reported" } }), skp]]) {
+    const lookup = result(sources);
+    expect(vinLinkedSkpPlateDifference(lookup)).toBeUndefined();
+    expect(lookupIdentityConflict(lookup, { plate, vin })).toBeTruthy();
+    expect(emptyVehicleFieldPatch(lookup, { plate, vin, insurer: "" })).toEqual({});
+  }
+  const noSkpVin = result([technical, source("skp", { plate: { value: "XX000XY", quality: "reported" }, insurer: { value: "Synthetic insurer", quality: "reported" } })]);
+  expect(vinLinkedSkpPlateDifference(noSkpVin)).toBeUndefined();
+  expect(lookupIdentityConflict(noSkpVin, { plate, vin })).toContain("EČV");
+});
+
+it("prefers a VIN-linked technical plate when looking up directly by VIN", () => {
+  const lookup = result([
+    source("skp", { vin: { value: vin, quality: "reported" }, plate: { value: "XX000XY", quality: "reported" }, insurer: { value: "Synthetic insurer", quality: "reported" } }),
+    source("stkonline", { vin: { value: vin, quality: "reported" }, plate: { value: plate, quality: "reported" } }),
+  ]);
+  lookup.query = { ...lookup.query, kind: "vin", value: vin };
+  expect(lookupIdentityConflict(lookup, { vin })).toBeUndefined();
+  expect(preferredVehicleFacts(lookup).plate?.value).toBe(plate);
+  expect(emptyVehicleFieldPatch(lookup, { vin, plate: "", insurer: "" })).toEqual({ plate, insurer: "Synthetic insurer" });
 });

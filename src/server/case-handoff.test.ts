@@ -93,4 +93,10 @@ describe("handoff commands", () => {
     expect(validateHandoffCommand({ ...decision, status: "completed", published: { contact: "forged" }, organizationId: "other", tokenHash: "forged" }, true)).toEqual(decision);
   });
   it.each([0, 73, 2.5])("rejects out-of-range TTL %s", hours => expect(() => validateHandoffCommand({ ...issue, hours })).toThrow());
+  it("normalizes the recipient phone and rejects PBX extensions", () => {
+    expect(validateHandoffCommand({ ...issue, recipientPhone: "0905 123 456" }).recipientPhone).toBe("+421905123456");
+    expect(validateHandoffCommand({ ...issue, recipientPhone: "00420 777 123 456" }).recipientPhone).toBe("+420777123456");
+    expect(() => validateHandoffCommand({ ...issue, recipientPhone: "1234" })).toThrow("telefónne číslo");
+    expect(() => validateHandoffCommand({ ...issue, recipientPhone: "420777123456" })).toThrow("telefónne číslo");
+  });
 });

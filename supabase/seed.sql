@@ -75,6 +75,18 @@ values
   ('00000000-0000-4000-8000-000000000207', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408771', 'LeasePlan Slovakia s.r.o', true),
   ('00000000-0000-4000-8000-000000000208', '00000000-0000-4000-8000-000000000001', 'telnyx', '+421232408774', 'Neutrálna linka 2', true);
 
+-- Editable assistance address book. The Telnyx DIDs above are incoming lines,
+-- not the assistance services' callback numbers, so their phone fields stay empty.
+insert into public.motorist_partner_directory (organization_id, kind, name)
+values
+  ('00000000-0000-4000-8000-000000000001', 'assistance', 'Allianz Assistance'),
+  ('00000000-0000-4000-8000-000000000001', 'assistance', 'Autoklub Slovakia Assistance'),
+  ('00000000-0000-4000-8000-000000000001', 'assistance', 'AXA Assistance CZ'),
+  ('00000000-0000-4000-8000-000000000001', 'assistance', 'Eurocross Assistance Czech Republic'),
+  ('00000000-0000-4000-8000-000000000001', 'assistance', 'Europ Assistance'),
+  ('00000000-0000-4000-8000-000000000001', 'assistance', 'LeasePlan Slovakia')
+on conflict do nothing;
+
 insert into public.motorist_attendance_shift_templates (id, organization_id, label, kind, starts_at_local, ends_at_local, planned_minutes, color, sort_order, active)
 values
   ('00000000-0000-4000-8000-000000001001', '00000000-0000-4000-8000-000000000001', '8h nočná', 'fixed_8h', '00:00', '08:00', 480, '#0f766e', 10, true),

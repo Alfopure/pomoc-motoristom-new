@@ -1,5 +1,5 @@
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
-import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 import { openAILiveClient, OpenAILiveError } from "@/lib/integrations/ai/openai-live";
 
 import type { Json } from "@/lib/supabase/database.types";
@@ -135,7 +135,9 @@ export async function startAiDemo(deps: AiDemoDeps, input: StartAiDemoInput): Pr
   const telnyx = requireTelnyx(deps);
   const now = nowOf(deps);
 
-  const target = normalizeE164(input.to, { defaultCountryCode: "421" });
+  let target: string | null;
+  try { target = normalizeEditablePhone(input.to); }
+  catch { target = null; }
   if (target === null || !/^\+[1-9]\d{6,14}$/.test(target)) {
     throw new AiDemoError("Telefónne číslo nie je platné.", 400, "invalid_number");
   }

@@ -17,6 +17,7 @@ import {
   startErrorMessage, stateLabel, timelineSteps, transcriptTurns, validateContext, validateTarget, voiceLabel, voiceOptions,
 } from "./ai-demo-model";
 import { SettingsField, SettingsNotice, SettingsSectionHeader, settingsInputClass } from "./settings-ui";
+import { PhoneNumberHint, PhoneNumberInput } from "../PhoneNumberInput";
 
 /**
  * The "AI" tab: one screen that starts a single demo call, shows where it is,
@@ -422,15 +423,14 @@ export function AiDemoPanel({ onNavigateToSettings }: { onNavigateToSettings?: (
         >
           <h3 className="text-sm font-semibold text-zinc-950">Skúšobný hovor</h3>
 
-          <SettingsField label="Komu zavolať" hint="Slovenské číslo, napríklad 0910 988 882. Server povoľuje len čísla zo svojho zoznamu.">
-            <input
-              type="tel"
+          <SettingsField label="Komu zavolať" hint="Server povoľuje len čísla zo svojho zoznamu.">
+            <PhoneNumberInput
               value={target}
-              onChange={(change) => setTarget(change.target.value)}
+              onChange={setTarget}
               className={settingsInputClass}
               autoComplete="off"
-              placeholder="0910 988 882"
             />
+            <PhoneNumberHint value={target} />
           </SettingsField>
           {targetCheck && !targetCheck.ok && <SettingsNotice tone="warning">{targetCheck.message}</SettingsNotice>}
 

@@ -100,6 +100,15 @@ describe("drafting", () => {
     expect(drafts.map((draft) => draft.profileId)).toEqual(["a", "b"]);
   });
 
+  it("loads old digits-only international settings as editable numbers", () => {
+    const original = operator({ settings: { ...DEFAULT_OPERATOR_SETTINGS, defaultMobileNumber: "420777123456", pauseForwardNumber: "421905123456" } });
+    const draft = operatorDraft(original);
+    expect(draft.defaultMobileNumber).toBe("+420777123456");
+    expect(draft.pauseForwardNumber).toBe("+421905123456");
+    expect(validateOperatorDraft(draft, CONTEXT)).toEqual([]);
+    expect(operatorPatch(draft, original)).toMatchObject({ defaultMobileNumber: "+420777123456", pauseForwardNumber: "+421905123456" });
+  });
+
   it("updates one operator only", () => {
     const drafts = operatorDraftsFromDocument([operator({ profileId: "a", displayName: "Adam" }), operator({ profileId: "b", displayName: "Boris" })]);
     const next = updateOperator(drafts, "b", { wrapUpSeconds: 60 });

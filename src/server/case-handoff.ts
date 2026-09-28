@@ -8,6 +8,7 @@ import { isHandoffReceipt, type HandoffCommand, type HandoffContext, type Handof
 import { requireDefaultMotoristActor } from "./api-auth";
 import { MutationError } from "./mutation-error";
 import { assertRateLimit, requestIp } from "./rate-limit";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 
 export const HANDOFF_COOKIE = "pm_handoff_session";
 export const HANDOFF_HEADERS = { "Cache-Control": "private, no-store, max-age=0", "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex, nofollow", "X-Frame-Options": "DENY" };
@@ -59,7 +60,14 @@ export function validateHandoffCommand(input: Record<string, unknown>, external 
   }
   if (["reject", "blocked", "revoke"].includes(command.action) && !command.comment) throw new MutationError("Napíšte dôvod.", 400);
   if (!external && ["issue", "publish"].includes(command.action) && !/^[a-f0-9]{64}$/.test(String(command.previewVersion))) throw new MutationError("Najprv načítajte náhľad zdieľaných údajov.", 400);
-  if (command.action === "issue" && (!command.recipientName || !/^\+?[0-9 ()-]{5,30}$/.test(String(command.recipientPhone)))) throw new MutationError("Vyplňte stredisko alebo kolegu a jeho telefón.", 400);
+  if (command.action === "issue") {
+    if (!command.recipientName) throw new MutationError("Vyplňte stredisko alebo kolegu a jeho telefón.", 400);
+    try {
+      const phone = normalizeEditablePhone(command.recipientPhone ?? "");
+      if (!phone) throw new Error("Missing recipient phone");
+      command.recipientPhone = phone;
+    } catch { throw new MutationError("Zadajte platné telefónne číslo príjemcu odkazu.", 400); }
+  }
   if (!external && ["issue", "renew"].includes(command.action)) { const hours = input.hours ?? 24; if (!Number.isInteger(hours) || Number(hours) < 1 || Number(hours) > 72) throw new MutationError("Platnosť môže byť 1 až 72 hodín.", 400); command.hours = hours; }
   for (const key of external ? ["eta"] : ["scheduledAt"]) {
     if (input[key] !== undefined) { if (input[key] === null || input[key] === "") command[key] = null; else if (typeof input[key] === "string" && Number.isFinite(Date.parse(input[key]))) command[key] = new Date(input[key]).toISOString(); else throw new MutationError("Neplatný termín.", 400); }

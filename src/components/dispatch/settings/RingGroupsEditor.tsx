@@ -31,6 +31,7 @@ import {
 } from "./ring-groups-model";
 import { SettingsField, SettingsIssueList, SettingsNotice, SettingsSectionHeader, settingsInputClass } from "./settings-ui";
 import { SortableList, SortableRow } from "./sortable-list";
+import { PhoneNumberHint, PhoneNumberInput } from "../PhoneNumberInput";
 
 /**
  * Ring groups screen (plan "Fáza 3"): who rings, in what order and for how
@@ -272,14 +273,13 @@ export function RingGroupsEditor({
                             </SettingsField>
                           ) : (
                             <SettingsField label="Externé číslo" hint="Osobné číslo rešpektuje pauzu vlastníka. Záloha je samostatný prevádzkový telefón.">
-                              <input
+                              <PhoneNumberInput
                                 className={settingsInputClass}
                                 disabled={!canEdit}
-                                inputMode="tel"
-                                placeholder="+421900123456"
                                 value={member.externalNumber}
-                                onChange={(event) => setGroups((current) => updateMember(current, group.key, member.key, { externalNumber: event.target.value }))}
+                                onChange={(value) => setGroups((current) => updateMember(current, group.key, member.key, { externalNumber: value }))}
                               />
+                              <PhoneNumberHint value={member.externalNumber} />
                               <select aria-label="Vlastník externého čísla" className={settingsInputClass} disabled={!canEdit} value={member.ownerProfileId ?? ""} onChange={(event) => setGroups((current) => updateMember(current, group.key, member.key, { ownerProfileId: event.target.value || null }))}>
                                 <option value="">Samostatná prevádzková záloha</option>
                                 {operators.map((operator) => <option key={operator.profileId} value={operator.profileId}>{operator.displayName} · osobný telefón</option>)}

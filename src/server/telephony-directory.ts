@@ -6,7 +6,8 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { TelephonyDirectoryContact, TelephonyDirectoryContactRole } from "@/lib/telephony/directory";
 import type { MotoristActor } from "@/server/api-auth";
 import { MutationError } from "@/server/motorist-mutations";
-import { cleanPhoneInput, sameDialNumber, TelephonyPhoneInputError } from "@/lib/telephony/phone";
+import { sameDialNumber } from "@/lib/telephony/phone";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 
 type FavoriteRow = {
   organization_id: string;
@@ -181,12 +182,11 @@ export async function createTelephonyFavorite(
 
   let phone: string;
   try {
-    phone = cleanPhoneInput(input.phone, "Telefónne číslo").input;
-  } catch (error) {
-    if (error instanceof TelephonyPhoneInputError) {
-      throw new MutationError("Zadaj platné telefónne číslo alebo internú klapku.", 400);
-    }
-    throw error;
+    const normalized = normalizeEditablePhone(input.phone, { allowExtension: true });
+    if (!normalized) throw new Error("Missing phone");
+    phone = normalized;
+  } catch {
+    throw new MutationError("Zadaj platné telefónne číslo alebo internú klapku.", 400);
   }
 
   const existing = (await searchTelephonyDirectory(actor, phone)).find((contact) => sameDialNumber(contact.phone, phone));
