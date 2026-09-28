@@ -653,6 +653,14 @@ export async function parkCall(deps: CallActionDeps, actor: CallActor, sessionId
   return runAction(deps, session, appEvent("park", actor, deps), "Zaparkovanie hovoru zlyhalo.");
 }
 
+export async function deferRingingCall(deps: CallActionDeps, actor: CallActor, sessionId: string, callControlId: string): Promise<CallActionResult> {
+  if (typeof callControlId !== "string" || !callControlId.trim()) {
+    throw new CallActionError("Chýba identifikátor zvoniaceho hovoru.", 400, "offer_required");
+  }
+  const session = await ownedActiveSession(deps, actor, sessionId);
+  return runAction(deps, session, appEvent("defer", actor, deps, { offeredCallControlId: callControlId }), "Odloženie hovoru do čakárne zlyhalo.");
+}
+
 export async function hangupCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
   // Per-action budget, the same mechanism sweeps use to wait 0 ms (`runSessionEvent`).

@@ -337,7 +337,8 @@ function buildActiveCalls(
     const meta = legMetaOf(leg);
     list.push({
       id: leg.id,
-      callControlId: leg.profile_id === actor.profileId && (leg.role === "operator" || leg.role === "consult")
+      callControlId: leg.profile_id === actor.profileId && (leg.role === "operator" || leg.role === "consult" ||
+        (leg.role === "external" && legIntentOf(leg) === "ring"))
         ? leg.telnyx_call_control_id
         : null,
       role: leg.role,

@@ -2243,6 +2243,7 @@ function DispatchConsoleContent({
                 stale={telephony.stale}
                 onAnswer={telephony.answer}
                 onAnswerOffer={telephony.answerOffer}
+                onDeferOfferIdentity={telephony.deferOffer}
                 onRejectOfferIdentity={telephony.rejectOffer}
                 onRejectOffer={telephony.hangupBrowser}
                 onCallAction={(action, sessionId) => void runPhoneCallAction(action, sessionId)}
@@ -2328,6 +2329,7 @@ function DispatchConsoleContent({
             onStopSupervise={(sessionId) => void telephony.stopSupervise(sessionId)}
             onAnswer={telephony.answer}
             onAnswerOffer={telephony.answerOffer}
+            onDeferOfferIdentity={telephony.deferOffer}
             onRejectOfferIdentity={telephony.rejectOffer}
             stale={telephony.stale}
             onHangupBrowser={telephony.hangupBrowser}
@@ -2553,6 +2555,7 @@ function DispatchConsoleContent({
           onCallAction={(action, sessionId) => void runPhoneCallAction(action, sessionId)}
           onAnswer={telephony.answer}
           onAnswerOffer={telephony.answerOffer}
+          onDeferOfferIdentity={telephony.deferOffer}
           onRejectOfferIdentity={telephony.rejectOffer}
           onRejectOffer={telephony.hangupBrowser}
           canManageCalls={viewerCanSupervise}

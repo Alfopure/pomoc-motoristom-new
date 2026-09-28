@@ -147,7 +147,12 @@ export function callPushCandidates(input: {
   if (expires <= now.getTime()) return [...candidates.values()];
   // No device heartbeat filter: an available operator's closed PWA can receive
   // push, then register its browser phone before the existing pickup action.
-  for (const profileId of planProfileIds(session)) {
+  // Manual queues are explicitly open for any eligible operator to choose a
+  // caller. Automatic queues retain the frozen ring-plan audience.
+  const queueAudience = session.state === "waiting" && meta.queue?.manual_only
+    ? [...available.keys()]
+    : planProfileIds(session);
+  for (const profileId of queueAudience) {
     if (!available.has(profileId) || candidates.has(profileId)) continue;
     if (input.presence.some((row) => row.organization_id === input.organizationId && row.profile_id === profileId && row.status === "ringing")) continue;
     // An existing own media leg is not another opportunity to pick the call up.
@@ -175,13 +180,20 @@ export async function loadCallPushCandidates(deps: CallNotificationDeps, session
   ]);
   if (legsResult.error || attemptsResult.error) throw new Error("Call push routing unavailable");
   const legs = legsResult.data ?? [];
+  const manualQueue = session.state === "waiting" && readMeta(session).queue?.manual_only === true;
+  const manualProfiles = manualQueue
+    ? await admin.from("motorist_profiles").select("*").eq("organization_id", organizationId).eq("active", true)
+    : null;
+  if (manualProfiles?.error) throw new Error("Call push audience unavailable");
   const profileIds = [...new Set([
     ...legs.filter(isPendingIncoming).map((leg) => leg.profile_id!),
-    ...(isPickable(session) ? planProfileIds(session) : []),
+    ...(isPickable(session) ? (manualQueue
+      ? (manualProfiles?.data ?? []).filter((profile) => TELEPHONY_ROLES.has(profile.role) && profile.access_status !== "disabled").map((profile) => profile.id)
+      : planProfileIds(session)) : []),
   ])];
   if (!profileIds.length) return [];
   const [profiles, presence, otherOffers, otherLegs] = await Promise.all([
-    admin.from("motorist_profiles").select("*").eq("organization_id", organizationId).in("id", profileIds).eq("active", true),
+    manualProfiles ?? admin.from("motorist_profiles").select("*").eq("organization_id", organizationId).in("id", profileIds).eq("active", true),
     admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId).in("profile_id", profileIds),
     admin.from("motorist_ring_attempts").select("profile_id").eq("organization_id", organizationId).in("profile_id", profileIds).neq("session_id", sessionId).eq("result", "offered").is("ended_at", null),
     admin.from("motorist_call_legs").select("*").eq("organization_id", organizationId).in("profile_id", profileIds).neq("session_id", sessionId).is("ended_at", null),

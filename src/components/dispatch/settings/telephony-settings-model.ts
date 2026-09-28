@@ -41,6 +41,8 @@ export const MAX_QUEUE_ESCALATE_MINUTES = 30;
 export type SettingsDraft = {
   liveCallsEnabled: boolean;
   smsLiveSends: boolean;
+  /** Default keeps today's ring plan; manual mode sends callers to the queue. */
+  inboundCallMode: "ring_first" | "queue_first";
   /** Numeric fields stay strings while the admin types. */
   dailyLegSoftCap: string;
   parkMaxMinutes: string;
@@ -60,6 +62,7 @@ export function settingsDraftFromDocument(settings: TelephonySettingsDoc): Setti
   return {
     liveCallsEnabled: settings.liveCallsEnabled,
     smsLiveSends: settings.smsLiveSends,
+    inboundCallMode: settings.inboundCallMode,
     dailyLegSoftCap: String(settings.dailyLegSoftCap),
     parkMaxMinutes: String(settings.parkMaxMinutes),
     maxRingFanout: String(settings.maxRingFanout),
@@ -102,6 +105,7 @@ export function settingsPayload(draft: SettingsDraft): TelephonySettingsPatchInp
   return {
     liveCallsEnabled: draft.liveCallsEnabled,
     smsLiveSends: draft.smsLiveSends,
+    inboundCallMode: draft.inboundCallMode,
     dailyLegSoftCap: parseCount(draft.dailyLegSoftCap),
     parkMaxMinutes: parseCount(draft.parkMaxMinutes),
     maxRingFanout: parseCount(draft.maxRingFanout),

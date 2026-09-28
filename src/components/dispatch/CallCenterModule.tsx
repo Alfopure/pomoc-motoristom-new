@@ -72,6 +72,7 @@ type CallCenterModuleProps = {
   onCallAction: (action: PhoneCallAction, sessionId: string) => void;
   onAnswer: () => void;
   onAnswerOffer?: (sessionId: string, callControlId: string | null) => void;
+  onDeferOfferIdentity?: (sessionId: string, callControlId: string) => void;
   onRejectOfferIdentity?: (sessionId: string, callControlId: string | null) => void;
   onRejectOffer: () => void;
   canManageCalls: boolean;
@@ -173,6 +174,7 @@ export function CallCenterModule({
   onCallAction,
   onAnswer,
   onAnswerOffer,
+  onDeferOfferIdentity,
   onRejectOffer,
   onRejectOfferIdentity,
   canManageCalls,
@@ -390,6 +392,7 @@ export function CallCenterModule({
           stale={notificationStateStale}
           onAnswer={onAnswer}
           onAnswerOffer={onAnswerOffer}
+          onDeferOfferIdentity={onDeferOfferIdentity}
           onRejectOffer={onRejectOffer}
           onRejectOfferIdentity={onRejectOfferIdentity}
           onCallAction={onCallAction}

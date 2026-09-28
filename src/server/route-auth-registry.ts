@@ -174,6 +174,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "telephony/calls/[id]/hold": { class: "session" },
   "telephony/calls/[id]/reconcile": { class: "session" },
   "telephony/calls/[id]/park": { class: "session" },
+  "telephony/calls/[id]/defer": { class: "session" },
   "telephony/calls/[id]/pickup": { class: "session" },
   "telephony/calls/[id]/add-party": { class: "session", note: "Pridá tretieho účastníka (kolegu alebo externé číslo) do konferencie hovoru; externé číslo prechádza rovnakým rate limitom a allowlistom ako vytáčanie." },
   "telephony/calls/[id]/leave": { class: "session", note: "Operátor odíde z trojstranného hovoru, zvyšní pokračujú." },

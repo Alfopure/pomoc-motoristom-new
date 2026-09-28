@@ -151,6 +151,7 @@ export type AppEventType =
   | "hold"
   | "unhold"
   | "park"
+  | "defer"
   | "pickup"
   | "blind_transfer"
   | "consult"
@@ -190,6 +191,8 @@ export type AppEvent = {
   type: AppEventType;
   actorProfileId: string | null;
   occurredAt: string;
+  /** Required for `defer`: rejects stale clicks after an offer is replaced. */
+  offeredCallControlId?: string;
   target?: TransferTarget;
   /** For `pickup`: the picking operator's device. */
   picker?: { profileId: string; sipUri: string; mobile?: boolean; offerToken?: string };
@@ -465,6 +468,7 @@ export function ignoredResult(reason: string): ReduceResult {
 // --- routing context --------------------------------------------------------
 
 export type RoutingSettings = {
+  inboundCallMode: "ring_first" | "queue_first";
   parkMaxMinutes: number;
   maxRingFanout: number;
   maxConcurrentLegs: number;
@@ -491,6 +495,7 @@ export const DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS = 120;
 export const MAX_QUEUE_ESCALATE_AFTER_SECONDS = 1_800;
 
 export const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
+  inboundCallMode: "ring_first",
   parkMaxMinutes: 30,
   maxRingFanout: 8,
   maxConcurrentLegs: 9,
@@ -629,12 +634,14 @@ export type SessionMeta = {
   waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null; audio_phase?: "combined" | "prompt" | "music"; music_until?: string | null } | null;
   /**
    * Unanswered inbound queue only; parked/held conversations never auto-ring.
+   * `manual_only` keeps queue audio and the callback limit, but disables
+   * automatic offers and backup-number escalation.
    *
    * `idle_since` is when the queue last placed an offer and found nobody —
    * null while it is still reaching people. `escalated_at` records the one
    * round in which it also rang the backup numbers.
    */
-  queue?: { next_offer_at: string; idle_since?: string | null; escalated_at?: string | null } | null;
+  queue?: { next_offer_at: string; idle_since?: string | null; escalated_at?: string | null; manual_only?: boolean } | null;
   previous_operator?: string | null;
   answered_external?: string | null;
   sdk_hold?: { leg: string; at: string } | null;

@@ -19,7 +19,7 @@ import {
   type PushCategory,
   type PushDeviceState,
 } from "./push-client";
-import { previewNotificationSound, setNativePushActive, unlockNotificationSound } from "./notification-sound";
+import { hasNativeAvailableCallPush, previewNotificationSound, setNativeAvailableCallPushActive, setNativePushActive, unlockNotificationSound } from "./notification-sound";
 
 const buttonClass = "inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 text-sm font-semibold text-zinc-800 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50";
 const categories: Array<{ key: PushCategory; label: string; detail: string }> = [
@@ -44,6 +44,7 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
       const next = await readPushDeviceState();
       setState(next);
       setNativePushActive(next.subscribed && next.taskNotificationsEnabled);
+      setNativeAvailableCallPushActive(hasNativeAvailableCallPush(next));
       setError(null);
     } catch (failure) {
       setState((current) => current ?? {
@@ -91,6 +92,7 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
         await disableCurrentDevicePush();
         setState({ ...state, subscribed: false, subscription: null });
         setNativePushActive(false);
+        setNativeAvailableCallPushActive(false);
         setNotice("Push upozornenia sú na tomto zariadení vypnuté.");
       } else {
         // Keep the permission call in the click event's activation chain.
@@ -98,6 +100,7 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
         const next = await readPushDeviceState().catch(() => ({ ...state, subscribed: true, subscription, permission: "granted" as const }));
         setState(next);
         setNativePushActive(next.subscribed && next.taskNotificationsEnabled);
+        setNativeAvailableCallPushActive(hasNativeAvailableCallPush(next));
         setNotice("Push upozornenia sú zapnuté. Vyskúšaj doručenie testovacím upozornením.");
       }
     } catch (failure) {
@@ -118,6 +121,7 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
       await updateDevicePushCategory(state, category, nextEnabled);
       setState((current) => current ? { ...current, [category]: nextEnabled } : current);
       if (category === "taskNotificationsEnabled") setNativePushActive(nextEnabled);
+      if (category === "availableCallsEnabled") setNativeAvailableCallPushActive(hasNativeAvailableCallPush({ ...state, availableCallsEnabled: nextEnabled }));
       setNotice(`${categories.find((item) => item.key === category)!.label}: ${nextEnabled ? "zapnuté" : "vypnuté"}.`);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "Typ upozornení sa nepodarilo nastaviť.");

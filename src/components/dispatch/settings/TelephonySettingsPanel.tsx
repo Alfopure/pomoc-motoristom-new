@@ -159,6 +159,21 @@ export function TelephonySettingsPanel({
 
         <CurrentCallBehaviour advisories={advisories} />
 
+        <fieldset className="rounded-lg border border-zinc-200 bg-zinc-50 p-3">
+          <legend className="px-1 text-sm font-bold text-zinc-950">Prichádzajúce hovory</legend>
+          <p className="mb-3 text-xs text-zinc-600">Úvodná hláška, otváracie hodiny a prípadné IVR zostávajú zachované. Voľba určuje, čo sa stane potom.</p>
+          <div className="grid gap-2">
+            <label className="flex cursor-pointer items-start gap-2 rounded-md border border-zinc-200 bg-white p-3 text-sm">
+              <input type="radio" name="inboundCallMode" value="ring_first" className="mt-0.5 size-4 accent-zinc-900" disabled={!canEdit} checked={draft.inboundCallMode === "ring_first"} onChange={() => set({ inboundCallMode: "ring_first" })} />
+              <span><strong className="block text-zinc-950">Najprv zvoniť operátorom</strong><span className="mt-0.5 block text-xs text-zinc-600">Použije sa plán zvonenia. Ak nikto neprijme, hovor môže prejsť do čakárne.</span></span>
+            </label>
+            <label className="flex cursor-pointer items-start gap-2 rounded-md border border-zinc-200 bg-white p-3 text-sm">
+              <input type="radio" name="inboundCallMode" value="queue_first" className="mt-0.5 size-4 accent-zinc-900" disabled={!canEdit} checked={draft.inboundCallMode === "queue_first"} onChange={() => set({ inboundCallMode: "queue_first" })} />
+              <span><strong className="block text-zinc-950">Najprv do čakárne</strong><span className="mt-0.5 block text-xs text-zinc-600">Operátori dostanú upozornenie a sami si vyberú hovor. Na prevzatie potrebujú pripojený telefón v aplikácii (WebRTC/SIP). Osobný mobil v tomto režime automaticky nezvoní; bez pripojeného zariadenia s aplikáciou hovor neprevezmú.</span></span>
+            </label>
+          </div>
+        </fieldset>
+
         <div className="grid gap-3 lg:grid-cols-2">
           <div className="lg:col-span-2">
             <SettingsField

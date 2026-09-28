@@ -339,6 +339,9 @@ describe("validateBusinessHours / validatePauseReasons / patches", () => {
   });
 
   it("validates the organisation settings patch", () => {
+    expect(DEFAULT_SETTINGS.inboundCallMode).toBe("ring_first");
+    expect(codes(validateSettingsPatch(parseSettingsPatch({ inboundCallMode: "unexpected" })))).toContain("mode_invalid");
+    expect(validateSettingsPatch(parseSettingsPatch({ inboundCallMode: "queue_first" }))).toEqual([]);
     expect(codes(validateSettingsPatch({ destinationAllowlist: [] }))).toContain("allowlist_empty");
     expect(codes(validateSettingsPatch({ destinationAllowlist: ["SK", "Mars"] }))).toContain("allowlist_entry_invalid");
     expect(codes(validateSettingsPatch({ parkMaxMinutes: 0 }))).toContain("park_invalid");
@@ -769,6 +772,15 @@ describe("line, settings and operator patches", () => {
     expect(settings).toMatchObject({ liveCallsEnabled: false, destinationAllowlist: ["SK"], parkMaxMinutes: 15 });
     expect(harness.db.find("motorist_telephony_settings", () => true)).toMatchObject({ live_calls_enabled: false, park_max_minutes: 15 });
     expect(auditRows(harness)[0].action).toBe("telephony.settings.update");
+  });
+
+  it("persists and reads the inbound queue mode without changing the default", async () => {
+    const { harness, deps } = harnessDeps();
+    expect((await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true })).settings?.inboundCallMode).toBe("ring_first");
+    const { settings } = await updateTelephonySettings(deps, { organizationId: ORG, actor: ACTOR, patch: { inboundCallMode: "queue_first" } });
+    expect(settings.inboundCallMode).toBe("queue_first");
+    expect(harness.db.find("motorist_telephony_settings", () => true)?.inbound_call_mode).toBe("queue_first");
+    expect((await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true })).settings?.inboundCallMode).toBe("queue_first");
   });
 
   it("creates the per-operator settings row on first write", async () => {

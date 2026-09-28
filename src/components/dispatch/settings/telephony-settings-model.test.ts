@@ -40,7 +40,7 @@ function settings(overrides: Partial<TelephonySettingsDoc> = {}): TelephonySetti
 describe("settingsDraftFromDocument", () => {
   it("renders the numbers as text and the allowlist as a comma-separated list", () => {
     const draft = settingsDraftFromDocument(settings());
-    expect(draft).toMatchObject({ liveCallsEnabled: false, smsLiveSends: false, parkMaxMinutes: "30", dailyLegSoftCap: "500" });
+    expect(draft).toMatchObject({ liveCallsEnabled: false, smsLiveSends: false, inboundCallMode: "ring_first", parkMaxMinutes: "30", dailyLegSoftCap: "500" });
     expect(draft.destinationAllowlist).toBe("SK, CZ");
     expect(settingsDirty(draft, settings())).toBe(false);
   });
@@ -50,6 +50,7 @@ describe("settingsDraftFromDocument", () => {
     expect(settingsDirty(updateSettingsDraft(draft, { destinationAllowlist: "sk  cz" }), settings())).toBe(false);
     expect(settingsDirty(updateSettingsDraft(draft, { destinationAllowlist: "SK, CZ, AT" }), settings())).toBe(true);
     expect(settingsDirty(updateSettingsDraft(draft, { liveCallsEnabled: true }), settings())).toBe(true);
+    expect(settingsDirty(updateSettingsDraft(draft, { inboundCallMode: "queue_first" }), settings())).toBe(true);
   });
 });
 
@@ -72,6 +73,7 @@ describe("parsing", () => {
     expect(settingsPayload(draft)).toEqual({
       liveCallsEnabled: false,
       smsLiveSends: false,
+      inboundCallMode: "ring_first",
       dailyLegSoftCap: 500,
       parkMaxMinutes: 15,
       maxRingFanout: 8,
