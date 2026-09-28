@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { PUSH_SETTINGS_EVENT, PUSH_SOUND_KEY, pushEnrollmentState, reconcilePushDeviceState, rememberNotificationSound, syncNotificationSoundFromStorage } from "./push-client";
-import { setNativePushActive, unlockNotificationSound } from "./notification-sound";
+import { hasNativeAvailableCallPush, setNativeAvailableCallPushActive, setNativePushActive, unlockNotificationSound } from "./notification-sound";
 
 /** Reads this device's existing enrollment; mounting never opts anyone in. */
 export function PushNotificationSync({ profileId }: { profileId?: string }) {
@@ -30,6 +30,7 @@ export function PushNotificationSync({ profileId }: { profileId?: string }) {
           return;
         }
         setNativePushActive(state.subscribed && state.taskNotificationsEnabled);
+        setNativeAvailableCallPushActive(hasNativeAvailableCallPush(state));
         rememberNotificationSound(state.soundEnabled);
       } catch {
         // Existing push keeps working during a temporary connectivity failure.
@@ -58,6 +59,7 @@ export function PushNotificationSync({ profileId }: { profileId?: string }) {
     return () => {
       disposed = true;
       setNativePushActive(false);
+      setNativeAvailableCallPushActive(false);
       document.removeEventListener("pointerdown", unlockNotificationSound);
       document.removeEventListener("keydown", unlockNotificationSound);
       document.removeEventListener("visibilitychange", refresh);

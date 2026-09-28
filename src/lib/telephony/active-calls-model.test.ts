@@ -437,6 +437,19 @@ describe("PhoneBar model", () => {
     expect(pollActivityInput(quiet)).toEqual({ hasBrowserCall: false, liveCallCount: 0 });
   });
 
+  it("exposes the exact pending personal-mobile ring leg only to its operator", () => {
+    const leg = (id: string, profileId: string, intent: string) => ({
+      id, callControlId: id, role: "external" as const, profileId, state: "ringing", toNumber: "+421900111222",
+      fromNumber: "+421232408700", answeredAt: null, bridgedAt: null, intent, muted: false, supervisorMode: null,
+    });
+    const offer = call({ state: "ringing", answeredAt: null, answeredByProfileId: null, offeredProfileIds: [ME], legs: [
+      leg("own-mobile", ME, "ring"), leg("colleague-mobile", COLLEAGUE, "ring"), leg("own-transfer", ME, "transfer"),
+    ] });
+    const model = buildPhoneBarModel(payload({ calls: [offer] }));
+    expect(model.offers[0].browserIncomingCallControlIds).toEqual(["own-mobile"]);
+    expect(model.offers[0].browserCallControlIds).toEqual([]);
+  });
+
   it("uses the answer time as the timer origin once answered", () => {
     const model = buildPhoneBarModel(payload({ calls: [call()] }));
     expect(model.active?.timerSince).toBe("2026-09-03T08:00:20.000Z");

@@ -52,6 +52,7 @@ const shapes: Record<Exclude<keyof RuntimeRoutingSnapshot, "settings">, Shape> =
 };
 const settingsShape: Shape = {
   park_max_minutes: number, max_ring_fanout: number, max_concurrent_legs: number,
+  inbound_call_mode: optional(oneOf("ring_first", "queue_first")),
   queue_escalate_after_seconds: optional(number), destination_allowlist: (value) => Array.isArray(value) && value.every(string),
 };
 

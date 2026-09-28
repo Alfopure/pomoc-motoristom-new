@@ -6,7 +6,7 @@ import type { PhoneBarCall, PhoneBarModel } from "@/lib/telephony/active-calls-m
 import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
 import type { WebphoneCallView, WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
-import { HeaderLiveCallsMenu, LiveCallsWorkspace, liveBrowserInviteSessionId, liveCallOperatorLabel, liveCallOverviewCounts } from "./LiveCallOverview";
+import { HeaderLiveCallsMenu, LiveCallsWorkspace, canSoundWaitingCall, liveBrowserInviteSessionId, liveCallOperatorLabel, liveCallOverviewCounts } from "./LiveCallOverview";
 
 function call(overrides: Partial<PhoneBarCall> = {}): PhoneBarCall {
   return {
@@ -99,6 +99,16 @@ describe("liveCallOverviewCounts", () => {
   });
 });
 
+describe("waiting room alert", () => {
+  it("stays silent during a direct offer, an active call, or operator pause", () => {
+    const waiting = model([call({ kind: "waiting", state: "waiting", answered: false })]);
+    expect(canSoundWaitingCall(waiting, null)).toBe(true);
+    expect(canSoundWaitingCall({ ...waiting, offers: [call({ kind: "offer", state: "ringing", offeredToMe: true })] }, null)).toBe(false);
+    expect(canSoundWaitingCall({ ...waiting, active: call() }, null)).toBe(false);
+    expect(canSoundWaitingCall({ ...waiting, ownPresenceStatus: "paused" }, null)).toBe(false);
+  });
+});
+
 describe("liveCallOperatorLabel", () => {
   it("prefers the owning operator, then an answered external phone, then ringing operators", () => {
     expect(liveCallOperatorLabel(call({ operatorName: "Mango" }))).toBe("Mango");
@@ -160,6 +170,21 @@ describe("live call invite actions", () => {
       const html = renderToStaticMarkup(createElement(component, { ...common, phone: phone({ ...browser, telnyxCallControlId: null }) }));
       expect(html).not.toContain("Prijať");
       expect(html).not.toContain("Odmietnuť");
+    });
+
+    it(`${component.name} offers defer only for an actor-owned ringing leg`, () => {
+      const own = { ...offers[0], direction: "inbound" as const, browserIncomingCallControlIds: ["own-leg-control"] };
+      const other = { ...offers[1], offeredToMe: false, browserIncomingCallControlIds: [] };
+      const html = renderToStaticMarkup(createElement(component, {
+        ...common, model: model([own, other]), onDeferOfferIdentity() {}, phone: phone(null),
+      }));
+      const rows = html.match(/<article\b[\s\S]*?<\/article>/g)!;
+      expect(rows[0]).toContain("Do čakárne");
+      expect(rows[1]).not.toContain("Do čakárne");
+      const stale = renderToStaticMarkup(createElement(component, {
+        ...common, model: model([own]), onDeferOfferIdentity() {}, phone: phone(null), stale: true,
+      }));
+      expect(stale).toMatch(/<button[^>]*disabled=""[^>]*title="Do čakárne"/);
     });
 
     it.each([

@@ -218,6 +218,7 @@ export async function loadRoutingSettings(admin: AdminClient, organizationId: st
 function routingSettingsFromRow(data: Database["public"]["Tables"]["motorist_telephony_settings"]["Row"] | null): RoutingSettings & { raw: typeof data } {
   if (!data) return { ...DEFAULT_ROUTING_SETTINGS, raw: null };
   return {
+    inboundCallMode: data.inbound_call_mode === "queue_first" ? "queue_first" : "ring_first",
     parkMaxMinutes: data.park_max_minutes,
     maxRingFanout: data.max_ring_fanout,
     maxConcurrentLegs: data.max_concurrent_legs,

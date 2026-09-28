@@ -20,10 +20,11 @@ import {
 } from "lucide-react";
 
 import { waitingRoomPark, type PhoneBarCall, type PhoneBarModel } from "@/lib/telephony/active-calls-model";
-import { matchesIncomingBrowserInvite } from "@/lib/telephony/browser-invite";
+import { deferOfferCallControlId, matchesIncomingBrowserInvite } from "@/lib/telephony/browser-invite";
 import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { canPickUpWithCurrentPresence } from "@/lib/telephony/call-pickup-presence";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
+import { playWaitingRoomChimeOnce } from "@/components/pwa/notification-sound";
 import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import type { WebphoneCallView, WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
@@ -59,6 +60,12 @@ export function liveCallOverviewCounts(model: PhoneBarModel, presences: readonly
   };
 }
 
+/** A queue cue must never play on top of an actual offer or conversation. */
+export function canSoundWaitingCall(model: PhoneBarModel, phone: WebphoneSnapshot | null): boolean {
+  return model.ownPresenceStatus === "available" && !model.active && !phone?.call?.active &&
+    !phone?.call?.ringing && !model.offers.some((call) => call.offeredToMe);
+}
+
 export function liveCallOperatorLabel(call: PhoneBarCall): string {
   if (call.operatorName) return call.operatorName;
   const external = call.participants.find((participant) => participant.kind === "operator" && !participant.profileId && participant.answered);
@@ -82,6 +89,7 @@ type SharedOverviewProps = {
   stale?: boolean;
   onAnswer: () => void;
   onAnswerOffer?: (sessionId: string, callControlId: string | null) => void;
+  onDeferOfferIdentity?: (sessionId: string, callControlId: string) => void;
   onRejectOfferIdentity?: (sessionId: string, callControlId: string | null) => void;
   onRejectOffer: () => void;
   onCallAction: (action: PhoneCallAction, sessionId: string) => void;
@@ -167,6 +175,9 @@ export function LiveCallsWorkspace(props: WorkspaceOverviewProps) {
 
 export function HeaderLiveCallsMenu(props: SharedOverviewProps) {
   const [now, setNow] = useState(() => Date.now());
+  const [newWaitingCall, setNewWaitingCall] = useState(false);
+  const knownWaiting = useRef<Set<string> | null>(null);
+  const highlightTimer = useRef<number | null>(null);
   const counts = liveCallOverviewCounts(props.model, props.presences);
   const browserInviteSessionId = liveBrowserInviteSessionId(props.model, props.phone?.call ?? null);
   useLiveCallClock(counts.total > 0, setNow);
@@ -175,17 +186,41 @@ export function HeaderLiveCallsMenu(props: SharedOverviewProps) {
   const alerting = counts.ringing + counts.waiting > 0;
   const menuRef = useRef<HTMLDetailsElement>(null);
 
+  useEffect(() => {
+    if (!props.model.checkedAt || props.stale) return;
+    const current = new Set(props.model.teamCalls.filter((call) => call.kind === "waiting" && call.direction === "inbound").map((call) => call.sessionId));
+    const previous = knownWaiting.current;
+    knownWaiting.current = current;
+    // The first successful snapshot establishes a baseline, including calls
+    // that were already waiting before this tab was opened or refreshed.
+    if (!previous) return;
+    const arrived = [...current].filter((id) => !previous.has(id));
+    if (arrived.length === 0) return;
+    setNewWaitingCall(true);
+    if (highlightTimer.current !== null) window.clearTimeout(highlightTimer.current);
+    highlightTimer.current = window.setTimeout(() => setNewWaitingCall(false), 2_500);
+    if (canSoundWaitingCall(props.model, props.phone)) {
+      void playWaitingRoomChimeOnce(arrived[0]);
+    }
+  }, [props.model, props.phone, props.stale]);
+
+  useEffect(() => () => { if (highlightTimer.current !== null) window.clearTimeout(highlightTimer.current); }, []);
+
   return (
+    <>
+    <span className="sr-only" role="status">
+      {newWaitingCall && counts.waiting > 0 ? `Nový hovor v čakárni. Aktuálne čaká ${counts.waiting} ${counts.waiting === 1 ? "hovor" : counts.waiting < 5 ? "hovory" : "hovorov"}.` : ""}
+    </span>
     <details ref={menuRef} className="group relative" onKeyDown={(event) => { if (event.key === "Escape" && menuRef.current) { menuRef.current.open = false; menuRef.current.querySelector("summary")?.focus(); } }}>
       <summary
-        className={`flex h-9 cursor-pointer list-none items-center gap-1.5 rounded-md border px-2 text-xs font-bold outline-none transition focus-visible:ring-2 focus-visible:ring-yellow-300 [&::-webkit-details-marker]:hidden ${alerting ? "border-amber-300 bg-amber-50 text-amber-950" : counts.active > 0 ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-zinc-200 bg-zinc-50 text-zinc-700"}`}
+        className={`flex h-9 cursor-pointer list-none items-center gap-1.5 rounded-md border px-2 text-xs font-bold outline-none transition focus-visible:ring-2 focus-visible:ring-yellow-300 [&::-webkit-details-marker]:hidden ${newWaitingCall && counts.waiting > 0 ? "border-amber-500 bg-amber-200 text-amber-950 ring-2 ring-amber-300" : alerting ? "border-amber-300 bg-amber-50 text-amber-950" : counts.active > 0 ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-zinc-200 bg-zinc-50 text-zinc-700"}`}
         aria-label={`Hovory: ${counts.active} prebieha, ${counts.ringing} zvoní, ${counts.waiting} čaká`}
       >
         <PhoneCall size={14} aria-hidden="true" />
         <span className="hidden sm:inline">Hovory</span>
         <span className="rounded bg-black/5 px-1.5 py-0.5" aria-live="polite">{counts.total}</span>
-        {counts.waiting > 0 && <span className="inline-flex items-center gap-1 rounded-md bg-amber-200 px-1.5 py-1 text-xs font-bold text-amber-950 motion-safe:animate-pulse"><Clock3 size={15} /><span>{counts.waiting}</span><span className="hidden md:inline">čaká</span></span>}
-        {alerting && <span className="size-1.5 rounded-full bg-amber-600 motion-safe:animate-pulse" aria-hidden="true" />}
+        {counts.waiting > 0 && <span className={`inline-flex items-center gap-1 rounded-md bg-amber-200 px-1.5 py-1 text-xs font-bold text-amber-950 ${newWaitingCall ? "motion-safe:animate-pulse" : ""}`}><Clock3 size={15} /><span>{counts.waiting}</span><span className="hidden md:inline">čaká</span></span>}
+        {alerting && <span className={`size-1.5 rounded-full bg-amber-600 ${counts.ringing > 0 ? "motion-safe:animate-pulse" : ""}`} aria-hidden="true" />}
         <ChevronDown size={13} className="transition group-open:rotate-180" aria-hidden="true" />
       </summary>
 
@@ -217,6 +252,7 @@ export function HeaderLiveCallsMenu(props: SharedOverviewProps) {
         </footer>
       </section>
     </details>
+    </>
   );
 }
 
@@ -232,6 +268,7 @@ function LiveCallRow({
   now,
   onAnswer,
   onAnswerOffer,
+  onDeferOfferIdentity,
   onCallAction,
   onNewCase,
   onOpenCase,
@@ -253,6 +290,7 @@ function LiveCallRow({
   const timer = formatCallTimer(waiting?.seconds ?? callElapsedSeconds(call, now));
   const isBusy = busyAction !== null;
   const canAnswer = !stale && phone?.status === "registered" && browserInviteSessionId === call.sessionId;
+  const deferCallControlId = deferOfferCallControlId(call, phone?.call);
   const canPickup = (canPickUpCall(call) || (phone?.onDemand && Boolean(call.browserIncomingCallControlIds?.length))) && !canAnswer;
   // "Finish the call first" was shown to an operator whose phone was merely
   // ringing: nothing was running, and the sentence told them to end something
@@ -315,6 +353,7 @@ function LiveCallRow({
 
       <div className={`flex flex-wrap items-center gap-1.5 ${compact ? "pl-10" : "sm:justify-end"}`}>
         {canAnswer && <ActionButton busy={phone?.answering} disabled={answerBlocked} icon={PhoneCall} label="Prijať" tone="accept" onClick={() => { if (!matchesIncomingBrowserInvite(call, phone?.call)) return; if (onAnswerOffer) onAnswerOffer(call.sessionId, phone?.call?.telnyxCallControlId ?? null); else onAnswer(); }} />}
+        {deferCallControlId && onDeferOfferIdentity && <ActionButton busy={busyAction === "defer"} disabled={stale || isBusy || answerBlocked} icon={Clock3} label="Do čakárne" tone="warning" onClick={() => { if (deferOfferCallControlId(call, phone?.call) !== deferCallControlId) return; onDeferOfferIdentity(call.sessionId, deferCallControlId); }} />}
         {canAnswer && <ActionButton disabled={answerBlocked} icon={X} label="Odmietnuť" tone="danger-outline" onClick={() => { if (!matchesIncomingBrowserInvite(call, phone?.call)) return; if (onRejectOfferIdentity) onRejectOfferIdentity(call.sessionId, phone?.call?.telnyxCallControlId ?? null); else onRejectOffer(); }} />}
         {canPickup && <ActionButton busy={busyAction === "pickup"} disabled={Boolean(pickupBlockReason)} icon={PhoneIncoming} label={pickupBlockReason ?? (phone?.onDemand ? "Prijať v appke" : "Prevziať")} tone="accept" onClick={() => onCallAction("pickup", call.sessionId)} />}
         {canPickup && pickupBlockReason === "Najprv sa nastav dostupný" && onMakeAvailable && <ActionButton disabled={isBusy} icon={PhoneCall} label="Som dostupný" tone="outline" onClick={onMakeAvailable} />}

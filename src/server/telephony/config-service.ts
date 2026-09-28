@@ -210,6 +210,7 @@ export type LinePatchInput = {
 };
 
 export type TelephonySettingsPatchInput = {
+  inboundCallMode?: "ring_first" | "queue_first";
   liveCallsEnabled?: boolean;
   smsLiveSends?: boolean;
   dailyLegSoftCap?: number;
@@ -336,6 +337,7 @@ export type RoutingLimitsDoc = {
 };
 
 export type TelephonySettingsDoc = {
+  inboundCallMode: "ring_first" | "queue_first";
   liveCallsEnabled: boolean;
   smsLiveSends: boolean;
   dailyLegSoftCap: number;
@@ -380,6 +382,7 @@ export type RoutingDocument = {
 };
 
 export const DEFAULT_SETTINGS: TelephonySettingsDoc = {
+  inboundCallMode: "ring_first",
   liveCallsEnabled: false,
   smsLiveSends: false,
   dailyLegSoftCap: 500,
@@ -670,6 +673,7 @@ export function parseSettingsPatch(value: unknown): TelephonySettingsPatchInput 
   const row = isRecord(value) ? value : {};
   const issues: ValidationIssue[] = [];
   const patch: TelephonySettingsPatchInput = {};
+  if ("inboundCallMode" in row) patch.inboundCallMode = (readText(row.inboundCallMode) ?? "") as TelephonySettingsPatchInput["inboundCallMode"];
   if ("liveCallsEnabled" in row) patch.liveCallsEnabled = readFlag(row, "liveCallsEnabled", false, "", issues);
   if ("smsLiveSends" in row) patch.smsLiveSends = readFlag(row, "smsLiveSends", false, "", issues);
   if ("dailyLegSoftCap" in row) patch.dailyLegSoftCap = readInteger(row.dailyLegSoftCap) ?? Number.NaN;
@@ -1190,6 +1194,9 @@ export function validateLinePatch(patch: LinePatchInput, context: ValidationCont
 
 export function validateSettingsPatch(patch: TelephonySettingsPatchInput): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  if (patch.inboundCallMode !== undefined && patch.inboundCallMode !== "ring_first" && patch.inboundCallMode !== "queue_first") {
+    issues.push(issue("inboundCallMode", "mode_invalid", "Zvoľ zvonenie operátorom alebo najprv čakáreň."));
+  }
   if (patch.dailyLegSoftCap !== undefined && (!Number.isInteger(patch.dailyLegSoftCap) || patch.dailyLegSoftCap <= 0 || patch.dailyLegSoftCap > MAX_DAILY_LEG_SOFT_CAP)) {
     issues.push(issue("dailyLegSoftCap", "cap_invalid", `Denný limit hovorov musí byť 1 až ${MAX_DAILY_LEG_SOFT_CAP}.`));
   }
@@ -1577,6 +1584,7 @@ function routingDocumentFromRows(rows: Awaited<ReturnType<typeof loadLegacyRouti
             maxRingFanout: settings.max_ring_fanout,
             maxConcurrentLegs: settings.max_concurrent_legs,
             queueEscalateAfterSeconds: settings.queue_escalate_after_seconds ?? DEFAULT_SETTINGS.queueEscalateAfterSeconds,
+            inboundCallMode: settings.inbound_call_mode === "queue_first" ? "queue_first" : "ring_first",
           }
         : { ...DEFAULT_SETTINGS }
       : null,
@@ -2119,6 +2127,7 @@ export async function updateTelephonySettings(
         maxRingFanout: existing.data.max_ring_fanout,
         maxConcurrentLegs: existing.data.max_concurrent_legs,
         queueEscalateAfterSeconds: existing.data.queue_escalate_after_seconds ?? DEFAULT_SETTINGS.queueEscalateAfterSeconds,
+        inboundCallMode: existing.data.inbound_call_mode === "queue_first" ? "queue_first" : "ring_first",
       }
     : { ...DEFAULT_SETTINGS };
 
@@ -2131,6 +2140,7 @@ export async function updateTelephonySettings(
     maxRingFanout: input.patch.maxRingFanout ?? current.maxRingFanout,
     maxConcurrentLegs: input.patch.maxConcurrentLegs ?? current.maxConcurrentLegs,
     queueEscalateAfterSeconds: input.patch.queueEscalateAfterSeconds ?? current.queueEscalateAfterSeconds,
+    inboundCallMode: input.patch.inboundCallMode ?? current.inboundCallMode,
   };
 
   // The cross-field rules (`maxConcurrentLegs > maxRingFanout`) have to hold for
@@ -2163,6 +2173,7 @@ export async function updateTelephonySettings(
       max_ring_fanout: next.maxRingFanout,
       max_concurrent_legs: next.maxConcurrentLegs,
       queue_escalate_after_seconds: next.queueEscalateAfterSeconds,
+      inbound_call_mode: next.inboundCallMode,
     },
     { onConflict: "organization_id" },
   );
