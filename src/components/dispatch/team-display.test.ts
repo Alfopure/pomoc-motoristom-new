@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { colleagueCallView, lastOnlineLabel } from "./team-display";
+import { colleagueCallView, lastOnlineLabel, presenceIsFresh } from "./team-display";
 const now = Date.parse("2026-09-20T07:30:00Z");
 const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
 describe("last confirmed operator connection", () => {
@@ -37,5 +37,17 @@ describe("colleague call from the team strip", () => {
   it("does not guess while the state is being verified", () => {
     expect(colleagueCallView({ ...base, presenceState: "available", verified: false })).toEqual({ callable: false, reason: "Stav kolegu sa overuje." });
     expect(colleagueCallView({ ...base, presenceState: "stale" })).toEqual({ callable: false, reason: "Stav kolegu sa overuje." });
+  });
+});
+
+describe("team strip presence freshness", () => {
+  it("trusts a snapshot newer than the strip's own clock, which only ticks every 15 s", () => {
+    expect(presenceIsFresh(new Date(now + 14_000).toISOString(), now)).toBe(true);
+    expect(presenceIsFresh(new Date(now + 90_000).toISOString(), now)).toBe(true);
+  });
+  it("stops trusting a snapshot after 30 s and never trusts a missing one", () => {
+    expect(presenceIsFresh(ago(0.49), now)).toBe(true);
+    expect(presenceIsFresh(ago(0.51), now)).toBe(false);
+    for (const value of [undefined, "", "invalid"]) expect(presenceIsFresh(value, now)).toBe(false);
   });
 });
