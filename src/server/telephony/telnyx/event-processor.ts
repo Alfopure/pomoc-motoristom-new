@@ -8,6 +8,7 @@ import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_I
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { effectsDeps, ownedSessionWork, runSessionEvent, SessionEventDeferredError, WEBHOOK_LEASE_WAIT_MS, type SessionRunnerDeps } from "../session-runner";
+import { sessionOwnership } from "../ownership";
 import { describeServiceError, SessionLeaseBusyError } from "../service-errors";
 import { recordCallEvent, type CommandOutcome } from "../state/effects";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
@@ -74,12 +75,34 @@ const DEFERRED_DRAIN_TYPES = Object.keys(DEFERRED_EVENT_RANK);
 /** Wide enough that low-ranked audio rows cannot push a later hangup out of the page. */
 const DEFERRED_DRAIN_LIMIT = 40;
 
+/**
+ * A lease-busy deferral of a durably claimed control fact is acknowledged with
+ * 200 and finished by its own host (`drainDeferredDelivery`) instead of asking
+ * Telnyx to redeliver it.
+ *
+ * On 25 Sep 74 % of all deliveries (1 232 of 1 665) were such 500s: Telnyx
+ * redelivers at most six times within seconds, every redelivery paid the claim,
+ * the session lookup and a full lease poll again and mostly hit the same holder,
+ * and what was left waited for the five-minute cron (processing lag up to 6 min).
+ *
+ * The window is measured from ingress and bounded by the route's 60 s
+ * `maxDuration`: no replay starts after it, and a replay's owned work is itself
+ * capped at `SESSION_WORK_MS` (24 s). Anything still deferred at the end is left
+ * to the next holder's post-release drain and to the cron, exactly as before.
+ */
+export const DEFERRED_SELF_DRAIN_WINDOW_MS = 30_000;
+/** Only a deferral decided this soon after ingress is acknowledged; a slower one keeps asking for redelivery. */
+export const DEFERRED_ACK_MAX_ELAPSED_MS = 10_000;
+/** Read-only waits between lease checks; nothing is claimed or acquired while waiting. */
+const DEFERRED_SELF_DRAIN_POLL_MS: readonly number[] = [250, 400, 600, 800, 1_000, 1_500, 2_000];
+const DEFERRED_SELF_DRAIN_MAX_ROUNDS = 40;
+
 /** Audio facts whose reducer branch is a pure ignore once the customer leg is gone. */
 const LEASE_FREE_IGNORE_TYPES: ReadonlySet<string> = new Set(["call.gather.ended", "call.playback.ended", "call.speak.ended"]);
 /** `wrap_up` only ever advances to `ended` (transitions.ts `TERMINAL_STATES || wrap_up` / stale finalise), so it is monotone like the terminal states. */
 const LEASE_FREE_IGNORE_STATES: ReadonlySet<string> = new Set(["ended", "wrap_up", "failed"]);
 
-export type ProcessorOutcome = "processed" | "ignored" | "duplicate" | "busy" | "failed" | "malformed" | "unverified_connection" | "unknown_session" | "awaiting_correlation" | "unresolved";
+export type ProcessorOutcome = "processed" | "ignored" | "duplicate" | "busy" | "failed" | "deferred" | "malformed" | "unverified_connection" | "unknown_session" | "awaiting_correlation" | "unresolved";
 
 export type ProcessorResult = {
   status: 200 | 400 | 500;
@@ -275,6 +298,8 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
 export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown): Promise<ProcessorResult> {
   const now = nowOf(deps);
   const started = now().getTime();
+  // Wall clock for the self-drain window: `deps.now` may be a frozen test clock.
+  const ingressWall = Date.now();
   const done = (partial: Omit<ProcessorResult, "ms">): ProcessorResult => {
     const result = { ...partial, ms: now().getTime() - started };
     if (event) {
@@ -532,8 +557,14 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
   } catch (error) {
     const message = describeServiceError(error);
     const deferred = error instanceof SessionEventDeferredError || !processingStarted;
+    // A busy lease before any work started, on a session whose inbox drain
+    // replays this event type: the fact is durable in the ledger and its own
+    // host can finish it once the holder releases (see DEFERRED_SELF_DRAIN_WINDOW_MS).
+    const selfDrainable = error instanceof SessionLeaseBusyError && !processingStarted && !deps.ledgerReplay &&
+      Boolean(session) && Boolean(event.callControlId) && DEFERRED_EVENT_RANK[event.type] !== undefined;
+    let durable = false;
     try {
-      await markWebhookEventFailed(deps.admin, event.id, error, { claimedAt: claim.claimedAt, logger: deps.logger, releaseForRetry: deferred });
+      durable = await markWebhookEventFailed(deps.admin, event.id, error, { claimedAt: claim.claimedAt, logger: deps.logger, releaseForRetry: deferred });
     } catch (ledgerError) {
       deps.logger?.({ level: "error", scope: "webhook", eventId: event.id, message: "ledger update failed", error: ledgerError instanceof Error ? ledgerError.message : String(ledgerError) });
     }
@@ -555,26 +586,72 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // and the drain is never run inline: the 500 must go out at once so the
     // redelivery is not delayed, and an inline drain would sit on the lease it
     // competes for.
+    const selfDrain = selfDrainable && durable;
+    let drainScheduled = false;
     if (deferred && session && deps.deferMaintenance) {
       const deferredSessionId = session.id;
       try {
         deps.deferMaintenance(async () => {
-          try { await replayDeferredSessionEvents(deps, deferredSessionId); }
-          catch (drainError) {
+          try {
+            // Never inside the request's ownership scope: the drain competes for the lease like any writer.
+            if (selfDrain) await sessionOwnership.exit(() => drainDeferredDelivery(deps, deferredSessionId, event.id, ingressWall));
+            else await replayDeferredSessionEvents(deps, deferredSessionId);
+          } catch (drainError) {
             deps.logger?.({ level: "warn", scope: "webhook", sessionId: deferredSessionId, message: "deferred drain failed", error: drainError instanceof Error ? drainError.message : String(drainError) });
           }
         });
+        drainScheduled = true;
       } catch {
         // No request scope to retain the drain: provider redelivery and the cron remain.
         deps.logger?.({ level: "warn", scope: "webhook", sessionId: deferredSessionId, message: "deferred drain scheduling unavailable" });
       }
     }
-    // Preserve the existing compensation policy for ambiguous command failures.
-    // A lease deferral has not applied the main transition; neither it nor a
-    // failure resolving the session may be acknowledged as completed work.
-    const status = eventClass === "control" && session && !deferred ? 200 : 500;
-    return done({ ...identity, claim, sessionId: session?.id ?? null, status, outcome: "failed", error: message });
+    // Acknowledged only when the row is durably deferred and this host retained
+    // its own drain; otherwise redelivery is still requested. Ambiguous command
+    // failures keep their existing compensation policy (200 for a control fact
+    // whose transition may have applied).
+    const acknowledged = selfDrain && drainScheduled && Date.now() - ingressWall <= DEFERRED_ACK_MAX_ELAPSED_MS;
+    const status = acknowledged || (eventClass === "control" && session && !deferred) ? 200 : 500;
+    return done({ ...identity, claim, sessionId: session?.id ?? null, status, outcome: acknowledged ? "deferred" : "failed", error: message });
   }
+}
+
+/**
+ * Finishes an acknowledged lease-busy deferral on the host that deferred it.
+ *
+ * Waiting is read-only — one row of the ledger and one of the session per round
+ * — so it claims nothing and never competes with the holder or with an
+ * operator's click. When the lease is free the session's ready inbox is replayed
+ * in rank order (a hangup before an answer), which includes this event. It stops
+ * as soon as this event is no longer deferred (processed here, by the holder's
+ * own post-release drain, by a redelivery or by the cron) or the window ends.
+ */
+export async function drainDeferredDelivery(deps: ProcessorDeps, sessionId: string, eventId: string, ingressWall: number): Promise<void> {
+  const deadline = ingressWall + DEFERRED_SELF_DRAIN_WINDOW_MS;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  for (let round = 0; round < DEFERRED_SELF_DRAIN_MAX_ROUNDS; round += 1) {
+    if (round > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(DEFERRED_SELF_DRAIN_POLL_MS[Math.min(round - 1, DEFERRED_SELF_DRAIN_POLL_MS.length - 1)]!, remaining));
+    }
+    const row = await deps.admin.from("motorist_telnyx_webhook_events").select("status, retry_state")
+      .eq("organization_id", deps.organizationId).eq("event_id", eventId).maybeSingle();
+    if (row.error) break;
+    if (!row.data || row.data.status === "processed" || row.data.retry_state !== "deferred") {
+      deps.logger?.({ scope: "webhook", eventId, sessionId, message: "deferred delivery settled", rounds: round, ms: Date.now() - ingressWall });
+      return;
+    }
+    if (Date.now() >= deadline) break;
+    const session = await deps.admin.from("motorist_call_sessions").select("*")
+      .eq("organization_id", deps.organizationId).eq("id", sessionId).maybeSingle();
+    if (session.error || !session.data) break;
+    const leaseUntil = session.data.lease_until ? Date.parse(session.data.lease_until) : Number.NaN;
+    // Held: wait read-only. Free: replay the ready inbox (it acquires with the webhook budget).
+    if (!(leaseUntil > nowOf(deps)().getTime())) await replayReadySessionEvents(deps, session.data, undefined, false, { deadline, limit: 4 });
+  }
+  // Left for the next holder's post-release drain and the cron (unchanged recovery).
+  deps.logger?.({ level: "warn", scope: "webhook", eventId, sessionId, message: "deferred delivery left for recovery", ms: Date.now() - ingressWall });
 }
 
 async function maybeSweep(deps: ProcessorDeps, startedAt: number, waitingFirst = false): Promise<void> {
@@ -659,8 +736,10 @@ export async function drainCustomerTerminal(deps: ProcessorDeps, session: Sessio
   await replayReadySessionEvents({ ...deps, replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, session, undefined, true);
 }
 
-async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow, current?: TelephonyEvent, customerTerminalOnly = false): Promise<void> {
-  const deadline = Date.now() + DEFERRED_DRAIN_DEADLINE_MS;
+async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow, current?: TelephonyEvent, customerTerminalOnly = false,
+  options: { deadline?: number; limit?: number } = {}): Promise<void> {
+  const deadline = Math.min(options.deadline ?? Number.POSITIVE_INFINITY, Date.now() + DEFERRED_DRAIN_DEADLINE_MS);
+  const limit = options.limit ?? 2;
   try {
     if (customerTerminalOnly && !session.customer_leg_id) return;
     let legQuery = deps.admin.from("motorist_call_legs").select("telnyx_call_control_id")
@@ -711,7 +790,7 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
       if (Date.now() >= deadline) break;
       const replay = await processTelnyxEvent({ ...deps, ledgerReplay: row.retry_state === "deferred" ? "cron" : "correlation",
         replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, envelope);
-      if (++replayed >= 2) break;
+      if (++replayed >= limit) break;
       if (replay.outcome === "busy" || replay.error?.includes("SessionLeaseBusyError")) break;
     }
   } catch (error) {

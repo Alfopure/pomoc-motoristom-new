@@ -17,9 +17,11 @@ export function CallRecordingIndicator({ callId, onClick, expanded, controls, bu
     `/api/telephony/calls/${encodeURIComponent(callId)}/recording-detail`,
   );
 
+  // 14-16 Supabase requests per refresh on the server; a hidden tab does not
+  // need the live dot, and 15 s is plenty for a state that changes a few times per call.
   useEffect(() => {
     if (loading) return;
-    const timer = setTimeout(refresh, 5000);
+    const timer = setTimeout(() => { if (document.visibilityState !== "hidden") refresh(); }, 15_000);
     return () => clearTimeout(timer);
   }, [callId, loading, refresh]);
 

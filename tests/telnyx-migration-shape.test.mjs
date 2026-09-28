@@ -26,6 +26,10 @@ const pauseRoutingMigration = readFileSync(
   new URL("../supabase/migrations/20260923100000_operator_pause_routing.sql", import.meta.url),
   "utf8",
 );
+const quietSessionWritesMigration = readFileSync(
+  new URL("../supabase/migrations/20261008100000_quiet_internal_session_writes.sql", import.meta.url),
+  "utf8",
+);
 const seed = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
 const seedScript = readFileSync(new URL("../scripts/seed-demo-data.mjs", import.meta.url), "utf8");
 
@@ -240,6 +244,18 @@ test("lease-only session writes touch neither updated_at nor the realtime doorbe
   }
   // INSERT/DELETE keep a WHEN-less trigger (WHEN may not reference the missing row).
   assert.match(round2Migration, /create trigger motorist_call_sessions_broadcast\s+after insert or delete/);
+});
+
+test("lease acquires and effect checkpoints do not ring the realtime doorbell", () => {
+  // acquire_v2 bumps ownership_generation and checkpoints rewrite pending_effects;
+  // neither changes what a console shows, and each ring refetches every console.
+  assert.match(quietSessionWritesMigration, /create trigger motorist_call_sessions_broadcast_update\s+after update[\s\S]*?when \(/);
+  for (const column of ["'lease_token'", "'lease_until'", "'updated_at'", "'version'", "'ownership_generation'", "'pending_effects'",
+    "'effects_next_attempt_at'", "'cancellations_next_attempt_at'", "'termination_next_attempt_at'"]) {
+    assert.equal(quietSessionWritesMigration.split(column).length - 1, 2, `WHEN clause ignores ${column} on both sides`);
+  }
+  // State, legs, offers and presence still ring: nothing else is excluded.
+  assert.doesNotMatch(quietSessionWritesMigration, /- 'state'|- 'metadata'|- 'answered_by_profile_id'|- 'presence_pickup'/);
 });
 
 test("does not reference the previous provider or dropped objects", () => {

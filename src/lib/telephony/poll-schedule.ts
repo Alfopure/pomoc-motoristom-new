@@ -55,6 +55,16 @@ export const REALTIME_ACTIVE_CALL_POLL_MS = {
   idleHidden: 30_000,
 } as const;
 
+/**
+ * Minimum gap between doorbell-triggered `calls/active` refetches in one tab.
+ * A visible console still reacts within a second; a hidden one within three,
+ * which is also its engaged poll cadence.
+ */
+export const DOORBELL_REFETCH_GAP_MS = {
+  visible: 1_000,
+  hidden: 3_000,
+} as const;
+
 export const SUPPORT_POLL_MS = {
   /** presence, workplace-selection and call history. */
   visible: 10_000,

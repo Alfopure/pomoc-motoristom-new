@@ -472,11 +472,16 @@ export function buildPhoneBarModel(payload: ActiveCallsPayload, options: PhoneBa
   };
 }
 
-/** Poll activity input for `poll-schedule.ts`: an offer counts as engaged. */
+/**
+ * Poll activity input for `poll-schedule.ts`: an offer or a waiting caller counts
+ * as engaged. A colleague's call does not: it switched every idle console to the
+ * 750 ms cadence for as long as anyone was on the phone, and the doorbell
+ * already refetches when that call changes.
+ */
 export function pollActivityInput(model: PhoneBarModel): { hasBrowserCall: boolean; liveCallCount: number } {
   return {
     hasBrowserCall: Boolean(model.active) || model.offers.length > 0,
-    liveCallCount: model.offers.length + model.waiting.length + model.otherActiveCount,
+    liveCallCount: model.offers.length + model.waiting.length,
   };
 }
 

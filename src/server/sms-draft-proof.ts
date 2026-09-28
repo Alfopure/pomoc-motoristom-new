@@ -4,7 +4,12 @@ import { requireSupabaseServiceEnv } from "@/lib/supabase/env";
 import type { PreparedSms } from "@/lib/sms/contracts";
 
 // Domain separation: this MAC is only a proof for this application's SMS draft.
-export function signSmsDraft(draft: PreparedSms, secret = requireSupabaseServiceEnv().serviceKey) {
+function draftSigningSecret() {
+  const env = requireSupabaseServiceEnv();
+  return env.signingSecret ?? env.serviceKey;
+}
+
+export function signSmsDraft(draft: PreparedSms, secret = draftSigningSecret()) {
   return createHmac("sha256", secret).update("motorist:sms-draft:v1\n").update(JSON.stringify(draft)).digest("hex");
 }
 export function verifySmsDraft(draft: PreparedSms, proof: string, secret?: string) {

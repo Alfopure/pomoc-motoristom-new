@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CallbackQueueStore } from "./callback-queue-store";
 import { EMPTY_CALLBACK_QUEUE, type CallbackQueuePayload, type CallbackRequestPayload } from "./callback-queue";
 import { telephonyJson } from "./client-request";
+import { subscribeTelephonyRealtime } from "./realtime-client";
 
 vi.mock("./client-request", () => ({ TELEPHONY_TIMEOUT_MS: { read: 10000 }, telephonyJson: vi.fn() }));
 vi.mock("./realtime-client", () => ({ subscribeTelephonyRealtime: vi.fn(() => () => {}) }));
 const request = vi.mocked(telephonyJson);
+const subscribe = vi.mocked(subscribeTelephonyRealtime);
 function row(id: string): CallbackRequestPayload { return { id, status: "open" } as CallbackRequestPayload; }
 function payload(ids: string[], total = ids.length, cursor: string | null = null): CallbackQueuePayload { return { ...EMPTY_CALLBACK_QUEUE, configured: true, open: ids.map(row), openTotal: total, nextCursor: cursor }; }
 function response(body: CallbackQueuePayload, status = 200) { return { body, status, ok: status === 200 }; }
@@ -52,5 +54,22 @@ describe("shared callback queue", () => {
     const store = new CallbackQueueStore(); const close = store.subscribe(() => {});
     close(); finish(response(payload(["private"]))); await vi.advanceTimersByTimeAsync(0);
     expect(store.getSnapshot().queue.open).toEqual([]);
+  });
+
+  it("reloads the queue at most once per ten seconds of telephony doorbells", async () => {
+    vi.useFakeTimers(); request.mockResolvedValue(response(payload(["a"])));
+    vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    vi.stubGlobal("document", { addEventListener: vi.fn(), removeEventListener: vi.fn(), visibilityState: "visible" });
+    const store = new CallbackQueueStore("org-1"); const close = store.subscribe(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(request).toHaveBeenCalledTimes(1);
+    const ring = subscribe.mock.calls[0]![0].onChange;
+    ring(); await vi.advanceTimersByTimeAsync(150);
+    expect(request).toHaveBeenCalledTimes(2);
+    for (let i = 0; i < 30; i += 1) { ring(); await vi.advanceTimersByTimeAsync(100); }
+    expect(request).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(request).toHaveBeenCalledTimes(3);
+    close(); vi.unstubAllGlobals();
   });
 });

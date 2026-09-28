@@ -24,6 +24,7 @@ import { acquireCallWakeLock } from "@/lib/telephony/call-wake-lock";
 import { isTelephonyNotConfigured, TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { activeCallPollDelayMs, telephonyPollActivity } from "@/lib/telephony/poll-schedule";
 import { subscribeTelephonyRealtime } from "@/lib/telephony/realtime-client";
+import { DOORBELL_REFETCH_GAP_MS } from "@/lib/telephony/poll-schedule";
 import {
   deriveTelephonyOperatorPresences,
   type TelephonyAvailabilityAction,
@@ -468,9 +469,24 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   useEffect(() => {
     if (!enabled || configured !== true || !organizationId) return;
     realtimeConnectedRef.current = false;
+    // Every call-leg, session and presence write rings the doorbell — dozens per
+    // call, in every open tab — and each ring used to refetch the snapshot at
+    // once. On 25 Sep ~60 % of `calls/active` traffic came from those rings.
+    // Leading + trailing throttle: the first ring refetches immediately, later
+    // ones within the gap collapse into one refetch at its end, so the screen
+    // still settles on the latest state.
+    let lastRing = 0;
+    let ringTimer: number | undefined;
+    const ring = () => {
+      if (ringTimer !== undefined) return;
+      const gap = document.visibilityState === "hidden" ? DOORBELL_REFETCH_GAP_MS.hidden : DOORBELL_REFETCH_GAP_MS.visible;
+      const wait = lastRing + gap - Date.now();
+      if (wait <= 0) { lastRing = Date.now(); refreshRef.current?.(); return; }
+      ringTimer = window.setTimeout(() => { ringTimer = undefined; lastRing = Date.now(); refreshRef.current?.(); }, wait);
+    };
     const unsubscribe = subscribeTelephonyRealtime({
       organizationId,
-      onChange: () => refreshRef.current?.(),
+      onChange: ring,
       onStatus: (status) => {
         const connected = status === "connected";
         if (realtimeConnectedRef.current === connected) return;
@@ -481,6 +497,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     });
     return () => {
       realtimeConnectedRef.current = false;
+      if (ringTimer !== undefined) window.clearTimeout(ringTimer);
       unsubscribe();
     };
   }, [configured, enabled, organizationId]);

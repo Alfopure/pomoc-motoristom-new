@@ -380,8 +380,8 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
       call_control_id: call.callControlId, call_session_id: call.telnyxSessionId, hangup_cause: "normal_clearing",
       client_state: encodeClientState(h.clientStateOf(call.callControlId)),
     }, "deferred-hangup"));
-    // The 500 contract is kept: the fact is not applied yet.
-    expect(result).toMatchObject({ status: 500, outcome: "failed", sessionId: call.sessionId });
+    // Not applied yet, but durable and retained by this host: acknowledged instead of redelivered.
+    expect(result).toMatchObject({ status: 200, outcome: "deferred", sessionId: call.sessionId });
     expect(ledgerRow(h, "deferred-hangup")).toMatchObject({ retry_state: "deferred", delivery_count: 1, deferral_count: 1, attempts: 1 });
     expect(ledgerRow(h, "deferred-hangup").error).toContain("deferral=lease_busy");
     expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook", eventId: "deferred-hangup", deferral: "lease_busy", polls: expect.any(Number), lease_wait_ms: expect.any(Number) }));
@@ -404,6 +404,55 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
     expect(ledgerRow(h, "deferred-hangup")).toMatchObject({ status: "processed", attempts: 2, delivery_count: 1, deferral_count: 1 });
     expect(customerLeg(h, call.sessionId, call.callControlId).ended_at).toBe(ledgerRow(h, "deferred-hangup").occurred_at);
     expect(h.session(call.sessionId)).toMatchObject({ state: "wrap_up", lease_token: null });
+  });
+
+  it("waits read-only while the holder keeps the lease, then finishes the acknowledged delivery itself", async () => {
+    const { h, call } = await talkingCall({ writerContract: 2, sweepAfterEvent: false });
+    const lease = (name: string, args: Record<string, unknown>) => h.db.rpcHandlers.get(name)!(args, h.db);
+    const held = lease("motorist_session_lease_acquire_v2", { p_session_id: call.sessionId, p_token: "holder", p_ttl_ms: 30_000 }) as { generation: number } | null;
+    let draining = false;
+    let drainSleeps = 0;
+    h.deps.random = () => 0;
+    h.deps.sleep = async ms => {
+      if (draining) {
+        drainSleeps += 1;
+        expect(sessionOwnership.getStore()).toBeUndefined();
+        // The holder finishes while this host is waiting.
+        if (drainSleeps === 2) expect(lease("motorist_session_lease_release_v2", { p_session_id: call.sessionId, p_token: "holder", p_generation: Number(held?.generation) })).toBe(true);
+      }
+      h.advance(ms);
+    };
+    const queued: Array<() => Promise<void>> = [];
+    const result = await processTelnyxEvent({ ...h.deps, deferMaintenance: work => { queued.push(work); } }, h.envelope("call.hangup", {
+      call_control_id: call.callControlId, call_session_id: call.telnyxSessionId, hangup_cause: "normal_clearing",
+      client_state: encodeClientState(h.clientStateOf(call.callControlId)),
+    }, "held-hangup"));
+    expect(result).toMatchObject({ status: 200, outcome: "deferred" });
+    expect(queued).toHaveLength(1);
+
+    const before = acquires(h);
+    draining = true;
+    await queued[0]();
+    // No acquire polls while the lease was held: exactly one, after it was released.
+    expect(drainSleeps).toBeGreaterThanOrEqual(2);
+    expect(acquires(h) - before).toBe(1);
+    expect(ledgerRow(h, "held-hangup")).toMatchObject({ status: "processed", delivery_count: 1 });
+    expect(customerLeg(h, call.sessionId, call.callControlId).ended_at).not.toBeNull();
+    expect(h.session(call.sessionId)).toMatchObject({ state: "wrap_up", lease_token: null });
+  });
+
+  it("still asks for redelivery when it cannot retain its own drain", async () => {
+    const { h, call } = await talkingCall({ writerContract: 2, sweepAfterEvent: false });
+    const lease = (name: string, args: Record<string, unknown>) => h.db.rpcHandlers.get(name)!(args, h.db);
+    lease("motorist_session_lease_acquire_v2", { p_session_id: call.sessionId, p_token: "holder", p_ttl_ms: 30_000 });
+    h.deps.random = () => 0;
+    h.deps.sleep = async ms => { h.advance(ms); };
+    const result = await processTelnyxEvent({ ...h.deps, deferMaintenance: () => { throw new Error("no request scope"); } }, h.envelope("call.hangup", {
+      call_control_id: call.callControlId, call_session_id: call.telnyxSessionId, hangup_cause: "normal_clearing",
+      client_state: encodeClientState(h.clientStateOf(call.callControlId)),
+    }, "unretained-hangup"));
+    expect(result).toMatchObject({ status: 500, outcome: "failed" });
+    expect(ledgerRow(h, "unretained-hangup")).toMatchObject({ retry_state: "deferred" });
   });
 
   it("replays gather/playback/initiated after hangup/answered/bridged", async () => {

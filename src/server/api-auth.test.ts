@@ -113,3 +113,55 @@ function makeQuery<T>(data: T) {
 
   return query;
 }
+
+describe("signed-in actor resolution", () => {
+  beforeEach(async () => {
+    mocks.createAdmin.mockReset();
+    mocks.createServer.mockReset();
+    vi.stubEnv("MOTORIST_DEV_AUTH_BYPASS", "");
+    (await import("./api-auth")).clearProfileCache();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("verifies the token locally and reuses the active profile for the same user", async () => {
+    const profile = { id: "profile-jana", display_name: "Jana", role: "dispatcher" as const, email: "jana@example.test" };
+    const query = makeQuery(profile);
+    const getClaims = vi.fn(async () => ({ data: { claims: { sub: "user-jana", email: "jana@example.test" } }, error: null }));
+    const getUser = vi.fn();
+    mocks.createServer.mockResolvedValue({ auth: { getClaims, getUser }, from: vi.fn(() => query) });
+
+    const first = await requireMotoristActor("org-1", ["dispatcher"]);
+    const second = await requireMotoristActor("org-1", ["dispatcher"]);
+
+    expect(first).toMatchObject({ userId: "user-jana", profileId: "profile-jana" });
+    expect(second).toEqual(first);
+    expect(getClaims).toHaveBeenCalledTimes(2);
+    expect(getUser).not.toHaveBeenCalled();
+    expect(query.maybeSingle).toHaveBeenCalledTimes(1);
+  });
+
+  it("still rejects an invalid token even when the profile is cached", async () => {
+    const profile = { id: "profile-jana", display_name: "Jana", role: "dispatcher" as const, email: "jana@example.test" };
+    const query = makeQuery(profile);
+    const getClaims = vi.fn()
+      .mockResolvedValueOnce({ data: { claims: { sub: "user-jana" } }, error: null })
+      .mockResolvedValueOnce({ data: null, error: { message: "Invalid JWT signature" } });
+    mocks.createServer.mockResolvedValue({ auth: { getClaims, getUser: vi.fn() }, from: vi.fn(() => query) });
+
+    await requireMotoristActor("org-1", ["dispatcher"]);
+    await expect(requireMotoristActor("org-1", ["dispatcher"])).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("re-reads a missing profile instead of caching the refusal", async () => {
+    const missing = makeQuery(null);
+    const getClaims = vi.fn(async () => ({ data: { claims: { sub: "user-new" } }, error: null }));
+    mocks.createServer.mockResolvedValue({ auth: { getClaims, getUser: vi.fn() }, from: vi.fn(() => missing) });
+
+    await expect(requireMotoristActor("org-1")).rejects.toMatchObject({ status: 403 });
+    await expect(requireMotoristActor("org-1")).rejects.toMatchObject({ status: 403 });
+    expect(missing.maybeSingle).toHaveBeenCalledTimes(2);
+  });
+});
