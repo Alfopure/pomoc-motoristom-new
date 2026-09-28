@@ -15,6 +15,19 @@ export function lastOnlineLabel(online: boolean, lastOnlineAt: string | null, no
   return `Naposledy pred ${Math.floor(hours / 24)} dňami`;
 }
 
+/**
+ * A presence snapshot is trusted by the team strip until it is 30 s old.
+ * `checkedAt` is the server's capture time and `now` the strip's clock, which
+ * ticks every 15 s while snapshots arrive every 2-10 s, so a newer snapshot
+ * routinely looks "from the future". That is fresh, not suspect: rejecting it
+ * made the colleague-call button flicker grey (28 Sep 2026), and a PC clock
+ * behind the server would have kept it grey.
+ */
+export function presenceIsFresh(checkedAt: string | undefined, now: number, leaseMs = 30_000): boolean {
+  const age = now - Date.parse(checkedAt ?? "");
+  return Number.isFinite(age) && age < leaseMs;
+}
+
 export type ColleagueCallView =
   | { callable: true; paused: boolean; route: string }
   | { callable: false; reason: string };
