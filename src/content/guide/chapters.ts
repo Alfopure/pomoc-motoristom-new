@@ -315,9 +315,10 @@ export const guideChapters: GuideChapter[] = [
   },
   {
     slug: "plany-zvonenia", title: "Plány a kroky zvonenia", description: "Poskladajte poradie skupín, správne prečítajte časy a určte, čo nasleduje po neprijatí.", categoryId: "nastavenia", audience: "manager", minutes: 9,
-    keywords: ["plán zvonenia", "krok", "postupne", "všetkým naraz", "čas", "timeout", "poradie", "fallback", "nikto nezdvihne"], prerequisites: ["Rola Manažér alebo Admin na ukladanie zmien.", "Aspoň jedna uložená skupina s vhodnými členmi.", "Viete, ktorá linka alebo voľba IVR má plán používať."],
+    keywords: ["plán zvonenia", "krok", "postupne", "všetkým naraz", "čas", "timeout", "poradie", "fallback", "nikto nezdvihne", "rovno do čakárne", "režim čísla"], prerequisites: ["Rola Manažér alebo Admin na ukladanie zmien.", "Aspoň jedna uložená skupina s vhodnými členmi.", "Viete, ktorá linka alebo voľba IVR má plán používať."],
     sections: [
       { id: "co-je-plan", title: "Plán určuje poradie aj posledné riešenie", paragraphs: ["Plán postupne prechádza kroky. Každý krok vyberá jednu skupinu, čas a spôsob zvonenia. Keď operátor hovor prijme, ďalšie kroky sa nespúšťajú. Ak nikto nezdvihne alebo nie je vhodný člen, pokračuje ďalší krok a nakoniec nastavené riešenie.", "Zmena plánu sa môže dotknúť viacerých liniek aj volieb IVR. Zobrazený zoznam použití si prečítajte pred uložením."], screenshotIds: ["ring-plans"] },
+      { id: "rezim-cisla", title: "Režim konkrétneho volaného čísla", paragraphs: ["V Nastavenia → Telefonovanie → Prichádzajúce hovory najprv vyberte Linka. Hneď pod ňou nastavte, či toto číslo zdedí predvolený režim, zazvoní podľa plánu, všetkým naraz, postupne, alebo pôjde rovno do čakárne. Zmena sa uloží hneď po výbere a platí pre nové hovory na toto číslo.", "Pole Ako zvoní pri kroku mení zdieľaný plán. Ak číslo používa vlastnú voľbu Všetkým naraz alebo Postupne, tá má pri hovore na toto číslo prednosť pred spôsobom zvonenia v krokoch plánu. Úvodné hlášky, otváracie hodiny a IVR zostávajú zachované." ] },
       { id: "zostavit-plan", title: "Ako zostaviť plán", steps: [
         { id: "pridat-plan", title: "Otvorte Plány zvonenia a Pridať plán", text: "Cesta je Nastavenia → Telefonovanie → Plány zvonenia. Vyplňte Názov plánu a skontrolujte jeho aktívnosť." },
         { id: "pridat-prvy-krok", title: "Stlačte Pridať krok", text: "Vyberte Skupina, zadajte Čas (s) a zvoľte Ako zvoní. Začnite skupinou, ktorá má obsluhovať väčšinu hovorov." },
@@ -333,7 +334,7 @@ export const guideChapters: GuideChapter[] = [
         { id: "skusit-prijatie", title: "Dohodnite nový skúšobný hovor", text: "Najprv overte prijatie v prvom kroku. Potom samostatne overte neprijatie, druhý krok a posledné riešenie; zapojení kolegovia musia vedieť, že ide o skúšku." },
         { id: "skusit-pauzu", title: "Overte pauzu a nedostupnosť", text: "Skontrolujte, čo sa stane pri pauze jedného člena a keď v skupine nemôže prijať nikto.", result: "Viete vysvetliť, kto dostane ponuku, aké časy sa použijú a kde klient skončí. Prebiehajúci starší hovor nemusí použiť práve uložené zmeny." },
       ] },
-    ], related: ["skupiny-zvonenia", "cisla-hodiny-a-ivr", "cakaren", "cesta-hovoru"], sources: ["src/components/dispatch/settings/RingPlanEditor.tsx", "src/components/dispatch/settings/ring-plan-model.ts", "src/server/telephony/routing/ring-plan.ts", "src/server/telephony/state/transitions.ts"],
+    ], related: ["skupiny-zvonenia", "cisla-hodiny-a-ivr", "cakaren", "cesta-hovoru"], sources: ["src/components/dispatch/settings/LineInboundModeControl.tsx", "src/components/dispatch/settings/RingPlanEditor.tsx", "src/components/dispatch/settings/ring-plan-model.ts", "src/server/telephony/routing/ring-plan.ts", "src/server/telephony/state/transitions.ts"],
   },
   {
     slug: "cisla-hodiny-a-ivr", title: "Čísla, otváracie hodiny a IVR", description: "Pripojte plán k telefónnej linke, nastavte pracovný čas a vysvetlite klientovi hlasové voľby.", categoryId: "nastavenia", audience: "manager", minutes: 9,

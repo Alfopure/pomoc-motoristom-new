@@ -3,6 +3,10 @@ import { groupDraftsFromDocument, ringGroupsPayload, type GroupDraft } from "./r
 import { planDraftsFromDocument, ringPlansPayload, type PlanDraft } from "./ring-plan-model";
 
 export type IncomingDraft = { groups: GroupDraft[]; plans: PlanDraft[] };
+/** A line PATCH returns a legacy document; keep the coherent plan snapshot and unsaved draft baseline. */
+export function mergeSavedLine(document: RoutingDocument, saved: RoutingDocument): RoutingDocument {
+  return { ...document, lines: saved.lines, settings: saved.settings ?? document.settings };
+}
 export const incomingDraft = (document: RoutingDocument): IncomingDraft => ({ groups: groupDraftsFromDocument(document.groups), plans: planDraftsFromDocument(document.plans) });
 /** UUIDs are created at addition, not serialization: new steps can refer to new groups in the same save. */
 export function identifyGroups(groups: GroupDraft[], uuid: () => string = () => crypto.randomUUID()): GroupDraft[] {
