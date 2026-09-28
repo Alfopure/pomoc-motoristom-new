@@ -94,6 +94,8 @@ export type TelephonyConsole = {
   dial: (phone: string, caseId?: string, options?: { lineId?: string | null; callbackTargetVerificationId?: string }) => Promise<void>;
   /** Rings a callback request's caller back through the ordinary outbound path. */
   callBackRequest: (requestId: string, verificationId?: string) => Promise<void>;
+  /** Colleague call: rings the colleague's own application phone (never a number). */
+  callColleague: (profileId: string) => Promise<void>;
   callAction: (action: PhoneCallAction, sessionId: string, target?: TransferRequest) => Promise<void>;
   /** Mute, unmute or throw out one added participant (`parties/[legId]/…`). */
   partyAction: (action: PhonePartyAction, sessionId: string, legId: string) => Promise<void>;
@@ -890,6 +892,52 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     else await startOutboundRequest(execute, operation.requestId);
   }, [startOutboundRequest, reconcileCallStart, prepareStart]);
 
+  /**
+   * Colleague call. The same shape as `dial`: the server places this
+   * operator's own leg first and the browser answers exactly that invite; the
+   * colleague's phone rings after it (design §2.2).
+   */
+  const callColleague = useCallback(async (targetProfileId: string) => {
+    const operation = prepareStart("/api/telephony/calls/internal", { targetProfileId });
+    const execute = async (webphone: CoordinatedWebphone | null) => {
+      pendingStartRef.current = operation;
+      const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
+        operation.path,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: operation.body,
+          operationId: operation.requestId,
+          label: "interný hovor",
+          timeoutMs: TELEPHONY_TIMEOUT_MS.control,
+          onSlow: () => setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."),
+        },
+      );
+      if (result.status >= 400 && result.status < 500 && pendingStartRef.current === operation) pendingStartRef.current = null;
+      if (isTelephonyNotConfigured(result)) {
+        setConfigured(false);
+        setNotice(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+        throw new Error(TELEPHONY_NOT_CONFIGURED_MESSAGE);
+      }
+      if (!result.ok || !result.body?.sessionId) {
+        const message = result.body?.error ?? "Interný hovor sa nepodarilo vytočiť.";
+        setNotice(message);
+        throw new Error(message);
+      }
+      if (pendingStartRef.current === operation) pendingStartRef.current = null;
+      if (result.body.operatorLegCallControlId && webphone && webphone === webphoneRef.current) {
+        webphone.expectOperatorLeg({
+          callControlId: result.body.operatorLegCallControlId,
+          sessionId: result.body.sessionId,
+          timingOperationId: operation.requestId,
+        });
+      }
+      refreshRef.current?.();
+    };
+    if (pendingStartRef.current) await reconcileCallStart(execute);
+    else await startOutboundRequest(execute, operation.requestId);
+  }, [startOutboundRequest, reconcileCallStart, prepareStart]);
+
   // --- derived ---------------------------------------------------------------
 
   const operatorName = useCallback(
@@ -1017,6 +1065,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     waitingCalls,
     dial,
     callBackRequest,
+    callColleague,
     callAction,
     partyAction,
     supervise,

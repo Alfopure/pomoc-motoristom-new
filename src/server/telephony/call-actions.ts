@@ -12,11 +12,14 @@ import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { isUuid } from "@/lib/telephony/uuid";
+import { colleaguePresenceBlock, COLLEAGUE_CALL_MESSAGES, type ColleagueCallBlock } from "@/lib/telephony/colleague-call";
+import { sipDisplayText } from "@/lib/telephony/sip-display";
 
 import { writeCallAudit } from "./audit";
 import { deviceIsLive, deviceSipUri, getOperatorDevice, type DeviceDeps } from "./operator-devices";
 import { presenceAllowsOffer } from "./routing/eligibility";
-import { releaseOperator, reserveOperatorOwnership, reserveOperatorPickup, releaseOperatorPresence, type PresenceTransitionResult } from "./routing/reservation";
+import { isPausedWithoutCall, releaseOperator, reserveOperatorOwnership, reserveOperatorPickup, releaseOperatorPresence, type PresenceTransitionResult } from "./routing/reservation";
+import { ACTIVE_LEG_WINDOW_MS } from "./routing/ring-plan";
 import { telephonyStabilityEnabled } from "./stability";
 import { effectivePresenceStatus } from "@/lib/telephony/presence-policy";
 import { findInitialCall, initialOperationIdentity, InitialOperationExistsError, readInitialCallPlan, recoverInitialDial, type InitialCallPlan } from "./initial-call-operation";
@@ -421,26 +424,95 @@ export async function callColleague(deps: CallActionDeps, actor: CallActor, inpu
   }
 }
 
+/** Legs one colleague call occupies: the caller's phone and the colleague's. */
+const INTERNAL_CALL_LEGS = 2;
+/**
+ * Free legs a colleague call leaves for customers: one arriving caller and two
+ * operators rung at once. "Zákazníci majú prednosť" (owner, 28 Sep 2026).
+ */
+export const INTERNAL_CALL_CUSTOMER_RESERVE = 3;
+
+function colleagueCallError(block: ColleagueCallBlock, status = 409): CallActionError {
+  return new CallActionError(COLLEAGUE_CALL_MESSAGES[block], status, `colleague_${block}`);
+}
+
+/**
+ * The daily cap and the organisation's concurrent-leg ceiling in one read
+ * round. A colleague call never takes the capacity a customer would need.
+ */
+async function assertInternalCallBudget(deps: CallActionDeps): Promise<void> {
+  const now = nowOf(deps);
+  const [usage, settings, legs] = await Promise.all([
+    loadDailyUsage(deps.admin, { organizationId: deps.organizationId, now }),
+    loadRoutingSettings(deps.admin, deps.organizationId),
+    deps.admin.from("motorist_call_legs").select("id", { count: "exact", head: true })
+      .eq("organization_id", deps.organizationId).is("ended_at", null)
+      .gte("initiated_at", new Date(now.getTime() - ACTIVE_LEG_WINDOW_MS).toISOString()),
+  ]);
+  assertLoadedLegBudget(deps, usage, settings);
+  if (legs.error) throw new CallActionError("Voľnú kapacitu liniek sa nepodarilo overiť.", 503, "capacity_unknown");
+  if ((legs.count ?? 0) + INTERNAL_CALL_LEGS + INTERNAL_CALL_CUSTOMER_RESERVE > settings.maxConcurrentLegs) throw colleagueCallError("capacity");
+}
+
+/**
+ * The colleague's own phone in the application — never a company line or a
+ * private number. Rings an available colleague and one on pause.
+ */
+async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): Promise<{ profileId: string; sipUri: string; label: string }> {
+  if (!isUuid(profileId)) throw new CallActionError("Kolega sa nenašiel.", 404, "target_not_found");
+  const [profile, presence, settings, device] = await Promise.all([
+    humansOnly(deps.admin.from("motorist_profiles").select("id, display_name, active, access_status")
+      .eq("organization_id", deps.organizationId).eq("id", profileId)).maybeSingle(),
+    deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", deps.organizationId).eq("profile_id", profileId).maybeSingle(),
+    telephonyStabilityEnabled()
+      ? deps.admin.from("motorist_operator_telephony_settings").select("delivery_mode").eq("organization_id", deps.organizationId).eq("profile_id", profileId).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+    getOperatorDevice({ ...deviceDeps(deps), deviceKind: "web" }, { organizationId: deps.organizationId, profileId }),
+  ]);
+  if (profile.error || presence.error || settings.error) throw new CallActionError("Kolegu sa nepodarilo overiť.", 503, "target_unknown");
+  if (!profile.data || !profile.data.active || profile.data.access_status === "disabled") throw new CallActionError("Kolega sa nenašiel.", 404, "target_not_found");
+  const row = presence.data;
+  const block = colleaguePresenceBlock({ status: row ? effectivePresenceStatus(row, nowOf(deps)) : null, inCall: Boolean(row?.current_session_id) });
+  if (block) throw colleagueCallError(block);
+  // Their calls go to a personal mobile: no application phone to ring.
+  if ((settings.data as { delivery_mode?: string } | null)?.delivery_mode === "personal_mobile") throw colleagueCallError("personal_mobile");
+  const sipUri = device ? deviceSipUri(device) : null;
+  if (!device || !sipUri || !deviceIsLive(device, nowOf(deps))) throw colleagueCallError("no_phone");
+  return { profileId, sipUri, label: profile.data.display_name };
+}
+
 async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string }): Promise<StartOutboundResult> {
   requireConfigured(deps);
   if (input.targetProfileId === actor.profileId) throw new CallActionError("Nie je možné volať sám sebe.", 400, "self_call");
   await assertOutboundRate(deps, actor);
-  await assertLegBudget(deps);
-  const target = await resolveTransferTarget(deps, actor, { profileId: input.targetProfileId });
-  if (target.kind !== "operator") throw new CallActionError("Kolega sa nenašiel.", 404);
-  const device = await requireLiveDevice(deps, actor.profileId);
-  const { line, from } = await resolveFromLine(deps, actor.profileId, null);
+  // Independent reads in one round; failures are reported in a fixed order.
+  const [budget, target, device, fromLine, caller] = await Promise.allSettled([
+    assertInternalCallBudget(deps),
+    resolveColleagueTarget(deps, input.targetProfileId),
+    requireLiveDevice(deps, actor.profileId),
+    resolveFromLine(deps, actor.profileId, null),
+    actor.displayName ? Promise.resolve(actor.displayName) : deps.admin.from("motorist_profiles").select("display_name")
+      .eq("organization_id", deps.organizationId).eq("id", actor.profileId).maybeSingle().then((result) => result.data?.display_name ?? null),
+  ]);
+  for (const outcome of [budget, target, device, fromLine]) if (outcome.status === "rejected") throw outcome.reason;
+  if (target.status !== "fulfilled" || device.status !== "fulfilled" || fromLine.status !== "fulfilled") throw new CallActionError("Interný hovor sa nepodarilo pripraviť.", 500);
+  const { line, from } = fromLine.value;
+  const callerName = caller.status === "fulfilled" ? caller.value?.trim() || null : null;
+  const plan = { to: target.value.sipUri, from, sipUri: device.value.sipUri, fromDisplayName: sipDisplayText(callerName) };
 
   const session = await createSession(deps, {
     direction: "internal",
     callerNumber: from,
-    calledNumber: target.sipUri,
+    calledNumber: target.value.sipUri,
     lineId: line?.id ?? null,
     caseId: null,
     answeredBy: actor.profileId,
-    metadata: { ...(input.requestId ? { initial_operation: { ...initialOperationIdentity(actor, "internal", input)!, request: input, to: target.sipUri, from, sipUri: device.sipUri } } : {}), internal: { target_profile_id: target.profileId, target_sip: target.sipUri, by: actor.profileId }, line_label: line?.label ?? null },
+    metadata: { ...(input.requestId ? { initial_operation: { ...initialOperationIdentity(actor, "internal", input)!, request: input, ...plan } } : {}),
+      internal: { target_profile_id: target.value.profileId, target_sip: target.value.sipUri, by: actor.profileId,
+        caller_name: callerName, target_name: target.value.label, caller_display: plan.fromDisplayName ?? null },
+      line_label: line?.label ?? null },
   });
-  return initializeOutgoingSession(deps, actor, session, { to: target.sipUri, from, sipUri: device.sipUri });
+  return initializeOutgoingSession(deps, actor, session, plan);
 }
 
 async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor, original: SessionRow,
@@ -479,7 +551,12 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
         throw new CallActionError("Požiadavka už bola vybavená alebo prebieha jej spätné volanie.", 409, "callback_link_rejected");
       }
     }
-    const reservation = await reserveOperatorOwnership(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, sessionId: session.id });
+    let reservation = await reserveOperatorOwnership(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, sessionId: session.id });
+    // A colleague call from a pause keeps the caller paused (owner, 28 Sep 2026).
+    if (!reservation.applied && session.direction === "internal" &&
+      await isPausedWithoutCall(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, now: nowOf(deps) })) {
+      reservation = { applied: true };
+    }
     if (!reservation.applied) {
       await markSessionFailed(deps, session, "operator_busy");
       throw new CallActionError("Operátor nie je dostupný (prebieha iný hovor).", 409, "operator_busy");
@@ -776,7 +853,11 @@ async function pickupWaitingCallOwned(deps: CallActionDeps, actor: CallActor, se
   // Schema compatibility is independent of new-feature admission. In particular,
   // creation-off still requires availability; it must nevertheless retain the
   // token created by the migrated reservation RPC before dialing the picker.
-  if (!telephonyStabilityEnabled() && !continuingOwnership) {
+  // A colleague call may be accepted from a pause (owner, 28 Sep 2026); the
+  // tokenized pickup below keeps the pause and returns to it afterwards.
+  const pausedColleague = session.direction === "internal" && session.state === "ringing" &&
+    readMeta(session).internal?.target_profile_id === actor.profileId && presence.data?.status === "paused" && !presence.data.current_session_id;
+  if (!telephonyStabilityEnabled() && !continuingOwnership && !pausedColleague) {
     const allowed = presenceAllowsOffer(presence.data ? { profileId: actor.profileId,
       status: presence.data.status, currentSessionId: presence.data.current_session_id,
       wrapUpUntil: presence.data.wrap_up_until, pauseReturn: presence.data.pause_return } : undefined, nowOf(deps), session.id);

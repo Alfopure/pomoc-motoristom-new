@@ -28,6 +28,7 @@ import type { IClientOptions } from "@telnyx/webrtc";
 import {
   EXPECTED_LEG_TTL_MS,
   heartbeatRegistrationState,
+  inviteIsColleagueCall,
   matchAutoAnswer,
   matchExpectedLeg,
   pruneExpectedLegs,
@@ -336,11 +337,16 @@ export class TelnyxWebphone {
     this.publish();
   }
 
+  /** A colleague may ring an operator on pause; see `inviteIsColleagueCall`. */
+  private isColleagueInvite(call: WebphoneSdkCall): boolean {
+    return inviteIsColleagueCall({ customHeaders: call.options?.customHeaders });
+  }
+
   private suppressAutomaticInvite(call: WebphoneSdkCall): boolean {
     if (!RINGING_STATES.has(String(call.state).toLowerCase()) || call.direction !== "inbound") return false;
     const id = call.telnyxIDs?.telnyxCallControlId || call.id;
     const exact = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now());
-    if (!this.withdrawnInvites.has(id) && (this.incomingPolicy.automaticAllowed || exact || this.callSessionId)) return false;
+    if (!this.withdrawnInvites.has(id) && (this.incomingPolicy.automaticAllowed || exact || this.callSessionId || this.isColleagueInvite(call))) return false;
     this.recordCallObservation(call, "ringtone_start", { outcome: "suppressed" });
     this.stopRinging();
     // A pickup response may arrive after its invite. Keep it silent until its
@@ -1389,7 +1395,8 @@ export class TelnyxWebphone {
             telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId ?? null,
             sessionId,
             muted: Boolean(call.isAudioMuted),
-            ringing: RINGING_STATES.has(state) && !this.withdrawnInvites.has(call.telnyxIDs?.telnyxCallControlId || call.id) && (this.incomingPolicy.automaticAllowed || Boolean(this.callSessionId)),
+            ringing: RINGING_STATES.has(state) && !this.withdrawnInvites.has(call.telnyxIDs?.telnyxCallControlId || call.id) &&
+              (this.incomingPolicy.automaticAllowed || Boolean(this.callSessionId) || this.isColleagueInvite(call)),
             active: ACTIVE_STATES.has(state),
           }
         : null,

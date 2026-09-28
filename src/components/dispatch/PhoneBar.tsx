@@ -739,13 +739,14 @@ function CallSummary({
 }) {
   const state = phoneBarStateLabel(call);
   const elapsed = formatCallTimer(callElapsedSeconds(call, now));
-  const number = formatPhoneNumberForDisplay(call.number) || call.number || "Neznáme číslo";
+  // A colleague call is identified by the colleague's name alone.
+  const number = formatPhoneNumberForDisplay(call.number) || call.number || (call.direction === "internal" ? "" : "Neznáme číslo");
 
   return (
     <div className="flex min-w-0 flex-1 basis-full items-center gap-2 lg:basis-auto">
       <div className="min-w-0 flex-1">
-        <p className="truncate text-xs font-bold leading-5 lg:text-sm" title={call.callerName ? `${call.callerName} · ${number}` : number}>
-          {call.callerName ? `${call.callerName} · ${number}` : number}
+        <p className="truncate text-xs font-bold leading-5 lg:text-sm" title={call.callerName && number ? `${call.callerName} · ${number}` : call.callerName ?? number}>
+          {call.callerName && number ? `${call.callerName} · ${number}` : call.callerName ?? number}
         </p>
         <div className="flex min-w-0 items-center gap-1.5 text-[10px] lg:text-[11px]">
           <span className={`shrink-0 rounded px-1.5 py-0.5 font-bold ${STATE_TONES[state.tone]}`}>{state.label}</span>

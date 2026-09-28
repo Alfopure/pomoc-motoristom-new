@@ -306,6 +306,8 @@ function LiveCallRow({
           : null;
   const answerBlocked = isBusy || Boolean(phone?.answering) || (phone?.pendingOperatorLegs ?? 0) > 0;
   const supervising = model.supervising?.sessionId === call.sessionId;
+  // A colleague call is private and has no customer: no supervision or case.
+  const colleagueCall = call.direction === "internal";
   const StateIcon = call.kind === "offer" ? PhoneIncoming : call.kind === "waiting" ? Clock3 : call.direction === "outbound" ? PhoneOutgoing : PhoneCall;
   const surface = state.tone === "ring"
     ? "border-l-red-500 bg-red-50/40"
@@ -358,17 +360,17 @@ function LiveCallRow({
         {canPickup && <ActionButton busy={busyAction === "pickup"} disabled={Boolean(pickupBlockReason)} icon={PhoneIncoming} label={pickupBlockReason ?? (phone?.onDemand ? "Prijať v appke" : "Prevziať")} tone="accept" onClick={() => onCallAction("pickup", call.sessionId)} />}
         {canPickup && pickupBlockReason === "Najprv sa nastav dostupný" && onMakeAvailable && <ActionButton disabled={isBusy} icon={PhoneCall} label="Som dostupný" tone="outline" onClick={onMakeAvailable} />}
         {call.kind === "active" && call.mine && <ActionButton busy={busyAction === "hangup"} icon={PhoneOff} label="Ukončiť" tone="danger" onClick={confirmAndEnd} />}
-        {call.kind === "active" && !call.mine && Boolean(call.operatorProfileId) && canManageCalls && !supervising && (
+        {call.kind === "active" && !call.mine && Boolean(call.operatorProfileId) && canManageCalls && !supervising && !colleagueCall && (
           <>
             <ActionButton busy={busyAction === `supervise:${call.sessionId}`} disabled={isBusy} icon={Ear} label="Počúvať" tone="outline" onClick={() => onSupervise(call.sessionId, "monitor")} />
             <ActionButton busy={busyAction === `supervise:${call.sessionId}`} disabled={isBusy} icon={Users} label="Vstúpiť" tone="outline" onClick={() => onSupervise(call.sessionId, "barge")} />
           </>
         )}
-        {call.kind === "active" && !call.mine && Boolean(call.operatorProfileId) && canManageCalls && supervising && <ActionButton busy={busyAction === `stop-supervise:${call.sessionId}`} disabled={isBusy} icon={PhoneOff} label="Ukončiť dozor" tone="warning" onClick={() => onStopSupervise(call.sessionId)} />}
+        {call.kind === "active" && !call.mine && Boolean(call.operatorProfileId) && canManageCalls && supervising && !colleagueCall && <ActionButton busy={busyAction === `stop-supervise:${call.sessionId}`} disabled={isBusy} icon={PhoneOff} label="Ukončiť dozor" tone="warning" onClick={() => onStopSupervise(call.sessionId)} />}
         {call.kind === "active" && !call.mine && !call.operatorProfileId && canManageCalls && <ActionButton busy={busyAction === "hangup"} disabled={isBusy} icon={PhoneOff} label="Ukončiť" tone="danger-outline" onClick={confirmAndEnd} />}
-        {canManageCalls && call.kind !== "active" && !call.offeredToMe && <details className="relative" onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}><summary aria-label="Ďalšie možnosti čakajúceho hovoru" className="inline-flex min-h-9 cursor-pointer list-none items-center gap-1 rounded-md border border-zinc-200 px-2 text-[11px] font-semibold [&::-webkit-details-marker]:hidden"><MoreHorizontal size={14} />Viac</summary><div className="absolute right-0 top-full z-20 mt-1 w-56 rounded-lg border border-zinc-200 bg-white p-2 shadow-lg"><ActionButton busy={busyAction === "hangup"} disabled={isBusy} icon={PhoneOff} label="Ukončiť čakajúci hovor" tone="danger-outline" onClick={confirmAndEnd} /></div></details>}
+        {canManageCalls && call.kind !== "active" && !call.offeredToMe && !colleagueCall && <details className="relative" onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}><summary aria-label="Ďalšie možnosti čakajúceho hovoru" className="inline-flex min-h-9 cursor-pointer list-none items-center gap-1 rounded-md border border-zinc-200 px-2 text-[11px] font-semibold [&::-webkit-details-marker]:hidden"><MoreHorizontal size={14} />Viac</summary><div className="absolute right-0 top-full z-20 mt-1 w-56 rounded-lg border border-zinc-200 bg-white p-2 shadow-lg"><ActionButton busy={busyAction === "hangup"} disabled={isBusy} icon={PhoneOff} label="Ukončiť čakajúci hovor" tone="danger-outline" onClick={confirmAndEnd} /></div></details>}
         {!compact && call.caseId && onOpenCase && <ActionButton icon={PhoneCall} label="Prípad" tone="outline" onClick={() => onOpenCase(call.caseId as string)} />}
-        {!compact && !call.caseId && onNewCase && <ActionButton icon={Plus} label="Nový prípad" tone="outline" onClick={() => onNewCase(call)} />}
+        {!compact && !call.caseId && onNewCase && !colleagueCall && <ActionButton icon={Plus} label="Nový prípad" tone="outline" onClick={() => onNewCase(call)} />}
       </div>
     </article>
   );

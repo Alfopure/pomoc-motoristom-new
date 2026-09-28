@@ -3,6 +3,7 @@ import type { Json } from "@/lib/supabase/database.types";
 import type { EffectsDeps } from "./effects";
 import { SessionConflictError } from "../service-errors";
 import { measureGuard, sessionOwnership } from "../ownership";
+import { isPausedWithoutCall } from "../routing/reservation";
 import { commandKey, readMeta, toJson, type Command, type Compensation, type ReduceResult, type SessionEvent, type SessionRow, type Transition } from "./types";
 
 export type EffectContinuation = {
@@ -90,14 +91,19 @@ function prepared(session: SessionRow, transition: Transition, commands: Command
 
 export async function stageEffects(deps: EffectsDeps, input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number }): Promise<SessionRow> {
   const now = deps.now().toISOString();
+  // Colleague calls only: a colleague on pause answers without a reservation
+  // and stays paused. Every other guard is reserved atomically below.
+  const guard = input.result.guard?.allowPaused &&
+    await isPausedWithoutCall(deps.admin, { organizationId: deps.organizationId, profileId: input.result.guard.profileId, now: deps.now() })
+    ? null : input.result.guard;
   const main = prepared(input.session, input.result.next, input.result.commands, input.result.compensations, input.event, "main", now);
-  const rejected = input.result.guard ? prepared(input.session, input.result.guard.onRejected.next, input.result.guard.onRejected.commands, [], input.event, "rejected", now) : null;
+  const rejected = guard ? prepared(input.session, guard.onRejected.next, guard.onRejected.commands, [], input.event, "rejected", now) : null;
   const stage = () => deps.admin.rpc("motorist_stage_transition_v1", {
     p_organization_id: deps.organizationId, p_session_id: input.session.id, p_expected_version: input.expectedVersion,
-    p_main: toJson(main), p_rejected: toJson(rejected), p_guard: toJson(input.result.guard ? { profileId: input.result.guard.profileId, offerToken: input.result.guard.offerToken ?? null } : null),
+    p_main: toJson(main), p_rejected: toJson(rejected), p_guard: toJson(guard ? { profileId: guard.profileId, offerToken: guard.offerToken ?? null } : null),
   });
   // Reservation and staging are atomic in this RPC; report the combined time.
-  const result = await (input.result.guard ? measureGuard("guard_stage_ms", () => measureRequestStep("guard.stage", stage)) : stage());
+  const result = await (guard ? measureGuard("guard_stage_ms", () => measureRequestStep("guard.stage", stage)) : stage());
   if (result.error) throw new Error(`Transition staging failed: ${result.error.message}`);
   const response = result.data as { applied?: boolean; session?: SessionRow } | null;
   if (response?.applied === false) throw new SessionConflictError(input.session.id, input.expectedVersion);

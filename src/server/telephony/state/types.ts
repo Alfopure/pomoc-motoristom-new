@@ -275,6 +275,12 @@ export type DialCommand = CommandBase & {
   /** Ring attempt this dial belongs to (natural key, resolved by effects). */
   attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null } | null;
   autoAnswer?: boolean;
+  /**
+   * The colleague's leg of a colleague call. Marked for the browser, which
+   * otherwise silences invites while its operator is paused; it still rings
+   * and is never answered automatically.
+   */
+  colleagueCall?: boolean;
   fromDisplayName?: string;
   /**
    * Supervision without a conference: the dial endpoint attaches the new leg to
@@ -463,6 +469,12 @@ export type Compensation = {
 export type ReservationGuard = {
   profileId: string;
   offerToken?: string;
+  /**
+   * Colleague calls only: a colleague on pause may answer without being
+   * reserved. They stay paused (no customer offer reaches them) and nothing
+   * has to be restored when the call ends.
+   */
+  allowPaused?: boolean;
   onRejected: { next: Transition; commands: Command[] };
 };
 
@@ -633,7 +645,12 @@ export type SessionMeta = {
   } | null;
   outbound?: { to: string; by: string; from: string; case_id?: string | null } | null;
   outbound_auto_bridge?: { commandId: string; operatorControlId: string; startedAt: string } | null;
-  internal?: { target_profile_id: string; target_sip: string; by: string } | null;
+  /**
+   * Colleague call. Names are frozen display text; `caller_display` is the
+   * caller's name already reduced to SIP display characters (older sessions
+   * lack all three).
+   */
+  internal?: { target_profile_id: string; target_sip: string; by: string; caller_name?: string | null; target_name?: string | null; caller_display?: string | null } | null;
   transfer?: { kind: "blind" | "attended"; target: TransferTarget; by: string | null; at: string; completed_at?: string | null } | null;
   consult?: { target: TransferTarget; by: string | null; at: string; leg_call_control_id?: string | null; answered_at?: string | null } | null;
   callback?: { requested_at?: string | null; source?: CallbackSource | null; confirmed?: boolean; declined_at?: string | null; digit?: string; context?: string; event_id?: string; deadline_at?: string; confirmation_retry?: boolean; closing_at?: string; input_retry?: boolean } | null;

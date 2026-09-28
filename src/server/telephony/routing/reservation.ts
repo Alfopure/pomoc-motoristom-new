@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database, OperatorPresenceStatus } from "@/lib/supabase/database.types";
+import { effectivePresenceStatus } from "@/lib/telephony/presence-policy";
 import { telephonyStabilityEnabled } from "../stability";
 
 type PresenceRow = Database["public"]["Tables"]["motorist_operator_presence"]["Row"];
@@ -43,6 +44,18 @@ export async function reserveOperatorOwnership(admin: AdminClient, input: { orga
     return transitionPresence(admin, { ...input, action: "acquire", expectedRevision: current.data?.presence_revision });
   }
   return { applied: await reserveOperator(admin, { profileId: input.profileId, sessionId: input.sessionId }) };
+}
+
+/**
+ * A colleague call may reach an operator on pause without reserving them: they
+ * stay paused, so no customer offer reaches them during the call and nothing
+ * has to be restored afterwards. A bound session means a real call is running.
+ */
+export async function isPausedWithoutCall(admin: AdminClient, input: { organizationId: string; profileId: string; now: Date }): Promise<boolean> {
+  const { data, error } = await admin.from("motorist_operator_presence").select("*")
+    .eq("organization_id", input.organizationId).eq("profile_id", input.profileId).maybeSingle();
+  if (error) throw new ReservationError(`pause read failed: ${error.message}`, error);
+  return Boolean(data && !data.current_session_id && effectivePresenceStatus(data, input.now) === "paused");
 }
 
 export function authorizeOperatorDispatch(admin: AdminClient, input: Omit<PresenceTransitionInput, "action">): Promise<PresenceTransitionResult> {

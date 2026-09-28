@@ -1297,7 +1297,8 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
   }
   acceptDeviceLeg(b, leg);
   b.note("colleague answered → talking");
-  if (leg.profile_id) b.guard = { profileId: leg.profile_id, offerToken: (leg.client_state as TelnyxClientState | null)?.offerToken, onRejected: { next: rejected.transition(), commands: rejected.commands } };
+  if (leg.profile_id) b.guard = { profileId: leg.profile_id, offerToken: (leg.client_state as TelnyxClientState | null)?.offerToken,
+    allowPaused: true, onRejected: { next: rejected.transition(), commands: rejected.commands } };
   return b.result();
 }
 
@@ -1353,6 +1354,9 @@ function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): Re
       clientState: { sid: b.session.id, role: "operator", operatorId: internal.target_profile_id, intent: "internal" },
       linkTo: leg.telnyx_call_control_id,
       timeoutSecs: INTERNAL_TIMEOUT_SECS,
+      colleagueCall: true,
+      // The colleague's phone shows who is calling instead of the company line.
+      ...(internal.caller_display ? { fromDisplayName: internal.caller_display } : {}),
     };
   }
   b.cmd(dial);
@@ -1617,7 +1621,71 @@ function onHangup(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
   }
 
   if (isCustomer(leg)) return onCustomerHangup(b, leg, event, at);
+  if (b.session.direction === "internal" && isInternalPartyLeg(leg)) return onInternalPartyHangup(b, leg, event, at);
   return onPartyHangup(b, leg, event, at);
+}
+
+function isInternalPartyLeg(leg: LegRow): boolean {
+  const intent = legIntent(leg);
+  return leg.role === "operator" && (intent === "internal" || intent === "internal_caller");
+}
+
+/** Another device of the same colleague is still being offered this call (web + mobile). */
+function colleagueStillInvited(b: TransitionBuilder, leg: LegRow): boolean {
+  if (!leg.profile_id) return false;
+  if (b.openLegs().some((other) => other.profile_id === leg.profile_id && legIntent(other) === "internal" &&
+    other.telnyx_call_control_id !== leg.telnyx_call_control_id)) return true;
+  const pending = b.meta.mobile_offers?.[leg.profile_id];
+  return Boolean(pending && Date.parse(pending.at) + PICKUP_STALE_MS > b.ctx.now.getTime());
+}
+
+/**
+ * A colleague call ends for both people when either of them leaves, like any
+ * phone call. The operator-centric rules would otherwise apply: the caller
+ * hanging up put the colleague into the waiting room as if they were a
+ * customer, and a colleague who declined or hung up left the caller connected
+ * to nothing.
+ */
+function onInternalPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent, at: string): ReduceResult {
+  if (hasOtherAcceptedLeg(b, leg)) {
+    finishIfQuiet(b, at);
+    return b.note("superseded colleague leg left; accepted leg remains connected").result();
+  }
+  const intent = legIntent(leg);
+  if (intent === "internal" && !leg.answered_at && colleagueStillInvited(b, leg)) {
+    finishIfQuiet(b, at);
+    return b.note("one device of the colleague stopped ringing; another is still offered").result();
+  }
+  const state = b.session.state;
+  if (ACTIVE_SESSION_STATES.has(state)) {
+    b.patchMeta({ hangup: { by: leg.profile_id ?? null, at, scope: "session" } });
+    for (const other of b.openLegs()) {
+      if (other.telnyx_call_control_id !== leg.telnyx_call_control_id) b.cmd(hangupCmd(b, other, "internal_party_left"));
+    }
+    if (TALKING_STATES.has(state)) {
+      b.setState("wrap_up");
+      b.call.status = "ended";
+      b.call.end_reason = "operator_hangup";
+      b.call.ended_at = at;
+      releaseTalkingOperators(b, true);
+      b.note(intent === "internal" ? "colleague hung up → call ended" : "caller hung up → call ended");
+    } else {
+      b.setState("ended").patchSession({ ended_at: at });
+      b.call.status = "ended";
+      b.call.end_reason = intent === "internal"
+        ? classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause })
+        : "operator_cancel";
+      b.call.ended_at = at;
+      releaseTalkingOperators(b, false);
+      b.note(intent === "internal" ? "colleague did not answer → call ended" : "caller cancelled before the colleague answered");
+    }
+  } else if (leg.profile_id) {
+    // Idempotent: the call already ended; release only an operator still bound to it.
+    b.presenceChange({ profileId: leg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id,
+      onlyIfStatus: ["on_call", "ringing"], reason: "leg ended" });
+  }
+  finishIfQuiet(b, at);
+  return b.result();
 }
 
 /**
@@ -1759,13 +1827,15 @@ function releaseTalkingOperators(b: TransitionBuilder, wrapUp: boolean): void {
     // A supervisor only listened to the call: they owe it no after-call work
     // and must go straight back into the ring plan (design §4 Phase 4).
     const talked = leg.role !== "supervisor" && (Boolean(leg.answered_at) || leg.profile_id === b.session.answered_by_profile_id);
+    // A colleague call leaves nothing to write up: both go straight back.
+    const afterWork = wrapUp && talked && b.session.direction !== "internal";
     b.presenceChange({
       profileId: leg.profile_id,
-      status: wrapUp && talked ? "after_call_work" : "available",
+      status: afterWork ? "after_call_work" : "available",
       sessionId: null,
-      startWrapUp: wrapUp && talked,
+      startWrapUp: afterWork,
       onlyIfSession: b.session.id,
-      reason: wrapUp && talked ? "call ended" : "session ended",
+      reason: afterWork ? "call ended" : "session ended",
     });
   }
 }
@@ -3023,8 +3093,12 @@ function onSweep(b: TransitionBuilder): ReduceResult {
     return finaliseAlreadyEndedCall(b);
   }
   const pickup = b.session.presence_pickup as { v?: number; profileId?: string; offerToken?: string; expiresAt?: string } | null;
+  // A colleague who accepted a colleague call in the mobile app talks on it
+  // without owning the session (the caller does); their claim is not stale.
+  const colleagueAccepted = b.session.direction === "internal" && TALKING_STATES.has(state) &&
+    b.openLegs().some((leg) => leg.profile_id === pickup?.profileId && legIntent(leg) === "internal" && Boolean(leg.answered_at));
   if (pickup?.v === 1 && pickup.profileId && pickup.offerToken && pickup.expiresAt && Date.parse(pickup.expiresAt) <= b.ctx.now.getTime()
-    && !(TALKING_STATES.has(state) && b.session.answered_by_profile_id === pickup.profileId)) {
+    && !(TALKING_STATES.has(state) && b.session.answered_by_profile_id === pickup.profileId) && !colleagueAccepted) {
     b.patchMeta({ pickup: null });
     b.presenceChange({ profileId: pickup.profileId, status: "available", sessionId: null, onlyIfSession: b.session.id,
       onlyIfToken: pickup.offerToken, onlyIfStatus: ["ringing"], reason: "pickup reservation expired" });

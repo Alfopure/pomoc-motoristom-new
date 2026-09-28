@@ -258,3 +258,17 @@
   .compactDialerField { flex: 1; width: auto; }
   .compactDialerField input { width: 100%; }
 }
+/* Colleague calls from the team strip (interný hovor). */
+.teamMemberDetails { display: block; height: 100%; min-width: 0; }
+.teamMemberCallable summary { padding-right: 44px; }
+.teamQuickCall { position: absolute; top: 50%; right: 6px; display: inline-flex; width: 32px; height: 32px; align-items: center; justify-content: center; transform: translateY(-50%); border: 1px solid #e8c600; border-radius: 7px; background: #fcd703; color: #292d38; }
+.teamQuickCall:disabled { border-color: #e7eaf0; background: #f4f5f8; color: #a0a6b2; cursor: not-allowed; }
+.teamCall { display: grid; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #eef0f4; }
+.teamDetail .teamCallRoute { margin: 0; padding: 7px 9px; border-radius: 7px; background: #f0fdf4; color: #14532d; line-height: 1.35; }
+.teamDetail .teamCallRoute[data-tone="paused"] { background: #fffbeb; color: #78350f; }
+.teamDetail .teamCallRoute[data-tone="off"] { background: #f4f5f8; color: #4b5263; }
+.teamCallButton { display: inline-flex; min-height: 36px; align-items: center; justify-content: center; gap: 6px; border: 1px solid #e8c600; border-radius: 8px; background: #fcd703; color: #292d38; font-size: 12px; font-weight: 650; }
+.teamCallButton:disabled { border-color: #e7eaf0; background: #f4f5f8; color: #8a91a1; cursor: not-allowed; }
+.teamDetail .teamCallNote { margin: 0; color: #687186; }
+.teamDetail .teamCallError { margin: 0; color: #b91c1c; font-weight: 600; }
+@media (max-width: 639px) { .teamQuickCall { width: 40px; height: 40px; }.teamMemberCallable summary { padding-right: 52px; }.teamCallButton { min-height: 44px; } }

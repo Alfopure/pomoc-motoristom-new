@@ -858,6 +858,8 @@ export function mapCallCenterCall({
     calledNumber: call.called_number ?? line?.phone_number ?? "-",
     receivedNumber: inbound ? call.received_number ?? line?.phone_number ?? undefined : undefined,
     destinationNumber: call.destination_number ?? undefined,
+    ...(call.direction === "internal" && stringValue(jsonRecord(latestPayload.internal).target_name)
+      ? { colleagueName: stringValue(jsonRecord(latestPayload.internal).target_name) } : {}),
     operatorId: call.operator_id ?? undefined,
     lineId: line?.id,
     lineLabel: line?.label ?? UNKNOWN_LINE_LABEL,
