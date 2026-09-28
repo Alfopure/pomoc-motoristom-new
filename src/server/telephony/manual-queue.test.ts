@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
+import { createTelephonyHarness, LINES, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
 import { deferRingingCall, pickupWaitingCall } from "./call-actions";
 import { runPendingEffectRecovery } from "./cron-jobs";
 import { sweepOverdueRingSteps } from "./routing/ring-plan";
@@ -13,6 +13,58 @@ const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
 afterEach(() => vi.unstubAllEnvs());
 
 describe("manual inbound waiting room", () => {
+  it("routes two numbers sharing a plan differently when one number overrides the default", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    h.db.update("motorist_telephony_lines", { metadata: { inbound_call_mode: "queue_first" } }, row => row.id === LINES.allianz);
+
+    const queued = await h.inbound({ to: NUMBERS.allianz });
+    const ringing = await h.inbound({ to: NUMBERS.neutral });
+
+    expect(h.session(queued.sessionId).state).toBe("waiting");
+    expect(h.attempts(queued.sessionId)).toHaveLength(0);
+    expect(readMeta(h.session(queued.sessionId) as SessionRow).queue?.manual_only).toBe(true);
+    expect(h.session(ringing.sessionId).state).toBe("ringing");
+    expect(h.attempts(ringing.sessionId).length).toBeGreaterThan(0);
+  });
+
+  it("lets a number ring in order despite a queue-first organisation default", async () => {
+    const h = createTelephonyHarness();
+    h.db.update("motorist_telephony_settings", { inbound_call_mode: "queue_first" }, () => true);
+    h.db.update("motorist_telephony_lines", { metadata: { inbound_call_mode: "ring_ordered" } }, row => row.id === LINES.allianz);
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    expect(readMeta(h.session(call.sessionId) as SessionRow).ring?.plan?.steps.map(step => step.strategy)).toEqual(["ordered", "ordered"]);
+    expect(h.attempts(call.sessionId)).toHaveLength(1);
+  });
+
+  it("lets a number ring all members even when the shared plan has an ordered step", async () => {
+    const h = createTelephonyHarness();
+    h.db.update("motorist_telephony_lines", { metadata: { inbound_call_mode: "ring_all" } }, row => row.id === LINES.allianz);
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    expect(readMeta(h.session(call.sessionId) as SessionRow).ring?.plan?.steps.map(step => step.strategy)).toEqual(["all", "all"]);
+  });
+
+  it("uses the dialled return number's override before the shared target line's override", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    h.db.update("motorist_telephony_lines", { metadata: { inbound_call_mode: "ring_all" } }, row => row.id === LINES.neutral);
+    h.db.update("motorist_telephony_lines", { metadata: { return_line_id: LINES.neutral, inbound_call_mode: "queue_first" } }, row => row.id === LINES.allianz);
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    expect(h.session(call.sessionId)).toMatchObject({ line_id: LINES.neutral, state: "waiting" });
+    expect(readMeta(h.session(call.sessionId) as SessionRow).line_inbound_mode).toBe("queue_first");
+  });
+
+  it("does not inherit another number's mode through a return-line routing target", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    h.db.update("motorist_telephony_lines", { metadata: { inbound_call_mode: "queue_first" } }, row => row.id === LINES.neutral);
+    h.db.update("motorist_telephony_lines", { metadata: { return_line_id: LINES.neutral } }, row => row.id === LINES.allianz);
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    expect(h.session(call.sessionId)).toMatchObject({ line_id: LINES.neutral, state: "ringing" });
+    expect(readMeta(h.session(call.sessionId) as SessionRow).line_inbound_mode).toBeUndefined();
+  });
+
   it("queues two callers without dialling and lets the operator choose one", async () => {
     const h = createTelephonyHarness();
     h.db.update("motorist_telephony_settings", { inbound_call_mode: "queue_first" }, () => true);

@@ -160,8 +160,8 @@ export function TelephonySettingsPanel({
         <CurrentCallBehaviour advisories={advisories} />
 
         <fieldset className="rounded-lg border border-zinc-200 bg-zinc-50 p-3">
-          <legend className="px-1 text-sm font-bold text-zinc-950">Prichádzajúce hovory</legend>
-          <p className="mb-3 text-xs text-zinc-600">Úvodná hláška, otváracie hodiny a prípadné IVR zostávajú zachované. Voľba určuje, čo sa stane potom.</p>
+          <legend className="px-1 text-sm font-bold text-zinc-950">Predvolený režim prichádzajúcich hovorov</legend>
+          <p className="mb-3 text-xs text-zinc-600">Platí pre čísla bez vlastnej voľby v časti Prichádzajúce hovory. Úvodná hláška, otváracie hodiny a prípadné IVR zostávajú zachované.</p>
           <div className="grid gap-2">
             <label className="flex cursor-pointer items-start gap-2 rounded-md border border-zinc-200 bg-white p-3 text-sm">
               <input type="radio" name="inboundCallMode" value="ring_first" className="mt-0.5 size-4 accent-zinc-900" disabled={!canEdit} checked={draft.inboundCallMode === "ring_first"} onChange={() => set({ inboundCallMode: "ring_first" })} />

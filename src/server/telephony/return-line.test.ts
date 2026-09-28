@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { createTelephonyHarness, LINES, NUMBERS, ORG, PLAN_ID, PROFILES } from "@/test/telephony-harness";
-import { updateTelephonyLine } from "./config-service";
+import { parseLinePatch, updateTelephonyLine } from "./config-service";
 
 const actor = { profileId: PROFILES.o4, role: "manager" as const };
 
 describe("business return line", () => {
+  it("saves one number's call mode without replacing its other metadata", async () => {
+    const h = createTelephonyHarness();
+    h.db.update("motorist_telephony_lines", { metadata: { custom_setting: "preserve" } }, row => row.id === LINES.allianz);
+    const result = await updateTelephonyLine({ admin: h.admin }, { organizationId: ORG, actor, lineId: LINES.allianz, patch: { inboundCallMode: "ring_ordered" } });
+    expect(result.line.inboundCallMode).toBe("ring_ordered");
+    expect(h.rows("motorist_telephony_lines").find(row => row.id === LINES.allianz)?.metadata).toMatchObject({ custom_setting: "preserve", inbound_call_mode: "ring_ordered" });
+    expect(parseLinePatch({ inboundCallMode: null })).toEqual({ inboundCallMode: null });
+    expect(() => parseLinePatch({ inboundCallMode: "invalid" })).toThrow();
+  });
+
   it("uses the main line's greeting and group while retaining the number dialed by the caller", async () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
     h.db.update("motorist_telephony_lines", { metadata: { return_line_id: LINES.neutral }, ring_plan_id: null }, row => row.id === LINES.allianz);

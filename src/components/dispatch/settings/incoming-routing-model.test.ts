@@ -3,9 +3,21 @@ import { createTelephonyHarness, ORG } from "@/test/telephony-harness";
 import { getRoutingDocument } from "@/server/telephony/config-service";
 import { newGroupDraft, newMemberDraft } from "./ring-groups-model";
 import { newPlanDraft, newStepDraft } from "./ring-plan-model";
-import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingMatches, incomingPayload } from "./incoming-routing-model";
+import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingMatches, incomingPayload, mergeSavedLine } from "./incoming-routing-model";
 async function document() { const harness = createTelephonyHarness(); return getRoutingDocument(harness.deps, { organizationId: ORG, includeSettings: true }); }
 describe("combined routing draft", () => {
+  it("keeps the coherent plan version when one number is saved separately", async () => {
+    const current = { ...await document(), snapshotId: "coherent-1" };
+    const draft = incomingDraft(current);
+    draft.plans[0].steps[0].timeoutSecs = "35";
+    const saved = { ...await document(), snapshotId: undefined, lines: current.lines.map((line, index) => index === 0 ? { ...line, inboundCallMode: "queue_first" as const } : line) };
+    const merged = mergeSavedLine(current, saved);
+    expect(merged.snapshotId).toBe("coherent-1");
+    expect(merged.routingVersion).toBe(current.routingVersion);
+    expect(merged.lines[0].inboundCallMode).toBe("queue_first");
+    expect(incomingMatches(draft, merged)).toBe(false);
+    expect(draft.plans[0].steps[0].timeoutSecs).toBe("35");
+  });
   it("assigns stable IDs before a new plan refers to a new group", () => {
     let n=0; const uuid = () => `00000000-0000-4000-8000-${String(++n).padStart(12,"0")}`;
     const groups = identifyGroups([{ ...newGroupDraft("Tím"), members: [newMemberDraft("operator")] }], uuid);

@@ -33,6 +33,24 @@ export type CallbackSource = Tables["motorist_callback_requests"]["Row"]["source
 
 export type TelephonyEnvironment = "production" | "development";
 
+/** An override for one dialled number. A null value inherits the organisation default. */
+export type LineInboundMode = "ring_first" | "ring_all" | "ring_ordered" | "queue_first";
+
+export function lineInboundMode(metadata: unknown): LineInboundMode | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const value = (metadata as Record<string, unknown>).inbound_call_mode;
+  return value === "ring_first" || value === "ring_all" || value === "ring_ordered" || value === "queue_first"
+    ? value
+    : null;
+}
+
+export function lineModeBehaviour(mode: LineInboundMode | null, defaultMode: "ring_first" | "queue_first") {
+  return {
+    inboundCallMode: mode === "queue_first" ? "queue_first" as const : mode ? "ring_first" as const : defaultMode,
+    strategyOverride: mode === "ring_all" ? "all" as const : mode === "ring_ordered" ? "ordered" as const : null,
+  };
+}
+
 // --- media -----------------------------------------------------------------
 
 /** Pre-recorded Slovak prompts shipped in `public/telephony/` (served under `TELNYX_MEDIA_BASE_URL`). */
@@ -580,6 +598,8 @@ export type RoutingContext = {
 export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" | "consult";
 
 export type SessionMeta = {
+  /** Dialled number's routing override, frozen at inbound session creation. */
+  line_inbound_mode?: LineInboundMode;
   effects_v1?: { generation: number };
   accepted_device_legs?: Record<string, string>;
   mobile_offers?: Record<string, { source: string; at: string }>;

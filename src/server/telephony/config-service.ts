@@ -21,7 +21,7 @@ import {
   type PauseRoutingMode,
 } from "@/lib/telephony/operator-settings";
 import { callbackConfirmationMedia, IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
-import { DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS, MAX_QUEUE_ESCALATE_AFTER_SECONDS, type TelephonyEnvironment } from "./state/types";
+import { DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS, MAX_QUEUE_ESCALATE_AFTER_SECONDS, lineInboundMode, type LineInboundMode, type TelephonyEnvironment } from "./state/types";
 import { ConfigServiceError, type ValidationIssue } from "./service-errors";
 import { humansOnly } from "@/server/profile-kind";
 
@@ -200,6 +200,7 @@ export type IvrMenuInput = {
 
 export type LinePatchInput = {
   returnLineId?: string | null;
+  inboundCallMode?: LineInboundMode | null;
   label?: string;
   partnerName?: string | null;
   ringPlanId?: string | null;
@@ -267,6 +268,7 @@ export type PauseReasonDoc = { id: string; code: string; label: string; maxMinut
 
 export type LineDoc = {
   returnLineId?: string | null;
+  inboundCallMode?: LineInboundMode | null;
   id: string;
   phoneNumber: string;
   label: string;
@@ -660,6 +662,13 @@ export function parseLinePatch(value: unknown): LinePatchInput {
   if ("label" in row) patch.label = typeof row.label === "string" ? row.label : "";
   if ("partnerName" in row) patch.partnerName = readText(row.partnerName);
   if ("returnLineId" in row) patch.returnLineId = readOptionalId(row, "returnLineId", "", issues);
+  if ("inboundCallMode" in row) {
+    if (row.inboundCallMode === null || row.inboundCallMode === "ring_first" || row.inboundCallMode === "ring_all" || row.inboundCallMode === "ring_ordered" || row.inboundCallMode === "queue_first") {
+      patch.inboundCallMode = row.inboundCallMode;
+    } else {
+      issues.push(issue("inboundCallMode", "mode_invalid", "Zvoľ spôsob prijatia hovoru pre túto linku."));
+    }
+  }
   if ("ringPlanId" in row) patch.ringPlanId = readOptionalId(row, "ringPlanId", "", issues);
   if ("ivrMenuId" in row) patch.ivrMenuId = readOptionalId(row, "ivrMenuId", "", issues);
   if ("businessHoursId" in row) patch.businessHoursId = readOptionalId(row, "businessHoursId", "", issues);
@@ -1175,6 +1184,10 @@ export function validateIvrMenus(input: IvrMenuInput[], context: ValidationConte
 
 export function validateLinePatch(patch: LinePatchInput, context: ValidationContext): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  if (patch.inboundCallMode !== undefined && patch.inboundCallMode !== null &&
+    !["ring_first", "ring_all", "ring_ordered", "queue_first"].includes(patch.inboundCallMode)) {
+    issues.push(issue("inboundCallMode", "mode_invalid", "Neplatný spôsob prijatia hovoru pre túto linku."));
+  }
   if (patch.returnLineId && !context.lineIds.has(patch.returnLineId)) issues.push(issue("returnLineId", "line_foreign", "Cieľová linka nepatrí do tejto organizácie."));
   if (patch.label !== undefined && !patch.label.trim()) issues.push(issue("label", "label_required", "Linka potrebuje štítok."));
   if (patch.ringPlanId !== undefined && patch.ringPlanId !== null && !context.ringPlanIds.has(patch.ringPlanId)) {
@@ -1493,6 +1506,7 @@ function routingDocumentFromRows(rows: Awaited<ReturnType<typeof loadLegacyRouti
     pauseReasonsInUse: [...new Set(presence.map((row) => row.pause_reason_id).filter((id): id is string => Boolean(id)))],
     lines: lines.map((line) => ({
       returnLineId: returnLineId(line.metadata),
+      inboundCallMode: lineInboundMode(line.metadata),
       id: line.id,
       phoneNumber: line.phone_number,
       label: line.label,
@@ -2011,11 +2025,15 @@ export async function updateTelephonyLine(
 
   const values: Tables["motorist_telephony_lines"]["Update"] = {};
   let metadataRevision: string | undefined;
-  if (input.patch.returnLineId !== undefined) {
+  if (input.patch.returnLineId !== undefined || input.patch.inboundCallMode !== undefined) {
     const stored = await deps.admin.from("motorist_telephony_lines").select("metadata,updated_at").eq("organization_id", input.organizationId).eq("id", input.lineId).single();
     if (stored.error) throw new ConfigServiceError("Nastavenie linky sa nepodarilo načítať.", 503, "config_read_failed");
     metadataRevision = stored.data.updated_at;
-    values.metadata = { ...(isRecord(stored.data.metadata) ? stored.data.metadata : {}), return_line_id: input.patch.returnLineId };
+    values.metadata = {
+      ...(isRecord(stored.data.metadata) ? stored.data.metadata : {}),
+      ...(input.patch.returnLineId !== undefined ? { return_line_id: input.patch.returnLineId } : {}),
+      ...(input.patch.inboundCallMode !== undefined ? { inbound_call_mode: input.patch.inboundCallMode } : {}),
+    };
   }
   if (input.patch.label !== undefined) values.label = input.patch.label.trim();
   if (input.patch.partnerName !== undefined) values.partner_name = input.patch.partnerName?.trim() || null;
@@ -2052,7 +2070,6 @@ export async function updateTelephonyLine(
 /** Maps the changed DB columns back onto the document fields for the audit row. */
 function pick(line: LineDoc, columns: string[]): Record<string, unknown> {
   const map: Record<string, keyof LineDoc> = {
-    metadata: "returnLineId",
     label: "label",
     partner_name: "partnerName",
     ring_plan_id: "ringPlanId",
@@ -2063,6 +2080,11 @@ function pick(line: LineDoc, columns: string[]): Record<string, unknown> {
   };
   const out: Record<string, unknown> = {};
   for (const column of columns) {
+    if (column === "metadata") {
+      out.returnLineId = line.returnLineId ?? null;
+      out.inboundCallMode = line.inboundCallMode ?? null;
+      continue;
+    }
     const key = map[column];
     if (key) out[key] = line[key];
   }
