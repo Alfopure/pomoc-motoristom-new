@@ -215,7 +215,7 @@ describe("callColleague", () => {
     expect(h.session(result.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o1 });
     expect(h.presence(PROFILES.o2)).toMatchObject({ status: "on_call", current_session_id: result.sessionId });
     expect(await fail(callColleague(actionDeps(h), o1, { targetProfileId: PROFILES.o1 }))).toMatchObject({ status: 400 });
-    expect(await fail(callColleague(actionDeps(h), o2, { targetProfileId: PROFILES.o4 }))).toMatchObject({ status: 409, code: "target_unavailable" });
+    expect(await fail(callColleague(actionDeps(h), o2, { targetProfileId: PROFILES.o4 }))).toMatchObject({ status: 409, code: "colleague_offline", message: "Kolega je odhlásený z telefónie." });
   });
 });
 

@@ -87,6 +87,8 @@ type CallCenterModuleProps = {
   operators: Operator[];
   onDataChange: (data: DispatchData) => void;
   onDial: (phone: string, caseId?: string) => Promise<void>;
+  /** Colleague call from the team strip: rings their application phone. */
+  onCallColleague?: (profileId: string) => Promise<void>;
   onNewCase: (call?: CallCenterCall) => void;
   onNewCaseFromLiveCall: (call: PhoneBarCall) => void;
   onOpenCase: (caseId: string) => void;
@@ -187,6 +189,7 @@ export function CallCenterModule({
   operatorPresences,
   onDataChange,
   onDial,
+  onCallColleague,
   onNewCase,
   onNewCaseFromLiveCall,
   onOpenCase,
@@ -354,6 +357,13 @@ export function CallCenterModule({
     }
   }
 
+  // Why this operator's own phone cannot start a colleague call right now.
+  const colleagueCallBlocked = notificationStateStale ? "Stav telefónu sa obnovuje."
+    : phone?.call || activeSnapshot?.active ? "Najprv dokončite svoj hovor."
+      : busyCallAction || outboundPending ? "Počkajte, kým sa dokončí predchádzajúca akcia."
+        : phone && phone.status !== "registered" && !(phone.onDemand && phone.status === "idle") ? "Najprv pripojte svoj telefón."
+          : null;
+
   return (
     <main className={`${styles.module} min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-zinc-50 p-3 sm:p-4`}>
       {notificationFocus && <CallNotificationFocus
@@ -378,7 +388,8 @@ export function CallCenterModule({
         </div>
       </header>
       {routingSummary}
-      <CallCenterTeam operators={operators} presences={operatorPresences} />
+      <CallCenterTeam operators={operators} presences={operatorPresences} currentOperatorId={currentOperatorId}
+        onCallColleague={telephonyConfigured ? onCallColleague : undefined} callUnavailableReason={colleagueCallBlocked} />
       {phonebookOpen && <div className={styles.phonebookPopover}><PhonebookPanel busyAction={busyAction} onQuickCall={(entry) => void startQuickCall(entry)} /><button type="button" onClick={() => setPhonebookOpen(false)} className="mt-2 min-h-9 px-3 text-xs font-semibold">Zavrieť adresár</button></div>}
 
       {telephonyConfigured && activeSnapshot && activeSnapshot.waiting.length > 0 && (
@@ -641,12 +652,19 @@ function HistoryCallRow({
   const customerSummary = call.caseNumber && customerName?.startsWith(`${call.caseNumber} · `)
     ? customerName.slice(call.caseNumber.length + 3)
     : customerName === call.caseNumber ? undefined : customerName;
-  const employeeEndpoint = call.direction === "outbound"
-    ? call.callerNumber
-    : call.destinationNumber ?? call.calledNumber;
-  const customerLabel = call.direction === "internal" ? "Volajúci" : "Zákazník";
-  const operatorLabel = call.direction === "internal" ? "Volaný / operátor" : "Operátor";
-  const operatorName = call.operatorName
+  // A colleague call: the caller and the called colleague by name. Its numbers
+  // are the company line and a phone address, and calling them back would ring
+  // the whole switchboard, so the row offers no "Volať".
+  const colleagueCall = call.direction === "internal";
+  const employeeEndpoint = colleagueCall
+    ? call.colleagueName ?? "Kolega"
+    : call.direction === "outbound"
+      ? call.callerNumber
+      : call.destinationNumber ?? call.calledNumber;
+  const customerLabel = colleagueCall ? "Volajúci" : "Zákazník";
+  const operatorLabel = colleagueCall ? "Volaný kolega" : "Operátor";
+  const colleagueCaller = call.callerName ?? call.operatorName ?? "Kolega";
+  const operatorName = colleagueCall ? call.colleagueName ?? "Kolega" : call.operatorName
     ?? (call.status === "missed" || call.status === "abandoned_queue" || call.status === "failed"
       ? "Nikto neprevzal"
       : call.status === "incoming" || call.status === "ringing_agent"
@@ -654,8 +672,8 @@ function HistoryCallRow({
         : "Operátor nezaznamenaný");
   const employeeEndpointLabel = call.direction === "outbound"
     ? `Volané z ${employeeEndpoint}`
-    : call.direction === "internal"
-      ? `Volaná klapka ${employeeEndpoint}`
+    : colleagueCall
+      ? `Volaný kolega ${employeeEndpoint}`
       : `Finálny cieľ ${employeeEndpoint}`;
   const DirectionIcon = call.direction === "outbound" ? PhoneOutgoing : call.direction === "internal" ? PhoneCall : PhoneIncoming;
   const displayedStartedAt = historyDisplayStartedAt(call);
@@ -681,14 +699,23 @@ function HistoryCallRow({
           <span className={styles.historyResult} data-tone={result.tone}>{result.label}</span>
         </div>
         <div className={styles.mobileIdentity}>
-          <button type="button" onClick={() => onOpenDetail(call)} className={styles.customerButton} aria-label={`Otvoriť detail hovoru ${formatPhoneNumberForDisplay(customerNumber)}`}>
-            <strong>{formatPhoneNumberForDisplay(customerNumber)}</strong>
-            {customerSummary && <span title={customerName}>{customerSummary}</span>}
-          </button>
-          <button type="button" onClick={() => onCallBack(call)} disabled={phoneScopeBusy(busyAction)} className={styles.callButton} aria-label={`Volať ${formatPhoneNumberForDisplay(customerNumber)}`}>
-            {busyAction === `${call.id}:call_back` ? <Loader2 size={13} className="animate-spin" /> : <PhoneOutgoing size={13} />}
-            Volať
-          </button>
+          {colleagueCall ? (
+            <button type="button" onClick={() => onOpenDetail(call)} className={styles.customerButton} aria-label={`Otvoriť detail interného hovoru ${colleagueCaller}`}>
+              <strong>{colleagueCaller}</strong>
+              <span>{`Interný hovor · ${employeeEndpoint}`}</span>
+            </button>
+          ) : (
+            <>
+              <button type="button" onClick={() => onOpenDetail(call)} className={styles.customerButton} aria-label={`Otvoriť detail hovoru ${formatPhoneNumberForDisplay(customerNumber)}`}>
+                <strong>{formatPhoneNumberForDisplay(customerNumber)}</strong>
+                {customerSummary && <span title={customerName}>{customerSummary}</span>}
+              </button>
+              <button type="button" onClick={() => onCallBack(call)} disabled={phoneScopeBusy(busyAction)} className={styles.callButton} aria-label={`Volať ${formatPhoneNumberForDisplay(customerNumber)}`}>
+                {busyAction === `${call.id}:call_back` ? <Loader2 size={13} className="animate-spin" /> : <PhoneOutgoing size={13} />}
+                Volať
+              </button>
+            </>
+          )}
         </div>
         {visibleColumns.length > 0 && <dl className={styles.historyMobileExtras}>{visibleColumns.map(column => <div key={column.key}><dt>{column.label}</dt><dd>{extraValue(column.key)}</dd></div>)}</dl>}
         <div className={styles.mobileContext}>
@@ -710,7 +737,7 @@ function HistoryCallRow({
               <dt>Smer</dt><dd>{directionLabel[call.direction]}</dd>
               {customerName && <><dt>{customerLabel}</dt><dd>{customerName}</dd></>}
               <dt>{operatorLabel}</dt><dd>{operatorName}</dd>
-              <dt>{call.direction === "outbound" ? "Volané z" : call.direction === "internal" ? "Volaná klapka" : "Finálny cieľ"}</dt><dd>{employeeEndpoint}</dd>
+              {!colleagueCall && <><dt>{call.direction === "outbound" ? "Volané z" : "Finálny cieľ"}</dt><dd>{employeeEndpoint}</dd></>}
               <dt>Linka</dt><dd>{call.lineLabel}</dd>
               {call.endedAt && <><dt>Ukončený</dt><dd>{formatShortDate(call.endedAt)} {formatTime(call.endedAt)}</dd></>}
               {call.receivedNumber && <><dt>Volané číslo</dt><dd>{call.receivedNumber}</dd></>}
@@ -723,12 +750,16 @@ function HistoryCallRow({
       </div>
       <div className={styles.desktopHistoryRow}>
         <div className={styles.historyTime}><strong title={call.endedAt ? `Ukončený ${formatShortDate(call.endedAt)} ${formatTime(call.endedAt)}` : undefined}><DirectionIcon size={12} aria-label={directionLabel[call.direction]} />{formatTime(displayedStartedAt)}{call.endedAt ? `–${formatTime(call.endedAt)}` : ""}</strong><time dateTime={displayedStartedAt}>{formatShortDate(displayedStartedAt)}</time></div>
-        <button type="button" onClick={() => onOpenDetail(call)} className={styles.historyCustomer} title={`${customerName ?? ""} ${formatPhoneNumberForDisplay(customerNumber)}`}><strong>{customerSummary || formatPhoneNumberForDisplay(customerNumber) || "Neznáme číslo"}</strong>{customerSummary && <span>{formatPhoneNumberForDisplay(customerNumber)}</span>}</button>
+        {colleagueCall
+          ? <button type="button" onClick={() => onOpenDetail(call)} className={styles.historyCustomer} title={`Volajúci ${colleagueCaller}`}><strong>{colleagueCaller}</strong><span>Interný hovor</span></button>
+          : <button type="button" onClick={() => onOpenDetail(call)} className={styles.historyCustomer} title={`${customerName ?? ""} ${formatPhoneNumberForDisplay(customerNumber)}`}><strong>{customerSummary || formatPhoneNumberForDisplay(customerNumber) || "Neznáme číslo"}</strong>{customerSummary && <span>{formatPhoneNumberForDisplay(customerNumber)}</span>}</button>}
         <span className={styles.historyResult} data-tone={result.tone}>{result.label}</span>
         <div className={styles.historyOperator}><strong title={operatorName}>{operatorName}</strong><span title={`${employeeEndpointLabel} · ${call.lineLabel}`}>{call.lineLabel}</span></div>
         {visibleColumns.map(column => <div key={column.key} className={styles.historyExtra} data-column={column.key}>{extraValue(column.key, true)}</div>)}
         <div className={styles.historyCase}>{call.caseId ? <button type="button" onClick={() => onOpenCase(call.caseId!)} title={`Otvoriť prípad ${call.caseNumber ?? ""}`}><Link2 size={12} /><span>{call.caseNumber ?? "Otvoriť prípad"}</span></button> : <details onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}><summary><Plus size={12} />Prípad</summary><div><button type="button" onClick={() => onNewCase(call)}><Plus size={13} />Nový prípad</button><CaseLinkControl call={call} cases={cases} disabled={busyAction === `${call.id}:link`} onLink={(caseId) => onLinkCall(call, caseId)} /></div></details>}</div>
-        <button type="button" onClick={() => onCallBack(call)} disabled={phoneScopeBusy(busyAction)} className={styles.historyCallAction} title="Volať späť">{busyAction === `${call.id}:call_back` ? <Loader2 size={14} className="animate-spin" /> : <PhoneOutgoing size={14} />}Volať</button>
+        {colleagueCall
+          ? <span aria-hidden="true" />
+          : <button type="button" onClick={() => onCallBack(call)} disabled={phoneScopeBusy(busyAction)} className={styles.historyCallAction} title="Volať späť">{busyAction === `${call.id}:call_back` ? <Loader2 size={14} className="animate-spin" /> : <PhoneOutgoing size={14} />}Volať</button>}
       </div>
     </div>
   );

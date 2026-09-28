@@ -1249,6 +1249,24 @@ describe("PA-01/02/10 paused browser offer policy", () => {
     expect(h.phone.getSnapshot().call?.sessionId).toBe("picked");
     h.phone.stop();
   });
+  it("lets a colleague's call ring on pause, for a manual answer only", async () => {
+    const h = harness(); h.phone.setIncomingOfferPolicy({ automaticAllowed: false });
+    h.phone.start(); await flush();
+    const colleague = fakeCall({ options: { remoteCallerNumber: "+421232408718", customHeaders: [{ name: "X-PM-Colleague-Call", value: "1" }] } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: colleague }); await flush();
+    expect(colleague.hungUp).toBe(false); expect(colleague.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "call-1", ringing: true });
+    h.phone.answer(); await flush();
+    expect(colleague.answered).toBe(true);
+    h.phone.stop();
+    // Any other invite is still silenced on pause, whatever headers it carries.
+    const other = harness(); other.phone.setIncomingOfferPolicy({ automaticAllowed: false });
+    other.phone.start(); await flush();
+    const customer = fakeCall({ options: { customHeaders: [{ name: "X-PM-Colleague-Call", value: "0" }] } });
+    other.client.emit("telnyx.notification", { type: "callUpdate", call: customer }); await flush();
+    expect(customer.hungUp).toBe(true); expect(customer.answered).toBe(false);
+    other.phone.stop();
+  });
   it("fresh controller rejects late automatic invite while restoring exact persisted pickup", async () => {
     const h = harness();
     h.phone.setIncomingOfferPolicy({ automaticAllowed: false, explicitLegs: [{ callControlId: "pickup-id", sessionId: "picked" }] });
