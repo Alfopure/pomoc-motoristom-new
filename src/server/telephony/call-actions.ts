@@ -8,6 +8,7 @@ import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { isUuid } from "@/lib/telephony/uuid";
@@ -236,8 +237,13 @@ async function assertOwnership(deps: CallActionDeps, session: SessionRow, actor:
   }
 }
 
-async function normalizeDestination(deps: CallActionDeps, raw: string, loadedSettings?: Awaited<ReturnType<typeof loadRoutingSettings>>): Promise<string> {
-  const e164 = normalizeE164(raw);
+function manualPhoneNumber(raw: string): string | null {
+  try { return normalizeEditablePhone(raw); }
+  catch { return null; }
+}
+
+async function normalizeDestination(deps: CallActionDeps, raw: string, loadedSettings?: Awaited<ReturnType<typeof loadRoutingSettings>>, source: "manual" | "resolved" = "manual"): Promise<string> {
+  const e164 = source === "manual" ? manualPhoneNumber(raw) : normalizeE164(raw);
   // Both messages name the number, and the allowlist one names the number we
   // arrived at rather than the one that was typed. National input carries no
   // country, so "0776 123 456" becomes a Slovak +421776123456 — which is the
@@ -366,6 +372,9 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
 async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput): Promise<StartOutboundResult> {
   const startedAt = nowOf(deps).getTime();
   requireConfigured(deps);
+  // Validate the submitted number before a callback policy may replace it with
+  // a trusted stored target. The replacement itself keeps provider-tolerant parsing.
+  if (!manualPhoneNumber(input.to)) throw new CallActionError(`Neplatné telefónne číslo: ${String(input.to ?? "").trim()}`, 400, "invalid_number");
   await assertOutboundRate(deps, actor);
   // These reads are independent. Finish every guard before reserving an operator
   // or creating a call, but do not add each database round trip to setup latency.
@@ -379,7 +388,7 @@ async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, inpu
   assertLoadedLegBudget(deps, usage, settings);
   const confirmed = confirmedCallbackTarget(target, input.callbackTargetVerificationId);
   if (!confirmed) throw new CallActionError(target.status === "blocked" ? "Toto číslo neprijíma spätné volania. Doplňte overený cieľ v adresári." : "Potvrďte overený alternatívny cieľ volania.", 409, "callback_target_confirmation_required");
-  const to = await normalizeDestination(deps, confirmed, settings);
+  const to = await normalizeDestination(deps, confirmed, settings, "resolved");
   const now = nowOf(deps);
 
   const session = await createSession(deps, {
@@ -663,7 +672,7 @@ function targetAudit(target: { profileId?: string | null; number?: string | null
   return {
     kind: resolved?.kind ?? (target.number ? "number" : "operator"),
     requested: target.number?.trim() ?? target.profileId ?? null,
-    dialled: resolved?.kind === "number" ? resolved.number : (target.number ? normalizeE164(target.number) : null),
+    dialled: resolved?.kind === "number" ? resolved.number : (target.number ? manualPhoneNumber(target.number) : null),
     target: resolved?.label ?? null,
   };
 }

@@ -5,9 +5,11 @@ import { Archive, ArrowUpRight, BookUser, Building2, CarFront, Check, ChevronRig
 import { CONTACT_ROLES, DIRECTORY_FOCUS, DIRECTORY_KINDS, DIRECTORY_LABELS, directoryDraft, directoryKey, directoryRelations, emptyDirectoryDraft, normalizeDirectorySearch, safeDirectoryWebsite, type DirectoryDraft, type DirectoryEntry, type DirectoryKind } from "@/lib/directory";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
 import { isDialablePhoneInput } from "@/lib/telephony/phone";
+import { storedPhoneForDial } from "@/lib/telephony/phone-entry";
 import { CallbackPolicyPanel } from "./CallbackPolicyPanel";
 import { GooglePlaceAutocomplete } from "../GooglePlaceAutocomplete";
 import { useReplacementVehicleAvailability } from "../useReplacementVehicleAvailability";
+import { PhoneNumberHint, PhoneNumberInput } from "../PhoneNumberInput";
 
 export type DirectoryEditor = { mode: "create"; kind: DirectoryKind; owner?: DirectoryEntry } | { mode: "view" | "edit"; entry: DirectoryEntry };
 type Props = {
@@ -78,7 +80,7 @@ export function DirectoryEntryDialog({ editor, entries, canEdit, accessHidden = 
               {editor.mode === "create" && !editor.owner && <div><p className="mb-2 text-xs font-semibold text-zinc-500">Čo chcete pridať?</p><div className="grid grid-cols-2 gap-2">{DIRECTORY_KINDS.map(kind => <button type="button" key={kind} aria-pressed={draft.kind === kind} onClick={() => { setDraft({ ...emptyDirectoryDraft(kind), name: draft.name, phone: draft.phone, email: draft.email, note: draft.note }); setError(null); }} className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${draft.kind === kind ? "border-yellow-400 bg-yellow-50 text-zinc-950 ring-1 ring-yellow-400" : "border-zinc-200 text-zinc-500 hover:bg-zinc-50"}`}>{DIRECTORY_LABELS[kind]}</button>)}</div></div>}
               <div className="space-y-4">
                 <TextField label={draft.kind === "contact" ? "Meno a priezvisko" : "Názov"} value={draft.name} onChange={name => setDraft({ ...draft, name })} required maxLength={180} placeholder={draft.kind === "contact" ? "Napr. Ján Novák" : draft.kind === "branch" ? "Napr. Pobočka Žilina" : "Názov spoločnosti"} />
-                <div className="grid gap-4 sm:grid-cols-2"><TextField label="Telefón" type="tel" value={draft.phone} onChange={phone => setDraft({ ...draft, phone })} maxLength={40} placeholder="+421 …" /><TextField label="E-mail" type="email" value={draft.email} onChange={email => setDraft({ ...draft, email })} maxLength={254} placeholder="kontakt@firma.sk" /></div>
+                <div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1.5 block text-sm font-medium text-zinc-700">Telefón</span><PhoneNumberInput value={draft.phone} onChange={phone => setDraft({ ...draft, phone })} allowExtension maxLength={40} className={inputClass} /><PhoneNumberHint value={draft.phone} allowExtension className="mt-1 block text-xs text-zinc-500" /></label><TextField label="E-mail" type="email" value={draft.email} onChange={email => setDraft({ ...draft, email })} maxLength={254} placeholder="kontakt@firma.sk" /></div>
                 {draft.kind === "contact" ? <><p className="text-xs text-zinc-500">Doplňte aspoň telefón alebo e-mail. Telefón sa používa aj v zozname kontaktov pri volaní.</p><SelectField label="Zaradenie osoby" value={draft.role} onChange={role => setDraft({ ...draft, role: role as DirectoryDraft["role"] })} options={Object.entries(CONTACT_ROLES)} /></> : <>
                   {(draft.kind === "company" || draft.kind === "assistance") && <div className="grid gap-4 sm:grid-cols-2"><TextField label="IČO" value={draft.ico} onChange={ico => setDraft({ ...draft, ico })} maxLength={32} /><SelectField label="Zameranie" value={draft.focus} onChange={focus => setDraft({ ...draft, focus: focus as DirectoryDraft["focus"] })} options={Object.entries(DIRECTORY_FOCUS)} /></div>}
                   {draft.kind === "branch" ? <BranchFields draft={draft} setDraft={setDraft} entries={entries} /> : <TextField label="Adresa" value={draft.address} onChange={address => setDraft({ ...draft, address })} maxLength={500} placeholder="Ulica, mesto, PSČ" />}
@@ -112,7 +114,7 @@ function EntryDetails({ entry, entries, canEdit, onOpen, onEdit, onNewContact, o
     if (dialing) return;
     setDialing(true); setCallError(null);
     try {
-      if (onDial) await onDial(entry.phone);
+      if (onDial) await onDial(storedPhoneForDial(entry.phone));
       else {
         const target = await requestCallbackTargetConfirmation(entry.phone);
         if (target) window.location.assign(`tel:${target.dialNumber.replace(/[^+\d]/g, "")}`);

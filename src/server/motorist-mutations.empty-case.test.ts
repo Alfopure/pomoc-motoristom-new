@@ -200,6 +200,35 @@ describe("createCase empty draft", () => {
     expect(warnings.filter((warning) => warning.code === "incomplete_contact")).toHaveLength(2);
   });
 
+  it("stores one canonical contact when the fallback uses Slovak local notation", async () => {
+    await createCase({
+      contactName: "Ján Novák",
+      contactPhone: "0905 123 456",
+      contacts: [{ name: "Ján Novák", phone: "+421 905 123 456", isPrimary: true }],
+    });
+
+    const caseInsert = state.inserts.find((entry) => entry.table === "motorist_cases");
+    const details = caseInsert?.payload.customer_details as { contacts?: Array<{ phone: string }> };
+    expect(details.contacts).toHaveLength(1);
+    expect(details.contacts?.[0].phone).toBe("+421905123456");
+    expect(state.inserts.find((entry) => entry.table === "motorist_contacts")?.payload.phone).toBe("+421905123456");
+  });
+
+  it("stores the alternate phone in the same canonical format", async () => {
+    await createCase({ alternativeContact: "00420 777 123 456" });
+
+    const caseInsert = state.inserts.find((entry) => entry.table === "motorist_cases");
+    expect(caseInsert?.payload.customer_details).toMatchObject({ alternativeContact: "+420777123456" });
+  });
+
+  it("keeps an ambiguous alternate phone editable and reports a warning", async () => {
+    const { warnings } = await createCase({ alternativeContact: "420777123456" });
+
+    const caseInsert = state.inserts.find((entry) => entry.table === "motorist_cases");
+    expect(caseInsert?.payload.customer_details).toMatchObject({ alternativeContact: "420777123456" });
+    expect(warnings).toContainEqual(expect.objectContaining({ code: "invalid_phone", field: "alternativeContact" }));
+  });
+
   it("persists the problem and vehicle note in separate stable channels", async () => {
     await createCase({ vehicleIssue: "Defekt predného kolesa", vehicleNote: "Disk je poškodený", vehicleMake: "Škoda" });
 
@@ -211,6 +240,14 @@ describe("createCase empty draft", () => {
       incident_details: expect.objectContaining({ description: "Defekt predného kolesa" }),
     });
   });
+
+  it("stores editable vehicle facts alongside the case without a schema change", async () => {
+    await createCase({ licensePlate: "BA123XY", vehicleFuel: "Elektrina", vehicleBodyType: "Kombi", vehicleSeats: 5, vehicleInsurer: "Fixture poisťovňa" });
+
+    expect(state.inserts.find((entry) => entry.table === "motorist_cases")?.payload).toMatchObject({
+      vehicle_details: expect.objectContaining({ fuel: "Elektrina", bodyType: "Kombi", seats: 5, insurer: "Fixture poisťovňa" }),
+    });
+  });
 });
 
 describe("updateCase optional relations", () => {
@@ -218,6 +255,15 @@ describe("updateCase optional relations", () => {
     state.inserts.length = 0;
     state.updates.length = 0;
     state.existingCase = existingCase();
+  });
+
+  it("updates a vehicle fact in case details without replacing the other facts", async () => {
+    state.existingCase = existingCase({ vehicle_details: { fuel: "Nafta", bodyType: "Sedan", seats: 5, insurer: "Pôvodná poisťovňa" } });
+    await updateCase("case-1", { expectedUpdatedAt: "2026-09-10T10:00:00Z", vehicleInsurer: "Nová poisťovňa" });
+
+    expect(state.updates.find((entry) => entry.table === "motorist_cases")?.payload).toMatchObject({
+      vehicle_details: { fuel: "Nafta", bodyType: "Sedan", seats: 5, insurer: "Nová poisťovňa" },
+    });
   });
 
   it("creates missing contact, vehicle and pickup when the draft is completed later", async () => {

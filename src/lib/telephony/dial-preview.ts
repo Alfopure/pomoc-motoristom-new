@@ -14,7 +14,7 @@
  */
 
 import { formatPhoneNumberForDisplay } from "./phone";
-import { normalizeE164 } from "./normalize-e164";
+import { normalizeEditablePhone } from "./phone-entry";
 
 export type DialPreview =
   /** Nothing typed yet: no number, no complaint. */
@@ -30,7 +30,9 @@ function statesCountry(raw: string): boolean {
 
 export function dialPreview(raw: string): DialPreview {
   if (!raw.trim()) return { kind: "empty" };
-  const e164 = normalizeE164(raw);
+  let e164: string | null;
+  try { e164 = normalizeEditablePhone(raw); }
+  catch { return { kind: "invalid" }; }
   if (!e164) return { kind: "invalid" };
 
   const countryAssumed = !statesCountry(raw);

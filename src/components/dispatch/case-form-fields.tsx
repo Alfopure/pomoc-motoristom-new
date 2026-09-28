@@ -3,6 +3,8 @@
 import { useId, useState, type HTMLInputTypeAttribute, type ReactNode } from "react";
 import { CheckCircle2, ChevronDown, CircleAlert } from "lucide-react";
 import type { CustomerContactRole } from "@/domain/types";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
+import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
 import styles from "./case-detail.module.css";
 
 /**
@@ -16,8 +18,7 @@ export type ContactDraft = {
   id: string;
   firstName: string;
   lastName: string;
-  phonePrefix: string;
-  phoneNational: string;
+  phone: string;
   email: string;
   role: CustomerContactRole;
   note: string;
@@ -30,53 +31,12 @@ export function RequiredMark() {
   );
 }
 
-export const countryPrefixes = [
-  ["+421", "SK"],
-  ["+420", "CZ"],
-  ["+48", "PL"],
-  ["+36", "HU"],
-  ["+43", "AT"],
-  ["+49", "DE"],
-  ["+39", "IT"],
-] as const;
-
-/** Keep arbitrary international prefixes intact; the list above is only a convenience list. */
-export function normalizePhonePrefixInput(value: string) {
-  const digits = value.replace(/\D/g, "").slice(0, 3);
-  return digits ? `+${digits}` : "+";
-}
-
-export function splitContactPhone(phone: string) {
-  const trimmed = phone.trim();
-  const normalized = trimmed.startsWith("00") ? `+${trimmed.slice(2)}` : trimmed;
-  const knownPrefix = [...countryPrefixes]
-    .sort(([left], [right]) => right.length - left.length)
-    .find(([candidate]) => normalized.startsWith(candidate))?.[0];
-
-  if (knownPrefix) {
-    return {
-      prefix: knownPrefix,
-      national: normalized.slice(knownPrefix.length).replace(/\D/g, ""),
-    };
-  }
-
-  if (normalized.startsWith("+")) {
-    // An unknown country-code boundary cannot be guessed safely. A standalone
-    // "+" preserves every digit instead of silently rewriting the number as Slovak.
-    return { prefix: "+", national: normalized.slice(1).replace(/\D/g, "") };
-  }
-
-  return { prefix: "+421", national: normalized.replace(/\D/g, "") };
-}
-
 export function joinContactPhone(contact: ContactDraft | undefined) {
   if (!contact) return "";
-
-  const national = contact.phoneNational.replace(/\D/g, "");
-  if (!national) return "";
-
-  const prefix = normalizePhonePrefixInput(contact.phonePrefix);
-  return prefix === "+" ? `+${national}` : `${prefix} ${national}`;
+  const phone = contact.phone.trim();
+  if (!phone) return "";
+  try { return normalizeEditablePhone(phone) ?? ""; }
+  catch { return phone; }
 }
 
 export function FormSection({
@@ -375,45 +335,24 @@ export function PhoneField({
   reserveErrorSpace?: boolean;
 }) {
   const errorId = useId();
-  const prefixListId = useId();
 
   return (
-    <label className={styles.field}>
+    <div className={styles.field}>
       <span className={styles.fieldLabel}>Telefón{required && <RequiredMark />}</span>
-      <div className={`${styles.phoneControl} grid rounded-md border bg-white focus-within:ring-2 ${error ? "border-red-300 focus-within:ring-red-200" : "border-zinc-200 focus-within:ring-yellow-300"}`}>
-        <input
-          type="tel"
-          list={prefixListId}
-          aria-label="Predvoľba telefónu"
-          inputMode="tel"
-          autoComplete="tel-country-code"
-          value={contact.phonePrefix}
-          disabled={disabled}
-          onChange={(event) => onChange({ phonePrefix: normalizePhonePrefixInput(event.target.value) })}
-          className={`${styles.fieldControl} min-w-0 rounded-l-md border-r border-zinc-200 bg-zinc-50 px-2 text-sm font-semibold outline-none disabled:cursor-not-allowed disabled:text-zinc-400`}
-        />
-        <datalist id={prefixListId}>
-          {countryPrefixes.map(([prefix, country]) => (
-            <option key={prefix} value={prefix} label={country} />
-          ))}
-        </datalist>
-        <input
-          type="tel"
-          aria-label="Telefón"
-          aria-required={required}
-          required={required}
-          inputMode="numeric"
-          autoComplete="tel-national"
-          value={contact.phoneNational}
-          disabled={disabled}
-          onChange={(event) => onChange({ phoneNational: event.target.value.replace(/\D/g, "").slice(0, 15) })}
-          aria-invalid={Boolean(error)}
-          aria-describedby={error ? errorId : undefined}
-          className={`${styles.fieldControl} min-w-0 rounded-r-md px-3 text-sm outline-none disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400`}
-        />
-      </div>
+      <PhoneNumberInput
+        aria-label="Telefón"
+        aria-required={required}
+        required={required}
+        disabled={disabled}
+        value={contact.phone}
+        onChange={(value) => onChange({ phone: value })}
+        aria-invalid={Boolean(error)}
+        aria-describedby={error ? errorId : undefined}
+        className={`${styles.fieldControl} w-full min-w-0 rounded-md border bg-white px-3 text-sm outline-none transition focus:ring-2 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400 ${error ? "border-red-300 focus:ring-red-200" : "border-zinc-200 focus:ring-yellow-300"}`}
+      />
+      <PhoneNumberHint value={contact.phone} className="mt-1 block text-[11px] leading-4 text-zinc-500" />
       <FieldError id={errorId} error={error} reserveSpace={reserveErrorSpace} />
-    </label>
+    </div>
   );
 }
 

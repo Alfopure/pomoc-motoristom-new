@@ -58,3 +58,10 @@ it("does not write metadata for an unrelated edit", async () => {
   await updateFleetAsset("test-fleet", { label: "Updated label" });
   expect(state.updates[0]).not.toHaveProperty("metadata");
 });
+
+it("stores a crew phone in E.164 and rejects an invalid change before writing", async () => {
+  await updateFleetAsset("test-fleet", { assignedDriverPhone: "0905 123 456" });
+  expect(state.asset.assigned_driver_phone).toBe("+421905123456");
+  await expect(updateFleetAsset("test-fleet", { assignedDriverPhone: "1234" })).rejects.toMatchObject({ status: 400 });
+  expect(state.updates).toHaveLength(1);
+});

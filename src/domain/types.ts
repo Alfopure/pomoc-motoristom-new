@@ -174,6 +174,10 @@ export type Vehicle = {
   productionYear?: number;
   color?: string;
   category: string;
+  fuel?: string;
+  bodyType?: string;
+  seats?: number;
+  insurer?: string;
   vehicleType?: ClientVehicleType;
   transmission?: VehicleTransmission;
   driveType?: string;

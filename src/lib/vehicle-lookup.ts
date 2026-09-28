@@ -93,12 +93,33 @@ export function vehicleText(value: unknown): string | undefined {
   return text;
 }
 
+/** SKP can still list an older EČV for a policy found by VIN. Trust its insurer
+ * only when a technical source independently binds the queried vehicle's EČV
+ * to the same VIN; never replace the EČV in the case with SKP's value. */
+export function vinLinkedSkpPlateDifference(result: VehicleLookupResult): { technicalPlate: string; skpPlate: string } | undefined {
+  if (result.sources.some((source) => source.status === "ambiguous")) return undefined;
+  const skp = result.sources.find((source) => source.source === "skp" && source.status === "found");
+  const skpVin = normalizeVehicleIdentifier(skp?.facts.vin?.value ?? "");
+  const skpPlate = normalizeVehicleIdentifier(skp?.facts.plate?.value ?? "");
+  if (!isVin(skpVin) || !isSlovakPlate(skpPlate) || (result.query.kind === "vin" && skpVin !== result.query.value)) return undefined;
+
+  const technical = result.sources.filter((source) => source.status === "found" && (source.source === "databazavozidiel" || source.source === "stkonline"));
+  const matching = technical.find((source) => normalizeVehicleIdentifier(source.facts.vin?.value ?? "") === skpVin && isSlovakPlate(normalizeVehicleIdentifier(source.facts.plate?.value ?? "")));
+  const technicalPlate = normalizeVehicleIdentifier(matching?.facts.plate?.value ?? "");
+  if (!technicalPlate || technicalPlate === skpPlate || (result.query.kind === "plate" && technicalPlate !== result.query.value)) return undefined;
+  if (technical.some((source) => (source.facts.vin && normalizeVehicleIdentifier(source.facts.vin.value) !== skpVin)
+    || (source.facts.plate && normalizeVehicleIdentifier(source.facts.plate.value) !== technicalPlate))) return undefined;
+  return { technicalPlate, skpPlate };
+}
+
 export function lookupIdentityConflict(result: VehicleLookupResult, identity: VehicleIdentity): string | undefined {
   const enteredQueryIdentifier = identity[result.query.kind];
   if (enteredQueryIdentifier !== undefined && normalizeVehicleIdentifier(enteredQueryIdentifier) !== result.query.value) return "Výsledok patrí k inému zadanému identifikátoru vozidla. Dohľadajte aktuálne vozidlo znova.";
   if (result.sources.some((source) => source.status === "ambiguous")) return "Zdroj vrátil viac vozidiel alebo rozdielne identifikátory. Overte VIN v dokladoch.";
+  const historicalSkpPlate = vinLinkedSkpPlateDifference(result)?.skpPlate;
   for (const field of ["vin", "plate"] as const) {
-    const values = new Set(result.sources.filter((source) => source.status === "found").map((source) => source.facts[field]?.value).filter((v): v is string => Boolean(v)).map(normalizeVehicleIdentifier));
+    const values = new Set(result.sources.filter((source) => source.status === "found" && !(field === "plate" && historicalSkpPlate && source.source === "skp"))
+      .map((source) => source.facts[field]?.value).filter((v): v is string => Boolean(v)).map(normalizeVehicleIdentifier));
     const expected = normalizeVehicleIdentifier(identity[field] ?? (result.query.kind === field ? result.query.value : ""));
     if (values.size > 1 || (expected && [...values].some((value) => value !== expected))) return `Dohľadané ${field === "vin" ? "VIN" : "EČV"} nesúhlasí s formulárom alebo iným zdrojom. Údaje sa nedoplnili.`;
   }
@@ -107,9 +128,11 @@ export function lookupIdentityConflict(result: VehicleLookupResult, identity: Ve
 export function preferredVehicleFacts(result: VehicleLookupResult, includePartial = false): VehicleFacts {
   const facts: VehicleFacts = {};
   const order: VehicleSource[] = ["databazavozidiel", "skp", "stkonline", "vpic", "haka"];
+  const historicalSkpPlate = vinLinkedSkpPlateDifference(result)?.skpPlate;
   for (const source of [...result.sources].sort((a, b) => order.indexOf(a.source) - order.indexOf(b.source))) {
     if (source.status !== "found" || source.source === "haka") continue;
     for (const [key, fact] of Object.entries(source.facts) as [VehicleField, VehicleFact][]) {
+      if (key === "plate" && source.source === "skp" && historicalSkpPlate) continue;
       if (!facts[key] && (includePartial || fact.quality !== "partial")) facts[key] = fact;
     }
   }
@@ -167,6 +190,22 @@ export function emptyVehicleFieldPatch(result: VehicleLookupResult, current: Veh
     else delete facts[field];
   }
   return Object.fromEntries(Object.entries(current).filter(([key, value]) => !value?.trim() && facts[key as VehicleField]).map(([key]) => [key, facts[key as VehicleField]!.value]));
+}
+
+/** Values still matching an accepted lookup can be removed when the vehicle identity changes. */
+export function vehicleFieldsMatchingLookup(result: VehicleLookupResult, current: VehicleFormValues): Set<VehicleField> {
+  const matches = new Set<VehicleField>();
+  for (const [field, value] of Object.entries(current) as [VehicleField, string][]) {
+    if (!value?.trim()) continue;
+    const values = result.sources
+      .filter((source) => source.status === "found" && source.source !== "haka")
+      .map((source) => source.facts[field]?.value)
+      .filter((candidate): candidate is string => Boolean(candidate));
+    if (result.query.kind === field) values.push(result.query.value);
+    const normalize = field === "plate" || field === "vin" ? normalizeVehicleIdentifier : (candidate: string) => candidate;
+    if (values.some((candidate) => normalize(candidate) === normalize(value))) matches.add(field);
+  }
+  return matches;
 }
 
 /** Internal feeds with no country must not assert a new plate → VIN binding. */

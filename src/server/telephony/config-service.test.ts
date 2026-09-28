@@ -6,6 +6,7 @@ import {
   assertOperatorNotOnCall,
   compactDiff,
   contextFromDocument,
+  DEFAULT_OPERATOR_SETTINGS,
   DEFAULT_SETTINGS,
   destinationsOutsideAllowlist,
   getRoutingDocument,
@@ -29,6 +30,7 @@ import {
   validateBusinessHours,
   validateLinePatch,
   validateOperatorSettingsPatch,
+  validateOperatorSettingsDocument,
   validatePauseReasons,
   validateRoutingReplace,
   validateSettingsPatch,
@@ -96,6 +98,13 @@ function codes(issues: Array<{ code: string }>): string[] {
 describe("validateRoutingReplace", () => {
   it("accepts the seeded world unchanged", () => {
     expect(validateRoutingReplace({ groups: [group()], plans: [plan()] }, context())).toEqual([]);
+  });
+
+  it("keeps reading unchanged stored destinations while another section is edited", () => {
+    const oldGroup = group({ members: [{ id: null, memberKind: "external_number", profileId: null, externalNumber: "421900000000", position: 0, ringSecs: null }] });
+    const oldPlan = plan({ fallbackKind: "external_number", fallbackNumber: "421900000000" });
+    expect(validateRoutingReplace({ plans: [plan()] }, context({ groups: [oldGroup] }))).toEqual([]);
+    expect(validateRoutingReplace({ groups: [group()] }, context({ plans: [oldPlan] }))).toEqual([]);
   });
 
   it("refuses a plan without a single step", () => {
@@ -185,6 +194,8 @@ describe("validateRoutingReplace", () => {
   it("refuses an external member that is not E.164", () => {
     const invalid = group({ members: [{ id: null, memberKind: "external_number", profileId: null, externalNumber: "klapka 12", position: 0, ringSecs: null }] });
     expect(codes(validateRoutingReplace({ groups: [invalid] }, context()))).toContain("number_invalid");
+    const ambiguous = group({ members: [{ id: null, memberKind: "external_number", profileId: null, externalNumber: "421900000000", position: 0, ringSecs: null }] });
+    expect(codes(validateRoutingReplace({ groups: [ambiguous] }, context()))).toContain("number_invalid");
   });
 
   it("refuses an external member outside the destination allowlist", () => {
@@ -234,6 +245,7 @@ describe("validateRoutingReplace", () => {
     expect(codes(validateRoutingReplace({ plans: [plan({ fallbackKind: "external_number", fallbackNumber: null })] }, context()))).toContain("fallback_number_invalid");
     expect(codes(validateRoutingReplace({ plans: [plan({ fallbackKind: "external_number", fallbackNumber: "+15551234567" })] }, context()))).toContain("fallback_number_not_allowed");
     expect(validateRoutingReplace({ plans: [plan({ fallbackKind: "external_number", fallbackNumber: "0900 000 000" })] }, context())).toEqual([]);
+    expect(codes(validateRoutingReplace({ plans: [plan({ fallbackKind: "external_number", fallbackNumber: "421900000000" })] }, context()))).toContain("fallback_number_invalid");
   });
 
   it("refuses removing a group a plan still uses and a plan a line still uses", () => {
@@ -352,6 +364,9 @@ describe("validateBusinessHours / validatePauseReasons / patches", () => {
     expect(codes(validateOperatorSettingsPatch({ defaultMobileNumber: "+12025550123" }, context()))).toContain("destination_not_allowed");
     expect(codes(validateOperatorSettingsPatch({ pauseForwardProfileId: FOREIGN }, context()))).toContain("pause_operator_foreign");
     expect(validateOperatorSettingsPatch({ defaultMobileNumber: "+421 911 222 333", pauseRoutingMode: "default_mobile" }, context())).toEqual([]);
+    expect(codes(validateOperatorSettingsPatch({ defaultMobileNumber: "421911222333" }, context()))).toContain("phone_invalid");
+    expect(codes(validateOperatorSettingsPatch({ pauseForwardNumber: "420777123456" }, context()))).toContain("phone_invalid");
+    expect(validateOperatorSettingsDocument({ ...DEFAULT_OPERATOR_SETTINGS, defaultMobileNumber: "421911222333" }, context(), PROFILES.o1)).toEqual([]);
     expect(validateOperatorSettingsPatch({ defaultFromLineId: LINES.neutral, wrapUpSeconds: 20 }, context())).toEqual([]);
   });
 });
@@ -619,6 +634,19 @@ describe("replaceBusinessHours and replacePauseReasons", () => {
 });
 
 describe("replaceIvrMenus", () => {
+  it("rejects ambiguous manually entered external targets", async () => {
+    const { harness, deps } = harnessDeps();
+    const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    const menu = before.ivrMenus[0];
+    await expect(replaceIvrMenus(deps, {
+      organizationId: ORG, actor: ACTOR, expectedVersion: before.routingVersion,
+      ivrMenus: [{ ...menu, options: menu.options.map((option, index) => index === 0
+        ? { ...option, action: "external_number" as const, targetRingPlanId: null, targetNumber: "420777123456" }
+        : option) }],
+    })).rejects.toMatchObject({ status: 400, issues: expect.arrayContaining([expect.objectContaining({ code: "number_invalid" })]) });
+    expect(harness.rows("motorist_ivr_options").some((option) => option.target_number === "+420777123456")).toBe(false);
+  });
+
   it.each(["callback-offer.mp3", "https://audio.test/custom-confirmation.mp3"])("normalizes only the legacy invitation when saving callback media %s", async file => {
     const { harness, deps } = harnessDeps();
     const before = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });

@@ -5,7 +5,8 @@ import { CaseAccessBoundary, useCaseEditorPresence, useCaseCollaboration } from 
 import { useCaseDraftPublisher } from "./use-case-draft-preview";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
 import { CASE_ATTACHMENT_ACCEPT, validateCaseAttachmentFiles } from "@/lib/case-attachments";
-import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
+import { resolveInternalVehicle, vehicleFieldsMatchingLookup, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronUp, FileUp, GripVertical, Loader2, Plus, Save, Star, Trash2, X } from "lucide-react";
@@ -86,7 +87,6 @@ import {
   SelectField,
   TextareaField,
   TextField,
-  splitContactPhone,
 } from "./case-form-fields";
 import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { LocationPicker } from "./LocationPicker";
@@ -130,14 +130,13 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   // idle/mock hovor) štartuje formulár čistý — žiadne prenesené meno/číslo.
   const hasActiveCall = Boolean(call.callerNumber) && call.callerNumber !== "Bez aktívneho hovoru";
   const initialName = splitName(hasActiveCall ? call.callerName ?? "" : "");
-  const initialPhone = parsePhone(hasActiveCall ? call.callerNumber : "");
+  const initialPhone = hasActiveCall ? normalizeE164(call.callerNumber) ?? "" : "";
   const [contacts, setContacts] = useState<ContactDraft[]>([
     {
       id: crypto.randomUUID(),
       firstName: initialName.firstName,
       lastName: initialName.lastName,
-      phonePrefix: initialPhone.prefix,
-      phoneNational: initialPhone.national,
+      phone: initialPhone,
       email: "",
       role: "primary_customer",
       note: "",
@@ -163,6 +162,10 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   const [productionYear, setProductionYear] = useState("");
   const [vehicleColor, setVehicleColor] = useState("");
   const [vehicleCategory, setVehicleCategory] = useState("");
+  const [vehicleFuel, setVehicleFuel] = useState("");
+  const [vehicleBodyType, setVehicleBodyType] = useState("");
+  const [vehicleSeats, setVehicleSeats] = useState("");
+  const [vehicleInsurer, setVehicleInsurer] = useState("");
   const [vehicleType, setVehicleType] = useState<ClientVehicleType | "">("");
   const [transmission, setTransmission] = useState<VehicleTransmission | "">("");
   const [transmissionNote, setTransmissionNote] = useState("");
@@ -228,7 +231,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
     note,
     customerType: customerType ? customerTypeLabels[customerType] : "",
     contacts: contacts.map(contact => {
-      const value = [contactDisplayName(contact), contact.phoneNational ? fullPhone(contact) : "", contact.email, contact.note].filter(Boolean).join(" · ");
+      const value = [contactDisplayName(contact), contact.phone ? fullPhone(contact) : "", contact.email, contact.note].filter(Boolean).join(" · ");
       return value ? `${contact.isPrimary ? "Hlavný kontakt · " : ""}${customerContactRoleLabels[contact.role]}: ${value}` : "";
     }).filter(Boolean).join("\n"),
     companyName: customerType === "company" ? companyName : "", companyIdNumber: customerType === "company" ? companyIdNumber : "",
@@ -316,6 +319,10 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
       vehicleMake.trim() ||
       vehicleModel.trim() ||
       vehicleCategory.trim() ||
+      vehicleFuel.trim() ||
+      vehicleBodyType.trim() ||
+      vehicleSeats.trim() ||
+      vehicleInsurer.trim() ||
       vehicleIssue.trim() ||
       productionYear.trim() ||
       vehicleColor.trim() ||
@@ -335,8 +342,6 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
           lastName: contact.lastName,
           name: contactDisplayName(contact),
           phone: fullPhone(contact),
-          phonePrefix: contact.phonePrefix,
-          phoneNational: contact.phoneNational,
           email: contact.email,
           role: contact.role,
           note: contact.note,
@@ -531,6 +536,10 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
       vehicleMake: vehicleMake.trim() || undefined,
       vehicleModel: vehicleModel.trim() || undefined,
       vehicleCategory: vehicleCategory.trim() || undefined,
+      vehicleFuel,
+      vehicleBodyType,
+      vehicleSeats: toOptionalNumber(vehicleSeats),
+      vehicleInsurer,
       vehicleType: vehicleType || undefined,
       productionYear: toOptionalNumber(productionYear),
       vehicleColor,
@@ -671,8 +680,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
               id: crypto.randomUUID(),
               firstName: "",
               lastName: "",
-              phonePrefix: "+421",
-              phoneNational: "",
+              phone: "",
               email: "",
               role: "driver",
               note: "",
@@ -886,13 +894,33 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
               </p>
             )}
             <div className="grid gap-3 @3xl:grid-cols-3">
-              <VehicleLookupControl contextKey="new-case" plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor }} onApply={(patch, snapshot) => {
+              <VehicleLookupControl contextKey="new-case" plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor, vehicleCategory, fuel: vehicleFuel, bodyType: vehicleBodyType, seats: vehicleSeats, insurer: vehicleInsurer, curbWeightKg: weightKg }} onApply={(patch, snapshot, changedIdentifier) => {
+                if (!snapshot && vehicleLookup) {
+                  const matched = vehicleFieldsMatchingLookup(vehicleLookup.result, { plate: licensePlate, vin, make: vehicleMake, model: vehicleModel, color: vehicleColor, vehicleCategory, fuel: vehicleFuel, bodyType: vehicleBodyType, seats: vehicleSeats, insurer: vehicleInsurer, curbWeightKg: weightKg });
+                  if (matched.has("plate") && !(changedIdentifier === "vin" && vehicleLookup.result.query.kind === "plate")) setLicensePlate("");
+                  if (matched.has("vin") && !(changedIdentifier === "plate" && vehicleLookup.result.query.kind === "vin")) setVin("");
+                  if (matched.has("make")) setVehicleMake("");
+                  if (matched.has("model")) setVehicleModel("");
+                  if (matched.has("color")) setVehicleColor("");
+                  if (matched.has("vehicleCategory")) setVehicleCategory("");
+                  if (matched.has("fuel")) setVehicleFuel("");
+                  if (matched.has("bodyType")) setVehicleBodyType("");
+                  if (matched.has("seats")) setVehicleSeats("");
+                  if (matched.has("insurer")) setVehicleInsurer("");
+                  if (matched.has("curbWeightKg")) setWeightKg("");
+                }
                 markDirty(); setVehicleLookup(snapshot);
                 if (patch.plate !== undefined) setLicensePlate(patch.plate);
                 if (patch.vin !== undefined) setVin(patch.vin);
                 if (patch.make !== undefined) setVehicleMake(patch.make);
                 if (patch.model !== undefined) setVehicleModel(patch.model);
                 if (patch.color !== undefined) setVehicleColor(patch.color);
+                if (patch.vehicleCategory !== undefined) setVehicleCategory(patch.vehicleCategory);
+                if (patch.fuel !== undefined) setVehicleFuel(patch.fuel);
+                if (patch.bodyType !== undefined) setVehicleBodyType(patch.bodyType);
+                if (patch.seats !== undefined && /^\d{1,2}$/.test(patch.seats)) setVehicleSeats(patch.seats);
+                if (patch.insurer !== undefined) setVehicleInsurer(patch.insurer);
+                if (patch.curbWeightKg !== undefined && /^\d{1,6}$/.test(patch.curbWeightKg)) setWeightKg(patch.curbWeightKg);
               }} />
               <TextField label="Značka" value={vehicleMake} onChange={setVehicleMake} />
               <TextField label="Model" value={vehicleModel} onChange={setVehicleModel} />
@@ -910,12 +938,16 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
                 transformValue={(value) => digitsOnly(value, 4)}
               />
               <TextField label="Farba" value={vehicleColor} onChange={setVehicleColor} />
+              <TextField label="Palivo" value={vehicleFuel} onChange={setVehicleFuel} />
+              <TextField label="Karoséria" value={vehicleBodyType} onChange={setVehicleBodyType} />
+              <TextField label="Počet miest" value={vehicleSeats} onChange={setVehicleSeats} type="number" inputMode="numeric" min={1} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
               <SelectField label="Typ vozidla" value={vehicleType} onChange={(value) => setVehicleType(value as ClientVehicleType | "")} options={[["", "Nezadané"], ...vehicleTypes.map((type) => [type, clientVehicleTypeLabels[type]] as [string, string])]} />
               <SelectField label="Prevodovka" value={transmission} onChange={(value) => setTransmission(value as VehicleTransmission | "")} options={[["", "Nezadané"], ...transmissions.map((item) => [item, transmissionLabels[item]] as [string, string])]} />
               <TextField label="Poznámka k prevodovke" value={transmissionNote} onChange={setTransmissionNote} />
               <SelectField label="Pohon" value={driveType} onChange={setDriveType} options={driveTypeOptions.map(([value, label]) => [value, label])} />
               <TextField label="Hmotnosť kg" value={weightKg} onChange={setWeightKg} error={fieldErrors.weightKg} type="number" inputMode="numeric" min={1} max={100000} step={1} transformValue={(value) => digitsOnly(value, 6)} />
               <TextField label="Kategória" value={vehicleCategory} onChange={setVehicleCategory} />
+              <TextField label="Poisťovňa PZP" value={vehicleInsurer} onChange={setVehicleInsurer} />
             </div>
             {commanderNotice && <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900">{commanderNotice}</div>}
             <TextareaField label="Opis problému / situácie" required={!replacementOnly} value={vehicleIssue} onChange={setVehicleIssue} />
@@ -1316,10 +1348,6 @@ function splitName(name: string) {
     firstName: parts[0] ?? "",
     lastName: parts.slice(1).join(" "),
   };
-}
-
-function parsePhone(phone: string) {
-  return splitContactPhone(phone);
 }
 
 function fullPhone(contact: ContactDraft | undefined) {

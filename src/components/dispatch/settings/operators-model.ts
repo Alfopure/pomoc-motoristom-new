@@ -16,7 +16,7 @@
 import type { AppRole } from "@/domain/types";
 import { DEVICE_LIVENESS_WINDOW_MS, isDeviceLive } from "@/lib/telephony/device-liveness";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
-import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { normalizeEditablePhone, storedPhoneForDial } from "@/lib/telephony/phone-entry";
 import { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS, type PauseRoutingMode } from "@/lib/telephony/operator-settings";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { LineDoc, OperatorDoc, OperatorSettingsPatchInput, ValidationIssue } from "@/server/telephony/config-service";
@@ -59,11 +59,11 @@ export function operatorDraft(operator: OperatorDoc): OperatorDraft {
     wrapUpSeconds: settings.wrapUpSeconds,
     autoAnswerOutbound: settings.autoAnswerOutbound,
     ringDeviceVolume: settings.ringDeviceVolume,
-    defaultMobileNumber: settings.defaultMobileNumber,
+    defaultMobileNumber: settings.defaultMobileNumber ? storedPhoneForDial(settings.defaultMobileNumber) : null,
     deliveryMode: settings.deliveryMode ?? "web",
     pauseRoutingMode: settings.pauseRoutingMode,
     pauseForwardProfileId: settings.pauseForwardProfileId,
-    pauseForwardNumber: settings.pauseForwardNumber,
+    pauseForwardNumber: settings.pauseForwardNumber ? storedPhoneForDial(settings.pauseForwardNumber) : null,
   };
 }
 
@@ -155,8 +155,10 @@ export function validateOperatorDraft(draft: OperatorDraft, context: OperatorVal
     ["pauseForwardNumber", draft.pauseForwardNumber],
   ] as const) {
     if (!value) continue;
-    const normalized = normalizeE164(value);
-    if (!normalized) issues.push(issue(`${draft.profileId}.${path}`, "phone_invalid", "Zadaj platné telefónne číslo vrátane predvoľby."));
+    let normalized: string | null;
+    try { normalized = normalizeEditablePhone(value); }
+    catch { normalized = null; }
+    if (!normalized) issues.push(issue(`${draft.profileId}.${path}`, "phone_invalid", "Zadaj platné telefónne číslo. Pre zahraničie použi + alebo 00."));
     else if (context.destinationAllowlist && !isDestinationAllowed(normalized, context.destinationAllowlist)) {
       issues.push(issue(`${draft.profileId}.${path}`, "destination_not_allowed", "Číslo nie je v povolených cieľoch organizácie."));
     }

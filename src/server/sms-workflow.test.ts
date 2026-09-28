@@ -5,6 +5,7 @@ const adminMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: adminMock }));
 vi.mock("@/lib/supabase/env", () => ({ requireSupabaseServiceEnv: () => ({ serviceKey: "test-draft-secret" }) }));
 import { normalizeSmsRecipient, notConfiguredTransport, prepareSms, resolveSmsTransport, sendCaseSms, sendPreparedSms, SmsWorkflowError, type SmsTransport } from "./sms-workflow";
+import { normalizeSmsEditableRecipient } from "./sms-errors";
 import { applyTelnyxMessageStatus } from "./telephony/telnyx/sms-status";
 import type { SmsPrepareInput } from "@/lib/sms/contracts";
 
@@ -86,6 +87,11 @@ describe("SMS preparation and verified recipient", () => {
     expect(p.draft).toMatchObject({ caseId: null, toNumber: "+421905123456", actorProfileId: "dispatcher" });
     expect(h.db.rows("motorist_sms_messages")).toHaveLength(0);
     expect(h.db.rows("motorist_location_share_links")).toHaveLength(0);
+  });
+  it("rejects ambiguous manually entered recipient and callback numbers", async () => {
+    harness();
+    await expect(preview({ toNumber: "420777123456" })).rejects.toMatchObject({ status: 400 });
+    await expect(preview({ caseId: "case-1", template: "location_request", callbackNumber: "421905123456" })).rejects.toMatchObject({ status: 400 });
   });
   it("prepares an external handoff as standalone SMS to the colleague instead of the case client", async () => {
     const h = harness();
@@ -224,7 +230,9 @@ describe("durable SMS send and retries", () => {
 describe("normalizeSmsRecipient", () => {
   it.each([
     ["0905 123 456", "+421905123456"],
+    ["905 123 456", "+421905123456"],
     ["+421 905 123 456", "+421905123456"],
+    ["+421 (0) 905 123 456", "+421905123456"],
     ["00420777123456", "+420777123456"],
     ["421905123456", "+421905123456"],
   ])("normalizes %s to %s", (input, expected) => {
@@ -242,5 +250,17 @@ describe("normalizeSmsRecipient", () => {
 
     expect(failure).toBeInstanceOf(SmsWorkflowError);
     expect((failure as SmsWorkflowError).status).toBe(400);
+  });
+});
+
+describe("normalizeSmsEditableRecipient", () => {
+  it("accepts Slovak local entry and explicit international entry", () => {
+    expect(normalizeSmsEditableRecipient("0905 123 456")).toBe("+421905123456");
+    expect(normalizeSmsEditableRecipient("+420 777 123 456")).toBe("+420777123456");
+  });
+
+  it("requires + or 00 for a manually entered international number", () => {
+    expect(() => normalizeSmsEditableRecipient("421905123456")).toThrow(SmsWorkflowError);
+    expect(() => normalizeSmsEditableRecipient("420777123456")).toThrow(SmsWorkflowError);
   });
 });

@@ -99,6 +99,8 @@ describe("startAiDemo gates", () => {
   it("refuses an unparseable number", async () => {
     const f = fixture();
     await expect(start(f, { to: "not a number" })).rejects.toMatchObject({ code: "invalid_number", status: 400 });
+    await expect(start(f, { to: "421910988882" })).rejects.toMatchObject({ code: "invalid_number", status: 400 });
+    expect(f.h.rows("motorist_ai_demo_attempts")).toHaveLength(0);
   });
 
   it("fails closed when the caller ID is not an active line here", async () => {

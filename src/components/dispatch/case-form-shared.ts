@@ -37,6 +37,7 @@ import {
   transmissionLabels,
   vehicleConditionFlagLabels,
 } from "@/domain/case-card";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 
 export const jobTypes = Object.keys(jobTypeLabels) as JobType[];
 export const vehicleTypes = Object.keys(clientVehicleTypeLabels) as ClientVehicleType[];
@@ -137,7 +138,6 @@ export function getCaseFormFieldErrors(input: CaseFormValidationInput): CaseForm
   // Pri čisto NV prípade sú údaje o klientovom vozidle voliteľné (P-03); kontakt ostáva povinný.
   const replacementOnly = isReplacementVehicleOnlyCase(input.jobTypes);
   const requireCoreFields = input.requireCoreFields ?? false;
-  const phoneDigits = (input.contactPhone ?? "").replace(/\D/g, "");
   const plate = input.licensePlate?.trim() ?? "";
   const normalizedVin = input.vin?.trim().toLocaleUpperCase("sk-SK") ?? "";
   const year =
@@ -145,8 +145,8 @@ export function getCaseFormFieldErrors(input: CaseFormValidationInput): CaseForm
 
   if (requireCoreFields && !input.contactName?.trim()) errors.contactName = "Meno zákazníka je povinné.";
   if (requireCoreFields && !input.contactPhone?.trim()) errors.contactPhone = "Telefón zákazníka je povinný.";
-  if (input.contactPhone?.trim() && (phoneDigits.length < 9 || phoneDigits.length > 15)) {
-    errors.contactPhone = "Telefón musí obsahovať 9 až 15 číslic vrátane predvoľby.";
+  if (input.contactPhone?.trim() && !validContactPhone(input.contactPhone)) {
+    errors.contactPhone = "Zadajte platné telefónne číslo; zahraničné začnite + alebo 00.";
   }
   const contactEmailError = getEmailValidationError(input.contactEmail);
   if (contactEmailError) errors.contactEmail = contactEmailError;
@@ -249,12 +249,11 @@ export function getCaseFormValidation(input: CaseFormValidationInput): CaseFormV
       fieldErrors.companyIdNumber,
       ...(input.additionalContacts ?? []).flatMap((contact, index) => {
         const contactNumber = index + 2;
-        const digits = (contact.phone ?? "").replace(/\D/g, "");
         return compactErrors([
           !contact.name?.trim() ? `${contactNumber}. kontakt: doplňte meno.` : null,
           !contact.phone?.trim() ? `${contactNumber}. kontakt: doplňte telefón.` : null,
-          contact.phone?.trim() && (digits.length < 9 || digits.length > 15)
-            ? `${contactNumber}. kontakt: telefón musí obsahovať 9 až 15 číslic.`
+          contact.phone?.trim() && !validContactPhone(contact.phone)
+            ? `${contactNumber}. kontakt: zadajte platné telefónne číslo; zahraničné začnite + alebo 00.`
             : null,
           getEmailValidationError(contact.email)
             ? `${contactNumber}. kontakt: email nemá správny formát.`
@@ -334,6 +333,11 @@ export function normalizeVinInput(value: string) {
 
 function compactErrors(messages: Array<string | null | undefined>) {
   return Array.from(new Set(messages.filter((message): message is string => Boolean(message))));
+}
+
+function validContactPhone(value: string) {
+  try { return Boolean(normalizeEditablePhone(value)); }
+  catch { return false; }
 }
 
 export function getEmailValidationError(value?: string) {

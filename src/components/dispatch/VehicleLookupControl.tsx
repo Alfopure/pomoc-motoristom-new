@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronRight, LoaderCircle, Search } from "lucide-react";
 import { TextField } from "./case-form-fields";
 import { normalizeLicensePlateInput, normalizeVinInput } from "./case-form-shared";
-import { emptyVehicleFieldPatch, isSlovakPlate, isVin, lookupIdentityConflict, normalizeVehicleIdentifier, preferredVehicleFacts, type VehicleFieldChoices, type VehicleFormValues, type VehicleLookupResponse, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
+import { emptyVehicleFieldPatch, isSlovakPlate, isVin, lookupIdentityConflict, normalizeVehicleIdentifier, preferredVehicleFacts, vinLinkedSkpPlateDifference, type VehicleFieldChoices, type VehicleFormValues, type VehicleLookupResponse, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 import { requestVehicleLookup } from "@/lib/vehicle-lookup-client";
 import { VehicleLookupDetails, vehicleLookupDate } from "./VehicleLookupDetails";
 
@@ -23,7 +23,7 @@ type Props = {
   onPlateChange: (value: string) => void;
   onVinChange: (value: string) => void;
   onPlateBlur?: () => void;
-  onApply: (patch: VehicleFormValues, snapshot: VehicleLookupSnapshot | null) => void;
+  onApply: (patch: VehicleFormValues, snapshot: VehicleLookupSnapshot | null, changedIdentifier?: "plate" | "vin") => void;
 };
 export function VehicleLookupControl(props: Props) {
   const [proposal, setProposal] = useState<VehicleLookupResponse | null>(null);
@@ -96,12 +96,13 @@ export function VehicleLookupControl(props: Props) {
 
   function changeIdentity(kind: "plate" | "vin", value: string) {
     request.current?.abort(); request.current = null;
-    if (props.snapshot && normalizeVehicleIdentifier(value) !== normalizeVehicleIdentifier(kind === "plate" ? props.plate : props.vin)) props.onApply({}, null);
+    if (props.snapshot && normalizeVehicleIdentifier(value) !== normalizeVehicleIdentifier(kind === "plate" ? props.plate : props.vin)) props.onApply({}, null, kind);
     (kind === "plate" ? props.onPlateChange : props.onVinChange)(kind === "plate" ? normalizeLicensePlateInput(value) : normalizeVinInput(value));
   }
   const snapshot = proposal?.snapshot ?? props.snapshot;
   const result = snapshot?.result;
   const conflict = result ? lookupIdentityConflict(result, { plate: props.plate, vin: props.vin }) : undefined;
+  const skpPlateDifference = result && !conflict ? vinLinkedSkpPlateDifference(result) : undefined;
   const facts = result ? preferredVehicleFacts(result, true) : {};
   const patch = result ? emptyVehicleFieldPatch(result, { ...props.values, plate: props.plate, vin: props.vin }, includePartial, choices) : {};
 
@@ -124,6 +125,7 @@ export function VehicleLookupControl(props: Props) {
           <span className="min-w-0"><span className="block text-sm font-semibold">{proposal ? "Dohľadané údaje · návrh" : "Uložené overenie vozidla"}</span>
             <span className="mt-0.5 block text-xs text-zinc-600">{[facts.make?.value, facts.model?.value].filter(Boolean).join(" ") || "Zobraziť detail vozidla"} · {vehicleLookupDate(snapshot.result.fetchedAt, true)}</span>
             <span className={`mt-1 block text-xs ${conflict ? "font-medium text-amber-900" : "text-zinc-700"}`}>{conflict ? "Identita nesúhlasí · PZP vozidla nepotvrdené" : <>PZP: {facts.insuranceStatus?.value ?? "nepotvrdené"}{facts.insurer && ` · ${facts.insurer.value}`} · k {vehicleLookupDate(snapshot.result.query.checkedForDate)}</>}</span>
+            {skpPlateDifference && <span className="mt-1 block text-xs text-amber-800">SKP uvádza odlišné EČV {skpPlateDifference.skpPlate}; VIN sa zhoduje.</span>}
           </span><ChevronRight size={18} className="shrink-0 text-zinc-500" />
         </button>
         {expanded && <VehicleLookupDetails returnFocus={opener} snapshot={snapshot} proposal={Boolean(proposal)} cached={Boolean(proposal?.cached)} identity={{ plate: props.plate, vin: props.vin }} conflict={conflict} includePartial={includePartial} choices={choices} patch={patch} disabled={Boolean(props.disabled || loading)} onIncludePartial={setIncludePartial} onChoice={(field, source) => setChoices(previous => ({ ...previous, [field]: source || undefined }))} onClose={() => setExpanded(false)} onAccept={() => {

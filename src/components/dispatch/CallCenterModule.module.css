@@ -162,8 +162,9 @@
 .moduleHeading p { color: #687186; font-size: 12px; }
 .headingActions { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .headingActions > button, .compactDialer button { display: inline-flex; min-height: 36px; align-items: center; gap: 6px; padding: 0 12px; border: 1px solid #dfe3ec; border-radius: 8px; background: white; font-size: 12px; font-weight: 600; }
-.compactDialer { display: flex; align-items: center; gap: 6px; }
-.compactDialer input { width: 170px; height: 36px; border: 1px solid #dfe3ec; border-radius: 8px; background: white; padding: 0 10px; font-size: 12px; }
+.compactDialer { display: flex; align-items: flex-start; gap: 6px; }
+.compactDialerField { display: grid; gap: 2px; min-width: 0; width: 170px; }
+.compactDialerField input { width: 100%; height: 36px; border: 1px solid #dfe3ec; border-radius: 8px; background: white; padding: 0 10px; font-size: 12px; }
 .compactDialer button { background: #fcd703; border-color: #e8c600; }
 .compactDialer button:disabled { opacity: .45; }
 .phonebookPopover { max-width: 480px; margin-bottom: 12px; }
@@ -254,4 +255,6 @@
   .historyCategories button { min-height: 44px; font-size: 11px; gap: 4px; }
   .historyColumnsMenu summary, .historyColumnsMenu label, .historyColumnsMenu > div > button { min-height: 44px; }
   .historyRecording { min-height: 44px; width: 44px; }
+  .compactDialerField { flex: 1; width: auto; }
+  .compactDialerField input { width: 100%; }
 }

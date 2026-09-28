@@ -292,10 +292,6 @@
   line-height: 1.45;
 }
 
-.phoneControl {
-  grid-template-columns: 72px minmax(0, 1fr);
-}
-
 .choice {
   min-height: 32px;
   height: auto;

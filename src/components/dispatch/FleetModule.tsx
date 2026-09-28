@@ -4,6 +4,8 @@ import type { FleetData } from "@/data/dispatch-types";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
 import { VehicleLookupSearch } from "./VehicleLookupSearch";
+import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
+import { storedPhoneForDial } from "@/lib/telephony/phone-entry";
 import { isSlovakPlate, isVin, normalizeVehicleIdentifier, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 
 import { useMemo, useRef, useState, type ReactNode } from "react";
@@ -490,7 +492,7 @@ export function FleetModule({
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <TextField label="Šofér / posádka" value={draft.assignedDriverName} onChange={(value) => setDraft((current) => ({ ...current, assignedDriverName: value }))} />
-                <TextField label="Telefón" value={draft.assignedDriverPhone} onChange={(value) => setDraft((current) => ({ ...current, assignedDriverPhone: value }))} />
+                <label className="block"><span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Telefón</span><PhoneNumberInput value={draft.assignedDriverPhone} onChange={(value) => setDraft((current) => ({ ...current, assignedDriverPhone: value }))} className="h-10 w-full rounded-md border border-zinc-200 px-3 text-sm outline-none ring-yellow-300 transition focus:ring-2" /><PhoneNumberHint value={draft.assignedDriverPhone} className="mt-1 block text-xs font-normal text-zinc-500" /></label>
                 <SelectField
                   label="Stav posádky"
                   value={draft.assignedDriverStatus}
@@ -1062,7 +1064,7 @@ function CompactSelect({ onChange, options, value }: { onChange: (value: string)
   );
 }
 
-function assetToDraft(asset: FleetAsset | undefined, defaultBranchId: string | undefined, mode: FleetMode): FleetDraft {
+export function assetToDraft(asset: FleetAsset | undefined, defaultBranchId: string | undefined, mode: FleetMode): FleetDraft {
   if (!asset) {
     return emptyDraft(defaultBranchId, mode);
   }
@@ -1091,7 +1093,7 @@ function assetToDraft(asset: FleetAsset | undefined, defaultBranchId: string | u
     occupancyCaseId: asset.occupancyCaseId ?? "",
     occupancyNote: asset.occupancyNote ?? "",
     assignedDriverName: asset.assignedDriverName ?? "",
-    assignedDriverPhone: asset.assignedDriverPhone ?? "",
+    assignedDriverPhone: asset.assignedDriverPhone ? storedPhoneForDial(asset.assignedDriverPhone) : "",
     assignedDriverStatus: asset.assignedDriverStatus ?? "",
     towCategory: asset.towCategory ?? "",
     capabilities: asset.capabilities ?? [],

@@ -14,6 +14,7 @@
 
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { normalizeEditablePhone, storedPhoneForDial } from "@/lib/telephony/phone-entry";
 import type {
   RingGroupDoc,
   RingGroupInput,
@@ -82,7 +83,7 @@ export function groupDraftsFromDocument(groups: readonly RingGroupDoc[]): GroupD
         id: member.id,
         memberKind: member.memberKind,
         profileId: member.profileId,
-        externalNumber: member.externalNumber ?? "",
+        externalNumber: member.externalNumber ? storedPhoneForDial(member.externalNumber) : "",
         ...(member.ownerProfileId !== undefined ? { ownerProfileId: member.ownerProfileId } : {}),
         ringSecs: member.ringSecs === null ? "" : String(member.ringSecs),
       })),
@@ -243,9 +244,11 @@ export function validateRingGroupDrafts(groups: readonly GroupDraft[], context: 
         continue;
       }
 
-      const normalized = normalizeE164(member.externalNumber);
+      let normalized: string | null;
+      try { normalized = normalizeEditablePhone(member.externalNumber); }
+      catch { normalized = null; }
       if (!normalized) {
-        issues.push(issue(member.key, "number_invalid", "Externé číslo nie je platné (formát E.164, napr. +421900123456)."));
+        issues.push(issue(member.key, "number_invalid", "Externé číslo nie je platné. Pre zahraničie použi + alebo 00."));
         continue;
       }
       if (!isDestinationAllowed(normalized, context.destinationAllowlist)) {

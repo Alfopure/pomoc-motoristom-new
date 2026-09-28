@@ -137,14 +137,14 @@ describe("telephony directory", () => {
       rpc: vi.fn(),
     });
 
-    const result = await createTelephonyFavorite(actor, { name: "  Nový   kontakt ", phone: "+421 900 555 666" });
+    const result = await createTelephonyFavorite(actor, { name: "  Nový   kontakt ", phone: "0900 555 666" });
 
     expect(contactInsertQuery.calls).toContainEqual({
       method: "insert",
       args: [{
         organization_id: actor.organizationId,
         name: "Nový kontakt",
-        phone: "+421 900 555 666",
+        phone: "+421900555666",
         email: null,
         role: "client",
         notes: "Ručne pridaný z telefónneho zoznamu",
@@ -155,6 +155,11 @@ describe("telephony directory", () => {
       args: [{ organization_id: actor.organizationId, profile_id: actor.profileId, contact_id: contact.id }],
     });
     expect(result).toEqual({ contact: { ...createdContact, isFavorite: true }, created: true });
+  });
+
+  it("rejects incomplete Slovak numbers instead of saving them as extensions", async () => {
+    await expect(createTelephonyFavorite(actor, { name: "Nedokončené", phone: "0905 123" })).rejects.toMatchObject({ status: 400 });
+    expect(adminMock).not.toHaveBeenCalled();
   });
 
   it("rejects malformed contact identifiers before accessing the database", async () => {
