@@ -22,7 +22,7 @@ describe("case form validation", () => {
     });
 
     expect(errors).toEqual({
-      contactPhone: "Telefón musí obsahovať 9 až 15 číslic vrátane predvoľby.",
+      contactPhone: "Zadajte platné telefónne číslo; zahraničné začnite + alebo 00.",
       contactEmail: "Email nemá správny formát.",
       vin: "VIN musí mať 17 znakov a nesmie obsahovať I, O ani Q.",
       productionYear: "Rok výroby musí byť medzi 1950 a budúcim rokom.",

@@ -77,6 +77,22 @@ describe("directory draft validation", () => {
     expect(parseDirectoryDraft({ name: "Ján", email: "jan@example.test" }, "contact")).toMatchObject({ phone: "", email: "jan@example.test" });
   });
 
+  it("stores complete phone numbers in international form while retaining PBX extensions", () => {
+    expect(parseDirectoryDraft({ name: "CZ partner", phone: "00420 777 123 456" }, "company").phone).toBe("+420777123456");
+    expect(parseDirectoryDraft({ name: "Slovak partner", phone: "0905 123 456" }, "company").phone).toBe("+421905123456");
+    expect(parseDirectoryDraft({ name: "PBX", phone: "1234" }, "company").phone).toBe("1234");
+    expect(() => parseDirectoryDraft({ name: "Bad", phone: "+420" }, "company")).toThrow(expect.objectContaining({ status: 400 }));
+    expect(() => parseDirectoryDraft({ name: "Incomplete", phone: "0905 123" }, "company")).toThrow(expect.objectContaining({ status: 400 }));
+    expect(() => parseDirectoryDraft({ name: "Ambiguous", phone: "420777123456" }, "company")).toThrow(expect.objectContaining({ status: 400 }));
+  });
+
+  it("normalizes a stored legacy number on unrelated updates but rejects manually re-entering it", () => {
+    const current: DirectoryEntry = { ...emptyDirectoryDraft("company"), id: COMPANY, updatedAt: OLD_TIME, name: "Old company", phone: "420777123456" };
+    expect(parseDirectoryDraft({ name: "New company" }, "company", current).phone).toBe("+420777123456");
+    expect(() => parseDirectoryDraft({ name: "New company", phone: "420777123456" }, "company", current))
+      .toThrow(expect.objectContaining({ status: 400 }));
+  });
+
   it("keeps historical contacts and operational branches from being deactivated", () => {
     expect(() => parseDirectoryDraft({ name: "Ján" }, "contact")).toThrow(expect.objectContaining({ status: 400 }));
     expect(() => parseDirectoryDraft({ name: "Ján", phone: "101", active: false }, "contact")).toThrow(expect.objectContaining({ status: 400 }));
@@ -153,7 +169,7 @@ describe("directory authorization and tenant boundaries", () => {
 describe("directory persistence and concurrency", () => {
   it.each(["manager", "admin"] as const)("saves a real shared contact as %s", async role => {
     const entry = await saveDirectoryEntry({ ...actor, role }, "contact", { name: "Ján Novák", phone: "0900 111 222", role: "partner" });
-    expect(fake.db.rows("motorist_contacts")).toEqual([expect.objectContaining({ id: entry.id, organization_id: ORG, name: "Ján Novák", phone: "0900 111 222", role: "partner" })]);
+    expect(fake.db.rows("motorist_contacts")).toEqual([expect.objectContaining({ id: entry.id, organization_id: ORG, name: "Ján Novák", phone: "+421900111222", role: "partner" })]);
     expect(fake.db.rows("motorist_audit_log")).toEqual([expect.objectContaining({ entity_id: entry.id, organization_id: ORG, actor_profile_id: actor.profileId, action: "directory.create" })]);
   });
 
@@ -308,5 +324,14 @@ describe("legacy partner forms preserve directory metadata", () => {
     if (operation === "reactivate") await createPartnerDirectoryEntry({ kind: "company", name: "Test company", note: "New note" });
     else await updatePartnerDirectoryEntry(COMPANY, { note: "New note" });
     expect(fake.db.rows("motorist_partner_directory")[0].metadata).toEqual({ ...metadata, note: "New note" });
+  });
+
+  it("canonicalizes legacy partner phone updates before saving", async () => {
+    fake.db.seed("motorist_organizations", [{ id: ORG, slug: "pomoc-motoristom", active: true }]);
+    fake.db.seed("motorist_partner_directory", [company()]);
+    await updatePartnerDirectoryEntry(COMPANY, { phone: "0049 151 1234 5678" });
+    expect(fake.db.rows("motorist_partner_directory")[0].phone).toBe("+4915112345678");
+    await expect(updatePartnerDirectoryEntry(COMPANY, { phone: "invalid" })).rejects.toMatchObject({ status: 400 });
+    expect(fake.db.rows("motorist_partner_directory")[0].phone).toBe("+4915112345678");
   });
 });

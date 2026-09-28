@@ -13,6 +13,7 @@
 
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { normalizeEditablePhone, storedPhoneForDial } from "@/lib/telephony/phone-entry";
 import type {
   IvrMenuDoc,
   LineDoc,
@@ -74,7 +75,7 @@ export function planDraftsFromDocument(plans: readonly RingPlanDoc[]): PlanDraft
     id: plan.id,
     name: plan.name,
     fallbackKind: plan.fallbackKind,
-    fallbackNumber: plan.fallbackNumber ?? "",
+    fallbackNumber: plan.fallbackNumber ? storedPhoneForDial(plan.fallbackNumber) : "",
     active: plan.active,
     steps: [...plan.steps]
       .sort((left, right) => left.stepIndex - right.stepIndex)
@@ -210,9 +211,11 @@ export function validateRingPlanDrafts(plans: readonly PlanDraft[], context: Pla
     names.add(nameKey);
 
     if (plan.fallbackKind === "external_number") {
-      const normalized = normalizeE164(plan.fallbackNumber);
+      let normalized: string | null;
+      try { normalized = normalizeEditablePhone(plan.fallbackNumber); }
+      catch { normalized = null; }
       if (!normalized) {
-        issues.push(issue(plan.key, "fallback_number_invalid", "Presmerovanie na číslo potrebuje platné číslo v tvare E.164."));
+        issues.push(issue(plan.key, "fallback_number_invalid", "Zadaj platné číslo presmerovania. Pre zahraničie použi + alebo 00."));
       } else if (!isDestinationAllowed(normalized, context.destinationAllowlist)) {
         issues.push(issue(plan.key, "fallback_number_not_allowed", `Číslo ${normalized} nie je v povolených cieľoch organizácie.`));
       }

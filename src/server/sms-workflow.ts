@@ -16,7 +16,7 @@ import { createTelnyxSmsTransport } from "@/lib/integrations/telnyx/sms-client";
 import { getTelnyxConfig } from "@/server/telephony/telnyx/env";
 import { buildLocationShareUrl } from "@/server/location-share-links";
 import { signSmsDraft, verifySmsDraft } from "@/server/sms-draft-proof";
-import { normalizeSmsRecipient, SmsWorkflowError } from "./sms-errors";
+import { normalizeSmsEditableRecipient, normalizeSmsRecipient, SmsWorkflowError } from "./sms-errors";
 import { smsSender } from "./sms-channel";
 import { loadSmsReplyContext } from "./sms-inbox";
 export { normalizeSmsRecipient, SmsWorkflowError } from "./sms-errors";
@@ -74,7 +74,7 @@ export async function prepareSms(input: SmsPrepareInput & SmsActor & { publicBas
   const reply = input.replyToMessageId ? await loadSmsReplyContext(admin, input.organizationId, input.replyToMessageId) : null;
   if (reply && (input.template !== "custom" || input.taskId)) throw new SmsWorkflowError("Odpoveď pripravte ako vlastnú SMS v konverzácii.", 400);
   if (reply && ((input.caseId && input.caseId !== reply.row.case_id)
-    || (input.toNumber && normalizeSmsRecipient(input.toNumber) !== reply.toNumber))) {
+    || (input.toNumber && normalizeSmsEditableRecipient(input.toNumber) !== reply.toNumber))) {
     throw new SmsWorkflowError("Príjemca alebo prípad nezodpovedá prijatej SMS.", 409);
   }
   const caseId = reply ? reply.row.case_id : input.caseId?.trim() || null;
@@ -88,13 +88,15 @@ export async function prepareSms(input: SmsPrepareInput & SmsActor & { publicBas
     throw new SmsWorkflowError("Potvrďte, že technik skutočne vyrazil. Výpočet trasy nestačí.", 400);
   }
   const config = getTelnyxConfig();
-  const toNumber = reply?.toNumber ?? context?.toNumber ?? normalizeSmsRecipient(input.toNumber);
+  const toNumber = reply?.toNumber ?? context?.toNumber ?? normalizeSmsEditableRecipient(input.toNumber);
   const channel = smsSender(input.organizationId, toNumber);
   const locationToken = input.template === "location_request" ? createLocationShareToken().token : null;
   const templateContext = {
     caseNumber: context?.caseRow.case_number ?? "",
     brandName: profile.data?.brand_name || "Pomoc motoristom",
-    callbackNumber: input.template === "custom" ? undefined : normalizeSmsRecipient(input.callbackNumber || profile.data?.primary_phone, "Kontaktný telefón"),
+    callbackNumber: input.template === "custom" ? undefined : input.callbackNumber
+      ? normalizeSmsEditableRecipient(input.callbackNumber, "Kontaktný telefón")
+      : normalizeSmsRecipient(profile.data?.primary_phone, "Kontaktný telefón"),
     etaMinutes: input.etaMinutes,
     towAddress: input.towAddress?.trim(),
     link: locationToken ? buildLocationShareUrl(input.publicBaseUrl, locationToken) : undefined,

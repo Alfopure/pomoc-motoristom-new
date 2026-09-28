@@ -173,6 +173,8 @@ describe("startOutboundCall", () => {
     const h = createTelephonyHarness();
     expect(await fail(startOutboundCall(actionDeps(h), o1, { to: "+49 151 123456" }))).toMatchObject({ status: 403, code: "destination_not_allowed" });
     expect(await fail(startOutboundCall(actionDeps(h), o1, { to: "abc" }))).toMatchObject({ status: 400, code: "invalid_number" });
+    expect(await fail(startOutboundCall(actionDeps(h), o1, { to: "421905123456" }))).toMatchObject({ status: 400, code: "invalid_number" });
+    expect(await fail(startOutboundCall(actionDeps(h), o1, { to: "420777123456" }))).toMatchObject({ status: 400, code: "invalid_number" });
     expect(h.telnyx.of("dial")).toHaveLength(0);
   });
 
@@ -317,6 +319,7 @@ describe("transfers", () => {
     expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { profileId: PROFILES.o3 })))).toMatchObject({ status: 409, code: "target_unavailable" });
     expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { number: "+49 151 12345678" })))).toMatchObject({ status: 403 });
     expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { number: "+49151" })))).toMatchObject({ status: 400 });
+    expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { number: "420777123456" })))).toMatchObject({ status: 400, code: "invalid_number" });
     expect(await fail(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, {})))).toMatchObject({ status: 400 });
     await expect(completeAnnouncedAction(h, blindTransfer(actionDeps(h), o1, call.sessionId, { number: "0900 000 000" }))).resolves.toMatchObject({ state: "ringing" });
     expect(h.telnyx.of("transfer")[0].params.to).toBe(NUMBERS.external);

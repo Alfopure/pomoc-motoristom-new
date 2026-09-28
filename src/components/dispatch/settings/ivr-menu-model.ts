@@ -32,6 +32,7 @@ import type {
   ValidationIssue,
 } from "@/server/telephony/config-service";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { normalizeEditablePhone, storedPhoneForDial } from "@/lib/telephony/phone-entry";
 
 import { nextDraftKey } from "./ring-groups-model";
 
@@ -94,7 +95,7 @@ function optionDraft(option: IvrOptionDoc): IvrOptionDraft {
     digit: option.digit,
     action: option.action,
     targetRingPlanId: option.targetRingPlanId,
-    targetNumber: option.targetNumber ?? "",
+    targetNumber: option.targetNumber ? storedPhoneForDial(option.targetNumber) : "",
     label: option.label,
     promptMediaUrl: option.promptMediaUrl ?? "",
     ttsText: option.ttsText ?? "",
@@ -323,13 +324,18 @@ export function validateIvrMenuDrafts(menus: readonly IvrMenuDraft[], context: I
         if (!option.targetRingPlanId) issues.push(issue(option.key, "plan_required", "Vyber plán zvonenia, na ktorý voľba smeruje."));
         else if (!planIds.has(option.targetRingPlanId)) issues.push(issue(option.key, "plan_foreign", "Plán zvonenia nepatrí do tejto organizácie."));
       }
-      if (option.action === "external_number" && !normalizeE164(option.targetNumber)) {
-        issues.push(issue(option.key, "number_invalid", "Presmerovanie na číslo potrebuje platné číslo v tvare E.164 (napr. +421900123456)."));
+      if (option.action === "external_number" && !editableNumber(option.targetNumber)) {
+        issues.push(issue(option.key, "number_invalid", "Zadaj platné číslo. Pre zahraničie použi + alebo 00."));
       }
     }
   }
 
   return issues;
+}
+
+function editableNumber(value: string) {
+  try { return normalizeEditablePhone(value); }
+  catch { return null; }
 }
 
 // ---------------------------------------------------------------------------

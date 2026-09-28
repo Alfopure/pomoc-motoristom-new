@@ -6,12 +6,14 @@ import { Coffee, Loader2, Pause, UserRoundCheck, X } from "lucide-react";
 import type { Operator } from "@/domain/types";
 import { DEFAULT_OPERATOR_SETTINGS, type PauseRoutingMode } from "@/lib/telephony/operator-settings";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
+import { normalizeEditablePhone, storedPhoneForDial } from "@/lib/telephony/phone-entry";
 import type { TelephonyOperatorPresence } from "@/lib/telephony/presence";
 
 import { activePauseReasons } from "./my-phone-model";
 import { ConfigRequestError, loadRoutingConfig, saveOperatorSettings } from "./settings/config-client";
 import { findOperator } from "./settings/operators-model";
 import type { PhonePauseReason } from "./useTelephonyConsole";
+import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
 
 export type PauseRoutingSelection = {
   pauseReasonId?: string;
@@ -78,8 +80,8 @@ export function PauseRoutingDialog({
         const operator = findOperator(response.document.operators, profileId);
         const settings = operator?.settings ?? DEFAULT_OPERATOR_SETTINGS;
         setMode(settings.pauseRoutingMode === "operator" ? "operator" : "none");
-        setDefaultMobile(settings.defaultMobileNumber ?? "");
-        setExternalNumber(settings.pauseForwardNumber ?? "");
+        setDefaultMobile(settings.defaultMobileNumber ? storedPhoneForDial(settings.defaultMobileNumber) : "");
+        setExternalNumber(settings.pauseForwardNumber ? storedPhoneForDial(settings.pauseForwardNumber) : "");
         setForwardProfileId(settings.pauseForwardProfileId ?? "");
         if (Array.isArray(response.document.pauseReasons)) {
           setFreshReasons(activePauseReasons(response.document.pauseReasons).map((reason) => ({ id: reason.id, code: reason.code, label: reason.label, maxMinutes: reason.maxMinutes })));
@@ -109,11 +111,13 @@ export function PauseRoutingDialog({
     [operators, profileId],
   );
   const selectedPresence = presences.find((presence) => presence.profileId === forwardProfileId);
+  const normalizedDefaultMobile = editablePhone(defaultMobile);
+  const normalizedExternalNumber = editablePhone(externalNumber);
   const invalid =
     loading ||
     !profileId ||
-    (mode === "default_mobile" && !defaultMobile.trim()) ||
-    (mode === "external_number" && !externalNumber.trim()) ||
+    (mode === "default_mobile" && !normalizedDefaultMobile) ||
+    (mode === "external_number" && !normalizedExternalNumber) ||
     (mode === "operator" && !forwardProfileId);
 
   async function submit() {
@@ -122,10 +126,10 @@ export function PauseRoutingDialog({
     setError(null);
     try {
       await saveOperatorSettings(profileId, {
-        defaultMobileNumber: defaultMobile.trim() || null,
+        defaultMobileNumber: normalizedDefaultMobile ?? (defaultMobile.trim() || null),
         pauseRoutingMode: mode,
         pauseForwardProfileId: mode === "operator" ? forwardProfileId : null,
-        pauseForwardNumber: mode === "external_number" ? externalNumber.trim() : null,
+        pauseForwardNumber: mode === "external_number" ? normalizedExternalNumber : null,
       });
       const activated = await onActivate({ ...(pauseReasonId ? { pauseReasonId } : {}) });
       if (activated) onClose();
@@ -215,7 +219,8 @@ export function PauseRoutingDialog({
               {mode === "default_mobile" && (
                 <label className="grid gap-1.5 text-xs font-semibold text-zinc-700">
                   Moje predvolené mobilné číslo
-                  <input type="tel" inputMode="tel" autoComplete="tel" value={defaultMobile} onChange={(event) => setDefaultMobile(event.target.value)} placeholder="+421 900 000 000" className="h-11 rounded-md border border-zinc-300 px-3 text-base outline-none focus:ring-2 focus:ring-yellow-300" />
+                  <PhoneNumberInput value={defaultMobile} onChange={setDefaultMobile} className="h-11 rounded-md border border-zinc-300 px-3 text-base outline-none focus:ring-2 focus:ring-yellow-300" />
+                  <PhoneNumberHint value={defaultMobile} className="font-normal text-zinc-600" />
                   <span className="font-normal text-zinc-500">Uloží sa aj do Nastavenia → Môj telefón pre ďalšiu pauzu.</span>
                 </label>
               )}
@@ -223,7 +228,8 @@ export function PauseRoutingDialog({
               {mode === "external_number" && (
                 <label className="grid gap-1.5 text-xs font-semibold text-zinc-700">
                   Externý telefón alebo mobil
-                  <input type="tel" inputMode="tel" value={externalNumber} onChange={(event) => setExternalNumber(event.target.value)} placeholder="+421 900 000 000" className="h-11 rounded-md border border-zinc-300 px-3 text-base outline-none focus:ring-2 focus:ring-yellow-300" />
+                  <PhoneNumberInput value={externalNumber} onChange={setExternalNumber} className="h-11 rounded-md border border-zinc-300 px-3 text-base outline-none focus:ring-2 focus:ring-yellow-300" />
+                  <PhoneNumberHint value={externalNumber} className="font-normal text-zinc-600" />
                   <span className="font-normal text-zinc-500">Číslo musí byť medzi povolenými cieľmi organizácie.</span>
                 </label>
               )}
@@ -259,6 +265,11 @@ export function PauseRoutingDialog({
       </section>
     </div>
   );
+}
+
+function editablePhone(value: string) {
+  try { return normalizeEditablePhone(value); }
+  catch { return null; }
 }
 
 function presenceStateShort(presence: TelephonyOperatorPresence): string {

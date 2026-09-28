@@ -5,6 +5,8 @@ import { taskWorkspaceSystemEnabled } from "./task-system-gate";
 import { runCompatibleCaseTaskAction } from "./legacy-task-adapter";
 import { CaseWritePlan, commitAtomicCaseSave, caseMutationIdentity, readCaseMutationResult } from "./case-atomic-save";
 import { matchFleetIdentities } from "@/lib/fleet-pairing";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
+import { sameE164 } from "@/lib/telephony/normalize-e164";
 
 import { lookupSnapshotForSave } from "@/server/vehicle-lookup/snapshot";
 
@@ -824,8 +826,14 @@ export async function createBranch(input: CreateBranchInput) {
   return branch;
 }
 
+function normalizePartnerPhone(value: unknown): string | null {
+  try { return normalizeEditablePhone(value ?? "", { allowExtension: true }); }
+  catch { throw new MutationError("Zadajte platný telefón alebo internú klapku.", 400); }
+}
+
 export async function createPartnerDirectoryEntry(input: PartnerDirectoryInput, authorize?: OrganizationAuthorizer) {
   validatePartnerDirectoryInput(input);
+  const phone = normalizePartnerPhone(input.phone);
 
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
@@ -847,7 +855,7 @@ export async function createPartnerDirectoryEntry(input: PartnerDirectoryInput, 
         .from("motorist_partner_directory")
         .update({
           ico: cleanString(input.ico),
-          phone: cleanString(input.phone),
+          phone,
           email: cleanString(input.email),
           active: input.active ?? true,
           metadata: { ...objectJson(existingResult.data.metadata), note: cleanString(input.note) } as Json,
@@ -875,7 +883,7 @@ export async function createPartnerDirectoryEntry(input: PartnerDirectoryInput, 
         kind: input.kind,
         name: input.name.trim(),
         ico: cleanString(input.ico),
-        phone: cleanString(input.phone),
+        phone,
         email: cleanString(input.email),
         active: input.active ?? true,
         metadata: { note: cleanString(input.note) },
@@ -897,6 +905,7 @@ export async function updatePartnerDirectoryEntry(id: string, input: Partial<Par
     throw new MutationError("Chýba položka adresára.", 400);
   }
   validatePartnerDirectoryInput(input, false);
+  const phone = input.phone !== undefined ? normalizePartnerPhone(input.phone) : undefined;
 
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
@@ -910,7 +919,7 @@ export async function updatePartnerDirectoryEntry(id: string, input: Partial<Par
         ...(input.kind ? { kind: input.kind } : {}),
         ...(input.name !== undefined ? { name: input.name.trim() } : {}),
         ...(input.ico !== undefined ? { ico: cleanString(input.ico) } : {}),
-        ...(input.phone !== undefined ? { phone: cleanString(input.phone) } : {}),
+        ...(input.phone !== undefined ? { phone } : {}),
         ...(input.email !== undefined ? { email: cleanString(input.email) } : {}),
         ...(input.active !== undefined ? { active: input.active } : {}),
         ...(input.note !== undefined ? { metadata: { ...objectJson(previousEntry.metadata), note: cleanString(input.note) } as Json } : {}),
@@ -1161,10 +1170,16 @@ export async function createCaseAttachmentSignedUrl(caseId: string, attachmentId
   };
 }
 
+function normalizeFleetDriverPhone(value: unknown): string | null {
+  try { return normalizeEditablePhone(value); }
+  catch { throw new MutationError("Zadajte platné telefónne číslo posádky.", 400); }
+}
+
 export async function createFleetAsset(input: CreateFleetAssetInput) {
   if (!nonEmpty(input.label) || !nonEmpty(input.branchId)) {
     throw new MutationError("Technika potrebuje názov a pobočku.", 400);
   }
+  if (input.assignedDriverPhone !== undefined) input = { ...input, assignedDriverPhone: normalizeFleetDriverPhone(input.assignedDriverPhone) ?? "" };
 
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
@@ -1202,6 +1217,7 @@ export async function updateFleetAsset(id: string, input: UpdateFleetAssetInput)
   if (!nonEmpty(id)) {
     throw new MutationError("Chýba vozidlo flotily.", 400);
   }
+  if (input.assignedDriverPhone !== undefined) input = { ...input, assignedDriverPhone: normalizeFleetDriverPhone(input.assignedDriverPhone) ?? "" };
 
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
@@ -3077,7 +3093,7 @@ function primaryContactInput(input: CreateCaseInput | UpdateCaseInput) {
 
   return {
     name: primary?.name ?? input.contactName?.trim() ?? "",
-    phone: primary?.phone ?? input.contactPhone?.trim() ?? "",
+    phone: primary?.phone ?? canonicalCasePhone(input.contactPhone) ?? "",
     email: primary?.email ?? input.contactEmail,
   };
 }
@@ -3103,7 +3119,7 @@ async function createCaseContact(
       .insert({
         organization_id: organizationId,
         name,
-        phone: cleanString(contact.phone),
+        phone: canonicalCasePhone(contact.phone),
         email: cleanString(contact.email),
         role: "client",
         notes: cleanString(note),
@@ -3127,7 +3143,7 @@ function contactForUpdate(contact: ContactRow | null, input: UpdateCaseInput) {
 
   return {
     name: input.contactName !== undefined ? input.contactName : contact?.name ?? "",
-    phone: input.contactPhone !== undefined ? input.contactPhone : contact?.phone ?? "",
+    phone: input.contactPhone !== undefined ? canonicalCasePhone(input.contactPhone) ?? "" : contact?.phone ?? "",
     email: input.contactEmail !== undefined ? input.contactEmail : contact?.email ?? undefined,
   };
 }
@@ -3138,7 +3154,7 @@ function upsertCaseContact(plan: CaseWritePlan, contact: ContactRow | null, inpu
   if (!hasMeaningfulContact(next)) return null;
   return plan.write("motorist_contacts", contact?.id ?? null, {
     name: cleanString(next.name) ?? cleanString(next.phone) ?? cleanString(next.email) ?? contact?.name,
-    phone: cleanString(next.phone), email: cleanString(next.email),
+    phone: canonicalCasePhone(next.phone), email: cleanString(next.email),
     ...(!contact ? { role: "client", notes: cleanString(input.customerNote) } : {}),
     ...(input.customerNote !== undefined ? { notes: cleanString(input.customerNote) } : {}),
   }, contact?.updated_at);
@@ -3168,6 +3184,10 @@ function hasMeaningfulVehicleInput(input: CreateCaseInput | UpdateCaseInput) {
       cleanString(input.vehicleMake) ||
       cleanString(input.vehicleModel) ||
       cleanString(input.vehicleCategory) ||
+      cleanString(input.vehicleFuel) ||
+      cleanString(input.vehicleBodyType) ||
+      cleanString(input.vehicleInsurer) ||
+      cleanNumber(input.vehicleSeats) !== null ||
       cleanString(input.vehicleType) ||
       canonicalCaseProblemDescription(input.vehicleIssue, input.incidentDescription) ||
       cleanString(input.vehicleNote) ||
@@ -3202,6 +3222,10 @@ function upsertCaseVehicle(plan: CaseWritePlan, vehicle: VehicleRow | null, inpu
     vehicleMake: input.vehicleMake !== undefined ? input.vehicleMake : vehicle?.make ?? undefined,
     vehicleModel: input.vehicleModel !== undefined ? input.vehicleModel : vehicle?.model ?? undefined,
     vehicleCategory: input.vehicleCategory !== undefined ? input.vehicleCategory : vehicle?.category ?? undefined,
+    vehicleFuel: input.vehicleFuel,
+    vehicleBodyType: input.vehicleBodyType,
+    vehicleSeats: input.vehicleSeats,
+    vehicleInsurer: input.vehicleInsurer,
     vehicleType: input.vehicleType,
     vehicleIssue: input.vehicleIssue !== undefined ? input.vehicleIssue : vehicle?.notes ?? undefined,
     incidentDescription: input.incidentDescription,
@@ -3276,7 +3300,7 @@ function effectiveJobTypesForUpdate(existing: CaseRow, input: UpdateCaseInput): 
 function normalizeCaseContacts(input: CreateCaseInput | UpdateCaseInput) {
   const contacts = (input.contacts ?? []).map(normalizeCaseContact).filter((contact): contact is NormalizedCaseContact => Boolean(contact));
   const fallbackName = cleanString(input.contactName);
-  const fallbackPhone = cleanString(input.contactPhone);
+  const fallbackPhone = canonicalCasePhone(input.contactPhone);
 
   if (fallbackName && fallbackPhone && !contacts.some((contact) => samePhone(contact.phone, fallbackPhone))) {
     contacts.unshift({
@@ -3317,7 +3341,7 @@ type NormalizedCaseContact = {
 };
 
 function normalizeCaseContact(contact: CaseContactInput): NormalizedCaseContact | null {
-  const phone = cleanString(contact.phone);
+  const phone = canonicalCasePhone(contact.phone);
   const firstName = cleanString(contact.firstName);
   const lastName = cleanString(contact.lastName);
   const name = cleanString(contact.name) ?? cleanString([firstName, lastName].filter(Boolean).join(" "));
@@ -3344,7 +3368,14 @@ function normalizeCaseContact(contact: CaseContactInput): NormalizedCaseContact 
 }
 
 function samePhone(left: string, right: string) {
-  return left.replace(/\D/g, "") === right.replace(/\D/g, "");
+  return sameE164(left, right) || left.replace(/\D/g, "") === right.replace(/\D/g, "");
+}
+
+function canonicalCasePhone(value: string | null | undefined) {
+  const raw = cleanString(value);
+  if (!raw) return null;
+  try { return normalizeEditablePhone(raw); }
+  catch { return raw; } // Incomplete draft contacts remain visible for correction.
 }
 
 function customerDetailsPayload(input: CreateCaseInput | UpdateCaseInput): Json {
@@ -3359,7 +3390,7 @@ function customerDetailsPayload(input: CreateCaseInput | UpdateCaseInput): Json 
     ...(input.assistanceServiceName !== undefined ? { assistanceServiceName: cleanString(input.assistanceServiceName) } : {}),
     ...(input.assistanceReference !== undefined ? { assistanceReference: cleanString(input.assistanceReference) } : {}),
     ...(input.partnerDirectoryId !== undefined ? { partnerDirectoryId: cleanString(input.partnerDirectoryId) } : {}),
-    ...(input.alternativeContact !== undefined ? { alternativeContact: cleanString(input.alternativeContact) } : {}),
+    ...(input.alternativeContact !== undefined ? { alternativeContact: canonicalCasePhone(input.alternativeContact) } : {}),
     ...(input.contacts !== undefined ? { contacts } : {}),
     ...(input.customerNote !== undefined ? { note: cleanString(input.customerNote) } : {}),
   };
@@ -3381,6 +3412,10 @@ function vehicleDetailsPayload(input: CreateCaseInput | UpdateCaseInput, options
     ...(input.vehicleType !== undefined ? { vehicleType: input.vehicleType } : {}),
     ...(input.productionYear !== undefined ? { productionYear: cleanNumber(input.productionYear) } : {}),
     ...(input.vehicleColor !== undefined ? { color: cleanString(input.vehicleColor) } : {}),
+    ...(input.vehicleFuel !== undefined ? { fuel: cleanString(input.vehicleFuel) } : {}),
+    ...(input.vehicleBodyType !== undefined ? { bodyType: cleanString(input.vehicleBodyType) } : {}),
+    ...(input.vehicleSeats !== undefined ? { seats: cleanNumber(input.vehicleSeats) } : {}),
+    ...(input.vehicleInsurer !== undefined ? { insurer: cleanString(input.vehicleInsurer) } : {}),
     ...(input.driveType !== undefined ? { driveType: cleanString(input.driveType) } : {}),
     ...(flags !== undefined ? { conditionFlags: flags } : {}),
     ...(input.vehicleNote !== undefined ? { note: cleanString(input.vehicleNote) } : {}),
@@ -3637,7 +3672,7 @@ function caseUpdatePayload(
     ])
       ? { customer_details: mergeJson(existing.customer_details, customerDetailsPayload(input)) }
       : {}),
-    ...(hasAny(input, ["vehicleLookup", "jobTypes", "vehicleType", "productionYear", "vehicleColor", "driveType", "vehicleConditionFlags", "vehicleDriveable", "vehicleNote"])
+    ...(hasAny(input, ["vehicleLookup", "jobTypes", "vehicleType", "productionYear", "vehicleColor", "vehicleFuel", "vehicleBodyType", "vehicleSeats", "vehicleInsurer", "driveType", "vehicleConditionFlags", "vehicleDriveable", "vehicleNote"])
       ? { vehicle_details: mergeJson(existing.vehicle_details, vehicleDetailsPayload(input, { includeJobTypes: "jobTypes" in input })) }
       : {}),
     ...(hasAny(input, ["incidentType", "incidentDescription", "vehicleIssue", "participantsCount", "passengersCount", "damages", "damageAreas", "damageNote"])
@@ -3682,6 +3717,10 @@ function hasVehicleUpdate(input: UpdateCaseInput) {
     "vehicleMake",
     "vehicleModel",
     "vehicleCategory",
+    "vehicleFuel",
+    "vehicleBodyType",
+    "vehicleSeats",
+    "vehicleInsurer",
     "vehicleType",
     "transmission",
     "productionYear",

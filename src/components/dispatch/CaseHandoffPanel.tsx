@@ -5,6 +5,8 @@ import { isHandoffReceipt, handoffEventLabels, handoffIsActive, handoffLabels, t
 import { HandoffSummary } from "./HandoffSummary";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 import { readHandoff, useHandoffRead } from "./use-handoff-read";
+import { previewEditablePhone } from "@/lib/telephony/phone-entry";
+import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
 import "./case-handoff.css";
 
 export function CaseHandoffPanel(props: { caseId: string; caseNumber: string; active?: boolean }) {
@@ -64,17 +66,18 @@ const [smsIntent, setSmsIntent] = useState<{ phone: string; message: string } | 
   }
   const current = context?.handoffs.find(handoffIsActive);
   const disabled = busy || !!pending;
+  const validRecipientPhone = Boolean(previewEditablePhone(phone));
   return <section className="case-handoff-panel" ref={sectionRef} hidden={!active} aria-label="Externé odovzdanie prípadu">
     <button type="button" className="handoff-panel-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><Link2 size={17} /><span><strong>Odovzdať prípad</strong><small>Odkaz pre stredisko alebo pristavovača bez plného účtu</small></span><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>
     <div hidden={!expanded} className="handoff-panel-body">
       <p className="handoff-access-note"><ShieldCheck size={16} />Držiteľ odkazu uvidí iba potvrdené údaje nižšie. Prijatie ani dokončenie úkonu samo neuzavrie interný prípad.</p>
       {context && <>
         <div className="handoff-sender-grid"><div className="handoff-sender-form">
-          {!current && <><label>Stredisko alebo kolega<input maxLength={160} value={name} disabled={disabled} onChange={event => setName(event.target.value)} placeholder="Napr. Peter · Bratislava" /></label><label>Telefón príjemcu odkazu<input type="tel" maxLength={30} value={phone} disabled={disabled} onChange={event => setPhone(event.target.value)} placeholder="+421…" /></label></>}
+          {!current && <><label>Stredisko alebo kolega<input maxLength={160} value={name} disabled={disabled} onChange={event => setName(event.target.value)} placeholder="Napr. Peter · Bratislava" /></label><label>Telefón príjemcu odkazu<PhoneNumberInput maxLength={30} value={phone} disabled={disabled} onChange={setPhone} /><PhoneNumberHint value={phone} className="text-xs font-normal text-slate-500" /></label></>}
           <label>Pokyny pre kolegu<textarea aria-label="Pokyny pre kolegu" maxLength={2000} rows={3} value={instructions} disabled={disabled} onChange={event => { detailsDirty.current = true; setInstructions(event.target.value); }} placeholder="Iba pokyny určené príjemcovi odkazu" /></label>
           <label>Dohodnutý čas<input type="datetime-local" value={scheduled} disabled={disabled} onChange={event => { detailsDirty.current = true; setScheduled(event.target.value); }} /></label>
           <label>Platnosť nového alebo obnoveného odkazu<select value={hours} disabled={disabled} onChange={event => setHours(Number(event.target.value))}><option value={12}>12 hodín</option><option value={24}>24 hodín</option><option value={48}>48 hodín</option><option value={72}>72 hodín</option></select></label>
-          {!current ? <button type="button" className="handoff-primary" disabled={disabled || !name.trim() || !phone.trim()} onClick={() => void command("issue")}><Send size={15} />Vytvoriť odkaz pre kolegu</button> : <button type="button" disabled={disabled} onClick={() => void command("publish", current)}>Zverejniť tento výber údajov</button>}
+          {!current ? <button type="button" className="handoff-primary" disabled={disabled || !name.trim() || !validRecipientPhone} onClick={() => void command("issue")}><Send size={15} />Vytvoriť odkaz pre kolegu</button> : <button type="button" disabled={disabled} onClick={() => void command("publish", current)}>Zverejniť tento výber údajov</button>}
         </div><div className="handoff-share-preview"><h3>Príjemca uvidí</h3><strong>{context.preview.caseNumber} · {context.preview.action}</strong><HandoffSummary value={{ ...context.preview, instructions, scheduledAt: scheduled || null }} /></div></div>
         {context.handoffs.map(grant => <article key={grant.id} className="handoff-grant"><div className="handoff-grant-heading"><strong>{grant.recipientName}</strong><span className="handoff-status" data-status={grant.status}>{handoffLabels[grant.status]}</span></div><p>{grant.recipientPhone} · platnosť do {new Date(grant.expiresAt).toLocaleString("sk-SK")}</p><p>{grant.openedAt ? `Karta otvorená ${new Date(grant.openedAt).toLocaleString("sk-SK")}` : "Karta zatiaľ nebola otvorená"} · verzia údajov {grant.publishedVersion}</p>
           {grant.published && <details><summary>Zverejnené údaje tohto odovzdania</summary><HandoffSummary value={grant.published} /></details>}

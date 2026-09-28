@@ -1,5 +1,7 @@
 "use client";
 
+import { PhoneNumberHint, PhoneNumberInput } from "../PhoneNumberInput";
+
 import { useMemo, useState } from "react";
 import { KeyRound, Loader2, PhoneOff, Save, Users } from "lucide-react";
 
@@ -242,15 +244,13 @@ export function OperatorsTelephonyPanel({
                 </SettingsField>
 
                 <SettingsField label="Predvolený mobil" hint="Ponúkne sa pri pauze ako rýchle presmerovanie hovorov.">
-                  <input
+                  <PhoneNumberInput
                     className={settingsInputClass}
                     disabled={!canEdit || busy}
-                    type="tel"
-                    inputMode="tel"
                     value={draft.defaultMobileNumber ?? ""}
-                    placeholder="+421 900 000 000"
-                    onChange={(event) => setDrafts((current) => updateOperator(current, draft.profileId, { defaultMobileNumber: event.target.value || null }))}
+                    onChange={(value) => setDrafts((current) => updateOperator(current, draft.profileId, { defaultMobileNumber: value || null }))}
                   />
+                  <PhoneNumberHint value={draft.defaultMobileNumber ?? ""} />
                 </SettingsField>
 
                 <SettingsField label="Hlasitosť zvonenia (%)" hint="Uloží sa do profilu; telefón ju zatiaľ nepoužíva.">

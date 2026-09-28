@@ -10,6 +10,7 @@ import { casePriorityLabels, caseStatusLabels, caseStatusTone, priorityTone } fr
 import type { DispatchMapModel } from "@/lib/map-adapter";
 import type { PhoneBarCall } from "@/lib/telephony/active-calls-model";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
+import { storedPhoneForDial } from "@/lib/telephony/phone-entry";
 import { CaseEditorHeader, CaseLocationButton, type CaseHeaderControls } from "./CaseEditorHeader";
 import { CaseDetail } from "./CaseDetail";
 import type { SaveCaseDraft } from "./NewCaseDrawer";
@@ -109,7 +110,7 @@ export function CaseCockpitPanel({
 
     setIsDialingFromHeader(true);
     try {
-      await onDial(contactPhone, caseItem.id);
+      await onDial(storedPhoneForDial(contactPhone), caseItem.id);
     } catch {
       // The shared telephony controller presents the provider error in the
       // header status menu. Avoid an unhandled rejection in this compact action.

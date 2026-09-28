@@ -4,7 +4,8 @@ import type { CaseDetailData } from "@/data/case-detail";
 import { VehicleLookupControl } from "./VehicleLookupControl";
 import { CaseAccessBoundary, CaseEditorActivity, useCaseEditorPresence, useCaseCollaboration } from "./CaseCollaborationProvider";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
-import { resolveInternalVehicle, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
+import { resolveInternalVehicle, vehicleFieldsMatchingLookup, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
+import { storedPhoneForDial } from "@/lib/telephony/phone-entry";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -126,7 +127,6 @@ import {
   SelectField,
   TextareaField,
   TextField,
-  splitContactPhone,
 } from "./case-form-fields";
 import { GooglePlaceAutocomplete } from "./GooglePlaceAutocomplete";
 import { LocationPicker } from "./LocationPicker";
@@ -560,7 +560,7 @@ export function CaseDetail({
 
       setIsRunningAction(true);
       try {
-        await onDial(contactPhone, caseItem.id);
+        await onDial(storedPhoneForDial(contactPhone), caseItem.id);
         setNotice(`Volanie na ${contactPhone} bolo spustené.`);
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "Hovor sa nepodarilo spustiť.");
@@ -945,6 +945,9 @@ export function CaseDetail({
               <InfoItem label="VIN" value={caseItem.vehicle.vin ?? ""} invalid={Boolean(readOnlyFieldErrors.vin)} warningMessage={readOnlyFieldErrors.vin} />
               <InfoItem label="Značka / model" value={[caseItem.vehicle.make, caseItem.vehicle.model].filter(Boolean).join(" ")} />
               <InfoItem label="Technické údaje" value={[caseItem.vehicle.productionYear, caseItem.vehicle.color, caseItem.vehicle.vehicleType ? clientVehicleTypeLabels[caseItem.vehicle.vehicleType] : undefined].filter(Boolean).join(" · ")} />
+              <InfoItem label="Palivo / karoséria" value={[caseItem.vehicle.fuel, caseItem.vehicle.bodyType].filter(Boolean).join(" · ")} />
+              <InfoItem label="Počet miest" value={caseItem.vehicle.seats ? String(caseItem.vehicle.seats) : ""} />
+              <InfoItem label="Poisťovňa PZP" value={caseItem.vehicle.insurer ?? ""} />
               <InfoItem label="Prevodovka / pohon" value={[caseItem.vehicle.transmission ? transmissionLabels[caseItem.vehicle.transmission] : undefined, caseItem.vehicle.driveType].filter(Boolean).join(" · ")} />
               <InfoItem label="Opis problému / situácie" value={caseItem.vehicle.issue || caseItem.incidentDetails.description || ""} detail={caseItem.vehicle.note ?? labelList(caseItem.vehicle.conditionFlags, vehicleConditionFlagLabels)} required invalid={Boolean(readOnlyFieldErrors.vehicleIssue)} />
               <InfoItem label="Pojazdnosť" value={caseItem.vehicle.conditionFlags.includes("driveable") ? "Pojazdné" : caseItem.vehicle.conditionFlags.includes("immobile") ? "Nepojazdné" : ""} required invalid={!driveabilitySelected} />
@@ -1303,6 +1306,10 @@ function EditCaseForm({
   const [vehicleMake, setVehicleMake] = useState(caseItem.vehicle.make);
   const [vehicleModel, setVehicleModel] = useState(caseItem.vehicle.model);
   const [vehicleCategory, setVehicleCategory] = useState(caseItem.vehicle.category);
+  const [vehicleFuel, setVehicleFuel] = useState(caseItem.vehicle.fuel ?? "");
+  const [vehicleBodyType, setVehicleBodyType] = useState(caseItem.vehicle.bodyType ?? "");
+  const [vehicleSeats, setVehicleSeats] = useState(caseItem.vehicle.seats ? String(caseItem.vehicle.seats) : "");
+  const [vehicleInsurer, setVehicleInsurer] = useState(caseItem.vehicle.insurer ?? "");
   const [vehicleType, setVehicleType] = useState<ClientVehicleType | "">(caseItem.vehicle.vehicleType ?? "");
   const [transmission, setTransmission] = useState<VehicleTransmission | "">(caseItem.vehicle.transmission ?? "");
   const [transmissionNote, setTransmissionNote] = useState("");
@@ -1414,8 +1421,6 @@ function EditCaseForm({
       lastName: contact.lastName,
       name: contactDisplayName(contact),
       phone: fullPhone(contact),
-      phonePrefix: contact.phonePrefix,
-      phoneNational: contact.phoneNational,
       email: contact.email,
       role: contact.role,
       note: contact.note,
@@ -1485,6 +1490,10 @@ function EditCaseForm({
     vehicleMake,
     vehicleModel,
     vehicleCategory,
+    vehicleFuel,
+    vehicleBodyType,
+    vehicleSeats: toOptionalNumber(vehicleSeats),
+    vehicleInsurer,
     vehicleType: vehicleType || null,
     productionYear: toOptionalNumber(productionYear),
     vehicleColor,
@@ -1567,6 +1576,10 @@ function EditCaseForm({
     setVehicleMake(caseItem.vehicle.make);
     setVehicleModel(caseItem.vehicle.model);
     setVehicleCategory(caseItem.vehicle.category);
+    setVehicleFuel(caseItem.vehicle.fuel ?? "");
+    setVehicleBodyType(caseItem.vehicle.bodyType ?? "");
+    setVehicleSeats(caseItem.vehicle.seats ? String(caseItem.vehicle.seats) : "");
+    setVehicleInsurer(caseItem.vehicle.insurer ?? "");
     setVehicleType(caseItem.vehicle.vehicleType ?? "");
     setTransmission(caseItem.vehicle.transmission ?? "");
     setDriveType(caseItem.vehicle.driveType ?? "");
@@ -1725,8 +1738,7 @@ function EditCaseForm({
               id: crypto.randomUUID(),
               firstName: "",
               lastName: "",
-              phonePrefix: "+421",
-              phoneNational: "",
+              phone: "",
               email: "",
               role: "driver",
               note: "",
@@ -2268,24 +2280,48 @@ function EditCaseForm({
           </p>
         )}
         <div className="grid gap-3 @3xl:grid-cols-3">
-          <VehicleLookupControl contextKey={caseItem.id} plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor }} onApply={(patch, snapshot) => {
+          <VehicleLookupControl contextKey={caseItem.id} plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor, vehicleCategory, fuel: vehicleFuel, bodyType: vehicleBodyType, seats: vehicleSeats, insurer: vehicleInsurer, curbWeightKg: weightKg }} onApply={(patch, snapshot, changedIdentifier) => {
+            if (!snapshot && vehicleLookup) {
+              const matched = vehicleFieldsMatchingLookup(vehicleLookup.result, { plate: licensePlate, vin, make: vehicleMake, model: vehicleModel, color: vehicleColor, vehicleCategory, fuel: vehicleFuel, bodyType: vehicleBodyType, seats: vehicleSeats, insurer: vehicleInsurer, curbWeightKg: weightKg });
+              if (matched.has("plate") && !(changedIdentifier === "vin" && vehicleLookup.result.query.kind === "plate")) setLicensePlate("");
+              if (matched.has("vin") && !(changedIdentifier === "plate" && vehicleLookup.result.query.kind === "vin")) setVin("");
+              if (matched.has("make")) setVehicleMake("");
+              if (matched.has("model")) setVehicleModel("");
+              if (matched.has("color")) setVehicleColor("");
+              if (matched.has("vehicleCategory")) setVehicleCategory("");
+              if (matched.has("fuel")) setVehicleFuel("");
+              if (matched.has("bodyType")) setVehicleBodyType("");
+              if (matched.has("seats")) setVehicleSeats("");
+              if (matched.has("insurer")) setVehicleInsurer("");
+              if (matched.has("curbWeightKg")) setWeightKg("");
+            }
             setVehicleLookup(snapshot);
             if (patch.plate !== undefined) setLicensePlate(patch.plate);
             if (patch.vin !== undefined) setVin(patch.vin);
             if (patch.make !== undefined) setVehicleMake(patch.make);
             if (patch.model !== undefined) setVehicleModel(patch.model);
             if (patch.color !== undefined) setVehicleColor(patch.color);
+            if (patch.vehicleCategory !== undefined) setVehicleCategory(patch.vehicleCategory);
+            if (patch.fuel !== undefined) setVehicleFuel(patch.fuel);
+            if (patch.bodyType !== undefined) setVehicleBodyType(patch.bodyType);
+            if (patch.seats !== undefined && /^\d{1,2}$/.test(patch.seats)) setVehicleSeats(patch.seats);
+            if (patch.insurer !== undefined) setVehicleInsurer(patch.insurer);
+            if (patch.curbWeightKg !== undefined && /^\d{1,6}$/.test(patch.curbWeightKg)) setWeightKg(patch.curbWeightKg);
           }} />
           <TextField label="Značka" value={vehicleMake} onChange={setVehicleMake} />
           <TextField label="Model" value={vehicleModel} onChange={setVehicleModel} />
           <TextField label="Rok výroby" value={productionYear} onChange={setProductionYear} error={fieldErrors.productionYear} type="number" inputMode="numeric" min={1950} max={new Date().getFullYear() + 1} step={1} transformValue={(value) => digitsOnly(value, 4)} />
           <TextField label="Farba" value={vehicleColor} onChange={setVehicleColor} />
+          <TextField label="Palivo" value={vehicleFuel} onChange={setVehicleFuel} />
+          <TextField label="Karoséria" value={vehicleBodyType} onChange={setVehicleBodyType} />
+          <TextField label="Počet miest" value={vehicleSeats} onChange={setVehicleSeats} type="number" inputMode="numeric" min={1} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
           <SelectField label="Typ vozidla" value={vehicleType} onChange={(value) => setVehicleType(value as ClientVehicleType | "")} options={[["", "Nezadaný"], ...vehicleTypes.map((type) => [type, clientVehicleTypeLabels[type]] as [string, string])]} />
           <SelectField label="Prevodovka" value={transmission} onChange={(value) => setTransmission(value as VehicleTransmission | "")} options={[["", "Nezadaná"], ...transmissions.map((item) => [item, transmissionLabels[item]] as [string, string])]} />
           <TextField label="Poznámka k prevodovke" value={transmissionNote} onChange={setTransmissionNote} />
           <SelectField label="Pohon" value={driveType} onChange={setDriveType} options={[["", "Nezadaný"], ...driveTypeOptions.map(([value, label]) => [value, label] as [string, string])]} />
           <TextField label="Hmotnosť kg" value={weightKg} onChange={setWeightKg} error={fieldErrors.weightKg} type="number" inputMode="numeric" min={1} max={100000} step={1} transformValue={(value) => digitsOnly(value, 6)} />
           <TextField label="Kategória" value={vehicleCategory} onChange={setVehicleCategory} />
+          <TextField label="Poisťovňa PZP" value={vehicleInsurer} onChange={setVehicleInsurer} />
         </div>
         <TextareaField label="Opis problému / situácie" value={vehicleIssue} onChange={setVehicleIssue} required={!replacementOnly} />
         {!replacementOnly && (
@@ -2739,15 +2775,15 @@ function labelList<T extends string>(values: T[], labels: Record<T, string>) {
 function contactsFromCase(caseItem: DispatchCase): ContactDraft[] {
   const contacts = caseItem.customerDetails.contacts?.length
     ? caseItem.customerDetails.contacts.map((contact) => {
-        const parsedPhone = parsePhone(contact.phone);
         const split = splitName(contact.name);
 
         return {
           id: contact.id,
           firstName: contact.firstName ?? split.firstName,
           lastName: contact.lastName ?? split.lastName,
-          phonePrefix: contact.phonePrefix ?? parsedPhone.prefix,
-          phoneNational: contact.phoneNational ?? parsedPhone.national,
+          phone: storedPhoneForDial(contact.phone || (contact.phoneNational
+            ? `${contact.phonePrefix ?? "+421"}${contact.phoneNational}`
+            : "")),
           email: contact.email ?? "",
           role: contact.role,
           note: contact.note ?? "",
@@ -2761,15 +2797,12 @@ function contactsFromCase(caseItem: DispatchCase): ContactDraft[] {
   }
 
   const split = splitName(caseItem.contact.name);
-  const parsedPhone = parsePhone(caseItem.contact.phone);
-
   return [
     {
       id: caseItem.contact.id,
       firstName: caseItem.customerDetails.firstName ?? split.firstName,
       lastName: caseItem.customerDetails.lastName ?? split.lastName,
-      phonePrefix: parsedPhone.prefix,
-      phoneNational: parsedPhone.national,
+      phone: storedPhoneForDial(caseItem.contact.phone),
       email: caseItem.contact.email ?? "",
       role: "primary_customer",
       note: "",
@@ -2784,10 +2817,6 @@ function splitName(name: string) {
     firstName: parts[0] ?? "",
     lastName: parts.slice(1).join(" "),
   };
-}
-
-function parsePhone(phone: string) {
-  return splitContactPhone(phone);
 }
 
 function fullPhone(contact: ContactDraft | undefined) {

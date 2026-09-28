@@ -34,6 +34,7 @@ import {
 } from "./ring-plan-model";
 import { SettingsField, SettingsIssueList, SettingsNotice, SettingsSectionHeader, settingsInputClass } from "./settings-ui";
 import { SortableList, SortableRow } from "./sortable-list";
+import { PhoneNumberHint, PhoneNumberInput } from "../PhoneNumberInput";
 
 /**
  * Ring plan screen (plan "Fáza 3"): the ordered steps a call walks through and
@@ -374,14 +375,13 @@ export function RingPlanEditor({
 
               {plan.fallbackKind === "external_number" && (
                 <SettingsField label="Číslo presmerovania">
-                  <input
+                  <PhoneNumberInput
                     className={settingsInputClass}
                     disabled={!canEdit}
-                    inputMode="tel"
-                    placeholder="+421900123456"
                     value={plan.fallbackNumber}
-                    onChange={(event) => setPlans((current) => updatePlan(current, plan.key, { fallbackNumber: event.target.value }))}
+                    onChange={(value) => setPlans((current) => updatePlan(current, plan.key, { fallbackNumber: value }))}
                   />
+                  <PhoneNumberHint value={plan.fallbackNumber} />
                 </SettingsField>
               )}
             </div>

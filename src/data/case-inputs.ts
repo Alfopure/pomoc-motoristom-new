@@ -29,6 +29,7 @@ import type {
   VehicleConditionFlag,
   VehicleTransmission,
 } from "@/domain/types";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 
 export type PlaceSelectionInput = {
   label: string;
@@ -60,6 +61,10 @@ export type CreateCaseInput = {
   vehicleMake?: string;
   vehicleModel?: string;
   vehicleCategory?: string;
+  vehicleFuel?: string;
+  vehicleBodyType?: string;
+  vehicleSeats?: number | null;
+  vehicleInsurer?: string;
   vehicleType?: ClientVehicleType | null;
   productionYear?: number | null;
   vehicleColor?: string;
@@ -284,6 +289,7 @@ export function collectCaseInputWarnings(input: CreateCaseInput): CaseInputWarni
 
   appendIncompleteContactWarning(warnings, "contact", input.contactName, input.contactPhone, input.contactEmail);
   appendContactWarnings(warnings, "contactPhone", "contactEmail", input.contactPhone, input.contactEmail);
+  appendContactWarnings(warnings, "alternativeContact", "", input.alternativeContact, undefined);
 
   input.contacts?.forEach((contact, index) => {
     const name = contact.name ?? [contact.firstName, contact.lastName].filter(Boolean).join(" ");
@@ -340,8 +346,11 @@ function appendContactWarnings(
   phone: string | undefined,
   email: string | undefined,
 ) {
-  if (nonEmpty(phone) && phone.replace(/\D/g, "").length < 6) {
-    warnings.push({ code: "invalid_phone", field: phoneField, message: "Telefón má obsahovať aspoň 6 číslic." });
+  if (nonEmpty(phone)) {
+    let valid = false;
+    try { valid = Boolean(normalizeEditablePhone(phone)); }
+    catch { /* The warning keeps incomplete draft contact data editable. */ }
+    if (!valid) warnings.push({ code: "invalid_phone", field: phoneField, message: "Zadajte platné telefónne číslo; zahraničné začnite + alebo 00." });
   }
 
   if (nonEmpty(email) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {

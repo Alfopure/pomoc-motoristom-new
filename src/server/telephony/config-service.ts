@@ -9,6 +9,7 @@ import type { Database, Json } from "@/lib/supabase/database.types";
 
 import { COUNTRY_DIAL_PREFIXES, isDestinationAllowed } from "@/lib/telephony/destinations";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 import {
   DEFAULT_OPERATOR_SETTINGS,
   MAX_RING_DEVICE_VOLUME,
@@ -414,6 +415,11 @@ function readId(value: unknown): string | null {
 
 function issue(path: string, code: string, message: string): ValidationIssue {
   return { path, code, message };
+}
+
+function normalizeManualPhone(value: unknown): string | null {
+  try { return normalizeEditablePhone(value); }
+  catch { return null; }
 }
 
 /**
@@ -875,9 +881,9 @@ export function validateRoutingReplace(input: { groups?: RingGroupInput[]; plans
 
       if (member.ownerProfileId && !context.profileIds.has(member.ownerProfileId)) issues.push(issue(memberPath, "owner_foreign", "Vlastník čísla nepatrí do organizácie."));
       if (member.profileId) issues.push(issue(memberPath, "member_shape", "Externé číslo nemôže mať operátora."));
-      const normalized = normalizeE164(member.externalNumber);
+      const normalized = input.groups ? normalizeManualPhone(member.externalNumber) : normalizeE164(member.externalNumber);
       if (!normalized) {
-        issues.push(issue(memberPath, "number_invalid", "Externé číslo nie je platné (formát E.164, napr. +421900123456)."));
+        issues.push(issue(memberPath, "number_invalid", "Externé číslo nie je platné. Pre zahraničie použi + alebo 00."));
         return;
       }
       if (!isDestinationAllowed(normalized, context.destinationAllowlist)) {
@@ -905,8 +911,8 @@ export function validateRoutingReplace(input: { groups?: RingGroupInput[]; plans
 
     if (!FALLBACK_KINDS.includes(plan.fallbackKind)) issues.push(issue(path, "fallback_invalid", "Neplatné správanie po vyčerpaní plánu."));
     if (plan.fallbackKind === "external_number") {
-      const normalized = normalizeE164(plan.fallbackNumber);
-      if (!normalized) issues.push(issue(path, "fallback_number_invalid", "Presmerovanie na číslo potrebuje platné číslo v tvare E.164."));
+      const normalized = input.plans ? normalizeManualPhone(plan.fallbackNumber) : normalizeE164(plan.fallbackNumber);
+      if (!normalized) issues.push(issue(path, "fallback_number_invalid", "Zadaj platné číslo presmerovania. Pre zahraničie použi + alebo 00."));
       else if (!isDestinationAllowed(normalized, context.destinationAllowlist)) {
         issues.push(issue(path, "fallback_number_not_allowed", `Číslo ${normalized} nie je v povolených cieľoch organizácie.`));
       }
@@ -1145,8 +1151,8 @@ export function validateIvrMenus(input: IvrMenuInput[], context: ValidationConte
       }
 
       if (option.action === "external_number") {
-        const normalized = normalizeE164(option.targetNumber);
-        if (!normalized) issues.push(issue(optionPath, "number_invalid", "Presmerovanie na číslo potrebuje platné číslo v tvare E.164 (napr. +421900123456)."));
+        const normalized = normalizeManualPhone(option.targetNumber);
+        if (!normalized) issues.push(issue(optionPath, "number_invalid", "Zadaj platné číslo presmerovania. Pre zahraničie použi + alebo 00."));
         else if (!isDestinationAllowed(normalized, context.destinationAllowlist)) {
           issues.push(issue(optionPath, "number_not_allowed", `Číslo ${normalized} nie je v povolených cieľoch organizácie.`));
         }
@@ -1243,7 +1249,7 @@ export function validateSettingsPatch(patch: TelephonySettingsPatchInput): Valid
   return issues;
 }
 
-export function validateOperatorSettingsPatch(patch: OperatorSettingsPatchInput, context: ValidationContext): ValidationIssue[] {
+export function validateOperatorSettingsPatch(patch: OperatorSettingsPatchInput, context: ValidationContext, source: "manual" | "stored" = "manual"): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (patch.wrapUpSeconds !== undefined && (!Number.isInteger(patch.wrapUpSeconds) || patch.wrapUpSeconds < 0 || patch.wrapUpSeconds > MAX_WRAP_UP_SECONDS)) {
     issues.push(issue("wrapUpSeconds", "wrap_up_invalid", `Čas po hovore musí byť 0 až ${MAX_WRAP_UP_SECONDS} sekúnd.`));
@@ -1266,8 +1272,8 @@ export function validateOperatorSettingsPatch(patch: OperatorSettingsPatchInput,
     ["pauseForwardNumber", patch.pauseForwardNumber],
   ] as const) {
     if (raw === undefined || raw === null) continue;
-    const normalized = normalizeE164(raw);
-    if (!normalized) issues.push(issue(path, "phone_invalid", "Telefónne číslo musí byť platné medzinárodné číslo."));
+    const normalized = source === "manual" ? normalizeManualPhone(raw) : normalizeE164(raw);
+    if (!normalized) issues.push(issue(path, "phone_invalid", "Zadaj platné telefónne číslo. Pre zahraničie použi + alebo 00."));
     else if (!isDestinationAllowed(normalized, context.destinationAllowlist)) {
       issues.push(issue(path, "destination_not_allowed", `Číslo ${normalized} nie je v povolených cieľoch organizácie.`));
     }
@@ -1281,7 +1287,7 @@ export function validateOperatorSettingsDocument(
   context: ValidationContext,
   profileId: string,
 ): ValidationIssue[] {
-  const issues = validateOperatorSettingsPatch(settings, context);
+  const issues = validateOperatorSettingsPatch(settings, context, "stored");
   if (settings.deliveryMode === "personal_mobile" && !settings.defaultMobileNumber) {
     issues.push(issue("defaultMobileNumber", "default_mobile_required", "Pre presmerovanie na vlastný mobil najprv zadaj mobilné číslo."));
   }
@@ -1705,7 +1711,7 @@ function groupsToRpc(groups: RingGroupInput[]): Json {
       id: member.id ?? randomUUID(),
       member_kind: member.memberKind,
       profile_id: member.memberKind === "operator" ? member.profileId : null,
-      external_number: member.memberKind === "external_number" ? normalizeE164(member.externalNumber) : null,
+      external_number: member.memberKind === "external_number" ? normalizeEditablePhone(member.externalNumber) : null,
       ...(member.ownerProfileId !== undefined ? { owner_profile_id: member.ownerProfileId } : {}),
       position: member.position,
       ring_secs: member.ringSecs ?? null,
@@ -1718,7 +1724,7 @@ function plansToRpc(plans: RingPlanInput[]): Json {
     id: plan.id ?? randomUUID(),
     name: plan.name,
     fallback_kind: plan.fallbackKind,
-    fallback_number: plan.fallbackKind === "external_number" ? normalizeE164(plan.fallbackNumber) : null,
+    fallback_number: plan.fallbackKind === "external_number" ? normalizeEditablePhone(plan.fallbackNumber) : null,
     active: plan.active ?? true,
     steps: plan.steps.map((step) => ({
       id: step.id ?? randomUUID(),
@@ -1761,7 +1767,7 @@ function menusToRpc(menus: IvrMenuInput[]): Json {
       digit: option.digit,
       action: option.action,
       target_ring_plan_id: option.action === "ring_plan" ? option.targetRingPlanId ?? null : null,
-      target_number: option.action === "external_number" ? normalizeE164(option.targetNumber) : null,
+      target_number: option.action === "external_number" ? normalizeEditablePhone(option.targetNumber) : null,
       label: option.label,
       prompt_media_url: option.action === "callback" ? callbackConfirmationMedia(option.promptMediaUrl) : option.promptMediaUrl ?? null,
       tts_text: option.ttsText ?? null,
@@ -2205,7 +2211,7 @@ export async function updateOperatorTelephonySettings(
       input.patch.defaultMobileNumber !== undefined
         ? input.patch.defaultMobileNumber === null
           ? null
-          : normalizeE164(input.patch.defaultMobileNumber) ?? input.patch.defaultMobileNumber
+          : normalizeEditablePhone(input.patch.defaultMobileNumber)
         : current.defaultMobileNumber,
     pauseRoutingMode: input.patch.pauseRoutingMode ?? current.pauseRoutingMode,
     pauseForwardProfileId:
@@ -2214,7 +2220,7 @@ export async function updateOperatorTelephonySettings(
       input.patch.pauseForwardNumber !== undefined
         ? input.patch.pauseForwardNumber === null
           ? null
-          : normalizeE164(input.patch.pauseForwardNumber) ?? input.patch.pauseForwardNumber
+          : normalizeEditablePhone(input.patch.pauseForwardNumber)
         : current.pauseForwardNumber,
   };
   assertValid(validateOperatorSettingsDocument(next, contextFromDocument(document), input.profileId));

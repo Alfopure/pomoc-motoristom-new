@@ -11,6 +11,7 @@ describe("dialPreview", () => {
   it("refuses what the server would refuse", () => {
     expect(dialPreview("+49151")).toEqual({ kind: "invalid" });
     expect(dialPreview("klapka 12")).toEqual({ kind: "invalid" });
+    expect(dialPreview("420776123456")).toEqual({ kind: "invalid" });
   });
 
   it("shows the number as it will be dialled", () => {

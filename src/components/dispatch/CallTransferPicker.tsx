@@ -6,6 +6,7 @@ import { Loader2, PhoneForwarded, UserRound, X } from "lucide-react";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { dialPreview } from "@/lib/telephony/dial-preview";
 import { colleagueBadge } from "@/lib/telephony/colleague-availability";
+import { PhoneNumberInput } from "./PhoneNumberInput";
 
 export type TransferTargetOption = {
   profileId: string;
@@ -149,21 +150,18 @@ export function CallTransferPicker({
         onSubmit={(event) => {
           event.preventDefault();
           if (!dialled || busy) return;
-          onSubmit({ number: externalNumber.trim() });
+          onSubmit({ number: dialled });
         }}
       >
         <label className="text-[11px] font-bold uppercase tracking-wide text-zinc-500" htmlFor="transfer-external-number">
           Externé číslo
         </label>
         <div className="mt-1 flex gap-1.5">
-          <input
+          <PhoneNumberInput
             id="transfer-external-number"
-            type="tel"
-            inputMode="tel"
             autoComplete="off"
             value={externalNumber}
-            onChange={(event) => setExternalNumber(event.target.value)}
-            placeholder="+421 900 000 000"
+            onChange={setExternalNumber}
             className="h-9 min-w-0 flex-1 rounded-md border border-zinc-200 px-2 text-sm outline-none ring-yellow-300 transition focus:ring-2"
           />
           <button

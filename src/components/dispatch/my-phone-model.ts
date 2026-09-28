@@ -12,7 +12,7 @@
 import { formatTime } from "@/lib/dispatch-calculations";
 import type { OperatorPresenceStatus } from "@/lib/supabase/database.types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
-import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 import { pausePlan } from "@/lib/telephony/pause-ending";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { LineDoc, OperatorDoc, PauseReasonDoc, RoutingDocument } from "@/server/telephony/config-service";
@@ -233,7 +233,9 @@ export function checkTestCallNumber(raw: string, input: { allowlist: readonly st
   const trimmed = raw.trim();
   if (!trimmed) return { number: null, error: "Zadaj číslo, na ktoré sa má skúšobne zavolať.", warning: null };
 
-  const number = normalizeE164(trimmed);
+  let number: string | null;
+  try { number = normalizeEditablePhone(trimmed); }
+  catch { number = null; }
   if (!number) return { number: null, error: "Neplatné telefónne číslo.", warning: null };
   if (input.allowlist !== null && !isDestinationAllowed(number, input.allowlist)) {
     return { number: null, error: "Cieľové číslo nie je v povolených destináciách organizácie.", warning: null };

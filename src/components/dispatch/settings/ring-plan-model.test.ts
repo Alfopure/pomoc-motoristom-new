@@ -94,6 +94,13 @@ describe("planDraftsFromDocument", () => {
     expect(draft.steps[0].timeoutSecs).toBe("20");
     expect(draft.fallbackNumber).toBe("");
   });
+  it("loads a stored bare international fallback for unrelated edits", () => {
+    const stored = plan({ fallbackKind: "external_number", fallbackNumber: "420777123456" });
+    const [draft] = planDraftsFromDocument([stored]);
+    expect(draft.fallbackNumber).toBe("+420777123456");
+    expect(validateRingPlanDrafts([draft], context()).map((issue) => issue.code)).not.toContain("fallback_number_invalid");
+    expect(stored.fallbackNumber).toBe("420777123456");
+  });
 });
 
 describe("moveStep", () => {

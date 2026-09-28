@@ -191,10 +191,33 @@ test("constrained fields prevent letters and invalid identifier characters", asy
   await expect(productionYear).toHaveValue("2026");
 
   await phone.fill("abc 900 xyz 123 456");
-  await expect(phone).toHaveValue("900123456");
+  await expect(phone).toHaveAttribute("aria-invalid", "true");
+  await phone.fill("0905 123 456");
+  await expect(phone).toHaveAttribute("aria-invalid", "false");
 
   await vin.fill("wba-i-o-q123456789012345");
   await expect(vin).toHaveValue("WBA12345678901234");
+});
+
+test("new case phone interprets local and international numbers consistently", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: viewportHeight });
+  await openDashboard(page);
+  await openNewCase(page);
+
+  const phone = page.getByLabel("Telefón", { exact: true }).first();
+  await expect(phone).toHaveValue("");
+  await phone.fill("0905 123 456");
+  await expect(page.getByText("predvoľba +421 bola doplnená", { exact: false })).toBeVisible();
+  await phone.blur();
+  await expect(phone).toHaveValue("+421905123456");
+
+  await phone.fill("+420 777 123 456");
+  await phone.blur();
+  await expect(phone).toHaveValue("+420777123456");
+
+  await phone.fill("+380 67 123 4567");
+  await phone.blur();
+  await expect(phone).toHaveValue("+380671234567");
 });
 
 test("edit validates an assistance-service contact email inline", async ({ page }) => {

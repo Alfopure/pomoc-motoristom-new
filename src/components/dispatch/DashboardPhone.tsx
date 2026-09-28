@@ -10,7 +10,9 @@ import type {
 } from "@/lib/telephony/directory";
 import type { DispatchData } from "@/data/dispatch-types";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
-import { cleanPhoneInput } from "@/lib/telephony/phone";
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
+import { PhoneNumberHint } from "./PhoneNumberInput";
 import { useLayoutPreview } from "./LayoutPreview";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 import { useSmsUnreadCount } from "./SmsInbox";
@@ -172,9 +174,8 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
     const dialContact = contact ?? selectedContact;
     const phone = dialContact?.phone ?? normalizedQuery;
 
-    try {
-      cleanPhoneInput(phone, "Telefónne číslo");
-    } catch {
+    const normalizedPhone = dialContact ? normalizeE164(phone) : editablePhone(phone);
+    if (!normalizedPhone) {
       setError("Zadajte platné telefónne číslo alebo vyberte kontakt.");
       setIsOpen(true);
       return;
@@ -188,7 +189,7 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
     }
 
     try {
-      await onDial(phone, dialContact ?? undefined);
+      await onDial(normalizedPhone, dialContact ?? undefined);
       setIsOpen(false);
     } catch (dialError) {
       setError(messageFromError(dialError, "Hovor sa nepodarilo spustiť."));
@@ -317,6 +318,8 @@ export function DashboardPhone({ onCreateCase, className = "", disabled = false,
             {unreadSmsCount > 0 && <span role="status" aria-label={`${unreadSmsCount} neprečítaných SMS`} className="rounded-full bg-zinc-950 px-1.5 text-xs leading-5 text-white">{unreadSmsCount > 99 ? "99+" : unreadSmsCount}</span>}
           </button>
         </div>
+
+        {/^[+\d]/.test(normalizedQuery) && <PhoneNumberHint value={query} className="mt-1 block text-[11px] text-zinc-600" />}
 
         {error && (
           <div className="mt-2 flex min-w-0 items-start gap-1.5 text-xs text-red-700" role="alert">
@@ -489,12 +492,12 @@ async function readResponse<T>(response: Response): Promise<T> {
 }
 
 function isDialable(value: string) {
-  try {
-    cleanPhoneInput(value);
-    return true;
-  } catch {
-    return false;
-  }
+  return editablePhone(value) !== null;
+}
+
+function editablePhone(value: string) {
+  try { return normalizeEditablePhone(value); }
+  catch { return null; }
 }
 
 function isAbortError(error: unknown) {

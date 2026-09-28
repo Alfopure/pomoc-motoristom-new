@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { joinContactPhone, splitContactPhone, type ContactDraft } from "./case-form-fields";
+import { joinContactPhone, type ContactDraft } from "./case-form-fields";
 
-function contact(phonePrefix: string, phoneNational: string): ContactDraft {
+function contact(phone: string): ContactDraft {
   return {
     id: "contact-1",
     firstName: "Test",
     lastName: "Customer",
-    phonePrefix,
-    phoneNational,
+    phone,
     email: "",
     role: "primary_customer",
     note: "",
@@ -16,21 +15,20 @@ function contact(phonePrefix: string, phoneNational: string): ContactDraft {
 }
 
 describe("international case contact phones", () => {
-  it("keeps known country prefixes separate for convenient editing", () => {
-    expect(splitContactPhone("+420 123 456 789")).toEqual({ prefix: "+420", national: "123456789" });
-  });
-
   it("keeps an Italian +39 number instead of changing it to +421", () => {
-    const split = splitContactPhone("+399 123 456 789");
-
-    expect(split).toEqual({ prefix: "+39", national: "9123456789" });
-    expect(joinContactPhone(contact(split.prefix, split.national))).toBe("+39 9123456789");
+    expect(joinContactPhone(contact("+39 9123456789"))).toBe("+399123456789");
   });
 
-  it("round-trips a manually entered prefix that is not in the suggestion list", () => {
-    const split = splitContactPhone("+971 50 123 4567");
+  it("accepts a manually entered international prefix", () => {
+    expect(joinContactPhone(contact("+971 50 123 4567"))).toBe("+971501234567");
+  });
 
-    expect(split).toEqual({ prefix: "+", national: "971501234567" });
-    expect(joinContactPhone(contact(split.prefix, split.national))).toBe("+971501234567");
+  it("canonicalizes Slovak national and pasted Czech numbers for case storage", () => {
+    expect(joinContactPhone(contact("0905 123 456"))).toBe("+421905123456");
+    expect(joinContactPhone(contact("00420 777 123 456"))).toBe("+420777123456");
+  });
+
+  it("leaves ambiguous bare international input visible for correction", () => {
+    expect(joinContactPhone(contact("421905123456"))).toBe("421905123456");
   });
 });

@@ -48,6 +48,8 @@ import type {
 } from "@/lib/telephony/presence";
 import { telephonyFetch, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
+import { normalizeEditablePhone, storedPhoneForDial } from "@/lib/telephony/phone-entry";
+import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import { DEFAULT_HISTORY_COLUMNS, HISTORY_CATEGORIES, HISTORY_COLUMNS, historyCallbackLabel, historyResult, historySeconds, parseHistoryColumns, type HistoryCategory, type HistoryColumn } from "./history-display";
 import styles from "./CallCenterModule.module.css";
@@ -317,7 +319,7 @@ export function CallCenterModule({
 
     try {
       const destination = customerNumberForCall(call);
-      await onDial(destination, call.caseId);
+      await onDial(storedPhoneForDial(destination), call.caseId);
       setActionNotice(`Volanie na ${destination} bolo spustené.`);
       onTelephonyChanged();
     } catch (error) {
@@ -338,7 +340,7 @@ export function CallCenterModule({
     setActionNotice(null);
 
     try {
-      await onDial(entry.phone);
+      await onDial(storedPhoneForDial(entry.phone));
       setActionNotice(`Volanie na ${entry.label} bolo spustené.`);
       onTelephonyChanged();
       return true;
@@ -451,12 +453,13 @@ export function CallCenterModule({
 
 function CompactDialer({ busy, configured, onDial }: { busy: boolean; configured: boolean; onDial: (phone: string) => Promise<boolean> }) {
   const [number, setNumber] = useState("");
+  const normalizedNumber = editablePhone(number);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || !configured || !number.trim()) return;
-    void onDial(number.trim()).then((accepted) => { if (accepted) setNumber(""); });
+    if (busy || !configured || !normalizedNumber) return;
+    void onDial(normalizedNumber).then((accepted) => { if (accepted) setNumber(""); });
   }
-  return <form className={styles.compactDialer} onSubmit={submit}><label className="sr-only" htmlFor="call-center-dial-number">Telefónne číslo</label><input id="call-center-dial-number" type="tel" value={number} onChange={(event) => setNumber(event.target.value)} placeholder="Telefónne číslo" disabled={!configured} /><button type="submit" disabled={!configured || busy || !number.trim()}>{busy ? <Loader2 size={15} className="animate-spin" /> : <PhoneOutgoing size={15} />}Volať</button></form>;
+  return <form className={styles.compactDialer} onSubmit={submit}><label className="sr-only" htmlFor="call-center-dial-number">Telefónne číslo</label><div className={styles.compactDialerField}><PhoneNumberInput id="call-center-dial-number" value={number} onChange={setNumber} disabled={!configured} /><PhoneNumberHint value={number} className="text-[10px] leading-3 text-zinc-600" /></div><button type="submit" disabled={!configured || busy || !normalizedNumber}>{busy ? <Loader2 size={15} className="animate-spin" /> : <PhoneOutgoing size={15} />}Volať</button></form>;
 }
 
 
@@ -849,7 +852,8 @@ function PhonebookPanel({
 
   async function createFavorite(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (createFavoritePending) return;
+    const phone = editablePhone(favoritePhone);
+    if (createFavoritePending || !phone) return;
 
     setCreateFavoritePending(true);
     setError(null);
@@ -857,7 +861,7 @@ function PhonebookPanel({
       const response = await telephonyFetch("/api/telephony/directory/favorites", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: favoriteName, phone: favoritePhone }),
+        body: JSON.stringify({ name: favoriteName, phone }),
         label: "nový obľúbený kontakt",
         timeoutMs: TELEPHONY_TIMEOUT_MS.mutation,
       });
@@ -927,19 +931,17 @@ function PhonebookPanel({
           </label>
           <label className="grid gap-1 text-[11px] font-semibold text-zinc-700">
             Telefónne číslo
-            <input
-              type="tel"
-              inputMode="tel"
+            <PhoneNumberInput
               value={favoritePhone}
-              onChange={(event) => setFavoritePhone(event.target.value)}
+              onChange={setFavoritePhone}
               required
-              placeholder="+421 900 000 000"
               className="h-9 min-w-0 rounded-md border border-zinc-300 bg-white px-2.5 text-sm font-medium outline-none ring-yellow-300 focus:ring-2"
             />
+            <PhoneNumberHint value={favoritePhone} className="text-[11px] font-normal text-zinc-600" />
           </label>
           <button
             type="submit"
-            disabled={createFavoritePending || !favoriteName.trim() || !favoritePhone.trim()}
+            disabled={createFavoritePending || !favoriteName.trim() || !editablePhone(favoritePhone)}
             className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-zinc-950 px-3 text-xs font-bold text-white hover:bg-zinc-800 disabled:cursor-wait disabled:bg-zinc-300"
           >
             {createFavoritePending ? <Loader2 size={14} className="animate-spin" /> : <Star size={14} />}
@@ -1226,6 +1228,11 @@ function normalizeSearch(value: string) {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
+}
+
+function editablePhone(value: string) {
+  try { return normalizeEditablePhone(value); }
+  catch { return null; }
 }
 
 

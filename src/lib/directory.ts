@@ -1,5 +1,6 @@
 import type { PlaceSelectionInput } from "@/data/case-inputs";
 import { normalizeDialNumberForComparison } from "@/lib/telephony/phone";
+import { storedPhoneForDial } from "@/lib/telephony/phone-entry";
 
 export const DIRECTORY_KINDS = ["company", "assistance", "branch", "contact"] as const;
 export type DirectoryKind = (typeof DIRECTORY_KINDS)[number];
@@ -36,7 +37,7 @@ export function emptyDirectoryDraft(kind: DirectoryKind): DirectoryDraft {
 }
 
 export function directoryDraft(entry: DirectoryEntry): DirectoryDraft {
-  return { kind: entry.kind, name: entry.name, phone: entry.phone, email: entry.email, note: entry.note, active: entry.active, ico: entry.ico, address: entry.address, website: entry.website, focus: entry.focus, contactIds: [...entry.contactIds], parentId: entry.parentId, role: entry.role, location: entry.location ? { ...entry.location } : null, availableReplacementCars: entry.availableReplacementCars };
+  return { kind: entry.kind, name: entry.name, phone: storedPhoneForDial(entry.phone), email: entry.email, note: entry.note, active: entry.active, ico: entry.ico, address: entry.address, website: entry.website, focus: entry.focus, contactIds: [...entry.contactIds], parentId: entry.parentId, role: entry.role, location: entry.location ? { ...entry.location } : null, availableReplacementCars: entry.availableReplacementCars };
 }
 
 export function directoryKey(entry: Pick<DirectoryEntry, "kind" | "id">) { return `${entry.kind}:${entry.id}`; }

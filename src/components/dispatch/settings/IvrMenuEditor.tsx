@@ -33,6 +33,7 @@ import {
 } from "./ivr-menu-model";
 import { issuesByPath } from "./ring-groups-model";
 import { SettingsField, SettingsIssueList, SettingsNotice, SettingsSectionHeader, settingsInputClass } from "./settings-ui";
+import { PhoneNumberHint, PhoneNumberInput } from "../PhoneNumberInput";
 
 /**
  * IVR menu screen (plan "Fáza 4"): what the caller hears before anybody's phone
@@ -302,14 +303,13 @@ export function IvrMenuEditor({
                             </SettingsField>
                           ) : option.action === "external_number" ? (
                             <SettingsField label="Cieľové číslo">
-                              <input
+                              <PhoneNumberInput
                                 className={settingsInputClass}
                                 disabled={!canEdit}
-                                inputMode="tel"
-                                placeholder="+421900123456"
                                 value={option.targetNumber}
-                                onChange={(event) => setMenus((current) => updateIvrOption(current, menu.key, option.key, { targetNumber: event.target.value }))}
+                                onChange={(value) => setMenus((current) => updateIvrOption(current, menu.key, option.key, { targetNumber: value }))}
                               />
+                              <PhoneNumberHint value={option.targetNumber} />
                             </SettingsField>
                           ) : ACTIONS_WITH_PROMPT.includes(option.action) ? (
                             <SettingsField label="Nahrávka voľby" hint={option.action === "callback" ? "Potvrdzuje už uložené spätné volanie. Nežiadajte ďalšie stlačenie tlačidla. Prázdne pole použije spoločnú hlášku potvrdenia." : "Prehrá sa pred ukončením hovoru."}>
