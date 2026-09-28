@@ -8,7 +8,7 @@ import type { TelephonyTeamOperator, TelephonyTeamPayload } from "@/lib/telephon
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
-import { colleagueCallView, lastOnlineLabel } from "./team-display";
+import { colleagueCallView, lastOnlineLabel, presenceIsFresh } from "./team-display";
 import styles from "./CallCenterModule.module.css";
 
 const LABELS: Record<string, string> = { available: "Dostupný", ringing: "Zvoní", on_call: "Telefonuje", paused: "Pauza", after_call_work: "Dokončuje hovor", offline: "Mimo radu", unassigned: "Nezaradený", unregistered: "Offline", stale: "Overuje sa", error: "Chyba spojenia" };
@@ -30,8 +30,7 @@ function OperatorCard({ operator, presence, verified, now, call }: { operator: T
   const [open, setOpen] = useState(false);
   const [calling, setCalling] = useState(false);
   const [callError, setCallError] = useState<string | null>(null);
-  const presenceAge = now - Date.parse(presence?.checkedAt ?? "");
-  const freshPresence = presence && presenceAge >= -1_000 && presenceAge < TEAM_LEASE_MS ? presence : undefined;
+  const freshPresence = presence && presenceIsFresh(presence.checkedAt, now) ? presence : undefined;
   const online = verified && operator.online;
   let status = verified ? freshPresence?.state ?? operator.status : "stale";
   if (!online && status === "available") status = "unregistered";
