@@ -57,16 +57,16 @@ async function boot(page: Page, server: Backend, viewer = "viewer") {
 }
 test("a saved edit reaches a second clean editor without reload or remount", async ({ page, context }) => {
   const server = backend(); const errors = await boot(page, server, "author"); const second = await context.newPage(); const errors2 = await boot(second, server);
-  const secondNote = second.getByLabel("Interná poznámka dispečera", { exact: true });
+  const secondNote = second.getByLabel("Iné poznámky", { exact: true });
   await secondNote.evaluate(node => Object.assign(node, { retainedInput: true }));
-  await page.getByLabel("Interná poznámka dispečera", { exact: true }).fill("Uložená zmena kolegyne");
+  await page.getByLabel("Iné poznámky", { exact: true }).fill("Uložená zmena kolegyne");
   await expect(secondNote).toHaveValue("Uložená zmena kolegyne");
   expect(await secondNote.evaluate(node => Boolean((node as HTMLTextAreaElement & { retainedInput?: boolean }).retainedInput))).toBe(true);
   expect(server.writes).toBe(1); expect([...errors, ...errors2]).toEqual([]);
 });
 test("remote save preserves dirty text and cursor and shows a comparison", async ({ page }) => {
   const server = backend(); await boot(page, server);
-  const note = page.getByLabel("Interná poznámka dispečera", { exact: true });
+  const note = page.getByLabel("Iné poznámky", { exact: true });
   await note.fill("Môj rozpísaný text"); await note.evaluate(node => (node as HTMLTextAreaElement).setSelectionRange(4, 4));
   server.card = { ...server.card, mainNote: "Zmena kolegyne", updatedAt: "2026-09-19T12:00:00Z" }; server.revision++;
   await broadcast(server);
@@ -85,7 +85,7 @@ test("new-case activity carries no unsaved PII and cancellation removes it", asy
 });
 test("revocation clears visible data and offline expiry hides a mounted dirty editor", async ({ page }) => {
   const server = backend(); await page.clock.install(); await boot(page, server);
-  const note = page.getByLabel("Interná poznámka dispečera", { exact: true }); await note.fill("Zachovať môj draft");
+  const note = page.getByLabel("Iné poznámky", { exact: true }); await note.fill("Zachovať môj draft");
   server.offline = true; await page.clock.fastForward(30_100); await expect(note).toBeHidden();
   server.offline = false; await page.evaluate(() => window.dispatchEvent(new Event("online"))); await expect(note).toBeVisible(); await expect(note).toHaveValue("Zachovať môj draft");
   server.denied = true; await broadcast(server); await page.clock.fastForward(550); await expect(page.getByTestId("case-edit-form-main")).toHaveCount(0);

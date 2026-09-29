@@ -212,7 +212,6 @@ export function getCaseFormCompletionErrors(input: CaseFormCompletionInput) {
       ? "Doplňte požadovaný typ náhradného vozidla."
       : null,
     !input.paymentMethod ? "Vyberte spôsob platby." : null,
-    !input.paymentStatus ? "Vyberte stav platby." : null,
   ].filter((message): message is string => Boolean(message));
 }
 
@@ -247,6 +246,7 @@ export function getCaseFormValidation(input: CaseFormValidationInput): CaseFormV
       fieldErrors.contactPhone,
       fieldErrors.contactEmail,
       fieldErrors.companyIdNumber,
+      fieldErrors.insurancePortalUrl,
       ...(input.additionalContacts ?? []).flatMap((contact, index) => {
         const contactNumber = index + 2;
         return compactErrors([
@@ -291,8 +291,6 @@ export function getCaseFormValidation(input: CaseFormValidationInput): CaseFormV
         ? "Doplňte miesto pristavenia náhradného vozidla."
         : null,
       !input.paymentMethod ? "Vyberte spôsob platby." : null,
-      !input.paymentStatus ? "Vyberte stav platby." : null,
-      fieldErrors.insurancePortalUrl,
       input.attachmentError,
     ]),
   };

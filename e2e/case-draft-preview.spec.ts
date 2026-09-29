@@ -110,7 +110,7 @@ async function boot(page: Page, server: Backend, viewer = "viewer", mobile = fal
 }
 const activity = (page: Page) => page.getByLabel("Rozpracované nové prípady", { exact: true });
 const preview = (page: Page) => page.getByRole("region", { name: "Rozpracovaný prípad – Jana", exact: true });
-const newNote = (page: Page) => page.getByLabel("Interná poznámka dispečera", { exact: true });
+const newNote = (page: Page) => page.getByLabel("Iné poznámky", { exact: true });
 async function createDraft(page: Page, server: Backend, note = "Klient čaká na odťah") {
   await page.getByRole("button", { name: "Vytvoriť nový prípad", exact: true }).click();
   await newNote(page).fill(note);
