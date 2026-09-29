@@ -518,6 +518,16 @@ function startMoh(b: TransitionBuilder, customer: LegRow): void {
   b.cmd({ kind: "playback_start", commandId, leg: ref(customer), media: { key: "moh" }, loop: "infinity", bestEffort: true });
 }
 
+const RINGBACK_FILE = "tones-v1/ringback.mp3";
+
+/** Uses the same single playback command as waiting music, without pre-bridging an offer. */
+function startRingback(b: TransitionBuilder, customer: LegRow): void {
+  if (!b.ctx.mediaAvailable) return;
+  b.cmd({ kind: "playback_start", commandId: b.cmdId(customer.telnyx_call_control_id, "playback:ringback"),
+    leg: ref(customer), media: { file: RINGBACK_FILE }, loop: "infinity", bestEffort: true,
+    clientState: customerState(b.session.id, "ringback") });
+}
+
 function callbackOfferSpec(media: MediaRef): GatherSpec {
   return {
     media,
@@ -918,7 +928,7 @@ function startRingPlan(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
   }
   b.patchMeta({ ring: { ...(b.meta.ring ?? {}), plan, mode: "plan", exhausted: false, fallback: null } });
   b.patchSession({ ring_plan_id: plan.planId });
-  startMoh(b, customer);
+  startRingback(b, customer);
   const started = ringFromStep(b, customer, plan, 0);
   if (!started) applyFallback(b, customer, plan);
 }
@@ -1114,9 +1124,9 @@ function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
 }
 
 /**
- * Ring modes that leave the waiting-room loop running on the customer leg while
- * somebody is being called. `plan` is the ring plan (`fanout`); `transfer` is a
- * blind transfer, which starts the same loop in `blindTransferCustomer`.
+ * Ring modes that leave a playback loop running on the customer leg while
+ * somebody is being called. `plan` uses ringback; `transfer` keeps waiting music.
+ * Both use the same playback stop after the guarded bridge succeeds.
  */
 const RINGING_WITH_MUSIC = new Set(["plan", "transfer"]);
 
@@ -1128,6 +1138,14 @@ function mohIsPlaying(b: TransitionBuilder): boolean {
 }
 
 function stopMoh(b: TransitionBuilder, customer: LegRow): void {
+  // No target may be reachable in this very transition. Cancel the unsent
+  // ringback rather than queueing it in front of the fallback announcement.
+  const pendingRingback = b.commands.findIndex((command) => command.kind === "playback_start" &&
+    "file" in command.media && command.media.file === RINGBACK_FILE);
+  if (pendingRingback >= 0) {
+    b.commands.splice(pendingRingback, 1);
+    return;
+  }
   if (!mohIsPlaying(b)) return;
   const commandId = b.cmdId(customer.telnyx_call_control_id, "playback_stop");
   // One transition can pass through two callers (fallback → callback offer).
@@ -1154,7 +1172,8 @@ function offerCallback(b: TransitionBuilder, customer: LegRow, media: MediaRef, 
 }
 
 function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, state: "waiting" | "parked" = "waiting", manualOnly = false): void {
-  const musicRunning = mohIsPlaying(b);
+  const ringbackRunning = !b.meta.queue && b.session.state === "ringing" && b.meta.ring?.mode === "plan";
+  const musicRunning = mohIsPlaying(b) && !ringbackRunning;
   // The waiting-room limit is frozen the moment the caller enters it, like the
   // ring plan is frozen at call start: `loadRoutingSettings` re-reads the
   // settings row on every event, so an admin lowering `park_max_minutes` used to
@@ -1188,7 +1207,9 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
     b.note(`${state} (${reason}, ${manual ? "manual pickup" : "automatic offers"})`);
     return;
   }
-  // The ring plan already started the loop; restarting it would jump the audio.
+  // A failed initial bridge leaves ringback running. Replace it with music;
+  // a failed transfer or waiting-room pickup already has the correct loop.
+  if (ringbackRunning) stopMoh(b, customer);
   if (!musicRunning) startMoh(b, customer);
   b.cmd(gatherCmd(b, customer, mohTickSpec()));
   b.note(`${state} (${reason})`);
@@ -1440,8 +1461,8 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
       enterWaiting(failed, customer, "bridge_failed");
       // A failed bridge drops every command staged after it, so the
       // compensation has to carry what the waiting room still needs. No
-      // `playback_stop`: the loop is still running and `enterWaiting` will not
-      // restart it, so stopping it here would leave a silent waiting room.
+      // extra `playback_stop`: `enterWaiting` preserves existing waiting music
+      // or replaces initial ringback with music as part of its own commands.
       // `gather_stop` only for a pickup from the waiting room without a queue →
       // the one case where `enterWaiting` issues a fresh `gather`; a queued
       // caller keeps the queue gather it already has.
@@ -2303,6 +2324,9 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
   if (event.clientState?.intent === "greeting" || event.clientState?.intent === "greeting_retry") return ignoredResult("introduction already finished");
   if (event.status === "call_hangup") return markCustomerGone(b, leg, event, "playback");
   if (event.status === "cancelled" || event.status === "cancelled_amd") return ignoredResult(`playback ${event.status}`);
+  // Telnyx loops the file itself. A completion can arrive after it was stopped
+  // for an answer or fallback; it must not restart audio over the next phase.
+  if (event.clientState?.intent === "ringback") return ignoredResult("ringback playback ended");
   const state = b.session.state;
   if (state === "missed" && b.meta.closing_message && event.clientState?.intent === "closing_message") {
     b.cmd(hangupCmd(b, leg, "closing_message", false));

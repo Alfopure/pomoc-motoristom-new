@@ -135,8 +135,8 @@ describe("directional call startup announcements", () => {
     h.db.insert("motorist_call_recording_policies", { organization_id: ORG, recording_enabled: true, approved_at: h.now().toISOString(), inbound_enabled: true, outbound_enabled: true });
     h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), inboundStartAnnouncements: false, outboundStartAnnouncements: true } } }, () => true);
     const call = await h.inbound({ to: NUMBERS.allianz, completeGreeting: false });
-    // Waiting music may run while the dispatcher rings; no startup speech may run.
-    expect(h.telnyx.of("playbackStart").every((command) => String(command.params.audioUrl).endsWith("/moh.mp3"))).toBe(true);
+    // Ringback may run while the dispatcher rings; no startup speech may run.
+    expect(h.telnyx.of("playbackStart").every((command) => String(command.params.audioUrl).endsWith("/tones-v1/ringback.mp3"))).toBe(true);
     expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence).toBeUndefined();
     const operator = h.legFor(call.sessionId, PROFILES.o1)!;
     await h.legEvent(String(operator.telnyx_call_control_id), "call.answered");

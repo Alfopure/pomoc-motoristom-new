@@ -26,7 +26,7 @@ async function ringingInbound(h: TelephonyHarness, to: string = NUMBERS.allianz)
 }
 
 describe("inbound ring plan", () => {
-  it("answers, plays greeting + MOH and fans out step 0 to registered available operators", async () => {
+  it("answers, plays greeting + ringback and fans out step 0 to registered available operators", async () => {
     const h = createTelephonyHarness();
     const call = await h.inbound({ to: "+4210232408718" });
 
@@ -38,7 +38,7 @@ describe("inbound ring plan", () => {
     expect((session.metadata as { partner_name: string }).partner_name).toBe("Allianz Assistance");
 
     const playbacks = h.telnyx.of("playbackStart").map((entry) => entry.params.audioUrl);
-    expect(playbacks).toEqual(["https://media.test/telephony/announcements-v4/sk/greeting.mp3", "https://media.test/telephony/announcements-v1/moh.mp3"]);
+    expect(playbacks).toEqual(["https://media.test/telephony/announcements-v4/sk/greeting.mp3", "https://media.test/telephony/tones-v1/ringback.mp3"]);
 
     const dials = h.telnyx.of("dial");
     expect(dials.map((entry) => entry.params.to).sort()).toEqual(["sip:gencred001@sip.telnyx.com", "sip:gencred002@sip.telnyx.com", "sip:gencred003@sip.telnyx.com"]);
@@ -246,8 +246,8 @@ describe("inbound ring plan", () => {
     await h.legEvent(String(external.telnyx_call_control_id), "call.hangup", { hangup_cause: "no_answer" });
 
     expect(h.session(call.sessionId).state).toBe("waiting");
-    // Queue audio combines the reminder, callback choice and a minute of music.
-    expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ audioUrl: "https://media.test/telephony/announcements-v1/moh.mp3", loop: "infinity" });
+    // Initial ringback is stopped; the queue audio includes its own music.
+    expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ audioUrl: "https://media.test/telephony/tones-v1/ringback.mp3", loop: "infinity" });
     const tick = h.telnyx.of("gatherUsingAudio").at(-1)!;
     // DTMF interrupts the audio; the timeout starts after the music finishes.
     expect(tick.params).toMatchObject({ timeoutMillis: 1_000, validDigits: "1", audioUrl: "https://media.test/telephony/announcements-v4/sk/queueWaiting.mp3" });
