@@ -1022,7 +1022,7 @@ export function CaseDetail({
                     detail={caseItem.replacementVehicle.provisionReason}
                   />
                 )}
-                <InfoItem label="Platba" value={caseItem.paymentDetails.method ? paymentMethodLabels[caseItem.paymentDetails.method] : ""} detail={caseItem.paymentDetails.status ? paymentStatusLabels[caseItem.paymentDetails.status] : undefined} required invalid={!caseItem.paymentDetails.method || !caseItem.paymentDetails.status} />
+                <InfoItem label="Platba" value={caseItem.paymentDetails.method ? paymentMethodLabels[caseItem.paymentDetails.method] : ""} detail={caseItem.paymentDetails.status ? paymentStatusLabels[caseItem.paymentDetails.status] : undefined} required invalid={!caseItem.paymentDetails.method} />
                 <InfoItem label="Ukončenie" value={caseItem.closureDetails.status ?? ""} detail={closureType ? closureTypeLabels[closureType] : undefined} />
                 <InfoItem label="Interná poznámka" value={caseItem.mainNote} />
               </div>
@@ -1687,7 +1687,6 @@ function EditCaseForm({
     if (type === "insurance") {
       setSourceType("assistance");
       setPaymentMethod("insurance");
-      setPaymentStatus("waiting_for_insurance");
       setClosureType("insurance_portal");
       return;
     }
@@ -1695,14 +1694,12 @@ function EditCaseForm({
     if (type === "company") {
       setSourceType("partner");
       setPaymentMethod("invoice");
-      setPaymentStatus("unpaid");
       setClosureType("self_payer");
       return;
     }
 
     setSourceType("client");
     setPaymentMethod("cash");
-    setPaymentStatus("unpaid");
     setClosureType("self_payer");
   }
 
@@ -1718,7 +1715,6 @@ function EditCaseForm({
       setAssistanceServiceName(entry.name);
       setSourceType("assistance");
       setPaymentMethod("insurance");
-      setPaymentStatus("waiting_for_insurance");
       setClosureType("insurance_portal");
     } else {
       setCompanyName(entry.name);
@@ -1740,7 +1736,7 @@ function EditCaseForm({
               lastName: "",
               phone: "",
               email: "",
-              role: "driver",
+              role: "other",
               note: "",
               isPrimary: false,
             },
@@ -2264,6 +2260,7 @@ function EditCaseForm({
           </div>
         )}
 
+        {(sourceType === "assistance" || insurancePortalUrl.trim()) && <TextField label="Portál asistenčnej služby" value={insurancePortalUrl} onChange={setInsurancePortalUrl} error={fieldErrors.insurancePortalUrl} type="url" inputMode="url" />}
         <ContactEditor contacts={contacts} fieldErrors={fieldErrors} onAdd={addContact} onMove={moveContact} onPrimary={setPrimaryContact} onRemove={removeContact} onUpdate={updateContact} />
         <TextareaField label="Poznámka k zákazníkovi" value={customerNote} onChange={setCustomerNote} />
       </EditFormSection>
@@ -2279,87 +2276,112 @@ function EditCaseForm({
             Prípad na náhradné vozidlo: údaje o klientovom vozidle sú voliteľné a odťahové polia sú skryté.
           </p>
         )}
-        <div className="grid gap-3 @3xl:grid-cols-3">
-          <VehicleLookupControl contextKey={caseItem.id} plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor, vehicleCategory, fuel: vehicleFuel, bodyType: vehicleBodyType, seats: vehicleSeats, insurer: vehicleInsurer, curbWeightKg: weightKg }} onApply={(patch, snapshot, changedIdentifier) => {
-            if (!snapshot && vehicleLookup) {
-              const matched = vehicleFieldsMatchingLookup(vehicleLookup.result, { plate: licensePlate, vin, make: vehicleMake, model: vehicleModel, color: vehicleColor, vehicleCategory, fuel: vehicleFuel, bodyType: vehicleBodyType, seats: vehicleSeats, insurer: vehicleInsurer, curbWeightKg: weightKg });
-              if (matched.has("plate") && !(changedIdentifier === "vin" && vehicleLookup.result.query.kind === "plate")) setLicensePlate("");
-              if (matched.has("vin") && !(changedIdentifier === "plate" && vehicleLookup.result.query.kind === "vin")) setVin("");
-              if (matched.has("make")) setVehicleMake("");
-              if (matched.has("model")) setVehicleModel("");
-              if (matched.has("color")) setVehicleColor("");
-              if (matched.has("vehicleCategory")) setVehicleCategory("");
-              if (matched.has("fuel")) setVehicleFuel("");
-              if (matched.has("bodyType")) setVehicleBodyType("");
-              if (matched.has("seats")) setVehicleSeats("");
-              if (matched.has("insurer")) setVehicleInsurer("");
-              if (matched.has("curbWeightKg")) setWeightKg("");
-            }
-            setVehicleLookup(snapshot);
-            if (patch.plate !== undefined) setLicensePlate(patch.plate);
-            if (patch.vin !== undefined) setVin(patch.vin);
-            if (patch.make !== undefined) setVehicleMake(patch.make);
-            if (patch.model !== undefined) setVehicleModel(patch.model);
-            if (patch.color !== undefined) setVehicleColor(patch.color);
-            if (patch.vehicleCategory !== undefined) setVehicleCategory(patch.vehicleCategory);
-            if (patch.fuel !== undefined) setVehicleFuel(patch.fuel);
-            if (patch.bodyType !== undefined) setVehicleBodyType(patch.bodyType);
-            if (patch.seats !== undefined && /^\d{1,2}$/.test(patch.seats)) setVehicleSeats(patch.seats);
-            if (patch.insurer !== undefined) setVehicleInsurer(patch.insurer);
-            if (patch.curbWeightKg !== undefined && /^\d{1,6}$/.test(patch.curbWeightKg)) setWeightKg(patch.curbWeightKg);
-          }} />
-          <TextField label="Značka" value={vehicleMake} onChange={setVehicleMake} />
-          <TextField label="Model" value={vehicleModel} onChange={setVehicleModel} />
-          <TextField label="Rok výroby" value={productionYear} onChange={setProductionYear} error={fieldErrors.productionYear} type="number" inputMode="numeric" min={1950} max={new Date().getFullYear() + 1} step={1} transformValue={(value) => digitsOnly(value, 4)} />
-          <TextField label="Farba" value={vehicleColor} onChange={setVehicleColor} />
-          <TextField label="Palivo" value={vehicleFuel} onChange={setVehicleFuel} />
-          <TextField label="Karoséria" value={vehicleBodyType} onChange={setVehicleBodyType} />
-          <TextField label="Počet miest" value={vehicleSeats} onChange={setVehicleSeats} type="number" inputMode="numeric" min={1} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
-          <SelectField label="Typ vozidla" value={vehicleType} onChange={(value) => setVehicleType(value as ClientVehicleType | "")} options={[["", "Nezadaný"], ...vehicleTypes.map((type) => [type, clientVehicleTypeLabels[type]] as [string, string])]} />
-          <SelectField label="Prevodovka" value={transmission} onChange={(value) => setTransmission(value as VehicleTransmission | "")} options={[["", "Nezadaná"], ...transmissions.map((item) => [item, transmissionLabels[item]] as [string, string])]} />
-          <TextField label="Poznámka k prevodovke" value={transmissionNote} onChange={setTransmissionNote} />
-          <SelectField label="Pohon" value={driveType} onChange={setDriveType} options={[["", "Nezadaný"], ...driveTypeOptions.map(([value, label]) => [value, label] as [string, string])]} />
-          <TextField label="Hmotnosť kg" value={weightKg} onChange={setWeightKg} error={fieldErrors.weightKg} type="number" inputMode="numeric" min={1} max={100000} step={1} transformValue={(value) => digitsOnly(value, 6)} />
-          <TextField label="Kategória" value={vehicleCategory} onChange={setVehicleCategory} />
-          <TextField label="Poisťovňa PZP" value={vehicleInsurer} onChange={setVehicleInsurer} />
-        </div>
-        <TextareaField label="Opis problému / situácie" value={vehicleIssue} onChange={setVehicleIssue} required={!replacementOnly} />
-        {!replacementOnly && (
-          <>
-            <div>
-              <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Pojazdnosť<RequiredMark /></span>
-              <div className="flex flex-wrap gap-2">
-                {[
-                  [false, "Nepojazdné"],
-                  [true, "Pojazdné"],
-                ].map(([value, label]) => (
-                  <button
-                    key={String(value)}
-                    type="button"
-                    onClick={() => setDriveable(Boolean(value))}
-                    className={`h-9 rounded-md px-3 text-xs font-semibold ring-1 ${vehicleDriveable === value ? "bg-yellow-100 text-zinc-950 ring-yellow-300" : "bg-zinc-50 text-zinc-600 ring-zinc-200"}`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+        <div className="grid min-w-0 gap-2">
+          <div className="grid min-w-0 gap-2 @2xl:grid-cols-[minmax(0,430px)_minmax(0,1fr)]">
+            <div className="min-w-0">
+            <VehicleLookupControl contextKey={caseItem.id} plate={licensePlate} vin={vin} snapshot={vehicleLookup} required={!replacementOnly} plateError={fieldErrors.licensePlate} vinError={fieldErrors.vin} onPlateChange={setLicensePlate} onVinChange={setVin} onPlateBlur={prefillFromCommander} values={{ make: vehicleMake, model: vehicleModel, color: vehicleColor, vehicleCategory, fuel: vehicleFuel, bodyType: vehicleBodyType, seats: vehicleSeats, insurer: vehicleInsurer, curbWeightKg: weightKg }} onApply={(patch, snapshot, changedIdentifier) => {
+              if (!snapshot && vehicleLookup) {
+                const matched = vehicleFieldsMatchingLookup(vehicleLookup.result, { plate: licensePlate, vin, make: vehicleMake, model: vehicleModel, color: vehicleColor, vehicleCategory, fuel: vehicleFuel, bodyType: vehicleBodyType, seats: vehicleSeats, insurer: vehicleInsurer, curbWeightKg: weightKg });
+                if (matched.has("plate") && !(changedIdentifier === "vin" && vehicleLookup.result.query.kind === "plate")) setLicensePlate("");
+                if (matched.has("vin") && !(changedIdentifier === "plate" && vehicleLookup.result.query.kind === "vin")) setVin("");
+                if (matched.has("make")) setVehicleMake("");
+                if (matched.has("model")) setVehicleModel("");
+                if (matched.has("color")) setVehicleColor("");
+                if (matched.has("vehicleCategory")) setVehicleCategory("");
+                if (matched.has("fuel")) setVehicleFuel("");
+                if (matched.has("bodyType")) setVehicleBodyType("");
+                if (matched.has("seats")) setVehicleSeats("");
+                if (matched.has("insurer")) setVehicleInsurer("");
+                if (matched.has("curbWeightKg")) setWeightKg("");
+              }
+              setVehicleLookup(snapshot);
+              if (patch.plate !== undefined) setLicensePlate(patch.plate);
+              if (patch.vin !== undefined) setVin(patch.vin);
+              if (patch.make !== undefined) setVehicleMake(patch.make);
+              if (patch.model !== undefined) setVehicleModel(patch.model);
+              if (patch.color !== undefined) setVehicleColor(patch.color);
+              if (patch.vehicleCategory !== undefined) setVehicleCategory(patch.vehicleCategory);
+              if (patch.fuel !== undefined) setVehicleFuel(patch.fuel);
+              if (patch.bodyType !== undefined) setVehicleBodyType(patch.bodyType);
+              if (patch.seats !== undefined && /^\d{1,2}$/.test(patch.seats)) setVehicleSeats(patch.seats);
+              if (patch.insurer !== undefined) setVehicleInsurer(patch.insurer);
+              if (patch.curbWeightKg !== undefined && /^\d{1,6}$/.test(patch.curbWeightKg)) setWeightKg(patch.curbWeightKg);
+            }} />
             </div>
-            <CheckboxGroup items={conditionFlags} labels={vehicleConditionFlagLabels} selected={vehicleFlags} onChange={(nextFlags) => setVehicleFlags(vehicleDriveable === null ? nextFlags : normalizeVehicleConditionFlags(nextFlags, vehicleDriveable))} />
-          </>
-        )}
-        <TextareaField label="Poznámka k vozidlu" value={vehicleNote} onChange={setVehicleNote} />
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2">
+              <TextField label="Značka" value={vehicleMake} onChange={setVehicleMake} />
+              <TextField label="Model" value={vehicleModel} onChange={setVehicleModel} />
+            </div>
+          </div>
+          <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @2xl:grid-cols-4">
+            <TextField label="Rok výroby" value={productionYear} onChange={setProductionYear} error={fieldErrors.productionYear} type="number" inputMode="numeric" min={1950} max={new Date().getFullYear() + 1} step={1} transformValue={(value) => digitsOnly(value, 4)} />
+            <TextField label="Farba" value={vehicleColor} onChange={setVehicleColor} />
+            <TextField label="Palivo" value={vehicleFuel} onChange={setVehicleFuel} />
+            <SelectField label="Typ vozidla" value={vehicleType} onChange={(value) => setVehicleType(value as ClientVehicleType | "")} options={[["", "Nezadaný"], ...vehicleTypes.map((type) => [type, clientVehicleTypeLabels[type]] as [string, string])]} />
+          </div>
+          <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @2xl:grid-cols-5">
+            <SelectField label="Prevodovka" value={transmission} onChange={(value) => setTransmission(value as VehicleTransmission | "")} options={[["", "Nezadaná"], ...transmissions.map((item) => [item, transmissionLabels[item]] as [string, string])]} />
+            <SelectField label="Pohon" value={driveType} onChange={setDriveType} options={[["", "Nezadaný"], ...driveTypeOptions.map(([value, label]) => [value, label] as [string, string])]} />
+            <TextField label="Hmotnosť kg" value={weightKg} onChange={setWeightKg} error={fieldErrors.weightKg} type="number" inputMode="numeric" min={1} max={100000} step={1} transformValue={(value) => digitsOnly(value, 6)} />
+            <div className="@2xl:col-span-2"><TextField label="Poisťovňa PZP" value={vehicleInsurer} onChange={setVehicleInsurer} /></div>
+          </div>
+        </div>
         {!replacementOnly && (
-          <>
-            <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Incident</h4>
-            <div className="grid gap-3 @3xl:grid-cols-3">
+          <div className="grid min-w-0 gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-2">
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @2xl:grid-cols-[minmax(0,230px)_minmax(0,1fr)_minmax(0,110px)_minmax(0,110px)]">
+              <div>
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Pojazdnosť<RequiredMark /></span>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    [false, "Nepojazdné"],
+                    [true, "Pojazdné"],
+                  ].map(([value, label]) => (
+                    <button
+                      key={String(value)}
+                      type="button"
+                      onClick={() => setDriveable(Boolean(value))}
+                      className={`h-9 rounded-md px-3 text-xs font-semibold ring-1 ${vehicleDriveable === value ? "bg-yellow-100 text-zinc-950 ring-yellow-300" : "bg-zinc-50 text-zinc-600 ring-zinc-200"}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <SelectField label="Typ incidentu" value={incidentType} onChange={(value) => setIncidentType(value as IncidentType | "")} options={[["", "Nezadaný"], ...incidentTypes.map((type) => [type, incidentTypeLabels[type]] as [string, string])]} required />
               <TextField label="Počet účastníkov" value={participantsCount} onChange={setParticipantsCount} error={fieldErrors.participantsCount} type="number" inputMode="numeric" min={0} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
               <TextField label="Počet pasažierov" value={passengersCount} onChange={setPassengersCount} error={fieldErrors.passengersCount} type="number" inputMode="numeric" min={0} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
             </div>
-            <CheckboxGroup items={damageAreas} labels={damageAreaLabels} selected={selectedDamageAreas} onChange={setSelectedDamageAreas} />
-            <TextareaField label="Poznámka k poškodeniu" value={damageNote} onChange={setDamageNote} />
-          </>
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2">
+              <div>
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Stav vozidla</span>
+                <CheckboxGroup items={conditionFlags} labels={vehicleConditionFlagLabels} selected={vehicleFlags} onChange={(nextFlags) => setVehicleFlags(vehicleDriveable === null ? nextFlags : normalizeVehicleConditionFlags(nextFlags, vehicleDriveable))} />
+              </div>
+              <div>
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Poškodené časti</span>
+                <CheckboxGroup items={damageAreas} labels={damageAreaLabels} selected={selectedDamageAreas} onChange={setSelectedDamageAreas} />
+              </div>
+            </div>
+          </div>
         )}
+        <TextareaField label="Opis problému / situácie" value={vehicleIssue} onChange={setVehicleIssue} required={!replacementOnly} />
+        <details className="group rounded-md border border-zinc-200 bg-white px-3 py-2">
+          <summary className="flex min-h-8 cursor-pointer items-center justify-between gap-2 text-xs font-semibold text-zinc-600">
+            Ďalšie technické údaje a poznámky
+            <ChevronDown size={14} className="shrink-0 transition-transform group-open:rotate-180" aria-hidden="true" />
+          </summary>
+          <div className="grid min-w-0 gap-2 border-t border-zinc-100 pt-2">
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @2xl:grid-cols-4">
+              <TextField label="Karoséria" value={vehicleBodyType} onChange={setVehicleBodyType} />
+              <TextField label="Počet miest" value={vehicleSeats} onChange={setVehicleSeats} type="number" inputMode="numeric" min={1} max={99} step={1} transformValue={(value) => digitsOnly(value, 2)} />
+              <TextField label="Kategória" value={vehicleCategory} onChange={setVehicleCategory} />
+              <TextField label="Poznámka k prevodovke" value={transmissionNote} onChange={setTransmissionNote} />
+            </div>
+            <div className="grid min-w-0 gap-2 @xl:grid-cols-2">
+              <TextareaField label="Poznámka k vozidlu" value={vehicleNote} onChange={setVehicleNote} />
+              <TextareaField label="Poznámka k poškodeniu" value={damageNote} onChange={setDamageNote} />
+            </div>
+          </div>
+        </details>
       </EditFormSection>
 
       <EditFormSection
@@ -2451,101 +2473,111 @@ function EditCaseForm({
               Nie, nepotrebuje
             </button>
           </div>
-          <div className={`mt-3 grid gap-3 rounded-md border p-3 ${replacementVehicleNeeded ? "border-yellow-200 bg-white" : "border-zinc-200 bg-zinc-100"}`}>
-            <div className="grid gap-3 @xl:grid-cols-2">
-              <TextField label="Požadovaný typ vozidla" value={replacementVehicleType} onChange={setReplacementVehicleType} disabled={!replacementVehicleNeeded} required={replacementVehicleNeeded} />
-              <TextField label="Špeciálne požiadavky" value={replacementVehicleNote} onChange={setReplacementVehicleNote} disabled={!replacementVehicleNeeded} />
-            </div>
-            <div>
-              <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Preferencie</span>
-              <CheckboxGroup
-                items={replacementPreferences}
-                labels={replacementPreferenceLabels}
-                selected={selectedReplacementPreferences}
-                onChange={setSelectedReplacementPreferences}
-                disabled={!replacementVehicleNeeded}
-              />
-            </div>
-            {replacementOnly && customerType !== "insurance" && (
-              <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
-                <TextField label="Asistenčná služba" value={assistanceServiceName} onChange={setAssistanceServiceName} disabled={!replacementVehicleNeeded} />
-                <TextField label="Číslo prípadu asistenčky" value={assistanceReference} onChange={setAssistanceReference} disabled={!replacementVehicleNeeded} />
+          <details open={replacementVehicleNeeded} className={`mt-2 min-w-0 rounded-md border p-2 ${replacementVehicleNeeded ? "border-yellow-200 bg-white" : "border-zinc-200 bg-zinc-100"}`}>
+            <summary className={`cursor-pointer text-xs font-semibold text-zinc-600 ${replacementVehicleNeeded ? "hidden" : ""}`}>
+              Ďalšie údaje náhradného vozidla
+            </summary>
+            <div className="grid min-w-0 gap-2">
+              <div className="grid min-w-0 gap-2 @xl:grid-cols-2">
+                <TextField label="Požadovaný typ vozidla" value={replacementVehicleType} onChange={setReplacementVehicleType} disabled={!replacementVehicleNeeded} required={replacementVehicleNeeded} />
+                <TextField label="Špeciálne požiadavky" value={replacementVehicleNote} onChange={setReplacementVehicleNote} disabled={!replacementVehicleNeeded} />
               </div>
-            )}
-            <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
-              <SelectField
-                label="Kategória vozidla"
-                value={replacementCategory}
-                onChange={(value) => setReplacementCategory(value as "" | ReplacementVehicleCategory)}
-                options={[["", "Nezadaná"], ...replacementCategories.map((category) => [category, replacementCategoryLabels[category]] as [string, string])]}
-                disabled={!replacementVehicleNeeded}
-              />
-              <TextField
-                label="Miesto pristavenia"
-                value={replacementDeliveryPlace}
-                onChange={setReplacementDeliveryPlace}
-                disabled={!replacementVehicleNeeded}
-                required={replacementOnly}
-              />
-              <SelectField
-                label="Nárok na pristavenie"
-                value={replacementEntitlement}
-                onChange={(value) => setReplacementEntitlement(value as "" | ReplacementVehicleEntitlement)}
-                options={[["", "Nezadaný"], ...replacementEntitlements.map((entitlement) => [entitlement, replacementEntitlementLabels[entitlement]] as [string, string])]}
-                disabled={!replacementVehicleNeeded}
-              />
-              <SelectField
-                label="Možnosť predĺženia"
-                value={replacementExtension}
-                onChange={(value) => setReplacementExtension(value as "" | "yes" | "no")}
-                options={[["", "Nezadaná"], ["yes", "Áno"], ["no", "Nie"]]}
-                disabled={!replacementVehicleNeeded}
-              />
-              <TextField
-                label="Maximálny počet dní"
-                value={replacementMaxDays}
-                onChange={setReplacementMaxDays}
-                type="number"
-                inputMode="numeric"
-                min={1}
-                max={365}
-                step={1}
-                transformValue={(value) => digitsOnly(value, 3)}
-                disabled={!replacementVehicleNeeded}
-              />
-            </div>
-            <div className="grid gap-3 border-t border-zinc-100 pt-3 @xl:grid-cols-2">
-              <SelectField
-                label="Poskytnuté náhradné vozidlo"
-                value={replacementProvisionStatus}
-                onChange={(value) => setReplacementProvisionStatus(value as "" | ReplacementVehicleProvisionStatus)}
-                options={[
-                  ["", "Nerozhodnuté"],
-                  ["pending", "Čaká na preverenie"],
-                  ["provided", "Áno, poskytnuté"],
-                  ["not_provided", "Nie, neposkytnuté"],
-                ]}
-                disabled={!replacementVehicleNeeded}
-              />
-              {(replacementProvisionStatus === "not_provided" || replacementProvisionStatus === "pending") && (
-                <TextField
-                  label={replacementProvisionStatus === "not_provided" ? "Dôvod neposkytnutia" : "Čo sa preveruje"}
-                  value={replacementProvisionReason}
-                  onChange={setReplacementProvisionReason}
+              <div>
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Preferencie</span>
+                <CheckboxGroup
+                  items={replacementPreferences}
+                  labels={replacementPreferenceLabels}
+                  selected={selectedReplacementPreferences}
+                  onChange={setSelectedReplacementPreferences}
                   disabled={!replacementVehicleNeeded}
-                  required={replacementProvisionStatus === "not_provided"}
                 />
+              </div>
+              {replacementOnly && customerType !== "insurance" && (
+                <div className="grid min-w-0 gap-2 border-t border-zinc-100 pt-2 @xl:grid-cols-2">
+                  <TextField label="Asistenčná služba" value={assistanceServiceName} onChange={setAssistanceServiceName} disabled={!replacementVehicleNeeded} />
+                  <TextField label="Číslo prípadu asistenčky" value={assistanceReference} onChange={setAssistanceReference} disabled={!replacementVehicleNeeded} />
+                </div>
               )}
+              <div className="grid min-w-0 gap-2 border-t border-zinc-100 pt-2 @xl:grid-cols-2 @2xl:grid-cols-[minmax(0,240px)_minmax(0,1fr)]">
+                <SelectField
+                  label="Nárok na pristavenie"
+                  value={replacementEntitlement}
+                  onChange={(value) => setReplacementEntitlement(value as "" | ReplacementVehicleEntitlement)}
+                  options={[["", "Nezadaný"], ...replacementEntitlements.map((entitlement) => [entitlement, replacementEntitlementLabels[entitlement]] as [string, string])]}
+                  disabled={!replacementVehicleNeeded}
+                />
+                <TextField
+                  label="Miesto pristavenia"
+                  value={replacementDeliveryPlace}
+                  onChange={setReplacementDeliveryPlace}
+                  disabled={!replacementVehicleNeeded}
+                  required={replacementOnly}
+                />
+              </div>
+              <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @2xl:grid-cols-[160px_minmax(0,1fr)]">
+                <TextField
+                  label="Maximálny počet dní"
+                  value={replacementMaxDays}
+                  onChange={setReplacementMaxDays}
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={365}
+                  step={1}
+                  transformValue={(value) => digitsOnly(value, 3)}
+                  disabled={!replacementVehicleNeeded}
+                />
+                <SelectField
+                  label="Možnosť predĺženia"
+                  value={replacementExtension}
+                  onChange={(value) => setReplacementExtension(value as "" | "yes" | "no")}
+                  options={[["", "Nezadaná"], ["yes", "Áno"], ["no", "Nie"]]}
+                  disabled={!replacementVehicleNeeded}
+                />
+              </div>
+              <div className="grid min-w-0 gap-2 border-t border-zinc-100 pt-2 @xl:grid-cols-2">
+                <SelectField
+                  label="Poskytnuté náhradné vozidlo"
+                  value={replacementProvisionStatus}
+                  onChange={(value) => setReplacementProvisionStatus(value as "" | ReplacementVehicleProvisionStatus)}
+                  options={[
+                    ["", "Nerozhodnuté"],
+                    ["pending", "Čaká na preverenie"],
+                    ["provided", "Áno, poskytnuté"],
+                    ["not_provided", "Nie, neposkytnuté"],
+                  ]}
+                  disabled={!replacementVehicleNeeded}
+                />
+                {(replacementProvisionStatus === "not_provided" || replacementProvisionStatus === "pending") && (
+                  <TextField
+                    label={replacementProvisionStatus === "not_provided" ? "Dôvod neposkytnutia" : "Čo sa preveruje"}
+                    value={replacementProvisionReason}
+                    onChange={setReplacementProvisionReason}
+                    disabled={!replacementVehicleNeeded}
+                    required={replacementProvisionStatus === "not_provided"}
+                  />
+                )}
+              </div>
+              <details className="group rounded-md border border-zinc-200 bg-white px-3 py-2">
+                <summary className="flex min-h-8 cursor-pointer items-center justify-between gap-2 text-xs font-semibold text-zinc-600">
+                  Ďalšie údaje náhradného vozidla
+                  <ChevronDown size={14} className="shrink-0 transition-transform group-open:rotate-180" aria-hidden="true" />
+                </summary>
+                <div className="border-t border-zinc-100 pt-2">
+                  <SelectField
+                    label="Kategória vozidla"
+                    value={replacementCategory}
+                    onChange={(value) => setReplacementCategory(value as "" | ReplacementVehicleCategory)}
+                    options={[["", "Nezadaná"], ...replacementCategories.map((category) => [category, replacementCategoryLabels[category]] as [string, string])]}
+                    disabled={!replacementVehicleNeeded}
+                  />
+                </div>
+              </details>
             </div>
-            {!replacementVehicleNeeded && (
-              <p className="text-xs font-medium text-zinc-500">
-                Podrobnosti sa sprístupnia po voľbe „Áno, potrebuje“ a zostanú na rovnakom mieste.
-              </p>
-            )}
-          </div>
+          </details>
         </div>
         <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Dokumenty</h4>
-        <div className="grid gap-3 @3xl:grid-cols-[160px_1fr_1fr_auto]">
+        <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @2xl:grid-cols-[160px_minmax(0,1fr)_minmax(0,1fr)_auto]">
           <SelectField label="Typ prílohy" value={attachmentCategory} onChange={(value) => setAttachmentCategory(value as CaseAttachmentInput["category"])} options={attachmentCategories.map((category) => [category, attachmentCategoryLabels[category]])} />
           <label className="block">
             <span className="mb-1 block text-xs font-semibold uppercase tracking-normal text-zinc-500">Súbory</span>
@@ -2610,32 +2642,34 @@ function EditCaseForm({
           </div>
         )}
         <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Platba</h4>
-        <div className="grid gap-3 @xl:grid-cols-2">
-          <SelectField label="Platba" value={paymentMethod} onChange={(value) => setPaymentMethod(value as PaymentMethod | "")} options={[["", "Nezadaná"], ...paymentMethods.map((method) => [method, paymentMethodLabels[method]] as [string, string])]} required />
-          <SelectField label="Stav platby" value={paymentStatus} onChange={(value) => setPaymentStatus(value as PaymentStatus | "")} options={[["", "Nezadaný"], ...paymentStatuses.map((status) => [status, paymentStatusLabels[status]] as [string, string])]} required />
-        </div>
-        <h4 className="border-t border-zinc-200 pt-3 text-xs font-semibold uppercase tracking-normal text-zinc-500">Ukončenie a poznámky</h4>
-        <div className="grid gap-3 @3xl:grid-cols-3">
-          <SelectField
-            label="Stav prípadu"
-            value={caseClosureStatus}
-            onChange={(value) => setCaseClosureStatus(value as "" | CaseClosureStatus)}
-            options={[
-              ["", "Ponechať aktuálny"],
-              ...caseClosureStatuses.map((status) => [status, status === "open" ? "Otvorený (vrátiť do práce)" : caseStatusLabels[status]] as [string, string]),
-            ]}
-          />
-          <SelectField label="Typ ukončenia" value={closureType} onChange={(value) => setClosureType(value as ClosureType | "")} options={[["", "Nezadaný"], ["insurance_portal", "Asistenčná služba"], ["self_payer", "Samoplatca"], ["internal", "Interné"]]} />
-          <TextField label="Stav ukončenia" value={closureStatus} onChange={setClosureStatus} />
-          {sourceType === "assistance" && <TextField label="Portál asistenčnej služby" value={insurancePortalUrl} onChange={setInsurancePortalUrl} error={fieldErrors.insurancePortalUrl} type="url" inputMode="url" />}
-        </div>
+        <SelectField label="Spôsob platby" value={paymentMethod} onChange={(value) => setPaymentMethod(value as PaymentMethod | "")} options={[["", "Nezadaná"], ...paymentMethods.map((method) => [method, paymentMethodLabels[method]] as [string, string])]} required />
+        <details className="group rounded-md border border-zinc-200 bg-white px-3 py-2">
+          <summary className="flex min-h-8 cursor-pointer items-center justify-between gap-2 text-xs font-semibold text-zinc-600">
+            Stav platby a ukončenie prípadu
+            <ChevronDown size={14} className="shrink-0 transition-transform group-open:rotate-180" aria-hidden="true" />
+          </summary>
+          <div className="grid min-w-0 gap-2 border-t border-zinc-100 pt-2 @xl:grid-cols-2 @2xl:grid-cols-4">
+            <SelectField label="Stav platby" value={paymentStatus} onChange={(value) => setPaymentStatus(value as PaymentStatus | "")} options={[["", "Nezadaný"], ...paymentStatuses.map((status) => [status, paymentStatusLabels[status]] as [string, string])]} />
+            <SelectField
+              label="Stav prípadu"
+              value={caseClosureStatus}
+              onChange={(value) => setCaseClosureStatus(value as "" | CaseClosureStatus)}
+              options={[
+                ["", "Ponechať aktuálny"],
+                ...caseClosureStatuses.map((status) => [status, status === "open" ? "Otvorený (vrátiť do práce)" : caseStatusLabels[status]] as [string, string]),
+              ]}
+            />
+            <SelectField label="Typ ukončenia" value={closureType} onChange={(value) => setClosureType(value as ClosureType | "")} options={[["", "Nezadaný"], ["insurance_portal", "Asistenčná služba"], ["self_payer", "Samoplatca"], ["internal", "Interné"]]} />
+            <TextField label="Stav ukončenia" value={closureStatus} onChange={setClosureStatus} />
+            <div className="@xl:col-span-2 @2xl:col-span-4"><TextareaField label="Poznámka k ukončeniu zásahu" value={closureNote} onChange={setClosureNote} /></div>
+          </div>
+        </details>
         {caseClosureStatus === "cancelled" && (
           <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">
             Prípad sa uloží ako zrušený a zmizne zo zoznamu aktívnych prípadov. Nájdeš ho v Prípady → História.
           </p>
         )}
-        <TextareaField label="Poznámka k ukončeniu zásahu" value={closureNote} onChange={setClosureNote} />
-        <TextareaField label="Interná poznámka dispečera" value={note} onChange={setNote} />
+        <TextareaField label="Iné poznámky" value={note} onChange={setNote} />
       </EditFormSection>
         </div>
       </div>
@@ -2676,7 +2710,7 @@ function ContactEditor({
               {index + 1}. kontakt
               {contact.isPrimary && <span className="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2 py-0.5 text-yellow-900"><Star size={12} /> Primárny</span>}
             </div>
-            <div className="flex gap-1">
+            {contacts.length > 1 && <div className="flex gap-1">
               <IconButton label="Vyššie" onClick={() => onMove(contact.id, -1)} disabled={index === 0}>
                 <ChevronUp size={15} />
               </IconButton>
@@ -2689,16 +2723,26 @@ function ContactEditor({
               <IconButton label="Odobrať" onClick={() => onRemove(contact.id)} disabled={contacts.length === 1}>
                 <Trash2 size={15} />
               </IconButton>
-            </div>
+            </div>}
           </div>
-          <div className="grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-4">
+          <div className="grid min-w-0 gap-2 @xl:grid-cols-2 @2xl:grid-cols-4">
             <TextField label="Meno" value={contact.firstName} onChange={(value) => onUpdate(contact.id, { firstName: value })} error={contact.isPrimary ? fieldErrors.contactName : undefined} required={contact.isPrimary} />
             <TextField label="Priezvisko" value={contact.lastName} onChange={(value) => onUpdate(contact.id, { lastName: value })} />
             <PhoneField contact={contact} onChange={(patch) => onUpdate(contact.id, patch)} error={contact.isPrimary ? fieldErrors.contactPhone : undefined} required={contact.isPrimary} />
             <TextField label="Email" value={contact.email} onChange={(value) => onUpdate(contact.id, { email: value })} error={contact.isPrimary ? fieldErrors.contactEmail : getEmailValidationError(contact.email)} type="email" inputMode="email" />
-            <SelectField label="Rola" value={contact.role} onChange={(value) => onUpdate(contact.id, { role: value as CustomerContactRole })} options={customerContactRoles.map((role) => [role, customerContactRoleLabels[role]])} />
-            <TextField label="Poznámka" value={contact.note} onChange={(value) => onUpdate(contact.id, { note: value })} />
           </div>
+          {(!contact.isPrimary || contact.role !== "primary_customer" || contact.note.trim()) && (
+            <details className="group rounded-md border border-zinc-200 bg-white px-3 py-2">
+              <summary className="flex min-h-8 cursor-pointer items-center justify-between gap-2 text-xs font-semibold text-zinc-600">
+                <span>Ďalšie údaje kontaktu{!contact.isPrimary ? ` · ${customerContactRoleLabels[contact.role]}` : ""}{contact.note ? " · poznámka" : ""}</span>
+                <ChevronDown size={14} className="shrink-0 transition-transform group-open:rotate-180" aria-hidden="true" />
+              </summary>
+              <div className="grid gap-2 border-t border-zinc-100 pt-2 @xl:grid-cols-2">
+                <SelectField label="Rola" value={contact.role} onChange={(value) => onUpdate(contact.id, { role: value as CustomerContactRole })} options={customerContactRoles.map((role) => [role, customerContactRoleLabels[role]])} />
+                <TextField label="Poznámka" value={contact.note} onChange={(value) => onUpdate(contact.id, { note: value })} />
+              </div>
+            </details>
+          )}
         </div>
       ))}
     </div>

@@ -56,6 +56,28 @@ describe("case form validation", () => {
     })).toEqual([]);
   });
 
+  it("allows an unset payment status while still requiring a payment method", () => {
+    const completeCase = {
+      contactName: "Ján Novák",
+      contactPhone: "+421 900 123 456",
+      customerType: "private_person" as const,
+      destinationSelected: true,
+      incidentType: "breakdown" as const,
+      jobTypes: ["tow" as const],
+      licensePlate: "BA123AB",
+      needsDestination: true,
+      pickupSelected: true,
+      replacementVehicleNeeded: false,
+      sourceType: "client",
+      vehicleDriveable: true,
+      vehicleIssue: "Porucha motora",
+    };
+
+    expect(getCaseFormCompletionErrors({ ...completeCase, paymentMethod: "cash" })).toEqual([]);
+    expect(getCaseFormValidation({ ...completeCase, paymentMethod: "cash" }).sectionValid.extras).toBe(true);
+    expect(getCaseFormCompletionErrors(completeCase)).toContain("Vyberte spôsob platby.");
+  });
+
   it("groups identical create and edit validation into the five visible sections", () => {
     const validation = getCaseFormValidation({
       contactEmail: "wrong",
@@ -63,6 +85,7 @@ describe("case form validation", () => {
       contactPhone: "+421 900123456",
       customerType: "private_person",
       incidentType: "breakdown",
+      insurancePortalUrl: "invalid-url",
       jobTypes: ["tow"],
       licensePlate: "BA123AB",
       needsDestination: true,
@@ -83,6 +106,7 @@ describe("case form validation", () => {
       extras: true,
     });
     expect(validation.sectionErrors.customer).toContain("Email nemá správny formát.");
+    expect(validation.sectionErrors.customer).toContain("Portál musí byť platná adresa začínajúca http:// alebo https://.");
     expect(validation.sectionErrors.location).toContain("Vyberte cieľ odťahu.");
   });
 

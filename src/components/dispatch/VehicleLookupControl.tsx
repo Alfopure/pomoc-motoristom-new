@@ -7,6 +7,7 @@ import { normalizeLicensePlateInput, normalizeVinInput } from "./case-form-share
 import { emptyVehicleFieldPatch, isSlovakPlate, isVin, lookupIdentityConflict, normalizeVehicleIdentifier, preferredVehicleFacts, vinLinkedSkpPlateDifference, type VehicleFieldChoices, type VehicleFormValues, type VehicleLookupResponse, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 import { requestVehicleLookup } from "@/lib/vehicle-lookup-client";
 import { VehicleLookupDetails, vehicleLookupDate } from "./VehicleLookupDetails";
+import styles from "./case-detail.module.css";
 
 type Props = {
   plate: string;
@@ -107,8 +108,8 @@ export function VehicleLookupControl(props: Props) {
   const patch = result ? emptyVehicleFieldPatch(result, { ...props.values, plate: props.plate, vin: props.vin }, includePartial, choices) : {};
 
   return (
-    <div ref={control} className="col-span-full min-w-0" data-testid="vehicle-lookup">
-      <div className="grid gap-3 sm:grid-cols-2">
+    <div ref={control} className="col-span-full min-w-0 @container" data-testid="vehicle-lookup">
+      <div className={`${styles.vehicleLookupFields} grid min-w-0 gap-2`}>
         {(["plate", "vin"] as const).map((kind) => (
           <div key={kind} className="flex min-w-0 items-start gap-1.5">
             <div className="min-w-0 flex-1"><TextField label={kind === "plate" ? "EČV" : "VIN"} value={kind === "plate" ? props.plate : props.vin} onChange={(value) => changeIdentity(kind, value)} onBlur={kind === "plate" ? props.onPlateBlur : undefined} required={kind === "plate" && props.required} error={kind === "plate" ? props.plateError : props.vinError} disabled={props.disabled} /></div>
