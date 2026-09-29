@@ -1,3 +1,4 @@
+import { withRequestMetrics } from "@/server/request-metrics";
 import { loadDispatchData } from "@/data/dispatch-repository";
 import { motoristAccessGuard, requireMotoristOrgMember } from "@/server/api-auth";
 import { createCaseAttachmentSignedUrl, MutationError, uploadCaseAttachments } from "@/server/motorist-mutations";
@@ -5,23 +6,29 @@ import { createCaseAttachmentSignedUrl, MutationError, uploadCaseAttachments } f
 export const runtime = "nodejs";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const denied = await motoristAccessGuard({ request });
-  if (denied) return denied;
+  return withRequestMetrics("document.upload", async () => {
+    let committed = false;
+    const denied = await motoristAccessGuard({ request });
+    if (denied) return denied;
 
-  try {
-    const { id } = await params;
-    const formData = await request.formData();
-    const files = formData.getAll("files").filter((item): item is File => item instanceof File);
-    const note = stringFormValue(formData.get("note"));
-    const category = stringFormValue(formData.get("category"));
+    try {
+      const { id } = await params;
+      const formData = await request.formData();
+      const files = formData.getAll("files").filter((item): item is File => item instanceof File);
+      const note = stringFormValue(formData.get("note"));
+      const category = stringFormValue(formData.get("category"));
 
-    const attachments = await uploadCaseAttachments(id, files, note, requireMotoristOrgMember, category);
-    const dispatchData = await loadDispatchData();
+      const attachments = await uploadCaseAttachments(id, files, note, requireMotoristOrgMember, category);
+      committed = true;
+      const dispatchData = await loadDispatchData();
 
-    return Response.json({ caseId: id, attachments, dispatchData });
-  } catch (error) {
-    return mutationErrorResponse(error);
-  }
+      return Response.json({ caseId: id, attachments, dispatchData });
+    } catch (error) {
+      const response = mutationErrorResponse(error);
+      if (committed) response.headers.set("x-operation-committed", "true");
+      return response;
+    }
+  });
 }
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {

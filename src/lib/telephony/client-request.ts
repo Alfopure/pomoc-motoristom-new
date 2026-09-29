@@ -1,5 +1,8 @@
 import { isMobileApp } from "./phone-platform";
 import { beginBrowserCallStep } from "./call-timing";
+import { beginDiagnosticOperation } from "@/lib/diagnostics/client";
+import { diagnosticFailure, diagnosticRequestId, diagnosticResponse } from "@/lib/diagnostics/operations";
+import { telephonyRequestDiagnostic } from "./diagnostics";
 
 /**
  * Bounded browser requests for telephony endpoints.
@@ -172,9 +175,17 @@ export async function telephonyJson<T>(
   init: TelephonyFetchInit,
   runtime?: Parameters<typeof telephonyFetch>[2],
 ): Promise<TelephonyJsonResult<T>> {
-  const response = await telephonyFetch(input, init, runtime);
-  const body = (await response.json().catch(() => null)) as T | null;
-  return { ok: response.ok, status: response.status, body };
+  const diagnostic = telephonyRequestDiagnostic(input, init.method);
+  const finishDiagnostic = diagnostic ? beginDiagnosticOperation(diagnostic.operation, "telephony", { callSessionId: diagnostic.callSessionId, operationId: init.operationId }) : undefined;
+  try {
+    const response = await telephonyFetch(input, init, runtime);
+    const body = (await response.json().catch(() => null)) as T | null;
+    finishDiagnostic?.({ outcome: response.ok && body === null ? "unknown" : diagnosticResponse(response, body), ...diagnosticRequestId(response) });
+    return { ok: response.ok, status: response.status, body };
+  } catch (error) {
+    finishDiagnostic?.({ outcome: diagnosticFailure(error) });
+    throw error;
+  }
 }
 
 /**

@@ -1,0 +1,2 @@
+import { captureDiagnosticError } from '../../src/lib/diagnostics/errors';
+Object.assign(window,{sentryFixtureStorm(){for(let i=0;i<1000;i++){const error=new TypeError('CANARY_email@example.com +421901123456 CANARY_SECRET');error.stack=`TypeError: ${error.message}\n at CANARY_FUNCTION (${location.origin}/_next/static/chunks/abcdef1234567890.js?token=CANARY_SECRET:12:${i+1})`;captureDiagnosticError(error);}}});

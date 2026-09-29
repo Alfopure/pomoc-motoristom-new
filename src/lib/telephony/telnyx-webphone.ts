@@ -136,6 +136,8 @@ export type WebphoneSnapshot = {
 
 export type IncomingOfferPolicy = { presenceRevision?: number; automaticAllowed: boolean; requestPending?: boolean; explicitLegs?: Array<{ callControlId: string; sessionId: string }> };
 
+export type WebphoneStopReason = "component_unmount" | "pagehide" | "ownership_release" | "mobile_standby" | "superseded" | "recovery_timeout" | "auth_failure" | "unknown";
+
 export type TelnyxWebphoneOptions = {
   deviceKind?: "web" | "mobile";
   resumeSessionId?: string | null;
@@ -234,6 +236,7 @@ export class TelnyxWebphone {
   private readonly options: TelnyxWebphoneOptions;
   private readonly boundVisibility = () => this.onVisibilityChange();
   private readonly boundPageHide = () => {
+    this.log({ event: "pagehide", reason: "pagehide" });
     this.stopHeartbeat();
     this.beaconHeartbeat({ leaving: true });
   };
@@ -283,8 +286,9 @@ export class TelnyxWebphone {
     this.startHeartbeat();
   }
 
-  stop(): void {
+  stop(reason: WebphoneStopReason = "unknown"): void {
     if (!this.started) { this.disposeAudio(); return; }
+    this.log({ event: "stop", reason });
     this.beaconHeartbeat({ leaving: true });
     this.mintGeneration++;
     this.minting = false;
@@ -299,7 +303,7 @@ export class TelnyxWebphone {
     this.clearTimer("expectedLegTimer");
     this.expected = [];
     this.callError = null;
-    this.dispatch({ type: "stop" });
+    this.dispatch({ type: "stop" }, reason);
     this.disposeAudio();
   }
 
@@ -368,6 +372,7 @@ export class TelnyxWebphone {
    * explicit confirmation.
    */
   takeover(): void {
+    this.log({ event: "takeover", reason: "takeover_requested" });
     this.takeoverRequested = true;
     this.dispatch({ type: "start" });
   }
@@ -448,19 +453,30 @@ export class TelnyxWebphone {
     return this.options.now ? this.options.now() : Date.now();
   }
 
-  private dispatch(event: WebphoneEvent): void {
+  private log(entry: Record<string, unknown>): void {
+    try {
+      this.options.logger?.({ scope: "webphone", deviceSessionId: this.snapshot?.deviceSessionId,
+        callSessionId: this.snapshot?.call?.sessionId, ...entry });
+    } catch { /* Diagnostic observers cannot interrupt the media state machine. */ }
+  }
+
+  private dispatch(event: WebphoneEvent, stopReason: WebphoneStopReason = "unknown"): void {
+    const previousStatus = this.state.status;
     const result = reduceWebphone(this.state, event, { now: this.now(), random: this.options.random });
     const changed = result.state !== this.state;
     this.state = result.state;
-    this.options.logger?.({ scope: "webphone", event: event.type, status: this.state.status });
-    for (const effect of result.effects) this.runEffect(effect);
+    if (previousStatus !== this.state.status && event.type !== "stop") this.log({ event: event.type, status: this.state.status });
+    const reason = event.type === "stop" ? stopReason : this.state.status === "superseded" ? "superseded"
+      : event.type === "recovery_failed" ? "recovery_timeout"
+      : (event.type === "client_error" && event.authFailure) || (event.type === "token_rejected" && [401, 403].includes(event.status)) ? "auth_failure" : "unknown";
+    for (const effect of result.effects) this.runEffect(effect, reason);
     // Publish registration and renewed session ids immediately. Waiting for
     // the next timer tick can leave a resumed tab unavailable to routing.
     if (this.state.status === "registered" && (event.type === "client_ready" || event.type === "token_issued")) void this.sendHeartbeat();
     if (changed) this.publish();
   }
 
-  private runEffect(effect: WebphoneEffect): void {
+  private runEffect(effect: WebphoneEffect, reason: WebphoneStopReason): void {
     switch (effect.kind) {
       case "clear_timers":
         this.clearTimer("retryTimer");
@@ -473,7 +489,7 @@ export class TelnyxWebphone {
         void this.connect(effect.credentials);
         return;
       case "disconnect":
-        void this.disconnectClient();
+        void this.disconnectClient(reason);
         return;
       case "await_recovery":
         if (this.recoveryTimer === null) {
@@ -913,7 +929,7 @@ export class TelnyxWebphone {
     const code = payload?.warning?.code;
     if (typeof code !== "number") return;
     // Never log the provider payload: it can include tokens, SDP and numbers.
-    this.options.logger?.({ scope: "webphone", event: "sdk_warning", code });
+    this.log({ event: "sdk_warning", code });
     if (code === 34001) {
       if (this.now() - this.lastWarningRefreshAt < TOKEN_REFRESH_MIN_MS || this.minting) return;
       this.lastWarningRefreshAt = this.now();
@@ -937,8 +953,9 @@ export class TelnyxWebphone {
     return this.sdkModule;
   }
 
-  private async disconnectClient(): Promise<void> {
+  private async disconnectClient(reason: WebphoneStopReason): Promise<void> {
     const client = this.client;
+    if (client) this.log({ event: "disconnect", reason });
     this.client = null;
     this.clientGeneration += 1;
     this.mintGeneration++;
@@ -1000,7 +1017,7 @@ export class TelnyxWebphone {
     if (code === 45002) {
       // 2.27.10 pairs this unscoped error with socket.error carrying the socket
       // generation. Only that event may change readiness after a reconnect.
-      this.options.logger?.({ scope: "webphone", event: "sdk_socket_error", code });
+      this.log({ event: "sdk_socket_error", code });
       return;
     }
     if (code === 45004 || code === 48001) {
@@ -1020,7 +1037,7 @@ export class TelnyxWebphone {
       return;
     }
     if (payload?.error?.fatal === false) {
-      this.options.logger?.({ scope: "webphone", event: "sdk_recoverable_error", code });
+      this.log({ event: "sdk_recoverable_error", code });
       return;
     }
     this.dispatch({ type: "client_error", message, authFailure: isAuthFailure(message) });

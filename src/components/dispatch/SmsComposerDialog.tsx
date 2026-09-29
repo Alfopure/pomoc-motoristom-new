@@ -1,4 +1,6 @@
 "use client";
+import { beginDiagnosticOperation } from "@/lib/diagnostics/client";
+import { diagnosticFailure, diagnosticRequestId, diagnosticResponse } from "@/lib/diagnostics/operations";
 
 import { useLayoutPreview } from "./LayoutPreview";
 import { useCaseCollaboration } from "./CaseCollaborationProvider";
@@ -202,17 +204,20 @@ function SmsComposerSession({ caseId, caseNumber, initialPhone = "", initialMess
     event.preventDefault();
     if (busyRef.current || !preview || validation || pendingContext || (locationMode && locationRequestDisabled && !attempted)) return;
     busyRef.current = true; setSending(true); setAttempted(true); setError("");
+    const finishDiagnostic = beginDiagnosticOperation("sms.send", "sms");
     try {
       const response = await fetch("/api/sms/send", { method: "POST", headers: { "Content-Type": "application/json" },
         signal: AbortSignal.timeout(25_000), body: JSON.stringify({ ...preview, message: message.trim() }) });
       const data = await response.json();
       if (!response.ok) {
+        finishDiagnostic({ outcome: diagnosticResponse(response, data), ...diagnosticRequestId(response) });
         // These failures happen before the durable send claim; a new preview is safe.
         if ([400, 403, 409, 423, 429].includes(response.status)) setAttempted(false);
         throw new Error(data.error || "Výsledok odoslania je nejasný. Overte tú istú požiadavku.");
       }
       setResult(data); onSent?.(data); window.dispatchEvent(new Event("sms-history-changed"));
-    } catch (error) { setError(error instanceof Error && error.name !== "TimeoutError" ? error.message : "Spojenie sa prerušilo. Overte výsledok tej istej požiadavky; text ani príjemca sa nemenia."); }
+      finishDiagnostic({ outcome: "ok", ...diagnosticRequestId(response) });
+    } catch (error) { finishDiagnostic({ outcome: diagnosticFailure(error) }); setError(error instanceof Error && error.name !== "TimeoutError" ? error.message : "Spojenie sa prerušilo. Overte výsledok tej istej požiadavky; text ani príjemca sa nemenia."); }
     finally { busyRef.current = false; setSending(false); }
   }
   function newMessage() {

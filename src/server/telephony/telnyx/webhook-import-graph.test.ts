@@ -83,7 +83,10 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
 // Reviewed increase 53 → 54: routing/snapshot validates the existing JSON RPC
 // with no new runtime dependency beyond server-only. All DB eligibility and
 // dispatch guards stay shared; the forbidden-dependency checks still apply.
-const MAX_MODULES = 54;
+// Reviewed increase 54 → 55: app-version is the existing pure environment
+// selector, now reused by request metrics to correlate the serving deployment.
+// It imports no runtime dependencies, performs no I/O and adds no collector.
+const MAX_MODULES = 55;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);

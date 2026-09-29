@@ -3,13 +3,17 @@ import { realpathSync } from "node:fs";
 import { relative } from "node:path";
 
 const deploymentVersion = process.env.DEPLOYMENT_VERSION?.trim();
+const diagnosticBuild = [deploymentVersion, process.env.VERCEL_GIT_COMMIT_SHA, "local"].find(value => value && /^[a-zA-Z0-9_-]{1,64}$/.test(value))!;
 // Trace physical package paths: files beneath pnpm aliases collide with symlinks
 // when Vercel assembles the function directory.
 const playwrightRuntime = relative(process.cwd(), realpathSync("node_modules/playwright-core")).replaceAll("\\", "/");
 
 const nextConfig: NextConfig = {
   deploymentId: deploymentVersion,
+  env: { NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID: diagnosticBuild },
   generateBuildId: async () => deploymentVersion || "local",
+  // Only the private artifact script enables maps, then removes them from public output.
+  productionBrowserSourceMaps: process.env.DIAGNOSTICS_PRIVATE_SOURCE_MAPS === "1",
   poweredByHeader: false,
   serverExternalPackages: ["@sparticuz/chromium", "playwright-core"],
   outputFileTracingIncludes: {
