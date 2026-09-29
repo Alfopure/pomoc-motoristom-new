@@ -40,7 +40,7 @@ for (const width of viewportWidths) {
     await page.setViewportSize({ width, height: viewportHeight });
     await openDashboard(page);
 
-    await expect(page.getByTestId("signed-in-user-name")).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Účet / })).toBeVisible();
     await expect(page.getByText("Linka pomoci motoristom", { exact: true })).toHaveCount(0);
     if (width >= 1024) {
       await expect(page.getByRole("button", { name: "Nástenka", exact: true })).toBeVisible();
@@ -103,7 +103,7 @@ test("case header offers separate web and mobile call actions", async ({ page })
   await expectNoDocumentOverflow(page, "case call actions at 390px");
 });
 
-test("replacement vehicle details stay in place while the explicit choice changes", async ({ page }) => {
+test("replacement vehicle details appear when needed and retain unsaved values", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: viewportHeight });
   await openDashboard(page);
   await openNewCase(page);
@@ -121,9 +121,8 @@ test("replacement vehicle details stay in place while the explicit choice change
   await expect(page.getByRole("checkbox", { name: "Nepojazdné", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Pojazdné", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Nepojazdné", exact: true })).toHaveCount(1);
-  await expect(vehicleType).toBeVisible();
-  await expect(vehicleType).toBeDisabled();
-  await expect(specialRequirements).toBeDisabled();
+  await expect(vehicleType).toHaveCount(0);
+  await expect(specialRequirements).toHaveCount(0);
 
   await yesButton.click();
   await expect(yesButton).toHaveAttribute("aria-pressed", "true");
@@ -135,8 +134,8 @@ test("replacement vehicle details stay in place while the explicit choice change
   await vehicleType.fill("Kombi");
 
   await noButton.click();
-  await expect(vehicleType).toBeVisible();
-  await expect(vehicleType).toBeDisabled();
+  await expect(vehicleType).toHaveCount(0);
+  await yesButton.click();
   await expect(vehicleType).toHaveValue("Kombi");
 });
 
@@ -305,24 +304,21 @@ test("an entirely empty case can be persisted as a draft", async ({ page }) => {
   await expect(page.getByText("Karta je uložená ako rozpracovaná.", { exact: false })).toBeVisible();
 });
 
-test("leaving a new case uses the in-app save-or-discard dialog", async ({ page }) => {
+test("switching pages preserves an unfinished new case", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: viewportHeight });
   await openDashboard(page);
   await openNewCase(page);
-  await page.getByLabel("Interná poznámka dispečera", { exact: true }).fill("Rozpracovaný telefonát");
+  await page.getByLabel("Iné poznámky", { exact: true }).fill("Rozpracovaný telefonát");
 
   const mainNavigation = page.getByRole("navigation", { name: "Hlavná navigácia" });
   await mainNavigation.getByRole("button", { name: "Menu", exact: true }).click();
   const tasksNavigation = mainNavigation.getByRole("dialog", { name: "Obrazovky aplikácie" }).getByRole("button", { name: /^Úlohy/ });
   await tasksNavigation.click();
-  await expect(page.getByRole("dialog")).toContainText("Rozpracovaný prípad nie je uložený");
-  await page.getByRole("button", { name: "Zostať vo formulári", exact: true }).first().click();
-  await expect(page.getByLabel("Interná poznámka dispečera", { exact: true })).toHaveValue("Rozpracovaný telefonát");
-
-  await mainNavigation.getByRole("button", { name: "Menu", exact: true }).click();
-  await tasksNavigation.click();
-  await page.getByRole("button", { name: "Odísť bez uloženia", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Úlohy", exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Rozpracovaný prípad nie je uložený" })).toHaveCount(0);
+
+  await mainNavigation.getByRole("button", { name: "Nástenka", exact: true }).click();
+  await expect(page.getByLabel("Iné poznámky", { exact: true })).toHaveValue("Rozpracovaný telefonát");
 });
 
 test("an employee can quick-add an assistance service from the case form", async ({ page }) => {
@@ -622,11 +618,9 @@ test("case cockpit edits in compact sections and keeps operational details avail
   await expect(sections.nth(1)).toHaveAttribute("open", "");
   await expect(sections.nth(1).getByLabel("Meno", { exact: true }).first()).toBeVisible();
 
-  const operationalOverview = page.locator("details").filter({ hasText: "Prevádzkový prehľad" }).first();
-  await expect(operationalOverview).not.toHaveAttribute("open", "");
-  await operationalOverview.locator("summary").click();
-  await expect(operationalOverview).toHaveAttribute("open", "");
-  await expect(operationalOverview.getByText("Ďalší krok", { exact: true })).toBeVisible();
+  const operationalHeader = page.getByRole("group", { name: "Stav a priorita prípadu" });
+  await expect(operationalHeader.getByRole("combobox", { name: "Stav prípadu v hlavičke" })).toBeVisible();
+  await expect(operationalHeader.getByRole("combobox", { name: "Priorita prípadu v hlavičke" })).toBeVisible();
 });
 
 test("compact case editor protects a pending change before it collapses", async ({ page }) => {
@@ -909,18 +903,17 @@ test("valid edits save automatically and refresh the open card", async ({ page }
     }
 
     patchCount += 1;
-    const payload = route.request().postDataJSON() as { licensePlate?: string; vehicleDriveable?: boolean };
-    submittedPlate = payload.licensePlate ?? "";
+    const payload = route.request().postDataJSON() as { licensePlate?: string; vehicleDriveable?: boolean; mutationId?: string };
+    submittedPlate = payload.licensePlate ?? submittedPlate;
     submittedDriveableValues.push(payload.vehicleDriveable);
     savedCaseId = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
-    const dispatchData = createMockDispatchData({
-      dispatchCases: mockDispatchCases.map((caseItem) =>
-        caseItem.id === savedCaseId
-          ? { ...caseItem, vehicle: { ...caseItem.vehicle, licensePlate: submittedPlate }, updatedAt: new Date().toISOString() }
-          : caseItem,
-      ),
-    });
-    await route.fulfill({ status: 200, json: { caseId: savedCaseId, dispatchData, warnings: [] } });
+    const caseItem = mockDispatchCases.find((item) => item.id === savedCaseId)!;
+    const caseDetail = {
+      ...caseItem,
+      vehicle: { ...caseItem.vehicle, licensePlate: submittedPlate, driveable: payload.vehicleDriveable ?? caseItem.vehicle.driveable },
+      updatedAt: new Date(Date.now() + patchCount * 1_000).toISOString(),
+    };
+    await route.fulfill({ status: 200, json: { caseId: savedCaseId, caseDetail, committedRevision: caseDetail.updatedAt, mutationId: payload.mutationId, warnings: [] } });
   });
 
   await page.setViewportSize({ width: 1280, height: viewportHeight });

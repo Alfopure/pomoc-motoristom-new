@@ -304,6 +304,16 @@
   gap: 8px;
 }
 
+.vehicleLookupFields {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@container (min-width: 410px) {
+  .vehicleLookupFields {
+    grid-template-columns: 160px minmax(0, 1fr);
+  }
+}
+
 .taskComposer {
   padding: 10px;
   gap: 8px;
@@ -321,6 +331,11 @@
   display: grid;
   min-width: 0;
   gap: 10px;
+}
+
+.locationFields > *,
+.locationFields :global(.google-place-autocomplete-host) {
+  min-width: 0;
 }
 
 .locationFields :global(.google-place-autocomplete-host):empty,

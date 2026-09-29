@@ -92,7 +92,7 @@ for (const width of [1440, 1280, 1024, 390, 320]) test(`one compact status and s
 
 test("hidden existing editor leaves presence, keeps its DOM and resumes on return", async ({ page }) => {
   const api = await boot(page); await openEditor(page);
-  const note = page.getByLabel("Interná poznámka dispečera", { exact: true });
+  const note = page.getByLabel("Iné poznámky", { exact: true });
   await note.fill("Zachovať neuložený text");
   await note.evaluate(node => { Object.assign(node, { retainedSyncDraft: true }); (node as HTMLTextAreaElement).setSelectionRange(3, 3); });
   await expect.poll(() => api.presence.some(item => item.action === "heartbeat" && item.caseId === syncCard.id)).toBe(true);
@@ -135,7 +135,7 @@ async function browserVisible(page: Page, visible: boolean) {
 test("browser visibility leaves an existing session and resumes with a new one and retained draft", async ({ page }) => {
   const api = await boot(page); await openEditor(page);
   await page.clock.install();
-  const note = page.getByLabel("Interná poznámka dispečera", { exact: true });
+  const note = page.getByLabel("Iné poznámky", { exact: true });
   await note.fill("Zachovať pri prepnutí tabu");
   await note.evaluate(node => { Object.assign(node, { sameEditor: true }); (node as HTMLTextAreaElement).setSelectionRange(4, 4); });
   await expect.poll(() => api.presence.filter(item => item.action === "heartbeat" && item.caseId === syncCard.id).length).toBeGreaterThan(0);
