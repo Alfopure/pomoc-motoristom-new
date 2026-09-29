@@ -44,8 +44,21 @@ export async function generateCasePdf(snapshot: CasePdfSnapshot): Promise<Buffer
     const page = await browser.newPage({ locale: "sk-SK", javaScriptEnabled: false });
     // Case text cannot load remote images, scripts, styles, fonts or tracking URLs.
     await page.route("**/*", route => route.abort());
-    await page.setContent(renderCasePdf(snapshot, regular.toString("base64"), bold.toString("base64")), { waitUntil: "load", timeout: 15_000 });
-    await page.evaluate(() => document.fonts.ready);
+    // The briefing is a single A4 handoff. If unusually long saved text would
+    // spill onto another page, shorten optional prose and mark it in the PDF.
+    // Keep the print body a little below the available 277 mm to allow for
+    // Chromium's pagination rounding and the page-number footer.
+    const maxHeightPx = 268 * 96 / 25.4;
+    let height = 0;
+    for (const budget of [1, 0.72, 0.5, 0.35]) {
+      await page.setContent(renderCasePdf(snapshot, regular.toString("base64"), bold.toString("base64"), budget), { waitUntil: "load", timeout: 15_000 });
+      await page.evaluate(() => document.fonts.ready);
+      height = await page.evaluate(() => document.body.scrollHeight);
+      if (height <= maxHeightPx) break;
+    }
+    if (height > maxHeightPx) {
+      await page.evaluate(scale => { document.body.style.zoom = String(scale); }, maxHeightPx / height);
+    }
     const pdf = await page.pdf({ format: "A4", printBackground: true, displayHeaderFooter: true, headerTemplate: "<span></span>", footerTemplate: '<div style="font-size:8px;color:#71717a;width:100%;text-align:center"><span class="pageNumber"></span> / <span class="totalPages"></span></div>' });
     if (expired) throw new Error("PDF deadline reached");
     console.info("case_pdf_generated", { durationMs: Date.now() - started, bytes: pdf.length });
