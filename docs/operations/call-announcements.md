@@ -6,6 +6,10 @@ Pripravené sú slovenské, české, anglické a nemecké hlášky. Vybraný jaz
 
 Všetky používané hovorené hlášky majú jednotný prirodzený hlas Richard. Zapnutý úvod prichádzajúceho hovoru trvá menej než 3 sekundy. Počas podržania hrá tichá inštrumentálna slučka; čakáreň pripomína možnosť spätného volania medzi dlhšími blokmi hudby. Zapnutý úvod sa dokončí pred spustením menu, hudby alebo zvonenia operátorov. Výpadok média má hlasovú náhradu; ak nefunguje ani tá, hovor pokračuje bežným smerovaním bez privítania. Chyba úvodnej nahrávky sama neukončí zákaznícky hovor. Oznam pred nahrávaním má samostatnú kontrolu dokončenia: pri jeho výpadku hovor pokračuje bez spustenia záznamu.
 
+Pri prvom zvonení operátorom počuje volajúci klasický vyzváňací tón (425 Hz, sekunda tónu a štyri sekundy pauzy). Tón sa prehráva aj pri smerovaní na osobný mobil. Pri prijatí sa vypne; prechod do čakárne ho nahradí jej hláškou a hudbou. Režim „najprv čakáreň“, ďalšie ponuky z čakárne, podržanie a prepájanie používajú doterajšiu hudbu. Tón používa rovnaký príkaz na prehrávanie ako predchádzajúca hudba a nepridáva sieťový krok pred spojením hovoru.
+
+Súbor `tones-v1/ringback.mp3` obsahuje šesť cyklov (30 sekúnd), aby opakovanie nezvýšilo počet udalostí od poskytovateľa oproti pôvodnej 22-sekundovej hudbe. Dá sa vytvoriť lokálne pomocou `scripts/build-ringback.py`; pri nasadení sa negeneruje. Pri chybe zvukového súboru pokračuje smerovanie hovoru. Zvuk ani simulované testy nenahrádzajú kontrolu počuteľnosti na skutočnom telefóne.
+
 ## Úvodné hlášky podľa smeru hovoru
 
 Každá linka má dva nezávislé prepínače, spoločné pre všetky jej jazyky:
