@@ -334,7 +334,9 @@ describe("transfers", () => {
     await h.process(h.envelope("call.initiated", { call_control_id: "cc-target", call_session_id: call.telnyxSessionId, client_state: transfer.targetLegClientState, direction: "outgoing" }));
     await h.legEvent("cc-target", "call.hangup", { hangup_cause: "timeout" });
     expect(h.session(call.sessionId).state).toBe("waiting");
-    expect(h.telnyx.of("playbackStart").at(-1)?.params).toMatchObject({ audioUrl: "https://media.test/telephony/announcements-v1/moh.mp3", loop: "infinity" });
+    // Check the new waiting heartbeat, not the historical playback that
+    // already ended when the initial ring plan connected the operator.
+    expect(h.telnyx.of("gather").at(-1)?.params).toMatchObject({ callControlId: call.callControlId, timeoutMillis: 60_000 });
   });
 
   it("runs an attended transfer: consult, join, complete", async () => {
