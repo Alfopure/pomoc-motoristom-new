@@ -1,16 +1,28 @@
 # Samostatné plne testovateľné prostredie
 
-Stav k 2026-09-30: používateľ schválil samostatné TEST zdroje a testovanie celej aplikácie. Vercel projekt `pomoc-motoristom-test` (`prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk`) je vytvorený v `fra1`, Node 24.x; dostal 43 TEST premenných iba v Production target, nové cron/signing/sync secrets, vlastné VAPID kľúče a vypnuté live flags. Samostatné TEST Supabase prístupy sú dostupné a overené. Repo link a `link.productionBranch=dev` sú potvrdené spätným čítaním. Generované aliasy chráni `all_except_custom_domains`; aplikácia zatiaľ nebola nasadená a kanonická doména sa nepresunula. TEST migrácia `20260930080415` bola aplikovaná a overená: update trigger vynecháva deväť interných stĺpcov, insert/delete trigger zostal zachovaný; bez seed dát. Reálne integračné testy sa overujú osobitne. Telnyx API key zatiaľ nebol dostupný; pripravená súkromná šablóna na nový kľúč existujúceho účtu je prázdna. Historický zoznam dev resources nie je dôkaz aktuálneho provider prístupu. Chýbajúci prístup alebo neuskutočnený test sa uvádza ako **nenakonfigurované / neoverené**, nie ako úspech.
+Stav k 2026-09-30: **TEST aplikácia je nasadená a základné funkcie sú overené** na `https://test.dispecing.linkapomoci.sk`. [PR #332](https://github.com/Alfopure/pomoc-motoristom-new/pull/332) je zlúčená do `dev` (`9c7565c3`); samostatný projekt `pomoc-motoristom-test` používa iba TEST Supabase. Živé integrácie zostávajú vypnuté: chýba Telnyx API key a schválený telefón/email testera. Zvuk, SMS, doručenie emailu, AI a ostatné externé služby ešte nie sú funkčne prebraté.
+
+| Overenie | Výsledok z 2026-09-30 |
+| --- | --- |
+| Prvé overené nasadenie | `dpl_6WfCvnxmosxEFeGXg4hRVW8CDuLh`, READY, `dev` / Production samostatného TEST projektu, `fra1`; hosted gate: 5 265 testov, typecheck a build prešli. |
+| Doména a TLS | Presunutá na TEST projekt, `gitBranch: null`, Vercel `misconfigured=false`; oba autoritatívne Websupport NS potvrdili CNAME `f9c23ecf19e30b83.vercel-dns-016.com`. TLS platný do 2026-12-21. |
+| Verejná aplikácia | HTTPS `/api/health/live` a `/api/health/ready` → 200, rovnaká verzia; login v browseri bez JS/console/chunk chýb, viditeľný TEST štítok; v 12 načítaných JS súboroch sa našiel iba TEST Supabase host. |
+| Prihlásené HTTP funkcie | O 08:47 UTC prešlo 19 kontrol: dočasný TEST manager, login, dashboard/adresár, vytvorenie/úprava prípadu, kontaktu a úlohy, upload/download prílohy a platný PDF export. Päť kontrol potvrdilo odstránenie vlastných testovacích záznamov, súboru a identity. |
+| Plánovaný cron | Prirodzený Vercel beh o 08:45:18 UTC → 200, `telephony-cron-runtime`, `status=ok`, 1 495 ms; nebol spustený ručne. Neautorizovaný prístup o 08:48 UTC → 401. |
+
+Tabuľka je preberací záznam prvého overeného nasadenia; aktuálnu verziu po ďalších releasoch vráti `/api/health/live`.
+
+HTTP smoke overil totožný 68 B súbor a platný 26 563 B PDF; nebol to test obsluhy prihláseného browsera ani providerov. Legitímny audit, nemenné potvrdenia uloženia prípadu a spotrebovaná hodnota číselného radu zostali. Produkčné mapovanie aj verzia `dpl_A57dUzyA7dFE5HA7CVwoDA7fUS34` sa nezmenili. TEST má 43 premenných iba v Production target, vlastné signing/cron/push kľúče a vypnutý auth bypass. TEST migrácia `20260930080415` bola overená bez seed dát: update trigger vynecháva deväť interných stĺpcov, insert/delete trigger zostal zachovaný.
 
 ## Hranice a nasadenie
 
 | Účel | Vercel | Vetva / cieľ | Aplikačné prostredie | Supabase |
 | --- | --- | --- | --- | --- |
 | Ostrá prevádzka | `pomoc-motoristom-dispatching` | `main` / Production | `production` | `ifpaeegaesdmljfkdvcn` |
-| Stabilný plný TEST | `pomoc-motoristom-test`, `prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk` | `dev` / Production **tohto TEST projektu** | `MOTORIST_APP_ENV=test` | `nzpnqdstvkfncflgqlny` |
+| Stabilná TEST aplikácia | `pomoc-motoristom-test`, `prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk` | `dev` / Production **tohto TEST projektu** | `MOTORIST_APP_ENV=test` | `nzpnqdstvkfncflgqlny` |
 | Pracovné Preview | existujúci projekt | pracovná vetva / Preview | `test`, bez živých integrácií | `nzpnqdstvkfncflgqlny` |
 
-Ostrá doména je `https://dispecing.linkapomoci.sk`. `dispecing-test.vercel.app` je tiež ostrý alias. TEST používa `https://test.dispecing.linkapomoci.sk`; do overenia náhrady ostáva na existujúcom `dev` Preview. Doterajší alias `pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app` ostáva iba zálohou pôvodného obmedzeného Preview. Po presune nie je dôkazom plnej funkčnosti nového TEST projektu.
+Ostrá doména je `https://dispecing.linkapomoci.sk`. `dispecing-test.vercel.app` je tiež ostrý alias. Kanonická TEST doména už smeruje na samostatný TEST projekt. Doterajší alias `pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app` ostáva iba obmedzeným Preview fallbackom (`ready=200`, `dpl_BopL7WC9n4pTt964K8SHcs47HwCb`); jeho úspech nepreukazuje telefón ani cron stabilného TEST projektu.
 
 TEST nemení produkčné kľúče, čísla, webhooky, databázu ani doménu. Úplne mimo rozsahu ostávajú Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispatching-old`, `dev.dispecing.linkapomoci.sk` a pôvodný VIPTel listener. TEST autorizácia nepovoľuje produkčné migrácie ani obnovu dát zo zdroja bez osobitného zadania. Historická kópia v TEST obsahuje skutočné kontakty a provider identifikátory; nie je dovolením volať ich alebo znovu vykonať staré príkazy.
 
@@ -83,8 +95,8 @@ Nasledujúce požiadavky vychádzajú z aktuálneho kódu. Dostupnosť credentia
 
 ### Kde vidieť výsledky
 
-- V [TEST aplikácii](https://test.dispecing.linkapomoci.sk) otvor **Hovory → detail hovoru**: história, stav a dostupné trvania. Kým sa doména nepresunie, ide o pôvodný obmedzený Preview, nie nové nasadenie.
-- V [samostatnom TEST projekte Vercel](https://vercel.com/alfopures-projects/pomoc-motoristom-test) otvor **Logs**: webhooky, cron a chyby konkrétneho deploymentu. Výsledky nového projektu pribudnú až po nasadení a vykonaní testov.
+- V [TEST aplikácii](https://test.dispecing.linkapomoci.sk) otvor **Hovory → detail hovoru**: história, stav a dostupné trvania. Skopírovaná história nie je dôkazom nového TEST hovoru.
+- V [samostatnom TEST projekte Vercel](https://vercel.com/alfopures-projects/pomoc-motoristom-test) otvor **Logs**: webhooky, cron a chyby konkrétneho deploymentu; už je dostupný overený plánovaný beh cronu.
 - V [TEST Supabase](https://supabase.com/dashboard/project/nzpnqdstvkfncflgqlny/logs/explorer) sú databázové a Auth logy; vždy skontrolovať tento TEST ref.
 
 Nová obrazovka `/monitor` patrí do stále draft PR #329; nie je zlúčená ani aktivovaná. Tieto výsledky sa zatiaľ sledujú na existujúcich miestach vyššie.
@@ -120,4 +132,4 @@ Nezávislé lokálne review spoločného Telnyx účtu uzavrelo tri nájdené me
 ./node_modules/.bin/vitest run src/server/telephony/telnyx/test-safety.test.ts src/server/telephony/telnyx/test-sip-credential.test.ts src/server/telephony/telnyx/event-processor.test.ts src/server/telephony/telnyx/webhook-import-graph.test.ts src/server/telephony/recording-provider-safety.test.ts src/server/telephony/recording-processing.test.ts src/server/telephony/recording-storage.test.ts
 ```
 
-Nezávisle schválený limit statického import graphu webhooku je 56 modulov (predtým 54): pribudli iba čisté env/TEST policy helpers, zakázané ťažké závislosti zostávajú zakázané. Päť čerstvých lokálnych Node importov zostaveného Next webhooku s vypnutým `fetch` malo production medián 154,19 ms. Toto meranie nepreukazuje hosted cold-start ani rýchlosť pripojenia hovoru. Finálny plný test/build gate a skutočné integračné prebratie sa zaznamenávajú osobitne.
+Nezávisle schválený limit statického import graphu webhooku je 56 modulov (predtým 54): pribudli iba čisté env/TEST policy helpers, zakázané ťažké závislosti zostávajú zakázané. Päť čerstvých lokálnych Node importov zostaveného Next webhooku s vypnutým `fetch` malo production medián 154,19 ms. Toto meranie nepreukazuje hosted cold-start ani rýchlosť pripojenia hovoru. Hosted test/build gate je overený vyššie; prebratie živých integrácií ostáva otvorené.
