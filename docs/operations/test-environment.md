@@ -1,5 +1,7 @@
 # Oddelené testovacie prostredie
 
+**Aktualizácia 2026-09-30:** kanonická doména `test.dispecing.linkapomoci.sk` už patrí samostatnému Vercel projektu `pomoc-motoristom-test`, vetva `dev` / Production. Aktuálne mapovanie, overenú pripravenosť a integračné pravidlá určuje [runbook samostatného TEST prostredia](full-test-environment.md). Nižšie uvedená topológia kanonickej domény na Preview je historická; neobnovovať ju pri bežnej údržbe. Postupy obnovy Supabase a autorizovaného obnovenia dát zostávajú použiteľné pre ten istý TEST ref `nzpnqdstvkfncflgqlny`.
+
 Konfigurácia od 2026-09-21 oddeľuje nové Preview nasadenia vrátane vetvy `dev` od produkčnej databázy. Produkčný projekt, jeho heslá, Auth konfigurácia, Vercel Production premenné a produkčná doména sa pri vytvorení testu nemenia.
 
 ## Projekty a adresy
