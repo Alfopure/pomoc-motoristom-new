@@ -25,7 +25,7 @@ function lookupResponse(input: VehicleLookupInput, overrides: VehicleFacts = {})
     emissionInspectionAt: "2025-01-15", emissionInspectionValidUntil: "2027-01-15",
   }).map(([key, value]) => [key, { value, quality: "reported" }])) as VehicleFacts;
   return { cached: false, snapshot: { proof: "a".repeat(43), result: {
-    version: 1, id: `fixture-${plate}`, query: { kind: input.kind, value: input.value.replace(/[\s-]/g, ""), country: "SK", checkedForDate: "2026-09-05" }, fetchedAt,
+    version: 1, id: `fixture-${plate}`, query: { kind: input.kind, value: input.value.replace(/[\s-]/g, ""), country: input.country, checkedForDate: "2026-09-05" }, fetchedAt,
     sources: [
       { source: "skp", status: "found", url: "https://www.skp.sk/", fetchedAt, warnings: [], facts: {
         plate: { value: plate, quality: "reported" }, vin: { value: vin, quality: "reported" },
@@ -43,6 +43,20 @@ function lookupResponse(input: VehicleLookupInput, overrides: VehicleFacts = {})
       } },
     ],
   } } };
+}
+
+function czechLookupResponse(input: VehicleLookupInput): VehicleLookupResponse {
+  const response = lookupResponse(input);
+  const fetchedAt = response.snapshot.result.fetchedAt;
+  response.snapshot.result.sources = [
+    { source: "mycarplate", status: "found", url: "https://www.mycarplate.online/countries/czech-republic", fetchedAt, warnings: [], facts: {
+      plate: { value: input.value.replace(/[\s-]/g, ""), quality: "reported" }, vin: { value: syntheticVin, quality: "reported" }, make: { value: "Fixture VW", quality: "reported" },
+    } },
+    { source: "autokuk", status: "found", url: "https://autokuk.cz/api", fetchedAt, warnings: [], facts: {
+      vignetteStatus: { value: "Platná", quality: "reported" }, vignetteValidUntil: { value: "2027-03-23", quality: "reported" },
+    } },
+  ];
+  return response;
 }
 
 function mockData(): DispatchData {
@@ -628,6 +642,46 @@ test("fleet has standalone lookup with an inline result and a read-only full det
   expect(api.lookupInputs).toHaveLength(1);
 });
 
+test("Czech plate defaults to CZ and shows vignette while insurance remains unverified", async ({ page }) => {
+  const plate = "1QA0000";
+  const api = await sandboxApi(page, async input => czechLookupResponse(input));
+  await openDashboard(page);
+  await navigate(page, /^Flotila/);
+  const search = page.getByTestId("vehicle-lookup-search");
+  await search.getByLabel("EČV alebo VIN", { exact: true }).fill(plate);
+  await expect(search.getByLabel("Krajina evidencie")).toHaveValue("CZ");
+  await search.getByRole("button", { name: "Overiť", exact: true }).click();
+  const summary = search.getByRole("region", { name: "Výsledok overenia vozidla", exact: true });
+  await expect(summary).toContainText("PZP: neoverené");
+  await expect(summary).toContainText("Diaľničná známka: Platná");
+  expect(api.lookupInputs[0]).toMatchObject({ kind: "plate", value: plate, country: "CZ" });
+  await search.getByRole("button", { name: "Celý detail vozidla", exact: true }).click();
+  const detail = search.getByRole("dialog");
+  await expect(detail.getByRole("heading", { name: "Česká diaľničná známka" })).toBeVisible();
+  await expect(detail.getByRole("link", { name: /Overiť známku na eDalnice/ })).toHaveAttribute("href", "https://edalnice.gov.cz/cs");
+  await detail.getByRole("button", { name: "Zavrieť detail vozidla", exact: true }).click();
+  await search.getByLabel("Krajina evidencie").selectOption("SK");
+  await expect(summary).toHaveCount(0);
+  expect(api.writes).toHaveLength(0);
+});
+
+test("case lookup uses the selected country and discards a Czech proposal on country change", async ({ page }) => {
+  const plate = "1QA0000";
+  const api = await sandboxApi(page, async input => czechLookupResponse(input));
+  await openDashboard(page);
+  await openNewCase(page);
+  const control = page.getByTestId("vehicle-lookup");
+  await control.getByLabel("EČV", { exact: true }).fill(plate);
+  await expect(control.getByLabel("Krajina evidencie")).toHaveValue("CZ");
+  await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
+  await expect(control.getByRole("dialog")).toBeVisible();
+  expect(api.lookupInputs[0]).toMatchObject({ kind: "plate", country: "CZ", knownIdentity: { country: "CZ", plate } });
+  await control.getByRole("button", { name: "Zavrieť návrh dohľadania", exact: true }).click();
+  await control.getByLabel("Krajina evidencie").selectOption("SK");
+  await expect(control.getByText("Dohľadané údaje · návrh", { exact: true })).toHaveCount(0);
+  expect(api.writes).toHaveLength(0);
+});
+
 test("fleet row scan preserves edits and saves only to the explicitly selected vehicle", async ({ page }) => {
   const api = await sandboxApi(page, async input => lookupResponse(input, { vin: { value: input.knownIdentity?.vin || syntheticVin, quality: "reported" } }));
   await openDashboard(page);
@@ -774,5 +828,27 @@ test("raw Commander row opens a read-only vehicle lookup without changing fleet 
   await expect(ghosts.getByRole("button", { name: `Overiť vozidlo ${plateB}`, exact: true })).toBeVisible();
   expect(api.data.commanderVehicles).toEqual(originalCommander);
   expect(api.data.fleetAssets).toEqual(originalFleet);
+  expect(api.writes).toHaveLength(0);
+});
+
+test("external Czech fleet scan replaces a previous manual SK country choice", async ({ page }) => {
+  const plate = "1QA0000";
+  const api = await sandboxApi(page, async input => czechLookupResponse(input));
+  api.data.commanderVehicles = [{
+    id: "fixture-czech-ghost", sourceVehicleId: "fixture-czech-external", label: "Fixture české vozidlo",
+    licensePlate: plate, vin: syntheticVin, sourceActive: true, lastImportedAt: "2026-09-05T10:00:00.000Z",
+    link: { id: "fixture-czech-candidate", fleetAssetId: api.data.fleetAssets[0].id, status: "candidate", matchMethod: "license_plate", confidence: 0.5 },
+  }];
+  await openDashboard(page);
+  await navigate(page, /^Flotila/);
+  const search = page.getByTestId("vehicle-lookup-search");
+  await search.getByLabel("Krajina evidencie").selectOption("SK");
+  await page.getByRole("button", { name: /^Párovanie vozidiel/ }).click();
+  await page.getByRole("button", { name: "Obnoviť dáta", exact: true }).click();
+  const ghosts = page.locator("section").filter({ has: page.getByRole("heading", { name: "Commander bez zhody so Software House", exact: true }) }).last();
+  await ghosts.getByRole("button", { name: `Overiť vozidlo ${plate}`, exact: true }).click();
+  await expect.poll(() => api.lookupInputs.length).toBe(1);
+  expect(api.lookupInputs[0]).toMatchObject({ kind: "plate", value: plate, country: "CZ" });
+  await expect(search.getByLabel("Krajina evidencie")).toHaveValue("CZ");
   expect(api.writes).toHaveLength(0);
 });

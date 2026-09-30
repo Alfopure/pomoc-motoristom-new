@@ -1,19 +1,21 @@
 /** Public contract shared by the server and all three vehicle forms. No secrets. */
-export type VehicleSource = "databazavozidiel" | "skp" | "stkonline" | "haka" | "vpic";
+export type VehicleCountry = "SK" | "CZ";
+export type VehicleSource = "databazavozidiel" | "skp" | "stkonline" | "haka" | "vpic" | "mycarplate" | "rsv" | "autokuk";
 export type LookupStatus = "found" | "not_found" | "ambiguous" | "challenge_required" | "rate_limited" | "unavailable" | "unsupported";
 export type VehicleField = "plate" | "vin" | "make" | "model" | "color" | "fuel" | "modelYear" | "bodyType" | "doors" | "seats" | "transmission" | "engineCapacityCc" | "powerKw" | "technicalInspectionValidUntil" | "emissionInspectionValidUntil" | "technicalInspectionAt" | "emissionInspectionAt" | "insurer" | "insuranceStatus"
   | "vehicleCategory" | "vehicleType" | "vehicleTypeDesignation" | "typeVariantVersion" | "variant" | "version" | "manufacturer" | "firstRegisteredAt" | "firstRegisteredInSkAt"
   | "engineType" | "engineManufacturer" | "engineNumber" | "engineRpm" | "transmissionGears" | "maxSpeedKmh" | "emissionClass"
   | "curbWeightKg" | "grossWeightKg" | "grossTrainWeightKg" | "maxAxleWeightKg" | "trailerWeightKg" | "trailerBrakedWeightKg" | "trailerUnbrakedWeightKg"
-  | "axleCount" | "drivenAxles" | "wheelbaseMm" | "lengthMm" | "widthMm" | "heightMm" | "tireDimensions" | "rimDimensions" | "towingDevice";
+  | "axleCount" | "drivenAxles" | "wheelbaseMm" | "lengthMm" | "widthMm" | "heightMm" | "tireDimensions" | "rimDimensions" | "towingDevice"
+  | "vignetteStatus" | "vignetteValidFrom" | "vignetteValidUntil";
 export type VehicleFact = { value: string; quality: "reported" | "decoded" | "partial" };
 export type VehicleFacts = Partial<Record<VehicleField, VehicleFact>>;
 export type VehicleIdentity = { plate?: string; vin?: string; country?: string };
 export type VehicleReport = { url: string; title: string; identity?: VehicleIdentity };
 export type VehicleFieldChoices = Partial<Record<VehicleField, VehicleSource>>;
 export type VehicleFactOption = { source: VehicleSource; fact: VehicleFact };
-export type VehicleQuery = { kind: "plate" | "vin"; value: string; country: "SK"; checkedForDate: string };
-export type VehicleLookupInput = { kind: "plate" | "vin"; value: string; country: "SK"; knownIdentity?: VehicleIdentity };
+export type VehicleQuery = { kind: "plate" | "vin"; value: string; country: VehicleCountry; checkedForDate: string };
+export type VehicleLookupInput = { kind: "plate" | "vin"; value: string; country: VehicleCountry; knownIdentity?: VehicleIdentity };
 export type VehicleSourceResult = {
   source: VehicleSource;
   status: LookupStatus;
@@ -35,7 +37,7 @@ export type VehicleLookupSnapshot = { result: VehicleLookupResult; proof: string
 export type VehicleLookupResponse = { snapshot: VehicleLookupSnapshot; cached: boolean; conflict?: string };
 export type VehicleFormValues = Partial<Record<VehicleField, string>>;
 
-export const vehicleSourceLabels: Record<VehicleSource, string> = { databazavozidiel: "DatabázaVozidiel.sk", skp: "SKP · PZP", stkonline: "STKonline", haka: "HAKA · hlásenia", vpic: "NHTSA · VIN dekódovanie" };
+export const vehicleSourceLabels: Record<VehicleSource, string> = { databazavozidiel: "DatabázaVozidiel.sk", skp: "SKP · PZP", stkonline: "STKonline", haka: "HAKA · hlásenia", vpic: "NHTSA · VIN dekódovanie", mycarplate: "MyCarPlate · ČR", rsv: "Register vozidiel ČR", autokuk: "Autokuk · ČR" };
 export const vehicleFieldLabels: Record<VehicleField, string> = {
   plate: "EČV", vin: "VIN", make: "Značka", model: "Model", color: "Farba", fuel: "Palivo",
   modelYear: "Modelový rok (nie rok výroby)", bodyType: "Karoséria", doors: "Dvere", seats: "Sedadlá",
@@ -53,36 +55,40 @@ export const vehicleFieldLabels: Record<VehicleField, string> = {
   trailerBrakedWeightKg: "Max. hmotnosť brzdeného prívesu (kg)", trailerUnbrakedWeightKg: "Max. hmotnosť nebrzdeného prívesu (kg)",
   axleCount: "Počet náprav", drivenAxles: "Poháňané nápravy", wheelbaseMm: "Rázvor (mm)", lengthMm: "Dĺžka (mm)", widthMm: "Šírka (mm)", heightMm: "Výška (mm)",
   tireDimensions: "Pneumatiky", rimDimensions: "Ráfiky", towingDevice: "Spájacie zariadenie",
+  vignetteStatus: "Česká diaľničná známka", vignetteValidFrom: "Známka platná od", vignetteValidUntil: "Známka platná do",
 };
 
 export function normalizeVehicleIdentifier(value: string) { return value.trim().toUpperCase().replace(/[\s-]/g, ""); }
 export function isVin(value: string) { return /^[A-HJ-NPR-Z0-9]{17}$/.test(value); }
 export function isSlovakPlate(value: string) { return /^[A-Z0-9]{5,8}$/.test(value) && /[A-Z]/.test(value); }
+export function isCzechPlate(value: string) { return /^[A-Z0-9]{5,8}$/.test(value) && /[A-Z]/.test(value) && /[0-9]/.test(value); }
 export function slovakToday(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Bratislava", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
   return ["year", "month", "day"].map((type) => parts.find((part) => part.type === type)!.value).join("-");
 }
 
 export function parseVehicleLookupInput(input: unknown, now = new Date()): { query: VehicleQuery; knownIdentity: VehicleIdentity } {
-  if (!input || typeof input !== "object") throw new Error("Zadajte slovenskú EČV alebo 17-miestny VIN.");
+  if (!input || typeof input !== "object") throw new Error("Zadajte EČV alebo 17-miestny VIN.");
   const row = input as Record<string, unknown>;
-  if (row.country !== "SK" || !["plate", "vin"].includes(String(row.kind)) || typeof row.value !== "string" || row.value.length > 30) throw new Error("Dohľadávanie zatiaľ podporuje slovenské vozidlá.");
+  if ((row.country !== "SK" && row.country !== "CZ") || !["plate", "vin"].includes(String(row.kind)) || typeof row.value !== "string" || row.value.length > 30) throw new Error("Zvoľte Slovensko alebo Česko a zadajte EČV alebo VIN.");
+  const country = row.country as VehicleCountry;
   const kind = row.kind as "plate" | "vin";
   const value = normalizeVehicleIdentifier(row.value);
-  if (!(kind === "vin" ? isVin(value) : isSlovakPlate(value))) throw new Error(kind === "vin" ? "VIN musí mať 17 znakov bez I, O a Q." : "Skontrolujte EČV slovenského vozidla.");
+  const validPlate = country === "CZ" ? isCzechPlate : isSlovakPlate;
+  if (!(kind === "vin" ? isVin(value) : validPlate(value))) throw new Error(kind === "vin" ? "VIN musí mať 17 znakov bez I, O a Q." : `Skontrolujte EČV vozidla (${country}).`);
   const known = row.knownIdentity;
   if (known !== undefined && (!known || typeof known !== "object")) throw new Error("Neplatná identita vozidla.");
   const identity = (known ?? {}) as Record<string, unknown>;
-  const knownIdentity: VehicleIdentity = { country: "SK" };
+  const knownIdentity: VehicleIdentity = { country };
   for (const field of ["vin", "plate"] as const) {
     if (identity[field] !== undefined && typeof identity[field] !== "string") throw new Error("Neplatná identita vozidla.");
     const normalized = normalizeVehicleIdentifier((identity[field] as string | undefined) ?? "");
-    if (normalized && !(field === "vin" ? isVin(normalized) : isSlovakPlate(normalized))) throw new Error("Skontrolujte aj druhý vyplnený identifikátor vozidla.");
+    if (normalized && !(field === "vin" ? isVin(normalized) : validPlate(normalized))) throw new Error("Skontrolujte aj druhý vyplnený identifikátor vozidla.");
     if (normalized) knownIdentity[field] = normalized;
   }
-  if (identity.country && identity.country !== "SK") throw new Error("Dohľadávanie zatiaľ podporuje slovenské vozidlá.");
+  if (identity.country && identity.country !== country) throw new Error("Krajina vozidla nesúhlasí s vyhľadávaním.");
   if (knownIdentity[kind] && knownIdentity[kind] !== value) throw new Error("Identifikátor sa počas dohľadávania zmenil.");
-  return { query: { kind, value, country: "SK", checkedForDate: slovakToday(now) }, knownIdentity };
+  return { query: { kind, value, country, checkedForDate: slovakToday(now) }, knownIdentity };
 }
 
 /** Empty provider sentinels are not vehicle information. */
@@ -113,6 +119,7 @@ export function vinLinkedSkpPlateDifference(result: VehicleLookupResult): { tech
 }
 
 export function lookupIdentityConflict(result: VehicleLookupResult, identity: VehicleIdentity): string | undefined {
+  if (identity.country && identity.country !== result.query.country) return "Krajina výsledku nesúhlasí so zvolenou krajinou vozidla. Dohľadajte vozidlo znova.";
   const enteredQueryIdentifier = identity[result.query.kind];
   if (enteredQueryIdentifier !== undefined && normalizeVehicleIdentifier(enteredQueryIdentifier) !== result.query.value) return "Výsledok patrí k inému zadanému identifikátoru vozidla. Dohľadajte aktuálne vozidlo znova.";
   if (result.sources.some((source) => source.status === "ambiguous")) return "Zdroj vrátil viac vozidiel alebo rozdielne identifikátory. Overte VIN v dokladoch.";
@@ -127,7 +134,7 @@ export function lookupIdentityConflict(result: VehicleLookupResult, identity: Ve
 
 export function preferredVehicleFacts(result: VehicleLookupResult, includePartial = false): VehicleFacts {
   const facts: VehicleFacts = {};
-  const order: VehicleSource[] = ["databazavozidiel", "skp", "stkonline", "vpic", "haka"];
+  const order: VehicleSource[] = result.query.country === "CZ" ? ["rsv", "autokuk", "mycarplate", "vpic", "databazavozidiel", "skp", "stkonline", "haka"] : ["databazavozidiel", "skp", "stkonline", "vpic", "haka", "rsv", "autokuk", "mycarplate"];
   const historicalSkpPlate = vinLinkedSkpPlateDifference(result)?.skpPlate;
   for (const source of [...result.sources].sort((a, b) => order.indexOf(a.source) - order.indexOf(b.source))) {
     if (source.status !== "found" || source.source === "haka") continue;
@@ -225,7 +232,8 @@ export function readVehicleLookupSnapshot(value: unknown): VehicleLookupSnapshot
   if (!value || typeof value !== "object") return undefined;
   const snapshot = value as VehicleLookupSnapshot;
   if (typeof snapshot.proof !== "string" || !/^[\w-]{43}$/.test(snapshot.proof) || snapshot.result?.version !== 1 || !Array.isArray(snapshot.result.sources) || snapshot.result.sources.length > 5 || !snapshot.result.query) return undefined;
-  const sourceHosts: Record<VehicleSource, string> = { databazavozidiel: "www.databazavozidiel.sk", skp: "www.skp.sk", stkonline: "www.stkonline.sk", haka: "www.hakasystem.eu", vpic: "vpic.nhtsa.dot.gov" };
+  if (snapshot.result.query.country !== "SK" && snapshot.result.query.country !== "CZ") return undefined;
+  const sourceHosts: Record<VehicleSource, string> = { databazavozidiel: "www.databazavozidiel.sk", skp: "www.skp.sk", stkonline: "www.stkonline.sk", haka: "www.hakasystem.eu", vpic: "vpic.nhtsa.dot.gov", mycarplate: "www.mycarplate.online", rsv: "dataovozidlech.cz", autokuk: "autokuk.cz" };
   const seen = new Set<VehicleSource>();
   try {
     for (const source of snapshot.result.sources) {

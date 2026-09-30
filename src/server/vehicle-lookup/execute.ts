@@ -7,8 +7,11 @@ import { parseStkOnline, stkOnlineUrl } from "./providers/stkonline";
 import { hakaUrl, parseHaka } from "./providers/haka";
 import { parseVpic } from "./providers/vpic";
 import { ProviderHttpError, providerText } from "./providers/http";
+import { AUTOKUK_URL, lookupAutokuk } from "./providers/autokuk";
+import { MYCARPLATE_URL, lookupMyCarPlate } from "./providers/mycarplate";
+import { RSV_URL, lookupRsv } from "./providers/rsv";
 
-export type LookupProviders = { skp: boolean; stkonline: boolean; haka: boolean; vpic: boolean; databazavozidiel?: boolean };
+export type LookupProviders = { skp: boolean; stkonline: boolean; haka: boolean; vpic: boolean; databazavozidiel?: boolean; autokuk?: boolean; mycarplate?: boolean; rsv?: boolean };
 const STK_HEADERS = { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.0.0 Safari/537.36", Accept: "text/html", "Accept-Language": "sk-SK,sk;q=0.9" };
 async function sourceResult(source: VehicleSource, url: string, enabled: boolean, task: () => Promise<VehicleSourceResult>): Promise<VehicleSourceResult> {
   const started = Date.now();
@@ -20,6 +23,7 @@ async function sourceResult(source: VehicleSource, url: string, enabled: boolean
 }
 export async function executeVehicleLookup(query: VehicleQuery, enabled: LookupProviders, deadline = Date.now() + 40_000): Promise<VehicleLookupResult> {
   if (Date.now() >= deadline) throw new Error("lookup_deadline");
+  if (query.country === "CZ") return executeCzechVehicleLookup(query, enabled, deadline);
   const httpTimeout = remainingTimeout(deadline, 9_000);
   const haka = sourceResult("haka", hakaUrl(query), enabled.haka, async () => parseHaka(await providerText(hakaUrl(query), { timeoutMs: httpTimeout }), query, new Date().toISOString()));
   // Registry and STK can establish the plate → VIN binding before we ask SKP.
@@ -41,6 +45,31 @@ export async function executeVehicleLookup(query: VehicleQuery, enabled: LookupP
   sources.push(insurance, await haka);
   const vin = verifiedVin(result);
   if (vin && enabled.vpic && Date.now() < deadline) sources.push(await sourceResult("vpic", "https://vpic.nhtsa.dot.gov/api/", true, async () => parseVpic(JSON.parse(await providerText(`https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/${encodeURIComponent(vin)}?format=json`, { timeoutMs: remainingTimeout(deadline, 5_000) })), new Date().toISOString())));
+  return result;
+}
+
+async function executeCzechVehicleLookup(query: VehicleQuery, enabled: LookupProviders, deadline: number): Promise<VehicleLookupResult> {
+  const sources: VehicleSourceResult[] = [];
+  const autokuk = await sourceResult("autokuk", AUTOKUK_URL, enabled.autokuk === true, async () => lookupAutokuk(query, { timeoutMs: remainingTimeout(deadline, 9_000) }));
+  sources.push(autokuk);
+  // The guest lookup has a small daily quota. Use it in Preview only when the
+  // primary provider has not established the entered plate's VIN.
+  if (query.kind === "plate") {
+    const hasVin = isVin(normalizeVehicleIdentifier(autokuk.facts.vin?.value ?? ""));
+    const shouldTryGuest = enabled.mycarplate === true && !hasVin && autokuk.status !== "ambiguous" && Date.now() < deadline;
+    if (shouldTryGuest || !enabled.mycarplate) sources.push(await sourceResult("mycarplate", MYCARPLATE_URL, shouldTryGuest, async () => lookupMyCarPlate(query, { timeoutMs: remainingTimeout(deadline, 9_000) })));
+  }
+
+  const result: VehicleLookupResult = { version: 1, id: randomUUID(), query, fetchedAt: new Date().toISOString(), sources };
+  const vin = verifiedVin(result);
+  const canQueryRsv = Boolean(vin && enabled.rsv && Date.now() < deadline);
+  const rsvQuery: VehicleQuery = { ...query, kind: "vin", value: vin ?? query.value };
+  const rsv = await sourceResult("rsv", RSV_URL, canQueryRsv, async () => lookupRsv(rsvQuery, { timeoutMs: remainingTimeout(deadline, 9_000) }));
+  if (!vin && enabled.rsv) rsv.warnings = ["Na doplnenie technických údajov z českého registra potrebujeme overený VIN."];
+  sources.push(rsv);
+  if (vin && enabled.vpic && Date.now() < deadline) {
+    sources.push(await sourceResult("vpic", "https://vpic.nhtsa.dot.gov/api/", true, async () => parseVpic(JSON.parse(await providerText(`https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/${encodeURIComponent(vin)}?format=json`, { timeoutMs: remainingTimeout(deadline, 5_000) })), new Date().toISOString())));
+  }
   return result;
 }
 

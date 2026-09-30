@@ -16,6 +16,9 @@ const urls: Record<VehicleSource, string> = {
   stkonline: "https://www.stkonline.sk/",
   haka: "https://www.hakasystem.eu/",
   vpic: "https://vpic.nhtsa.dot.gov/api/",
+  mycarplate: "https://www.mycarplate.online/countries/czech-republic",
+  rsv: "https://dataovozidlech.cz/vyhledavani",
+  autokuk: "https://autokuk.cz/api",
 };
 function source(name: VehicleSource, facts: VehicleFacts = {}): VehicleSourceResult {
   return { source: name, status: "found", url: urls[name], fetchedAt: time, facts, warnings: [] };

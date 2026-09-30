@@ -9,6 +9,8 @@ import type { VehicleLookupResult, VehicleQuery } from "@/lib/vehicle-lookup";
 const actor = { organizationId: "org-a", profileId: "profile-a" } as MotoristActor;
 const query: VehicleQuery = { kind: "plate", value: "XX000XX", country: "SK", checkedForDate: "2026-09-05" };
 const result: VehicleLookupResult = { version: 1, id: "test", query, fetchedAt: "2026-09-05T08:00:00Z", sources: [{ source: "skp", status: "unsupported", facts: {}, fetchedAt: "2026-09-05T08:00:00Z", url: "https://www.skp.sk/", warnings: [] }, { source: "stkonline", status: "found", facts: { vin: { value: "WVWZZZ1JZXW000001", quality: "reported" } }, fetchedAt: "2026-09-05T08:00:00Z", url: "https://www.stkonline.sk/", warnings: [] }] };
+const czechQuery: VehicleQuery = { kind: "plate", value: "1AAA111", country: "CZ", checkedForDate: "2026-09-05" };
+const czechResult: VehicleLookupResult = { version: 1, id: "cz-test", query: czechQuery, fetchedAt: "2026-09-05T08:00:00Z", sources: [{ source: "mycarplate", status: "found", url: "https://www.mycarplate.online/countries/czech-republic", fetchedAt: "2026-09-05T08:00:00Z", warnings: [], facts: { plate: { value: czechQuery.value, quality: "reported" }, vin: { value: "WVWZZZ1JZXW000001", quality: "reported" } } }] };
 beforeEach(() => {
   vi.stubEnv("DATABAZA_VOZIDIEL_API_KEY", "");
   vi.stubEnv("SUPABASE_URL", "https://example.supabase.co"); vi.stubEnv("SUPABASE_ANON_KEY", "test"); vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "test"); vi.stubEnv("VEHICLE_LOOKUP_SIGNING_KEY", "test");
@@ -114,4 +116,50 @@ it("keeps a short cache lifetime when the enabled registry result is missing", a
   mocks.execute.mockResolvedValue({ ...result, sources: [{ ...result.sources[0], status: "found" }, result.sources[1]] });
   await lookupVehicle(query, actor);
   expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_success: false });
+});
+
+it("enables the guest Czech pilot against isolated Preview and never marks SKP as failed", async () => {
+  vi.stubEnv("SUPABASE_URL", "https://nzpnqdstvkfncflgqlny.supabase.co");
+  vi.stubEnv("VERCEL_ENV", "preview");
+  mocks.rpc.mockResolvedValueOnce({ data: { status: "reserved", token: "lease", providers: { skp: true, stkonline: true, haka: true, vpic: true } }, error: null }).mockResolvedValue({ data: true, error: null });
+  mocks.execute.mockResolvedValue(czechResult);
+  await lookupVehicle(czechQuery, actor);
+  expect(mocks.execute).toHaveBeenCalledWith(czechQuery, expect.objectContaining({ mycarplate: true, autokuk: false, rsv: false }), expect.any(Number));
+  expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_success: true, p_skp_failed: null });
+});
+
+it("does not let a supplemental VIN decoder outage shorten a confirmed Czech result", async () => {
+  vi.stubEnv("SUPABASE_URL", "https://nzpnqdstvkfncflgqlny.supabase.co");
+  vi.stubEnv("VERCEL_ENV", "preview");
+  mocks.rpc.mockResolvedValueOnce({ data: { status: "reserved", token: "lease", providers: { skp: true, stkonline: true, haka: true, vpic: true } }, error: null }).mockResolvedValue({ data: true, error: null });
+  mocks.execute.mockResolvedValue({ ...czechResult, sources: [...czechResult.sources, { source: "vpic", status: "unavailable", url: "https://vpic.nhtsa.dot.gov/api/", fetchedAt: "2026-09-05T08:00:00Z", facts: {}, warnings: [] }] });
+  await lookupVehicle(czechQuery, actor);
+  expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_success: true });
+});
+
+it("keeps guest lookup disabled for local development using production Supabase", async () => {
+  vi.stubEnv("NODE_ENV", "development");
+  vi.stubEnv("SUPABASE_URL", "https://ifpaeegaesdmljfkdvcn.supabase.co");
+  mocks.rpc.mockResolvedValueOnce({ data: { status: "reserved", token: "lease", providers: { skp: true, stkonline: true, haka: true, vpic: true } }, error: null }).mockResolvedValue({ data: true, error: null });
+  mocks.execute.mockResolvedValue(czechResult);
+  await lookupVehicle(czechQuery, actor);
+  expect(mocks.execute).toHaveBeenCalledWith(czechQuery, expect.objectContaining({ mycarplate: false }), expect.any(Number));
+});
+
+it("requires an explicit licence and key before enabling MyCarPlate on production", async () => {
+  vi.stubEnv("VERCEL_ENV", "production");
+  vi.stubEnv("VERCEL_GIT_COMMIT_REF", "main");
+  mocks.rpc.mockResolvedValueOnce({ data: { status: "reserved", token: "lease", providers: { skp: true, stkonline: true, haka: true, vpic: true } }, error: null }).mockResolvedValue({ data: true, error: null });
+  mocks.execute.mockResolvedValue(czechResult);
+  await lookupVehicle(czechQuery, actor);
+  expect(mocks.execute).toHaveBeenCalledWith(czechQuery, expect.objectContaining({ mycarplate: false }), expect.any(Number));
+  expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_success: false, p_skp_failed: null });
+
+  vi.stubEnv("CZ_MYCARPLATE_LICENSED", "true");
+  vi.stubEnv("CZ_MYCARPLATE_API_KEY", "synthetic-secret");
+  mocks.rpc.mockResolvedValueOnce({ data: { status: "reserved", token: "another-lease", providers: { skp: true, stkonline: true, haka: true, vpic: true } }, error: null }).mockResolvedValue({ data: true, error: null });
+  await lookupVehicle(czechQuery, actor);
+  expect(mocks.execute).toHaveBeenLastCalledWith(czechQuery, expect.objectContaining({ mycarplate: true }), expect.any(Number));
+  expect(JSON.stringify(mocks.execute.mock.calls)).not.toContain("synthetic-secret");
+  expect(mocks.rpc.mock.calls[0][1].p_query_hash).not.toBe(mocks.rpc.mock.calls[2][1].p_query_hash);
 });
