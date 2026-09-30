@@ -1,5 +1,6 @@
 import 'server-only';
 import { randomUUID } from 'node:crypto';
+import { resolveAppEnvironment } from '@/lib/app-environment';
 import { createSupabaseAdminClient } from '@/lib/supabase/admin';
 import type { Json } from '@/lib/supabase/database.types';
 import { DIAGNOSTIC_LIMITS, isDiagnosticSafeId, isDiagnosticUuid, parseDiagnosticEvent, type DiagnosticAck, type DiagnosticEvent, type DiagnosticEventInput, type DiagnosticOverview } from '@/lib/diagnostics/types';
@@ -8,7 +9,7 @@ import { MutationError } from '@/server/mutation-error';
 import type { TelephonyCronJobResult } from '@/server/telephony/cron-jobs';
 export const DIAGNOSTIC_MEMBER_ROLES = ['dispatcher','senior_dispatcher','manager','admin'] as const;
 export const diagnosticsEnabled = () => process.env.DIAGNOSTICS_ENABLED === 'true';
-export const diagnosticsEnvironment = (): 'production'|'test'|'development' => process.env.VERCEL_ENV === 'production' ? 'production' : process.env.VERCEL_ENV === 'preview' || process.env.NEXT_PUBLIC_SUPABASE_URL?.includes('nzpnqdstvkfncflgqlny') ? 'test' : 'development';
+export const diagnosticsEnvironment = () => resolveAppEnvironment();
 const serverBuild = () => { const id=process.env.DEPLOYMENT_VERSION ?? process.env.VERCEL_GIT_COMMIT_SHA ?? process.env.NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID ?? 'local';return isDiagnosticSafeId(id)?id:'unknown'; };
 const noStore = {'Cache-Control':'private, no-store'};
 function response(value:unknown,status=200,headers:Record<string,string>={}) {return Response.json(value,{status,headers:{...noStore,...headers}});}

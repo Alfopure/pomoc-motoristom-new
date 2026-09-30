@@ -1,4 +1,9 @@
 -- Optional diagnostics store. Disabled until an operator sets an evidenced physical budget.
+-- On a populated hosted database, prebuild the call-leg index CONCURRENTLY using
+-- supabase/operations/operations-diagnostics-index.sql before this transaction.
+-- These DDL bounds also cover foreign-key metadata locks; function SET clauses do not.
+set local lock_timeout = '250ms';
+set local statement_timeout = '5s';
 create table public.motorist_diagnostic_guard (
  id boolean primary key default true check(id), budget_bytes bigint not null default 0 check(budget_bytes between 0 and 134217728),
  physical_bytes bigint not null default 0, checked_at timestamptz, blocked boolean not null default true
@@ -159,6 +164,18 @@ grant execute on function public.motorist_diagnostics_read(uuid,uuid,text,text,u
 
 -- Server facts, never provider cause labels, determine the observation. Cause remains unknown.
 create index if not exists motorist_call_legs_diagnostic_candidates on public.motorist_call_legs(organization_id,updated_at,id) where role='operator' and bridged_at is not null and ended_at is not null;
+do $$ begin
+ if not exists (
+  select 1 from pg_index i join pg_class c on c.oid=i.indexrelid join pg_am a on a.oid=c.relam
+  where i.indexrelid='public.motorist_call_legs_diagnostic_candidates'::regclass
+    and i.indrelid='public.motorist_call_legs'::regclass and i.indisvalid and i.indisready
+    and not i.indisunique and a.amname='btree' and i.indnatts=3 and i.indexprs is null
+    and pg_get_indexdef(i.indexrelid,1,true)='organization_id'
+    and pg_get_indexdef(i.indexrelid,2,true)='updated_at'
+    and pg_get_indexdef(i.indexrelid,3,true)='id'
+    and pg_get_expr(i.indpred,i.indrelid)='((role = ''operator''::text) AND (bridged_at IS NOT NULL) AND (ended_at IS NOT NULL))'
+ ) then raise exception 'Diagnostics candidate index is invalid or has an unexpected definition'; end if;
+end $$;
 -- Invalid historical timestamps are absent evidence, never a failed maintenance run.
 create function public.motorist_diagnostic_timestamp(value text) returns timestamptz language plpgsql stable set search_path=public,pg_temp as $$
 begin return value::timestamptz;exception when others then return null;end $$;

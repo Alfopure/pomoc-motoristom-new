@@ -24,6 +24,21 @@ describe("monitor page access", () => {
     expect(page.type).toBe(MonitorScreen);
     expect(page.props).toEqual({ appVersion: "monitor-build", identity: { profileId: "profile", organizationId: "org" }, externalLinks: { vercel: "https://vercel.com/alfopures-projects/pomoc-motoristom-dispatching", supabase: "https://supabase.com/dashboard/project/nzpnqdstvkfncflgqlny", sentry: undefined, uptime: undefined } });
   });
+  it("resolves dedicated TEST links server-side without passing environment values to the client", async () => {
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("VERCEL_GIT_COMMIT_REF", "dev");
+    vi.stubEnv("VERCEL_PROJECT_ID", "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://nzpnqdstvkfncflgqlny.supabase.co");
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "private-test-key");
+    io.auth.mockResolvedValue({ authorized: true, profile: { profileId: "profile", organizationId: "org" } });
+    const page = await MonitorPage();
+    expect(page.props.externalLinks).toMatchObject({
+      vercel: "https://vercel.com/alfopures-projects/pomoc-motoristom-test",
+      supabase: "https://supabase.com/dashboard/project/nzpnqdstvkfncflgqlny",
+    });
+    expect(JSON.stringify(page.props)).not.toContain("private-test-key");
+  });
   it("authenticates before the panel kill switch and never mounts the poller when disabled", async () => {
     vi.stubEnv("DIAGNOSTICS_PANEL_ENABLED", "false");
     io.auth.mockResolvedValue({ authorized: false, message: "Prihláste sa." });

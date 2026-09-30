@@ -3,7 +3,7 @@ const f=vi.hoisted(()=>({rpc:vi.fn(),auth:vi.fn(),after:vi.fn()}));
 vi.mock('@/lib/supabase/admin',()=>({createSupabaseAdminClient:()=>({rpc:f.rpc})}));
 vi.mock('@/server/api-auth',()=>({requireDefaultMotoristActor:f.auth,assertSameOriginRequest:(r:Request)=>{if(r.headers.get('origin')!=='https://example.test')throw new Error('origin');}}));
 vi.mock('next/server',()=>({after:f.after}));
-import { ingestDiagnostics,parseDiagnosticQuery,readDiagnosticBody,readDiagnostics } from './service';
+import { diagnosticsEnvironment,ingestDiagnostics,parseDiagnosticQuery,readDiagnosticBody,readDiagnostics,runDiagnosticsMaintenance } from './service';
 import { recordServerDiagnostic } from './record';
 import { parseDiagnosticEvent } from '@/lib/diagnostics/types';
 const id='00000000-0000-0000-0000-000000000001';const org='00000000-0000-0000-0000-000000000002';
@@ -28,6 +28,20 @@ describe('closed diagnostic envelope',()=>{
  it('bounds actual stream bytes without Content-Length',async()=>{await expect(readDiagnosticBody(request({value:'x'.repeat(17000)}))).rejects.toMatchObject({status:413});});
 });
 describe('read and fail-open writes',()=>{
+ it('keeps dedicated TEST ingestion, reads and maintenance in the TEST environment',async()=>{
+  vi.stubEnv('MOTORIST_APP_ENV','test');vi.stubEnv('VERCEL_ENV','production');
+  vi.stubEnv('DIAGNOSTICS_PANEL_ENABLED','true');vi.stubEnv('DIAGNOSTICS_PHYSICAL_BUDGET_BYTES','33554432');
+  expect(diagnosticsEnvironment()).toBe('test');
+  await ingestDiagnostics(request({actor:{profileId:id,organizationId:org},events:[event]}));
+  await readDiagnostics(new Request('https://example.test'));
+  await runDiagnosticsMaintenance(org);
+  expect(f.rpc.mock.calls.map(([name,args])=>[name,args.p_environment])).toEqual([
+   ['motorist_diagnostics_ingest','test'],['motorist_diagnostics_read','test'],['motorist_diagnostics_maintain','test'],
+  ]);
+  vi.stubEnv('MOTORIST_APP_ENV','production');expect(diagnosticsEnvironment()).toBe('production');
+  vi.stubEnv('MOTORIST_APP_ENV',undefined);vi.stubEnv('VERCEL_ENV','preview');expect(diagnosticsEnvironment()).toBe('test');
+  vi.stubEnv('VERCEL_ENV',undefined);expect(diagnosticsEnvironment()).toBe('development');
+ });
  it('bounds ranges and cursor, rejects invalid timestamps',()=>{expect(()=>parseDiagnosticQuery(new Request('https://example.test?until=wrong'))).toThrow();expect(()=>parseDiagnosticQuery(new Request('https://example.test?since=2026-09-01&until=2026-09-29'))).toThrow();expect(()=>parseDiagnosticQuery(new Request('https://example.test?pageSize=101'))).toThrow();});
  it('gates read to manager/admin even when feature is off',async()=>{vi.stubEnv('DIAGNOSTICS_ENABLED','false');await readDiagnostics(new Request('https://example.test'));expect(f.auth).toHaveBeenCalledWith(['manager','admin']);expect(f.rpc).not.toHaveBeenCalled();});
  it('disables panel reads after authorization without disabling ingestion',async()=>{vi.stubEnv('DIAGNOSTICS_PANEL_ENABLED','false');const r=await readDiagnostics(new Request('https://example.test'));expect(r.status).toBe(503);expect(f.auth).toHaveBeenCalledWith(['manager','admin']);expect(f.rpc).not.toHaveBeenCalled();vi.stubEnv('DIAGNOSTICS_PANEL_ENABLED','true');});
