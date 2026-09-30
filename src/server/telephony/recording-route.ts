@@ -1,4 +1,5 @@
 import "server-only";
+import { assertTelephonyDeployment } from "./runtime";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { assertSameOriginRequest, requireDefaultMotoristActor, type MotoristActor } from "@/server/api-auth";
 import { configErrorResponse } from "./config-route";
@@ -34,7 +35,10 @@ export async function recordingRoute(request: Request, run: (input: {
 }) => Promise<unknown>): Promise<Response> {
   try {
     const mutation = !["GET", "HEAD"].includes(request.method);
-    if (mutation) assertSameOriginRequest(request);
+    if (mutation) {
+      assertSameOriginRequest(request);
+      assertTelephonyDeployment();
+    }
     const actor = await requireDefaultMotoristActor([...RECORDING_ROLES]);
     const body = mutation ? await readRecordingBody(request) : {};
     const result = await run({ admin: createSupabaseAdminClient(), actor, body });

@@ -122,6 +122,24 @@ describe("processTelnyxEvent", () => {
     expect(h.rows("motorist_call_sessions")).toHaveLength(0);
   });
 
+  it("requires durable TEST provenance before a connectionless callback can mutate a copied session", async () => {
+    const h = createTelephonyHarness({ sweepAfterEvent: false });
+    const call = await h.inbound({ answer: false });
+    if (!h.deps.config.configured) throw new Error("configured fixture required");
+    h.deps.config = { ...h.deps.config, testSafety: { restricted: true, deploymentAllowed: true, enabled: false, allowedNumbers: [NUMBERS.customer], fromNumbers: [NUMBERS.allianz] } };
+    h.db.update("motorist_telnyx_webhook_events", { connection_id: "production-app" }, () => true);
+    const stateBefore = h.session(call.sessionId).state;
+    const ledgerBefore = h.rows("motorist_telnyx_webhook_events").length;
+    const event = h.envelope("call.hangup", { call_control_id: call.callControlId, connection_id: null,
+      client_state: encodeClientState({ sid: call.sessionId, role: "customer" }) }, "connectionless-end");
+    expect(await h.process(event)).toMatchObject({ outcome: "unverified_connection" });
+    expect(h.session(call.sessionId).state).toBe(stateBefore);
+    expect(h.rows("motorist_telnyx_webhook_events")).toHaveLength(ledgerBefore);
+    h.db.update("motorist_telnyx_webhook_events", { connection_id: CONNECTION_ID }, () => true);
+    expect(await h.process(event)).toMatchObject({ status: 200, outcome: "processed" });
+    expect(h.session(call.sessionId).state).toBe("ended");
+  });
+
   it("acknowledges completed duplicates but requests redelivery while control processing is busy", async () => {
     const h = createTelephonyHarness();
     const envelope = h.envelope("call.initiated", { call_control_id: "cc-1", call_session_id: "tsess-1", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "evt-dup");

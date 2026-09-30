@@ -6,6 +6,7 @@ import { applyTelnyxMessageStatus, parseTelnyxMessageEvent } from "@/server/tele
 import { receiveTelnyxSms } from "@/server/telephony/telnyx/sms-inbound";
 import { getSmsChannel } from "@/server/sms-channel";
 import { SmsWorkflowError } from "@/server/sms-errors";
+import { canOperateTelephony } from "@/lib/app-environment";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,6 +17,7 @@ export const maxDuration = 10;
  * number isolate environments; unknown outgoing IDs and failed writes retry.
  */
 export async function POST(request: Request) {
+  if (!canOperateTelephony()) return Response.json({ error: "telephony_environment_disabled" }, { status: 503 });
   const config = getTelnyxConfig();
   if (!config.configured || !config.publicKey) {
     return notConfiguredResponse();

@@ -62,6 +62,7 @@ describe("telephony runtime", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     delete process.env.TELNYX_API_KEY;
     delete process.env.TELNYX_LIVE_CALLS_ENABLED;
     delete process.env.VERCEL_ENV;
@@ -72,6 +73,19 @@ describe("telephony runtime", () => {
     expect(telephonyEnvironment({ VERCEL_ENV: "preview", NODE_ENV: "production" })).toBe("development");
     expect(telephonyEnvironment({})).toBe("development");
     expect(isProductionDeployment({ VERCEL_ENV: "preview" })).toBe(false);
+  });
+
+  it("uses development device records for the dedicated TEST production target", () => {
+    expect(telephonyEnvironment({ MOTORIST_APP_ENV: "test", VERCEL_ENV: "production" })).toBe("development");
+    expect(isProductionDeployment({ MOTORIST_APP_ENV: "test", VERCEL_ENV: "production" })).toBe(false);
+  });
+
+  it("refuses a Preview before querying or changing shared telephony state", async () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    const from = vi.spyOn(harness.admin, "from");
+    await expect(createTelephonyDeps()).rejects.toBeInstanceOf(TelephonyNotConfiguredError);
+    expect(from).not.toHaveBeenCalled();
+    expect(telephonyConfiguredOrResponse({ configured: true } as never)?.status).toBe(503);
   });
 
   it("builds deps with a client whose live gate ANDs the env switch with the DB switch", async () => {

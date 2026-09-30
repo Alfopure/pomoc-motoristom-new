@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createFakeSupabase, type FakeSupabase } from "@/test/fake-supabase";
 
@@ -32,7 +32,7 @@ vi.mock("@/server/telephony/telnyx/client", () => ({
   createTelnyxClient: () => ({ deleteTelephonyCredential: (...args: unknown[]) => deleteTelephonyCredential(...(args as [string])) }),
 }));
 
-import { deleteAccessUser } from "./access-management";
+import { deleteAccessUser, markPasswordCompleted, updateAccessUser } from "./access-management";
 
 const actor = { profileId: ADMIN, organizationId: ORG, role: "admin" as const, displayName: "Admin", userId: "auth-admin" };
 
@@ -57,12 +57,31 @@ async function fails(promise: Promise<unknown>) {
 }
 
 describe("deleteAccessUser", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     seed();
     deleteUser.mockReset();
     deleteUser.mockResolvedValue({ data: null, error: null });
     deleteTelephonyCredential.mockReset();
     deleteTelephonyCredential.mockResolvedValue();
+  });
+
+  it("refuses Preview deletion or availability changes before partial Auth, profile or phone writes", async () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    fake.db.seed("motorist_operator_devices", [{ id: "device-1", profile_id: TARGET, telnyx_credential_id: "test-credential" }]);
+    fake.db.seed("motorist_operator_presence", [{ id: "presence-1", profile_id: TARGET }]);
+    fake.db.seed("motorist_ring_group_members", [{ id: "member-1", profile_id: TARGET }]);
+    expect(await fails(deleteAccessUser(actor, TARGET))).toMatchObject({ status: 503 });
+    expect(await fails(markPasswordCompleted())).toMatchObject({ status: 503 });
+    expect(await fails(updateAccessUser(actor, TARGET, { active: false }))).toMatchObject({ status: 503 });
+    expect(await fails(updateAccessUser(actor, TARGET, { role: "manager" }))).toMatchObject({ status: 503 });
+    expect(fake.db.rows("motorist_profiles").find(row => row.id === TARGET)).toMatchObject({ active: true, access_status: "active" });
+    for (const table of ["motorist_operator_devices", "motorist_operator_presence", "motorist_ring_group_members"]) {
+      expect(fake.db.rows(table)).toHaveLength(1);
+    }
+    expect(fake.db.rows("motorist_audit_log")).toHaveLength(0);
+    expect(deleteUser).not.toHaveBeenCalled();
+    expect(deleteTelephonyCredential).not.toHaveBeenCalled();
   });
 
   it("refuses a reserved operator before the first provider leg without changing the account", async () => {

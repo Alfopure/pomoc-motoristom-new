@@ -87,3 +87,27 @@ test("the allowed copy hostname never exempts original project identifiers", () 
     assert.equal(assertTargetProject({ SUPABASE_URL: value }).length, 1, value);
   }
 });
+
+test("dedicated TEST production target remains bound to TEST", () => {
+  const env = {
+    MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev",
+    VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk",
+    MOTORIST_TEST_LIVE_INTEGRATIONS: "true",
+    SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co",
+    APP_BASE_URL: "https://test.dispecing.linkapomoci.sk",
+  };
+  assert.deepEqual(assertTargetProject(env), []);
+  for (const override of [
+    { SUPABASE_URL: "https://ifpaeegaesdmljfkdvcn.supabase.co" },
+    { NEXT_PUBLIC_SUPABASE_URL: "https://ifpaeegaesdmljfkdvcn.supabase.co" },
+    { POSTGRES_URL: "postgres://secret@db.ifpaeegaesdmljfkdvcn.supabase.co/postgres" },
+    { VERCEL_PROJECT_ID: undefined }, { VERCEL_PROJECT_ID: "prj_foreign" },
+    { VERCEL_ENV: "preview" }, { VERCEL_GIT_COMMIT_REF: "main" },
+    { APP_BASE_URL: "https://dispecing-test.vercel.app" }, { MOTORIST_APP_ENV: "typo" },
+  ]) assert.ok(assertTargetProject({ ...env, ...override }).length > 0, JSON.stringify(Object.keys(override)));
+});
+
+test("legacy production and ordinary Preview reject cross-project wiring", () => {
+  assert.ok(assertTargetProject({ VERCEL_ENV: "production", SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co" }).length);
+  assert.ok(assertTargetProject({ VERCEL_ENV: "preview", SUPABASE_URL: "https://ifpaeegaesdmljfkdvcn.supabase.co" }).length);
+});
