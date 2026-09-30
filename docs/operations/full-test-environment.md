@@ -1,6 +1,14 @@
 # Samostatné plne testovateľné prostredie
 
-Stav k 2026-09-30: **TEST aplikácia je nasadená a základné funkcie sú overené** na `https://test.dispecing.linkapomoci.sk`. [PR #332](https://github.com/Alfopure/pomoc-motoristom-new/pull/332) je zlúčená do `dev` (`9c7565c3`); samostatný projekt `pomoc-motoristom-test` používa iba TEST Supabase. Živé integrácie zostávajú vypnuté: chýba Telnyx API key a schválený telefón/email testera. Zvuk, SMS, doručenie emailu, AI a ostatné externé služby ešte nie sú funkčne prebraté.
+Stav k 2026-09-30: **TEST aplikácia je nasadená a základné funkcie sú overené** na `https://test.dispecing.linkapomoci.sk`. [PR #332](https://github.com/Alfopure/pomoc-motoristom-new/pull/332) je zlúčená do `dev` (`9c7565c3`); samostatný projekt `pomoc-motoristom-test` používa iba TEST Supabase. Živé integrácie zostávajú vypnuté: Telnyx prístup je už overený, ale nie je zapojený do aplikácie; objednané slovenské TEST číslo čaká na regulačné overenie a aktiváciu. Zvuk, SMS, doručenie emailu, AI a ostatné externé služby ešte nie sú funkčne prebraté.
+
+### Príprava Telnyx — 2026-09-30
+
+Kľúč existujúceho účtu bol overený čítaním API a zostáva v súkromnom úložisku mimo repozitára. Vzniklo päť nových TEST konfigurácií s potvrdeným spätným čítaním: dva outbound voice profily, Call Control aplikácia, credential connection a messaging profile. Call Control aplikácia, oba voice profily a messaging sú vypnuté; aktívna credential connection má interné SIP pravidlo a vlastný vypnutý outbound profile. Callbacky sú nastavené na kanonickú TEST doménu. Tieto credentials/resource ID ešte nie sú vo Vercel env; aplikačné live prepínače zostávajú vypnuté, nebol vykonaný hovor či SMS a produkčné resources sa nemenili.
+
+Používateľ následne vybral slovenské číslo s overením a vznikla objednávka jedného bratislavského hlasového čísla pre novú TEST aplikáciu: 1 USD/mesiac + 1 USD zriadenie, bez SMS. Objednávka má stav `pending` / `requirement-info-pending`; všetkých päť požiadaviek čaká na hodnotu a číslo nie je potvrdené ako aktívne. V účte existujú schválené podklady z predošlých objednávok, ale k novej sa automaticky nepripojili. Majiteľ musí potvrdiť alebo pripojiť požadované overenie cez [Telnyx Orders](https://portal.telnyx.com/#/numbers/orders), podľa [návodu poskytovateľa](https://support.telnyx.com/en/articles/4380325-search-and-buy-numbers); žiadne doklady identity sa pri tejto príprave neodosielali. Po schválení zostáva aktivácia čísla, schválené testovacie destinácie, pripojenie TEST konfigurácie a reálne integračné testy. SMS a doručenie emailu vyžadujú osobitne overené zdroje a adresátov.
+
+### Preberací záznam aplikácie
 
 | Overenie | Výsledok z 2026-09-30 |
 | --- | --- |
