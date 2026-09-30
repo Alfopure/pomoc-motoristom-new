@@ -1169,7 +1169,7 @@ async function claimOperatorForDial(deps: EffectsDeps, ctx: ExecutionContext, co
   return true;
 }
 
-async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, options?: { authorized?: boolean; planOnly?: boolean }): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
+async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, options?: { planOnly?: boolean }): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   await assertOwnership();
   const telnyx = requireTelnyx(deps);
   const adopted = ctx.dialResults.get(command.commandId);
@@ -1207,15 +1207,15 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
   }
   // A colleague call reaches an operator on pause without claiming them: they
   // stay paused, so no customer offer reaches them, and nothing is restored.
-  const pausedColleague = !options?.authorized && !alreadyDispatched && stable && Boolean(command.profileId) &&
+  const pausedColleague = !alreadyDispatched && stable && Boolean(command.profileId) &&
     (command.clientState.intent === "internal" || command.clientState.intent === "internal_caller") &&
     await isPausedWithoutCall(deps.admin, { organizationId: deps.organizationId, profileId: command.profileId!, now: deps.now() });
-  if (!options?.authorized && !alreadyDispatched && stable && command.profileId && command.role !== "supervisor" && !pausedColleague) {
+  if (!alreadyDispatched && stable && command.profileId && command.role !== "supervisor" && !pausedColleague) {
     if (!await claimOperatorForDial(deps, ctx, command)) return { skipped: true, detail: { reason: "offer no longer authorized" } };
     // The token has to be durable before the leg exists, or a replay cannot
     // recognise its own offer. A fan-out checkpoints the whole group at once
     // instead; see `executeRingFanout`.
-    if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
+    if (ctx.continuation && !options?.planOnly) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
   if (options?.planOnly) return { skipped: false, detail: { planned: true, stable } };
   const result = await telnyx.dial(dialParams(command));
@@ -1422,24 +1422,17 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   // out their own provider call. They are independent legs; the caller is
   // waiting for the first of them, not the last.
   //
-  // Claim every operator first, then make all of those tokens durable in one
-  // write, then dial. The invariant that matters — a token is persisted before
-  // its leg can exist — is kept for the group rather than per member, and the
-  // single checkpoint avoids N fenced compare-and-sets racing on one row.
+  // Resolve personal mobile ownership before claiming each operator. A
+  // fallback starts as an external number and may only acquire its profileId
+  // in executeDial; preauthorizing the group before that resolution skipped
+  // its reservation and made the answer guard hang up the mobile.
+  // Planning also checks the journal first so replay keeps the original
+  // owner/token. Persist every prepared token in one checkpoint before dialing.
   const stableFanout = telephonyStabilityEnabled() || hasStabilityContract(session);
-  const claimed: DialCommand[] = [];
-  if (stableFanout) {
-    const claims = await Promise.allSettled(dials.map(async (dial) =>
-      dial.profileId && dial.role !== "supervisor" ? claimOperatorForDial(deps, ctx, dial) : true));
-    for (const [index, claim] of claims.entries()) {
-      if (claim.status === "rejected") throw claim.reason;
-      if (claim.value) claimed.push(dials[index]);
-      else skippedMembers.push(dials[index].profileId ?? dials[index].externalNumber ?? "");
-    }
-    if (ctx.continuation && claimed.length) {
-      ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
-    }
-  } else claimed.push(...dials);
+  const planned = await Promise.allSettled(dials.map((dial) => executeDial(deps, ctx, dial, { planOnly: true })));
+  if (stableFanout && ctx.continuation && planned.some(outcome => outcome.status === "fulfilled" && !outcome.value.skipped)) {
+    ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
+  }
 
   // One renew for the group: `assertOwnership` at the head of every dial and
   // the journal's own preparation renew it again anyway.
@@ -1453,11 +1446,10 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   // the group instead of two for each of them — and the members are fenced
   // together, so a termination committed meanwhile stops all of them rather
   // than the ones that had not gone out yet.
-  const planned = await Promise.allSettled(claimed.map((dial) => executeDial(deps, frozen, dial, { authorized: stableFanout, planOnly: true })));
   const sendable: Array<{ index: number; dial: DialCommand }> = [];
   const dialled: Array<PromiseSettledResult<{ skipped: boolean; detail?: Record<string, unknown> }>> = planned.map((outcome, index) => {
     if (outcome.status === "rejected" || outcome.value.skipped) return outcome;
-    sendable.push({ index, dial: claimed[index] });
+    sendable.push({ index, dial: dials[index] });
     return outcome;
   });
   const results = await requireTelnyx(deps).dialMany(sendable.map(({ dial }) => dialParams(dial)));
@@ -1471,13 +1463,14 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     }
   }));
   for (const [index, outcome] of dialled.entries()) {
-    const dial = claimed[index];
+    const dial = dials[index];
     try {
       const executed = outcome.status === "fulfilled" ? outcome.value : (() => { throw outcome.reason; })();
       if (!executed.skipped) succeeded += 1;
       else {
+        skippedMembers.push(dial.profileId ?? dial.externalNumber ?? "");
         let attempt = admin.from("motorist_ring_attempts").update({ result: "cancelled", ended_at: now }).eq("session_id", session.id).eq("step_index", command.step).in("result", ["pending", "offered"]);
-        attempt = dial.profileId ? attempt.eq("profile_id", dial.profileId) : attempt.eq("external_number", dial.externalNumber ?? "");
+        attempt = dial.attempt?.profileId ? attempt.eq("profile_id", dial.attempt.profileId) : attempt.eq("external_number", dial.attempt?.externalNumber ?? "");
         const cancelled = await attempt;
         if (cancelled.error) fail("rejected attempt update failed", cancelled.error);
       }
@@ -1491,7 +1484,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
         continue;
       }
       let query = admin.from("motorist_ring_attempts").update({ result: "failed", ended_at: now }).eq("session_id", session.id).eq("step_index", command.step);
-      query = dial.profileId ? query.eq("profile_id", dial.profileId) : query.eq("external_number", dial.externalNumber ?? "");
+      query = dial.attempt?.profileId ? query.eq("profile_id", dial.attempt.profileId) : query.eq("external_number", dial.attempt?.externalNumber ?? "");
       await query;
       if (dial.profileId && !telephonyStabilityEnabled() && !hasStabilityContract(session)) {
         await admin
