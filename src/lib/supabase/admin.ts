@@ -1,4 +1,5 @@
 import "server-only";
+import { assertAppEnvironment } from "@/lib/app-environment";
 
 import { telephonyDatabaseFetch } from "@/server/telephony/ownership";
 
@@ -7,6 +8,7 @@ import type { Database } from "./database.types";
 import { requireSupabaseServiceEnv } from "./env";
 
 export function createSupabaseAdminClient(signal?: AbortSignal) {
+  assertAppEnvironment();
   const { url, serviceKey } = requireSupabaseServiceEnv();
 
   return createClient<Database>(url, serviceKey, {

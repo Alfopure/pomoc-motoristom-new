@@ -18,6 +18,7 @@ import { loadParticipantManifest, observeParticipants } from "../state/participa
 import { enqueueSavedRecording } from "../recording-jobs";
 import { recordingIntent } from "../state/recording";
 import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, type WebhookClaim } from "./webhook-ledger";
+import { acceptsTestProviderEvent, getTestProviderSafety, hasTestCallProvenance } from "./test-safety";
 
 /**
  * Telnyx webhook processor (design §2.3).
@@ -322,7 +323,18 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
   const identity = { ...base, eventId: event.id, type: event.type, eventClass };
 
   const allowed = allowedConnectionIds(deps);
-  if (event.connectionId && allowed.size > 0 && !allowed.has(event.connectionId)) {
+  const config = deps.config;
+  const boundary = config.configured ? { ...config, safety: config.testSafety ?? getTestProviderSafety() } : null;
+  let testEventAllowed = !boundary || acceptsTestProviderEvent(boundary, event);
+  if (testEventAllowed && boundary?.safety.restricted && !event.connectionId) {
+    testEventAllowed = false;
+    if (event.callControlId) testEventAllowed = await hasTestCallProvenance(boundary, event.callControlId, deps);
+    if (event.conferenceId && deps.telnyx) {
+      const response = await deps.telnyx.request<{ data?: { connection_id?: string } }>("GET", `/conferences/${encodeURIComponent(event.conferenceId)}`);
+      testEventAllowed = (!event.callControlId || testEventAllowed) && response.data?.connection_id === boundary.callControlAppId;
+    }
+  }
+  if (!testEventAllowed || (event.connectionId && allowed.size > 0 && !allowed.has(event.connectionId))) {
     deps.logger?.({ scope: "webhook", eventId: event.id, type: event.type, outcome: "unverified_connection", connectionId: event.connectionId });
     return done({ ...identity, status: 200, outcome: "unverified_connection" });
   }

@@ -1,7 +1,7 @@
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
 import { parseOperatorSettingsPatch, updateOperatorTelephonySettings } from "@/server/telephony/config-service";
 import { canEditConfig, configDeps, configErrorResponse, toConfigActor } from "@/server/telephony/config-route";
-import { readJsonBody, TELEPHONY_ROUTE_ROLES } from "@/server/telephony/runtime";
+import { assertTelephonyDeployment, readJsonBody, TELEPHONY_ROUTE_ROLES } from "@/server/telephony/runtime";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,6 +14,7 @@ export const dynamic = "force-dynamic";
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     assertSameOriginRequest(request);
+    assertTelephonyDeployment();
     const actor = await requireDefaultMotoristActor(TELEPHONY_ROUTE_ROLES);
     const { id } = await context.params;
     if (id !== actor.profileId && !canEditConfig(actor.role)) {

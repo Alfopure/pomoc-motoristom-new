@@ -6,6 +6,7 @@ import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../pr
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 
 import { getTelnyxConfig, type TelnyxConfig } from "./env";
+import { checkTestProviderRequest, getTestProviderSafety, hasTestCallProvenance, resolveTestSipCredential, TestProviderSafetyError } from "./test-safety";
 
 /**
  * Thin Telnyx REST client over `fetch`.
@@ -425,6 +426,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
   const maxRetryAfterMs = options.maxRetryAfterMs ?? TELNYX_MAX_RETRY_AFTER_MS;
   const now = options.now ?? (() => Date.now());
   const liveGate = { ...options.liveGate };
+  // Immutable ownership of calls just acknowledged by this client's guarded TEST dial.
+  // No global cache; subsequent invocations need durable signed-ingress/journal evidence.
+  const createdTestCalls = new Set<string>();
 
   async function attempt(
     method: string,
@@ -494,7 +498,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     return text;
   }
 
-  async function request<T>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, requestOptions: RequestOptions = {}): Promise<T> {
+  async function request<T>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, requestOptions: RequestOptions = {}, boundaryDeadline = Infinity): Promise<T> {
+    const requestStarted = now();
+    const requestDeadline = Math.min(requestStarted + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS), boundaryDeadline, sessionOwnership.getStore()?.deadline ?? Infinity);
     const commandId = requestOptions.journalCommandId ?? requestOptions.commandId ?? null;
     const wireCommandId = requestOptions.commandId ?? null;
     const url = new URL(`${configured.apiBaseUrl}${path.startsWith("/") ? path : `/${path}`}`);
@@ -502,9 +508,50 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
     const payload = requestOptions.body || wireCommandId ? compact({ ...(requestOptions.body ?? {}), command_id: wireCommandId ?? undefined }) : undefined;
+    const safety = configured.testSafety ?? getTestProviderSafety();
+    try {
+      const checked = checkTestProviderRequest({ ...configured, safety }, method, path, payload);
+      for (const callId of new Set(checked.callIds)) {
+        if (now() >= requestDeadline || (!createdTestCalls.has(callId) && !await hasTestCallProvenance({ ...configured, safety }, callId))) throw new TestProviderSafetyError();
+      }
+      for (const conferenceId of new Set(checked.conferenceIds)) {
+        const response = await request<unknown>("GET", `/conferences/${encodeURIComponent(conferenceId)}`, {}, requestDeadline);
+        if (asRecord(asRecord(response).data).connection_id !== configured.callControlAppId) throw new TestProviderSafetyError();
+      }
+      // Tokens and SIP targets must belong to the dedicated TEST connection,
+      // including credentials restored from a copied or stale device row.
+      const credentials = new Map<string, string | undefined>();
+      if (checked.credentialId) credentials.set(checked.credentialId, undefined);
+      for (const username of new Set(checked.sipUsernames)) {
+        if (now() >= requestDeadline) throw new TestProviderSafetyError();
+        credentials.set(await resolveTestSipCredential(username), username);
+      }
+      for (const [credentialId, username] of credentials) {
+        const response = await request<unknown>("GET", `/telephony_credentials/${encodeURIComponent(credentialId)}`, {}, requestDeadline);
+        const credential = asRecord(asRecord(response).data);
+        // Telnyx GET credentials returns resource_id="connection:<id>", not
+        // the connection_id field used in the create request.
+        if (credential.resource_id !== `connection:${configured.credentialConnectionId}` || (credential.expired === true && method !== "DELETE") ||
+          (username && credential.sip_username !== username)) throw new TestProviderSafetyError();
+      }
+      if (checked.credentialId && method === "POST") {
+        // A browser possessing the JWT can dial without our REST client. Its
+        // dedicated SIP connection must therefore have provider-side PSTN off.
+        const response = await request<unknown>("GET", `/credential_connections/${encodeURIComponent(configured.credentialConnectionId!)}`, {}, requestDeadline);
+        const connection = asRecord(asRecord(response).data);
+        const outboundProfile = str(asRecord(connection.outbound).outbound_voice_profile_id);
+        if (connection.active !== true || connection.sip_uri_calling_preference !== "internal" || !outboundProfile || !configured.outboundVoiceProfileId ||
+          outboundProfile === configured.outboundVoiceProfileId) throw new TestProviderSafetyError();
+        const profileResponse = await request<unknown>("GET", `/outbound_voice_profiles/${encodeURIComponent(outboundProfile)}`, {}, requestDeadline);
+        if (asRecord(asRecord(profileResponse).data).enabled !== false) throw new TestProviderSafetyError();
+      }
+    } catch (error) {
+      if (error instanceof TestProviderSafetyError) throw new TelnyxCommandError({ code: error.code, status: error.status, message: error.message, commandId });
+      throw error;
+    }
     const body = payload ? JSON.stringify(payload) : undefined;
 
-    const started = now();
+    const started = requestStarted;
     const attempts: TelnyxHttpAttempt[] = [];
     const log = (status: number | null, retried: boolean, error: string | null, cached = false) => {
       // Even a custom failing logger must not change the accepted command outcome.
@@ -514,7 +561,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       } catch { /* Telemetry is not part of command execution. */ }
     };
     const owner = sessionOwnership.getStore();
-    const deadline = Math.min(started + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS), owner?.deadline ?? Infinity);
+    const deadline = Math.min(requestDeadline, owner?.deadline ?? Infinity);
     const journal = requestOptions.skipJournal ? null : journalRequest(method, path, commandId, body);
     const dispatch = async () => {
       const journaled = await dispatchJournaled(
@@ -572,6 +619,10 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     }
 
     log(response.status, retried, null);
+    if (safety.restricted && method === "POST" && path === "/calls") {
+      const created = str(asRecord(asRecord(parsed).data).call_control_id);
+      if (created && createdTestCalls.size < 128) createdTestCalls.add(created);
+    }
     return parsed as T;
   }
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MutationError } from "@/server/motorist-mutations";
 import type { AppRole } from "@/domain/types";
@@ -324,4 +324,16 @@ describe("coherent incoming routes", () => {
     expect((await putIncoming(request("incoming", "PUT", { groups:[],plans:[] }))).status).toBe(400);
     expect(replaceIncomingRouting).not.toHaveBeenCalled();
   });
+});
+
+
+afterEach(() => vi.unstubAllEnvs());
+
+it("refuses Preview routing writes before invoking a configuration service", async () => {
+  vi.stubEnv("VERCEL_ENV", "preview");
+  state.role = "admin";
+  const response = await patchSettings(request("settings", "PATCH", { patch: { liveCallsEnabled: true } }));
+  expect(response.status).toBe(503);
+  expect(updateTelephonySettings).not.toHaveBeenCalled();
+  expect((await getSettings()).status).toBe(200);
 });

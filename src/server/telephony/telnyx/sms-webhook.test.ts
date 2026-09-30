@@ -26,6 +26,30 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 describe("SMS webhook acknowledgement", () => {
+  function activateTest() {
+    for (const [key, value] of Object.entries({ MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev", VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk",
+      SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co", APP_BASE_URL: "https://test.dispecing.linkapomoci.sk",
+      MOTORIST_TEST_LIVE_INTEGRATIONS: "true", MOTORIST_TEST_ALLOWED_NUMBERS: "+421905123456", MOTORIST_TEST_FROM_NUMBERS: "+12025550123" })) vi.stubEnv(key, value);
+  }
+  it("does not process signed callbacks on an ordinary Preview", async () => {
+    activateTest(); vi.stubEnv("VERCEL_ENV", "preview");
+    expect((await POST(signedRequest(payload()))).status).toBe(503);
+    expect(admin).not.toHaveBeenCalled();
+  });
+  it("stores TEST inbound messages only for the exact approved tester/DID pair with live opt-in", async () => {
+    activateTest();
+    const h = createFakeSupabase(); admin.mockReturnValue(h.admin);
+    const foreign = payload(); foreign.data.payload.from.phone_number += "0";
+    expect(await (await POST(signedRequest(foreign))).json()).toMatchObject({ outcome: "test_boundary_rejected" });
+    const otherDid = payload(); otherDid.data.payload.to[0].phone_number += "0";
+    expect(await (await POST(signedRequest(otherDid))).json()).toMatchObject({ outcome: "test_boundary_rejected" });
+    vi.stubEnv("MOTORIST_TEST_LIVE_INTEGRATIONS", "false");
+    expect(await (await POST(signedRequest(payload()))).json()).toMatchObject({ outcome: "test_boundary_rejected" });
+    expect(h.db.rows("motorist_sms_messages")).toHaveLength(0);
+    vi.stubEnv("MOTORIST_TEST_LIVE_INTEGRATIONS", "true");
+    expect(await (await POST(signedRequest(payload()))).json()).toMatchObject({ outcome: "stored" });
+    expect(h.db.rows("motorist_sms_messages")).toHaveLength(1);
+  });
   it("verifies original signed bytes before database access", async () => {
     expect((await POST(signedRequest(payload(), true))).status).toBe(400);
     expect(admin).not.toHaveBeenCalled();

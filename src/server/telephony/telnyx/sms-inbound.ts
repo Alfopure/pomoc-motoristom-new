@@ -5,6 +5,7 @@ import type { Database, Json } from "@/lib/supabase/database.types";
 import type { SmsChannel } from "@/server/sms-channel";
 import { normalizeSmsRecipient, SmsWorkflowError } from "@/server/sms-errors";
 import { parseTelnyxMessageEvent } from "./sms-status";
+import { acceptsTestInboundSms, getTestProviderSafety } from "./test-safety";
 
 /** A single durable insert precedes the acknowledgement. No case is inferred from a phone number. */
 export async function receiveTelnyxSms(admin: SupabaseClient<Database>, envelope: unknown, channel: SmsChannel, now = new Date()) {
@@ -13,8 +14,11 @@ export async function receiveTelnyxSms(admin: SupabaseClient<Database>, envelope
   if (event.payload.messaging_profile_id !== channel.messagingProfileId) return { outcome: "foreign_profile" };
   if (!event.providerMessageId) throw new SmsWorkflowError("Chýba ID prijatej SMS.", 400);
   const from = record(event.payload.from).phone_number;
-  const sender = normalizeSmsRecipient(from, "Odosielateľ prijatej SMS");
   const recipients = Array.isArray(event.payload.to) ? event.payload.to : [];
+  if (!acceptsTestInboundSms(getTestProviderSafety(), from, recipients.map(recipient => record(recipient).phone_number))) {
+    return { outcome: "test_boundary_rejected" };
+  }
+  const sender = normalizeSmsRecipient(from, "Odosielateľ prijatej SMS");
   const ours = recipients.some((recipient) => {
     try { return normalizeSmsRecipient(record(recipient).phone_number) === channel.number; } catch { return false; }
   });

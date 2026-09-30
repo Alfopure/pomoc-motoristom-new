@@ -1,4 +1,5 @@
 import "server-only";
+import { canOperateTelephony, resolveAppEnvironment } from "@/lib/app-environment";
 import { after } from "next/server";
 import { withBackgroundRequestMetrics } from "@/server/request-metrics";
 import { sessionOwnership } from "./ownership";
@@ -31,13 +32,13 @@ export type TelephonyRuntimeDeps = CallActionDeps & ProcessorDeps;
 const CALL_PUSH_SESSION_CONCURRENCY = 3;
 const CALL_PUSH_QUEUE_BUDGET_MS = 15_000;
 
-/** `production` only on the Vercel production deployment; preview/dev share the dev credential connection. */
+/** Dedicated TEST deploys on Vercel production but uses development telephony records. */
 export function telephonyEnvironment(env: EnvRecord = process.env): TelephonyEnvironment {
-  return env.VERCEL_ENV?.trim() === "production" ? "production" : "development";
+  return resolveAppEnvironment(env) === "production" ? "production" : "development";
 }
 
 export function isProductionDeployment(env: EnvRecord = process.env): boolean {
-  return env.VERCEL_ENV?.trim() === "production";
+  return resolveAppEnvironment(env) === "production";
 }
 
 export type CreateTelephonyDepsOptions = {
@@ -95,7 +96,12 @@ async function readLiveGateSettings(admin: ReturnType<typeof createSupabaseAdmin
   }
 }
 
+export function assertTelephonyDeployment(): void {
+  if (!canOperateTelephony()) throw new TelephonyNotConfiguredError();
+}
+
 export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = {}): Promise<TelephonyRuntimeDeps> {
+  assertTelephonyDeployment();
   const admin = createSupabaseAdminClient();
   const organizationId = options.organizationId ?? (await resolveDefaultOrganizationId());
   const config = options.config ?? getTelnyxConfig();
@@ -176,7 +182,7 @@ export function notConfiguredResponse(): Response {
 
 /** Guard for routes that need a live provider; returns a 503 response or `null`. */
 export function telephonyConfiguredOrResponse(config: TelnyxConfig = getTelnyxConfig()): Response | null {
-  return config.configured ? null : notConfiguredResponse();
+  return config.configured && canOperateTelephony() ? null : notConfiguredResponse();
 }
 
 function errorJson(message: string, status: number, code?: string | null): Response {

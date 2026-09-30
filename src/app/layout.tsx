@@ -1,3 +1,4 @@
+import { resolveAppEnvironment } from "@/lib/app-environment";
 import type { Metadata, Viewport } from "next";
 import { Poppins } from "next/font/google";
 import Script from "next/script";
@@ -54,6 +55,11 @@ export default function RootLayout({
       <body className="min-h-full bg-zinc-100">
         {process.env.NODE_ENV === "development" && <DevelopmentCacheReset />}
         {process.env.NODE_ENV === "production" && <ServiceWorkerRegistration />}
+        {resolveAppEnvironment() === "test" && (
+          <div role="note" className="pointer-events-none fixed bottom-1 left-1 z-[9999] rounded bg-amber-200 px-2 py-1 text-xs font-bold text-amber-950">
+            TEST · skúšobné prostredie
+          </div>
+        )}
         {children}
       </body>
     </html>

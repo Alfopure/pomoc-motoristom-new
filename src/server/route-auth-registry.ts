@@ -220,7 +220,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "telephony/operators/[id]/disconnect": { class: "session", role: ["manager", "admin"], note: "Odpojí prehliadačový telefón operátora (ďalší heartbeat dostane 409) a zmaže jeho Telnyx credential, aby sa starým tokenom nedalo znova zaregistrovať (neúspech = 502)." },
   "telephony/operators/[id]/settings": { class: "session", note: "PATCH vlastných nastavení (self) alebo cudzích (manager/admin)." },
   "telephony/devices/heartbeat": { class: "session", note: "Heartbeat prehliadačového telefónu; zastaraná device_session_id → 409." },
-  "telephony/dev/simulate-inbound": { class: "session", role: ["admin"], note: "Vývojový simulátor prichádzajúceho hovoru; v produkcii (VERCEL_ENV=production) vracia 403." },
+  "telephony/dev/simulate-inbound": { class: "session", role: ["admin"], note: "Vývojový simulátor prichádzajúceho hovoru; v produkčnom aplikačnom prostredí (MOTORIST_APP_ENV=production; legacy VERCEL fallback) vracia 403." },
   "telephony/presence": { class: "session" },
   "telephony/presence/end-wrap-up": { class: "session" },
   "telephony/webphone/token": { class: "session", note: "Vydáva krátkodobý Telnyx WebRTC token a rotuje device_session_id." },
