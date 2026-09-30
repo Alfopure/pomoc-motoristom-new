@@ -28,7 +28,7 @@ create table motorist_profiles(id uuid primary key,organization_id uuid,active b
 create table motorist_cases(id uuid primary key,organization_id uuid);
 create table motorist_call_sessions(id uuid primary key,organization_id uuid,answered_by_profile_id uuid,state text,customer_leg_id uuid,direction text,started_at timestamptz,answered_at timestamptz,ended_at timestamptz,termination_requested_at timestamptz,parked_at timestamptz,metadata jsonb default '{}');
 create table motorist_call_legs(id uuid primary key,organization_id uuid,session_id uuid,profile_id uuid,role text,initiated_at timestamptz,answered_at timestamptz,bridged_at timestamptz,ended_at timestamptz,updated_at timestamptz default now());
-create table motorist_operator_devices(id uuid primary key,organization_id uuid,profile_id uuid,device_session_id uuid,environment text);
+create table motorist_operator_devices(id uuid primary key,organization_id uuid,profile_id uuid,device_session_id text,environment text);
 '''
 def connect():return psycopg.connect(dbname=DB,**LOCAL,autocommit=True)
 def event(**extra):
@@ -54,6 +54,7 @@ class Contracts(unittest.TestCase):
     with connect() as c:
       c.execute(FIXTURE)
       c.execute((ROOT/'supabase/migrations/20261008130000_operations_diagnostics.sql').read_text())
+      c.execute((ROOT/'supabase/migrations/20261008130100_diagnostics_device_session_text.sql').read_text())
       c.execute('insert into motorist_organizations values(%s),(%s)',(ORG,OTHER))
       c.execute("insert into motorist_profiles values(%s,%s,true,'dispatcher'),(%s,%s,true,'manager'),(%s,%s,true,'dispatcher')",(PROFILE,ORG,MANAGER,ORG,FOREIGN,OTHER))
       c.execute('insert into motorist_cases values(%s,%s)',(CASE,ORG))
