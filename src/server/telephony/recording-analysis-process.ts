@@ -5,19 +5,21 @@ import { QUALITY_RUBRIC_VERSION } from "@/lib/telephony/recording-quality";
 import { openAIBatchClient, OpenAIBatchError } from "@/lib/integrations/ai/openai-batch";
 import { makeQualityAnalysisRequest, parseBatchResponseContent, parseQualityAnalysis } from "@/lib/integrations/ai/quality-analysis";
 import { buildQualitySource, loadRecordingSourceRows, sourceRestricted } from "./recording-source";
-import { record, reserveRecordingBudget, type RecordingJobContext, type RecordingJobOutcome } from "./recording-jobs";
+import { record, reserveRecordingBudget, type RecordingJob, type RecordingJobContext, type RecordingJobOutcome } from "./recording-jobs";
+import { assertTestProcessingResume, beginTestProcessing, checkpointTestProcessing, testCleanupSource } from "./recording-test-provenance";
 
 const str = (value: Json | undefined): string | null => typeof value === "string" && value.length > 0 ? value : null;
 const later = (minutes = 5) => new Date(Date.now() + minutes * 60_000).toISOString();
 const terminal = new Set(["completed", "failed", "expired", "cancelled"]);
 const queued = (): RecordingJobOutcome => ({ state: "queued", nextAttemptAt: new Date().toISOString() });
 
-async function save(ctx: RecordingJobContext, checkpoint: Json, providerIds: Json = {}, paid = false) {
-  if (!await ctx.checkpoint(checkpoint, paid, providerIds)) throw new Error("analysis_lease_lost");
+async function save(ctx: RecordingJobContext, checkpoint: Json, providerIds: Json = {}, paid = false, owner?: RecordingJob) {
+  if (!await checkpointTestProcessing(ctx, checkpoint, paid, providerIds, owner)) throw new Error("analysis_lease_lost");
 }
 
 export async function processRecordingAnalysisJob(ctx: RecordingJobContext): Promise<RecordingJobOutcome> {
   if (process.env.RECORDING_PROCESSING_ENABLED !== "true" || process.env.AI_TRANSCRIPT_ENABLED !== "true" || !ctx.policy.analysis_enabled || !ctx.policy.approved_at) return { state: "waiting", nextAttemptAt: later(), errorCode: "analysis_disabled" };
+  assertTestProcessingResume(ctx.job);
   const cp = record(ctx.job.checkpoint), ids = record(ctx.job.provider_ids);
   const client = openAIBatchClient({ signal: ctx.signal });
   let submissionAttempted = false;
@@ -25,6 +27,7 @@ export async function processRecordingAnalysisJob(ctx: RecordingJobContext): Pro
     const rows = await loadRecordingSourceRows(ctx.admin, ctx.organizationId, ctx.job.call_id, ctx.signal);
     if (!rows || sourceRestricted(rows) || rows.call.recording_source_revision !== ctx.job.input_revision) return { state: "cancelled", errorCode: "analysis_source_changed" };
     if (!rows.call.ended_at || rows.recordings.length === 0 || rows.recordings.some((r) => r.status !== "available" || !rows.transcripts.some((t) => t.recording_id === r.id && t.audio_source_revision === r.source_revision && t.status === "complete"))) return { state: "waiting", nextAttemptAt: later(), errorCode: "analysis_source_pending" };
+    await beginTestProcessing(ctx, rows.recordings);
     const source = buildQualitySource(rows);
     const includeQuality = ctx.policy.quality_enabled && Boolean(ctx.policy.quality_legal_basis);
     const hash = createHash("sha256").update(JSON.stringify({ spans: source.spans.map(({ speakerLabel: _label, ...span }) => span),
@@ -130,6 +133,7 @@ export async function processRecordingAnalysisJob(ctx: RecordingJobContext): Pro
 }
 
 export async function processRecordingAnalysisCleanupJob(ctx: RecordingJobContext): Promise<RecordingJobOutcome> {
+  const owner = await testCleanupSource(ctx, "analysis");
   const client = openAIBatchClient({ signal: ctx.signal }), ids = record(ctx.job.provider_ids), cp = record(ctx.job.checkpoint);
   try {
     const sourceJobId = str(cp.source_job_id);
@@ -139,10 +143,10 @@ export async function processRecordingAnalysisCleanupJob(ctx: RecordingJobContex
       const page = await client.listFiles(str(cp.cleanup_files_cursor) ?? undefined);
       const matches = page.data.filter((file) => file.filename === `recording-${sourceJobId}.jsonl`);
       if (matches.length === 1) {
-        await save(ctx, { cleanup_files_cursor: null, analysis_stage: "uploaded" }, { openai_input_file_id: matches[0].id });
+        await save(ctx, { cleanup_files_cursor: null, analysis_stage: "uploaded" }, { openai_input_file_id: matches[0].id }, false, owner);
         return queued();
       }
-      await save(ctx, { cleanup_files_cursor: page.hasMore && page.data.length ? page.data.at(-1)!.id : null });
+      await save(ctx, { cleanup_files_cursor: page.hasMore && page.data.length ? page.data.at(-1)!.id : null }, {}, false, owner);
       return { state: "waiting", nextAttemptAt: later(page.hasMore ? 5 : 60), errorCode: matches.length > 1 ? "analysis_cleanup_multiple_files" : "analysis_cleanup_upload_unconfirmed" };
     }
     if (!batchId && cp.analysis_stage === "creating_batch") {
@@ -150,16 +154,16 @@ export async function processRecordingAnalysisCleanupJob(ctx: RecordingJobContex
       const page = await client.listBatches(str(cp.cleanup_batches_cursor) ?? undefined);
       const matches = page.data.filter((batch) => batch.input_file_id === ids.openai_input_file_id && batch.metadata.recording_job_id === sourceJobId);
       if (matches.length === 1) {
-        await save(ctx, { cleanup_batches_cursor: null }, { openai_batch_id: matches[0].id });
+        await save(ctx, { cleanup_batches_cursor: null }, { openai_batch_id: matches[0].id }, false, owner);
         return queued();
       }
-      await save(ctx, { cleanup_batches_cursor: page.hasMore && page.data.length ? page.data.at(-1)!.id : null });
+      await save(ctx, { cleanup_batches_cursor: page.hasMore && page.data.length ? page.data.at(-1)!.id : null }, {}, false, owner);
       return { state: "waiting", nextAttemptAt: later(page.hasMore ? 5 : 60), errorCode: matches.length > 1 ? "analysis_cleanup_multiple_batches" : "analysis_cleanup_batch_unconfirmed" };
     }
     if (batchId) {
       const batch = await client.retrieve(batchId);
       if (!sourceJobId || batch.metadata.recording_job_id !== sourceJobId || str(ids.openai_input_file_id) && batch.input_file_id !== ids.openai_input_file_id) throw new Error("analysis_cleanup_binding_failed");
-      await save(ctx, { cleanup_status: batch.status }, { openai_input_file_id: batch.input_file_id, openai_output_file_id: batch.output_file_id, openai_error_file_id: batch.error_file_id });
+      await save(ctx, { cleanup_status: batch.status }, { openai_input_file_id: batch.input_file_id, openai_output_file_id: batch.output_file_id, openai_error_file_id: batch.error_file_id }, false, owner);
       if (!terminal.has(batch.status)) {
         if (batch.status !== "cancelling") await client.cancel(batchId);
         return { state: "waiting", nextAttemptAt: later(), errorCode: "analysis_cleanup_provider_pending" };
@@ -171,7 +175,7 @@ export async function processRecordingAnalysisCleanupJob(ctx: RecordingJobContex
     for (const fileId of files) {
       if (deleted.has(fileId)) continue;
       try { await client.deleteFile(fileId); } catch (error) { if (!(error instanceof OpenAIBatchError && error.status === 404)) throw error; }
-      deleted.add(fileId); await save(ctx, { deleted_openai_files: [...deleted] });
+      deleted.add(fileId); await save(ctx, { deleted_openai_files: [...deleted] }, {}, false, owner);
       if (Date.now() + 2000 >= ctx.deadline) return queued();
     }
     return { state: "complete", checkpoint: { cleanup_status: "provider_files_deleted", residual_retention: "Provider contractual metadata and abuse-monitoring retention may remain." } };

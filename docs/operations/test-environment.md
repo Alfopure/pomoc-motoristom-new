@@ -2,6 +2,12 @@
 
 **Aktualizácia 2026-09-30:** kanonická doména `test.dispecing.linkapomoci.sk` už patrí samostatnému Vercel projektu `pomoc-motoristom-test`, vetva `dev` / Production. Aktuálne mapovanie, overenú pripravenosť a integračné pravidlá určuje [runbook samostatného TEST prostredia](full-test-environment.md). Nižšie uvedená topológia kanonickej domény na Preview je historická; neobnovovať ju pri bežnej údržbe. Postupy obnovy Supabase a autorizovaného obnovenia dát zostávajú použiteľné pre ten istý TEST ref `nzpnqdstvkfncflgqlny`.
 
+Pre stabilný TEST zachovaj vlastný `RECORDINGS_SYNC_SECRET` až do dokončenia upratania všetkých ním podpísaných AI/Scribe záznamov. Dôkaz viaže pôvodnú úlohu aj konkrétne provider ID; skopírované či zamenené ID sa odmietne pred provider požiadavkou. Vypnutie vytvárania nebráni uprataniu preukázaných TEST záznamov, ale odstránenie alebo rotácia podpisového kľúča zneplatní staré dôkazy a upratanie zostane čakať. Nepoužívaj produkčný kľúč ani obídenie kontroly pôvodu.
+
+Voliteľný `MOTORIST_TEST_SMS_ALPHA_SENDER` povoľuje presný názov odosielateľa iba pre **odchádzajúce SMS**: 3–11 ASCII písmen/číslic, aspoň jedno písmeno, zhodné s `TELNYX_SMS_ALPHA_SENDER`. Naďalej platí overený TEST deployment, jeho messaging profile, live prepínače a presný zoznam schválených príjemcov. Táto možnosť nezapína odpovede na SMS ani nenahrádza E.164 caller ID pre hlasové hovory; skutočné prijatie správy treba overiť osobitne.
+
+Objednané slovenské hlasové TEST číslo k 2026-09-30 stále čaká na regulačné overenie. Majiteľ musí dokončiť požiadavky v [Telnyx Orders](https://portal.telnyx.com/#/numbers/orders); bez potvrdenej aktivácie nemožno vyhlásiť hlasový TEST za dokončený. Číslo nemá SMS podporu, takže jeho schválenie samo osebe nedokazuje obojsmerné SMS.
+
 Konfigurácia od 2026-09-21 oddeľuje nové Preview nasadenia vrátane vetvy `dev` od produkčnej databázy. Produkčný projekt, jeho heslá, Auth konfigurácia, Vercel Production premenné a produkčná doména sa pri vytvorení testu nemenia.
 
 ## Projekty a adresy

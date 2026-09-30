@@ -2,7 +2,7 @@ import { canOperateTelephony, isTestLiveDeployment, resolveAppEnvironment, TEST_
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 
-export type TestProviderSafety = { restricted: boolean; deploymentAllowed: boolean; enabled: boolean; allowedNumbers: readonly string[]; fromNumbers: readonly string[]; aiSipTarget?: string | null };
+export type TestProviderSafety = { restricted: boolean; deploymentAllowed: boolean; enabled: boolean; allowedNumbers: readonly string[]; fromNumbers: readonly string[]; aiSipTarget?: string | null; smsAlphaSender?: string | null };
 const E164 = /^\+[1-9]\d{7,14}$/;
 const SIP = /^sip:([a-zA-Z0-9_-]{1,128})@sip\.telnyx\.com$/;
 
@@ -20,13 +20,15 @@ export function getTestProviderSafety(env: Record<string, string | undefined> = 
   try { restricted = usesTestDatabase || resolveAppEnvironment(env) === "test" || !canOperateTelephony(env); } catch { /* fail closed */ }
   const allowedNumbers = numbers(env.MOTORIST_TEST_ALLOWED_NUMBERS);
   const fromNumbers = numbers(env.MOTORIST_TEST_FROM_NUMBERS);
+  const alpha = env.MOTORIST_TEST_SMS_ALPHA_SENDER ?? "";
+  const smsAlphaSender = /^[A-Za-z0-9]{3,11}$/.test(alpha) && /[A-Za-z]/.test(alpha) ? alpha : null;
   const aiProject = env.OPENAI_LIVE_PROJECT_ID?.trim() ?? "";
   const aiHost = env.OPENAI_LIVE_SIP_HOST?.trim() || "sip.api.openai.com";
   const aiSipTarget = env.AI_DEMO_ENABLED?.trim().toLowerCase() === "true" && /^proj_[A-Za-z0-9_-]{1,128}$/.test(aiProject) &&
     ["sip.api.openai.com", "sip-eu.api.openai.com"].includes(aiHost) ? `sip:${aiProject}@${aiHost};transport=tls` : null;
   const deploymentAllowed = isTestLiveDeployment(env);
   return { restricted, deploymentAllowed, allowedNumbers, fromNumbers,
-    aiSipTarget,
+    aiSipTarget, smsAlphaSender,
     enabled: deploymentAllowed && env.MOTORIST_TEST_LIVE_INTEGRATIONS === "true" && allowedNumbers.length > 0 && fromNumbers.length > 0 };
 }
 
@@ -118,7 +120,8 @@ export function checkTestProviderRequest(boundary: ProviderBoundary, method: str
   if (method !== "POST" || !(path === "/calls" || path === "/messages" || callAction === "transfer" || conferenceAction === "add_participants")) throw new TestProviderSafetyError();
   if (path === "/calls" && body.connection_id !== boundary.callControlAppId) throw new TestProviderSafetyError();
   if (path === "/messages" && (!boundary.messagingProfileId || body.messaging_profile_id !== boundary.messagingProfileId)) throw new TestProviderSafetyError();
-  if (typeof body.from !== "string" || !boundary.safety.fromNumbers.includes(body.from)) throw new TestProviderSafetyError();
+  const approvedAlpha = path === "/messages" && boundary.safety.smsAlphaSender != null && body.from === boundary.safety.smsAlphaSender;
+  if (typeof body.from !== "string" || (!boundary.safety.fromNumbers.includes(body.from) && !approvedAlpha)) throw new TestProviderSafetyError();
   const destinations = Array.isArray(body.to) ? body.to : [body.to];
   if (!destinations.length || destinations.length > 50) throw new TestProviderSafetyError();
   for (const destination of destinations) {

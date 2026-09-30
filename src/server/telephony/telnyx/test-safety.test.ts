@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTelnyxClient } from "./client";
 import { getTelnyxConfig } from "./env";
-import { acceptsTestProviderEvent, checkTestProviderRequest, getTestProviderSafety, resolveTestSipCredential } from "./test-safety";
+import { acceptsTestInboundSms, acceptsTestProviderEvent, checkTestProviderRequest, getTestProviderSafety, resolveTestSipCredential } from "./test-safety";
 
 vi.mock("./test-safety", async (original) => ({ ...await original<typeof import("./test-safety")>(),
   resolveTestSipCredential: vi.fn(async () => "test-credential"),
@@ -97,6 +97,32 @@ describe("TEST provider boundary", () => {
     expect(fetch).not.toHaveBeenCalled();
     await api.sendMessage({ to: TO, from: FROM, text: "synthetic" });
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it("admits the exact TEST alpha sender only for an approved SMS recipient/profile", async () => {
+    const env = { ...ENV, MOTORIST_TEST_SMS_ALPHA_SENDER: "DispecTEST", TELNYX_SMS_ALPHA_SENDER: "DispecTEST" };
+    const { api, fetch } = client(env);
+    for (const patch of [{ from: "PomocMotor" }, { from: "dispectest" }, { from: "DispecTEST " }, { to: TO + "9" }, { messagingProfileId: "production" }]) {
+      await expect(api.sendMessage({ to: TO, text: "synthetic", ...patch })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    }
+    await expect(api.dial({ to: TO, from: "DispecTEST", commandId: "voice" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    await expect(api.transfer({ callControlId: "existing", to: TO, from: "DispecTEST", commandId: "transfer" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    await expect(api.request("POST", "/conferences/test/actions/add_participants", { body: { to: TO, from: "DispecTEST" } })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    expect(acceptsTestInboundSms(getTestProviderSafety(env), TO, ["DispecTEST"])).toBe(false);
+    expect(acceptsTestInboundSms(getTestProviderSafety(env), "DispecTEST", [FROM])).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+    await api.sendMessage({ to: TO, text: "synthetic" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toMatchObject({ from: "DispecTEST", to: TO, messaging_profile_id: "test-messaging" });
+  });
+  it.each([undefined, "", "AB", "ABCDEFGHIJKL", "12345", "Dispec TEST", "Dispec-TEST", "DíspecTEST", "DispecTEST\n"])("rejects invalid or absent alpha allowance %j before fetching", async (alpha) => {
+    const { api, fetch } = client({ ...ENV, MOTORIST_TEST_SMS_ALPHA_SENDER: alpha });
+    await expect(api.sendMessage({ to: TO, from: alpha || "DispecTEST", text: "synthetic" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each([{ MOTORIST_TEST_LIVE_INTEGRATIONS: "false" }, { VERCEL_ENV: "preview" }, { MOTORIST_TEST_FROM_NUMBERS: "" }])("alpha SMS retains deployment, live and number boundaries %j", async (patch) => {
+    const { api, fetch } = client({ ...ENV, MOTORIST_TEST_SMS_ALPHA_SENDER: "DispecTEST", ...patch });
+    await expect(api.sendMessage({ to: TO, from: "DispecTEST", text: "synthetic" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    expect(fetch).not.toHaveBeenCalled();
   });
   it("protects outbound conference additions without breaking joins of existing legs", async () => {
     const { api, fetch } = client();
