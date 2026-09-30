@@ -10,7 +10,7 @@ const neutralEnvironmentKeys = new Set([
   "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_PROJECT_REF", "EXPECTED_SUPABASE_PROJECT_REF",
   "APP_BASE_URL", "NEXT_PUBLIC_APP_URL", "PUBLIC_APP_URL",
   "MOTORIST_TEST_LIVE_INTEGRATIONS", "MOTORIST_TEST_ALLOWED_NUMBERS", "MOTORIST_TEST_FROM_NUMBERS",
-  "MOTORIST_TEST_ALLOWED_EMAILS",
+  "MOTORIST_TEST_ALLOWED_EMAILS", "MOTORIST_TEST_SMS_ALPHA_SENDER",
   // Also withhold inherited provider keys/switches. Fixtures opt in using fake
   // values; adding a provider variable to CI must not turn a unit test live.
   ...Object.keys(process.env).filter(key =>
