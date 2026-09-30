@@ -7,6 +7,19 @@ const identityKeys = ["VERCEL_ENV", "VERCEL_PROJECT_ID", "VERCEL_GIT_COMMIT_REF"
 
 afterEach(() => vi.unstubAllEnvs());
 
+it("withholds hosted fleet and paid-lookup credentials even after fixture restoration", () => {
+  const providerKeys = ["COMMANDER_API_PASSWORD", "WEBDISPECINK_PASSWORD", "WEBDISPECINK_SYNC_ENABLED",
+    "SWHOUSE_LOGIN_PASSWORD", "SWHOUSE_SMOKE", "DATABAZA_VOZIDIEL_API_KEY"];
+  for (const key of providerKeys) {
+    // Absent locally or blanked by the worker configuration when inherited.
+    expect(process.env[key] ?? "", key).toBe("");
+    vi.stubEnv(key, "synthetic-fixture-value");
+    expect(process.env[key], key).toBe("synthetic-fixture-value");
+  }
+  vi.unstubAllEnvs();
+  for (const key of providerKeys) expect(process.env[key] ?? "", key).toBe("");
+});
+
 it("starts neutral and restores that worker baseline after explicit deployment stubs", () => {
   const nodeEnv = process.env.NODE_ENV;
   expect(nodeEnv).toBeTruthy();
