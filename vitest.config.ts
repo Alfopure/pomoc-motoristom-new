@@ -14,7 +14,7 @@ const neutralEnvironmentKeys = new Set([
   // Also withhold inherited provider keys/switches. Fixtures opt in using fake
   // values; adding a provider variable to CI must not turn a unit test live.
   ...Object.keys(process.env).filter(key =>
-    /^(VERCEL_|MOTORIST_|SUPABASE_|NEXT_PUBLIC_SUPABASE_|TELNYX_|OPENAI_|AI_DEMO_|EMAIL_|RESEND_|ELEVENLABS_|GOOGLE_MAPS_|NEXT_PUBLIC_GOOGLE_MAPS_)/.test(key)),
+    /^(VERCEL_|MOTORIST_|SUPABASE_|NEXT_PUBLIC_SUPABASE_|TELNYX_|OPENAI_|AI_DEMO_|EMAIL_|RESEND_|ELEVENLABS_|GOOGLE_MAPS_|NEXT_PUBLIC_GOOGLE_MAPS_|COMMANDER_|WEBDISPECINK_|SWHOUSE_|DATABAZA_VOZIDIEL_)/.test(key)),
 ]);
 
 export default defineConfig({
