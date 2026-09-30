@@ -3,23 +3,30 @@ const APP_SHELL_PATHS = ["/offline", "/icon-192", "/icon", "/apple-icon", "/mani
 
 self.addEventListener("install", function (event) {
   self.skipWaiting();
-  event.waitUntil(caches.open(CACHE_NAME).then(function (cache) {
-    return cache.addAll(APP_SHELL_PATHS);
-  }));
+  event.waitUntil((async function () {
+    try {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.addAll(APP_SHELL_PATHS);
+    } catch {
+      // Unavailable storage must not prevent this worker's fixes from installing.
+    }
+  })());
 });
 
 self.addEventListener("activate", function (event) {
-  event.waitUntil(
-    caches.keys().then(function (keys) {
-      return Promise.all(keys.filter(function (key) {
+  event.waitUntil((async function () {
+    try {
+      const keys = await caches.keys();
+      await Promise.all(keys.filter(function (key) {
         return key !== CACHE_NAME;
       }).map(function (key) {
         return caches.delete(key);
       }));
-    }).then(function () {
-      return self.clients.claim();
-    }),
-  );
+    } catch {
+      // Cache cleanup is optional; existing tabs still need the updated worker.
+    }
+    await self.clients.claim();
+  })());
 });
 
 self.addEventListener("fetch", function (event) {
@@ -45,17 +52,31 @@ async function networkNavigationOrOffline(request) {
     // dispatcher HTML could expose stale customer data on a shared computer.
     return await fetch(request);
   } catch {
-    return (await caches.match("/offline")) || Response.error();
+    try {
+      const offline = await caches.match("/offline");
+      if (offline) return offline;
+    } catch {
+      // The offline page may also be unavailable when browser storage fails.
+    }
+    return Response.error();
   }
 }
 
 async function cacheFirst(request) {
-  const cached = await caches.match(request);
-  if (cached) return cached;
+  try {
+    const cached = await caches.match(request);
+    if (cached) return cached;
+  } catch {
+    // A cache read failure is a miss; the network can still serve the asset.
+  }
   const response = await fetch(request);
   if (response.ok) {
-    const cache = await caches.open(CACHE_NAME);
-    await cache.put(request, response.clone());
+    try {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.put(request, response.clone());
+    } catch {
+      // Preserve the successful response even when storage is full or disabled.
+    }
   }
   return response;
 }
