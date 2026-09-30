@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppRole } from "@/domain/types";
 import { MutationError } from "@/server/motorist-mutations";
@@ -246,4 +246,18 @@ describe("POST /api/telephony/operators/[id]/disconnect", () => {
     expect(confirmed.status).toBe(200);
     expect(disconnectDevice).toHaveBeenCalledTimes(1);
   });
+});
+
+
+afterEach(() => vi.unstubAllEnvs());
+
+it("blocks Preview personal ringing changes, credential rotation and device disconnect", async () => {
+  vi.stubEnv("VERCEL_ENV", "preview");
+  state.role = "admin";
+  expect((await patchSettings(request(PROFILE_1, "PATCH", { patch: { wrapUpSeconds: 30 } }), context(PROFILE_1))).status).toBe(503);
+  expect((await postCredential(request(PROFILE_1, "POST", { rotate: true }), context(PROFILE_1))).status).toBe(503);
+  expect((await postDisconnect(request(PROFILE_1, "POST"), context(PROFILE_1))).status).toBe(503);
+  expect(updateOperatorTelephonySettings).not.toHaveBeenCalled();
+  expect(ensureOperatorCredential).not.toHaveBeenCalled();
+  expect(disconnectDevice).not.toHaveBeenCalled();
 });

@@ -1147,6 +1147,23 @@ export type Database = {
         after_payload: Json | null;
         created_at: Timestamp;
       }>;
+      motorist_provider_commands: Table<{
+        session_id: string;
+        command_id: string;
+        fingerprint: string;
+        method: string;
+        path: string;
+        correlation_state: string | null;
+        request_payload: Json;
+        dispatch_generation: number;
+        dispatch_token: string;
+        first_dispatched_at: Timestamp;
+        outcome: "unknown" | "accepted" | "rejected" | "rate_limited";
+        result: Json | null;
+        http_status: number | null;
+        termination_cleanup_at: Timestamp | null;
+        next_attempt_at: Timestamp | null;
+      }>;
       motorist_telnyx_webhook_events: Table<{
         event_id: string;
         organization_id: string | null;

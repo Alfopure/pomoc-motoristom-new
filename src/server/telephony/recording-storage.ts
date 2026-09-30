@@ -6,6 +6,7 @@ import { getSupabaseServiceEnv } from "@/lib/supabase/env";
 import type { Json } from "@/lib/supabase/database.types";
 import { record, RecordingProcessingError, type RecordingJobContext, type RecordingJobOutcome } from "./recording-jobs";
 import { inspectRecordingWav } from "./recording-audio-integrity";
+import { assertRecordingProviderAccess } from "./recording-provider-safety";
 import { newRecordingHash, updateRecordingHash, finishRecordingHash, type RecordingSha256State } from "./recording-storage-sha256";
 
 export const RECORDING_CHUNK_BYTES=6*1024*1024;
@@ -59,15 +60,19 @@ function validTusUrl(value:string,base:string){const url=new URL(value,base);if(
 async function storageRequest(path:string,init:RequestInit,signal:AbortSignal){const cfg=storageConfig();const url=new URL(path,cfg.base);if(url.origin!==cfg.base)throw new RecordingProcessingError("storage_host_invalid");try{return await fetch(url,{...init,cache:'no-store',redirect:'error',signal,headers:{Authorization:`Bearer ${cfg.key}`,apikey:cfg.key,...init.headers}});}catch{throw new RecordingProcessingError('storage_request_failed',true);}}
 export async function signedRecordingSource(path:string,signal:AbortSignal){const res=await storageRequest(`/storage/v1/object/sign/${RECORDINGS_BUCKET}/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expiresIn:3600})},signal);if(!res.ok)throw new RecordingProcessingError('storage_sign_failed',true);const data=record(await res.json());const signed=data.signedURL??data.signedUrl;if(typeof signed!=='string')throw new RecordingProcessingError('storage_sign_failed');const cfg=storageConfig();const url=new URL(signed.startsWith('/object/')?`/storage/v1${signed}`:signed,cfg.base);if(url.origin!==cfg.base)throw new RecordingProcessingError('storage_sign_host_invalid');return url.href;}
 export async function refreshRecordingSource(ctx:RecordingJobContext){
+ const verified=await assertRecordingProviderAccess(ctx,'import');
  const id=ctx.recording?.provider_recording_id,key=process.env.TELNYX_API_KEY?.trim();if(!id||!key)throw new RecordingProcessingError('recording_provider_not_configured');
- const res=await fetch(`https://api.telnyx.com/v2/recordings/${encodeURIComponent(id)}`,{headers:{Authorization:`Bearer ${key}`},signal:ctx.signal,cache:'no-store',redirect:'error'});
+ let data=verified;
+ if(!data){const res=await fetch(`https://api.telnyx.com/v2/recordings/${encodeURIComponent(id)}`,{headers:{Authorization:`Bearer ${key}`},signal:ctx.signal,cache:'no-store',redirect:'error'});
  if(!res.ok)throw new RecordingProcessingError('recording_refresh_failed',res.status>=500||res.status===429);
- const data=record(record(await res.json()).data);if(data.id!==id||data.status!=='completed')throw new RecordingProcessingError('recording_not_ready',true);
+ data=record(record(await res.json()).data);}
+ if(data.id!==id||data.status!=='completed')throw new RecordingProcessingError('recording_not_ready',true);
  if(ctx.recording?.provider_session_id&&data.call_session_id!==ctx.recording.provider_session_id)throw new RecordingProcessingError('recording_provider_binding_mismatch');
  const urls=record(data.download_urls);const url=urls.wav??urls.mp3;if(typeof url!=='string')throw new RecordingProcessingError('recording_url_missing');return url;
 }
 export async function processRecordingImport(ctx:RecordingJobContext,io: {refreshSource?: typeof refreshRecordingSource; downloadChunk?: typeof downloadRecordingChunk} = {}):Promise<RecordingJobOutcome>{
  const r=ctx.recording;if(!r||!ctx.job.lease_token)throw new RecordingProcessingError('recording_missing');
+ await assertRecordingProviderAccess(ctx,'import');
  const cfg=storageConfig();const checkpoint=record(ctx.job.checkpoint);let offset=Number(checkpoint.offset??0);let hash=(checkpoint.hash_state??newRecordingHash()) as RecordingSha256State;
  if(!Number.isSafeInteger(offset)||offset<0||offset>134217728||hash.bytes!==offset||!Array.isArray(hash.words)||hash.words.length!==8||hash.words.some(w=>!Number.isInteger(w)||w<0||w>0xffffffff)||typeof hash.tail!=='string'||Buffer.from(hash.tail,'base64').length>=64)throw new RecordingProcessingError('import_checkpoint_invalid');
  let upload=typeof checkpoint.upload_url==='string'?validTusUrl(checkpoint.upload_url,cfg.base):null;const pending=record(checkpoint.pending_chunk);

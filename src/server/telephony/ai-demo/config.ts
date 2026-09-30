@@ -1,4 +1,5 @@
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { getTestProviderSafety } from "../telnyx/test-safety";
 
 import { aiDemoEnabled } from "./flag";
 
@@ -254,6 +255,14 @@ export function buildSipUri(projectId: string, sipHost: string): string {
 
 export function aiDemoFromNumber(env: EnvRecord = process.env): { number: string } | { invalid: string } {
   const override = read(env, "AI_DEMO_FROM_NUMBER");
+  const safety = getTestProviderSafety(env);
+  if (safety.restricted) {
+    if (!safety.enabled || override === null) return { invalid: override ?? "" };
+    const normalized = normalizeE164(override, { defaultCountryCode: "421" });
+    if (normalized === null || !safety.fromNumbers.includes(normalized) ||
+      AI_DEMO_ALLOWED_FROM.includes(normalized) || AI_DEMO_FORBIDDEN_FROM.includes(normalized)) return { invalid: override };
+    return { number: normalized };
+  }
   if (override === null) return { number: AI_DEMO_NEUTRAL_LINE };
   const normalized = normalizeE164(override, { defaultCountryCode: "421" });
   if (normalized === null) return { invalid: override };

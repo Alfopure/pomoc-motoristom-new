@@ -75,6 +75,50 @@ export function assertTargetProject(env = process.env) {
     problems.push(`SUPABASE_PROJECT_REF (${actualRef}) differs from EXPECTED_SUPABASE_PROJECT_REF (${expectedRef})`);
   }
 
+  // A dedicated TEST project uses Vercel's production target for the dev branch.
+  const explicit = env.MOTORIST_APP_ENV?.trim();
+  if (explicit && !["production", "test", "development"].includes(explicit)) {
+    problems.push("Invalid MOTORIST_APP_ENV");
+  }
+  const app = explicit || (env.VERCEL_ENV === "production" ? "production" : env.VERCEL_ENV === "preview" ? "test" : null);
+  if (app) {
+    const requiredRef = app === "production" ? "ifpaeegaesdmljfkdvcn" : "nzpnqdstvkfncflgqlny";
+    for (const key of ["SUPABASE_PROJECT_REF", "EXPECTED_SUPABASE_PROJECT_REF"]) {
+      if (env[key]?.trim() && env[key].trim() !== requiredRef) problems.push(`${key} does not match application environment`);
+    }
+    for (const key of ["SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"]) {
+      if (!env[key]) continue;
+      try {
+        const url = new URL(env[key]);
+        if (url.protocol !== "https:" || url.hostname !== `${requiredRef}.supabase.co` || url.username || url.password) {
+          problems.push(`${key} does not match application environment`);
+        }
+      } catch { problems.push(`${key} is invalid`); }
+    }
+    const otherRef = app === "production" ? "nzpnqdstvkfncflgqlny" : "ifpaeegaesdmljfkdvcn";
+    for (const key of ["SUPABASE_DB_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING", "POSTGRES_HOST"]) {
+      if (env[key]?.includes(otherRef)) problems.push(`${key} does not match application environment`);
+    }
+    for (const key of ["APP_BASE_URL", "NEXT_PUBLIC_APP_URL", "PUBLIC_APP_URL"]) {
+      if (!env[key]) continue;
+      try {
+        const host = new URL(env[key]).hostname;
+        if ((app !== "production" && ["dispecing.linkapomoci.sk", "dispecing-test.vercel.app"].includes(host)) ||
+          (app === "production" && host === "test.dispecing.linkapomoci.sk")) {
+          problems.push(`${key} does not match application environment`);
+        }
+      } catch { problems.push(`${key} is invalid`); }
+    }
+    if (explicit && env.VERCEL_GIT_COMMIT_REF === "main" && app !== "production") problems.push("main must use the production application environment");
+    if (env.MOTORIST_TEST_LIVE_INTEGRATIONS === "true" && (explicit !== "test" || env.VERCEL_ENV !== "production" ||
+      env.VERCEL_GIT_COMMIT_REF !== "dev" || env.VERCEL_PROJECT_ID !== "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk" || env.APP_BASE_URL !== "https://test.dispecing.linkapomoci.sk" ||
+      ![env.SUPABASE_URL, env.NEXT_PUBLIC_SUPABASE_URL].includes("https://nzpnqdstvkfncflgqlny.supabase.co"))) {
+      problems.push("Live TEST integrations require the dedicated TEST Vercel project, dev production target, TEST database and canonical TEST origin");
+    }
+  } else if (env.MOTORIST_TEST_LIVE_INTEGRATIONS === "true") {
+    problems.push("Live TEST integrations require explicit MOTORIST_APP_ENV=test");
+  }
+
   return problems;
 }
 

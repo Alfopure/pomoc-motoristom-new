@@ -6,7 +6,7 @@ import { assertSameOriginRequest, requireDefaultMotoristActor, type MotoristActo
 
 import { aiDemoEnabled } from "./ai-demo/flag";
 import { ConfigServiceError, getRoutingDocument, type ConfigActor, type ConfigDeps, type RoutingDocument } from "./config-service";
-import { readJsonBody, telephonyErrorResponse } from "./runtime";
+import { assertTelephonyDeployment, readJsonBody, telephonyErrorResponse } from "./runtime";
 
 /**
  * Shared body of the `/api/telephony/config/*` routes (design §4 Phase 3).
@@ -155,6 +155,7 @@ export async function handleConfigWrite(
 ): Promise<Response> {
   try {
     assertSameOriginRequest(request);
+    assertTelephonyDeployment();
     const actor = await requireDefaultMotoristActor(options.roles ?? CONFIG_WRITE_ROLES);
     const body = await readJsonBody(request);
     return await options.run({

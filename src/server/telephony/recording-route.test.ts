@@ -32,3 +32,14 @@ describe('recording HTTP boundary',()=>{
   expect(log.mock.calls.some(call=>call.some(x=>x instanceof Error&&x.message.includes('Private synthetic')))).toBe(false);
  });
 });
+
+
+it('blocks Preview recording policy mutations before admin work', async () => {
+ vi.stubEnv('VERCEL_ENV','preview');
+ const run=vi.fn();
+ const response=await recordingRoute(new Request('https://app.test/api/telephony/config/recording-policy', {
+  method:'PUT', headers:{origin:'https://app.test',host:'app.test','content-type':'application/json'}, body:'{}'
+ }),run);
+ expect(response.status).toBe(503);
+ expect(run).not.toHaveBeenCalled();
+});
