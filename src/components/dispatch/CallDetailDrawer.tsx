@@ -4,17 +4,20 @@ import { useEffect, useRef } from "react";
 import { PhoneForwarded, X } from "lucide-react";
 import type { CallCenterCall } from "@/data/dispatch-types";
 import { CallRecordingDetail } from "./recordings/CallRecordingDetail";
+import { CallDiagnosticsCard } from "@/components/monitor/CallDiagnosticsCard";
 
 export function CallDetailDrawer({
   call,
   open,
   onClose,
   onNewCase,
+  canViewDiagnostics = false,
 }: {
   call: CallCenterCall | null;
   open: boolean;
   onClose: () => void;
   onNewCase: (call: CallCenterCall) => void;
+  canViewDiagnostics?: boolean;
 }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -87,6 +90,7 @@ export function CallDetailDrawer({
         </section>
         {call.outcomeNote?.trim() && <section className="rounded-md border border-zinc-200 p-3 text-sm"><h3 className="font-semibold">Poznámka k hovoru</h3><p className="mt-1 whitespace-pre-wrap break-words text-zinc-700">{call.outcomeNote}</p></section>}
         <CallRecordingDetail key={call.id} callId={call.id} />
+        {canViewDiagnostics && <CallDiagnosticsCard key={call.id} callSessionId={call.providerSessionId} />}
       </div> : null}
     </div>
   );

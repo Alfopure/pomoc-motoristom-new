@@ -4,6 +4,7 @@ import type { FormEvent } from "react";
 import { useState } from "react";
 import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { captureDiagnosticError } from "@/lib/diagnostics/errors";
 import { loginDestination } from "./login-destination";
 
 export function MotoristLogin({ message, returnTo }: { message: string; returnTo?: string }) {
@@ -36,6 +37,7 @@ export function MotoristLogin({ message, returnTo }: { message: string; returnTo
     });
 
     if (signInError) {
+      captureDiagnosticError(signInError);
       setStatus("error");
       setError("Prihlásenie zlyhalo. Skontroluj email a heslo.");
       return;

@@ -1,5 +1,9 @@
 "use client";
+import { diagnosticJson } from "@/lib/diagnostics/request";
 import { mergeCaseDetail } from "@/data/case-detail";
+import { beginDiagnosticOperation, recordDiagnostic, setDiagnosticIdentity } from "@/lib/diagnostics/client";
+import { diagnosticFailure, diagnosticRequestId, diagnosticResponse } from "@/lib/diagnostics/operations";
+import { ReportProblemButton } from "@/components/monitor/ReportProblemButton";
 
 import { LayoutPreviewProvider, useLayoutPreview } from "./LayoutPreview";
 import { CalendarWidget } from "./CalendarWidget";
@@ -217,6 +221,9 @@ const sourceLabels: Record<NonNullable<DispatchCase["sourceType"]>, string> = {
 };
 
 export function DispatchConsole(props: Parameters<typeof DispatchConsoleContent>[0]) {
+  useEffect(() => {
+    setDiagnosticIdentity(props.viewerOrganizationId && props.viewerProfileId ? { organizationId: props.viewerOrganizationId, profileId: props.viewerProfileId } : null);
+  }, [props.viewerOrganizationId, props.viewerProfileId]);
   return <LayoutPreviewProvider enabled={props.layoutPreviewEnabled ?? false} actorKey={`${props.viewerOrganizationId ?? "demo"}:${props.viewerProfileId ?? "local-browser"}`}><RoutePlannerProvider key={`${props.viewerOrganizationId ?? "demo"}:${props.viewerProfileId ?? "local-browser"}`}><DispatchConsoleContent {...props} /></RoutePlannerProvider></LayoutPreviewProvider>;
 }
 
@@ -241,6 +248,9 @@ function DispatchConsoleContent({
 }) {
   const { mode: layoutMode } = useLayoutPreview();
   const updateAvailable = useAppUpdate(appVersion);
+  useEffect(() => {
+    if (updateAvailable) recordDiagnostic({ type: "app_update", module: "app", outcome: "ok", reason: "update_detected" });
+  }, [updateAvailable]);
   const [dispatchData, setDispatchData] = useState(initialData);
   const {
     attendance,
@@ -769,14 +779,29 @@ function DispatchConsoleContent({
     [activePriceRule, branches, fleetAssets, workspaceCase],
   );
   const visibleCaseId = workspaceCase?.id;
+  const pendingCaseOpen = useRef<{ caseId: string; finish: ReturnType<typeof beginDiagnosticOperation> } | null>(null);
+  useEffect(() => {
+    const pending = pendingCaseOpen.current;
+    if (!pending) return;
+    pendingCaseOpen.current = null;
+    pending.finish({ outcome: visibleCaseId === pending.caseId && !collaborationState.hidden ? "ok" : "unknown" });
+  });
+  function observeCaseOpen(caseId: string) {
+    if (collaborationState.available !== true) return; // The fallback HTTP read owns its own timing.
+    pendingCaseOpen.current?.finish({ outcome: "cancelled" });
+    pendingCaseOpen.current = { caseId, finish: beginDiagnosticOperation("case.open", "cases", { caseId }) };
+  }
+
   useEffect(() => {
     if (source !== "supabase" || collaborationState.available === true || collaborationState.denied || !visibleCaseId || activeView !== "dispatch") return;
     const controller = new AbortController();
+    const finishDiagnostic = beginDiagnosticOperation("case.open", "cases", { caseId: visibleCaseId });
     void fetch(`/api/cases/${visibleCaseId}`, { headers: { "x-case-response": "detail-v2" }, cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]) }).then(async response => {
       const body = await response.json();
+      finishDiagnostic({ outcome: response.ok && body.caseDetail?.id !== visibleCaseId ? "failed" : diagnosticResponse(response, body), ...diagnosticRequestId(response) });
       if (!response.ok || body.caseDetail?.id !== visibleCaseId) throw new Error("Aktuálny detail a históriu prípadu sa nepodarilo načítať.");
       if (!controller.signal.aborted) setDispatchData(current => mergeCaseDetail(current, body.caseDetail));
-    }).catch(error => { if (!controller.signal.aborted) setMutationNotice(error instanceof Error ? error.message : "Detail prípadu je nedostupný."); });
+    }).catch(error => { finishDiagnostic({ outcome: diagnosticFailure(error, false) }); if (!controller.signal.aborted) setMutationNotice(error instanceof Error ? error.message : "Detail prípadu je nedostupný."); });
     return () => controller.abort();
   }, [visibleCaseId, source, activeView, collaborationState.available, collaborationState.denied]);
   const refreshCallHistory = useCallback(async () => {
@@ -1033,6 +1058,8 @@ function DispatchConsoleContent({
   }, []);
 
   function requestAppRefresh() {
+    recordDiagnostic({ type: "app_update", module: "app", outcome: appRefreshBlockedRef.current ? "cancelled" : "ok",
+      reason: appRefreshBlockedRef.current ? "update_blocked" : "update_requested" });
     requestNavigation(() => window.location.reload(), {
       beforeNavigate: () => !appRefreshBlockedRef.current,
       documentNavigation: true,
@@ -1097,6 +1124,7 @@ function DispatchConsoleContent({
 
   function selectCase(caseId: string) {
     return requestNavigation(() => {
+      observeCaseOpen(caseId);
       setCenterView("map");
       setToolsOpen(false);
       setActiveCaseId(caseId);
@@ -1108,6 +1136,7 @@ function DispatchConsoleContent({
 
   function openCase(caseId: string) {
     requestNavigation(() => {
+      observeCaseOpen(caseId);
       setCenterView("map");
       setToolsOpen(false);
       const caseItem = dispatchCases.find((item) => item.id === caseId);
@@ -1122,6 +1151,7 @@ function DispatchConsoleContent({
 
   function openCaseDetail(caseId: string) {
     requestNavigation(() => {
+      observeCaseOpen(caseId);
       setCenterView("map");
       setToolsOpen(false);
       setActiveCaseId(caseId);
@@ -1530,12 +1560,11 @@ function DispatchConsoleContent({
     setPriorityChangeCaseId(caseId);
 
     try {
-      const response = await fetch(`/api/cases/${caseId}`, {
+      const { response, body: result } = await diagnosticJson<{ dispatchData?: DispatchData; error?: string; refreshRequired?: boolean }>("case.save", "cases", `/api/cases/${caseId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ priority, expectedUpdatedAt: dispatchCases.find(item => item.id === caseId)?.updatedAt }),
-      });
-      const result = (await response.json()) as { dispatchData?: DispatchData; error?: string; refreshRequired?: boolean };
+      }, { caseId }, value => Boolean(value?.dispatchData));
 
       if (!response.ok) {
         throw new Error(result.error ?? "Prioritu sa nepodarilo zmeniť.");
@@ -1607,12 +1636,11 @@ function DispatchConsoleContent({
     }
 
     try {
-      const response = await fetch(`/api/cases/${caseId}/actions`, {
+      const { response, body: result } = await diagnosticJson<{ dispatchData?: DispatchData; error?: string }>("case.action", "cases", `/api/cases/${caseId}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...payload, ...(typeof payload.taskId === "string" ? { taskExpectedRevision: dispatchData.tasks?.find(task => task.id === payload.taskId)?.revision } : {}) }),
-      });
-      const result = (await response.json()) as { dispatchData?: DispatchData; error?: string };
+      }, { caseId }, value => Boolean(value?.dispatchData));
 
       if (!response.ok || !result.dispatchData) {
         throw new Error(result.error ?? "Úlohu sa nepodarilo upraviť.");
@@ -1939,12 +1967,11 @@ function DispatchConsoleContent({
       let allowUnverifiedOverride = false;
 
       while (true) {
-        const response = await fetch(`/api/cases/${activeCase.id}/assign`, {
+        const { response, body: result } = await diagnosticJson<{ caseId?: string; code?: string; dispatchData?: DispatchData; error?: string }>("case.assign", "cases", `/api/cases/${activeCase.id}/assign`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ assetId, allowOccupiedOverride, allowUnverifiedOverride }),
-        });
-        const result = (await response.json()) as { caseId?: string; code?: string; dispatchData?: DispatchData; error?: string };
+        }, { caseId: activeCase.id }, value => Boolean(value?.dispatchData));
 
         if (response.status === 409 && result.code === "OCCUPIED_ASSET_CONFIRMATION_REQUIRED" && !allowOccupiedOverride) {
           const confirmed = window.confirm(`${result.error ?? "Vozidlo je podľa SWHouse obsadené."}\n\nChceš ho napriek tomu priradiť?`);
@@ -2817,6 +2844,9 @@ function AccountMenu({
             </span>
           </div>
           <div className="border-t border-zinc-200 p-2">
+            {(role === "manager" || role === "admin") && <a href="/monitor" target="_blank" rel="noopener noreferrer" onClick={() => setOpen(false)}
+              className="flex min-h-11 items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100">Monitor prevádzky <span className="ml-auto text-xs font-normal">↗</span></a>}
+            <ReportProblemButton className="min-h-11 w-full rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100" />
             <a
               href="/navod"
               target="_blank"

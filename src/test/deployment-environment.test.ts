@@ -20,6 +20,17 @@ it("withholds hosted fleet and paid-lookup credentials even after fixture restor
   for (const key of providerKeys) expect(process.env[key] ?? "", key).toBe("");
 });
 
+it("withholds hosted monitoring switches and transport after fixture restoration", () => {
+  const monitorKeys = ["DIAGNOSTICS_ENABLED", "DIAGNOSTICS_PANEL_ENABLED", "DIAGNOSTICS_CLASSIFIER_ENABLED",
+    "DIAGNOSTICS_PHYSICAL_BUDGET_BYTES", "NEXT_PUBLIC_DIAGNOSTICS_SENTRY_DSN", "NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID"];
+  for (const key of monitorKeys) {
+    expect(process.env[key] ?? "", key).toBe("");
+    vi.stubEnv(key, "synthetic-monitor-fixture");
+  }
+  vi.unstubAllEnvs();
+  for (const key of monitorKeys) expect(process.env[key] ?? "", key).toBe("");
+});
+
 it("starts neutral and restores that worker baseline after explicit deployment stubs", () => {
   const nodeEnv = process.env.NODE_ENV;
   expect(nodeEnv).toBeTruthy();

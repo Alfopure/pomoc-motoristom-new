@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { channel } from "node:diagnostics_channel";
 import { performance } from "node:perf_hooks";
+import { getAppVersion } from "./app-version";
 
 /**
  * `auth` is the whole gate; `auth.token` and `auth.profile` are the two halves
@@ -19,7 +20,7 @@ import { performance } from "node:perf_hooks";
  */
 export type RequestStep = "auth" | "auth.token" | "auth.profile" | "db" | "lease" | "provider" | "checkpoint" | "read" | "write"
   | "routing.snapshot" | "routing.configuration" | "routing.eligibility" | "guard.stage";
-export type MeasuredRoute = "case.get" | "case.save" | "call.start" | "call.action" | "call.webhook" | "call.active" | "dispatch.refresh" | "fleet.refresh";
+export type MeasuredRoute = "case.get" | "case.save" | "case.create" | "case.action" | "case.assign" | "sms.send" | "document.upload" | "document.generate" | "integration.lookup" | "call.start" | "call.action" | "call.webhook" | "call.active" | "dispatch.refresh" | "fleet.refresh";
 
 type Metric = { count: number; ms: number };
 type RequestMetrics = {
@@ -83,7 +84,7 @@ function finish(scope: RequestMetrics, detail: Record<string, unknown>): void {
   const round = (value: number) => Math.round(value * 10) / 10;
   const steps = Object.fromEntries(Object.entries(scope.steps).map(([name, metric]) => [name, { count: metric.count, ms: round(metric.ms) }]));
   try {
-    scope.logger({ scope: "request-performance", requestId: scope.id, route: scope.route,
+    scope.logger({ scope: "request-performance", requestId: scope.id, route: scope.route, serverBuild: getAppVersion(),
       ms: Math.max(0, round(scope.now() - scope.started)), steps,
       dbFirstMs: scope.dbFirstMs === null ? null : round(scope.dbFirstMs),
       dbMaxMs: scope.dbMaxMs === null ? null : round(scope.dbMaxMs), dbAborts: scope.dbAborts,
@@ -168,6 +169,7 @@ export async function withRequestMetrics(
       try {
         response.headers.set("server-timing", timings.join(", "));
         response.headers.set("x-request-id", scope.id);
+        response.headers.set("x-app-version", getAppVersion());
         timingHeaders = true;
       } catch { /* Redirects may have immutable headers; preserve the original response. */ }
       return response;

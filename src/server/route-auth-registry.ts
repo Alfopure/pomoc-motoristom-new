@@ -30,6 +30,9 @@ export type RouteAuthEntry = {
 };
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
+  diagnostics: {class: 'session', role: ['manager','admin']},
+  'diagnostics/events': {class: 'session', role: ['dispatcher','senior_dispatcher','manager','admin'], note: 'Same-origin, authenticated account-bound diagnostic batch.'},
+  'diagnostics/incidents/[id]': {class: 'session', role: ['manager','admin']},
   "telephony/team": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Narrow operational DTO; report and device secrets excluded." },
   "telephony/routing-summary": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   "telephony/config/incoming": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read scoped configuration; PUT manager/admin plus same-origin and atomic CAS." },

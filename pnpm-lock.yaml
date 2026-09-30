@@ -20,6 +20,9 @@ importers:
       '@dnd-kit/utilities':
         specifier: ^3.2.2
         version: 3.2.2(react@19.2.4)
+      '@sentry/browser':
+        specifier: 10.53.1
+        version: 10.53.1
       '@sparticuz/chromium':
         specifier: 149.0.0
         version: 149.0.0
@@ -99,6 +102,9 @@ importers:
       eslint-config-next:
         specifier: 16.2.6
         version: 16.2.6(@typescript-eslint/parser@8.59.4(eslint@9.39.4(jiti@2.7.0)(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0)(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
+      fake-indexeddb:
+        specifier: 6.2.4
+        version: 6.2.4
       tailwindcss:
         specifier: ^4
         version: 4.3.0
@@ -845,6 +851,30 @@ packages:
 
   '@rtsao/scc@1.1.0':
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
+
+  '@sentry-internal/browser-utils@10.53.1':
+    resolution: {integrity: sha512-X4d6y8sBMjmNhcDW4eMBU3ASsNIMz8dqaFkhyIMN/dkYr/yZKnbRZPaVuVUGvHKjnlficPpIH0/HK9KBjrYxPw==}
+    engines: {node: '>=18'}
+
+  '@sentry-internal/feedback@10.53.1':
+    resolution: {integrity: sha512-vVpTI/aEYN5d9IgZeYJWMqVaN0+iFgidSrYNAsZTh1US5sJUzF/wrl+68KdpmCtFROrN3jiAn1oPSwL5CKvEJA==}
+    engines: {node: '>=18'}
+
+  '@sentry-internal/replay-canvas@10.53.1':
+    resolution: {integrity: sha512-aueLaf/2prExwA76BGU5/bOXCKWqtt6jQXWA6WJQNrmKpPEtZJB4ypnpsou0McXQCF8tur2Y8U0TEkwQP13yJQ==}
+    engines: {node: '>=18'}
+
+  '@sentry-internal/replay@10.53.1':
+    resolution: {integrity: sha512-wZNzTBYkgGUPWMuUQv7L64+OJmoCnz7GQNiTrTFK6EVAjJXFBCSsPp/nhif0bLhbk8+0g4xz633uOhpXuQbFdw==}
+    engines: {node: '>=18'}
+
+  '@sentry/browser@10.53.1':
+    resolution: {integrity: sha512-zXF373hzUOGzUOrqd8xb1U3LQi5uYC3mwv+z5OMKUUinQlu30tTWBs7ypy6YTchtix9QlYaHWlayUF8vBZ5UjA==}
+    engines: {node: '>=18'}
+
+  '@sentry/core@10.53.1':
+    resolution: {integrity: sha512-XG4ezlkyuAPjBC5+9kXC94rXXuqYTw9NRhfaDHssbTFaGnqBR8vQX2UUgZfY7ucbeelRDGfBu1sywoU+mB04uA==}
+    engines: {node: '>=18'}
 
   '@sparticuz/chromium@149.0.0':
     resolution: {integrity: sha512-2NECBVKlUA9xIUXb4fT8OoGKdAJs+I2tNYscO8FwcxCKCWA7FmpPI0fdVxGJoIJglrFZYn+4YEJqChq4rdrxQg==}
@@ -1775,6 +1805,10 @@ packages:
   expect-type@1.3.0:
     resolution: {integrity: sha512-knvyeauYhqjOYvQ66MznSMs83wmHrCycNEN6Ao+2AeYEfxUIkuiVxdEa1qlGEPK+We3n0THiDciYSsCcgW/DoA==}
     engines: {node: '>=12.0.0'}
+
+  fake-indexeddb@6.2.4:
+    resolution: {integrity: sha512-INKeIKEtSViN4yVtEWEUqbsqmaIy7Ls+MfU0yxQVXg67pOJ/sH1ZxcVrP8XrKULUFohcPD9gnmym+qBfEybACw==}
+    engines: {node: '>=18'}
 
   fast-deep-equal@3.1.3:
     resolution: {integrity: sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==}
@@ -3534,6 +3568,34 @@ snapshots:
 
   '@rtsao/scc@1.1.0': {}
 
+  '@sentry-internal/browser-utils@10.53.1':
+    dependencies:
+      '@sentry/core': 10.53.1
+
+  '@sentry-internal/feedback@10.53.1':
+    dependencies:
+      '@sentry/core': 10.53.1
+
+  '@sentry-internal/replay-canvas@10.53.1':
+    dependencies:
+      '@sentry-internal/replay': 10.53.1
+      '@sentry/core': 10.53.1
+
+  '@sentry-internal/replay@10.53.1':
+    dependencies:
+      '@sentry-internal/browser-utils': 10.53.1
+      '@sentry/core': 10.53.1
+
+  '@sentry/browser@10.53.1':
+    dependencies:
+      '@sentry-internal/browser-utils': 10.53.1
+      '@sentry-internal/feedback': 10.53.1
+      '@sentry-internal/replay': 10.53.1
+      '@sentry-internal/replay-canvas': 10.53.1
+      '@sentry/core': 10.53.1
+
+  '@sentry/core@10.53.1': {}
+
   '@sparticuz/chromium@149.0.0':
     dependencies:
       tar-fs: 3.1.3
@@ -4662,6 +4724,8 @@ snapshots:
       strip-final-newline: 2.0.0
 
   expect-type@1.3.0: {}
+
+  fake-indexeddb@6.2.4: {}
 
   fast-deep-equal@3.1.3: {}
 

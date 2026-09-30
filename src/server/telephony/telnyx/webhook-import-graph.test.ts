@@ -87,7 +87,9 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
 // boundaries, with no new runtime package. Five fresh Node imports of the built
 // Next route with fetch disabled on 2026-09-30 took 139–160ms (median 154ms)
 // for production. This is local module loading, not hosted call latency.
-const MAX_MODULES = 56;
+// The monitor also reuses the pure app-version selector for request metrics;
+// it adds no runtime dependency or I/O to the webhook path.
+const MAX_MODULES = 57;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);
