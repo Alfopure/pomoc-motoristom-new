@@ -1,6 +1,14 @@
 # Samostatné plne testovateľné prostredie
 
-Stav k 2026-09-30: **TEST aplikácia je nasadená a základné funkcie sú overené** na `https://test.dispecing.linkapomoci.sk`. [PR #332](https://github.com/Alfopure/pomoc-motoristom-new/pull/332) je zlúčená do `dev` (`9c7565c3`); samostatný projekt `pomoc-motoristom-test` používa iba TEST Supabase. Živé integrácie zostávajú vypnuté: chýba Telnyx API key a schválený telefón/email testera. Zvuk, SMS, doručenie emailu, AI a ostatné externé služby ešte nie sú funkčne prebraté.
+Stav k 2026-09-30: **TEST aplikácia je nasadená a základné funkcie sú overené** na `https://test.dispecing.linkapomoci.sk`. [PR #332](https://github.com/Alfopure/pomoc-motoristom-new/pull/332) je zlúčená do `dev` (`9c7565c3`); samostatný projekt `pomoc-motoristom-test` používa iba TEST Supabase. Živé integrácie zostávajú vypnuté: Telnyx prístup je už overený, ale nie je zapojený do aplikácie; chýba TEST číslo a schválený telefón/email testera. Zvuk, SMS, doručenie emailu, AI a ostatné externé služby ešte nie sú funkčne prebraté.
+
+### Príprava Telnyx — 2026-09-30, 09:12 UTC
+
+Kľúč existujúceho účtu bol overený čítaním API a zostáva v súkromnom úložisku mimo repozitára. Vzniklo päť nových TEST konfigurácií s potvrdeným spätným čítaním: dva outbound voice profily, Call Control aplikácia, credential connection a messaging profile. Call Control aplikácia, oba voice profily a messaging sú vypnuté; aktívna credential connection má interné SIP pravidlo a vlastný vypnutý outbound profile. Callbacky sú nastavené na kanonickú TEST doménu. Tieto credentials/resource ID ešte nie sú vo Vercel env; nebolo kúpené číslo ani vykonaný hovor či SMS a produkčné resources sa nemenili.
+
+Výber čísla čaká na používateľa. Provider ponuka v tomto čase uvádzala SK lokálne číslo za 1 USD/mesiac + 1 USD zriadenie s dokladom geografickej adresy a identity/firmy; schválená regulatory group zatiaľ nebola dostupná. US lokálna ponuka uvádzala rovnakú cenu a neuvádzala regulačné požiadavky. Ani jedna ponuka nepreukazuje okamžitú aktiváciu hlasu alebo funkčnosť SMS. Zostáva zvoliť a aktivovať číslo, schváliť testerov, pripojiť TEST provider konfiguráciu a vykonať reálne integračné testy.
+
+### Preberací záznam aplikácie
 
 | Overenie | Výsledok z 2026-09-30 |
 | --- | --- |
