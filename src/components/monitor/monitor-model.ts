@@ -12,9 +12,13 @@ export const statusLabels = { new: "Nový", acknowledged: "Preveruje sa", resolv
 export const classificationLabels: Record<DiagnosticIncident["classification"], string> = { observation: "Zaznamenaná udalosť", candidate: "Možné prerušenie", interruption_observed: "Prerušenie potvrdené", expected_end: "Očakávané ukončenie", unknown: "Nedostatok dôkazov" };
 export const kindLabels: Record<DiagnosticIncident["kind"], string> = { ui_error: "Chyba obrazovky", user_report: "Hlásenie používateľa", operation: "Problém pri úkone", call_interruption: "Prerušenie hovoru" };
 export const eventLabels: Record<DiagnosticStoredEvent["type"], string> = { ui_error: "Chyba obrazovky", unhandled_rejection: "Nezachytená chyba", chunk_error: "Chyba načítania aplikácie", user_report: "Hlásenie používateľa", operation: "Úkon", page_lifecycle: "Stav stránky", phone_lifecycle: "Stav telefónu", app_update: "Verzia aplikácie", call_timing: "Priebeh spojenia", coverage: "Úplnosť zberu" };
+// Reuse locale/time-zone setup across rows and the monitor's periodic redraws.
+let timestampFormatter: Intl.DateTimeFormat | undefined;
 export function timestamp(value: string | null | undefined): string {
-  if (!value || !Number.isFinite(Date.parse(value))) return "Nezistené";
-  return new Intl.DateTimeFormat("sk-SK", { timeZone: "Europe/Bratislava", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(value));
+  const time = value ? Date.parse(value) : NaN;
+  if (!Number.isFinite(time)) return "Nezistené";
+  timestampFormatter ??= new Intl.DateTimeFormat("sk-SK", { timeZone: "Europe/Bratislava", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return timestampFormatter.format(time);
 }
 export function duration(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "Nezistené";
