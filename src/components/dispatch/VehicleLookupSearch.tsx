@@ -8,7 +8,11 @@ import { VehicleLookupDetails, vehicleLookupDate } from "./VehicleLookupDetails"
 
 type Props = { compact?: boolean; active?: boolean; lookupRequest?: { id: number; value: string } };
 const summaryFields: VehicleField[] = ["fuel", "color", "powerKw", "transmission", "curbWeightKg", "drivenAxles"];
-function inferredCountry(identifier: string): VehicleCountry { return /^\d/.test(normalizeVehicleIdentifier(identifier)) ? "CZ" : "SK"; }
+function inferredCountry(identifier: string): VehicleCountry {
+  const normalized = normalizeVehicleIdentifier(identifier);
+  // A VIN prefix identifies manufacturing origin, not registration country.
+  return !isVin(normalized) && /^\d/.test(normalized) ? "CZ" : "SK";
+}
 
 /** A read-only lookup: fleet search and the toolbox share the same dated result and full detail. */
 export function VehicleLookupSearch({ compact = false, active = true, lookupRequest }: Props) {

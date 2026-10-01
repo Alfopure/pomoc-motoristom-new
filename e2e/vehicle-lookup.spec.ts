@@ -642,6 +642,36 @@ test("fleet has standalone lookup with an inline result and a read-only full det
   expect(api.lookupInputs).toHaveLength(1);
 });
 
+test("digit-leading VIN keeps the Slovak lookup default", async ({ page }) => {
+  const vin = "1HGCM82633A000001";
+  const api = await sandboxApi(page);
+  await openDashboard(page);
+  await navigate(page, /^Flotila/);
+  const search = page.getByTestId("vehicle-lookup-search");
+  await search.getByLabel("EČV alebo VIN", { exact: true }).fill(vin);
+  await expect(search.getByLabel("Krajina evidencie")).toHaveValue("SK");
+  await search.getByRole("button", { name: "Overiť", exact: true }).click();
+  await expect.poll(() => api.lookupInputs.length).toBe(1);
+  expect(api.lookupInputs[0]).toMatchObject({ kind: "vin", value: vin, country: "SK" });
+  await expect(search.getByRole("region", { name: "Výsledok overenia vozidla", exact: true })).toContainText("Fixture poisťovňa");
+  expect(api.writes).toHaveLength(0);
+});
+
+test("digit-leading VIN respects an explicit Czech country selection", async ({ page }) => {
+  const vin = "1HGCM82633A000001";
+  const api = await sandboxApi(page);
+  await openDashboard(page);
+  await navigate(page, /^Flotila/);
+  const search = page.getByTestId("vehicle-lookup-search");
+  await search.getByLabel("Krajina evidencie").selectOption("CZ");
+  await search.getByLabel("EČV alebo VIN", { exact: true }).fill(vin);
+  await expect(search.getByLabel("Krajina evidencie")).toHaveValue("CZ");
+  await search.getByRole("button", { name: "Overiť", exact: true }).click();
+  await expect.poll(() => api.lookupInputs.length).toBe(1);
+  expect(api.lookupInputs[0]).toMatchObject({ kind: "vin", value: vin, country: "CZ" });
+  expect(api.writes).toHaveLength(0);
+});
+
 test("Czech plate defaults to CZ and shows vignette while insurance remains unverified", async ({ page }) => {
   const plate = "1QA0000";
   const api = await sandboxApi(page, async input => czechLookupResponse(input));
