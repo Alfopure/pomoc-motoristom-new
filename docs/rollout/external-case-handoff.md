@@ -2,6 +2,8 @@
 
 Stav k 12. 9. 2026: implementované v samostatnej V2 Preview vetve. Tento dokument nahrádza pôvodný návrh; pôvodná verzia zostáva v histórii Git. Produkčné vydanie nie je súčasťou tejto zmeny.
 
+Rozšírenie k 1. 10. 2026: [implementačný a nasadzovací plán](external-case-handoff-expansion-plan.md) pokrýva opätovné získanie rovnakého odkazu, samostatné predĺženie/rotáciu, rozšírené údaje a postup Preview → stabilný TEST → produkcia. Aktuálne správanie a overenie V3 sú v [samostatnom TEST zázname](external-case-handoff-test-2026-10-01.md); historický opis V2 nižšie zostáva zachovaný.
+
 ## Práca dispečera
 
 Panel **Odovzdať prípad** je súčasťou existujúceho detailu. Otvorenie iba načíta oprávnený prehľad; nevytvorí grant ani neodošle správu. Dispečer vyplní kolegu/stredisko, jeho telefón, osobitné pokyny, voliteľný dohodnutý čas a platnosť 12/24/48/72 hodín (predvolene 24). Vedľa vidí presný výber údajov pred vydaním odkazu.

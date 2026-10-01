@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sealHandoffToken } from "./handoff-secret";
 const mocks = vi.hoisted(() => ({ userRpc: vi.fn(), publicRpc: vi.fn(), actor: vi.fn(), cookieGet: vi.fn(), cookieSet: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createSupabaseServerClient: async () => ({ rpc: mocks.userRpc }) }));
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => ({ rpc: mocks.publicRpc }) }));
@@ -12,11 +13,13 @@ const issue = { action: "issue", commandId, recipientName: "Kolega", recipientPh
 const decision = { action: "accept", commandId, handoffId: grant, expectedRevision: 1, publishedVersion: 1 };
 function request(path: string, body?: unknown, headers: HeadersInit = {}) { return new Request(`https://preview.test${path}`, body === undefined ? { headers } : { method: "POST", headers: { Origin: "https://preview.test", "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) }); }
 beforeEach(() => {
+  vi.stubEnv("MOTORIST_HANDOFF_V3_ENABLED", "false");
   vi.clearAllMocks(); mocks.actor.mockResolvedValue({ organizationId: "org", profileId: "actor" });
   mocks.cookieGet.mockReturnValue({ value: session });
   mocks.userRpc.mockResolvedValue({ data: { handoff, commandId, committedRevision: 1, tokenAccepted: true }, error: null });
   mocks.publicRpc.mockResolvedValue({ data: { handoff, commandId, committedRevision: 1, sessionExpiresAt: "2030-01-01T12:00:00Z" }, error: null });
 });
+afterEach(() => vi.unstubAllEnvs());
 
 describe("limited handoff HTTP boundary", () => {
   it.each(["https://foreign.test", "null", ""]) ("rejects origin %s before reading private data", async origin => {
@@ -98,5 +101,46 @@ describe("handoff commands", () => {
     expect(validateHandoffCommand({ ...issue, recipientPhone: "00420 777 123 456" }).recipientPhone).toBe("+420777123456");
     expect(() => validateHandoffCommand({ ...issue, recipientPhone: "1234" })).toThrow("telefónne číslo");
     expect(() => validateHandoffCommand({ ...issue, recipientPhone: "420777123456" })).toThrow("telefónne číslo");
+  });
+});
+
+describe("enhanced handoff HTTP boundary", () => {
+  beforeEach(() => {
+    vi.stubEnv("MOTORIST_HANDOFF_V3_ENABLED", "true");
+    vi.stubEnv("MOTORIST_HANDOFF_KEYS", JSON.stringify({ v1: Buffer.alloc(32, 3).toString("base64") }));
+    vi.stubEnv("MOTORIST_HANDOFF_KEY_ID", "v1");
+    vi.stubEnv("MOTORIST_APP_ENV", "test"); vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("APP_BASE_URL", "https://test.dispecing.linkapomoci.sk");
+  });
+  it("issues an atomic encrypted secret and strips the envelope from the HTTP result", async () => {
+    let issued: Record<string, unknown>;
+    mocks.userRpc.mockImplementation(async (_name, args) => {
+      if (args.p_action === "issue") {
+        issued = args.p_input;
+        return { data: { handoff: { ...handoff, id: issued.issuedId }, commandId, committedRevision: 1, linkGeneration: 1 }, error: null };
+      }
+      return { data: { handoff: { ...handoff, id: issued.issuedId }, envelope: issued.tokenEnvelope, generation: 1, origin: issued.linkOrigin, tokenHash: issued.tokenHash }, error: null };
+    });
+    const result = await commandCaseHandoff(request(`/api/cases/${caseId}/handoffs`, issue), caseId);
+    expect(result.url).toMatch(/^https:\/\/test.dispecing.linkapomoci.sk\/handoff#token=[\w-]{43}$/);
+    expect(result).not.toHaveProperty("envelope"); expect(result).not.toHaveProperty("tokenHash");
+    expect(mocks.userRpc.mock.calls.map(call => call[1].p_action)).toEqual(["issue", "link"]);
+  });
+  it("retrieves the same token after reload or another deployment without changing its origin", async () => {
+    const origin = "https://test.dispecing.linkapomoci.sk", hash = handoffHash(token);
+    const envelope = sealHandoffToken(token, { organizationId: "org", caseId, handoffId: grant, generation: 1, tokenHash: hash, origin });
+    mocks.userRpc.mockResolvedValue({ data: { handoff, envelope, tokenHash: hash, generation: 1, origin }, error: null });
+    const recover = { action: "recover", commandId, handoffId: grant, expectedRevision: 1 };
+    const first = await commandCaseHandoff(request(`/api/cases/${caseId}/handoffs`, recover), caseId);
+    expect((await commandCaseHandoff(request(`/api/cases/${caseId}/handoffs`, recover), caseId)).url).toBe(first.url);
+    expect(first.url).toBe(`${origin}/handoff#token=${token}`);
+  });
+  it("rejects retrieval without authorization and fails before issuing if a key is missing", async () => {
+    vi.stubEnv("MOTORIST_HANDOFF_KEYS", "{}");
+    await expect(commandCaseHandoff(request(`/api/cases/${caseId}/handoffs`, issue), caseId)).rejects.toMatchObject({ status: 503 });
+    expect(mocks.userRpc).not.toHaveBeenCalled();
+    mocks.actor.mockRejectedValue(new Error("No actor"));
+    await expect(commandCaseHandoff(request(`/api/cases/${caseId}/handoffs`, { action: "recover", commandId, handoffId: grant, expectedRevision: 1 }), caseId)).rejects.toThrow("No actor");
+    expect(mocks.userRpc).not.toHaveBeenCalled();
   });
 });
