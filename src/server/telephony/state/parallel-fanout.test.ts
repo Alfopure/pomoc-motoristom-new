@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
+import { createTelephonyHarness, GROUPS, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { TelnyxCommandError } from "../telnyx/client";
 import { advanceRingStep } from "../routing/ring-plan";
+import { runSessionEvent } from "../session-runner";
+import { readPendingEffects } from "./continuation";
+import type { RingFanout, SessionRow } from "./types";
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
@@ -32,6 +35,162 @@ function watchDials(h: TelephonyHarness) {
 }
 
 describe("ring fan-out", () => {
+  it.each([false, true])("rings both configured endpoints without blocking the group (explicit mobile owner=%s)", async explicitOwner => {
+    const h = harness();
+    h.db.update("motorist_operator_telephony_settings", { default_mobile_number: NUMBERS.external }, row => row.profile_id === PROFILES.o1);
+    h.db.seed("motorist_ring_group_members", [{ organization_id: ORG, ring_group_id: GROUPS.a, member_kind: "external_number",
+      profile_id: null, owner_profile_id: explicitOwner ? PROFILES.o1 : null, external_number: NUMBERS.external, position: 3, ring_secs: null }]);
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+
+    expect(h.telnyx.of("dial")).toHaveLength(4);
+    expect(h.telnyx.of("dial").filter(dial => dial.params.to === NUMBERS.external)).toHaveLength(1);
+    expect(new Set(h.telnyx.of("dial").map(dial => dial.params.commandId)).size).toBe(4);
+    expect(offered(h, call.sessionId)).toHaveLength(4);
+    expect(h.presence(PROFILES.o1)).toMatchObject({ status: "ringing", current_session_id: call.sessionId });
+    expect(h.rows("motorist_job_incidents").filter(row => row.status === "open")).toEqual([]);
+  });
+
+  it.each([false, true])("uses the owned mobile when that owner's SIP is unavailable (explicit owner=%s)", async explicitOwner => {
+    const h = harness();
+    h.db.delete("motorist_operator_devices", row => row.profile_id === PROFILES.o1);
+    h.db.update("motorist_operator_telephony_settings", { default_mobile_number: NUMBERS.external }, row => row.profile_id === PROFILES.o1);
+    h.db.seed("motorist_ring_group_members", [{ organization_id: ORG, ring_group_id: GROUPS.a, member_kind: "external_number",
+      profile_id: null, owner_profile_id: explicitOwner ? PROFILES.o1 : null, external_number: NUMBERS.external, position: 3, ring_secs: null }]);
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const mobile = h.legs(call.sessionId).find(leg => leg.to_number === NUMBERS.external)!;
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+    expect(offered(h, call.sessionId)).toHaveLength(3);
+    expect(mobile).toMatchObject({ profile_id: PROFILES.o1, role: "external" });
+
+    h.telnyx.physical.answered(String(mobile.telnyx_call_control_id));
+    await h.legEvent(String(mobile.telnyx_call_control_id), "call.answered");
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o1 });
+    expect(h.telnyx.physical.connected(call.callControlId, String(mobile.telnyx_call_control_id))).toBe(true);
+    expect(h.presence(PROFILES.o1)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
+  });
+
+  it("admits one exact endpoint safely before the database migration", async () => {
+    const h = harness();
+    h.db.uniqueKeys.motorist_ring_attempts = [["id"], ["session_id", "step_index", "profile_id"],
+      ["session_id", "step_index", "external_number"], { columns: ["profile_id"], where: row => row.result === "offered" }];
+    h.db.update("motorist_operator_telephony_settings", { default_mobile_number: NUMBERS.external }, row => row.profile_id === PROFILES.o1);
+    h.db.seed("motorist_ring_group_members", [{ organization_id: ORG, ring_group_id: GROUPS.a, member_kind: "external_number",
+      profile_id: null, external_number: NUMBERS.external, position: 3, ring_secs: null }]);
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+    expect(offered(h, call.sessionId)).toHaveLength(3);
+    expect(h.rows("motorist_job_incidents").filter(row => row.status === "open")).toEqual([]);
+  });
+
+  it.each([
+    ["operator", "accepted"], ["external_number", "accepted"],
+    ["operator", "unknown"], ["external_number", "unknown"],
+  ] as const)("preserves the original %s endpoint with %s evidence in a legacy collision", async (memberKind, outcome) => {
+    const h = harness();
+    const stage = h.db.rpcHandlers.get("motorist_stage_transition_v1")!;
+    let webAddress = "";
+    h.db.registerRpc("motorist_stage_transition_v1", (args, db) => {
+      const main = args.p_main as { entry: { commands: Array<{ kind: string }> } };
+      const fanout = main.entry.commands.find(command => command.kind === "ring_fanout") as RingFanout | undefined;
+      if (fanout && !webAddress) {
+        const original = fanout.dials.find(dial => dial.profileId === PROFILES.o1)!;
+        webAddress = original.to;
+        if (memberKind === "external_number") {
+          Object.assign(original, { to: NUMBERS.external, role: "external", externalNumber: NUMBERS.external });
+          original.clientState.role = "external";
+          original.attempt!.externalNumber = NUMBERS.external;
+          Object.assign(fanout.attempts.find(attempt => attempt.profileId === PROFILES.o1)!,
+            { memberKind, externalNumber: NUMBERS.external });
+        }
+        if (outcome === "unknown") h.telnyx.loseNextResponse("dial");
+        else h.db.failNext("motorist_call_legs", "upsert", "injected bookkeeping failure");
+      }
+      return stage(args, db);
+    });
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    const pending = readPendingEffects(h.session(call.sessionId) as SessionRow);
+    const fanout = pending.entries.flatMap(entry => entry.commands).find(command => command.kind === "ring_fanout") as RingFanout;
+    const original = fanout.dials.find(dial => dial.profileId === PROFILES.o1)!;
+    const journal = h.rows("motorist_provider_commands").find(row => row.command_id === original.commandId)!;
+    expect(journal.outcome).toBe(outcome);
+    const other = structuredClone(original);
+    const otherExternal = memberKind === "operator";
+    Object.assign(other, { to: otherExternal ? NUMBERS.external : webAddress,
+      role: otherExternal ? "external" : "operator", externalNumber: otherExternal ? NUMBERS.external : null });
+    other.clientState.role = otherExternal ? "external" : "operator";
+    other.attempt!.externalNumber = otherExternal ? NUMBERS.external : null;
+    fanout.dials.push(other);
+    fanout.attempts.push({ ...fanout.attempts.find(attempt => attempt.profileId === PROFILES.o1)!,
+      memberKind: otherExternal ? "external_number" : "operator", externalNumber: other.attempt!.externalNumber, position: 3 });
+    h.db.seed("motorist_ring_attempts", [{ ...offered(h, call.sessionId).find(row => row.profile_id === PROFILES.o1)!,
+      id: h.nextEventId(), member_kind: otherExternal ? "external_number" : "operator", external_number: other.attempt!.externalNumber, leg_id: null }]);
+    h.db.update("motorist_call_sessions", { pending_effects: pending }, row => row.id === call.sessionId);
+
+    await runSessionEvent(h.deps, call.sessionId, { kind: "app", id: h.nextEventId(), type: "sweep", actorProfileId: null, occurredAt: h.now().toISOString() });
+
+    expect(h.telnyx.of("dial")).toHaveLength(3);
+    expect(h.rows("motorist_provider_commands").find(row => row.command_id === original.commandId)).toEqual(journal);
+    expect(offered(h, call.sessionId).filter(row => row.profile_id === PROFILES.o1))
+      .toEqual([expect.objectContaining({ member_kind: memberKind })]);
+    expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries.length).toBe(outcome === "accepted" ? 0 : 1);
+  });
+
+  it.each(["operator", "external_number"] as const)("repairs an undispatched legacy collision and resumes both endpoints (%s first)", async memberKind => {
+    const h = harness();
+    const stage = h.db.rpcHandlers.get("motorist_stage_transition_v1")!;
+    let injected = false;
+    h.db.registerRpc("motorist_stage_transition_v1", (args, db) => {
+      const main = args.p_main as { entry: { commands: Array<{ kind: string }> } };
+      const fanout = main.entry.commands.find(command => command.kind === "ring_fanout") as RingFanout | undefined;
+      if (fanout && !injected) {
+        // The old planner stored SIP and owned mobile under the same stable
+        // identity. No journal exists, proving the old batch never dispatched.
+        const sip = fanout.dials.find(dial => dial.profileId === PROFILES.o1)!;
+        const mobile = structuredClone(sip);
+        mobile.to = NUMBERS.external;
+        mobile.role = "external";
+        mobile.externalNumber = NUMBERS.external;
+        mobile.clientState.role = "external";
+        mobile.attempt!.externalNumber = NUMBERS.external;
+        fanout.dials.push(mobile);
+        const mobileAttempt = { ...fanout.attempts.find(attempt => attempt.profileId === PROFILES.o1)!,
+          memberKind: "external_number" as const, externalNumber: NUMBERS.external, position: 3 };
+        if (memberKind === "external_number") fanout.attempts.unshift(mobileAttempt);
+        else fanout.attempts.push(mobileAttempt);
+        // The provider accepts the whole batch, then one local leg write
+        // fails. Its durable continuation and offered attempt must resume
+        // against the immutable accepted journal without sending any dial again.
+        h.db.failNext("motorist_call_legs", "upsert", "injected dial bookkeeping failure");
+        injected = true;
+      }
+      return stage(args, db);
+    });
+
+    const call = await h.inbound({ to: NUMBERS.allianz });
+
+    expect(injected).toBe(true);
+    expect(h.telnyx.of("dial")).toHaveLength(4);
+    expect(h.telnyx.of("dial").filter(dial => dial.params.to === NUMBERS.external)).toHaveLength(1);
+    const pending = readPendingEffects(h.session(call.sessionId) as SessionRow);
+    expect(pending.entries.some(entry => entry.commands.some(command => command.kind === "ring_fanout") && entry.lastError)).toBe(true);
+    const attempt = offered(h, call.sessionId).find(row => row.profile_id === PROFILES.o1)!;
+    expect(attempt.member_kind).toBe(memberKind);
+    expect(h.rows("motorist_provider_commands").filter(row => row.session_id === call.sessionId && row.path === "/calls" && row.outcome === "accepted")).toHaveLength(4);
+
+    await runSessionEvent(h.deps, call.sessionId, { kind: "app", id: h.nextEventId(), type: "sweep", actorProfileId: null, occurredAt: h.now().toISOString() });
+
+    expect(h.telnyx.of("dial")).toHaveLength(4);
+    expect(offered(h, call.sessionId)).toHaveLength(4);
+    expect(offered(h, call.sessionId).find(row => row.profile_id === PROFILES.o1)).toMatchObject({ id: attempt.id, member_kind: memberKind, leg_id: expect.any(String) });
+    expect(h.legs(call.sessionId).filter(leg => leg.profile_id)).toHaveLength(4);
+    expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries).toEqual([]);
+    expect(h.presence(PROFILES.o1)).toMatchObject({ status: "ringing", current_session_id: call.sessionId });
+  });
+
   it("settles all accepted legs concurrently and preserves the original offer time", async () => {
     const h = harness();
     let release!: () => void;

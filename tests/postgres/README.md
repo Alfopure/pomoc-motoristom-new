@@ -26,6 +26,18 @@ Run `python3 tests/postgres/presence-contract.py` after installing `psycopg[bina
 
 The TypeScript workflow fake in `src/test/fake-presence.ts` supports application tests. It does not prove PostgreSQL locks, RLS, triggers, or transactional rollback.
 
+`python3 tests/postgres/parallel-ring-endpoints.py` recreates only the loopback
+`parallel_ring_endpoints` database and applies the exact endpoint migration over
+the original attempt table/index definitions and a minimal presence fixture.
+It requires the PostgreSQL `btree_gist` extension. It checks simultaneous SIP and
+owned mobile offers, exact endpoint uniqueness, cross-session exclusion on
+insert/update, preserved historical rows, shared presence tokens, pause
+cancellation, and concurrent commit/rollback admission. The contention tests
+observe actual PostgreSQL lock waits before releasing the first transaction.
+The operator/session exclusion uses the equality/inequality pattern documented
+in [PostgreSQL btree_gist](https://www.postgresql.org/docs/17/btree-gist.html).
+This verifies local database contracts, not hosted deployment or audible calls.
+
 `node tests/postgres/presence-compatibility.mjs` builds the working application and
 runs pickup → answer → hangup → manual availability through the exact installed
 presence/durable SQL RPCs for admission off/off, on/on and on/off. It also checks

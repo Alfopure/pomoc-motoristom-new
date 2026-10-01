@@ -359,7 +359,9 @@ function buildActiveCalls(
   for (const attempt of attempts) {
     if (!attempt.profile_id) continue;
     const list = offersBySession.get(attempt.session_id) ?? [];
-    list.push(attempt.profile_id);
+    // Web and personal mobile are separate offers for the same operator.
+    // Keep both leg identities, but show the operator once in shared overviews.
+    if (!list.includes(attempt.profile_id)) list.push(attempt.profile_id);
     offersBySession.set(attempt.session_id, list);
   }
 

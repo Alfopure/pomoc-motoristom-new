@@ -234,7 +234,7 @@ describe("exact outbound pickup context", () => {
     // The fake mirrors journal admission: no response leaves the admitted
     // command with no outcome, rather than manufacturing a provider refusal.
     expect(h.rows("motorist_provider_commands").find(row => String(row.path).endsWith("/actions/bridge")))
-      .toMatchObject({ outcome: null, http_status: null, result: null });
+      .toMatchObject({ outcome: "unknown", http_status: null, result: null });
     expect(h.telnyx.calls.slice(before).some(command => ["hangup", "playbackStop", "gatherStop"].includes(command.method))).toBe(false);
   });
 

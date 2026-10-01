@@ -296,7 +296,9 @@ class TransitionBuilder {
     return view.find(
       (attempt) =>
         attempt.step_index === state.step &&
-        ((leg.profile_id && attempt.profile_id === leg.profile_id) || (!leg.profile_id && attempt.external_number && attempt.external_number === leg.to_number)),
+        (leg.role === "external"
+          ? attempt.member_kind === "external_number" && attempt.external_number === leg.to_number
+          : attempt.member_kind === "operator" && Boolean(leg.profile_id) && attempt.profile_id === leg.profile_id),
     );
   }
 
@@ -1033,7 +1035,9 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
   const dials: DialCommand[] = [];
   const ringingProfileIds: string[] = [];
   for (const attempt of planned.attempts) {
-    const key = attempt.profileId ?? attempt.externalNumber ?? "member";
+    // Keep the established SIP identity. An owned mobile is a separate
+    // destination even when it shares that SIP operator's reservation token.
+    const key = attempt.externalNumber ?? attempt.profileId ?? "member";
     const sip = attempt.profileId ? devices.get(attempt.profileId)?.sip_username : null;
     const external = attempt.memberKind === "external_number";
     const to = external ? attempt.externalNumber : sip ? telnyxSipUri(sip) : null;
@@ -1479,7 +1483,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
       b.cmd(hangupCmd(b, other, "lose_race"));
       const otherAttempt = b.attemptForLeg(other);
       if (otherAttempt && !isTerminalAttemptResult(otherAttempt.result)) b.attempt(otherAttempt.id, { result: "cancelled", ended_at: b.nowIso });
-      if (other.profile_id) {
+      if (other.profile_id && other.profile_id !== leg.profile_id) {
         b.presenceChange({ profileId: other.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, onlyIfStatus: ["ringing"], reason: "lost race" });
       }
     }
@@ -1487,7 +1491,9 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
       if (!isTerminalAttemptResult(open.result) && (!attempt || open.id !== attempt.id)) b.attempt(open.id, { result: "cancelled", ended_at: b.nowIso });
     }
     const plan = b.ringPlan();
-    const member = plan?.steps.flatMap((step) => step.members).find((candidate) => candidate.profileId && candidate.profileId === leg.profile_id);
+    const member = plan?.steps.flatMap((step) => step.members).find((candidate) => leg.role === "external"
+      ? candidate.kind === "external_number" && candidate.externalNumber === leg.to_number
+      : candidate.kind === "operator" && Boolean(candidate.profileId) && candidate.profileId === leg.profile_id);
     if (member?.memberId) b.memberTouches.push({ memberId: member.memberId, field: "last_answered_at" });
     b.note(`${leg.role} ${leg.profile_id ?? leg.to_number ?? ""} answered → talking`);
   };
@@ -1884,6 +1890,13 @@ function hasOtherAcceptedLeg(b: TransitionBuilder, leg: LegRow): boolean {
   return Boolean(accepted?.answered_at && accepted.profile_id === leg.profile_id && accepted.telnyx_call_control_id !== leg.telnyx_call_control_id);
 }
 
+/** One failed endpoint must not release an operator whose sibling still rings. */
+function hasOtherRingOffer(b: TransitionBuilder, leg: LegRow, attempt: AttemptRow | undefined): boolean {
+  if (!leg.profile_id || legIntent(leg) !== "ring") return false;
+  return b.attemptsView().some((other) => other.id !== attempt?.id && other.profile_id === leg.profile_id && !isTerminalAttemptResult(other.result)) ||
+    b.openLegs().some((other) => other.telnyx_call_control_id !== leg.telnyx_call_control_id && other.profile_id === leg.profile_id && legIntent(other) === "ring" && !other.answered_at);
+}
+
 function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent, at: string): ReduceResult {
   const state = b.session.state;
   const meta = b.meta;
@@ -1922,7 +1935,7 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
     if (attempt && !isTerminalAttemptResult(attempt.result)) {
       b.attempt(attempt.id, { result: classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause }), ended_at: at });
     }
-    if (leg.profile_id) {
+    if (leg.profile_id && !hasOtherRingOffer(b, leg, attempt)) {
       b.presenceChange({ profileId: leg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, onlyIfStatus: ["ringing"], reason: "offer ended" });
     }
     const customer = b.customerLeg();

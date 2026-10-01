@@ -77,9 +77,9 @@ export function clampRingSecs(value: number | null | undefined, fallback: number
   return Math.min(MAX_MEMBER_RING_SECS, Math.max(MIN_MEMBER_RING_SECS, Math.round(base)));
 }
 
-/** Natural key of a member / attempt (`profile:<id>` or `number:<e164>`). */
+/** Endpoint key of a member / attempt; an owned mobile stays distinct from SIP. */
 export function memberKey(member: { profileId: string | null; externalNumber: string | null }): string {
-  return member.profileId ? `profile:${member.profileId}` : `number:${member.externalNumber ?? ""}`;
+  return member.externalNumber ? `number:${member.externalNumber}` : `profile:${member.profileId ?? ""}`;
 }
 
 export type PausedOperatorRouting = {
@@ -285,7 +285,7 @@ export type RingStepPlanInput = {
   activeLegCount?: number;
 };
 
-export type RingStepSkip = { member: FrozenRingMember; reason: IneligibilityReason | "attempted" | "capacity" | "fanout" | "feature_disabled" };
+export type RingStepSkip = { member: FrozenRingMember; reason: IneligibilityReason | "attempted" | "duplicate" | "capacity" | "fanout" | "feature_disabled" };
 
 export type RingStepPlanResult = {
   attempts: AttemptPlan[];
@@ -304,6 +304,7 @@ export function planRingStep(step: FrozenRingStep, input: RingStepPlanInput): Ri
   const capacity = Math.max(0, (input.maxConcurrentLegs ?? MAX_CONCURRENT_LEGS) - (input.activeLegCount ?? 0));
   const skipped: RingStepSkip[] = [];
   const eligible: FrozenRingMember[] = [];
+  const eligibleKeys = new Set<string>();
 
   for (const member of [...step.members].sort((left, right) => left.position - right.position)) {
     if (member.kind === "external_number" && (member.ownerProfileId || member.profileId) && !(input.ownedPstnEnabled ?? telephonyStabilityEnabled())) {
@@ -322,6 +323,15 @@ export function planRingStep(step: FrozenRingStep, input: RingStepPlanInput): Ri
       skipped.push({ member, reason: decision.reason });
       continue;
     }
+    // One dial per destination, while SIP and an explicitly configured mobile
+    // remain separate offers sharing the operator's session reservation.
+    // Personal routing may resolve multiple configured entries to one number.
+    const key = memberKey(member);
+    if (eligibleKeys.has(key)) {
+      skipped.push({ member, reason: "duplicate" });
+      continue;
+    }
+    eligibleKeys.add(key);
     eligible.push(member);
   }
 
@@ -532,8 +542,8 @@ export async function closeOrphanLegs(
 
 /**
  * A leaked `offered` ring attempt blocks its operator in *every* future session
- * (`ring_attempts_profile_open_offer_idx` is a global partial unique index on
- * `profile_id`), so anything older than the longest possible step plus grace, or
+ * (the offered-owner exclusion prevents reservations in other sessions),
+ * so anything older than the longest possible step plus grace, or
  * belonging to a session that is already terminal, must be terminalised.
  */
 export const STALE_ATTEMPT_MAX_AGE_MS = (120 + RING_STEP_GRACE_SECS + 60) * 1000;

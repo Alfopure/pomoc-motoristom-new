@@ -76,9 +76,10 @@ export const DEFAULT_UNIQUE_KEYS: Record<string, UniqueKeySpec[]> = {
   motorist_call_legs: [["id"], ["telnyx_call_control_id"], ["telnyx_call_leg_id"]],
   motorist_ring_attempts: [
     ["id"],
-    ["session_id", "step_index", "profile_id"],
+    { columns: ["session_id", "step_index", "profile_id"], where: (row) => row.member_kind !== "external_number" },
     ["session_id", "step_index", "external_number"],
-    { columns: ["profile_id"], where: (row) => row.result === "offered" },
+    { columns: ["profile_id"], where: (row) => row.result === "offered" && row.member_kind !== "external_number" },
+    { columns: ["profile_id", "external_number"], where: (row) => row.result === "offered" && row.member_kind === "external_number" },
   ],
   motorist_ring_groups: [["id"], ["organization_id", "name"]],
   motorist_ring_group_members: [
@@ -302,7 +303,7 @@ export class FakeDatabase {
     return next;
   }
 
-  private findConflict(table: string, row: FakeRow, exclude?: FakeRow): { key: string[]; existing: FakeRow } | null {
+  private findConflict(table: string, row: FakeRow, exclude?: FakeRow): { key: string[]; existing: FakeRow; code?: string } | null {
     for (const spec of this.uniqueKeys[table] ?? [["id"]]) {
       const key = uniqueColumns(spec);
       if (key.some((column) => isNil(row[column]))) continue;
@@ -311,6 +312,13 @@ export class FakeDatabase {
         (candidate) => candidate !== exclude && uniqueApplies(spec, candidate) && key.every((column) => sameValue(candidate[column], row[column])),
       );
       if (existing) return { key, existing };
+    }
+    // The GiST exclusion permits multiple endpoints in one session while
+    // keeping an operator's offered attempts exclusive against other callers.
+    if (table === "motorist_ring_attempts" && row.result === "offered" && !isNil(row.profile_id) && !isNil(row.session_id)) {
+      const existing = this.storage(table).find(candidate => candidate !== exclude && candidate.result === "offered" &&
+        sameValue(candidate.profile_id, row.profile_id) && !isNil(candidate.session_id) && !sameValue(candidate.session_id, row.session_id));
+      if (existing) return { key: ["profile_id", "session_id"], existing, code: "23P01" };
     }
     return null;
   }
@@ -323,7 +331,7 @@ export class FakeDatabase {
       if (conflict) {
         throw fakeError(
           `duplicate key value violates unique constraint "${table}_${conflict.key.join("_")}_key"`,
-          "23505",
+          conflict.code ?? "23505",
           `Key (${conflict.key.join(", ")}) already exists.`,
         );
       }
@@ -357,7 +365,7 @@ export class FakeDatabase {
         }
         Object.assign(existing, row, presenceRevisionPatch(table, existing, row), { updated_at: this.nowIso() });
         const conflict = this.findConflict(table, existing, existing);
-        if (conflict) throw fakeError(`duplicate key value violates unique constraint (${conflict.key.join(", ")})`, "23505");
+        if (conflict) throw fakeError(`conflicting key value violates constraint (${conflict.key.join(", ")})`, conflict.code ?? "23505");
         results.push(clone(existing));
       } else {
         results.push(...this.insert(table, row));
@@ -381,7 +389,7 @@ export class FakeDatabase {
       if (conflict) {
         for (const key of Object.keys(row)) delete row[key];
         Object.assign(row, before);
-        throw fakeError(`duplicate key value violates unique constraint (${conflict.key.join(", ")})`, "23505");
+        throw fakeError(`conflicting key value violates constraint (${conflict.key.join(", ")})`, conflict.code ?? "23505");
       }
       updated.push(clone(row));
     }
