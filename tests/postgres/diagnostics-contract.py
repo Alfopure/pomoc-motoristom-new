@@ -50,11 +50,16 @@ class Contracts(unittest.TestCase):
     with psycopg.connect(dbname='postgres',**LOCAL,autocommit=True) as c:
       for role in ('anon','authenticated','service_role'):
         if not c.execute('select 1 from pg_roles where rolname=%s',(role,)).fetchone():c.execute('create role '+role)
+      c.execute('alter role service_role bypassrls')
       c.execute('drop database if exists '+DB+' with (force)');c.execute('create database '+DB)
     with connect() as c:
+      # Hosted Supabase supplies these defaults before our migration runs.
+      c.execute('alter default privileges in schema public grant all on tables to service_role')
       c.execute(FIXTURE)
       c.execute((ROOT/'supabase/migrations/20261008130000_operations_diagnostics.sql').read_text())
       c.execute((ROOT/'supabase/migrations/20261008130100_diagnostics_device_session_text.sql').read_text())
+      cls.hosted_default_write_grants=all(c.execute('select has_table_privilege(%s,%s,%s)',('service_role','public.'+table,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')).fetchone()[0] for table in ('motorist_diagnostic_guard','motorist_diagnostic_counters','motorist_diagnostic_events','motorist_diagnostic_incidents'))
+      c.execute((ROOT/'supabase/migrations/20261008130200_diagnostics_service_table_privileges.sql').read_text())
       c.execute('insert into motorist_organizations values(%s),(%s)',(ORG,OTHER))
       c.execute("insert into motorist_profiles values(%s,%s,true,'dispatcher'),(%s,%s,true,'manager'),(%s,%s,true,'dispatcher')",(PROFILE,ORG,MANAGER,ORG,FOREIGN,OTHER))
       c.execute('insert into motorist_cases values(%s,%s)',(CASE,ORG))
@@ -68,6 +73,39 @@ class Contracts(unittest.TestCase):
     self.c.execute("update motorist_call_sessions set metadata='{}',termination_requested_at=null,parked_at=null")
     self.c.execute("update motorist_diagnostic_guard set budget_bytes=134217728,physical_bytes=0,checked_at=now(),blocked=false")
  def tearDown(self):self.c.close()
+ def test_hosted_defaults_are_removed_but_service_rpcs_still_write(self):
+    self.assertTrue(self.hosted_default_write_grants)
+    tables=('motorist_diagnostic_guard','motorist_diagnostic_counters','motorist_diagnostic_events','motorist_diagnostic_incidents')
+    for table in tables:
+      self.assertTrue(self.c.execute('select has_table_privilege(%s,%s,%s)',('service_role','public.'+table,'SELECT')).fetchone()[0])
+      self.assertFalse(self.c.execute('select has_table_privilege(%s,%s,%s)',('service_role','public.'+table,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')).fetchone()[0])
+      if int(self.c.execute('show server_version_num').fetchone()[0])>=170000:
+        self.assertFalse(self.c.execute('select has_table_privilege(%s,%s,%s)',('service_role','public.'+table,'MAINTAIN')).fetchone()[0])
+      for role in ('anon','authenticated'):
+        self.assertFalse(self.c.execute('select has_table_privilege(%s,%s,%s)',(role,'public.'+table,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')).fetchone()[0])
+    rpcs=self.c.execute("select p.oid,p.prosecdef,r.rolname from pg_proc p join pg_namespace n on n.oid=p.pronamespace join pg_roles r on r.oid=p.proowner where n.nspname='public' and p.proname in ('motorist_diagnostics_ingest','motorist_diagnostics_read','motorist_diagnostics_maintain')").fetchall()
+    self.assertEqual(len(rpcs),3)
+    for oid,security_definer,owner in rpcs:
+      self.assertTrue(security_definer);self.assertEqual(owner,'postgres')
+      self.assertTrue(self.c.execute('select has_function_privilege(%s,%s,%s)',('service_role',oid,'EXECUTE')).fetchone()[0])
+      for role in ('anon','authenticated'):
+        self.assertFalse(self.c.execute('select has_function_privilege(%s,%s,%s)',(role,oid,'EXECUTE')).fetchone()[0])
+    self.c.execute('set role service_role')
+    try:
+      for table in tables:
+        self.c.execute('select * from public.'+table+' limit 1')
+        for statement in ('insert into public.'+table+' select * from public.'+table+' where false','delete from public.'+table+' where false','truncate public.'+table):
+          with self.assertRaises(psycopg.errors.InsufficientPrivilege):self.c.execute(statement)
+      value=event(type='ui_error',outcome='failed')
+      self.assertEqual(ingest(self.c,[value])['acceptedIds'],[value['id']])
+      maintained=self.c.execute("select motorist_diagnostics_maintain(%s,'test',134217728,false)",(ORG,)).fetchone()[0]
+      self.assertFalse(maintained['blocked'])
+      overview=self.c.execute("select motorist_diagnostics_read(%s,%s,'test','overview')",(ORG,MANAGER)).fetchone()[0]
+      incident=overview['incidents'][0]['id']
+      updated=self.c.execute("select motorist_diagnostics_read(%s,%s,'test','status',p_id=>%s,p_status=>'resolved')",(ORG,MANAGER,incident)).fetchone()[0]
+      self.assertEqual(updated['incident']['status'],'resolved')
+      self.assertEqual(self.c.execute('select count(*) from motorist_diagnostic_events where id=%s',(value['id'],)).fetchone()[0],1)
+    finally:self.c.execute('reset role')
  def test_actor_isolation_and_history(self):
     own=event(deviceSessionId=DEVICE,callSessionId=CALL,caseId=CASE)
     self.assertEqual(ingest(self.c,[own])['acceptedIds'],[own['id']])
