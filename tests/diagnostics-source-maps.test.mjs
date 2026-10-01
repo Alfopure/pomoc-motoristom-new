@@ -14,8 +14,8 @@ function fixture(t) {
   mkdirSync(join(cwd, 'bin'));
   writeFileSync(join(cwd, 'bin/pnpm'), `#!/usr/bin/env node
 if(process.env.SENTRY_AUTH_TOKEN)process.exit(99);const fs=require('node:fs');fs.appendFileSync('commands.log','build\\n');
-if(process.env.DIAGNOSTICS_PRIVATE_SOURCE_MAPS==='1'){fs.mkdirSync('.next/static/chunks',{recursive:true});fs.writeFileSync('.next/static/chunks/abcdefgh.js','compiled');fs.writeFileSync('.next/static/chunks/abcdefgh.js.map','map');}
-if(process.env.FAKE_COPY_BLOCK)fs.mkdirSync('.context/diagnostics-source-maps/exact_release/chunks/abcdefgh.js.map',{recursive:true});
+if(process.env.DIAGNOSTICS_PRIVATE_SOURCE_MAPS==='1'){fs.mkdirSync('.next/static/chunks',{recursive:true});fs.writeFileSync('.next/static/chunks/abcdefgh.js',(process.env.FAKE_INLINE_REFERENCE?'const text="//# sourceMappingURL=missing.map";\\n':'')+'compiled\\n//# sourceMappingURL=maphash123.js.map');fs.writeFileSync('.next/static/chunks/maphash123.js.map','map');}
+if(process.env.FAKE_COPY_BLOCK)fs.mkdirSync('.context/diagnostics-source-maps/exact_release/chunks/maphash123.js.map',{recursive:true});
 process.exit(Number(process.env.FAKE_BUILD_EXIT||0));`, { mode: 0o755 });
   const cli = join(cwd, 'bin/sentry-cli');
   writeFileSync(cli, `#!/usr/bin/env node
@@ -36,8 +36,8 @@ test('same build uploads exact release only after stripping public maps', t => {
   const result = run('diagnostics-vercel-build', [], enabled);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(readFileSync(join(cwd, 'commands.log'), 'utf8'), 'build\nupload\n');
-  assert.equal(existsSync(join(cwd, '.next/static/chunks/abcdefgh.js.map')), false);
-  assert.equal(readFileSync(join(cwd, '.next/static/chunks/abcdefgh.js'), 'utf8'), 'compiled');
+  assert.equal(existsSync(join(cwd, '.next/static/chunks/maphash123.js.map')), false);
+  assert.equal(readFileSync(join(cwd, '.next/static/chunks/abcdefgh.js'), 'utf8'), 'compiled\n//# sourceMappingURL=maphash123.js.map');
   const args = JSON.parse(readFileSync(join(cwd, 'upload.json')));
   assert.deepEqual(args.slice(0, 7), ['sourcemaps', 'upload', '--release', 'exact_release', '--url-prefix', '~/_next/static', '--validate']);
   assert.equal(JSON.stringify(args).includes('private-token'), false);
@@ -45,14 +45,14 @@ test('same build uploads exact release only after stripping public maps', t => {
 test('failed build removes maps and never uploads', t => {
   const { cwd, run, enabled } = fixture(t);
   assert.equal(run('diagnostics-vercel-build', [], { ...enabled, FAKE_BUILD_EXIT: '7' }).status, 7);
-  assert.equal(existsSync(join(cwd, '.next/static/chunks/abcdefgh.js.map')), false);
+  assert.equal(existsSync(join(cwd, '.next/static/chunks/maphash123.js.map')), false);
   assert.equal(existsSync(join(cwd, 'upload.json')), false);
   assert.notEqual(run('diagnostics-source-maps', ['upload']).status, 0);
 });
 test('upload failure is visible with no public maps', t => {
   const { cwd, run, enabled } = fixture(t);
   assert.equal(run('diagnostics-vercel-build', [], { ...enabled, FAKE_UPLOAD_EXIT: '8' }).status, 8);
-  assert.equal(existsSync(join(cwd, '.next/static/chunks/abcdefgh.js.map')), false);
+  assert.equal(existsSync(join(cwd, '.next/static/chunks/maphash123.js.map')), false);
 });
 test('DSN without managed upload and CLI pin mismatch fail before building', t => {
   const { cwd, run, enabled } = fixture(t);
@@ -86,6 +86,12 @@ test('different deployment JavaScript is rejected before upload', t => {
 test('artifact-copy failure still strips public maps and never uploads', t => {
   const { cwd, run, enabled } = fixture(t);
   assert.notEqual(run('diagnostics-vercel-build', [], { ...enabled, FAKE_COPY_BLOCK: '1' }).status, 0);
-  assert.equal(existsSync(join(cwd, '.next/static/chunks/abcdefgh.js.map')), false);
+  assert.equal(existsSync(join(cwd, '.next/static/chunks/maphash123.js.map')), false);
   assert.equal(existsSync(join(cwd, 'upload.json')), false);
+});
+
+test('embedded source-map text is ignored in favor of the emitted reference', t => {
+  const { run, enabled } = fixture(t);
+  const result = run('diagnostics-vercel-build', [], { ...enabled, FAKE_INLINE_REFERENCE: '1' });
+  assert.equal(result.status, 0, result.stderr);
 });

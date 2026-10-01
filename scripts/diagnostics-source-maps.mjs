@@ -15,12 +15,23 @@ if (mode === 'build') {
   const root = resolve('.next/static');
   const maps = files(root).filter(f=>f.endsWith('.map'));
   try {
+    const mapSet = new Set(maps);
+    const matchedMaps = new Set();
     for (const map of maps) {
       const target = join(artifact,relative(root,map)); mkdirSync(resolve(target,'..'),{recursive:true}); copyFileSync(map,target);
-      const javascript = map.slice(0,-4);
-      if(!existsSync(javascript))throw new Error('Source map has no matching compiled JavaScript.');
-      copyFileSync(javascript,target.slice(0,-4));
     }
+    // Turbopack independently hashes JavaScript and its map. Follow the emitted
+    // reference rather than assuming that removing ".map" names the JS file.
+    for (const javascript of files(root).filter(file=>file.endsWith('.js'))) {
+      const reference = [...readFileSync(javascript,'utf8').matchAll(/^\/\/[#@][ \t]*sourceMappingURL=([^\s]+)[ \t]*$/gm)].at(-1)?.[1];
+      if (!reference) continue;
+      const map = resolve(javascript,'..',reference);
+      if (!mapSet.has(map)) throw new Error('Compiled JavaScript references a missing private source map.');
+      const target = join(artifact,relative(root,javascript));
+      mkdirSync(resolve(target,'..'),{recursive:true}); copyFileSync(javascript,target);
+      matchedMaps.add(map);
+    }
+    if(maps.length && !matchedMaps.size)throw new Error('No compiled JavaScript references the generated source maps.');
     mkdirSync(artifact,{recursive:true});writeFileSync(join(artifact,'manifest.json'),JSON.stringify({release,maps:maps.length,buildSucceeded:result.status===0,files:files(artifact).map(file=>({path:relative(artifact,file),sha256:digest(file)}))},null,2));
   } finally {
     // Even a failed artifact copy must not leave public source maps in deployment output.
