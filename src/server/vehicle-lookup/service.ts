@@ -2,6 +2,7 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import { requireSupabaseServiceEnv } from "@/lib/supabase/env";
+import { isTestLiveDeployment } from "@/lib/app-environment";
 import type { MotoristActor } from "@/server/api-auth";
 import { lookupIdentityConflict, type VehicleLookupResponse, type VehicleLookupResult, type VehicleQuery } from "@/lib/vehicle-lookup";
 import { sealVehicleLookup } from "./snapshot";
@@ -20,9 +21,10 @@ export async function lookupVehicle(query: VehicleQuery, actor: MotoristActor): 
   });
   const databazaEnabled = Boolean(process.env.DATABAZA_VOZIDIEL_API_KEY?.trim());
   const czechProviders = query.country === "CZ" ? {
-    autokuk: Boolean(process.env.CZ_AUTOKUK_API_KEY?.trim()),
-    rsv: Boolean(process.env.CZ_RSV_API_KEY?.trim()),
+    autokuk: process.env.VERCEL_ENV !== "preview" && Boolean(process.env.CZ_AUTOKUK_API_KEY?.trim()),
+    rsv: process.env.VERCEL_ENV !== "preview" && Boolean(process.env.CZ_RSV_API_KEY?.trim()),
     mycarplate: myCarPlateAllowed(url),
+    ...(process.env.VERCEL_ENV === "preview" ? { vpic: false } : {}),
   } : undefined;
   const queryHash = createHash("sha256").update(JSON.stringify(query.country === "CZ"
     ? [query.kind, query.value, query.country, query.checkedForDate, 5, czechProviders]
@@ -56,15 +58,15 @@ export async function lookupVehicle(query: VehicleQuery, actor: MotoristActor): 
   }
 }
 
-/** Guest access is for the isolated test database or local development. A
- * production rollout requires an explicit redistribution licence and API key. */
+/** Guest access is limited to local development or the dedicated stable TEST
+ * deployment. A production rollout requires a redistribution licence and key. */
 function myCarPlateAllowed(supabaseUrl: string): boolean {
+  if (process.env.VERCEL_ENV === "preview") return false;
   if (process.env.CZ_MYCARPLATE_LICENSED === "true" && Boolean(process.env.CZ_MYCARPLATE_API_KEY?.trim())) return true;
   const testDatabase = supabaseUrl === "https://nzpnqdstvkfncflgqlny.supabase.co";
   if (process.env.NODE_ENV === "development" && !process.env.VERCEL_ENV) {
     const host = new URL(supabaseUrl).hostname;
     if (testDatabase || host === "localhost" || host === "127.0.0.1") return true;
   }
-  return testDatabase && (process.env.VERCEL_ENV === "preview"
-    || (process.env.MOTORIST_APP_ENV === "test" && process.env.VERCEL_GIT_COMMIT_REF === "dev"));
+  return testDatabase && isTestLiveDeployment();
 }

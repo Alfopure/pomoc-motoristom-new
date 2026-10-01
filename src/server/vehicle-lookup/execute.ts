@@ -52,7 +52,7 @@ async function executeCzechVehicleLookup(query: VehicleQuery, enabled: LookupPro
   const sources: VehicleSourceResult[] = [];
   const autokuk = await sourceResult("autokuk", AUTOKUK_URL, enabled.autokuk === true, async () => lookupAutokuk(query, { timeoutMs: remainingTimeout(deadline, 9_000) }));
   sources.push(autokuk);
-  // The guest lookup has a small daily quota. Use it in Preview only when the
+  // The guest lookup has a small daily quota. Use it on stable TEST only when the
   // primary provider has not established the entered plate's VIN.
   if (query.kind === "plate") {
     const hasVin = isVin(normalizeVehicleIdentifier(autokuk.facts.vin?.value ?? ""));
