@@ -1,4 +1,4 @@
-import { TelnyxWebphone, type WebphoneSnapshot, type IncomingOfferPolicy, type TelnyxWebphoneOptions } from "./telnyx-webphone";
+import { TelnyxWebphone, type WebphoneSnapshot, type IncomingOfferPolicy, type TelnyxWebphoneOptions, type WebphoneStopReason } from "./telnyx-webphone";
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "./webphone-model";
 
 const idle = (): WebphoneSnapshot => ({ status: "idle", registration: webphoneRegistrationView(WEBPHONE_INITIAL_STATE), sipUsername: null, deviceSessionId: null, call: null, message: null });
@@ -32,7 +32,7 @@ export class CoordinatedWebphone {
     if (!this.local?.getSnapshot().call) return;
     event.preventDefault(); event.returnValue = "";
   };
-  private readonly pageHide = () => this.stop();
+  private readonly pageHide = () => this.stop("pagehide");
   private readonly pageShow = (event: PageTransitionEvent) => { if (event.persisted) this.start(); };
   private readonly visibilityChange = () => this.scheduleStandby();
 
@@ -40,6 +40,7 @@ export class CoordinatedWebphone {
     scope: string;
     mobile: boolean;
     createPhone?: (options: TelnyxWebphoneOptions) => TelnyxWebphone;
+    logger?: TelnyxWebphoneOptions["logger"];
   }) {}
 
   getSnapshot() { return this.snapshot; }
@@ -65,13 +66,13 @@ export class CoordinatedWebphone {
       this.startLocal(true);
       const owner = this.local;
       await new Promise<void>((resolve) => { this.release = resolve; });
-      if (this.local === owner) this.stopLocal();
+      if (this.local === owner) this.stopLocal("ownership_release");
     }).catch((error: unknown) => {
       if (generation === this.abort && !generation.signal.aborted) this.report(error);
     });
   }
 
-  stop() {
+  stop(reason: WebphoneStopReason = "unknown") {
     this.started = false;
     window.removeEventListener("beforeunload", this.beforeUnload);
     window.removeEventListener("pagehide", this.pageHide);
@@ -84,7 +85,7 @@ export class CoordinatedWebphone {
     this.requesting = false;
     for (const request of this.operatorRequests.values()) clearTimeout(request.timer);
     this.operatorRequests.clear();
-    this.stopLocal();
+    this.stopLocal(reason);
     this.release?.();
     this.release = null;
     this.channel?.close();
@@ -93,30 +94,32 @@ export class CoordinatedWebphone {
     this.pending.clear();
   }
 
-  dispose() { this.stop(); window.removeEventListener("pageshow", this.pageShow); }
+  dispose() { this.stop("component_unmount"); window.removeEventListener("pageshow", this.pageShow); }
 
   private startLocal(handoff = false, connect = true) {
     if (this.local) { if (connect) this.local.start(); return; }
     if (handoff) { try { this.resumeSessionId = localStorage.getItem(`pm:phone-session:${this.options.scope}`); } catch { /* private storage */ } }
     const phone = (this.options.createPhone ?? ((opts) => new TelnyxWebphone(opts)))({
       deviceKind: this.options.mobile ? "mobile" : "web", resumeSessionId: this.resumeSessionId, handoff,
+      logger: this.options.logger,
       onSession: (id) => {
         this.resumeSessionId = id;
         if (!this.options.mobile) { try { localStorage.setItem(`pm:phone-session:${this.options.scope}`, id); } catch { /* private storage */ } }
       },
     });
     this.local = phone;
+    try { this.options.logger?.({ event: "ownership_acquired", reason: "ownership_acquired" }); } catch { /* Optional observer. */ }
     this.applyIncomingPolicy();
     this.unsubscribe = phone.subscribe((state) => { this.publish(state); this.scheduleStandby(); });
     if (connect) phone.start();
   }
 
-  private stopLocal() {
+  private stopLocal(reason: WebphoneStopReason) {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
     this.idleDeadline = null;
     this.unsubscribe?.(); this.unsubscribe = null;
-    this.local?.stop(); this.local = null;
+    this.local?.stop(reason); this.local = null;
   }
 
   private publish(state: WebphoneSnapshot, follower = false) {
@@ -301,10 +304,10 @@ export class CoordinatedWebphone {
     }
     // A background idle phone does not need SIP registration. Merely returning
     // to the foreground never starts one; only the next explicit action does.
-    if (document.visibilityState === "hidden") { this.stopLocal(); this.publish(idle()); return; }
+    if (document.visibilityState === "hidden") { this.stopLocal("mobile_standby"); this.publish(idle()); return; }
     this.idleDeadline ??= Date.now() + MOBILE_VISIBLE_STANDBY_MS;
     const remaining = this.idleDeadline - Date.now();
-    if (remaining <= 0) { this.stopLocal(); this.publish(idle()); return; }
+    if (remaining <= 0) { this.stopLocal("mobile_standby"); this.publish(idle()); return; }
     // State/heartbeat updates keep the same deadline. Recheck activity when the
     // timer fires, so a new call or recovery can never be retired by an old timer.
     this.idleTimer = setTimeout(() => this.scheduleStandby(), remaining);

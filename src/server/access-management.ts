@@ -1,4 +1,5 @@
 import "server-only";
+import { canOperateTelephony } from "@/lib/app-environment";
 
 import type { User } from "@supabase/supabase-js";
 import { DELETED_ACCESS_PROFILE_NAME, isDeletedAccessProfile } from "@/domain/access-profile";
@@ -11,6 +12,13 @@ import { canAssignRole, canManageTargetRole, isAppRole } from "./access-policy";
 import { type MotoristActor, resolveDefaultOrganizationId } from "./api-auth";
 import { assertRateLimit, rateLimitKey, requestIp } from "./rate-limit";
 import { MutationError } from "./motorist-mutations";
+
+/** Account removal and availability changes also alter shared live phone routing. */
+function assertOperatorAccessDeployment(): void {
+  if (!canOperateTelephony()) {
+    throw new MutationError("Telefónne prístupy používateľov možno meniť iba v hlavnom prostredí aplikácie.", 503);
+  }
+}
 
 type Tables = Database["public"]["Tables"];
 type ProfileRow = Tables["motorist_profiles"]["Row"];
@@ -105,6 +113,7 @@ export async function createAccessUser(actor: MotoristActor, input: CreateAccess
 }
 
 export async function updateAccessUser(actor: MotoristActor, profileId: string, input: UpdateAccessUserInput) {
+  if (input.active !== undefined || input.role !== undefined) assertOperatorAccessDeployment();
   const supabase = createSupabaseAdminClient();
   const profile = await getManagedProfile(actor, profileId);
   const nextRole = input.role ?? profile.role;
@@ -237,6 +246,7 @@ const PROFILE_HISTORY_TABLES = [
  * state than an apparently active profile whose login has already disappeared.
  */
 export async function deleteAccessUser(actor: MotoristActor, profileId: string): Promise<DeleteAccessUserResult> {
+  assertOperatorAccessDeployment();
   const supabase = createSupabaseAdminClient();
   const profile = await getManagedProfile(actor, profileId);
 
@@ -663,6 +673,7 @@ export async function sendForgotPassword(emailInput: string | undefined, request
 }
 
 export async function markPasswordCompleted() {
+  assertOperatorAccessDeployment();
   const organizationId = await resolveDefaultOrganizationId();
   const server = await createSupabaseServerClient();
   const {

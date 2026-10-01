@@ -1,4 +1,8 @@
 "use client";
+import { beginDiagnosticOperation } from "@/lib/diagnostics/client";
+import { diagnosticJson } from "@/lib/diagnostics/request";
+import { diagnosticFailure, diagnosticRequestId, diagnosticResponse } from "@/lib/diagnostics/operations";
+import type { DiagnosticOutcome } from "@/lib/diagnostics/types";
 import type { CaseDetailData } from "@/data/case-detail";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
@@ -199,8 +203,7 @@ type AttachmentUrlResponse = {
 
 /** Opens a stored attachment through a short-lived signed URL; the bucket itself is private. */
 async function openCaseAttachment(caseId: string, attachmentId: string) {
-  const response = await fetch(`/api/cases/${caseId}/attachments?attachmentId=${encodeURIComponent(attachmentId)}`);
-  const result = (await response.json()) as AttachmentUrlResponse;
+  const { response, body: result } = await diagnosticJson<AttachmentUrlResponse>("document.download", "documents", `/api/cases/${caseId}/attachments?attachmentId=${encodeURIComponent(attachmentId)}`, undefined, { caseId }, value => Boolean(value?.signedUrl));
 
   if (!response.ok || !result.signedUrl) {
     throw new Error(result.error ?? "Prílohu sa nepodarilo otvoriť.");
@@ -479,12 +482,11 @@ export function CaseDetail({
 
     setIsRunningAction(true);
     try {
-      const response = await fetch(`/api/cases/${caseItem.id}/actions`, {
+      const { response, body: result } = await diagnosticJson<ApiMutationResponse>("case.action", "cases", `/api/cases/${caseItem.id}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...payload, ...(typeof payload.taskId === "string" ? { taskExpectedRevision: caseItem.tasks.find(task => task.id === payload.taskId)?.revision } : {}) }),
-      });
-      const result = (await response.json()) as ApiMutationResponse;
+      }, { caseId: caseItem.id }, value => Boolean(value?.dispatchData));
       if (!response.ok || !result.dispatchData) {
         throw new Error(result.error ?? "Akciu sa nepodarilo vykonať.");
       }
@@ -514,8 +516,10 @@ export function CaseDetail({
     setIsRunningAction(true);
     setIsExportingPdf(true);
     setNotice("Pripravujem PDF…");
+    const finishDiagnostic = beginDiagnosticOperation("document.generate", "documents", { caseId: caseItem.id });
     try {
       if ((draftDirty || isEditSaveLocked) && (!exportSaveRef.current || !await exportSaveRef.current())) {
+        finishDiagnostic({ outcome: "cancelled" });
         setNotice("Pred exportom uložte rozpracované zmeny. Údaje zostávajú vo formulári.");
         return;
       }
@@ -532,7 +536,8 @@ export function CaseDetail({
       document.body.append(link); link.click(); link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
       setNotice("PDF uložených údajov je pripravené na stiahnutie.");
-    } catch (error) { setNotice(error instanceof Error ? error.message : "PDF sa nepodarilo vytvoriť."); }
+      finishDiagnostic({ outcome: "ok", ...diagnosticRequestId(response) });
+    } catch (error) { finishDiagnostic({ outcome: diagnosticFailure(error, false) }); setNotice(error instanceof Error ? error.message : "PDF sa nepodarilo vytvoriť."); }
     finally {
       pdfExportInFlightRef.current = false;
       setIsExportingPdf(false);
@@ -640,11 +645,10 @@ export function CaseDetail({
         form.append("note", attachmentUploadNote.trim());
       }
 
-      const response = await fetch(`/api/cases/${caseItem.id}/attachments`, {
+      const { response, body: result } = await diagnosticJson<ApiMutationResponse>("document.upload", "documents", `/api/cases/${caseItem.id}/attachments`, {
         method: "POST",
         body: form,
-      });
-      const result = (await response.json()) as ApiMutationResponse;
+      }, { caseId: caseItem.id }, value => Boolean(value?.dispatchData));
 
       if (!response.ok || !result.dispatchData) {
         throw new Error(result.error ?? "Prílohy sa nepodarilo nahrať.");
@@ -1798,8 +1802,7 @@ function EditCaseForm({
         form.append("note", attachmentNote.trim());
       }
 
-      const response = await fetch(`/api/cases/${caseItem.id}/attachments`, { method: "POST", body: form });
-      const result = (await response.json()) as ApiMutationResponse & { attachments?: CaseAttachmentInput[] };
+      const { response, body: result } = await diagnosticJson<ApiMutationResponse & { attachments?: CaseAttachmentInput[] }>("document.upload", "documents", `/api/cases/${caseItem.id}/attachments`, { method: "POST", body: form }, { caseId: caseItem.id }, value => Boolean(value?.dispatchData));
 
       if (!response.ok || !result.dispatchData) {
         throw new Error(result.error ?? "Prílohy sa nepodarilo nahrať.");
@@ -1940,6 +1943,9 @@ function EditCaseForm({
     setRefreshOnlyRevision(null);
     const slowTimerId = window.setTimeout(() => setSaveSlow(true), CASE_SAVE_SLOW_MS);
     let failureMessage = "Automatické uloženie zlyhalo.";
+    const finishDiagnostic = beginDiagnosticOperation("case.save", "cases", { caseId: caseItem.id, operationId: operation.mutationId });
+    let diagnosticOutcome: DiagnosticOutcome = "unknown";
+    let diagnosticRequest: { requestId?: string } = {};
 
     try {
       for (let attempt = 0; attempt < CASE_AUTOSAVE_RETRY_DELAYS_MS.length; attempt += 1) {
@@ -1961,6 +1967,8 @@ function EditCaseForm({
             signal: controller.signal,
           });
           const result = (await response.json().catch(() => null)) as ApiMutationResponse | null;
+          diagnosticOutcome = diagnosticResponse(response, result);
+          diagnosticRequest = diagnosticRequestId(response);
 
           if (!response.ok) {
             if (response.status === 409 && result?.code === "CASE_REVISION_CONFLICT") {
@@ -1978,6 +1986,7 @@ function EditCaseForm({
           }
 
           if (!result?.committedRevision || result.mutationId !== operation.mutationId) {
+            diagnosticOutcome = "unknown";
             failureMessage = "Server nepotvrdil identitu uloženia.";
             continue;
           }
@@ -1998,7 +2007,9 @@ function EditCaseForm({
           try {
             const dispatchData = await loadCanonicalCaseState();
             acceptCanonicalCaseState(dispatchData, revision, serializedPayload);
+            diagnosticOutcome = "ok";
           } catch {
+            diagnosticOutcome = "committed_refresh_failed";
             if (latestDraftRef.current === serializedPayload) {
               setRefreshOnlyRevision(revision);
               setSaveError({
@@ -2015,6 +2026,7 @@ function EditCaseForm({
           }
           return true;
         } catch (caught) {
+          diagnosticOutcome = diagnosticFailure(caught);
           failureMessage =
             caught instanceof DOMException && caught.name === "AbortError"
               ? "Automatické uloženie prekročilo časový limit."
@@ -2040,6 +2052,7 @@ function EditCaseForm({
       setSavePhase("error");
       return false;
     } finally {
+      finishDiagnostic({ outcome: diagnosticOutcome, ...diagnosticRequest });
       window.clearTimeout(slowTimerId);
       setSaveSlow(false);
     }

@@ -1,10 +1,12 @@
 import "server-only";
+import { assertAppEnvironment } from "@/lib/app-environment";
 
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { requireSupabasePublicEnv } from "./env";
 
 export async function createSupabaseServerClient() {
+  assertAppEnvironment();
   const { url, publicKey } = requireSupabasePublicEnv();
   const cookieStore = await cookies();
 

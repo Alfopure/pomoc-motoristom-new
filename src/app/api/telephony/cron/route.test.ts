@@ -63,6 +63,7 @@ describe("GET /api/telephony/cron", () => {
 
   beforeEach(() => {
     process.env.CRON_SECRET = SECRET;
+    vi.stubEnv("DIAGNOSTICS_ENABLED", "false");
     runTelephonyCronJobs.mockReset().mockResolvedValue(SUMMARY);
     createTelephonyDeps.mockClear();
     materializeDueTaskReminders.mockClear().mockResolvedValue({ materialized: 0, skipped: 0 });
@@ -71,6 +72,7 @@ describe("GET /api/telephony/cron", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     delete process.env.CRON_SECRET;
   });
 
@@ -101,11 +103,11 @@ describe("GET /api/telephony/cron", () => {
     const body = await response.json();
     expect(body).toMatchObject({
       ...SUMMARY,
-      jobs: [...SUMMARY.jobs, { job: "notifications.materialize", status: "ok", detail: { materialized: 0, skipped: 0 } }, { job: "notifications.pause-ending", status: "ok", detail: { checked: 0, delivered: 0 } }, { job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } }],
+      jobs: [...SUMMARY.jobs, { job: "notifications.materialize", status: "ok", detail: { materialized: 0, skipped: 0 } }, { job: "notifications.pause-ending", status: "ok", detail: { checked: 0, delivered: 0 } }, { job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } }, { job: "diagnostics.maintenance", status: "disabled", detail: {} }],
     });
-    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 3);
+    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 4);
     // The tail jobs are timed too, so the budget split is visible in the response.
-    for (const job of body.jobs.slice(-3)) expect(job).toMatchObject({ ms: expect.any(Number), startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
+    for (const job of body.jobs.slice(-4)) expect(job).toMatchObject({ ms: expect.any(Number), startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
     expect(createTelephonyDeps).toHaveBeenCalledWith({ sweepAfterEvent: false });
     expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps", organizationId: "org-1" }, { cronStartedAt: expect.any(Number) });
     expect(materializeDueTaskReminders).toHaveBeenCalledTimes(1);
@@ -115,12 +117,12 @@ describe("GET /api/telephony/cron", () => {
   it("materialises due reminders, and honours the job control switch", async () => {
     materializeDueTaskReminders.mockResolvedValue({ materialized: 3, skipped: 1 });
     const ran = await (await GET(cronRequest(SECRET))).json();
-    expect(ran.jobs.at(-3)).toMatchObject({ job: "notifications.materialize", status: "ok", detail: { materialized: 3, skipped: 1 } });
+    expect(ran.jobs.find((job: {job: string}) => job.job === "notifications.materialize")).toMatchObject({ job: "notifications.materialize", status: "ok", detail: { materialized: 3, skipped: 1 } });
 
     jobControl = { enabled: false };
     materializeDueTaskReminders.mockClear();
     const off = await (await GET(cronRequest(SECRET))).json();
-    expect(off.jobs.at(-3)).toMatchObject({ job: "notifications.materialize", status: "disabled", detail: { reason: "job_control_disabled" } });
+    expect(off.jobs.find((job: {job: string}) => job.job === "notifications.materialize")).toMatchObject({ job: "notifications.materialize", status: "disabled", detail: { reason: "job_control_disabled" } });
     expect(materializeDueTaskReminders).not.toHaveBeenCalled();
   });
 
@@ -132,8 +134,8 @@ describe("GET /api/telephony/cron", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.status).toBe("degraded");
-    expect(body.jobs.at(-3)).toMatchObject({ job: "notifications.materialize", status: "failed", error: "reminders down" });
-    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 3);
+    expect(body.jobs.find((job: {job: string}) => job.job === "notifications.materialize")).toMatchObject({ job: "notifications.materialize", status: "failed", error: "reminders down" });
+    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 4);
     consoleError.mockRestore();
   });
 
@@ -143,7 +145,7 @@ describe("GET /api/telephony/cron", () => {
 
     const body = await (await GET(cronRequest(SECRET))).json();
     expect(body.status).toBe("degraded");
-    expect(body.jobs.at(-2)).toMatchObject({ job: "notifications.pause-ending", status: "failed", error: "pause warnings down" });
+    expect(body.jobs.find((job: {job: string}) => job.job === "notifications.pause-ending")).toMatchObject({ job: "notifications.pause-ending", status: "failed", error: "pause warnings down" });
     consoleError.mockRestore();
   });
 

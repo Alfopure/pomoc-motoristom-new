@@ -104,6 +104,36 @@ describe("getAiDemoConfig", () => {
 });
 
 describe("aiDemoFromNumber", () => {
+  const TEST_ENV = {
+    MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev",
+    VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk",
+    APP_BASE_URL: "https://test.dispecing.linkapomoci.sk", NEXT_PUBLIC_SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co",
+    MOTORIST_TEST_LIVE_INTEGRATIONS: "true", MOTORIST_TEST_ALLOWED_NUMBERS: "+421900000001",
+    MOTORIST_TEST_FROM_NUMBERS: "+421232400001", AI_DEMO_FROM_NUMBER: "+421232400001",
+  };
+
+  it("uses only an explicit dedicated caller ID in stable TEST", () => {
+    expect(aiDemoFromNumber(TEST_ENV)).toEqual({ number: "+421232400001" });
+    expect(getAiDemoConfig({ ...FULL, ...TEST_ENV }).configured).toBe(true);
+  });
+
+  it.each([
+    { AI_DEMO_FROM_NUMBER: "" },
+    { AI_DEMO_FROM_NUMBER: "+421232400002" },
+    { VERCEL_ENV: "preview" },
+    { MOTORIST_APP_ENV: "" },
+    { MOTORIST_TEST_LIVE_INTEGRATIONS: "false" },
+    { MOTORIST_TEST_FROM_NUMBERS: "+421*" },
+    { SUPABASE_PROJECT_REF: "ifpaeegaesdmljfkdvcn" },
+    { AI_DEMO_FROM_NUMBER: AI_DEMO_NEUTRAL_LINE, MOTORIST_TEST_FROM_NUMBERS: AI_DEMO_NEUTRAL_LINE },
+    { AI_DEMO_FROM_NUMBER: "+421232408718", MOTORIST_TEST_FROM_NUMBERS: "+421232408718" },
+  ])("rejects a TEST caller ID boundary without a production fallback: %j", override => {
+    expect(aiDemoFromNumber({ ...TEST_ENV, ...override })).toHaveProperty("invalid");
+    const config = getAiDemoConfig({ ...FULL, ...TEST_ENV, ...override });
+    expect(config.configured).toBe(false);
+    if (!config.configured) expect(config.missing).toContain("AI_DEMO_FROM_NUMBER");
+  });
+
   it("defaults to the neutral line", () => {
     expect(aiDemoFromNumber({})).toEqual({ number: AI_DEMO_NEUTRAL_LINE });
   });

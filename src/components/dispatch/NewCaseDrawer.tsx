@@ -1,4 +1,5 @@
 "use client";
+import { diagnosticJson } from "@/lib/diagnostics/request";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
 import { CaseAccessBoundary, useCaseEditorPresence, useCaseCollaboration } from "./CaseCollaborationProvider";
@@ -586,12 +587,11 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
     };
 
     try {
-      const response = await fetch("/api/cases", {
+      const { response, body: result } = await diagnosticJson<ApiMutationResponse>("case.create", "cases", "/api/cases", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...payload, editorSessionId: editorPresence.sessionId() }),
-      });
-      const result = (await response.json()) as ApiMutationResponse;
+      }, {}, value => Boolean(value?.caseId && value?.dispatchData));
 
       if (!response.ok || !result.caseId || !result.dispatchData) {
         throw new Error(result.error ?? "Prípad sa nepodarilo uložiť.");
@@ -607,11 +607,10 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
           if (attachmentNote.trim()) {
             uploadForm.append("note", attachmentNote.trim());
           }
-          const uploadResponse = await fetch(`/api/cases/${result.caseId}/attachments`, {
+          const { response: uploadResponse, body: uploadResult } = await diagnosticJson<ApiMutationResponse>("document.upload", "documents", `/api/cases/${result.caseId}/attachments`, {
             method: "POST",
             body: uploadForm,
-          });
-          const uploadResult = (await uploadResponse.json()) as ApiMutationResponse;
+          }, { caseId: result.caseId }, value => Boolean(value?.dispatchData));
 
           if (!uploadResponse.ok || !uploadResult.dispatchData) {
             throw new Error(uploadResult.error ?? "Prílohy sa nepodarilo nahrať.");

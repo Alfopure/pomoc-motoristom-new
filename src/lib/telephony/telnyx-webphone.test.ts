@@ -103,7 +103,7 @@ function fakeCall(overrides: Partial<WebphoneSdkCall> = {}): WebphoneSdkCall & {
 
 type Request = { url: string; body: unknown };
 
-function harness(options: { silent?: boolean; token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"] } = {}) {
+function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: boolean; token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"] } = {}) {
   const requests: Request[] = [];
   const timers: Array<{ id: number; handler: () => void; delayMs: number }> = [];
   let nextTimer = 1;
@@ -111,6 +111,7 @@ function harness(options: { silent?: boolean; token?: TelephonyJsonResult<unknow
 
   const phone = new TelnyxWebphone({
     silent: options.silent ?? true,
+    logger: options.logger,
     now: options.now ?? (() => Date.parse("2026-09-03T08:00:00.000Z")),
     createClient: options.createClient ?? (options.loadSdk ? undefined : credentials => { client.options.login_token = credentials.token; return client; }),
     loadSdk: options.loadSdk,
@@ -209,6 +210,41 @@ function heartbeatWorkers() {
 }
 
 describe("TelnyxWebphone", () => {
+  it("keeps active call control working when the diagnostic observer throws", async () => {
+    const logger = vi.fn(() => { throw new Error("collector unavailable"); });
+    const h = harness({ logger });
+    expect(() => h.phone.start()).not.toThrow();
+    await flush();
+    expect(() => h.client.emit("telnyx.ready")).not.toThrow();
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "session-1" });
+    const call = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+    expect(call.answered).toBe(true);
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    expect(() => h.phone.hangup()).not.toThrow();
+    expect(call.hungUp).toBe(true);
+    expect(() => h.phone.stop("component_unmount")).not.toThrow();
+    expect(h.client.disconnected).toBe(true);
+    expect(logger).toHaveBeenCalled();
+  });
+
+  it("captures the active identities and stop reason before SDK disconnect destroys them", async () => {
+    const entries: Array<Record<string, unknown>> = [];
+    const h = harness({ logger: entry => entries.push({ ...entry, alreadyDisconnected: h.client.disconnected }) });
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "session-1" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: fakeCall() });
+    await flush();
+    h.phone.stop("component_unmount");
+    expect(entries.filter(e => e.event === "stop" || e.event === "disconnect")).toEqual([
+      expect.objectContaining({ event: "stop", reason: "component_unmount", deviceSessionId: "device-1", callSessionId: "session-1", alreadyDisconnected: false }),
+      expect.objectContaining({ event: "disconnect", reason: "component_unmount", deviceSessionId: "device-1", callSessionId: "session-1", alreadyDisconnected: false }),
+    ]);
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(h.client.disconnected).toBe(true);
+  });
+
   it.each([true, false])("records the actual ringtone start result %s without sending a request on the invite path", async (played) => {
     vi.spyOn(BrowserIncomingRingtone.prototype, "start").mockResolvedValue(played);
     const h = harness({ silent: false });

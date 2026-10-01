@@ -4,6 +4,7 @@ import type { TelephonyCronJobResult } from './cron-jobs';
 import { checkpointRecordingJob, record, RecordingProcessingError, type RecordingAdmin, type RecordingJob, type RecordingJobContext, type RecordingJobOutcome, type RecordingPolicy } from './recording-jobs';
 import { deleteRecordingStorage, processRecordingImport } from './recording-storage';
 import { processRecordingAsrJob, processScribeCleanupJob } from './recording-asr';
+import { assertRecordingProviderAccess } from './recording-provider-safety';
 
 export const RECORDING_PROCESSING_BUDGET_MS = 15_000;
 /**
@@ -21,8 +22,9 @@ export function recordingJobEnabled(kind: string, policy: RecordingPolicy | null
   if (kind === 'analysis') return env.AI_TRANSCRIPT_ENABLED === 'true' && policy.analysis_enabled;
   return kind === 'import';
 }
-async function deleteRecordingJob(ctx: RecordingJobContext): Promise<RecordingJobOutcome> {
+export async function deleteRecordingJob(ctx: RecordingJobContext): Promise<RecordingJobOutcome> {
   if (!ctx.recording) return { state: 'complete' };
+  const providerProof = ctx.recording.provider_recording_id ? await assertRecordingProviderAccess(ctx, 'delete') : undefined;
   const originals = await ctx.admin.from('motorist_call_processing_jobs').select('checkpoint').eq('recording_id', ctx.recording.id).eq('organization_id', ctx.organizationId).eq('kind', 'import').abortSignal(ctx.signal);
   if (originals.error) throw new RecordingProcessingError('cleanup_lookup_failed', true);
   for (const row of originals.data ?? []) {
@@ -32,7 +34,7 @@ async function deleteRecordingJob(ctx: RecordingJobContext): Promise<RecordingJo
   await deleteRecordingStorage(ctx);
   const unresolvedUpload=(originals.data??[]).some(row=>record(row.checkpoint).upload_create_started_at&&!record(row.checkpoint).upload_url);
   const id = ctx.recording.provider_recording_id, key = process.env.TELNYX_API_KEY?.trim();
-  if (id) {
+  if (id && providerProof !== null) {
     if (!key) throw new RecordingProcessingError('recording_provider_not_configured', true);
     const response = await fetch(`https://api.telnyx.com/v2/recordings/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${key}` }, cache: 'no-store', redirect: 'error', signal: ctx.signal });
     if (!response.ok && response.status !== 404) throw new RecordingProcessingError('recording_provider_delete_unconfirmed', true);

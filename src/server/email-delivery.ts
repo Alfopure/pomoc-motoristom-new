@@ -1,4 +1,6 @@
 import "server-only";
+import { isTestLiveDeployment } from "@/lib/app-environment";
+import { getTestProviderSafety } from "@/server/telephony/telnyx/test-safety";
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
@@ -20,6 +22,16 @@ type EmailConfig =
   | { enabled: true; provider: "resend"; apiKey: string; from: string; replyTo?: string; appName: string }
   | { enabled: false; provider: "resend" | "disabled"; error: string | null; from?: string; replyTo?: string; appName: string };
 
+/** null means ordinary production/local behavior; an empty list disables TEST email. */
+function testEmailRecipients(): string[] | null {
+  if (!getTestProviderSafety().restricted) return null;
+  if (!isTestLiveDeployment() || process.env.MOTORIST_TEST_LIVE_INTEGRATIONS !== "true") return [];
+  const entries = process.env.MOTORIST_TEST_ALLOWED_EMAILS?.split(",").map(value => value.trim().toLowerCase()) ?? [];
+  return entries.length > 0 && entries.length <= 50 && entries.every(value =>
+    value.length <= 254 && /^[a-z0-9._+-]+@[a-z0-9]+(?:[.-][a-z0-9]+)*\.[a-z]{2,}$/.test(value))
+    ? [...new Set(entries)] : [];
+}
+
 export function getEmailConfig(): EmailConfig {
   const provider = cleanString(process.env.EMAIL_PROVIDER).toLowerCase() || "disabled";
   const appName = cleanString(process.env.EMAIL_APP_NAME) || "Pomoc Motoristom";
@@ -32,6 +44,10 @@ export function getEmailConfig(): EmailConfig {
 
   if (provider !== "resend") {
     return { enabled: false, provider: "resend", error: `Unsupported EMAIL_PROVIDER: ${provider}`, from, replyTo, appName };
+  }
+
+  if (testEmailRecipients()?.length === 0) {
+    return { enabled: false, provider: "resend", error: "TEST email is disabled or has no approved recipients", from, replyTo, appName };
   }
 
   const apiKey = cleanString(process.env.RESEND_API_KEY);
@@ -63,6 +79,11 @@ export async function sendEmail(message: EmailMessage): Promise<EmailDeliveryRes
 
   if (to.length === 0) {
     return { status: "failed", provider: "resend", error: "No recipient email configured" };
+  }
+
+  const allowed = testEmailRecipients();
+  if (allowed && !to.every(recipient => allowed.includes(recipient.toLowerCase()))) {
+    return { status: "disabled", provider: "resend", error: "TEST email recipient is outside the approved boundary" };
   }
 
   const payload = removeUndefinedFields({

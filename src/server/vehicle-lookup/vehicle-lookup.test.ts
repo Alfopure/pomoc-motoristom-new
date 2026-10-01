@@ -18,7 +18,9 @@ describe("Slovak vehicle identity and proposals", () => {
   it("normalizes only separators, accepts European VIN without US checksum", () => {
     expect(parseVehicleLookupInput({ kind: "vin", value: "wvw zzz1jz-xw000001", country: "SK" }).query.value).toBe(vin);
     expect(() => parseVehicleLookupInput({ kind: "vin", value: "IIIIIIIIIIIIIIIII", country: "SK" })).toThrow();
-    expect(() => parseVehicleLookupInput({ kind: "plate", value: "XX000XX", country: "CZ" })).toThrow();
+    expect(parseVehicleLookupInput({ kind: "plate", value: "1aa a111", country: "CZ" }).query).toMatchObject({ value: "1AAA111", country: "CZ" });
+    expect(() => parseVehicleLookupInput({ kind: "plate", value: "ABCDEFG", country: "CZ" })).toThrow();
+    expect(() => parseVehicleLookupInput({ kind: "plate", value: "1AA A111", country: "CZ", knownIdentity: { country: "SK" } })).toThrow();
     expect(() => parseVehicleLookupInput({ kind: "plate", value: "https://internal", country: "SK" })).toThrow();
     expect(() => parseVehicleLookupInput({ kind: "plate", value: "XX000XX", country: "SK", knownIdentity: { vin: "bad" } })).toThrow();
   });

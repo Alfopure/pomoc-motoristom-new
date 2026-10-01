@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { recordServerDiagnostic } from "@/server/diagnostics/record";
+import { isDiagnosticUuid, type DiagnosticReason } from "@/lib/diagnostics/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
@@ -42,6 +44,13 @@ export const CREDENTIAL_NAME_PREFIX = "pm";
 export const CREDENTIAL_TAG = "pomoc-motoristom";
 /** Refresh the credential when it expires within this window. */
 const CREDENTIAL_RENEW_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function recordDeviceTransition(deps: DeviceDeps, device: DeviceRow, reason: DiagnosticReason) {
+  if (deps.deviceKind === "mobile" || !isDiagnosticUuid(device.device_session_id)) return;
+  recordServerDiagnostic({organizationId: device.organization_id, profileId: device.profile_id}, {
+    type: "phone_lifecycle", module: "telephony", outcome: "ok", reason, deviceSessionId: device.device_session_id,
+  });
+}
 
 function deviceTable(deps: DeviceDeps) {
   return deps.deviceKind === "mobile" ? "motorist_operator_mobile_devices" as const : "motorist_operator_devices" as const;
@@ -146,6 +155,7 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
   if (previousCredentialId && previousCredentialId !== credential.id) {
     await deleteCredentialAtProvider(deps, previousCredentialId, "Staré prihlasovacie údaje sa nepodarilo zrušiť u operátora");
   }
+  if (existing) recordDeviceTransition(deps, existing, "superseded");
   return saved.data;
 }
 
@@ -276,6 +286,11 @@ export async function issueWebphoneToken(
   // A slow token response cannot overwrite a newer takeover or revocation.
   if (!updated) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
 
+  if (!renewing) {
+    if (device.device_session_id) recordDeviceTransition(deps, device, "superseded");
+    recordDeviceTransition(deps, updated, "registering");
+  }
+
   return { token, expiresAt: expiresAt.toISOString(), deviceSessionId, sipUsername, credentialId };
 }
 
@@ -309,6 +324,7 @@ export async function touchDevice(
     };
   });
   if (!updated) return { ok: false, reason: "stale_session" };
+  if (updated.registration_state !== device.registration_state) recordDeviceTransition(deps, updated, updated.registration_state === "error" ? "auth_failure" : updated.registration_state);
   return { ok: true, device: updated };
 }
 
@@ -319,6 +335,7 @@ async function revokeDeviceSession(deps: DeviceDeps, device: DeviceRow): Promise
     metadata: toJson(retainDeviceLastOnline(current, nowOf(deps))),
   }));
   if (!updated) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+  recordDeviceTransition(deps, device, "ownership_release");
   return updated;
 }
 

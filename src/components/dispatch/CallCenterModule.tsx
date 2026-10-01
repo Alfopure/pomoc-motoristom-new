@@ -460,7 +460,7 @@ export function CallCenterModule({
         </div>
       </div>
 
-      <CallDetailDrawer call={detailCall} open={Boolean(detailCall)} onClose={() => setDetailCall(null)} onNewCase={onNewCase} />
+      <CallDetailDrawer call={detailCall} open={Boolean(detailCall)} onClose={() => setDetailCall(null)} onNewCase={onNewCase} canViewDiagnostics={canManageCalls} />
     </main>
   );
 }

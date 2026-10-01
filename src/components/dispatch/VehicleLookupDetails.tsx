@@ -49,10 +49,11 @@ export function VehicleLookupDetails(props: Props) {
   const headingId = useId();
   const descriptionId = useId();
   const { result } = props.snapshot;
+  const isCzech = result.query.country === "CZ";
   const facts = preferredVehicleFacts(result, true);
   const conflicts = vehicleFactConflicts(result, props.includePartial);
   const partial = Object.values(facts).some(fact => fact.quality === "partial");
-  const insurance = result.sources.find(source => source.source === "skp");
+  const insurance = isCzech ? undefined : result.sources.find(source => source.source === "skp");
   const skpPlateDifference = props.conflict ? undefined : vinLinkedSkpPlateDifference(result);
   const title = [facts.make?.value, facts.model?.value].filter(Boolean).join(" ");
 
@@ -108,7 +109,7 @@ export function VehicleLookupDetails(props: Props) {
         <p className="text-xs font-medium text-zinc-500">{props.readOnly ? "Výsledok overenia vozidla" : props.proposal ? "Dohľadané údaje · návrh" : "Uložené overenie vozidla"}</p>
         <h2 id={headingId} className="mt-1 text-lg font-semibold">Detail vozidla{title ? ` · ${title}` : ""}</h2>
         <p id={descriptionId} className="mt-1 break-words text-xs text-zinc-600">{facts.plate?.value ?? props.identity.plate ?? result.query.value}{facts.vin && ` · VIN ${facts.vin.value}`}</p>
-        <p className={`mt-2 text-xs ${props.conflict ? "font-medium text-amber-900" : "text-zinc-700"}`}>{props.conflict ? "Identita nesúhlasí · PZP vozidla nepotvrdené" : <>PZP: <strong>{facts.insuranceStatus?.value ?? "nepotvrdené"}</strong>{facts.insurer && ` · ${facts.insurer.value}`} · k {vehicleLookupDate(result.query.checkedForDate)}</>}</p>
+        <p className={`mt-2 text-xs ${props.conflict ? "font-medium text-amber-900" : "text-zinc-700"}`}>{props.conflict ? "Identita nesúhlasí · PZP vozidla nepotvrdené" : <>PZP: <strong>{facts.insuranceStatus?.value ?? (isCzech ? "neoverené" : "nepotvrdené")}</strong>{facts.insurer && ` · ${facts.insurer.value}`} · k {vehicleLookupDate(result.query.checkedForDate)}</>}</p>
       </div>
       <button type="button" autoFocus aria-label={props.proposal ? "Zavrieť návrh dohľadania" : "Zavrieť detail vozidla"} onClick={() => closeDialog()} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-yellow-500"><X size={18} /></button>
     </header>
@@ -120,14 +121,19 @@ export function VehicleLookupDetails(props: Props) {
       </section>
       <section aria-label="Poistenie vozidla" className="min-w-0 rounded-xl border border-zinc-200 bg-white p-4">
         <div className="flex items-start gap-3"><Shield size={20} className="mt-0.5 shrink-0 text-zinc-500" /><div>
-          <h3 className="text-base font-semibold">Povinné zmluvné poistenie</h3>
+          <h3 className="text-base font-semibold">{isCzech ? "Povinné ručenie" : "Povinné zmluvné poistenie"}</h3>
           <p className="mt-1 text-xs text-zinc-600">Overované ku dňu {vehicleLookupDate(result.query.checkedForDate)}</p>
         </div></div>
-        {props.conflict ? <p className="mt-3 text-sm font-medium text-amber-900">PZP vozidla nepotvrdené. Identita zo zdrojov nesúhlasí; overte VIN v dokladoch. Pôvodné výsledky sú uvedené v podrobnostiach jednotlivých zdrojov.</p> : facts.insuranceStatus || facts.insurer ? <dl className="mt-3 grid gap-2 sm:grid-cols-2">{factRow("insuranceStatus")}{factRow("insurer")}</dl> : <p className="mt-3 text-sm font-medium text-amber-900">PZP sa nepodarilo potvrdiť.{insurance && ` ${statusLabel[insurance.status]}.`}</p>}
+        {props.conflict ? <p className="mt-3 text-sm font-medium text-amber-900">PZP vozidla nepotvrdené. Identita zo zdrojov nesúhlasí; overte VIN v dokladoch. Pôvodné výsledky sú uvedené v podrobnostiach jednotlivých zdrojov.</p> : facts.insuranceStatus || facts.insurer ? <dl className="mt-3 grid gap-2 sm:grid-cols-2">{factRow("insuranceStatus")}{factRow("insurer")}</dl> : <p className="mt-3 text-sm font-medium text-amber-900">{isCzech ? "Poistenie zatiaľ nebolo automaticky overené." : `PZP sa nepodarilo potvrdiť.${insurance ? ` ${statusLabel[insurance.status]}.` : ""}`}</p>}
         {!facts.insuranceStatus && <p className="mt-1 text-xs text-zinc-600">Chýbajúci výsledok neznamená, že vozidlo nie je poistené.</p>}
         {skpPlateDifference && <p className="mt-2 rounded-lg bg-amber-50 p-3 text-xs text-amber-950">SKP uvádza EČV {skpPlateDifference.skpPlate}, technický zdroj {skpPlateDifference.technicalPlate}. VIN sa zhoduje, preto sa môžu prevziať údaje o PZP. EČV vo formulári ostáva podľa technického zdroja; pri pochybnostiach ho overte v dokladoch.</p>}
         <p className="mt-2 text-xs text-zinc-500">Pri staršom zásahu nejde o overenie ku dňu incidentu.</p>
       </section>
+      {isCzech && <section aria-label="Česká diaľničná známka" className="min-w-0 rounded-xl border border-zinc-200 bg-white p-4">
+        <h3 className="text-base font-semibold">Česká diaľničná známka</h3>
+        {facts.vignetteStatus || facts.vignetteValidFrom || facts.vignetteValidUntil ? <dl className="mt-3 grid gap-2 sm:grid-cols-2">{factRow("vignetteStatus")}{factRow("vignetteValidFrom")}{factRow("vignetteValidUntil")}</dl> : <p className="mt-2 text-sm text-amber-900">Známku sa nepodarilo automaticky overiť.</p>}
+        <a href="https://edalnice.gov.cz/cs" target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-xs font-medium underline underline-offset-2">Overiť známku na eDalnice<ExternalLink size={12} /></a>
+      </section>}
       <section aria-labelledby={`${headingId}-identity`} className="min-w-0">
         <h3 id={`${headingId}-identity`} className="text-base font-semibold">Identifikácia a ďalšie údaje</h3>
         <dl className="mt-2 grid gap-2 sm:grid-cols-2">{identityFields.map(field => factRow(field))}</dl>
@@ -154,7 +160,7 @@ export function VehicleLookupDetails(props: Props) {
           })}
           {Object.keys(source.facts).length > 0 && <details className="mt-2"><summary className="cursor-pointer font-medium text-zinc-700">Všetky údaje tohto zdroja</summary><dl className="mt-2 divide-y divide-zinc-100 text-sm">{(Object.entries(source.facts) as [VehicleField, VehicleFact][]).map(([field, fact]) => <div key={field} className="grid grid-cols-1 gap-1 py-2 sm:grid-cols-2 sm:gap-4"><dt className="min-w-0 text-zinc-500">{vehicleFieldLabels[field]}{fact.quality === "partial" ? " · návrh" : ""}</dt><dd className="min-w-0 font-medium sm:text-right">{fact.value}{fact.quality === "decoded" && <span className="block font-normal text-zinc-500">Dekódované z VIN</span>}</dd></div>)}</dl></details>}
         </div>)}</div>
-        <p className="mt-3 text-xs text-zinc-600">Diaľničná známka nebola automaticky overená. <a href="https://eznamka.sk/selfcare/modification/select/select-vignettes/?operation=Check" target="_blank" rel="noreferrer" className="underline">Otvoriť overenie známky</a></p>
+        {!isCzech && <p className="mt-3 text-xs text-zinc-600">Diaľničná známka nebola automaticky overená. <a href="https://eznamka.sk/selfcare/modification/select/select-vignettes/?operation=Check" target="_blank" rel="noreferrer" className="underline">Otvoriť overenie známky</a></p>}
       </section>
     </div>
     <footer className="shrink-0 border-t border-zinc-200 bg-white p-4 sm:px-5">

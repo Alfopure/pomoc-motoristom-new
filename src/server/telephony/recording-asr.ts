@@ -5,6 +5,7 @@ import type { RecordingTranscriptSpan } from '@/lib/telephony/recording-quality'
 import { record, reserveRecordingBudget, RecordingProcessingError, type RecordingAdmin, type RecordingJobContext, type RecordingJobOutcome, type RecordingRow } from './recording-jobs';
 import { preserveRecordingAudioProvenance } from './recording-audio-integrity';
 import { signedRecordingSource } from './recording-storage';
+import { assertTestProcessingJob, assertTestProcessingResume, beginTestProcessing, bindTestScribeResources, checkpointTestProcessing, testCleanupSource } from './recording-test-provenance';
 
 export function normalizeScribeLanguage(value: unknown): string {
   if (typeof value !== 'string' || !/^[a-z]{2,3}$/i.test(value)) return 'und';
@@ -46,6 +47,7 @@ export function verifiedMultiChannel(manifest: Json) {
   return data.timingVerified === true && record(data.audioFormat).channels === 2 && data.channelMappingVerified === true && data.coverage === 'verified' && data.identitySource === 'authenticated_leg_binding' && intervals.length > 0 && intervals.every(i => i.verified === true && (i.channel === 0 || i.channel === 1) && ['customer', 'operator'].includes(String(i.role)));
 }
 export async function processRecordingAsrJob(ctx: RecordingJobContext): Promise<RecordingJobOutcome> {
+  assertTestProcessingResume(ctx.job);
   const ids = record(ctx.job.provider_ids), checkpoint = record(ctx.job.checkpoint);
   if (ids.scribe_request_id || checkpoint.submit_started_at) return {
     state: Date.now() - Date.parse(String(checkpoint.submit_started_at)) > 24 * 3600_000 ? 'submission_unknown' : 'waiting',
@@ -56,6 +58,7 @@ export async function processRecordingAsrJob(ctx: RecordingJobContext): Promise<
   const measuredDuration = record(r?.participant_manifest).audioDurationSeconds;
   const durationSeconds = Math.max(r?.duration_seconds ?? 0, typeof measuredDuration === 'number' ? measuredDuration : 0);
   if (!r?.storage_path || r.status !== 'available' || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > ctx.policy.max_segment_seconds) throw new RecordingProcessingError('asr_source_invalid');
+  await beginTestProcessing(ctx, [r]);
   if (r.started_at && r.ended_at && r.session_id && typeof record(r.metadata).recorder_id === 'string') {
     const session = await ctx.admin.from('motorist_call_sessions').select('*').eq('id', r.session_id).eq('organization_id', ctx.organizationId).abortSignal(ctx.signal).maybeSingle();
     if (session.error) throw new RecordingProcessingError('participant_refresh_failed', true);
@@ -73,12 +76,15 @@ export async function processRecordingAsrJob(ctx: RecordingJobContext): Promise<
   // Conservative reserve, not an invoice: $1 per channel-hour bounds the pilot.
   if (!await reserveRecordingBudget(ctx, Math.max(0.01, durationSeconds / 3600 * (multiChannel ? 2 : 1)))) return { state: 'waiting', errorCode: 'daily_budget_exceeded' };
   const sourceUrl = await signedRecordingSource(r.storage_path, ctx.signal);
-  if (!await ctx.checkpoint({ submit_started_at: new Date().toISOString(), multi_channel: multiChannel }, true)) return { state: 'cancelled', errorCode: 'lease_lost' };
+  if (!await checkpointTestProcessing(ctx, { submit_started_at: new Date().toISOString(), multi_channel: multiChannel }, true)) return { state: 'cancelled', errorCode: 'lease_lost' };
   try {
     const ack = await submitScribeAsync({ sourceUrl, correlationToken: ctx.job.correlation_token, multiChannel, signal: ctx.signal });
+    await bindTestScribeResources(ctx.admin, ctx.job, { scribe_request_id: ack.requestId, ...(ack.transcriptionId ? {scribe_transcript_id:ack.transcriptionId} : {}) }, ctx.signal);
     const binding = await ctx.admin.rpc('motorist_recording_bind_scribe_ack', {p_correlation_token:ctx.job.correlation_token,p_request_id:ack.requestId,p_provider_transcript_id:ack.transcriptionId}).abortSignal(ctx.signal);
     if(binding.error) throw new RecordingProcessingError('scribe_ack_bind_failed',true);
     // An early signed callback may already have completed this job; the CAS then refuses to overwrite it.
+    // Proofs were CAS-merged above. An early callback may since have added its
+    // transcript proof: never rewrite that map from this lease's stale snapshot.
     await ctx.checkpoint({}, false, { scribe_request_id: ack.requestId, ...(ack.transcriptionId ? {scribe_transcript_id:ack.transcriptionId} : {}) });
     return { state: 'waiting', providerIds: { scribe_request_id: ack.requestId, ...(ack.transcriptionId ? {scribe_transcript_id:ack.transcriptionId} : {}) }, nextAttemptAt: new Date(Date.now() + 300_000).toISOString() };
   } catch (error) {
@@ -125,6 +131,7 @@ export async function acceptScribeWebhook(admin: RecordingAdmin, raw: string, si
   const jobResult = await admin.from('motorist_call_processing_jobs').select('*').eq('correlation_token', token).eq('kind', 'asr').abortSignal(signal).maybeSingle();
   if (jobResult.error) throw new RecordingProcessingError('scribe_lookup_failed', true);
   const job = jobResult.data; if (!job?.recording_id) return 'ignored';
+  assertTestProcessingJob(job);
   const [source, call] = await Promise.all([
     admin.from('motorist_call_recordings').select('*').eq('id', job.recording_id).eq('organization_id', job.organization_id).abortSignal(signal).maybeSingle(),
     admin.from('motorist_calls').select('started_at').eq('id', job.call_id).eq('organization_id', job.organization_id).abortSignal(signal).maybeSingle(),
@@ -137,11 +144,13 @@ export async function acceptScribeWebhook(admin: RecordingAdmin, raw: string, si
   const text = typeof transcript.text === 'string' ? transcript.text : '';
   if (text.length > 300_000) throw new RecordingProcessingError('scribe_text_limit');
   const transcriptId = typeof transcript.transcription_id === 'string' ? transcript.transcription_id : typeof data.transcription_id === 'string' ? data.transcription_id : typeof record(job.provider_ids).scribe_transcript_id === 'string' ? String(record(job.provider_ids).scribe_transcript_id) : null;
+  await bindTestScribeResources(admin, job, { scribe_request_id: data.request_id, ...(transcriptId ? { scribe_transcript_id: transcriptId } : {}) }, signal);
   const result = await admin.rpc('motorist_recording_accept_scribe', { p_correlation_token: token, p_request_id: data.request_id, p_transcript_text: deleted ? '' : text, p_segments: spans as unknown as Json, p_language: normalizeScribeLanguage(transcript.language_code), p_provider_transcript_id: transcriptId }).abortSignal(signal);
   if (result.error) throw new RecordingProcessingError('scribe_persist_failed', true);
   return result.data ? 'accepted' : 'ignored';
 }
 export async function processScribeCleanupJob(ctx: RecordingJobContext): Promise<RecordingJobOutcome> {
+  await testCleanupSource(ctx, 'asr');
   const ids = record(ctx.job.provider_ids), id = ids.scribe_transcript_id;
   // A confirmed HTTP rejection created no transcript. Ambiguous submissions and
   // acknowledged requests without a transcript ID still require reconciliation.

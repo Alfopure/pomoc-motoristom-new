@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { VehicleQuery, VehicleSource, VehicleSourceResult } from "@/lib/vehicle-lookup";
 
-const mocks = vi.hoisted(() => ({ databaza: vi.fn(), skp: vi.fn(), stk: vi.fn(), haka: vi.fn(), vpic: vi.fn(), text: vi.fn() }));
+const mocks = vi.hoisted(() => ({ databaza: vi.fn(), skp: vi.fn(), stk: vi.fn(), haka: vi.fn(), vpic: vi.fn(), text: vi.fn(), autokuk: vi.fn(), mycarplate: vi.fn(), rsv: vi.fn() }));
 vi.mock("./providers/databazavozidiel", () => ({ DATABAZA_VOZIDIEL_URL: "https://www.databazavozidiel.sk/api/vehicles", lookupDatabazaVozidiel: mocks.databaza }));
 vi.mock("./providers/skp-browser", () => ({ lookupSkp: mocks.skp }));
 vi.mock("./providers/stkonline", async (original) => ({ ...await original<typeof import("./providers/stkonline")>(), parseStkOnline: mocks.stk }));
 vi.mock("./providers/haka", async (original) => ({ ...await original<typeof import("./providers/haka")>(), parseHaka: mocks.haka }));
 vi.mock("./providers/vpic", () => ({ parseVpic: mocks.vpic }));
 vi.mock("./providers/http", async (original) => ({ ...await original<typeof import("./providers/http")>(), providerText: mocks.text }));
+vi.mock("./providers/autokuk", () => ({ AUTOKUK_URL: "https://autokuk.cz/api", lookupAutokuk: mocks.autokuk }));
+vi.mock("./providers/mycarplate", () => ({ MYCARPLATE_URL: "https://www.mycarplate.online/countries/czech-republic", lookupMyCarPlate: mocks.mycarplate }));
+vi.mock("./providers/rsv", () => ({ RSV_URL: "https://dataovozidlech.cz/vyhledavani", lookupRsv: mocks.rsv }));
 
 import { executeVehicleLookup, type LookupProviders } from "./execute";
 
@@ -29,8 +32,51 @@ beforeEach(() => {
   mocks.haka.mockReturnValue(source("haka"));
   mocks.skp.mockResolvedValue(source("skp", "found", { insuranceStatus: { value: "Poistené", quality: "reported" } }));
   mocks.vpic.mockReturnValue(source("vpic"));
+  mocks.autokuk.mockResolvedValue(source("autokuk"));
+  mocks.mycarplate.mockResolvedValue(source("mycarplate"));
+  mocks.rsv.mockResolvedValue(source("rsv"));
 });
 afterEach(() => { vi.useRealTimers(); vi.resetAllMocks(); });
+
+describe("Czech vehicle lookup", () => {
+  const czechQuery: VehicleQuery = { kind: "plate", value: "1AAA111", country: "CZ", checkedForDate: "2026-09-15" };
+  const czechProviders: LookupProviders = { ...enabled, autokuk: false, mycarplate: true, rsv: true };
+
+  it("uses a verified plate-to-VIN binding for the official registry without calling Slovak providers", async () => {
+    mocks.mycarplate.mockResolvedValue(source("mycarplate", "found", {
+      plate: { value: czechQuery.value, quality: "reported" }, vin: { value: vin, quality: "reported" }, make: { value: "TEST", quality: "reported" },
+    }));
+    mocks.rsv.mockResolvedValue(source("rsv", "found", { vin: { value: vin, quality: "reported" }, vehicleCategory: { value: "M1", quality: "reported" } }));
+    const result = await executeVehicleLookup(czechQuery, czechProviders);
+    expect(mocks.mycarplate).toHaveBeenCalledExactlyOnceWith(czechQuery, { timeoutMs: expect.any(Number) });
+    expect(mocks.rsv).toHaveBeenCalledExactlyOnceWith({ ...czechQuery, kind: "vin", value: vin }, { timeoutMs: expect.any(Number) });
+    expect(result.sources.map(item => item.source)).toEqual(["autokuk", "mycarplate", "rsv", "vpic"]);
+    expect(result.sources.find(item => item.source === "rsv")?.facts.vehicleCategory?.value).toBe("M1");
+    expect(mocks.skp).not.toHaveBeenCalled();
+    expect(mocks.stk).not.toHaveBeenCalled();
+    expect(mocks.databaza).not.toHaveBeenCalled();
+    expect(mocks.haka).not.toHaveBeenCalled();
+  });
+
+  it("keeps VIN-dependent enrichment off when the plate result is ambiguous", async () => {
+    mocks.autokuk.mockResolvedValue(source("autokuk", "ambiguous"));
+    const result = await executeVehicleLookup(czechQuery, { ...czechProviders, autokuk: true });
+    expect(mocks.mycarplate).not.toHaveBeenCalled();
+    expect(mocks.rsv).not.toHaveBeenCalled();
+    expect(mocks.text).not.toHaveBeenCalled();
+    expect(result.sources.find(item => item.source === "rsv")?.status).toBe("unsupported");
+    expect(result.sources.find(item => item.source === "rsv")?.warnings[0]).toContain("overený VIN");
+  });
+
+  it("queries a user-entered Czech VIN directly and leaves insurance unverified", async () => {
+    const vinQuery: VehicleQuery = { ...czechQuery, kind: "vin", value: vin };
+    mocks.rsv.mockResolvedValue(source("rsv", "found", { vin: { value: vin, quality: "reported" }, grossWeightKg: { value: "2100", quality: "reported" } }));
+    const result = await executeVehicleLookup(vinQuery, czechProviders);
+    expect(mocks.rsv).toHaveBeenCalledExactlyOnceWith(vinQuery, { timeoutMs: expect.any(Number) });
+    expect(mocks.mycarplate).not.toHaveBeenCalled();
+    expect(result.sources.some(item => item.source === "skp" || item.facts.insurer || item.facts.insuranceStatus)).toBe(false);
+  });
+});
 
 describe("VIN-first PZP lookup", () => {
   it("runs the registry and STK together, then uses the registry's verified VIN for insurance", async () => {

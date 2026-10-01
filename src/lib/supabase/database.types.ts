@@ -72,6 +72,11 @@ export type AiDemoDialOutcome = "none" | "unknown" | "accepted" | "rejected";
 export type Database = {
   public: {
     Tables: {
+      motorist_diagnostic_events: Table<{id:string;organization_id:string;environment:string;profile_id:string|null;source:string;received_at:string;server_build:string;call_session_id:string|null;case_id:string|null;device_session_id:string|null;event:Json}>;
+      motorist_diagnostic_incidents: Table<{id:string;organization_id:string;environment:string;dedupe_key:string;first_seen_at:string;last_seen_at:string;module:string;operation:string|null;kind:string;status:string;count:number;build_id:string|null;profile_id:string|null;call_session_id:string|null;case_id:string|null;leg_id:string|null;classified_at:string|null;classification:string;evidence_ids:string[]}>;
+      motorist_diagnostic_counters: Table<{organization_id:string;environment:string;key:string;minute:string;batches:number;day:string;daily_events:number;daily_normal:number;event_count:number;incident_count:number;counter_count:number;dropped:number;cleanup_backlog:boolean;cursor_at:string|null;cursor_id:string|null;updated_at:string}>;
+      motorist_diagnostic_guard: Table<{id:boolean;budget_bytes:number;physical_bytes:number;checked_at:string|null;blocked:boolean}>;
+
       motorist_case_mutation_results: Table<{ organization_id: string; actor_id: string; mutation_id: string; case_id: string; fingerprint: string; result: Json; created_at: Timestamp }>;
       motorist_organizations: Table<{
         id: string;
@@ -1142,6 +1147,23 @@ export type Database = {
         after_payload: Json | null;
         created_at: Timestamp;
       }>;
+      motorist_provider_commands: Table<{
+        session_id: string;
+        command_id: string;
+        fingerprint: string;
+        method: string;
+        path: string;
+        correlation_state: string | null;
+        request_payload: Json;
+        dispatch_generation: number;
+        dispatch_token: string;
+        first_dispatched_at: Timestamp;
+        outcome: "unknown" | "accepted" | "rejected" | "rate_limited";
+        result: Json | null;
+        http_status: number | null;
+        termination_cleanup_at: Timestamp | null;
+        next_attempt_at: Timestamp | null;
+      }>;
       motorist_telnyx_webhook_events: Table<{
         event_id: string;
         organization_id: string | null;
@@ -1648,6 +1670,10 @@ export type Database = {
       }>;
     };
     Functions: {
+      motorist_diagnostics_ingest: { Args: {p_org:string;p_profile:string;p_environment:string;p_source:string;p_build:string;p_events:Json}; Returns:Json };
+      motorist_diagnostics_read: { Args: {p_org:string;p_profile:string;p_environment:string;p_mode:string;p_id?:string|null;p_since?:string;p_until?:string;p_cursor_at?:string|null;p_cursor_id?:string|null;p_limit?:number;p_status?:string|null}; Returns:Json };
+      motorist_diagnostics_maintain: { Args: {p_org:string;p_environment:string;p_budget:number;p_classify?:boolean}; Returns:Json };
+
       motorist_case_handoff: { Args: { p_organization_id: string; p_actor_id: string; p_case_id: string; p_action: string; p_input?: Json }; Returns: Json };
       motorist_public_handoff: { Args: { p_action: string; p_token_hash: string; p_input?: Json }; Returns: Json };
       motorist_ensure_task_assignment: { Args: { p_organization_id: string; p_task_id: string }; Returns: Json };

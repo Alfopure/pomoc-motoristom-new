@@ -1,5 +1,6 @@
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { disableCurrentDevicePush } from "@/components/pwa/push-client";
+import { setDiagnosticIdentity } from "@/lib/diagnostics/client";
 
 export type CurrentSessionSignOutClient = {
   auth: {
@@ -17,5 +18,6 @@ export async function signOutCurrentSession(
   await disablePush();
   const { error } = await client.auth.signOut({ scope: "local" });
   if (error) throw error;
+  setDiagnosticIdentity(null);
   navigate("/");
 }

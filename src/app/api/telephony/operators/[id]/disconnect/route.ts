@@ -2,7 +2,7 @@ import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/a
 import { assertOperatorNotOnCall, auditOperatorDeviceAction, requireOperatorOfOrganization } from "@/server/telephony/config-service";
 import { CONFIG_WRITE_ROLES, configDeps, configErrorResponse, toConfigActor } from "@/server/telephony/config-route";
 import { disconnectDevice } from "@/server/telephony/operator-devices";
-import { createTelephonyDeps, readJsonBody } from "@/server/telephony/runtime";
+import { assertTelephonyDeployment, createTelephonyDeps, readJsonBody } from "@/server/telephony/runtime";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,6 +20,7 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     assertSameOriginRequest(request);
+    assertTelephonyDeployment();
     const actor = await requireDefaultMotoristActor(CONFIG_WRITE_ROLES);
     const { id } = await context.params;
     const body = await readJsonBody<{ takeover?: unknown }>(request);

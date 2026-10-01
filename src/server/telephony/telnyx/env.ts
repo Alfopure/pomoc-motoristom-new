@@ -1,3 +1,5 @@
+import { getTestProviderSafety, type TestProviderSafety } from "./test-safety";
+
 /**
  * Telnyx configuration read from the environment.
  *
@@ -22,6 +24,7 @@ export type TelnyxConfig =
       mediaBaseUrl: string | null;
       liveCallsEnabled: boolean;
       smsLiveSendsEnabled: boolean;
+      testSafety?: TestProviderSafety;
     }
   | { configured: false; reason: string };
 
@@ -61,6 +64,7 @@ export function getTelnyxConfig(env: EnvRecord = process.env): TelnyxConfig {
     mediaBaseUrl: readEnv(env, "TELNYX_MEDIA_BASE_URL")?.replace(/\/+$/, "") ?? null,
     liveCallsEnabled: readFlag(env, "TELNYX_LIVE_CALLS_ENABLED"),
     smsLiveSendsEnabled: readFlag(env, "TELNYX_SMS_LIVE_SENDS"),
+    testSafety: getTestProviderSafety(env),
   };
 }
 

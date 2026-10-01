@@ -35,6 +35,8 @@ import { type IncomingOfferPolicy, type WebphoneSnapshot } from "@/lib/telephony
 import { callControlRetryPolicy, retryUnstartedCallControl } from "@/lib/telephony/call-control-retry";
 import { BrowserReconciliationGate } from "@/lib/telephony/browser-reconciliation";
 import { CoordinatedWebphone } from "@/lib/telephony/coordinated-webphone";
+import { logWebphoneDiagnostic } from "@/lib/telephony/diagnostics";
+import { recordDiagnostic, setDiagnosticCallContext, retainDiagnosticCallContext } from "@/lib/diagnostics/client";
 import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "@/lib/telephony/webphone-model";
 
@@ -208,12 +210,18 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
 
   useEffect(() => {
     if (!enabled || !organizationId || !profileId) return;
-    const webphone = new CoordinatedWebphone({ scope: `${organizationId}:${profileId}`, mobile: isMobileApp() });
+    const webphone = new CoordinatedWebphone({ scope: `${organizationId}:${profileId}`, mobile: isMobileApp(), logger: (entry) => {
+      const controlId = webphoneRef.current?.getSnapshot().call?.telnyxCallControlId;
+      const sessionId = entry.callSessionId ?? snapshotRef.current.calls.find(call => call.legs.some(leg => leg.callControlId === controlId))?.sessionId;
+      logWebphoneDiagnostic({ ...entry, callSessionId: sessionId });
+    } });
     webphoneRef.current = webphone;
     webphone.setIncomingOfferPolicy(incomingPolicyRef.current);
     let callState = "";
     let previousCall: WebphoneSnapshot["call"] = null;
     const unsubscribe = webphone.subscribe((next) => {
+      const observedSession = next.call?.sessionId ?? snapshotRef.current.calls.find(call => call.legs.some(leg => leg.callControlId === next.call?.telnyxCallControlId))?.sessionId;
+      setDiagnosticCallContext(next.call ? { callSessionId: observedSession, deviceSessionId: next.deviceSessionId ?? undefined } : null);
       const endedCall = previousCall;
       previousCall = next.call;
       if (endedCall?.telnyxCallControlId && endedCall.id !== next.call?.id) {
@@ -243,6 +251,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       reconciliationGateRef.current = new BrowserReconciliationGate();
       setReconciliationNotice(null);
       unsubscribe();
+      retainDiagnosticCallContext("component_unmount");
       webphone.dispose();
       webphoneRef.current = null;
       setPhone(IDLE_SNAPSHOT);
@@ -609,6 +618,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           call.legs.some((leg) => leg.profileId === snapshotRef.current.actorProfileId && leg.callControlId === browserCall.telnyxCallControlId))
         ? browserCall.telnyxCallControlId : null;
       if (endingBrowserLegId) {
+        recordDiagnostic({ type: "phone_lifecycle", module: "telephony", outcome: "ok", reason: "hangup_requested", callSessionId: sessionId,
+          deviceSessionId: browser?.getSnapshot().deviceSessionId ?? undefined });
         // Its terminal SDK update must not add a competing reconciliation
         // request while this explicit authoritative hangup is in flight.
         endingBrowserLegsRef.current.add(endingBrowserLegId);
@@ -998,6 +1009,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     answerRequestRef.current = callId;
     setAnswerRequestCallId(callId);
     setNotice(null);
+    const sessionId = current.call?.sessionId ?? snapshotRef.current.calls.find(call => call.legs.some(leg => leg.callControlId === current.call?.telnyxCallControlId))?.sessionId;
+    recordDiagnostic({ type: "call_timing", module: "telephony", outcome: "ok", reason: "answer_clicked", callSessionId: sessionId, deviceSessionId: current.deviceSessionId ?? undefined });
     // The SDK opens the microphone while answering this existing invite. A
     // separate getUserMedia/open/stop cycle here delays negotiation and checks
     // the wrong device when a different tab owns the media connection.
@@ -1018,6 +1031,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const rejectOffer = useCallback((sessionId: string, callControlId: string | null) => {
     const webphone = webphoneRef.current;
     if (!matchesRequestedIncomingOffer(buildPhoneBarModel(snapshotRef.current), sessionId, callControlId, webphone?.getSnapshot().call)) return;
+    recordDiagnostic({ type: "phone_lifecycle", module: "telephony", outcome: "ok", reason: "hangup_requested", callSessionId: sessionId, deviceSessionId: webphone?.getSnapshot().deviceSessionId ?? undefined });
     void webphone?.hangup();
   }, []);
   const deferOffer = useCallback((sessionId: string, callControlId: string) => {
@@ -1034,7 +1048,12 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     });
   }, [postCallCommand]);
   const takeoverPhone = useCallback(() => webphoneRef.current?.takeover(), []);
-  const hangupBrowser = useCallback(() => void webphoneRef.current?.hangup(), []);
+  const hangupBrowser = useCallback(() => {
+    const phone = webphoneRef.current?.getSnapshot();
+    const sessionId = phone?.call?.sessionId ?? snapshotRef.current.calls.find(call => call.legs.some(leg => leg.callControlId === phone?.call?.telnyxCallControlId))?.sessionId;
+    recordDiagnostic({ type: "phone_lifecycle", module: "telephony", outcome: "ok", reason: "hangup_requested", callSessionId: sessionId, deviceSessionId: phone?.deviceSessionId ?? undefined });
+    void webphoneRef.current?.hangup();
+  }, []);
   const toggleMute = useCallback(() => webphoneRef.current?.toggleMute(), []);
   const sendDtmf = useCallback((digit: string) => webphoneRef.current?.sendDtmf(digit), []);
   const unlockAudio = useCallback(() => void webphoneRef.current?.unlockAudio(), []);

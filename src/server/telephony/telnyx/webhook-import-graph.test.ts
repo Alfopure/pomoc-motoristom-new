@@ -83,7 +83,13 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
 // Reviewed increase 53 → 54: routing/snapshot validates the existing JSON RPC
 // with no new runtime dependency beyond server-only. All DB eligibility and
 // dispatch guards stay shared; the forbidden-dependency checks still apply.
-const MAX_MODULES = 54;
+// Reviewed increase 54 → 56: explicit application environment and TEST provider
+// boundaries, with no new runtime package. Five fresh Node imports of the built
+// Next route with fetch disabled on 2026-09-30 took 139–160ms (median 154ms)
+// for production. This is local module loading, not hosted call latency.
+// The monitor also reuses the pure app-version selector for request metrics;
+// it adds no runtime dependency or I/O to the webhook path.
+const MAX_MODULES = 57;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);
