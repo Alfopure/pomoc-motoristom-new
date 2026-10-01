@@ -34,6 +34,6 @@ export function monitorDashboardLinks(env: DashboardEnvironment) {
     vercel,
     supabase,
     sentry: dashboardUrl(env.DIAGNOSTICS_SENTRY_DASHBOARD_URL, ["sentry.io"]),
-    uptime: dashboardUrl(env.DIAGNOSTICS_UPTIME_DASHBOARD_URL, ["uptime.betterstack.com", "betteruptime.com", "dashboard.uptimerobot.com", "app.uptimerobot.com"]),
+    uptime: dashboardUrl(env.DIAGNOSTICS_UPTIME_DASHBOARD_URL, ["sentry.io", "uptime.betterstack.com", "betteruptime.com", "dashboard.uptimerobot.com", "app.uptimerobot.com"]),
   };
 }
