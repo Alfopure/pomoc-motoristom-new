@@ -28,6 +28,7 @@ Staré uložené fanouty s kolidujúcimi identifikátormi sa opravujú iba po ko
 1. Dodržať workflow pracovná vetva → Preview → PR do `dev` → overenie stabilného TEST. Produkcia iba cez PR `dev` → `main`.
 2. Najprv nasadiť kompatibilný aplikačný kód. Pred migráciou dokončiť aktívne hovory a preveriť, že žiadny starší build už nespracúva hovory, webhooky alebo cron.
 3. V tejto úlohe je autorizovaný iba TEST `nzpnqdstvkfncflgqlny`. Produkcia `ifpaeegaesdmljfkdvcn` vyžaduje samostatný explicitný pokyn na migráciu.
+   Po overení schémy musí samostatný TEST build používať `TELEPHONY_STABILITY_V1_ENABLED=true`, aby konfigurácia dovolila explicitné priradenie osobného mobilu. Verziu zápisového kontraktu nových relácií riadi databázový `motorist_telephony_writer_rollout.new_session_contract=2`; premenná `TELEPHONY_FENCING_V2_ENABLED` sa v aktuálnom kóde nepoužíva. Zapnutie stability samo nepovoľuje živé volania; aktivácia TEST linky a provider ochrany sa overujú osobitne. Unit testy musia mať vlastný základný režim a zapínať tieto funkcie explicitne, nezávisle od premenných nasadenia.
 4. Pri schválenom živom overení použiť iba povolené testovacie čísla. Overiť skutočné zvonenie oboch zariadení, zvuk pri zdvihnutí na každom z nich a zastavenie druhého zariadenia. Lokálna simulácia nepreukazuje živé audio ani dostupnosť mobilnej siete.
 5. Pri probléme zostať na kompatibilnom kóde; pozastaviť nové duálne ponuky úpravou autorizovaného routingu. Neobnovovať starý build s rozpracovanými duálnymi ponukami a nerepublikovať historický deployment.
 
