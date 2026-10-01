@@ -49,14 +49,24 @@ The retired VIPTel original: Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-moto
 
 That Supabase project is **not** dormant. It also holds the Watchdog vehicle-handover application — 10 254 `rental_photos` rows and 10 320 files in storage — so it is somebody's live database, not an old copy waiting to be deleted.
 
+### TEST handoff and owner approval
+
+For an ordinary change request, deliver the change to the stable TEST through the workflow below, unless the owner asks for a narrower scope. Wait for its deployment to finish and verify the changed behavior there with checks appropriate to the change. A successful build alone is not acceptance of the feature. Report external integration limitations honestly; disabled TEST calls do not establish working live audio.
+
+Before asking the owner to accept the change, provide a short handoff in the owner's language: the canonical TEST URL, the tested `dev` commit, what changed, how to try it, and what was verified or remains unverified. Then **wait for the owner's explicit production approval**. Requests to implement or fix a feature, “continue”, and questions about readiness do not authorize production. A clear instruction to deploy the identified, tested change does.
+
+Approval applies to the tested release scope. Immediately before merging a release, compare its head with the tested commit and review the entire `dev -> main` diff. If `dev` now contains additional changes, verify them on TEST and obtain approval for the expanded scope. Do not silently include another agent's work. A draft release PR may be prepared in advance, but do not merge it, enable auto-merge, push to `main`, deploy/promote/alias to production, or change production configuration before the applicable approval. Production database migrations and seeds still require the explicit project-specific authorization in step 7.
+
+Both `main` and `dev` require a pull request, an up-to-date branch and the successful `Vercel – pomoc-motoristom-dispatching` check, including for administrators; force pushes and deletion are blocked. Preserve these protections. Owner acceptance is recorded explicitly in the conversation/release PR; while agents and the owner use the same GitHub identity, these protections do not independently verify who gave that acceptance.
+
 Use the dev-first deployment workflow:
 
 1. Start from the current `dev` branch.
 2. Create a dedicated work branch.
 3. Push the work branch and inspect its Vercel Preview URL. Preview runs the same build gate as production (`vitest run`, `typecheck`, `build`).
 4. Open a pull request from the work branch into `dev`.
-5. After merge, verify `https://test.dispecing.linkapomoci.sk` on the dedicated TEST project's `dev`/Production deployment. The old generated `dev` alias is only the restricted Preview fallback.
-6. Release production only through a pull request from `dev` into `main`. The production domain is `https://dispecing.linkapomoci.sk`.
+5. After merge, verify `https://test.dispecing.linkapomoci.sk` on the dedicated TEST project's `dev`/Production deployment. Match `/api/health/live`'s version to the expected deployment and confirm that deployment's Git commit is the tested `dev` commit. Verify the changed behavior and give the owner the TEST handoff described above. The old generated `dev` alias is only the restricted Preview fallback.
+6. After explicit owner approval of that tested release scope, release production only through a pull request from `dev` into `main` with the existing Vercel build gate passing. Record the tested commit and the owner's approval in the release PR. The production domain is `https://dispecing.linkapomoci.sk`; verify the new deployment's health and version there after merge and report the result.
    **Never publish by redeploying an older deployment.** `vercel redeploy <url>` rebuilds *that deployment's source*, not current `main` — on 2026-09-21 this silently rolled production back three commits while picking up an environment variable. To apply new environment variables, deploy `main` afresh.
 7. Telephony (Telnyx) Supabase migrations and seed changes are in scope for this application, but apply them only when the user explicitly requests them and only against the explicitly authorized project: test `nzpnqdstvkfncflgqlny` or production `ifpaeegaesdmljfkdvcn`. Authorization to change test does not authorize production changes. Do not apply seed data on top of a copied snapshot. Do not deploy workers, schedulers, or listeners. The single allowed Vercel cron is `*/5 * * * *` -> `/api/telephony/cron` guarded by `CRON_SECRET`.
 8. Newly built Preview deployments and the dedicated TEST project's `dev`/Production target use test Supabase `nzpnqdstvkfncflgqlny`; production (`main`) uses `ifpaeegaesdmljfkdvcn`. The Vercel Development target was not changed by this isolation work: local developers must explicitly use test credentials and verify their effective project before writing. Test data is shared by stable TEST and all Preview branches. Existing deployment URLs retain their original environment until replaced; do not assume an old Preview is isolated.
