@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronRight, LoaderCircle, Search } from "lucide-react";
 import { TextField } from "./case-form-fields";
 import { normalizeLicensePlateInput, normalizeVinInput } from "./case-form-shared";
-import { emptyVehicleFieldPatch, isSlovakPlate, isVin, lookupIdentityConflict, normalizeVehicleIdentifier, preferredVehicleFacts, vinLinkedSkpPlateDifference, type VehicleFieldChoices, type VehicleFormValues, type VehicleLookupResponse, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
+import { emptyVehicleFieldPatch, isCzechPlate, isSlovakPlate, isVin, lookupIdentityConflict, normalizeVehicleIdentifier, preferredVehicleFacts, vinLinkedSkpPlateDifference, type VehicleCountry, type VehicleFieldChoices, type VehicleFormValues, type VehicleLookupResponse, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 import { requestVehicleLookup } from "@/lib/vehicle-lookup-client";
 import { VehicleLookupDetails, vehicleLookupDate } from "./VehicleLookupDetails";
 import styles from "./case-detail.module.css";
@@ -27,6 +27,9 @@ type Props = {
   onApply: (patch: VehicleFormValues, snapshot: VehicleLookupSnapshot | null, changedIdentifier?: "plate" | "vin") => void;
 };
 export function VehicleLookupControl(props: Props) {
+  const defaultCountry: VehicleCountry = props.snapshot?.result.query.country === "CZ" || /^\d/.test(normalizeVehicleIdentifier(props.plate)) ? "CZ" : "SK";
+  const [countrySelection, setCountrySelection] = useState<{ contextKey: string; country: VehicleCountry } | null>(null);
+  const country = countrySelection?.contextKey === props.contextKey ? countrySelection.country : defaultCountry;
   const [proposal, setProposal] = useState<VehicleLookupResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +42,7 @@ export function VehicleLookupControl(props: Props) {
   const opener = useRef<HTMLButtonElement | null>(null);
   const consumedRequest = useRef<number | undefined>(undefined);
   const latestLookup = useRef<(kind: "plate" | "vin") => Promise<void>>(null);
-  const identity = `${props.contextKey}:${normalizeVehicleIdentifier(props.plate)}:${normalizeVehicleIdentifier(props.vin)}`;
+  const identity = `${props.contextKey}:${country}:${normalizeVehicleIdentifier(props.plate)}:${normalizeVehicleIdentifier(props.vin)}`;
   const [stateIdentity, setStateIdentity] = useState(identity);
   const currentIdentity = useRef(identity);
   const currentProps = useRef(props);
@@ -59,7 +62,7 @@ export function VehicleLookupControl(props: Props) {
     setLoading(true); setError(null); setProposal(null); setExpanded(false); setIncludePartial(false); setChoices({}); setWaiting(0);
     const timer = setTimeout(() => controller.abort(), 90_000);
     try {
-      const result = await requestVehicleLookup({ kind, value: kind === "plate" ? props.plate : props.vin, country: "SK", knownIdentity: { plate: props.plate, vin: props.vin, country: "SK" } }, controller.signal, (seconds) => {
+      const result = await requestVehicleLookup({ kind, value: kind === "plate" ? props.plate : props.vin, country, knownIdentity: { plate: props.plate, vin: props.vin, country } }, controller.signal, (seconds) => {
         if (currentIdentity.current === requestedIdentity && request.current === controller) setWaiting(seconds);
       });
       if (currentIdentity.current !== requestedIdentity || controller.signal.aborted) return;
@@ -87,51 +90,65 @@ export function VehicleLookupControl(props: Props) {
       if (currentIdentity.current !== requestedIdentity) return;
       const latest = currentProps.current;
       if (latest.disabled) return;
-      const kind = isSlovakPlate(normalizeVehicleIdentifier(latest.plate)) ? "plate" : isVin(normalizeVehicleIdentifier(latest.vin)) ? "vin" : undefined;
+      const validPlate = country === "CZ" ? isCzechPlate(normalizeVehicleIdentifier(latest.plate)) : isSlovakPlate(normalizeVehicleIdentifier(latest.plate));
+      const kind = validPlate ? "plate" : isVin(normalizeVehicleIdentifier(latest.vin)) ? "vin" : undefined;
       if (!kind) return;
       if (document.activeElement instanceof HTMLButtonElement) opener.current = document.activeElement;
       void latestLookup.current?.(kind);
     }, 0);
     return () => clearTimeout(timer);
-  }, [props.lookupRequest, identity]);
+  }, [props.lookupRequest, identity, country]);
+
+  function changeCountry(next: VehicleCountry) {
+    request.current?.abort(); request.current = null;
+    setCountrySelection({ contextKey: props.contextKey, country: next });
+    setProposal(null); setError(null); setLoading(false); setWaiting(0); setExpanded(false);
+  }
 
   function changeIdentity(kind: "plate" | "vin", value: string) {
     request.current?.abort(); request.current = null;
     if (props.snapshot && normalizeVehicleIdentifier(value) !== normalizeVehicleIdentifier(kind === "plate" ? props.plate : props.vin)) props.onApply({}, null, kind);
     (kind === "plate" ? props.onPlateChange : props.onVinChange)(kind === "plate" ? normalizeLicensePlateInput(value) : normalizeVinInput(value));
   }
-  const snapshot = proposal?.snapshot ?? props.snapshot;
+  const snapshot = proposal?.snapshot ?? (props.snapshot?.result.query.country === country ? props.snapshot : undefined);
   const result = snapshot?.result;
-  const conflict = result ? lookupIdentityConflict(result, { plate: props.plate, vin: props.vin }) : undefined;
+  const conflict = result ? lookupIdentityConflict(result, { plate: props.plate, vin: props.vin, country }) : undefined;
   const skpPlateDifference = result && !conflict ? vinLinkedSkpPlateDifference(result) : undefined;
   const facts = result ? preferredVehicleFacts(result, true) : {};
   const patch = result ? emptyVehicleFieldPatch(result, { ...props.values, plate: props.plate, vin: props.vin }, includePartial, choices) : {};
 
   return (
     <div ref={control} className="col-span-full min-w-0 @container" data-testid="vehicle-lookup">
+      <label className="mb-3 block max-w-48 text-xs font-medium text-zinc-600">Krajina evidencie
+        <select value={country} onChange={event => changeCountry(event.target.value as VehicleCountry)} disabled={props.disabled} className="mt-1 block h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900">
+          <option value="SK">Slovensko (SK)</option>
+          <option value="CZ">Česko (CZ)</option>
+        </select>
+      </label>
       <div className={`${styles.vehicleLookupFields} grid min-w-0 gap-2`}>
         {(["plate", "vin"] as const).map((kind) => (
           <div key={kind} className="flex min-w-0 items-start gap-1.5">
             <div className="min-w-0 flex-1"><TextField label={kind === "plate" ? "EČV" : "VIN"} value={kind === "plate" ? props.plate : props.vin} onChange={(value) => changeIdentity(kind, value)} onBlur={kind === "plate" ? props.onPlateBlur : undefined} required={kind === "plate" && props.required} error={kind === "plate" ? props.plateError : props.vinError} disabled={props.disabled} /></div>
-            <button type="button" title={`Dohľadať podľa ${kind === "plate" ? "EČV" : "VIN"} · Slovensko`} aria-label={`Dohľadať podľa ${kind === "plate" ? "EČV" : "VIN"}`} disabled={props.disabled || loading || !(kind === "plate" ? isSlovakPlate(normalizeVehicleIdentifier(props.plate)) : isVin(normalizeVehicleIdentifier(props.vin)))} onClick={event => { opener.current = event.currentTarget; void lookup(kind); }} className="mt-6 flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-yellow-300 bg-yellow-50 text-zinc-800 hover:bg-yellow-100 disabled:opacity-40">
+            <button type="button" title={`Dohľadať podľa ${kind === "plate" ? "EČV" : "VIN"} · ${country === "CZ" ? "Česko" : "Slovensko"}`} aria-label={`Dohľadať podľa ${kind === "plate" ? "EČV" : "VIN"}`} disabled={props.disabled || loading || !(kind === "plate" ? (country === "CZ" ? isCzechPlate(normalizeVehicleIdentifier(props.plate)) : isSlovakPlate(normalizeVehicleIdentifier(props.plate))) : isVin(normalizeVehicleIdentifier(props.vin)))} onClick={event => { opener.current = event.currentTarget; void lookup(kind); }} className="mt-6 flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-yellow-300 bg-yellow-50 text-zinc-800 hover:bg-yellow-100 disabled:opacity-40">
               {loading ? <LoaderCircle size={17} className="animate-spin" /> : <Search size={17} />}
             </button>
           </div>
         ))}
       </div>
-      {loading && <p role="status" className="mt-2 text-xs text-zinc-600">{waiting ? `Prebieha iné dohľadávanie. Automaticky skúsim znova o ${waiting} s…` : "Overujem slovenské vozidlo a PZP k dnešnému dňu…"} Formulár môžete ďalej vypĺňať.</p>}
+      {loading && <p role="status" className="mt-2 text-xs text-zinc-600">{waiting ? `Prebieha iné dohľadávanie. Automaticky skúsim znova o ${waiting} s…` : country === "CZ" ? "Overujem české vozidlo a dostupné údaje o známke…" : "Overujem slovenské vozidlo a PZP k dnešnému dňu…"} Formulár môžete ďalej vypĺňať.</p>}
       {error && <p role="alert" className="mt-2 rounded-md bg-amber-50 p-2 text-xs text-amber-900">{error}</p>}
       {snapshot && <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50">
         <button type="button" onClick={event => { opener.current = event.currentTarget; setExpanded(true); }} aria-haspopup="dialog" className="flex w-full items-center justify-between gap-3 rounded-lg p-3 text-left hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-yellow-500">
           <span className="min-w-0"><span className="block text-sm font-semibold">{proposal ? "Dohľadané údaje · návrh" : "Uložené overenie vozidla"}</span>
             <span className="mt-0.5 block text-xs text-zinc-600">{[facts.make?.value, facts.model?.value].filter(Boolean).join(" ") || "Zobraziť detail vozidla"} · {vehicleLookupDate(snapshot.result.fetchedAt, true)}</span>
-            <span className={`mt-1 block text-xs ${conflict ? "font-medium text-amber-900" : "text-zinc-700"}`}>{conflict ? "Identita nesúhlasí · PZP vozidla nepotvrdené" : <>PZP: {facts.insuranceStatus?.value ?? "nepotvrdené"}{facts.insurer && ` · ${facts.insurer.value}`} · k {vehicleLookupDate(snapshot.result.query.checkedForDate)}</>}</span>
+            <span className={`mt-1 block text-xs ${conflict ? "font-medium text-amber-900" : "text-zinc-700"}`}>{conflict ? "Identita nesúhlasí · PZP vozidla nepotvrdené" : <>PZP: {facts.insuranceStatus?.value ?? (country === "CZ" ? "neoverené" : "nepotvrdené")}{facts.insurer && ` · ${facts.insurer.value}`} · k {vehicleLookupDate(snapshot.result.query.checkedForDate)}</>}</span>
+            {country === "CZ" && <span className="mt-1 block text-xs text-zinc-700">Diaľničná známka: {facts.vignetteStatus?.value ?? "neoverená"}{facts.vignetteValidUntil && ` · do ${vehicleLookupDate(facts.vignetteValidUntil.value)}`}</span>}
             {skpPlateDifference && <span className="mt-1 block text-xs text-amber-800">SKP uvádza odlišné EČV {skpPlateDifference.skpPlate}; VIN sa zhoduje.</span>}
           </span><ChevronRight size={18} className="shrink-0 text-zinc-500" />
         </button>
-        {expanded && <VehicleLookupDetails returnFocus={opener} snapshot={snapshot} proposal={Boolean(proposal)} cached={Boolean(proposal?.cached)} identity={{ plate: props.plate, vin: props.vin }} conflict={conflict} includePartial={includePartial} choices={choices} patch={patch} disabled={Boolean(props.disabled || loading)} onIncludePartial={setIncludePartial} onChoice={(field, source) => setChoices(previous => ({ ...previous, [field]: source || undefined }))} onClose={() => setExpanded(false)} onAccept={() => {
+        {expanded && <VehicleLookupDetails returnFocus={opener} snapshot={snapshot} proposal={Boolean(proposal)} cached={Boolean(proposal?.cached)} identity={{ plate: props.plate, vin: props.vin, country }} conflict={conflict} includePartial={includePartial} choices={choices} patch={patch} disabled={Boolean(props.disabled || loading)} onIncludePartial={setIncludePartial} onChoice={(field, source) => setChoices(previous => ({ ...previous, [field]: source || undefined }))} onClose={() => setExpanded(false)} onAccept={() => {
           const latest = currentProps.current;
-          if (lookupIdentityConflict(snapshot.result, { plate: latest.plate, vin: latest.vin })) return;
+          if (lookupIdentityConflict(snapshot.result, { plate: latest.plate, vin: latest.vin, country })) return;
           const acceptedPatch = emptyVehicleFieldPatch(snapshot.result, { ...latest.values, plate: latest.plate, vin: latest.vin }, includePartial, choices);
           latest.onApply(acceptedPatch, snapshot); setProposal(null); setExpanded(false);
         }} />}
