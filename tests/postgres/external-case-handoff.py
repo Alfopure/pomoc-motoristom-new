@@ -539,6 +539,13 @@ class ExternalHandoffContract(unittest.TestCase):
         self.db.execute("update motorist_fleet_assets set kind='replacement_car',make='Kia',model='Ceed',license_plate='RENT001' where id=%s", (asset,))
         preview = self.internal(case, "context")["preview"]
         self.assertEqual(preview["replacement"]["vehicle"]["plate"], "RENT001")
+        self.db.execute("update motorist_fleet_assets set occupancy_case_id=%s where id=%s", (self.new_case(), asset))
+        self.assertIsNone(self.internal(case, "context")["preview"]["replacement"]["vehicle"])
+        self.db.execute("update motorist_fleet_assets set occupancy_case_id=%s where id=%s", (case, asset))
+        duplicate = str(uuid.uuid4())
+        self.db.execute("insert into motorist_fleet_assets values(%s,%s,'replacement_car','Kia','Ceed','RENT002',%s,'PRIVATE_FLEET_NOTE')", (duplicate, ORG, case))
+        self.assertIsNone(self.internal(case, "context")["preview"]["replacement"]["vehicle"])
+        self.db.execute("delete from motorist_fleet_assets where id=%s", (duplicate,))
         self.db.execute("update motorist_fleet_assets set organization_id=%s where id=%s", (OTHER_ORG, asset))
         self.assertIsNone(self.internal(case, "context")["preview"]["replacement"]["vehicle"])
 

@@ -28,7 +28,7 @@ TEST a produkcia musia mať nezávislé kľúče. Kľúčová rotácia zachová 
 
 ## Lokálne overenie
 
-- Vitest: 5 474 prešlo, 2 preskočené podľa existujúcej konfigurácie; vrátane 51 cielených serverových/kryptografických kontrol.
+- Vitest: 5 475 prešlo, 2 preskočené podľa existujúcej konfigurácie; vrátane 52 cielených serverových/kryptografických kontrol.
 - Node regression suite: 58 prešlo, 1 existujúca preskočená kontrola.
 - PostgreSQL: 36 scenárov na jednorazovej loopback fixture, vrátane recovery/replay, scope, legacy, predĺženia, rotácie a allowlistu.
 - Playwright: 32 fixture scenárov so zachytenými HTTP requestmi, vrátane reloadu/rovnakej URL, stratenej issue odpovede, SMS bez send a mobilnej rozšírenej karty.
@@ -38,4 +38,4 @@ Lokálny pnpm 11 pri inštalácii narazil na existujúci neschválený build scr
 
 ## Nasadenie a obmedzenia
 
-Vzdialená migrácia, Preview gate, PR do `dev` a skutočné TEST správanie ešte vyžadujú konkrétny preberací záznam; lokálne výsledky ich nenahrádzajú. Produkčné ani retired projekty sa nesmú meniť. Toto vydanie nevykonáva živé SMS, fleet refresh ani telefonické provider operácie.
+[PR #353 do `dev`](https://github.com/Alfopure/pomoc-motoristom-new/pull/353) uchováva aktuálny gate a nasadzovací/autorizačný záznam. Prvé Preview `dpl_EcAvD3BN4Ysk3HT4TVwK98sLSJaH` prešlo hosted gate aj oboma health kontrolami; následná úprava sprísňuje nepriradenie auta už obsadeného iným prípadom a má vlastný nový gate. Vzdialená TEST migrácia vyžaduje samostatné potvrdenie majiteľa; až potom nasledujú TEST-only secrets, merge a skutočné TEST prebratie. Lokálne ani Preview výsledky toto prebratie nenahrádzajú. Produkčné ani retired projekty sa nesmú meniť. Toto vydanie nevykonáva živé SMS, fleet refresh ani telefonické provider operácie.

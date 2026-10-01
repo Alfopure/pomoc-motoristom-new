@@ -135,6 +135,21 @@ describe("enhanced handoff HTTP boundary", () => {
     expect((await commandCaseHandoff(request(`/api/cases/${caseId}/handoffs`, recover), caseId)).url).toBe(first.url);
     expect(first.url).toBe(`${origin}/handoff#token=${token}`);
   });
+  it("seals a rotated token against the next grant generation and recovers the committed result", async () => {
+    let issued: Record<string, unknown>;
+    mocks.userRpc.mockImplementation(async (_name, args) => {
+      if (args.p_action === "context") return { data: { handoffs: [{ ...handoff, tokenGeneration: 1 }] }, error: null };
+      if (args.p_action === "renew") {
+        issued = args.p_input;
+        return { data: { handoff: { ...handoff, revision: 2 }, commandId, committedRevision: 2, linkGeneration: 2 }, error: null };
+      }
+      return { data: { handoff: { ...handoff, revision: 2 }, envelope: issued.tokenEnvelope, generation: 2, origin: issued.linkOrigin, tokenHash: issued.tokenHash }, error: null };
+    });
+    const result = await commandCaseHandoff(request(`/api/cases/${caseId}/handoffs`, { action: "renew", commandId, handoffId: grant, expectedRevision: 1, hours: 24 }), caseId);
+    expect(result.url).toMatch(/#token=[\w-]{43}$/);
+    expect(mocks.userRpc.mock.calls.map(call => call[1].p_action)).toEqual(["context", "renew", "link"]);
+    expect(mocks.userRpc.mock.calls[1][1].p_input).toMatchObject({ issuedId: grant, secretGeneration: 2 });
+  });
   it("rejects retrieval without authorization and fails before issuing if a key is missing", async () => {
     vi.stubEnv("MOTORIST_HANDOFF_KEYS", "{}");
     await expect(commandCaseHandoff(request(`/api/cases/${caseId}/handoffs`, issue), caseId)).rejects.toMatchObject({ status: 503 });

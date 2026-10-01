@@ -42,7 +42,7 @@ create or replace function app_private.motorist_handoff_case(p_org uuid,p_case u
  left join public.motorist_locations p on p.id=c.pickup_location_id and p.organization_id=c.organization_id
  left join public.motorist_locations d on d.id=c.destination_location_id and d.organization_id=c.organization_id
  left join lateral (select count(*) total,(jsonb_agg(jsonb_build_object('make',coalesce(asset.make,''),'model',coalesce(asset.model,''),'plate',coalesce(asset.license_plate,'')) order by asset.id))->0 vehicle
-  from public.motorist_fleet_assets asset where asset.organization_id=c.organization_id and asset.kind='replacement_car' and (asset.id=c.selected_asset_id or asset.occupancy_case_id=c.id)) car on true
+  from public.motorist_fleet_assets asset where asset.organization_id=c.organization_id and asset.kind='replacement_car' and (asset.occupancy_case_id=c.id or (asset.id=c.selected_asset_id and asset.occupancy_case_id is null))) car on true
  where c.id=p_case and c.organization_id=p_org
 $$;
 

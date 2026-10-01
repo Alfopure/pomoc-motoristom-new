@@ -213,4 +213,4 @@ Pri probléme najprv vypnúť nové capabilities navrhovaným serverovým gate a
 - [ ] Explicitná autorizácia produkčnej migrácie aj release, PR `dev` → `main`, čerstvé produkčné nasadenie a smoke.
 - [ ] Zaznamenané identifikátory migrácií/deploymentov, vlastníci schválení, anonymizované dôkazy a overiteľný postup návratu; aktualizovaný runbook.
 
-Pri aktuálnej dokumentačnej úlohe zostávajú všetky implementačné a nasadzovacie položky otvorené.
+Pri pôvodnej dokumentačnej úlohe zostali všetky implementačné a nasadzovacie položky otvorené. Následná autorizovaná TEST realizácia má vlastný [preberací záznam](external-case-handoff-test-2026-10-01.md); tento plán ju nenahrádza.
