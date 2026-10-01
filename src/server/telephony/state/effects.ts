@@ -361,7 +361,9 @@ async function linkAttemptToLeg(deps: EffectsDeps, session: SessionRow, legId: s
   const state = clientState && typeof clientState === "object" && !Array.isArray(clientState) ? (clientState as Record<string, unknown>) : null;
   if (!state || state.intent !== "ring" || typeof state.step !== "number") return;
   let query = deps.admin.from("motorist_ring_attempts").update({ leg_id: legId }).eq("session_id", session.id).eq("step_index", state.step).is("leg_id", null);
-  query = profileId ? query.eq("profile_id", profileId) : query.eq("external_number", toNumber ?? "");
+  query = state.role === "external"
+    ? query.eq("member_kind", "external_number").eq("external_number", toNumber ?? "")
+    : query.eq("member_kind", "operator").eq("profile_id", profileId ?? "").is("external_number", null);
   const result = await query;
   if (result.error) fail("attempt link failed", result.error);
 }
@@ -1295,7 +1297,10 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
       .eq("session_id", session.id)
       .eq("step_index", command.attempt.stepIndex)
       .in("result", ["pending", "offered"]);
-    query = command.attempt.profileId ? query.eq("profile_id", command.attempt.profileId) : query.eq("external_number", command.attempt.externalNumber ?? "");
+    query = command.attempt.externalNumber
+      ? query.eq("member_kind", "external_number").eq("external_number", command.attempt.externalNumber)
+      : query.eq("member_kind", "operator").eq("profile_id", command.attempt.profileId ?? "").is("external_number", null);
+    if (command.attempt.profileId) query = query.eq("profile_id", command.attempt.profileId);
     const linked = await query;
     if (linked.error) fail("attempt link failed", linked.error);
   }
@@ -1321,10 +1326,15 @@ async function insertAttempt(deps: EffectsDeps, session: SessionRow, plan: Attem
     offered_at: now,
   });
   if (inserted.error) {
-    if (isDuplicate(inserted.error)) {
+    if (isDuplicate(inserted.error) || inserted.error.code === "23P01") {
       if (!telephonyStabilityEnabled() && !hasStabilityContract(session)) return false;
-      let query = deps.admin.from("motorist_ring_attempts").select("id, result").eq("session_id", session.id).eq("step_index", plan.stepIndex);
+      let query = deps.admin.from("motorist_ring_attempts").select("id, result").eq("session_id", session.id).eq("step_index", plan.stepIndex)
+        .eq("member_kind", plan.memberKind);
       query = plan.profileId ? query.eq("profile_id", plan.profileId) : query.eq("external_number", plan.externalNumber ?? "");
+      // The profile's SIP attempt is not a replay of its owned mobile offer.
+      // Older persisted fanouts may contain both; only the exact endpoint
+      // that owns this attempt can reuse it and reach the provider journal.
+      query = plan.externalNumber ? query.eq("external_number", plan.externalNumber) : query.is("external_number", null);
       const existing = await query.maybeSingle();
       if (existing.error) fail("existing attempt unavailable", existing.error);
       return existing.data?.result === "offered";
@@ -1371,6 +1381,66 @@ async function executeOverlappedRun(deps: EffectsDeps, ctx: ExecutionContext, ru
   return out;
 }
 
+/** Upgrade a stored pre-endpoint fanout without changing any dispatched intent. */
+async function repairLegacyFanoutIdentities(deps: EffectsDeps, ctx: ExecutionContext, command: RingFanout): Promise<void> {
+  const groups = new Map<string, DialCommand[]>();
+  for (const dial of command.dials) groups.set(dial.commandId, [...(groups.get(dial.commandId) ?? []), dial]);
+  const discarded = new Set<DialCommand>();
+  for (const [id, members] of groups) {
+    if (members.length < 2) continue;
+    if (sessionOwnership.getStore()?.contract !== 2) {
+      // Legacy calls have no durable proof of dispatch absence. Keep their
+      // original identity, without inventing another possibly duplicate dial.
+      for (const dial of members.slice(1)) discarded.add(dial);
+      continue;
+    }
+    const stored = await deps.admin.from("motorist_provider_commands").select("path, request_payload")
+      .eq("session_id", ctx.session.id).eq("command_id", id).maybeSingle();
+    if (stored.error) fail("legacy fanout journal unavailable", stored.error);
+    if (!stored.data) {
+      // The old batch aborted atomically, so none of this identity was sent.
+      // The caller's normal checkpoint persists these IDs before any HTTP.
+      for (const dial of members) {
+        if (dial.attempt?.externalNumber) dial.commandId = commandId({ sessionId: ctx.session.id,
+          legId: dial.attempt.externalNumber, step: command.step, intent: "ring" });
+      }
+      if (new Set(members.map(dial => dial.commandId)).size !== members.length) throw new EffectsError("ambiguous legacy ring endpoints");
+      continue;
+    }
+    const { path, request_payload: requestPayload } = stored.data;
+    const payload = requestPayload as Record<string, unknown> | null;
+    const matching = members.filter(dial => path === "/calls" && payload?.to === dial.to && payload?.from === dial.from);
+    if (matching.length !== 1) throw new EffectsError("legacy fanout does not match its immutable provider intent");
+    const evidence = await deps.admin.from("motorist_provider_commands").select("request_payload")
+      .eq("session_id", ctx.session.id).eq("path", "/calls");
+    if (evidence.error) fail("legacy endpoint evidence unavailable", evidence.error);
+    // Keep accepted/unknown/rejected evidence unchanged. The provider adapter
+    // still verifies the full immutable payload before any adoption or retry.
+    for (const dial of members) {
+      if (dial === matching[0]) continue;
+      discarded.add(dial);
+      // An older writer may have inserted both attempts before its conflicting
+      // batch failed. Retire only an unlinked sibling with proved no dial
+      // intent, never a possibly in-flight or accepted endpoint.
+      const dispatched = evidence.data?.some(row => (row.request_payload as Record<string, unknown> | null)?.to === dial.to);
+      if (!dispatched && dial.attempt) {
+        let query = deps.admin.from("motorist_ring_attempts").update({ result: "cancelled", ended_at: deps.now().toISOString() })
+          .eq("session_id", ctx.session.id).eq("step_index", dial.attempt.stepIndex).is("leg_id", null).in("result", ["pending", "offered"]);
+        query = dial.attempt.externalNumber
+          ? query.eq("member_kind", "external_number").eq("external_number", dial.attempt.externalNumber)
+          : query.eq("member_kind", "operator").eq("profile_id", dial.attempt.profileId ?? "").is("external_number", null);
+        const retired = await query;
+        if (retired.error) fail("legacy unsent attempt cleanup failed", retired.error);
+      }
+    }
+  }
+  if (discarded.size) {
+    command.dials = command.dials.filter(dial => !discarded.has(dial));
+    command.attempts = command.attempts.filter(plan => command.dials.some(dial =>
+      dial.attempt?.profileId === plan.profileId && dial.attempt?.externalNumber === plan.externalNumber));
+  }
+}
+
 async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, command: RingFanout): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   const { admin } = deps;
   const session = ctx.session;
@@ -1381,6 +1451,8 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     if (set.error) fail("current_step update failed", set.error);
     ctx.session = { ...ctx.session, current_step: command.guard.setStep };
   }
+
+  await repairLegacyFanoutIdentities(deps, ctx, command);
 
   const now = deps.now().toISOString();
   const dials: DialCommand[] = [];
@@ -1401,7 +1473,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     if (dial) dials.push(dial);
   }
 
-  const ringing = command.ringingProfileIds.filter((id) => !skippedMembers.includes(id));
+  const ringing = command.ringingProfileIds.filter((id) => dials.some((dial) => dial.profileId === id));
   if (ringing.length > 0 && !telephonyStabilityEnabled() && !hasStabilityContract(session)) {
     const presence = await admin
       .from("motorist_operator_presence")
@@ -1416,6 +1488,8 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   let succeeded = 0;
   let retryPending = false;
   const failures: Array<{ to: string; error: string }> = [];
+  const failedOwners = new Map<string, DialCommand>();
+  const retainedOwners = new Set<string>();
 
   // The third operator's phone used to start ringing only after the first two
   // dials had each made their own eight-or-so database round trips and waited
@@ -1466,11 +1540,16 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     const dial = dials[index];
     try {
       const executed = outcome.status === "fulfilled" ? outcome.value : (() => { throw outcome.reason; })();
-      if (!executed.skipped) succeeded += 1;
+      if (!executed.skipped) {
+        succeeded += 1;
+        if (dial.profileId) retainedOwners.add(dial.profileId);
+      }
       else {
         skippedMembers.push(dial.profileId ?? dial.externalNumber ?? "");
         let attempt = admin.from("motorist_ring_attempts").update({ result: "cancelled", ended_at: now }).eq("session_id", session.id).eq("step_index", command.step).in("result", ["pending", "offered"]);
-        attempt = dial.attempt?.profileId ? attempt.eq("profile_id", dial.attempt.profileId) : attempt.eq("external_number", dial.attempt?.externalNumber ?? "");
+        attempt = dial.attempt?.externalNumber
+          ? attempt.eq("member_kind", "external_number").eq("external_number", dial.attempt.externalNumber)
+          : attempt.eq("member_kind", "operator").eq("profile_id", dial.attempt?.profileId ?? "").is("external_number", null);
         const cancelled = await attempt;
         if (cancelled.error) fail("rejected attempt update failed", cancelled.error);
       }
@@ -1481,24 +1560,31 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
         // The provider may have created the leg. Keep the same offer/token and
         // command identity so the next existing recovery attempt can discover it.
         retryPending = true;
+        if (dial.profileId) retainedOwners.add(dial.profileId);
         continue;
       }
       let query = admin.from("motorist_ring_attempts").update({ result: "failed", ended_at: now }).eq("session_id", session.id).eq("step_index", command.step);
-      query = dial.attempt?.profileId ? query.eq("profile_id", dial.attempt.profileId) : query.eq("external_number", dial.attempt?.externalNumber ?? "");
-      await query;
-      if (dial.profileId && !telephonyStabilityEnabled() && !hasStabilityContract(session)) {
-        await admin
-          .from("motorist_operator_presence")
-          .update({ status: "available", current_session_id: null, status_since: now })
-          .eq("profile_id", dial.profileId)
-          .eq("current_session_id", session.id)
-          .eq("status", "ringing");
-      } else if (dial.profileId) {
-        await applyPresenceChange(deps, ctx.session, { profileId: dial.profileId, status: "available", sessionId: null,
-          onlyIfSession: session.id, onlyIfToken: dial.clientState.offerToken, onlyIfStatus: ["ringing"], reason: "dial failed" });
-      }
+      query = dial.attempt?.externalNumber
+        ? query.eq("member_kind", "external_number").eq("external_number", dial.attempt.externalNumber)
+        : query.eq("member_kind", "operator").eq("profile_id", dial.attempt?.profileId ?? "").is("external_number", null);
+      const failed = await query;
+      if (failed.error) fail("failed attempt update failed", failed.error);
+      if (dial.profileId) failedOwners.set(dial.profileId, dial);
       await recordTelephonyIncident(admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error, context: { sessionId: session.id, command: "dial", to: dial.to } });
     }
+  }
+
+  // SIP and personal mobile share one operator reservation. Decide release
+  // only after every endpoint has settled; a refused endpoint must not revoke
+  // its sibling's accepted or uncertain provider dial.
+  for (const [profileId, dial] of failedOwners) {
+    if (retainedOwners.has(profileId)) continue;
+    const remaining = await admin.from("motorist_ring_attempts").select("id").eq("session_id", session.id)
+      .eq("profile_id", profileId).in("result", ["pending", "offered"]).limit(1);
+    if (remaining.error) fail("remaining operator offers unavailable", remaining.error);
+    if (remaining.data?.length) continue;
+    await applyPresenceChange(deps, ctx.session, { profileId, status: "available", sessionId: null,
+      onlyIfSession: session.id, onlyIfToken: dial.clientState.offerToken, onlyIfStatus: ["ringing"], reason: "all dial endpoints failed" });
   }
 
   if (retryPending) throw new EffectsError("ring fanout awaiting the original dial outcome");

@@ -367,6 +367,39 @@ describe("advanceRingStep and sweep", () => {
 
 describe("personal PSTN ownership", () => {
   const settings = [{ profile_id: PROFILES.o1, default_mobile_number: "+421911222333", delivery_mode: "personal_mobile" as const }];
+  it.each(["all", "ordered"] as const)("keeps owned SIP and mobile as distinct endpoints in a frozen %s step", strategy => {
+    const mobile = { ...stepAll.members[0], kind: "external_number" as const, externalNumber: "+421911222333", ownerProfileId: PROFILES.o1, position: 4 };
+    const step = { ...stepAll, strategy, members: [...stepAll.members, mobile] };
+    const planned = planRingStep(step, input({ ownedPstnEnabled: true }));
+    expect(planned.attempts.filter(attempt => attempt.profileId === PROFILES.o1).map(attempt => attempt.memberKind))
+      .toEqual(strategy === "all" ? ["operator", "external_number"] : ["operator"]);
+    expect(planned.skipped.some(skip => skip.reason === "duplicate")).toBe(false);
+
+    // Each endpoint retains its own eligibility and attempt history.
+    const withoutSip = planRingStep({ ...step, strategy: "all" }, input({ ownedPstnEnabled: true, devices: devices.filter(device => device.profileId !== PROFILES.o1) }));
+    expect(withoutSip.attempts.filter(attempt => attempt.profileId === PROFILES.o1))
+      .toEqual([expect.objectContaining({ memberKind: "external_number", externalNumber: mobile.externalNumber })]);
+
+    const mobileFirst = planRingStep({ ...step, members: [{ ...mobile, position: 0 }, ...stepAll.members.map(member => ({ ...member, position: member.position + 1 }))] }, input({ ownedPstnEnabled: true }));
+    expect(mobileFirst.attempts[0]).toMatchObject({ memberKind: "external_number", externalNumber: mobile.externalNumber });
+    const afterSip = planRingStep({ ...step, members: [stepAll.members[0], mobile] }, input({ ownedPstnEnabled: true,
+      attempted: new Set([memberKey(stepAll.members[0])]) }));
+    expect(afterSip.attempts).toEqual([expect.objectContaining({ memberKind: "external_number", externalNumber: mobile.externalNumber })]);
+  });
+
+  it("counts simultaneous endpoints against capacity and does not dial the same mobile twice", () => {
+    const mobile = { ...stepAll.members[0], kind: "external_number" as const, externalNumber: "+421911222333", ownerProfileId: PROFILES.o1, position: 1 };
+    const step = { ...stepAll, members: [stepAll.members[0], mobile, { ...mobile, position: 2 }] };
+    const planned = planRingStep(step, input({ ownedPstnEnabled: true }));
+    expect(planned.attempts).toHaveLength(2);
+    expect(planned.skipped).toEqual([{ member: step.members[2], reason: "duplicate" }]);
+    const capped = planRingStep(step, input({ ownedPstnEnabled: true, maxConcurrentLegs: 2, activeLegCount: 1 }));
+    expect(capped.attempts).toHaveLength(1);
+    expect(capped.capacityLimited).toBe(true);
+    expect(planRingStep(step, input({ ownedPstnEnabled: true, openOffers: [PROFILES.o1] })).attempts).toEqual([]);
+    expect(planRingStep(step, input({ ownedPstnEnabled: true, presence: [{ profileId: PROFILES.o1, status: "paused" }] })).attempts).toEqual([]);
+  });
+
   it("PA-09 explicitly selected mobile keeps owner, bypasses web SIP and obeys capacity", () => {
     const members = resolvePersonalRingMembers([stepAll.members[0]], settings, ["SK"], true);
     expect(members[0]).toMatchObject({ kind: "external_number", profileId: PROFILES.o1, ownerProfileId: PROFILES.o1 });
