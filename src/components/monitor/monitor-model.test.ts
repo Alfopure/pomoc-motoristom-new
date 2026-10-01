@@ -24,4 +24,13 @@ describe("monitor evidence presentation", () => {
     expect(duration(Number.NaN)).toBe("Nezistené");
     expect(timestamp("not-a-date")).toBe("Nezistené");
   });
+  it("keeps Bratislava time correct when reused across daylight-saving changes", () => {
+    expect(timestamp("2026-03-29T00:30:00.000Z")).toBe("29. 03. 01:30:00");
+    expect(timestamp("2026-03-29T01:30:00.000Z")).toBe("29. 03. 03:30:00");
+    expect(timestamp("2026-01-01T23:30:00.000Z")).toBe("02. 01. 00:30:00");
+    expect(timestamp(null)).toBe("Nezistené");
+    expect(timestamp(undefined)).toBe("Nezistené");
+    expect(timestamp("")).toBe("Nezistené");
+    expect(timestamp("2026-03-29T00:30:00.000Z")).toBe("29. 03. 01:30:00");
+  });
 });
