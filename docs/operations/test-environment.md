@@ -2,9 +2,11 @@
 
 **Aktualizácia 2026-09-30:** kanonická doména `test.dispecing.linkapomoci.sk` už patrí samostatnému Vercel projektu `pomoc-motoristom-test`, vetva `dev` / Production. Aktuálne mapovanie, overenú pripravenosť a integračné pravidlá určuje [runbook samostatného TEST prostredia](full-test-environment.md). Nižšie uvedená topológia kanonickej domény na Preview je historická; neobnovovať ju pri bežnej údržbe. Postupy obnovy Supabase a autorizovaného obnovenia dát zostávajú použiteľné pre ten istý TEST ref `nzpnqdstvkfncflgqlny`.
 
+Bežné vydanie, urgentná oprava rovno do produkcie a následné zosúladenie TESTU majú jeden krátky [release postup](release-workflow.md). Aktuálne nasadzovanie opisuje [Vercel runbook](../deployment-vercel.md).
+
 Pre stabilný TEST zachovaj vlastný `RECORDINGS_SYNC_SECRET` až do dokončenia upratania všetkých ním podpísaných AI/Scribe záznamov. Dôkaz viaže pôvodnú úlohu aj konkrétne provider ID; skopírované či zamenené ID sa odmietne pred provider požiadavkou. Vypnutie vytvárania nebráni uprataniu preukázaných TEST záznamov, ale odstránenie alebo rotácia podpisového kľúča zneplatní staré dôkazy a upratanie zostane čakať. Nepoužívaj produkčný kľúč ani obídenie kontroly pôvodu.
 
-Voliteľný `MOTORIST_TEST_SMS_ALPHA_SENDER` povoľuje presný názov odosielateľa iba pre **odchádzajúce SMS**: 3–11 ASCII písmen/číslic, aspoň jedno písmeno, zhodné s `TELNYX_SMS_ALPHA_SENDER`. Naďalej platí overený TEST deployment, jeho messaging profile, live prepínače a presný zoznam schválených príjemcov. Táto možnosť nezapína odpovede na SMS ani nenahrádza E.164 caller ID pre hlasové hovory; skutočné prijatie správy treba overiť osobitne.
+Voliteľný `MOTORIST_TEST_SMS_ALPHA_SENDER` povoľuje presný názov odosielateľa iba pre **odchádzajúce SMS**: 3–11 ASCII písmen/číslic, aspoň jedno písmeno, zhodné s `TELNYX_SMS_ALPHA_SENDER`. Naďalej platí overený TEST deployment, jeho messaging profile a live prepínače; pravidlá príjemcov vrátane TEST-only výnimky od 2026-10-02 opisuje [SMS policy](test-sms-recipient-policy.md). Táto možnosť nezapína odpovede na SMS ani nenahrádza E.164 caller ID pre hlasové hovory; skutočné prijatie správy treba overiť osobitne.
 
 Objednané slovenské hlasové TEST číslo k 2026-09-30 stále čaká na regulačné overenie. Majiteľ musí dokončiť požiadavky v [Telnyx Orders](https://portal.telnyx.com/#/numbers/orders); bez potvrdenej aktivácie nemožno vyhlásiť hlasový TEST za dokončený. Číslo nemá SMS podporu, takže jeho schválenie samo osebe nedokazuje obojsmerné SMS.
 
