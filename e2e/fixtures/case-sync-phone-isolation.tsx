@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { CaseCollaborationProvider, useCaseCollaboration, useCaseCollaborationStore } from "../../src/components/dispatch/CaseCollaborationProvider";
 import { CaseSyncIndicator } from "../../src/components/dispatch/CaseSyncIndicator";
@@ -6,6 +6,8 @@ import { useTelephonyConsole } from "../../src/components/dispatch/useTelephonyC
 import { PhoneBar } from "../../src/components/dispatch/PhoneBar";
 import { EMPTY_ACTIVE_CALLS } from "../../src/lib/telephony/active-calls-model";
 import { collaborationCard } from "./case-collaboration-data";
+import { CaseDetail } from "../../src/components/dispatch/CaseDetail";
+import type { DispatchCase } from "../../src/domain/types";
 
 const initialCases = [collaborationCard];
 let emit: (event: string, payload?: unknown) => void = () => {};
@@ -16,6 +18,7 @@ const harness = {
   answeredIds: [] as string[], hungUpIds: [] as string[],
   caseReads: 0, revision: 1, caseDelay: 0, caseFailure: false, lastClick: 0, samples: [] as number[],
   refreshCases: () => {}, setBarsHeight: (height: number) => { void height; },
+  openCaseEditor: () => {}, crashCaseEditor: () => {}, repairCaseEditor: () => {},
   callState: (state: "ringing" | "active" | "hangup", id = "fixture-incoming") => emit("telnyx.notification", { type: "callUpdate", call: {
     id, state, direction: "inbound", options: { remoteCallerNumber: "+421900000002" }, telnyxIDs: { telnyxCallControlId: `control-${id}` },
     localStream: mediaStream, remoteStream: mediaStream, isAudioMuted: false,
@@ -59,9 +62,15 @@ function SyncControls() {
   return <output id="case-state" data-hidden={String(state.hidden)}>{state.cases[0]?.mainNote ?? "No card"}</output>;
 }
 function PhoneWorkspace() {
+  const [editor, setEditor] = useState<'closed' | 'open' | 'crashed'>('closed');
   const topBarsRef = useRef<HTMLDivElement>(null), spacer = useRef<HTMLDivElement>(null);
   const telephony = useTelephonyConsole({ enabled: true, operators: [], profileId: "00000000-0000-4000-8000-000000000101" });
   useEffect(() => { harness.mounts++; return () => { harness.cleanups++; }; }, []);
+  useEffect(() => {
+    harness.openCaseEditor = () => setEditor('open');
+    harness.crashCaseEditor = () => setEditor('crashed');
+    harness.repairCaseEditor = () => setEditor('open');
+  }, []);
   useEffect(() => { harness.setBarsHeight = height => { if (spacer.current) spacer.current.style.height = `${height}px`; }; }, []);
   return <>
     <div ref={topBarsRef} data-testid="fixture-top-bars">
@@ -77,6 +86,7 @@ function PhoneWorkspace() {
     <output id="phone-state" data-status={telephony.phone.status} data-stale={String(telephony.stale)} data-call={telephony.phone.call?.id ?? ""} data-ringing={String(telephony.phone.call?.ringing ?? false)} />
     <SyncControls />
     <label>Rozpracovaná poznámka<input id="dirty-note" defaultValue="Rozpísané" /></label>
+    {editor !== 'closed' && <CaseDetail active={false} caseItem={editor === 'crashed' ? { ...collaborationCard, vehicle: undefined } as unknown as DispatchCase : collaborationCard} assets={[]} branches={[]} partnerDirectory={[]} editing persistentEditing compactEditor />}
   </>;
 }
 createRoot(document.getElementById("root")!).render(<CaseCollaborationProvider actorKey="fixture-org:fixture-operator" enabled viewerProfileId="fixture-operator" initialCases={initialCases}><PhoneWorkspace /></CaseCollaborationProvider>);

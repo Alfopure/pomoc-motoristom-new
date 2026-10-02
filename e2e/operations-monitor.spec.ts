@@ -27,7 +27,7 @@ test.beforeAll(async () => {
   script = bundle.outputFiles.find(file => file.path.endsWith(".js"))!.text;
   css = (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css;
 });
-async function boot(page: Page, options: { failingPolls?: boolean; acknowledge?: boolean; width?: number; disabled?: boolean; coverage?: "unknown" | "limited"; blocked?: boolean } = {}) {
+async function boot(page: Page, options: { failingPolls?: boolean; acknowledge?: boolean; acknowledgeAfter?: number; reportRetryAfter?: number; width?: number; disabled?: boolean; coverage?: "unknown" | "limited"; blocked?: boolean } = {}) {
   const requests: string[] = [], errors: string[] = [];
   const counts: Record<string, number> = {};
   const reports: Array<Record<string, unknown>> = [];
@@ -44,7 +44,8 @@ async function boot(page: Page, options: { failingPolls?: boolean; acknowledge?:
     if (key === "/api/diagnostics/events") {
       const events = route.request().postDataJSON().events as Array<Record<string, unknown>>;
       reports.push(...events);
-      return options.acknowledge ? route.fulfill({ json: { acceptedIds: events.map(item => item.id) } }) : route.fulfill({ status: 503, json: { error: "unavailable" } });
+      if (options.acknowledge || (options.acknowledgeAfter !== undefined && counts[key] > options.acknowledgeAfter)) return route.fulfill({ json: { acceptedIds: events.map(item => item.id) } });
+      return route.fulfill({ status: options.reportRetryAfter ? 429 : 503, headers: options.reportRetryAfter ? { 'Retry-After': String(options.reportRetryAfter) } : {}, json: { error: "unavailable" } });
     }
     if (key.startsWith("/api/diagnostics/incidents/")) {
       if (route.request().method() === "PATCH") state = route.request().postDataJSON().status;
@@ -155,6 +156,29 @@ test("never presents an unavailable collector as an accepted report", async ({ p
   await page.getByRole("button", { name: "Nahlásiť problém", exact: true }).click();
   await expect(page.getByText("Prijatie zatiaľ nie je potvrdené.", { exact: false })).toBeVisible();
   await expect(page.getByText("Hlásenie bolo prijaté.", { exact: true })).toHaveCount(0);
+});
+test("updates a delayed report confirmation without creating another report", async ({ page }) => {
+  const io = await boot(page, { acknowledgeAfter: 1 });
+  const button = page.getByRole('button', { name: 'Nahlásiť problém', exact: true });
+  await button.click();
+  await expect(page.getByText('Prijatie zatiaľ nie je potvrdené.', { exact: false })).toBeVisible();
+  await expect(button).toBeDisabled();
+  await page.clock.runFor(10_000);
+  await expect(page.getByText('Hlásenie bolo prijaté.', { exact: true })).toBeVisible();
+  await expect(button).toBeEnabled();
+  expect(io.reports).toHaveLength(2);
+  expect(new Set(io.reports.map(report => report.id)).size).toBe(1);
+  expect(io.errors).toEqual([]);
+});
+test("keeps a rate-limited report pending until Retry-After and durable acceptance", async ({ page }) => {
+  const io = await boot(page, { acknowledgeAfter: 1, reportRetryAfter: 20 });
+  await page.getByRole('button', { name: 'Nahlásiť problém', exact: true }).click();
+  await expect(page.getByText('Prijatie zatiaľ nie je potvrdené.', { exact: false })).toBeVisible();
+  await page.clock.runFor(15_000);
+  expect(io.reports).toHaveLength(1);
+  await page.clock.runFor(10_000);
+  await expect(page.getByText('Hlásenie bolo prijaté.', { exact: true })).toBeVisible();
+  expect(new Set(io.reports.map(report => report.id)).size).toBe(1);
 });
 for (const width of [1440, 390]) test(`monitor is readable at ${width}px without layout overflow`, async ({ page }) => {
   const io = await boot(page, { width });

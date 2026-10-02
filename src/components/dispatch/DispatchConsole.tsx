@@ -2,6 +2,7 @@
 import { diagnosticJson } from "@/lib/diagnostics/request";
 import { mergeCaseDetail } from "@/data/case-detail";
 import { beginDiagnosticOperation, recordDiagnostic, setDiagnosticIdentity } from "@/lib/diagnostics/client";
+import { retainDiagnosticUiContext, setDiagnosticWorkspaceContext } from "@/lib/diagnostics/ui-context";
 import { diagnosticFailure, diagnosticRequestId, diagnosticResponse } from "@/lib/diagnostics/operations";
 import { ReportProblemButton } from "@/components/monitor/ReportProblemButton";
 
@@ -779,6 +780,10 @@ function DispatchConsoleContent({
     [activePriceRule, branches, fleetAssets, workspaceCase],
   );
   const visibleCaseId = workspaceCase?.id;
+  useLayoutEffect(() => {
+    setDiagnosticWorkspaceContext({ screen: activeView, case_id: visibleCaseId, workspace_kind: workspace.kind, workspace_mode: workspace.mode, editor_revision: caseEditorRevision });
+  }, [activeView, visibleCaseId, workspace.kind, workspace.mode, caseEditorRevision]);
+  useEffect(() => () => retainDiagnosticUiContext('workspace'), []);
   const pendingCaseOpen = useRef<{ caseId: string; finish: ReturnType<typeof beginDiagnosticOperation> } | null>(null);
   useEffect(() => {
     const pending = pendingCaseOpen.current;
