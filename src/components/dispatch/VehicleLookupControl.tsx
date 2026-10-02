@@ -7,6 +7,7 @@ import { normalizeLicensePlateInput, normalizeVinInput } from "./case-form-share
 import { emptyVehicleFieldPatch, isCzechPlate, isSlovakPlate, isVin, lookupIdentityConflict, normalizeVehicleIdentifier, preferredVehicleFacts, vinLinkedSkpPlateDifference, type VehicleCountry, type VehicleFieldChoices, type VehicleFormValues, type VehicleLookupResponse, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 import { requestVehicleLookup } from "@/lib/vehicle-lookup-client";
 import { VehicleLookupDetails, vehicleLookupDate } from "./VehicleLookupDetails";
+import { SkpManualFallback } from "./SkpManualFallback";
 import styles from "./case-detail.module.css";
 
 type Props = {
@@ -18,6 +19,7 @@ type Props = {
   /** A new token represents one explicit scan requested from a fleet row. */
   lookupRequest?: number;
   required?: boolean;
+  manualInsurerEntry?: boolean;
   disabled?: boolean;
   plateError?: string;
   vinError?: string;
@@ -146,7 +148,8 @@ export function VehicleLookupControl(props: Props) {
             {skpPlateDifference && <span className="mt-1 block text-xs text-amber-800">SKP uvádza odlišné EČV {skpPlateDifference.skpPlate}; VIN sa zhoduje.</span>}
           </span><ChevronRight size={18} className="shrink-0 text-zinc-500" />
         </button>
-        {expanded && <VehicleLookupDetails returnFocus={opener} snapshot={snapshot} proposal={Boolean(proposal)} cached={Boolean(proposal?.cached)} identity={{ plate: props.plate, vin: props.vin, country }} conflict={conflict} includePartial={includePartial} choices={choices} patch={patch} disabled={Boolean(props.disabled || loading)} onIncludePartial={setIncludePartial} onChoice={(field, source) => setChoices(previous => ({ ...previous, [field]: source || undefined }))} onClose={() => setExpanded(false)} onAccept={() => {
+        <SkpManualFallback result={snapshot.result} showEntryHint={props.manualInsurerEntry} identityConflict={Boolean(conflict)} className="mx-3 mb-3" />
+        {expanded && <VehicleLookupDetails returnFocus={opener} snapshot={snapshot} proposal={Boolean(proposal)} manualInsurerEntry={props.manualInsurerEntry} cached={Boolean(proposal?.cached)} identity={{ plate: props.plate, vin: props.vin, country }} conflict={conflict} includePartial={includePartial} choices={choices} patch={patch} disabled={Boolean(props.disabled || loading)} onIncludePartial={setIncludePartial} onChoice={(field, source) => setChoices(previous => ({ ...previous, [field]: source || undefined }))} onClose={() => setExpanded(false)} onAccept={() => {
           const latest = currentProps.current;
           if (lookupIdentityConflict(snapshot.result, { plate: latest.plate, vin: latest.vin, country })) return;
           const acceptedPatch = emptyVehicleFieldPatch(snapshot.result, { ...latest.values, plate: latest.plate, vin: latest.vin }, includePartial, choices);
