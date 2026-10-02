@@ -13,7 +13,7 @@ Aktuálny postup od 2026-10-02: [bežné vydanie, priama produkčná oprava a sy
 | Supabase | `ifpaeegaesdmljfkdvcn` | `nzpnqdstvkfncflgqlny` | `nzpnqdstvkfncflgqlny` |
 | Región | `fra1` | `fra1` | `fra1` |
 
-`dispecing-test.vercel.app` je produkčný alias. Generovaný `pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app` je obmedzený Preview fallback, nie stabilný TEST. Pre provider callbacky, webhooky a bookmarks preferovať canonical domény; vymenovanie projektu môže zmeniť generovaný alias.
+`dispecing-test.vercel.app` je produkčný alias. Generovaný `pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app` je obmedzený Preview fallback, nie stabilný TEST. Pre provider callbacky, webhooky a bookmarks preferovať canonical domény; premenovanie projektu môže zmeniť generovaný alias.
 
 Retired Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispatching-old`, `dev.dispecing.linkapomoci.sk` a VIPTel listener sa nemenia. Retired Supabase obsahuje inú živú aplikáciu.
 
