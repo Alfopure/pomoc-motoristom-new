@@ -1,0 +1,22 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { createPrivateSentryClient } from './sentry-sdk';
+import { sanitizeDiagnosticException } from './sentry';
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+it('sends a real SDK envelope with the safe code/context and no SDK-added private fields', async () => {
+  vi.stubGlobal('location', { origin: 'https://app.test', href: 'https://app.test/private?token=CANARY' });
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 200 }));
+  const error = new Error('Minified React error #185; CANARY private arguments');
+  error.stack = 'first@https://app.test/_next/static/chunks/abcdef1234567890.js:12:34';
+  const event = sanitizeDiagnosticException(error, 'a'.repeat(32), 'build', 'https://app.test', { ui: { state_origin: 'last_committed', dirty: true, save_phase: 'waiting' } })!;
+  const client = createPrivateSentryClient('https://public@errors.test/1');
+  client.captureEvent({ ...event, user: { email: 'CANARY' }, request: { url: 'CANARY' }, extra: { private: 'CANARY' }, tags: { ...event.tags, private: 'CANARY' } });
+  await client.flush(5000);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  const body = fetcher.mock.calls[0][1]?.body as string;
+  expect(body).not.toContain('CANARY');
+  expect(body).toContain('React error #185');
+  expect(body).toContain('dispatch_ui');
+  expect(body).toContain('abcdef1234567890.js');
+  expect(fetcher.mock.calls[0][1]?.referrerPolicy).toBe('no-referrer');
+  await client.close();
+});

@@ -1,5 +1,6 @@
 import { getDiagnosticCallContext } from './context';
-import { recordDiagnostic } from './client';
+import { getDiagnosticPageId, recordDiagnostic } from './client';
+import { getDiagnosticBreadcrumbs, getDiagnosticUiContext } from './ui-context';
 import { diagnosticErrorClass, sanitizeDiagnosticException, sendDiagnosticException } from './sentry';
 const seen = new WeakMap<object, string>();
 const recent = new Map<string, {
@@ -11,10 +12,12 @@ export function captureDiagnosticError(error: unknown, type: 'ui_error' | 'chunk
         if (error && typeof error === 'object' && seen.has(error))
             return seen.get(error)!;
         const context = getDiagnosticCallContext();
+        const ui = getDiagnosticUiContext();
+        const exceptionContext = { ...context, pageId: getDiagnosticPageId(), ui, breadcrumbs: getDiagnosticBreadcrumbs() };
         let id = crypto.randomUUID().replaceAll('-', '');
-        const safe = sanitizeDiagnosticException(error, id, process.env.NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID || 'local', typeof location === 'undefined' ? '' : location.origin);
+        const safe = sanitizeDiagnosticException(error, id, process.env.NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID || 'local', typeof location === 'undefined' ? '' : location.origin, exceptionContext);
         const top = safe?.exception.values[0].stacktrace.frames.at(-1);
-        const fingerprint = JSON.stringify([diagnosticErrorClass(error), top?.filename, top?.lineno, top?.colno, type, context.callSessionId, context.deviceSessionId]);
+        const fingerprint = JSON.stringify([diagnosticErrorClass(error), safe?.tags.react_error_code, top?.filename, top?.lineno, top?.colno, type, ui.case_id, context.callSessionId, context.deviceSessionId]);
         const prior = recent.get(fingerprint);
         if (prior && Date.now() - prior.at < 30000)
             id = prior.id;
@@ -27,8 +30,8 @@ export function captureDiagnosticError(error: unknown, type: 'ui_error' | 'chunk
         const errorClass = diagnosticErrorClass(error);
         const chunkFailure = errorClass === 'ChunkLoadError' || (error instanceof Error && /Loading chunk .+ failed|Failed to fetch dynamically imported module|Importing a module script failed/i.test(error.message.slice(0, 1024)));
         const eventType = chunkFailure ? 'chunk_error' : type;
-        recordDiagnostic({ ...context, type: eventType, module: 'app', outcome: 'failed', errorClass, errorId: id, reason: boundary ? 'boundary' : eventType === 'chunk_error' ? 'chunk_load' : eventType === 'unhandled_rejection' ? 'global_rejection' : 'global_error' });
-        sendDiagnosticException(error, id);
+        recordDiagnostic({ ...context, ...(ui.case_id ? { caseId: ui.case_id } : {}), type: eventType, module: 'app', outcome: 'failed', errorClass, errorId: id, reason: boundary ? 'boundary' : eventType === 'chunk_error' ? 'chunk_load' : eventType === 'unhandled_rejection' ? 'global_rejection' : 'global_error' });
+        sendDiagnosticException(error, id, exceptionContext);
         return id;
     }
     catch {

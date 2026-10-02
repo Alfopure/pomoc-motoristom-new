@@ -16,6 +16,34 @@ function fixture(options:{fetch?:typeof fetch; saved?:StoredDiagnostics;online?:
 }
 const settle=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
 describe('bounded diagnostic collector',()=>{
+  it('publishes a queued report becoming confirmed after an earlier in-flight batch',async()=>{
+    let resolve!:(response:Response)=>void;
+    const fetcher=vi.fn((_url:unknown,init?:RequestInit)=>new Promise<Response>(r=>{resolve=r;}));
+    const f=fixture({fetch:fetcher});await settle();
+    const listener=vi.fn();const unsubscribe=f.collector.subscribe(listener);
+    const operation=f.collector.record(input)!;
+    const first=f.collector.flush();await settle();
+    const report=f.collector.record({type:'user_report',module:'app',outcome:'unknown',reason:'user_requested'})!;
+    expect(f.collector.reportStatus(report)).toBe('queued');
+    await f.collector.flush();expect(fetcher).toHaveBeenCalledTimes(1);
+    resolve(new Response(JSON.stringify({acceptedIds:[operation]})));await first;
+    expect(f.collector.reportStatus(report)).toBe('queued');
+    f.advance(5000);const second=f.collector.flush();await settle();
+    resolve(new Response(JSON.stringify({acceptedIds:[report]})));await second;
+    expect(f.collector.reportStatus(report)).toBe('confirmed');expect(listener).toHaveBeenCalled();
+    unsubscribe();listener.mockClear();f.collector.setIdentity(null);expect(listener).not.toHaveBeenCalled();
+    expect(f.collector.reportStatus(report)).toBe('unavailable');
+  });
+  it('reports explicit server rejection and queue expiration without a false confirmation',async()=>{
+    const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>new Response(JSON.stringify({rejectedIds:JSON.parse(init!.body as string).events.map((e:DiagnosticEvent)=>e.id)})));
+    const f=fixture({fetch:fetcher});await settle();
+    const report=f.collector.record({type:'user_report',module:'app',outcome:'unknown'})!;
+    await f.collector.flush();expect(f.collector.reportStatus(report)).toBe('rejected');
+    const offline=fixture({online:false});await settle();
+    const expired=offline.collector.record({type:'user_report',module:'app',outcome:'unknown'})!;
+    offline.advance(86400001);await offline.collector.flush();
+    expect(offline.collector.reportStatus(expired)).toBe('unavailable');
+  });
   it('never attributes an anonymous bootstrap error to a subsequent account',async()=>{
     const collector=new DiagnosticCollector({pageId:profileId,buildId:'test',persistence:{read:async()=>null,write:async()=>{}}});
     expect(collector.record({type:'ui_error',module:'app',outcome:'failed',errorClass:'TypeError'})).toBeNull();
