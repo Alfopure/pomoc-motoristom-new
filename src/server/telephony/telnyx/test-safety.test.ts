@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTelnyxClient } from "./client";
 import { getTelnyxConfig } from "./env";
-import { acceptsTestInboundSms, acceptsTestProviderEvent, checkTestProviderRequest, getTestProviderSafety, resolveTestSipCredential } from "./test-safety";
+import { acceptsTestInboundSms, acceptsTestProviderEvent, allowsUnlistedTestSmsRecipient, checkTestProviderRequest, getTestProviderSafety, resolveTestSipCredential } from "./test-safety";
 
 vi.mock("./test-safety", async (original) => ({ ...await original<typeof import("./test-safety")>(),
   resolveTestSipCredential: vi.fn(async () => "test-credential"),
@@ -30,6 +30,49 @@ function boundary(env: Record<string, string | undefined> = ENV) {
 }
 
 describe("TEST provider boundary", () => {
+  it("opens SMS recipients only with the explicit dedicated TEST policy", async () => {
+    const env = { ...ENV, MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT: "true", MOTORIST_TEST_SMS_ALPHA_SENDER: "DispecTEST", TELNYX_SMS_ALPHA_SENDER: "DispecTEST" };
+    const { api, fetch } = client(env);
+    const recipient = "+420777000123";
+    expect(allowsUnlistedTestSmsRecipient(getTestProviderSafety(ENV), recipient)).toBe(false);
+    expect(allowsUnlistedTestSmsRecipient(getTestProviderSafety(env), recipient)).toBe(true);
+    await api.sendMessage({ to: recipient, text: "synthetic" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toMatchObject({ from: "DispecTEST", to: recipient, messaging_profile_id: "test-messaging" });
+  });
+  it.each([
+    { MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT: "false" }, { MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT: "TRUE" },
+    { VERCEL_ENV: "preview" }, { VERCEL_ENV: "development" }, { VERCEL_GIT_COMMIT_REF: "feature" },
+    { VERCEL_GIT_COMMIT_REF: "main" }, { VERCEL_PROJECT_ID: "production-project" },
+    { MOTORIST_APP_ENV: "production" }, { SUPABASE_URL: "https://ifpaeegaesdmljfkdvcn.supabase.co" },
+    { APP_BASE_URL: "https://dispecing.linkapomoci.sk" }, { MOTORIST_TEST_LIVE_INTEGRATIONS: "false" },
+    { MOTORIST_TEST_ALLOWED_NUMBERS: "" }, { MOTORIST_TEST_FROM_NUMBERS: "" },
+  ])("does not open SMS recipients outside the approved TEST deployment: %j", async (patch) => {
+    const env = { ...ENV, MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT: "true", ...patch };
+    expect(allowsUnlistedTestSmsRecipient(getTestProviderSafety(env), "+420777000123")).toBe(false);
+    const { api, fetch } = client(env);
+    await expect(api.sendMessage({ to: "+420777000123", from: FROM, text: "synthetic" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each(["+420", "420777000123", "+420777000123 ", "sip:foreign@sip.telnyx.com", "*"])("rejects malformed unrestricted SMS recipient %s", async (recipient) => {
+    const env = { ...ENV, MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT: "true" };
+    expect(allowsUnlistedTestSmsRecipient(getTestProviderSafety(env), recipient)).toBe(false);
+    const { api, fetch } = client(env);
+    await expect(api.sendMessage({ to: recipient, from: FROM, text: "synthetic" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("retains voice, ingress, sender and profile guards with unrestricted SMS recipients", async () => {
+    const env = { ...ENV, MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT: "true", MOTORIST_TEST_SMS_ALPHA_SENDER: "DispecTEST", TELNYX_SMS_ALPHA_SENDER: "DispecTEST" };
+    const { api, fetch } = client(env);
+    const recipient = "+420777000123";
+    await expect(api.dial({ to: recipient, from: FROM, commandId: "voice" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    await expect(api.transfer({ callControlId: "existing", to: recipient, from: FROM, commandId: "transfer" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    await expect(api.sendMessage({ to: recipient, from: "PomocMotor", text: "synthetic" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    await expect(api.sendMessage({ to: recipient, messagingProfileId: "production", text: "synthetic" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    expect(acceptsTestInboundSms(getTestProviderSafety(env), recipient, [FROM])).toBe(false);
+    expect(acceptsTestProviderEvent(boundary(env), { type: "call.initiated", connectionId: "test-app", direction: "incoming", from: recipient, to: FROM })).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it.each([
     { MOTORIST_TEST_LIVE_INTEGRATIONS: "false" }, { MOTORIST_TEST_LIVE_INTEGRATIONS: "TRUE" },
     { MOTORIST_TEST_ALLOWED_NUMBERS: "*" }, { MOTORIST_TEST_ALLOWED_NUMBERS: `${TO},garbage` },
