@@ -2,7 +2,7 @@ import { canOperateTelephony, isTestLiveDeployment, resolveAppEnvironment, TEST_
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 
-export type TestProviderSafety = { restricted: boolean; deploymentAllowed: boolean; enabled: boolean; allowedNumbers: readonly string[]; fromNumbers: readonly string[]; aiSipTarget?: string | null; smsAlphaSender?: string | null };
+export type TestProviderSafety = { restricted: boolean; deploymentAllowed: boolean; enabled: boolean; allowedNumbers: readonly string[]; fromNumbers: readonly string[]; aiSipTarget?: string | null; smsAlphaSender?: string | null; smsAllowAnyRecipient?: boolean };
 const E164 = /^\+[1-9]\d{7,14}$/;
 const SIP = /^sip:([a-zA-Z0-9_-]{1,128})@sip\.telnyx\.com$/;
 
@@ -28,8 +28,14 @@ export function getTestProviderSafety(env: Record<string, string | undefined> = 
     ["sip.api.openai.com", "sip-eu.api.openai.com"].includes(aiHost) ? `sip:${aiProject}@${aiHost};transport=tls` : null;
   const deploymentAllowed = isTestLiveDeployment(env);
   return { restricted, deploymentAllowed, allowedNumbers, fromNumbers,
+    smsAllowAnyRecipient: deploymentAllowed && env.MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT === "true",
     aiSipTarget, smsAlphaSender,
     enabled: deploymentAllowed && env.MOTORIST_TEST_LIVE_INTEGRATIONS === "true" && allowedNumbers.length > 0 && fromNumbers.length > 0 };
+}
+
+export function allowsUnlistedTestSmsRecipient(safety: TestProviderSafety | undefined, destination: string): boolean {
+  return safety?.restricted === true && safety.deploymentAllowed && safety.enabled &&
+    safety.smsAllowAnyRecipient === true && E164.test(destination);
 }
 
 export class TestProviderSafetyError extends Error {
@@ -129,7 +135,8 @@ export function checkTestProviderRequest(boundary: ProviderBoundary, method: str
     if (path === "/calls" && destination === boundary.safety.aiSipTarget) continue;
     const sip = path !== "/messages" ? SIP.exec(destination) : null;
     if (sip) checked.sipUsernames.push(sip[1]);
-    else if (!boundary.safety.allowedNumbers.includes(destination)) throw new TestProviderSafetyError();
+    else if (!boundary.safety.allowedNumbers.includes(destination) &&
+      !(path === "/messages" && allowsUnlistedTestSmsRecipient(boundary.safety, destination))) throw new TestProviderSafetyError();
   }
   return checked;
 }

@@ -16,6 +16,15 @@ const ENV = {
   TELNYX_SMS_LIVE_SENDS: "true",
 };
 
+const TEST_ENV = {
+  MOTORIST_APP_ENV: "test", MOTORIST_TEST_LIVE_INTEGRATIONS: "true", MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT: "true",
+  VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev", VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk",
+  SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co", APP_BASE_URL: "https://test.dispecing.linkapomoci.sk",
+  MOTORIST_TEST_ALLOWED_NUMBERS: "+421900000001", MOTORIST_TEST_FROM_NUMBERS: "+421200000001",
+  MOTORIST_TEST_SMS_ALPHA_SENDER: "DispecTEST", TELNYX_SMS_ALPHA_SENDER: "DispecTEST",
+  TELNYX_CALL_CONTROL_APP_ID: "test-app", TELNYX_CREDENTIAL_CONNECTION_ID: "test-connection",
+};
+
 function harness(options: { env?: Record<string, string | undefined>; smsLiveSends?: boolean; destinationAllowlist?: string[] } = {}) {
   const supabase = createFakeSupabase();
   supabase.db.seed("motorist_telephony_settings", [
@@ -41,6 +50,44 @@ describe("telnyx sms transport", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetSmsRateLimit();
+  });
+
+  it("preflights and sends an unlisted SMS recipient only on the opted-in dedicated TEST", async () => {
+    const { fetchMock, transport } = harness({ env: TEST_ENV, destinationAllowlist: ["+421900000001"] });
+    fetchMock.mockResolvedValue(jsonResponse(ACCEPTED));
+    await expect(transport.preflight({ organizationId: ORGANIZATION_ID, to: "+420777000123" })).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(transport.send({ organizationId: ORGANIZATION_ID, to: "+420777000123", body: "synthetic", idempotencyKey: "test-any-recipient" })).resolves.toMatchObject({ providerMessageId: "msg-1" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ from: "DispecTEST", to: "+420777000123", messaging_profile_id: "profile-1" });
+  });
+  it.each([
+    { MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT: "false" }, { VERCEL_ENV: "preview" },
+    { MOTORIST_TEST_LIVE_INTEGRATIONS: "false" }, { VERCEL_PROJECT_ID: "production-project" },
+  ])("does not skip the organisation allowlist outside the opted-in TEST: %j", async (patch) => {
+    const { fetchMock, transport } = harness({ env: { ...TEST_ENV, ...patch }, destinationAllowlist: ["+421900000001"] });
+    await expect(transport.preflight({ organizationId: ORGANIZATION_ID, to: "+420777000123" })).rejects.toMatchObject({ status: 403 });
+    await expect(transport.send({ organizationId: ORGANIZATION_ID, to: "+420777000123", body: "synthetic", idempotencyKey: "blocked" })).rejects.toMatchObject({ status: 403 });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("retains the production destination allowlist even if the TEST flag is set", async () => {
+    const { fetchMock, transport } = harness({ env: { MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT: "true" }, destinationAllowlist: ["SK"] });
+    await expect(transport.preflight({ organizationId: ORGANIZATION_ID, to: "+420777000123" })).rejects.toMatchObject({ status: 403 });
+    await expect(transport.send({ organizationId: ORGANIZATION_ID, to: "+420777000123", body: "synthetic", idempotencyKey: "production-blocked" })).rejects.toMatchObject({ status: 403 });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("keeps kill switches and the rate limit for unrestricted TEST recipients", async () => {
+    const disabled = harness({ env: TEST_ENV, smsLiveSends: false });
+    await expect(disabled.transport.preflight({ organizationId: ORGANIZATION_ID, to: "+420777000123" })).rejects.toMatchObject({ status: 423 });
+    expect(disabled.fetchMock).not.toHaveBeenCalled();
+    const { fetchMock, transport } = harness({ env: TEST_ENV, destinationAllowlist: ["+421900000001"] });
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(ACCEPTED)));
+    for (let index = 0; index < 20; index += 1) {
+      await transport.send({ organizationId: ORGANIZATION_ID, to: "+420777000123", body: "synthetic", idempotencyKey: `unrestricted-${index}` });
+    }
+    await expect(transport.preflight({ organizationId: ORGANIZATION_ID, to: "+420777000123" })).rejects.toMatchObject({ status: 429 });
+    await expect(transport.send({ organizationId: ORGANIZATION_ID, to: "+420777000123", body: "synthetic", idempotencyKey: "unrestricted-exhausted" })).rejects.toMatchObject({ status: 429 });
+    expect(fetchMock).toHaveBeenCalledTimes(20);
   });
 
   it("posts the alpha sender, recipient, text and messaging profile", async () => {
