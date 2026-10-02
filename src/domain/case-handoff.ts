@@ -1,23 +1,29 @@
 export const handoffStates = ["offered", "accepted", "en_route", "arrived", "completed", "rejected", "cancelled", "expired"] as const;
 export type HandoffState = typeof handoffStates[number];
 export const handoffLabels: Record<HandoffState, string> = { offered: "Čaká na prijatie", accepted: "Prijaté", en_route: "Na ceste", arrived: "Na mieste", completed: "Dokončené", rejected: "Odmietnuté", cancelled: "Zrušené", expired: "Platnosť skončila" };
-export const handoffEventLabels: Record<string, string> = { issue: "Odovzdanie vytvorené", publish: "Údaje aktualizované", renew: "Odkaz obnovený", accept: "Prijaté", reject: "Odmietnuté", en_route: "Na ceste", arrived: "Na mieste", complete: "Dokončené", update: "Aktualizácia", blocked: "Problém pri realizácii", revoke: "Zrušené" };
+export const handoffEventLabels: Record<string, string> = { issue: "Odovzdanie vytvorené", publish: "Údaje aktualizované", renew: "Odkaz obnovený", extend: "Platnosť predĺžená", recover: "Odkaz opätovne získaný", accept: "Prijaté", reject: "Odmietnuté", en_route: "Na ceste", arrived: "Na mieste", complete: "Dokončené", update: "Aktualizácia", blocked: "Problém pri realizácii", revoke: "Zrušené" };
 export type HandoffPlace = { address: string; lat: number | null; lng: number | null };
 export type HandoffPublished = {
   caseNumber: string; action: string;
   contact: { name: string; phone: string };
-  vehicle: { make: string; model: string; plate: string };
+  vehicle: { make: string; model: string; plate: string; color?: string; driveable?: boolean | null; conditionFlags?: string[] };
   pickup: HandoffPlace | null; destination: HandoffPlace | null;
   instructions?: string; scheduledAt?: string | null;
+  schemaVersion?: number;
+  assistance?: { name: string; reference: string };
+  replacement?: { needed: boolean | null; category: string; requestedType: string; preferences: string[]; status: string; deliveryPlace: string; vehicle: { make: string; model: string; plate: string } | null };
+  incident?: { description: string; passengersCount: number | null; access: string };
+  caseCreatedAt?: string | null; firstCallAt?: string | null;
 };
 export type HandoffEvent = { id: string; action: string; comment: string; actor: string; createdAt: string };
 export type CaseHandoff = {
   id: string; status: HandoffState; revision: number; publishedVersion: number;
   recipientName: string; recipientPhone?: string; expiresAt: string; createdAt: string;
   canRenew?: boolean;
+  recoverable?: boolean; tokenGeneration?: number; createdBy?: string; publishedAt?: string | null;
   openedAt: string | null; eta: string | null; published: HandoffPublished | null; events: HandoffEvent[];
 };
-export type HandoffContext = { preview: HandoffPublished; previewVersion: string; handoffs: CaseHandoff[] };
+export type HandoffContext = { preview: HandoffPublished; previewVersion: string; handoffs: CaseHandoff[]; enhanced?: boolean };
 export type HandoffCommand = { action: string; commandId: string; expectedRevision?: number; publishedVersion?: number; comment?: string; eta?: string | null; [key: string]: unknown };
 export type HandoffReceipt = { handoff: CaseHandoff; commandId?: string; committedRevision?: number; tokenAccepted?: boolean; url?: string };
 export function isHandoffReceipt(value: unknown, command: HandoffCommand): value is HandoffReceipt {
@@ -30,4 +36,7 @@ export function isHandoffReceipt(value: unknown, command: HandoffCommand): value
 }
 export function handoffIsActive(handoff: Pick<CaseHandoff, "status" | "expiresAt">): boolean {
   return ["offered", "accepted", "en_route", "arrived"].includes(handoff.status) && Date.parse(handoff.expiresAt) > Date.now();
+}
+export function handoffDate(value: string): string {
+  return new Intl.DateTimeFormat("sk-SK", { dateStyle: "medium", timeStyle: "short", timeZone: "Europe/Bratislava" }).format(new Date(value)) + " (Bratislava)";
 }
