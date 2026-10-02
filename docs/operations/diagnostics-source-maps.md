@@ -1,8 +1,10 @@
 # Private browser error diagnostics
 
-The errors-only Sentry client is off unless `NEXT_PUBLIC_DIAGNOSTICS_SENTRY_DSN` is present at build time. No Sentry account/project, retention or cost approval has been verified. Do not treat the adapter or an upload exit code as verified technical monitoring.
+The errors-only Sentry client is off unless `NEXT_PUBLIC_DIAGNOSTICS_SENTRY_DSN` is present at build time. On 2026-10-02, direct read-only verification of production `alfopure/sentry-beige-horizon` confirmed three captured browser errors with working private source maps for release `c3e5a86226148d5b61d526aa244229551de73a67`. This verifies that production capture/mapping path; TEST configuration, retention and account quotas require their own verification.
 
-The adapter sends only allowlisted error classes, same-origin Next compiler chunk coordinates, immutable release and opaque error correlation ID. It discards messages, function names, request details, user data, breadcrumbs, replay, sessions and tracing. Capture works before React hydration, including anonymous login errors; anonymous events never enter the authenticated internal queue and are not buffered for a subsequent login. Without a configured Sentry DSN, anonymous crashes have no durable capture. Sentry has a two-events/minute client cap, fingerprint dedupe and the shared twelve-attempts/minute cap across both transports. There is no server Sentry SDK or automatic server error forwarding.
+The adapter sends allowlisted error classes, same-origin Next compiler chunk coordinates, immutable release/environment, opaque error/page/call IDs, browser family/version, the last committed technical editor state and up to twelve closed-schema operation breadcrumbs. It preserves the first Safari stack frame and canonical numeric React codes, including depth error 185. Arbitrary error messages and their arguments, function names, input values, names, phone numbers, request details, user objects, SDK breadcrumbs, replay, sessions and tracing are discarded. The outbound SDK boundary revalidates this schema. See [browser incident handling](dispatch-browser-incidents.md).
+
+Capture works before React hydration, including anonymous login errors; anonymous events never enter the authenticated internal queue and are not buffered for a subsequent login. Without a configured Sentry DSN, anonymous crashes have no durable capture. Sentry has a two-events/minute client cap, fingerprint dedupe and the shared twelve-attempts/minute cap across both transports. There is no server Sentry SDK or automatic server error forwarding.
 
 To prepare private source maps for an exact release:
 
@@ -24,7 +26,7 @@ Keep TEST DSN/project separate. Introduce the code through work branch → revie
 
 The manual client deliberately removes `debug_meta`; retain release/URL matching (`~/_next/static`) for this upload path. Do not switch to debug-ID-only mapping without a reviewed privacy-preserving client change and another real mapped-stack check.
 
-Production activation remains blocked until the source map check, bundle/network budget and account configuration are verified. Default `pnpm build` neither creates public source maps nor uploads anything. A fresh Vercel source build will regenerate artifacts, so an external prebuilt release pipeline must preserve the identical compiled output; preparing local maps and deploying a different rebuild does not satisfy the gate.
+Each new release still requires the matching source map check and applicable TEST/production approval in AGENTS.md. Default `pnpm build` neither creates public source maps nor uploads anything. A fresh Vercel source build will regenerate artifacts, so an external prebuilt release pipeline must preserve the identical compiled output; preparing local maps and deploying a different rebuild does not satisfy the gate.
 
 Sentry references: [Custom browser client](https://docs.sentry.io/platforms/javascript/configuration/tree-shaking/), [CLI source maps](https://docs.sentry.io/cli/sourcemaps/uploading/).
 

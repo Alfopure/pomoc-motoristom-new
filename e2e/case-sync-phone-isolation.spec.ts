@@ -15,7 +15,7 @@ test.beforeAll(async () => {
   for (const variant of ["current", "baseline"]) {
     const result = await build({ entryPoints: ["e2e/fixtures/case-sync-phone-isolation.tsx"], bundle: true, write: false, outfile: `sync-phone-${variant}.js`, platform: "browser", format: "iife", jsx: "automatic",
       alias: { "@telnyx/webrtc": path.resolve("e2e/fixtures/mobile-calling-sdk.ts"), "@/lib/telephony/realtime-client": path.resolve("e2e/fixtures/mobile-calling-realtime.ts"), "@/lib/supabase/browser": path.resolve("e2e/fixtures/case-collaboration-realtime.ts") },
-      define: { "process.env.NODE_ENV": '"production"' },
+      define: { "process.env": JSON.stringify({ NODE_ENV: 'production' }) },
       plugins: variant !== "baseline" ? [] : [{ name: "exact-pre-change-case-boundary", setup(plugin) {
         plugin.onResolve({ filter: /\/CaseSyncIndicator$/ }, () => ({ path: "no-sync-icon", namespace: "baseline" }));
         plugin.onLoad({ filter: /.*/, namespace: "baseline" }, () => ({ contents: "export function CaseSyncIndicator() { return null; }", loader: "tsx" }));
@@ -63,6 +63,26 @@ async function flushBrowserTasks(page: Page) {
   });
 }
 
+test("an editor render failure and retry preserve the registered phone and active media", async ({ page }) => {
+  await page.clock.install();
+  const failures = await boot(page); await page.clock.runFor(600);
+  await page.evaluate(() => window.syncPhoneHarness.callState('active'));
+  await expect(page.locator('#phone-state')).toHaveAttribute('data-call', 'fixture-incoming');
+  await page.evaluate(() => window.syncPhoneHarness.openCaseEditor());
+  await expect(page.getByTestId('case-edit-form-main')).toBeVisible();
+  const before = await counters(page);
+  await page.evaluate(() => window.syncPhoneHarness.crashCaseEditor());
+  await expect(page.getByRole('heading', { name: 'Prípad sa nepodarilo zobraziť' })).toBeVisible();
+  await expect(page.locator('#phone-state')).toHaveAttribute('data-status', 'registered');
+  await expect(page.locator('#phone-state')).toHaveAttribute('data-call', 'fixture-incoming');
+  expect(await counters(page)).toEqual(before);
+  await page.evaluate(() => window.syncPhoneHarness.repairCaseEditor());
+  await page.getByRole('button', { name: 'Obnoviť editor', exact: true }).click();
+  await expect(page.getByTestId('case-edit-form-main')).toBeVisible();
+  expect(await counters(page)).toEqual(before);
+  expect(failures).toEqual([]);
+});
+
 test("case reads and the popup keep the real phone hook, invite, media and dirty input intact", async ({ page }) => {
   await page.clock.install(); const failures = await boot(page); await page.clock.runFor(600);
   await page.evaluate(() => window.syncPhoneHarness.callState("ringing"));
@@ -98,8 +118,10 @@ test("the same virtual time preserves phone request cadence with and without cas
   const controlContext = await browser.newContext(); const control = await controlContext.newPage(); const pages = [control, page];
   const failures: string[][] = [];
   for (const current of pages) {
-    await current.clock.install({ time: new Date("2026-09-21T13:00:00Z") }); failures.push(await boot(current));
+    await current.clock.install({ time: new Date("2026-09-21T13:00:00Z") });
+    // Freeze before bundle loading so machine/bundle speed cannot move past the checkpoint.
     await current.clock.pauseAt(new Date("2026-09-21T13:00:01Z"));
+    failures.push(await boot(current));
     await flushBrowserTasks(current);
   }
   const starts = await Promise.all(pages.map(current => current.evaluate(() => window.syncPhoneHarness.ledger.length)));

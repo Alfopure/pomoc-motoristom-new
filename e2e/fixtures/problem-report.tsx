@@ -1,0 +1,10 @@
+import { createRoot } from 'react-dom/client';
+import { ErrorFallback } from '@/lib/diagnostics/ErrorFallback';
+import { setDiagnosticIdentity } from '@/lib/diagnostics/client';
+import { setDiagnosticEditorContext } from '@/lib/diagnostics/ui-context';
+setDiagnosticIdentity({ organizationId: '00000000-0000-4000-8000-000000000001', profileId: '00000000-0000-4000-8000-000000000002' });
+setDiagnosticEditorContext({ case_id: '00000000-0000-4000-8000-000000000021', dirty: true, save_phase: 'waiting' });
+Object.assign(window, { logoutReportFixture: () => setDiagnosticIdentity(null) });
+const error = new Error('Minified React error #185; CANARY_PRIVATE');
+error.stack = 'next@https://report.test/_next/static/chunks/abcdef1234567890.js:12:34';
+createRoot(document.getElementById('root')!).render(<ErrorFallback error={error} retry={() => {}} />);
