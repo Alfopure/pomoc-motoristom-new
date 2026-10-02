@@ -50,6 +50,15 @@ class ExternalHandoffContract(unittest.TestCase):
           add column location_details jsonb;
         """)
         cls.db.execute(sql(ROOT / "supabase/migrations/20261001110000_external_case_handoff.sql"))
+        cls.db.execute("""
+        alter table motorist_cases add column created_at timestamptz default now(), add column assistance_reference text,
+          add column customer_details jsonb, add column vehicle_details jsonb, add column incident_details jsonb,
+          add column replacement_vehicle_details jsonb, add column selected_asset_id uuid;
+        alter table motorist_vehicles add column color text, add column is_driveable boolean;
+        create table motorist_fleet_assets(id uuid primary key,organization_id uuid,kind text,make text,model text,license_plate text,occupancy_case_id uuid,notes text);
+        create table motorist_calls(id uuid primary key,organization_id uuid,case_id uuid,direction text,started_at timestamptz,transcript text);
+        """)
+        cls.db.execute(sql(ROOT / "supabase/migrations/20261009100000_external_case_handoff_expansion.sql"))
 
     @classmethod
     def tearDownClass(cls):
@@ -69,7 +78,7 @@ class ExternalHandoffContract(unittest.TestCase):
     def new_case(self, org=ORG):
         case, contact, vehicle, pickup, destination = [str(uuid.uuid4()) for _ in range(5)]
         self.db.execute("insert into motorist_contacts values(%s,%s,'Client','+421900000000','PRIVATE_EMAIL',%s::jsonb)", (contact, org, json.dumps({"secret": "PRIVATE_CONTACT_DETAILS"})))
-        self.db.execute("insert into motorist_vehicles values(%s,%s,'Skoda','Octavia','TEST001','PRIVATE_VIN',%s::jsonb)", (vehicle, org, json.dumps({"secret": "PRIVATE_VEHICLE_DETAILS"})))
+        self.db.execute("insert into motorist_vehicles(id,organization_id,make,model,license_plate,vin,private_details) values(%s,%s,'Skoda','Octavia','TEST001','PRIVATE_VIN',%s::jsonb)", (vehicle, org, json.dumps({"secret": "PRIVATE_VEHICLE_DETAILS"})))
         self.db.execute("insert into motorist_locations values(%s,%s,'Pickup address',48.1,17.1,'PRIVATE_PICKUP_NOTE'),(%s,%s,'Destination address',48.2,17.2,'PRIVATE_DESTINATION_NOTE')", (pickup, org, destination, org))
         self.db.execute("""insert into motorist_cases(id,organization_id,case_number,status,case_type,contact_id,vehicle_id,pickup_location_id,destination_location_id,internal_note,prices,attachments,transcript)
         values(%s,%s,'TEST-CASE','open','Tow service',%s,%s,%s,%s,'PRIVATE_CASE_NOTE','{"price":"PRIVATE_PRICE"}','{"file":"PRIVATE_ATTACHMENT"}','PRIVATE_TRANSCRIPT')""", (case, org, contact, vehicle, pickup, destination))
@@ -128,10 +137,10 @@ class ExternalHandoffContract(unittest.TestCase):
         case, token, handoff, _ = self.issue()
         session, opened = self.session(token)
         public = self.public("read", session, {"handoffId": handoff["id"]})["handoff"]
-        self.assertEqual(set(public), {"id", "status", "revision", "publishedVersion", "recipientName", "expiresAt", "createdAt", "openedAt", "eta", "published", "events"})
-        self.assertEqual(set(public["published"]), {"caseNumber", "action", "contact", "vehicle", "pickup", "destination", "instructions", "scheduledAt"})
+        self.assertEqual(set(public), {"id", "status", "revision", "publishedVersion", "recipientName", "expiresAt", "createdAt", "openedAt", "eta", "published", "events", "createdBy", "publishedAt"})
+        self.assertEqual(set(public["published"]), {"schemaVersion", "caseNumber", "action", "contact", "vehicle", "pickup", "destination", "instructions", "scheduledAt", "assistance", "replacement", "incident", "caseCreatedAt", "firstCallAt"})
         self.assertEqual(set(public["published"]["contact"]), {"name", "phone"})
-        self.assertEqual(set(public["published"]["vehicle"]), {"make", "model", "plate"})
+        self.assertEqual(set(public["published"]["vehicle"]), {"make", "model", "plate", "color", "driveable", "conditionFlags"})
         self.assertNotIn("PRIVATE_", json.dumps(public))
         self.assertNotIn("recipientPhone", public)
         self.assertNotIn("token", json.dumps(public).lower())
@@ -446,6 +455,114 @@ class ExternalHandoffContract(unittest.TestCase):
                 return
             time.sleep(.01)
         self.fail("No observed handoff row lock")
+
+
+    def enhanced_issue(self, case=None):
+        envelope = {"version": 1, "keyId": "v1", "iv": "a" * 16, "tag": "a" * 22, "ciphertext": "a" * 58}
+        return self.issue(case, issuedId=str(uuid.uuid4()), secretGeneration=1, tokenEnvelope=envelope, linkOrigin="https://test.dispecing.linkapomoci.sk")
+
+    def test_30_recover_after_reload_returns_same_envelope_and_has_narrow_scope(self):
+        case, token, grant, command = self.enhanced_issue()
+        payload = {"handoffId": grant["id"], "commandId": str(uuid.uuid4())}
+        first = self.internal(case, "link", payload)
+        second = self.internal(case, "link", payload)
+        self.assertEqual(first, second)
+        self.assertEqual(first["tokenHash"], token)
+        self.assertEqual(first["envelope"], command["tokenEnvelope"])
+        self.assertEqual(first["origin"], command["linkOrigin"])
+        self.assertEqual(first["generation"], 1)
+        self.assertNotIn("envelope", json.dumps(self.internal(case, "context")))
+        self.rejected("42501", lambda: self.internal(case, "link", payload, actor=OTHER))
+        self.rejected("P0002", lambda: self.internal(self.new_case(), "link", payload))
+        with self.client("service_role") as client:
+            self.rejected("42501", lambda: self.internal(case, "link", payload, conn=client))
+
+    def test_31_encrypted_issue_replay_preserves_original_secret_and_generation(self):
+        case, token, grant, command = self.enhanced_issue()
+        replay = self.internal(case, "issue", {**command, "issuedId": str(uuid.uuid4()), "tokenHash": digest("unused"), "tokenEnvelope": {"different": True}})
+        self.assertEqual(replay["handoff"]["id"], grant["id"])
+        self.assertEqual(replay["linkGeneration"], 1)
+        recovered = self.internal(case, "link", {"handoffId": grant["id"], "generation": replay["linkGeneration"]})
+        self.assertEqual(recovered["tokenHash"], token)
+        self.assertEqual(recovered["envelope"], command["tokenEnvelope"])
+        receipt = self.db.execute("select payload from motorist_handoff_receipts where handoff_id=%s", (grant["id"],)).fetchone()[0]
+        self.assertNotIn("tokenEnvelope", json.dumps(receipt))
+
+    def test_32_extension_keeps_token_generation_snapshot_and_sessions(self):
+        case, token, grant, _ = self.enhanced_issue()
+        session, _ = self.session(token)
+        extended = self.internal(case, "extend", self.private_command(grant, hours=48))["handoff"]
+        self.assertEqual(extended["tokenGeneration"], 1)
+        self.assertEqual(extended["published"], grant["published"])
+        self.assertGreater(extended["expiresAt"], grant["expiresAt"])
+        self.assertEqual(self.internal(case, "link", {"handoffId": grant["id"]})["tokenHash"], token)
+        self.public("read", session, {"handoffId": grant["id"]})
+        self.rejected("PT409", lambda: self.internal(case, "extend", self.private_command(grant, hours=48)))
+
+    def test_33_rotation_invalidates_old_recovery_receipt_and_sessions(self):
+        case, token, grant, command = self.enhanced_issue()
+        session, _ = self.session(token)
+        renewed = self.internal(case, "renew", self.private_command(grant, hours=24, tokenHash=digest("rotated"), tokenEnvelope=command["tokenEnvelope"], linkOrigin=command["linkOrigin"], issuedId=grant["id"], secretGeneration=2))["handoff"]
+        self.assertEqual(renewed["tokenGeneration"], 2)
+        self.rejected("P0002", lambda: self.session(token))
+        self.rejected("P0002", lambda: self.public("read", session, {"handoffId": grant["id"]}))
+        replay = self.internal(case, "issue", command)
+        self.rejected("PT409", lambda: self.internal(case, "link", {"handoffId": grant["id"], "generation": replay["linkGeneration"]}))
+
+    def test_34_legacy_expired_cancelled_and_terminal_links_cannot_be_recovered(self):
+        case, _, grant, _ = self.issue()
+        self.rejected("PT409", lambda: self.internal(case, "link", {"handoffId": grant["id"]}))
+        case, token, grant, _ = self.enhanced_issue()
+        self.db.execute("update motorist_case_handoffs set expires_at=clock_timestamp()-interval '1 second' where id=%s", (grant["id"],))
+        self.rejected("P0002", lambda: self.internal(case, "link", {"handoffId": grant["id"]}))
+        grant = self.internal(case, "extend", self.private_command(grant, hours=24))["handoff"]
+        self.session(token)
+        grant = self.internal(case, "revoke", self.private_command(grant, comment="Test revocation"))["handoff"]
+        self.rejected("P0002", lambda: self.internal(case, "link", {"handoffId": grant["id"]}))
+        self.rejected("PT409", lambda: self.internal(case, "extend", self.private_command(grant, hours=24)))
+
+    def test_35_expanded_projection_filters_private_fields_and_wrong_fleet_kinds(self):
+        case = self.new_case()
+        asset = str(uuid.uuid4())
+        self.db.execute("insert into motorist_fleet_assets values(%s,%s,'tow_truck','PRIVATE_TRUCK','Tow','TOW000',%s,'PRIVATE_FLEET_NOTE')", (asset, ORG, case))
+        self.db.execute("""update motorist_cases set selected_asset_id=%s, customer_details='{"assistanceServiceName":"Assistance","assistanceReference":"AS-123","note":"PRIVATE_CUSTOMER"}',
+          vehicle_details='{"conditionFlags":["blocked_wheel","PRIVATE_FLAG"]}',
+          replacement_vehicle_details='{"needed":true,"category":"wagon","deliveryPlace":"Rental branch","preferences":["automatic","PRIVATE_PREF"],"entitlement":"PRIVATE_ENTITLEMENT"}',
+          incident_details='{"description":"Battery fault","passengersCount":2,"damageNote":"PRIVATE_DAMAGE"}' where id=%s""", (asset, case))
+        preview = self.internal(case, "context")["preview"]
+        self.assertEqual(preview["assistance"], {"name": "Assistance", "reference": "AS-123"})
+        self.assertIsNone(preview["vehicle"]["driveable"])
+        self.assertEqual(preview["vehicle"]["conditionFlags"], ["blocked_wheel"])
+        self.assertIsNone(preview["replacement"]["vehicle"])
+        self.assertEqual(preview["replacement"]["status"], "pending")
+        self.assertNotIn("PRIVATE_", json.dumps(preview))
+        self.db.execute("update motorist_fleet_assets set kind='replacement_car',make='Kia',model='Ceed',license_plate='RENT001' where id=%s", (asset,))
+        preview = self.internal(case, "context")["preview"]
+        self.assertEqual(preview["replacement"]["vehicle"]["plate"], "RENT001")
+        self.db.execute("update motorist_fleet_assets set occupancy_case_id=%s where id=%s", (self.new_case(), asset))
+        self.assertIsNone(self.internal(case, "context")["preview"]["replacement"]["vehicle"])
+        self.db.execute("update motorist_fleet_assets set occupancy_case_id=%s where id=%s", (case, asset))
+        duplicate = str(uuid.uuid4())
+        self.db.execute("insert into motorist_fleet_assets values(%s,%s,'replacement_car','Kia','Ceed','RENT002',%s,'PRIVATE_FLEET_NOTE')", (duplicate, ORG, case))
+        self.assertIsNone(self.internal(case, "context")["preview"]["replacement"]["vehicle"])
+        self.db.execute("delete from motorist_fleet_assets where id=%s", (duplicate,))
+        self.db.execute("update motorist_fleet_assets set organization_id=%s where id=%s", (OTHER_ORG, asset))
+        self.assertIsNone(self.internal(case, "context")["preview"]["replacement"]["vehicle"])
+
+    def test_36_first_call_is_linked_inbound_same_org_and_sender_is_immutable(self):
+        case = self.new_case()
+        self.db.execute("""insert into motorist_calls values
+         (gen_random_uuid(),%s,%s,'inbound','2026-10-01T10:00:00Z','PRIVATE_TRANSCRIPT'),
+         (gen_random_uuid(),%s,%s,'inbound','2026-10-01T09:00:00Z','PRIVATE_TRANSCRIPT'),
+         (gen_random_uuid(),%s,%s,'outbound','2026-10-01T08:00:00Z','PRIVATE_TRANSCRIPT'),
+         (gen_random_uuid(),%s,%s,'inbound','2026-10-01T07:00:00Z','PRIVATE_TRANSCRIPT')""", (ORG, case, ORG, case, ORG, case, OTHER_ORG, case))
+        _, _, grant, _ = self.enhanced_issue(case)
+        self.assertEqual(grant["published"]["firstCallAt"], "2026-10-01T09:00:00+00:00")
+        self.assertTrue(grant["createdBy"])
+        self.assertTrue(grant["publishedAt"])
+        author = grant["createdBy"]
+        self.db.execute("update motorist_profiles set display_name='Changed display name' where id=%s", (A,))
+        self.assertEqual(self.internal(case, "context")["handoffs"][0]["createdBy"], author)
 
 
 if __name__ == "__main__":
