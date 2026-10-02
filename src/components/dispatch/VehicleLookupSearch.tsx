@@ -5,6 +5,7 @@ import { ArrowUpRight, CarFront, LoaderCircle, Search } from "lucide-react";
 import { isCzechPlate, isSlovakPlate, isVin, lookupIdentityConflict, normalizeVehicleIdentifier, preferredVehicleFacts, vehicleFactConflicts, vehicleFieldLabels, type VehicleCountry, type VehicleField, type VehicleIdentity, type VehicleLookupResponse } from "@/lib/vehicle-lookup";
 import { requestVehicleLookup } from "@/lib/vehicle-lookup-client";
 import { VehicleLookupDetails, vehicleLookupDate } from "./VehicleLookupDetails";
+import { SkpManualFallback } from "./SkpManualFallback";
 
 type Props = { compact?: boolean; active?: boolean; lookupRequest?: { id: number; value: string } };
 const summaryFields: VehicleField[] = ["fuel", "color", "powerKw", "transmission", "curbWeightKg", "drivenAxles"];
@@ -117,12 +118,13 @@ export function VehicleLookupSearch({ compact = false, active = true, lookupRequ
       <p className="mt-1 text-[11px] text-zinc-500">{response.cached ? "Z predchádzajúceho overenia" : "Získané"} {vehicleLookupDate(result.fetchedAt, true)}</p>
       {conflict ? <p role="alert" className="mt-2 text-xs font-medium text-amber-900">{conflict} PZP vozidla nepotvrdené.</p> : <>
         <p className="mt-2 text-xs text-zinc-800">PZP: <strong>{conflicts.insuranceStatus || conflicts.insurer ? "Rozdielne údaje zdrojov" : facts.insuranceStatus?.value ?? (result.query.country === "CZ" ? "neoverené" : "nepotvrdené")}</strong>{!conflicts.insurer && facts.insurer && ` · ${facts.insurer.value}`} · k {vehicleLookupDate(result.query.checkedForDate)}</p>
-        {!facts.insuranceStatus && <p className="mt-1 text-[11px] text-zinc-500">Chýbajúci výsledok neznamená, že auto nie je poistené.</p>}
+        {result.query.country === "CZ" && !facts.insuranceStatus && <p className="mt-1 text-[11px] text-zinc-500">Chýbajúci výsledok neznamená, že auto nie je poistené.</p>}
         {result.query.country === "CZ" && <p className="mt-1 text-xs text-zinc-800">Diaľničná známka: <strong>{facts.vignetteStatus?.value ?? "neoverená"}</strong>{facts.vignetteValidUntil && ` · do ${vehicleLookupDate(facts.vignetteValidUntil.value)}`}</p>}
         <dl className={`mt-3 grid gap-x-3 gap-y-2 ${compact ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-6"}`}>
           {summaryFields.map(field => <div key={field} className="min-w-0"><dt className="text-[11px] text-zinc-500">{vehicleFieldLabels[field]}</dt><dd className={`mt-0.5 break-words text-xs font-medium ${conflicts[field] ? "text-amber-900" : "text-zinc-900"}`}>{conflicts[field] ? "Rozdielne údaje" : facts[field]?.value ?? "Nezistené"}{!conflicts[field] && facts[field]?.quality === "partial" && " · návrh"}</dd></div>)}
         </dl>
       </>}
+      <SkpManualFallback result={result} identityConflict={Boolean(conflict)} className="mt-2" />
       <button type="button" aria-haspopup="dialog" onClick={event => { opener.current = event.currentTarget; setExpanded(true); }} className="mt-3 inline-flex min-h-9 items-center gap-1 text-xs font-semibold text-zinc-800 underline underline-offset-4">Celý detail vozidla<ArrowUpRight size={14} /></button>
       {expanded && active && <VehicleLookupDetails returnFocus={opener} snapshot={response.snapshot} readOnly proposal={false} cached={response.cached} identity={identity} conflict={conflict} includePartial={true} choices={{}} patch={{}} disabled={false} onIncludePartial={() => {}} onChoice={() => {}} onClose={() => setExpanded(false)} onAccept={() => {}} />}
     </div>}

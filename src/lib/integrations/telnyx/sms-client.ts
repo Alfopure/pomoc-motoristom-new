@@ -65,6 +65,9 @@ export function smsErrorFromTelnyx(error: unknown): SmsWorkflowError {
     if (error.code === "sms_disabled") return new SmsWorkflowError(SMS_SENDS_DISABLED_MESSAGE, 423);
     const detail = error.detail ?? error.title ?? error.code;
     if (error.status === 429) return new SmsWorkflowError(`SMS sa nepodarilo odoslať (limit poskytovateľa): ${detail}`, 429);
+    if (error.status === 401 || error.status === 403) {
+      return new SmsWorkflowError(`SMS poskytovateľ odmietol správu: ${detail}`, error.status);
+    }
     if (error.status === 400 || error.status === 404 || error.status === 422) {
       return new SmsWorkflowError(`SMS poskytovateľ odmietol správu: ${detail}`, 400);
     }
