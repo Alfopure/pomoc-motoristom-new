@@ -1,5 +1,6 @@
 "use client";
 import { beginDiagnosticOperation } from "@/lib/diagnostics/client";
+import { retainDiagnosticUiContext, setDiagnosticEditorContext } from "@/lib/diagnostics/ui-context";
 import { diagnosticJson } from "@/lib/diagnostics/request";
 import { diagnosticFailure, diagnosticRequestId, diagnosticResponse } from "@/lib/diagnostics/operations";
 import type { DiagnosticOutcome } from "@/lib/diagnostics/types";
@@ -11,7 +12,7 @@ import { protectDraftBeforeUnload } from "@/lib/draft-unload";
 import { resolveInternalVehicle, vehicleFieldsMatchingLookup, type VehicleLookupSnapshot } from "@/lib/vehicle-lookup";
 import { storedPhoneForDial } from "@/lib/telephony/phone-entry";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   CarFront,
@@ -144,6 +145,7 @@ import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 import { CaseHandoffPanel } from "./CaseHandoffPanel";
 import { useLayoutPreview } from "./LayoutPreview";
+import { CaseEditorBoundary } from "./CaseEditorBoundary";
 
 type CaseDetailProps = {
   /** Visibility of the mounted content; does not control its draft lifetime. */
@@ -268,7 +270,11 @@ const closureTypeLabels: Record<ClosureType, string> = {
   internal: "Interné",
 };
 
-export function CaseDetail({
+export function CaseDetail(props: CaseDetailProps) {
+  return <CaseEditorBoundary key={props.caseItem.id} onFailure={() => props.onSavingChange?.(false)}><CaseDetailContent {...props} /></CaseEditorBoundary>;
+}
+
+function CaseDetailContent({
   active = true,
   renderTaskWorkflow,
   caseItem,
@@ -421,15 +427,15 @@ export function CaseDetail({
     setLocalEditing(nextEditing);
   }
 
-  function updateDirtyState(dirty: boolean) {
+  const updateDirtyState = useCallback((dirty: boolean) => {
     setDraftDirty(dirty);
     onDirtyChange?.(dirty);
-  }
+  }, [onDirtyChange]);
 
-  function updateSavingState(saving: boolean) {
+  const updateSavingState = useCallback((saving: boolean) => {
     setIsEditSaveLocked(saving);
     onSavingChange?.(saving);
-  }
+  }, [onSavingChange]);
 
   function discardEditorDraft() {
     if (!persistentEditing) {
@@ -548,8 +554,9 @@ export function CaseDetail({
   const pdfControls = useMemo(() => ({ disabled: isRunningAction, exporting: isExportingPdf, onDownload: exportCasePdf }), [isRunningAction, isExportingPdf, exportCasePdf]);
   const locationControls = useMemo(() => ({ received: Boolean(caseItem.customerSharedLocation), onOpen: openLocationDialog }), [caseItem.customerSharedLocation, openLocationDialog]);
   const headerControls = useMemo(() => editorControls ? { ...editorControls, pdf: pdfControls, location: locationControls } : null, [editorControls, pdfControls, locationControls]);
-  useEffect(() => { onEditorControlsChange?.(headerControls); }, [onEditorControlsChange, headerControls]);
-  useEffect(() => () => onEditorControlsChange?.(null), [onEditorControlsChange]);
+  const publishHeaderControls = useEffectEvent((controls: CaseHeaderControls | null) => onEditorControlsChange?.(controls));
+  useEffect(() => { publishHeaderControls(headerControls); }, [headerControls]);
+  useEffect(() => () => publishHeaderControls(null), []);
 
   async function runAction(action: keyof typeof actionLabels) {
     if (action === "call_customer") {
@@ -1647,23 +1654,28 @@ function EditCaseForm({
   const displayedSavePhase: CaseSavePhase =
     savePhase === "saving" ? "saving" : currentError ? "error" : isDirty ? "waiting" : savePhase;
   const showSaveStatus = displayedSavePhase === "saving" || displayedSavePhase === "waiting" || displayedSavePhase === "error" || Boolean(lastSavedAt);
+  useLayoutEffect(() => {
+    setDiagnosticEditorContext({ case_id: caseItem.id, dirty: isDirty, save_phase: displayedSavePhase, conflict, replacement_only: replacementOnly,
+      collaboration_available: collaborationState.available === true, collaboration_hidden: collaborationState.hidden,
+      collaboration_connected: collaborationState.connected, collaboration_stale: collaborationState.stale });
+  }, [caseItem.id, isDirty, displayedSavePhase, conflict, replacementOnly, collaborationState.available, collaborationState.hidden, collaborationState.connected, collaborationState.stale]);
+  useEffect(() => () => retainDiagnosticUiContext('editor', caseItem.id), [caseItem.id]);
 
+  const editorControls = useMemo<CaseEditorControls>(() => ({ priority, status: caseClosureStatus || caseItem.status, busy: savePhase === "saving" || conflict,
+    onPriorityChange: setPriority, onStatusChange: setCaseClosureStatus }), [priority, caseClosureStatus, caseItem.status, savePhase, conflict]);
+  const publishEditorControls = useEffectEvent((controls: CaseEditorControls | null) => onEditorControlsChange?.(controls));
+  const publishDirty = useEffectEvent((dirty: boolean) => onDirtyChange?.(dirty));
+  const publishSaving = useEffectEvent((saving: boolean) => onSavingChange?.(saving));
+  useEffect(() => { publishEditorControls(editorControls); }, [editorControls]);
+  useEffect(() => () => publishEditorControls(null), []);
+  // Draft bookkeeping changes on each edit; parent status changes only on a transition.
   useEffect(() => {
     if (acceptedDraftRef.current === null) acceptedDraftRef.current = serializedDraft;
-    onEditorControlsChange?.({ priority, status: caseClosureStatus || caseItem.status, busy: savePhase === "saving" || conflict,
-      onPriorityChange: setPriority, onStatusChange: setCaseClosureStatus });
-  }, [priority, caseClosureStatus, caseItem.status, savePhase, conflict, onEditorControlsChange, serializedDraft]);
-
-  useEffect(() => () => onEditorControlsChange?.(null), [onEditorControlsChange]);
-
-  useEffect(() => {
     latestDraftRef.current = serializedDraft;
-    onDirtyChange?.(isDirty);
-  }, [isDirty, onDirtyChange, serializedDraft]);
-
-  useEffect(() => {
-    onSavingChange?.(savePhase === "saving");
-  }, [onSavingChange, savePhase]);
+  }, [serializedDraft]);
+  useEffect(() => { publishDirty(isDirty); }, [isDirty]);
+  const isSaving = savePhase === "saving";
+  useEffect(() => { publishSaving(isSaving); }, [isSaving]);
 
   useEffect(() => {
     if (!isDirty && savePhase !== "saving") {
