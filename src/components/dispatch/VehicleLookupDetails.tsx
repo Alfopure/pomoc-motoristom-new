@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, type RefObject } from "react";
 import { ExternalLink, Shield, X } from "lucide-react";
 import { hakaReportMatch, preferredVehicleFacts, vehicleFactConflicts, vehicleFieldLabels, vehicleSourceLabels, vinLinkedSkpPlateDifference, type LookupStatus, type VehicleFact, type VehicleField, type VehicleFieldChoices, type VehicleFormValues, type VehicleIdentity, type VehicleLookupSnapshot, type VehicleSource } from "@/lib/vehicle-lookup";
+import { SkpManualFallback } from "./SkpManualFallback";
 
 const statusLabel: Record<LookupStatus, string> = {
   found: "Údaje nájdené", not_found: "Záznam nenájdený", ambiguous: "Nejednoznačná identita",
@@ -31,6 +32,7 @@ type Props = {
   snapshot: VehicleLookupSnapshot;
   proposal: boolean;
   readOnly?: boolean;
+  manualInsurerEntry?: boolean;
   cached: boolean;
   identity: VehicleIdentity;
   conflict?: string;
@@ -53,7 +55,6 @@ export function VehicleLookupDetails(props: Props) {
   const facts = preferredVehicleFacts(result, true);
   const conflicts = vehicleFactConflicts(result, props.includePartial);
   const partial = Object.values(facts).some(fact => fact.quality === "partial");
-  const insurance = isCzech ? undefined : result.sources.find(source => source.source === "skp");
   const skpPlateDifference = props.conflict ? undefined : vinLinkedSkpPlateDifference(result);
   const title = [facts.make?.value, facts.model?.value].filter(Boolean).join(" ");
 
@@ -124,8 +125,9 @@ export function VehicleLookupDetails(props: Props) {
           <h3 className="text-base font-semibold">{isCzech ? "Povinné ručenie" : "Povinné zmluvné poistenie"}</h3>
           <p className="mt-1 text-xs text-zinc-600">Overované ku dňu {vehicleLookupDate(result.query.checkedForDate)}</p>
         </div></div>
-        {props.conflict ? <p className="mt-3 text-sm font-medium text-amber-900">PZP vozidla nepotvrdené. Identita zo zdrojov nesúhlasí; overte VIN v dokladoch. Pôvodné výsledky sú uvedené v podrobnostiach jednotlivých zdrojov.</p> : facts.insuranceStatus || facts.insurer ? <dl className="mt-3 grid gap-2 sm:grid-cols-2">{factRow("insuranceStatus")}{factRow("insurer")}</dl> : <p className="mt-3 text-sm font-medium text-amber-900">{isCzech ? "Poistenie zatiaľ nebolo automaticky overené." : `PZP sa nepodarilo potvrdiť.${insurance ? ` ${statusLabel[insurance.status]}.` : ""}`}</p>}
-        {!facts.insuranceStatus && <p className="mt-1 text-xs text-zinc-600">Chýbajúci výsledok neznamená, že vozidlo nie je poistené.</p>}
+        {props.conflict ? <p className="mt-3 text-sm font-medium text-amber-900">PZP vozidla nepotvrdené. Identita zo zdrojov nesúhlasí; overte VIN v dokladoch. Pôvodné výsledky sú uvedené v podrobnostiach jednotlivých zdrojov.</p> : facts.insuranceStatus || facts.insurer ? <dl className="mt-3 grid gap-2 sm:grid-cols-2">{factRow("insuranceStatus")}{factRow("insurer")}</dl> : isCzech ? <p className="mt-3 text-sm font-medium text-amber-900">Poistenie zatiaľ nebolo automaticky overené.</p> : null}
+        {!isCzech && <SkpManualFallback result={result} showEntryHint={props.manualInsurerEntry} identityConflict={Boolean(props.conflict)} className="mt-3" />}
+        {isCzech && !facts.insuranceStatus && <p className="mt-1 text-xs text-zinc-600">Chýbajúci výsledok neznamená, že vozidlo nie je poistené.</p>}
         {skpPlateDifference && <p className="mt-2 rounded-lg bg-amber-50 p-3 text-xs text-amber-950">SKP uvádza EČV {skpPlateDifference.skpPlate}, technický zdroj {skpPlateDifference.technicalPlate}. VIN sa zhoduje, preto sa môžu prevziať údaje o PZP. EČV vo formulári ostáva podľa technického zdroja; pri pochybnostiach ho overte v dokladoch.</p>}
         <p className="mt-2 text-xs text-zinc-500">Pri staršom zásahu nejde o overenie ku dňu incidentu.</p>
       </section>

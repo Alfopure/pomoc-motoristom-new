@@ -425,7 +425,13 @@ test("closing a pending new case cannot restore the late proposal into a new for
 });
 
 test("a conflicting VIN stays visible and cannot be accepted", async ({ page }) => {
-  const api = await sandboxApi(page);
+  const api = await sandboxApi(page, async input => {
+    const response = lookupResponse(input);
+    const skp = response.snapshot.result.sources.find(source => source.source === "skp")!;
+    skp.status = "challenge_required";
+    skp.facts = {};
+    return response;
+  });
   await openDashboard(page); await openNewCase(page);
   await page.getByLabel("EČV", { exact: true }).fill(plateA);
   const manualVin = "WVWZZZ1JZXW000002";
@@ -437,10 +443,15 @@ test("a conflicting VIN stays visible and cannot be accepted", async ({ page }) 
   await expect(dialog.locator("header")).toContainText("Identita nesúhlasí · PZP vozidla nepotvrdené");
   await expect(dialog.locator("header")).not.toContainText("POISTENÉ");
   await expect(dialog.getByRole("region", { name: "Poistenie vozidla" })).not.toContainText("POISTENÉ");
+  const manualFallback = dialog.getByTestId("skp-manual-fallback");
+  await expect(manualFallback.getByRole("link", { name: "Overiť PZP ručne na SKP" })).toBeVisible();
+  await expect(manualFallback).toContainText("Najprv skontrolujte správne EČV a VIN");
+  await expect(manualFallback).not.toContainText("zapíšte poisťovňu");
   await dialog.getByRole("button", { name: "Zavrieť návrh dohľadania", exact: true }).click();
   const summary = page.getByRole("button", { name: /Dohľadané údaje · návrh/ });
   await expect(summary).toContainText("Identita nesúhlasí · PZP vozidla nepotvrdené");
   await expect(summary).not.toContainText("POISTENÉ");
+  await expect(page.getByTestId("vehicle-lookup").getByTestId("skp-manual-fallback")).toBeVisible();
   await expect(page.getByLabel("VIN", { exact: true })).toHaveValue(manualVin);
   await expect(page.getByLabel("Model", { exact: true })).toHaveValue("");
   expect(api.writes).toHaveLength(0);
@@ -472,15 +483,21 @@ test("challenge and unavailable sources do not imply missing insurance or block 
   const control = page.getByTestId("vehicle-lookup");
   await expect(control.getByText("Vyžaduje ručné overenie", { exact: true })).toBeVisible();
   await expect(control.getByText("Zdroj sa nepodarilo overiť", { exact: true }).first()).toBeVisible();
+  const manualFallback = page.getByRole("dialog").getByTestId("skp-manual-fallback");
+  await expect(manualFallback).toContainText("stránka SKP vyžadovala ochrannú kontrolu");
+  await expect(manualFallback.getByRole("link", { name: "Overiť PZP ručne na SKP" })).toHaveAttribute("href", "https://www.skp.sk/vyhladat-poistovatela-vozidla-a-overit-platnost-pzp/");
+  await expect(manualFallback).toContainText("zapíšte poisťovňu do poľa");
   await expect(control).not.toContainText(/NEPOISTENÉ|nemá známku|neplatné poistenie/i);
   await expect(page.getByLabel("VIN", { exact: true })).toHaveValue("");
   await control.getByRole("button", { name: "Zavrieť návrh dohľadania", exact: true }).click();
+  await expect(control.getByTestId("skp-manual-fallback")).toBeVisible();
+  await page.getByLabel("Poisťovňa PZP", { exact: true }).fill("Ručne zistená poisťovňa");
   await expect(page.getByRole("button", { name: "Uložiť rozpracované", exact: true })).toBeEnabled();
   await page.waitForTimeout(1_400);
   expect(api.writes).toHaveLength(0);
   await page.getByRole("button", { name: "Uložiť rozpracované", exact: true }).click();
   await expect.poll(() => api.writes.length).toBe(1);
-  expect(api.writes[0].body.vehicleLookup).toBeNull();
+  expect(api.writes[0].body).toMatchObject({ vehicleInsurer: "Ručne zistená poisťovňa", vehicleLookup: null });
 });
 
 test("shows source conflicts, accepts an explicit choice and flags a HAKA VIN mismatch", async ({ page }) => {
@@ -804,6 +821,26 @@ for (const width of [1280, 390]) {
     expect(api.writes).toHaveLength(0);
   });
 }
+
+test("vehicle tool offers manual SKP lookup when automatic checking is paused", async ({ page }) => {
+  await sandboxApi(page, async input => {
+    const response = lookupResponse(input);
+    const skp = response.snapshot.result.sources.find(source => source.source === "skp")!;
+    skp.status = "unsupported";
+    skp.facts = {};
+    return response;
+  });
+  await openDashboard(page);
+  const { widget } = await openVehicleTool(page, 1280);
+  await widget.getByLabel("EČV alebo VIN", { exact: true }).fill(plateA);
+  await widget.getByRole("button", { name: "Overiť", exact: true }).click();
+  const summary = widget.getByRole("region", { name: "Výsledok overenia vozidla", exact: true });
+  await expect(summary.getByTestId("skp-manual-fallback")).toContainText("bolo automatické overovanie PZP cez SKP pozastavené");
+  await expect(summary.getByTestId("skp-manual-fallback")).not.toContainText("ochrannú kontrolu");
+  await expect(summary.getByRole("link", { name: "Overiť PZP ručne na SKP" })).toHaveAttribute("href", "https://www.skp.sk/vyhladat-poistovatela-vozidla-a-overit-platnost-pzp/");
+  await widget.getByRole("button", { name: "Celý detail vozidla", exact: true }).click();
+  await expect(widget.getByRole("dialog").getByTestId("skp-manual-fallback")).toBeVisible();
+});
 
 test("vehicle tool cancels stale results and never presents mismatched identity as insured", async ({ page }) => {
   const gate = deferred();
