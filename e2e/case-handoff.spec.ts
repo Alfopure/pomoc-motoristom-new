@@ -16,12 +16,13 @@ test.beforeAll(async () => {
   css = bundle.outputFiles.find(file => file.path.endsWith(".css"))?.text ?? "";
   css += (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css;
 });
-async function boot(page: Page, options: { sender?: boolean; existing?: boolean; lostDecision?: boolean; lostIssue?: boolean; width?: number; sessionStatus?: number; frozen?: boolean; server?: { grant: CaseHandoff; active: boolean } } = {}) {
+async function boot(page: Page, options: { sender?: boolean; existing?: boolean; enhanced?: boolean; lostDecision?: boolean; lostIssue?: boolean; width?: number; sessionStatus?: number; frozen?: boolean; server?: { grant: CaseHandoff; active: boolean } } = {}) {
   const errors: string[] = [], external: string[] = [], decisions: Record<string, unknown>[] = [], internal: Record<string, unknown>[] = [], prepares: Record<string, unknown>[] = [], sends: string[] = [], reads: string[] = [];
   const server = options.server ?? { grant: structuredClone(base), active: Boolean(options.existing) };
   let lost = false, otherSession = false, denyInternal = false, publicDenied = 0;
   const sessions: string[] = [];
   const receipts = new Map<string, unknown>();
+  let currentUrl = `https://handoff.test/handoff#token=${secret}`;
   await page.setViewportSize({ width: options.width ?? 390, height: 844 });
   await page.clock.install({ time: new Date("2026-09-12T08:00:00Z") });
   if (options.frozen) await page.clock.pauseAt(new Date("2026-09-12T08:00:01Z"));
@@ -50,16 +51,19 @@ async function boot(page: Page, options: { sender?: boolean; existing?: boolean;
     }
     if (url.pathname === `/api/cases/${caseId}/handoffs`) {
       if (denyInternal) return route.fulfill({ status: 403, json: { error: "Prístup k prípadu bol zrušený." } });
-      if (request.method() === "GET") return route.fulfill({ json: { preview: published, previewVersion: "c".repeat(64), handoffs: server.active ? [server.grant] : [] } });
+      if (request.method() === "GET") return route.fulfill({ json: { preview: published, previewVersion: "c".repeat(64), handoffs: server.active ? [server.grant] : [], enhanced: Boolean(options.enhanced) } });
       const data = request.postDataJSON(); internal.push(data);
+      if (data.action === "recover") return route.fulfill({ json: { handoff: server.grant, commandId: data.commandId, committedRevision: server.grant.revision, url: currentUrl } });
       const replay = receipts.has(data.commandId);
       if (!receipts.has(data.commandId)) {
         if (data.action === "issue") { server.active = true; server.grant = { ...base, recipientName: data.recipientName, recipientPhone: data.recipientPhone, published: { ...published, instructions: data.instructions, scheduledAt: data.scheduledAt } }; }
         else server.grant = { ...server.grant, revision: server.grant.revision + 1, published: data.action === "publish" ? { ...published, instructions: data.instructions, scheduledAt: data.scheduledAt } : server.grant.published };
-        receipts.set(data.commandId, { handoff: server.grant, commandId: data.commandId, committedRevision: server.grant.revision, ...(data.action === "issue" || data.action === "renew" ? { url: `https://handoff.test/handoff#token=${String.fromCharCode(97 + server.grant.revision).repeat(43)}` } : {}) });
+        if (options.enhanced) server.grant = { ...server.grant, recoverable: true, tokenGeneration: data.action === "renew" ? (server.grant.tokenGeneration ?? 1) + 1 : server.grant.tokenGeneration ?? 1 };
+        if (data.action === "issue" || data.action === "renew") currentUrl = `https://handoff.test/handoff#token=${String.fromCharCode(97 + server.grant.revision).repeat(43)}`;
+        receipts.set(data.commandId, { handoff: server.grant, commandId: data.commandId, committedRevision: server.grant.revision, ...(data.action === "issue" || data.action === "renew" ? { url: currentUrl } : {}) });
       }
       if (options.lostIssue && !lost) { lost = true; return route.abort("failed"); }
-      const receipt = { ...(receipts.get(data.commandId) as Record<string, unknown>) }; if (replay) delete receipt.url;
+      const receipt = { ...(receipts.get(data.commandId) as Record<string, unknown>) }; if (replay && !options.enhanced) delete receipt.url;
       return route.fulfill({ json: receipt });
     }
     if (url.pathname === "/api/sms/context") return route.fulfill({ json: { cases: [{ id: caseId, caseNumber: base.published!.caseNumber, name: "Klient Juraj", phone: "+421905123456", validPhone: true }], tasks: [], callbackNumber: "+421900000000", sender: "PomocMotor", repliesEnabled: false } });
@@ -73,6 +77,51 @@ async function boot(page: Page, options: { sender?: boolean; existing?: boolean;
   await page.goto(`https://handoff.test/handoff${options.sender ? "?sender=1" : `#token=${secret}`}`);
   return { errors, external, decisions, internal, prepares, sends, reads, sessions, server, denyPublic: (status: number) => { publicDenied = status; }, substituteSession: () => { otherSession = true; }, revokeInternal: () => { denyInternal = true; } };
 }
+
+test("enhanced sender recovers the identical link after reload and extends without rotation or SMS", async ({ page }) => {
+  const trace = await boot(page, { sender: true, enhanced: true });
+  await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByLabel("Stredisko alebo kolega").fill("Peter");
+  await page.getByLabel("Telefón príjemcu odkazu").fill("+421907987654");
+  await page.getByRole("button", { name: "Vytvoriť odkaz pre kolegu" }).click();
+  const initial = await page.getByLabel("Odkaz pre Peter", { exact: true }).inputValue();
+  await page.reload();
+  await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByRole("button", { name: "Získať rovnaký odkaz" }).click();
+  await expect(page.getByLabel("Odkaz pre Peter", { exact: true })).toHaveValue(initial);
+  await page.getByRole("button", { name: "Predĺžiť platnosť bez zmeny odkazu" }).click();
+  await expect(page.getByLabel("Odkaz pre Peter", { exact: true })).toHaveValue(initial);
+  expect(trace.internal.map(command => command.action)).toEqual(["issue", "recover", "extend"]);
+  expect(trace.sends).toEqual([]);
+  expect(trace.errors).toEqual([]);
+});
+
+test("enhanced lost issue response replays one command and restores its original link", async ({ page }) => {
+  const trace = await boot(page, { sender: true, enhanced: true, lostIssue: true });
+  await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByLabel("Stredisko alebo kolega").fill("Peter");
+  await page.getByLabel("Telefón príjemcu odkazu").fill("+421907987654");
+  await page.getByRole("button", { name: "Vytvoriť odkaz pre kolegu" }).click();
+  await page.getByRole("button", { name: "Overiť výsledok tej istej požiadavky" }).click();
+  await expect(page.getByLabel("Odkaz pre Peter", { exact: true })).toHaveValue(`https://handoff.test/handoff#token=${"b".repeat(43)}`);
+  expect(trace.internal[1]).toEqual(trace.internal[0]);
+  expect(trace.server.grant.revision).toBe(1);
+  expect(trace.sends).toEqual([]);
+});
+
+test("rich recipient card shows assistance, separate vehicles, delivery and trustworthy times", async ({ page }) => {
+  const rich: CaseHandoff = { ...base, createdBy: "Dispečer Peter", publishedAt: "2026-09-12T08:00:00Z", published: { ...published, schemaVersion: 3, assistance: { name: "TEST Assistance", reference: "AS-TEST-123" }, vehicle: { ...published.vehicle, color: "Modrá", driveable: false, conditionFlags: ["blocked_wheel"] }, replacement: { needed: true, category: "wagon", requestedType: "", preferences: ["automatic"], status: "assigned", deliveryPlace: "Pobočka Senec", vehicle: { make: "Kia", model: "Ceed", plate: "RENT001" } }, incident: { description: "Motor sa nedá naštartovať", passengersCount: 2, access: "Nízka garáž" }, caseCreatedAt: "2026-09-12T07:00:00Z", firstCallAt: "2026-09-12T07:05:00Z" } };
+  const trace = await boot(page, { width: 360, server: { grant: rich, active: true } });
+  await expect(page.getByText("AS-TEST-123", { exact: true })).toBeVisible();
+  await expect(page.getByText("RENT001", { exact: true })).toBeVisible();
+  await expect(page.getByText("Pobočka Senec", { exact: true })).toBeVisible();
+  await expect(page.getByText("Zablokované koleso", { exact: true })).toBeVisible();
+  await expect(page.getByText("Prvý súvisiaci hovor", { exact: true })).toBeVisible();
+  await expect(page.getByText(/odoslal Dispečer Peter/)).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(trace.external).toEqual([]);
+  await page.screenshot({ path: ".context/handoff-expanded-mobile.png", fullPage: true });
+});
 
 test("recipient sees one mobile case, explicitly accepts and progresses, preserving grant binding on reload", async ({ page }, info) => {
   const trace = await boot(page);
@@ -132,7 +181,7 @@ test("sender issues explicitly, keeps uncertain command through style changes, a
   await page.getByRole("button", { name: "Obnoviť odkaz", exact: true }).click();
   await page.getByRole("button", { name: "Otvoriť SMS pre kolegu" }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByLabel("Telefón príjemcu", { exact: true })).toHaveValue("+421907987654");
+  await expect(dialog.getByLabel("Telefón príjemcu", { exact: false })).toHaveValue("+421907987654");
   await expect(dialog.getByLabel("Prípad SMS")).toHaveValue(""); await expect(dialog.getByLabel("Prípad SMS")).toBeDisabled();
   await expect(dialog.getByLabel("Text správy", { exact: false }).first()).toHaveValue(/handoff#token=[a-z]{43}/);
   await dialog.getByRole("button", { name: /Pripraviť náhľad/ }).click();

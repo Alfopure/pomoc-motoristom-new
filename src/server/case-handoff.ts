@@ -1,5 +1,5 @@
 import "server-only";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { cookies } from "next/headers";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -9,6 +9,7 @@ import { requireDefaultMotoristActor } from "./api-auth";
 import { MutationError } from "./mutation-error";
 import { assertRateLimit, requestIp } from "./rate-limit";
 import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
+import { enhancedHandoffEnabled, handoffOrigin, openHandoffToken, sealHandoffToken } from "./handoff-secret";
 
 export const HANDOFF_COOKIE = "pm_handoff_session";
 export const HANDOFF_HEADERS = { "Cache-Control": "private, no-store, max-age=0", "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex, nofollow", "X-Frame-Options": "DENY" };
@@ -42,7 +43,7 @@ export async function readHandoffBody(request: Request) {
   return body as Record<string, unknown>;
 }
 export function validateHandoffCommand(input: Record<string, unknown>, external = false): HandoffCommand {
-  const actions = external ? ["accept", "reject", "en_route", "arrived", "complete", "update", "blocked"] : ["issue", "publish", "renew", "revoke"];
+  const actions = external ? ["accept", "reject", "en_route", "arrived", "complete", "update", "blocked"] : ["issue", "publish", "renew", "revoke", "recover", "extend"];
   if (typeof input.action !== "string" || !actions.includes(input.action)) throw new MutationError("Neplatná akcia odovzdania.", 400);
   const command: HandoffCommand = { action: input.action, commandId: id(input.commandId) };
   if (input.action !== "issue") {
@@ -68,7 +69,7 @@ export function validateHandoffCommand(input: Record<string, unknown>, external 
       command.recipientPhone = phone;
     } catch { throw new MutationError("Zadajte platné telefónne číslo príjemcu odkazu.", 400); }
   }
-  if (!external && ["issue", "renew"].includes(command.action)) { const hours = input.hours ?? 24; if (!Number.isInteger(hours) || Number(hours) < 1 || Number(hours) > 72) throw new MutationError("Platnosť môže byť 1 až 72 hodín.", 400); command.hours = hours; }
+  if (!external && ["issue", "renew", "extend"].includes(command.action)) { const hours = input.hours ?? 24; if (!Number.isInteger(hours) || Number(hours) < 1 || Number(hours) > 72) throw new MutationError("Platnosť môže byť 1 až 72 hodín.", 400); command.hours = hours; }
   for (const key of external ? ["eta"] : ["scheduledAt"]) {
     if (input[key] !== undefined) { if (input[key] === null || input[key] === "") command[key] = null; else if (typeof input[key] === "string" && Number.isFinite(Date.parse(input[key]))) command[key] = new Date(input[key]).toISOString(); else throw new MutationError("Neplatný termín.", 400); }
   }
@@ -78,18 +79,50 @@ export async function getCaseHandoffContext(caseId: string): Promise<HandoffCont
   const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
   const client = await createSupabaseServerClient();
   const { data, error } = await client.rpc("motorist_case_handoff", { p_organization_id: actor.organizationId, p_actor_id: actor.profileId, p_case_id: id(caseId), p_action: "context", p_input: {} });
-  if (error) rpcError(error); return data as unknown as HandoffContext;
+  if (error) rpcError(error); return { ...data as unknown as HandoffContext, enhanced: enhancedHandoffEnabled() };
 }
 export async function commandCaseHandoff(request: Request, caseId: string): Promise<HandoffReceipt> {
   const input = await readHandoffBody(request);
   const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
-  const command = validateHandoffCommand(input), token = randomBytes(32).toString("base64url");
+  const command = validateHandoffCommand(input), token = randomBytes(32).toString("base64url"), enhanced = enhancedHandoffEnabled();
+  if (!enhanced && ["recover", "extend"].includes(command.action)) throw new MutationError("Rozšírené odovzdanie zatiaľ nie je zapnuté.", 503);
   const client = await createSupabaseServerClient();
+  const scope = { p_organization_id: actor.organizationId, p_actor_id: actor.profileId, p_case_id: id(caseId) };
+  async function recover(handoffId: string, generation?: number) {
+    const { data, error } = await client.rpc("motorist_case_handoff", { ...scope, p_action: "link", p_input: { handoffId, ...(generation ? { generation } : {}), commandId: command.commandId } as Json });
+    if (error) rpcError(error);
+    const result = data as unknown as { handoff: HandoffReceipt["handoff"]; envelope: unknown; tokenHash: string; generation: number; origin: string };
+    const recovered = openHandoffToken(result.envelope, { organizationId: actor.organizationId, caseId, handoffId, generation: result.generation, tokenHash: result.tokenHash, origin: result.origin });
+    return { handoff: result.handoff, url: `${result.origin}/handoff#token=${recovered}` };
+  }
+  if (command.action === "recover") {
+    const recovered = await recover(String(command.handoffId));
+    return { ...recovered, commandId: command.commandId, committedRevision: recovered.handoff.revision };
+  }
+  let secret: Record<string, Json> = {};
+  if (enhanced && ["issue", "renew"].includes(command.action)) {
+    let handoffId: string = randomUUID(), generation = 1;
+    if (command.action === "renew") {
+      const { data, error } = await client.rpc("motorist_case_handoff", { ...scope, p_action: "context", p_input: {} });
+      if (error) rpcError(error);
+      const grant = (data as unknown as HandoffContext).handoffs.find(item => item.id === command.handoffId);
+      if (!grant?.tokenGeneration) throw new MutationError("Najprv načítajte aktuálne odovzdanie.", 409);
+      handoffId = grant.id; generation = grant.tokenGeneration + 1;
+    }
+    const origin = handoffOrigin(request), tokenHash = handoffHash(token);
+    secret = { issuedId: handoffId, secretGeneration: generation, linkOrigin: origin, tokenEnvelope: sealHandoffToken(token, { organizationId: actor.organizationId, caseId, handoffId, generation, tokenHash, origin }) as unknown as Json };
+  }
   const { data, error } = await client.rpc("motorist_case_handoff", { p_organization_id: actor.organizationId, p_actor_id: actor.profileId, p_case_id: id(caseId), p_action: command.action,
-    p_input: { ...command, ...(["issue", "renew"].includes(command.action) ? { tokenHash: handoffHash(token) } : {}) } as Json });
+    p_input: { ...command, ...secret, ...(["issue", "renew"].includes(command.action) ? { tokenHash: handoffHash(token) } : {}) } as Json });
   if (error) rpcError(error);
   const receipt = data as unknown as HandoffReceipt;
   if (!isHandoffReceipt(receipt, command)) throw new MutationError("Potvrdenie sa nepodarilo overiť. Zopakujte tú istú požiadavku.", 503);
+  if (enhanced && ["issue", "renew"].includes(command.action)) {
+    const generation = (data as unknown as { linkGeneration?: number }).linkGeneration;
+    if (!generation) return receipt;
+    const recovered = await recover(receipt.handoff.id, generation);
+    return { handoff: recovered.handoff, commandId: receipt.commandId, committedRevision: receipt.committedRevision, url: recovered.url };
+  }
   return { ...receipt, ...(receipt.tokenAccepted ? { url: `${new URL(request.url).origin}/handoff#token=${token}` } : {}) };
 }
 export async function publicHandoff(request: Request, action: "session" | "read" | "command") {
