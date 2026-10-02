@@ -193,6 +193,16 @@ describe("telnyx sms transport", () => {
     expect((failure as SmsWorkflowError).message).toContain("to is not a valid number");
   });
 
+  it.each([401, 403])("keeps a definite HTTP %s provider rejection separate from an uncertain send", async (status) => {
+    const { fetchMock, transport } = harness({ env: TEST_ENV, destinationAllowlist: ["+421900000001"] });
+    const detail = "The region 'CZ' is not included in the messaging profile's whitelisted destinations.";
+    fetchMock.mockResolvedValue(jsonResponse({ errors: [{ code: "40309", title: "Invalid destination region", detail }] }, status));
+
+    await expect(transport.send({ to: "+420777000123", body: "Synthetic test", idempotencyKey: `rejected-${status}`, organizationId: ORGANIZATION_ID }))
+      .rejects.toMatchObject({ status, message: `SMS poskytovateľ odmietol správu: ${detail}` });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("maps a provider outage to a 502 workflow error", async () => {
     const { fetchMock, transport } = harness();
     fetchMock.mockResolvedValue(jsonResponse({ errors: [{ code: "20000", detail: "internal" }] }, 503));

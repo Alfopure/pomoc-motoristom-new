@@ -210,14 +210,16 @@ describe("durable SMS send and retries", () => {
     expect(await sendPreparedSms(input, { transport: h.transport })).toMatchObject({ reused: true, statusDetail: "send_unconfirmed" });
     expect(h.send).toHaveBeenCalledTimes(1);
   });
-  it("keeps a definite rejection durable and allows a deliberate new request", async () => {
-    const h = harness(); h.send.mockRejectedValueOnce(new SmsWorkflowError("Rejected", 400)); const p = await preview({ caseId: "case-1", template: "location_request" }); const input = { ...actor, ...p, message: p.draft.message };
-    expect(await sendPreparedSms(input, { transport: h.transport })).toMatchObject({ status: "failed" });
-    expect(h.db.rows("motorist_location_share_links")[0].status).toBe("revoked");
-    await sendPreparedSms(input, { transport: h.transport });
+  it.each([400, 401, 403, 404, 422, 423, 429])("keeps a definite HTTP %s rejection durable and allows a deliberate new request", async (status) => {
+    const setup = harness(); setup.send.mockRejectedValueOnce(new SmsWorkflowError("Rejected", status)); const prepared = await preview({ caseId: "case-1", template: "location_request" }); const input = { ...actor, ...prepared, message: prepared.draft.message };
+    expect(await sendPreparedSms(input, { transport: setup.transport })).toMatchObject({ status: "failed", statusDetail: "send_failed", error: "Rejected", reused: false });
+    expect(setup.db.rows("motorist_location_share_links")[0].status).toBe("revoked");
+    expect(setup.db.rows("motorist_sms_attempts")[0]).toMatchObject({ status: "failed", error_class: "SendRejected", error: "Rejected" });
+    expect(await sendPreparedSms(input, { transport: setup.transport })).toMatchObject({ status: "failed", statusDetail: "send_failed", error: "Rejected", reused: true });
+    expect(setup.send).toHaveBeenCalledTimes(1);
     const next = await preview({ caseId: "case-1", template: "location_request" });
-    await sendPreparedSms({ ...actor, ...next, message: next.draft.message }, { transport: h.transport });
-    expect(h.send).toHaveBeenCalledTimes(2);
+    expect(await sendPreparedSms({ ...actor, ...next, message: next.draft.message }, { transport: setup.transport })).toMatchObject({ status: "sent", error: null });
+    expect(setup.send).toHaveBeenCalledTimes(2);
   });
   it("blocks unconfigured transports and kill switches before writes", async () => {
     const h = harness(); const p = await preview(); const input = { ...actor, ...p, message: p.draft.message };

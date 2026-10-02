@@ -204,16 +204,16 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
     }).select("id").single();
     if (attempt.error || !attempt.data) throw new SmsWorkflowError("Pokus sa nepodarilo uložiť. SMS nebola odoslaná.", 400);
   } catch (error) {
-    await finishFailure(admin, row, error, false);
-    return { ...resultFromRow(row), status: "failed" as const, statusDetail: "send_failed" };
+    const errorMessage = await finishFailure(admin, row, error, false);
+    return { ...resultFromRow(row), status: "failed" as const, statusDetail: "send_failed", error: errorMessage };
   }
   let delivery: SmsTransportSendResult;
   try {
     delivery = await transport.send({ to: draft.toNumber, from: draft.sender, body, idempotencyKey, organizationId: input.organizationId });
   } catch (error) {
     const uncertain = !(error instanceof SmsWorkflowError && [400, 401, 403, 404, 422, 423, 429].includes(error.status));
-    await finishFailure(admin, row, error, uncertain);
-    return { ...resultFromRow(row), status: uncertain ? "sent" as const : "failed" as const, statusDetail: uncertain ? "send_unconfirmed" : "send_failed" };
+    const errorMessage = await finishFailure(admin, row, error, uncertain);
+    return { ...resultFromRow(row), status: uncertain ? "sent" as const : "failed" as const, statusDetail: uncertain ? "send_unconfirmed" : "send_failed", error: errorMessage };
   }
   const finishedAt = new Date().toISOString();
   const statusDetail = delivery.providerStatus ?? (delivery.status === "sent" ? "sent_to_provider" : delivery.status === "queued" ? "queued_at_provider" : "send_failed");
@@ -238,7 +238,7 @@ export async function sendPreparedSms(input: SendPreparedSmsInput, options: SmsS
     if (event.error) console.error("SMS timeline audit failed", { smsMessageId: row.id });
     await reconcileAcceptedSmsTask(admin, { ...row, status: delivery.status, provider_message_id: delivery.providerMessageId }, input.actorProfileId);
   }
-  return { providerMessageId: delivery.providerMessageId, smsMessageId: row.id, status: delivery.status, statusDetail, reused: false };
+  return { providerMessageId: delivery.providerMessageId, smsMessageId: row.id, status: delivery.status, statusDetail, error: delivery.status === "failed" ? "Poskytovateľ SMS správu neprijal." : null, reused: false };
 }
 
 async function finishFailure(admin: AdminClient, row: SmsRow, error: unknown, uncertain: boolean) {
@@ -258,6 +258,7 @@ async function finishFailure(admin: AdminClient, row: SmsRow, error: unknown, un
         .eq("organization_id", row.organization_id).eq("id", payload.location_link_id).eq("status", "active");
     }
   }
+  return errorMessage;
 }
 async function findRequest(admin: AdminClient, organizationId: string, key: string) {
   const found = await admin.from("motorist_sms_messages").select("*").eq("organization_id", organizationId).eq("provider", "telnyx_sms").eq("idempotency_key", key).maybeSingle();
@@ -282,7 +283,7 @@ async function reconcileAcceptedSmsTask(admin: AdminClient, row: SmsRow, actorPr
   if (result.error) throw new SmsWorkflowError("SMS bola prijatá, dokončenie úlohy sa nepodarilo uložiť. Zopakujte tú istú požiadavku.");
 }
 function resultFromRow(row: SmsRow) {
-  return { providerMessageId: row.provider_message_id ?? null, smsMessageId: row.id, status: row.status, statusDetail: row.status_detail, reused: false };
+  return { providerMessageId: row.provider_message_id ?? null, smsMessageId: row.id, status: row.status, statusDetail: row.status_detail, error: row.error ?? null, reused: false };
 }
 
 // Both HTTP entry points use the same signed context, actor, roles and retry policy.

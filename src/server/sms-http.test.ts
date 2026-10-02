@@ -20,4 +20,15 @@ describe("SMS route authorization", () => {
     await globalPost(request({ draft: { caseId: null }, proof: "proof", message: "Body", actorProfileId: "forged", organizationId: "foreign" }));
     expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ actorProfileId: "authenticated", organizationId: "org", message: "Body" }));
   });
+  it("returns the durable rejection and its reason through both authenticated routes", async () => {
+    const rejection = { smsMessageId: "rejected-sms", providerMessageId: null, status: "failed", statusDetail: "send_failed", error: "Destination region is not allowed", reused: false };
+    mocks.send.mockResolvedValue(rejection); mocks.sendCase.mockResolvedValue(rejection);
+    const body = { draft: { caseId: "case" }, proof: "proof", message: "Synthetic test" };
+    const responses = [await globalPost(request(body)), await casePost(request(body), { params: Promise.resolve({ id: "case" }) })];
+    for (const response of responses) {
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(await response.json()).toEqual({ sms: rejection });
+    }
+  });
 });
