@@ -1,7 +1,7 @@
 "use client";
 import type { CaseDetailData } from "@/data/case-detail";
 
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { ArrowLeft, FileText, Plus } from "lucide-react";
 import type { CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
@@ -67,13 +67,13 @@ export function ExpandedCasePanel({
 }: ExpandedCasePanelProps) {
   const isNew = kind === "new";
   const [editorControls, setEditorControls] = useState<CaseHeaderControls | null>(null);
-  function handleDirtyChange(dirty: boolean) {
+  const handleDirtyChange = useCallback((dirty: boolean) => {
     onDirtyChange?.(dirty);
-  }
+  }, [onDirtyChange]);
 
-  function handleSavingChange(saving: boolean) {
+  const handleSavingChange = useCallback((saving: boolean) => {
     onSavingChange?.(saving);
-  }
+  }, [onSavingChange]);
 
   return (
     <section className={`${styles.surface} flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white lg:rounded-md lg:border lg:border-zinc-200 lg:shadow-sm`}>
