@@ -82,7 +82,7 @@ const CONFERENCE_LIFECYCLE = new Set(["join", "leave", "hold", "unhold", "mute",
 // such as nested conference joins/forwarding cannot silently bypass target checks through extra/request().
 const TEST_DIAL_FIELDS = new Set(["to", "from", "connection_id", "client_state", "link_to", "timeout_secs", "time_limit_secs", "from_display_name",
   "sip_region", "media_encryption", "bridge_intent", "bridge_on_answer", "prevent_double_bridge", "custom_headers", "supervise_call_control_id", "supervisor_role",
-  "webhook_url", "command_id", "sip_transport_protocol", "send_silence_when_idle"]);
+  "webhook_url", "command_id", "sip_transport_protocol", "send_silence_when_idle", "park_after_unbridge"]);
 
 /** Inspect the final wire payload, including generic request(), batches and dial.extra. */
 export function checkTestProviderRequest(boundary: ProviderBoundary, method: string, path: string, body: Record<string, unknown> = {}): { sipUsernames: string[]; callIds: string[]; conferenceIds: string[]; credentialId?: string } {
@@ -94,6 +94,10 @@ export function checkTestProviderRequest(boundary: ProviderBoundary, method: str
   // nested dial conference_config can otherwise attach a new leg to a foreign conference.
   if ("conference_config" in body) throw new TestProviderSafetyError();
   if (method === "POST" && path === "/calls" && Object.keys(body).some(key => !TEST_DIAL_FIELDS.has(key))) throw new TestProviderSafetyError();
+  // Direct outbound keeps this leg parked after its linked browser leaves.
+  // Admit only our adapter's form; link_to still requires TEST call provenance.
+  if (method === "POST" && path === "/calls" && "park_after_unbridge" in body &&
+    (body.park_after_unbridge !== "self" || typeof body.link_to !== "string" || !body.link_to)) throw new TestProviderSafetyError();
   const callId = /^\/calls\/([^/]+)\/actions\//.exec(path)?.[1];
   const conferenceId = /^\/conferences\/([^/]+)\/actions\//.exec(path)?.[1];
   if (callId) checked.callIds.push(decodeURIComponent(callId));
