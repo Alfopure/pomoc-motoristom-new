@@ -26,11 +26,12 @@ describe("business return line", () => {
     expect(h.telnyx.of("dial").some(call => call.params.to === NUMBERS.neutral)).toBe(false);
   });
 
-  it.each(["empty", "inactive", "loop", "environment", "foreign"])("refuses a %s destination before creating an unrouted call", async problem => {
+  it.each(["empty", "inactive", "archived", "loop", "environment", "foreign"])("refuses a %s destination before creating an unrouted call", async problem => {
     const h = createTelephonyHarness();
     h.db.update("motorist_telephony_lines", { metadata: { return_line_id: LINES.neutral } }, row => row.id === LINES.allianz);
     if (problem === "empty") h.db.update("motorist_telephony_lines", { ring_plan_id: null }, row => row.id === LINES.neutral);
     if (problem === "inactive") h.db.update("motorist_telephony_lines", { active: false }, row => row.id === LINES.neutral);
+    if (problem === "archived") h.db.update("motorist_telephony_lines", { metadata: { archived_at: h.now().toISOString() } }, row => row.id === LINES.neutral);
     if (problem === "loop") h.db.update("motorist_telephony_lines", { metadata: { return_line_id: LINES.allianz } }, row => row.id === LINES.neutral);
     if (problem === "environment") h.db.update("motorist_telephony_lines", { environment: "development" }, row => row.id === LINES.neutral);
     if (problem === "foreign") h.db.update("motorist_telephony_lines", { organization_id: "another-org" }, row => row.id === LINES.neutral);

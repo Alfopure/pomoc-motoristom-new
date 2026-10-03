@@ -23,6 +23,7 @@ import {
 import { callbackConfirmationMedia, IVR_ACTIONS, IVR_DIGITS, MAX_IVR_TIMEOUT_SECS, MAX_IVR_TRIES, MAX_OPTIONS_PER_MENU, MAX_TTS_LENGTH, MIN_IVR_TIMEOUT_SECS, MIN_IVR_TRIES, type IvrAction } from "@/lib/telephony/ivr-settings";
 import { DEFAULT_QUEUE_ESCALATE_AFTER_SECONDS, MAX_QUEUE_ESCALATE_AFTER_SECONDS, lineInboundMode, type LineInboundMode, type TelephonyEnvironment } from "./state/types";
 import { ConfigServiceError, type ValidationIssue } from "./service-errors";
+import { isArchivedLine } from "./line-archive";
 import { humansOnly } from "@/server/profile-kind";
 
 export { DEFAULT_OPERATOR_SETTINGS, MAX_RING_DEVICE_VOLUME, MAX_WRAP_UP_SECONDS };
@@ -1504,7 +1505,7 @@ function routingDocumentFromRows(rows: Awaited<ReturnType<typeof loadLegacyRouti
     })),
     pauseReasons: pauseReasons.map((row) => ({ id: row.id, code: row.code, label: row.label, maxMinutes: row.max_minutes, sortOrder: row.sort_order, active: row.active })),
     pauseReasonsInUse: [...new Set(presence.map((row) => row.pause_reason_id).filter((id): id is string => Boolean(id)))],
-    lines: lines.map((line) => ({
+    lines: lines.filter((line) => !isArchivedLine(line.metadata)).map((line) => ({
       returnLineId: returnLineId(line.metadata),
       inboundCallMode: lineInboundMode(line.metadata),
       id: line.id,
@@ -2024,11 +2025,13 @@ export async function updateTelephonyLine(
   }
 
   const values: Tables["motorist_telephony_lines"]["Update"] = {};
-  let metadataRevision: string | undefined;
+  // Every patch, including an old editor's active:true request, must observe
+  // and compare the archival marker. History keeps the underlying line row.
+  const stored = await deps.admin.from("motorist_telephony_lines").select("metadata,updated_at")
+    .eq("organization_id", input.organizationId).eq("id", input.lineId).maybeSingle();
+  if (stored.error) throw new ConfigServiceError("Nastavenie linky sa nepodarilo načítať.", 503, "config_read_failed");
+  if (!stored.data || isArchivedLine(stored.data.metadata)) throw new ConfigServiceError("Linka neexistuje.", 404, "line_not_found");
   if (input.patch.returnLineId !== undefined || input.patch.inboundCallMode !== undefined) {
-    const stored = await deps.admin.from("motorist_telephony_lines").select("metadata,updated_at").eq("organization_id", input.organizationId).eq("id", input.lineId).single();
-    if (stored.error) throw new ConfigServiceError("Nastavenie linky sa nepodarilo načítať.", 503, "config_read_failed");
-    metadataRevision = stored.data.updated_at;
     values.metadata = {
       ...(isRecord(stored.data.metadata) ? stored.data.metadata : {}),
       ...(input.patch.returnLineId !== undefined ? { return_line_id: input.patch.returnLineId } : {}),
@@ -2044,8 +2047,11 @@ export async function updateTelephonyLine(
   if (input.patch.active !== undefined) values.active = input.patch.active;
 
   if (Object.keys(values).length > 0) {
-    let update = deps.admin.from("motorist_telephony_lines").update(values).eq("id", input.lineId).eq("organization_id", input.organizationId);
-    if (metadataRevision) update = update.eq("updated_at", metadataRevision);
+    let update = deps.admin.from("motorist_telephony_lines").update(values).eq("id", input.lineId)
+      .eq("organization_id", input.organizationId).eq("updated_at", stored.data.updated_at);
+    update = stored.data.metadata === null
+      ? update.is("metadata", null)
+      : update.eq("metadata", JSON.stringify(stored.data.metadata));
     const { data, error } = await update.select("id").maybeSingle();
     if (error) throw new ConfigServiceError(`Linku sa nepodarilo uložiť: ${error.message}`, 500, "config_write_failed");
     if (!data) throw new ConfigServiceError("Nastavenie linky medzitým zmenil iný používateľ. Obnovte ho a skúste to znova.", 409, "config_conflict");
