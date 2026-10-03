@@ -21,6 +21,7 @@ const PAYLOAD = { type: "live.transport.incoming", id: "evt_1", data: { session_
 
 const ENV = {
   AI_DEMO_ENABLED: "true",
+  AI_DEMO_FROM_NUMBER: "+421232408718",
   AI_DEMO_ALLOWED_RECIPIENTS: "+421910988882",
   OPENAI_API_KEY: "sk-proj-test",
   OPENAI_LIVE_PROJECT_ID: "proj_test",

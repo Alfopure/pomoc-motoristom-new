@@ -125,6 +125,38 @@ describe("announcement configuration", () => {
     ]);
   });
 
+  it("omits archived lines while allowing announcements on an inactive nonarchived line", async () => {
+    const h = world();
+    const archivedId = "00000000-0000-4000-8000-000000000202";
+    h.db.seed("motorist_telephony_lines", [{ id: archivedId, organization_id: ORG, provider: "telnyx", active: true,
+      label: "Archivovaná linka", phone_number: "+421232408774", metadata: { archived_at: NOW } }]);
+    h.db.update("motorist_telephony_lines", { active: false }, row => row.id === LINE);
+
+    expect((await getAnnouncementLines(h.deps, ORG)).map(line => line.id)).toEqual([LINE]);
+    await expect(saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision: NOW, config: configWith() }))
+      .resolves.toMatchObject({ id: LINE, config: configWith() });
+    await expect(generateAnnouncementAudio(h.deps, GENERATE)).resolves.toMatchObject({ text: GENERATE.text });
+    expect(h.db.find("motorist_telephony_lines", row => row.id === LINE)?.active).toBe(false);
+    expect(h.db.find("motorist_telephony_lines", row => row.id === archivedId)?.metadata).toEqual({ archived_at: NOW });
+  });
+
+  it("rejects archived saves and generation without changing history or contacting providers", async () => {
+    const h = world();
+    const metadata = { archived_at: NOW, announcements: configWith("Pôvodné hlásenie."), existingSetting: { enabled: true } };
+    h.db.update("motorist_telephony_lines", { active: false, metadata }, row => row.id === LINE);
+    const before = h.db.log.length;
+
+    await expect(saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision: NOW, config: configWith() }))
+      .rejects.toMatchObject({ status: 404, code: "line_not_found" });
+    await expect(generateAnnouncementAudio(h.deps, GENERATE)).rejects.toMatchObject({ status: 404, code: "line_not_found" });
+    expect(h.db.log.slice(before).every(entry => entry.operation === "select")).toBe(true);
+    expect(h.db.find("motorist_telephony_lines", row => row.id === LINE)?.metadata).toEqual(metadata);
+    expect(h.db.rows("motorist_audit_log")).toHaveLength(0);
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(h.storage.getBucket).not.toHaveBeenCalled();
+    expect(h.bucket.upload).not.toHaveBeenCalled();
+  });
+
   it("preserves unrelated metadata and records the save actor", async () => {
     const h = world();
     const saved = await saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision: NOW, config: configWith() });
@@ -170,6 +202,28 @@ describe("announcement configuration", () => {
     }) as unknown as typeof h.deps.admin.from);
     await expect(saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision: NOW, config: configWith() })).rejects.toMatchObject({ status: 409, code: "stale_document" });
     expect(h.db.find("motorist_telephony_lines", (row) => row.id === LINE)?.metadata).toEqual({ colleagueEdit: true });
+    expect(h.db.rows("motorist_audit_log")).toHaveLength(0);
+  });
+
+  it("cannot overwrite an archive added after the read even if its revision is unchanged", async () => {
+    const h = world();
+    const metadata = { existingSetting: { enabled: true }, archived_at: NOW };
+    const from = h.client.from.bind(h.client);
+    vi.spyOn(h.deps.admin, "from").mockImplementation(((table: string) => {
+      const builder = from(table);
+      if (table === "motorist_telephony_lines") {
+        const originalUpdate = builder.update.bind(builder);
+        builder.update = ((...args: Parameters<typeof originalUpdate>) => {
+          h.db.update("motorist_telephony_lines", { active: false, metadata, updated_at: NOW }, row => row.id === LINE);
+          return originalUpdate(...args);
+        }) as typeof builder.update;
+      }
+      return builder;
+    }) as unknown as typeof h.deps.admin.from);
+
+    await expect(saveLineAnnouncements(h.deps, { organizationId: ORG, actor: ACTOR, lineId: LINE, revision: NOW, config: configWith() }))
+      .rejects.toMatchObject({ status: 409, code: "stale_document" });
+    expect(h.db.find("motorist_telephony_lines", row => row.id === LINE)).toMatchObject({ active: false, metadata, updated_at: NOW });
     expect(h.db.rows("motorist_audit_log")).toHaveLength(0);
   });
 

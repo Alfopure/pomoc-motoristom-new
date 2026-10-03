@@ -6,6 +6,7 @@ import {
 
 const FULL = {
   AI_DEMO_ENABLED: "true",
+  AI_DEMO_FROM_NUMBER: AI_DEMO_NEUTRAL_LINE,
   AI_DEMO_ALLOWED_RECIPIENTS: "0910 988 882",
   OPENAI_API_KEY: "sk-proj-real-key",
   OPENAI_LIVE_PROJECT_ID: "proj_abc123",
@@ -26,7 +27,7 @@ describe("getAiDemoConfig", () => {
     const config = getAiDemoConfig({});
     expect(config.configured).toBe(false);
     if (config.configured) return;
-    expect(config.missing).toEqual(["OPENAI_API_KEY", "OPENAI_LIVE_PROJECT_ID", "OPENAI_WEBHOOK_SECRET"]);
+    expect(config.missing).toEqual(["OPENAI_API_KEY", "OPENAI_LIVE_PROJECT_ID", "OPENAI_WEBHOOK_SECRET", "AI_DEMO_FROM_NUMBER"]);
   });
 
   it("does not accept the .env.example placeholder as a key", () => {
@@ -134,8 +135,9 @@ describe("aiDemoFromNumber", () => {
     if (!config.configured) expect(config.missing).toContain("AI_DEMO_FROM_NUMBER");
   });
 
-  it("defaults to the neutral line", () => {
-    expect(aiDemoFromNumber({})).toEqual({ number: AI_DEMO_NEUTRAL_LINE });
+  it("requires an explicit caller ID instead of silently using the historical neutral line", () => {
+    expect(aiDemoFromNumber({})).toEqual({ invalid: "" });
+    expect(getAiDemoConfig({ ...FULL, AI_DEMO_FROM_NUMBER: "" })).toMatchObject({ configured: false, missing: ["AI_DEMO_FROM_NUMBER"] });
   });
 
   it("refuses the line that cannot originate, in both spellings Telnyx stores", () => {

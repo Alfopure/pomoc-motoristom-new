@@ -17,6 +17,7 @@ import {
 import { isUuid } from "@/lib/telephony/uuid";
 
 import { ConfigServiceError, type ConfigActor, type ConfigDeps } from "./config-service";
+import { isArchivedLine } from "./line-archive";
 
 export const ANNOUNCEMENT_BUCKET = "motorist-telephony-prompts";
 export const MAX_ANNOUNCEMENT_AUDIO_BYTES = 2 * 1024 * 1024;
@@ -59,13 +60,13 @@ export function announcementGenerationAvailable(): boolean {
 export async function getAnnouncementLines(deps: ConfigDeps, organizationId: string): Promise<AnnouncementLine[]> {
   const { data, error } = await deps.admin.from("motorist_telephony_lines").select(LINE_COLUMNS).eq("organization_id", organizationId).eq("provider", "telnyx").order("label");
   if (error) throw new ConfigServiceError("Hlásenia sa nepodarilo načítať.", 500, "config_read_failed");
-  return (data ?? []).map(lineDocument);
+  return (data ?? []).filter(row => !isArchivedLine(row.metadata)).map(lineDocument);
 }
 
 async function getLine(deps: ConfigDeps, organizationId: string, lineId: string): Promise<LineRow> {
   const { data, error } = await deps.admin.from("motorist_telephony_lines").select(LINE_COLUMNS).eq("id", lineId).eq("organization_id", organizationId).eq("provider", "telnyx").maybeSingle();
   if (error) throw new ConfigServiceError("Linku sa nepodarilo načítať.", 500, "config_read_failed");
-  if (!data) throw new ConfigServiceError("Linka neexistuje.", 404, "line_not_found");
+  if (!data || isArchivedLine(data.metadata)) throw new ConfigServiceError("Linka neexistuje.", 404, "line_not_found");
   return data;
 }
 
@@ -128,6 +129,9 @@ export async function saveLineAnnouncements(
   const { data, error } = await deps.admin.from("motorist_telephony_lines")
     .update({ metadata, updated_at: updatedAt })
     .eq("id", lineId).eq("organization_id", input.organizationId).eq("provider", "telnyx").eq("updated_at", input.revision)
+    // An archive or another metadata edit must survive even when its writer
+    // preserves updated_at. PostgREST expects jsonb equality as serialized JSON.
+    .eq("metadata", JSON.stringify(current.metadata))
     .select(LINE_COLUMNS).maybeSingle();
   if (error) throw new ConfigServiceError("Hlásenia sa nepodarilo uložiť.", 500, "config_write_failed");
   if (!data) throw stale();
