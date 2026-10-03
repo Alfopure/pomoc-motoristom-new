@@ -111,3 +111,17 @@ test("legacy production and ordinary Preview reject cross-project wiring", () =>
   assert.ok(assertTargetProject({ VERCEL_ENV: "production", SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co" }).length);
   assert.ok(assertTargetProject({ VERCEL_ENV: "preview", SUPABASE_URL: "https://ifpaeegaesdmljfkdvcn.supabase.co" }).length);
 });
+
+test("refuses a deployable build with the development auth bypass enabled", () => {
+  for (const env of [
+    {}, { NODE_ENV: "development" }, { NODE_ENV: "production" },
+    { VERCEL_ENV: "preview" }, { VERCEL_ENV: "production", MOTORIST_APP_ENV: "test" },
+  ]) {
+    const problems = assertTargetProject({ ...env, MOTORIST_DEV_AUTH_BYPASS: "true" });
+    assert.ok(problems.some(problem => problem.includes("MOTORIST_DEV_AUTH_BYPASS")));
+  }
+  const result = run({ NODE_ENV: "production", MOTORIST_DEV_AUTH_BYPASS: "true" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /MOTORIST_DEV_AUTH_BYPASS must be disabled for builds/);
+  assert.equal(run({ NODE_ENV: "production", MOTORIST_DEV_AUTH_BYPASS: "false" }).status, 0);
+});

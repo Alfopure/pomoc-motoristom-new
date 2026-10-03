@@ -15,6 +15,7 @@ import {
 } from "@/server/telephony/telnyx/client";
 import { isDestinationAllowed } from "@/server/telephony/call-actions";
 import { getTelnyxConfig, type EnvRecord, type TelnyxConfig } from "@/server/telephony/telnyx/env";
+import { allowsUnlistedTestSmsRecipient } from "@/server/telephony/telnyx/test-safety";
 import { TELNYX_MESSAGE_STATUS_MAP } from "@/server/telephony/telnyx/sms-status";
 import { addTelephonyUsage } from "@/server/telephony/usage";
 import { smsSender } from "@/server/sms-channel";
@@ -64,6 +65,9 @@ export function smsErrorFromTelnyx(error: unknown): SmsWorkflowError {
     if (error.code === "sms_disabled") return new SmsWorkflowError(SMS_SENDS_DISABLED_MESSAGE, 423);
     const detail = error.detail ?? error.title ?? error.code;
     if (error.status === 429) return new SmsWorkflowError(`SMS sa nepodarilo odoslať (limit poskytovateľa): ${detail}`, 429);
+    if (error.status === 401 || error.status === 403) {
+      return new SmsWorkflowError(`SMS poskytovateľ odmietol správu: ${detail}`, error.status);
+    }
     if (error.status === 400 || error.status === 404 || error.status === 422) {
       return new SmsWorkflowError(`SMS poskytovateľ odmietol správu: ${detail}`, 400);
     }
@@ -115,6 +119,7 @@ export function resetSmsRateLimit(): void {
 
 export function createTelnyxSmsTransport(options: TelnyxSmsTransportOptions = {}): TelnyxSmsTransport {
   const config = options.config ?? getTelnyxConfig(options.env ?? process.env);
+  const testSafety = config.configured ? config.testSafety : undefined;
 
   async function resolveClient(organizationId: string): Promise<{ client: TelnyxClient; admin: AdminClient; allowlist: string[] | null }> {
     if (!config.configured) {
@@ -142,7 +147,7 @@ export function createTelnyxSmsTransport(options: TelnyxSmsTransportOptions = {}
     async preflight(input) {
       const organizationId = requireOrganizationId(input.organizationId);
       const { allowlist } = await resolveClient(organizationId);
-      if (input.to && !isDestinationAllowed(input.to, allowlist)) {
+      if (input.to && !isDestinationAllowed(input.to, allowlist) && !allowsUnlistedTestSmsRecipient(testSafety, input.to)) {
         throw new SmsWorkflowError("Cieľové číslo nie je povolené (allowlist).", 403);
       }
       if (!smsRateLimitAvailable(organizationId, Date.now())) {
@@ -155,7 +160,7 @@ export function createTelnyxSmsTransport(options: TelnyxSmsTransportOptions = {}
       const { client, admin, allowlist } = await resolveClient(organizationId);
       // The same allowlist that guards voice: a mistyped international recipient
       // is premium-rate traffic with no ceiling otherwise.
-      if (!isDestinationAllowed(input.to, allowlist)) {
+      if (!isDestinationAllowed(input.to, allowlist) && !allowsUnlistedTestSmsRecipient(testSafety, input.to)) {
         throw new SmsWorkflowError("Cieľové číslo nie je povolené (allowlist).", 403);
       }
       if (!hitSmsRateLimit(organizationId, Date.now())) {

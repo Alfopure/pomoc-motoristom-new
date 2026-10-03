@@ -2,7 +2,7 @@ import { canOperateTelephony, isTestLiveDeployment, resolveAppEnvironment, TEST_
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 
-export type TestProviderSafety = { restricted: boolean; deploymentAllowed: boolean; enabled: boolean; allowedNumbers: readonly string[]; fromNumbers: readonly string[]; aiSipTarget?: string | null; smsAlphaSender?: string | null };
+export type TestProviderSafety = { restricted: boolean; deploymentAllowed: boolean; enabled: boolean; allowedNumbers: readonly string[]; fromNumbers: readonly string[]; allowAnyPhoneNumber?: boolean; aiSipTarget?: string | null; smsAlphaSender?: string | null; smsAllowAnyRecipient?: boolean };
 const E164 = /^\+[1-9]\d{7,14}$/;
 const SIP = /^sip:([a-zA-Z0-9_-]{1,128})@sip\.telnyx\.com$/;
 
@@ -27,9 +27,17 @@ export function getTestProviderSafety(env: Record<string, string | undefined> = 
   const aiSipTarget = env.AI_DEMO_ENABLED?.trim().toLowerCase() === "true" && /^proj_[A-Za-z0-9_-]{1,128}$/.test(aiProject) &&
     ["sip.api.openai.com", "sip-eu.api.openai.com"].includes(aiHost) ? `sip:${aiProject}@${aiHost};transport=tls` : null;
   const deploymentAllowed = isTestLiveDeployment(env);
-  return { restricted, deploymentAllowed, allowedNumbers, fromNumbers,
+  const allowAnyPhoneNumber = deploymentAllowed && env.MOTORIST_TEST_ALLOW_ANY_PHONE_NUMBER === "true";
+  return { restricted, deploymentAllowed, allowedNumbers, fromNumbers, allowAnyPhoneNumber,
+    smsAllowAnyRecipient: deploymentAllowed && env.MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT === "true",
     aiSipTarget, smsAlphaSender,
-    enabled: deploymentAllowed && env.MOTORIST_TEST_LIVE_INTEGRATIONS === "true" && allowedNumbers.length > 0 && fromNumbers.length > 0 };
+    enabled: deploymentAllowed && env.MOTORIST_TEST_LIVE_INTEGRATIONS === "true" &&
+      (allowAnyPhoneNumber || allowedNumbers.length > 0) && fromNumbers.length > 0 };
+}
+
+export function allowsUnlistedTestSmsRecipient(safety: TestProviderSafety | undefined, destination: string): boolean {
+  return safety?.restricted === true && safety.deploymentAllowed && safety.enabled &&
+    safety.smsAllowAnyRecipient === true && E164.test(destination);
 }
 
 export class TestProviderSafetyError extends Error {
@@ -60,7 +68,10 @@ export function acceptsTestProviderEvent(boundary: ProviderBoundary, event: { ty
   try { assertTestProviderEnabled(boundary); } catch { return false; }
   if (!event.connectionId) return false;
   if (event.direction === "incoming" && event.connectionId === boundary.callControlAppId) {
-    return boundary.safety.allowedNumbers.includes(event.from ?? "") && boundary.safety.fromNumbers.includes(event.to ?? "");
+    // Signed ingress on our application and DID establishes ownership. Caller
+    // identity may be withheld; it is not an outbound destination to validate.
+    return (boundary.safety.allowAnyPhoneNumber === true || boundary.safety.allowedNumbers.includes(event.from ?? "")) &&
+      boundary.safety.fromNumbers.includes(event.to ?? "");
   }
   return true;
 }
@@ -71,7 +82,7 @@ const CONFERENCE_LIFECYCLE = new Set(["join", "leave", "hold", "unhold", "mute",
 // such as nested conference joins/forwarding cannot silently bypass target checks through extra/request().
 const TEST_DIAL_FIELDS = new Set(["to", "from", "connection_id", "client_state", "link_to", "timeout_secs", "time_limit_secs", "from_display_name",
   "sip_region", "media_encryption", "bridge_intent", "bridge_on_answer", "prevent_double_bridge", "custom_headers", "supervise_call_control_id", "supervisor_role",
-  "webhook_url", "command_id", "sip_transport_protocol", "send_silence_when_idle"]);
+  "webhook_url", "command_id", "sip_transport_protocol", "send_silence_when_idle", "park_after_unbridge"]);
 
 /** Inspect the final wire payload, including generic request(), batches and dial.extra. */
 export function checkTestProviderRequest(boundary: ProviderBoundary, method: string, path: string, body: Record<string, unknown> = {}): { sipUsernames: string[]; callIds: string[]; conferenceIds: string[]; credentialId?: string } {
@@ -83,6 +94,10 @@ export function checkTestProviderRequest(boundary: ProviderBoundary, method: str
   // nested dial conference_config can otherwise attach a new leg to a foreign conference.
   if ("conference_config" in body) throw new TestProviderSafetyError();
   if (method === "POST" && path === "/calls" && Object.keys(body).some(key => !TEST_DIAL_FIELDS.has(key))) throw new TestProviderSafetyError();
+  // Direct outbound keeps this leg parked after its linked browser leaves.
+  // Admit only our adapter's form; link_to still requires TEST call provenance.
+  if (method === "POST" && path === "/calls" && "park_after_unbridge" in body &&
+    (body.park_after_unbridge !== "self" || typeof body.link_to !== "string" || !body.link_to)) throw new TestProviderSafetyError();
   const callId = /^\/calls\/([^/]+)\/actions\//.exec(path)?.[1];
   const conferenceId = /^\/conferences\/([^/]+)\/actions\//.exec(path)?.[1];
   if (callId) checked.callIds.push(decodeURIComponent(callId));
@@ -129,14 +144,17 @@ export function checkTestProviderRequest(boundary: ProviderBoundary, method: str
     if (path === "/calls" && destination === boundary.safety.aiSipTarget) continue;
     const sip = path !== "/messages" ? SIP.exec(destination) : null;
     if (sip) checked.sipUsernames.push(sip[1]);
-    else if (!boundary.safety.allowedNumbers.includes(destination)) throw new TestProviderSafetyError();
+    else if (!boundary.safety.allowedNumbers.includes(destination) &&
+      !(boundary.safety.allowAnyPhoneNumber === true && E164.test(destination)) &&
+      !(path === "/messages" && allowsUnlistedTestSmsRecipient(boundary.safety, destination))) throw new TestProviderSafetyError();
   }
   return checked;
 }
 
 export function acceptsTestInboundSms(safety: TestProviderSafety, from: unknown, recipients: unknown[]): boolean {
   if (!safety.restricted) return true;
-  return safety.enabled && typeof from === "string" && safety.allowedNumbers.includes(from) &&
+  return safety.deploymentAllowed && safety.enabled && typeof from === "string" &&
+    (safety.allowedNumbers.includes(from) || safety.allowAnyPhoneNumber === true && E164.test(from)) &&
     recipients.length > 0 && recipients.length <= 50 && recipients.every(number => typeof number === "string" && safety.fromNumbers.includes(number));
 }
 

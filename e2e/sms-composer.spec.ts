@@ -14,7 +14,7 @@ test.beforeAll(async () => {
   script = (await build({ entryPoints: ["e2e/fixtures/sms-composer.tsx"], bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic", define: { "process.env": JSON.stringify({ NODE_ENV: "production" }) } })).outputFiles[0].text;
   css = (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css;
 });
-async function boot(page: Page, options: { global?: boolean; width?: number; abortSend?: boolean } = {}) {
+async function boot(page: Page, options: { global?: boolean; width?: number; abortSend?: boolean; rejectSend?: boolean; uncertainSend?: boolean } = {}) {
   const state = { sends: [] as Record<string, unknown>[], prepares: [] as SmsPrepareInput[], errors: [] as string[], history: [] as SmsHistoryEntry[], locationWrites: [] as unknown[], aborted: false,
     inbox: [] as SmsInboxMessage[], conversation: [] as SmsConversationEntry[], inboxWrites: [] as Record<string, unknown>[] };
   page.on("pageerror", (error) => state.errors.push(error.message));
@@ -40,6 +40,8 @@ async function boot(page: Page, options: { global?: boolean; width?: number; abo
     if (url.pathname === "/api/sms/send") {
       state.sends.push(request.postDataJSON());
       if (options.abortSend && !state.aborted) { state.aborted = true; return route.abort("failed"); }
+      if (options.rejectSend) return route.fulfill({ json: { sms: { smsMessageId: "sms-1", status: "failed", statusDetail: "send_failed", error: "SMS poskytovateľ odmietol správu: krajina CZ nie je povolená.", reused: state.sends.length > 1 } } });
+      if (options.uncertainSend) return route.fulfill({ json: { sms: { smsMessageId: "sms-1", status: "sent", statusDetail: "send_unconfirmed", error: "network timeout", reused: state.sends.length > 1 } } });
       return route.fulfill({ json: { sms: { smsMessageId: "sms-1", status: "sent", statusDetail: "sent", reused: state.aborted } } });
     }
     if (url.pathname === "/api/cases/case-1" && request.method() === "PATCH") { const body = request.postDataJSON(); state.locationWrites.push(body); return route.fulfill({ json: { dispatchData: { source: "supabase" }, mutationId: body.mutationId, committedRevision: "2026-09-07T12:05:00.000Z" } }); }
@@ -111,6 +113,40 @@ test("an open draft keeps its case, recipient and request through refresh, netwo
   await expect(page.getByText("Odoslaná operátorovi", { exact: true })).toBeVisible();
   expect(state.sends).toHaveLength(2); expect(state.sends[1]).toEqual(state.sends[0]); expect(state.errors).toEqual([]);
 });
+for (const width of [390, 1440]) test(`provider rejection explains the failure and requires an explicit new request at ${width}px`, async ({ page }) => {
+  const state = await boot(page, { global: true, rejectSend: true, width });
+  await page.getByLabel("Telefón príjemcu").fill("+420777000123");
+  await page.getByLabel("Text správy").fill("Synthetic test message.");
+  await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
+  await page.getByRole("button", { name: "Odoslať SMS", exact: true }).click();
+  await expect(page.getByText("Zlyhala", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveText("SMS poskytovateľ odmietol správu: krajina CZ nie je povolená.");
+  await expect(page.getByRole("button", { name: "Overiť tú istú požiadavku" })).toHaveCount(0);
+  await expect(page.getByLabel("Finálny text na odoslanie")).toBeDisabled();
+  await page.getByRole("button", { name: "Zavrieť SMS" }).click();
+  await page.getByRole("button", { name: /SMS/ }).click();
+  await expect(page.getByRole("alert")).toContainText("krajina CZ nie je povolená");
+  expect(state.sends).toHaveLength(1);
+  await page.screenshot({ path: `.context/sms-browser/provider-rejection-${width}.png` });
+  await page.getByRole("button", { name: "Napísať novú SMS" }).click();
+  await page.getByLabel("Text správy").fill("Deliberate new request.");
+  await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
+  expect(state.prepares[1].requestId).not.toBe(state.prepares[0].requestId);
+  expect(state.sends).toHaveLength(1); expect(state.errors).toEqual([]);
+});
+
+test("an uncertain provider result keeps the original request locked and never offers a new SMS", async ({ page }) => {
+  const state = await boot(page, { uncertainSend: true });
+  await page.getByLabel("Text správy").fill("Synthetic uncertain send.");
+  await page.getByRole("button", { name: "Pripraviť náhľad" }).click();
+  await page.getByRole("button", { name: "Odoslať SMS", exact: true }).click();
+  await expect(page.getByText("Výsledok odoslania sa overuje", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Napísať novú SMS" })).toHaveCount(0);
+  await expect(page.getByLabel("Finálny text na odoslanie")).toBeDisabled();
+  await page.getByRole("button", { name: "Overiť tú istú požiadavku" }).click();
+  expect(state.sends).toHaveLength(2); expect(state.sends[1]).toEqual(state.sends[0]); expect(state.errors).toEqual([]);
+});
+
 test("ETA needs explicit minutes and departure; custom SMS without a case remains in history", async ({ page }) => {
   const state = await boot(page, { global: true });
   await page.getByLabel("Prípad SMS").selectOption("case-1");

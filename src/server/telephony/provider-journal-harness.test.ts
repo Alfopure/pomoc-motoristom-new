@@ -120,8 +120,8 @@ describe("the provider journal, on the test double", () => {
 
     // Executed, acknowledgement never arrived: the entry stays open, so the
     // next attempt has to ask rather than assume either way.
-    expect(journal(lost).filter((entry) => entry.outcome === null)).toHaveLength(1);
-    expect(journal(lost).find((entry) => entry.outcome === null)?.path).toMatch(/playback_stop$/);
+    expect(journal(lost).filter((entry) => entry.outcome === "unknown")).toHaveLength(1);
+    expect(journal(lost).find((entry) => entry.outcome === "unknown")?.path).toMatch(/playback_stop$/);
   });
 
   it("refuses a command from an owner whose lease was taken", async () => {

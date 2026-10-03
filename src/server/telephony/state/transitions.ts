@@ -136,6 +136,7 @@ class TransitionBuilder {
   readonly call: Transition["call"] = {};
   readonly memberTouches: Transition["memberTouches"] = [];
   readonly notes: string[] = [];
+  readonly routing: NonNullable<Transition["routing"]> = [];
   readonly commands: Command[] = [];
   readonly compensations: Compensation[] = [];
   guard: ReservationGuard | null = null;
@@ -296,7 +297,9 @@ class TransitionBuilder {
     return view.find(
       (attempt) =>
         attempt.step_index === state.step &&
-        ((leg.profile_id && attempt.profile_id === leg.profile_id) || (!leg.profile_id && attempt.external_number && attempt.external_number === leg.to_number)),
+        (leg.role === "external"
+          ? attempt.member_kind === "external_number" && attempt.external_number === leg.to_number
+          : attempt.member_kind === "operator" && Boolean(leg.profile_id) && attempt.profile_id === leg.profile_id),
     );
   }
 
@@ -323,6 +326,7 @@ class TransitionBuilder {
       call: { ...this.call },
       memberTouches: [...this.memberTouches],
       notes: [...this.notes],
+      ...(this.routing.length ? { routing: this.routing.slice(-32) } : {}),
     };
   }
 
@@ -965,7 +969,7 @@ function planStep(b: TransitionBuilder, plan: FrozenRingPlan, index: number): Ri
       .filter((attempt) => attempt.step_index === index)
       .map((attempt) => memberKey({ profileId: attempt.profile_id, externalNumber: attempt.external_number })),
   );
-  return planRingStep(step, {
+  const planned = planRingStep(step, {
     sessionId: b.session.id,
     ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
     now: b.ctx.now,
@@ -976,6 +980,43 @@ function planStep(b: TransitionBuilder, plan: FrozenRingPlan, index: number): Ri
     maxFanout: b.ctx.settings.maxRingFanout,
     maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs,
     activeLegCount: b.ctx.activeLegCount,
+  });
+  recordRoutingDecision(b, "selection", index, null, planned);
+  return planned;
+}
+
+/** Use the exact event-local eligibility snapshot, including partial skips. */
+function recordRoutingDecision(b: TransitionBuilder, kind: "selection" | "completed" | "fallback", index: number | null, reason: string | null, planned?: RingStepPlanResult): void {
+  const safeId = (value: string | null | undefined) => value && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : null;
+  const step = index === null ? undefined : b.ringPlan()?.steps[index];
+  const ring = b.meta.ring;
+  const lastAttempt = b.attemptsView().filter(attempt => attempt.step_index === index)
+    .sort((a, z) => Date.parse(z.offered_at ?? z.created_at) - Date.parse(a.offered_at ?? a.created_at))[0];
+  const candidates = planned ? [
+    ...planned.members.map(member => ({ member, outcome: "selected" as const, reason: null })),
+    ...planned.skipped.map(skip => ({ ...skip, outcome: "skipped" as const })),
+  ] : [];
+  b.routing.push({
+    version: 1, at: b.nowIso, kind, step: index, strategy: step?.strategy ?? null,
+    ringSecs: planned?.ringSecs ?? lastAttempt?.ring_secs ?? step?.timeoutSecs ?? null,
+    startedAt: kind === "selection" ? (planned?.attempts.length ? b.nowIso : null) : ring?.step_started_at ?? null,
+    deadlineAt: kind === "selection" ? (planned?.attempts.length ? stepDeadline(b.ctx.now, planned.ringSecs) : null) : ring?.step_deadline_at ?? null,
+    reason, selectedCount: planned?.attempts.length ?? 0, skippedCount: planned?.skipped.length ?? 0,
+    omittedMembers: Math.max(0, candidates.length - 64), activeLegCount: b.ctx.activeLegCount,
+    maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, maxFanout: b.ctx.settings.maxRingFanout,
+    members: candidates.slice(0, 64).map(({ member, outcome, reason: memberReason }) => {
+      const profileId = member.profileId ?? member.ownerProfileId ?? null;
+      const presence = b.ctx.presence.find(row => row.profile_id === profileId);
+      const device = b.ctx.devices.find(row => row.profile_id === profileId);
+      const seen = device?.device_seen_at ? Date.parse(device.device_seen_at) : NaN;
+      return {
+        memberId: safeId(member.memberId), profileId: safeId(profileId), endpoint: member.kind === "operator" ? "sip" : "pstn",
+        outcome, reason: memberReason, presence: presence?.status ?? null,
+        registration: device?.registration_state ?? null,
+        heartbeatAgeMs: Number.isFinite(seen) ? Math.max(0, b.ctx.now.getTime() - seen) : null,
+        openOffer: profileId !== null && b.ctx.openOffers.includes(profileId),
+      };
+    }),
   });
 }
 
@@ -1033,7 +1074,9 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
   const dials: DialCommand[] = [];
   const ringingProfileIds: string[] = [];
   for (const attempt of planned.attempts) {
-    const key = attempt.profileId ?? attempt.externalNumber ?? "member";
+    // Keep the established SIP identity. An owned mobile is a separate
+    // destination even when it shares that SIP operator's reservation token.
+    const key = attempt.externalNumber ?? attempt.profileId ?? "member";
     const sip = attempt.profileId ? devices.get(attempt.profileId)?.sip_username : null;
     const external = attempt.memberKind === "external_number";
     const to = external ? attempt.externalNumber : sip ? telnyxSipUri(sip) : null;
@@ -1086,6 +1129,7 @@ function exhaustionReason(b: TransitionBuilder): "ring_exhausted" | "no_operator
 function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPlan): void {
   const ring = b.meta.ring ?? {};
   const kind = plan.fallback.kind;
+  recordRoutingDecision(b, "fallback", b.activeRingStep(), kind === "external_number" && ring.fallback === "external_number" ? "callback_offer" : kind);
   if (kind === "external_number" && plan.fallback.number && ring.fallback !== "external_number") {
     const stepIndex = plan.steps.length;
     const planned: RingStepPlanResult = {
@@ -1479,7 +1523,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
       b.cmd(hangupCmd(b, other, "lose_race"));
       const otherAttempt = b.attemptForLeg(other);
       if (otherAttempt && !isTerminalAttemptResult(otherAttempt.result)) b.attempt(otherAttempt.id, { result: "cancelled", ended_at: b.nowIso });
-      if (other.profile_id) {
+      if (other.profile_id && other.profile_id !== leg.profile_id) {
         b.presenceChange({ profileId: other.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, onlyIfStatus: ["ringing"], reason: "lost race" });
       }
     }
@@ -1487,7 +1531,9 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
       if (!isTerminalAttemptResult(open.result) && (!attempt || open.id !== attempt.id)) b.attempt(open.id, { result: "cancelled", ended_at: b.nowIso });
     }
     const plan = b.ringPlan();
-    const member = plan?.steps.flatMap((step) => step.members).find((candidate) => candidate.profileId && candidate.profileId === leg.profile_id);
+    const member = plan?.steps.flatMap((step) => step.members).find((candidate) => leg.role === "external"
+      ? candidate.kind === "external_number" && candidate.externalNumber === leg.to_number
+      : candidate.kind === "operator" && Boolean(candidate.profileId) && candidate.profileId === leg.profile_id);
     if (member?.memberId) b.memberTouches.push({ memberId: member.memberId, field: "last_answered_at" });
     b.note(`${leg.role} ${leg.profile_id ?? leg.to_number ?? ""} answered → talking`);
   };
@@ -1884,6 +1930,13 @@ function hasOtherAcceptedLeg(b: TransitionBuilder, leg: LegRow): boolean {
   return Boolean(accepted?.answered_at && accepted.profile_id === leg.profile_id && accepted.telnyx_call_control_id !== leg.telnyx_call_control_id);
 }
 
+/** One failed endpoint must not release an operator whose sibling still rings. */
+function hasOtherRingOffer(b: TransitionBuilder, leg: LegRow, attempt: AttemptRow | undefined): boolean {
+  if (!leg.profile_id || legIntent(leg) !== "ring") return false;
+  return b.attemptsView().some((other) => other.id !== attempt?.id && other.profile_id === leg.profile_id && !isTerminalAttemptResult(other.result)) ||
+    b.openLegs().some((other) => other.telnyx_call_control_id !== leg.telnyx_call_control_id && other.profile_id === leg.profile_id && legIntent(other) === "ring" && !other.answered_at);
+}
+
 function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent, at: string): ReduceResult {
   const state = b.session.state;
   const meta = b.meta;
@@ -1922,7 +1975,7 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
     if (attempt && !isTerminalAttemptResult(attempt.result)) {
       b.attempt(attempt.id, { result: classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause }), ended_at: at });
     }
-    if (leg.profile_id) {
+    if (leg.profile_id && !hasOtherRingOffer(b, leg, attempt)) {
       b.presenceChange({ profileId: leg.profile_id, status: "available", sessionId: null, onlyIfSession: b.session.id, onlyIfStatus: ["ringing"], reason: "offer ended" });
     }
     const customer = b.customerLeg();
@@ -2080,10 +2133,19 @@ function continueRinging(b: TransitionBuilder, customer: LegRow): void {
     applyFallback(b, customer, plan);
     return;
   }
+  if (plan.steps[active].strategy === "all" && view.length > 0) {
+    // One shared offer window. A member who reconnects or gains capacity during
+    // this batch must not start another full window and postpone the fallback.
+    recordRoutingDecision(b, "completed", active, "all_offers_finished");
+    b.note(`step ${active}: simultaneous offer window finished`);
+    if (ringFromStep(b, customer, plan, active + 1)) return;
+    applyFallback(b, customer, plan);
+    return;
+  }
   const planned = planStep(b, plan, active);
   if (planned.attempts.length > 0) {
-    // `ordered` walks to the next member; `all` only gets here when a member was
-    // held back earlier (leg cap) and has become dialable meanwhile.
+    // Ordered steps walk to the next member. An all step can reach this only
+    // before its first batch, after waiting for initial capacity.
     fanout(b, customer, active, planned, null);
     return;
   }
@@ -2091,6 +2153,7 @@ function continueRinging(b: TransitionBuilder, customer: LegRow): void {
     holdStepForCapacity(b, active);
     return;
   }
+  recordRoutingDecision(b, "completed", active, plan.steps[active].strategy === "ordered" ? "ordered_exhausted" : "no_eligible_members");
   if (ringFromStep(b, customer, plan, active + 1)) return;
   applyFallback(b, customer, plan);
 }

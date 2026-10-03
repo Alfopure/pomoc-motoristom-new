@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { sessionOwnership } from "@/server/telephony/ownership";
 import type { FakeDatabase, FakeRow } from "./fake-supabase";
 
@@ -123,17 +124,23 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
     fenceSession(db, args.p_session_id);
     const row = session(args.p_session_id);
     if (!row) throw Object.assign(new Error("session not found"), { code: "PT409" });
+    const journal = (db.storage("motorist_provider_commands") ?? []);
+    const existing = journal.find((entry) => entry.session_id === args.p_session_id && entry.command_id === args.p_command_id);
+    if (existing) {
+      if (existing.fingerprint !== args.p_fingerprint || existing.method !== args.p_method || existing.path !== args.p_path ||
+        existing.correlation_state !== (args.p_correlation_state ?? null) || !isDeepStrictEqual(existing.request_payload, args.p_payload ?? {})) {
+        throw { code: "PT409", message: "provider command payload identity conflict", details: null, hint: null };
+      }
+      return { dispatch: false, outcome: String(existing.outcome ?? "unknown"), result: existing.result, http_status: Number(existing.http_status ?? 200) };
+    }
     const terminal = Boolean(row.termination_requested_at) || Boolean(row.ended_at) || ["ended", "failed"].includes(String(row.state));
     if (terminal && !TEARDOWN.test(String(args.p_path))) {
       throw { code: "PT409", message: "telephony termination blocks new provider command", details: null, hint: null };
     }
-    const journal = (db.storage("motorist_provider_commands") ?? []);
-    const existing = journal.find((entry) => entry.command_id === args.p_command_id);
-    if (existing && existing.fingerprint === args.p_fingerprint && existing.outcome) {
-      return { dispatch: false, outcome: String(existing.outcome), result: existing.result, http_status: Number(existing.http_status ?? 200) };
-    }
-    if (!existing) db.insert("motorist_provider_commands", { session_id: args.p_session_id, command_id: args.p_command_id,
-      fingerprint: args.p_fingerprint, method: args.p_method, path: args.p_path, outcome: null, http_status: null, result: null });
+    db.insert("motorist_provider_commands", { session_id: args.p_session_id, command_id: args.p_command_id,
+      fingerprint: args.p_fingerprint, method: args.p_method, path: args.p_path,
+      correlation_state: args.p_correlation_state ?? null, request_payload: structuredClone(args.p_payload ?? {}),
+      outcome: "unknown", http_status: null, result: null });
     return { dispatch: true };
   });
 
@@ -151,7 +158,7 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
     return { pending: false };
   });
   db.registerRpc("motorist_provider_command_lookup_v2", (args) => {
-    const entry = db.storage("motorist_provider_commands").find((row) => row.command_id === args.p_command_id);
+    const entry = db.storage("motorist_provider_commands").find((row) => row.session_id === args.p_session_id && row.command_id === args.p_command_id);
     return entry?.outcome ? { outcome: String(entry.outcome), result: entry.result } : null;
   });
 
@@ -160,10 +167,18 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
   db.registerRpc("motorist_provider_command_prepare_batch_v2", (args) => {
     const single = db.rpcHandlers.get("motorist_provider_command_prepare_v2")!;
     const items = (args.p_commands ?? []) as Array<Record<string, unknown>>;
-    return items.map((item) => single({
-      p_session_id: args.p_session_id, p_command_id: item.command_id, p_fingerprint: item.fingerprint,
-      p_method: item.method, p_path: item.path, p_correlation_state: item.correlation_state, p_payload: item.payload,
-    }, db));
+    const before = structuredClone(db.storage("motorist_provider_commands"));
+    try {
+      return items.map((item) => single({
+        p_session_id: args.p_session_id, p_command_id: item.command_id, p_fingerprint: item.fingerprint,
+        p_method: item.method, p_path: item.path, p_correlation_state: item.correlation_state, p_payload: item.payload,
+      }, db));
+    } catch (error) {
+      // The SQL batch is one transaction: a conflicting member rolls back
+      // every new intent, before any member can reach the provider.
+      db.tables.set("motorist_provider_commands", before);
+      throw error;
+    }
   });
 
   db.registerRpc("motorist_provider_command_result_batch_v2", (args) => {
@@ -177,7 +192,7 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
   });
 
   db.registerRpc("motorist_provider_command_result_v2", (args) => {
-    const entry = db.storage("motorist_provider_commands").find((row) => row.command_id === args.p_command_id);
+    const entry = db.storage("motorist_provider_commands").find((row) => row.session_id === args.p_session_id && row.command_id === args.p_command_id);
     if (entry) {
       entry.outcome = Number(args.p_status) < 400 ? "accepted" : "rejected";
       entry.http_status = args.p_status;

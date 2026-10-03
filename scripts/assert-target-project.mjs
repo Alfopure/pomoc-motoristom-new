@@ -38,6 +38,11 @@ const INSPECTED_KEYS = [
 export function assertTargetProject(env = process.env) {
   const problems = [];
 
+  // The bypass belongs to the local dev server, never a deployable build.
+  if (env.MOTORIST_DEV_AUTH_BYPASS === "true") {
+    problems.push("MOTORIST_DEV_AUTH_BYPASS must be disabled for builds");
+  }
+
   for (const key of INSPECTED_KEYS) {
     const value = env[key];
     if (!value) continue;

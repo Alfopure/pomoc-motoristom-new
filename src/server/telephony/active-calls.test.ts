@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
+import { buildPhoneBarModel } from "@/lib/telephony/active-calls-model";
 
 import { loadActiveCalls } from "./active-calls";
 
@@ -64,6 +65,27 @@ describe("active calls snapshot", () => {
     expect(snapshot.waiting[0].waitingSince).toBe(h.now().toISOString());
     expect(snapshot.calls[0].mine).toBe(false);
     expect(snapshot.presence.canManageAssignments).toBe(true);
+  });
+
+  it("shows one operator for simultaneous web and mobile offers while retaining both leg identities", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    const webAttempt = h.attempts(sessionId).find((attempt) => attempt.profile_id === PROFILES.o1)!;
+    const webLeg = h.legs(sessionId).find((leg) => leg.id === webAttempt.leg_id)!;
+    const mobileLeg = h.db.insert("motorist_call_legs", {
+      ...webLeg, id: "mobile-leg", telnyx_call_control_id: "mobile-control", telnyx_call_leg_id: "mobile-provider-leg",
+      role: "external", to_number: "+421905987654",
+    })[0];
+    h.db.insert("motorist_ring_attempts", {
+      ...webAttempt, id: "mobile-attempt", member_kind: "external_number", external_number: "+421905987654", leg_id: mobileLeg.id,
+    });
+
+    const snapshot = await loadActiveCalls(deps(h), { profileId: PROFILES.o1, canManageAssignments: false });
+    expect(snapshot.calls[0].offeredProfileIds.filter((id) => id === PROFILES.o1)).toEqual([PROFILES.o1]);
+    const model = buildPhoneBarModel(snapshot, { operatorName: (id) => id === PROFILES.o1 ? "Jana" : "Peter" });
+    expect(model.offers).toHaveLength(1);
+    expect(model.offers[0].offeredOperatorNames.filter((name) => name === "Jana")).toEqual(["Jana"]);
+    expect(model.offers[0].browserIncomingCallControlIds).toEqual(expect.arrayContaining([webLeg.telnyx_call_control_id, "mobile-control"]));
   });
 
   it("exposes identities only for the polling actor's operator, consult and owned PSTN ring legs", async () => {

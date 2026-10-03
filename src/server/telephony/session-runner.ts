@@ -945,7 +945,8 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
           attachContactOperations(fresh, follow, followEvent, durable);
           const nextApply = await applyReduceResult(effects, { session: fresh.session, result: follow, event: followEvent, expectedVersion: fresh.session.version });
           ringFollow = emptyFanout(nextApply);
-          apply = { ...nextApply, commands: [...apply.commands, ...nextApply.commands], notes: [...apply.notes, ...nextApply.notes] };
+          apply = { ...nextApply, commands: [...apply.commands, ...nextApply.commands], notes: [...apply.notes, ...nextApply.notes],
+            routing: [...(apply.routing ?? []), ...(nextApply.routing ?? [])].slice(-32) };
         }
         if (apply.session.cancellations_next_attempt_at && Date.parse(apply.session.cancellations_next_attempt_at) <= nowOf(deps)().getTime()) {
           await cancelRevokedOffers(effects, apply.session);
@@ -958,6 +959,7 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
           stateBefore: snapshot.session.state,
           stateAfter: apply.session.state,
           notes: [...apply.notes, ...apply.compensations.map((entry) => `compensation: ${entry}`)],
+          routing: apply.routing,
           commands: auditCommandOutcomes(apply.commands),
           timing: timing(effectsStarted),
           error: apply.failure?.error ?? null,

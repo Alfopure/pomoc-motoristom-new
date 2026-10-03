@@ -1,11 +1,24 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { canOperateTelephony, resolveAppEnvironment } from "@/lib/app-environment";
+import { telephonyStabilityEnabled } from "@/server/telephony/stability";
 
 const identityKeys = ["VERCEL_ENV", "VERCEL_PROJECT_ID", "VERCEL_GIT_COMMIT_REF", "MOTORIST_APP_ENV",
   "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_PROJECT_REF", "EXPECTED_SUPABASE_PROJECT_REF",
   "APP_BASE_URL", "NEXT_PUBLIC_APP_URL", "PUBLIC_APP_URL", "MOTORIST_TEST_LIVE_INTEGRATIONS"];
 
 afterEach(() => vi.unstubAllEnvs());
+
+it("keeps hosted telephony flags out of the baseline while allowing explicit stability fixtures", () => {
+  expect(telephonyStabilityEnabled()).toBe(false);
+  expect(process.env.TELEPHONY_STABILITY_V1_ENABLED).toBe("");
+
+  vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+  expect(telephonyStabilityEnabled()).toBe(true);
+  vi.unstubAllEnvs();
+
+  expect(telephonyStabilityEnabled()).toBe(false);
+  expect(process.env.TELEPHONY_STABILITY_V1_ENABLED).toBe("");
+});
 
 it("withholds hosted fleet and paid-lookup credentials even after fixture restoration", () => {
   const providerKeys = ["COMMANDER_API_PASSWORD", "WEBDISPECINK_PASSWORD", "WEBDISPECINK_SYNC_ENABLED",

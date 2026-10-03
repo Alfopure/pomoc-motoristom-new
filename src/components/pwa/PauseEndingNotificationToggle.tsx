@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { pushRequest } from "./push-client";
+import { PUSH_SETTINGS_EVENT, pushRequest } from "./push-client";
 
 type Settings = { enabled: boolean };
 const CHANNEL_NAME = "pm:pause-ending-settings";
@@ -28,13 +28,16 @@ export function PauseEndingNotificationToggle() {
     };
     const visible = () => { if (document.visibilityState === "visible") void load(); };
     void load();
+    window.addEventListener(PUSH_SETTINGS_EVENT, load);
     window.addEventListener("focus", visible);
     document.addEventListener("visibilitychange", visible);
     const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel(CHANNEL_NAME) : null;
     if (channel) channel.onmessage = () => void load();
     return () => {
       alive = false;
+      sequence.current++;
       channel?.close();
+      window.removeEventListener(PUSH_SETTINGS_EVENT, load);
       window.removeEventListener("focus", visible);
       document.removeEventListener("visibilitychange", visible);
     };
@@ -64,9 +67,10 @@ export function PauseEndingNotificationToggle() {
 
   return (
     <div className="space-y-1.5" data-testid="pause-ending-notifications">
-      <button type="button" role="switch" aria-checked={settings?.enabled ?? true} aria-label="Upozornenie pred koncom pauzy" disabled={!settings || busy} onClick={() => void toggle()} className="flex min-h-11 w-full items-center justify-between gap-3 text-left text-sm font-semibold text-zinc-900 disabled:opacity-60">
+      <button type="button" role={settings ? "switch" : undefined} aria-checked={settings?.enabled} aria-label="Upozornenie pred koncom pauzy" disabled={!settings || busy} onClick={() => void toggle()} className="flex min-h-11 w-full items-center justify-between gap-3 text-left text-sm font-semibold text-zinc-900 disabled:opacity-60">
         <span>Upozornenie pred koncom pauzy</span>
-        <span aria-hidden="true" className={`flex h-6 w-10 shrink-0 items-center rounded-full p-0.5 transition-colors ${settings?.enabled !== false ? "bg-emerald-600" : "bg-zinc-300"}`}><span className={`size-5 rounded-full bg-white shadow-sm transition-transform ${settings?.enabled !== false ? "translate-x-4" : ""}`} /></span>
+        {settings ? <span aria-hidden="true" className={`flex h-6 w-10 shrink-0 items-center rounded-full p-0.5 transition-colors ${settings.enabled ? "bg-emerald-600" : "bg-zinc-300"}`}><span className={`size-5 rounded-full bg-white shadow-sm transition-transform ${settings.enabled ? "translate-x-4" : ""}`} /></span>
+          : <span className="shrink-0 text-[11px] font-normal text-zinc-500">{error ? "Nenačítané" : "Načítavam…"}</span>}
       </button>
       <p className="text-xs leading-5 text-zinc-500">1 minútu pred plánovaným koncom príde upozornenie v aplikácii aj push na zapnuté zariadenia. Platí pre celý účet.</p>
       {error && <p role="alert" className="text-xs leading-4 text-red-700">{error}</p>}
