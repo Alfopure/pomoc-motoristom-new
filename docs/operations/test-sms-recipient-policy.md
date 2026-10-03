@@ -1,5 +1,7 @@
 # Príjemcovia odchádzajúcich TEST SMS
 
+**Aktualizácia 3. 10. 2026:** majiteľ následne odstránil osobitný zoznam testerov aj pre bežné hovory a príjem SMS. [Všeobecná telefónna politika](test-phone-number-policy.md) je samostatná; táto už schválená výnimka pre odchádzajúce SMS zostáva zachovaná vrátane celosvetových destinácií. Historické tvrdenia nižšie o nezmenených hlasových obmedzeniach opisujú pôvodný SMS-only rozsah.
+
 ## Schválený rozsah
 
 Majiteľ 2. 10. 2026 po zobrazení chyby „Cieľové číslo nie je povolené (allowlist)“ výslovne požiadal o odstránenie tejto funkcionality na TESTe. Ide iba o príjemcov odchádzajúcich SMS. Nie je to autorizácia produkcie, zmien hlasových hovorov, emailov, provider zdrojov, automatického kontaktovania kopírovaných klientov alebo spustenia hromadných správ.
@@ -34,4 +36,4 @@ Provider HTTP 401/403 je jednoznačné odmietnutie, nie nejasný výsledok odosl
 
 ## Návrat
 
-Nastaviť `MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT=false` v tom istom TEST scope a vybuildiť aktuálny `dev` nanovo. Neredeplyovať historický deployment. Organizačný a presný TEST zoznam príjemcov sa potom opäť uplatnia bez databázovej migrácie.
+Nastaviť `MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT=false` v tom istom TEST scope a vybuildiť aktuálny `dev` nanovo. Neredeplyovať historický deployment. Organizačný SMS filter sa potom opäť uplatní bez databázovej migrácie. Presný zoznam testerov sa uplatní iba vtedy, keď je vypnuté aj `MOTORIST_TEST_ALLOW_ANY_PHONE_NUMBER`.
