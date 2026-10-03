@@ -41,6 +41,8 @@ For this dedicated TEST project only, the owner-authorized integration tests may
 
 Dedicated Telnyx TEST resources may share the existing Telnyx account and credit. A separate account is optional, not a prerequisite; account API access is not a resource sandbox. Every TEST call, conference and recording provider operation must verify TEST provenance, including cleanup after creation is disabled. Copied historical provider IDs are not proof of ownership.
 
+On 2026-10-03 the owner explicitly removed the restriction to individual tester phone numbers and requested ordinary TEST calling under the same operating limits as production. `MOTORIST_TEST_ALLOW_ANY_PHONE_NUMBER=true` is authorized only in the dedicated stable TEST project's Production target. It removes the exact caller/recipient list for calls and SMS while preserving TEST-owned caller IDs, provider resources, signed webhooks, resource provenance and deployment/database isolation. Keep the independently authorized worldwide outgoing TEST SMS policy. Do not restore a one-mobile-only pilot restriction. This does not authorize production changes, automatic contact of copied customers, new ringing features or live integrations in working-branch Preview. See [TEST phone policy](docs/operations/test-phone-number-policy.md).
+
 `dispecing.linkapomoci.sk` belongs here. An earlier version of this file forbade touching it, which was correct while the original served it and is wrong now — the hostname moved with the owner's explicit instruction. If an agent reports it as an unexpected alias, that report is out of date, not the configuration.
 
 ### What this project must never touch

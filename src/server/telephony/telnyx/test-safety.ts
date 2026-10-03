@@ -2,7 +2,7 @@ import { canOperateTelephony, isTestLiveDeployment, resolveAppEnvironment, TEST_
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 
-export type TestProviderSafety = { restricted: boolean; deploymentAllowed: boolean; enabled: boolean; allowedNumbers: readonly string[]; fromNumbers: readonly string[]; aiSipTarget?: string | null; smsAlphaSender?: string | null; smsAllowAnyRecipient?: boolean };
+export type TestProviderSafety = { restricted: boolean; deploymentAllowed: boolean; enabled: boolean; allowedNumbers: readonly string[]; fromNumbers: readonly string[]; allowAnyPhoneNumber?: boolean; aiSipTarget?: string | null; smsAlphaSender?: string | null; smsAllowAnyRecipient?: boolean };
 const E164 = /^\+[1-9]\d{7,14}$/;
 const SIP = /^sip:([a-zA-Z0-9_-]{1,128})@sip\.telnyx\.com$/;
 
@@ -27,10 +27,12 @@ export function getTestProviderSafety(env: Record<string, string | undefined> = 
   const aiSipTarget = env.AI_DEMO_ENABLED?.trim().toLowerCase() === "true" && /^proj_[A-Za-z0-9_-]{1,128}$/.test(aiProject) &&
     ["sip.api.openai.com", "sip-eu.api.openai.com"].includes(aiHost) ? `sip:${aiProject}@${aiHost};transport=tls` : null;
   const deploymentAllowed = isTestLiveDeployment(env);
-  return { restricted, deploymentAllowed, allowedNumbers, fromNumbers,
+  const allowAnyPhoneNumber = deploymentAllowed && env.MOTORIST_TEST_ALLOW_ANY_PHONE_NUMBER === "true";
+  return { restricted, deploymentAllowed, allowedNumbers, fromNumbers, allowAnyPhoneNumber,
     smsAllowAnyRecipient: deploymentAllowed && env.MOTORIST_TEST_SMS_ALLOW_ANY_RECIPIENT === "true",
     aiSipTarget, smsAlphaSender,
-    enabled: deploymentAllowed && env.MOTORIST_TEST_LIVE_INTEGRATIONS === "true" && allowedNumbers.length > 0 && fromNumbers.length > 0 };
+    enabled: deploymentAllowed && env.MOTORIST_TEST_LIVE_INTEGRATIONS === "true" &&
+      (allowAnyPhoneNumber || allowedNumbers.length > 0) && fromNumbers.length > 0 };
 }
 
 export function allowsUnlistedTestSmsRecipient(safety: TestProviderSafety | undefined, destination: string): boolean {
@@ -66,7 +68,10 @@ export function acceptsTestProviderEvent(boundary: ProviderBoundary, event: { ty
   try { assertTestProviderEnabled(boundary); } catch { return false; }
   if (!event.connectionId) return false;
   if (event.direction === "incoming" && event.connectionId === boundary.callControlAppId) {
-    return boundary.safety.allowedNumbers.includes(event.from ?? "") && boundary.safety.fromNumbers.includes(event.to ?? "");
+    // Signed ingress on our application and DID establishes ownership. Caller
+    // identity may be withheld; it is not an outbound destination to validate.
+    return (boundary.safety.allowAnyPhoneNumber === true || boundary.safety.allowedNumbers.includes(event.from ?? "")) &&
+      boundary.safety.fromNumbers.includes(event.to ?? "");
   }
   return true;
 }
@@ -136,6 +141,7 @@ export function checkTestProviderRequest(boundary: ProviderBoundary, method: str
     const sip = path !== "/messages" ? SIP.exec(destination) : null;
     if (sip) checked.sipUsernames.push(sip[1]);
     else if (!boundary.safety.allowedNumbers.includes(destination) &&
+      !(boundary.safety.allowAnyPhoneNumber === true && E164.test(destination)) &&
       !(path === "/messages" && allowsUnlistedTestSmsRecipient(boundary.safety, destination))) throw new TestProviderSafetyError();
   }
   return checked;
@@ -143,7 +149,8 @@ export function checkTestProviderRequest(boundary: ProviderBoundary, method: str
 
 export function acceptsTestInboundSms(safety: TestProviderSafety, from: unknown, recipients: unknown[]): boolean {
   if (!safety.restricted) return true;
-  return safety.enabled && typeof from === "string" && safety.allowedNumbers.includes(from) &&
+  return safety.deploymentAllowed && safety.enabled && typeof from === "string" &&
+    (safety.allowedNumbers.includes(from) || safety.allowAnyPhoneNumber === true && E164.test(from)) &&
     recipients.length > 0 && recipients.length <= 50 && recipients.every(number => typeof number === "string" && safety.fromNumbers.includes(number));
 }
 
