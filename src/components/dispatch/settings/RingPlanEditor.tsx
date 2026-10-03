@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction, type ReactNode } from "react";
-import { ListOrdered, Loader2, Plus, Save, Trash2 } from "lucide-react";
+import { ArrowDown, ListOrdered, Loader2, Plus, Save, Trash2, Users } from "lucide-react";
 
 import type { RoutingDocument, ValidationIssue } from "@/server/telephony/config-service";
 
@@ -36,6 +36,13 @@ import { SettingsField, SettingsIssueList, SettingsNotice, SettingsSectionHeader
 import { SortableList, SortableRow } from "./sortable-list";
 import { PhoneNumberHint, PhoneNumberInput } from "../PhoneNumberInput";
 
+const FALLBACK_HELP: Record<PlanDraft["fallbackKind"], string> = {
+  waiting_room: "Volajúci zostane v čakárni. Systém bude hovor znovu ponúkať dostupným operátorom v aplikácii; prevziať ho možno aj ručne.",
+  external_number: "Číslo sa vytočí raz. Pri neprijatí nasleduje ponuka spätného volania, ak je číslo volajúceho známe.",
+  callback_prompt: "Volajúci môže požiadať o spätné volanie, ak je jeho telefónne číslo známe.",
+  hangup_message: "Prehrá sa záverečná hláška a hovor sa ukončí.",
+};
+
 /**
  * Ring plan screen (plan "Fáza 3"): the ordered steps a call walks through and
  * what happens when they are exhausted. Every decision lives in
@@ -54,9 +61,16 @@ export function RingPlanEditor({
   onSaved,
   controlled,
   renderGroupEditor,
+  visiblePlanIds,
+  onAddPlan,
+  strategyOverride,
 }: {
   controlled?: { plans: PlanDraft[]; onChange: Dispatch<SetStateAction<PlanDraft[]>> };
-  renderGroupEditor?: (groupId: string) => ReactNode;
+  renderGroupEditor?: (groupId: string, context: { strategy: "all" | "ordered"; timeoutSecs: number; planId: string | null }) => ReactNode;
+  /** Filters rendering only; state, validation and saving retain every plan. */
+  visiblePlanIds?: readonly string[] | null;
+  onAddPlan?: () => void;
+  strategyOverride?: "all" | "ordered" | null;
   canEdit: boolean;
   document: RoutingDocument;
   focusPlanId?: string | null;
@@ -77,6 +91,7 @@ export function RingPlanEditor({
     [document.operators],
   );
 
+  const scopeKey = visiblePlanIds?.join(",") ?? "all";
   useEffect(() => {
     if (!focusPlanId) return;
     const frame = window.requestAnimationFrame(() => {
@@ -85,7 +100,7 @@ export function RingPlanEditor({
       element?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [focusPlanId]);
+  }, [focusPlanId, scopeKey]);
 
   // A plan an IVR digit targets is as much "in use" as a line's plan: the RPC
   // refuses to delete it and switching it off reroutes those callers silently.
@@ -110,6 +125,7 @@ export function RingPlanEditor({
   const issuesFor = useMemo(() => issuesByPath(issues), [issues]);
   const formIssues = [...(issuesFor.get("") ?? []), ...serverIssues];
   const dirty = ringPlansDirty(plans, document.plans);
+  const visiblePlans = visiblePlanIds == null ? plans : plans.filter(plan => plan.id && visiblePlanIds.includes(plan.id));
 
   async function save() {
     if (saving || !canEdit) return;
@@ -155,15 +171,20 @@ export function RingPlanEditor({
           <SettingsNotice tone="warning">Najprv pridaj skupinu s členmi. Potom ju vyber v kroku plánu.</SettingsNotice>
         )}
 
-        {plans.map((plan) => {
+        {visiblePlans.map((plan) => {
           const references = referencesUsingPlan(plan.id, document.lines, document.ivrMenus);
+          const effectivePlan = strategyOverride ? { ...plan, steps: plan.steps.map(step => ({ ...step, strategy: strategyOverride })) } : plan;
           return (
           <div
             key={plan.key}
             id={plan.id ? `ring-plan-${plan.id}` : undefined}
             tabIndex={-1}
-            className={controlled ? "scroll-mt-4 rounded-lg outline-none focus-visible:ring-1 focus-visible:ring-zinc-300" : `scroll-mt-4 rounded-md border bg-zinc-50 p-3 outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${focusPlanId === plan.id ? "border-yellow-400 ring-2 ring-yellow-200" : "border-zinc-200"}`}
+            className={`scroll-mt-4 rounded-xl border border-zinc-200 bg-white p-4 outline-none focus-visible:ring-2 focus-visible:ring-zinc-300 ${focusPlanId === plan.id ? "border-zinc-400" : ""}`}
           >
+            <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="font-semibold text-zinc-900">{plan.name || "Nový plán"}</h4><span className="text-xs text-zinc-500">{plan.active ? "Aktívny plán" : "Vypnutý plán"}</span></div>
+            {!plan.active && <p className="mt-2 text-sm text-amber-800">Tento plán sa nespustí. Jeho kroky ani nastavený koniec sa nepoužijú.</p>}
+            <details open={!plan.active || plan.steps.length === 0 || undefined} className="mt-2 text-sm">
+              <summary className="cursor-pointer py-2 text-xs font-medium text-zinc-500">Názov, stav a použitie plánu</summary>
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
               <SettingsField label="Názov plánu">
                 <input
@@ -197,16 +218,17 @@ export function RingPlanEditor({
                 </button>
               </div>
             </div>
+            {references.length > 0 && <p className="mt-2 text-xs text-zinc-500">Plán nemožno odobrať, kým ho používajú linky alebo IVR. Najprv zmeň ich priradenie; väzby sú uvedené nižšie.</p>}
 
-            <p className={controlled ? "mt-3 text-[13px] leading-5 text-zinc-600" : "mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900"}>
-              {describeRingPlan(plan, document.groups, maxRingFanout)}
+            <p className="mt-3 text-xs leading-5 text-zinc-600">
+              {describeRingPlan(effectivePlan, document.groups, maxRingFanout)}
               {plan.active && plan.steps.length > 0 && (
-                <span className="mt-1 block text-xs text-zinc-500">Nastavené maximum zvonenia (skutočný čas môže byť kratší): {ringPlanSeconds(plan, document.groups)} s.</span>
+                <span className="mt-1 block text-xs text-zinc-500">Nastavené maximum zvonenia (skutočný čas môže byť kratší): {ringPlanSeconds(effectivePlan, document.groups)} s.</span>
               )}
             </p>
 
             {(() => {
-              const usage = planUsageNote(plan, document.lines, { ivrMenus: document.ivrMenus, groups: document.groups });
+              const usage = planUsageNote(effectivePlan, document.lines, { ivrMenus: document.ivrMenus, groups: document.groups });
               if (!usage) return null;
               return (
                 <p
@@ -244,12 +266,15 @@ export function RingPlanEditor({
                 </ul>
               </details>
             )}
+            </details>
+            {references.length > 1 && <p className="mt-2 text-xs text-zinc-500">Zdieľaný plán · úpravy platia pre všetky jeho linky a voľby IVR ({references.length}).</p>}
+            {strategyOverride && <p className="mt-2 text-xs text-zinc-600">Vybraná linka nastavuje zvonenie {STRATEGY_LABELS[strategyOverride]}. Spôsob uložený v jednotlivých krokoch sa pre túto linku nepoužije.</p>}
 
             <SettingsIssueList issues={issuesFor.get(plan.key) ?? []} />
 
             <div className="mt-3">
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs font-semibold text-zinc-500">Kroky ({plan.steps.length})</span>
+                <span className="inline-flex items-center gap-2 text-xs font-semibold text-zinc-500"><Users size={15} aria-hidden="true" />Komu zvoní · kroky ({plan.steps.length})</span>
                 <button
                   type="button"
                   disabled={!canEdit || document.groups.length === 0}
@@ -272,11 +297,12 @@ export function RingPlanEditor({
                 >
                   {plan.steps.map((step, index) => {
                     const group = document.groups.find((candidate) => candidate.id === step.ringGroupId);
-                    const timing = stepTiming(step, group);
+                    const strategy = strategyOverride ?? step.strategy;
+                    const timing = stepTiming({ ...step, strategy }, group);
                     return (
                     <SortableRow key={step.key} id={step.key} disabled={!canEdit} handleLabel={`Presunúť ${index + 1}. krok plánu ${plan.name}`}>
-                      <div className="grid gap-2 sm:grid-cols-[28px_minmax(0,1.4fr)_minmax(0,110px)_minmax(0,1fr)_auto] sm:items-end">
-                        <span className="text-sm font-semibold text-zinc-500">{index + 1}.</span>
+                      <div className="grid gap-3 lg:grid-cols-[28px_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,170px)_auto] lg:items-end">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-xs font-semibold text-zinc-600">{index + 1}</span>
 
                         <SettingsField label="Skupina">
                           <select aria-label="Skupina"
@@ -295,19 +321,8 @@ export function RingPlanEditor({
                           </select>
                         </SettingsField>
 
-                        <SettingsField label="Čas (s)">
-                          <input
-                            className={settingsInputClass}
-                            disabled={!canEdit}
-                            inputMode="numeric"
-                            title={`${MIN_TIMEOUT_SECS} až ${MAX_TIMEOUT_SECS} s`}
-                            value={step.timeoutSecs}
-                            onChange={(event) => setPlans((current) => updateStep(current, plan.key, step.key, { timeoutSecs: event.target.value }))}
-                          />
-                        </SettingsField>
-
                         <SettingsField label="Ako zvoní">
-                          <select aria-label="Ako zvoní"
+                          {strategyOverride ? <p className="flex min-h-10 items-center rounded-md bg-zinc-50 px-3 text-sm text-zinc-700">{STRATEGY_LABELS[strategy]}</p> : <select aria-label="Ako zvoní"
                             className={settingsInputClass}
                             disabled={!canEdit}
                             value={step.strategy}
@@ -317,7 +332,18 @@ export function RingPlanEditor({
                           >
                             <option value="all">{STRATEGY_LABELS.all}</option>
                             <option value="ordered">{STRATEGY_LABELS.ordered}</option>
-                          </select>
+                          </select>}
+                        </SettingsField>
+
+                        <SettingsField label={strategy === "all" ? "Spoločný čas zvonenia (s)" : "Predvolený čas na osobu (s)"}>
+                          <input
+                            className={settingsInputClass}
+                            disabled={!canEdit}
+                            inputMode="numeric"
+                            title={`${MIN_TIMEOUT_SECS} až ${MAX_TIMEOUT_SECS} s`}
+                            value={step.timeoutSecs}
+                            onChange={(event) => setPlans((current) => updateStep(current, plan.key, step.key, { timeoutSecs: event.target.value }))}
+                          />
                         </SettingsField>
 
                         <button
@@ -332,10 +358,10 @@ export function RingPlanEditor({
                         </button>
                       </div>
                       {timing && (
-                        <p className={controlled ? "mt-2 text-xs leading-5 text-zinc-500" : "mt-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-950"}>
+                        <p className="mt-2 text-xs leading-5 text-zinc-500">
                           <span className="font-semibold">Účinný čas kroku:</span>{" "}
                           {timing.strategy === "all"
-                            ? `${timing.stepSecs} s pre každého naraz podľa času kroku.${timing.members.some((member) => member.memberOverrideIgnored) ? " Vlastné časy členov sa v tomto kroku nepoužijú." : ""}`
+                            ? `najviac ${timing.stepSecs} s pre všetkých v jednom kole.`
                             : timing.members.map((entry) => {
                                 const member = group?.members.find((candidate) => candidate.id === entry.memberId);
                                 const label = member?.memberKind === "operator"
@@ -345,9 +371,9 @@ export function RingPlanEditor({
                               }).join("; ") + "."}
                         </p>
                       )}
-                      {group && renderGroupEditor && <details open={focusGroupId === group.id || undefined} className="mt-2 rounded-lg border border-zinc-200 bg-white">
-                        <summary className="cursor-pointer px-3 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-yellow-400">Členovia skupiny: {group.members.map(member => member.memberKind === "operator" ? operatorNames.get(member.profileId ?? "") ?? "Operátor" : member.externalNumber ?? "Externé číslo").join(", ") || "Zatiaľ bez členov"} · Upraviť členov</summary>
-                        {renderGroupEditor(group.id)}
+                      {group && renderGroupEditor && <details open={focusGroupId === group.id || undefined} className="mt-3 rounded-lg border border-zinc-200 bg-white">
+                        <summary className="cursor-pointer px-3 py-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-zinc-400"><span className="text-zinc-500">Členovia skupiny:</span> {group.members.map(member => member.memberKind === "operator" ? operatorNames.get(member.profileId ?? "") ?? "Operátor" : member.externalNumber ?? "Externé číslo").join(", ") || "Zatiaľ bez členov"}<span className="ml-2 text-xs text-zinc-500">Upraviť členov</span></summary>
+                        {renderGroupEditor(group.id, { strategy, timeoutSecs: Number(step.timeoutSecs), planId: plan.id })}
                       </details>}
                       <SettingsIssueList issues={issuesFor.get(step.key) ?? []} />
                     </SortableRow>
@@ -357,7 +383,8 @@ export function RingPlanEditor({
               )}
             </div>
 
-            <div className="mt-3 grid gap-3 border-t border-zinc-200 pt-3 sm:grid-cols-2">
+            <div className="my-3 flex items-center gap-2 text-xs text-zinc-500"><ArrowDown size={14} aria-hidden="true" />Po poslednom kroku</div>
+            <div className="grid gap-3 rounded-lg bg-zinc-50 p-3 sm:grid-cols-2">
               <SettingsField label="Keď nikto nezdvihne">
                 <select aria-label="Keď nikto nezdvihne"
                   className={settingsInputClass}
@@ -371,6 +398,7 @@ export function RingPlanEditor({
                     </option>
                   ))}
                 </select>
+                <span className="mt-2 block text-xs leading-5 text-zinc-500">{FALLBACK_HELP[plan.fallbackKind]}</span>
               </SettingsField>
 
               {plan.fallbackKind === "external_number" && (
@@ -390,12 +418,13 @@ export function RingPlanEditor({
         })}
 
         {plans.length === 0 && <SettingsNotice tone="warning">Zatiaľ nie je vytvorený žiadny plán zvonenia.</SettingsNotice>}
+        {plans.length > 0 && visiblePlans.length === 0 && <SettingsNotice tone="info">Vybraná linka nemá priradený plán zvonenia ani plán v IVR. Priradenie upravíš v nastavení čísla.</SettingsNotice>}
 
         <div className="flex flex-wrap items-center gap-2 border-t border-zinc-200 pt-3">
           <button
             type="button"
             disabled={!canEdit}
-            onClick={() => setPlans((current) => addPlan(current))}
+            onClick={() => { setPlans((current) => addPlan(current)); onAddPlan?.(); }}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Plus size={15} aria-hidden="true" />

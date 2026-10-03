@@ -99,7 +99,17 @@ export function TelephonyConfigPanel({ onTestCall, routingTarget, onRoutingDirty
   // never widens its response), so its result is merged into the document the
   // panel already holds.
   const applySettings = useCallback((settings: TelephonySettingsDoc) => {
-    setState((current) => (current ? { ...current, document: { ...current.document, settings, snapshotId: undefined } } : current));
+    setState((current) => (current ? {
+      ...current,
+      document: {
+        ...current.document,
+        settings,
+        snapshotId: undefined,
+        capabilities: current.document.capabilities
+          ? { ...current.document.capabilities, defaultInboundCallMode: settings.inboundCallMode }
+          : undefined,
+      },
+    } : current));
     setVersion((current) => current + 1);
   }, []);
 

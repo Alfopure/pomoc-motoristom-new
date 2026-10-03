@@ -71,8 +71,18 @@ export function LineInboundModeControl({ line, defaultMode, canEdit, onSaved }: 
   }
 
   const inherited = defaultMode === "queue_first" ? "teraz rovno do čakárne" : defaultMode === "ring_first" ? "teraz podľa plánu zvonenia" : "nastavenie organizácie";
+  const effectiveMode = selection ?? defaultMode;
+  const explanation = effectiveMode === "queue_first"
+    ? "Hovor čaká bez automatického zvonenia. Operátor ho vyberie ručne v aplikácii s pripojeným telefónom. Kroky plánu ani jeho záložná akcia sa nespustia."
+    : effectiveMode === "ring_all"
+      ? "V každom kroku zvonia dostupní členovia naraz. Tento spôsob platí pre všetky plány vybranej linky, aj keď majú uložené postupné zvonenie."
+      : effectiveMode === "ring_ordered"
+        ? "V každom kroku zvonia dostupní členovia po jednom, v poradí zoznamu. Tento spôsob platí pre všetky plány vybranej linky."
+        : effectiveMode === "ring_first"
+          ? "Hovor prejde krokmi plánu. V každom kroku si zvolíš, komu a akým spôsobom sa má zvoniť."
+          : "Linka preberá nastavenie organizácie. Predvolený režim sa v tejto odpovedi nepodarilo zistiť.";
   return (
-    <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
+    <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4">
       <label className="grid max-w-xl gap-1 text-sm font-semibold text-zinc-950">
         Čo sa stane s hovorom na číslo {line.phoneNumber}
         <select
@@ -88,11 +98,8 @@ export function LineInboundModeControl({ line, defaultMode, canEdit, onSaved }: 
           <option value="queue_first">Rovno do čakárne</option>
         </select>
       </label>
-      <p className="mt-2 text-xs leading-5 text-zinc-700">
-        Platí len pre toto volané číslo, po úvodnej hláške, otváracích hodinách a prípadnom IVR.
-        Voľby „všetkým naraz“ a „postupne“ nahradia spôsob zvonenia v krokoch zdieľaného plánu iba pre túto linku.
-        V čakárni si operátor hovor vyberie ručne; potrebuje pripojený telefón v aplikácii. Zmena sa uloží hneď po výbere.
-      </p>
+      <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-600">{explanation}</p>
+      <p className="mt-2 text-xs leading-5 text-zinc-500">Platí po úvodnej hláške, otváracích hodinách a prípadnom hlasovom menu. <span className="font-medium text-zinc-700">Výber režimu sa uloží ihneď.</span></p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {saving && <span role="status" className="inline-flex items-center gap-1 text-xs font-medium text-amber-800"><Loader2 size={14} className="animate-spin" aria-hidden="true" />Ukladám režim čísla…</span>}
         {uncertain && <button type="button" onClick={() => void verify(selection).catch(() => setError("Stav sa stále nepodarilo overiť. Skús to znova."))} className="rounded-md border border-amber-400 bg-white px-2 py-1 text-xs font-semibold">Overiť stav</button>}
