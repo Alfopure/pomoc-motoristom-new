@@ -29,10 +29,16 @@ export type MotoristAuthState =
 /**
  * Dev-only auth bypass. It must be enabled explicitly so that a normal
  * `npm run dev` session still resolves the actor from the signed-in user.
- * Playwright enables it explicitly for isolated browser tests.
+ * Playwright enables it explicitly for isolated browser tests. Hosted or
+ * production runtimes must still authenticate even if the flag is misconfigured.
  */
 function devAuthBypass(): boolean {
-  return process.env.MOTORIST_DEV_AUTH_BYPASS === "true";
+  return process.env.MOTORIST_DEV_AUTH_BYPASS === "true"
+    && process.env.NODE_ENV === "development"
+    && !process.env.VERCEL
+    && !process.env.VERCEL_ENV
+    && !process.env.VERCEL_PROJECT_ID
+    && (!process.env.MOTORIST_APP_ENV || process.env.MOTORIST_APP_ENV === "development");
 }
 
 /**

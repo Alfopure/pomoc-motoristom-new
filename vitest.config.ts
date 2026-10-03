@@ -6,7 +6,7 @@ import { defineConfig } from "vitest/config";
 // a test. test.env is applied in workers before application modules are imported.
 // Leave NODE_ENV, PATH and other runner/runtime settings untouched.
 const neutralEnvironmentKeys = new Set([
-  "VERCEL_ENV", "VERCEL_PROJECT_ID", "VERCEL_GIT_COMMIT_REF", "MOTORIST_APP_ENV",
+  "VERCEL", "VERCEL_ENV", "VERCEL_PROJECT_ID", "VERCEL_GIT_COMMIT_REF", "MOTORIST_APP_ENV",
   "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_PROJECT_REF", "EXPECTED_SUPABASE_PROJECT_REF",
   "APP_BASE_URL", "NEXT_PUBLIC_APP_URL", "PUBLIC_APP_URL",
   "MOTORIST_TEST_LIVE_INTEGRATIONS", "MOTORIST_TEST_ALLOWED_NUMBERS", "MOTORIST_TEST_FROM_NUMBERS",
