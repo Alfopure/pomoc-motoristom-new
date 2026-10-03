@@ -8,17 +8,17 @@ import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
 import { ConfigRequestError, loadRoutingConfig, saveRoutingConfig, type RoutingConfigResponse } from "./config-client";
 import { FALLBACK_DESTINATION_ALLOWLIST, validateRingGroupDrafts, type GroupDraft } from "./ring-groups-model";
 import { describeRingPlan, ringPlanIdsInUse, validateRingPlanDrafts, type PlanDraft } from "./ring-plan-model";
-import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingLineBehaviour, incomingMatches, incomingPayload, incomingPlanIdsForLine, initialIncomingLineId, mergeSavedLine } from "./incoming-routing-model";
+import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingAffectedLines, incomingModeName, updateIncomingLineMode, incomingLineBehaviour, incomingMatches, incomingPayload, incomingPlanIdsForLine, initialIncomingLineId } from "./incoming-routing-model";
 import { RingGroupsEditor } from "./RingGroupsEditor";
 import { RingPlanEditor } from "./RingPlanEditor";
 import { LineInboundModeControl } from "./LineInboundModeControl";
+import type { DetachedPersonDevices } from "./ring-people-model";
 import { SettingsIssueList, SettingsNotice, settingsInputClass } from "./settings-ui";
 
 export type IncomingEditorActions = { save: () => Promise<boolean>; discard: () => void };
-export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLineSaved, onNavigate, onDirtyChange, onActionsChange, onEditorStateChange }: {
+export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onNavigate, onDirtyChange, onActionsChange, onEditorStateChange }: {
   document: RoutingDocument; canEdit: boolean; target?: RoutingNavigationTarget | null;
   onSaved: (response: RoutingConfigResponse) => void;
-  onLineSaved: (response: RoutingConfigResponse) => void;
   onNavigate: (target: RoutingNavigationTarget) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onActionsChange?: (actions: IncomingEditorActions | null) => void;
@@ -26,6 +26,7 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLi
 }) {
   const [baseline, setBaseline] = useState(document);
   const [draft, setDraft] = useState(() => incomingDraft(document));
+  const [detachedDevices, setDetachedDevices] = useState<DetachedPersonDevices>(() => new Map());
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +43,8 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLi
   }
   const working = useMemo(() => documentWithDraft(baseline, draft), [baseline, draft]);
   const dirty = !incomingMatches(draft, baseline);
+  const affectedLines = useMemo(() => incomingAffectedLines(baseline, draft), [baseline, draft]);
+  const atomicModes = baseline.capabilities?.atomicIncomingLineModes === true;
   const pendingChanges = useRef(dirty || saving);
   useEffect(() => { pendingChanges.current = dirty || saving; }, [dirty, saving]);
   const issues = useMemo(() => [
@@ -71,26 +74,26 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLi
   function revealPlan(planId: string) { setLineId(""); setFocusPlanId(planId); }
   function revealIssues() { showLibrary(); setGroupsOpen(true); }
   function accept(response: RoutingConfigResponse) {
+    setDetachedDevices(new Map());
     pendingChanges.current = false;
     setBaseline(response.document); setDraft(incomingDraft(response.document)); setRemote(null); setUncertain(false); onSaved(response);
   }
-  function acceptLineMode(response: RoutingConfigResponse) {
-    // This PATCH saves one number independently. Keep unsaved group/plan drafts
-    // and their original comparison baseline intact.
-    setBaseline(current => mergeSavedLine(current, response.document));
-    onLineSaved(response);
-  }
-  function discard() { pendingChanges.current = false; setDraft(incomingDraft(remote ?? baseline)); if (remote) setBaseline(remote); setRemote(null); setUncertain(false); setError(null); }
+  function discard() { pendingChanges.current = false; setDetachedDevices(new Map()); setDraft(incomingDraft(remote ?? baseline)); if (remote) setBaseline(remote); setRemote(null); setUncertain(false); setError(null); setNotice(null); }
   async function verify(): Promise<boolean> {
     try {
       const latest = await loadRoutingConfig("incoming");
       if (incomingMatches(draft, latest.document)) {
-        accept(latest); setError(null); setNotice("Uložený stav je overený. Skupiny aj plány zodpovedajú tvojim zmenám."); return true;
+        accept(latest); setError(null); setNotice("Uložený stav je overený. Režimy liniek, skupiny aj plány zodpovedajú tvojim zmenám."); return true;
       }
       setRemote(latest.document); setUncertain(false);
       setError("Uložený stav sa líši. Tvoje zmeny zostávajú v návrhu. Porovnaj ich pred ďalším uložením.");
     } catch { setUncertain(true); setError("Výsledok uloženia zatiaľ nemožno overiť. Návrh zostáva zachovaný; neukladaj ho opakovane naslepo."); }
     return false;
+  }
+  async function verifySavedState() {
+    if (saving) return;
+    setSaving(true);
+    try { await verify(); } finally { setSaving(false); }
   }
   async function save(): Promise<boolean> {
     if (!canEdit || saving || uncertain || issues.length > 0 || remote) return false;
@@ -99,7 +102,7 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLi
     setSaving(true); setError(null); setNotice(null);
     try {
       const response = await saveRoutingConfig("incoming", { ...incomingPayload(draft), version: baseline.routingVersion });
-      accept(response); accepted = true; setNotice(`Skupiny aj plány sú uložené spolu. Nové smerovanie platí pre nové hovory.${response.warning ? ` ${response.warning}` : ""}`); return true;
+      accept(response); accepted = true; setNotice(`Všetky zmeny sú uložené spolu. Nové smerovanie platí pre nové hovory.${response.warning ? ` ${response.warning}` : ""}`); return true;
     } catch (caught) {
       if (caught instanceof ConfigRequestError && caught.status >= 400 && caught.status < 500) {
         setError(caught.message);
@@ -142,7 +145,7 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLi
           </select>
         </label>
       </div>
-      {line && <LineInboundModeControl key={line.id} line={line} defaultMode={defaultMode} canEdit={canEdit} onSaved={acceptLineMode}>
+      {line && <LineInboundModeControl key={line.id} line={line} defaultMode={defaultMode} canEdit={canEdit && !saving && !uncertain && !remote} available={atomicModes} onChange={mode => setDraft(current => updateIncomingLineMode(current, baseline, line.id, mode))}>
         <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-zinc-100 pt-2 text-xs text-zinc-500">
         <button type="button" className="inline-flex min-h-8 items-center gap-1.5 hover:text-zinc-950" onClick={() => onNavigate({ section: "telephony", tab: "numbers", lineId: line.id })}><Settings2 size={13} aria-hidden="true" />Priradenie linky</button>
         {effectiveLine?.businessHoursId && <button type="button" className="inline-flex min-h-8 items-center gap-1.5 hover:text-zinc-950" onClick={() => onNavigate({ section: "telephony", tab: "hours", lineId: effectiveLine.id, businessHoursId: effectiveLine.businessHoursId! })}><Clock3 size={13} aria-hidden="true" />Otváracie hodiny</button>}
@@ -155,9 +158,9 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLi
     </div>
     {line && <div className="-my-3 flex items-center gap-2 pl-5 text-xs text-zinc-400 sm:pl-7" aria-hidden="true"><ArrowDown size={17} /><span>{!activeRoute ? "Uložený postup pre neaktívnu linku" : manualQueue ? "Hovor čaká na operátora" : "Hovor pokračuje podľa tohto postupu"}</span></div>}
     {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
-    {notice && <SettingsNotice tone="success">{notice}</SettingsNotice>}
-    {uncertain && <button type="button" disabled={saving} onClick={() => void verify()} className="justify-self-start rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold">Overiť uložený stav</button>}
-    {remote && <details open className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm"><summary className="cursor-pointer font-semibold">Konflikt: porovnať uloženú konfiguráciu a vlastný návrh</summary><div className="mt-2 grid gap-3 md:grid-cols-2">{[{ title: "Aktuálne uložené", document: remote }, { title: "Tvoj zachovaný návrh", document: working }].map(entry => <div key={entry.title}><h3 className="font-semibold">{entry.title}</h3>{entry.document.plans.map(plan => <p className="mt-2" key={plan.id}><strong>{plan.name}:</strong> {describeRingPlan(incomingDraft(entry.document).plans.find(row => row.id === plan.id)!, entry.document.groups, entry.document.limits?.maxRingFanout)}</p>)}{entry.document.groups.map(group => <p key={group.id} className="mt-1 text-xs">{group.name}: {group.members.map(member => member.memberKind === "operator" ? entry.document.operators.find(operator => operator.profileId === member.profileId)?.displayName ?? "Operátor" : member.externalNumber).join(", ") || "bez členov"}</p>)}</div>)}</div><p className="mt-3 text-xs">Pre bezpečnú novú úpravu načítaj uložený stav. Vlastné hodnoty si najprv môžeš skopírovať z návrhu.</p><button type="button" onClick={discard} className="mt-2 min-h-10 rounded-lg border border-amber-300 bg-white px-3 font-semibold">Zahodiť návrh a načítať uložené</button></details>}
+    {notice && !dirty && <SettingsNotice tone="success">{notice}</SettingsNotice>}
+    {uncertain && <button type="button" disabled={saving} onClick={() => void verifySavedState()} className="justify-self-start rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold">Overiť uložený stav</button>}
+    {remote && <details open className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm"><summary className="cursor-pointer font-semibold">Konflikt: porovnať uloženú konfiguráciu a vlastný návrh</summary><div className="mt-2 grid gap-3 md:grid-cols-2">{[{ title: "Aktuálne uložené", document: remote }, { title: "Tvoj zachovaný návrh", document: working }].map(entry => <div key={entry.title}><h3 className="font-semibold">{entry.title}</h3>{(draft.lineModes ?? []).map(change => { const compared = entry.document.lines.find(row => row.id === change.id); return <p className="mt-2 text-sm" key={change.id}><strong>{compared?.label ?? "Odstránená linka"}:</strong> {compared ? incomingModeName(compared.inboundCallMode) : "Linka už nie je dostupná"}</p>; })}{entry.document.plans.map(plan => <p className="mt-2" key={plan.id}><strong>{plan.name}:</strong> {describeRingPlan(incomingDraft(entry.document).plans.find(row => row.id === plan.id)!, entry.document.groups, entry.document.limits?.maxRingFanout)}</p>)}{entry.document.groups.map(group => <p key={group.id} className="mt-1 text-xs">{group.name}: {group.members.map(member => member.memberKind === "operator" ? entry.document.operators.find(operator => operator.profileId === member.profileId)?.displayName ?? "Operátor" : member.externalNumber).join(", ") || "bez členov"}</p>)}</div>)}</div><p className="mt-3 text-xs">Pre bezpečnú novú úpravu načítaj uložený stav. Vlastné hodnoty si najprv môžeš skopírovať z návrhu.</p><button type="button" onClick={discard} className="mt-2 min-h-10 rounded-lg border border-amber-300 bg-white px-3 font-semibold">Zahodiť návrh a načítať uložené</button></details>}
     {manualQueue || unknownMode ? <div className="rounded-2xl border border-zinc-200 bg-white p-6">
       <div className="mb-4 grid h-12 w-12 place-items-center rounded-xl bg-yellow-50 text-zinc-800"><Clock3 size={24} aria-hidden="true" /></div>
       <h3 className="font-semibold text-zinc-900">{manualQueue ? "Hovor čaká na ručné prevzatie" : "Predvolený režim nie je dostupný"}</h3>
@@ -165,20 +168,21 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLi
       <button type="button" onClick={showLibrary} className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-lg border border-zinc-200 px-3 text-sm font-medium"><Library size={15} aria-hidden="true" />Upraviť plány v knižnici</button>
     </div> : <>
       {!line && <p className="px-1 text-sm text-zinc-600">Knižnica obsahuje všetky plány vrátane nepoužitých. Úprava zdieľaného plánu sa prejaví na všetkých linkách, ktoré ho používajú.</p>}
-      <RingPlanEditor canEdit={canEdit && !saving} document={working} controlled={{ plans: draft.plans, onChange: setPlans }} visiblePlanIds={visiblePlanIds} strategyOverride={line ? behaviour.strategyOverride : null} onAddPlan={showLibrary} focusPlanId={focusPlanId} focusGroupId={target?.groupId} onSaved={onSaved} onNavigateToIvr={() => onNavigate({ section: "telephony", tab: "ivr" })} onNavigateToNumbers={() => onNavigate({ section: "telephony", tab: "numbers" })} renderGroupEditor={(groupId, context) => <RingGroupsEditor canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onlyGroupId={groupId} timingContext={context} groupSelector={context.groupSelector} onSaved={onSaved} onNavigateToPlan={revealPlan} />} />
+      <RingPlanEditor canEdit={canEdit && !saving} document={working} controlled={{ plans: draft.plans, onChange: setPlans }} visiblePlanIds={visiblePlanIds} strategyOverride={line ? behaviour.strategyOverride : null} onAddPlan={showLibrary} focusPlanId={focusPlanId} focusGroupId={target?.groupId} onSaved={onSaved} onNavigateToIvr={() => onNavigate({ section: "telephony", tab: "ivr" })} onNavigateToNumbers={() => onNavigate({ section: "telephony", tab: "numbers" })} renderGroupEditor={(groupId, context) => <RingGroupsEditor detachedDevices={{ devices: detachedDevices, onChange: setDetachedDevices }} canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onlyGroupId={groupId} timingContext={context} groupSelector={context.groupSelector} onSaved={onSaved} onNavigateToPlan={revealPlan} />} />
     </>}
     <details className="border-t border-zinc-200 pt-1" open={groupsOpen} onToggle={event => setGroupsOpen(event.currentTarget.open)}>
       <summary className="cursor-pointer px-1 py-3 text-xs font-medium text-zinc-500">Knižnica skupín ({draft.groups.length}) · správa zdieľaných zoznamov</summary>
-      <RingGroupsEditor canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onSaved={onSaved} onNavigateToPlan={revealPlan} />
+      <RingGroupsEditor detachedDevices={{ devices: detachedDevices, onChange: setDetachedDevices }} canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onSaved={onSaved} onNavigateToPlan={revealPlan} />
     </details>
     <div className={`${dirty ? "sticky bottom-0 z-10 shadow-[0_-4px_20px_rgba(20,30,50,0.05)]" : ""} rounded-xl border border-zinc-200 bg-white px-4 py-3 sm:px-5`}>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div role="status" className="flex items-center gap-2 text-sm text-zinc-600">{dirty ? <span className="h-2 w-2 rounded-full bg-amber-400" /> : <Check size={16} className="text-zinc-400" aria-hidden="true" />}{dirty ? "Neuložené zmeny skupín a plánov" : "Všetky zmeny sú uložené"}</div>
+        <div role="status" className="flex items-center gap-2 text-sm text-zinc-600">{dirty ? <span className="h-2 w-2 rounded-full bg-amber-400" /> : <Check size={16} className="text-zinc-400" aria-hidden="true" />}{dirty ? "Neuložené zmeny" : "Všetky zmeny sú uložené"}</div>
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" disabled={!dirty || saving} onClick={() => { if (window.confirm("Zahodiť všetky neuložené zmeny skupín a plánov?")) discard(); }} className="inline-flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-zinc-500 hover:bg-zinc-50 disabled:opacity-40"><Undo2 size={15} aria-hidden="true" />Zahodiť</button>
+          <button type="button" disabled={!dirty || saving} onClick={() => { if (window.confirm("Zahodiť všetky neuložené zmeny vrátane režimov liniek?")) discard(); }} className="inline-flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-zinc-500 hover:bg-zinc-50 disabled:opacity-40"><Undo2 size={15} aria-hidden="true" />Zahodiť</button>
           <button type="button" disabled={!canEdit || !dirty || saving || uncertain || Boolean(remote) || issues.length > 0} onClick={() => void save()} className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-[#FCD703] px-4 text-sm font-semibold text-zinc-950 disabled:opacity-40">{saving ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Save size={16} aria-hidden="true" />}Uložiť všetky zmeny</button>
         </div>
       </div>
+      {dirty && <p className="mt-2 text-xs leading-5 text-zinc-500">{affectedLines.length > 0 ? `Dotknuté linky: ${affectedLines.map(row => `${row.label} (${formatPhoneNumberForDisplay(row.phoneNumber)})`).join(", ")}.` : "Zmeny sa týkajú skupín alebo plánov bez priradenej linky."} Zmeny sa prejavia až po uložení, pre nové hovory.</p>}
       {issues.length > 0 && <div className="mt-2"><SettingsIssueList issues={issues} /><button type="button" onClick={revealIssues} className="mt-2 min-h-9 rounded-md border border-zinc-200 px-3 text-xs font-semibold">Zobraziť všetky plány a chyby</button></div>}
     </div>
   </section>;

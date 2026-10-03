@@ -325,6 +325,19 @@ describe("coherent incoming routes", () => {
     expect(replaceIncomingRouting).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({organizationId:"org-1",expectedVersion:7,groups:expect.any(Array),plans:[]}));
     expect(replaceRingGroups).not.toHaveBeenCalled(); expect(replaceRingPlans).not.toHaveBeenCalled();
   });
+  it("passes line mode changes into the same authenticated save", async () => {
+    const lineModes = [{ id: "00000000-0000-4000-8000-000000000201", inboundCallMode: "ring_all", expectedInboundCallMode: null }];
+    const response = await putIncoming(request("incoming", "PUT", { groups: COMBINED_GROUPS, plans: [], lineModes, version: 7 }));
+    expect(response.status).toBe(200);
+    expect(replaceIncomingRouting).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ organizationId: "org-1", expectedVersion: 7, lineModes }));
+    expect(updateTelephonyLine).not.toHaveBeenCalled();
+  });
+  it.each([null, {}, [{ id: "00000000-0000-4000-8000-000000000201", inboundCallMode: "ring_all" }], [{ id: "00000000-0000-4000-8000-000000000201", inboundCallMode: "ring_all", expectedInboundCallMode: null, organizationId: "foreign" }]])("rejects invalid mode changes before any write %#", async lineModes => {
+    const response = await putIncoming(request("incoming", "PUT", { groups: COMBINED_GROUPS, plans: [], lineModes, version: 7 }));
+    expect(response.status).toBe(400);
+    expect(replaceIncomingRouting).not.toHaveBeenCalled();
+    expect(updateTelephonyLine).not.toHaveBeenCalled();
+  });
   it("rejects unknown sections and missing versions without committing",async()=>{
     expect((await putIncoming(request("incoming", "PUT", { groups:[],plans:[],version:7,settings:{} }))).status).toBe(400);
     expect((await putIncoming(request("incoming", "PUT", { groups:[],plans:[] }))).status).toBe(400);

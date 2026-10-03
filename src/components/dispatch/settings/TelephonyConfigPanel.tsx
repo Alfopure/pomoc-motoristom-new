@@ -10,7 +10,6 @@ import type { DraftEditorState } from "../useDraftEditors";
 import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
 import { RoutingUnsavedDialog } from "./RoutingUnsavedDialog";
 import { IncomingRoutingEditor, type IncomingEditorActions } from "./IncomingRoutingEditor";
-import { mergeSavedLine } from "./incoming-routing-model";
 import { MyPhonePanel, type MyPhoneTestCall } from "../MyPhonePanel";
 import { AiTab } from "./AiTab";
 import { AnnouncementsPanel } from "./AnnouncementsPanel";
@@ -111,16 +110,6 @@ export function TelephonyConfigPanel({ onTestCall, routingTarget, onRoutingDirty
       },
     } : current));
     setVersion((current) => current + 1);
-  }, []);
-
-  // A single-number PATCH returns a legacy document without the incoming
-  // editor's coherent snapshot. Merge only its line data, so an unsaved plan
-  // draft stays mounted and keeps its original version for conflict checks.
-  const applyLineResponse = useCallback((response: RoutingConfigResponse) => {
-    setState(current => current ? {
-      ...current,
-      document: mergeSavedLine(current.document, response.document),
-    } : current);
   }, []);
 
   useEffect(() => {
@@ -240,7 +229,7 @@ export function TelephonyConfigPanel({ onTestCall, routingTarget, onRoutingDirty
 
       {target?.lineId && !state.document.lines.some(line => line.id === target.lineId) && <SettingsNotice tone="warning">Vybraná linka už neexistuje alebo k nej nemáš prístup.</SettingsNotice>}
       {tab === "incoming" && coherent && !state.document.snapshotId && <SettingsNotice tone="info">Overujem aktuálne nastavenie skupín a plánov…</SettingsNotice>}
-      {tab === "incoming" && coherent && state.document.snapshotId && <IncomingRoutingEditor document={state.document} canEdit={state.canEdit} target={target} onSaved={applyResponse} onLineSaved={applyLineResponse} onNavigate={next => void navigate(next.tab, next)} onDirtyChange={dirtyChanged} onActionsChange={actionsChanged} onEditorStateChange={onRoutingEditorStateChange} />}
+      {tab === "incoming" && coherent && state.document.snapshotId && <IncomingRoutingEditor document={state.document} canEdit={state.canEdit} target={target} onSaved={applyResponse} onNavigate={next => void navigate(next.tab, next)} onDirtyChange={dirtyChanged} onActionsChange={actionsChanged} onEditorStateChange={onRoutingEditorStateChange} />}
       {tab === "phone" && <MyPhonePanel key={`phone-${version}`} document={state.document} onSaved={applyResponse} onTestCall={onTestCall} />}
       {tab === "groups" && (
         <RingGroupsEditor

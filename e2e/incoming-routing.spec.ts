@@ -15,7 +15,8 @@ test.beforeAll(async()=>{
  script=bundle.outputFiles.find(file=>file.path.endsWith(".js"))!.text;
  css=(await postcss([tailwindcss({base:process.cwd(),optimize:true})]).process(await readFile("src/app/globals.css","utf8"),{from:path.resolve("src/app/globals.css")})).css;
 });
-type Api={mode?:"conflict"|"lost-response"|"missing"|"readonly";saved?:Record<string,unknown>;writes:number;document?:RoutingDocument;defaultLine?:boolean;linePatches?:Array<Record<string,unknown>>};
+type LineModeWrite={id:string;inboundCallMode:RoutingDocument["lines"][number]["inboundCallMode"];expectedInboundCallMode:RoutingDocument["lines"][number]["inboundCallMode"]};
+type Api={mode?:"conflict"|"lost-response"|"lost-mode"|"verify-retry"|"missing"|"readonly";verificationReads?:number;releaseVerification?:()=>void;saved?:Record<string,unknown>;writes:number;document?:RoutingDocument;defaultLine?:boolean;linePatches?:Array<Record<string,unknown>>};
 async function boot(page:Page,width=1440,api:Api={writes:0}){
  const errors:string[]=[];page.on("pageerror",error=>errors.push(error.message));let document=structuredClone(api.document??routingFixture);
  await page.setViewportSize({width,height:950});
@@ -34,10 +35,16 @@ async function boot(page:Page,width=1440,api:Api={writes:0}){
    if(api.mode==="missing"&&url.pathname.endsWith("incoming"))return route.fulfill({status:503,json:{code:"config_snapshot_missing",error:"Not activated"}});
    if(route.request().method()==="PUT"){
     api.writes++;api.saved=route.request().postDataJSON();
-    if(api.mode==="conflict"){document={...document,routingVersion:6,plans:document.plans.map(plan=>({...plan,name:"Zmena kolegu"}))};return route.fulfill({status:409,json:{code:"stale_document",error:"Konfiguráciu medzitým zmenil kolega."}});}
-    const payload=api.saved as {groups:RingGroupInput[];plans:RingPlanInput[]};
-    document={...document,routingVersion:document.routingVersion+1,groups:payload.groups.map(group=>({...group,description:group.description??null,members:group.members.map(member=>({...member,lastOfferedAt:null,lastAnsweredAt:null}))})),plans:payload.plans} as RoutingDocument;
-    if(api.mode==="lost-response")return route.abort("failed");
+    if(api.mode==="conflict"){document={...document,routingVersion:6,lines:document.lines.map(line=>({...line,inboundCallMode:"ring_ordered"})),plans:document.plans.map(plan=>({...plan,name:"Zmena kolegu"}))};return route.fulfill({status:409,json:{code:"stale_document",error:"Konfiguráciu medzitým zmenil kolega."}});}
+    const payload=api.saved as {groups:RingGroupInput[];plans:RingPlanInput[];lineModes?:LineModeWrite[]};
+    const lineModes=new Map((payload.lineModes??[]).map(line=>[line.id,line.inboundCallMode]));
+    document={...document,lines:document.lines.map(line=>lineModes.has(line.id)&&api.mode!=="lost-mode"?{...line,inboundCallMode:lineModes.get(line.id)}:line),routingVersion:document.routingVersion+1,groups:payload.groups.map(group=>({...group,description:group.description??null,members:group.members.map(member=>({...member,lastOfferedAt:null,lastAnsweredAt:null}))})),plans:payload.plans} as RoutingDocument;
+    if(api.mode==="lost-response"||api.mode==="lost-mode"||api.mode==="verify-retry")return route.abort("failed");
+   }
+   if(api.mode==="verify-retry"&&api.writes>0){
+    api.verificationReads=(api.verificationReads??0)+1;
+    if(api.verificationReads===1)return route.abort("failed");
+    await new Promise<void>(resolve=>{api.releaseVerification=resolve;});
    }
    return route.fulfill({json:{document,canEdit:api.mode!=="readonly",canManageSettings:false}});
   }
@@ -69,16 +76,16 @@ for(const width of [1440,1280,390])test(`combined editor remains readable at ${w
  const errors=await boot(page,width,{writes:0,document:dualDeviceRoutingFixture,defaultLine:true});await expect(page.getByRole("button",{name:"Uložiť všetky zmeny"})).toHaveCount(1);
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
  const recipients=page.getByRole("list",{name:"Príjemcovia skupiny Martin – web a mobil",exact:true});
- await expect(recipients.getByRole("listitem")).toHaveCount(2);
- await expect(recipients.getByRole("listitem").filter({hasText:"Martin Novák"})).toHaveCount(2);
+ await expect(recipients.getByRole("listitem")).toHaveCount(1);
+ await expect(recipients.getByRole("listitem").filter({hasText:"Martin Novák"})).toHaveCount(1);
  await expect(page.getByRole("textbox",{name:/^Externé číslo/})).toHaveCount(0);
- await page.screenshot({path:path.join(screenshotDirectory,`call-flow-${width}.png`),fullPage:true});
- if(width===1440)await page.getByRole("region",{name:"Prichádzajúce hovory",exact:true}).screenshot({path:path.join(screenshotDirectory,"call-flow-detail.png")});
+ await page.screenshot({path:path.join(screenshotDirectory,`people-save-${width}.png`),fullPage:true});
+ if(width===1440)await page.getByRole("region",{name:"Prichádzajúce hovory",exact:true}).screenshot({path:path.join(screenshotDirectory,"people-save-detail.png")});
  if(width!==1280){
   const card=page.locator(`#ring-plan-${ids.plan}`);
   await card.getByRole("radiogroup",{name:"Ako zvoní",exact:true}).getByRole("radio",{name:/^postupne$/i}).click();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  await page.screenshot({path:path.join(screenshotDirectory,`call-flow-ordered-${width}.png`),fullPage:true});
+  await page.screenshot({path:path.join(screenshotDirectory,`people-save-ordered-${width}.png`),fullPage:true});
  }
  expect(errors).toEqual([]);
 });
@@ -89,7 +96,7 @@ test("one save includes inline group and plan changes without losing overrides",
  await page.getByLabel("Názov skupiny",{exact:true}).filter({visible:true}).fill("Tím pomoci");
  await page.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/}).fill("25");
  await page.getByRole("button",{name:"Uložiť všetky zmeny"}).click();
- await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
+ await expect(page.getByText("Všetky zmeny sú uložené spolu.",{exact:false})).toBeVisible();
  expect(api.writes).toBe(1);expect(api.saved).toMatchObject({version:5,groups:[{name:"Tím pomoci",members:[{ringSecs:null},{ringSecs:30}]}],plans:[{steps:[{timeoutSecs:25,strategy:"ordered"}]}]});expect(errors).toEqual([]);
 });
 test("keyboard ringing and fallback choices save the intended route",async({page})=>{
@@ -104,7 +111,7 @@ test("keyboard ringing and fallback choices save the intended route",async({page
  await expect(fallback.getByRole("radio",{name:"Iné číslo",exact:true})).toBeChecked();
  await page.getByRole("textbox",{name:/^Číslo presmerovania/}).fill("+421900000004");
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
- await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
+ await expect(page.getByText("Všetky zmeny sú uložené spolu.",{exact:false})).toBeVisible();
  expect(api.writes).toBe(1);
  expect(api.saved).toMatchObject({groups:expectedGroups(routingFixture),plans:[{fallbackKind:"external_number",fallbackNumber:"+421900000004",steps:[{strategy:"ordered"}]}]});
 });
@@ -121,6 +128,9 @@ test("recipient rows support keyboard ordering and directly editing a new number
  await handle.focus();
  await page.keyboard.press("Space");
  await expect(handle).toHaveAttribute("aria-pressed","true");
+ // KeyboardSensor registers its document listener asynchronously; wait for the
+ // next paint so the following key uses the measured, active drag state.
+ await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve()))));
  await page.keyboard.press("ArrowDown");
  await expect(page.getByRole("status").filter({hasText:new RegExp(`over droppable area .*${routingFixture.groups[0].members[1].id}`)})).toBeAttached();
  await page.keyboard.press("Space");
@@ -128,7 +138,7 @@ test("recipient rows support keyboard ordering and directly editing a new number
  await expect(recipients.getByRole("listitem").nth(0)).toContainText("Peter Kováč");
  await expect(recipients.getByRole("listitem").nth(1)).toContainText("Jana Nováková");
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
- await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
+ await expect(page.getByText("Všetky zmeny sú uložené spolu.",{exact:false})).toBeVisible();
  expect(api.saved).toMatchObject({groups:[{members:[
   {id:routingFixture.groups[0].members[1].id,profileId:ids.peter,position:0,ringSecs:30},
   {id:routingFixture.groups[0].members[0].id,profileId:ids.jana,position:1,ringSecs:null},
@@ -136,8 +146,12 @@ test("recipient rows support keyboard ordering and directly editing a new number
  ]}]});
 });
 test("conflict preserves both drafts and displays current saved comparison",async({page})=>{
- const api:Api={mode:"conflict",writes:0};await boot(page,1440,api);await openPlanDetails(page);await page.getByLabel("Názov plánu",{exact:true}).fill("Moje zmeny");await page.getByRole("button",{name:"Uložiť všetky zmeny"}).click();
+ const api:Api={mode:"conflict",writes:0};await boot(page,1440,api);await openPlanDetails(page);await page.getByLabel("Názov plánu",{exact:true}).fill("Moje zmeny");await (await openLineMode(page)).selectOption("ring_all");await page.getByRole("button",{name:"Uložiť všetky zmeny"}).click();
  await expect(page.getByLabel("Názov plánu",{exact:true})).toHaveValue("Moje zmeny");await expect(page.getByText("Zmena kolegu:",{exact:true})).toBeVisible();await expect(page.getByRole("button",{name:"Uložiť všetky zmeny"})).toBeDisabled();
+ await expect(await openLineMode(page)).toHaveValue("ring_all");expect(api.linePatches??[]).toEqual([]);
+ await page.getByRole("button",{name:"Zahodiť návrh a načítať uložené",exact:true}).click();
+ await expect(await openLineMode(page)).toHaveValue("ring_ordered");
+ await expect((await openPlanDetails(page)).getByLabel("Názov plánu",{exact:true})).toHaveValue("Zmena kolegu");
 });
 test("lost response verifies committed contents before allowing another save",async({page})=>{
  const api:Api={mode:"lost-response",writes:0};await boot(page,1440,api);await openPlanDetails(page);await page.getByLabel("Názov plánu",{exact:true}).fill("Overené po výpadku");await page.getByRole("button",{name:"Uložiť všetky zmeny"}).click();
@@ -168,7 +182,7 @@ test("active line opens its plan and saving keeps unrelated plans and groups int
  await line.selectOption(ids.line);
  await page.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/}).fill("25");
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
- await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
+ await expect(page.getByText("Všetky zmeny sú uložené spolu.",{exact:false})).toBeVisible();
  const expectedPlans=structuredClone(multiLineRoutingFixture.plans);
  expectedPlans[0].steps[0].timeoutSecs=25;
  expect(api.writes).toBe(1);
@@ -199,7 +213,7 @@ test("simultaneous ringing hides personal timing and ordered ringing restores th
  await expect(memberTimes).toHaveCount(0);
  await card.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/}).fill("25");
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
- await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
+ await expect(page.getByText("Všetky zmeny sú uložené spolu.",{exact:false})).toBeVisible();
  expect(api.saved).toMatchObject({groups:expectedGroups(routingFixture),plans:[{steps:[{strategy:"all",timeoutSecs:25}]}]});
 });
 
@@ -215,7 +229,7 @@ test("queue mode hides automatic controls without losing drafts and hidden error
  await expect(page.getByLabel("Keď nikto nezdvihne",{exact:true})).toHaveCount(0);
  await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
  expect(api.writes).toBe(0);
- expect(api.linePatches).toEqual([{lineId:ids.line,patch:{inboundCallMode:"queue_first"}}]);
+ expect(api.linePatches??[]).toEqual([]);
 
  await page.getByRole("combobox",{name:"Linka",exact:true}).selectOption(extraIds.secondLine);
  await expect(page.locator(`#ring-plan-${ids.plan}`)).toHaveCount(0);
@@ -227,14 +241,14 @@ test("queue mode hides automatic controls without losing drafts and hidden error
  await restored.getByLabel("Názov plánu",{exact:true}).fill("Upravené prichádzajúce hovory");
  await page.getByRole("combobox",{name:"Linka",exact:true}).selectOption(ids.line);
  await openLineMode(page);
- await mode.selectOption("ring_first");
+ await mode.selectOption("");
  await expect(page.locator(`#ring-plan-${ids.plan}`)).toBeVisible();
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
- await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
+ await expect(page.getByText("Všetky zmeny sú uložené spolu.",{exact:false})).toBeVisible();
  const expectedPlans=structuredClone(multiLineRoutingFixture.plans);
  expectedPlans[0].name="Upravené prichádzajúce hovory";
  expect(api.saved).toEqual({version:5,groups:expectedGroups(multiLineRoutingFixture),plans:expectedPlans});
- expect(api.linePatches).toHaveLength(2);
+ expect(api.linePatches??[]).toEqual([]);
 });
 
 test("line strategy overrides show effective ringing without rewriting the shared plan",async({page})=>{
@@ -248,7 +262,7 @@ test("line strategy overrides show effective ringing without rewriting the share
  await expect(card.getByLabel(/^Vlastný čas \(s\)/)).toHaveCount(0);
  await card.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/}).fill("25");
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
- await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
+ await expect(page.getByText("Všetky zmeny sú uložené spolu.",{exact:false})).toBeVisible();
  expect(api.saved).toMatchObject({groups:expectedGroups(document),plans:[{steps:[{strategy:"ordered",timeoutSecs:25}]}]});
  await (await openLineMode(page)).selectOption("ring_ordered");
  await expect(card.getByRole("radiogroup",{name:"Ako zvoní",exact:true})).toHaveCount(0);
@@ -260,7 +274,7 @@ test("line strategy overrides show effective ringing without rewriting the share
 
 test("unavailable personal mobile controls preserve existing ownership during an unrelated save",async({page})=>{
  const document=structuredClone(multiLineRoutingFixture);
- document.capabilities={ownedMobileRouting:false,defaultInboundCallMode:"ring_first"};
+ document.capabilities={ownedMobileRouting:false,defaultInboundCallMode:"ring_first",atomicIncomingLineModes:true};
  document.groups[1].members[0].ownerProfileId=ids.peter;
  const api:Api={writes:0,document};await boot(page,1440,api);
  await page.getByRole("combobox",{name:"Linka",exact:true}).selectOption(extraIds.secondLine);
@@ -270,8 +284,225 @@ test("unavailable personal mobile controls preserve existing ownership during an
  await expect(card.getByRole("textbox",{name:/^Externé číslo/})).toBeVisible();
  await card.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/}).fill("40");
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
- await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
+ await expect(page.getByText("Všetky zmeny sú uložené spolu.",{exact:false})).toBeVisible();
  const expectedPlans=structuredClone(document.plans);
  expectedPlans[1].steps[0].timeoutSecs=40;
  expect(api.saved).toEqual({version:5,groups:expectedGroups(document),plans:expectedPlans});
+});
+
+test("one save commits the line mode together with group and plan changes",async({page})=>{
+ const api:Api={writes:0};await boot(page,1440,api);
+ await (await openLineMode(page)).selectOption("ring_ordered");
+ await page.locator(`#ring-plan-${ids.plan}`).getByText("Podrobnosti skupiny Dispečeri",{exact:true}).click();
+ await page.getByLabel("Názov skupiny",{exact:true}).filter({visible:true}).fill("Tím pomoci");
+ await page.getByRole("textbox",{name:/^Predvolený čas na osobu \(s\)$/}).fill("25");
+ expect(api.writes).toBe(0);expect(api.linePatches??[]).toEqual([]);
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeEnabled();
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.writes).toBe(1);expect(api.linePatches??[]).toEqual([]);
+ expect(api.saved).toMatchObject({version:5,lineModes:[{id:ids.line,inboundCallMode:"ring_ordered",expectedInboundCallMode:null}],groups:[{name:"Tím pomoci",members:[{ringSecs:null},{ringSecs:30}]}],plans:[{steps:[{timeoutSecs:25,strategy:"all"}]}]});
+ await expect(await openLineMode(page)).toHaveValue("ring_ordered");
+});
+
+test("line-only changes are drafted across lines and save only changed modes",async({page})=>{
+ const api:Api={writes:0,document:multiLineRoutingFixture};await boot(page,1440,api);
+ const line=page.getByRole("combobox",{name:"Linka",exact:true});
+ await (await openLineMode(page)).selectOption("queue_first");
+ await line.selectOption(extraIds.secondLine);
+ await (await openLineMode(page)).selectOption("ring_all");
+ await line.selectOption(ids.line);
+ await expect(await openLineMode(page)).toHaveValue("queue_first");
+ expect(api.writes).toBe(0);expect(api.linePatches??[]).toEqual([]);
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.writes).toBe(1);
+ expect(api.saved).toEqual({version:5,groups:expectedGroups(multiLineRoutingFixture),plans:multiLineRoutingFixture.plans,lineModes:[
+  {id:ids.line,inboundCallMode:"queue_first",expectedInboundCallMode:null},
+  {id:extraIds.secondLine,inboundCallMode:"ring_all",expectedInboundCallMode:null},
+ ]});
+ expect(api.linePatches??[]).toEqual([]);
+});
+
+test("discard restores both line mode and plan without a write",async({page})=>{
+ const api:Api={writes:0};await boot(page,1440,api);
+ await (await openPlanDetails(page)).getByLabel("Názov plánu",{exact:true}).fill("Neuložený názov");
+ await (await openLineMode(page)).selectOption("queue_first");
+ await expect(page.getByRole("heading",{name:"Hovor čaká na ručné prevzatie",exact:true})).toBeVisible();
+ page.once("dialog",dialog=>dialog.accept());
+ await page.getByRole("button",{name:"Zahodiť",exact:true}).click();
+ await expect(await openLineMode(page)).toHaveValue("");
+ await expect((await openPlanDetails(page)).getByLabel("Názov plánu",{exact:true})).toHaveValue(routingFixture.plans[0].name);
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.writes).toBe(0);expect(api.linePatches??[]).toEqual([]);
+});
+
+test("line mode alone protects tab departure and is discarded with the rest",async({page})=>{
+ const api:Api={writes:0};await boot(page,1440,api);
+ await (await openLineMode(page)).selectOption("ring_all");
+ await page.getByRole("button",{name:"Čísla",exact:true}).click();
+ const dialog=page.getByRole("dialog",{name:"Neuložené nastavenia"});
+ await expect(dialog).toBeVisible();
+ await dialog.getByRole("button",{name:"Zostať",exact:true}).click();
+ await expect(await openLineMode(page)).toHaveValue("ring_all");
+ await page.getByRole("button",{name:"Čísla",exact:true}).click();
+ await dialog.getByRole("button",{name:"Zahodiť a pokračovať",exact:true}).click();
+ await expect(dialog).toHaveCount(0);
+ await page.getByRole("button",{name:"Prichádzajúce hovory",exact:true}).click();
+ await expect(await openLineMode(page)).toHaveValue("");
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.writes).toBe(0);expect(api.linePatches??[]).toEqual([]);
+});
+
+test("lost response verifies the line mode as well as plans",async({page})=>{
+ const api:Api={mode:"lost-response",writes:0};await boot(page,1440,api);
+ await (await openPlanDetails(page)).getByLabel("Názov plánu",{exact:true}).fill("Overené spolu");
+ await (await openLineMode(page)).selectOption("ring_all");
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByText("Uložený stav je overený.",{exact:false})).toBeVisible();
+ await expect(await openLineMode(page)).toHaveValue("ring_all");
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.writes).toBe(1);expect(api.saved).toMatchObject({lineModes:[{id:ids.line,inboundCallMode:"ring_all",expectedInboundCallMode:null}]});
+});
+
+test("a different saved line mode prevents accepting matching plans after a lost response",async({page})=>{
+ const api:Api={mode:"lost-mode",writes:0};await boot(page,1440,api);
+ await (await openPlanDetails(page)).getByLabel("Názov plánu",{exact:true}).fill("Zachovaný návrh");
+ await (await openLineMode(page)).selectOption("ring_all");
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByText("Uložený stav sa líši.",{exact:false})).toBeVisible();
+ await expect(page.getByText("Uložený stav je overený.",{exact:false})).toHaveCount(0);
+ await expect(await openLineMode(page)).toHaveValue("ring_all");
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.writes).toBe(1);expect(api.linePatches??[]).toEqual([]);
+});
+
+test("one person controls Web and Mobil while toggling preserves exact endpoint data",async({page})=>{
+ const api:Api={writes:0,document:dualDeviceRoutingFixture};await boot(page,1440,api);
+ const card=page.locator(`#ring-plan-${ids.plan}`);
+ const recipients=card.getByRole("list",{name:"Príjemcovia skupiny Martin – web a mobil",exact:true});
+ await expect(recipients.getByRole("listitem")).toHaveCount(1);
+ const mobile=recipients.getByRole("checkbox",{name:"Mobil pre Martin Novák",exact:true});
+ const web=recipients.getByRole("checkbox",{name:"Web pre Martin Novák",exact:true});
+ await expect(mobile).toBeChecked();await expect(web).toBeChecked();
+ await mobile.focus();await page.keyboard.press("Space");
+ await expect(mobile).not.toBeChecked();await expect(web).toBeChecked();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeEnabled();
+ await page.keyboard.press("Space");await expect(mobile).toBeChecked();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ await card.getByRole("textbox",{name:/^Spoločný čas zvonenia \(s\)$/}).fill("25");
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.saved).toMatchObject({groups:expectedGroups(dualDeviceRoutingFixture)});
+ expect(api.linePatches??[]).toEqual([]);
+});
+
+test("ordered ringing exposes the true interleaved device sequence",async({page})=>{
+ const document=structuredClone(dualDeviceRoutingFixture);
+ const members=document.groups[0].members;
+ document.groups[0].members=[members[0],{...routingFixture.groups[0].members[1],id:"00000000-0000-4000-8000-000000000413",position:1},{...members[1],position:2}];
+ const api:Api={writes:0,document};await boot(page,1440,api);
+ const card=page.locator(`#ring-plan-${ids.plan}`);
+ const recipients=card.getByRole("list",{name:"Príjemcovia skupiny Martin – web a mobil",exact:true});
+ await expect(recipients.getByRole("listitem")).toHaveCount(2);
+ await card.getByRole("radiogroup",{name:"Ako zvoní",exact:true}).getByRole("radio",{name:/^postupne$/i}).click();
+ await expect(recipients.getByRole("listitem")).toHaveCount(3);
+ await expect(recipients.getByRole("listitem").nth(0)).toContainText("Martin Novák");
+ await expect(recipients.getByRole("listitem").nth(0)).toContainText("Web");
+ await expect(recipients.getByRole("listitem").nth(1)).toContainText("Peter Kováč");
+ await expect(recipients.getByRole("listitem").nth(2)).toContainText("Martin Novák");
+ await expect(recipients.getByRole("listitem").nth(2)).toContainText("Mobil");
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ const expectedPlans=structuredClone(document.plans);expectedPlans[0].steps[0].strategy="ordered";
+ expect(api.saved).toMatchObject({groups:expectedGroups(document),plans:expectedPlans});
+});
+
+test("enabling mobile on a Web-only person adds one owned device and preserves Web",async({page})=>{
+ const document=structuredClone(dualDeviceRoutingFixture);
+ document.groups[0].members=[document.groups[0].members[0]];
+ const api:Api={writes:0,document};await boot(page,1440,api);
+ const card=page.locator(`#ring-plan-${ids.plan}`);
+ const mobile=card.getByRole("checkbox",{name:"Mobil pre Martin Novák",exact:true});
+ await expect(mobile).not.toBeChecked();await mobile.check();
+ await expect(card.getByRole("checkbox",{name:"Web pre Martin Novák",exact:true})).toBeChecked();
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ const saved=api.saved as {groups:RingGroupInput[]};
+ expect(saved.groups[0].members).toHaveLength(2);
+ expect(saved.groups[0].members[0]).toEqual(expectedGroups(document)[0].members[0]);
+ expect(saved.groups[0].members[1]).toMatchObject({memberKind:"external_number",profileId:null,externalNumber:"+421900000001",ownerProfileId:ids.jana,position:1,ringSecs:null});
+ expect(api.writes).toBe(1);expect(api.linePatches??[]).toEqual([]);
+});
+
+test("unavailable mobile stays visible but cannot be enabled or lose existing ownership",async({page})=>{
+ const document=structuredClone(dualDeviceRoutingFixture);
+ document.capabilities={...document.capabilities!,ownedMobileRouting:false};
+ const api:Api={writes:0,document};await boot(page,1440,api);
+ const card=page.locator(`#ring-plan-${ids.plan}`);
+ const mobile=card.getByRole("checkbox",{name:"Mobil pre Martin Novák",exact:true});
+ await expect(mobile).toBeChecked();await expect(mobile).toBeDisabled();
+ await expect(card.getByText("Zvonenie na osobné čísla tu nie je dostupné.",{exact:false})).toBeVisible();
+ await card.getByRole("textbox",{name:/^Spoločný čas zvonenia \(s\)$/}).fill("25");
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.saved).toMatchObject({groups:expectedGroups(document)});
+});
+
+test("a database without joint mode saving offers no immediate line-mode write",async({page})=>{
+ const document=structuredClone(routingFixture);
+ document.capabilities={...document.capabilities!,atomicIncomingLineModes:false};
+ const api:Api={writes:0,document};await boot(page,1440,api);
+ const mode=await openLineMode(page);
+ await expect(mode).toBeDisabled();
+ await expect(page.getByText("Režim môžeš zmeniť v nastavení čísla.",{exact:false})).toBeVisible();
+ await page.getByRole("textbox",{name:/^Spoločný čas zvonenia \(s\)$/}).fill("25");
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.saved).not.toHaveProperty("lineModes");expect(api.linePatches??[]).toEqual([]);
+});
+
+test("temporarily hidden devices restore exact data after queue and line changes",async({page})=>{
+ const api:Api={writes:0,document:dualDeviceRoutingFixture};await boot(page,1440,api);
+ const card=page.locator(`#ring-plan-${ids.plan}`);
+ await card.getByRole("checkbox",{name:"Mobil pre Martin Novák",exact:true}).uncheck();
+ await (await openLineMode(page)).selectOption("queue_first");
+ await expect(card).toHaveCount(0);
+ const line=page.getByRole("combobox",{name:"Linka",exact:true});
+ await line.selectOption(extraIds.secondLine);
+ await line.selectOption(ids.line);
+ await (await openLineMode(page)).selectOption("");
+ await card.getByRole("checkbox",{name:"Mobil pre Martin Novák",exact:true}).check();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.writes).toBe(0);expect(api.linePatches??[]).toEqual([]);
+ await card.getByRole("textbox",{name:/^Spoločný čas zvonenia \(s\)$/}).fill("25");
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.saved).not.toHaveProperty("lineModes");
+ expect(api.saved).toMatchObject({groups:expectedGroups(dualDeviceRoutingFixture)});
+});
+
+test("manual verification keeps mode plan and device edits locked until the read resolves",async({page})=>{
+ const api:Api={mode:"verify-retry",writes:0,document:dualDeviceRoutingFixture};await boot(page,1440,api);
+ const card=await openPlanDetails(page);
+ await card.getByLabel("Názov plánu",{exact:true}).fill("Spoločne overený plán");
+ await (await openLineMode(page)).selectOption("ring_all");
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ const verify=page.getByRole("button",{name:"Overiť uložený stav",exact:true});
+ await expect(verify).toBeEnabled();
+ await verify.click();
+ await expect.poll(()=>Boolean(api.releaseVerification)).toBe(true);
+ try{
+  await expect(verify).toBeDisabled();
+  await expect(await openLineMode(page)).toBeDisabled();
+  await expect(card.getByLabel("Názov plánu",{exact:true})).toBeDisabled();
+  await expect(card.getByRole("checkbox",{name:"Web pre Martin Novák",exact:true})).toBeDisabled();
+  await expect(card.getByRole("checkbox",{name:"Mobil pre Martin Novák",exact:true})).toBeDisabled();
+  await expect(page.getByRole("button",{name:"Zahodiť",exact:true})).toBeDisabled();
+ }finally{api.releaseVerification?.();}
+ await expect(page.getByText("Uložený stav je overený.",{exact:false})).toBeVisible();
+ await expect(await openLineMode(page)).toHaveValue("ring_all");
+ await expect(card.getByLabel("Názov plánu",{exact:true})).toHaveValue("Spoločne overený plán");
+ await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
+ expect(api.writes).toBe(1);expect(api.verificationReads).toBe(2);expect(api.linePatches??[]).toEqual([]);
 });

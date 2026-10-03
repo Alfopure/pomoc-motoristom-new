@@ -3,7 +3,7 @@ import { DEFAULT_OPERATOR_SETTINGS } from "../../src/lib/telephony/operator-sett
 export const ids={ organization:"00000000-0000-4000-8000-000000000001", line:"00000000-0000-4000-8000-000000000201", plan:"00000000-0000-4000-8000-000000000301", group:"00000000-0000-4000-8000-000000000401", jana:"00000000-0000-4000-8000-000000000101", peter:"00000000-0000-4000-8000-000000000102" };
 export const routingFixture:RoutingDocument={
  organizationId:ids.organization,routingVersion:5,snapshotId:"fixture-v5",settingsConfigured:true,
- capabilities:{ownedMobileRouting:true,defaultInboundCallMode:"ring_first"},
+ capabilities:{ownedMobileRouting:true,defaultInboundCallMode:"ring_first",atomicIncomingLineModes:true},
  lines:[{id:ids.line,phoneNumber:"+421 232 408 700",label:"Hlavná linka",partnerName:null,telnyxNumberId:null,ringPlanId:ids.plan,ivrMenuId:null,businessHoursId:null,environment:"development",active:true}],
  groups:[{id:ids.group,name:"Dispečeri",description:"Hlavný tím pomoci",active:true,members:[{id:"00000000-0000-4000-8000-000000000411",memberKind:"operator",profileId:ids.jana,externalNumber:null,position:0,ringSecs:null,lastOfferedAt:null,lastAnsweredAt:null},{id:"00000000-0000-4000-8000-000000000412",memberKind:"operator",profileId:ids.peter,externalNumber:null,position:1,ringSecs:30,lastOfferedAt:null,lastAnsweredAt:null}]}],
  plans:[{id:ids.plan,name:"Bežné prichádzajúce hovory",fallbackKind:"waiting_room",fallbackNumber:null,active:true,steps:[{id:"00000000-0000-4000-8000-000000000311",stepIndex:0,ringGroupId:ids.group,timeoutSecs:20,strategy:"all"}]}],
