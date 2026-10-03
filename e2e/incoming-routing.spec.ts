@@ -8,6 +8,7 @@ import { routingFixture,multiLineRoutingFixture,dualDeviceRoutingFixture,ids,ext
 import type { RingGroupInput,RingPlanInput,RoutingDocument } from "../src/server/telephony/config-service";
 const postcss=createRequire(require.resolve("@tailwindcss/postcss"))("postcss");
 let script:string,css:string;
+const screenshotDirectory=process.env.ROUTING_SCREENSHOT_DIR??".context";
 test.use({ launchOptions: { ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ? {executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH}:{}), args:["--no-sandbox"] } });
 test.beforeAll(async()=>{
  const bundle=await build({entryPoints:["e2e/fixtures/incoming-routing.tsx"],outfile:".context/incoming-routing-fixture.js",bundle:true,write:false,platform:"browser",format:"iife",jsx:"automatic",define:{"process.env":JSON.stringify({NODE_ENV:"production"})}});
@@ -71,13 +72,13 @@ for(const width of [1440,1280,390])test(`combined editor remains readable at ${w
  await expect(recipients.getByRole("listitem")).toHaveCount(2);
  await expect(recipients.getByRole("listitem").filter({hasText:"Martin Novák"})).toHaveCount(2);
  await expect(page.getByRole("textbox",{name:/^Externé číslo/})).toHaveCount(0);
- await page.screenshot({path:`/home/vercel-sandbox/pomoc-motoristom-new/.context/call-flow-${width}.png`,fullPage:true});
- if(width===1440)await page.getByRole("region",{name:"Prichádzajúce hovory",exact:true}).screenshot({path:"/home/vercel-sandbox/pomoc-motoristom-new/.context/call-flow-detail.png"});
+ await page.screenshot({path:path.join(screenshotDirectory,`call-flow-${width}.png`),fullPage:true});
+ if(width===1440)await page.getByRole("region",{name:"Prichádzajúce hovory",exact:true}).screenshot({path:path.join(screenshotDirectory,"call-flow-detail.png")});
  if(width!==1280){
   const card=page.locator(`#ring-plan-${ids.plan}`);
   await card.getByRole("radiogroup",{name:"Ako zvoní",exact:true}).getByRole("radio",{name:/^postupne$/i}).click();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  await page.screenshot({path:`/home/vercel-sandbox/pomoc-motoristom-new/.context/call-flow-ordered-${width}.png`,fullPage:true});
+  await page.screenshot({path:path.join(screenshotDirectory,`call-flow-ordered-${width}.png`),fullPage:true});
  }
  expect(errors).toEqual([]);
 });
