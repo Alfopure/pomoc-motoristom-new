@@ -17,7 +17,11 @@ vi.mock("./default-organization", () => ({
   resolveDefaultOrganizationId: vi.fn(async () => "org-1"),
 }));
 
-import { requireMotoristActor } from "./api-auth";
+import {
+  assertSameOriginRequest, clearProfileCache, getDefaultMotoristAuthState, motoristAccessGuard,
+  requireDefaultMotoristActor, requireDefaultMotoristOrgMember, requireDefaultMotoristOrgRole,
+  requireMotoristActor, requireMotoristOrgMember,
+} from "./api-auth";
 
 describe("development actor resolution", () => {
   beforeEach(() => {
@@ -163,5 +167,59 @@ describe("signed-in actor resolution", () => {
     await expect(requireMotoristActor("org-1")).rejects.toMatchObject({ status: 403 });
     await expect(requireMotoristActor("org-1")).rejects.toMatchObject({ status: 403 });
     expect(missing.maybeSingle).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("development bypass deployment boundary", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearProfileCache();
+    vi.stubEnv("MOTORIST_DEV_AUTH_BYPASS", "true");
+    vi.stubEnv("NODE_ENV", "development");
+    for (const key of ["VERCEL", "VERCEL_ENV", "VERCEL_PROJECT_ID", "MOTORIST_APP_ENV"]) vi.stubEnv(key, "");
+    mocks.createServer.mockResolvedValue({ auth: { getClaims: async () => ({ data: null, error: null }) } });
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each([
+    ["production runtime", { NODE_ENV: "production" }],
+    ["unit-test runtime", { NODE_ENV: "test" }],
+    ["missing runtime", { NODE_ENV: "" }],
+    ["Vercel marker", { VERCEL: "1" }],
+    ["Vercel project identity", { VERCEL_PROJECT_ID: "prj_fixture" }],
+    ["Preview claiming development", { VERCEL_ENV: "preview" }],
+    ["hosted production", { NODE_ENV: "production", VERCEL_ENV: "production", MOTORIST_APP_ENV: "production" }],
+    ["dedicated TEST", { VERCEL_ENV: "production", MOTORIST_APP_ENV: "test" }],
+    ["explicit production data environment", { MOTORIST_APP_ENV: "production" }],
+    ["explicit TEST data environment", { MOTORIST_APP_ENV: "test" }],
+  ] as Array<[string, Record<string, string>]>)("requires authentication and Origin validation in %s", async (_name, env) => {
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+
+    expect((await motoristAccessGuard({ roles: ["admin"] }))?.status).toBe(401);
+    await expect(requireDefaultMotoristOrgMember()).rejects.toMatchObject({ status: 401 });
+    await expect(requireDefaultMotoristOrgRole(["admin"])).rejects.toMatchObject({ status: 401 });
+    await expect(requireMotoristOrgMember("org-1")).rejects.toMatchObject({ status: 401 });
+    await expect(requireDefaultMotoristActor()).rejects.toMatchObject({ status: 401 });
+    await expect(requireMotoristActor("org-1")).rejects.toMatchObject({ status: 401 });
+    await expect(getDefaultMotoristAuthState()).resolves.toMatchObject({ authorized: false, reason: "unauthenticated" });
+    expect(() => assertSameOriginRequest(new Request("https://dispatch.example/api/users", {
+      method: "POST", headers: { host: "dispatch.example", origin: "https://outside.invalid" },
+    }))).toThrow();
+    expect(mocks.createAdmin).not.toHaveBeenCalled();
+  });
+
+  it("retains the explicit bypass in the local development server", async () => {
+    expect(await motoristAccessGuard({ roles: ["admin"] })).toBeNull();
+    expect(mocks.createServer).not.toHaveBeenCalled();
+  });
+
+  it("still enforces the signed-in user's role when a hosted flag is misconfigured", async () => {
+    vi.stubEnv("VERCEL_ENV", "production");
+    mocks.createServer.mockResolvedValue(makeAuthenticatedClient({
+      id: "profile-dispatcher", display_name: "Fixture", role: "dispatcher", email: "dispatcher@example.test",
+    }));
+    expect((await motoristAccessGuard({ roles: ["admin"] }))?.status).toBe(403);
+    expect(mocks.createAdmin).not.toHaveBeenCalled();
   });
 });
