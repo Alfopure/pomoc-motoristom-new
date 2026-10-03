@@ -10,6 +10,7 @@ import { cleanupVerdict, describeAttempt, endAttempt, runAiDemoCleanup, startAiD
 
 const ENV = {
   AI_DEMO_ENABLED: "true",
+  AI_DEMO_FROM_NUMBER: AI_DEMO_NEUTRAL_LINE,
   AI_DEMO_ALLOWED_RECIPIENTS: "+421910988882",
   OPENAI_API_KEY: "sk-proj-test",
   OPENAI_LIVE_PROJECT_ID: "proj_test123",
@@ -108,6 +109,14 @@ describe("startAiDemo gates", () => {
     f.h.db.update("motorist_telephony_lines", { active: false }, (row) => row.phone_number === AI_DEMO_NEUTRAL_LINE);
     await expect(start(f)).rejects.toMatchObject({ code: "ai_demo_from_invalid", status: 503 });
     expect(f.h.telnyx.of("dial")).toHaveLength(0);
+  });
+
+  it("rejects an archived caller ID even if the active flag is stale", async () => {
+    const f = fixture();
+    f.h.db.update("motorist_telephony_lines", { metadata: { archived_at: "2026-10-03T11:00:00Z" } }, (row) => row.phone_number === AI_DEMO_NEUTRAL_LINE);
+    await expect(start(f)).rejects.toMatchObject({ code: "ai_demo_from_invalid", status: 503 });
+    expect(f.h.telnyx.of("dial")).toHaveLength(0);
+    expect(f.h.rows("motorist_ai_demo_attempts")).toHaveLength(0);
   });
 
   it("stops at the daily limit", async () => {

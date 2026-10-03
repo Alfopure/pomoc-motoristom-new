@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { withRequestMetrics } from "@/server/request-metrics";
 
-import { CONNECTION_ID, createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
+import { CONNECTION_ID, createTelephonyHarness, LINES, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
 import { sessionOwnership } from "../ownership";
 import { WEBHOOK_LEASE_POLL_MS } from "../session-runner";
@@ -229,6 +229,41 @@ describe("processTelnyxEvent", () => {
 
     expect(h.session(call.sessionId).line_id).toBe("00000000-0000-4000-8000-000000000202");
     expect(h.logs.some((entry) => entry.message === "line number is not canonical E.164")).toBe(true);
+  });
+
+  it.each([
+    { phoneNumber: NUMBERS.allianz, active: true },
+    { phoneNumber: NUMBERS.allianz, active: false },
+    { phoneNumber: "02/3240 8718", active: true },
+    { phoneNumber: "02/3240 8718", active: false },
+  ])("never creates or answers a new call on archived $phoneNumber (active=$active)", async ({ phoneNumber, active }) => {
+    const h = createTelephonyHarness();
+    h.db.update("motorist_telephony_lines", {
+      phone_number: phoneNumber, active, metadata: { archived_at: h.now().toISOString() },
+    }, row => row.id === LINES.allianz);
+
+    const result = await h.process(h.envelope("call.initiated", {
+      call_control_id: "archived-cc", call_session_id: "archived-session", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer,
+    }));
+
+    expect(result).toMatchObject({ status: 500, outcome: "failed" });
+    expect(h.rows("motorist_call_sessions")).toHaveLength(0);
+    expect(h.rows("motorist_call_legs")).toHaveLength(0);
+    expect(h.telnyx.of("answer")).toHaveLength(0);
+    expect(h.telnyx.of("dial")).toHaveLength(0);
+  });
+
+  it("still processes hangup for an existing call after its line is archived", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    h.db.update("motorist_telephony_lines", { active: false, metadata: { archived_at: h.now().toISOString() } }, row => row.id === LINES.allianz);
+    const customer = h.rows("motorist_call_legs").find(row => row.session_id === call.sessionId && row.role === "customer")!;
+
+    const result = await h.legEvent(String(customer.telnyx_call_control_id), "call.hangup");
+
+    expect(result).toMatchObject({ status: 200, outcome: "processed" });
+    expect(h.db.find("motorist_call_legs", row => row.id === customer.id)).toMatchObject({ ended_at: expect.any(String) });
+    expect(h.session(call.sessionId).line_id).toBe(LINES.allianz);
   });
 
   it("waits for a contended lease and continues once it is released", async () => {

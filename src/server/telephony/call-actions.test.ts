@@ -69,6 +69,25 @@ describe("isDestinationAllowed", () => {
 });
 
 describe("startOutboundCall", () => {
+  it.each(["explicit", "operator_default", "environment_fallback"] as const)("never dials an archived %s caller ID", async (source) => {
+    const h = createTelephonyHarness();
+    h.db.update("motorist_telephony_lines", {
+      active: source !== "environment_fallback",
+      metadata: { archived_at: "2026-10-03T11:00:00Z", archive_reason: "transferred_to_test" },
+    }, (row) => row.id === LINES.allianz);
+    if (source === "environment_fallback") {
+      h.db.update("motorist_operator_telephony_settings", { default_from_line_id: null }, () => true);
+    }
+    const error = await fail(startOutboundCall(actionDeps(h), o1, {
+      to: NUMBERS.customer,
+      ...(source === "explicit" ? { lineId: LINES.allianz } : {}),
+    }));
+    expect(error).toMatchObject({ code: "line_archived", status: 409 });
+    expect(h.telnyx.of("dial")).toHaveLength(0);
+    expect(h.rows("motorist_call_sessions")).toHaveLength(0);
+    expect(h.presence(PROFILES.o1).current_session_id).toBeNull();
+  });
+
   it("returns 503 when telephony is not configured", async () => {
     const h = createTelephonyHarness();
     const error = await fail(startOutboundCall(actionDeps(h, { telnyx: null, config: getTelnyxConfig({}) }), o1, { to: "0905123456" }));

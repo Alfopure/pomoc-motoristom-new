@@ -1,4 +1,5 @@
 import { openAILiveClient, OpenAILiveError } from "@/lib/integrations/ai/openai-live";
+import { isArchivedLine } from "../line-archive";
 
 import { countToday, loadActive, migrationApplied } from "./attempts";
 import { aiDemoBudgets, aiDemoEnabled, getAiDemoConfig, AI_DEMO_ALLOWED_VOICES, AI_DEMO_LIMITS, AI_DEMO_NATURAL_VOICES } from "./config";
@@ -45,12 +46,12 @@ export async function runAiDemoPreflight(deps: AiDemoDeps, options: { remote: bo
   if (fromNumber) {
     const line = await deps.admin
       .from("motorist_telephony_lines")
-      .select("id")
+      .select("id, metadata")
       .eq("organization_id", deps.organizationId)
       .eq("phone_number", fromNumber)
       .eq("active", true)
       .maybeSingle();
-    fromLineActive = Boolean(line.data);
+    fromLineActive = Boolean(line.data && !isArchivedLine(line.data.metadata));
   }
 
   const settings = await deps.admin

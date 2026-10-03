@@ -7,6 +7,7 @@ import type { Json } from "@/lib/supabase/database.types";
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { toJson } from "../state/types";
 import { CallActionError } from "../service-errors";
+import { isArchivedLine } from "../line-archive";
 import type { SessionRunnerDeps } from "../session-runner";
 import { createTelnyxClient, isCallGoneError, TelnyxCommandError, TelnyxLiveCallsDisabledError, type TelnyxClient } from "../telnyx/client";
 import type { ProcessorDeps } from "../telnyx/event-processor";
@@ -172,7 +173,7 @@ export async function startAiDemo(deps: AiDemoDeps, input: StartAiDemoInput): Pr
 
   const fromLine = await deps.admin
     .from("motorist_telephony_lines")
-    .select("id, active")
+    .select("id, active, metadata")
     .eq("organization_id", deps.organizationId)
     .eq("phone_number", config.fromNumber)
     .eq("active", true)
@@ -180,7 +181,7 @@ export async function startAiDemo(deps: AiDemoDeps, input: StartAiDemoInput): Pr
   if (fromLine.error) throw new AiDemoError("Odchádzajúcu linku sa nepodarilo načítať.", 503, "line_unavailable");
   // Fail closed: without a known active line we cannot say whose identity the
   // recipient would see, and "some number from the account" is not an answer.
-  if (!fromLine.data) throw new AiDemoError("Odchádzajúca linka dema nie je aktívna v tejto organizácii.", 503, "ai_demo_from_invalid");
+  if (!fromLine.data || isArchivedLine(fromLine.data.metadata)) throw new AiDemoError("Odchádzajúca linka dema nie je aktívna v tejto organizácii.", 503, "ai_demo_from_invalid");
 
   if (input.requestId) {
     const existing = await findByRequestId(deps.admin, deps.organizationId, input.actorProfileId, input.requestId);

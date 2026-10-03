@@ -16,6 +16,7 @@ import { colleaguePresenceBlock, COLLEAGUE_CALL_MESSAGES, type ColleagueCallBloc
 import { sipDisplayText } from "@/lib/telephony/sip-display";
 
 import { writeCallAudit } from "./audit";
+import { isArchivedLine } from "./line-archive";
 import { deviceIsLive, deviceSipUri, getOperatorDevice, type DeviceDeps } from "./operator-devices";
 import { presenceAllowsOffer } from "./routing/eligibility";
 import { isPausedWithoutCall, releaseOperator, reserveOperatorOwnership, reserveOperatorPickup, releaseOperatorPresence, type PresenceTransitionResult } from "./routing/reservation";
@@ -264,25 +265,31 @@ async function resolveFromLine(deps: CallActionDeps, profileId: string, lineId: 
   const { admin, organizationId } = deps;
   let line: LineRow | null = null;
   if (lineId) {
-    const { data } = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("id", lineId).eq("active", true).maybeSingle();
+    const { data, error } = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("id", lineId).eq("active", true).maybeSingle();
+    if (error) throw new CallActionError("Nastavenia odchádzajúcej linky sa nepodarilo načítať.", 503, "line_unavailable");
     line = data ?? null;
     if (!line) throw new CallActionError("Zvolená linka neexistuje.", 400, "invalid_line");
   } else {
     const settings = await admin.from("motorist_operator_telephony_settings").select("default_from_line_id").eq("profile_id", profileId).maybeSingle();
     if (settings.data?.default_from_line_id) {
-      const { data } = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("id", settings.data.default_from_line_id).eq("active", true).maybeSingle();
+      const { data, error } = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("id", settings.data.default_from_line_id).eq("active", true).maybeSingle();
+      if (error) throw new CallActionError("Nastavenia odchádzajúcej linky sa nepodarilo načítať.", 503, "line_unavailable");
       line = data ?? null;
     }
   }
+  if (line && isArchivedLine(line.metadata)) throw new CallActionError("Táto linka je archivovaná. Vyber inú odchádzajúcu linku.", 409, "line_archived");
   const from = line?.phone_number ?? (deps.config.configured ? deps.config.defaultFromNumber : null);
   if (!from) throw new CallActionError("Chýba odchádzajúce číslo (TELNYX_DEFAULT_FROM_NUMBER).", 500, "missing_from");
   // Operators without a personal default still use a configured DID. Resolve
   // its line so outbound startup settings and the displayed identity apply.
   if (!line) {
     const result = await admin.from("motorist_telephony_lines").select("*")
-      .eq("organization_id", organizationId).eq("phone_number", from).eq("active", true).maybeSingle();
+      .eq("organization_id", organizationId).eq("phone_number", from).maybeSingle();
     if (result.error) throw new CallActionError("Nastavenia odchádzajúcej linky sa nepodarilo načítať.", 503, "line_unavailable");
-    line = result.data ?? null;
+    // An archived DID must not reappear through the environment fallback,
+    // including when its row is already inactive after a transfer to TEST.
+    if (result.data && isArchivedLine(result.data.metadata)) throw new CallActionError("Predvolená odchádzajúca linka je archivovaná.", 409, "line_archived");
+    line = result.data?.active ? result.data : null;
   }
   return { line, from };
 }
