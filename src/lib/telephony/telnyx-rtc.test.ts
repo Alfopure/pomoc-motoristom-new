@@ -7,6 +7,7 @@ type Socket = {
   readyState: number;
   send: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
+  onmessage?: (event: { data: string }) => void;
 };
 type SessionInternals = {
   _triggerKeepAliveTimeoutCheck(): void;
@@ -45,6 +46,23 @@ function request(method: string) {
 }
 
 describe("Telnyx SDK keepalive rejection handling", () => {
+  it.each(["telnyx_rtc.ping", "telnyx_rtc.modify"])("preserves a successful %s response and outbound confirmation", async (method) => {
+    const connection = client.connection as unknown as { _registerSocketEvents(socket: Socket): void };
+    connection._registerSocketEvents(socket);
+    const confirmed = vi.spyOn(client, "onOutboundConfirmed");
+    const warning = vi.fn();
+    client.on("telnyx.warning", warning);
+    const message = request(method);
+    const pending = client.execute(message);
+    const result = { accepted: true };
+    socket.onmessage?.({ data: JSON.stringify({ jsonrpc: "2.0", id: message.request.id, result }) });
+    await expect(pending).resolves.toEqual(result);
+    expect(confirmed).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(warning).not.toHaveBeenCalled();
+    expect(socket.close).not.toHaveBeenCalled();
+  });
+
   it.each(["server-ping", "keepalive-timer"])("consumes stale %s requests during socket replacement", async (source) => {
     if (source === "server-ping") {
       internals()._onSocketMessage({ jsonrpc: "2.0", id: "server-ping", method: "telnyx_rtc.ping", params: {} });
