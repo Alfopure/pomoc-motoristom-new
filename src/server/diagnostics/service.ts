@@ -7,6 +7,7 @@ import { DIAGNOSTIC_LIMITS, isDiagnosticSafeId, isDiagnosticUuid, parseDiagnosti
 import { assertSameOriginRequest, requireDefaultMotoristActor, type MotoristActor } from '@/server/api-auth';
 import { MutationError } from '@/server/mutation-error';
 import type { TelephonyCronJobResult } from '@/server/telephony/cron-jobs';
+import { readRoutingDiagnostics } from './routing-read';
 export const DIAGNOSTIC_MEMBER_ROLES = ['dispatcher','senior_dispatcher','manager','admin'] as const;
 export const diagnosticsEnabled = () => process.env.DIAGNOSTICS_ENABLED === 'true';
 export const diagnosticsEnvironment = () => resolveAppEnvironment();
@@ -66,6 +67,7 @@ export function parseDiagnosticQuery(request:Request) {
   return {since,until,cursorAt,cursorId,pageSize,callSessionId};
 }
 export async function readDiagnostics(request:Request,id?:string,status?:unknown):Promise<Response> {
+  const startedAt = Date.now();
   try{
     const actor=await requireDefaultMotoristActor(['manager','admin']);
     if(process.env.DIAGNOSTICS_PANEL_ENABLED==='false')return response({error:'Monitor prevádzky je vypnutý.'},503);
@@ -76,8 +78,14 @@ export async function readDiagnostics(request:Request,id?:string,status?:unknown
       if(id||query.callSessionId)return response({error:'Diagnostika nie je aktivovaná.'},503);
       const empty:DiagnosticOverview={checkedAt:new Date().toISOString(),enabled:false,environment:diagnosticsEnvironment(),coverage:'unknown',since:query.since,until:query.until,incidents:[],nextCursor:null,operations:[],builds:[],calls:[],storage:null};return response(empty);
     }
-    const {data,error}=await createSupabaseAdminClient().rpc('motorist_diagnostics_read',{p_org:actor.organizationId,p_profile:actor.profileId,p_environment:diagnosticsEnvironment(),p_mode:id?(status===undefined?'detail':'status'):query.callSessionId?'timeline':'overview',p_id:id??query.callSessionId,p_since:query.since,p_until:query.until,p_cursor_at:query.cursorAt,p_cursor_id:query.cursorId,p_limit:query.pageSize,p_status:status===undefined?null:String(status)}).abortSignal(AbortSignal.timeout(1500));
-    if(error)throw new Error('diagnostic_read_unavailable');if(data===null)return response({error:'Záznam sa nenašiel.'},404);return response(data);
+    const admin = createSupabaseAdminClient();
+    const {data,error}=await admin.rpc('motorist_diagnostics_read',{p_org:actor.organizationId,p_profile:actor.profileId,p_environment:diagnosticsEnvironment(),p_mode:id?(status===undefined?'detail':'status'):query.callSessionId?'timeline':'overview',p_id:id??query.callSessionId,p_since:query.since,p_until:query.until,p_cursor_at:query.cursorAt,p_cursor_id:query.cursorId,p_limit:query.pageSize,p_status:status===undefined?null:String(status)}).abortSignal(AbortSignal.timeout(1500));
+    if(error)throw new Error('diagnostic_read_unavailable');if(data===null)return response({error:'Záznam sa nenašiel.'},404);
+    if (!id && query.callSessionId && typeof data === 'object' && !Array.isArray(data) && data.callSessionId === query.callSessionId) {
+      const routing = await readRoutingDiagnostics(admin, { organizationId: actor.organizationId, callSessionId: query.callSessionId, since: query.since, until: query.until, budgetMs: 1800 - (Date.now() - startedAt) });
+      return response({ ...data, ...routing });
+    }
+    return response(data);
   }catch(error){return diagnosticErrorResponse(error);}
 }
 export async function updateDiagnosticStatus(request:Request,id:string){try{requireOrigin(request);const body=await readDiagnosticBody(request,128) as Record<string,unknown>;if(!body||typeof body!=='object'||Object.keys(body).some(k=>k!=='status')||typeof body.status!=='string')throw new MutationError('Neplatný stav.',400);return readDiagnostics(request,id,body.status);}catch(error){return diagnosticErrorResponse(error);}}

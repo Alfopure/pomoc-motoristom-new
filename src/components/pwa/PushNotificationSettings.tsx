@@ -3,16 +3,13 @@
 import { MobileCallNotificationToggle } from "./MobileCallNotificationToggle";
 import { PauseEndingNotificationToggle } from "./PauseEndingNotificationToggle";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Bell, BellOff, Check, LoaderCircle, Send, Smartphone, Volume2 } from "lucide-react";
 import {
-  browserPushSupport,
-  DEFAULT_PUSH_CATEGORIES,
   disableCurrentDevicePush,
   enableDevicePush,
   PUSH_SETTINGS_EVENT,
   pushRequest,
-  readNotificationSound,
   readPushDeviceState,
   storeNotificationSound,
   updateDevicePushCategory,
@@ -36,39 +33,67 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
   const [error, setError] = useState<string | null>(null);
   const [testCooldown, setTestCooldown] = useState(0);
   const [soundTesting, setSoundTesting] = useState(false);
+  const sequence = useRef(0);
+  const saving = useRef(false);
+  const refreshPending = useRef(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async ({ preserveError = false }: { preserveError?: boolean } = {}) => {
     if (!enabled) return;
+    // Settings events can fire inside a write. Read after it finishes so a
+    // previous GET cannot replace the preference that was just saved.
+    if (saving.current) { refreshPending.current = true; return; }
+    const version = ++sequence.current;
     setLoading(true);
     try {
       const next = await readPushDeviceState();
+      if (version !== sequence.current) return;
       setState(next);
       setNativePushActive(next.subscribed && next.taskNotificationsEnabled);
       setNativeAvailableCallPushActive(hasNativeAvailableCallPush(next));
-      setError(null);
+      if (!preserveError) setError(null);
     } catch (failure) {
-      setState((current) => current ?? {
-        support: browserPushSupport(),
-        permission: typeof Notification === "undefined" ? "default" : Notification.permission,
-        configured: false,
-        publicKey: null,
-        subscription: null,
-        subscribed: false,
-        soundEnabled: readNotificationSound(),
-        ...DEFAULT_PUSH_CATEGORIES,
-        callNotificationsConfigured: false,
-      });
+      if (version !== sequence.current) return;
       setError(failure instanceof Error ? failure.message : "Stav upozornení sa nepodarilo načítať.");
     } finally {
-      setLoading(false);
+      if (version === sequence.current) setLoading(false);
     }
   }, [enabled]);
 
   useEffect(() => {
     let disposed = false;
+    const load = () => { void refresh(); };
+    const visible = () => { if (document.visibilityState === "visible") load(); };
     queueMicrotask(() => { if (!disposed) void refresh(); });
-    return () => { disposed = true; };
+    window.addEventListener(PUSH_SETTINGS_EVENT, load);
+    window.addEventListener("focus", visible);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      disposed = true;
+      sequence.current++;
+      window.removeEventListener(PUSH_SETTINGS_EVENT, load);
+      window.removeEventListener("focus", visible);
+      document.removeEventListener("visibilitychange", visible);
+    };
   }, [refresh]);
+
+  function beginSave() {
+    saving.current = true;
+    sequence.current++;
+    setLoading(false);
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+  }
+
+  function finishSave() {
+    saving.current = false;
+    setBusy(false);
+    if (refreshPending.current) {
+      refreshPending.current = false;
+      // Enrollment rollback also emits a settings event; keep its error visible.
+      void refresh({ preserveError: true });
+    }
+  }
 
   useEffect(() => {
     if (testCooldown <= 0) return;
@@ -83,10 +108,8 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
   }, [notice]);
 
   async function togglePush() {
-    if (!state || busy) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
+    if (!state || saving.current) return;
+    beginSave();
     try {
       if (state.subscribed) {
         await disableCurrentDevicePush();
@@ -107,16 +130,14 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
       setState((current) => current ? { ...current, permission: typeof Notification === "undefined" ? "default" : Notification.permission } : current);
       setError(failure instanceof Error ? failure.message : "Nastavenie upozornení sa nepodarilo zmeniť.");
     } finally {
-      setBusy(false);
+      finishSave();
     }
   }
 
   async function toggleCategory(category: PushCategory) {
-    if (!state || busy || !state.subscribed || !state.subscription) return;
+    if (!state || saving.current || !state.subscribed || !state.subscription) return;
     const nextEnabled = !state[category];
-    setBusy(true);
-    setError(null);
-    setNotice(null);
+    beginSave();
     try {
       await updateDevicePushCategory(state, category, nextEnabled);
       setState((current) => current ? { ...current, [category]: nextEnabled } : current);
@@ -126,17 +147,15 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "Typ upozornení sa nepodarilo nastaviť.");
     } finally {
-      setBusy(false);
+      finishSave();
     }
   }
 
   async function toggleSound() {
-    if (!state || busy) return;
+    if (!state || saving.current) return;
     const soundEnabled = !state.soundEnabled;
     unlockNotificationSound();
-    setBusy(true);
-    setError(null);
-    setNotice(null);
+    beginSave();
     try {
       if (state.subscribed && state.subscription) {
         await pushRequest("/api/push/subscriptions", "PATCH", { endpoint: state.subscription.endpoint, soundEnabled });
@@ -147,15 +166,13 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "Zvuk sa nepodarilo nastaviť.");
     } finally {
-      setBusy(false);
+      finishSave();
     }
   }
 
   async function sendTest() {
-    if (!state?.subscription || !state.subscribed || busy || testCooldown > 0) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
+    if (!state?.subscription || !state.subscribed || saving.current || testCooldown > 0) return;
+    beginSave();
     try {
       await pushRequest("/api/push/test", "POST", { endpoint: state.subscription.endpoint });
       setTestCooldown(30);
@@ -168,9 +185,10 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
       if (next) {
         setState(next);
         setNativePushActive(next.subscribed && next.taskNotificationsEnabled);
+        setNativeAvailableCallPushActive(hasNativeAvailableCallPush(next));
       }
     } finally {
-      setBusy(false);
+      finishSave();
     }
   }
 
@@ -212,14 +230,15 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
           <p className="text-sm font-semibold text-zinc-900">Push upozornenia</p>
           <p className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
             {loading ? <LoaderCircle size={13} className="animate-spin" /> : state?.subscribed ? <Check size={13} className="text-emerald-600" /> : <BellOff size={13} />}
-            {loading ? "Overujem zariadenie…" : state?.subscribed ? "Zapnuté na tomto zariadení" : "Vypnuté na tomto zariadení"}
+            {loading ? "Overujem zariadenie…" : !state ? "Stav zariadenia nie je načítaný" : state.subscribed ? "Zapnuté na tomto zariadení" : "Vypnuté na tomto zariadení"}
           </p>
         </div>
-        <button type="button" role="switch" aria-checked={Boolean(state?.subscribed)} aria-label="Push upozornenia na tomto zariadení"
+        <button type="button" role={state ? "switch" : undefined} aria-checked={state?.subscribed} aria-label="Push upozornenia na tomto zariadení"
           disabled={loading || busy || !enabled || (!state?.subscribed && !canEnable)}
           onClick={() => void togglePush()}
           className="relative inline-flex min-h-11 w-14 shrink-0 items-center rounded-xl transition focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-zinc-900 disabled:cursor-not-allowed disabled:opacity-40">
-          <span aria-hidden="true" className={`flex h-8 w-14 items-center rounded-full p-1 ${state?.subscribed ? "bg-emerald-600" : "bg-zinc-300"}`}><span className={`inline-block size-6 rounded-full bg-white shadow-sm transition-transform ${state?.subscribed ? "translate-x-6" : "translate-x-0"}`} /></span>
+          {state ? <span aria-hidden="true" className={`flex h-8 w-14 items-center rounded-full p-1 ${state.subscribed ? "bg-emerald-600" : "bg-zinc-300"}`}><span className={`inline-block size-6 rounded-full bg-white shadow-sm transition-transform ${state.subscribed ? "translate-x-6" : "translate-x-0"}`} /></span>
+            : <span aria-hidden="true" className="flex h-8 w-14 items-center justify-center rounded-full bg-zinc-100 text-zinc-500">{loading ? <LoaderCircle size={16} className="animate-spin" /> : "—"}</span>}
         </button>
       </div>
 
@@ -233,14 +252,16 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
               <p className="text-sm font-semibold text-zinc-900">{label}</p>
               <p className="mt-0.5 text-xs leading-4 text-zinc-500">{detail}</p>
             </div>
-            <button type="button" role="switch" aria-checked={state?.[key] ?? true} aria-label={label}
+            <button type="button" role={state?.subscribed ? "switch" : undefined} aria-checked={state?.subscribed ? state[key] : undefined} aria-label={label}
               disabled={loading || busy || !enabled || !state?.subscribed || !state.subscription || !state.callNotificationsConfigured}
               onClick={() => void toggleCategory(key)}
               className="relative inline-flex min-h-11 w-14 shrink-0 items-center rounded-xl transition focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-zinc-900 disabled:cursor-not-allowed disabled:opacity-40">
-              <span aria-hidden="true" className={`flex h-8 w-14 items-center rounded-full p-1 ${(state?.[key] ?? true) ? "bg-emerald-600" : "bg-zinc-300"}`}><span className={`inline-block size-6 rounded-full bg-white shadow-sm transition-transform ${(state?.[key] ?? true) ? "translate-x-6" : "translate-x-0"}`} /></span>
+              {state?.subscribed ? <span aria-hidden="true" className={`flex h-8 w-14 items-center rounded-full p-1 ${state[key] ? "bg-emerald-600" : "bg-zinc-300"}`}><span className={`inline-block size-6 rounded-full bg-white shadow-sm transition-transform ${state[key] ? "translate-x-6" : "translate-x-0"}`} /></span>
+                : <span aria-hidden="true" className="flex h-8 w-14 items-center justify-center rounded-full bg-zinc-100 text-zinc-500">{loading && !state ? <LoaderCircle size={16} className="animate-spin" /> : "—"}</span>}
             </button>
           </div>
         ))}
+        {state && !state.subscribed && <p className="px-1 pt-1 text-xs leading-5 text-zinc-500">Typy upozornení nastavíte po zapnutí push upozornení na tomto zariadení.</p>}
         {state?.subscribed && !state.callNotificationsConfigured && <p className="px-1 pt-1 text-xs leading-5 text-amber-800">Výber typov upozornení ešte nie je pripravený. Upozornenia na úlohy fungujú ďalej.</p>}
         <p className="px-1 pt-2 text-xs leading-5 text-zinc-500">Ťuknutie na upozornenie otvorí aplikáciu a aktuálny stav hovoru. Hovor sa prijíma až v aplikácii.</p>
       </fieldset>
@@ -250,10 +271,11 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
           <p className="flex items-center gap-2 text-sm font-semibold text-zinc-900"><Volume2 size={16} />Zvuk upozornení</p>
           <p className="mt-1 text-xs leading-5 text-zinc-500">V aplikácii aj pri push upozornení. Zvuk na pozadí riadi systém zariadenia.</p>
         </div>
-        <button type="button" role="switch" aria-checked={state?.soundEnabled ?? true} aria-label="Zvuk upozornení"
+        <button type="button" role={state ? "switch" : undefined} aria-checked={state?.soundEnabled} aria-label="Zvuk upozornení"
           disabled={loading || busy || !enabled || !state} onClick={() => void toggleSound()}
           className="relative inline-flex min-h-11 w-14 shrink-0 items-center rounded-xl transition focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-zinc-900 disabled:opacity-40">
-          <span aria-hidden="true" className={`flex h-8 w-14 items-center rounded-full p-1 ${state?.soundEnabled ? "bg-emerald-600" : "bg-zinc-300"}`}><span className={`inline-block size-6 rounded-full bg-white shadow-sm transition-transform ${state?.soundEnabled ? "translate-x-6" : "translate-x-0"}`} /></span>
+          {state ? <span aria-hidden="true" className={`flex h-8 w-14 items-center rounded-full p-1 ${state.soundEnabled ? "bg-emerald-600" : "bg-zinc-300"}`}><span className={`inline-block size-6 rounded-full bg-white shadow-sm transition-transform ${state.soundEnabled ? "translate-x-6" : "translate-x-0"}`} /></span>
+            : <span aria-hidden="true" className="flex h-8 w-14 items-center justify-center rounded-full bg-zinc-100 text-zinc-500">{loading ? <LoaderCircle size={16} className="animate-spin" /> : "—"}</span>}
         </button>
       </div>
 
@@ -267,7 +289,7 @@ export function PushNotificationSettings({ enabled = true }: { enabled?: boolean
               setNotice(started ? "Test zvuku je spustený. Ak ho nepočuješ, skontroluj hlasitosť, tichý režim a pripojené slúchadlá." : "Zvuk sa nepodarilo odomknúť. Vráť sa do aplikácie, ukonči prípadný iný hovor a skús test znova.");
             } finally { setSoundTesting(false); }
           }}><Volume2 size={15} />{soundTesting ? "Pripravujem zvuk…" : "Vyskúšať zvuk"}</button>
-        <button type="button" disabled={busy || loading || !enabled} onClick={() => { window.dispatchEvent(new Event(PUSH_SETTINGS_EVENT)); void refresh(); }} className={buttonClass}>Obnoviť stav</button>
+        <button type="button" disabled={busy || loading || !enabled} onClick={() => window.dispatchEvent(new Event(PUSH_SETTINGS_EVENT))} className={buttonClass}>Obnoviť stav</button>
       </div>
       {notice && <p role="status" className="mt-3 rounded-xl bg-emerald-50 p-3 text-sm leading-6 text-emerald-800">{notice}</p>}
       {error && <p role="alert" className="mt-3 rounded-xl bg-red-50 p-3 text-sm leading-6 text-red-700">{error}</p>}
