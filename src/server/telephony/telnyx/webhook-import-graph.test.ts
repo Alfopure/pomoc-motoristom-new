@@ -89,7 +89,9 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
 // for production. This is local module loading, not hosted call latency.
 // The monitor also reuses the pure app-version selector for request metrics;
 // it adds no runtime dependency or I/O to the webhook path.
-const MAX_MODULES = 57;
+// Reviewed increase 57 → 58: the pure archived-line metadata predicate keeps
+// transferred numbers out of new inbound calls; it has no imports or I/O.
+const MAX_MODULES = 58;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);

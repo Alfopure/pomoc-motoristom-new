@@ -3,13 +3,15 @@ import type { Database } from "@/lib/supabase/database.types";
 import { returnLineId, returnLineProblem } from "@/lib/telephony/return-line";
 import type { LineRow } from "./state/types";
 import { humansOnly } from "@/server/profile-kind";
+import { isArchivedLine } from "./line-archive";
 
 export async function resolveInboundReturnLine(admin: SupabaseClient<Database>, organizationId: string, source: LineRow | null): Promise<LineRow | null> {
+  if (source && isArchivedLine(source.metadata)) throw new Error("Return source line is archived");
   const targetId = returnLineId(source?.metadata);
   if (!source || !targetId) return source;
   const target = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("id", targetId).maybeSingle();
   if (target.error) throw new Error("Return line lookup failed");
-  if (!target.data) throw new Error("Return line is unavailable");
+  if (!target.data || isArchivedLine(target.data.metadata)) throw new Error("Return line is unavailable");
   const [plan, steps, groups, members, profiles] = await Promise.all([
     admin.from("motorist_ring_plans").select("*").eq("organization_id", organizationId).eq("id", target.data.ring_plan_id ?? "00000000-0000-0000-0000-000000000000").maybeSingle(),
     admin.from("motorist_ring_plan_steps").select("*").eq("organization_id", organizationId).eq("ring_plan_id", target.data.ring_plan_id ?? "00000000-0000-0000-0000-000000000000"),

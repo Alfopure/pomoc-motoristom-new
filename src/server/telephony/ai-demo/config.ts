@@ -19,7 +19,7 @@ import { aiDemoEnabled } from "./flag";
 
 export type EnvRecord = Record<string, string | undefined>;
 
-/** "Neutrálna linka 2" (`docs/operations/telnyx-setup.md:15`); the demo's caller ID. */
+/** Historical demo identity; a current caller ID must be configured explicitly. */
 export const AI_DEMO_NEUTRAL_LINE = "+421232408774";
 /** Allianz Assistance (`:10`) is only permitted on an explicit instruction. */
 export const AI_DEMO_ALLOWED_FROM: readonly string[] = [AI_DEMO_NEUTRAL_LINE, "+421232408718"];
@@ -263,7 +263,7 @@ export function aiDemoFromNumber(env: EnvRecord = process.env): { number: string
       AI_DEMO_ALLOWED_FROM.includes(normalized) || AI_DEMO_FORBIDDEN_FROM.includes(normalized)) return { invalid: override };
     return { number: normalized };
   }
-  if (override === null) return { number: AI_DEMO_NEUTRAL_LINE };
+  if (override === null) return { invalid: "" };
   const normalized = normalizeE164(override, { defaultCountryCode: "421" });
   if (normalized === null) return { invalid: override };
   if (AI_DEMO_FORBIDDEN_FROM.includes(normalized)) return { invalid: normalized };

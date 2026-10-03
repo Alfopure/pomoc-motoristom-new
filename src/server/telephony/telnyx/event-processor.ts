@@ -5,6 +5,7 @@ import type { Database } from "@/lib/supabase/database.types";
 import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
 
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
+import { isArchivedLine } from "../line-archive";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { effectsDeps, ownedSessionWork, runSessionEvent, SessionEventDeferredError, WEBHOOK_LEASE_WAIT_MS, type SessionRunnerDeps } from "../session-runner";
@@ -192,9 +193,15 @@ async function findLine(deps: ProcessorDeps, environment: string, to: string | n
   const { admin, organizationId } = deps;
   const normalized = to ? normalizeE164(to) : null;
   if (!normalized) return null;
-  const pick = (rows: LineRow[]): LineRow | null => rows.find((row) => row.environment === environment) ?? rows[0] ?? null;
+  const pick = (rows: LineRow[]): LineRow | null => {
+    // An archive must not become an unknown-line call and enter generic routing.
+    // Read inactive rows too: the marker remains authoritative after transfer.
+    if (rows.some((row) => isArchivedLine(row.metadata))) throw new Error("Inbound line is archived");
+    const active = rows.filter((row) => row.active);
+    return active.find((row) => row.environment === environment) ?? active[0] ?? null;
+  };
 
-  const exact = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("phone_number", normalized).eq("active", true);
+  const exact = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("phone_number", normalized);
   if (exact.error) throw new Error(`line lookup failed: ${exact.error.message}`);
   const hit = pick(exact.data ?? []);
   if (hit) return hit;
@@ -202,7 +209,7 @@ async function findLine(deps: ProcessorDeps, environment: string, to: string | n
   // A row stored in a non-canonical shape (`02/3240 8700`, `+4210232408700`)
   // would otherwise leave the call without a line, a ring plan or an IVR. A
   // trigger normalises new writes; this keeps existing data working.
-  const all = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("active", true);
+  const all = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId);
   if (all.error) throw new Error(`line lookup failed: ${all.error.message}`);
   const loose = (all.data ?? []).filter((row) => normalizeE164(row.phone_number) === normalized);
   const match = pick(loose);

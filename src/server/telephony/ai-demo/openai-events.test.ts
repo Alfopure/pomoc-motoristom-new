@@ -10,6 +10,7 @@ import { startAiDemo, type AiDemoDeps } from "./orchestrator";
 
 const ENV = {
   AI_DEMO_ENABLED: "true",
+  AI_DEMO_FROM_NUMBER: AI_DEMO_NEUTRAL_LINE,
   AI_DEMO_ALLOWED_RECIPIENTS: "+421910988882",
   OPENAI_API_KEY: "sk-proj-test",
   OPENAI_LIVE_PROJECT_ID: "proj_test123",
