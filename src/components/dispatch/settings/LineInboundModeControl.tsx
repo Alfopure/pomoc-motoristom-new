@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Loader2 } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { ChevronDown, Loader2, Settings2 } from "lucide-react";
 
 import type { LineInboundMode } from "@/server/telephony/state/types";
 import type { LineDoc } from "@/server/telephony/config-service";
@@ -10,8 +10,9 @@ import { settingsInputClass } from "./settings-ui";
 
 type Mode = LineInboundMode | null;
 
-export function LineInboundModeControl({ line, defaultMode, canEdit, onSaved }: {
+export function LineInboundModeControl({ line, defaultMode, canEdit, onSaved, children }: {
   line: LineDoc;
+  children?: ReactNode;
   defaultMode: "ring_first" | "queue_first" | null;
   canEdit: boolean;
   onSaved: (response: RoutingConfigResponse) => void;
@@ -81,8 +82,19 @@ export function LineInboundModeControl({ line, defaultMode, canEdit, onSaved }: 
         : effectiveMode === "ring_first"
           ? "Hovor prejde krokmi plánu. V každom kroku si zvolíš, komu a akým spôsobom sa má zvoniť."
           : "Linka preberá nastavenie organizácie. Predvolený režim sa v tejto odpovedi nepodarilo zistiť.";
+  const modeLabel = effectiveMode === "queue_first" ? "Ručné prevzatie v čakárni"
+    : effectiveMode === "ring_all" ? "Vždy všetkým naraz"
+      : effectiveMode === "ring_ordered" ? "Vždy postupne"
+        : effectiveMode === "ring_first" ? "Automaticky podľa plánu" : "Podľa nastavenia organizácie";
   return (
-    <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4">
+    <div className="mt-2">
+      <details className="group/mode">
+        <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500 [&::-webkit-details-marker]:hidden">
+          <Settings2 size={14} aria-hidden="true" />
+          <span>Režim linky:</span><span className="font-medium text-zinc-800">{modeLabel}</span>
+          <span className="ml-auto inline-flex min-h-8 items-center gap-1 font-medium text-zinc-600">Zmeniť režim<ChevronDown size={13} className="transition group-open/mode:rotate-180" aria-hidden="true" /></span>
+        </summary>
+        <div className="mt-2 rounded-lg bg-zinc-50 p-3 sm:p-4">
       <label className="grid max-w-xl gap-1 text-sm font-semibold text-zinc-950">
         Čo sa stane s hovorom na číslo {line.phoneNumber}
         <select
@@ -100,7 +112,10 @@ export function LineInboundModeControl({ line, defaultMode, canEdit, onSaved }: 
       </label>
       <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-600">{explanation}</p>
       <p className="mt-2 text-xs leading-5 text-zinc-500">Platí po úvodnej hláške, otváracích hodinách a prípadnom hlasovom menu. <span className="font-medium text-zinc-700">Výber režimu sa uloží ihneď.</span></p>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+          {children}
+        </div>
+      </details>
+      <div className="flex flex-wrap items-center gap-2 empty:hidden">
         {saving && <span role="status" className="inline-flex items-center gap-1 text-xs font-medium text-amber-800"><Loader2 size={14} className="animate-spin" aria-hidden="true" />Ukladám režim čísla…</span>}
         {uncertain && <button type="button" onClick={() => void verify(selection).catch(() => setError("Stav sa stále nepodarilo overiť. Skús to znova."))} className="rounded-md border border-amber-400 bg-white px-2 py-1 text-xs font-semibold">Overiť stav</button>}
         {notice && <span role="status" className="text-xs font-medium text-emerald-800">{notice}</span>}

@@ -1,13 +1,14 @@
-import { test,expect,type Page,type Locator } from "@playwright/test";
+import { test,expect,type Page } from "@playwright/test";
 import { build } from "esbuild";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/postcss";
-import { routingFixture,multiLineRoutingFixture,ids,extraIds } from "./fixtures/incoming-routing-data";
+import { routingFixture,multiLineRoutingFixture,dualDeviceRoutingFixture,ids,extraIds } from "./fixtures/incoming-routing-data";
 import type { RingGroupInput,RingPlanInput,RoutingDocument } from "../src/server/telephony/config-service";
 const postcss=createRequire(require.resolve("@tailwindcss/postcss"))("postcss");
 let script:string,css:string;
+const screenshotDirectory=process.env.ROUTING_SCREENSHOT_DIR??".context";
 test.use({ launchOptions: { ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ? {executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH}:{}), args:["--no-sandbox"] } });
 test.beforeAll(async()=>{
  const bundle=await build({entryPoints:["e2e/fixtures/incoming-routing.tsx"],outfile:".context/incoming-routing-fixture.js",bundle:true,write:false,platform:"browser",format:"iife",jsx:"automatic",define:{"process.env":JSON.stringify({NODE_ENV:"production"})}});
@@ -52,8 +53,10 @@ async function openPlanDetails(page:Page,planId=ids.plan){
   await card.getByText("Názov, stav a použitie plánu",{exact:true}).click();
  return card;
 }
-async function openMembers(card:Locator){
- await card.locator("summary").filter({hasText:"Upraviť členov"}).click();
+async function openLineMode(page:Page){
+ const control=page.getByLabel(/Čo sa stane s hovorom na číslo/);
+ if(!await control.isVisible())await page.locator("summary").filter({hasText:"Režim linky"}).click();
+ return control;
 }
 function expectedGroups(document:RoutingDocument){
  // The read-only call history is not part of the replacement API contract.
@@ -63,30 +66,74 @@ function expectedGroups(document:RoutingDocument){
  }))}));
 }
 for(const width of [1440,1280,390])test(`combined editor remains readable at ${width}px`,async({page})=>{
- const errors=await boot(page,width,{writes:0,document:multiLineRoutingFixture,defaultLine:true});await expect(page.getByRole("button",{name:"Uložiť všetky zmeny"})).toHaveCount(1);
+ const errors=await boot(page,width,{writes:0,document:dualDeviceRoutingFixture,defaultLine:true});await expect(page.getByRole("button",{name:"Uložiť všetky zmeny"})).toHaveCount(1);
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
- await page.screenshot({path:`.context/routing-implemented-${width}.png`,fullPage:true});
+ const recipients=page.getByRole("list",{name:"Príjemcovia skupiny Martin – web a mobil",exact:true});
+ await expect(recipients.getByRole("listitem")).toHaveCount(2);
+ await expect(recipients.getByRole("listitem").filter({hasText:"Martin Novák"})).toHaveCount(2);
+ await expect(page.getByRole("textbox",{name:/^Externé číslo/})).toHaveCount(0);
+ await page.screenshot({path:path.join(screenshotDirectory,`call-flow-${width}.png`),fullPage:true});
+ if(width===1440)await page.getByRole("region",{name:"Prichádzajúce hovory",exact:true}).screenshot({path:path.join(screenshotDirectory,"call-flow-detail.png")});
  if(width!==1280){
   const card=page.locator(`#ring-plan-${ids.plan}`);
-  await openMembers(card);
+  await card.getByRole("radiogroup",{name:"Ako zvoní",exact:true}).getByRole("radio",{name:/^postupne$/i}).click();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  await page.screenshot({path:`.context/routing-members-${width}.png`,fullPage:true});
-  await card.getByLabel("Ako zvoní",{exact:true}).selectOption("ordered");
-  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  await page.screenshot({path:`.context/routing-ordered-${width}.png`,fullPage:true});
+  await page.screenshot({path:path.join(screenshotDirectory,`call-flow-ordered-${width}.png`),fullPage:true});
  }
  expect(errors).toEqual([]);
 });
 test("one save includes inline group and plan changes without losing overrides",async({page})=>{
  const api:Api={writes:0};const errors=await boot(page,1440,api);
- await page.getByLabel("Ako zvoní",{exact:true}).selectOption("ordered");
- await openMembers(page.locator(`#ring-plan-${ids.plan}`));
+ await page.getByRole("radiogroup",{name:"Ako zvoní",exact:true}).getByRole("radio",{name:/^postupne$/i}).click();
  await page.locator(`#ring-plan-${ids.plan}`).getByText("Podrobnosti skupiny Dispečeri",{exact:true}).click();
  await page.getByLabel("Názov skupiny",{exact:true}).filter({visible:true}).fill("Tím pomoci");
- await page.getByLabel(/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/).fill("25");
+ await page.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/}).fill("25");
  await page.getByRole("button",{name:"Uložiť všetky zmeny"}).click();
  await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
  expect(api.writes).toBe(1);expect(api.saved).toMatchObject({version:5,groups:[{name:"Tím pomoci",members:[{ringSecs:null},{ringSecs:30}]}],plans:[{steps:[{timeoutSecs:25,strategy:"ordered"}]}]});expect(errors).toEqual([]);
+});
+test("keyboard ringing and fallback choices save the intended route",async({page})=>{
+ const api:Api={writes:0};await boot(page,1440,api);
+ const strategy=page.getByRole("radiogroup",{name:"Ako zvoní",exact:true});
+ await strategy.getByRole("radio",{name:/naraz$/i}).focus();
+ await page.keyboard.press("ArrowRight");
+ await expect(strategy.getByRole("radio",{name:/^postupne$/i})).toBeChecked();
+ const fallback=page.getByRole("radiogroup",{name:"Keď nikto nezdvihne",exact:true});
+ await fallback.getByRole("radio",{name:"Čakáreň",exact:true}).focus();
+ await page.keyboard.press("ArrowRight");
+ await expect(fallback.getByRole("radio",{name:"Iné číslo",exact:true})).toBeChecked();
+ await page.getByRole("textbox",{name:/^Číslo presmerovania/}).fill("+421900000004");
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
+ expect(api.writes).toBe(1);
+ expect(api.saved).toMatchObject({groups:expectedGroups(routingFixture),plans:[{fallbackKind:"external_number",fallbackNumber:"+421900000004",steps:[{strategy:"ordered"}]}]});
+});
+test("recipient rows support keyboard ordering and directly editing a new number",async({page})=>{
+ const api:Api={writes:0};await boot(page,1440,api);
+ const card=page.locator(`#ring-plan-${ids.plan}`);
+ const recipients=card.getByRole("list",{name:"Príjemcovia skupiny Dispečeri",exact:true});
+ await card.getByRole("radiogroup",{name:"Ako zvoní",exact:true}).getByRole("radio",{name:/^postupne$/i}).click();
+ await card.getByRole("button",{name:"Pridať číslo",exact:true}).click();
+ await expect(recipients.locator('[role="listitem"]')).toHaveCount(3);
+ await card.getByRole("textbox",{name:/^Externé číslo/}).fill("+421900000004");
+ await card.getByLabel("Vlastník externého čísla",{exact:true}).selectOption(ids.jana);
+ const handle=card.getByRole("button",{name:"Presunúť 1. člena skupiny Dispečeri",exact:true});
+ await handle.focus();
+ await page.keyboard.press("Space");
+ await expect(handle).toHaveAttribute("aria-pressed","true");
+ await page.keyboard.press("ArrowDown");
+ await expect(page.getByRole("status").filter({hasText:new RegExp(`over droppable area .*${routingFixture.groups[0].members[1].id}`)})).toBeAttached();
+ await page.keyboard.press("Space");
+ await expect(handle).not.toHaveAttribute("aria-pressed","true");
+ await expect(recipients.getByRole("listitem").nth(0)).toContainText("Peter Kováč");
+ await expect(recipients.getByRole("listitem").nth(1)).toContainText("Jana Nováková");
+ await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
+ await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
+ expect(api.saved).toMatchObject({groups:[{members:[
+  {id:routingFixture.groups[0].members[1].id,profileId:ids.peter,position:0,ringSecs:30},
+  {id:routingFixture.groups[0].members[0].id,profileId:ids.jana,position:1,ringSecs:null},
+  {memberKind:"external_number",externalNumber:"+421900000004",ownerProfileId:ids.jana,position:2,ringSecs:null},
+ ]}]});
 });
 test("conflict preserves both drafts and displays current saved comparison",async({page})=>{
  const api:Api={mode:"conflict",writes:0};await boot(page,1440,api);await openPlanDetails(page);await page.getByLabel("Názov plánu",{exact:true}).fill("Moje zmeny");await page.getByRole("button",{name:"Uložiť všetky zmeny"}).click();
@@ -119,7 +166,7 @@ test("active line opens its plan and saving keeps unrelated plans and groups int
  await expect(page.locator(`#ring-plan-${extraIds.secondPlan}`)).toBeVisible();
  await expect(page.locator(`#ring-plan-${ids.plan}`)).toHaveCount(0);
  await line.selectOption(ids.line);
- await page.getByLabel(/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/).fill("25");
+ await page.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/}).fill("25");
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
  await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
  const expectedPlans=structuredClone(multiLineRoutingFixture.plans);
@@ -142,16 +189,15 @@ test("active line opens its plan and saving keeps unrelated plans and groups int
 test("simultaneous ringing hides personal timing and ordered ringing restores the saved override",async({page})=>{
  const api:Api={writes:0};await boot(page,1440,api);
  const card=page.locator(`#ring-plan-${ids.plan}`);
- await openMembers(card);
  await expect(card.getByLabel(/^Vlastný čas \(s\)/)).toHaveCount(0);
- await card.getByLabel("Ako zvoní",{exact:true}).selectOption("ordered");
+ await card.getByRole("radiogroup",{name:"Ako zvoní",exact:true}).getByRole("radio",{name:/^postupne$/i}).click();
  const memberTimes=card.getByLabel(/^Vlastný čas \(s\)/);
  await expect(memberTimes).toHaveCount(2);
  await expect(memberTimes.nth(0)).toHaveValue("");
  await expect(memberTimes.nth(1)).toHaveValue("30");
- await card.getByLabel("Ako zvoní",{exact:true}).selectOption("all");
+ await card.getByRole("radiogroup",{name:"Ako zvoní",exact:true}).getByRole("radio",{name:/naraz$/i}).click();
  await expect(memberTimes).toHaveCount(0);
- await card.getByLabel(/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/).fill("25");
+ await card.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/}).fill("25");
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
  await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
  expect(api.saved).toMatchObject({groups:expectedGroups(routingFixture),plans:[{steps:[{strategy:"all",timeoutSecs:25}]}]});
@@ -161,11 +207,11 @@ test("queue mode hides automatic controls without losing drafts and hidden error
  const api:Api={writes:0,document:multiLineRoutingFixture};await boot(page,1440,api);
  const card=await openPlanDetails(page);
  await card.getByLabel("Názov plánu",{exact:true}).fill("");
- const mode=page.getByLabel(/Čo sa stane s hovorom na číslo/);
+ const mode=await openLineMode(page);
  await mode.selectOption("queue_first");
  await expect(page.getByRole("heading",{name:"Hovor čaká na ručné prevzatie",exact:true})).toBeVisible();
  await expect(page.locator('[id^="ring-plan-"]')).toHaveCount(0);
- await expect(page.getByLabel(/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/)).toHaveCount(0);
+ await expect(page.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/})).toHaveCount(0);
  await expect(page.getByLabel("Keď nikto nezdvihne",{exact:true})).toHaveCount(0);
  await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
  expect(api.writes).toBe(0);
@@ -180,6 +226,7 @@ test("queue mode hides automatic controls without losing drafts and hidden error
  await expect(restored.getByText("Plán potrebuje názov.",{exact:true})).toBeVisible();
  await restored.getByLabel("Názov plánu",{exact:true}).fill("Upravené prichádzajúce hovory");
  await page.getByRole("combobox",{name:"Linka",exact:true}).selectOption(ids.line);
+ await openLineMode(page);
  await mode.selectOption("ring_first");
  await expect(page.locator(`#ring-plan-${ids.plan}`)).toBeVisible();
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
@@ -196,20 +243,19 @@ test("line strategy overrides show effective ringing without rewriting the share
  document.plans[0].steps[0].strategy="ordered";
  const api:Api={writes:0,document};await boot(page,1440,api);
  const card=page.locator(`#ring-plan-${ids.plan}`);
- await expect(card.getByRole("combobox",{name:"Ako zvoní",exact:true})).toHaveCount(0);
+ await expect(card.getByRole("radiogroup",{name:"Ako zvoní",exact:true})).toHaveCount(0);
  await expect(card.getByText(/Účinný čas kroku: najviac 20 s pre všetkých v jednom kole/)).toBeVisible();
- await openMembers(card);
  await expect(card.getByLabel(/^Vlastný čas \(s\)/)).toHaveCount(0);
- await card.getByLabel(/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/).fill("25");
+ await card.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/}).fill("25");
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
  await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
  expect(api.saved).toMatchObject({groups:expectedGroups(document),plans:[{steps:[{strategy:"ordered",timeoutSecs:25}]}]});
- await page.getByLabel(/Čo sa stane s hovorom na číslo/).selectOption("ring_ordered");
- await expect(card.getByRole("combobox",{name:"Ako zvoní",exact:true})).toHaveCount(0);
+ await (await openLineMode(page)).selectOption("ring_ordered");
+ await expect(card.getByRole("radiogroup",{name:"Ako zvoní",exact:true})).toHaveCount(0);
  await expect(card.getByLabel(/^Vlastný čas \(s\)/).nth(1)).toHaveValue("30");
  // The library exposes the stored shared strategy, independent of this line.
  await page.getByRole("button",{name:"Všetky plány",exact:true}).click();
- await expect(card.getByRole("combobox",{name:"Ako zvoní",exact:true})).toHaveValue("ordered");
+ await expect(card.getByRole("radiogroup",{name:"Ako zvoní",exact:true}).getByRole("radio",{name:/^postupne$/i})).toBeChecked();
 });
 
 test("unavailable personal mobile controls preserve existing ownership during an unrelated save",async({page})=>{
@@ -219,10 +265,10 @@ test("unavailable personal mobile controls preserve existing ownership during an
  const api:Api={writes:0,document};await boot(page,1440,api);
  await page.getByRole("combobox",{name:"Linka",exact:true}).selectOption(extraIds.secondLine);
  const card=page.locator(`#ring-plan-${extraIds.secondPlan}`);
- await openMembers(card);
+ await card.getByRole("button",{name:/^Upraviť príjemcu/}).click();
  await expect(card.getByLabel("Vlastník externého čísla",{exact:true})).toHaveCount(0);
  await expect(card.getByRole("textbox",{name:/^Externé číslo/})).toBeVisible();
- await card.getByLabel(/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/).fill("40");
+ await card.getByRole("textbox",{name:/^(Spoločný čas zvonenia|Predvolený čas na osobu) \(s\)$/}).fill("40");
  await page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true}).click();
  await expect(page.getByText("Skupiny aj plány sú uložené spolu.",{exact:false})).toBeVisible();
  const expectedPlans=structuredClone(document.plans);

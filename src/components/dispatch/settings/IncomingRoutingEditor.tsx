@@ -1,13 +1,14 @@
 "use client";
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { DraftEditorState } from "../useDraftEditors";
-import { ArrowRight, Library, Loader2, PhoneCall, Save, Undo2, Users } from "lucide-react";
+import { ArrowDown, Check, Clock3, Library, Loader2, PhoneIncoming, Save, Settings2, Undo2 } from "lucide-react";
 import type { RoutingDocument } from "@/server/telephony/config-service";
+import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
 import { ConfigRequestError, loadRoutingConfig, saveRoutingConfig, type RoutingConfigResponse } from "./config-client";
 import { FALLBACK_DESTINATION_ALLOWLIST, validateRingGroupDrafts, type GroupDraft } from "./ring-groups-model";
 import { describeRingPlan, ringPlanIdsInUse, validateRingPlanDrafts, type PlanDraft } from "./ring-plan-model";
-import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingLineBehaviour, incomingMatches, incomingPayload, incomingPlanIdsForLine, incomingRouteSummary, initialIncomingLineId, mergeSavedLine } from "./incoming-routing-model";
+import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingLineBehaviour, incomingMatches, incomingPayload, incomingPlanIdsForLine, initialIncomingLineId, mergeSavedLine } from "./incoming-routing-model";
 import { RingGroupsEditor } from "./RingGroupsEditor";
 import { RingPlanEditor } from "./RingPlanEditor";
 import { LineInboundModeControl } from "./LineInboundModeControl";
@@ -63,7 +64,6 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLi
   const behaviour = incomingLineBehaviour(line, defaultMode);
   const manualQueue = Boolean(line && behaviour.mode === "queue_first");
   const unknownMode = Boolean(line && behaviour.mode === null);
-  const routeSummary = incomingRouteSummary(working, lineId);
   const activeRoute = Boolean(line?.active && effectiveLine?.active);
   const activeIvr = working.ivrMenus.some(menu => menu.id === effectiveLine?.ivrMenuId && menu.active);
   const activeHours = working.businessHours.some(hours => hours.id === effectiveLine?.businessHoursId && hours.active);
@@ -118,43 +118,67 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLi
   // The parent owns only navigation; this component remains the sole draft owner.
   useEffect(() => { onActionsChange?.({ save, discard }); return () => onActionsChange?.(null); });
   return <section className="grid min-w-0 gap-3 [&_label>span]:font-medium [&_label>span]:normal-case" aria-label="Prichádzajúce hovory">
-    <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-[0_1px_3px_rgba(20,30,50,0.04)]">
-      <h2 className="text-base font-semibold text-zinc-900">Prichádzajúce hovory</h2>
-      <p className="mt-1 text-sm text-zinc-600">Vyber číslo a nastav cestu hovoru. Zmeny členov a plánov zostávajú v návrhu, kým ich neuložíš.</p>
-      <div className="mt-3 flex flex-wrap items-end gap-3">
-        <label className="grid min-w-0 gap-1 text-xs font-medium text-zinc-600">Linka<select className={settingsInputClass} value={lineId} onChange={event => { const chosen = working.lines.find(row => row.id === event.target.value); const effective = chosen?.returnLineId ? working.lines.find(row => row.id === chosen.returnLineId) : chosen; setLineId(event.target.value); setFocusPlanId(effective?.ringPlanId ?? null); }}><option value="">Všetky plány vrátane nepoužitých</option>{working.lines.map(row => <option key={row.id} value={row.id}>{row.label} · {row.phoneNumber}{row.active ? "" : " (neaktívna)"}</option>)}</select></label>
-        {line && <button type="button" onClick={showLibrary} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-zinc-200 px-3 text-sm font-medium"><Library size={15} aria-hidden="true" />Všetky plány</button>}
-        {line && <button type="button" className="min-h-10 rounded-lg border border-zinc-200 px-3 text-sm font-medium" onClick={() => onNavigate({ section: "telephony", tab: "numbers", lineId: line.id })}>Priradenie linky</button>}
-        {effectiveLine?.businessHoursId && <button type="button" className="min-h-10 rounded-lg border border-zinc-200 px-3 text-sm font-medium" onClick={() => onNavigate({ section: "telephony", tab: "hours", lineId: effectiveLine.id, businessHoursId: effectiveLine.businessHoursId! })}>Otváracie hodiny</button>}
-        {effectiveLine?.ivrMenuId && <button type="button" className="min-h-10 rounded-lg border border-zinc-200 px-3 text-sm font-medium" onClick={() => onNavigate({ section: "telephony", tab: "ivr", lineId: effectiveLine.id, ivrMenuId: effectiveLine.ivrMenuId! })}>Hlasové menu</button>}
+    <header className="flex flex-wrap items-start justify-between gap-3 px-1 pt-1">
+      <div>
+        <h2 className="text-2xl font-semibold tracking-tight text-zinc-950">{line ? "Cesta prichádzajúceho hovoru" : "Knižnica plánov"}</h2>
+        <p className="mt-1.5 text-sm text-zinc-500">{line ? "Kto hovor prijme a čo sa stane, ak nezdvihne." : "Všetky postupy zvonenia na jednom mieste."}</p>
       </div>
-      {line && <ol aria-label="Cesta hovoru" className="mt-4 grid gap-3 rounded-lg border border-zinc-100 bg-zinc-50 p-3 sm:grid-cols-3">
-        {[
-          { label: "Číslo", text: `${line.phoneNumber}${line.active ? "" : " · neaktívne"}`, icon: PhoneCall },
-          { label: manualQueue ? "Čakáreň" : "Komu zvoní", text: !activeRoute ? routeSummary.ring : manualQueue ? "Bez automatického zvonenia" : unknownMode ? "Podľa predvoľby organizácie" : routeSummary.ring, icon: Users },
-          { label: manualQueue ? "Prevzatie hovoru" : "Keď nikto nezdvihne", text: !activeRoute ? routeSummary.fallback : manualQueue ? "Ručne v aplikácii" : unknownMode ? "Podľa predvoľby organizácie" : routeSummary.fallback, icon: ArrowRight },
-        ].map((item, index) => <li key={item.label} className="flex min-w-0 items-start gap-2"><item.icon size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-zinc-500" /><div className="min-w-0"><span className="text-xs font-medium text-zinc-500">{index + 1}. {item.label}</span><p className="mt-1 text-sm text-zinc-800">{item.text}</p></div></li>)}
-      </ol>}
-      {line && (activeHours || activeIvr) && <p className="mt-2 text-xs text-zinc-500">Pred zvonením sa uplatnia {activeHours ? "otváracie hodiny" : ""}{activeHours && activeIvr ? " a " : ""}{activeIvr ? "voľba v hlasovom menu" : ""}.{activeIvr ? " Nižšie sú aj plány dostupné cez IVR." : ""}</p>}
-      {line && <LineInboundModeControl key={line.id} line={line} defaultMode={defaultMode} canEdit={canEdit} onSaved={acceptLineMode} />}
-      {line?.returnLineId && <p className="mt-2 text-xs text-zinc-600">Návratové číslo používa smerovanie linky {effectiveLine?.label ?? "(nedostupná)"}.</p>}
+      {line && <button type="button" onClick={showLibrary} className="inline-flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-zinc-600 hover:bg-white hover:text-zinc-950"><Library size={16} aria-hidden="true" />Všetky plány</button>}
+    </header>
+    <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-4 sm:px-6">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-zinc-900 text-white"><PhoneIncoming size={22} aria-hidden="true" /></span>
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400">{line ? "Volajúci vytočí" : "Nastavenie pre linku"}</p>
+            <p className="mt-0.5 break-words text-xl font-semibold tracking-tight text-zinc-950 sm:text-2xl">{line ? formatPhoneNumberForDisplay(line.phoneNumber) : "Všetky linky"}</p>
+            {line && <p className="mt-1 text-sm text-zinc-500">{line.label}{!activeRoute && <span className="ml-2 rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-800">Smerovanie nie je aktívne</span>}</p>}
+          </div>
+        </div>
+        <label className="grid w-full min-w-0 gap-1 text-xs text-zinc-500 sm:w-auto sm:max-w-[260px]">{line ? "Zmeniť linku" : "Vybrať linku"}
+          <select aria-label="Linka" className={settingsInputClass} value={lineId} onChange={event => { setLineId(event.target.value); setFocusPlanId(null); }}>
+            <option value="">Všetky plány vrátane nepoužitých</option>
+            {working.lines.map(row => <option key={row.id} value={row.id}>{row.label} · {row.phoneNumber}{row.active ? "" : " (neaktívna)"}</option>)}
+          </select>
+        </label>
+      </div>
+      {line && <LineInboundModeControl key={line.id} line={line} defaultMode={defaultMode} canEdit={canEdit} onSaved={acceptLineMode}>
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-zinc-100 pt-2 text-xs text-zinc-500">
+        <button type="button" className="inline-flex min-h-8 items-center gap-1.5 hover:text-zinc-950" onClick={() => onNavigate({ section: "telephony", tab: "numbers", lineId: line.id })}><Settings2 size={13} aria-hidden="true" />Priradenie linky</button>
+        {effectiveLine?.businessHoursId && <button type="button" className="inline-flex min-h-8 items-center gap-1.5 hover:text-zinc-950" onClick={() => onNavigate({ section: "telephony", tab: "hours", lineId: effectiveLine.id, businessHoursId: effectiveLine.businessHoursId! })}><Clock3 size={13} aria-hidden="true" />Otváracie hodiny</button>}
+        {effectiveLine?.ivrMenuId && <button type="button" className="min-h-8 hover:text-zinc-950" onClick={() => onNavigate({ section: "telephony", tab: "ivr", lineId: effectiveLine.id, ivrMenuId: effectiveLine.ivrMenuId! })}>Hlasové menu</button>}
+        </div>
+      </LineInboundModeControl>}
+      {line && (activeHours || activeIvr) && <p className="mt-2 text-xs leading-5 text-zinc-500">Najprv sa uplatnia {activeHours ? "otváracie hodiny" : ""}{activeHours && activeIvr ? " a " : ""}{activeIvr ? "voľba v hlasovom menu" : ""}.{activeIvr ? " Plány nižšie patria jednotlivým vetvám menu." : ""}</p>}
+      {line?.returnLineId && <p className="mt-2 text-xs text-zinc-500">Návratové číslo používa smerovanie linky {effectiveLine?.label ?? "(nedostupná)"}.</p>}
       {target?.planId && !working.plans.some(plan => plan.id === target.planId) && <SettingsNotice tone="warning">Vybraný plán už neexistuje alebo k nemu nemáš prístup. Zobrazuje sa dostupná konfigurácia.</SettingsNotice>}
     </div>
+    {line && <div className="-my-3 flex items-center gap-2 pl-5 text-xs text-zinc-400 sm:pl-7" aria-hidden="true"><ArrowDown size={17} /><span>{!activeRoute ? "Uložený postup pre neaktívnu linku" : manualQueue ? "Hovor čaká na operátora" : "Hovor pokračuje podľa tohto postupu"}</span></div>}
     {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
     {notice && <SettingsNotice tone="success">{notice}</SettingsNotice>}
     {uncertain && <button type="button" disabled={saving} onClick={() => void verify()} className="justify-self-start rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold">Overiť uložený stav</button>}
     {remote && <details open className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm"><summary className="cursor-pointer font-semibold">Konflikt: porovnať uloženú konfiguráciu a vlastný návrh</summary><div className="mt-2 grid gap-3 md:grid-cols-2">{[{ title: "Aktuálne uložené", document: remote }, { title: "Tvoj zachovaný návrh", document: working }].map(entry => <div key={entry.title}><h3 className="font-semibold">{entry.title}</h3>{entry.document.plans.map(plan => <p className="mt-2" key={plan.id}><strong>{plan.name}:</strong> {describeRingPlan(incomingDraft(entry.document).plans.find(row => row.id === plan.id)!, entry.document.groups, entry.document.limits?.maxRingFanout)}</p>)}{entry.document.groups.map(group => <p key={group.id} className="mt-1 text-xs">{group.name}: {group.members.map(member => member.memberKind === "operator" ? entry.document.operators.find(operator => operator.profileId === member.profileId)?.displayName ?? "Operátor" : member.externalNumber).join(", ") || "bez členov"}</p>)}</div>)}</div><p className="mt-3 text-xs">Pre bezpečnú novú úpravu načítaj uložený stav. Vlastné hodnoty si najprv môžeš skopírovať z návrhu.</p><button type="button" onClick={discard} className="mt-2 min-h-10 rounded-lg border border-amber-300 bg-white px-3 font-semibold">Zahodiť návrh a načítať uložené</button></details>}
-    {manualQueue || unknownMode ? <div className="rounded-xl border border-zinc-200 bg-white p-4">
+    {manualQueue || unknownMode ? <div className="rounded-2xl border border-zinc-200 bg-white p-6">
+      <div className="mb-4 grid h-12 w-12 place-items-center rounded-xl bg-yellow-50 text-zinc-800"><Clock3 size={24} aria-hidden="true" /></div>
       <h3 className="font-semibold text-zinc-900">{manualQueue ? "Hovor čaká na ručné prevzatie" : "Predvolený režim nie je dostupný"}</h3>
       <p className="mt-2 text-sm leading-6 text-zinc-600">{manualQueue ? "Operátor si hovor vyberie v čakárni a prevezme ho cez pripojený telefón v aplikácii. Automatické kroky ani nastavenie „Keď nikto nezdvihne“ sa v tomto režime nepoužijú." : "Účinné zvonenie nemožno určiť bez predvoľby organizácie. Uložené plány môžeš prezerať v knižnici."}</p>
       <button type="button" onClick={showLibrary} className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-lg border border-zinc-200 px-3 text-sm font-medium"><Library size={15} aria-hidden="true" />Upraviť plány v knižnici</button>
     </div> : <>
       {!line && <p className="px-1 text-sm text-zinc-600">Knižnica obsahuje všetky plány vrátane nepoužitých. Úprava zdieľaného plánu sa prejaví na všetkých linkách, ktoré ho používajú.</p>}
-      <RingPlanEditor canEdit={canEdit && !saving} document={working} controlled={{ plans: draft.plans, onChange: setPlans }} visiblePlanIds={visiblePlanIds} strategyOverride={line ? behaviour.strategyOverride : null} onAddPlan={showLibrary} focusPlanId={focusPlanId} focusGroupId={target?.groupId} onSaved={onSaved} onNavigateToIvr={() => onNavigate({ section: "telephony", tab: "ivr" })} onNavigateToNumbers={() => onNavigate({ section: "telephony", tab: "numbers" })} renderGroupEditor={(groupId, context) => <RingGroupsEditor canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onlyGroupId={groupId} timingContext={context} onSaved={onSaved} onNavigateToPlan={revealPlan} />} />
+      <RingPlanEditor canEdit={canEdit && !saving} document={working} controlled={{ plans: draft.plans, onChange: setPlans }} visiblePlanIds={visiblePlanIds} strategyOverride={line ? behaviour.strategyOverride : null} onAddPlan={showLibrary} focusPlanId={focusPlanId} focusGroupId={target?.groupId} onSaved={onSaved} onNavigateToIvr={() => onNavigate({ section: "telephony", tab: "ivr" })} onNavigateToNumbers={() => onNavigate({ section: "telephony", tab: "numbers" })} renderGroupEditor={(groupId, context) => <RingGroupsEditor canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onlyGroupId={groupId} timingContext={context} groupSelector={context.groupSelector} onSaved={onSaved} onNavigateToPlan={revealPlan} />} />
     </>}
-    <details className="rounded-xl border border-zinc-200 bg-white" open={groupsOpen} onToggle={event => setGroupsOpen(event.currentTarget.open)}><summary className="cursor-pointer px-4 py-3 text-sm font-semibold">Knižnica skupín ({draft.groups.length}) · pridať skupinu a upraviť nepoužité</summary><RingGroupsEditor canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onSaved={onSaved} onNavigateToPlan={revealPlan} /></details>
-    <div className={`${dirty ? "sticky bottom-0 z-10 shadow-[0_-2px_10px_rgba(20,30,50,0.05)]" : ""} rounded-xl border border-zinc-200 bg-white p-3`}>
-      <div className="flex flex-wrap items-center gap-2"><button type="button" disabled={!canEdit || !dirty || saving || uncertain || Boolean(remote) || issues.length > 0} onClick={() => void save()} className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-[#FCD703] px-4 text-sm font-semibold text-zinc-950 disabled:opacity-40">{saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}Uložiť všetky zmeny</button><button type="button" disabled={!dirty || saving} onClick={() => { if (window.confirm("Zahodiť všetky neuložené zmeny skupín a plánov?")) discard(); }} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-zinc-200 px-3 text-sm font-medium disabled:opacity-40"><Undo2 size={15} />Zahodiť</button><span role="status" className="text-xs text-zinc-600">{dirty ? "Neuložené zmeny skupín a plánov" : "Všetky zmeny sú uložené"}</span></div>
+    <details className="border-t border-zinc-200 pt-1" open={groupsOpen} onToggle={event => setGroupsOpen(event.currentTarget.open)}>
+      <summary className="cursor-pointer px-1 py-3 text-xs font-medium text-zinc-500">Knižnica skupín ({draft.groups.length}) · správa zdieľaných zoznamov</summary>
+      <RingGroupsEditor canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onSaved={onSaved} onNavigateToPlan={revealPlan} />
+    </details>
+    <div className={`${dirty ? "sticky bottom-0 z-10 shadow-[0_-4px_20px_rgba(20,30,50,0.05)]" : ""} rounded-xl border border-zinc-200 bg-white px-4 py-3 sm:px-5`}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div role="status" className="flex items-center gap-2 text-sm text-zinc-600">{dirty ? <span className="h-2 w-2 rounded-full bg-amber-400" /> : <Check size={16} className="text-zinc-400" aria-hidden="true" />}{dirty ? "Neuložené zmeny skupín a plánov" : "Všetky zmeny sú uložené"}</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" disabled={!dirty || saving} onClick={() => { if (window.confirm("Zahodiť všetky neuložené zmeny skupín a plánov?")) discard(); }} className="inline-flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-zinc-500 hover:bg-zinc-50 disabled:opacity-40"><Undo2 size={15} aria-hidden="true" />Zahodiť</button>
+          <button type="button" disabled={!canEdit || !dirty || saving || uncertain || Boolean(remote) || issues.length > 0} onClick={() => void save()} className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-[#FCD703] px-4 text-sm font-semibold text-zinc-950 disabled:opacity-40">{saving ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Save size={16} aria-hidden="true" />}Uložiť všetky zmeny</button>
+        </div>
+      </div>
       {issues.length > 0 && <div className="mt-2"><SettingsIssueList issues={issues} /><button type="button" onClick={revealIssues} className="mt-2 min-h-9 rounded-md border border-zinc-200 px-3 text-xs font-semibold">Zobraziť všetky plány a chyby</button></div>}
     </div>
   </section>;

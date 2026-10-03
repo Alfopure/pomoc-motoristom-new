@@ -1,4 +1,5 @@
 import type { RoutingDocument } from "../../src/server/telephony/config-service";
+import { DEFAULT_OPERATOR_SETTINGS } from "../../src/lib/telephony/operator-settings";
 export const ids={ organization:"00000000-0000-4000-8000-000000000001", line:"00000000-0000-4000-8000-000000000201", plan:"00000000-0000-4000-8000-000000000301", group:"00000000-0000-4000-8000-000000000401", jana:"00000000-0000-4000-8000-000000000101", peter:"00000000-0000-4000-8000-000000000102" };
 export const routingFixture:RoutingDocument={
  organizationId:ids.organization,routingVersion:5,snapshotId:"fixture-v5",settingsConfigured:true,
@@ -47,4 +48,25 @@ export const multiLineRoutingFixture: RoutingDocument = {
    steps: [{ id: "00000000-0000-4000-8000-000000000331", stepIndex: 0, ringGroupId: extraIds.secondGroup, timeoutSecs: 50, strategy: "all" }],
   },
  ],
+};
+
+/** Model data only: one operator has a web endpoint and an explicitly owned mobile. */
+export const dualDeviceRoutingFixture: RoutingDocument = {
+ ...multiLineRoutingFixture,
+ lines: multiLineRoutingFixture.lines.map(line => line.id === ids.line
+  ? { ...line, label: "TEST linka", phoneNumber: "+421 232 408 700" }
+  : line),
+ operators: multiLineRoutingFixture.operators.map(operator => operator.profileId === ids.jana
+  ? { ...operator, displayName: "Martin Novák", settings: { ...DEFAULT_OPERATOR_SETTINGS, deliveryMode: "web", defaultMobileNumber: "+421900000001" } }
+  : operator),
+ groups: multiLineRoutingFixture.groups.map(group => group.id === ids.group ? {
+  ...group, name: "Martin – web a mobil", description: null,
+  members: [
+   group.members[0],
+   { ...group.members[1], memberKind: "external_number", profileId: null, externalNumber: "+421900000001", ownerProfileId: ids.jana },
+  ],
+ } : group),
+ plans: multiLineRoutingFixture.plans.map(plan => plan.id === ids.plan
+  ? { ...plan, name: "Martin – web a mobil", fallbackKind: "hangup_message" }
+  : plan),
 };
