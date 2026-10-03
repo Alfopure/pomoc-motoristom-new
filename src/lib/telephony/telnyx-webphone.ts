@@ -15,7 +15,7 @@
  * Every decision it makes is delegated to `webphone-model.ts`, which is pure
  * and unit-tested; this file is the shell that performs the effects.
  *
- * The SDK is imported lazily (`await import("@telnyx/webrtc")`) so the console
+ * The SDK adapter is imported lazily (`await import("./telnyx-rtc")`) so the console
  * bundle does not carry a WebRTC stack for users who never open the phone.
  */
 
@@ -946,7 +946,7 @@ export class TelnyxWebphone {
 
   private loadSdk(): Promise<WebphoneSdkModule> {
     if (!this.sdkModule) {
-      const promise = this.options.loadSdk ? this.options.loadSdk() : import("@telnyx/webrtc");
+      const promise = this.options.loadSdk ? this.options.loadSdk() : import("./telnyx-rtc");
       this.sdkModule = promise;
       void promise.catch(() => { if (this.sdkModule === promise) this.sdkModule = null; });
     }
