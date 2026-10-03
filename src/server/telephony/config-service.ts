@@ -364,6 +364,12 @@ export type RoutingDocument = {
   /** Present only for one-statement coherent reads. Not a CAS token. */
   snapshotId?: string;
   settingsConfigured?: boolean;
+  /** Safe UI availability and inheritance facts, included for every config reader. */
+  capabilities?: {
+    /** The personal-mobile server guard only; does not assert parallel-endpoint schema readiness. */
+    ownedMobileRouting: boolean;
+    defaultInboundCallMode: "ring_first" | "queue_first";
+  };
   groups: RingGroupDoc[];
   plans: RingPlanDoc[];
   businessHours: BusinessHoursDoc[];
@@ -1480,6 +1486,10 @@ function routingDocumentFromRows(rows: Awaited<ReturnType<typeof loadLegacyRouti
     organizationId,
     routingVersion: settings?.routing_version ?? 0,
     settingsConfigured: Boolean(settings),
+    capabilities: {
+      ownedMobileRouting: telephonyStabilityEnabled(),
+      defaultInboundCallMode: settings?.inbound_call_mode === "queue_first" ? "queue_first" : "ring_first",
+    },
     groups: groups.map((group) => ({
       id: group.id,
       name: group.name,

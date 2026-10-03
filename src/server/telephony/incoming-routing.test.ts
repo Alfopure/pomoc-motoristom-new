@@ -21,6 +21,15 @@ function fixture() {
 }
 afterEach(()=>vi.unstubAllEnvs());
 describe("incoming routing service",()=>{
+  it.each(["true", "false"])("includes truthful mobile availability (%s) and inheritance in coherent manager reads", async flag => {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", flag);
+    const h = fixture();
+    h.db.update("motorist_telephony_settings", { inbound_call_mode: "queue_first" }, () => true);
+    const document = await getCoherentRoutingDocument(h.deps, { organizationId: ORG, includeSettings: false, includeLimits: true });
+    expect(document.capabilities).toEqual({ ownedMobileRouting: flag === "true", defaultInboundCallMode: "queue_first" });
+    expect(document.settings).toBeNull();
+    expect(h.db.log.filter(row => row.kind === "query")).toHaveLength(0);
+  });
   it("does not fall back to unrelated multi-query reads when coherent RPC missing",async()=>{
     const h=createTelephonyHarness();h.db.registerRpc("motorist_routing_snapshot",()=>{throw fakeError("Could not find the function","PGRST202");});
     await expect(getCoherentRoutingDocument(h.deps,{organizationId:ORG,includeSettings:true})).rejects.toMatchObject({code:"config_snapshot_missing",status:503});

@@ -1,8 +1,10 @@
 "use client";
 
-import { useMemo, useState, type Dispatch, type SetStateAction } from "react";
-import { Loader2, Plus, Save, Trash2, Users } from "lucide-react";
+import { useId, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { ChevronDown, Loader2, Monitor, Phone, Plus, Save, Trash2, Users } from "lucide-react";
 
+import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import { isDestinationAllowed } from "@/lib/telephony/destinations";
 import type { RoutingDocument, ValidationIssue } from "@/server/telephony/config-service";
 
 import { ConfigRequestError, saveRoutingConfig, type RoutingConfigResponse } from "./config-client";
@@ -17,7 +19,6 @@ import {
   groupStepTimings,
   groupUsageNote,
   issuesByPath,
-  memberRingSecsNote,
   moveMemberInGroups,
   planReferencesUsingGroup,
   removeGroup,
@@ -49,14 +50,17 @@ export function RingGroupsEditor({
   onSaved,
   controlled,
   onlyGroupId,
+  timingContext,
 }: {
   controlled?: { groups: GroupDraft[]; onChange: Dispatch<SetStateAction<GroupDraft[]>> };
   onlyGroupId?: string;
+  timingContext?: { strategy: "all" | "ordered"; timeoutSecs: number; planId: string | null };
   canEdit: boolean;
   document: RoutingDocument;
   onNavigateToPlan?: (planId: string) => void;
   onSaved: (response: RoutingConfigResponse) => void;
 }) {
+  const headingId = useId();
   const [localGroups, setLocalGroups] = useState<GroupDraft[]>(() => groupDraftsFromDocument(document.groups));
   const groups = controlled?.groups ?? localGroups;
   const setGroups = controlled?.onChange ?? setLocalGroups;
@@ -69,10 +73,7 @@ export function RingGroupsEditor({
     () => [...document.operators].sort((left, right) => left.displayName.localeCompare(right.displayName, "sk")),
     [document.operators],
   );
-  const operatorNames = useMemo(
-    () => new Map(operators.map((operator) => [operator.profileId, operator.displayName])),
-    [operators],
-  );
+
 
   const issues = useMemo(
     () =>
@@ -108,15 +109,15 @@ export function RingGroupsEditor({
   }
 
   return (
-    <section className="rounded-md border border-zinc-200 bg-white" aria-labelledby="ring-groups-heading">
+    <section className={onlyGroupId ? "min-w-0" : "rounded-md border border-zinc-200 bg-white"} aria-labelledby={headingId}>
       {!onlyGroupId && <SettingsSectionHeader
         icon={Users}
         title="Skupiny zvonenia"
-        description="Kto zvoní pri prichádzajúcom hovore. Poradie členov sa dá ťahať myšou alebo klávesnicou."
+        description="Zdieľané zoznamy operátorov a telefónnych čísel. Zmena členov platí vo všetkých plánoch, ktoré skupinu používajú."
       />}
 
-      <div className="grid gap-4 p-4">
-        <h3 id="ring-groups-heading" className="sr-only">
+      <div className={onlyGroupId ? "grid min-w-0 gap-3 px-2 pb-3 sm:px-3" : "grid gap-4 p-4"}>
+        <h3 id={headingId} className="sr-only">
           Skupiny zvonenia
         </h3>
 
@@ -132,190 +133,125 @@ export function RingGroupsEditor({
         {groups.length === 0 && <SettingsNotice tone="warning">Zatiaľ nie je vytvorená žiadna skupina zvonenia.</SettingsNotice>}
 
         {groups.filter(group => !onlyGroupId || group.id === onlyGroupId).map((group) => {
-          // The full draft list is what lets the note tell "one step is skipped"
-          // apart from "this plan has no runnable step left".
           const usageNote = groupUsageNote(group, document.plans, groups);
-          // Both notes describe what `planRingStep` will really do with this
-          // group: the fan-out cap truncates an "all" step, and a per-member
-          // ring time is dropped outside an "ordered" step.
-          const fanoutNote = groupFanoutNote(group, document.plans, document.limits?.maxRingFanout);
-          const ringSecsNote = memberRingSecsNote(group, document.plans);
           const planReferences = planReferencesUsingGroup(group.id, document.plans);
           const timings = groupStepTimings(group, document.plans);
+          const ordered = timingContext
+            ? timingContext.strategy === "ordered"
+            : timings.some(timing => timing.strategy === "ordered");
+          const mobileAvailable = document.capabilities?.ownedMobileRouting === true;
+          const sharedElsewhere = onlyGroupId && planReferences.some(plan => plan.id !== timingContext?.planId);
+          const fanoutNote = timingContext
+            ? timingContext.strategy === "all" && document.limits && group.members.length > document.limits.maxRingFanout
+              ? `Naraz môže zvoniť najviac ${document.limits.maxRingFanout} dostupných členov. Rozhoduje aj poradie v skupine.`
+              : null
+            : groupFanoutNote(group, document.plans, document.limits?.maxRingFanout);
           const groupIssues = issuesFor.get(group.key) ?? [];
 
           return (
-            <div key={group.key} className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
-              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto]">
-                <SettingsField label="Názov skupiny">
-                  <input
-                    className={settingsInputClass}
-                    disabled={!canEdit}
-                    value={group.name}
-                    onChange={(event) => setGroups((current) => updateGroup(current, group.key, { name: event.target.value }))}
-                  />
-                </SettingsField>
-                <SettingsField label="Poznámka">
-                  <input
-                    className={settingsInputClass}
-                    disabled={!canEdit}
-                    value={group.description}
-                    onChange={(event) => setGroups((current) => updateGroup(current, group.key, { description: event.target.value }))}
-                  />
-                </SettingsField>
-                <div className="flex items-end gap-2 pb-1">
-                  <label className="inline-flex h-10 items-center gap-2 text-sm font-medium text-zinc-800">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 accent-[#FCD703]"
-                      disabled={!canEdit}
-                      checked={group.active}
-                      onChange={(event) => setGroups((current) => updateGroup(current, group.key, { active: event.target.checked }))}
-                    />
-                    Aktívna
-                  </label>
-                  <button
-                    type="button"
-                    disabled={!canEdit || planReferences.length > 0}
-                    onClick={() => setGroups((current) => removeGroup(current, group.key))}
-                    aria-label={`Odobrať skupinu ${group.name || "bez názvu"}`}
-                    title={planReferences.length > 0 ? `Najprv ju odober z plánov: ${planReferences.map((plan) => plan.name).join(", ")}` : "Odobrať skupinu z návrhu"}
-                    className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-zinc-200 disabled:text-zinc-400 disabled:hover:bg-white"
-                  >
-                    <Trash2 size={14} aria-hidden="true" />
-                    Odobrať skupinu
-                  </button>
+            <div key={group.key} className={onlyGroupId ? "min-w-0" : "min-w-0 rounded-lg border border-zinc-200 bg-zinc-50/60 p-3 sm:p-4"}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Users size={16} className="shrink-0 text-zinc-500" aria-hidden="true" />
+                  <h4 className="break-words text-sm font-semibold text-zinc-900">{group.name || "Nová skupina"}</h4>
+                  <span className="text-xs text-zinc-500">{group.members.length}</span>
+                  {!group.active && <span className="rounded bg-zinc-200 px-2 py-1 text-xs text-zinc-700">Vypnutá</span>}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <AddButton disabled={!canEdit} label="Operátor" onClick={() => setGroups(current => addMember(current, group.key, "operator"))} />
+                  <AddButton disabled={!canEdit} label="Externé číslo" onClick={() => setGroups(current => addMember(current, group.key, "external_number"))} />
                 </div>
               </div>
-
-              {usageNote && <p className={`mt-2 text-xs ${group.active ? "text-zinc-600" : "text-amber-700"}`}>{usageNote}</p>}
-              {planReferences.length > 0 && (
-                <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700">
-                  <span className="font-medium">Väzbu zrušíš v konkrétnom pláne:</span>
-                  {planReferences.map((plan) => (
-                    <button
-                      key={plan.id}
-                      type="button"
-                      onClick={() => onNavigateToPlan?.(plan.id)}
-                      disabled={!onNavigateToPlan}
-                      className="min-h-8 rounded-md border border-zinc-300 bg-zinc-50 px-2 font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-default"
-                    >
-                      Otvoriť {plan.name} ({plan.active ? "aktívny" : "neaktívny"})
-                    </button>
-                  ))}
-                </div>
-              )}
-              {fanoutNote && <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">{fanoutNote}</p>}
-              {ringSecsNote && <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">{ringSecsNote}</p>}
-              {timings.length > 0 && (
-                <div className="mt-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-950">
-                  <p className="font-semibold">Účinné časy v plánoch</p>
-                  <ul className="mt-1 grid gap-1" aria-label={`Účinné časy skupiny ${group.name}`}>
-                    {timings.map((timing) => (
-                      <li key={`${timing.planId}:${timing.stepIndex}`}>
-                        <span className="font-medium">{timing.planName}{timing.planActive ? "" : " (neaktívny)"}, krok {timing.stepIndex + 1} · {timing.strategy === "all" ? "všetkým naraz" : "postupne"}:</span>{" "}
-                        {timing.strategy === "all"
-                          ? `${timing.timeoutSecs} s pre každého podľa času kroku; vlastné časy členov sa tu nepoužijú.`
-                          : timing.members.map((entry) => {
-                              const member = group.members.find((candidate) => candidate.key === entry.memberKey);
-                              const label = member?.memberKind === "operator"
-                                ? operatorNames.get(member.profileId ?? "") ?? "Nevybraný operátor"
-                                : member?.externalNumber || "Nevyplnené externé číslo";
-                              const seconds = entry.effectiveSecs === null ? "neplatný čas" : `${entry.effectiveSecs} s`;
-                              return `${label}: ${seconds} (${entry.source === "step" ? "preberá čas kroku" : "vlastný čas"})`;
-                            }).join("; ") + "."}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+              {!group.active && <p className="mt-2 text-xs text-amber-800">Táto skupina sa pri hovore preskočí. Zapneš ju v podrobnostiach skupiny.</p>}
+              {sharedElsewhere && <p className="mt-2 text-xs text-zinc-600">Zdieľaná skupina: úprava členov sa prejaví aj v ďalších plánoch. Väzby nájdeš v podrobnostiach.</p>}
+              {fanoutNote && <p className="mt-2 text-xs text-amber-800">{fanoutNote}</p>}
               <SettingsIssueList issues={groupIssues} />
 
               <div className="mt-3">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="text-xs font-semibold text-zinc-500">Členovia ({group.members.length})</span>
-                  <div className="flex gap-2">
-                    <AddButton disabled={!canEdit} label="Operátor" onClick={() => setGroups((current) => addMember(current, group.key, "operator"))} />
-                    <AddButton disabled={!canEdit} label="Externé číslo" onClick={() => setGroups((current) => addMember(current, group.key, "external_number"))} />
-                  </div>
-                </div>
-
                 {group.members.length === 0 ? (
-                  <p className="rounded-md border border-dashed border-zinc-300 px-3 py-3 text-xs text-zinc-600">
-                    Skupina nemá členov. Pridaj operátora alebo externé číslo (napríklad mobil dispečera), inak v tejto skupine nikto nezazvoní.
+                  <p className="rounded-md border border-dashed border-zinc-300 px-3 py-3 text-sm text-zinc-600">
+                    Pridaj operátora alebo telefónne číslo. Prázdna skupina nemá komu zvoniť.
                   </p>
                 ) : (
-                  <SortableList
-                    items={group.members.map((member) => member.key)}
-                    onMove={(activeKey, overKey) => setGroups((current) => moveMemberInGroups(current, group.key, activeKey, overKey))}
-                  >
-                    {group.members.map((member, index) => (
-                      <SortableRow key={member.key} id={member.key} disabled={!canEdit} handleLabel={`Presunúť ${index + 1}. člena skupiny ${group.name}`}>
-                        <div className="grid gap-2 sm:grid-cols-[28px_minmax(0,1.6fr)_minmax(0,110px)_auto] sm:items-end">
-                          <span className="text-sm font-semibold text-zinc-500">{index + 1}.</span>
-
-                          {member.memberKind === "operator" ? (
-                            <SettingsField label="Operátor">
-                              <select
-                                className={settingsInputClass}
-                                disabled={!canEdit}
-                                value={member.profileId ?? ""}
-                                onChange={(event) => setGroups((current) => updateMember(current, group.key, member.key, { profileId: event.target.value || null }))}
-                              >
-                                <option value="">— vyber operátora —</option>
-                                {operators.map((operator) => (
-                                  <option key={operator.profileId} value={operator.profileId}>
-                                    {operator.displayName}
-                                    {operator.active ? "" : " (neaktívny)"}
-                                  </option>
-                                ))}
-                              </select>
-                            </SettingsField>
-                          ) : (
-                            <SettingsField label="Externé číslo" hint="Osobné číslo rešpektuje pauzu vlastníka. Záloha je samostatný prevádzkový telefón.">
-                              <PhoneNumberInput
-                                className={settingsInputClass}
-                                disabled={!canEdit}
-                                value={member.externalNumber}
-                                onChange={(value) => setGroups((current) => updateMember(current, group.key, member.key, { externalNumber: value }))}
-                              />
-                              <PhoneNumberHint value={member.externalNumber} />
-                              <select aria-label="Vlastník externého čísla" className={settingsInputClass} disabled={!canEdit} value={member.ownerProfileId ?? ""} onChange={(event) => setGroups((current) => updateMember(current, group.key, member.key, { ownerProfileId: event.target.value || null }))}>
-                                <option value="">Samostatná prevádzková záloha</option>
-                                {operators.map((operator) => <option key={operator.profileId} value={operator.profileId}>{operator.displayName} · osobný telefón</option>)}
-                              </select>
-                            </SettingsField>
-                          )}
-
-                          <SettingsField label="Zvonenie (s)" hint="Len v krokoch „postupne“.">
-                            <input
-                              className={settingsInputClass}
-                              disabled={!canEdit}
-                              inputMode="numeric"
-                              placeholder="podľa kroku"
-                              title={`Prázdne = čas kroku. Inak ${MIN_RING_SECS} až ${MAX_RING_SECS} s. Použije sa len v kroku „postupne“; v kroku „všetkým naraz“ platí čas kroku.`}
-                              value={member.ringSecs}
-                              onChange={(event) => setGroups((current) => updateMember(current, group.key, member.key, { ringSecs: event.target.value }))}
-                            />
-                          </SettingsField>
-
-                          <button
-                            type="button"
-                            disabled={!canEdit}
-                            onClick={() => setGroups((current) => removeMember(current, group.key, member.key))}
-                            aria-label={`Odobrať ${index + 1}. člena skupiny ${group.name}`}
-                            className="mb-1 inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-xs font-semibold text-zinc-800 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            <Trash2 size={14} aria-hidden="true" />
-                            Odobrať
-                          </button>
-                        </div>
-                        <SettingsIssueList issues={issuesFor.get(member.key) ?? []} />
-                      </SortableRow>
-                    ))}
+                  <SortableList items={group.members.map(member => member.key)} onMove={(activeKey, overKey) => setGroups(current => moveMemberInGroups(current, group.key, activeKey, overKey))}>
+                    {group.members.map((member, index) => {
+                      const operator = operators.find(candidate => candidate.profileId === member.profileId);
+                      const mobileNumber = normalizeE164(operator?.settings?.defaultMobileNumber);
+                      const personalMobile = mobileAvailable && operator?.settings?.deliveryMode === "personal_mobile" && mobileNumber && isDestinationAllowed(mobileNumber, document.limits?.destinationAllowlist);
+                      const normalizedNumber = normalizeE164(member.externalNumber);
+                      const matchedOwners = normalizedNumber ? operators.filter(candidate => normalizeE164(candidate.settings?.defaultMobileNumber) === normalizedNumber) : [];
+                      const owner = member.ownerProfileId
+                        ? operators.find(candidate => candidate.profileId === member.ownerProfileId)
+                        : matchedOwners.length === 1 ? matchedOwners[0] : null;
+                      return (
+                        <SortableRow key={member.key} id={member.key} disabled={!canEdit} handleLabel={`Presunúť ${index + 1}. člena skupiny ${group.name}`}>
+                          <div className={`grid gap-3 ${ordered ? "lg:grid-cols-[minmax(0,1fr)_120px_auto]" : "sm:grid-cols-[minmax(0,1fr)_auto]"} items-start`}>
+                            <div className="min-w-0">
+                              <div className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-600">
+                                {member.memberKind === "operator" && !personalMobile ? <Monitor size={14} aria-hidden="true" /> : <Phone size={14} aria-hidden="true" />}
+                                {ordered && <span>{index + 1}.</span>}
+                                <span>{member.memberKind === "operator" ? personalMobile ? "Osobný mobil operátora" : "Operátor v aplikácii" : "Telefónne číslo"}</span>
+                              </div>
+                              {member.memberKind === "operator" ? (
+                                <SettingsField label="Operátor">
+                                  <select className={settingsInputClass} disabled={!canEdit} value={member.profileId ?? ""} onChange={event => setGroups(current => updateMember(current, group.key, member.key, { profileId: event.target.value || null }))}>
+                                    <option value="">— vyber operátora —</option>
+                                    {operators.map(candidate => <option key={candidate.profileId} value={candidate.profileId}>{candidate.displayName}{candidate.active ? "" : " (neaktívny)"}</option>)}
+                                  </select>
+                                  {personalMobile && <span className="mt-1 block text-xs text-zinc-500">{operator?.settings?.defaultMobileNumber || "Operátor nemá nastavené mobilné číslo."}</span>}
+                                </SettingsField>
+                              ) : (
+                                <div className="grid gap-2">
+                                  <SettingsField label="Externé číslo">
+                                    <PhoneNumberInput className={settingsInputClass} disabled={!canEdit} value={member.externalNumber} onChange={value => setGroups(current => updateMember(current, group.key, member.key, { externalNumber: value }))} />
+                                    <PhoneNumberHint value={member.externalNumber} />
+                                  </SettingsField>
+                                  {mobileAvailable && <SettingsField label="Komu patrí číslo">
+                                    <select aria-label="Vlastník externého čísla" className={settingsInputClass} disabled={!canEdit} value={member.ownerProfileId ?? ""} onChange={event => setGroups(current => updateMember(current, group.key, member.key, { ownerProfileId: event.target.value || null }))}>
+                                      <option value="">Bez ručného priradenia</option>
+                                      {operators.map(candidate => <option key={candidate.profileId} value={candidate.profileId}>{candidate.displayName} · osobný telefón</option>)}
+                                    </select>
+                                  </SettingsField>}
+                                  {owner && <p className="text-xs text-zinc-500">{member.ownerProfileId ? "Vlastník" : "Rozpoznaný vlastník"}: {owner.displayName}. {mobileAvailable ? "Zvonenie rešpektuje dostupnosť operátora." : "Zvonenie na osobné čísla tu nie je dostupné; tento člen sa preskočí."}</p>}
+                                  {!member.ownerProfileId && matchedOwners.length > 1 && <p className="text-xs text-amber-800">Číslo patrí viacerým operátorom. Kým sa vlastníctvo nevyjasní, systém ho nevyzvoní.</p>}
+                                  {!owner && matchedOwners.length === 0 && mobileAvailable && <p className="text-xs text-zinc-500">Osobný mobil priraď operátorovi, aby rešpektoval jeho pauzu a prebiehajúci hovor.</p>}
+                                </div>
+                              )}
+                            </div>
+                            {ordered && <div className="lg:pt-6"><SettingsField label="Vlastný čas (s)" hint={timingContext && Number.isFinite(timingContext.timeoutSecs) && timingContext.timeoutSecs >= MIN_RING_SECS && timingContext.timeoutSecs <= MAX_RING_SECS ? `Prázdne = ${timingContext.timeoutSecs} s podľa kroku.` : "Prázdne = čas kroku; platí pri postupnom zvonení."}>
+                              <input className={settingsInputClass} disabled={!canEdit} inputMode="numeric" placeholder="podľa kroku" title={`Prázdne = čas kroku. Inak ${MIN_RING_SECS} až ${MAX_RING_SECS} s.`} value={member.ringSecs} onChange={event => setGroups(current => updateMember(current, group.key, member.key, { ringSecs: event.target.value }))} />
+                            </SettingsField></div>}
+                            <button type="button" disabled={!canEdit} onClick={() => setGroups(current => removeMember(current, group.key, member.key))} aria-label={`Odobrať ${index + 1}. člena skupiny ${group.name}`} className="inline-flex h-10 items-center justify-center gap-2 self-start rounded-md border border-zinc-200 bg-white px-3 text-xs font-semibold text-zinc-600 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 sm:mt-6">
+                              <Trash2 size={14} aria-hidden="true" /> Odobrať
+                            </button>
+                          </div>
+                          <SettingsIssueList issues={issuesFor.get(member.key) ?? []} />
+                        </SortableRow>
+                      );
+                    })}
                   </SortableList>
                 )}
               </div>
+
+              <details className="group mt-3 border-t border-zinc-200 pt-3" open={groupIssues.length > 0 || undefined}>
+                <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium text-zinc-600 hover:text-zinc-950 [&::-webkit-details-marker]:hidden">
+                  <ChevronDown size={14} className="transition group-open:rotate-180" aria-hidden="true" />
+                  Podrobnosti skupiny {group.name || "bez názvu"}
+                </summary>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <SettingsField label="Názov skupiny"><input className={settingsInputClass} disabled={!canEdit} value={group.name} onChange={event => setGroups(current => updateGroup(current, group.key, { name: event.target.value }))} /></SettingsField>
+                  <SettingsField label="Poznámka"><input className={settingsInputClass} disabled={!canEdit} value={group.description} onChange={event => setGroups(current => updateGroup(current, group.key, { description: event.target.value }))} /></SettingsField>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                  <label className="inline-flex min-h-10 items-center gap-2 text-sm text-zinc-800"><input type="checkbox" className="h-4 w-4 accent-[#FCD703]" disabled={!canEdit} checked={group.active} onChange={event => setGroups(current => updateGroup(current, group.key, { active: event.target.checked }))} /> Skupina je aktívna</label>
+                  <button type="button" disabled={!canEdit || planReferences.length > 0} onClick={() => setGroups(current => removeGroup(current, group.key))} aria-label={`Odobrať skupinu ${group.name || "bez názvu"}`} className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:text-zinc-400 disabled:hover:bg-white"><Trash2 size={14} aria-hidden="true" /> Odobrať skupinu</button>
+                </div>
+                {usageNote && <p className="mt-2 text-xs leading-5 text-zinc-600">{usageNote}</p>}
+                {planReferences.length > 0 && <div className="mt-2 text-xs leading-5 text-zinc-600">
+                  <p>Skupinu možno odstrániť až po odpojení od týchto plánov:</p>
+                  <div className="mt-1 flex flex-wrap gap-2">{planReferences.map(plan => <button key={plan.id} type="button" onClick={() => onNavigateToPlan?.(plan.id)} disabled={!onNavigateToPlan} className="min-h-8 rounded-md border border-zinc-200 bg-white px-2 text-zinc-800 hover:bg-zinc-100 disabled:cursor-default">Otvoriť {plan.name}{plan.active ? "" : " (neaktívny)"}</button>)}</div>
+                </div>}
+              </details>
             </div>
           );
         })}

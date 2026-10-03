@@ -434,6 +434,17 @@ describe("routing document read model", () => {
     expect(document.limits).toEqual({ destinationAllowlist: ["SK", "CZ"], maxRingFanout: 8, maxConcurrentLegs: 9 });
   });
 
+  it.each(["true", "false", undefined])("reports the actual mobile guard (%s) and inherited mode without admin settings", async (flag) => {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", flag);
+    const { harness, deps } = harnessDeps();
+    harness.db.update("motorist_telephony_settings", { inbound_call_mode: "queue_first", live_calls_enabled: true }, () => true);
+
+    const document = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: false, includeLimits: true });
+
+    expect(document.capabilities).toEqual({ ownedMobileRouting: flag === "true", defaultInboundCallMode: "queue_first" });
+    expect(document.settings).toBeNull();
+  });
+
   it("gives a member-level reader only their own device and settings", async () => {
     const { deps } = harnessDeps();
     const document = await getRoutingDocument(deps, {
@@ -463,10 +474,12 @@ describe("routing document read model", () => {
   });
 
   it("falls back to the documented defaults when the settings row is missing", async () => {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "false");
     const { harness, deps } = harnessDeps();
     harness.db.delete("motorist_telephony_settings", () => true);
     const document = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
     expect(document.settings).toEqual(DEFAULT_SETTINGS);
+    expect(document.capabilities).toEqual({ ownedMobileRouting: false, defaultInboundCallMode: "ring_first" });
   });
 });
 

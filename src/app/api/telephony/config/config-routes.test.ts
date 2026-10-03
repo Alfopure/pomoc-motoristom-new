@@ -28,6 +28,7 @@ vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => ({ mar
 const document = {
   organizationId: "org-1",
   routingVersion: 7,
+  capabilities: { ownedMobileRouting: false, defaultInboundCallMode: "queue_first" },
   groups: [],
   plans: [],
   businessHours: [],
@@ -108,6 +109,7 @@ describe("GET /api/telephony/config/*", () => {
     expect(body).toMatchObject({ canEdit: false, canManageSettings: false });
     expect(body.document.settings).toBeNull();
     expect(body.document.limits).toBeNull();
+    expect(body.document.capabilities).toEqual(document.capabilities);
     // Own row keeps its device; every colleague's Telnyx credential and SIP user is stripped.
     expect(body.document.operators.find((operator) => operator.profileId === "profile-1")?.device).not.toBeNull();
     expect(body.document.operators.find((operator) => operator.profileId === "profile-2")?.device).toBeNull();
@@ -126,6 +128,7 @@ describe("GET /api/telephony/config/*", () => {
     // arrive through this response either.
     expect(body.document.settings).toBeNull();
     expect(body.document.limits).toEqual({ destinationAllowlist: ["SK"], maxRingFanout: 8, maxConcurrentLegs: 9 });
+    expect(body.document.capabilities).toEqual(document.capabilities);
     expect(body.document.operators.find((operator) => operator.profileId === "profile-2")?.device).not.toBeNull();
     expect(getRoutingDocument).toHaveBeenCalledWith(expect.anything(), {
       organizationId: "org-1",
@@ -140,6 +143,7 @@ describe("GET /api/telephony/config/*", () => {
     state.role = "admin";
     const body = (await (await getPlans()).json()) as { document: typeof document };
     expect(body.document.settings).toMatchObject({ liveCallsEnabled: true, dailyLegSoftCap: 500 });
+    expect(body.document.capabilities).toEqual(document.capabilities);
   });
 
   it("keeps the numbers panel readable for every member", async () => {
@@ -296,6 +300,7 @@ describe("coherent incoming routes", () => {
     const response = await getIncoming(); const body = await response.json();
     expect(response.status).toBe(200); expect(body.document.snapshotId).toBe("coherent");
     expect(body.document.settings).toBeNull(); expect(body.document.limits).toBeNull(); expect(body.document.operators[1].device).toBeNull();
+    expect(body.document.capabilities).toEqual(document.capabilities);
     expect(getRoutingDocument).not.toHaveBeenCalled();
     expect(getCoherentRoutingDocument).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ organizationId: "org-1", viewerProfileId: "profile-1", includeOperatorDetails: false }));
   });
@@ -316,6 +321,7 @@ describe("coherent incoming routes", () => {
   it("saves groups and plans in one scoped versioned service call", async () => {
     const response=await putIncoming(request("incoming", "PUT", { groups: COMBINED_GROUPS, plans: [], version: 7 }));
     expect(response.status).toBe(200); expect(replaceIncomingRouting).toHaveBeenCalledOnce();
+    expect((await response.json()).document.capabilities).toEqual(document.capabilities);
     expect(replaceIncomingRouting).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({organizationId:"org-1",expectedVersion:7,groups:expect.any(Array),plans:[]}));
     expect(replaceRingGroups).not.toHaveBeenCalled(); expect(replaceRingPlans).not.toHaveBeenCalled();
   });
