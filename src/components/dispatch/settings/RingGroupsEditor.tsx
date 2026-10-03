@@ -148,7 +148,7 @@ export function RingGroupsEditor({
         description="Zdieľané zoznamy operátorov a telefónnych čísel. Zmena členov platí vo všetkých plánoch, ktoré skupinu používajú."
       />}
 
-      <div className={onlyGroupId ? "grid min-w-0 gap-3 px-2 pb-1 sm:px-3" : "grid gap-4 p-4"}>
+      <div className={onlyGroupId ? "grid min-w-0 gap-2 px-2 sm:px-3" : "grid gap-4 p-4"}>
         <h3 id={headingId} className="sr-only">
           Skupiny zvonenia
         </h3>
@@ -311,8 +311,8 @@ export function RingGroupsEditor({
                         {group.members.map((member, index) => renderMember(member, index))}
                       </SortableList>}
                   </div>
-                  {grouped && <details className="group mt-2 text-zinc-500">
-                    <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 text-xs hover:text-zinc-800 [&::-webkit-details-marker]:hidden"><ChevronDown size={13} className="transition group-open:rotate-180" aria-hidden="true" />Poradie a podrobnosti zariadení</summary>
+                  {grouped && <details className="group text-zinc-500">
+                    <summary className="flex min-h-10 cursor-pointer list-none items-center gap-1.5 text-xs hover:text-zinc-800 [&::-webkit-details-marker]:hidden"><ChevronDown size={13} className="transition group-open:rotate-180" aria-hidden="true" />Poradie a podrobnosti zariadení</summary>
                     <p className="mb-2 text-xs leading-5">Každé zariadenie je samostatný príjemca. Poradie rozhoduje pri limite súčasného zvonenia a v plánoch s postupným zvonením.</p>
                     <div role="list" aria-label={`Zariadenia skupiny ${group.name}`}>
                       <SortableList items={group.members.map(member => member.key)} onMove={(activeKey, overKey) => setGroups(current => moveMemberInGroups(current, group.key, activeKey, overKey))}>
@@ -323,12 +323,13 @@ export function RingGroupsEditor({
                 </>
               )}
 
-              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 border-t border-zinc-100 pt-3">
-                <AddButton disabled={!canEdit} label="Pridať operátora" onClick={() => addRecipient(group.key, "operator")} />
-                <AddButton disabled={!canEdit} label="Pridať číslo" onClick={() => addRecipient(group.key, "external_number")} />
-              </div>
-              <details className={`group text-zinc-500 ${onlyGroupId ? "mt-1" : "mt-3"}`} open={groupIssues.length > 0 || undefined}>
-                <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 text-xs hover:text-zinc-800 [&::-webkit-details-marker]:hidden">
+              <div className="flex flex-wrap items-start gap-x-5 border-t border-zinc-100 pt-1">
+                <div className="flex flex-wrap gap-x-4">
+                  <AddButton disabled={!canEdit} label="Pridať operátora" onClick={() => addRecipient(group.key, "operator")} />
+                  <AddButton disabled={!canEdit} label="Pridať číslo" onClick={() => addRecipient(group.key, "external_number")} />
+                </div>
+                <details className="group min-w-0 grow basis-56 text-zinc-500 open:basis-full" open={groupIssues.length > 0 || undefined}>
+                <summary className="flex min-h-10 cursor-pointer list-none items-center gap-1.5 text-xs hover:text-zinc-800 [&::-webkit-details-marker]:hidden">
                   <ChevronDown size={13} className="transition group-open:rotate-180" aria-hidden="true" />
                   Podrobnosti skupiny {group.name || "bez názvu"}
                 </summary>
@@ -346,7 +347,8 @@ export function RingGroupsEditor({
                   <p>Skupinu možno odstrániť až po odpojení od týchto plánov:</p>
                   <div className="mt-1 flex flex-wrap gap-2">{planReferences.map(plan => <button key={plan.id} type="button" onClick={() => onNavigateToPlan?.(plan.id)} disabled={!onNavigateToPlan} className="min-h-8 text-zinc-600 underline decoration-zinc-300 underline-offset-4 hover:text-zinc-950 disabled:cursor-default">Otvoriť {plan.name}{plan.active ? "" : " (neaktívny)"}</button>)}</div>
                 </div>}
-              </details>
+                </details>
+              </div>
             </div>
           );
         })}
@@ -379,32 +381,30 @@ function PersonRecipient({ person, canEdit, onToggle, onRemove }: {
   const hintId = useId();
   const name = person.operator.displayName;
   const initials = name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join("").toLocaleUpperCase("sk");
-  return <div role="listitem" aria-label={name} className="min-w-0 border-b border-zinc-200/70 py-3 last:border-b-0">
-    <div className="flex items-start gap-3">
-      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-xs font-semibold text-zinc-600" aria-hidden="true">{initials || <Users size={17} />}</span>
-      <div className="min-w-0 flex-1">
-        <div className="flex min-h-9 items-center justify-between gap-2">
-          <span className="break-words text-sm font-semibold text-zinc-900">{name}{!person.operator.active && <span className="ml-2 font-normal text-amber-800">Neaktívny</span>}</span>
-          {canEdit && <button type="button" onClick={onRemove} aria-label={`Odobrať operátora ${name}`} title="Odobrať operátora aj jeho zariadenia z tejto skupiny" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-zinc-400 hover:bg-red-50 hover:text-red-700 focus-visible:outline-2 focus-visible:outline-yellow-400"><Trash2 size={15} aria-hidden="true" /></button>}
-        </div>
-        <div className="mt-1 flex flex-wrap gap-2">
-          {(["web", "mobile"] as const).map(device => {
-            const checked = Boolean(person[device]);
-            const lastDevice = checked && (!person[device === "web" ? "mobile" : "web"] || (device === "web" && Boolean(person.mobileUnavailable)));
-            const unavailable = device === "mobile" && person.mobileUnavailable;
-            const disabled = !canEdit || lastDevice || Boolean(unavailable);
-            const Icon = device === "web" ? Monitor : Phone;
-            const label = device === "web" ? "Web" : "Mobil";
-            return <label key={device} title={unavailable || (lastDevice ? "Aspoň jedno dostupné zariadenie zostáva zapnuté. Celého operátora odstrániš ikonou koša." : undefined)} className={`inline-flex min-h-10 items-center gap-2 rounded-md border px-3 text-sm ${checked && !unavailable ? "border-zinc-300 bg-white text-zinc-900" : "border-zinc-200 text-zinc-500"} ${disabled ? "cursor-default" : "cursor-pointer hover:border-zinc-400"}`}>
-              <input type="checkbox" aria-label={`${label} pre ${name}`} aria-describedby={unavailable ? hintId : undefined} disabled={disabled} checked={checked} onChange={event => onToggle(device, event.target.checked)} className="h-4 w-4 accent-[#FCD703] focus-visible:outline-2 focus-visible:outline-yellow-400" />
-              <Icon size={14} aria-hidden="true" />{label}
-            </label>;
-          })}
-        </div>
-        {person.mobileNumber && <p className="mt-2 text-xs text-zinc-500">Mobil · {formatPhoneNumberForDisplay(person.mobileNumber)}</p>}
-        {person.mobileUnavailable && <p id={hintId} className="mt-2 text-xs leading-5 text-amber-800">{person.mobileUnavailable}</p>}
-        <span className="sr-only">Na odobratie všetkých zariadení použi Odobrať operátora.</span>
+  return <div role="listitem" aria-label={name} className="min-w-0 border-b border-zinc-200/70 py-2 last:border-b-0">
+    <div className="grid grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 sm:grid-cols-[40px_minmax(0,1fr)_auto_auto]">
+      <span className="col-start-1 row-start-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-xs font-semibold text-zinc-600" aria-hidden="true">{initials || <Users size={17} />}</span>
+      <div className="col-start-2 row-start-1 min-w-0">
+        <span className="break-words text-sm font-semibold text-zinc-900">{name}{!person.operator.active && <span className="ml-2 font-normal text-amber-800">Neaktívny</span>}</span>
+        {person.mobileNumber && <p className="mt-0.5 text-xs text-zinc-500">Mobil · {formatPhoneNumberForDisplay(person.mobileNumber)}</p>}
       </div>
+      <div className="col-start-2 col-end-4 row-start-2 flex flex-wrap gap-2 sm:col-start-3 sm:col-end-4 sm:row-start-1">
+        {(["web", "mobile"] as const).map(device => {
+          const checked = Boolean(person[device]);
+          const lastDevice = checked && (!person[device === "web" ? "mobile" : "web"] || (device === "web" && Boolean(person.mobileUnavailable)));
+          const unavailable = device === "mobile" && person.mobileUnavailable;
+          const disabled = !canEdit || lastDevice || Boolean(unavailable);
+          const Icon = device === "web" ? Monitor : Phone;
+          const label = device === "web" ? "Web" : "Mobil";
+          return <label key={device} title={unavailable || (lastDevice ? "Aspoň jedno dostupné zariadenie zostáva zapnuté. Celého operátora odstrániš ikonou koša." : undefined)} className={`inline-flex min-h-10 items-center gap-2 rounded-md border px-3 text-sm ${checked && !unavailable ? "border-zinc-300 bg-white text-zinc-900" : "border-zinc-200 text-zinc-500"} ${disabled ? "cursor-default" : "cursor-pointer hover:border-zinc-400"}`}>
+            <input type="checkbox" aria-label={`${label} pre ${name}`} aria-describedby={unavailable ? hintId : undefined} disabled={disabled} checked={checked} onChange={event => onToggle(device, event.target.checked)} className="h-4 w-4 accent-[#FCD703] focus-visible:outline-2 focus-visible:outline-yellow-400" />
+            <Icon size={14} aria-hidden="true" />{label}
+          </label>;
+        })}
+      </div>
+      {canEdit && <button type="button" onClick={onRemove} aria-label={`Odobrať operátora ${name}`} title="Odobrať operátora aj jeho zariadenia z tejto skupiny" className="col-start-3 row-start-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-zinc-400 hover:bg-red-50 hover:text-red-700 focus-visible:outline-2 focus-visible:outline-yellow-400 sm:col-start-4"><Trash2 size={15} aria-hidden="true" /></button>}
+      {person.mobileUnavailable && <p id={hintId} className="col-start-2 col-end-4 text-xs leading-5 text-amber-800 sm:col-end-5">{person.mobileUnavailable}</p>}
+      <span className="sr-only">Na odobratie všetkých zariadení použi Odobrať operátora.</span>
     </div>
   </div>;
 }
@@ -436,7 +436,7 @@ function AddButton({ disabled, label, onClick }: { disabled: boolean; label: str
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="inline-flex min-h-9 items-center gap-1.5 rounded-md px-1 text-xs font-medium text-zinc-600 hover:bg-zinc-50 hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-yellow-400 disabled:cursor-not-allowed disabled:opacity-40"
+      className="inline-flex min-h-10 items-center gap-1.5 rounded-md px-1 text-xs font-medium text-zinc-600 hover:bg-zinc-50 hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-yellow-400 disabled:cursor-not-allowed disabled:opacity-40"
     >
       <Plus size={15} aria-hidden="true" />
       {label}

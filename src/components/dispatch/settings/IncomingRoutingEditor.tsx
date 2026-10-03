@@ -120,18 +120,18 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
   useEffect(() => () => onEditorStateChange?.(null), [onEditorStateChange]);
   // The parent owns only navigation; this component remains the sole draft owner.
   useEffect(() => { onActionsChange?.({ save, discard }); return () => onActionsChange?.(null); });
-  return <section className="grid min-w-0 gap-3 [&_label>span]:font-medium [&_label>span]:normal-case" aria-label="Prichádzajúce hovory">
+  return <section className="grid min-w-0 gap-2 [&_label>span]:font-medium [&_label>span]:normal-case" aria-label="Prichádzajúce hovory">
     <header className="flex flex-wrap items-start justify-between gap-3 px-1 pt-1">
       <div>
         <h2 className="text-2xl font-semibold tracking-tight text-zinc-950">{line ? "Cesta prichádzajúceho hovoru" : "Knižnica plánov"}</h2>
-        <p className="mt-1.5 text-sm text-zinc-500">{line ? "Kto hovor prijme a čo sa stane, ak nezdvihne." : "Všetky postupy zvonenia na jednom mieste."}</p>
+        <p className="mt-1 text-sm text-zinc-500">{line ? "Kto hovor prijme a čo sa stane, ak nezdvihne." : "Všetky postupy zvonenia na jednom mieste."}</p>
       </div>
       {line && <button type="button" onClick={showLibrary} className="inline-flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-zinc-600 hover:bg-white hover:text-zinc-950"><Library size={16} aria-hidden="true" />Všetky plány</button>}
     </header>
-    <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-4 sm:px-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-2.5 sm:px-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3 sm:gap-4">
-          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-zinc-900 text-white"><PhoneIncoming size={22} aria-hidden="true" /></span>
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-zinc-900 text-white"><PhoneIncoming size={22} aria-hidden="true" /></span>
           <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400">{line ? "Volajúci vytočí" : "Nastavenie pre linku"}</p>
             <p className="mt-0.5 break-words text-xl font-semibold tracking-tight text-zinc-950 sm:text-2xl">{line ? formatPhoneNumberForDisplay(line.phoneNumber) : "Všetky linky"}</p>
@@ -156,7 +156,7 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
       {line?.returnLineId && <p className="mt-2 text-xs text-zinc-500">Návratové číslo používa smerovanie linky {effectiveLine?.label ?? "(nedostupná)"}.</p>}
       {target?.planId && !working.plans.some(plan => plan.id === target.planId) && <SettingsNotice tone="warning">Vybraný plán už neexistuje alebo k nemu nemáš prístup. Zobrazuje sa dostupná konfigurácia.</SettingsNotice>}
     </div>
-    {line && <div className="-my-3 flex items-center gap-2 pl-5 text-xs text-zinc-400 sm:pl-7" aria-hidden="true"><ArrowDown size={17} /><span>{!activeRoute ? "Uložený postup pre neaktívnu linku" : manualQueue ? "Hovor čaká na operátora" : "Hovor pokračuje podľa tohto postupu"}</span></div>}
+    {line && <div className="-my-2 flex items-center gap-2 pl-5 text-xs text-zinc-400 sm:pl-7" aria-hidden="true"><ArrowDown size={17} /><span>{!activeRoute ? "Uložený postup pre neaktívnu linku" : manualQueue ? "Hovor čaká na operátora" : "Hovor pokračuje podľa tohto postupu"}</span></div>}
     {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
     {notice && !dirty && <SettingsNotice tone="success">{notice}</SettingsNotice>}
     {uncertain && <button type="button" disabled={saving} onClick={() => void verifySavedState()} className="justify-self-start rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold">Overiť uložený stav</button>}
@@ -170,11 +170,11 @@ export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
       {!line && <p className="px-1 text-sm text-zinc-600">Knižnica obsahuje všetky plány vrátane nepoužitých. Úprava zdieľaného plánu sa prejaví na všetkých linkách, ktoré ho používajú.</p>}
       <RingPlanEditor canEdit={canEdit && !saving} document={working} controlled={{ plans: draft.plans, onChange: setPlans }} visiblePlanIds={visiblePlanIds} strategyOverride={line ? behaviour.strategyOverride : null} onAddPlan={showLibrary} focusPlanId={focusPlanId} focusGroupId={target?.groupId} onSaved={onSaved} onNavigateToIvr={() => onNavigate({ section: "telephony", tab: "ivr" })} onNavigateToNumbers={() => onNavigate({ section: "telephony", tab: "numbers" })} renderGroupEditor={(groupId, context) => <RingGroupsEditor detachedDevices={{ devices: detachedDevices, onChange: setDetachedDevices }} canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onlyGroupId={groupId} timingContext={context} groupSelector={context.groupSelector} onSaved={onSaved} onNavigateToPlan={revealPlan} />} />
     </>}
-    <details className="border-t border-zinc-200 pt-1" open={groupsOpen} onToggle={event => setGroupsOpen(event.currentTarget.open)}>
-      <summary className="cursor-pointer px-1 py-3 text-xs font-medium text-zinc-500">Knižnica skupín ({draft.groups.length}) · správa zdieľaných zoznamov</summary>
+    <details className="border-t border-zinc-200" open={groupsOpen} onToggle={event => setGroupsOpen(event.currentTarget.open)}>
+      <summary className="cursor-pointer px-1 py-2 text-xs font-medium text-zinc-500">Knižnica skupín ({draft.groups.length}) · správa zdieľaných zoznamov</summary>
       <RingGroupsEditor detachedDevices={{ devices: detachedDevices, onChange: setDetachedDevices }} canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onSaved={onSaved} onNavigateToPlan={revealPlan} />
     </details>
-    <div className={`${dirty ? "sticky bottom-0 z-10 shadow-[0_-4px_20px_rgba(20,30,50,0.05)]" : ""} rounded-xl border border-zinc-200 bg-white px-4 py-3 sm:px-5`}>
+    <div className={`${dirty ? "sticky bottom-0 z-10 shadow-[0_-4px_20px_rgba(20,30,50,0.05)]" : ""} rounded-xl border border-zinc-200 bg-white px-4 py-2.5 sm:px-5`}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div role="status" className="flex items-center gap-2 text-sm text-zinc-600">{dirty ? <span className="h-2 w-2 rounded-full bg-amber-400" /> : <Check size={16} className="text-zinc-400" aria-hidden="true" />}{dirty ? "Neuložené zmeny" : "Všetky zmeny sú uložené"}</div>
         <div className="flex flex-wrap items-center gap-2">
