@@ -443,6 +443,8 @@ export type CallbackPlan = {
 };
 
 export type Transition = {
+  /** Persisted with the event audit and durable continuation; never sampled. */
+  routing?: import("@/lib/diagnostics/routing").RoutingDiagnostic[];
   session: SessionPatch;
   legs: LegPatch[];
   attempts: AttemptPatch[];

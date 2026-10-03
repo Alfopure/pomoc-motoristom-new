@@ -45,9 +45,10 @@ export function MobileCallNotificationToggle() {
 
   return (
     <div className="space-y-1.5" data-testid="mobile-call-notifications">
-      <button type="button" role="switch" aria-checked={settings?.enabled ?? false} aria-label="Upozorniť na hovory aj v mobilnej appke" disabled={!settings || busy} onClick={() => void toggle()} className="flex min-h-11 w-full items-center justify-between gap-3 text-left text-xs font-bold text-zinc-900 disabled:opacity-60">
+      <button type="button" role={settings ? "switch" : undefined} aria-checked={settings?.enabled} aria-label="Upozorniť na hovory aj v mobilnej appke" disabled={!settings || busy} onClick={() => void toggle()} className="flex min-h-11 w-full items-center justify-between gap-3 text-left text-xs font-bold text-zinc-900 disabled:opacity-60">
         <span>Upozorniť na hovory aj v mobilnej appke</span>
-        <span aria-hidden="true" className={`flex h-6 w-10 shrink-0 items-center rounded-full p-0.5 transition-colors ${settings?.enabled ? "bg-emerald-600" : "bg-zinc-300"}`}><span className={`size-5 rounded-full bg-white shadow-sm transition-transform ${settings?.enabled ? "translate-x-4" : ""}`} /></span>
+        {settings ? <span aria-hidden="true" className={`flex h-6 w-10 shrink-0 items-center rounded-full p-0.5 transition-colors ${settings.enabled ? "bg-emerald-600" : "bg-zinc-300"}`}><span className={`size-5 rounded-full bg-white shadow-sm transition-transform ${settings.enabled ? "translate-x-4" : ""}`} /></span>
+          : <span className="shrink-0 text-[11px] font-normal text-zinc-500">{error ? "Nenačítané" : "Načítavam…"}</span>}
       </button>
       <p className="text-[11px] leading-4 text-zinc-600">Na mobil príde push upozornenie. Hovor prijmete po otvorení appky; nejde o volanie na mobilné číslo.</p>
       {settings?.enabled && settings.mobileApps === 0 && <p className="text-[11px] leading-4 text-amber-800">Najprv v mobilnej appke povoľte upozornenia na hovory.</p>}

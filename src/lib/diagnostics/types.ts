@@ -1,3 +1,4 @@
+import type { RoutingDiagnostic } from './routing';
 /** Browser-safe closed schema. Never add messages, URLs, stacks or arbitrary metadata. */
 export const DIAGNOSTIC_LIMITS = { queueEvents: 200, queueBytes: 128 * 1024, ttlMs: 86_400_000, batchEvents: 16, batchBytes: 16 * 1024, eventBytes: 1024, flushMs: 30_000, criticalFlushMs: 5_000, attemptsPerMinute: 12, sampleRate: 0.05, maxCount: 10_000 } as const;
 export const DIAGNOSTIC_MODULES = ['app','auth','cases','telephony','sms','documents','fleet','integrations'] as const;
@@ -52,5 +53,5 @@ export type DiagnosticOperationSummary = {operation:DiagnosticOperation;sampleRa
 export type DiagnosticCallSummary = {direction:'inbound'|'outbound'|'internal';total:number;answered:number;unanswered:number;active:number;averageWaitSeconds:number|null;averageAnsweredToEndSeconds:number|null};
 export type DiagnosticStorage = {chargedBytes:number;eventCount:number;incidentCount:number;dropped:number;physicalBytes:number|null;physicalBudgetBytes:number;physicalCheckedAt:string|null;blocked:boolean;cleanupBacklog:boolean};
 export type DiagnosticOverview = {checkedAt:string;enabled:boolean;environment:'production'|'test'|'development';coverage:'unknown'|'limited';since:string;until:string;incidents:DiagnosticIncident[];nextCursor:string|null;operations:DiagnosticOperationSummary[];builds:{buildId:string;lastSeenAt:string;events:number}[];calls:DiagnosticCallSummary[];storage:DiagnosticStorage|null};
-export type DiagnosticTimeline = {callSessionId:string;checkedAt:string;events:DiagnosticStoredEvent[];legs:{id:string;role:string;answeredAt:string|null;bridgedAt:string|null;endedAt:string|null}[];nextCursor:string|null;cause:'unknown'};
+export type DiagnosticTimeline = {callSessionId:string;checkedAt:string;events:DiagnosticStoredEvent[];legs:{id:string;role:string;answeredAt:string|null;bridgedAt:string|null;endedAt:string|null}[];nextCursor:string|null;cause:'unknown';routing?:RoutingDiagnostic[];routingTruncated?:boolean;routingUnavailable?:boolean;routingProfiles?:Record<string,string>};
 export type DiagnosticIncidentDetail = {incident:DiagnosticIncident;events:DiagnosticStoredEvent[];checkedAt:string};

@@ -1,8 +1,9 @@
 import { beforeEach,describe,expect,it,vi } from 'vitest';
-const f=vi.hoisted(()=>({rpc:vi.fn(),auth:vi.fn(),after:vi.fn()}));
+const f=vi.hoisted(()=>({rpc:vi.fn(),auth:vi.fn(),after:vi.fn(),routingRead:vi.fn()}));
 vi.mock('@/lib/supabase/admin',()=>({createSupabaseAdminClient:()=>({rpc:f.rpc})}));
 vi.mock('@/server/api-auth',()=>({requireDefaultMotoristActor:f.auth,assertSameOriginRequest:(r:Request)=>{if(r.headers.get('origin')!=='https://example.test')throw new Error('origin');}}));
 vi.mock('next/server',()=>({after:f.after}));
+vi.mock('./routing-read',()=>({readRoutingDiagnostics:f.routingRead}));
 import { diagnosticsEnvironment,ingestDiagnostics,parseDiagnosticQuery,readDiagnosticBody,readDiagnostics,runDiagnosticsMaintenance } from './service';
 import { recordServerDiagnostic } from './record';
 import { parseDiagnosticEvent } from '@/lib/diagnostics/types';
@@ -28,6 +29,29 @@ describe('closed diagnostic envelope',()=>{
  it('bounds actual stream bytes without Content-Length',async()=>{await expect(readDiagnosticBody(request({value:'x'.repeat(17000)}))).rejects.toMatchObject({status:413});});
 });
 describe('read and fail-open writes',()=>{
+ it('adds routing evidence only after the RPC confirms the authorized call session',async()=>{
+  vi.stubEnv('DIAGNOSTICS_PANEL_ENABLED','true');
+  const timeline={callSessionId:id,checkedAt:'2026-10-03T13:00:00.000Z',events:[],legs:[],cause:'unknown'};
+  const evidence={routing:[],routingUnavailable:true,routingTruncated:false};
+  f.rpc.mockReturnValue({abortSignal:vi.fn().mockResolvedValue({data:timeline,error:null})});
+  f.routingRead.mockResolvedValue(evidence);
+  const r=await readDiagnostics(new Request(`https://example.test?callSessionId=${id}&since=2026-10-03T12:00:00Z&until=2026-10-03T13:00:00Z`));
+  expect(r.status).toBe(200);expect(await r.json()).toEqual({...timeline,...evidence});
+  expect(f.auth).toHaveBeenCalledWith(['manager','admin']);
+  expect(f.rpc.mock.invocationCallOrder[0]).toBeLessThan(f.routingRead.mock.invocationCallOrder[0]);
+  expect(f.routingRead).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({organizationId:org,callSessionId:id,since:'2026-10-03T12:00:00Z',until:'2026-10-03T13:00:00Z'}));
+ });
+ it('does not inspect audit rows for absent or mismatched session results',async()=>{
+  vi.stubEnv('DIAGNOSTICS_PANEL_ENABLED','true');
+  for(const data of [null,{callSessionId:org,events:[],legs:[]}]){
+   f.rpc.mockReturnValue({abortSignal:vi.fn().mockResolvedValue({data,error:null})});
+   await readDiagnostics(new Request(`https://example.test?callSessionId=${id}`));
+  }
+  expect(f.routingRead).not.toHaveBeenCalled();
+  f.auth.mockRejectedValue(new Error('unauthorized'));
+  await readDiagnostics(new Request(`https://example.test?callSessionId=${id}`));
+  expect(f.routingRead).not.toHaveBeenCalled();
+ });
  it('keeps dedicated TEST ingestion, reads and maintenance in the TEST environment',async()=>{
   vi.stubEnv('MOTORIST_APP_ENV','test');vi.stubEnv('VERCEL_ENV','production');
   vi.stubEnv('DIAGNOSTICS_PANEL_ENABLED','true');vi.stubEnv('DIAGNOSTICS_PHYSICAL_BUDGET_BYTES','33554432');

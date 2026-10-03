@@ -156,6 +156,7 @@ export function auditCommandOutcomes(commands: CommandOutcome[]) {
 }
 
 export type ApplyResult = {
+  routing?: Transition["routing"];
   session: SessionRow;
   branch: "main" | "rejected";
   commands: CommandOutcome[];
@@ -627,6 +628,7 @@ export async function recordCallEvent(
     stateBefore: string | null;
     stateAfter: string | null;
     notes: string[];
+    routing?: Transition["routing"];
     commands: Array<{ kind: string; ok: boolean; command_id?: string | null; skipped?: boolean; started_at?: string; effect_ms?: number; phase?: string }>;
     error?: string | null;
     timing?: EventTiming;
@@ -662,6 +664,7 @@ export async function recordCallEvent(
       state_before: input.stateBefore,
       state_after: input.stateAfter,
       notes: input.notes,
+      ...(input.routing?.length ? { routing: input.routing } : {}),
       commands: input.commands,
       error: input.error ?? null,
       ...(measuredTiming || event.kind === "telnyx" ? { timing: {
@@ -2115,7 +2118,7 @@ async function executeReduceResult(
     if (!failure && !projectionError && !input.continuation.auditComplete && input.continuation.commands.every((command) => input.continuation!.completedCommands.includes(commandKey(command)))) {
       try {
         await recordCallEvent(deps, { session, event: input.continuation.event, handledStatus: "processed", stateBefore: input.continuation.stateBefore, stateAfter: session.state,
-          notes: [...transition.notes, "durable effects completed"], commands: auditCommandOutcomes(outcomes) });
+          notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) });
         input.continuation.auditComplete = true;
       } catch (error) {
         if (!deferProjections || error instanceof SessionLeaseLostError) throw error;
@@ -2140,7 +2143,7 @@ async function executeReduceResult(
   }
 
   return { session, branch, commands: outcomes, compensations: compensated, failed: failure !== null, failure,
-    ...(projectionError ? { projectionPending: true } : {}), notes: transition.notes };
+    ...(projectionError ? { projectionPending: true } : {}), notes: transition.notes, ...(transition.routing?.length ? { routing: transition.routing } : {}) };
 }
 
 /** What the urgent dispatch measured for a command, so the audit does not restate it from the journal-cache replay (M21: 1.7-3.3 s later). */
