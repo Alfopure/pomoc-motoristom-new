@@ -30,6 +30,7 @@ import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import type { WebphoneCallView, WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 
 import { callElapsedSeconds, formatCallTimer, phoneBarStateLabel, type PhoneCallAction } from "./phone-bar-model";
+import { CallJourneyButton } from "./CallJourney";
 
 export type LiveCallOverviewFilter = "all" | "ringing" | "waiting" | "active";
 
@@ -354,6 +355,7 @@ function LiveCallRow({
       </div>
 
       <div className={`flex flex-wrap items-center gap-1.5 ${compact ? "pl-10" : "sm:justify-end"}`}>
+        {!compact && <CallJourneyButton sessionId={call.sessionId} />}
         {canAnswer && <ActionButton busy={phone?.answering} disabled={answerBlocked} icon={PhoneCall} label="Prijať" tone="accept" onClick={() => { if (!matchesIncomingBrowserInvite(call, phone?.call)) return; if (onAnswerOffer) onAnswerOffer(call.sessionId, phone?.call?.telnyxCallControlId ?? null); else onAnswer(); }} />}
         {deferCallControlId && onDeferOfferIdentity && <ActionButton busy={busyAction === "defer"} disabled={stale || isBusy || answerBlocked} icon={Clock3} label="Do čakárne" tone="warning" onClick={() => { if (deferOfferCallControlId(call, phone?.call) !== deferCallControlId) return; onDeferOfferIdentity(call.sessionId, deferCallControlId); }} />}
         {canAnswer && <ActionButton disabled={answerBlocked} icon={X} label="Odmietnuť" tone="danger-outline" onClick={() => { if (!matchesIncomingBrowserInvite(call, phone?.call)) return; if (onRejectOfferIdentity) onRejectOfferIdentity(call.sessionId, phone?.call?.telnyxCallControlId ?? null); else onRejectOffer(); }} />}

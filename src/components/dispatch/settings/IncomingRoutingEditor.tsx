@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Clock3, Loader2, Save, Settings2, Undo2 } from "lucide-react";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Clock3, GitBranch, Loader2, Save, Settings2, Undo2 } from "lucide-react";
 import type { DraftEditorState } from "../useDraftEditors";
 import type { RoutingDocument } from "@/server/telephony/config-service";
 import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
@@ -11,6 +11,7 @@ import { ConfigRequestError, loadRoutingConfig, saveRoutingConfig, type RoutingC
 import { initialIncomingLineId } from "./incoming-routing-model";
 import { emptyIncomingFlow, incomingFlowChanges, incomingFlowsMatch, incomingFlowSummary, legacyIncomingFlow, validateIncomingFlowDraft, type FlowDrafts } from "./incoming-flow-model";
 import { IncomingFlowSteps } from "./IncomingFlowSteps";
+import { IncomingFlowMonitor } from "./IncomingFlowMonitor";
 import { LegacyIncomingRoutingEditor } from "./LegacyIncomingRoutingEditor";
 import { SettingsIssueList, SettingsNotice } from "./settings-ui";
 import styles from "./incoming-flow.module.css";
@@ -51,6 +52,7 @@ export function IncomingRoutingEditor(props: Props) {
 }
 
 function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNavigate, onDirtyChange, onActionsChange, onEditorStateChange, onLegacy }: Props & { onLegacy: (lineId: string) => void }) {
+  const [view, setView] = useState<"settings" | "live">("settings");
   const [baseline, setBaseline] = useState(document);
   const [drafts, setDrafts] = useState<FlowDrafts>({});
   const [lineId, setLineId] = useState(() => initialIncomingLineId(document, target));
@@ -143,10 +145,13 @@ function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
       <div className={styles.lineMain}><button type="button" className={styles.iconButton} disabled={baseline.lines.length < 2} onClick={() => nextLine(-1)} aria-label="Predchádzajúca linka"><ChevronLeft size={24} aria-hidden="true" /></button><div className={styles.lineIdentity} aria-live="polite"><p>{line.label}</p><strong>{formatPhoneNumberForDisplay(line.phoneNumber)}</strong><small>Linka {lineIndex + 1} z {baseline.lines.length}{!line.active ? " · Vypnutá" : ""}{drafts[line.id] && changes.some(change => change.id === line.id) ? " · Neuložené zmeny" : ""}</small></div><button type="button" className={styles.iconButton} disabled={baseline.lines.length < 2} onClick={() => nextLine(1)} aria-label="Nasledujúca linka"><ChevronRight size={24} aria-hidden="true" /></button></div>
       {baseline.lines.length > 1 && <nav className={styles.lineDots} aria-label="Vybrať linku">{baseline.lines.map(candidate => <button key={candidate.id} type="button" aria-current={candidate.id === line.id} aria-label={`${candidate.label}, ${formatPhoneNumberForDisplay(candidate.phoneNumber)}`} onClick={() => setLineId(candidate.id)}><span /></button>)}</nav>}
     </div> : <SettingsNotice>Nie je dostupná žiadna linka. Najprv ju pridaj v nastavení čísel.</SettingsNotice>}
+    {line && <div className={styles.viewTabs} role="group" aria-label="Zobrazenie postupu"><button type="button" aria-pressed={view === "settings"} onClick={() => setView("settings")}><Settings2 size={15} aria-hidden="true" />Nastavenie{dirty && <span className={styles.statusDot} aria-label="Neuložené zmeny" />}</button><button type="button" aria-pressed={view === "live"} onClick={() => setView("live")}><GitBranch size={15} aria-hidden="true" />Sledovať hovory</button></div>}
+    {view === "live" && line && <IncomingFlowMonitor key={line.id} lineId={line.id} savedFlow={line.incomingFlow ?? null} dirty={dirty && Boolean(drafts[line.id])} />}
     {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
     {notice && !dirty && <SettingsNotice tone="success">{notice}</SettingsNotice>}
     {uncertain && <button type="button" disabled={saving} onClick={() => void verifySavedState()} className={styles.button}>Overiť uložený stav</button>}
     {remote && <details open className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm"><summary className="min-h-11 cursor-pointer font-semibold">Porovnať uložené postupy a vlastný návrh</summary><div className="grid gap-4 md:grid-cols-2">{[{ title: "Aktuálne uložené", document: remote }, { title: "Tvoj zachovaný návrh", document: baseline }].map((entry, index) => <div key={entry.title}><h3 className="font-semibold">{entry.title}</h3>{changes.map(change => { const compared = entry.document.lines.find(candidate => candidate.id === change.id); const value = index === 1 ? change.flow : compared?.incomingFlow; return <p key={change.id} className="mt-2 break-words text-xs leading-6"><strong>{compared?.label ?? "Odstránená linka"}:</strong> {value ? incomingFlowSummary(value, entry.document) : compared ? "Pôvodné smerovanie podľa plánu" : "Linka už nie je dostupná"}</p>; })}</div>)}</div><p className="mt-3 text-xs">Pred novou úpravou načítaj uložený stav. Vlastné hodnoty si môžeš skopírovať zo zachovaného návrhu.</p><button type="button" className={`${styles.button} mt-3`} onClick={discard}>Zahodiť návrh a načítať uložené</button></details>}
+    {view === "settings" && <>
     {line && usingLegacy && <div className={styles.legacyNotice}>
       <strong>{legacy?.flow ? "Uložené pôvodné smerovanie" : "Táto linka používa pôvodné nastavenie"}</strong>
       <p>{legacy?.reason ?? "Nižšie vidíš doterajšie poradie a časy. Voľba Aplikácia v novom postupe zahŕňa web aj mobilnú appku. Pôvodné smerovanie zostane aktívne až do uloženia."}</p>
@@ -166,5 +171,6 @@ function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
       {!baseline.snapshotId && <small>Na bezpečné uloženie chýba aktuálny stav nastavení. Obnov stránku.</small>}
       {issues.length > 0 && <div className="basis-full"><SettingsIssueList issues={issues} /></div>}
     </div>
+    </>}
   </section>;
 }

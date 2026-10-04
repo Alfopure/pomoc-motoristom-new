@@ -14,6 +14,15 @@ function response(body: CallbackQueuePayload, status = 200) { return { body, sta
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
 describe("shared callback queue", () => {
+  it("replaces stale loaded pages when a caller request changes the global order", async () => {
+    vi.useFakeTimers();
+    request.mockResolvedValueOnce(response(payload(["old-missed", "resolved-later"], 4, "old-cursor")))
+      .mockResolvedValueOnce(response({ ...payload(["new-request", "old-missed"], 3, "new-cursor"), resetPage: true }));
+    const store = new CallbackQueueStore(); const close = store.subscribe(() => {});
+    await vi.advanceTimersByTimeAsync(0); store.loadMore(); await vi.advanceTimersByTimeAsync(0);
+    expect(store.getSnapshot().queue.open.map(item => item.id)).toEqual(["new-request", "old-missed"]);
+    expect(store.getSnapshot().queue.nextCursor).toBe("new-cursor"); close();
+  });
   it("uses one request for header and panel and keeps the complete count beyond a page", async () => {
     vi.useFakeTimers(); request.mockResolvedValue(response(payload(["a"], 125, "next")));
     const store = new CallbackQueueStore(); const closeHeader = store.subscribe(() => {}); const closePanel = store.subscribe(() => {});

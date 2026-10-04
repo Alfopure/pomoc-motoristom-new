@@ -3,6 +3,7 @@ export type RoutingDiagnosticMember = {
   memberId: string | null;
   profileId: string | null;
   endpoint: "sip" | "pstn";
+  applicationDevice?: "web" | "mobile";
   outcome: "selected" | "skipped";
   reason: string | null;
   presence: string | null;

@@ -4,6 +4,7 @@ import { evaluateBusinessHours } from "@/lib/telephony/business-hours";
 import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { announcementConfigFromMetadata, resolveAnnouncement, resolveCombinedInboundIntro } from "@/lib/telephony/announcements";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
+import type { IncomingWaitPolicy } from "@/lib/telephony/incoming-flow";
 import { classifyRingHangup } from "../routing/eligibility";
 import { decideIvr, describeIvrDecision, ivrGatherSpec, type IvrGatherOutcome } from "../routing/ivr";
 import { memberKey, planQueueStep, queueOperatorMembers, planRingStep, stepDeadline, toEligibilityDevices, toEligibilityPresence, type RingStepPlanResult } from "../routing/ring-plan";
@@ -14,6 +15,8 @@ import { readPendingEffects } from "./continuation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { contactOperationIntent } from "../contact-proof";
 import {
+  appendJourneyEvidence,
+  type JourneyEvidenceEntry,
   ACTIVE_SESSION_STATES,
   CALLBACK_OFFER_TIMEOUT_MS,
   DEFAULT_TRANSFER_TIMEOUT_SECS,
@@ -141,6 +144,7 @@ class TransitionBuilder {
   readonly compensations: Compensation[] = [];
   guard: ReservationGuard | null = null;
   private nextState: CallSessionState;
+  private journeyStep: number | null;
 
   constructor(
     readonly session: SessionRow,
@@ -152,6 +156,9 @@ class TransitionBuilder {
     this.nowIso = ctx.now.toISOString();
     this.eventKey = event.id;
     this.nextState = session.state;
+    const meta = readMeta(session);
+    this.journeyStep = ["ringing", "waiting"].includes(session.state)
+      ? meta.waiting?.flow_step_index ?? meta.ring?.active_step ?? null : null;
   }
 
   fork(): TransitionBuilder {
@@ -167,6 +174,10 @@ class TransitionBuilder {
   }
 
   setState(state: CallSessionState): this {
+    if (state !== this.nextState) {
+      if (["talking", "callback_offered", "missed", "ended", "failed"].includes(state)) this.exitJourneyStep(state);
+      this.journey("phase", null, undefined, state);
+    }
     this.nextState = state;
     this.sessionPatch.state = state;
     return this;
@@ -185,6 +196,26 @@ class TransitionBuilder {
   note(text: string): this {
     this.notes.push(text);
     return this;
+  }
+
+  private journey(kind: JourneyEvidenceEntry["kind"], stepIndex: number | null, reason?: string, phase?: string, at = this.nowIso): void {
+    this.patchMeta({ journey: appendJourneyEvidence(this.meta.journey, {
+      id: `${this.eventKey}:${kind}:${stepIndex ?? "none"}:${phase ?? reason ?? ""}`, at, kind, stepIndex,
+      ...(reason ? { reason } : {}), ...(phase ? { phase } : {}),
+    }) });
+  }
+
+  enterJourneyStep(index: number, phase: string): void {
+    if (this.journeyStep === index) return;
+    this.exitJourneyStep("completed");
+    this.journeyStep = index;
+    this.journey("step_enter", index, undefined, phase);
+  }
+
+  exitJourneyStep(reason: string, at?: string): void {
+    if (this.journeyStep === null) return;
+    this.journey("step_exit", this.journeyStep, reason, undefined, at);
+    this.journeyStep = null;
   }
 
   cmdId(legKey: string, intent: string, step: string | number = this.eventKey): string {
@@ -487,16 +518,30 @@ function mohTickSpec(): GatherSpec {
   };
 }
 
-/** Default audio includes music; custom speech gets a separate music phase. */
+function queueCallbackEnabled(b: TransitionBuilder): boolean {
+  return (b.meta.waiting?.audio_policy?.mode ?? "callback") === "callback" && Boolean(normalizeE164(b.session.caller_number));
+}
+
+/** Default legacy audio includes music; explicit policies always separate it. */
 function queueWaitSpec(b: TransitionBuilder): GatherSpec {
-  return { media: { key: normalizeE164(b.session.caller_number) ? "queueWaiting" : "holdReminder" }, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1, validDigits: "1", timeoutMillis: 1_000 };
+  const key = queueCallbackEnabled(b) ? "queueWaiting" : "holdReminder";
+  const config = b.meta.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata);
+  const prompt = resolveAnnouncement(config, key);
+  // The shipped queueWaiting file includes a whole minute of music. For a
+  // new cadence speak its configured localized text, while retaining custom
+  // speech-only recordings and the unchanged legacy combined recording.
+  const speechOnly = Boolean(b.meta.waiting?.audio_policy && key === "queueWaiting" && prompt.file === `announcements-v4/${config.language}/queueWaiting.mp3`);
+  return { media: { key }, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1,
+    validDigits: queueCallbackEnabled(b) ? "1" : "0123456789#*", timeoutMillis: 1_000,
+    ...(speechOnly ? { forceSpeech: true } : {}) };
 }
 
 function startQueuePrompt(b: TransitionBuilder, leg: LegRow): void {
+  if (b.meta.waiting?.audio_policy?.mode === "music") { startQueueMusic(b, leg); return; }
   stopMoh(b, leg);
   const config = b.meta.announcements ?? announcementConfigFromMetadata(b.ctx.line?.metadata);
   const prompt = resolveAnnouncement(config, "queueWaiting");
-  const combined = Boolean(normalizeE164(b.session.caller_number) && b.ctx.mediaAvailable && prompt.file === `announcements-v4/${config.language}/queueWaiting.mp3`);
+  const combined = Boolean(!b.meta.waiting?.audio_policy && normalizeE164(b.session.caller_number) && b.ctx.mediaAvailable && prompt.file === `announcements-v4/${config.language}/queueWaiting.mp3`);
   if (b.meta.waiting) b.patchMeta({ waiting: { ...b.meta.waiting, audio_phase: combined ? "combined" : "prompt", music_until: null } });
   b.cmd(gatherCmd(b, leg, queueWaitSpec(b)));
 }
@@ -504,10 +549,14 @@ function startQueuePrompt(b: TransitionBuilder, leg: LegRow): void {
 function startQueueMusic(b: TransitionBuilder, leg: LegRow): void {
   const waiting = b.meta.waiting;
   const currentEnd = waiting?.audio_phase === "music" && waiting.music_until ? Date.parse(waiting.music_until) : NaN;
-  const remaining = currentEnd > b.ctx.now.getTime() ? Math.max(1_000, Math.min(MOH_TICK_TIMEOUT_MS, currentEnd - b.ctx.now.getTime())) : MOH_TICK_TIMEOUT_MS;
+  const interval = waiting?.audio_policy && waiting.audio_policy.mode !== "music" ? waiting.audio_policy.intervalSeconds * 1_000 : MOH_TICK_TIMEOUT_MS;
+  const deadline = waiting ? Date.parse(waiting.since) + (waiting.max_minutes ?? b.ctx.settings.parkMaxMinutes) * 60_000 : Infinity;
+  const phaseRemaining = currentEnd > b.ctx.now.getTime() ? currentEnd - b.ctx.now.getTime() : interval;
+  const remaining = Math.max(1_000, Math.min(interval, phaseRemaining, deadline - b.ctx.now.getTime()));
   if (waiting) b.patchMeta({ waiting: { ...waiting, audio_phase: "music", music_until: new Date(b.ctx.now.getTime() + remaining).toISOString() } });
   if (!Number.isFinite(currentEnd)) startMoh(b, leg);
-  b.cmd(gatherCmd(b, leg, { media: null, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1, validDigits: "1", timeoutMillis: remaining, initialTimeoutMillis: remaining }));
+  b.cmd(gatherCmd(b, leg, { media: null, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1,
+    validDigits: queueCallbackEnabled(b) ? "1" : "0123456789#*", timeoutMillis: remaining, initialTimeoutMillis: remaining }));
 }
 
 /**
@@ -943,7 +992,7 @@ function ringFromStep(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPl
   for (let index = fromStep; index < plan.steps.length; index += 1) {
     const step = plan.steps[index];
     if (step.kind === "wait") {
-      enterFlowWait(b, customer, index, step.waitMinutes!);
+      enterFlowWait(b, customer, index, step.waitMinutes!, step.waitPolicy);
       return true;
     }
     const planned = planStep(b, plan, index);
@@ -955,6 +1004,8 @@ function ringFromStep(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPl
         return true;
       }
       b.note(`step ${index} (${step.groupName}) skipped: ${planned.skipped.map((skip) => `${memberKey(skip.member)}=${skip.reason}`).join(",") || "no members"}`);
+      b.enterJourneyStep(index, "ringing");
+      b.exitJourneyStep("no_eligible_members");
       continue;
     }
     fanout(b, customer, index, planned, { expectedStep: b.session.current_step, setStep: index + 1 });
@@ -1018,6 +1069,7 @@ function recordRoutingDecision(b: TransitionBuilder, kind: "selection" | "comple
       const seen = device?.device_seen_at ? Date.parse(device.device_seen_at) : NaN;
       return {
         memberId: safeId(member.memberId), profileId: safeId(profileId), endpoint: member.kind === "operator" ? "sip" : "pstn",
+        ...(member.applicationDevice ? { applicationDevice: member.applicationDevice } : {}),
         outcome, reason: memberReason, presence: presence?.status ?? null,
         registration: device?.registration_state ?? null,
         heartbeatAgeMs: Number.isFinite(seen) ? Math.max(0, b.ctx.now.getTime() - seen) : null,
@@ -1037,6 +1089,7 @@ function capacityWaitedMs(b: TransitionBuilder): number {
 
 /** Keeps `stepIndex` armed (no dials) so a sweep re-tries it once a leg frees up. */
 function holdStepForCapacity(b: TransitionBuilder, stepIndex: number): void {
+  b.enterJourneyStep(stepIndex, "capacity_wait");
   const ring = b.meta.ring ?? {};
   b.setState("ringing").patchMeta({
     ring: {
@@ -1076,6 +1129,7 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
   // The single choke point for every `POST /calls` of a ring step: never dial
   // for a caller the provider already reported gone (M12).
   if (b.meta.customer_gone_at) { b.note("customer gone at provider → no dial"); return; }
+  b.enterJourneyStep(stepIndex, "ringing");
   const devices = new Map(b.ctx.devices.map((device) => [device.profile_id, device]));
   const mobileDevices = new Map((b.ctx.mobileDevices ?? []).map((device) => [device.profile_id, device]));
   const from = b.ctx.fromNumber ?? b.session.called_number ?? "";
@@ -1138,6 +1192,7 @@ function exhaustionReason(b: TransitionBuilder): "ring_exhausted" | "no_operator
 }
 
 function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPlan): void {
+  b.exitJourneyStep("exhausted");
   const ring = b.meta.ring ?? {};
   const kind = plan.fallback.kind;
   recordRoutingDecision(b, "fallback", b.activeRingStep(), kind === "external_number" && ring.fallback === "external_number" ? "callback_offer" : kind);
@@ -1233,8 +1288,9 @@ function offerCallback(b: TransitionBuilder, customer: LegRow, media: MediaRef, 
 }
 
 /** A flow wait is a real intermediate node, not the legacy terminal queue. */
-function enterFlowWait(b: TransitionBuilder, customer: LegRow, index: number, minutes: number): void {
-  enterWaiting(b, customer, "flow_wait", "waiting", true);
+function enterFlowWait(b: TransitionBuilder, customer: LegRow, index: number, minutes: number, policy?: IncomingWaitPolicy): void {
+  b.enterJourneyStep(index, "waiting");
+  enterWaiting(b, customer, "flow_wait", "waiting", true, { index, minutes, policy });
   const deadline = new Date(b.ctx.now.getTime() + minutes * 60_000).toISOString();
   b.patchSession({ current_step: index + 1 });
   b.patchMeta({
@@ -1247,6 +1303,7 @@ function enterFlowWait(b: TransitionBuilder, customer: LegRow, index: number, mi
 function finishFlowWait(b: TransitionBuilder, customer: LegRow, index: number): void {
   const plan = b.ringPlan();
   if (plan?.source !== "incoming_flow" || plan.steps[index]?.kind !== "wait") return;
+  b.exitJourneyStep("wait_timeout");
   cancelOpenAttempts(b, b.nowIso, "flow wait timeout");
   for (const other of b.openLegs()) if (!isCustomer(other)) {
     b.cmd(hangupCmd(b, other, "flow_wait_timeout"));
@@ -1263,7 +1320,11 @@ function finishFlowWait(b: TransitionBuilder, customer: LegRow, index: number): 
   b.note(`flow step ${index}: wait completed → continue`);
 }
 
-function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, state: "waiting" | "parked" = "waiting", manualOnly = false): void {
+function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, state: "waiting" | "parked" = "waiting", manualOnly = false,
+  flowWait?: { index: number; minutes: number; policy?: IncomingWaitPolicy }): void {
+  // Failed/finished ringing ends that step; a failed pickup inside a bounded
+  // flow wait keeps the same wait interval and its original deadline.
+  if (!flowWait && b.meta.waiting?.flow_step_index === undefined) b.exitJourneyStep(reason);
   const ringbackRunning = !b.meta.queue && b.session.state === "ringing" && b.meta.ring?.mode === "plan";
   const musicRunning = mohIsPlaying(b) && !ringbackRunning;
   // The waiting-room limit is frozen the moment the caller enters it, like the
@@ -1278,11 +1339,12 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
   const previous = queued && b.meta.queue ? b.meta.waiting : null;
   const manual = manualOnly || b.meta.queue?.manual_only === true;
   const nextOfferAt = manual
-    ? new Date(Date.parse(previous?.since ?? b.nowIso) + (previous?.max_minutes ?? b.ctx.settings.parkMaxMinutes) * 60_000).toISOString()
+    ? new Date(Date.parse(previous?.since ?? b.nowIso) + (previous?.max_minutes ?? flowWait?.minutes ?? b.ctx.settings.parkMaxMinutes) * 60_000).toISOString()
     : new Date(b.ctx.now.getTime() + QUEUE_RECHECK_MS).toISOString();
   if (queued && !previous) stopMoh(b, customer);
   b.setState(state).patchMeta({
-    waiting: previous ?? { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso, max_minutes: b.ctx.settings.parkMaxMinutes },
+    waiting: previous ?? { since: b.nowIso, reason, ticks: 0, last_tick_at: b.nowIso, max_minutes: flowWait?.minutes ?? b.ctx.settings.parkMaxMinutes,
+      ...(flowWait ? { flow_step_index: flowWait.index } : {}), ...(flowWait?.policy ? { audio_policy: { ...flowWait.policy } } : {}) },
     // A queue that already exists keeps its idle clock and its spent
     // escalation; re-entering the waiting room after an offer rang out is the
     // same queue, not a new one. A fresh queue starts idle, because the ring
@@ -1514,6 +1576,7 @@ function onOfferAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridg
   }
 
   const win = () => {
+    b.exitJourneyStep("answered", opts.at);
     b.setState("talking").patchSession({
       answered_by_profile_id: leg.profile_id ?? null,
       answered_at: b.session.answered_at ?? opts.at,
@@ -1831,6 +1894,7 @@ function keepParties(b: TransitionBuilder, customer: LegRow, at: string, cause: 
 }
 
 function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent, at: string): ReduceResult {
+  b.exitJourneyStep("customer_hangup", at);
   const state = b.session.state;
   const meta = b.meta;
   const appHangup = meta.hangup ?? null;
@@ -2234,7 +2298,7 @@ function onGatherEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceResul
   if (event.clientState?.gatherId && event.clientState.gatherId !== b.meta.gather?.id) return ignoredResult("stale gather completion");
   if (purpose === "queue_wait" && !b.meta.queue) return ignoredResult("queue gather already finished");
   if (b.meta.queue && (state === "waiting" || state === "ringing") && purpose === "queue_wait") {
-    if (digits === "1") {
+    if (digits === "1" && queueCallbackEnabled(b)) {
       confirmCallback(b, leg, "missed", null, "1", "waiting_room");
       return b.result();
     }
@@ -2357,6 +2421,7 @@ function confirmCallback(
   }
   const previous = b.meta.callback?.confirmed ? b.meta.callback : null;
   const request = { kind: "requested" as const, requested_at: previous?.requested_at ?? b.event.occurredAt ?? b.nowIso, digit, context, event_id: previous?.event_id ?? b.eventKey };
+  b.exitJourneyStep("callback_requested", request.requested_at);
   stopMoh(b, leg);
   if (b.meta.queue) b.cmd({ kind: "gather_stop", commandId: b.cmdId(leg.telnyx_call_control_id, "gather_stop"), leg: ref(leg), bestEffort: true });
   cancelOpenAttempts(b, b.nowIso, "callback requested");

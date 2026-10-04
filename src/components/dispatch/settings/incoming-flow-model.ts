@@ -174,7 +174,11 @@ export function removeFlowStep(flow: IncomingFlow, id: string): IncomingFlow {
 
 export function incomingStepSummary(step: IncomingFlowStep, flow: IncomingFlow, document: RoutingDocument): string {
   if (step.type === "ring") return `${step.people.map(person => document.operators.find(operator => operator.profileId === person.profileId)?.displayName ?? "Nedostupný operátor").join(" + ") || "Zvonenie bez ľudí"} (najviac ${step.seconds} s)`;
-  if (step.type === "wait") return `čakáreň ${step.minutes} min`;
+  if (step.type === "wait") {
+    const policy = step.policy ?? { mode: "callback", intervalSeconds: 60 };
+    const audio = policy.mode === "music" ? "iba hudba" : `${policy.mode === "callback" ? "ponuka spätného volania" : "informácia o čakaní"}, medzi hláškami ${policy.intervalSeconds} s hudby`;
+    return `čakáreň ${step.minutes} min (${audio})`;
+  }
   if (step.type === "external") return `číslo ${step.number || "nie je doplnené"} (najviac ${step.seconds} s)`;
   return `zopakovať kroky ${step.stepIds.map(id => flow.steps.findIndex(candidate => candidate.id === id) + 1).join(", ")} ešte ${step.times}×`;
 }

@@ -114,34 +114,23 @@ export async function loadCallbackQueue(
   const { admin, organizationId } = deps;
   const since = new Date(now.getTime() - CALLBACK_RESOLVED_WINDOW_MS).toISOString();
 
-  let openQuery = admin.from("motorist_callback_requests").select("*")
-    .eq("organization_id", organizationId).in("status", [...CALLBACK_LIVE_STATUSES]);
-  if (options.cursor) {
-    const cursor = decodeCallbackCursor(options.cursor);
-    openQuery = openQuery.or(`created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`);
-  }
-  const [openResult, resolvedResult, totalResult] = await Promise.all([
-    openQuery.order("created_at", { ascending: true }).order("id", { ascending: true }).limit(CALLBACK_QUEUE_LIMIT + 1),
-    admin
-      .from("motorist_callback_requests")
-      .select("*")
-      .eq("organization_id", organizationId)
-      .in("status", ["done", "cancelled"])
-      .gte("resolved_at", since)
-      .order("resolved_at", { ascending: false })
-      .limit(20),
-    admin.from("motorist_callback_requests").select("id", { count: "exact", head: true })
-      .eq("organization_id", organizationId).in("status", [...CALLBACK_LIVE_STATUSES]),
+  const cursor = options.cursor ? decodeCallbackCursor(options.cursor) : null;
+  const [openResult, resolvedResult] = await Promise.all([
+    admin.rpc("motorist_callback_queue_page_v1", { p_organization_id: organizationId, p_cursor: cursor ? toJson(cursor) : undefined, p_limit: CALLBACK_QUEUE_LIMIT }),
+    admin.from("motorist_callback_requests").select("*")
+      .eq("organization_id", organizationId).in("status", ["done", "cancelled"])
+      .gte("resolved_at", since).order("resolved_at", { ascending: false }).limit(20),
   ]);
   if (openResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${openResult.error.message}`, 500);
   if (resolvedResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${resolvedResult.error.message}`, 500);
-
-  if (totalResult.error) throw new CallActionError("Počet spätných volaní sa nepodarilo načítať.", 500);
-  const openRows = ((openResult.data ?? []) as CallbackRow[]).slice(0, CALLBACK_QUEUE_LIMIT);
+  const page = readPriorityPage(openResult.data, organizationId);
+  const entries = page.entries.slice(0, CALLBACK_QUEUE_LIMIT);
+  const openRows = entries.map(entry => entry.request);
   const rows = [...openRows, ...(resolvedResult.data ?? [])] as CallbackRow[];
   const lineIds = [...new Set(rows.map((row) => row.line_id).filter((id): id is string => Boolean(id)))];
   const profileIds = [...new Set(rows.map((row) => row.claimed_by).filter((id): id is string => Boolean(id)))];
-  const sessionIds = [...new Set(rows.map((row) => row.session_id).filter((id): id is string => Boolean(id)))];
+  // Open rows carry the same evidence snapshot that established their priority.
+  const sessionIds = [...new Set(((resolvedResult.data ?? []) as CallbackRow[]).map((row) => row.session_id).filter((id): id is string => Boolean(id)))];
 
   const [lines, profiles, sessions] = await Promise.all([
     lineIds.length
@@ -158,6 +147,7 @@ export async function loadCallbackQueue(
   const lineById = new Map((lines.data ?? []).map((line) => [line.id, line]));
   const nameById = new Map((profiles.data ?? []).map((profile) => [profile.id, profile.display_name]));
   const metadataById = new Map((sessions.data ?? []).map((session) => [session.id, session.metadata]));
+  for (const entry of entries) if (entry.request.session_id) metadataById.set(entry.request.session_id, toJson(entry.sessionMetadata));
 
   const toPayload = (row: CallbackRow) =>
     toCallbackPayload(row, {
@@ -173,28 +163,56 @@ export async function loadCallbackQueue(
     configured: options.configured ?? true,
     actorProfileId: actor.profileId,
     actorRole: actor.role,
-    openTotal: totalResult.count ?? openRows.length,
-    nextCursor: (openResult.data?.length ?? 0) > CALLBACK_QUEUE_LIMIT ? encodeCallbackCursor(openRows[openRows.length - 1]) : null,
-    open: openRows.map(toPayload),
+    openTotal: page.openTotal,
+    totalsByOrigin: page.totalsByOrigin,
+    priorityOrder: true,
+    resetPage: page.reset,
+    nextCursor: page.entries.length > CALLBACK_QUEUE_LIMIT ? encodeCallbackCursor({
+      version: 2, revision: page.revision, rank: entries[entries.length - 1].rank,
+      sortAt: entries[entries.length - 1].sortAt, id: entries[entries.length - 1].request.id,
+    }) : null,
+    open: entries.map(entry => ({ ...toPayload(entry.request), queueSortAt: entry.sortAt })),
     resolved: ((resolvedResult.data ?? []) as CallbackRow[]).map(toPayload),
   };
 }
 
-export function encodeCallbackCursor(row: { id: string; created_at: string }): string {
-  return Buffer.from(JSON.stringify({ id: row.id, createdAt: row.created_at })).toString("base64url");
+type CallbackPriorityCursor = { version: 2; revision: string; rank: 0 | 1; sortAt: string; id: string };
+type PriorityPage = {
+  entries: Array<{ request: CallbackRow; sessionMetadata: unknown; rank: 0 | 1; sortAt: string }>;
+  revision: string; openTotal: number; reset: boolean;
+  totalsByOrigin: Record<"requested" | "missed" | "manual" | "unknown", number>;
+};
+const timestamp = (value: unknown): value is string => typeof value === "string" &&
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
+function validCursor(row: CallbackPriorityCursor): boolean {
+  return row?.version === 2 && typeof row.revision === "string" && /^[a-f0-9]{32}$/.test(row.revision) &&
+    (row.rank === 0 || row.rank === 1) && isUuid(row.id) && timestamp(row.sortAt);
 }
-
-export function decodeCallbackCursor(value: string): { id: string; createdAt: string } {
+function readPriorityPage(value: unknown, organizationId: string): PriorityPage {
+  const page = value as PriorityPage;
+  if (!page || !Array.isArray(page.entries) || page.entries.length > CALLBACK_QUEUE_LIMIT + 1 ||
+    typeof page.revision !== "string" || !/^[a-f0-9]{32}$/.test(page.revision) ||
+    !Number.isSafeInteger(page.openTotal) || page.openTotal < 0 || typeof page.reset !== "boolean" ||
+    !page.totalsByOrigin || ["requested", "missed", "manual", "unknown"].some(kind => {
+      const count = page.totalsByOrigin[kind as keyof PriorityPage["totalsByOrigin"]];
+      return !Number.isSafeInteger(count) || count < 0;
+    }) || page.entries.some(entry => !entry?.request || entry.request.organization_id !== organizationId ||
+      !isUuid(entry.request.id) || (entry.rank !== 0 && entry.rank !== 1) || !timestamp(entry.sortAt))) {
+    throw new CallActionError("Poradie spätných volaní sa nepodarilo overiť.", 500);
+  }
+  return page;
+}
+export function encodeCallbackCursor(row: CallbackPriorityCursor): string {
+  return Buffer.from(JSON.stringify(row)).toString("base64url");
+}
+export function decodeCallbackCursor(value: string): CallbackPriorityCursor {
   try {
     if (value.length > 512) throw new Error("Invalid cursor");
     const row = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-    if (!isUuid(row.id) || typeof row.createdAt !== "string" ||
-      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(row.createdAt) ||
-      !Number.isFinite(Date.parse(row.createdAt))) throw new Error("Invalid cursor");
-    // Preserve PostgreSQL microseconds. Date.toISOString() truncates them and
-    // would fetch the previous boundary row again on the next page.
-    return { id: row.id, createdAt: row.createdAt };
-  } catch { throw new CallActionError("Neplatná strana spätných volaní.", 400); }
+    if (!validCursor(row)) throw new Error("Invalid cursor");
+    // Keep the original PostgreSQL microseconds for exact page boundaries.
+    return { version: 2, revision: row.revision, rank: row.rank, sortAt: row.sortAt, id: row.id };
+  } catch { throw new CallActionError("Zoznam spätných volaní sa zmenil. Obnovte ho od začiatku.", 400); }
 }
 
 // --- actions -----------------------------------------------------------------

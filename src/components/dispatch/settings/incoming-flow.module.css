@@ -79,6 +79,20 @@
 .endCard p { font-size: 11px; color: #71717a; margin-top: 3px; }
 .endCopy { flex: 1 1 180px; }
 .addArea { margin-left: 39px; }
+.waitPolicy { border-top: 1px solid #edf0f3; margin-top: 13px; padding-top: 12px; }
+.waitLabel { font-size: 11px; color: #71717a; margin-bottom: 7px; }
+.waitModes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.waitModes button { display: flex; align-items: center; gap: 7px; min-height: 48px; padding: 9px 11px; text-align: left; border: 1px solid #e4e4e7; border-radius: 7px; background: white; font-size: 11px; line-height: 1.6; }
+.waitModes svg { flex: none; }
+.waitModes button[aria-pressed="true"] { background: #fffbea; border-color: #e4c967; color: #665414; }
+.waitSpeech { padding: 12px; background: #f8f9fb; border-radius: 7px; margin-top: 10px; }
+.waitInterval { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: 10px; margin-bottom: 9px; }
+.waitSpeech>p { font-size: 11px; color: #52525b; }
+.waitSpeech small { display: block; font-size: 10px; color: #9096a0; margin-top: 6px; line-height: 1.8; }
+.viewTabs { display: flex; gap: 19px; border-bottom: 1px solid #e1e5eb; }
+.viewTabs button { display: flex; gap: 7px; align-items: center; min-height: 46px; padding: 6px 0 10px; position: relative; color: #71717a; font-size: 12px; }
+.viewTabs button[aria-pressed="true"] { color: #18181b; font-weight: 600; }
+.viewTabs button[aria-pressed="true"]::after { content: ""; position: absolute; bottom: 0; left: 0; right: 0; height: 3px; border-radius: 3px; background: #e6bc00; }
 .addButton { display: flex; width: 100%; min-height: 44px; align-items: center; justify-content: center; gap: 6px; border: 1px dashed #d4d4d8; border-radius: 9px; font-size: 12px; color: #52525b; }
 .addOptions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
 .addOptions button { display: grid; align-content: start; gap: 5px; padding: 12px; min-height: 100px; text-align: left; border: 1px solid #e4e4e7; border-radius: 9px; background: white; font-size: 12px; }
@@ -116,6 +130,12 @@
   .answerRule { flex-basis: 200px; }
 }
 @media (max-width: 560px) {
+  .waitModes { grid-template-columns: 1fr; gap: 6px; }
+  .waitModes button { min-height: 44px; font-size: 10px; }
+  .waitSpeech { padding: 10px; }
+  .waitSpeech>p { font-size: 10px; }
+  .waitSpeech small { font-size: 9px; }
+  .viewTabs button { font-size: 11px; }
   .heading h2 { font-size: 21px; }
   .intro { flex-direction: column; gap: 6px; }
   .answerRule { flex-basis: auto; }

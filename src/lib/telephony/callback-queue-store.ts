@@ -96,6 +96,8 @@ export class CallbackQueueStore {
     try {
       const targetCount = cursor ? 0 : this.snapshot.queue.open.length;
       let pageCursor = cursor;
+      let replaceLoaded = !cursor;
+      let resets = 0;
       let queue: CallbackQueuePayload = EMPTY_CALLBACK_QUEUE;
       const seenCursors = new Set<string>();
       do {
@@ -108,13 +110,19 @@ export class CallbackQueueStore {
           throw new Error(result.body?.error ?? "Frontu spätných volaní sa nepodarilo načítať.");
         }
         const page = result.body;
+        if (page.resetPage) {
+          if (++resets > 2) throw new Error("Zoznam sa práve mení. Obnovte ho znova.");
+          queue = EMPTY_CALLBACK_QUEUE;
+          replaceLoaded = true;
+          seenCursors.clear();
+        }
         queue = { ...page, open: [...new Map([...queue.open, ...page.open].map((row) => [row.id, row])).values()] };
         pageCursor = page.nextCursor ?? undefined;
         if (pageCursor && seenCursors.has(pageCursor)) throw new Error("Stránkovanie fronty sa nepodarilo dokončiť.");
         if (pageCursor) seenCursors.add(pageCursor);
       } while (!cursor && pageCursor && queue.open.length < targetCount);
       this.failures = 0;
-      if (cursor) queue.open = [...new Map([...this.snapshot.queue.open, ...queue.open].map((row) => [row.id, row])).values()];
+      if (!replaceLoaded) queue.open = [...new Map([...this.snapshot.queue.open, ...queue.open].map((row) => [row.id, row])).values()];
       this.publish({ queue, loaded: true, loading: false, error: null });
       if (this.lease) clearTimeout(this.lease);
       // Never retain private caller data indefinitely through a failed reauth.
