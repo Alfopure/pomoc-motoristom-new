@@ -57,13 +57,14 @@ describe("Slovak telephony alert explanations", () => {
 
   it("does not let historical connection confirmation hide a later failed transfer", () => {
     const message = render([alert("connections", { entries: [{ sessionId: "call-1", outcome: "pending" }] })], [call({ confirmedAt: NOW, confirmationSource: "conference_membership" })]);
-    expect(message.subject).toContain("posúdiť jednotlivo");
+    expect(message.subject).toContain("Ďalší priebeh hovoru nie je potvrdený");
     expect(message.text).toContain("výsledok ďalšieho spojenia alebo prepojenia nie je potvrdený");
   });
 
   it("treats ordinary bridge progress warnings as unconfirmed even with historical bridge evidence", () => {
     const message = render([alert("webhooks", { entries: [{ sessionId: "call-1", reason: "connection_unconfirmed" }] })], [call({ confirmedAt: NOW, confirmationSource: "bridge_events" })]);
     expect(message.subject).not.toContain("Hovor bol spojený;");
+    expect(message.subject).toContain("Ďalší priebeh hovoru nie je potvrdený");
     expect(message.text).toContain("výsledok ďalšieho spojenia alebo prepojenia nie je potvrdený");
   });
 
@@ -115,6 +116,7 @@ describe("Slovak telephony alert explanations", () => {
     const message = renderTelephonyAlertEmail({ alerts: [alert("webhooks")], report, evidence, environment: "production" });
     expect(message.subject).toContain("PRODUKCIA");
     expect(message.subject).not.toContain("Hovor bol spojený;");
+    expect(message.subject).toContain("Overenie hovoru je neúplné");
     expect(message.text).toContain("Časť údajov chýba");
   });
 

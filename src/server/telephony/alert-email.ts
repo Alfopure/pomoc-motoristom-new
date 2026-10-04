@@ -184,8 +184,16 @@ export function renderTelephonyAlertEmail(input: TelephonyAlertEmailInput): { su
       headline = evidence.calls.length === 1 ? `Hovor bol spojený; ${attention}` : `Spojenie uvedených hovorov potvrdené; ${attention}`;
       summary = "Máme potvrdenie spojenia účastníkov uvedených hovorov. Zvuk tým nie je overený; technický problém je opísaný nižšie.";
     } else if (confirmed) {
-      headline = "Výsledky hovorov treba posúdiť jednotlivo";
-      summary = `Potvrdenie spojenia máme pri ${confirmed} z ${evidence.calls.length} zobrazených hovorov. Pri ďalšom kroku alebo ďalších hovoroch môže výsledok chýbať; pozrite každý záznam nižšie.`;
+      if (evidence.calls.length === 1 && unresolved) {
+        headline = "Ďalší priebeh hovoru nie je potvrdený";
+        summary = "Hovor bol predtým spojený. Výsledok ďalšieho spojenia alebo prepojenia však nie je potvrdený; overte ho s operátorom podľa podrobností nižšie.";
+      } else if (evidence.calls.length === 1) {
+        headline = "Overenie hovoru je neúplné";
+        summary = "Pri uvedenom hovore máme potvrdenie skoršieho spojenia. Dostupné údaje však nestačia na vyhodnotenie celého hláseného problému; podrobnosti sú nižšie.";
+      } else {
+        headline = "Výsledky hovorov treba posúdiť jednotlivo";
+        summary = `Potvrdenie spojenia máme pri ${confirmed} z ${evidence.calls.length} zobrazených hovorov. Pri ďalšom kroku alebo ďalších hovoroch môže výsledok chýbať; pozrite každý záznam nižšie.`;
+      }
     } else {
       headline = "Spojenie hovoru nevieme potvrdiť";
       summary = "Z dostupných dôkazov nevieme potvrdiť rozhovor s operátorom. Nie je to automaticky dôkaz, že sa hovor vôbec nespojil.";
