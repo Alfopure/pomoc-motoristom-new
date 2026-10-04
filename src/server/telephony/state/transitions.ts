@@ -23,6 +23,7 @@ import {
   CAPACITY_RETRY_SECS,
   CAPACITY_WAIT_MAX_MS,
   MOH_TICK_TIMEOUT_MS,
+  MEDIA_FILES,
   GREETING_TIMEOUT_MS,
   WAITING_TICK_STALE_MS,
   TALKING_STATES,
@@ -554,7 +555,8 @@ function startQueueMusic(b: TransitionBuilder, leg: LegRow): void {
   const phaseRemaining = currentEnd > b.ctx.now.getTime() ? currentEnd - b.ctx.now.getTime() : interval;
   const remaining = Math.max(1_000, Math.min(interval, phaseRemaining, deadline - b.ctx.now.getTime()));
   if (waiting) b.patchMeta({ waiting: { ...waiting, audio_phase: "music", music_until: new Date(b.ctx.now.getTime() + remaining).toISOString() } });
-  if (!Number.isFinite(currentEnd)) startMoh(b, leg);
+  const retryMusic = waiting?.music?.retry_at && Date.parse(waiting.music.retry_at) <= b.ctx.now.getTime();
+  if (!Number.isFinite(currentEnd) || retryMusic) startMoh(b, leg);
   b.cmd(gatherCmd(b, leg, { media: null, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1,
     validDigits: queueCallbackEnabled(b) ? "1" : "0123456789#*", timeoutMillis: remaining, initialTimeoutMillis: remaining }));
 }
@@ -569,7 +571,10 @@ function startMoh(b: TransitionBuilder, customer: LegRow): void {
   if (!b.ctx.mediaAvailable) return;
   const commandId = b.cmdId(customer.telnyx_call_control_id, "playback:moh");
   if (b.commands.some((command) => "commandId" in command && command.commandId === commandId)) return;
-  b.cmd({ kind: "playback_start", commandId, leg: ref(customer), media: { key: "moh" }, loop: "infinity", bestEffort: true });
+  const trackedQueueMusic = Boolean(b.meta.queue && b.meta.waiting?.audio_phase === "music");
+  if (trackedQueueMusic && b.meta.waiting) b.patchMeta({ waiting: { ...b.meta.waiting, music: { id: commandId, started_at: b.nowIso } } });
+  b.cmd({ kind: "playback_start", commandId, leg: ref(customer), media: { key: "moh" }, loop: "infinity", bestEffort: true,
+    ...(trackedQueueMusic ? { clientState: customerState(b.session.id, `queue_music:${commandId.replaceAll("-", "").slice(0, 12)}`) } : {}) });
 }
 
 const RINGBACK_FILE = "tones-v1/ringback.mp3";
@@ -2475,6 +2480,27 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
   const leg = b.findLeg(event.callControlId);
   if (!leg || !isCustomer(leg)) return ignoredResult("playback on a non-customer leg");
   if (b.legEnded(leg)) return ignoredResult("customer leg ended");
+  let isMusic = false;
+  try { isMusic = typeof event.payload.media_url === "string" && new URL(event.payload.media_url).pathname.endsWith(`/${MEDIA_FILES.moh}`); } catch { /* Unrecognized provider media cannot prove which playback ended. */ }
+  const ordinaryParkedMusic = WAITING_STATES.has(b.session.state) && !b.meta.queue;
+  if (event.type === "call.playback.ended" && isMusic && !ordinaryParkedMusic && event.status !== "call_hangup") {
+    const waiting = b.meta.waiting;
+    const music = waiting?.music;
+    // client_state is call-wide and may already identify the subsequent silent
+    // gather. The media and provider timestamp must also identify this loop;
+    // an earlier loop's delayed failure must not restart its replacement.
+    const correlated = music && (event.clientState?.intent === `queue_music:${music.id.replaceAll("-", "").slice(0, 12)}` ||
+      event.clientState?.intent === "queue_wait" && Boolean(event.clientState.gatherId && event.clientState.gatherId === b.meta.gather?.id));
+    if (!b.meta.queue || waiting?.audio_phase !== "music" || !music || !correlated ||
+      !event.occurredAt || !(Date.parse(event.occurredAt) >= Date.parse(music.started_at))) return ignoredResult("old or uncorrelated queue music completion");
+    if (["completed", "file_not_found", "failed", "error"].includes(event.status ?? "") && !music.retry_at) {
+      // Back off and use an existing tick, never a rapid webhook retry loop.
+      b.patchMeta({ waiting: { ...waiting, music: { ...music, retry_at: new Date(b.ctx.now.getTime() + MOH_TICK_TIMEOUT_MS).toISOString() } } });
+      return b.note("queue music ended → retry after backoff").result();
+    }
+    return ignoredResult("queue music retry already scheduled or playback cancelled");
+  }
+  if (event.clientState?.intent?.startsWith("queue_music:") && event.status !== "call_hangup") return ignoredResult("queue music completion without exact media evidence");
   const gather = b.meta.gather;
   const gathering = ["ivr", "after_hours", "callback_offered"].includes(b.session.state) || Boolean(b.meta.queue && ["waiting", "ringing"].includes(b.session.state));
   if (gathering && gather && event.clientState?.gatherId === gather.id && !gather.call_gone &&

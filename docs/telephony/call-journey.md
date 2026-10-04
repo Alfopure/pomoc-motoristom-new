@@ -93,3 +93,21 @@ pásmo a frontu s viac než jednou stranou.
 tri hovory, potvrdený prechod, zachovaný návrh, zastarané údaje, odobratý
 prístup, klávesnica a úzky mobil. Tieto testy nepreukazujú živé prehrávanie
 hlášky ani fyzické zvonenie; to treba rozlíšiť od overenia nasadenej obrazovky.
+
+Dodatočné integračné overenie spája spracovanie telefonickej udalosti,
+transakčný zápis a nové načítanie priebehu. Pokrýva aj okamžité ručné prijatie
+v rovnakej milisekunde ako vznik operátorskej vetvy: do čakárne sa priradí
+iba preukázateľne prijatá vetva, nie oneskorené prevzatie po jej limite.
+
+`state/incoming-wait-wire.test.ts` používa skutočný Telnyx HTTP adaptér
+s nahradeným sieťovým transportom. Overuje odosielané polia, dlhé čakárne,
+intervaly hlášok a obnovu po chybe. Pri preukázanom zlyhaní hudby sa ďalší
+pokus uskutoční najskôr po minúte počas bežného spracovania čakárne.
+Celkový limit sa neposúva; stará udalosť neobnoví hudbu po zmene fázy hovoru.
+Nejednoznačný sieťový timeout sám nespúšťa ďalšie prehrávanie.
+
+`tests/postgres/call-journey-persistence.py` overuje presné existujúce SQL
+funkcie v dočasnej lokálnej databáze: uloženie histórie, atómový rollback,
+kontrolu verzie a odmietnutie zastaraného zapisovateľa. Vzdialenú databázu
+nemení. Ani tieto integračné skúšky nenahrádzajú telefonát so skutočným
+zvukom a klávesnicou volajúceho.
