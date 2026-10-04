@@ -12,6 +12,8 @@ import { sweepExpiredWrapUp } from "./presence-service";
 import { sweepEndedSessionPresence } from "./presence-recovery";
 import { reconciledHangupEvent } from "./call-reconciliation";
 import { DATABASE_REQUEST_MS } from "./ownership";
+import { getTelephonyHealth } from "./health";
+import { PROGRESS_FAIL_MS, sessionProgressIssue, type ProviderObservation, type ProviderVerification } from "./health-progress";
 
 /**
  * Jobs behind the single allowed Vercel cron (every 5 minutes →
@@ -37,8 +39,8 @@ import { DATABASE_REQUEST_MS } from "./ownership";
  *    have gone quiet. Every job above reasons from our own rows; this is the
  *    only one that can tell "the call is still up and nothing happened" apart
  *    from "the hangup webhook never arrived", and it closes the second case.
- * 5. `telephony.sessions.stuck` — detection only: active sessions untouched for
- *    `stuckAfterMs` are reported (and swept when a provider is configured) so
+ * 5. `telephony.sessions.stuck` — interactions overdue by `stuckAfterMs`
+ *    are reported (and swept when a provider is configured) so
  *    the health surface and the runbook have a number to look at.
  * 6. `telephony.ai-demo.cleanup`, then `telephony.alerts` — the only path that
  *    reaches a human: it mails the failing health checks to `ALERT_EMAIL_TO`,
@@ -103,8 +105,8 @@ export const LEDGER_RETENTION_DAYS = 30;
 export const LEDGER_PAYLOAD_RETENTION_DAYS = 7;
 /** Event types whose payload is dropped early (high volume, no forensic value). */
 export const LEDGER_PAYLOAD_EVENT_TYPES = ["call.playback.started", "call.playback.ended", "call.cost", "call.speak.started", "call.speak.ended"];
-/** An active session untouched for this long is reported as stuck. */
-export const STUCK_SESSION_MS = 15 * 60_000;
+/** An expected interaction overdue by this long is reported as stuck. */
+export const STUCK_SESSION_MS = PROGRESS_FAIL_MS;
 /**
  * A quiet session is asked about at Telnyx after this long. Well under the
  * stuck threshold on purpose: reconciliation is how a lost `call.hangup` gets
@@ -115,6 +117,8 @@ export const RECONCILE_IDLE_MS = 3 * 60_000;
 /** Sessions per tick, and legs per session, so one bad night cannot blow the budget. */
 export const RECONCILE_SESSION_LIMIT = 10;
 export const RECONCILE_LEG_LIMIT = 6;
+/** Do not let multiple slow provider reads consume the alert mailer's budget. */
+export const RECONCILE_BUDGET_MS = 8_000;
 
 export type TelephonyCronJobStatus = "ok" | "skipped" | "disabled" | "failed";
 
@@ -271,19 +275,21 @@ export async function detectStuckSessions(deps: TelephonyCronDeps): Promise<Tele
     .from("motorist_call_sessions")
     .select("*")
     .eq("organization_id", deps.organizationId)
-    .in("state", [...ACTIVE_SESSION_STATES])
-    .lt("updated_at", cutoff);
+    .in("state", [...ACTIVE_SESSION_STATES]);
   if (error) return { job: STUCK_SESSION_JOB, status: "failed", detail: {}, error: error.message };
 
-  const stuck = (data ?? []) as SessionRow[];
+  const stuck = ((data ?? []) as SessionRow[]).filter((session) => {
+    const issue = sessionProgressIssue(session, now);
+    return issue !== null && issue.overdueMs > (deps.stuckAfterMs ?? STUCK_SESSION_MS);
+  });
   const swept: string[] = [];
   const errors: Array<{ sessionId: string; error: string }> = [];
   if (deps.telnyx) {
     const run = sessionRunner(deps);
     for (const session of stuck) {
       try {
-        // The 15-minute cutoff was evaluated on the pre-lease row, so the
-        // verdict travels with the event (the lease write is not activity).
+        // Progress deadlines were evaluated before acquiring the lease, so
+        // that verdict travels with the event (the lease is not activity).
         await run(session.id, { kind: "app", id: `cron-stuck:${session.id}:${randomUUID()}`, type: "sweep", actorProfileId: null, occurredAt: now.toISOString(), stale: true });
         swept.push(session.id);
       } catch (sweepError) {
@@ -477,53 +483,128 @@ export async function pruneWebhookLedger(deps: TelephonyCronDeps): Promise<Telep
  * missing, so wrap-up, presence and the `motorist_calls` row all close exactly
  * as they would have.
  */
-export async function reconcileWithTelnyx(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
-  const telnyx = deps.telnyx;
-  if (!telnyx) return { job: RECONCILE_JOB, status: "skipped", detail: { reason: "not_configured" } };
+type ReconciliationCandidate = Pick<SessionRow, "id" | "state">;
+type ReconciliationCandidates = { sessions: ReconciliationCandidate[]; remaining: number; cutoff: string; error: string | null };
+type ReconciliationResult = TelephonyCronJobResult & { verification: ProviderVerification };
 
+/**
+ * Snapshot before maintenance can refresh leases. The immutable start also
+ * admits long calls touched by an earlier poll/recording sweep. Rotate bounded
+ * pages so ten long calls cannot permanently hide the eleventh.
+ */
+async function reconciliationCandidates(deps: TelephonyCronDeps): Promise<ReconciliationCandidates> {
   const now = nowOf(deps);
   const cutoff = new Date(now.getTime() - (deps.reconcileIdleMs ?? RECONCILE_IDLE_MS)).toISOString();
-  const sessions = await deps.admin
-    .from("motorist_call_sessions")
-    .select("id, state, updated_at")
-    .eq("organization_id", deps.organizationId)
-    .in("state", [...ACTIVE_SESSION_STATES])
-    .lt("updated_at", cutoff)
-    .order("updated_at", { ascending: true })
-    .limit(RECONCILE_SESSION_LIMIT);
-  if (sessions.error) return { job: RECONCILE_JOB, status: "failed", detail: {}, error: sessions.error.message };
+  const eligible = (head = false) => deps.admin.from("motorist_call_sessions")
+    .select("id, state", head ? { count: "exact", head: true } : {})
+    .eq("organization_id", deps.organizationId).in("state", [...ACTIVE_SESSION_STATES])
+    .or(`started_at.lt.${cutoff},updated_at.lt.${cutoff}`);
+  const count = await eligible(true);
+  if (count.error) return { sessions: [], remaining: 0, cutoff, error: count.error.message };
+  const total = count.count ?? 0;
+  if (!total) return { sessions: [], remaining: 0, cutoff, error: null };
+  const pages = Math.ceil(total / RECONCILE_SESSION_LIMIT);
+  const page = Math.floor(now.getTime() / (5 * 60_000)) % pages;
+  const offset = page * RECONCILE_SESSION_LIMIT;
+  const rows = await eligible().order("started_at").order("id")
+    .range(offset, offset + RECONCILE_SESSION_LIMIT - 1);
+  return { sessions: rows.data ?? [], remaining: Math.max(0, total - (rows.data?.length ?? 0)), cutoff, error: rows.error?.message ?? null };
+}
+
+export async function reconcileWithTelnyx(deps: TelephonyCronDeps, candidates?: ReconciliationCandidates): Promise<ReconciliationResult> {
+  const now = nowOf(deps);
+  const verification: ProviderVerification = { checkedAt: now.toISOString(), entries: [], remaining: 0, error: null };
+  const telnyx = deps.telnyx;
+  if (!telnyx) return { job: RECONCILE_JOB, status: "skipped", detail: { reason: "not_configured" }, verification: { ...verification, skipped: "not_configured" } };
+
+  const selected = candidates ?? await reconciliationCandidates(deps);
+  verification.remaining = selected.remaining;
+  if (selected.error) return { job: RECONCILE_JOB, status: "failed", detail: {}, error: selected.error,
+    verification: { ...verification, error: selected.error } };
+  // A preceding recovery may have ended a selected session. Do not resurrect
+  // its provider operations or report a missing leg as a new problem.
+  const current = selected.sessions.length ? await deps.admin.from("motorist_call_sessions").select("id, state")
+    .eq("organization_id", deps.organizationId).in("id", selected.sessions.map((row) => row.id)).in("state", [...ACTIVE_SESSION_STATES])
+    : { data: [], error: null };
+  if (current.error) return { job: RECONCILE_JOB, status: "failed", detail: {}, error: current.error.message,
+    verification: { ...verification, error: current.error.message } };
 
   const run = sessionRunner(deps);
+  const clock = deps.clock ?? (() => Date.now());
+  const deadline = clock() + RECONCILE_BUDGET_MS;
   const errors: Array<{ sessionId: string; error: string }> = [];
   let checkedLegs = 0;
   let deadLegs = 0;
   let closedSessions = 0;
 
-  for (const session of sessions.data ?? []) {
+  for (const session of current.data ?? []) {
+    const observation = (verdict: ProviderObservation["verdict"], extra: Partial<ProviderObservation> = {}): ProviderObservation => ({
+      sessionId: session.id, state: session.state, verdict, checkedAt: nowOf(deps).toISOString(), ...extra,
+    });
+    if (clock() >= deadline) {
+      verification.remaining += 1;
+      verification.entries.push(observation("unknown", { reason: "verification_budget_exhausted" }));
+      continue;
+    }
     const legs = await deps.admin
       .from("motorist_call_legs")
       .select("id, telnyx_call_control_id, role")
+      .eq("organization_id", deps.organizationId)
       .eq("session_id", session.id)
       .is("ended_at", null)
-      .limit(RECONCILE_LEG_LIMIT);
+      .order("id")
+      .limit(RECONCILE_LEG_LIMIT + 1);
     if (legs.error) {
       errors.push({ sessionId: session.id, error: legs.error.message });
+      verification.entries.push(observation("unavailable", { reason: "leg_read_failed", error: legs.error.message }));
       continue;
+    }
+    const openLegs = legs.data ?? [];
+    if (!openLegs.length) verification.entries.push(observation("unknown", { reason: "no_open_legs" }));
+    if (openLegs.length > RECONCILE_LEG_LIMIT) {
+      verification.remaining += 1;
+      verification.entries.push(observation("unknown", { reason: "leg_limit" }));
     }
 
     let closedHere = 0;
-    for (const leg of legs.data ?? []) {
+    for (const leg of openLegs.slice(0, RECONCILE_LEG_LIMIT)) {
+      if (clock() >= deadline) {
+        verification.remaining += 1;
+        verification.entries.push(observation("unknown", { reason: "verification_budget_exhausted" }));
+        break;
+      }
       const callControlId = leg.telnyx_call_control_id;
-      if (!callControlId) continue;
+      if (!callControlId) {
+        verification.entries.push(observation("unknown", { legId: leg.id, role: leg.role, reason: "missing_provider_id" }));
+        continue;
+      }
+      let ended: ProviderObservation | undefined;
       try {
         checkedLegs += 1;
         const status = await telnyx.retrieveCall(callControlId);
-        if (status.alive) continue;
+        if (status.known && status.alive) {
+          verification.entries.push(observation("alive", { legId: leg.id, role: leg.role }));
+          continue;
+        }
+        // Match browser reconciliation: 404/422 or malformed responses are
+        // unknown, not positive authority to hang up an ongoing conversation.
+        if (!status.known || status.raw?.is_alive !== false) {
+          verification.entries.push(observation("unknown", { legId: leg.id, role: leg.role, reason: "provider_status_unknown" }));
+          continue;
+        }
         deadLegs += 1;
-        await run(session.id, reconciledHangupEvent(callControlId, now, status.known));
+        ended = observation("ended", { legId: leg.id, role: leg.role, reason: "provider_database_mismatch", reconciled: false });
+        verification.entries.push(ended);
+        const result = await run(session.id, reconciledHangupEvent(callControlId, nowOf(deps), true)) as { apply?: { failed?: boolean } } | undefined;
+        const closed = await deps.admin.from("motorist_call_legs").select("ended_at").eq("organization_id", deps.organizationId).eq("id", leg.id).maybeSingle();
+        if (result?.apply?.failed || closed.error || !closed.data?.ended_at) throw new Error(closed.error?.message ?? "Confirmed ended leg remains unreconciled");
+        ended.reconciled = true;
         closedHere += 1;
       } catch (error) {
-        errors.push({ sessionId: session.id, error: error instanceof Error ? error.message : String(error) });
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push({ sessionId: session.id, error: message });
+        if (ended) ended.error = message;
+        else verification.entries.push(observation("unavailable", { legId: leg.id, role: leg.role, reason: "provider_read_failed", error: message }));
       }
     }
     if (closedHere > 0) closedSessions += 1;
@@ -538,22 +619,28 @@ export async function reconcileWithTelnyx(deps: TelephonyCronDeps): Promise<Tele
   return {
     job: RECONCILE_JOB,
     status: errors.length > 0 ? "failed" : "ok",
-    detail: { sessions: sessions.data?.length ?? 0, checkedLegs, deadLegs, closedSessions, cutoff, errors },
+    detail: { sessions: current.data?.length ?? 0, checkedLegs, deadLegs, closedSessions, cutoff: selected.cutoff, errors, remaining: verification.remaining },
+    verification,
   };
 }
 
 /** Mails the failing health checks to `ALERT_EMAIL_TO` (see `alerts.ts`). */
-export async function runAlertJob(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
+export async function runAlertJob(deps: TelephonyCronDeps, providerVerification?: ProviderVerification): Promise<TelephonyCronJobResult> {
   const result = await runTelephonyAlerts({
     admin: deps.admin,
     organizationId: deps.organizationId,
     config: deps.config,
     now: () => nowOf(deps),
+    report: deps.alerts?.report ?? await getTelephonyHealth({ admin: deps.admin, organizationId: deps.organizationId,
+      config: deps.config, now: () => nowOf(deps), providerVerification }),
     ...(deps.alerts ?? {}),
   });
   if (result.status === "failed") {
     deps.logger?.({ level: "error", scope: "cron", job: ALERT_JOB, error: result.error });
   }
+  deps.logger?.({ level: "info", scope: "cron", job: ALERT_JOB, status: result.status,
+    health: result.detail.health, alerts: result.detail.alerts, sent: result.detail.sent,
+    suppressed: result.detail.suppressed, reason: result.detail.reason });
   return { job: ALERT_JOB, status: result.status, detail: result.detail, ...(result.error ? { error: result.error } : {}) };
 }
 
@@ -600,14 +687,21 @@ export async function runTelephonyCronJobs(deps: TelephonyCronDeps, options: { c
   // Sequential on purpose: one cron run per tick, every promise awaited before
   // the response. Terminal facts from the ledger go first, before anything that
   // could close a leg synthetically or dial anybody.
+  const replay = await timed(() => replayStalledWebhookEvents(deps, { deadline: cronStartedAt + REPLAY_DEADLINE_MS }));
+  const candidates = deps.telnyx ? await reconciliationCandidates(deps) : undefined;
+  let providerVerification: ProviderVerification | undefined;
   const jobs = [
-    await timed(() => replayStalledWebhookEvents(deps, { deadline: cronStartedAt + REPLAY_DEADLINE_MS })),
+    replay,
     await timed(() => runRingSweep(deps)),
     await timed(() => runPendingEffectRecovery(deps)),
-    await timed(() => reconcileWithTelnyx(deps)),
+    await timed(async () => {
+      const result = await reconcileWithTelnyx(deps, candidates);
+      providerVerification = result.verification;
+      return result;
+    }),
     await timed(() => detectStuckSessions(deps)),
     await timed(() => runAiDemoCleanupJob(deps, clock())),
-    await timed(() => runAlertJob(deps)),
+    await timed(() => runAlertJob(deps, providerVerification)),
     await timed(() => pruneWebhookLedger(deps)),
   ];
   const checkedAt = nowOf(deps);
