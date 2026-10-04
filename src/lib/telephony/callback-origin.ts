@@ -39,7 +39,8 @@ export const CALLBACK_ORIGIN_LABELS: Record<CallbackOrigin["kind"], string> = {
 
 export function callbackOriginDetail(origin: CallbackOrigin): string | null {
   if (origin.kind !== "requested") return null;
-  const action = origin.digit ? `Klient stlačil ${origin.digit}` : "Klient potvrdil spätné volanie";
+  const context = ({ waiting_room: "počas čakania", ivr: "v hlasovom menu", after_hours: "mimo otváracích hodín", park_timeout: "po čakaní" } as Record<string, string>)[origin.context ?? ""];
+  const action = `${origin.digit ? `Volajúci stlačil ${origin.digit}` : "Volajúci potvrdil spätné volanie"}${context ? ` · ${context}` : ""}`;
   const time = origin.requestedAt ? new Date(origin.requestedAt) : null;
   return time && Number.isFinite(time.getTime())
     ? `${action} · ${time.toLocaleString("sk-SK", { timeZone: "Europe/Bratislava", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}`

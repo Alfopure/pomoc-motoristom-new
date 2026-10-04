@@ -1,4 +1,5 @@
 import { expandIncomingFlow, type IncomingFlow } from "@/lib/telephony/incoming-flow";
+import { incomingFlowSignature } from "@/lib/telephony/call-journey";
 import type { FrozenRingMember, FrozenRingPlan, FrozenRingStep } from "../state/types";
 import { applyPausedOperatorRouting, type PausedOperatorRouting } from "./ring-plan";
 
@@ -12,9 +13,14 @@ export function materialiseIncomingFlow(flow: IncomingFlow, now: Date, pausedRou
   routing: readonly PausedOperatorRouting[];
   destinationAllowlist: readonly string[];
 }): FrozenRingPlan {
-  const steps: FrozenRingStep[] = expandIncomingFlow(flow).map(({ step, sourceId }, index) => {
-    const common = { index, groupId: null, sourceId, strategy: "all" as const };
-    if (step.type === "wait") return { ...common, kind: "wait", groupName: "Čakáreň", timeoutSecs: 0, waitMinutes: step.minutes, members: [] };
+  const origins: Array<{ repeatStepId?: string; repeatRound?: number }> = [];
+  for (const step of flow.steps) {
+    if (step.type === "repeat") for (let round = 1; round <= step.times; round++) for (const _id of step.stepIds) origins.push({ repeatStepId: step.id, repeatRound: round });
+    else origins.push({});
+  }
+  const steps: FrozenRingStep[] = expandIncomingFlow(flow).map(({ step, sourceId, occurrenceId }, index) => {
+    const common = { index, groupId: null, sourceId, occurrenceId, ...origins[index], strategy: "all" as const };
+    if (step.type === "wait") return { ...common, kind: "wait", groupName: "Čakáreň", timeoutSecs: 0, waitMinutes: step.minutes, ...(step.policy ? { waitPolicy: { ...step.policy } } : {}), members: [] };
     if (step.type === "external") return {
       ...common, kind: "ring", groupName: "Záložné číslo", timeoutSecs: step.seconds,
       members: [{ kind: "external_number", profileId: null, externalNumber: step.number, provenance: "configured_external", position: 0, ringSecs: step.seconds, memberId: null }],
@@ -27,6 +33,6 @@ export function materialiseIncomingFlow(flow: IncomingFlow, now: Date, pausedRou
     return { ...common, kind: "ring", groupName: "Operátori", timeoutSecs: step.seconds,
       members: pausedRouting ? applyPausedOperatorRouting(members, pausedRouting) : members };
   });
-  return { source: "incoming_flow", planId: null, name: "Postup prichádzajúceho hovoru", frozenAt: now.toISOString(), steps,
+  return { source: "incoming_flow", flowSignature: incomingFlowSignature(flow), planId: null, name: "Postup prichádzajúceho hovoru", frozenAt: now.toISOString(), steps,
     fallback: { kind: flow.ending, number: null }, queueMembers: [] };
 }

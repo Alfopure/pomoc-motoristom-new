@@ -170,6 +170,8 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // telephony (provider-neutral routes + Telnyx call control)
   "telephony/calls": { class: "session", note: "Click-to-call; kill switch, rate limit 10/min a allowlist sú v call-actions." },
   "telephony/calls/active": { class: "session" },
+  "telephony/calls/journeys": { class: "session", note: "Read-only call progress; every query is scoped to the actor organization. No provider operations." },
+  "telephony/calls/[id]/journey": { class: "session", note: "Read-only observed history after exact call/session organization authorization." },
   "telephony/calls/internal": { class: "session" },
   "telephony/calls/[id]/cancel-consult": { class: "session" },
   "telephony/calls/[id]/complete-transfer": { class: "session" },

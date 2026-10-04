@@ -36,5 +36,25 @@ describe("incoming flow schema and finite expansion", () => {
     const source = flow(); source.steps = Array.from({ length: 18 }, (_, n) => ({ ...ring, id: id(n + 1) })); source.steps.push({ id: id(30), type: "repeat", stepIds: source.steps.map(step => step.id), times: 5 }); invalid(source, "expanded_too_long");
   });
   it("bounds total caller wait", () => invalid({ ...flow(), steps: [1, 2, 3].map(n => ({ id: id(n), type: "wait", minutes: 60 })) }, "duration_too_long"));
+  it("preserves legacy wait JSON without silently adding a new audio policy", () => {
+    const source = { ...flow(), steps: [{ id: id(1), type: "wait", minutes: 2 }] };
+    expect(parseIncomingFlow(source)).toEqual(source);
+  });
+  it.each(["music", "announcement", "callback"] as const)("accepts and detaches explicit %s policy", mode => {
+    for (const intervalSeconds of [15, 30, 60]) {
+      const policy = { mode, intervalSeconds };
+      const source = { ...flow(), steps: [{ id: id(1), type: "wait", minutes: 2, policy }] };
+      const parsed = parseIncomingFlow(source);
+      expect(parsed).toEqual(source);
+      expect(parsed.steps[0]).not.toBe(source.steps[0]);
+    }
+  });
+  it.each([null, { mode: "silent", intervalSeconds: 30 }, { mode: "music", intervalSeconds: "30" }, { mode: "callback", intervalSeconds: 16 }])("rejects invalid wait policy %#", policy => {
+    invalid({ ...flow(), steps: [{ id: id(1), type: "wait", minutes: 2, policy }] }, "wait_policy_invalid");
+  });
+  it("rejects missing or extra wait policy behavior", () => {
+    for (const policy of [{ mode: "music" }, { mode: "callback", intervalSeconds: 15, autoCall: true }])
+      invalid({ ...flow(), steps: [{ id: id(1), type: "wait", minutes: 2, policy }] }, "shape_invalid");
+  });
   it("returns null for missing or invalid stored flows", () => { expect(readIncomingFlow(undefined)).toBeNull(); expect(readIncomingFlow({ version: 2 })).toBeNull(); expect(readIncomingFlow(flow())).toEqual(flow()); });
 });

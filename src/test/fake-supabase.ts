@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { registerPresenceRpcs } from "./fake-presence";
 import { registerStabilityRpcs } from "./fake-stability";
 import { registerWebhookRpcs } from "./fake-webhook";
+import { registerCallbackQueueRpc } from "./fake-callback-queue";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
@@ -561,23 +562,25 @@ export class FakeQueryBuilder implements PromiseLike<FakeResult> {
     return this.addFilter(`or(${expression})`, (row) =>
       clauses.some((clause) => {
         const [column, operator, ...rest] = clause.split(".");
+        const path = column.split(/->>?/);
+        const candidate = path.reduce<unknown>((value, key) => value && typeof value === "object" ? (value as FakeRow)[key] : undefined, row);
         const raw = rest.join(".");
         const value = raw === "null" ? null : raw === "true" ? true : raw === "false" ? false : /^-?\d+(\.\d+)?$/.test(raw) ? Number(raw) : raw;
         switch (operator) {
           case "eq":
-            return sameValue(row[column], value);
+            return sameValue(candidate, value);
           case "neq":
-            return !sameValue(row[column], value);
+            return !sameValue(candidate, value);
           case "is":
-            return value === null ? isNil(row[column]) : row[column] === value;
+            return value === null ? isNil(candidate) : candidate === value;
           case "gt":
-            return !isNil(row[column]) && compare(row[column], value) > 0;
+            return !isNil(candidate) && compare(candidate, value) > 0;
           case "gte":
-            return !isNil(row[column]) && compare(row[column], value) >= 0;
+            return !isNil(candidate) && compare(candidate, value) >= 0;
           case "lt":
-            return !isNil(row[column]) && compare(row[column], value) < 0;
+            return !isNil(candidate) && compare(candidate, value) < 0;
           case "lte":
-            return !isNil(row[column]) && compare(row[column], value) <= 0;
+            return !isNil(candidate) && compare(candidate, value) <= 0;
           default:
             throw new Error(`fake-supabase: unsupported or() operator "${operator}"`);
         }
@@ -783,6 +786,7 @@ function toMs(value: unknown): number | null {
 }
 
 export function registerTelephonyRpcs(db: FakeDatabase): void {
+  registerCallbackQueueRpc(db);
   registerWebhookRpcs(db);
   registerPresenceRpcs(db);
   registerStabilityRpcs(db);

@@ -56,8 +56,8 @@ async function fail(promise: Promise<unknown>): Promise<CallActionError> {
 
 describe("loadCallbackQueue", () => {
   it("preserves PostgreSQL cursor microseconds", () => {
-    const row = { id: "00000000-0000-4000-8000-000000000001", created_at: "2026-09-19T12:00:00.123456+00:00" };
-    expect(decodeCallbackCursor(encodeCallbackCursor(row))).toEqual({ id: row.id, createdAt: row.created_at });
+    const row = { version: 2 as const, revision: "a".repeat(32), rank: 0 as const, id: "00000000-0000-4000-8000-000000000001", sortAt: "2026-09-19T12:00:00.123456+00:00" };
+    expect(decodeCallbackCursor(encodeCallbackCursor(row))).toEqual(row);
   });
   it("counts the complete unresolved queue and pages tied timestamps without omissions", async () => {
     const h = createTelephonyHarness();
@@ -75,9 +75,31 @@ describe("loadCallbackQueue", () => {
     expect(new Set([...first.open, ...second.open].map((row) => row.id))).toEqual(new Set(ids));
   });
 
-  it("rejects malformed cursors instead of interpolating them into a query", async () => {
+  it("rejects malformed cursors before querying the priority page", async () => {
     const h = createTelephonyHarness();
     await expect(loadCallbackQueue(queueDeps(h), o1, { cursor: "invalid" })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("puts a new explicit request before more than one page of old missed calls", async () => {
+    const h = createTelephonyHarness();
+    Array.from({ length: 125 }, () => seedRequest(h));
+    const requestedAt = h.now().toISOString();
+    const requested = seedRequest(h, { created_at: requestedAt, metadata: { request: { kind: "requested", digit: "1", requested_at: requestedAt, context: "waiting_room" } } });
+    const queue = await loadCallbackQueue(queueDeps(h), o1);
+    expect(queue.open[0].id).toBe(requested);
+    expect(queue).toMatchObject({ priorityOrder: true, totalsByOrigin: { requested: 1, missed: 125, manual: 0, unknown: 0 } });
+  });
+
+  it("restarts a stale page after a missed call gains confirmed request evidence", async () => {
+    const h = createTelephonyHarness();
+    const ids = Array.from({ length: 125 }, () => seedRequest(h));
+    const first = await loadCallbackQueue(queueDeps(h), o1);
+    const requested = ids[124];
+    h.db.update("motorist_callback_requests", { metadata: { request: { kind: "requested", digit: "1", requested_at: h.now().toISOString() } } }, row => row.id === requested);
+    const refreshed = await loadCallbackQueue(queueDeps(h), o1, { cursor: first.nextCursor });
+    expect(refreshed.resetPage).toBe(true);
+    expect(refreshed.open[0].id).toBe(requested);
+    expect(refreshed.open).toHaveLength(100);
   });
 
   it("recovers legacy confirmed requests stored as missed, without inventing a digit", async () => {
@@ -98,8 +120,8 @@ describe("loadCallbackQueue", () => {
   it("does not silently relabel confirmed callers if the session evidence lookup fails", async () => {
     const h = createTelephonyHarness();
     seedRequest(h, { session_id: "00000000-0000-4000-8000-000000000901" });
-    h.db.failNext("motorist_call_sessions", "select", "temporarily unavailable");
-    await expect(loadCallbackQueue(queueDeps(h), o1)).rejects.toThrow("Voľbu volajúceho sa nepodarilo overiť");
+    h.db.failNext("motorist_callback_queue_page_v1", "rpc", "evidence snapshot unavailable");
+    await expect(loadCallbackQueue(queueDeps(h), o1)).rejects.toThrow("evidence snapshot unavailable");
   });
 
   it("returns the live queue oldest first with its line and claimant labels", async () => {
