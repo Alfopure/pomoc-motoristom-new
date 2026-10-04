@@ -1147,3 +1147,20 @@ it("accepts an explicit external owner only within the organization", () => {
   owned.members[0].ownerProfileId = FOREIGN;
   expect(codes(validateRoutingReplace({ groups: [owned] }, context()))).toContain("owner_foreign");
 });
+
+describe("legacy editors preserve unified incoming flows", () => {
+  const savedFlow = { version: 1, ending: "hangup", steps: [{ id: "00000000-0000-4000-8000-000000000099", type: "wait", minutes: 1 }] };
+  it.each([{ inboundCallMode: "ring_all" as const }, { ringPlanId: null }, { ivrMenuId: null }, { returnLineId: null }])("refuses legacy route overrides without removing an existing flow %#", async patch => {
+    const { harness, deps } = harnessDeps();
+    harness.db.update("motorist_telephony_lines", { metadata: { incoming_flow: savedFlow, custom: "keep" } }, row => row.id === LINES.neutral);
+    await expect(updateTelephonyLine(deps, { organizationId: ORG, actor: ACTOR, lineId: LINES.neutral, patch })).rejects.toMatchObject({ code: "incoming_flow_active" });
+    expect(harness.rows("motorist_telephony_lines").find(row => row.id === LINES.neutral)?.metadata).toEqual({ incoming_flow: savedFlow, custom: "keep" });
+  });
+  it("includes saved flow destinations when narrowing allowlist", async () => {
+    const { harness, deps } = harnessDeps();
+    const number = "+421910123456";
+    harness.db.update("motorist_telephony_lines", { metadata: { incoming_flow: { ...savedFlow, steps: [{ id: "00000000-0000-4000-8000-000000000099", type: "external", seconds: 20, number }] } } }, row => row.id === LINES.neutral);
+    const document = await getRoutingDocument(deps, { organizationId: ORG, includeSettings: true });
+    expect(destinationsOutsideAllowlist(document, ["CZ"]).some(offender => offender.where.includes("postup linky") && offender.number === number)).toBe(true);
+  });
+});

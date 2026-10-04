@@ -35,6 +35,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   'diagnostics/incidents/[id]': {class: 'session', role: ['manager','admin']},
   "telephony/team": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Narrow operational DTO; report and device secrets excluded." },
   "telephony/routing-summary": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "telephony/config/incoming-flow": { class: "session", role: ["manager", "admin"], note: "PUT only; same-origin guard, scoped per-line flow validation and atomic snapshot/version CAS." },
   "telephony/config/incoming": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read scoped configuration; PUT manager/admin plus same-origin and atomic CAS." },
   "cases/live": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read-only POST for version manifest; actor-derived audience, no-store." },
   "cases/presence": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Server-derived actor and expiring lease, same-origin mutation." },

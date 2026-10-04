@@ -342,10 +342,32 @@ async function loadRoutingConfiguration(deps: SessionRunnerDeps, session: Sessio
 
   let ringPlan: FrozenRingPlan | null = meta.ring?.plan ?? null;
   const ringPlans: Record<string, FrozenRingPlan> = {};
+  const planKey = (plan: FrozenRingPlan) => plan.planId ?? `incoming-flow:${session.line_id}`;
+  const lineMetadata = line?.metadata as Record<string, unknown> | null;
+  if (inboundRouting && !ringPlan && lineMetadata?.incoming_flow != null) {
+    // Keep the new editor schema/compiler off legacy webhook cold starts.
+    const [{ parseIncomingFlow }, { materialiseIncomingFlow }] = await Promise.all([
+      import("@/lib/telephony/incoming-flow"), import("./routing/incoming-flow"),
+    ]);
+    const [paused, personal] = await Promise.all([
+      admin.from("motorist_operator_presence").select("profile_id").eq("organization_id", organizationId).eq("status", "paused"),
+      entrySnapshot ? Promise.resolve({ data: entrySnapshot.operatorSettings, error: null })
+        : admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId),
+    ]);
+    if (paused.error || personal.error) throw new Error("flow pause routing load failed");
+    // Preserve nominated colleagues once, while keeping explicit application and
+    // personal-number choices intact. Subsequent events use the frozen members.
+    ringPlan = materialiseIncomingFlow(parseIncomingFlow(lineMetadata.incoming_flow), now, {
+      pausedProfileIds: new Set((paused.data ?? []).map(row => row.profile_id)),
+      routing: (personal.data ?? []).map(row => ({ profileId: row.profile_id, mode: row.pause_routing_mode,
+        defaultMobileNumber: row.default_mobile_number, forwardProfileId: row.pause_forward_profile_id, forwardNumber: row.pause_forward_number })),
+      destinationAllowlist: settings.raw?.destination_allowlist ?? ["SK", "CZ"],
+    });
+  }
   if (inboundRouting) {
     const planIds = new Set<string>();
     if (!ringPlan && line?.ring_plan_id) planIds.add(line.ring_plan_id);
-    for (const option of ivr?.options ?? []) if (option.target_ring_plan_id) planIds.add(option.target_ring_plan_id);
+    for (const option of ringPlan?.source === "incoming_flow" ? [] : ivr?.options ?? []) if (option.target_ring_plan_id) planIds.add(option.target_ring_plan_id);
     // The RPC's abbreviated presence is not availability. Resolve paused
     // substitutes freshly, then the shared eligibility phase rereads targets.
     const paused = entrySnapshot && planIds.size > 0
@@ -363,17 +385,17 @@ async function loadRoutingConfiguration(deps: SessionRunnerDeps, session: Sessio
       if (frozen) ringPlans[planId] = frozen;
     }));
     if (!ringPlan && line?.ring_plan_id) ringPlan = ringPlans[line.ring_plan_id] ?? null;
-    if (ringPlan) ringPlans[ringPlan.planId] = ringPlan;
+    if (ringPlan) ringPlans[planKey(ringPlan)] = ringPlan;
   }
 
-  if (inboundRouting) {
+  if (inboundRouting && ringPlan?.source !== "incoming_flow") {
     const personal = entrySnapshot ? { data: entrySnapshot.operatorSettings, error: null }
       : await admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId);
     if (personal.error) throw new Error(`personal routing load failed: ${personal.error.message}`);
     for (const [id, plan] of Object.entries(ringPlans)) {
       ringPlans[id] = { ...plan, steps: plan.steps.map((step) => ({ ...step, members: resolvePersonalRingMembers(step.members, personal.data ?? [], settings.raw?.destination_allowlist ?? ["SK", "CZ"]) })) };
     }
-    if (ringPlan) ringPlan = ringPlans[ringPlan.planId] ?? ringPlan;
+    if (ringPlan) ringPlan = ringPlans[planKey(ringPlan)] ?? ringPlan;
   }
 
   const frozenLineMode: LineInboundMode | null =
@@ -381,11 +403,11 @@ async function loadRoutingConfiguration(deps: SessionRunnerDeps, session: Sessio
     (meta.line_inbound_mode === "ring_first" || meta.line_inbound_mode === "ring_all" || meta.line_inbound_mode === "ring_ordered" || meta.line_inbound_mode === "queue_first")
       ? meta.line_inbound_mode : null;
   const behaviour = lineModeBehaviour(frozenLineMode, settings.inboundCallMode);
-  if (behaviour.strategyOverride && inboundRouting) {
+  if (behaviour.strategyOverride && inboundRouting && ringPlan?.source !== "incoming_flow") {
     for (const [id, plan] of Object.entries(ringPlans)) {
       ringPlans[id] = { ...plan, steps: plan.steps.map(step => ({ ...step, strategy: behaviour.strategyOverride! })) };
     }
-    if (ringPlan) ringPlan = ringPlans[ringPlan.planId] ?? ringPlan;
+    if (ringPlan) ringPlan = ringPlans[planKey(ringPlan)] ?? ringPlan;
   }
 
   return { line, settings: { ...settings, inboundCallMode: behaviour.inboundCallMode }, recordingPolicy, routing, businessHours, ivr, ringPlan, ringPlans };
@@ -515,6 +537,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
 
   let presence: PresenceRow[] = [];
   let devices: DeviceRow[] = [];
+  let mobileDevices: DeviceRow[] | undefined;
   let openOffers: string[] = [];
   let activeLegCount = 0;
   if (routing) {
@@ -522,7 +545,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     for (const plan of Object.values(ringPlans)) for (const step of plan.steps) for (const member of step.members) if (member.profileId) profileIds.add(member.profileId);
     for (const plan of Object.values(ringPlans)) for (const member of plan.queueMembers ?? []) if (member.profileId) profileIds.add(member.profileId);
     const ids = [...profileIds];
-    const [presenceResult, devicesResult, offersResult, legsResult] = await measureRequestStep("routing.eligibility", () => Promise.all([
+    const [presenceResult, devicesResult, offersResult, legsResult, mobileDevicesResult] = await measureRequestStep("routing.eligibility", () => Promise.all([
       ids.length > 0 ? admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId).in("profile_id", ids) : Promise.resolve({ data: [] as PresenceRow[], error: null }),
       ids.length > 0 ? admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment).in("profile_id", ids) : Promise.resolve({ data: [] as DeviceRow[], error: null }),
       ids.length > 0
@@ -536,13 +559,18 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
         // Bounded: a leg orphaned by a lost `call.hangup` webhook must not eat the
         // org-wide capacity forever (the sweep closes them, see `closeOrphanLegs`).
         .gte("initiated_at", new Date(now.getTime() - ACTIVE_LEG_WINDOW_MS).toISOString()),
+      ringPlan?.source === "incoming_flow" && ids.length > 0
+        ? admin.from("motorist_operator_mobile_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment).in("profile_id", ids)
+        : Promise.resolve({ data: [] as DeviceRow[], error: null }),
     ]));
     if (presenceResult.error) throw new Error(`presence load failed: ${presenceResult.error.message}`);
     if (devicesResult.error) throw new Error(`devices load failed: ${devicesResult.error.message}`);
+    if (mobileDevicesResult.error) throw new Error(`mobile devices load failed: ${mobileDevicesResult.error.message}`);
     if (offersResult.error) throw new Error(`open offers load failed: ${offersResult.error.message}`);
     if (legsResult.error) throw new Error(`leg count failed: ${legsResult.error.message}`);
     presence = (presenceResult.data ?? []) as PresenceRow[];
     devices = (devicesResult.data ?? []) as DeviceRow[];
+    if (ringPlan?.source === "incoming_flow") mobileDevices = (mobileDevicesResult.data ?? []) as DeviceRow[];
     openOffers = [...new Set(((offersResult.data ?? []) as Array<{ profile_id: string | null }>).map((row) => row.profile_id).filter((id): id is string => Boolean(id)))];
     activeLegCount = legsResult.count ?? 0;
     if (activeLegCount >= settings.maxConcurrentLegs) {
@@ -573,6 +601,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     ringPlans,
     presence,
     devices,
+    ...(mobileDevices ? { mobileDevices } : {}),
     openOffers,
     activeLegCount,
     settings,
