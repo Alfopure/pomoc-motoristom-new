@@ -27,8 +27,14 @@ function describeFlow(flow: IncomingFlow, document: RoutingDocument, target: Rou
       return { label: `${index + 1}. Zvonenie`, compact: `${people.join(" + ")} (najviac ${step.seconds} s)`,
         sentence: `Systém skúsi dostupné zariadenia naraz, najviac ${step.seconds} s: ${devices.join("; ")}.` };
     }
-    if (step.type === "wait") return { label: `${index + 1}. Čakáreň`, compact: `čakáreň najviac ${step.minutes} min`,
-      sentence: `Hovor čaká najviac ${step.minutes} min na ručné prevzatie. Ak ho nikto neprevezme, pokračuje ďalším krokom.` };
+    if (step.type === "wait") {
+      const policy = step.policy ?? { mode: "callback", intervalSeconds: 60 };
+      const audio = policy.mode === "music" ? "Hrá iba hudba, bez oznamu a ponuky spätného volania."
+        : policy.mode === "announcement" ? `Zaznie oznam o čakaní, medzi oznamami hrá ${policy.intervalSeconds} s hudby. Spätné volanie sa neponúka.`
+          : `Zaznie ponuka spätného volania, medzi oznamami hrá ${policy.intervalSeconds} s hudby. Pri dostupnom čísle môže volajúci stlačiť 1; po uložení požiadavky sa hovor ukončí. Pri skrytom čísle zaznie iba oznam o čakaní.`;
+      return { label: `${index + 1}. Čakáreň`, compact: `čakáreň najviac ${step.minutes} min`,
+        sentence: `Hovor čaká najviac ${step.minutes} min na ručné prevzatie. ${audio} Ak zostane na linke bez prevzatia, pokračuje ďalej podľa postupu.` };
+    }
     if (step.type === "external") return { label: `${index + 1}. Záložné číslo`, compact: `${step.number} (najviac ${step.seconds} s)`,
       sentence: `Systém skúsi číslo ${step.number}, najviac ${step.seconds} s.` };
     const references = step.stepIds.map(id => flow.steps.findIndex(candidate => candidate.id === id) + 1).join(", ");

@@ -25,6 +25,8 @@ export type CallbackRequestPayload = {
   source: CallbackSource;
   /** Caller choice, independently of the route. Optional for older clients. */
   origin?: CallbackOrigin;
+  /** Server's canonical ordering key; never display as the time of consent. */
+  queueSortAt?: string;
   /** `open` = nobody took it yet, `scheduled` = claimed by an operator. */
   status: CallbackStatus;
   lineId: string | null;
@@ -58,7 +60,11 @@ export type CallbackQueuePayload = {
   /** Total unresolved, independent of the loaded page or UI filter. */
   openTotal?: number;
   nextCursor?: string | null;
-  /** Live queue: `open` + `scheduled`, oldest first. */
+  priorityOrder?: boolean;
+  /** A changed priority membership invalidates previously loaded pages. */
+  resetPage?: boolean;
+  totalsByOrigin?: Record<CallbackOrigin["kind"], number>;
+  /** Live queue: requested first, then ordinary unresolved calls. */
   open: CallbackRequestPayload[];
   /** Closed in the last 24 hours, newest first — context, not a work list. */
   resolved: CallbackRequestPayload[];
@@ -142,21 +148,29 @@ export const CALLBACK_ORDER_LABELS: Record<CallbackQueueOrder, string> = {
 };
 
 /**
- * FIFO by age unless the dispatcher picks another order. Every order is a
+ * Confirmed requests always precede other rows. The chosen order applies
+ * within those groups. Every order is a
  * stable function of the rows themselves — never of the clock — so colour, not
  * order, carries urgency: a queue that reorders itself as rows turn red moves
  * the button out from under the dispatcher's cursor.
  */
 export function sortCallbackQueue(requests: CallbackRequestPayload[], order: CallbackQueueOrder = "oldest"): CallbackRequestPayload[] {
   return [...requests].sort((left, right) => {
+    const priority = Number(right.origin?.kind === "requested") - Number(left.origin?.kind === "requested");
+    if (priority) return priority;
     if (order === "deadline") {
       // A row without any parsable timestamp has no promise to keep; it sorts last.
       const a = callbackDeadline(left) ?? Number.POSITIVE_INFINITY;
       const b = callbackDeadline(right) ?? Number.POSITIVE_INFINITY;
       if (a !== b) return a - b;
     }
-    const a = parse(left.createdAt) ?? 0;
-    const b = parse(right.createdAt) ?? 0;
+    if (left.queueSortAt && right.queueSortAt) {
+      // Canonical UTC with six decimal digits preserves PostgreSQL boundaries.
+      const compared = left.queueSortAt.localeCompare(right.queueSortAt);
+      if (compared) return order === "newest" ? -compared : compared;
+    }
+    const a = parse(left.origin?.kind === "requested" ? left.origin.requestedAt : null) ?? parse(left.createdAt) ?? 0;
+    const b = parse(right.origin?.kind === "requested" ? right.origin.requestedAt : null) ?? parse(right.createdAt) ?? 0;
     return (order === "newest" ? b - a : a - b) || left.id.localeCompare(right.id);
   });
 }

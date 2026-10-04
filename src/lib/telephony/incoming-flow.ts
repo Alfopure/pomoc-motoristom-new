@@ -1,7 +1,9 @@
 /** Versioned, finite incoming call flow shared by the editor, API and runtime. */
 export type IncomingFlowPerson = { profileId: string; application: boolean; personalNumber: string | null };
 export type IncomingRingStep = { id: string; type: "ring"; seconds: number; people: IncomingFlowPerson[] };
-export type IncomingWaitStep = { id: string; type: "wait"; minutes: number };
+export type IncomingWaitPolicy = { mode: "music" | "announcement" | "callback"; intervalSeconds: 15 | 30 | 60 };
+/** Missing policy preserves the original callback invitation and minute of music. */
+export type IncomingWaitStep = { id: string; type: "wait"; minutes: number; policy?: IncomingWaitPolicy };
 export type IncomingRepeatStep = { id: string; type: "repeat"; stepIds: string[]; times: number };
 export type IncomingExternalStep = { id: string; type: "external"; number: string; seconds: number };
 export type IncomingFlowStep = IncomingRingStep | IncomingWaitStep | IncomingRepeatStep | IncomingExternalStep;
@@ -32,8 +34,8 @@ export class IncomingFlowValidationError extends Error {
 export function parseIncomingFlow(value: unknown): IncomingFlow {
   const issues: IncomingFlowIssue[] = [];
   const add = (path: string, code: string, message: string) => issues.push({ path, code, message });
-  const keys = (row: Record<string, unknown>, allowed: string[], path: string) => {
-    if (Object.keys(row).some(key => !allowed.includes(key)) || allowed.some(key => !(key in row))) add(path, "shape_invalid", "Postup obsahuje neznáme alebo chýbajúce pole.");
+  const keys = (row: Record<string, unknown>, allowed: string[], path: string, optional: string[] = []) => {
+    if (Object.keys(row).some(key => !allowed.includes(key) && !optional.includes(key)) || allowed.some(key => !(key in row))) add(path, "shape_invalid", "Postup obsahuje neznáme alebo chýbajúce pole.");
   };
   const integer = (number: unknown, min: number, max: number, path: string) => {
     if (typeof number !== "number" || !Number.isInteger(number) || number < min || number > max) add(path, "range_invalid", `Hodnota musí byť celé číslo od ${min} do ${max}.`);
@@ -89,8 +91,16 @@ export function parseIncomingFlow(value: unknown): IncomingFlow {
       phone(raw.number, `${path}.number`);
       integer(raw.seconds, MIN_INCOMING_RING_SECONDS, MAX_INCOMING_RING_SECONDS, `${path}.seconds`);
     } else if (raw.type === "wait") {
-      keys(raw, ["id", "type", "minutes"], path);
+      keys(raw, ["id", "type", "minutes"], path, ["policy"]);
       integer(raw.minutes, 1, MAX_INCOMING_WAIT_MINUTES, `${path}.minutes`);
+      if ("policy" in raw) {
+        if (!record(raw.policy)) add(`${path}.policy`, "wait_policy_invalid", "Vyber spôsob čakania a interval oznamu.");
+        else {
+          keys(raw.policy, ["mode", "intervalSeconds"], `${path}.policy`);
+          if (!["music", "announcement", "callback"].includes(String(raw.policy.mode))) add(`${path}.policy.mode`, "wait_policy_invalid", "Vyber hudbu, oznam alebo ponuku spätného volania.");
+          if (![15, 30, 60].includes(raw.policy.intervalSeconds as number)) add(`${path}.policy.intervalSeconds`, "wait_policy_invalid", "Medzi oznamami môže hrať 15, 30 alebo 60 sekúnd hudby.");
+        }
+      }
     } else if (raw.type === "repeat") {
       keys(raw, ["id", "type", "stepIds", "times"], path);
       integer(raw.times, 1, MAX_INCOMING_REPEAT_TIMES, `${path}.times`);

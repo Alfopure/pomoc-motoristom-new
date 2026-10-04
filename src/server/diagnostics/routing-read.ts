@@ -6,7 +6,7 @@ import { isDiagnosticUuid } from '@/lib/diagnostics/types';
 export const ROUTING_READ_LIMITS = { rows: 100, snapshots: 64, bytes: 128 * 1024, members: 64 } as const;
 export type RoutingTimelineEvidence = { routing: RoutingDiagnostic[]; routingTruncated: boolean; routingUnavailable: boolean; routingProfiles?: Record<string, string> };
 const unavailable = (): RoutingTimelineEvidence => ({ routing: [], routingTruncated: false, routingUnavailable: true });
-const reasons = ['all_offers_finished', 'ordered_exhausted', 'no_eligible_members', 'external_number', 'waiting_room', 'hangup_message', 'callback_offer'] as const;
+const reasons = ['all_offers_finished', 'ordered_exhausted', 'no_eligible_members', 'external_number', 'waiting_room', 'hangup_message', 'callback_offer', 'callback_prompt', 'hangup'] as const;
 const memberReasons = ['no_presence', 'offline', 'paused', 'ringing', 'on_call', 'wrap_up', 'no_device', 'device_stale', 'open_offer', 'attempted', 'duplicate', 'capacity', 'fanout', 'feature_disabled'] as const;
 const presence = ['available', 'ringing', 'on_call', 'after_call_work', 'paused', 'offline'] as const;
 const registration = ['registered', 'unregistered', 'registering', 'error', 'unknown'] as const;
@@ -31,7 +31,7 @@ export function parseRoutingDiagnostic(value: unknown): RoutingDiagnostic | null
     if (!member || member.memberId !== null && !isDiagnosticUuid(member.memberId) || member.profileId !== null && !isDiagnosticUuid(member.profileId)) return null;
     if (!oneOf(member.endpoint, ['sip', 'pstn']) || !oneOf(member.outcome, ['selected', 'skipped']) || !nullableEnum(member.reason, memberReasons) || !nullableEnum(member.presence, presence) || !nullableEnum(member.registration, registration) || typeof member.openOffer !== 'boolean') return null;
     if (member.heartbeatAgeMs !== null && !integer(member.heartbeatAgeMs)) return null;
-    members.push({ memberId: member.memberId as string | null, profileId: member.profileId as string | null, endpoint: member.endpoint, outcome: member.outcome, reason: member.reason as string | null, presence: member.presence as string | null, registration: member.registration as string | null, heartbeatAgeMs: member.heartbeatAgeMs as number | null, openOffer: member.openOffer });
+    members.push({ memberId: member.memberId as string | null, profileId: member.profileId as string | null, endpoint: member.endpoint, ...(oneOf(member.applicationDevice, ['web', 'mobile']) ? { applicationDevice: member.applicationDevice } : {}), outcome: member.outcome, reason: member.reason as string | null, presence: member.presence as string | null, registration: member.registration as string | null, heartbeatAgeMs: member.heartbeatAgeMs as number | null, openOffer: member.openOffer });
   }
   return { version: 1, at: raw.at, kind: raw.kind, step: raw.step as number | null, strategy: raw.strategy as RoutingDiagnostic['strategy'], ringSecs: raw.ringSecs as number | null, startedAt: raw.startedAt as string | null, deadlineAt: raw.deadlineAt as string | null, reason: raw.reason as string | null, selectedCount: raw.selectedCount as number, skippedCount: raw.skippedCount as number, omittedMembers: raw.omittedMembers as number, activeLegCount: raw.activeLegCount as number, maxConcurrentLegs: raw.maxConcurrentLegs as number, maxFanout: raw.maxFanout as number, members };
 }
