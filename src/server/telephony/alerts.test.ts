@@ -51,7 +51,7 @@ describe("telephony alerts", () => {
     expect(result).toMatchObject({ status: "ok", detail: { sent: 1 } });
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ to: "alerts@example.test" });
-    expect(sent[0].subject).toContain("chybu");
+    expect(sent[0].subject).toContain("Telefónia potrebuje kontrolu");
     expect(h.rows("motorist_telephony_alerts")).toHaveLength(1);
     expect(h.rows("motorist_telephony_alerts")[0]).toMatchObject({ alert_key: `${usageDay(h.now())}:sessions:fail`, status: "fail", sends: 1 });
   });
@@ -112,11 +112,90 @@ describe("telephony alerts", () => {
   it("runs off the real health report when none is injected", async () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
     const { sessionId } = await h.inbound({ to: "+421232408718" });
-    h.db.update("motorist_call_sessions", { state: "talking", updated_at: new Date(h.now().getTime() - 20 * 60_000).toISOString() }, (row) => row.id === sessionId);
+    h.db.update("motorist_call_sessions", { state: "received", updated_at: new Date(h.now().getTime() - 20 * 60_000).toISOString() }, (row) => row.id === sessionId);
+    h.advance(20 * 60_000);
     const { send } = mailbox();
 
     const result = await runTelephonyAlerts(alertDeps(h, { send }));
-    expect(result).toMatchObject({ status: "ok", detail: { health: "fail", sent: 1 } });
-    expect(String((send.mock.calls[0][0] as { text: string }).text)).toContain("Zaseknuté hovory");
+    expect(result).toMatchObject({ status: "ok", detail: { health: "fail" } });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(String((send.mock.calls[0][0] as { text: string }).text)).toContain("Hovor čaká na ďalší krok");
+  });
+
+  it.each(["failed", "disabled"])("keeps structured %s transport results retryable", async (status) => {
+    const h = createTelephonyHarness();
+    const send = vi.fn().mockResolvedValueOnce({ status, error: "mail rejected" }).mockResolvedValue({ status: "sent" });
+    const deps = alertDeps(h, { send, report: report([{ key: "usage", status: "fail", detail: {} }]) });
+    expect(await runTelephonyAlerts(deps)).toMatchObject({ status: "failed", detail: { sent: 0, deliveryStatus: status } });
+    expect(h.rows("motorist_telephony_alerts")).toHaveLength(0);
+    expect(await runTelephonyAlerts(deps)).toMatchObject({ status: "ok", detail: { sent: 1 } });
+    expect(send.mock.calls[0][0].idempotencyKey).toBe(send.mock.calls[1][0].idempotencyKey);
+  });
+
+  it("reports a second affected call the same day without resending the first", async () => {
+    const h = createTelephonyHarness();
+    const { send, sent } = mailbox();
+    const makeReport = (sessionIds: string[]) => report([{ key: "provider", status: "warn", detail: {
+      entries: sessionIds.map((sessionId) => ({ sessionId, verdict: "unavailable", checkedAt: h.now().toISOString() })),
+    } }], "warn");
+    await runTelephonyAlerts(alertDeps(h, { send, report: makeReport(["call-1"]) }));
+    h.advance(300_000);
+    expect(await runTelephonyAlerts(alertDeps(h, { send, report: makeReport(["call-1"]) }))).toMatchObject({ detail: { sent: 0 } });
+    expect(await runTelephonyAlerts(alertDeps(h, { send, report: makeReport(["call-1", "call-2"]) }))).toMatchObject({ detail: { sent: 1 } });
+    expect(sent).toHaveLength(2);
+    expect(sent[1].text).toContain("call-2");
+    expect(sent[1].text).not.toContain("call-1");
+  });
+
+  it("scopes ledger events and new incident openings independently", () => {
+    const events = alertsFromReport(report([{ key: "ledger", status: "fail", detail: { failedIds: ["e1", "e2"] } }]), "today");
+    expect(events).toHaveLength(2);
+    expect(events[0].key).not.toBe(events[1].key);
+    const jobs = (openedAt: string) => alertsFromReport(report([{ key: "incidents", status: "fail", detail: { jobs: [{ job: "reconcile", openedAt }] } }]), "today");
+    expect(jobs("first")[0].key).not.toBe(jobs("second")[0].key);
+  });
+
+  it("does not turn repaired connection history into a new failed-call alert", () => {
+    const alerts = alertsFromReport(report([{ key: "connections", status: "fail", detail: { entries: [
+      { sessionId: "pending", outcome: "pending" }, { sessionId: "repaired", outcome: "confirmed_after_failure" },
+    ] } }]), "today");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].detail.sessionIds).toEqual(["pending"]);
+  });
+
+  it("respects the connection grace period and includes uncertain ended outcomes", () => {
+    const alerts = alertsFromReport(report([{ key: "connections", status: "warn", detail: { entries: [
+      { sessionId: "old", outcome: "pending", failedAt: "2026-09-03T07:59:00Z" },
+      { sessionId: "fresh", outcome: "pending", failedAt: "2026-09-03T07:59:59Z" },
+      { sessionId: "ended", outcome: "ended_without_confirmation" },
+    ] } }]), "today");
+    expect(alerts.flatMap((alert) => alert.detail.sessionIds)).toEqual(["old", "ended"]);
+  });
+
+  it("only scopes affected provider calls and sends warning read errors", () => {
+    const alerts = alertsFromReport(report([
+      { key: "provider", status: "warn", detail: { sessionIds: ["alive", "unknown"], entries: [
+        { sessionId: "alive", verdict: "alive" }, { sessionId: "unknown", verdict: "unknown" },
+      ] } },
+      { key: "devices", status: "warn", detail: { error: "database unavailable" } },
+      { key: "ledger", status: "warn", detail: { stalled: 1 } },
+    ]), "today");
+    expect(alerts).toHaveLength(2);
+    expect(alerts[0].detail.sessionIds).toEqual(["unknown"]);
+    expect(alerts[1].check).toBe("devices");
+  });
+
+  it("uses an order-independent bounded idempotency key and retries after ledger failure", async () => {
+    const h = createTelephonyHarness();
+    const { send, sent } = mailbox();
+    const checks: TelephonyHealthReport["checks"] = [
+      { key: "sessions", status: "fail", detail: { stuckIds: Array.from({ length: 10 }, (_, n) => `call-${n}`) } },
+      { key: "usage", status: "fail", detail: {} },
+    ];
+    h.db.failNext("motorist_telephony_alerts", "insert", "ledger unavailable");
+    expect(await runTelephonyAlerts(alertDeps(h, { send, report: report(checks) }))).toMatchObject({ status: "failed" });
+    await runTelephonyAlerts(alertDeps(h, { send, report: report([...checks].reverse()) }));
+    expect(sent[0].idempotencyKey.length).toBeLessThan(200);
+    expect(sent[0].idempotencyKey).toBe(sent[1].idempotencyKey);
   });
 });
