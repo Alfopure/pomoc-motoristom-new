@@ -808,7 +808,11 @@ function resolvePrompt(deps: EffectsDeps, ctx: ExecutionContext, media: MediaRef
  */
 function canRecoverMediaFailure(session: SessionRow, error: unknown): boolean {
   if (error instanceof SessionLeaseLostError) return false;
-  return session.writer_contract !== 2 || error instanceof TelnyxCommandError &&
+  return session.writer_contract !== 2 || isDefiniteMediaRejection(error);
+}
+
+function isDefiniteMediaRejection(error: unknown): boolean {
+  return error instanceof TelnyxCommandError &&
     error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429;
 }
 
@@ -1981,6 +1985,18 @@ async function executeReduceResult(
         ctx.session = session;
       }
       const message = describeError(error);
+      if (command.kind === "playback_start" && command.clientState?.intent?.startsWith("queue_music:") && isDefiniteMediaRejection(error) && !isCallGoneError(error)) {
+        const meta = readMeta(ctx.session);
+        const waiting = meta.waiting;
+        if (meta.queue && waiting?.audio_phase === "music" && waiting.music?.id === command.commandId && !waiting.music.retry_at) {
+          const checkpoint = emptyTransition();
+          // Only a definite rejection proves the loop did not start. An
+          // ambiguous timeout must not dispatch a fresh overlapping playback.
+          checkpoint.session.metadata = toJson({ ...meta, waiting: { ...waiting, music: { ...waiting.music, retry_at: new Date(deps.now().getTime() + 60_000).toISOString() } } });
+          session = await persistTransition(deps, { session: ctx.session, transition: checkpoint, expectedVersion: ctx.session.version, event: input.event });
+          ctx.session = session;
+        }
+      }
       if (command.kind === "gather" && readMeta(ctx.session).gather?.id === command.clientState.gatherId && canRecoverMediaFailure(ctx.session, error)) {
         const meta = readMeta(ctx.session);
         const checkpoint = emptyTransition();

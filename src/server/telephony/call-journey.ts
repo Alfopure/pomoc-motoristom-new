@@ -106,7 +106,12 @@ export function projectCallJourney(input: JourneyProjectionInput): CallJourney {
     // initiation inside a known step interval; never guess an old wait boundary.
     if (startedAt && (endedAt || isActive)) for (const leg of validLegs) {
       const client = record(leg.client_state), initiated = stamp(leg.initiated_at);
-      if (client.intent !== "pickup" || leg.role !== "operator" || !initiated || Date.parse(initiated) < Date.parse(startedAt) || endedAt && Date.parse(initiated) >= Date.parse(endedAt) || attempts.some(attempt => attempt.leg_id === leg.id)) continue;
+      // Fast auto-answer can share the same millisecond as initiation. Only
+      // the accepted leg that actually ended this step owns that boundary;
+      // a later pickup at a wait timeout belongs to the following step.
+      const sameTickWinner = Boolean(endedAt && initiated && Date.parse(initiated) === Date.parse(endedAt) && exited?.reason === "answered" && stamp(leg.answered_at) && Date.parse(leg.answered_at!) === Date.parse(endedAt) &&
+        (meta.answered_leg_call_control_id === leg.telnyx_call_control_id || leg.profile_id && record(meta.accepted_device_legs)[leg.profile_id] === leg.telnyx_call_control_id || stamp(leg.bridged_at)));
+      if (client.intent !== "pickup" || leg.role !== "operator" || !initiated || Date.parse(initiated) < Date.parse(startedAt) || endedAt && Date.parse(initiated) >= Date.parse(endedAt) && !sameTickWinner || attempts.some(attempt => attempt.leg_id === leg.id)) continue;
       const cause = safeReason(leg.hangup_cause), answered = stamp(leg.answered_at);
       const accepted = answered && (!endedAt || Date.parse(answered) <= Date.parse(endedAt)) && !["late_answer", "operator_busy", "flow_wait_timeout"].includes(cause ?? "");
       endpoints.push({ id: `pickup:${leg.id}`, profileId: leg.profile_id, displayName: leg.profile_id ? safeText(input.profiles.get(leg.profile_id)) : null,

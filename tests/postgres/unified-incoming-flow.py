@@ -166,6 +166,23 @@ try:
     check('service role can save through restricted RPC',snapshot(c)['settings']['routing_version']==3)
     security=c.execute("select prosecdef,proconfig from pg_proc where oid='motorist_save_incoming_flow(uuid,jsonb,integer,text)'::regprocedure").fetchone()
     check('RPC definer search path is fixed',security[0] and 'search_path=""' in security[1])
+    # New waiting policy must survive the exact installed save/read contract,
+    # not merely the editor draft and the TypeScript parser.
+    for mode in ['music','announcement','callback']:
+      for interval in [15,30,60]:
+        current=next(row for row in snapshot(c)['lines'] if row['id']==LINE)['metadata']['incoming_flow']
+        next_flow=flow(50)
+        next_flow['steps'].append({'id':'00000000-0000-4000-8000-000000000002','type':'wait','minutes':15,
+                                  'policy':{'mode':mode,'intervalSeconds':interval}})
+        c.execute('set role service_role')
+        try: save(c,changes(next_flow,current))
+        finally: c.execute('reset role')
+        with connect() as fresh:
+          metadata=next(row for row in snapshot(fresh)['lines'] if row['id']==LINE)['metadata']
+          check(f'{mode}/{interval}s policy survives privileged save and fresh read',
+                metadata['incoming_flow']==next_flow and metadata['custom']=={'keep':True})
+    before=snapshot(c);save(c,changes(next_flow,next_flow))
+    check('unchanged waiting policy save is a no-op',snapshot(c)==before)
   print(json.dumps({'checks':len(checks),'passed':checks},ensure_ascii=False,indent=2))
 finally:
   with psycopg.connect(dbname='postgres',autocommit=True,**LOCAL) as admin: admin.execute(f'drop database {NAME} with (force)')

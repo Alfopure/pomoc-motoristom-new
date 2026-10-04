@@ -707,6 +707,8 @@ export type SessionMeta = {
   pickup?: { by: string; at: string } | null;
   /** `max_minutes` is `park_max_minutes` frozen when the caller entered the waiting room. */
   waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null; audio_phase?: "combined" | "prompt" | "music"; music_until?: string | null;
+    /** Exact detached loop; only a definite failure permits a bounded retry. */
+    music?: { id: string; started_at: string; retry_at?: string | null };
     /** Resume the frozen flow after this bounded, manually picked-up wait. */
     flow_step_index?: number; audio_policy?: IncomingWaitPolicy } | null;
   /**
