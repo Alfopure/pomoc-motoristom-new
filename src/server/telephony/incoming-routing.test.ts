@@ -28,7 +28,7 @@ describe("incoming routing service",()=>{
     const h = fixture();
     h.db.update("motorist_telephony_settings", { inbound_call_mode: "queue_first" }, () => true);
     const document = await getCoherentRoutingDocument(h.deps, { organizationId: ORG, includeSettings: false, includeLimits: true });
-    expect(document.capabilities).toEqual({ ownedMobileRouting: flag === "true", defaultInboundCallMode: "queue_first", atomicIncomingLineModes: true });
+    expect(document.capabilities).toEqual({ ownedMobileRouting: flag === "true", defaultInboundCallMode: "queue_first", atomicIncomingLineModes: true, unifiedIncomingFlow: false });
     expect(document.settings).toBeNull();
     expect(h.db.log.filter(row => row.kind === "query")).toHaveLength(0);
   });
@@ -95,4 +95,13 @@ describe("incoming line-mode payload", () => {
     expect(() => parseIncomingLineModes([change, change])).toThrow();
     expect(() => parseIncomingLineModes(Array.from({ length: 201 }, () => change))).toThrow();
   });
+});
+
+it("old combined mode editor cannot override an active step flow", async () => {
+  const h = fixture();
+  const lineId = String(h.rows("motorist_telephony_lines")[0].id);
+  h.db.update("motorist_telephony_lines", { metadata: { incoming_flow: { version: 1, ending: "hangup", steps: [{ id: "00000000-0000-4000-8000-000000000099", type: "wait", minutes: 1 }] } } }, row => row.id === lineId);
+  const document = await getCoherentRoutingDocument(h.deps, { organizationId: ORG, includeSettings: true });
+  await expect(replaceIncomingRouting(h.deps, { organizationId: ORG, actor: { profileId: PROFILES.o1, role: "admin" }, expectedVersion: document.routingVersion, groups: document.groups.map(groupToInput), plans: document.plans.map(planToInput), lineModes: [{ id: lineId, inboundCallMode: "ring_all", expectedInboundCallMode: null }] })).rejects.toMatchObject({ code: "incoming_flow_active" });
+  expect(h.db.log.some(row => row.kind === "rpc" && row.table === "motorist_save_incoming_routing")).toBe(false);
 });

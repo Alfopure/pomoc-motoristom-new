@@ -1,3 +1,4 @@
+import { readIncomingFlow, type IncomingFlow } from "@/lib/telephony/incoming-flow";
 import { returnLineId, returnLineProblem } from "@/lib/telephony/return-line";
 import { telephonyStabilityEnabled } from "./stability";
 import { randomUUID } from "node:crypto";
@@ -268,6 +269,8 @@ export type BusinessHoursDoc = {
 export type PauseReasonDoc = { id: string; code: string; label: string; maxMinutes: number | null; sortOrder: number; active: boolean };
 
 export type LineDoc = {
+  incomingFlow?: IncomingFlow | null;
+  incomingFlowInvalid?: boolean;
   returnLineId?: string | null;
   inboundCallMode?: LineInboundMode | null;
   id: string;
@@ -319,6 +322,7 @@ export type IvrOptionDoc = {
 };
 
 export type OperatorDoc = {
+  accessStatus?: string;
   profileId: string;
   displayName: string;
   role: AppRole;
@@ -368,6 +372,8 @@ export type RoutingDocument = {
   capabilities?: {
     /** True only when the database can atomically save line modes with groups and plans. */
     atomicIncomingLineModes?: boolean;
+    /** Atomic flow save and application endpoint schema are both installed. */
+    unifiedIncomingFlow?: boolean;
     /** The personal-mobile server guard only; does not assert parallel-endpoint schema readiness. */
     ownedMobileRouting: boolean;
     defaultInboundCallMode: "ring_first" | "queue_first";
@@ -1444,7 +1450,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
 }
 
 const SNAPSHOT_KEYS = ["groups", "members", "plans", "steps", "hours", "intervals", "exceptions", "pauseReasons", "presence", "lines", "ivrMenus", "ivrOptions", "profiles", "operatorSettings", "devices", "settings"] as const;
-export type RoutingSnapshot = Record<(typeof SNAPSHOT_KEYS)[number], unknown> & { snapshotId: string; atomicIncomingLineModes?: boolean };
+export type RoutingSnapshot = Record<(typeof SNAPSHOT_KEYS)[number], unknown> & { snapshotId: string; atomicIncomingLineModes?: boolean; unifiedIncomingFlow?: boolean };
 
 export function routingDocumentFromSnapshot(snapshot: RoutingSnapshot, input: RoutingDocumentInput): RoutingDocument {
   if (!snapshot || typeof snapshot.snapshotId !== "string" || SNAPSHOT_KEYS.some(key => key !== "settings" && !Array.isArray(snapshot[key]))) {
@@ -1452,7 +1458,7 @@ export function routingDocumentFromSnapshot(snapshot: RoutingSnapshot, input: Ro
   }
   const rows = SNAPSHOT_KEYS.map(key => snapshot[key]) as unknown as Awaited<ReturnType<typeof loadLegacyRoutingRows>>;
   const document = routingDocumentFromRows(rows, input);
-  return { ...document, snapshotId: snapshot.snapshotId, capabilities: { ...document.capabilities!, atomicIncomingLineModes: snapshot.atomicIncomingLineModes === true } };
+  return { ...document, snapshotId: snapshot.snapshotId, capabilities: { ...document.capabilities!, atomicIncomingLineModes: snapshot.atomicIncomingLineModes === true, unifiedIncomingFlow: snapshot.unifiedIncomingFlow === true } };
 }
 
 /** A single SQL statement sees one MVCC snapshot, including lines/settings which do not bump routingVersion. */
@@ -1548,6 +1554,8 @@ function routingDocumentFromRows(rows: Awaited<ReturnType<typeof loadLegacyRouti
     pauseReasons: pauseReasons.map((row) => ({ id: row.id, code: row.code, label: row.label, maxMinutes: row.max_minutes, sortOrder: row.sort_order, active: row.active })),
     pauseReasonsInUse: [...new Set(presence.map((row) => row.pause_reason_id).filter((id): id is string => Boolean(id)))],
     lines: lines.filter((line) => !isArchivedLine(line.metadata)).map((line) => ({
+      incomingFlow: readIncomingFlow(isRecord(line.metadata) ? line.metadata.incoming_flow : null),
+      incomingFlowInvalid: isRecord(line.metadata) && line.metadata.incoming_flow != null && readIncomingFlow(line.metadata.incoming_flow) === null,
       returnLineId: returnLineId(line.metadata),
       inboundCallMode: lineInboundMode(line.metadata),
       id: line.id,
@@ -1596,6 +1604,7 @@ function routingDocumentFromRows(rows: Awaited<ReturnType<typeof loadLegacyRouti
         const device = visible ? deviceByProfile.get(profile.id) ?? null : null;
         return {
           profileId: profile.id,
+          accessStatus: profile.access_status,
           displayName: profile.display_name,
           role: profile.role as AppRole,
           active: profile.active,
@@ -1895,6 +1904,7 @@ export async function replaceIncomingRouting(
   for (const change of lineModes) {
     const line = before.lines.find(row => row.id === change.id);
     if (!line) throw new ConfigServiceError("Linka už nie je dostupná. Načítaj nastavenia znova.", 409, "config_conflict");
+    if (line.incomingFlow || line.incomingFlowInvalid) throw new ConfigServiceError("Táto linka používa postup po krokoch. Zmeň ju v nastavení prichádzajúcich hovorov.", 409, "incoming_flow_active");
     if ((line.inboundCallMode ?? null) !== change.expectedInboundCallMode) throw new ConfigServiceError("Režim linky medzitým zmenil niekto iný. Načítaj nastavenia znova.", 409, "config_conflict");
   }
   assertValid(validateRoutingReplace({ groups: input.groups, plans: input.plans }, contextFromDocument(before)));
@@ -2089,6 +2099,13 @@ export async function updateTelephonyLine(
     .eq("organization_id", input.organizationId).eq("id", input.lineId).maybeSingle();
   if (stored.error) throw new ConfigServiceError("Nastavenie linky sa nepodarilo načítať.", 503, "config_read_failed");
   if (!stored.data || isArchivedLine(stored.data.metadata)) throw new ConfigServiceError("Linka neexistuje.", 404, "line_not_found");
+  if (isRecord(stored.data.metadata) && stored.data.metadata.incoming_flow != null &&
+    ["returnLineId", "inboundCallMode", "ringPlanId", "ivrMenuId"].some(key => key in input.patch)) {
+    throw new ConfigServiceError("Táto linka používa postup po krokoch. Uprav smerovanie v nastavení prichádzajúcich hovorov.", 409, "incoming_flow_active");
+  }
+  if (input.patch.returnLineId && before.lines.some(line => line.id === input.patch.returnLineId && (line.incomingFlow || line.incomingFlowInvalid))) {
+    throw new ConfigServiceError("Ako návratovú linku nemožno použiť linku s postupom po krokoch.", 409, "incoming_flow_active");
+  }
   if (input.patch.returnLineId !== undefined || input.patch.inboundCallMode !== undefined) {
     values.metadata = {
       ...(isRecord(stored.data.metadata) ? stored.data.metadata : {}),
@@ -2178,6 +2195,12 @@ export function destinationsOutsideAllowlist(document: RoutingDocument, allowlis
     if (plan.fallbackKind !== "external_number") continue;
     const normalized = normalizeE164(plan.fallbackNumber);
     if (normalized && !isDestinationAllowed(normalized, allowlist)) offenders.push({ where: `plán „${plan.name}"`, number: normalized });
+  }
+  for (const line of document.lines) {
+    for (const step of line.incomingFlow?.steps ?? []) {
+      const numbers = step.type === "external" ? [step.number] : step.type === "ring" ? step.people.flatMap(person => person.personalNumber ? [person.personalNumber] : []) : [];
+      for (const number of numbers) if (!isDestinationAllowed(number, allowlist)) offenders.push({ where: `postup linky „${line.label || line.phoneNumber}"`, number });
+    }
   }
   for (const operator of document.operators) {
     const settings = operator.settings;

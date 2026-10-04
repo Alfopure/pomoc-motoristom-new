@@ -78,8 +78,8 @@ export function clampRingSecs(value: number | null | undefined, fallback: number
 }
 
 /** Endpoint key of a member / attempt; an owned mobile stays distinct from SIP. */
-export function memberKey(member: { profileId: string | null; externalNumber: string | null }): string {
-  return member.externalNumber ? `number:${member.externalNumber}` : `profile:${member.profileId ?? ""}`;
+export function memberKey(member: { profileId: string | null; externalNumber: string | null; applicationDevice?: "web" | "mobile" }): string {
+  return member.externalNumber ? `number:${member.externalNumber}` : `profile:${member.profileId ?? ""}${member.applicationDevice === "mobile" ? ":mobile" : ""}`;
 }
 
 export type PausedOperatorRouting = {
@@ -146,7 +146,7 @@ export type RingPlanRows = {
 export function resolvePersonalRingMembers(members: readonly FrozenRingMember[], rows: readonly PersonalRoutingRow[], allowlist: readonly string[], createMobile = false): FrozenRingMember[] {
   return members.map((member) => {
     const settings = rows.find((row) => row.profile_id === member.profileId);
-    if (createMobile && member.kind === "operator" && settings?.delivery_mode === "personal_mobile") {
+    if (createMobile && member.kind === "operator" && !member.application && settings?.delivery_mode === "personal_mobile") {
       const number = normalizeE164(settings.default_mobile_number);
       if (number && isDestinationAllowed(number, allowlist)) return { ...member, kind: "external_number", externalNumber: number, ownerProfileId: member.profileId, provenance: "personal_mobile" };
     }
@@ -277,6 +277,7 @@ export type RingStepPlanInput = {
   now: Date;
   presence: EligibilityPresence[];
   devices: EligibilityDevice[];
+  mobileDevices?: EligibilityDevice[];
   openOffers: string[];
   /** Member keys already attempted in this step (any result). */
   attempted: ReadonlySet<string>;
@@ -306,7 +307,10 @@ export function planRingStep(step: FrozenRingStep, input: RingStepPlanInput): Ri
   const eligible: FrozenRingMember[] = [];
   const eligibleKeys = new Set<string>();
 
-  for (const member of [...step.members].sort((left, right) => left.position - right.position)) {
+  const endpoints = step.members.flatMap((member): FrozenRingMember[] => member.kind === "operator" && member.application && !member.applicationDevice
+    ? [{ ...member, applicationDevice: "web" }, { ...member, applicationDevice: "mobile" }]
+    : [member]);
+  for (const member of endpoints.sort((left, right) => left.position - right.position)) {
     if (member.kind === "external_number" && (member.ownerProfileId || member.profileId) && !(input.ownedPstnEnabled ?? telephonyStabilityEnabled())) {
       skipped.push({ member, reason: "feature_disabled" });
       continue;
@@ -317,7 +321,7 @@ export function planRingStep(step: FrozenRingStep, input: RingStepPlanInput): Ri
     }
     const decision = evaluateMemberEligibility(
       member.kind === "operator" ? { kind: "operator", profileId: member.profileId ?? "" } : { kind: "external_number", externalNumber: member.externalNumber ?? "", ownerProfileId: member.ownerProfileId ?? member.profileId },
-      { now: input.now, presence: input.presence, devices: input.devices, openOffers: input.openOffers, sessionId: input.sessionId },
+      { now: input.now, presence: input.presence, devices: member.applicationDevice === "mobile" ? input.mobileDevices ?? [] : input.devices, openOffers: input.openOffers, sessionId: input.sessionId },
     );
     if (!decision.eligible) {
       skipped.push({ member, reason: decision.reason });
@@ -351,6 +355,8 @@ export function planRingStep(step: FrozenRingStep, input: RingStepPlanInput): Ri
     externalNumber: member.externalNumber,
     position: member.position,
     ringSecs: step.strategy === "ordered" ? member.ringSecs : step.timeoutSecs,
+    ...(member.application ? { application: true } : {}),
+    ...(member.applicationDevice ? { applicationDevice: member.applicationDevice } : {}),
   }));
 
   const remainingAfter = step.strategy === "ordered" ? eligible.length - chosen.length : 0;

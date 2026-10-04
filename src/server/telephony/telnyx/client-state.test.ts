@@ -6,6 +6,14 @@ const SID = "6f1c1c1e-1234-4abc-8def-0123456789ab";
 const OPERATOR = "0a9b8c7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d";
 
 describe("client-state", () => {
+  it("keeps a mobile app ring and revocable token distinct within the wire budget", () => {
+    const state: TelnyxClientState = { sid: SID, role: "operator", operatorId: OPERATOR,
+      step: 99, intent: "ring", offerToken: "0123456789ab", applicationDevice: "mobile" };
+    const encoded = encodeClientState(state);
+    expect(encoded.length).toBeLessThanOrEqual(CLIENT_STATE_MAX_BYTES);
+    expect(decodeClientState(encoded)).toEqual(state);
+    expect(decodeClientState(Buffer.from(JSON.stringify({ s: SID, r: "operator", m: "mobile" })).toString("base64"))).toBeNull();
+  });
   it("round-trips every field and stays under the byte budget", () => {
     const state: TelnyxClientState = { sid: SID, role: "operator", operatorId: OPERATOR, step: 12, intent: "callback_prompt", autoAnswer: true };
     const encoded = encodeClientState(state);

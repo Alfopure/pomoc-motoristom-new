@@ -104,21 +104,29 @@ export type FrozenRingMember = {
   /** Resolved ring time for `ordered` steps: `max(5, member.ring_secs ?? step.timeout_secs)`. */
   ringSecs: number;
   memberId: string | null;
+  /** Explicit flow choice: ring registered application endpoints, not personal routing. */
+  application?: boolean;
+  applicationDevice?: "web" | "mobile";
 };
 
 export type FrozenRingStep = {
   index: number;
-  groupId: string;
+  groupId: string | null;
   groupName: string;
   strategy: "all" | "ordered";
   timeoutSecs: number;
   members: FrozenRingMember[];
+  /** Legacy plans omit this and remain ordinary ring steps. */
+  kind?: "ring" | "wait";
+  waitMinutes?: number;
+  sourceId?: string;
 };
 
 export type FrozenRingPlan = {
-  planId: string;
+  planId: string | null;
   name: string;
-  fallback: { kind: "external_number" | "waiting_room" | "callback_prompt" | "hangup_message"; number: string | null };
+  fallback: { kind: "external_number" | "waiting_room" | "callback_prompt" | "hangup_message" | "hangup"; number: string | null };
+  source?: "incoming_flow";
   steps: FrozenRingStep[];
   /** Original browser members, before pause forwarding replaces a member. */
   queueMembers?: FrozenRingMember[];
@@ -273,7 +281,7 @@ export type DialCommand = CommandBase & {
   preventDoubleBridge?: boolean;
   parkAfterUnbridge?: "self";
   /** Ring attempt this dial belongs to (natural key, resolved by effects). */
-  attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null } | null;
+  attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null; applicationDevice?: "web" | "mobile" } | null;
   autoAnswer?: boolean;
   /**
    * The colleague's leg of a colleague call. Marked for the browser, which
@@ -301,6 +309,8 @@ export type AttemptPlan = {
   externalNumber: string | null;
   position: number;
   ringSecs: number;
+  application?: boolean;
+  applicationDevice?: "web" | "mobile";
 };
 
 export type RingFanout = CommandBase & {
@@ -585,6 +595,8 @@ export type RoutingContext = {
   ringPlans: Record<string, FrozenRingPlan>;
   presence: PresenceRow[];
   devices: DeviceRow[];
+  /** Mobile credentials have an independent registration/heartbeat. */
+  mobileDevices?: DeviceRow[];
   /** Profile ids holding an `offered` attempt in another session. */
   openOffers: string[];
   /** Open legs across the organisation (fan-out cap input). */
@@ -670,7 +682,9 @@ export type SessionMeta = {
   after_hours?: { reason: string; at: string } | null;
   pickup?: { by: string; at: string } | null;
   /** `max_minutes` is `park_max_minutes` frozen when the caller entered the waiting room. */
-  waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null; audio_phase?: "combined" | "prompt" | "music"; music_until?: string | null } | null;
+  waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null; audio_phase?: "combined" | "prompt" | "music"; music_until?: string | null;
+    /** Resume the frozen flow after this bounded, manually picked-up wait. */
+    flow_step_index?: number } | null;
   /**
    * Unanswered inbound queue only; parked/held conversations never auto-ring.
    * `manual_only` keeps queue audio and the callback limit, but disables

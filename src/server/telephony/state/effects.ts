@@ -1303,6 +1303,7 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
     query = command.attempt.externalNumber
       ? query.eq("member_kind", "external_number").eq("external_number", command.attempt.externalNumber)
       : query.eq("member_kind", "operator").eq("profile_id", command.attempt.profileId ?? "").is("external_number", null);
+    if (command.attempt.applicationDevice) query = query.eq("application_device", command.attempt.applicationDevice);
     if (command.attempt.profileId) query = query.eq("profile_id", command.attempt.profileId);
     const linked = await query;
     if (linked.error) fail("attempt link failed", linked.error);
@@ -1325,6 +1326,7 @@ async function insertAttempt(deps: EffectsDeps, session: SessionRow, plan: Attem
     external_number: plan.externalNumber,
     position: plan.position,
     ring_secs: plan.ringSecs,
+    ...(plan.applicationDevice ? { application_device: plan.applicationDevice } : {}),
     result: "offered",
     offered_at: now,
   });
@@ -1338,6 +1340,7 @@ async function insertAttempt(deps: EffectsDeps, session: SessionRow, plan: Attem
       // Older persisted fanouts may contain both; only the exact endpoint
       // that owns this attempt can reuse it and reach the provider journal.
       query = plan.externalNumber ? query.eq("external_number", plan.externalNumber) : query.is("external_number", null);
+      if (plan.applicationDevice) query = query.eq("application_device", plan.applicationDevice);
       const existing = await query.maybeSingle();
       if (existing.error) fail("existing attempt unavailable", existing.error);
       return existing.data?.result === "offered";
@@ -1432,6 +1435,7 @@ async function repairLegacyFanoutIdentities(deps: EffectsDeps, ctx: ExecutionCon
         query = dial.attempt.externalNumber
           ? query.eq("member_kind", "external_number").eq("external_number", dial.attempt.externalNumber)
           : query.eq("member_kind", "operator").eq("profile_id", dial.attempt.profileId ?? "").is("external_number", null);
+        if (dial.attempt.applicationDevice) query = query.eq("application_device", dial.attempt.applicationDevice);
         const retired = await query;
         if (retired.error) fail("legacy unsent attempt cleanup failed", retired.error);
       }
@@ -1440,7 +1444,7 @@ async function repairLegacyFanoutIdentities(deps: EffectsDeps, ctx: ExecutionCon
   if (discarded.size) {
     command.dials = command.dials.filter(dial => !discarded.has(dial));
     command.attempts = command.attempts.filter(plan => command.dials.some(dial =>
-      dial.attempt?.profileId === plan.profileId && dial.attempt?.externalNumber === plan.externalNumber));
+      dial.attempt?.profileId === plan.profileId && dial.attempt?.externalNumber === plan.externalNumber && (dial.attempt?.applicationDevice ?? "web") === (plan.applicationDevice ?? "web")));
   }
 }
 
@@ -1472,7 +1476,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
       skippedMembers.push(plan.profileId ?? plan.externalNumber ?? "");
       continue;
     }
-    const dial = command.dials.find((candidate) => candidate.attempt?.profileId === plan.profileId && candidate.attempt?.externalNumber === plan.externalNumber);
+    const dial = command.dials.find((candidate) => candidate.attempt?.profileId === plan.profileId && candidate.attempt?.externalNumber === plan.externalNumber && (candidate.attempt?.applicationDevice ?? "web") === (plan.applicationDevice ?? "web"));
     if (dial) dials.push(dial);
   }
 
@@ -1553,6 +1557,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
         attempt = dial.attempt?.externalNumber
           ? attempt.eq("member_kind", "external_number").eq("external_number", dial.attempt.externalNumber)
           : attempt.eq("member_kind", "operator").eq("profile_id", dial.attempt?.profileId ?? "").is("external_number", null);
+        if (dial.attempt?.applicationDevice) attempt = attempt.eq("application_device", dial.attempt.applicationDevice);
         const cancelled = await attempt;
         if (cancelled.error) fail("rejected attempt update failed", cancelled.error);
       }
@@ -1570,6 +1575,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
       query = dial.attempt?.externalNumber
         ? query.eq("member_kind", "external_number").eq("external_number", dial.attempt.externalNumber)
         : query.eq("member_kind", "operator").eq("profile_id", dial.attempt?.profileId ?? "").is("external_number", null);
+      if (dial.attempt?.applicationDevice) query = query.eq("application_device", dial.attempt.applicationDevice);
       const failed = await query;
       if (failed.error) fail("failed attempt update failed", failed.error);
       if (dial.profileId) failedOwners.set(dial.profileId, dial);

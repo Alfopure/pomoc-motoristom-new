@@ -76,9 +76,11 @@ export const DEFAULT_UNIQUE_KEYS: Record<string, UniqueKeySpec[]> = {
   motorist_call_legs: [["id"], ["telnyx_call_control_id"], ["telnyx_call_leg_id"]],
   motorist_ring_attempts: [
     ["id"],
-    { columns: ["session_id", "step_index", "profile_id"], where: (row) => row.member_kind !== "external_number" },
+    { columns: ["session_id", "step_index", "profile_id"], where: (row) => row.member_kind !== "external_number" && row.application_device !== "mobile" },
+    { columns: ["session_id", "step_index", "profile_id"], where: (row) => row.member_kind !== "external_number" && row.application_device === "mobile" },
     ["session_id", "step_index", "external_number"],
-    { columns: ["profile_id"], where: (row) => row.result === "offered" && row.member_kind !== "external_number" },
+    { columns: ["profile_id"], where: (row) => row.result === "offered" && row.member_kind !== "external_number" && row.application_device !== "mobile" },
+    { columns: ["profile_id"], where: (row) => row.result === "offered" && row.member_kind !== "external_number" && row.application_device === "mobile" },
     { columns: ["profile_id", "external_number"], where: (row) => row.result === "offered" && row.member_kind === "external_number" },
   ],
   motorist_ring_groups: [["id"], ["organization_id", "name"]],

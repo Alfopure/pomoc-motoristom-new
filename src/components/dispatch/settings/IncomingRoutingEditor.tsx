@@ -1,189 +1,170 @@
 "use client";
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Clock3, Loader2, Save, Settings2, Undo2 } from "lucide-react";
 import type { DraftEditorState } from "../useDraftEditors";
-import { ArrowDown, Check, Clock3, Library, Loader2, PhoneIncoming, Save, Settings2, Undo2 } from "lucide-react";
 import type { RoutingDocument } from "@/server/telephony/config-service";
-import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
+import { parseIncomingFlow, type IncomingFlow } from "@/lib/telephony/incoming-flow";
+import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import { ConfigRequestError, loadRoutingConfig, saveRoutingConfig, type RoutingConfigResponse } from "./config-client";
-import { FALLBACK_DESTINATION_ALLOWLIST, validateRingGroupDrafts, type GroupDraft } from "./ring-groups-model";
-import { describeRingPlan, ringPlanIdsInUse, validateRingPlanDrafts, type PlanDraft } from "./ring-plan-model";
-import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingAffectedLines, incomingModeName, updateIncomingLineMode, incomingLineBehaviour, incomingMatches, incomingPayload, incomingPlanIdsForLine, initialIncomingLineId } from "./incoming-routing-model";
-import { RingGroupsEditor } from "./RingGroupsEditor";
-import { RingPlanEditor } from "./RingPlanEditor";
-import { LineInboundModeControl } from "./LineInboundModeControl";
-import type { DetachedPersonDevices } from "./ring-people-model";
-import { SettingsIssueList, SettingsNotice, settingsInputClass } from "./settings-ui";
+import { initialIncomingLineId } from "./incoming-routing-model";
+import { emptyIncomingFlow, incomingFlowChanges, incomingFlowsMatch, incomingFlowSummary, legacyIncomingFlow, validateIncomingFlowDraft, type FlowDrafts } from "./incoming-flow-model";
+import { IncomingFlowSteps } from "./IncomingFlowSteps";
+import { LegacyIncomingRoutingEditor } from "./LegacyIncomingRoutingEditor";
+import { SettingsIssueList, SettingsNotice } from "./settings-ui";
+import styles from "./incoming-flow.module.css";
 
 export type IncomingEditorActions = { save: () => Promise<boolean>; discard: () => void };
-export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onNavigate, onDirtyChange, onActionsChange, onEditorStateChange }: {
+type Props = {
   document: RoutingDocument; canEdit: boolean; target?: RoutingNavigationTarget | null;
   onSaved: (response: RoutingConfigResponse) => void;
   onNavigate: (target: RoutingNavigationTarget) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onActionsChange?: (actions: IncomingEditorActions | null) => void;
   onEditorStateChange?: (state: DraftEditorState | null) => void;
-}) {
+};
+
+/** Existing databases and complex legacy routes retain their original, guarded editor. */
+export function IncomingRoutingEditor(props: Props) {
+  const [legacy, setLegacy] = useState(Boolean((props.target?.planId || props.target?.groupId) && !props.target?.lineId));
+  const [legacyPending, setLegacyPending] = useState(false);
+  const [legacyLineId, setLegacyLineId] = useState<string | null>(null);
+  const [previousTarget, setPreviousTarget] = useState(props.target);
+  const parentEditorStateChange = props.onEditorStateChange;
+  const handleLegacyState = useCallback((state: DraftEditorState | null) => {
+    setLegacyPending(Boolean(state?.dirty || state?.saving));
+    parentEditorStateChange?.(state);
+  }, [parentEditorStateChange]);
+  const legacyTarget = useMemo(() => legacyLineId ? { section: "telephony" as const, tab: "incoming" as const, lineId: legacyLineId } : props.target, [legacyLineId, props.target]);
+  if (props.target !== previousTarget) {
+    setPreviousTarget(props.target);
+    if (props.target?.planId || props.target?.groupId) setLegacy(true);
+    else if (props.target?.lineId) setLegacy(false);
+  }
+  if (!props.document.capabilities?.unifiedIncomingFlow) return <LegacyIncomingRoutingEditor {...props} />;
+  if (legacy) return <div className="grid min-w-0 gap-3">
+    <div><button type="button" disabled={legacyPending} className={styles.button} onClick={() => setLegacy(false)}><ArrowLeft size={16} aria-hidden="true" />Späť na postup hovoru</button>{legacyPending && <p className={styles.note}>Pred návratom ulož alebo zahoď rozpracované zmeny.</p>}</div>
+    <LegacyIncomingRoutingEditor {...props} target={legacyTarget} onEditorStateChange={handleLegacyState} />
+  </div>;
+  return <UnifiedIncomingRoutingEditor {...props} onLegacy={lineId => { setLegacyLineId(lineId); setLegacy(true); }} />;
+}
+
+function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNavigate, onDirtyChange, onActionsChange, onEditorStateChange, onLegacy }: Props & { onLegacy: (lineId: string) => void }) {
   const [baseline, setBaseline] = useState(document);
-  const [draft, setDraft] = useState(() => incomingDraft(document));
-  const [detachedDevices, setDetachedDevices] = useState<DetachedPersonDevices>(() => new Map());
+  const [drafts, setDrafts] = useState<FlowDrafts>({});
+  const [lineId, setLineId] = useState(() => initialIncomingLineId(document, target));
   const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [uncertain, setUncertain] = useState(false);
   const [remote, setRemote] = useState<RoutingDocument | null>(null);
-  const [lineId, setLineId] = useState(() => initialIncomingLineId(document, target));
-  const [groupsOpen, setGroupsOpen] = useState(Boolean(target?.groupId) || document.groups.length === 0);
-  const [focusPlanId, setFocusPlanId] = useState(target?.planId ?? null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [rememberedNumbers, setRememberedNumbers] = useState<Record<string, string>>({});
   const [previousTarget, setPreviousTarget] = useState(target);
   if (target !== previousTarget) {
     setPreviousTarget(target);
-    if (target) { setLineId(initialIncomingLineId(baseline, target)); if (target.groupId) setGroupsOpen(true); }
-    setFocusPlanId(target?.planId ?? null);
+    if (target?.lineId) setLineId(initialIncomingLineId(baseline, target));
   }
-  const working = useMemo(() => documentWithDraft(baseline, draft), [baseline, draft]);
-  const dirty = !incomingMatches(draft, baseline);
-  const affectedLines = useMemo(() => incomingAffectedLines(baseline, draft), [baseline, draft]);
-  const atomicModes = baseline.capabilities?.atomicIncomingLineModes === true;
-  const pendingChanges = useRef(dirty || saving);
-  useEffect(() => { pendingChanges.current = dirty || saving; }, [dirty, saving]);
-  const issues = useMemo(() => [
-    ...validateRingGroupDrafts(draft.groups, { operatorIds: working.operators.map(row => row.profileId), destinationAllowlist: working.limits?.destinationAllowlist ?? FALLBACK_DESTINATION_ALLOWLIST, plans: working.plans }),
-    ...validateRingPlanDrafts(draft.plans, { groups: working.groups, destinationAllowlist: working.limits?.destinationAllowlist ?? FALLBACK_DESTINATION_ALLOWLIST, planIdsInUse: ringPlanIdsInUse(working.lines, working.ivrMenus), maxRingFanout: working.limits?.maxRingFanout }),
-  ], [draft, working]);
-  const setGroups: Dispatch<SetStateAction<GroupDraft[]>> = change => setDraft(current => ({ ...current, groups: identifyGroups(typeof change === "function" ? change(current.groups) : change) }));
-  const setPlans: Dispatch<SetStateAction<PlanDraft[]>> = change => setDraft(current => ({ ...current, plans: identifyPlans(typeof change === "function" ? change(current.plans) : change) }));
+  const changes = useMemo(() => incomingFlowChanges(drafts, baseline), [drafts, baseline]);
+  const dirty = changes.length > 0;
+  const pendingChanges = useRef(false);
+  useEffect(() => { pendingChanges.current = dirty || saving || uncertain; }, [dirty, saving, uncertain]);
+  const line = baseline.lines.find(candidate => candidate.id === lineId) ?? baseline.lines[0];
+  const lineIndex = line ? baseline.lines.indexOf(line) : -1;
+  const legacy = useMemo(() => line ? legacyIncomingFlow(baseline, line) : null, [baseline, line]);
+  const flow = line ? drafts[line.id] ?? line.incomingFlow ?? legacy?.flow ?? null : null;
+  const usingLegacy = Boolean(line && !drafts[line.id] && !line.incomingFlow);
+  const locked = !canEdit || saving || uncertain || Boolean(remote);
+  const issues = useMemo(() => changes.flatMap(change => validateIncomingFlowDraft(change.flow, { ...baseline, lines: baseline.lines.map(candidate => ({ ...candidate, incomingFlow: drafts[candidate.id] ?? candidate.incomingFlow })) }).map(issue => ({ ...issue, path: `${change.id}.${issue.path}`, message: `${baseline.lines.find(candidate => candidate.id === change.id)?.label ?? "Linka"}: ${issue.message}` }))), [changes, baseline, drafts]);
   useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false); }, [dirty, onDirtyChange]);
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty && !uncertain) return;
     const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
-  }, [dirty]);
-  const line = working.lines.find(row => row.id === lineId);
-  const effectiveLine = line?.returnLineId ? working.lines.find(row => row.id === line.returnLineId) : line;
-  const visiblePlanIds = incomingPlanIdsForLine(working, lineId);
-  const defaultMode = baseline.capabilities?.defaultInboundCallMode ?? baseline.settings?.inboundCallMode ?? null;
-  const behaviour = incomingLineBehaviour(line, defaultMode);
-  const manualQueue = Boolean(line && behaviour.mode === "queue_first");
-  const unknownMode = Boolean(line && behaviour.mode === null);
-  const activeRoute = Boolean(line?.active && effectiveLine?.active);
-  const activeIvr = working.ivrMenus.some(menu => menu.id === effectiveLine?.ivrMenuId && menu.active);
-  const activeHours = working.businessHours.some(hours => hours.id === effectiveLine?.businessHoursId && hours.active);
-  function showLibrary() { setLineId(""); setFocusPlanId(null); }
-  function revealPlan(planId: string) { setLineId(""); setFocusPlanId(planId); }
-  function revealIssues() { showLibrary(); setGroupsOpen(true); }
-  function accept(response: RoutingConfigResponse) {
-    setDetachedDevices(new Map());
-    pendingChanges.current = false;
-    setBaseline(response.document); setDraft(incomingDraft(response.document)); setRemote(null); setUncertain(false); onSaved(response);
+  }, [dirty, uncertain]);
+  function updateFlow(next: IncomingFlow) {
+    if (!line || locked) return;
+    pendingChanges.current = true;
+    setDrafts(current => ({ ...current, [line.id]: next })); setError(null); setNotice(null);
   }
-  function discard() { pendingChanges.current = false; setDetachedDevices(new Map()); setDraft(incomingDraft(remote ?? baseline)); if (remote) setBaseline(remote); setRemote(null); setUncertain(false); setError(null); setNotice(null); }
+  function accept(response: RoutingConfigResponse) {
+    pendingChanges.current = false;
+    setBaseline(response.document); setDrafts({}); setRememberedNumbers({}); setRemote(null); setUncertain(false); onSaved(response);
+  }
+  function discard() {
+    pendingChanges.current = false;
+    if (remote) setBaseline(remote);
+    setDrafts({}); setRememberedNumbers({}); setRemote(null); setUncertain(false); setError(null); setNotice(null);
+  }
   async function verify(): Promise<boolean> {
     try {
       const latest = await loadRoutingConfig("incoming");
-      if (incomingMatches(draft, latest.document)) {
-        accept(latest); setError(null); setNotice("Uložený stav je overený. Režimy liniek, skupiny aj plány zodpovedajú tvojim zmenám."); return true;
+      if (incomingFlowsMatch(changes, latest.document)) {
+        accept(latest); setError(null); setNotice("Uložený stav je overený. Postupy zodpovedajú tvojim zmenám."); return true;
       }
       setRemote(latest.document); setUncertain(false);
-      setError("Uložený stav sa líši. Tvoje zmeny zostávajú v návrhu. Porovnaj ich pred ďalším uložením.");
-    } catch { setUncertain(true); setError("Výsledok uloženia zatiaľ nemožno overiť. Návrh zostáva zachovaný; neukladaj ho opakovane naslepo."); }
+      setError("Uložený stav sa líši. Tvoje zmeny zostávajú v návrhu; porovnaj ich pred ďalším uložením.");
+    } catch { setUncertain(true); setError("Výsledok uloženia zatiaľ nemožno overiť. Návrh zostáva zachovaný. Najprv over uložený stav."); }
     return false;
   }
-  async function verifySavedState() {
-    if (saving) return;
-    setSaving(true);
-    try { await verify(); } finally { setSaving(false); }
-  }
   async function save(): Promise<boolean> {
-    if (!canEdit || saving || uncertain || issues.length > 0 || remote) return false;
+    if (locked || issues.length > 0 || !baseline.snapshotId) return false;
     if (!dirty) return true;
     let accepted = false;
-    setSaving(true); setError(null); setNotice(null);
+    pendingChanges.current = true; setSaving(true); setError(null); setNotice(null);
     try {
-      const response = await saveRoutingConfig("incoming", { ...incomingPayload(draft), version: baseline.routingVersion });
-      accept(response); accepted = true; setNotice(`Všetky zmeny sú uložené spolu. Nové smerovanie platí pre nové hovory.${response.warning ? ` ${response.warning}` : ""}`); return true;
+      const response = await saveRoutingConfig("incomingFlow", { version: baseline.routingVersion, snapshotId: baseline.snapshotId, lines: changes.map(change => ({ ...change, flow: parseIncomingFlow(change.flow) })) });
+      accept(response); accepted = true;
+      setNotice(`Postupy sú uložené. Zmena platí pre nové hovory.${response.warning ? ` ${response.warning}` : ""}`);
+      return true;
     } catch (caught) {
       if (caught instanceof ConfigRequestError && caught.status >= 400 && caught.status < 500) {
-        setError(caught.message);
+        setError([caught.message, ...caught.issues.map(issue => issue.message)].filter(Boolean).join(" "));
         if (caught.status === 409) {
           try { const latest = await loadRoutingConfig("incoming"); setRemote(latest.document); } catch { setUncertain(true); }
         }
         return false;
       }
-      setUncertain(true);
-      accepted = await verify();
-      return accepted;
+      setUncertain(true); accepted = await verify(); return accepted;
     } finally { pendingChanges.current = !accepted && dirty; setSaving(false); }
   }
+  async function verifySavedState() { if (saving) return; setSaving(true); try { await verify(); } finally { setSaving(false); } }
   useEffect(() => { onEditorStateChange?.({ dirty, saving, save, discard, hasPendingChanges: () => pendingChanges.current }); });
   useEffect(() => () => onEditorStateChange?.(null), [onEditorStateChange]);
-  // The parent owns only navigation; this component remains the sole draft owner.
   useEffect(() => { onActionsChange?.({ save, discard }); return () => onActionsChange?.(null); });
-  return <section className="grid min-w-0 gap-2 [&_label>span]:font-medium [&_label>span]:normal-case" aria-label="Prichádzajúce hovory">
-    <header className="flex flex-wrap items-start justify-between gap-3 px-1 pt-1">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight text-zinc-950">{line ? "Cesta prichádzajúceho hovoru" : "Knižnica plánov"}</h2>
-        <p className="mt-1 text-sm text-zinc-500">{line ? "Kto hovor prijme a čo sa stane, ak nezdvihne." : "Všetky postupy zvonenia na jednom mieste."}</p>
-      </div>
-      {line && <button type="button" onClick={showLibrary} className="inline-flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-zinc-600 hover:bg-white hover:text-zinc-950"><Library size={16} aria-hidden="true" />Všetky plány</button>}
-    </header>
-    <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-2.5 sm:px-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3 sm:gap-4">
-          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-zinc-900 text-white"><PhoneIncoming size={22} aria-hidden="true" /></span>
-          <div className="min-w-0">
-            <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400">{line ? "Volajúci vytočí" : "Nastavenie pre linku"}</p>
-            <p className="mt-0.5 break-words text-xl font-semibold tracking-tight text-zinc-950 sm:text-2xl">{line ? formatPhoneNumberForDisplay(line.phoneNumber) : "Všetky linky"}</p>
-            {line && <p className="mt-1 text-sm text-zinc-500">{line.label}{!activeRoute && <span className="ml-2 rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-800">Smerovanie nie je aktívne</span>}</p>}
-          </div>
-        </div>
-        <label className="grid w-full min-w-0 gap-1 text-xs text-zinc-500 sm:w-auto sm:max-w-[260px]">{line ? "Zmeniť linku" : "Vybrať linku"}
-          <select aria-label="Linka" className={settingsInputClass} value={lineId} onChange={event => { setLineId(event.target.value); setFocusPlanId(null); }}>
-            <option value="">Všetky plány vrátane nepoužitých</option>
-            {working.lines.map(row => <option key={row.id} value={row.id}>{row.label} · {row.phoneNumber}{row.active ? "" : " (neaktívna)"}</option>)}
-          </select>
-        </label>
-      </div>
-      {line && <LineInboundModeControl key={line.id} line={line} defaultMode={defaultMode} canEdit={canEdit && !saving && !uncertain && !remote} available={atomicModes} onChange={mode => setDraft(current => updateIncomingLineMode(current, baseline, line.id, mode))}>
-        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-zinc-100 pt-2 text-xs text-zinc-500">
-        <button type="button" className="inline-flex min-h-8 items-center gap-1.5 hover:text-zinc-950" onClick={() => onNavigate({ section: "telephony", tab: "numbers", lineId: line.id })}><Settings2 size={13} aria-hidden="true" />Priradenie linky</button>
-        {effectiveLine?.businessHoursId && <button type="button" className="inline-flex min-h-8 items-center gap-1.5 hover:text-zinc-950" onClick={() => onNavigate({ section: "telephony", tab: "hours", lineId: effectiveLine.id, businessHoursId: effectiveLine.businessHoursId! })}><Clock3 size={13} aria-hidden="true" />Otváracie hodiny</button>}
-        {effectiveLine?.ivrMenuId && <button type="button" className="min-h-8 hover:text-zinc-950" onClick={() => onNavigate({ section: "telephony", tab: "ivr", lineId: effectiveLine.id, ivrMenuId: effectiveLine.ivrMenuId! })}>Hlasové menu</button>}
-        </div>
-      </LineInboundModeControl>}
-      {line && (activeHours || activeIvr) && <p className="mt-2 text-xs leading-5 text-zinc-500">Najprv sa uplatnia {activeHours ? "otváracie hodiny" : ""}{activeHours && activeIvr ? " a " : ""}{activeIvr ? "voľba v hlasovom menu" : ""}.{activeIvr ? " Plány nižšie patria jednotlivým vetvám menu." : ""}</p>}
-      {line?.returnLineId && <p className="mt-2 text-xs text-zinc-500">Návratové číslo používa smerovanie linky {effectiveLine?.label ?? "(nedostupná)"}.</p>}
-      {target?.planId && !working.plans.some(plan => plan.id === target.planId) && <SettingsNotice tone="warning">Vybraný plán už neexistuje alebo k nemu nemáš prístup. Zobrazuje sa dostupná konfigurácia.</SettingsNotice>}
-    </div>
-    {line && <div className="-my-2 flex items-center gap-2 pl-5 text-xs text-zinc-400 sm:pl-7" aria-hidden="true"><ArrowDown size={17} /><span>{!activeRoute ? "Uložený postup pre neaktívnu linku" : manualQueue ? "Hovor čaká na operátora" : "Hovor pokračuje podľa tohto postupu"}</span></div>}
+  function nextLine(direction: -1 | 1) {
+    if (!baseline.lines.length) return;
+    setLineId(baseline.lines[(lineIndex + direction + baseline.lines.length) % baseline.lines.length].id);
+  }
+  return <section className={styles.editor} aria-label="Prichádzajúce hovory">
+    <header className={styles.heading}><h2>Cesta prichádzajúceho hovoru</h2><p>Ľudia v jednom kroku zvonia naraz. Jednotlivé kroky idú postupne.</p></header>
+    {line ? <div className={styles.lineSelector}>
+      <div className={styles.lineMain}><button type="button" className={styles.iconButton} disabled={baseline.lines.length < 2} onClick={() => nextLine(-1)} aria-label="Predchádzajúca linka"><ChevronLeft size={24} aria-hidden="true" /></button><div className={styles.lineIdentity} aria-live="polite"><p>{line.label}</p><strong>{formatPhoneNumberForDisplay(line.phoneNumber)}</strong><small>Linka {lineIndex + 1} z {baseline.lines.length}{!line.active ? " · Vypnutá" : ""}{drafts[line.id] && changes.some(change => change.id === line.id) ? " · Neuložené zmeny" : ""}</small></div><button type="button" className={styles.iconButton} disabled={baseline.lines.length < 2} onClick={() => nextLine(1)} aria-label="Nasledujúca linka"><ChevronRight size={24} aria-hidden="true" /></button></div>
+      {baseline.lines.length > 1 && <nav className={styles.lineDots} aria-label="Vybrať linku">{baseline.lines.map(candidate => <button key={candidate.id} type="button" aria-current={candidate.id === line.id} aria-label={`${candidate.label}, ${formatPhoneNumberForDisplay(candidate.phoneNumber)}`} onClick={() => setLineId(candidate.id)}><span /></button>)}</nav>}
+    </div> : <SettingsNotice>Nie je dostupná žiadna linka. Najprv ju pridaj v nastavení čísel.</SettingsNotice>}
     {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
     {notice && !dirty && <SettingsNotice tone="success">{notice}</SettingsNotice>}
-    {uncertain && <button type="button" disabled={saving} onClick={() => void verifySavedState()} className="justify-self-start rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold">Overiť uložený stav</button>}
-    {remote && <details open className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm"><summary className="cursor-pointer font-semibold">Konflikt: porovnať uloženú konfiguráciu a vlastný návrh</summary><div className="mt-2 grid gap-3 md:grid-cols-2">{[{ title: "Aktuálne uložené", document: remote }, { title: "Tvoj zachovaný návrh", document: working }].map(entry => <div key={entry.title}><h3 className="font-semibold">{entry.title}</h3>{(draft.lineModes ?? []).map(change => { const compared = entry.document.lines.find(row => row.id === change.id); return <p className="mt-2 text-sm" key={change.id}><strong>{compared?.label ?? "Odstránená linka"}:</strong> {compared ? incomingModeName(compared.inboundCallMode) : "Linka už nie je dostupná"}</p>; })}{entry.document.plans.map(plan => <p className="mt-2" key={plan.id}><strong>{plan.name}:</strong> {describeRingPlan(incomingDraft(entry.document).plans.find(row => row.id === plan.id)!, entry.document.groups, entry.document.limits?.maxRingFanout)}</p>)}{entry.document.groups.map(group => <p key={group.id} className="mt-1 text-xs">{group.name}: {group.members.map(member => member.memberKind === "operator" ? entry.document.operators.find(operator => operator.profileId === member.profileId)?.displayName ?? "Operátor" : member.externalNumber).join(", ") || "bez členov"}</p>)}</div>)}</div><p className="mt-3 text-xs">Pre bezpečnú novú úpravu načítaj uložený stav. Vlastné hodnoty si najprv môžeš skopírovať z návrhu.</p><button type="button" onClick={discard} className="mt-2 min-h-10 rounded-lg border border-amber-300 bg-white px-3 font-semibold">Zahodiť návrh a načítať uložené</button></details>}
-    {manualQueue || unknownMode ? <div className="rounded-2xl border border-zinc-200 bg-white p-6">
-      <div className="mb-4 grid h-12 w-12 place-items-center rounded-xl bg-yellow-50 text-zinc-800"><Clock3 size={24} aria-hidden="true" /></div>
-      <h3 className="font-semibold text-zinc-900">{manualQueue ? "Hovor čaká na ručné prevzatie" : "Predvolený režim nie je dostupný"}</h3>
-      <p className="mt-2 text-sm leading-6 text-zinc-600">{manualQueue ? "Operátor si hovor vyberie v čakárni a prevezme ho cez pripojený telefón v aplikácii. Automatické kroky ani nastavenie „Keď nikto nezdvihne“ sa v tomto režime nepoužijú." : "Účinné zvonenie nemožno určiť bez predvoľby organizácie. Uložené plány môžeš prezerať v knižnici."}</p>
-      <button type="button" onClick={showLibrary} className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-lg border border-zinc-200 px-3 text-sm font-medium"><Library size={15} aria-hidden="true" />Upraviť plány v knižnici</button>
-    </div> : <>
-      {!line && <p className="px-1 text-sm text-zinc-600">Knižnica obsahuje všetky plány vrátane nepoužitých. Úprava zdieľaného plánu sa prejaví na všetkých linkách, ktoré ho používajú.</p>}
-      <RingPlanEditor canEdit={canEdit && !saving} document={working} controlled={{ plans: draft.plans, onChange: setPlans }} visiblePlanIds={visiblePlanIds} strategyOverride={line ? behaviour.strategyOverride : null} onAddPlan={showLibrary} focusPlanId={focusPlanId} focusGroupId={target?.groupId} onSaved={onSaved} onNavigateToIvr={() => onNavigate({ section: "telephony", tab: "ivr" })} onNavigateToNumbers={() => onNavigate({ section: "telephony", tab: "numbers" })} renderGroupEditor={(groupId, context) => <RingGroupsEditor detachedDevices={{ devices: detachedDevices, onChange: setDetachedDevices }} canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onlyGroupId={groupId} timingContext={context} groupSelector={context.groupSelector} onSaved={onSaved} onNavigateToPlan={revealPlan} />} />
+    {uncertain && <button type="button" disabled={saving} onClick={() => void verifySavedState()} className={styles.button}>Overiť uložený stav</button>}
+    {remote && <details open className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm"><summary className="min-h-11 cursor-pointer font-semibold">Porovnať uložené postupy a vlastný návrh</summary><div className="grid gap-4 md:grid-cols-2">{[{ title: "Aktuálne uložené", document: remote }, { title: "Tvoj zachovaný návrh", document: baseline }].map((entry, index) => <div key={entry.title}><h3 className="font-semibold">{entry.title}</h3>{changes.map(change => { const compared = entry.document.lines.find(candidate => candidate.id === change.id); const value = index === 1 ? change.flow : compared?.incomingFlow; return <p key={change.id} className="mt-2 break-words text-xs leading-6"><strong>{compared?.label ?? "Odstránená linka"}:</strong> {value ? incomingFlowSummary(value, entry.document) : compared ? "Pôvodné smerovanie podľa plánu" : "Linka už nie je dostupná"}</p>; })}</div>)}</div><p className="mt-3 text-xs">Pred novou úpravou načítaj uložený stav. Vlastné hodnoty si môžeš skopírovať zo zachovaného návrhu.</p><button type="button" className={`${styles.button} mt-3`} onClick={discard}>Zahodiť návrh a načítať uložené</button></details>}
+    {line && usingLegacy && <div className={styles.legacyNotice}>
+      <strong>{legacy?.flow ? "Uložené pôvodné smerovanie" : "Táto linka používa pôvodné nastavenie"}</strong>
+      <p>{legacy?.reason ?? "Nižšie vidíš doterajšie poradie a časy. Voľba Aplikácia v novom postupe zahŕňa web aj mobilnú appku. Pôvodné smerovanie zostane aktívne až do uloženia."}</p>
+      <div className={styles.links}>{legacy?.canReplace && <button type="button" disabled={locked} className={`${styles.button} ${styles.primary}`} onClick={() => updateFlow(structuredClone(legacy.flow ?? emptyIncomingFlow()))}>{legacy.flow ? "Upraviť tento postup" : "Pripraviť nový postup"}</button>}<button type="button" disabled={dirty || saving || uncertain} className={styles.textButton} onClick={() => onLegacy(line.id)}>Otvoriť pôvodné nastavenie</button></div>
+      {dirty && <p>Pred otvorením pôvodného nastavenia ulož alebo zahoď rozpracované zmeny.</p>}
+    </div>}
+    {flow && <>
+      <div className={styles.intro}><p><strong>{dirty && drafts[line!.id] ? "Návrh postupu:" : usingLegacy ? "Doterajšie poradie:" : "Postup hovoru:"}</strong> {incomingFlowSummary(flow, baseline)}</p><p className={styles.answerRule}><Check size={15} aria-hidden="true" />Keď niekto prijme hovor, ostatné zvonenia a ďalšie kroky sa zastavia.</p></div>
+      <IncomingFlowSteps flow={flow} document={baseline} lineId={line!.id} disabled={locked || usingLegacy} onChange={updateFlow} rememberedNumbers={rememberedNumbers} rememberNumber={(key, number) => setRememberedNumbers(current => ({ ...current, [key]: number }))} />
+      <p className={styles.note}>Zvonia iba dostupní operátori a pripojené zariadenia. Pauza, obsadenosť a kapacita organizácie sa uplatnia aj v tomto postupe.</p>
     </>}
-    <details className="border-t border-zinc-200" open={groupsOpen} onToggle={event => setGroupsOpen(event.currentTarget.open)}>
-      <summary className="cursor-pointer px-1 py-2 text-xs font-medium text-zinc-500">Knižnica skupín ({draft.groups.length}) · správa zdieľaných zoznamov</summary>
-      <RingGroupsEditor detachedDevices={{ devices: detachedDevices, onChange: setDetachedDevices }} canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onSaved={onSaved} onNavigateToPlan={revealPlan} />
-    </details>
-    <div className={`${dirty ? "sticky bottom-0 z-10 shadow-[0_-4px_20px_rgba(20,30,50,0.05)]" : ""} rounded-xl border border-zinc-200 bg-white px-4 py-2.5 sm:px-5`}>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div role="status" className="flex items-center gap-2 text-sm text-zinc-600">{dirty ? <span className="h-2 w-2 rounded-full bg-amber-400" /> : <Check size={16} className="text-zinc-400" aria-hidden="true" />}{dirty ? "Neuložené zmeny" : "Všetky zmeny sú uložené"}</div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button type="button" disabled={!dirty || saving} onClick={() => { if (window.confirm("Zahodiť všetky neuložené zmeny vrátane režimov liniek?")) discard(); }} className="inline-flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium text-zinc-500 hover:bg-zinc-50 disabled:opacity-40"><Undo2 size={15} aria-hidden="true" />Zahodiť</button>
-          <button type="button" disabled={!canEdit || !dirty || saving || uncertain || Boolean(remote) || issues.length > 0} onClick={() => void save()} className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-[#FCD703] px-4 text-sm font-semibold text-zinc-950 disabled:opacity-40">{saving ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Save size={16} aria-hidden="true" />}Uložiť všetky zmeny</button>
-        </div>
-      </div>
-      {dirty && <p className="mt-2 text-xs leading-5 text-zinc-500">{affectedLines.length > 0 ? `Dotknuté linky: ${affectedLines.map(row => `${row.label} (${formatPhoneNumberForDisplay(row.phoneNumber)})`).join(", ")}.` : "Zmeny sa týkajú skupín alebo plánov bez priradenej linky."} Zmeny sa prejavia až po uložení, pre nové hovory.</p>}
-      {issues.length > 0 && <div className="mt-2"><SettingsIssueList issues={issues} /><button type="button" onClick={revealIssues} className="mt-2 min-h-9 rounded-md border border-zinc-200 px-3 text-xs font-semibold">Zobraziť všetky plány a chyby</button></div>}
+    {line && <div className={styles.links}><button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "numbers", lineId: line.id })}><Settings2 size={14} aria-hidden="true" />Nastavenie linky</button>{line.businessHoursId && <button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "hours", lineId: line.id, businessHoursId: line.businessHoursId! })}><Clock3 size={14} aria-hidden="true" />Otváracie hodiny sa uplatnia pred postupom</button>}{line.ivrMenuId && <button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "ivr", lineId: line.id, ivrMenuId: line.ivrMenuId! })}>Hlasové menu</button>}</div>}
+    <div className={styles.saveBar} data-dirty={dirty}>
+      <p role="status">{dirty ? <span className={styles.statusDot} /> : <Check size={15} aria-hidden="true" />}{dirty ? `Neuložené zmeny: ${changes.length} ${changes.length === 1 ? "linka" : changes.length < 5 ? "linky" : "liniek"}` : "Všetky zmeny sú uložené"}</p>
+      <div className={styles.saveButtons}><button type="button" disabled={!dirty || saving || uncertain} className={styles.button} onClick={() => { if (window.confirm("Zahodiť všetky rozpracované zmeny postupov?")) discard(); }}><Undo2 size={15} aria-hidden="true" />Zahodiť</button><button type="button" disabled={locked || !dirty || issues.length > 0 || !baseline.snapshotId} className={`${styles.button} ${styles.primary}`} onClick={() => void save()}>{saving ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Save size={15} aria-hidden="true" />}Uložiť zmeny</button></div>
+      {dirty && <small>Dotknuté linky: {changes.map(change => { const changed = baseline.lines.find(candidate => candidate.id === change.id); return `${changed?.label ?? "Linka"} (${formatPhoneNumberForDisplay(changed?.phoneNumber ?? "")})`; }).join(", ")}. Uloženie platí iba pre nové hovory.</small>}
+      {!baseline.snapshotId && <small>Na bezpečné uloženie chýba aktuálny stav nastavení. Obnov stránku.</small>}
+      {issues.length > 0 && <div className="basis-full"><SettingsIssueList issues={issues} /></div>}
     </div>
   </section>;
 }

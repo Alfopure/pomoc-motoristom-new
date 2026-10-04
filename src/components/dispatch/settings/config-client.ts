@@ -13,6 +13,7 @@ import type { OperatorSettingsDoc, RoutingDocument, TelephonySettingsDoc, Valida
 
 export const TELEPHONY_CONFIG_ENDPOINTS = {
   incoming: "/api/telephony/config/incoming",
+  incomingFlow: "/api/telephony/config/incoming-flow",
   ringGroups: "/api/telephony/config/ring-groups",
   ringPlans: "/api/telephony/config/ring-plans",
   businessHours: "/api/telephony/config/business-hours",

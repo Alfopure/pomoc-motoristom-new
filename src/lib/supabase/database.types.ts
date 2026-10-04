@@ -1293,6 +1293,7 @@ export type Database = {
         updated_at: Timestamp;
       }>;
       motorist_ring_attempts: Table<{
+        application_device?: "web" | "mobile" | null;
         id: string;
         organization_id: string;
         session_id: string;
@@ -1895,6 +1896,10 @@ export type Database = {
       };
       motorist_routing_snapshot: {
         Args: { p_organization_id: string };
+        Returns: Json;
+      };
+      motorist_save_incoming_flow: {
+        Args: { p_organization_id: string; p_changes: Json; p_expected_version: number; p_expected_snapshot_id: string };
         Returns: Json;
       };
       motorist_save_incoming_routing: {

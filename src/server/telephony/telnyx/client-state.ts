@@ -22,6 +22,8 @@ export type TelnyxClientState = {
   autoAnswer?: boolean;
   /** Exact revocable offer, never a general permission to answer. */
   offerToken?: string;
+  /** Distinguish simultaneous app offers before their leg-to-attempt link lands. */
+  applicationDevice?: "mobile";
 };
 
 export const CLIENT_STATE_MAX_BYTES = 200;
@@ -39,6 +41,7 @@ type WireState = {
   g?: string;
   a?: 1;
   t?: string;
+  m?: 1;
 };
 
 export class ClientStateError extends Error {
@@ -73,6 +76,7 @@ export function assertClientState(value: unknown): asserts value is TelnyxClient
   if (state.intent !== undefined && !isIntent(state.intent)) throw new ClientStateError("client_state.intent is invalid");
   if (state.gatherId !== undefined && (typeof state.gatherId !== "string" || !/^[a-f0-9]{12}$/.test(state.gatherId))) throw new ClientStateError("client_state.gatherId is invalid");
   if (state.offerToken !== undefined && (typeof state.offerToken !== "string" || !/^[a-zA-Z0-9_-]{1,12}$/.test(state.offerToken))) throw new ClientStateError("client_state.offerToken is invalid");
+  if (state.applicationDevice !== undefined && state.applicationDevice !== "mobile") throw new ClientStateError("client_state.applicationDevice is invalid");
   if (state.autoAnswer !== undefined && typeof state.autoAnswer !== "boolean") {
     throw new ClientStateError("client_state.autoAnswer is invalid");
   }
@@ -88,6 +92,7 @@ export function encodeClientState(state: TelnyxClientState): string {
   if (state.gatherId !== undefined) wire.g = state.gatherId;
   if (state.autoAnswer) wire.a = 1;
   if (state.offerToken !== undefined) wire.t = state.offerToken;
+  if (state.applicationDevice === "mobile") wire.m = 1;
 
   const encoded = Buffer.from(JSON.stringify(wire), "utf8").toString("base64");
   if (encoded.length > CLIENT_STATE_MAX_BYTES) {
@@ -122,6 +127,10 @@ export function decodeClientState(value: unknown): TelnyxClientState | null {
   if (wire.i !== undefined) state.intent = wire.i as string;
   if (wire.g !== undefined) state.gatherId = wire.g as string;
   if (wire.t !== undefined) state.offerToken = wire.t as string;
+  if (wire.m !== undefined) {
+    if (wire.m !== 1) return null;
+    state.applicationDevice = "mobile";
+  }
   if (wire.a !== undefined) {
     if (wire.a !== 1 && wire.a !== true) return null;
     state.autoAnswer = true;

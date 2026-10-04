@@ -299,7 +299,8 @@ class TransitionBuilder {
         attempt.step_index === state.step &&
         (leg.role === "external"
           ? attempt.member_kind === "external_number" && attempt.external_number === leg.to_number
-          : attempt.member_kind === "operator" && Boolean(leg.profile_id) && attempt.profile_id === leg.profile_id),
+          : attempt.member_kind === "operator" && Boolean(leg.profile_id) && attempt.profile_id === leg.profile_id &&
+            ((attempt as typeof attempt & { application_device?: string | null }).application_device ?? "web") === (state.applicationDevice ?? "web")),
     );
   }
 
@@ -919,7 +920,7 @@ function startIvr(b: TransitionBuilder, leg: LegRow, tries: number): void {
 
 function startRingPlan(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPlan | null): void {
   b.patchMeta({ gather: null });
-  if (b.session.direction === "inbound" && b.ctx.settings.inboundCallMode === "queue_first") {
+  if (plan?.source !== "incoming_flow" && b.session.direction === "inbound" && b.ctx.settings.inboundCallMode === "queue_first") {
     b.patchMeta({ ring: { ...(b.meta.ring ?? {}), plan, mode: "plan", exhausted: false, fallback: null } });
     if (plan) b.patchSession({ ring_plan_id: plan.planId });
     enterWaiting(b, customer, "queue_first", "waiting", true);
@@ -941,6 +942,10 @@ function startRingPlan(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
 function ringFromStep(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPlan, fromStep: number): boolean {
   for (let index = fromStep; index < plan.steps.length; index += 1) {
     const step = plan.steps[index];
+    if (step.kind === "wait") {
+      enterFlowWait(b, customer, index, step.waitMinutes!);
+      return true;
+    }
     const planned = planStep(b, plan, index);
     if (planned.attempts.length === 0) {
       // Design §2.6: over the org-wide leg cap the step waits for capacity instead
@@ -967,7 +972,8 @@ function planStep(b: TransitionBuilder, plan: FrozenRingPlan, index: number): Ri
     b
       .attemptsView()
       .filter((attempt) => attempt.step_index === index)
-      .map((attempt) => memberKey({ profileId: attempt.profile_id, externalNumber: attempt.external_number })),
+      .map((attempt) => memberKey({ profileId: attempt.profile_id, externalNumber: attempt.external_number,
+        applicationDevice: (attempt as typeof attempt & { application_device?: "web" | "mobile" | null }).application_device ?? undefined })),
   );
   const planned = planRingStep(step, {
     sessionId: b.session.id,
@@ -975,6 +981,7 @@ function planStep(b: TransitionBuilder, plan: FrozenRingPlan, index: number): Ri
     now: b.ctx.now,
     presence: toEligibilityPresence(b.ctx.presence),
     devices: toEligibilityDevices(b.ctx.devices),
+    mobileDevices: toEligibilityDevices(b.ctx.mobileDevices ?? []),
     openOffers: b.ctx.openOffers,
     attempted,
     maxFanout: b.ctx.settings.maxRingFanout,
@@ -1007,7 +1014,7 @@ function recordRoutingDecision(b: TransitionBuilder, kind: "selection" | "comple
     members: candidates.slice(0, 64).map(({ member, outcome, reason: memberReason }) => {
       const profileId = member.profileId ?? member.ownerProfileId ?? null;
       const presence = b.ctx.presence.find(row => row.profile_id === profileId);
-      const device = b.ctx.devices.find(row => row.profile_id === profileId);
+      const device = (member.applicationDevice === "mobile" ? b.ctx.mobileDevices ?? [] : b.ctx.devices).find(row => row.profile_id === profileId);
       const seen = device?.device_seen_at ? Date.parse(device.device_seen_at) : NaN;
       return {
         memberId: safeId(member.memberId), profileId: safeId(profileId), endpoint: member.kind === "operator" ? "sip" : "pstn",
@@ -1070,14 +1077,16 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
   // for a caller the provider already reported gone (M12).
   if (b.meta.customer_gone_at) { b.note("customer gone at provider → no dial"); return; }
   const devices = new Map(b.ctx.devices.map((device) => [device.profile_id, device]));
+  const mobileDevices = new Map((b.ctx.mobileDevices ?? []).map((device) => [device.profile_id, device]));
   const from = b.ctx.fromNumber ?? b.session.called_number ?? "";
   const dials: DialCommand[] = [];
   const ringingProfileIds: string[] = [];
   for (const attempt of planned.attempts) {
     // Keep the established SIP identity. An owned mobile is a separate
     // destination even when it shares that SIP operator's reservation token.
-    const key = attempt.externalNumber ?? attempt.profileId ?? "member";
-    const sip = attempt.profileId ? devices.get(attempt.profileId)?.sip_username : null;
+    const key = attempt.externalNumber ?? `${attempt.profileId ?? "member"}${attempt.applicationDevice === "mobile" ? ":mobile" : ""}`;
+    const endpointDevices = attempt.applicationDevice === "mobile" ? mobileDevices : devices;
+    const sip = attempt.profileId ? endpointDevices.get(attempt.profileId)?.sip_username : null;
     const external = attempt.memberKind === "external_number";
     const to = external ? attempt.externalNumber : sip ? telnyxSipUri(sip) : null;
     if (!to) {
@@ -1085,7 +1094,8 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
       continue;
     }
     const clientState: TelnyxClientState = { sid: b.session.id, role: external ? "external" : "operator",
-      ...(attempt.profileId ? { operatorId: attempt.profileId } : {}), step: stepIndex, intent: "ring" };
+      ...(attempt.profileId ? { operatorId: attempt.profileId } : {}), step: stepIndex, intent: "ring",
+      ...(attempt.applicationDevice === "mobile" ? { applicationDevice: "mobile" } : {}) };
     dials.push({
       kind: "dial",
       commandId: b.cmdId(key, "ring", stepIndex),
@@ -1098,9 +1108,10 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
       linkTo: customer.telnyx_call_control_id,
       timeoutSecs: attempt.ringSecs,
       fromDisplayName: callerDisplay(b),
-      attempt: { stepIndex, profileId: attempt.profileId, externalNumber: attempt.externalNumber },
+      attempt: { stepIndex, profileId: attempt.profileId, externalNumber: attempt.externalNumber,
+        ...(attempt.applicationDevice ? { applicationDevice: attempt.applicationDevice } : {}) },
     });
-    if (attempt.profileId) ringingProfileIds.push(attempt.profileId);
+    if (attempt.profileId && !ringingProfileIds.includes(attempt.profileId)) ringingProfileIds.push(attempt.profileId);
   }
   const deadlineAt = stepDeadline(b.ctx.now, planned.ringSecs);
   b.cmd({ kind: "ring_fanout", step: stepIndex, guard, attempts: planned.attempts, dials, ringingProfileIds, deadlineAt });
@@ -1155,6 +1166,12 @@ function applyFallback(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
     enterWaiting(b, customer, exhaustion);
     return;
   }
+  if (kind === "hangup") {
+    closeWithIvrMessage(b, customer, null);
+    b.call.end_reason = "all_busy";
+    b.note("flow finished → hangup");
+    return;
+  }
   if (kind === "hangup_message") {
     b.setState("missed").patchSession({ ended_at: null });
     b.call.status = "missed";
@@ -1199,7 +1216,7 @@ function stopMoh(b: TransitionBuilder, customer: LegRow): void {
 
 function offerCallback(b: TransitionBuilder, customer: LegRow, media: MediaRef, source: SessionMeta["callback"] extends infer T ? (T extends { source?: infer S } ? NonNullable<S> : never) : never): void {
   if (!normalizeE164(b.session.caller_number)) {
-    if (source !== "park_timeout" && b.ringPlan()) enterWaiting(b, customer, "ring_exhausted");
+    if (source !== "park_timeout" && b.ringPlan() && b.ringPlan()?.source !== "incoming_flow") enterWaiting(b, customer, "ring_exhausted");
     else {
       stopMoh(b, customer);
       closeWithIvrMessage(b, customer, { key: "allBusy" });
@@ -1215,6 +1232,37 @@ function offerCallback(b: TransitionBuilder, customer: LegRow, media: MediaRef, 
   b.note(`callback offer (${source})`);
 }
 
+/** A flow wait is a real intermediate node, not the legacy terminal queue. */
+function enterFlowWait(b: TransitionBuilder, customer: LegRow, index: number, minutes: number): void {
+  enterWaiting(b, customer, "flow_wait", "waiting", true);
+  const deadline = new Date(b.ctx.now.getTime() + minutes * 60_000).toISOString();
+  b.patchSession({ current_step: index + 1 });
+  b.patchMeta({
+    waiting: { ...b.meta.waiting!, since: b.nowIso, max_minutes: minutes, flow_step_index: index },
+    queue: { ...b.meta.queue!, next_offer_at: deadline, manual_only: true },
+  });
+  b.note(`flow step ${index}: manual waiting for ${minutes} minute(s)`);
+}
+
+function finishFlowWait(b: TransitionBuilder, customer: LegRow, index: number): void {
+  const plan = b.ringPlan();
+  if (plan?.source !== "incoming_flow" || plan.steps[index]?.kind !== "wait") return;
+  cancelOpenAttempts(b, b.nowIso, "flow wait timeout");
+  for (const other of b.openLegs()) if (!isCustomer(other)) {
+    b.cmd(hangupCmd(b, other, "flow_wait_timeout"));
+    // A delayed answer after the wait may never claim a later ring step.
+    b.leg(other.telnyx_call_control_id, { state: "ended", ended_at: b.nowIso, hangup_cause: "flow_wait_timeout" });
+    if (other.profile_id) b.presenceChange({ profileId: other.profile_id, status: "available", sessionId: null,
+      onlyIfSession: b.session.id, onlyIfStatus: ["ringing"], reason: "flow wait timeout" });
+  }
+  b.cmd({ kind: "gather_stop", commandId: b.cmdId(customer.telnyx_call_control_id, "gather_stop:flow_wait"), leg: ref(customer), bestEffort: true });
+  stopMoh(b, customer);
+  b.patchMeta({ waiting: null, queue: null, gather: null, pickup: null });
+  startRingback(b, customer);
+  if (!ringFromStep(b, customer, plan, index + 1)) applyFallback(b, customer, plan);
+  b.note(`flow step ${index}: wait completed → continue`);
+}
+
 function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, state: "waiting" | "parked" = "waiting", manualOnly = false): void {
   const ringbackRunning = !b.meta.queue && b.session.state === "ringing" && b.meta.ring?.mode === "plan";
   const musicRunning = mohIsPlaying(b) && !ringbackRunning;
@@ -1226,7 +1274,7 @@ function enterWaiting(b: TransitionBuilder, customer: LegRow, reason: string, st
   // Ring exhaustion keeps its automatic offers. An explicit queue choice is
   // manual, so its caller stays available for pickup without another dial.
   const queued = state === "waiting" && b.session.direction === "inbound" && !b.session.answered_at &&
-    (reason === "ring_exhausted" || reason === "no_operator_reachable" || reason === "ivr" || reason === "queue_first" || reason === "operator_deferred" || Boolean(b.meta.queue));
+    (reason === "ring_exhausted" || reason === "no_operator_reachable" || reason === "ivr" || reason === "queue_first" || reason === "operator_deferred" || reason === "flow_wait" || Boolean(b.meta.queue));
   const previous = queued && b.meta.queue ? b.meta.waiting : null;
   const manual = manualOnly || b.meta.queue?.manual_only === true;
   const nextOfferAt = manual
@@ -2331,6 +2379,10 @@ function onWaitingTick(b: TransitionBuilder, leg: LegRow): ReduceResult {
   const limitMinutes = typeof waiting.max_minutes === "number" && waiting.max_minutes > 0 ? waiting.max_minutes : b.ctx.settings.parkMaxMinutes;
   const limitMs = limitMinutes * 60_000;
   if (!Number.isNaN(since) && b.ctx.now.getTime() - since >= limitMs) {
+    if (typeof waiting.flow_step_index === "number" && b.ringPlan()?.source === "incoming_flow") {
+      finishFlowWait(b, leg, waiting.flow_step_index);
+      return b.result();
+    }
     if (b.meta.queue) {
       cancelOpenAttempts(b, b.nowIso, "queue timeout");
       for (const other of b.openLegs()) if (!isCustomer(other)) b.cmd(hangupCmd(b, other, "queue_timeout"));
@@ -3303,7 +3355,7 @@ function recoverGather(b: TransitionBuilder, customer: LegRow): ReduceResult {
     closeWithIvrMessage(b, customer, { key: "afterHoursNoCallback" });
     b.call.end_reason = "after_hours";
   } else if (b.session.state === "callback_offered") {
-    if (choice?.source === "park_timeout" || !b.ringPlan()) {
+    if (choice?.source === "park_timeout" || !b.ringPlan() || b.ringPlan()?.source === "incoming_flow") {
       closeWithIvrMessage(b, customer, { key: "allBusy" });
       b.call.end_reason = "callback_unavailable";
     } else enterWaiting(b, customer, "ring_exhausted");
