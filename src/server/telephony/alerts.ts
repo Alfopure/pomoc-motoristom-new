@@ -1,11 +1,15 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { createHash } from "node:crypto";
 
+import { resolveAppEnvironment, type AppEnvironment } from "@/lib/app-environment";
 import type { Database } from "@/lib/supabase/database.types";
-import { escapeHtml, sendEmail } from "@/server/email-delivery";
+import { sendEmail } from "@/server/email-delivery";
 
 import { getTelephonyHealth, type HealthStatus, type TelephonyHealthCheck, type TelephonyHealthReport } from "./health";
 import { usageDay } from "./usage";
 import type { TelnyxConfig } from "./telnyx/env";
+import { alertObject, alertSessionIds, loadTelephonyAlertEvidence } from "./alert-evidence";
+import { renderTelephonyAlertEmail } from "./alert-email";
 
 /**
  * Turns the health report into e-mail, once per problem per day.
@@ -14,7 +18,7 @@ import type { TelnyxConfig } from "./telnyx/env";
  * written, the health route answers, the cron summary is returned to whoever
  * called it. At 03:00 nobody is asking. This job is the only path that reaches
  * a human, so it deliberately errs towards sending — but `motorist_telephony_alerts`
- * keeps a row per (day, check, status), which is what stops a five-minute cron
+ * keeps a row per (day, check, status, affected entity), which stops a five-minute cron
  * from mailing the same stuck session 288 times.
  *
  * A worsening problem is a new key (`…:warn` → `…:fail`), so an escalation is
@@ -34,6 +38,8 @@ export type TelephonyAlertDeps = {
   recipient?: string | null;
   /** Test seam; defaults to the live health report. */
   report?: TelephonyHealthReport;
+  /** Application environment, independent of Vercel's Production target. */
+  environment?: AppEnvironment | "unknown";
 };
 
 export type TelephonyAlert = {
@@ -51,37 +57,62 @@ export type TelephonyAlertResult = {
 
 /**
  * Checks that are worth waking somebody for at `warn`. The rest only alert at
- * `fail`: a warning on the leg cap or on webhook silence during a live call is
+ * `fail`: a warning on the leg cap or a missing expected event is
  * something you want to hear about *before* it turns into lost calls, while a
  * warning anywhere else is a "look at it today" the health route already shows.
  */
-const WARN_WORTHY = new Set(["usage", "webhooks"]);
+const WARN_WORTHY = new Set(["usage", "webhooks", "provider", "connections"]);
 
-const SLOVAK_LABELS: Record<string, string> = {
-  configuration: "Konfigurácia telefónie",
-  sessions: "Zaseknuté hovory",
-  webhooks: "Prichádzajúce webhooky",
-  ledger: "Webhook ledger",
-  connections: "Výsledky spojenia hovorov",
-  incidents: "Otvorené incidenty",
-  usage: "Denné využitie",
-  devices: "Prehliadačové telefóny",
-};
+function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
+
+/** Scope alerts by stable incident identity: a different caller later today must still be reported. */
+function scopedAlerts(alert: TelephonyAlert, checkedAt: string): TelephonyAlert[] {
+  // A connection report also contains repaired historical failures. They are
+  // context, not new failing calls to notify about independently.
+  if (alert.check === "connections" && Array.isArray(alert.detail.entries)) {
+    const entries = alert.detail.entries.filter((value) => {
+      const entry = alertObject(value);
+      return ["unknown", "ended_without_confirmation"].includes(String(entry.outcome)) ||
+        entry.outcome === "pending" && (typeof entry.failedAt !== "string" || Date.parse(checkedAt) - Date.parse(entry.failedAt) >= 30_000);
+    });
+    alert = { ...alert, detail: { ...alert.detail, entries, sessionIds: entries.map((entry) => alertObject(entry).sessionId) } };
+  }
+  if (alert.check === "provider" && Array.isArray(alert.detail.entries)) {
+    const entries = alert.detail.entries.filter((entry) => alertObject(entry).verdict !== "alive");
+    alert = { ...alert, detail: { ...alert.detail, entries, sessionIds: entries.map((entry) => alertObject(entry).sessionId) } };
+  }
+  const sessionIds = alertSessionIds(alert);
+  if (sessionIds.length) return sessionIds.map((sessionId) => {
+    const entries = Array.isArray(alert.detail.entries) ? alert.detail.entries.filter((entry) => alertObject(entry).sessionId === sessionId) : null;
+    const reasons = [...new Set((entries ?? []).map(alertObject).map((entry) => `${String(entry.verdict ?? entry.outcome ?? "")}:${String(entry.reason ?? "")}`))].sort().join("|");
+    return { ...alert,
+      key: `${alert.key}:${digest(`session:${sessionId}:${reasons}`).slice(0, 24)}`,
+      detail: { ...alert.detail, sessionIds: [sessionId],
+      ...(Array.isArray(alert.detail.stuckIds) ? { stuckIds: [sessionId] } : {}),
+        ...(entries ? { entries } : {}),
+      },
+    };
+  });
+  const eventIds = alert.check === "ledger" && Array.isArray(alert.detail.failedIds)
+    ? [...new Set(alert.detail.failedIds.filter((id): id is string => typeof id === "string"))] : [];
+  if (eventIds.length) return eventIds.map((eventId) => ({ ...alert,
+    key: `${alert.key}:${digest(`event:${eventId}`).slice(0, 24)}`, detail: { ...alert.detail, failedIds: [eventId] },
+  }));
+  const jobs = alert.check === "incidents" && Array.isArray(alert.detail.jobs) ? alert.detail.jobs.map(alertObject) : [];
+  if (jobs.length && jobs.every((job) => typeof job.job === "string" && typeof job.openedAt === "string")) {
+    return jobs.map((job) => ({ ...alert, key: `${alert.key}:${digest(`job:${job.job}:${job.openedAt}`).slice(0, 24)}`, detail: { ...alert.detail, jobs: [job] } }));
+  }
+  return [alert];
+}
 
 export function alertsFromReport(report: TelephonyHealthReport, day: string): TelephonyAlert[] {
   const alerts: TelephonyAlert[] = [];
   for (const check of report.checks) {
-    const notify = check.status === "fail" || (check.status === "warn" && WARN_WORTHY.has(check.key));
+    const notify = check.status === "fail" || (check.status === "warn" && (WARN_WORTHY.has(check.key) || Boolean(check.detail.error)));
     if (!notify) continue;
-    alerts.push({ key: `${day}:${check.key}:${check.status}`, check: check.key, status: check.status as TelephonyAlert["status"], detail: check.detail });
+    alerts.push(...scopedAlerts({ key: `${day}:${check.key}:${check.status}`, check: check.key, status: check.status as TelephonyAlert["status"], detail: check.detail }, report.checkedAt));
   }
   return alerts;
-}
-
-function describe(alert: TelephonyAlert): string {
-  const label = SLOVAK_LABELS[alert.check] ?? alert.check;
-  const prefix = alert.status === "fail" ? "CHYBA" : "Upozornenie";
-  return `${prefix} — ${label}: ${JSON.stringify(alert.detail)}`;
 }
 
 export async function runTelephonyAlerts(deps: TelephonyAlertDeps): Promise<TelephonyAlertResult> {
@@ -96,40 +127,45 @@ export async function runTelephonyAlerts(deps: TelephonyAlertDeps): Promise<Tele
   if (!recipient) return { status: "skipped", detail: { health: report.status, alerts: alerts.length, sent: 0, reason: "no_recipient" } };
 
   const nowIso = now.toISOString();
-  const existing = await deps.admin
-    .from("motorist_telephony_alerts")
-    .select("id, alert_key, sends")
-    .eq("organization_id", deps.organizationId)
-    .in("alert_key", alerts.map((alert) => alert.key));
-  if (existing.error) return { status: "failed", detail: { health: report.status }, error: existing.error.message };
-
-  const seen = new Map((existing.data ?? []).map((row) => [row.alert_key, row]));
+  const seen = new Map<string, { id: string; alert_key: string; sends: number }>();
+  // Scoped ledger incidents can exceed the safe PostgREST URL length in one IN.
+  for (let offset = 0; offset < alerts.length; offset += 50) {
+    const existing = await deps.admin.from("motorist_telephony_alerts").select("id, alert_key, sends")
+      .eq("organization_id", deps.organizationId).in("alert_key", alerts.slice(offset, offset + 50).map((alert) => alert.key));
+    if (existing.error) return { status: "failed", detail: { health: report.status }, error: existing.error.message };
+    for (const row of existing.data ?? []) seen.set(row.alert_key, row);
+  }
   const fresh = alerts.filter((alert) => !seen.has(alert.key));
 
-  for (const [, row] of seen) {
-    // Still failing: keep the counter honest for the runbook, send nothing.
-    await deps.admin
-      .from("motorist_telephony_alerts")
-      .update({ last_seen_at: nowIso, sends: Number(row.sends ?? 0) })
-      .eq("id", row.id);
+  const seenIds = [...seen.values()].map((row) => row.id);
+  for (let offset = 0; offset < seenIds.length; offset += 50) {
+    // Still failing: update observation time, preserving the actual send count.
+    await deps.admin.from("motorist_telephony_alerts").update({ last_seen_at: nowIso })
+      .eq("organization_id", deps.organizationId).in("id", seenIds.slice(offset, offset + 50));
   }
 
   if (fresh.length === 0) return { status: "ok", detail: { health: report.status, alerts: alerts.length, sent: 0, suppressed: alerts.length } };
 
-  const worst: TelephonyAlert["status"] = fresh.some((alert) => alert.status === "fail") ? "fail" : "warn";
-  const subject = worst === "fail" ? `[Dispečing] Telefónia hlási chybu (${fresh.length})` : `[Dispečing] Telefónia – upozornenie (${fresh.length})`;
-  const lines = fresh.map(describe);
+  const evidence = await loadTelephonyAlertEvidence({ admin: deps.admin, organizationId: deps.organizationId, alerts: fresh });
+  let environment = deps.environment;
+  if (!environment) {
+    try { environment = resolveAppEnvironment(); } catch { environment = "unknown"; }
+  }
+  const message = renderTelephonyAlertEmail({ alerts: fresh, report, evidence, environment });
   const send = deps.send ?? sendEmail;
 
   try {
-    await send({
+    const delivery = await send({
       to: recipient,
-      subject,
-      text: `${subject}\n\n${lines.join("\n")}\n\nStav: ${report.status}\nČas: ${nowIso}`,
-      html: `<p><strong>${escapeHtml(subject)}</strong></p><ul>${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul><p>Stav: ${escapeHtml(report.status)}<br>Čas: ${escapeHtml(nowIso)}</p>`,
+      ...message,
       // Same key as the ledger row: a retry after a crashed send cannot double-mail.
-      idempotencyKey: `telephony-alert-${deps.organizationId}-${fresh.map((alert) => alert.key).join("|")}`.slice(0, 200),
+      idempotencyKey: `telephony-alert-${deps.organizationId}-${digest(fresh.map((alert) => alert.key).sort().join("|"))}`,
     });
+    const deliveryStatus = alertObject(delivery).status;
+    if (deliveryStatus === "failed" || deliveryStatus === "disabled") return {
+      status: "failed", detail: { health: report.status, alerts: alerts.length, sent: 0, deliveryStatus },
+      error: typeof alertObject(delivery).error === "string" ? String(alertObject(delivery).error) : `email_${deliveryStatus}`,
+    };
   } catch (error) {
     return { status: "failed", detail: { health: report.status, alerts: alerts.length, sent: 0 }, error: error instanceof Error ? error.message : String(error) };
   }

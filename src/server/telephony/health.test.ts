@@ -38,24 +38,119 @@ describe("telephony health", () => {
     expect(check(report, "webhooks").status).toBe("skipped");
   });
 
-  it("fails on a session nobody has touched for longer than the stuck threshold", async () => {
+  it("fails on missing progress in an unfinished incoming call", async () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
     const { sessionId } = await h.inbound({ to: "+421232408718" });
-    h.db.update("motorist_call_sessions", { state: "talking", updated_at: new Date(h.now().getTime() - 20 * 60_000).toISOString() }, (row) => row.id === sessionId);
+    h.db.update("motorist_call_sessions", { state: "received", metadata: {}, started_at: new Date(h.now().getTime() - 20 * 60_000).toISOString() }, (row) => row.id === sessionId);
 
     const report = await getTelephonyHealth(healthDeps(h));
     expect(report.status).toBe("fail");
     expect(check(report, "sessions").detail).toMatchObject({ stuck: 1, stuckIds: [sessionId] });
   });
 
-  it("warns when a live call is running but no webhook has arrived for minutes", async () => {
+  it("warns about overdue ringing even after an unrelated webhook and maintenance write", async () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
-    await h.inbound({ to: "+421232408718" });
-    h.db.update("motorist_telnyx_webhook_events", { received_at: new Date(h.now().getTime() - WEBHOOK_SILENCE_WARN_MS - 60_000).toISOString() }, () => true);
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    h.db.update("motorist_call_sessions", { metadata: { ring: { step_deadline_at: new Date(h.now().getTime() - WEBHOOK_SILENCE_WARN_MS - 60_000).toISOString() } }, updated_at: h.now().toISOString() }, (row) => row.id === sessionId);
 
     const report = await getTelephonyHealth(healthDeps(h));
     expect(check(report, "webhooks").status).toBe("warn");
-    expect(check(report, "webhooks").detail.silenceMs).toBeGreaterThan(WEBHOOK_SILENCE_WARN_MS);
+    expect(check(report, "webhooks").detail).toMatchObject({ sessionIds: [sessionId], silenceMs: 0,
+      entries: [expect.objectContaining({ sessionId, reason: "ringing_overdue" })] });
+    expect(report.status).toBe("warn");
+  });
+
+  it.each(["talking", "held", "consulting", "conference"])("does not turn a long %s conversation into webhook/stuck failure", async (state) => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId, callControlId } = await h.inbound({ to: "+421232408718" });
+    const operatorId = h.openLegFor(sessionId, PROFILES.o1)!.telnyx_call_control_id;
+    await h.legEvent(String(operatorId), "call.answered");
+    await h.legEvent(String(operatorId), "call.bridged");
+    await h.legEvent(callControlId, "call.bridged");
+    h.db.update("motorist_call_sessions", { state, metadata: {} }, row => row.id === sessionId);
+    h.advance(90 * 60_000);
+    const report = await getTelephonyHealth(healthDeps(h));
+    expect(check(report, "sessions").status).toBe("ok");
+    expect(check(report, "webhooks").status).toBe("ok");
+    expect(check(report, "provider")).toMatchObject({ status: "skipped", detail: { reason: "not_checked", unverifiedSessionIds: [sessionId] } });
+    expect(report.status).toBe("ok");
+  });
+
+  it("requires current bridge evidence even without recording metadata", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    await h.legEvent(String(h.openLegFor(sessionId, PROFILES.o1)!.telnyx_call_control_id), "call.answered");
+    h.db.update("motorist_call_sessions", { metadata: {} }, row => row.id === sessionId);
+    h.advance(6 * 60_000);
+    expect(check(await getTelephonyHealth(healthDeps(h)), "webhooks")).toMatchObject({ status: "warn",
+      detail: { entries: [expect.objectContaining({ sessionId, reason: "connection_unconfirmed" })] } });
+  });
+
+  it("recognizes a bridged personal mobile as the current operator", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId, callControlId } = await h.inbound({ to: "+421232408718" });
+    const operator = h.openLegFor(sessionId, PROFILES.o1)!;
+    await h.legEvent(String(operator.telnyx_call_control_id), "call.answered");
+    await h.legEvent(String(operator.telnyx_call_control_id), "call.bridged");
+    await h.legEvent(callControlId, "call.bridged");
+    h.db.update("motorist_call_legs", { role: "external" }, row => row.id === operator.id);
+    h.db.update("motorist_call_sessions", { metadata: {} }, row => row.id === sessionId);
+    h.advance(30 * 60_000);
+    const report = await getTelephonyHealth(healthDeps(h));
+    expect(check(report, "webhooks").status).toBe("ok");
+    expect(check(report, "sessions").status).toBe("ok");
+  });
+
+  it("uses the exact winning leg instead of a late answered device of the same operator", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId, callControlId } = await h.inbound({ to: "+421232408718" });
+    const operator = h.openLegFor(sessionId, PROFILES.o1)!;
+    await h.legEvent(String(operator.telnyx_call_control_id), "call.answered");
+    await h.legEvent(String(operator.telnyx_call_control_id), "call.bridged");
+    await h.legEvent(callControlId, "call.bridged");
+    h.db.update("motorist_call_sessions", { metadata: { answered_leg_call_control_id: operator.telnyx_call_control_id } }, row => row.id === sessionId);
+    h.db.seed("motorist_call_legs", [{ ...operator, id: "00000000-late-loser", telnyx_call_control_id: "late-loser", telnyx_call_leg_id: "late-loser-leg", answered_at: h.now().toISOString(), bridged_at: null, ended_at: null }]);
+    h.advance(30 * 60_000);
+    const report = await getTelephonyHealth(healthDeps(h));
+    expect(check(report, "webhooks").status).toBe("ok");
+    expect(check(report, "sessions").status).toBe("ok");
+  });
+
+  it("does not hide an unconfirmed bridge behind the optimistic talking state", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    h.db.update("motorist_call_sessions", { state: "talking", metadata: { recording: { connection: { startedAt: h.now().toISOString(), confirmedAt: null } } } }, row => row.id === sessionId);
+    h.advance(6 * 60_000);
+    expect(check(await getTelephonyHealth(healthDeps(h)), "webhooks")).toMatchObject({ status: "warn",
+      detail: { entries: [expect.objectContaining({ sessionId, reason: "connection_unconfirmed" })] } });
+  });
+
+  it.each(["unknown", "unavailable", "ended"] as const)("shows provider %s evidence as a warning, including repaired ended legs", async verdict => {
+    const h = createTelephonyHarness();
+    const report = await getTelephonyHealth({ ...healthDeps(h), providerVerification: {
+      checkedAt: h.now().toISOString(), entries: [{ sessionId: "call-1", state: "talking", verdict, checkedAt: h.now().toISOString(), reconciled: true }], remaining: 0, error: null,
+    } });
+    expect(check(report, "provider").status).toBe("warn");
+    expect(report.status).toBe("warn");
+  });
+
+  it("reports an unreconciled positively ended provider leg as failure", async () => {
+    const h = createTelephonyHarness();
+    const report = await getTelephonyHealth({ ...healthDeps(h), providerVerification: {
+      checkedAt: h.now().toISOString(), entries: [{ sessionId: "call-1", state: "talking", verdict: "ended", checkedAt: h.now().toISOString(), reconciled: false }], remaining: 0, error: null,
+    } });
+    expect(check(report, "provider").status).toBe("fail");
+  });
+
+  it.each([
+    ["motorist_telephony_settings", "configuration"], ["motorist_call_sessions", "sessions"],
+    ["motorist_telnyx_webhook_events", "webhooks"], ["motorist_job_incidents", "incidents"],
+    ["motorist_telephony_daily_usage", "usage"], ["motorist_operator_devices", "devices"],
+  ])("does not report a failed %s read as healthy", async (table, key) => {
+    const h = createTelephonyHarness();
+    h.db.failNext(table, "select", "database read unavailable");
+    const report = await getTelephonyHealth(healthDeps(h));
+    expect(check(report, key)).toMatchObject({ status: "warn", detail: { error: "database read unavailable" } });
     expect(report.status).toBe("warn");
   });
 

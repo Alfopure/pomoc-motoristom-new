@@ -46,10 +46,10 @@ describe("telephony cron jobs", () => {
     expect(runSession).toHaveBeenCalledWith(sessionId, expect.objectContaining({ kind: "app", type: "sweep" }), { known: expect.objectContaining({ id: sessionId }) });
   });
 
-  it("reports an active session untouched for longer than the stuck threshold", async () => {
+  it("reports genuinely stalled progress despite a fresh maintenance timestamp", async () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
     const { sessionId } = await h.inbound({ to: "+421232408718" });
-    h.db.update("motorist_call_sessions", { state: "talking", updated_at: new Date(h.now().getTime() - 20 * 60_000).toISOString() }, (row) => row.id === sessionId);
+    h.db.update("motorist_call_sessions", { state: "received", metadata: {}, started_at: new Date(h.now().getTime() - 20 * 60_000).toISOString() }, (row) => row.id === sessionId);
     const runSession = vi.fn(async () => ({ outcome: "ignored" }));
 
     const result = await detectStuckSessions({ ...h.deps, runSession });
@@ -57,6 +57,16 @@ describe("telephony cron jobs", () => {
     expect(result.detail).toMatchObject({ stuck: 1, swept: 1 });
     expect(runSession).toHaveBeenCalledTimes(1);
     expect(h.logs.some((entry) => entry.job === STUCK_SESSION_JOB)).toBe(true);
+  });
+
+  it("does not sweep an established long conversation as stuck", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    h.db.update("motorist_call_sessions", { state: "talking", metadata: {} }, row => row.id === sessionId);
+    h.advance(90 * 60_000);
+    const runSession = vi.fn();
+    expect(await detectStuckSessions({ ...h.deps, runSession })).toMatchObject({ detail: { stuck: 0, swept: 0 } });
+    expect(runSession).not.toHaveBeenCalled();
   });
 
   it("does not sweep a session that was touched recently", async () => {
@@ -360,14 +370,18 @@ describe("telephony cron jobs", () => {
     expect(h.legs(call.sessionId).find((leg) => leg.telnyx_call_control_id === call.callControlId)?.ended_at).toBeTruthy();
   });
 
-  it("treats a leg Telnyx has never heard of as dead", async () => {
+  it("does not close a leg when Telnyx has no authoritative status for it", async () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
     const call = await h.inbound({ to: "+421232408718" });
     h.db.update("motorist_call_sessions", { state: "talking", updated_at: new Date(h.now().getTime() - 5 * 60_000).toISOString() }, (row) => row.id === call.sessionId);
     h.telnyx.setCallStatus(call.callControlId, { alive: false, known: false });
 
-    const result = await reconcileWithTelnyx(h.deps);
-    expect(result.detail).toMatchObject({ deadLegs: 1 });
+    const runSession = vi.fn();
+    const result = await reconcileWithTelnyx({ ...h.deps, runSession });
+    expect(result.detail).toMatchObject({ deadLegs: 0 });
+    expect(result.verification.entries).toContainEqual(expect.objectContaining({ sessionId: call.sessionId, verdict: "unknown", reason: "provider_status_unknown" }));
+    expect(runSession).not.toHaveBeenCalled();
+    expect(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === call.callControlId)?.ended_at).toBeNull();
   });
 
   it("does not touch a session that is still moving", async () => {
@@ -387,7 +401,90 @@ describe("telephony cron jobs", () => {
 
     const result = await reconcileWithTelnyx(h.deps);
     expect(result.status).toBe("failed");
+    expect(result.verification.entries).toContainEqual(expect.objectContaining({ sessionId: call.sessionId, verdict: "unavailable", reason: "provider_read_failed" }));
     expect(h.rows("motorist_job_incidents").length).toBeGreaterThan(0);
+  });
+
+  it("does not interpret a malformed successful provider response as an ended call", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const call = await h.inbound({ to: "+421232408718" });
+    h.advance(5 * 60_000);
+    vi.spyOn(h.deps.telnyx!, "retrieveCall").mockResolvedValue({ callControlId: call.callControlId, alive: false, known: true, raw: {}, callSessionId: null });
+    const runSession = vi.fn();
+    const result = await reconcileWithTelnyx({ ...h.deps, runSession });
+    expect(result.detail.deadLegs).toBe(0);
+    expect(result.verification.entries.every(entry => entry.verdict === "unknown")).toBe(true);
+    expect(runSession).not.toHaveBeenCalled();
+  });
+
+  it("still verifies a long call after maintenance refreshed updated_at", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const call = await h.inbound({ to: "+421232408718" });
+    h.advance(6 * 60_000);
+    h.db.update("motorist_call_sessions", { state: "talking", updated_at: h.now().toISOString() }, row => row.id === call.sessionId);
+    const result = await reconcileWithTelnyx(h.deps);
+    expect(result.verification.entries).toContainEqual(expect.objectContaining({ sessionId: call.sessionId, verdict: "alive" }));
+  });
+
+  it("rotates bounded pages so an eleventh quiet call is eventually verified", async () => {
+    const h = createTelephonyHarness();
+    const old = new Date(h.now().getTime() - 10 * 60_000).toISOString();
+    for (let index = 0; index < 11; index++) {
+      const id = `session-${index.toString().padStart(2, "0")}`;
+      h.db.seed("motorist_call_sessions", [{ id, organization_id: ORG, state: "talking", started_at: old, updated_at: h.now().toISOString() }]);
+      h.db.seed("motorist_call_legs", [{ id: `leg-${index}`, session_id: id, organization_id: ORG, role: "customer", telnyx_call_control_id: `control-${index}`, ended_at: null }]);
+    }
+    const first = await reconcileWithTelnyx(h.deps);
+    h.advance(5 * 60_000);
+    const next = await reconcileWithTelnyx(h.deps);
+    expect(first.verification.entries.length).toBeLessThanOrEqual(10);
+    expect(next.verification.entries.length).toBeLessThanOrEqual(10);
+    expect(first.verification.remaining).toBeGreaterThan(0);
+    expect(new Set([...first.verification.entries, ...next.verification.entries].map(entry => entry.sessionId)).size).toBe(11);
+  });
+
+  it("leaves budget-limited coverage unknown after one slow provider read", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const call = await h.inbound({ to: "+421232408718" });
+    h.advance(6 * 60_000);
+    let clock = 0;
+    const retrieve = vi.spyOn(h.deps.telnyx!, "retrieveCall").mockImplementation(async () => { clock += 9_000; throw new Error("provider timeout"); });
+    const runSession = vi.fn();
+    const result = await reconcileWithTelnyx({ ...h.deps, runSession, clock: () => clock });
+    expect(retrieve).toHaveBeenCalledTimes(1);
+    expect(result.verification.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: call.sessionId, verdict: "unavailable" }),
+      expect.objectContaining({ sessionId: call.sessionId, verdict: "unknown", reason: "verification_budget_exhausted" }),
+    ]));
+    expect(result.verification.remaining).toBeGreaterThan(0);
+    expect(runSession).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed candidate query without claiming provider verification", async () => {
+    const h = createTelephonyHarness();
+    h.db.failNext("motorist_call_sessions", "select", "database unavailable");
+    const result = await reconcileWithTelnyx(h.deps);
+    expect(result).toMatchObject({ status: "failed", verification: { entries: [], error: "database unavailable" } });
+    expect(h.telnyx.of("retrieveCall")).toHaveLength(0);
+  });
+
+  it("passes provider observations into the cron alert decision and logs only its summary", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const call = await h.inbound({ to: "+421232408718" });
+    const operatorId = String(h.openLegFor(call.sessionId, PROFILES.o1)!.telnyx_call_control_id);
+    await h.legEvent(operatorId, "call.answered");
+    await h.legEvent(operatorId, "call.bridged");
+    await h.legEvent(call.callControlId, "call.bridged");
+    h.db.update("motorist_call_sessions", { state: "talking", metadata: {} }, row => row.id === call.sessionId);
+    h.advance(6 * 60_000);
+    h.telnyx.setCallStatus(call.callControlId, { alive: false, known: false });
+    const send = vi.fn(async () => undefined);
+    const summary = await runTelephonyCronJobs({ ...h.deps, alerts: { recipient: "operator@example.test", send } });
+    expect(summary.jobs.find(job => job.job === ALERT_JOB)?.detail).toMatchObject({ health: "warn", alerts: 1, sent: 1 });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "cron", job: ALERT_JOB, health: "warn", alerts: 1, sent: 1 }));
+    const decision = h.logs.find(entry => entry.job === ALERT_JOB && entry.health === "warn");
+    expect(JSON.stringify(decision)).not.toContain(call.sessionId);
   });
   it("replays high deferral counts but excludes explicit dead letters and future admission times", async () => {
     const h = createTelephonyHarness();
