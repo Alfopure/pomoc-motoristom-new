@@ -84,6 +84,8 @@ Za ľudským vysvetlením má byť samostatná diagnostická časť, ktorú mož
 
 Prostredie vychádza z identity aplikácie, nie iba z Vercel targetu. **TEST** je `https://test.dispecing.linkapomoci.sk`; technický Vercel target tohto samostatného projektu je tiež Production. Produkcia aplikácie je `https://dispecing.linkapomoci.sk`. E-mail z TESTu preto nesmie vyzerať ako produkčný incident.
 
+Majiteľ 4. 10. 2026 schválil, aby upozornenia zo stabilného TESTu chodili na rovnakú adresu ako produkčné upozornenia. Správa má **TEST v predmete aj v tele**; produkčná správa má označenie **PRODUKCIA**. TEST upozornenie opisuje testovaciu aplikáciu a samo osebe neznamená problém v ostrej prevádzke. Príjemca sa nastavuje cez `ALERT_EMAIL_TO` a musí byť aj v `MOTORIST_TEST_ALLOWED_EMAILS` samostatného TEST projektu, iba v jeho Production targete. Zdieľa sa adresa príjemcu, nie produkčné prístupové kľúče. Bežné pracovné Preview nemá povolené odosielanie. Identifikátor odoslania u poskytovateľa rozlišuje prostredie, aby TEST správa nemohla potlačiť produkčnú správu o rovnakom type problému.
+
 ## Opakovanie správ a zlyhanie doručenia
 
 Pravidlo je najviac jedna správa o tej istej identifikovanej kombinácii problému a závažnosti za deň. Nový dotknutý hovor alebo nová konkrétna udalosť sa nesmú skryť za skoršie upozornenie rovnakého typu. Zhoršenie z `warn` na `fail` alebo nový dôvod problému môže vytvoriť ďalšie upozornenie. Pri celkových kontrolách bez identity hovoru zostáva deduplikácia podľa typu kontroly, závažnosti a dňa. Samotná zmena veku problému alebo poradia výsledkov nesmie vytvárať novú správu pri každom päťminútovom behu.

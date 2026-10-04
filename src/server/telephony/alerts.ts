@@ -158,8 +158,9 @@ export async function runTelephonyAlerts(deps: TelephonyAlertDeps): Promise<Tele
     const delivery = await send({
       to: recipient,
       ...message,
-      // Same key as the ledger row: a retry after a crashed send cannot double-mail.
-      idempotencyKey: `telephony-alert-${deps.organizationId}-${digest(fresh.map((alert) => alert.key).sort().join("|"))}`,
+      // TEST snapshots retain production organization/incident IDs. Separate
+      // provider keys even when both environments use the same Resend account.
+      idempotencyKey: `telephony-alert-${environment}-${deps.organizationId}-${digest(fresh.map((alert) => alert.key).sort().join("|"))}`,
     });
     const deliveryStatus = alertObject(delivery).status;
     if (deliveryStatus === "failed" || deliveryStatus === "disabled") return {

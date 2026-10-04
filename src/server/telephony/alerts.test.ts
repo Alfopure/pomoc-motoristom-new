@@ -198,4 +198,32 @@ describe("telephony alerts", () => {
     expect(sent[0].idempotencyKey.length).toBeLessThan(200);
     expect(sent[0].idempotencyKey).toBe(sent[1].idempotencyKey);
   });
+
+  it("separates TEST and production mail to the same recipient with identical copied incident IDs", async () => {
+    const production = createTelephonyHarness();
+    const test = createTelephonyHarness();
+    const { send, sent } = mailbox();
+    const failing = report([{ key: "usage", status: "warn", detail: { legs: 90, dailyLegSoftCap: 100 } }], "warn");
+    await runTelephonyAlerts(alertDeps(production, { send, report: failing, environment: "production" }));
+    // The dedicated TEST project uses Vercel's Production target. Its explicit
+    // application environment must control both the label and provider key.
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    vi.stubEnv("VERCEL_ENV", "production");
+    try {
+      await runTelephonyAlerts(alertDeps(test, { send, report: failing }));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0].to).toBe(sent[1].to);
+    expect(production.rows("motorist_telephony_alerts")[0].alert_key).toBe(test.rows("motorist_telephony_alerts")[0].alert_key);
+    expect(sent[0].idempotencyKey).not.toBe(sent[1].idempotencyKey);
+    expect(sent[0].idempotencyKey).toContain("telephony-alert-production-");
+    expect(sent[1].idempotencyKey).toContain("telephony-alert-test-");
+    expect(sent[0].subject).toContain("[Dispečing · PRODUKCIA]");
+    expect(sent[1].subject).toContain("[Dispečing · TEST]");
+    expect(sent[1].html).toContain("DISPEČING · TEST");
+    expect(sent[1].text).toContain('"environment": "test"');
+  });
 });
