@@ -1,9 +1,25 @@
 import type { LineDoc, RingGroupDoc, RingPlanDoc, RoutingDocument } from "@/server/telephony/config-service";
 import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
+import type { LineInboundMode } from "@/server/telephony/state/types";
 import { groupDraftsFromDocument, ringGroupsPayload, type GroupDraft } from "./ring-groups-model";
 import { FALLBACK_LABELS, planDraftsFromDocument, ringPlansPayload, type PlanDraft } from "./ring-plan-model";
 
-export type IncomingDraft = { groups: GroupDraft[]; plans: PlanDraft[] };
+export type IncomingLineModeDraft = { id: string; inboundCallMode: LineInboundMode | null; expectedInboundCallMode: LineInboundMode | null };
+export type IncomingDraft = { groups: GroupDraft[]; plans: PlanDraft[]; lineModes?: IncomingLineModeDraft[] };
+
+export function incomingModeName(mode: LineInboundMode | null | undefined): string {
+  return mode === "queue_first" ? "Ručné prevzatie v čakárni" : mode === "ring_all" ? "Vždy všetkým naraz"
+    : mode === "ring_ordered" ? "Vždy postupne" : mode === "ring_first" ? "Automaticky podľa plánu" : "Podľa predvoľby organizácie";
+}
+
+/** Keep the original value for compare-and-swap; reverting removes the change. */
+export function updateIncomingLineMode(draft: IncomingDraft, baseline: RoutingDocument, id: string, mode: LineInboundMode | null): IncomingDraft {
+  const line = baseline.lines.find(row => row.id === id);
+  if (!line) return draft;
+  const expected = line.inboundCallMode ?? null;
+  const others = (draft.lineModes ?? []).filter(row => row.id !== id);
+  return { ...draft, lineModes: mode === expected ? others : [...others, { id, inboundCallMode: mode, expectedInboundCallMode: expected }] };
+}
 
 /** The dialled line's override wins, including when it borrows a return route. */
 export function incomingLineBehaviour(line: LineDoc | undefined, defaultMode: "ring_first" | "queue_first" | null) {
@@ -52,12 +68,7 @@ export function initialIncomingLineId(document: RoutingDocument, target?: Routin
   return requested?.id ?? document.lines.find(line => line.active)?.id ?? document.lines[0]?.id ?? "";
 }
 
-/** A line PATCH returns a legacy document; keep the coherent plan snapshot and unsaved draft baseline. */
-export function mergeSavedLine(document: RoutingDocument, saved: RoutingDocument): RoutingDocument {
-  return { ...document, lines: saved.lines, settings: saved.settings ?? document.settings,
-    capabilities: saved.capabilities ?? document.capabilities };
-}
-export const incomingDraft = (document: RoutingDocument): IncomingDraft => ({ groups: groupDraftsFromDocument(document.groups), plans: planDraftsFromDocument(document.plans) });
+export const incomingDraft = (document: RoutingDocument): IncomingDraft => ({ groups: groupDraftsFromDocument(document.groups), plans: planDraftsFromDocument(document.plans), lineModes: [] });
 /** UUIDs are created at addition, not serialization: new steps can refer to new groups in the same save. */
 export function identifyGroups(groups: GroupDraft[], uuid: () => string = () => crypto.randomUUID()): GroupDraft[] {
   return groups.map(group => ({ ...group, id: group.id ?? uuid(), members: group.members.map(member => ({ ...member, id: member.id ?? uuid() })) }));
@@ -65,19 +76,48 @@ export function identifyGroups(groups: GroupDraft[], uuid: () => string = () => 
 export function identifyPlans(plans: PlanDraft[], uuid: () => string = () => crypto.randomUUID()): PlanDraft[] {
   return plans.map(plan => ({ ...plan, id: plan.id ?? uuid(), steps: plan.steps.map(step => ({ ...step, id: step.id ?? uuid() })) }));
 }
-export function incomingPayload(draft: IncomingDraft) { return { groups: ringGroupsPayload(draft.groups), plans: ringPlansPayload(draft.plans) }; }
+export function incomingPayload(draft: IncomingDraft) {
+  return { groups: ringGroupsPayload(draft.groups), plans: ringPlansPayload(draft.plans),
+    ...((draft.lineModes?.length ?? 0) > 0 ? { lineModes: draft.lineModes } : {}) };
+}
 export function incomingMatches(draft: IncomingDraft, document: RoutingDocument): boolean {
   const canonical = (value: ReturnType<typeof incomingPayload>) => JSON.stringify({
     groups: [...value.groups].sort((a,b) => String(a.id).localeCompare(String(b.id))).map(group => ({ ...group, members: group.members.map(({ ownerProfileId, ...member }) => ({ ...member, ownerProfileId: ownerProfileId ?? null })) })),
     plans: [...value.plans].sort((a,b) => String(a.id).localeCompare(String(b.id))),
   });
-  return canonical(incomingPayload(draft)) === canonical(incomingPayload(incomingDraft(document)));
+  return canonical(incomingPayload(draft)) === canonical(incomingPayload(incomingDraft(document)))
+    && (draft.lineModes ?? []).every(change => {
+      const line = document.lines.find(row => row.id === change.id);
+      return Boolean(line) && (line!.inboundCallMode ?? null) === change.inboundCallMode;
+    });
 }
 export function documentWithDraft(document: RoutingDocument, draft: IncomingDraft): RoutingDocument {
   const payload = incomingPayload(draft);
   const history = new Map(document.groups.flatMap(group => group.members.map(member => [member.id, member] as const)));
   return { ...document,
+    lines: document.lines.map(line => {
+      const change = draft.lineModes?.find(row => row.id === line.id);
+      return change ? { ...line, inboundCallMode: change.inboundCallMode } : line;
+    }),
     groups: payload.groups.map(group => ({ ...group, id: group.id!, description: group.description ?? null, active: group.active ?? true, members: group.members.map(member => ({ ...member, id: member.id!, profileId: member.profileId ?? null, externalNumber: member.externalNumber ?? null, ringSecs: member.ringSecs ?? null, lastOfferedAt: history.get(member.id!)?.lastOfferedAt ?? null, lastAnsweredAt: history.get(member.id!)?.lastAnsweredAt ?? null })) })) as RingGroupDoc[],
     plans: payload.plans.map(plan => ({ ...plan, id: plan.id!, active: plan.active ?? true, fallbackNumber: plan.fallbackNumber ?? null, steps: plan.steps.map(step => ({ ...step, id: step.id! })) })) as RingPlanDoc[],
   };
+}
+
+/** Include every line using a changed shared group/plan, plus changed modes. */
+export function incomingAffectedLines(baseline: RoutingDocument, draft: IncomingDraft): LineDoc[] {
+  const before = incomingPayload(incomingDraft(baseline));
+  const after = incomingPayload(draft);
+  const changedIds = <T extends { id?: string | null }>(oldRows: T[], newRows: T[]) => {
+    const old = new Map(oldRows.map(row => [row.id, JSON.stringify(row)]));
+    const next = new Map(newRows.map(row => [row.id, JSON.stringify(row)]));
+    return new Set([...old.keys(), ...next.keys()].filter(id => old.get(id) !== next.get(id)));
+  };
+  const groups = changedIds(before.groups, after.groups);
+  const plans = changedIds(before.plans, after.plans);
+  for (const plan of [...before.plans, ...after.plans]) {
+    if (plan.steps.some(step => groups.has(step.ringGroupId))) plans.add(plan.id);
+  }
+  const modes = new Set((draft.lineModes ?? []).map(row => row.id));
+  return baseline.lines.filter(line => modes.has(line.id) || incomingPlanIdsForLine(baseline, line.id)?.some(id => plans.has(id)));
 }

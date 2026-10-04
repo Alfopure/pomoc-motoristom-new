@@ -3,20 +3,43 @@ import { createTelephonyHarness, ORG } from "@/test/telephony-harness";
 import { getRoutingDocument } from "@/server/telephony/config-service";
 import { newGroupDraft, newMemberDraft } from "./ring-groups-model";
 import { newPlanDraft, newStepDraft, validateRingPlanDrafts } from "./ring-plan-model";
-import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingLineBehaviour, incomingMatches, incomingPayload, incomingPlanIdsForLine, incomingRouteSummary, initialIncomingLineId, mergeSavedLine } from "./incoming-routing-model";
+import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingLineBehaviour, incomingMatches, incomingPayload, incomingPlanIdsForLine, incomingRouteSummary, initialIncomingLineId, updateIncomingLineMode, incomingAffectedLines } from "./incoming-routing-model";
 async function document() { const harness = createTelephonyHarness(); return getRoutingDocument(harness.deps, { organizationId: ORG, includeSettings: true }); }
 describe("combined routing draft", () => {
-  it("keeps the coherent plan version when one number is saved separately", async () => {
-    const current = { ...await document(), snapshotId: "coherent-1" };
-    const draft = incomingDraft(current);
-    draft.plans[0].steps[0].timeoutSecs = "35";
-    const saved = { ...await document(), snapshotId: undefined, lines: current.lines.map((line, index) => index === 0 ? { ...line, inboundCallMode: "queue_first" as const } : line) };
-    const merged = mergeSavedLine(current, saved);
-    expect(merged.snapshotId).toBe("coherent-1");
-    expect(merged.routingVersion).toBe(current.routingVersion);
-    expect(merged.lines[0].inboundCallMode).toBe("queue_first");
-    expect(incomingMatches(draft, merged)).toBe(false);
-    expect(draft.plans[0].steps[0].timeoutSecs).toBe("35");
+  it("keeps line mode edits in the same draft and drops reverted changes", async () => {
+    const source = await document();
+    const id = source.lines[0].id;
+    source.lines[0].inboundCallMode = null;
+    const original = incomingDraft(source);
+    const changed = updateIncomingLineMode(original, source, id, "queue_first");
+    expect(incomingMatches(changed, source)).toBe(false);
+    expect(incomingPayload(changed).lineModes).toEqual([{ id, inboundCallMode: "queue_first", expectedInboundCallMode: null }]);
+    expect(documentWithDraft(source, changed).lines[0].inboundCallMode).toBe("queue_first");
+    expect(source.lines[0].inboundCallMode).toBeNull();
+    const reverted = updateIncomingLineMode(changed, source, id, null);
+    expect(incomingMatches(reverted, source)).toBe(true);
+    expect(incomingPayload(reverted)).not.toHaveProperty("lineModes");
+  });
+  it("requires modes as well as plans to match after an uncertain save", async () => {
+    const source = await document();
+    source.lines[0].inboundCallMode = null;
+    const changed = updateIncomingLineMode(incomingDraft(source), source, source.lines[0].id, "queue_first");
+    changed.plans[0].steps[0].timeoutSecs = "35";
+    const saved = documentWithDraft(source, changed);
+    expect(incomingMatches(changed, saved)).toBe(true);
+    saved.lines[0].inboundCallMode = "ring_all";
+    expect(incomingMatches(changed, saved)).toBe(false);
+    saved.lines = [];
+    expect(incomingMatches(changed, saved)).toBe(false);
+  });
+  it("keeps the original expected mode across edits and ignores unknown lines", async () => {
+    const source = await document();
+    source.lines[0].inboundCallMode = "ring_first";
+    const changed = updateIncomingLineMode(incomingDraft(source), source, source.lines[0].id, "queue_first");
+    const again = updateIncomingLineMode(changed, source, source.lines[0].id, null);
+    expect(again.lineModes).toEqual([{ id: source.lines[0].id, inboundCallMode: null, expectedInboundCallMode: "ring_first" }]);
+    expect(updateIncomingLineMode(again, source, "missing", "ring_all")).toBe(again);
+    expect(incomingDraft(source).lineModes).toEqual([]);
   });
   it("assigns stable IDs before a new plan refers to a new group", () => {
     let n=0; const uuid = () => `00000000-0000-4000-8000-${String(++n).padStart(12,"0")}`;
@@ -120,5 +143,24 @@ describe("incoming line display scope", () => {
     expect(incomingLineBehaviour({ ...source.lines[2], inboundCallMode: null }, null))
       .toEqual({ mode: null, strategyOverride: null });
     expect(incomingPayload(incomingDraft(source))).toEqual(before);
+  });
+});
+
+
+describe("incoming save impact", () => {
+  it("includes shared group use through direct, IVR and return routes", async () => {
+    const source = await scopedDocument();
+    source.plans[2].steps = [];
+    const draft = incomingDraft(source);
+    draft.groups[0].name = "Updated shared team";
+    expect(incomingAffectedLines(source, draft).map(line => line.id)).toEqual(["active", "return"]);
+  });
+  it("limits a mode-only change to its dialled line and omits unchanged lines", async () => {
+    const source = await scopedDocument();
+    const original = incomingDraft(source);
+    expect(incomingAffectedLines(source, original)).toEqual([]);
+    const changed = updateIncomingLineMode(original, source, "return", "queue_first");
+    expect(incomingAffectedLines(source, changed).map(line => line.id)).toEqual(["return"]);
+    expect(incomingPayload(changed).lineModes).toHaveLength(1);
   });
 });

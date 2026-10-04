@@ -4,6 +4,7 @@ import concurrent.futures
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from uuid import uuid4
 import psycopg
@@ -88,6 +89,92 @@ try:
     # A lost HTTP response is recoverable by reading the authoritative payload/version.
     committed=save(c,document('Overené'),3)
     check('response loss can be reconciled from authoritative snapshot',snap(c)['settings']['routing_version']==committed['after']['settings']['routing_version'] and snap(c)['plans'][0]['name']=='Overené')
+    # The additive migration advertises support only after the new writer exists.
+    check('old snapshot does not advertise combined mode saves', 'atomicIncomingLineModes' not in snap(c))
+    c.execute((ROOT/'supabase/migrations/20261009110000_incoming_routing_line_modes.sql').read_text())
+    check('migration enables atomic line modes without changing routing', snap(c)['atomicIncomingLineModes'] is True and snap(c)['settings']['routing_version']==4)
+    def modes(name='Spolu', next_mode='ring_all', expected=None, line=LINE):
+      result=document(name)
+      result['line_modes']=[{'id':line,'inbound_call_mode':next_mode,'expected_inbound_call_mode':expected}]
+      return result
+    def stored_mode(snapshot): return snapshot['lines'][0]['metadata'].get('inbound_call_mode')
+    def rejects(label, payload, code, version=None):
+      original=snap(c)
+      if version is None: version=original['settings']['routing_version']
+      try: save(c,payload,version); raise AssertionError(label+' accepted')
+      except psycopg.Error as e: check(label,code in str(e) or code==e.sqlstate)
+      check(label+' preserves all routing',snap(c)==original)
+    combined=save(c,modes(),4)
+    check('groups plans and line mode share one version increment',combined['after']['settings']['routing_version']==5 and stored_mode(combined['after'])=='ring_all' and combined['after']['plans'][0]['name']=='Spolu')
+    check('snapshots include old and new line modes',stored_mode(combined['before']) is None and stored_mode(combined['after'])=='ring_all')
+    check('mode write preserves unrelated line metadata',combined['before']['lines'][0]['metadata']['return_line_id']==combined['after']['lines'][0]['metadata']['return_line_id'])
+    # Valid routing with an invalid mode must not partially save, even via direct RPC.
+    for name, value in [('object',{}),('null',None),('scalar',[False]),('missing expectation',[{'id':LINE,'inbound_call_mode':'ring_all'}]),('invalid mode',[{'id':LINE,'inbound_call_mode':'all','expected_inbound_call_mode':'ring_all'}]),('extra field',[{'id':LINE,'inbound_call_mode':None,'expected_inbound_call_mode':'ring_all','active':False}]),('duplicate',[{'id':LINE,'inbound_call_mode':None,'expected_inbound_call_mode':'ring_all'}]*2)]:
+      payload=document('Nesmie sa uložiť'); payload['line_modes']=value
+      rejects('rejects '+name+' line modes',payload,'incoming_line_mode_invalid')
+    rejects('legacy line mode conflict refuses every section',modes(expected=None),'line_mode_conflict')
+    rejects('stale routing version refuses mode and every section',modes(next_mode='queue_first',expected='ring_all'),'stale_document',4)
+    broken=modes(next_mode='queue_first',expected='ring_all'); broken['plans'][0]['steps'][0]['timeout_secs']=999
+    rejects('plan failure rolls back line mode and groups',broken,'23514')
+    other_line=str(uuid4())
+    c.execute("insert into motorist_telephony_lines(id,organization_id,phone_number,label) values(%s,%s,'+421232408701','Foreign')",(other_line,OTHER))
+    rejects('foreign line cannot be edited',modes(line=other_line),'incoming_line_not_found')
+    rejects('missing line cannot be edited',modes(line=str(uuid4())),'incoming_line_not_found')
+    c.execute("update motorist_telephony_lines set metadata=metadata||'{\"archived_at\":\"2026-10-03T00:00:00Z\"}'::jsonb where id=%s",(LINE,))
+    rejects('archived line cannot be edited',modes(expected='ring_all'),'incoming_line_not_found')
+    c.execute("update motorist_telephony_lines set metadata=metadata-'archived_at' where id=%s",(LINE,))
+    # Force an actual failure after the groups/plans writer, proving the last write rolls everything back.
+    c.execute("""create function reject_test_mode() returns trigger language plpgsql as $$ begin
+      if new.metadata ->> 'inbound_call_mode' = 'queue_first' then raise exception 'test_line_write_failed'; end if; return new;
+      end $$; create trigger reject_test_mode before update on motorist_telephony_lines for each row execute function reject_test_mode();""")
+    rejects('last line write failure rolls back groups plans and version',modes(next_mode='queue_first',expected='ring_all'),'test_line_write_failed')
+    c.execute('drop trigger reject_test_mode on motorist_telephony_lines; drop function reject_test_mode()')
+    for role in ['anon','authenticated']:
+      try:
+        c.execute(f'set role {role}'); save(c,modes(expected='ring_all'),5); raise AssertionError('write RPC accessible by '+role)
+      except psycopg.errors.InsufficientPrivilege: checks.append('combined write denied to '+role)
+      finally: c.execute('reset role')
+    c.execute('set role service_role')
+    inherited=save(c,modes(next_mode=None,expected='ring_all'),5)
+    c.execute('reset role')
+    check('service role can reset a line to inherited mode',stored_mode(inherited['after']) is None)
+    legacy=save(c,document('Starší klient'),6)
+    check('older clients save groups/plans without touching line modes',stored_mode(legacy['after']) is None and legacy['after']['settings']['routing_version']==7)
+
+    def wait_until_blocked(pid):
+      deadline=time.monotonic()+5
+      while time.monotonic()<deadline:
+        if c.execute('select cardinality(pg_blocking_pids(%s)) > 0',(pid,)).fetchone()[0]: return
+        time.sleep(.01)
+      raise AssertionError('concurrent statement never reached the row lock')
+    # Legacy PATCH arrives first without changing routing_version. New writer
+    # must re-read the mode after the row lock becomes available, then reject.
+    with connect() as legacy_db, connect() as combined_db:
+      legacy_db.execute('begin')
+      legacy_db.execute("update motorist_telephony_lines set metadata=metadata||'{\"inbound_call_mode\":\"queue_first\"}'::jsonb where id=%s",(LINE,))
+      def pending_combined():
+        try: return save(combined_db,modes(expected=None),7)
+        except psycopg.errors.RaiseException as e: return str(e)
+      with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        pending=pool.submit(pending_combined)
+        wait_until_blocked(combined_db.info.backend_pid)
+        legacy_db.execute('commit')
+        check('combined save detects concurrent legacy PATCH after row-lock wait','line_mode_conflict' in pending.result(timeout=5))
+      check('legacy PATCH conflict leaves groups plans and version unchanged',snap(c)['plans'][0]['name']=='Starší klient' and snap(c)['settings']['routing_version']==7 and stored_mode(snap(c))=='queue_first')
+    # New combined save arrives first; an old PATCH with previously read
+    # metadata/updated_at must affect zero rows after waiting for the commit.
+    old_line=snap(c)['lines'][0]
+    with connect() as combined_db, connect() as legacy_db:
+      combined_db.execute('begin')
+      outcome=save(combined_db,modes(next_mode='ring_ordered',expected='queue_first'),7)
+      def pending_legacy():
+        return legacy_db.execute('update motorist_telephony_lines set metadata=%s where id=%s and organization_id=%s and metadata=%s and updated_at=%s', (Jsonb({**old_line['metadata'],'inbound_call_mode':'ring_all'}),LINE,ORG,Jsonb(old_line['metadata']),old_line['updated_at'])).rowcount
+      with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        pending=pool.submit(pending_legacy)
+        wait_until_blocked(legacy_db.info.backend_pid)
+        combined_db.execute('commit')
+        check('legacy PATCH cannot overwrite committed atomic mode',pending.result(timeout=5)==0 and stored_mode(snap(c))=='ring_ordered')
+      check('combined acknowledgement matches complete committed routing',snap(c)==outcome['after'])
   print(json.dumps({'passed':len(checks),'checks':checks},ensure_ascii=False,indent=2))
 finally:
   with psycopg.connect(dbname='postgres', autocommit=True, **LOCAL) as admin: admin.execute(f'drop database if exists {NAME} with (force)')
