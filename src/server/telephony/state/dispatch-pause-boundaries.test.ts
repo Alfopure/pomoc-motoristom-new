@@ -76,9 +76,8 @@ async function prepare(h: TelephonyHarness, route: Route, rejectedBeforeDispatch
   }
   return async () => {
     const action = completeAnnouncedAction(h, blindTransfer(deps, actor, call.sessionId, route === "blind_pstn" ? { number: mobileNumber } : { profileId: targetProfile }));
-    // Silent controls reject within the HTTP action; recorded actions report
-    // the same rejection through their later announcement completion.
-    if (rejectedBeforeDispatch) await expect(action).rejects.toMatchObject({ status: recording ? 502 : 409 });
+    // Both recorded and silent controls report unavailable targets immediately.
+    if (rejectedBeforeDispatch) await expect(action).rejects.toMatchObject({ status: 409 });
     else await action;
     return { sessionId: call.sessionId, source: call.callControlId };
   };

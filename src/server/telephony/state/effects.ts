@@ -218,7 +218,11 @@ export async function persistTransition(
   const folded = input.phase === "critical" && sessionOwnership.getStore()?.contract === 2 &&
     (input.continuation?.databaseCursor ?? 0) === 0 &&
     input.transition.legs.length + input.transition.attempts.length > 0;
-  if (folded) {
+  if (input.phase === "projection") {
+    // Audio/recorder acknowledgements can advance the session after the
+    // critical phase. History retries must never restore its older snapshot.
+    session = input.session;
+  } else if (folded) {
     const applied = await ownershipRpc<{ applied: boolean; session?: SessionRow } | null>(admin, "motorist_apply_critical_v2", {
       p_session_id: input.session.id,
       p_expected_version: input.expectedVersion,
@@ -890,7 +894,13 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
     }
     case "recording_start": {
       if (!readMeta(ctx.session).recording?.policy.enabled) throw new EffectsError("recording policy proof unavailable");
-      const call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id).maybeSingle();
+      let call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id).maybeSingle();
+      if (!call.error && !call.data) {
+        // Recording admission needs a real call identity, but updating an
+        // existing history row is only a projection and must not delay audio.
+        await upsertCallRow(deps, ctx.session, {});
+        call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id).maybeSingle();
+      }
       if (call.error || !call.data) throw new EffectsError("recording_admission_denied");
       const admission = await deps.admin.rpc("motorist_recording_admit_session", { p_organization_id: deps.organizationId, p_session_id: ctx.session.id, p_call_id: call.data.id, p_max_per_hour: 10 });
       if (admission.error || admission.data !== true) throw new EffectsError("recording_admission_denied");
@@ -1715,10 +1725,10 @@ async function executeReduceResult(
     }
   }
 
-  // Frozen recording-disabled calls need identity/ownership before audio, but
-  // call history and fairness timestamps must not hold answer/bridge hostage.
-  // Recording transitions retain their existing prerequisite ordering.
-  const deferProjections = Boolean(input.continuation && !input.databaseOnly && readMeta(input.session).recording?.policy.enabled === false);
+  // Commit ownership, recorder intent and privacy barriers before commands.
+  // History and fairness are recoverable projections for recorded calls too.
+  // START separately ensures the call identity needed for recording admission.
+  const deferProjections = Boolean(input.continuation && !input.databaseOnly && readMeta(input.session).recording);
   let projectionError: string | null = null;
   let session = await persistTransition(deps, { session: input.session, transition, expectedVersion: input.continuation ? null : input.expectedVersion,
     event: input.event, continuation: input.continuation, ...(deferProjections ? { phase: "critical" as const } : {}) });
@@ -1809,7 +1819,7 @@ async function executeReduceResult(
           const update = emptyTransition();
           update.session.metadata = toJson({ ...readMeta(fresh.data), recording: { ...recording,
             coverageUnconfirmed: { since: deps.now().toISOString(), epoch: pending.epoch, audioCommandId: key } } });
-          ctx.session = await persistTransition(deps, { session: fresh.data, transition: update, expectedVersion: fresh.data.version, event: input.event });
+          ctx.session = await persistTransition(deps, { session: fresh.data, transition: update, expectedVersion: fresh.data.version, event: input.event, phase: "critical" });
           session = ctx.session;
           deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "recording_coverage_unconfirmed", commandId: key });
         }
@@ -1848,13 +1858,13 @@ async function executeReduceResult(
       if (ivrOutcome) {
         const checkpoint = emptyTransition();
         checkpoint.session.metadata = toJson(ivrOutcome);
-        session = await persistTransition(deps, { session: ctx.session, transition: checkpoint, expectedVersion: ctx.session.version, event: input.event });
+        session = await persistTransition(deps, { session: ctx.session, transition: checkpoint, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
         ctx.session = session;
       }
       if ((command.kind === "conference_create" || command.kind === "bridge" && executed.detail?.conferenceId) && ctx.conferenceId && readContactHistory(ctx.session).operations.length) {
         const update = emptyTransition();
         update.session.metadata = toJson({ ...readMeta(ctx.session), callback_contact: bindContactConference(readContactHistory(ctx.session), command.commandId, ctx.conferenceId) });
-        ctx.session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event });
+        ctx.session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
       }
       if (pendingCommand) {
         try {
@@ -1872,7 +1882,7 @@ async function executeReduceResult(
                 operatorProfileId: fresh.data.answered_by_profile_id, callControlIds: [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)] }
               : recording.connection;
             update.session.metadata = toJson({ ...meta, recording: { ...recording, connection: verifiedConnection, pendingAudio: remaining.length ? { ...recording.pendingAudio, commands: remaining } : null } });
-            session = await persistTransition(deps, { session: fresh.data, transition: update, expectedVersion: fresh.data.version, event: input.event });
+            session = await persistTransition(deps, { session: fresh.data, transition: update, expectedVersion: fresh.data.version, event: input.event, phase: "critical" });
             ctx.session = session;
           }
         } catch {
@@ -1893,7 +1903,7 @@ async function executeReduceResult(
           const update = emptyTransition();
           update.session.metadata = changed.metadata;
           try {
-            session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event });
+            session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
             break;
           } catch (error) {
             if (!(error instanceof SessionConflictError) || retry >= 3) throw error;
@@ -1915,7 +1925,11 @@ async function executeReduceResult(
           session = fresh.data;
         }
       }
-      if (["bridge", "conference_join", "conference_leave", "conference_hold", "conference_unhold", "recording_stop", "recording_start"].includes(command.kind)) {
+      // START registers capture before audio exists. Its pending bridge/join/
+      // unhold records the real participants after provider confirmation;
+      // observing them here adds DB work and claims an earlier audible boundary.
+      const awaitingAudio = command.kind === "recording_start" && readMeta(ctx.session).recording?.pendingAudio;
+      if (!awaitingAudio && ["bridge", "conference_join", "conference_leave", "conference_hold", "conference_unhold", "recording_stop", "recording_start"].includes(command.kind)) {
         const provenConference = Boolean(readMeta(ctx.session).recording?.policy.conferenceVerified &&
           (["conference_join", "conference_unhold"].includes(command.kind) || command.kind === "bridge" && executed.detail?.conferenceId));
         try { await observeParticipants(deps.admin, ctx.session, commandKey(command), deps.now().toISOString(), provenConference); }
@@ -1965,7 +1979,7 @@ async function executeReduceResult(
           const changed = recordingCommandOutcome(ctx.session, command, false, deps.now().toISOString(), isCallGoneError(error), error instanceof EffectsError && error.message === "recording_admission_denied" || command.kind === "recording_start" && isCallGoneError(error));
           const update = emptyTransition();
           update.session.metadata = changed.metadata;
-          session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event });
+          session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
           ctx.session = session;
         } catch {
           // The already-persisted starting/stopping state remains potentially
@@ -2263,7 +2277,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     const current = readPendingEffects(fresh.data).entries.find((item) => item.id === entry.id);
     if (!current) continue;
     if ((options.skipCompletedProjections || options.priorityEntryId && current.id !== options.priorityEntryId) &&
-      readMeta(fresh.data).recording?.policy.enabled === false && !current.transition.contactChecks?.length &&
+      !current.transition.contactChecks?.length &&
       current.databaseCursor >= criticalDatabaseEffectCount(current.transition) &&
       current.commands.every((command) => current.completedCommands.includes(commandKey(command)))) continue;
     if (current.transition.contactChecks?.length) {

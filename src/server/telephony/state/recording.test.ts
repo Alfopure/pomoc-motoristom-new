@@ -88,11 +88,11 @@ describe("recording lifecycle", () => {
     const h = enabledHarness({ conference: true, statusAnnouncements }); const call = await talking(h);
     await holdCall(h.deps, actor, call.sessionId); await completeCallAnnouncements(h, call.sessionId);
     await unholdCall(h.deps, actor, call.sessionId);
-    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence?.keys).toEqual(statusAnnouncements ? ["resume", "recordingResumed"] : ["resume"]);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence?.keys ?? []).toEqual(statusAnnouncements ? ["recordingResumed"] : []);
     await completeCallAnnouncements(h, call.sessionId);
     expect(h.session(call.sessionId).state).toBe("talking");
     expect(h.telnyx.of("recordingStart")).toHaveLength(2);
-    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence).toBeNull();
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence ?? null).toBeNull();
   });
 
   it("keeps the preference captured at call start when the line changes mid-call", async () => {
@@ -324,7 +324,7 @@ describe("recording lifecycle", () => {
     const call = await talking(h);
     await holdCall(h.deps, actor, call.sessionId);
     expect(h.telnyx.of("recordingStop")).toHaveLength(1);
-    expect(h.session(call.sessionId).state).toBe("talking");
+    expect(h.session(call.sessionId).state).toBe("held");
     await completeCallAnnouncements(h, call.sessionId);
     expect(h.session(call.sessionId).state).toBe("held");
     await unholdCall(h.deps, actor, call.sessionId);
@@ -379,6 +379,7 @@ describe("recording lifecycle", () => {
     const consult = h.legs(call.sessionId).find((leg) => leg.role === "consult")!;
     await h.legEvent(String(consult.telnyx_call_control_id), "call.answered");
     await completeTransfer(h.deps, actor, call.sessionId);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).announcement_sequence).toMatchObject({ callControlId: consult.telnyx_call_control_id, keys: ["recordingServiceNotice"] });
     expect(h.telnyx.of("recordingStart")).toHaveLength(1);
     await completeCallAnnouncements(h, call.sessionId);
     expect(h.telnyx.of("recordingStart")).toHaveLength(2);
