@@ -70,7 +70,7 @@ export const DEFERRED_DRAIN_DEADLINE_MS = 8_000;
  */
 export const DEFERRED_EVENT_RANK: Readonly<Record<string, number>> = {
   "call.hangup": 0, "call.answered": 1, "call.bridged": 2, "call.initiated": 3,
-  "call.hold": 4, "call.unhold": 4,
+  "call.hold": 4, "call.unhold": 4, "call.dtmf.received": 4,
   "call.gather.ended": 5, "call.playback.ended": 5, "call.speak.ended": 5,
 };
 const DEFERRED_DRAIN_TYPES = Object.keys(DEFERRED_EVENT_RANK);
