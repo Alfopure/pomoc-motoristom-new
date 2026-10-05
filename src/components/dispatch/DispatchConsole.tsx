@@ -116,6 +116,8 @@ import { signOutCurrentSession } from "@/components/auth/sign-out";
 import { PushNotificationSync } from "@/components/pwa/PushNotificationSync";
 import { PauseEndingNotificationSync } from "@/components/pwa/PauseEndingNotificationSync";
 import { useAppUpdate } from "@/components/pwa/useAppUpdate";
+import { AppReleaseBadge } from "@/components/pwa/AppReleaseBadge";
+import { localAppRelease, type AppRelease } from "@/lib/app-release";
 import { isAppRefreshBlocked } from "@/components/pwa/app-refresh-policy";
 import { notificationTarget } from "@/components/pwa/notification-target";
 import { navigateAfterDraftApproval } from "@/lib/draft-unload";
@@ -231,6 +233,7 @@ export function DispatchConsole(props: Parameters<typeof DispatchConsoleContent>
 function DispatchConsoleContent({
   initialData,
   appVersion = "development",
+  appRelease = localAppRelease,
   viewerDisplayName,
   viewerEmail,
   viewerOrganizationId,
@@ -240,6 +243,7 @@ function DispatchConsoleContent({
   initialData: DispatchData;
   layoutPreviewEnabled?: boolean;
   appVersion?: string;
+  appRelease?: AppRelease;
   viewerDisplayName?: string;
   viewerEmail?: string;
   viewerOrganizationId?: string;
@@ -2306,6 +2310,8 @@ function DispatchConsoleContent({
           </button>
         </div>
       </header>
+
+      <AppReleaseBadge release={appRelease} />
 
       {updateAvailable && (
         <div role="status" data-testid="app-update-notice" className="flex items-center justify-between gap-2 border-b border-yellow-200 bg-yellow-50 px-3 text-xs text-zinc-800 sm:px-4">

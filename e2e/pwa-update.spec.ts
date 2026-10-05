@@ -24,6 +24,7 @@ for (const resumeEvent of ["visibilitychange", "pageshow"] as const) {
     const navigation = await observeReload(page);
     await openApp(page);
     await expect(updateNotice(page)).toHaveCount(0);
+    const loadedCode = await page.getByTestId("app-release-code").textContent();
     release.version = release.nextVersion;
     // The resume check is deliberately throttled for 15 seconds.
     await advancePastResumeThrottle(page);
@@ -33,6 +34,7 @@ for (const resumeEvent of ["visibilitychange", "pageshow"] as const) {
     }, resumeEvent));
 
     await expect(updateNotice(page)).toContainText("Nová verzia je pripravená.");
+    await expect(page.getByTestId("app-release-code")).toHaveText(loadedCode!);
     await expect(updateButton(page)).toBeEnabled();
     expect(navigation.documents).toBe(1);
     expect(navigation.reloads).toBe(0);

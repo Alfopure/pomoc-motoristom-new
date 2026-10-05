@@ -17,10 +17,12 @@ test("desktop map panel keeps keyboard resizing and its saved height", async ({ 
   const workspace = page.locator("#dispatch-workspace-shell");
   const separator = page.getByRole("separator", { name: "Potiahnuť a zmeniť výšku spodnej lišty" });
   await expect(separator).toBeVisible();
+  const initialPercent = Number(await separator.getAttribute("aria-valuenow"));
   await separator.press("ArrowUp");
-  await expect(separator).toHaveAttribute("aria-valuenow", "38");
+  await expect(separator).toHaveAttribute("aria-valuenow", String(initialPercent + 4));
+  const resizedRows = await workspace.evaluate(element => getComputedStyle(element).getPropertyValue("--dispatch-desktop-grid-rows"));
   await page.reload();
-  await expect(workspace).toHaveCSS("--dispatch-desktop-grid-rows", "minmax(260px, 62fr) minmax(96px, 38fr)");
+  await expect(workspace).toHaveCSS("--dispatch-desktop-grid-rows", resizedRows);
   await separator.press("End");
   await expect(workspace).toHaveAttribute("data-workspace-mode", "expanded");
   await separator.press("Home");
@@ -43,7 +45,9 @@ test("a pending desktop case stays visible after crossing to mobile", async ({ p
   await expect(plate).toBeVisible();
   await expect(plate).toHaveValue("MOBILE DRAFT");
   await page.getByRole("button", { name: "Zobraziť mapu na celú plochu" }).click();
-  await page.getByRole("button", { name: "Zostať vo formulári", exact: true }).last().click();
+  // Switching between map and case preserves the editor without leaving it.
+  await expect(plate).toBeHidden();
+  await page.getByRole("button", { name: "Skryť mapu a zobraziť prípad", exact: true }).click();
   await expect(plate).toBeVisible();
   await expect(plate).toHaveValue("MOBILE DRAFT");
 });
@@ -55,6 +59,7 @@ for (const width of [360, 390, 768, 1280]) {
     page.on("pageerror", (error) => runtimeErrors.push(error.message));
     await page.setViewportSize({ width, height: 900 });
     await openDashboard(page);
+    await expect(page.getByTestId("app-release-code")).toBeInViewport({ ratio: 1 });
     const shell = page.getByTestId("dispatch-console");
     const cases = page.getByTestId("dispatch-case-list");
     const navigation = page.getByRole("navigation", { name: "Mobilná navigácia" });
@@ -106,13 +111,14 @@ for (const width of [360, 390, 768, 1280]) {
     }
 
     await navigate(page, "Úlohy");
-    const createForm = page.locator("#new-task-form");
+    const taskPage = page.getByTestId("standalone-tasks-page");
+    const createForm = taskPage.locator("#new-task-form");
     await expect(page.getByRole("heading", { name: "Zoznam úloh", exact: true })).toBeVisible();
     if (mobile) {
       await expect(navigation.locator('[aria-current="page"]')).toHaveAccessibleName("Úlohy");
       await expect(createForm).toBeHidden();
       await page.screenshot({ animations: "disabled", path: `.context/compact-tasks-${width}.png` });
-      await page.getByRole("button", { name: "Nová úloha", exact: true }).click();
+      await taskPage.getByRole("button", { name: "Nová úloha", exact: true }).click();
       await expect(createForm).toBeVisible();
       await expect(createForm.getByLabel("Názov úlohy", { exact: true })).toHaveCSS("font-size", "16px");
       await createForm.getByRole("button", { name: "Vytvoriť úlohu", exact: true }).scrollIntoViewIfNeeded();
@@ -128,8 +134,9 @@ for (const width of [360, 390, 768, 1280]) {
     await expect(settings.getByRole("button").first()).toHaveAccessibleName("Upozornenia");
     await expect(settings.getByRole("button", { name: "Upozornenia", exact: true })).toHaveAttribute("aria-current", "page");
     await expect(page.getByRole("heading", { name: "Upozornenia a zvuk", exact: true })).toBeVisible();
-    await expect(page.getByRole("switch", { name: "Push upozornenia na tomto zariadení", exact: true })).toBeVisible();
-    await expect(page.getByRole("switch", { name: "Zvuk upozornení", exact: true })).toBeVisible();
+    // The isolated mock account has no push identity; its controls remain readable.
+    await expect(page.getByLabel("Push upozornenia na tomto zariadení", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Zvuk upozornení", { exact: true })).toBeVisible();
     if (mobile) {
       const lastControl = page.getByRole("button", { name: "Obnoviť stav", exact: true });
       await lastControl.scrollIntoViewIfNeeded();
@@ -153,15 +160,16 @@ for (const width of [360, 390, 768, 1280]) {
     if (mobile) await navigation.getByRole("button", { name: "Prípady", exact: true }).click();
     await page.getByRole("button", { name: "Nový prípad", exact: true }).first().click();
     await page.getByLabel("EČV", { exact: true }).fill("MOBILE QA");
-    await navigate(page, "Úlohy");
+    // Tasks preserve the mounted case; settings exercise the leave guard.
+    await navigate(page, "Nastavenia");
     const unsaved = page.getByRole("dialog", { name: "Rozpracovaný prípad nie je uložený", exact: true });
     await expect(unsaved).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await unsaved.getByRole("button", { name: "Zostať vo formulári", exact: true }).last().click();
     await expect(page.getByLabel("EČV", { exact: true })).toHaveValue("MOBILE QA");
-    await navigate(page, "Úlohy");
+    await navigate(page, "Nastavenia");
     await unsaved.getByRole("button", { name: "Odísť bez uloženia", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Zoznam úloh", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Upozornenia a zvuk", exact: true })).toBeVisible();
     expect(runtimeErrors).toEqual([]);
   });
 }

@@ -6,8 +6,10 @@ import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { captureDiagnosticError } from "@/lib/diagnostics/errors";
 import { loginDestination } from "./login-destination";
+import { AppReleaseBadge } from "@/components/pwa/AppReleaseBadge";
+import type { AppRelease } from "@/lib/app-release";
 
-export function MotoristLogin({ message, returnTo }: { message: string; returnTo?: string }) {
+export function MotoristLogin({ message, returnTo, appRelease }: { message: string; returnTo?: string; appRelease?: AppRelease }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<"idle" | "working" | "error">("idle");
@@ -53,6 +55,7 @@ export function MotoristLogin({ message, returnTo }: { message: string; returnTo
     <main className="auth-app-shell flex min-h-screen items-center justify-center bg-zinc-100 px-4 py-10 text-zinc-950">
       <section className="w-full max-w-sm overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-2xl shadow-zinc-950/10">
         <div className="h-2 bg-[#FCD703]" />
+        {appRelease && <AppReleaseBadge release={appRelease} />}
         <div className="p-6">
           <div className="mb-6">
             <div className="mb-5 flex items-center gap-3">

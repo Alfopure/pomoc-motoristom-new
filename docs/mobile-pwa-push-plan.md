@@ -33,6 +33,8 @@ Na iOS/iPadOS 16.4+ vyžaduje push aplikáciu pridanú na plochu. Zvuk v pozadí
 
 ## Aktualizácia otvorenej PWA
 
+Viditeľné označenie prostredia a verzie, porovnávanie TESTu s produkciou a postup overenia popisuje [verzia aplikácie](operations/app-versions.md).
+
 Nové nasadenie samo nenahradí JavaScript a rozhranie už otvorenej PWA. Worker načítava navigačné HTML zo siete, ale pri kompaktnom vydaní sa jeho skript nezmenil; samotné `registration.update()` preto toto vydanie neodhalilo. Manifest používa relatívny štart `/`, takže inštalácia z nemennej Preview adresy navyše zostane na danej adrese.
 
 Prihlásená konzola si teraz uchová verziu načítaného dokumentu. Pri štarte, návrate do viditeľného okna, obnovení siete a každých päť minút počas používania ju porovná s necachovaným `/api/health/live`. Identifikátor pochádza z `VERCEL_DEPLOYMENT_ID`, potom explicitného `DEPLOYMENT_VERSION` alebo `VERCEL_GIT_COMMIT_SHA`. Lokálna neznáma verzia nevyvolá upozornenie. Výpadok siete nezablokuje prácu ani nespustí obnovenie.
