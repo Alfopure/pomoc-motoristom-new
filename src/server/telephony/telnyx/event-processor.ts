@@ -508,7 +508,11 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
           // Only requested, announced captures from our registry enter processing. A provider
           // recording enabled in its portal must not silently become an authorised app recording.
           const recorder = readMeta(ownedSession).recording?.recorders.find((r) => r.callControlId === event.callControlId && (r.providerRecordingId && typeof event.payload.recording_id === "string" ? r.providerRecordingId === event.payload.recording_id : event.clientState?.intent === recordingIntent(r.id)));
-          if (recorder && providerRecordingId && sourceUrl && startedAt && endedAt && Number.isFinite(Date.parse(startedAt)) && Date.parse(endedAt) >= Date.parse(startedAt)) {
+          // The durable inbox deliberately omits signed audio URLs. A replay
+          // still has the exact announced recorder identity and provider times;
+          // import obtains a fresh URL through its existing provider provenance
+          // guard. Requiring the ephemeral URL here strands lease-busy saves.
+          if (recorder && providerRecordingId && startedAt && endedAt && Number.isFinite(Date.parse(startedAt)) && Date.parse(endedAt) >= Date.parse(startedAt)) {
             const call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", ownedSession.id).maybeSingle();
             if (call.error || !call.data) throw new Error("recording call association unavailable");
             await enqueueSavedRecording(deps.admin, { organizationId: deps.organizationId, callId: call.data.id, sessionId: ownedSession.id, providerRecordingId, recorderId: recorder.id,
