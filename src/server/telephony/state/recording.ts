@@ -45,12 +45,9 @@ function eligible(session: SessionRow, context: RoutingContext, state: Recording
     (session.direction === "inbound" ? state.policy.inbound : session.direction === "outbound" && state.policy.outbound));
 }
 
-function actionAnnouncementsEnabled(session: SessionRow, context: RoutingContext, state: RecordingState | undefined): boolean {
-  // Basic call controls are immediate for calls without capture. Optional
-  // operational prompts remain available by explicit server configuration;
-  // recorded or uncertain sessions retain their existing privacy sequence.
-  return process.env.TELNYX_CALL_ACTION_ANNOUNCEMENTS_ENABLED === "true" ||
-    Boolean(state?.recorders.some(potentiallyRecording) || state?.barrier || state?.pendingAudio) || eligible(session, context, state);
+function actionAnnouncementsEnabled(): boolean {
+  // Optional control prompts are independent of mandatory notices and STOP.
+  return process.env.TELNYX_CALL_ACTION_ANNOUNCEMENTS_ENABLED === "true";
 }
 
 /** A global recording switch alone cannot make a silent call require a media lease. */
@@ -300,16 +297,18 @@ export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: A
       if (state.barrier) return reject("Vypnutie nahrávania ešte nie je potvrdené.");
       return stopRecorders(current, state, event, context, false);
     }
-    if (event.kind === "app" && ACTION_PROMPTS[event.type] && session.direction !== "internal" && actionAnnouncementsEnabled(current, context, state)) {
+    // A private consult participant must hear the recording notice before
+    // joining the customer, including when operational prompts are disabled.
+    if (event.kind === "app" && event.type === "complete_transfer" && eligible(current, context, state) && state.policy.conferenceVerified && state.policy.transferVerified) {
       core(current, legs, attempts, event, context);
-      const keys: AnnouncementKey[] = [ACTION_PROMPTS[event.type]!];
+      const consult = legs.find((leg) => leg.role === "consult" && isOpenLeg(leg));
+      if (consult && !state.notifiedCallControlIds?.includes(consult.telnyx_call_control_id)) return startSequence(current, context, consult.telnyx_call_control_id, [noticeKey(state)], event, event.id);
+    }
+    if (event.kind === "app" && ACTION_PROMPTS[event.type] && session.direction !== "internal") {
+      core(current, legs, attempts, event, context);
+      const keys: AnnouncementKey[] = actionAnnouncementsEnabled() ? [ACTION_PROMPTS[event.type]!] : [];
       if (["unhold", "cancel_consult"].includes(event.type) && isAnnouncementEnabled(announcements, "recordingResumed") && eligible(current, context, state) && state.policy.conferenceVerified && context.recordingPolicy?.conferenceVerified) keys.push("recordingResumed");
-      // A private consult participant must hear the recording notice before joining the customer.
-      if (event.type === "complete_transfer" && eligible(current, context, state) && state.policy.conferenceVerified && state.policy.transferVerified) {
-        const consult = legs.find((leg) => leg.role === "consult" && isOpenLeg(leg));
-        if (consult && !state.notifiedCallControlIds?.includes(consult.telnyx_call_control_id)) return startSequence(current, context, consult.telnyx_call_control_id, [noticeKey(state)], event, event.id);
-      }
-      return startSequence(current, context, customer.telnyx_call_control_id, keys, event, event.id);
+      if (keys.length) return startSequence(current, context, customer.telnyx_call_control_id, keys, event, event.id);
     }
     if (event.kind === "app" && event.type === "supervise" && event.supervisor?.mode === "barge" && eligible(current, context, state) && state.policy.conferenceVerified) {
       const supervisor = legs.find((leg) => leg.role === "supervisor" && leg.profile_id === event.supervisor?.profileId && isOpenLeg(leg));
