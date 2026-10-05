@@ -1999,11 +1999,13 @@ async function executeReduceResult(
         ctx.session = session;
       }
       const message = describeError(error);
-      if (command.kind === "playback_start" && command.clientState?.intent?.startsWith("queue_music:") && isDefiniteMediaRejection(error) && !isCallGoneError(error)) {
+      if (command.kind === "playback_start" && "key" in command.media && command.media.key === "moh" && isDefiniteMediaRejection(error) && !isCallGoneError(error)) {
         const meta = readMeta(ctx.session);
         const waiting = meta.waiting;
         if (meta.queue && waiting?.audio_phase === "music" && waiting.music?.id === command.commandId && !waiting.music.retry_at) {
           const checkpoint = emptyTransition();
+          // Match the tracked command, including reminder playback carrying
+          // the current gather token instead of a separate queue_music intent.
           // Only a definite rejection proves the loop did not start. An
           // ambiguous timeout must not dispatch a fresh overlapping playback.
           checkpoint.session.metadata = toJson({ ...meta, waiting: { ...waiting, music: { ...waiting.music, retry_at: new Date(deps.now().getTime() + 60_000).toISOString() } } });
