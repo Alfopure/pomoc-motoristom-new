@@ -488,7 +488,7 @@ function latestIso(first: string, ...rest: Array<string | null | undefined>): st
   return latest;
 }
 
-function gatherCmd(b: TransitionBuilder, leg: LegRow, spec: GatherSpec, intentSuffix = ""): Command {
+function gatherCmd(b: TransitionBuilder, leg: LegRow, spec: GatherSpec, intentSuffix = ""): Extract<Command, { kind: "gather" }> {
   const id = b.cmdId(leg.telnyx_call_control_id, `gather:${spec.purpose}${intentSuffix}`);
   const gatherId = id.replaceAll("-", "").slice(0, 12);
   if (spec.purpose !== "moh_tick") b.patchMeta({ gather: { id: gatherId, started_at: b.nowIso, deadline_at: new Date(b.ctx.now.getTime() + gatherTimeoutMs({ ...b.session, metadata: mergeMeta(b.session, b.meta) }, spec)).toISOString(), spec } });
@@ -556,9 +556,24 @@ function startQueueMusic(b: TransitionBuilder, leg: LegRow): void {
   const remaining = Math.max(1_000, Math.min(interval, phaseRemaining, deadline - b.ctx.now.getTime()));
   if (waiting) b.patchMeta({ waiting: { ...waiting, audio_phase: "music", music_until: new Date(b.ctx.now.getTime() + remaining).toISOString() } });
   const retryMusic = waiting?.music?.retry_at && Date.parse(waiting.music.retry_at) <= b.ctx.now.getTime();
-  if (!Number.isFinite(currentEnd) || retryMusic) startMoh(b, leg);
-  b.cmd(gatherCmd(b, leg, { media: null, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1,
-    validDigits: queueCallbackEnabled(b) ? "1" : "0123456789#*", timeoutMillis: remaining, initialTimeoutMillis: remaining }));
+  const gather = gatherCmd(b, leg, { media: null, purpose: "queue_wait", maximumDigits: 1, maximumTries: 1,
+    validDigits: queueCallbackEnabled(b) ? "1" : "0123456789#*", timeoutMillis: remaining, initialTimeoutMillis: remaining });
+  if (waiting?.audio_policy && waiting.audio_policy.mode !== "music") {
+    // Telnyx queues a gather behind a playback already in progress: our 22 s
+    // music file then delayed a configured 15 s interval to 37 s. Arm the
+    // gather first; playback can run alongside it. Rearming after a digit or
+    // watchdog must also clear the old playback, preserving the original end.
+    if (Number.isFinite(currentEnd) && !waiting.music?.retry_at) stopMoh(b, leg, { required: true });
+    b.cmd(gather);
+    if (!Number.isFinite(currentEnd) || !waiting.music?.retry_at || retryMusic) {
+      // client_state is call-wide. The later playback must keep this exact
+      // gather token so DTMF1 and the timer still identify the current wait.
+      startMoh(b, leg, gather.clientState);
+    }
+  } else {
+    if (!Number.isFinite(currentEnd) || retryMusic) startMoh(b, leg);
+    b.cmd(gather);
+  }
 }
 
 /**
@@ -567,14 +582,14 @@ function startQueueMusic(b: TransitionBuilder, leg: LegRow): void {
  * room share the command id, so a fallback that walks from one to the other
  * cannot issue the same `playback_start` twice.
  */
-function startMoh(b: TransitionBuilder, customer: LegRow): void {
+function startMoh(b: TransitionBuilder, customer: LegRow, clientState?: TelnyxClientState): void {
   if (!b.ctx.mediaAvailable) return;
   const commandId = b.cmdId(customer.telnyx_call_control_id, "playback:moh");
   if (b.commands.some((command) => "commandId" in command && command.commandId === commandId)) return;
   const trackedQueueMusic = Boolean(b.meta.queue && b.meta.waiting?.audio_phase === "music");
   if (trackedQueueMusic && b.meta.waiting) b.patchMeta({ waiting: { ...b.meta.waiting, music: { id: commandId, started_at: b.nowIso } } });
   b.cmd({ kind: "playback_start", commandId, leg: ref(customer), media: { key: "moh" }, loop: "infinity", bestEffort: true,
-    ...(trackedQueueMusic ? { clientState: customerState(b.session.id, `queue_music:${commandId.replaceAll("-", "").slice(0, 12)}`) } : {}) });
+    ...(clientState ? { clientState } : trackedQueueMusic ? { clientState: customerState(b.session.id, `queue_music:${commandId.replaceAll("-", "").slice(0, 12)}`) } : {}) });
 }
 
 const RINGBACK_FILE = "tones-v1/ringback.mp3";
@@ -1260,7 +1275,7 @@ function mohIsPlaying(b: TransitionBuilder): boolean {
   return (b.session.state === "ringing" && RINGING_WITH_MUSIC.has(b.meta.ring?.mode ?? "")) || WAITING_STATES.has(b.session.state);
 }
 
-function stopMoh(b: TransitionBuilder, customer: LegRow): void {
+function stopMoh(b: TransitionBuilder, customer: LegRow, options: { required?: boolean } = {}): void {
   // No target may be reachable in this very transition. Cancel the unsent
   // ringback rather than queueing it in front of the fallback announcement.
   const pendingRingback = b.commands.findIndex((command) => command.kind === "playback_start" &&
@@ -1273,7 +1288,10 @@ function stopMoh(b: TransitionBuilder, customer: LegRow): void {
   const commandId = b.cmdId(customer.telnyx_call_control_id, "playback_stop");
   // One transition can pass through two callers (fallback → callback offer).
   if (b.commands.some((command) => "commandId" in command && command.commandId === commandId)) return;
-  b.cmd({ kind: "playback_stop", commandId, leg: ref(customer), bestEffort: true });
+  // A reminder rearm must clear playback before arming the replacement timer.
+  // Keep that stop pending on uncertain delivery rather than queueing a timer
+  // behind music that might still be playing.
+  b.cmd({ kind: "playback_stop", commandId, leg: ref(customer), bestEffort: !options.required });
 }
 
 function offerCallback(b: TransitionBuilder, customer: LegRow, media: MediaRef, source: SessionMeta["callback"] extends infer T ? (T extends { source?: infer S } ? NonNullable<S> : never) : never): void {
@@ -2528,7 +2546,9 @@ function onPlaybackEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceRes
       event.clientState?.intent === "queue_wait" && Boolean(event.clientState.gatherId && event.clientState.gatherId === b.meta.gather?.id));
     if (!b.meta.queue || waiting?.audio_phase !== "music" || !music || !correlated ||
       !event.occurredAt || !(Date.parse(event.occurredAt) >= Date.parse(music.started_at))) return ignoredResult("old or uncorrelated queue music completion");
-    if (["completed", "file_not_found", "failed", "error"].includes(event.status ?? "") && !music.retry_at) {
+    // Infinite playback emits `completed` after every file iteration. It is
+    // still playing; only an actual failure should suppress it until retry.
+    if (["file_not_found", "failed", "error"].includes(event.status ?? "") && !music.retry_at) {
       // Back off and use an existing tick, never a rapid webhook retry loop.
       b.patchMeta({ waiting: { ...waiting, music: { ...music, retry_at: new Date(b.ctx.now.getTime() + MOH_TICK_TIMEOUT_MS).toISOString() } } });
       return b.note("queue music ended → retry after backoff").result();
