@@ -1671,6 +1671,7 @@ export type Database = {
       }>;
     };
     Functions: {
+      motorist_active_call_snapshot_v1: { Args: { p_organization_id: string; p_environment: string }; Returns: Json };
       motorist_callback_queue_page_v1: { Args: { p_organization_id: string; p_cursor?: Json; p_limit?: number }; Returns: Json };
       motorist_diagnostics_ingest: { Args: {p_org:string;p_profile:string;p_environment:string;p_source:string;p_build:string;p_events:Json}; Returns:Json };
       motorist_diagnostics_read: { Args: {p_org:string;p_profile:string;p_environment:string;p_mode:string;p_id?:string|null;p_since?:string;p_until?:string;p_cursor_at?:string|null;p_cursor_id?:string|null;p_limit?:number;p_status?:string|null}; Returns:Json };
