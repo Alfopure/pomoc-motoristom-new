@@ -4,6 +4,7 @@ import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
 import { createTelephonyHarness, LINES, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { pickupWaitingCall } from "../call-actions";
 import { runSessionEvent } from "../session-runner";
+import { decodeClientState, encodeClientState } from "../telnyx/client-state";
 import { readMeta, type CallbackPlan, type SessionRow } from "./types";
 
 const waitId = "00000000-0000-4000-8000-000000007801";
@@ -148,14 +149,15 @@ describe("per-step waiting room audio policy", () => {
     expect(h.telnyx.of("dial")).toHaveLength(0);
   });
 
-  it.each(["answer", "callback"])("serializes simultaneous pickup and callback when %s wins", async winner => {
+  it.each(["answer", "callback"].flatMap(winner => ["gather", "dtmf"].map(input => ({ winner, input }))))("serializes simultaneous pickup and $input callback when $winner wins", async ({ winner, input }) => {
     const { h, inbound } = setup({ mode: "callback", intervalSeconds: 15 });
     const call = await inbound();
     const queueState = lastGather(h).params.clientState;
     await pickupWaitingCall(h.deps, { profileId: PROFILES.o2, role: "dispatcher" }, call.sessionId);
     const picker = h.openLegFor(call.sessionId, PROFILES.o2)!;
     const answer = () => h.legEvent(String(picker.telnyx_call_control_id), "call.answered");
-    const callback = () => complete(h, call.callControlId, queueState, "1");
+    const callback = () => input === "gather" ? complete(h, call.callControlId, queueState, "1")
+      : h.legEvent(call.callControlId, "call.dtmf.received", { digit: "1", client_state: queueState });
     if (winner === "answer") { await answer(); await callback(); }
     else { await callback(); await answer(); }
     expect(h.session(call.sessionId).state).toBe(winner === "answer" ? "talking" : "callback_offered");
@@ -163,16 +165,83 @@ describe("per-step waiting room audio policy", () => {
     expect(h.telnyx.of("bridge")).toHaveLength(winner === "answer" ? 1 : 0);
   });
 
-  it("does not accept an old wait choice after timeout or caller hangup", async () => {
+  it.each(["gather", "dtmf"])("does not accept an old %s wait choice after timeout or caller hangup", async input => {
     for (const end of ["timeout", "hangup"] as const) {
       const { h, inbound } = setup({ mode: "callback", intervalSeconds: 15 }, 1);
       const call = await inbound(); const oldGather = lastGather(h).params.clientState;
       if (end === "hangup") await h.legEvent(call.callControlId, "call.hangup");
       else { h.advance(60_000); h.touchDevice(PROFILES.o1); await sweep(h, call.sessionId); }
-      await complete(h, call.callControlId, oldGather, "1");
+      if (input === "gather") await complete(h, call.callControlId, oldGather, "1");
+      else await h.legEvent(call.callControlId, "call.dtmf.received", { digit: "1", client_state: oldGather });
       expect(h.rows("motorist_callback_requests").some(row => Boolean((row.metadata as { request?: unknown })?.request))).toBe(false);
       expect(h.session(call.sessionId).state).toBe(end === "timeout" ? "ringing" : "ended");
     }
+  });
+
+  it.each(["music", "announcement", "anonymous"] as const)("does not infer callback consent from bare DTMF with %s waiting", async mode => {
+    const { h, inbound } = setup({ mode: mode === "anonymous" ? "callback" : mode, intervalSeconds: 15 }, 2, { anonymous: mode === "anonymous" });
+    const call = await inbound();
+    const before = h.telnyx.calls.length;
+    await h.legEvent(call.callControlId, "call.dtmf.received", { digit: "1", client_state: lastGather(h).params.clientState });
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+    expect(h.telnyx.calls).toHaveLength(before);
+  });
+
+  it.each(["other digit", "multiple digits", "missing state", "missing token", "stale token", "wrong role", "wrong intent", "wrong session",
+    "before gather", "missing timestamp", "after deadline", "invalid start", "invalid deadline", "ended customer", "wrong customer",
+    "answered externally", "gone gather", "multiple-digit gather", "no queue"] as const)("ignores uncorrelated waiting DTMF: %s", async fault => {
+    const { h, inbound } = setup({ mode: "callback", intervalSeconds: 15 });
+    const call = await inbound();
+    h.advance(8_000); await complete(h, call.callControlId);
+    const current = meta(h, call.sessionId);
+    const state = decodeClientState(String(lastGather(h).params.clientState))!;
+    if (fault === "missing token") delete state.gatherId;
+    if (fault === "stale token") state.gatherId = "000000000000";
+    if (fault === "wrong role") state.role = "operator";
+    if (fault === "wrong intent") state.intent = "ivr";
+    if (fault === "wrong session") state.sid = "00000000-0000-4000-8000-000000009999";
+    if (fault === "invalid start") current.gather!.started_at = "invalid";
+    if (fault === "invalid deadline") current.gather!.deadline_at = "invalid";
+    if (fault === "gone gather") current.gather!.call_gone = true;
+    if (fault === "multiple-digit gather") current.gather!.spec.maximumDigits = 2;
+    if (fault === "no queue") current.queue = null;
+    h.db.update("motorist_call_sessions", { metadata: current,
+      ...(fault === "wrong customer" ? { customer_leg_id: null } : {}),
+      ...(fault === "answered externally" ? { answered_at: h.now().toISOString() } : {}),
+    }, row => row.id === call.sessionId);
+    if (fault === "ended customer") h.db.update("motorist_call_legs", { ended_at: h.now().toISOString(), state: "ended" }, row => row.telnyx_call_control_id === call.callControlId);
+    const event = h.envelope("call.dtmf.received", { call_control_id: call.callControlId, call_session_id: call.telnyxSessionId,
+      digit: fault === "other digit" ? "2" : fault === "multiple digits" ? "11" : "1", client_state: fault === "missing state" ? null : encodeClientState(state) });
+    if (fault === "before gather") event.data.occurred_at = new Date(h.now().getTime() - 1).toISOString();
+    if (fault === "missing timestamp") event.data.occurred_at = "";
+    if (fault === "after deadline") event.data.occurred_at = new Date(Date.parse(current.gather!.deadline_at) + 1).toISOString();
+    const before = h.telnyx.calls.length;
+    await h.process(event);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+    expect(h.telnyx.calls).toHaveLength(before);
+  });
+
+  it("leaves individual IVR digits to its gather completion", async () => {
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    const call = await h.inbound({ to: NUMBERS.neutral });
+    expect(h.session(call.sessionId).state).toBe("ivr");
+    const before = h.telnyx.calls.length;
+    await h.legEvent(call.callControlId, "call.dtmf.received", { digit: "1", client_state: lastGather(h).params.clientState });
+    expect(h.session(call.sessionId).state).toBe("ivr");
+    expect(h.telnyx.calls).toHaveLength(before);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+  });
+
+  it("cannot accept a pickup operator's digit as the waiting caller's request", async () => {
+    const { h, inbound } = setup({ mode: "callback", intervalSeconds: 15 });
+    const call = await inbound();
+    const callerState = lastGather(h).params.clientState;
+    await pickupWaitingCall(h.deps, { profileId: PROFILES.o2, role: "dispatcher" }, call.sessionId);
+    const picker = h.openLegFor(call.sessionId, PROFILES.o2)!;
+    const before = h.telnyx.calls.length;
+    await h.legEvent(String(picker.telnyx_call_control_id), "call.dtmf.received", { digit: "1", client_state: callerState });
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+    expect(h.telnyx.calls).toHaveLength(before);
   });
 
   it("records skipped steps without inventing a ringing interval", async () => {

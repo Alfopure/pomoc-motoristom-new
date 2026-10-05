@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingFlow, IncomingWaitPolicy } from "@/lib/telephony/incoming-flow";
-import { createTelephonyHarness, LINES, NUMBERS, PROFILES } from "@/test/telephony-harness";
+import { callbackOrigin } from "@/lib/telephony/callback-origin";
+import { CONNECTION_ID, createTelephonyHarness, LINES, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
 import { createTelnyxClient } from "../telnyx/client";
 import { decodeClientState } from "../telnyx/client-state";
+import { replayDeferredSessionEvents } from "../telnyx/event-processor";
 import { runSessionEvent } from "../session-runner";
 import { parkCall } from "../call-actions";
 import { readMeta, type CallbackPlan, type SessionRow } from "./types";
@@ -192,17 +194,90 @@ describe("waiting flow through real Telnyx HTTP adapter", () => {
     expect(calls.filter(item => item.action === "calls")).toHaveLength(0);
   });
 
-  it("does not treat the separate DTMF event as a confirmed choice or completed playback as a gather timeout", async () => {
-    const { h, calls, inbound, complete, lastGather } = setup({ mode: "callback", intervalSeconds: 15 });
+  it.each(["prompt", "music"] as const)("accepts the caller's bare DTMF during %s even if the gather later reports an empty timeout", async phase => {
+    const { h, calls, inbound, complete, lastGather, meta } = setup({ mode: "callback", intervalSeconds: 15 });
     const call = await inbound();
+    if (phase === "music") { h.advance(8_000); await complete(call.callControlId); }
     const state = lastGather().body.client_state;
     const count = calls.length;
-    await h.legEvent(call.callControlId, "call.dtmf.received", { digit: "1", client_state: state });
     await h.legEvent(call.callControlId, "call.speak.ended", { status: "completed", client_state: state });
     expect(h.rows("motorist_callback_requests")).toHaveLength(0);
     expect(calls).toHaveLength(count);
-    await complete(call.callControlId, "1", state);
+    h.advance(250);
+    const requestedAt = h.now().toISOString();
+    await h.legEvent(call.callControlId, "call.dtmf.received", { digit: "1", client_state: state }, "caller-one");
+    const afterChoice = calls.length;
+    await h.legEvent(call.callControlId, "call.dtmf.received", { digit: "1", client_state: state }, "caller-one");
+    await h.legEvent(call.callControlId, "call.dtmf.received", { digit: "1", client_state: state });
+    h.advance(15_000);
+    await complete(call.callControlId, "", state); // Exact failure observed on the real Telnyx music gather.
+    await complete(call.callControlId, "1", state); // A valid completion must not confirm twice either.
     expect(h.rows("motorist_callback_requests")).toHaveLength(1);
+    expect(calls).toHaveLength(afterChoice);
+    const request = h.rows("motorist_callback_requests")[0];
+    expect(callbackOrigin(String(request.source), request.metadata)).toEqual({
+      kind: "requested", requestedAt, digit: "1", context: "waiting_room", evidence: "dtmf",
+    });
+    expect(meta(call.sessionId).journey?.entries.filter(entry => entry.reason === "callback_requested")).toHaveLength(1);
+    expect(calls.filter(item => item.action === "gather_stop")).toHaveLength(1);
+    const confirmations = calls.filter(item => item.action === "playback_start" && decodeClientState(String(item.body.client_state))?.intent === "callback_confirmation");
+    expect(confirmations).toHaveLength(1);
+    await h.legEvent(call.callControlId, "call.playback.ended", { status: "completed", client_state: confirmations[0].body.client_state });
+    expect(calls.at(-1)?.action).toBe("hangup");
+    expect(calls.filter(item => item.action === "calls")).toHaveLength(0);
+  });
+
+  it.each([1, 2] as const)("persists a retried DTMF choice before confirmation with writer contract %s", async contract => {
+    const { h, calls, inbound, lastGather } = setup({ mode: "callback", intervalSeconds: 15 }, 2, contract);
+    const call = await inbound();
+    const state = lastGather().body.client_state;
+    const callbackRpc = h.db.rpcHandlers.get("motorist_create_callback_obligation_v1")!;
+    let fail = true;
+    h.db.registerRpc("motorist_create_callback_obligation_v1", (args, db) => {
+      if (fail) throw new Error("Injected callback write failure");
+      return callbackRpc(args, db);
+    });
+    const event = h.envelope("call.dtmf.received", { call_control_id: call.callControlId, call_session_id: call.telnyxSessionId, digit: "1", client_state: state }, "durable-caller-one");
+    const confirmations = () => calls.filter(item => item.action === "playback_start" && decodeClientState(String(item.body.client_state))?.intent === "callback_confirmation");
+    await h.process(event);
+    expect(h.session(call.sessionId).metadata).toMatchObject({ callback: { confirmed: true, digit: "1", event_id: "durable-caller-one" } });
+    expect(h.rows("motorist_callback_requests")).toHaveLength(0);
+    expect(confirmations()).toHaveLength(0);
+    fail = false;
+    h.advance(60_000);
+    await h.process(event);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(1);
+    // Contract 1 may resend after replaying its cursor; Telnyx deduplicates the
+    // identical command. Contract 2 journals the acknowledged HTTP delivery.
+    expect(new Set(confirmations().map(item => item.body.command_id)).size).toBe(1);
+    const deliveries = confirmations().length;
+    if (contract === 2) expect(deliveries).toBe(1);
+    await h.process(event);
+    expect(h.rows("motorist_callback_requests")).toHaveLength(1);
+    expect(confirmations()).toHaveLength(deliveries);
+  });
+
+  it.each([false, true])("drains deferred DTMF before an empty gather timeout, while caller hangup wins (%s)", async hungUp => {
+    const { h, calls, inbound, complete, lastGather } = setup({ mode: "callback", intervalSeconds: 15 });
+    const call = await inbound();
+    h.advance(8_000); await complete(call.callControlId);
+    const state = lastGather().body.client_state;
+    h.advance(1_000);
+    const row = { organization_id: ORG, call_session_id: call.telnyxSessionId, call_control_id: call.callControlId, connection_id: CONNECTION_ID,
+      status: "failed", retry_state: "deferred", attempts: 1, delivery_count: 1, deferral_count: 1, effect_failure_count: 0, contract_version: 2,
+      claimed_at: null, next_attempt_at: h.now().toISOString(), received_at: h.now().toISOString(), occurred_at: h.now().toISOString() };
+    h.db.insert("motorist_telnyx_webhook_events", [
+      { ...row, event_id: "deferred-timeout", event_type: "call.gather.ended", payload: { status: "timeout", digits: "", client_state: state } },
+      { ...row, event_id: "deferred-one", event_type: "call.dtmf.received", payload: { digit: "1", client_state: state } },
+      ...(hungUp ? [{ ...row, event_id: "deferred-hangup", event_type: "call.hangup", payload: { hangup_cause: "normal_clearing", client_state: state } }] : []),
+    ]);
+    const mark = h.db.log.length;
+    await replayDeferredSessionEvents(h.deps, call.sessionId);
+    await replayDeferredSessionEvents(h.deps, call.sessionId); // Each retained drain is deliberately bounded.
+    expect(h.db.log.slice(mark).filter(entry => entry.table === "motorist_telnyx_claim_webhook_event_v2").map(entry => (entry.payload as { p_event_id: string }).p_event_id))
+      .toEqual([...(hungUp ? ["deferred-hangup"] : []), "deferred-one", "deferred-timeout"]);
+    expect(h.rows("motorist_callback_requests").filter(row => callbackOrigin(String(row.source), row.metadata).kind === "requested")).toHaveLength(hungUp ? 0 : 1);
+    expect(calls.filter(item => item.action === "playback_start" && decodeClientState(String(item.body.client_state))?.intent === "callback_confirmation")).toHaveLength(hungUp ? 0 : 1);
   });
 
   it("retains announcement-only policy across a provider 422 fallback and watchdog recovery", async () => {

@@ -33,7 +33,9 @@ describe("health release identifiers", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
-    await expect(response.json()).resolves.toEqual({ status: "live", version: "dpl_current" });
+    await expect(response.json()).resolves.toEqual({ status: "live", version: "dpl_current", release: {
+      environment: "development", code: null, builtAt: null, commit: "current-commit", deployment: "dpl_current",
+    } });
     expect(mocks.adminClient).not.toHaveBeenCalled();
     expect(mocks.serviceEnv).not.toHaveBeenCalled();
   });

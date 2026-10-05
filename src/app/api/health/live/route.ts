@@ -1,4 +1,5 @@
 import { getAppVersion } from "@/server/app-version";
+import { getAppRelease } from "@/server/app-release";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,6 +9,7 @@ export function GET() {
     {
       status: "live",
       version: getAppVersion(),
+      release: getAppRelease(),
     },
     {
       headers: {

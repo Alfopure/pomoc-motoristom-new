@@ -2,8 +2,10 @@ import type { NextConfig } from "next";
 import { realpathSync } from "node:fs";
 import { relative } from "node:path";
 import { resolveAppEnvironment } from "./src/lib/app-environment";
+import { appBuildMetadata } from "./scripts/app-release";
 
 const deploymentVersion = process.env.DEPLOYMENT_VERSION?.trim();
+const release = appBuildMetadata();
 const diagnosticBuild = [deploymentVersion, process.env.VERCEL_GIT_COMMIT_SHA, "local"].find(value => value && /^[a-zA-Z0-9_-]{1,64}$/.test(value))!;
 // Trace physical package paths: files beneath pnpm aliases collide with symlinks
 // when Vercel assembles the function directory.
@@ -11,7 +13,12 @@ const playwrightRuntime = relative(process.cwd(), realpathSync("node_modules/pla
 
 const nextConfig: NextConfig = {
   deploymentId: deploymentVersion,
-  env: { NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID: diagnosticBuild, NEXT_PUBLIC_DIAGNOSTICS_ENVIRONMENT: resolveAppEnvironment() },
+  env: {
+    NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID: diagnosticBuild,
+    NEXT_PUBLIC_DIAGNOSTICS_ENVIRONMENT: resolveAppEnvironment(),
+    NEXT_PUBLIC_APP_RELEASE_CODE: release.code,
+    NEXT_PUBLIC_APP_BUILT_AT: release.builtAt,
+  },
   generateBuildId: async () => deploymentVersion || "local",
   // Only the private artifact script enables maps, then removes them from public output.
   productionBrowserSourceMaps: process.env.DIAGNOSTICS_PRIVATE_SOURCE_MAPS === "1",
