@@ -3,6 +3,7 @@ import { createTelephonyHarness, ORG, PROFILES, type TelephonyHarness } from "@/
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
 import { completeTransfer, holdCall, hangupCall, startConsult, unholdCall } from "../call-actions";
 import { runPendingEffectRecovery } from "../cron-jobs";
+import { recoverSessionContactChecks } from "../session-runner";
 import { readContactHistory, type ContactProof } from "../contact-proof";
 import { readPendingEffects } from "./continuation";
 import { type SessionRow } from "./types";
@@ -18,8 +19,8 @@ const pending = (h: TelephonyHarness, id: string) => readPendingEffects(session(
 const proofs = (h: TelephonyHarness, id: string) => readContactHistory(session(h, id)).proofs;
 const audioMethods = new Set(["dial", "bridge", "createConference", "conference:join", "recordingStart", "playbackStart", "speak"]);
 
-async function ringing() {
-  const h = createTelephonyHarness();
+async function ringing(writerContract?: 2) {
+  const h = createTelephonyHarness({ writerContract });
   h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(), inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
   const call = await h.inbound(); await completeCallAnnouncements(h, call.sessionId);
   const row = session(h, call.sessionId);
@@ -139,6 +140,21 @@ describe("conference callback maintenance recovery", () => {
     await unholdCall(h.deps, actor, call.sessionId); await completeCallAnnouncements(h, call.sessionId);
     expect(h.session(call.sessionId).state).toBe("talking");
     expect(call.callbackStatus()).toBe("done");expect(proofs(h, call.sessionId)).toHaveLength(1);
+  });
+
+  it("fulfills restored contact after the fenced unhold response without reissuing audio commands", async () => {
+    const call = await ringing(2), { h } = call;
+    const read = afterJoinRead(h, () => { throw new Error("initial verification unavailable"); });
+    await h.legEvent(call.operator, "call.answered");
+    await holdCall(h.deps, actor, call.sessionId); await completeCallAnnouncements(h, call.sessionId);
+    read.mockRestore();
+    await unholdCall(h.deps, actor, call.sessionId); await completeCallAnnouncements(h, call.sessionId);
+    expect(h.session(call.sessionId).state).toBe("talking");
+    expect(call.callbackStatus()).toBe("open");
+    const sent = h.telnyx.calls.length;
+    await recoverSessionContactChecks(h.deps, call.sessionId);
+    expect(call.callbackStatus()).toBe("done");expect(proofs(h, call.sessionId)).toHaveLength(1);
+    expect(h.telnyx.calls.slice(sent).filter(call => audioMethods.has(call.method))).toEqual([]);
   });
 
   it("verifies the new serving operator when attended transfer restores customer audio", async () => {

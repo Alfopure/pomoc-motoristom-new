@@ -1,4 +1,8 @@
 export class SessionLeaseLostError extends Error {
+  // An abandoned owned request is terminal. postgrest-js otherwise treats
+  // this transport refusal as a network failure and sleeps/retries a GET.
+  readonly code = "ABORT_ERR";
+
   constructor() {
     super("session lease unavailable during effects");
     this.name = "SessionLeaseLostError";
