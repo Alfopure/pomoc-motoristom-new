@@ -6,8 +6,10 @@ import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { captureDiagnosticError } from "@/lib/diagnostics/errors";
 import { loginDestination } from "./login-destination";
+import { AppReleaseBadge } from "@/components/pwa/AppReleaseBadge";
+import type { AppRelease } from "@/lib/app-release";
 
-export function MotoristLogin({ message, returnTo }: { message: string; returnTo?: string }) {
+export function MotoristLogin({ message, returnTo, appRelease }: { message: string; returnTo?: string; appRelease?: AppRelease }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<"idle" | "working" | "error">("idle");
@@ -110,6 +112,7 @@ export function MotoristLogin({ message, returnTo }: { message: string; returnTo
             Informácie o nahrávaní hovorov
           </Link>
         </div>
+        {appRelease && <div className="px-4 pb-2"><AppReleaseBadge release={appRelease} /></div>}
       </section>
     </main>
   );

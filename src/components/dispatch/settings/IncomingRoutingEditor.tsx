@@ -1,128 +1,176 @@
 "use client";
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Clock3, GitBranch, Loader2, Save, Settings2, Undo2 } from "lucide-react";
 import type { DraftEditorState } from "../useDraftEditors";
-import { Loader2, Save, Undo2 } from "lucide-react";
 import type { RoutingDocument } from "@/server/telephony/config-service";
 import type { RoutingNavigationTarget } from "@/lib/telephony/routing-summary";
+import { parseIncomingFlow, type IncomingFlow } from "@/lib/telephony/incoming-flow";
+import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import { ConfigRequestError, loadRoutingConfig, saveRoutingConfig, type RoutingConfigResponse } from "./config-client";
-import { FALLBACK_DESTINATION_ALLOWLIST, validateRingGroupDrafts, type GroupDraft } from "./ring-groups-model";
-import { describeRingPlan, ringPlanIdsInUse, validateRingPlanDrafts, type PlanDraft } from "./ring-plan-model";
-import { documentWithDraft, identifyGroups, identifyPlans, incomingDraft, incomingMatches, incomingPayload, mergeSavedLine } from "./incoming-routing-model";
-import { RingGroupsEditor } from "./RingGroupsEditor";
-import { RingPlanEditor } from "./RingPlanEditor";
-import { LineInboundModeControl } from "./LineInboundModeControl";
-import { SettingsIssueList, SettingsNotice, settingsInputClass } from "./settings-ui";
+import { initialIncomingLineId } from "./incoming-routing-model";
+import { emptyIncomingFlow, incomingFlowChanges, incomingFlowsMatch, incomingFlowSummary, legacyIncomingFlow, validateIncomingFlowDraft, type FlowDrafts } from "./incoming-flow-model";
+import { IncomingFlowSteps } from "./IncomingFlowSteps";
+import { IncomingFlowMonitor } from "./IncomingFlowMonitor";
+import { LegacyIncomingRoutingEditor } from "./LegacyIncomingRoutingEditor";
+import { SettingsIssueList, SettingsNotice } from "./settings-ui";
+import styles from "./incoming-flow.module.css";
 
 export type IncomingEditorActions = { save: () => Promise<boolean>; discard: () => void };
-export function IncomingRoutingEditor({ document, canEdit, target, onSaved, onLineSaved, onNavigate, onDirtyChange, onActionsChange, onEditorStateChange }: {
+type Props = {
   document: RoutingDocument; canEdit: boolean; target?: RoutingNavigationTarget | null;
   onSaved: (response: RoutingConfigResponse) => void;
-  onLineSaved: (response: RoutingConfigResponse) => void;
   onNavigate: (target: RoutingNavigationTarget) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onActionsChange?: (actions: IncomingEditorActions | null) => void;
   onEditorStateChange?: (state: DraftEditorState | null) => void;
-}) {
+};
+
+/** Existing databases and complex legacy routes retain their original, guarded editor. */
+export function IncomingRoutingEditor(props: Props) {
+  const [legacy, setLegacy] = useState(Boolean((props.target?.planId || props.target?.groupId) && !props.target?.lineId));
+  const [legacyPending, setLegacyPending] = useState(false);
+  const [legacyLineId, setLegacyLineId] = useState<string | null>(null);
+  const [previousTarget, setPreviousTarget] = useState(props.target);
+  const parentEditorStateChange = props.onEditorStateChange;
+  const handleLegacyState = useCallback((state: DraftEditorState | null) => {
+    setLegacyPending(Boolean(state?.dirty || state?.saving));
+    parentEditorStateChange?.(state);
+  }, [parentEditorStateChange]);
+  const legacyTarget = useMemo(() => legacyLineId ? { section: "telephony" as const, tab: "incoming" as const, lineId: legacyLineId } : props.target, [legacyLineId, props.target]);
+  if (props.target !== previousTarget) {
+    setPreviousTarget(props.target);
+    if (props.target?.planId || props.target?.groupId) setLegacy(true);
+    else if (props.target?.lineId) setLegacy(false);
+  }
+  if (!props.document.capabilities?.unifiedIncomingFlow) return <LegacyIncomingRoutingEditor {...props} />;
+  if (legacy) return <div className="grid min-w-0 gap-3">
+    <div><button type="button" disabled={legacyPending} className={styles.button} onClick={() => setLegacy(false)}><ArrowLeft size={16} aria-hidden="true" />Späť na postup hovoru</button>{legacyPending && <p className={styles.note}>Pred návratom ulož alebo zahoď rozpracované zmeny.</p>}</div>
+    <LegacyIncomingRoutingEditor {...props} target={legacyTarget} onEditorStateChange={handleLegacyState} />
+  </div>;
+  return <UnifiedIncomingRoutingEditor {...props} onLegacy={lineId => { setLegacyLineId(lineId); setLegacy(true); }} />;
+}
+
+function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNavigate, onDirtyChange, onActionsChange, onEditorStateChange, onLegacy }: Props & { onLegacy: (lineId: string) => void }) {
+  const [view, setView] = useState<"settings" | "live">("settings");
   const [baseline, setBaseline] = useState(document);
-  const [draft, setDraft] = useState(() => incomingDraft(document));
+  const [drafts, setDrafts] = useState<FlowDrafts>({});
+  const [lineId, setLineId] = useState(() => initialIncomingLineId(document, target));
   const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [uncertain, setUncertain] = useState(false);
   const [remote, setRemote] = useState<RoutingDocument | null>(null);
-  const [lineId, setLineId] = useState(target?.lineId ?? document.lines[0]?.id ?? "");
-  const [focusPlanId, setFocusPlanId] = useState(target?.planId ?? null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [rememberedNumbers, setRememberedNumbers] = useState<Record<string, string>>({});
   const [previousTarget, setPreviousTarget] = useState(target);
-  if (target !== previousTarget) { setPreviousTarget(target); if (target?.lineId) setLineId(target.lineId); setFocusPlanId(target?.planId ?? null); }
-  const working = useMemo(() => documentWithDraft(baseline, draft), [baseline, draft]);
-  const dirty = !incomingMatches(draft, baseline);
-  const pendingChanges = useRef(dirty || saving);
-  useEffect(() => { pendingChanges.current = dirty || saving; }, [dirty, saving]);
-  const issues = useMemo(() => [
-    ...validateRingGroupDrafts(draft.groups, { operatorIds: working.operators.map(row => row.profileId), destinationAllowlist: working.limits?.destinationAllowlist ?? FALLBACK_DESTINATION_ALLOWLIST, plans: working.plans }),
-    ...validateRingPlanDrafts(draft.plans, { groups: working.groups, destinationAllowlist: working.limits?.destinationAllowlist ?? FALLBACK_DESTINATION_ALLOWLIST, planIdsInUse: ringPlanIdsInUse(working.lines, working.ivrMenus), maxRingFanout: working.limits?.maxRingFanout }),
-  ], [draft, working]);
-  const setGroups: Dispatch<SetStateAction<GroupDraft[]>> = change => setDraft(current => ({ ...current, groups: identifyGroups(typeof change === "function" ? change(current.groups) : change) }));
-  const setPlans: Dispatch<SetStateAction<PlanDraft[]>> = change => setDraft(current => ({ ...current, plans: identifyPlans(typeof change === "function" ? change(current.plans) : change) }));
+  if (target !== previousTarget) {
+    setPreviousTarget(target);
+    if (target?.lineId) setLineId(initialIncomingLineId(baseline, target));
+  }
+  const changes = useMemo(() => incomingFlowChanges(drafts, baseline), [drafts, baseline]);
+  const dirty = changes.length > 0;
+  const pendingChanges = useRef(false);
+  useEffect(() => { pendingChanges.current = dirty || saving || uncertain; }, [dirty, saving, uncertain]);
+  const line = baseline.lines.find(candidate => candidate.id === lineId) ?? baseline.lines[0];
+  const lineIndex = line ? baseline.lines.indexOf(line) : -1;
+  const legacy = useMemo(() => line ? legacyIncomingFlow(baseline, line) : null, [baseline, line]);
+  const flow = line ? drafts[line.id] ?? line.incomingFlow ?? legacy?.flow ?? null : null;
+  const usingLegacy = Boolean(line && !drafts[line.id] && !line.incomingFlow);
+  const locked = !canEdit || saving || uncertain || Boolean(remote);
+  const issues = useMemo(() => changes.flatMap(change => validateIncomingFlowDraft(change.flow, { ...baseline, lines: baseline.lines.map(candidate => ({ ...candidate, incomingFlow: drafts[candidate.id] ?? candidate.incomingFlow })) }).map(issue => ({ ...issue, path: `${change.id}.${issue.path}`, message: `${baseline.lines.find(candidate => candidate.id === change.id)?.label ?? "Linka"}: ${issue.message}` }))), [changes, baseline, drafts]);
   useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false); }, [dirty, onDirtyChange]);
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty && !uncertain) return;
     const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
-  }, [dirty]);
-  const line = working.lines.find(row => row.id === lineId);
-  const effectiveLine = line?.returnLineId ? working.lines.find(row => row.id === line.returnLineId) : line;
+  }, [dirty, uncertain]);
+  function updateFlow(next: IncomingFlow) {
+    if (!line || locked) return;
+    pendingChanges.current = true;
+    setDrafts(current => ({ ...current, [line.id]: next })); setError(null); setNotice(null);
+  }
   function accept(response: RoutingConfigResponse) {
     pendingChanges.current = false;
-    setBaseline(response.document); setDraft(incomingDraft(response.document)); setRemote(null); setUncertain(false); onSaved(response);
+    setBaseline(response.document); setDrafts({}); setRememberedNumbers({}); setRemote(null); setUncertain(false); onSaved(response);
   }
-  function acceptLineMode(response: RoutingConfigResponse) {
-    // This PATCH saves one number independently. Keep unsaved group/plan drafts
-    // and their original comparison baseline intact.
-    setBaseline(current => mergeSavedLine(current, response.document));
-    onLineSaved(response);
+  function discard() {
+    pendingChanges.current = false;
+    if (remote) setBaseline(remote);
+    setDrafts({}); setRememberedNumbers({}); setRemote(null); setUncertain(false); setError(null); setNotice(null);
   }
-  function discard() { pendingChanges.current = false; setDraft(incomingDraft(remote ?? baseline)); if (remote) setBaseline(remote); setRemote(null); setUncertain(false); setError(null); }
   async function verify(): Promise<boolean> {
     try {
       const latest = await loadRoutingConfig("incoming");
-      if (incomingMatches(draft, latest.document)) {
-        accept(latest); setError(null); setNotice("Uložený stav je overený. Skupiny aj plány zodpovedajú tvojim zmenám."); return true;
+      if (incomingFlowsMatch(changes, latest.document)) {
+        accept(latest); setError(null); setNotice("Uložený stav je overený. Postupy zodpovedajú tvojim zmenám."); return true;
       }
       setRemote(latest.document); setUncertain(false);
-      setError("Uložený stav sa líši. Tvoje zmeny zostávajú v návrhu. Porovnaj ich pred ďalším uložením.");
-    } catch { setUncertain(true); setError("Výsledok uloženia zatiaľ nemožno overiť. Návrh zostáva zachovaný; neukladaj ho opakovane naslepo."); }
+      setError("Uložený stav sa líši. Tvoje zmeny zostávajú v návrhu; porovnaj ich pred ďalším uložením.");
+    } catch { setUncertain(true); setError("Výsledok uloženia zatiaľ nemožno overiť. Návrh zostáva zachovaný. Najprv over uložený stav."); }
     return false;
   }
   async function save(): Promise<boolean> {
-    if (!canEdit || saving || uncertain || issues.length > 0 || remote) return false;
+    if (locked || issues.length > 0 || !baseline.snapshotId) return false;
     if (!dirty) return true;
     let accepted = false;
-    setSaving(true); setError(null); setNotice(null);
+    pendingChanges.current = true; setSaving(true); setError(null); setNotice(null);
     try {
-      const response = await saveRoutingConfig("incoming", { ...incomingPayload(draft), version: baseline.routingVersion });
-      accept(response); accepted = true; setNotice(`Skupiny aj plány sú uložené spolu. Nové smerovanie platí pre nové hovory.${response.warning ? ` ${response.warning}` : ""}`); return true;
+      const response = await saveRoutingConfig("incomingFlow", { version: baseline.routingVersion, snapshotId: baseline.snapshotId, lines: changes.map(change => ({ ...change, flow: parseIncomingFlow(change.flow) })) });
+      accept(response); accepted = true;
+      setNotice(`Postupy sú uložené. Zmena platí pre nové hovory.${response.warning ? ` ${response.warning}` : ""}`);
+      return true;
     } catch (caught) {
       if (caught instanceof ConfigRequestError && caught.status >= 400 && caught.status < 500) {
-        setError(caught.message);
+        setError([caught.message, ...caught.issues.map(issue => issue.message)].filter(Boolean).join(" "));
         if (caught.status === 409) {
           try { const latest = await loadRoutingConfig("incoming"); setRemote(latest.document); } catch { setUncertain(true); }
         }
         return false;
       }
-      setUncertain(true);
-      accepted = await verify();
-      return accepted;
+      setUncertain(true); accepted = await verify(); return accepted;
     } finally { pendingChanges.current = !accepted && dirty; setSaving(false); }
   }
+  async function verifySavedState() { if (saving) return; setSaving(true); try { await verify(); } finally { setSaving(false); } }
   useEffect(() => { onEditorStateChange?.({ dirty, saving, save, discard, hasPendingChanges: () => pendingChanges.current }); });
   useEffect(() => () => onEditorStateChange?.(null), [onEditorStateChange]);
-  // The parent owns only navigation; this component remains the sole draft owner.
   useEffect(() => { onActionsChange?.({ save, discard }); return () => onActionsChange?.(null); });
-  return <section className="grid min-w-0 gap-3 [&_label>span]:font-medium [&_label>span]:normal-case" aria-label="Prichádzajúce hovory">
-    <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-[0_1px_3px_rgba(20,30,50,0.04)]">
-      <h2 className="text-base font-semibold text-zinc-900">Prichádzajúce hovory</h2>
-      <p className="mt-1 text-sm text-zinc-600">Nastav režim pre vybrané číslo, kto zvoní a čo sa stane, keď nikto nezdvihne. Režim čísla sa uloží hneď po výbere; skupiny a plány uložíš tlačidlom dole.</p>
-      <div className="mt-3 flex flex-wrap items-end gap-3">
-        <label className="grid min-w-0 gap-1 text-xs font-medium text-zinc-600">Linka<select className={settingsInputClass} value={lineId} onChange={event => { const chosen = working.lines.find(row => row.id === event.target.value); const effective = chosen?.returnLineId ? working.lines.find(row => row.id === chosen.returnLineId) : chosen; setLineId(event.target.value); setFocusPlanId(effective?.ringPlanId ?? null); }}><option value="">Všetky plány vrátane nepoužitých</option>{working.lines.map(row => <option key={row.id} value={row.id}>{row.label} · {row.phoneNumber}{row.active ? "" : " (neaktívna)"}</option>)}</select></label>
-        {line && <button type="button" className="min-h-10 rounded-lg border border-zinc-200 px-3 text-sm font-medium" onClick={() => onNavigate({ section: "telephony", tab: "numbers", lineId: line.id })}>Priradenie linky</button>}
-        {effectiveLine?.businessHoursId && <button type="button" className="min-h-10 rounded-lg border border-zinc-200 px-3 text-sm font-medium" onClick={() => onNavigate({ section: "telephony", tab: "hours", lineId: effectiveLine.id, businessHoursId: effectiveLine.businessHoursId! })}>Otváracie hodiny</button>}
-        {effectiveLine?.ivrMenuId && <button type="button" className="min-h-10 rounded-lg border border-zinc-200 px-3 text-sm font-medium" onClick={() => onNavigate({ section: "telephony", tab: "ivr", lineId: effectiveLine.id, ivrMenuId: effectiveLine.ivrMenuId! })}>Hlasové menu</button>}
-      </div>
-      {line && <LineInboundModeControl key={line.id} line={line} defaultMode={baseline.settings?.inboundCallMode ?? null} canEdit={canEdit} onSaved={acceptLineMode} />}
-      {line?.returnLineId && <p className="mt-2 text-xs text-zinc-600">Návratové číslo používa smerovanie linky {effectiveLine?.label ?? "(nedostupná)"}.</p>}
-      {target?.planId && !working.plans.some(plan => plan.id === target.planId) && <SettingsNotice tone="warning">Vybraný plán už neexistuje alebo k nemu nemáš prístup. Zobrazuje sa dostupná konfigurácia.</SettingsNotice>}
-    </div>
+  function nextLine(direction: -1 | 1) {
+    if (!baseline.lines.length) return;
+    setLineId(baseline.lines[(lineIndex + direction + baseline.lines.length) % baseline.lines.length].id);
+  }
+  return <section className={styles.editor} aria-label="Prichádzajúce hovory">
+    <header className={styles.heading}><h2>Cesta prichádzajúceho hovoru</h2><p>Ľudia v jednom kroku zvonia naraz. Jednotlivé kroky idú postupne.</p></header>
+    {line ? <div className={styles.lineSelector}>
+      <div className={styles.lineMain}><button type="button" className={styles.iconButton} disabled={baseline.lines.length < 2} onClick={() => nextLine(-1)} aria-label="Predchádzajúca linka"><ChevronLeft size={24} aria-hidden="true" /></button><div className={styles.lineIdentity} aria-live="polite"><p>{line.label}</p><strong>{formatPhoneNumberForDisplay(line.phoneNumber)}</strong><small>Linka {lineIndex + 1} z {baseline.lines.length}{!line.active ? " · Vypnutá" : ""}{drafts[line.id] && changes.some(change => change.id === line.id) ? " · Neuložené zmeny" : ""}</small></div><button type="button" className={styles.iconButton} disabled={baseline.lines.length < 2} onClick={() => nextLine(1)} aria-label="Nasledujúca linka"><ChevronRight size={24} aria-hidden="true" /></button></div>
+      {baseline.lines.length > 1 && <nav className={styles.lineDots} aria-label="Vybrať linku">{baseline.lines.map(candidate => <button key={candidate.id} type="button" aria-current={candidate.id === line.id} aria-label={`${candidate.label}, ${formatPhoneNumberForDisplay(candidate.phoneNumber)}`} onClick={() => setLineId(candidate.id)}><span /></button>)}</nav>}
+    </div> : <SettingsNotice>Nie je dostupná žiadna linka. Najprv ju pridaj v nastavení čísel.</SettingsNotice>}
+    {line && <div className={styles.viewTabs} role="group" aria-label="Zobrazenie postupu"><button type="button" aria-pressed={view === "settings"} onClick={() => setView("settings")}><Settings2 size={15} aria-hidden="true" />Nastavenie{dirty && <span className={styles.statusDot} aria-label="Neuložené zmeny" />}</button><button type="button" aria-pressed={view === "live"} onClick={() => setView("live")}><GitBranch size={15} aria-hidden="true" />Sledovať hovory</button></div>}
+    {view === "live" && line && <IncomingFlowMonitor key={line.id} lineId={line.id} savedFlow={line.incomingFlow ?? null} dirty={dirty && Boolean(drafts[line.id])} />}
     {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
-    {notice && <SettingsNotice tone="success">{notice}</SettingsNotice>}
-    {uncertain && <button type="button" disabled={saving} onClick={() => void verify()} className="justify-self-start rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold">Overiť uložený stav</button>}
-    {remote && <details open className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm"><summary className="cursor-pointer font-semibold">Konflikt: porovnať uloženú konfiguráciu a vlastný návrh</summary><div className="mt-2 grid gap-3 md:grid-cols-2">{[{ title: "Aktuálne uložené", document: remote }, { title: "Tvoj zachovaný návrh", document: working }].map(entry => <div key={entry.title}><h3 className="font-semibold">{entry.title}</h3>{entry.document.plans.map(plan => <p className="mt-2" key={plan.id}><strong>{plan.name}:</strong> {describeRingPlan(incomingDraft(entry.document).plans.find(row => row.id === plan.id)!, entry.document.groups, entry.document.limits?.maxRingFanout)}</p>)}{entry.document.groups.map(group => <p key={group.id} className="mt-1 text-xs">{group.name}: {group.members.map(member => member.memberKind === "operator" ? entry.document.operators.find(operator => operator.profileId === member.profileId)?.displayName ?? "Operátor" : member.externalNumber).join(", ") || "bez členov"}</p>)}</div>)}</div><p className="mt-3 text-xs">Pre bezpečnú novú úpravu načítaj uložený stav. Vlastné hodnoty si najprv môžeš skopírovať z návrhu.</p><button type="button" onClick={discard} className="mt-2 min-h-10 rounded-lg border border-amber-300 bg-white px-3 font-semibold">Zahodiť návrh a načítať uložené</button></details>}
-    <RingPlanEditor canEdit={canEdit && !saving} document={working} controlled={{ plans: draft.plans, onChange: setPlans }} focusPlanId={focusPlanId} focusGroupId={target?.groupId} onSaved={onSaved} onNavigateToIvr={() => onNavigate({ section: "telephony", tab: "ivr" })} onNavigateToNumbers={() => onNavigate({ section: "telephony", tab: "numbers" })} renderGroupEditor={groupId => <RingGroupsEditor canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onlyGroupId={groupId} onSaved={onSaved} onNavigateToPlan={setFocusPlanId} />} />
-    <details className="rounded-xl border border-zinc-200 bg-white" open={draft.groups.length === 0 || undefined}><summary className="cursor-pointer px-4 py-3 text-sm font-semibold">Knižnica skupín ({draft.groups.length}) · pridať skupinu a upraviť nepoužité</summary><RingGroupsEditor canEdit={canEdit && !saving} document={working} controlled={{ groups: draft.groups, onChange: setGroups }} onSaved={onSaved} onNavigateToPlan={setFocusPlanId} /></details>
-    <div className={`${dirty ? "sticky bottom-0 z-10 shadow-[0_-2px_10px_rgba(20,30,50,0.05)]" : ""} rounded-xl border border-zinc-200 bg-white p-3`}>
-      <div className="flex flex-wrap items-center gap-2"><button type="button" disabled={!canEdit || !dirty || saving || uncertain || Boolean(remote) || issues.length > 0} onClick={() => void save()} className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-[#FCD703] px-4 text-sm font-semibold text-zinc-950 disabled:opacity-40">{saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}Uložiť všetky zmeny</button><button type="button" disabled={!dirty || saving} onClick={() => { if (window.confirm("Zahodiť všetky neuložené zmeny skupín a plánov?")) discard(); }} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-zinc-200 px-3 text-sm font-medium disabled:opacity-40"><Undo2 size={15} />Zahodiť</button><span role="status" className="text-xs text-zinc-600">{dirty ? "Neuložené zmeny skupín a plánov" : "Všetky zmeny sú uložené"}</span></div>
-      {issues.length > 0 && dirty && <div className="mt-2"><SettingsIssueList issues={issues} /></div>}
+    {notice && !dirty && <SettingsNotice tone="success">{notice}</SettingsNotice>}
+    {uncertain && <button type="button" disabled={saving} onClick={() => void verifySavedState()} className={styles.button}>Overiť uložený stav</button>}
+    {remote && <details open className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm"><summary className="min-h-11 cursor-pointer font-semibold">Porovnať uložené postupy a vlastný návrh</summary><div className="grid gap-4 md:grid-cols-2">{[{ title: "Aktuálne uložené", document: remote }, { title: "Tvoj zachovaný návrh", document: baseline }].map((entry, index) => <div key={entry.title}><h3 className="font-semibold">{entry.title}</h3>{changes.map(change => { const compared = entry.document.lines.find(candidate => candidate.id === change.id); const value = index === 1 ? change.flow : compared?.incomingFlow; return <p key={change.id} className="mt-2 break-words text-xs leading-6"><strong>{compared?.label ?? "Odstránená linka"}:</strong> {value ? incomingFlowSummary(value, entry.document) : compared ? "Pôvodné smerovanie podľa plánu" : "Linka už nie je dostupná"}</p>; })}</div>)}</div><p className="mt-3 text-xs">Pred novou úpravou načítaj uložený stav. Vlastné hodnoty si môžeš skopírovať zo zachovaného návrhu.</p><button type="button" className={`${styles.button} mt-3`} onClick={discard}>Zahodiť návrh a načítať uložené</button></details>}
+    {view === "settings" && <>
+    {line && usingLegacy && <div className={styles.legacyNotice}>
+      <strong>{legacy?.flow ? "Uložené pôvodné smerovanie" : "Táto linka používa pôvodné nastavenie"}</strong>
+      <p>{legacy?.reason ?? "Nižšie vidíš doterajšie poradie a časy. Voľba Aplikácia v novom postupe zahŕňa web aj mobilnú appku. Pôvodné smerovanie zostane aktívne až do uloženia."}</p>
+      <div className={styles.links}>{legacy?.canReplace && <button type="button" disabled={locked} className={`${styles.button} ${styles.primary}`} onClick={() => updateFlow(structuredClone(legacy.flow ?? emptyIncomingFlow()))}>{legacy.flow ? "Upraviť tento postup" : "Pripraviť nový postup"}</button>}<button type="button" disabled={dirty || saving || uncertain} className={styles.textButton} onClick={() => onLegacy(line.id)}>Otvoriť pôvodné nastavenie</button></div>
+      {dirty && <p>Pred otvorením pôvodného nastavenia ulož alebo zahoď rozpracované zmeny.</p>}
+    </div>}
+    {flow && <>
+      <div className={styles.intro}><p><strong>{dirty && drafts[line!.id] ? "Návrh postupu:" : usingLegacy ? "Doterajšie poradie:" : "Postup hovoru:"}</strong> {incomingFlowSummary(flow, baseline)}</p><p className={styles.answerRule}><Check size={15} aria-hidden="true" />Keď niekto prijme hovor, ostatné zvonenia a ďalšie kroky sa zastavia.</p></div>
+      <IncomingFlowSteps flow={flow} document={baseline} lineId={line!.id} disabled={locked || usingLegacy} onChange={updateFlow} rememberedNumbers={rememberedNumbers} rememberNumber={(key, number) => setRememberedNumbers(current => ({ ...current, [key]: number }))} />
+      <p className={styles.note}>Zvonia iba dostupní operátori a pripojené zariadenia. Pauza, obsadenosť a kapacita organizácie sa uplatnia aj v tomto postupe.</p>
+    </>}
+    {line && <div className={styles.links}><button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "numbers", lineId: line.id })}><Settings2 size={14} aria-hidden="true" />Nastavenie linky</button>{line.businessHoursId && <button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "hours", lineId: line.id, businessHoursId: line.businessHoursId! })}><Clock3 size={14} aria-hidden="true" />Otváracie hodiny sa uplatnia pred postupom</button>}{line.ivrMenuId && <button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "ivr", lineId: line.id, ivrMenuId: line.ivrMenuId! })}>Hlasové menu</button>}</div>}
+    <div className={styles.saveBar} data-dirty={dirty}>
+      <p role="status">{dirty ? <span className={styles.statusDot} /> : <Check size={15} aria-hidden="true" />}{dirty ? `Neuložené zmeny: ${changes.length} ${changes.length === 1 ? "linka" : changes.length < 5 ? "linky" : "liniek"}` : "Všetky zmeny sú uložené"}</p>
+      <div className={styles.saveButtons}><button type="button" disabled={!dirty || saving || uncertain} className={styles.button} onClick={() => { if (window.confirm("Zahodiť všetky rozpracované zmeny postupov?")) discard(); }}><Undo2 size={15} aria-hidden="true" />Zahodiť</button><button type="button" disabled={locked || !dirty || issues.length > 0 || !baseline.snapshotId} className={`${styles.button} ${styles.primary}`} onClick={() => void save()}>{saving ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Save size={15} aria-hidden="true" />}Uložiť zmeny</button></div>
+      {dirty && <small>Dotknuté linky: {changes.map(change => { const changed = baseline.lines.find(candidate => candidate.id === change.id); return `${changed?.label ?? "Linka"} (${formatPhoneNumberForDisplay(changed?.phoneNumber ?? "")})`; }).join(", ")}. Uloženie platí iba pre nové hovory.</small>}
+      {!baseline.snapshotId && <small>Na bezpečné uloženie chýba aktuálny stav nastavení. Obnov stránku.</small>}
+      {issues.length > 0 && <div className="basis-full"><SettingsIssueList issues={issues} /></div>}
     </div>
+    </>}
   </section>;
 }

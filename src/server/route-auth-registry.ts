@@ -35,6 +35,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   'diagnostics/incidents/[id]': {class: 'session', role: ['manager','admin']},
   "telephony/team": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Narrow operational DTO; report and device secrets excluded." },
   "telephony/routing-summary": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "telephony/config/incoming-flow": { class: "session", role: ["manager", "admin"], note: "PUT only; same-origin guard, scoped per-line flow validation and atomic snapshot/version CAS." },
   "telephony/config/incoming": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read scoped configuration; PUT manager/admin plus same-origin and atomic CAS." },
   "cases/live": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read-only POST for version manifest; actor-derived audience, no-store." },
   "cases/presence": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Server-derived actor and expiring lease, same-origin mutation." },
@@ -169,6 +170,8 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   // telephony (provider-neutral routes + Telnyx call control)
   "telephony/calls": { class: "session", note: "Click-to-call; kill switch, rate limit 10/min a allowlist sú v call-actions." },
   "telephony/calls/active": { class: "session" },
+  "telephony/calls/journeys": { class: "session", note: "Read-only call progress; every query is scoped to the actor organization. No provider operations." },
+  "telephony/calls/[id]/journey": { class: "session", note: "Read-only observed history after exact call/session organization authorization." },
   "telephony/calls/internal": { class: "session" },
   "telephony/calls/[id]/cancel-consult": { class: "session" },
   "telephony/calls/[id]/complete-transfer": { class: "session" },

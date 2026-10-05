@@ -116,6 +116,8 @@ import { signOutCurrentSession } from "@/components/auth/sign-out";
 import { PushNotificationSync } from "@/components/pwa/PushNotificationSync";
 import { PauseEndingNotificationSync } from "@/components/pwa/PauseEndingNotificationSync";
 import { useAppUpdate } from "@/components/pwa/useAppUpdate";
+import { AppReleaseBadge } from "@/components/pwa/AppReleaseBadge";
+import { localAppRelease, type AppRelease } from "@/lib/app-release";
 import { isAppRefreshBlocked } from "@/components/pwa/app-refresh-policy";
 import { notificationTarget } from "@/components/pwa/notification-target";
 import { navigateAfterDraftApproval } from "@/lib/draft-unload";
@@ -231,6 +233,7 @@ export function DispatchConsole(props: Parameters<typeof DispatchConsoleContent>
 function DispatchConsoleContent({
   initialData,
   appVersion = "development",
+  appRelease = localAppRelease,
   viewerDisplayName,
   viewerEmail,
   viewerOrganizationId,
@@ -240,6 +243,7 @@ function DispatchConsoleContent({
   initialData: DispatchData;
   layoutPreviewEnabled?: boolean;
   appVersion?: string;
+  appRelease?: AppRelease;
   viewerDisplayName?: string;
   viewerEmail?: string;
   viewerOrganizationId?: string;
@@ -249,6 +253,8 @@ function DispatchConsoleContent({
 }) {
   const { mode: layoutMode } = useLayoutPreview();
   const updateAvailable = useAppUpdate(appVersion);
+  // Keep the document's version when the account menu is reopened after a server refresh.
+  const [loadedAppRelease] = useState(appRelease);
   useEffect(() => {
     if (updateAvailable) recordDiagnostic({ type: "app_update", module: "app", outcome: "ok", reason: "update_detected" });
   }, [updateAvailable]);
@@ -2198,6 +2204,7 @@ function DispatchConsoleContent({
           onRefresh={requestAppRefresh}
           refreshBlocked={appRefreshBlocked}
           updateAvailable={updateAvailable}
+          appRelease={loadedAppRelease}
         />
         <div className="hidden shrink-0 lg:block"><CaseSyncIndicator topBarsRef={topBarsRef} /></div>
         </div>
@@ -2658,6 +2665,10 @@ function DispatchConsoleContent({
         />
       )}
 
+      <footer data-testid="app-release-footer" className="mt-auto hidden shrink-0 px-1 lg:block">
+        <AppReleaseBadge release={loadedAppRelease} />
+      </footer>
+
       <PushNotificationSync profileId={source === "supabase" ? notificationViewerProfileId : undefined} />
       <PauseEndingNotificationSync
         enabled={source === "supabase" && telephonyConfigured}
@@ -2756,6 +2767,7 @@ function AccountMenu({
   onRefresh,
   refreshBlocked,
   updateAvailable,
+  appRelease,
   role,
   signingOut,
 }: {
@@ -2765,6 +2777,7 @@ function AccountMenu({
   onRefresh: () => void;
   refreshBlocked: boolean;
   updateAvailable: boolean;
+  appRelease: AppRelease;
   role?: AppRole;
   signingOut: boolean;
 }) {
@@ -2779,7 +2792,7 @@ function AccountMenu({
     }
 
     function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape" && !rootRef.current?.querySelector("dialog[open]")) setOpen(false);
     }
 
     document.addEventListener("pointerdown", closeOnOutsidePointer);
@@ -2832,7 +2845,7 @@ function AccountMenu({
         <div
           role="dialog"
           aria-label="Používateľský účet"
-          className="absolute left-0 top-[calc(100%+0.55rem)] z-[2147483500] w-[min(19rem,calc(100vw-1rem))] overflow-hidden rounded-xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl"
+          className="absolute left-0 top-[calc(100%+0.55rem)] z-[2147483500] max-h-[calc(100dvh-5rem)] w-[min(19rem,calc(100vw-1rem))] overflow-y-auto overscroll-contain rounded-xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl"
         >
           <div className="flex items-start gap-3 p-3.5">
             <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-600">
@@ -2902,6 +2915,9 @@ function AccountMenu({
                 <span className="mt-0.5 block text-[11px] font-normal text-zinc-500">Len z tohto zariadenia</span>
               </span>
             </button>
+          </div>
+          <div className="border-t border-zinc-100 p-2">
+            <AppReleaseBadge release={appRelease} variant="menu" />
           </div>
         </div>
       )}

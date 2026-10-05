@@ -218,7 +218,7 @@ describe("recording commands concurrent with polling and provider bookkeeping", 
       injected = true;
       await h.legEvent(operator, "call.hangup");
     };
-    await unholdCall(h.deps, actor, call.sessionId);
+    await expect(unholdCall(h.deps, actor, call.sessionId)).rejects.toMatchObject({ status: 502 });
     await completeCallAnnouncements(h, call.sessionId);
     expect(injected).toBe(true);
     expect(h.telnyx.of("conference:unhold")).toHaveLength(0);

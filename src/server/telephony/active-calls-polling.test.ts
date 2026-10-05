@@ -14,6 +14,28 @@ function view(h: TelephonyHarness) {
 
 const requests = (h: TelephonyHarness, from: number) => h.db.log.length - from;
 
+function pauseSessionRead(h: TelephonyHarness) {
+  let release!: () => void;
+  let began!: () => void;
+  const ready = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { began = resolve; });
+  const from = h.client.from.bind(h.client);
+  const reads = vi.fn();
+  vi.spyOn(h.client, "from").mockImplementation((table) => {
+    const query = from(table);
+    if (table === "motorist_call_sessions") {
+      reads();
+      const then = query.then.bind(query);
+      query.then = (fulfilled, rejected) => {
+        began();
+        return ready.then(() => then(fulfilled, rejected));
+      };
+    }
+    return query;
+  });
+  return { release, started, reads };
+}
+
 describe("what a console poll costs", () => {
   it("serves every console in the same second from one database pass", async () => {
     const h = createTelephonyHarness();
@@ -68,6 +90,43 @@ describe("what a console poll costs", () => {
     await loadActiveCallsCached(view(h), who(PROFILES.o1));
 
     expect(requests(h, from)).toBeGreaterThan(1);
+  });
+
+  it("shares a slow database pass even after its cache interval expires", async () => {
+    const h = createTelephonyHarness();
+    const read = pauseSessionRead(h);
+    const first = loadActiveCallsCached(view(h), who(PROFILES.o1));
+    await read.started;
+    h.advance(ACTIVE_CALLS_CACHE_TTL_MS * 5);
+    const second = loadActiveCallsCached(view(h), who(PROFILES.o2));
+    await Promise.resolve();
+    read.release();
+    const snapshots = await Promise.all([first, second]);
+
+    expect(read.reads).toHaveBeenCalledTimes(1);
+    expect(snapshots.map(snapshot => snapshot.actorProfileId)).toEqual([PROFILES.o1, PROFILES.o2]);
+    // The completed pass is already old: the next poll must refresh it.
+    await loadActiveCallsCached(view(h), who(PROFILES.o1));
+    expect(read.reads).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns the same database error to every waiter and lets a later poll recover", async () => {
+    const h = createTelephonyHarness();
+    h.db.failNext("motorist_call_sessions", "select", "sessions unavailable");
+    const read = pauseSessionRead(h);
+    const first = loadActiveCallsCached(view(h), who(PROFILES.o1));
+    await read.started;
+    h.advance(ACTIVE_CALLS_CACHE_TTL_MS * 5);
+    const results = Promise.allSettled([first, loadActiveCallsCached(view(h), who(PROFILES.o2))]);
+    read.release();
+
+    for (const result of await results) {
+      expect(result.status).toBe("rejected");
+      if (result.status === "rejected") expect(result.reason.message).toContain("sessions unavailable");
+    }
+    expect(read.reads).toHaveBeenCalledTimes(1);
+    await expect(loadActiveCallsCached(view(h), who(PROFILES.o1))).resolves.toBeDefined();
+    expect(read.reads).toHaveBeenCalledTimes(2);
   });
 
   it("does not cache a failed pass", async () => {

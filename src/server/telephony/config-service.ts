@@ -1,3 +1,4 @@
+import { readIncomingFlow, type IncomingFlow } from "@/lib/telephony/incoming-flow";
 import { returnLineId, returnLineProblem } from "@/lib/telephony/return-line";
 import { telephonyStabilityEnabled } from "./stability";
 import { randomUUID } from "node:crypto";
@@ -268,6 +269,8 @@ export type BusinessHoursDoc = {
 export type PauseReasonDoc = { id: string; code: string; label: string; maxMinutes: number | null; sortOrder: number; active: boolean };
 
 export type LineDoc = {
+  incomingFlow?: IncomingFlow | null;
+  incomingFlowInvalid?: boolean;
   returnLineId?: string | null;
   inboundCallMode?: LineInboundMode | null;
   id: string;
@@ -319,6 +322,7 @@ export type IvrOptionDoc = {
 };
 
 export type OperatorDoc = {
+  accessStatus?: string;
   profileId: string;
   displayName: string;
   role: AppRole;
@@ -364,6 +368,16 @@ export type RoutingDocument = {
   /** Present only for one-statement coherent reads. Not a CAS token. */
   snapshotId?: string;
   settingsConfigured?: boolean;
+  /** Safe UI availability and inheritance facts, included for every config reader. */
+  capabilities?: {
+    /** True only when the database can atomically save line modes with groups and plans. */
+    atomicIncomingLineModes?: boolean;
+    /** Atomic flow save and application endpoint schema are both installed. */
+    unifiedIncomingFlow?: boolean;
+    /** The personal-mobile server guard only; does not assert parallel-endpoint schema readiness. */
+    ownedMobileRouting: boolean;
+    defaultInboundCallMode: "ring_first" | "queue_first";
+  };
   groups: RingGroupDoc[];
   plans: RingPlanDoc[];
   businessHours: BusinessHoursDoc[];
@@ -653,6 +667,35 @@ export function parseIvrMenus(value: unknown): IvrMenuInput[] {
   });
   assertValid(issues);
   return parsed;
+}
+
+export type IncomingLineModeInput = {
+  id: string;
+  inboundCallMode: LineInboundMode | null;
+  expectedInboundCallMode: LineInboundMode | null;
+};
+
+const isIncomingLineMode = (value: unknown): value is LineInboundMode | null =>
+  value === null || value === "ring_first" || value === "ring_all" || value === "ring_ordered" || value === "queue_first";
+
+/** Only changed lines are submitted; both explicit null and the expected value are required. */
+export function parseIncomingLineModes(value: unknown): IncomingLineModeInput[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new ConfigServiceError("Zoznam zmien režimu liniek nie je platný.", 400, "config_invalid");
+  assertSectionSize(value, "lineModes");
+  const ids = new Set<string>();
+  return value.map((row, index) => {
+    const path = `lineModes[${index}]`;
+    if (!isRecord(row) || typeof row.id !== "string" || !UUID_PATTERN.test(row.id)
+      || Object.keys(row).some(key => !["id", "inboundCallMode", "expectedInboundCallMode"].includes(key))
+      || !isIncomingLineMode(row.inboundCallMode) || !isIncomingLineMode(row.expectedInboundCallMode)) {
+      throw new ConfigServiceError("Zmena režimu linky nemá platný identifikátor alebo režim.", 400, "config_invalid", [issue(path, "line_mode_invalid", "Zvoľ platný režim linky a načítaj jej pôvodné nastavenie.")]);
+    }
+    const id = row.id.toLowerCase();
+    if (ids.has(id)) throw new ConfigServiceError("Linka je v návrhu uvedená viackrát.", 400, "config_invalid", [issue(`${path}.id`, "duplicate", "Každú linku možno zmeniť iba raz.")]);
+    ids.add(id);
+    return { id, inboundCallMode: row.inboundCallMode, expectedInboundCallMode: row.expectedInboundCallMode };
+  });
 }
 
 /** `PATCH` bodies carry only the fields the user touched; absent ≠ null. */
@@ -1407,14 +1450,15 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
 }
 
 const SNAPSHOT_KEYS = ["groups", "members", "plans", "steps", "hours", "intervals", "exceptions", "pauseReasons", "presence", "lines", "ivrMenus", "ivrOptions", "profiles", "operatorSettings", "devices", "settings"] as const;
-export type RoutingSnapshot = Record<(typeof SNAPSHOT_KEYS)[number], unknown> & { snapshotId: string };
+export type RoutingSnapshot = Record<(typeof SNAPSHOT_KEYS)[number], unknown> & { snapshotId: string; atomicIncomingLineModes?: boolean; unifiedIncomingFlow?: boolean };
 
 export function routingDocumentFromSnapshot(snapshot: RoutingSnapshot, input: RoutingDocumentInput): RoutingDocument {
   if (!snapshot || typeof snapshot.snapshotId !== "string" || SNAPSHOT_KEYS.some(key => key !== "settings" && !Array.isArray(snapshot[key]))) {
     throw new ConfigServiceError("Nastavenia majú neúplný formát. Skús ich načítať znova.", 503, "config_snapshot_invalid");
   }
   const rows = SNAPSHOT_KEYS.map(key => snapshot[key]) as unknown as Awaited<ReturnType<typeof loadLegacyRoutingRows>>;
-  return { ...routingDocumentFromRows(rows, input), snapshotId: snapshot.snapshotId };
+  const document = routingDocumentFromRows(rows, input);
+  return { ...document, snapshotId: snapshot.snapshotId, capabilities: { ...document.capabilities!, atomicIncomingLineModes: snapshot.atomicIncomingLineModes === true, unifiedIncomingFlow: snapshot.unifiedIncomingFlow === true } };
 }
 
 /** A single SQL statement sees one MVCC snapshot, including lines/settings which do not bump routingVersion. */
@@ -1480,6 +1524,10 @@ function routingDocumentFromRows(rows: Awaited<ReturnType<typeof loadLegacyRouti
     organizationId,
     routingVersion: settings?.routing_version ?? 0,
     settingsConfigured: Boolean(settings),
+    capabilities: {
+      ownedMobileRouting: telephonyStabilityEnabled(),
+      defaultInboundCallMode: settings?.inbound_call_mode === "queue_first" ? "queue_first" : "ring_first",
+    },
     groups: groups.map((group) => ({
       id: group.id,
       name: group.name,
@@ -1506,6 +1554,8 @@ function routingDocumentFromRows(rows: Awaited<ReturnType<typeof loadLegacyRouti
     pauseReasons: pauseReasons.map((row) => ({ id: row.id, code: row.code, label: row.label, maxMinutes: row.max_minutes, sortOrder: row.sort_order, active: row.active })),
     pauseReasonsInUse: [...new Set(presence.map((row) => row.pause_reason_id).filter((id): id is string => Boolean(id)))],
     lines: lines.filter((line) => !isArchivedLine(line.metadata)).map((line) => ({
+      incomingFlow: readIncomingFlow(isRecord(line.metadata) ? line.metadata.incoming_flow : null),
+      incomingFlowInvalid: isRecord(line.metadata) && line.metadata.incoming_flow != null && readIncomingFlow(line.metadata.incoming_flow) === null,
       returnLineId: returnLineId(line.metadata),
       inboundCallMode: lineInboundMode(line.metadata),
       id: line.id,
@@ -1554,6 +1604,7 @@ function routingDocumentFromRows(rows: Awaited<ReturnType<typeof loadLegacyRouti
         const device = visible ? deviceByProfile.get(profile.id) ?? null : null;
         return {
           profileId: profile.id,
+          accessStatus: profile.access_status,
           displayName: profile.display_name,
           role: profile.role as AppRole,
           active: profile.active,
@@ -1679,6 +1730,9 @@ export const STALE_DOCUMENT_MESSAGE =
   "Konfiguráciu medzitým zmenil niekto iný. Načítaj ju znova a uprav ju nad aktuálnym stavom, inak by si jeho zmeny prepísal.";
 
 const RPC_MESSAGES: Array<{ match: RegExp; message: string; status: number; code: string }> = [
+  { match: /line_mode_conflict/, message: "Režim linky medzitým zmenil niekto iný. Načítaj nastavenia znova; žiadna časť návrhu sa neuložila.", status: 409, code: "config_conflict" },
+  { match: /incoming_line_not_found/, message: "Niektorá linka už nie je dostupná. Načítaj nastavenia znova; žiadna časť návrhu sa neuložila.", status: 409, code: "config_conflict" },
+  { match: /incoming_line_mode_invalid/, message: "Návrh obsahuje neplatnú zmenu režimu linky.", status: 400, code: "config_invalid" },
   { match: /stale_document/, message: STALE_DOCUMENT_MESSAGE, status: 409, code: "stale_document" },
   { match: /cross_organization/, message: "Konfigurácia odkazuje na záznam inej organizácie.", status: 403, code: "cross_organization" },
   { match: /_id_required/, message: "Konfigurácia obsahuje záznam bez identifikátora. Načítaj ju znova.", status: 400, code: "id_required" },
@@ -1836,13 +1890,23 @@ async function auditReplace(
   return outcome.failed ? AUDIT_FAILED_WARNING : null;
 }
 
-/** Both sections commit once. Returned snapshots belong to this commit, never a later read. */
+/** Groups, plans and changed line modes commit once. Snapshots belong to this commit. */
 export async function replaceIncomingRouting(
   deps: ConfigDeps,
-  input: { organizationId: string; actor: ConfigActor; groups: RingGroupInput[]; plans: RingPlanInput[]; expectedVersion: number },
+  input: { organizationId: string; actor: ConfigActor; groups: RingGroupInput[]; plans: RingPlanInput[]; lineModes?: IncomingLineModeInput[]; expectedVersion: number },
 ): Promise<ReplaceResult> {
   const readInput = { organizationId: input.organizationId, includeSettings: true };
   const before = await getCoherentRoutingDocument(deps, readInput);
+  const lineModes = parseIncomingLineModes(input.lineModes);
+  if (lineModes.length > 0 && !before.capabilities?.atomicIncomingLineModes) {
+    throw new ConfigServiceError("Spoločné uloženie režimu linky ešte nie je dostupné. Návrh sa neuložil.", 503, "config_migration_missing");
+  }
+  for (const change of lineModes) {
+    const line = before.lines.find(row => row.id === change.id);
+    if (!line) throw new ConfigServiceError("Linka už nie je dostupná. Načítaj nastavenia znova.", 409, "config_conflict");
+    if (line.incomingFlow || line.incomingFlowInvalid) throw new ConfigServiceError("Táto linka používa postup po krokoch. Zmeň ju v nastavení prichádzajúcich hovorov.", 409, "incoming_flow_active");
+    if ((line.inboundCallMode ?? null) !== change.expectedInboundCallMode) throw new ConfigServiceError("Režim linky medzitým zmenil niekto iný. Načítaj nastavenia znova.", 409, "config_conflict");
+  }
   assertValid(validateRoutingReplace({ groups: input.groups, plans: input.plans }, contextFromDocument(before)));
   if (!telephonyStabilityEnabled()) {
     const owners = new Map(before.groups.flatMap(group => group.members.map(member => [member.id, member.ownerProfileId ?? null] as const)));
@@ -1853,7 +1917,10 @@ export async function replaceIncomingRouting(
   const { data, error } = await deps.admin.rpc("motorist_save_incoming_routing", {
     p_organization_id: input.organizationId,
     p_expected_version: input.expectedVersion,
-    p_document: { groups: groupsToRpc(input.groups), plans: plansToRpc(input.plans) },
+    p_document: {
+      groups: groupsToRpc(input.groups), plans: plansToRpc(input.plans),
+      ...(lineModes.length > 0 ? { line_modes: lineModes.map(line => ({ id: line.id, inbound_call_mode: line.inboundCallMode, expected_inbound_call_mode: line.expectedInboundCallMode })) } : {}),
+    },
   });
   if (error) {
     const mapped = RPC_MESSAGES.find(entry => entry.match.test(`${error.code} ${error.message}`));
@@ -1866,6 +1933,7 @@ export async function replaceIncomingRouting(
   const toRows = (document: RoutingDocument) => [
     ...document.groups.map(group => ({ id: `group:${group.id}`, name: `Skupina ${group.name}`, content: groupToInput(group) })),
     ...document.plans.map(plan => ({ id: `plan:${plan.id}`, name: `Plán ${plan.name}`, content: planToInput(plan) })),
+    ...document.lines.filter(line => lineModes.some(change => change.id === line.id)).map(line => ({ id: `line:${line.id}`, name: `Linka ${line.label || line.phoneNumber}`, content: { inboundCallMode: line.inboundCallMode ?? null } })),
   ];
   const diff = compactDiff(toRows(committedBefore), toRows(after), row => row.id, row => row.name, row => row.content);
   const warning = await auditReplace(deps, { organizationId: input.organizationId, actor: input.actor, action: "telephony.incoming_routing.replace", diff });
@@ -2031,6 +2099,13 @@ export async function updateTelephonyLine(
     .eq("organization_id", input.organizationId).eq("id", input.lineId).maybeSingle();
   if (stored.error) throw new ConfigServiceError("Nastavenie linky sa nepodarilo načítať.", 503, "config_read_failed");
   if (!stored.data || isArchivedLine(stored.data.metadata)) throw new ConfigServiceError("Linka neexistuje.", 404, "line_not_found");
+  if (isRecord(stored.data.metadata) && stored.data.metadata.incoming_flow != null &&
+    ["returnLineId", "inboundCallMode", "ringPlanId", "ivrMenuId"].some(key => key in input.patch)) {
+    throw new ConfigServiceError("Táto linka používa postup po krokoch. Uprav smerovanie v nastavení prichádzajúcich hovorov.", 409, "incoming_flow_active");
+  }
+  if (input.patch.returnLineId && before.lines.some(line => line.id === input.patch.returnLineId && (line.incomingFlow || line.incomingFlowInvalid))) {
+    throw new ConfigServiceError("Ako návratovú linku nemožno použiť linku s postupom po krokoch.", 409, "incoming_flow_active");
+  }
   if (input.patch.returnLineId !== undefined || input.patch.inboundCallMode !== undefined) {
     values.metadata = {
       ...(isRecord(stored.data.metadata) ? stored.data.metadata : {}),
@@ -2120,6 +2195,12 @@ export function destinationsOutsideAllowlist(document: RoutingDocument, allowlis
     if (plan.fallbackKind !== "external_number") continue;
     const normalized = normalizeE164(plan.fallbackNumber);
     if (normalized && !isDestinationAllowed(normalized, allowlist)) offenders.push({ where: `plán „${plan.name}"`, number: normalized });
+  }
+  for (const line of document.lines) {
+    for (const step of line.incomingFlow?.steps ?? []) {
+      const numbers = step.type === "external" ? [step.number] : step.type === "ring" ? step.people.flatMap(person => person.personalNumber ? [person.personalNumber] : []) : [];
+      for (const number of numbers) if (!isDestinationAllowed(number, allowlist)) offenders.push({ where: `postup linky „${line.label || line.phoneNumber}"`, number });
+    }
   }
   for (const operator of document.operators) {
     const settings = operator.settings;

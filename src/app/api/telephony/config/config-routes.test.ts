@@ -28,6 +28,7 @@ vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => ({ mar
 const document = {
   organizationId: "org-1",
   routingVersion: 7,
+  capabilities: { ownedMobileRouting: false, defaultInboundCallMode: "queue_first" },
   groups: [],
   plans: [],
   businessHours: [],
@@ -45,6 +46,7 @@ const document = {
 
 const getRoutingDocument = vi.fn(async () => document);
 const getCoherentRoutingDocument = vi.fn(async () => ({ ...document, snapshotId: "coherent" }));
+const saveIncomingFlows = vi.fn(async () => ({ document, warning: null }));
 const replaceIncomingRouting = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
 const replaceRingGroups = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
 const replaceRingPlans = vi.fn(async () => ({ document, diff: { added: [], removed: [], changed: [] }, warning: null }));
@@ -71,8 +73,14 @@ vi.mock("@/server/telephony/config-service", async (importOriginal) => {
   };
 });
 
+vi.mock("@/server/telephony/incoming-flow-service", async importOriginal => ({
+  ...(await importOriginal<typeof import("@/server/telephony/incoming-flow-service")>()),
+  saveIncomingFlows: (...args: unknown[]) => saveIncomingFlows(...(args as [])),
+}));
+
 import { ConfigServiceError } from "@/server/telephony/config-service";
 
+import { PUT as putIncomingFlow } from "./incoming-flow/route";
 import { GET as getIncoming, PUT as putIncoming } from "./incoming/route";
 import { GET as getSummary } from "../routing-summary/route";
 
@@ -93,7 +101,7 @@ const VALID_GROUPS = [{ id: "00000000-0000-4000-8000-000000000001", name: "Dispe
 beforeEach(() => {
   state.role = "manager";
   assertSameOriginRequest.mockReset();
-  for (const mock of [getCoherentRoutingDocument, replaceIncomingRouting, getRoutingDocument, replaceRingGroups, replaceRingPlans, replaceBusinessHours, replacePauseReasons, replaceIvrMenus, updateTelephonyLine, updateTelephonySettings]) {
+  for (const mock of [saveIncomingFlows, getCoherentRoutingDocument, replaceIncomingRouting, getRoutingDocument, replaceRingGroups, replaceRingPlans, replaceBusinessHours, replacePauseReasons, replaceIvrMenus, updateTelephonyLine, updateTelephonySettings]) {
     mock.mockClear();
   }
 });
@@ -108,6 +116,7 @@ describe("GET /api/telephony/config/*", () => {
     expect(body).toMatchObject({ canEdit: false, canManageSettings: false });
     expect(body.document.settings).toBeNull();
     expect(body.document.limits).toBeNull();
+    expect(body.document.capabilities).toEqual(document.capabilities);
     // Own row keeps its device; every colleague's Telnyx credential and SIP user is stripped.
     expect(body.document.operators.find((operator) => operator.profileId === "profile-1")?.device).not.toBeNull();
     expect(body.document.operators.find((operator) => operator.profileId === "profile-2")?.device).toBeNull();
@@ -126,6 +135,7 @@ describe("GET /api/telephony/config/*", () => {
     // arrive through this response either.
     expect(body.document.settings).toBeNull();
     expect(body.document.limits).toEqual({ destinationAllowlist: ["SK"], maxRingFanout: 8, maxConcurrentLegs: 9 });
+    expect(body.document.capabilities).toEqual(document.capabilities);
     expect(body.document.operators.find((operator) => operator.profileId === "profile-2")?.device).not.toBeNull();
     expect(getRoutingDocument).toHaveBeenCalledWith(expect.anything(), {
       organizationId: "org-1",
@@ -140,6 +150,7 @@ describe("GET /api/telephony/config/*", () => {
     state.role = "admin";
     const body = (await (await getPlans()).json()) as { document: typeof document };
     expect(body.document.settings).toMatchObject({ liveCallsEnabled: true, dailyLegSoftCap: 500 });
+    expect(body.document.capabilities).toEqual(document.capabilities);
   });
 
   it("keeps the numbers panel readable for every member", async () => {
@@ -296,6 +307,7 @@ describe("coherent incoming routes", () => {
     const response = await getIncoming(); const body = await response.json();
     expect(response.status).toBe(200); expect(body.document.snapshotId).toBe("coherent");
     expect(body.document.settings).toBeNull(); expect(body.document.limits).toBeNull(); expect(body.document.operators[1].device).toBeNull();
+    expect(body.document.capabilities).toEqual(document.capabilities);
     expect(getRoutingDocument).not.toHaveBeenCalled();
     expect(getCoherentRoutingDocument).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ organizationId: "org-1", viewerProfileId: "profile-1", includeOperatorDetails: false }));
   });
@@ -316,8 +328,22 @@ describe("coherent incoming routes", () => {
   it("saves groups and plans in one scoped versioned service call", async () => {
     const response=await putIncoming(request("incoming", "PUT", { groups: COMBINED_GROUPS, plans: [], version: 7 }));
     expect(response.status).toBe(200); expect(replaceIncomingRouting).toHaveBeenCalledOnce();
+    expect((await response.json()).document.capabilities).toEqual(document.capabilities);
     expect(replaceIncomingRouting).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({organizationId:"org-1",expectedVersion:7,groups:expect.any(Array),plans:[]}));
     expect(replaceRingGroups).not.toHaveBeenCalled(); expect(replaceRingPlans).not.toHaveBeenCalled();
+  });
+  it("passes line mode changes into the same authenticated save", async () => {
+    const lineModes = [{ id: "00000000-0000-4000-8000-000000000201", inboundCallMode: "ring_all", expectedInboundCallMode: null }];
+    const response = await putIncoming(request("incoming", "PUT", { groups: COMBINED_GROUPS, plans: [], lineModes, version: 7 }));
+    expect(response.status).toBe(200);
+    expect(replaceIncomingRouting).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ organizationId: "org-1", expectedVersion: 7, lineModes }));
+    expect(updateTelephonyLine).not.toHaveBeenCalled();
+  });
+  it.each([null, {}, [{ id: "00000000-0000-4000-8000-000000000201", inboundCallMode: "ring_all" }], [{ id: "00000000-0000-4000-8000-000000000201", inboundCallMode: "ring_all", expectedInboundCallMode: null, organizationId: "foreign" }]])("rejects invalid mode changes before any write %#", async lineModes => {
+    const response = await putIncoming(request("incoming", "PUT", { groups: COMBINED_GROUPS, plans: [], lineModes, version: 7 }));
+    expect(response.status).toBe(400);
+    expect(replaceIncomingRouting).not.toHaveBeenCalled();
+    expect(updateTelephonyLine).not.toHaveBeenCalled();
   });
   it("rejects unknown sections and missing versions without committing",async()=>{
     expect((await putIncoming(request("incoming", "PUT", { groups:[],plans:[],version:7,settings:{} }))).status).toBe(400);
@@ -336,4 +362,35 @@ it("refuses Preview routing writes before invoking a configuration service", asy
   expect(response.status).toBe(503);
   expect(updateTelephonySettings).not.toHaveBeenCalled();
   expect((await getSettings()).status).toBe(200);
+});
+
+
+describe("unified incoming flow API", () => {
+  const payload = () => ({ version: 7, snapshotId: "a".repeat(32), lines: [{ id: "00000000-0000-4000-8000-000000000001", expectedFlow: null, flow: { version: 1, ending: "hangup", steps: [{ id: "00000000-0000-4000-8000-000000000002", type: "wait", minutes: 1 }] } }] });
+  it("checks role and same origin before any flow write", async () => {
+    state.role = "dispatcher";
+    expect((await putIncomingFlow(request("incoming-flow", "PUT", payload()))).status).toBe(403);
+    state.role = "manager";
+    assertSameOriginRequest.mockImplementationOnce(() => { throw new MutationError("Wrong origin", 403); });
+    expect((await putIncomingFlow(request("incoming-flow", "PUT", payload()))).status).toBe(403);
+    expect(saveIncomingFlows).not.toHaveBeenCalled();
+  });
+  it("passes actor-scoped changed lines and both concurrency tokens", async () => {
+    const body = payload();
+    const response = await putIncomingFlow(request("incoming-flow", "PUT", body));
+    expect(response.status).toBe(200);
+    expect(saveIncomingFlows).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ organizationId: "org-1", expectedVersion: 7, expectedSnapshotId: body.snapshotId, changes: body.lines }));
+    expect((await response.json()).document.settings).toBeNull();
+  });
+  it("rejects foreign organization override, missing snapshot and malformed flow before service", async () => {
+    expect((await putIncomingFlow(request("incoming-flow", "PUT", { ...payload(), organizationId: "foreign" }))).status).toBe(400);
+    expect((await putIncomingFlow(request("incoming-flow", "PUT", { ...payload(), snapshotId: "" }))).status).toBe(400);
+    expect((await putIncomingFlow(request("incoming-flow", "PUT", { ...payload(), lines: [{ ...payload().lines[0], flow: { version: 2 } }] }))).status).toBe(400);
+    expect(saveIncomingFlows).not.toHaveBeenCalled();
+  });
+  it("keeps ordinary Preview writes disabled", async () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    expect((await putIncomingFlow(request("incoming-flow", "PUT", payload()))).status).toBe(503);
+    expect(saveIncomingFlows).not.toHaveBeenCalled();
+  });
 });

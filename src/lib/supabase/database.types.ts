@@ -1293,6 +1293,7 @@ export type Database = {
         updated_at: Timestamp;
       }>;
       motorist_ring_attempts: Table<{
+        application_device?: "web" | "mobile" | null;
         id: string;
         organization_id: string;
         session_id: string;
@@ -1670,6 +1671,8 @@ export type Database = {
       }>;
     };
     Functions: {
+      motorist_active_call_snapshot_v1: { Args: { p_organization_id: string; p_environment: string }; Returns: Json };
+      motorist_callback_queue_page_v1: { Args: { p_organization_id: string; p_cursor?: Json; p_limit?: number }; Returns: Json };
       motorist_diagnostics_ingest: { Args: {p_org:string;p_profile:string;p_environment:string;p_source:string;p_build:string;p_events:Json}; Returns:Json };
       motorist_diagnostics_read: { Args: {p_org:string;p_profile:string;p_environment:string;p_mode:string;p_id?:string|null;p_since?:string;p_until?:string;p_cursor_at?:string|null;p_cursor_id?:string|null;p_limit?:number;p_status?:string|null}; Returns:Json };
       motorist_diagnostics_maintain: { Args: {p_org:string;p_environment:string;p_budget:number;p_classify?:boolean}; Returns:Json };
@@ -1895,6 +1898,10 @@ export type Database = {
       };
       motorist_routing_snapshot: {
         Args: { p_organization_id: string };
+        Returns: Json;
+      };
+      motorist_save_incoming_flow: {
+        Args: { p_organization_id: string; p_changes: Json; p_expected_version: number; p_expected_snapshot_id: string };
         Returns: Json;
       };
       motorist_save_incoming_routing: {

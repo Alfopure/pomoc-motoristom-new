@@ -39,6 +39,19 @@ export type Ownership = {
   leaseWaitMs?: number;
 };
 export const sessionOwnership = new AsyncLocalStorage<Ownership>();
+const ownershipRenewals = new WeakMap<Ownership, Promise<void>>();
+
+function ownershipIndependentRpc(input: RequestInfo | URL): boolean {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  const path = new URL(url).pathname;
+  // Renew must not recursively renew itself. Provider acceptance is immutable
+  // evidence: these dedicated RPCs accept the original dispatch tuple even
+  // after lease expiry, so recording an acknowledgement must not require a
+  // new lease or be mistaken for a new provider command.
+  return path === "/rest/v1/rpc/motorist_session_lease_renew_v2" ||
+    path === "/rest/v1/rpc/motorist_provider_command_result_v2" ||
+    path === "/rest/v1/rpc/motorist_provider_command_result_batch_v2";
+}
 
 /** The read cap for an un-owned PostgREST GET/HEAD, or null when the request is not one. */
 function unownedReadCap(input: RequestInfo | URL, init?: RequestInit): AbortSignal | null {
@@ -57,9 +70,9 @@ function unownedReadCap(input: RequestInfo | URL, init?: RequestInit): AbortSign
  * retry, so the cap is surfaced as one: it then bounds the whole read, not
  * each attempt.
  */
-function abortInsteadOfTimeout(error: unknown): never {
+function abortInsteadOfTimeout(error: unknown, description: string): never {
   if ((error as { name?: unknown } | null)?.name === "TimeoutError") {
-    throw new DOMException(`un-owned read exceeded ${UNOWNED_READ_MS} ms`, "AbortError");
+    throw new DOMException(description, "AbortError");
   }
   throw error;
 }
@@ -80,14 +93,21 @@ export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: Re
     if (!cap) return measureRequestStep("db", () => fetch(input, { ...init, headers }));
     const signal = init?.signal ? AbortSignal.any([init.signal, cap]) : cap;
     const detach = observeDatabaseTimeout(cap);
-    try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal }).catch(abortInsteadOfTimeout)); }
+    try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal })
+      .catch(error => abortInsteadOfTimeout(error, `un-owned read exceeded ${UNOWNED_READ_MS} ms`))); }
     finally { detach(); }
   }
+  // Snapshot/routing reads and database checkpoints can outlast the 15 s TTL
+  // before the first provider command gets to its guard. Renew during that
+  // work as well, sharing the same 5 s window as provider dispatch. The token,
+  // generation and per-request deadline still fence every actual write.
+  if (!ownershipIndependentRpc(input)) await assertOwnership(owner);
   const remaining = owner.deadline - Date.now();
   if (remaining <= 0) throw new SessionLeaseLostError();
   const timeout = AbortSignal.timeout(Math.max(1, Math.min(DATABASE_REQUEST_MS, remaining)));
   const detach = observeDatabaseTimeout(timeout);
-  try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout })); }
+  try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout })
+    .catch(error => abortInsteadOfTimeout(error, `owned database request exceeded ${Math.min(DATABASE_REQUEST_MS, remaining)} ms`))); }
   finally { detach(); }
 }
 
@@ -128,11 +148,25 @@ export async function assertOwnership(owner = sessionOwnership.getStore()): Prom
   // answer, or a fan-out of N dials — renewed once each.
   const since = Date.now() - (owner.renewedAt ?? owner.acquiredAt);
   if (since >= 0 && since < OWNERSHIP_RENEW_SKIP_MS) return;
-  const ok = await ownershipRpc<boolean>(owner.admin, "motorist_session_lease_renew_v2", {
-    p_session_id: owner.sessionId, p_token: owner.token, p_generation: owner.generation, p_ttl_ms: SESSION_LEASE_MS,
-  });
-  if (!ok) throw new SessionLeaseLostError();
-  owner.renewedAt = Date.now();
+  const pending = ownershipRenewals.get(owner);
+  if (pending) {
+    await pending;
+  } else {
+    const started = Date.now();
+    const renewal = (async () => {
+      const ok = await ownershipRpc<boolean>(owner.admin, "motorist_session_lease_renew_v2", {
+        p_session_id: owner.sessionId, p_token: owner.token, p_generation: owner.generation, p_ttl_ms: SESSION_LEASE_MS,
+      });
+      if (!ok) throw new SessionLeaseLostError();
+      // Count the window from sending, not receiving a potentially delayed
+      // response: the database may have renewed before that delay.
+      owner.renewedAt = started;
+    })();
+    ownershipRenewals.set(owner, renewal);
+    try { await renewal; }
+    finally { ownershipRenewals.delete(owner); }
+  }
+  if (Date.now() >= owner.deadline) throw new SessionLeaseLostError();
 }
 
 

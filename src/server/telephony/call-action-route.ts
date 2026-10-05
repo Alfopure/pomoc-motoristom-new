@@ -69,8 +69,8 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
       const applied = result && typeof result === "object" && "sessionId" in result && result.sessionId === params.id;
       const reconciled = applied && "reconciled" in result && result.reconciled === true;
       if (applied && (options.replayDeferred !== false || reconciled)) {
-        const reportDeferred = () => {
-          try { deps.logger?.({ level: "warn", scope: "call-action", sessionId: params.id, code: "event_replay_deferred" }); }
+        const reportDeferred = (code = "event_replay_deferred") => {
+          try { deps.logger?.({ level: "warn", scope: "call-action", sessionId: params.id, code }); }
           catch { /* Optional diagnostics cannot invalidate the completed action. */ }
         };
         try {
@@ -79,6 +79,10 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
               const { replayDeferredSessionEvents } = await import("./telnyx/event-processor");
               await replayDeferredSessionEvents(deps, params.id);
             } catch { reportDeferred(); }
+            try {
+              const { recoverSessionContactChecks } = await import("./session-runner");
+              await recoverSessionContactChecks(deps, params.id);
+            } catch { reportDeferred("contact_verification_deferred"); }
           }));
         } catch { reportDeferred(); }
       }

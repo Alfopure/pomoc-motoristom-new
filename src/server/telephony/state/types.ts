@@ -1,4 +1,5 @@
 import type { MonitorInvitation } from "@/lib/telephony/monitor-invitations";
+import type { IncomingWaitPolicy } from "@/lib/telephony/incoming-flow";
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { CallLegRole, CallSessionState, Database, Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
@@ -104,21 +105,34 @@ export type FrozenRingMember = {
   /** Resolved ring time for `ordered` steps: `max(5, member.ring_secs ?? step.timeout_secs)`. */
   ringSecs: number;
   memberId: string | null;
+  /** Explicit flow choice: ring registered application endpoints, not personal routing. */
+  application?: boolean;
+  applicationDevice?: "web" | "mobile";
 };
 
 export type FrozenRingStep = {
   index: number;
-  groupId: string;
+  groupId: string | null;
   groupName: string;
   strategy: "all" | "ordered";
   timeoutSecs: number;
   members: FrozenRingMember[];
+  /** Legacy plans omit this and remain ordinary ring steps. */
+  kind?: "ring" | "wait";
+  waitMinutes?: number;
+  waitPolicy?: IncomingWaitPolicy;
+  sourceId?: string;
+  occurrenceId?: string;
+  repeatStepId?: string;
+  repeatRound?: number;
 };
 
 export type FrozenRingPlan = {
-  planId: string;
+  planId: string | null;
   name: string;
-  fallback: { kind: "external_number" | "waiting_room" | "callback_prompt" | "hangup_message"; number: string | null };
+  fallback: { kind: "external_number" | "waiting_room" | "callback_prompt" | "hangup_message" | "hangup"; number: string | null };
+  source?: "incoming_flow";
+  flowSignature?: string;
   steps: FrozenRingStep[];
   /** Original browser members, before pause forwarding replaces a member. */
   queueMembers?: FrozenRingMember[];
@@ -273,7 +287,7 @@ export type DialCommand = CommandBase & {
   preventDoubleBridge?: boolean;
   parkAfterUnbridge?: "self";
   /** Ring attempt this dial belongs to (natural key, resolved by effects). */
-  attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null } | null;
+  attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null; applicationDevice?: "web" | "mobile" } | null;
   autoAnswer?: boolean;
   /**
    * The colleague's leg of a colleague call. Marked for the browser, which
@@ -301,6 +315,8 @@ export type AttemptPlan = {
   externalNumber: string | null;
   position: number;
   ringSecs: number;
+  application?: boolean;
+  applicationDevice?: "web" | "mobile";
 };
 
 export type RingFanout = CommandBase & {
@@ -585,6 +601,8 @@ export type RoutingContext = {
   ringPlans: Record<string, FrozenRingPlan>;
   presence: PresenceRow[];
   devices: DeviceRow[];
+  /** Mobile credentials have an independent registration/heartbeat. */
+  mobileDevices?: DeviceRow[];
   /** Profile ids holding an `offered` attempt in another session. */
   openOffers: string[];
   /** Open legs across the organisation (fan-out cap input). */
@@ -607,11 +625,29 @@ export type RoutingContext = {
   lean?: true;
 };
 
+/** Compact, additive reducer evidence. It never reads or sends provider data. */
+export type JourneyEvidenceEntry = {
+  id: string; at: string; kind: "step_enter" | "step_exit" | "phase";
+  stepIndex: number | null; phase?: string; reason?: string;
+};
+export type JourneyEvidence = { version: 1; entries: JourneyEvidenceEntry[]; truncated?: boolean };
+export const JOURNEY_EVIDENCE_LIMIT = 512;
+
+/** Safe for old session JSON; duplicate transition replay cannot grow history. */
+export function appendJourneyEvidence(previous: unknown, entry: JourneyEvidenceEntry): JourneyEvidence {
+  const old = previous && typeof previous === "object" && !Array.isArray(previous) ? previous as Partial<JourneyEvidence> : {};
+  const entries = old.version === 1 && Array.isArray(old.entries) ? old.entries.filter(item => item && typeof item.id === "string" && typeof item.at === "string").slice(0, JOURNEY_EVIDENCE_LIMIT) : [];
+  if (entries.some(item => item.id === entry.id)) return { version: 1, entries, ...(old.truncated ? { truncated: true } : {}) };
+  if (entries.length >= JOURNEY_EVIDENCE_LIMIT) return { version: 1, entries, truncated: true };
+  return { version: 1, entries: [...entries, entry], ...(old.truncated ? { truncated: true } : {}) };
+}
+
 // --- session metadata -------------------------------------------------------
 
 export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" | "consult";
 
 export type SessionMeta = {
+  journey?: JourneyEvidence;
   /** Dialled number's routing override, frozen at inbound session creation. */
   line_inbound_mode?: LineInboundMode;
   effects_v1?: { generation: number };
@@ -670,7 +706,11 @@ export type SessionMeta = {
   after_hours?: { reason: string; at: string } | null;
   pickup?: { by: string; at: string } | null;
   /** `max_minutes` is `park_max_minutes` frozen when the caller entered the waiting room. */
-  waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null; audio_phase?: "combined" | "prompt" | "music"; music_until?: string | null } | null;
+  waiting?: { since: string; reason: string; ticks: number; last_tick_at?: string | null; max_minutes?: number | null; audio_phase?: "combined" | "prompt" | "music"; music_until?: string | null;
+    /** Exact detached loop; only a definite failure permits a bounded retry. */
+    music?: { id: string; started_at: string; retry_at?: string | null };
+    /** Resume the frozen flow after this bounded, manually picked-up wait. */
+    flow_step_index?: number; audio_policy?: IncomingWaitPolicy } | null;
   /**
    * Unanswered inbound queue only; parked/held conversations never auto-ring.
    * `manual_only` keeps queue audio and the callback limit, but disables

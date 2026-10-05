@@ -4,7 +4,7 @@ import type { Database } from "@/lib/supabase/database.types";
 
 import { createClient } from "@supabase/supabase-js";
 
-import { ownershipRpc, telephonyDatabaseFetch, UNOWNED_READ_MS } from "./ownership";
+import { assertOwnership, ownershipRpc, sessionOwnership, telephonyDatabaseFetch, DATABASE_REQUEST_MS, SESSION_LEASE_MS, SESSION_WORK_MS, UNOWNED_READ_MS, type Ownership } from "./ownership";
 import { SessionLeaseLostError } from "./service-errors";
 
 function admin(error: { code?: string; message: string } | null, data: unknown = null) {
@@ -42,6 +42,172 @@ describe("ownershipRpc", () => {
 
     expect((error as Error & { code?: string }).code).toBeUndefined();
     expect((error as Error).message).toContain("connection reset");
+  });
+});
+
+describe("database work under a session lease", () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  function owner(now = Date.now()): Ownership {
+    return {
+      admin: createClient<Database>("https://x.supabase.co", "service-key", {
+        global: { fetch: telephonyDatabaseFetch }, auth: { persistSession: false, autoRefreshToken: false },
+      }),
+      sessionId: "session", organizationId: "org", token: "token", generation: 7,
+      contract: 2, acquiredAt: now, deadline: now + SESSION_WORK_MS,
+    };
+  }
+  const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+
+  it("keeps the lease alive through slow reads before staging the control", async () => {
+    let now = Date.now();
+    let expires = now + SESSION_LEASE_MS;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const owned = owner(now);
+    const renewals: number[] = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("x-telephony-session")).toBe(owned.sessionId);
+      expect(headers.get("x-telephony-token")).toBe(owned.token);
+      expect(headers.get("x-telephony-generation")).toBe(String(owned.generation));
+      if (String(input).endsWith("/rpc/motorist_session_lease_renew_v2")) {
+        const valid = now < expires;
+        if (valid) { renewals.push(now); expires = now + SESSION_LEASE_MS; }
+        return json(valid);
+      }
+      if (String(input).endsWith("/rpc/motorist_stage_transition_v1")) {
+        // Model the same lease fence that rejected the real cancel-consult:
+        // without renewal the read sequence consumes 20 s of a 15 s lease.
+        return json({ applied: now < expires });
+      }
+      now += 4_000;
+      return json([]);
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    const result = await sessionOwnership.run(owned, async () => {
+      for (let i = 0; i < 5; i++) await owned.admin.from("motorist_call_sessions").select("id");
+      return ownershipRpc(owned.admin, "motorist_stage_transition_v1", {});
+    });
+
+    expect(result).toEqual({ applied: true });
+    expect(renewals).toHaveLength(2);
+    expect(now - owned.acquiredAt).toBe(20_000);
+    expect(fetch).toHaveBeenCalledTimes(8); // Five reads, two renewals, one stage.
+  });
+
+  it("shares a pending renewal across parallel reads and the provider guard", async () => {
+    const owned = owner(Date.now() - 6_000);
+    let respond!: (value: Response) => void;
+    const renewing = new Promise<Response>((resolve) => { respond = resolve; });
+    let began!: () => void;
+    const started = new Promise<void>((resolve) => { began = resolve; });
+    const fetch = vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith("/rpc/motorist_session_lease_renew_v2")) { began(); return renewing; }
+      return Promise.resolve(json([]));
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    await sessionOwnership.run(owned, async () => {
+      const requests = [0, 1, 2].map(() => telephonyDatabaseFetch("https://x.supabase.co/rest/v1/motorist_call_sessions"));
+      requests.push(assertOwnership().then(() => new Response()));
+      await started;
+      expect(fetch).toHaveBeenCalledTimes(1);
+      respond(json(true));
+      await Promise.all(requests);
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("adds no renewal to a fast control", async () => {
+    const owned = owner();
+    const fetch = vi.fn().mockResolvedValue(json([]));
+    vi.stubGlobal("fetch", fetch);
+
+    await sessionOwnership.run(owned, async () => {
+      await telephonyDatabaseFetch(new URL("https://x.supabase.co/rest/v1/motorist_call_sessions"));
+      await telephonyDatabaseFetch(new Request("https://x.supabase.co/rest/v1/rpc/motorist_stage_transition_v1", { method: "POST", body: "{}" }));
+      await assertOwnership();
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["GET", "PATCH"])("does not send a %s after the lease is lost", async (method) => {
+    const owned = owner(Date.now() - 6_000);
+    const fetch = vi.fn().mockResolvedValue(json(false));
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(sessionOwnership.run(owned, () => telephonyDatabaseFetch("https://x.supabase.co/rest/v1/motorist_call_sessions", { method })))
+      .rejects.toBeInstanceOf(SessionLeaseLostError);
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(fetch.mock.calls[0][0])).toMatch(/\/rpc\/motorist_session_lease_renew_v2$/);
+  });
+
+  it("does not renew or send work past the session deadline", async () => {
+    const owned = { ...owner(), deadline: Date.now() - 1 };
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(sessionOwnership.run(owned, () => telephonyDatabaseFetch("https://x.supabase.co/rest/v1/motorist_call_sessions")))
+      .rejects.toBeInstanceOf(SessionLeaseLostError);
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("checks the work deadline again after a slow renewal", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const owned = owner(now - SESSION_WORK_MS + 1_000);
+    const fetch = vi.fn(async () => { now += 2_000; return json(true); });
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(sessionOwnership.run(owned, () => telephonyDatabaseFetch("https://x.supabase.co/rest/v1/motorist_call_sessions")))
+      .rejects.toBeInstanceOf(SessionLeaseLostError);
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let postgrest-js retry an owned read timeout under a fresh cap", async () => {
+    const owned = owner();
+    const fetch = vi.fn().mockRejectedValue(new DOMException("Read timed out", "TimeoutError"));
+    vi.stubGlobal("fetch", fetch);
+    const started = Date.now();
+
+    const result = await sessionOwnership.run(owned, async () => await owned.admin.from("motorist_call_sessions").select("id"));
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(result.error?.message).toContain(`owned database request exceeded ${DATABASE_REQUEST_MS} ms`);
+  });
+
+  it("preserves a lost-lease error through a Supabase read without retry sleeps", async () => {
+    const owned = { ...owner(), deadline: Date.now() - 1 };
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const started = Date.now();
+
+    await expect(sessionOwnership.run(owned, async () => await owned.admin.from("motorist_call_sessions").select("id").throwOnError()))
+      .rejects.toBeInstanceOf(SessionLeaseLostError);
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it.each(["motorist_provider_command_result_v2", "motorist_provider_command_result_batch_v2"])("retains late immutable acceptance through %s after lease expiry", async (rpc) => {
+    const owned = { ...owner(Date.now() - SESSION_LEASE_MS - 1_000), deadline: Date.now() + 4_000 };
+    const fetch = vi.fn().mockResolvedValue(json(true));
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(sessionOwnership.run(owned, () => ownershipRpc(owned.admin, rpc, {}))).resolves.toBe(true);
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(fetch.mock.calls[0][0])).toBe(`https://x.supabase.co/rest/v1/rpc/${rpc}`);
+    const headers = new Headers(fetch.mock.calls[0][1].headers);
+    expect(headers.get("x-telephony-token")).toBe(owned.token);
+    expect(headers.get("x-telephony-generation")).toBe(String(owned.generation));
   });
 });
 

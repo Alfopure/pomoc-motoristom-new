@@ -70,7 +70,7 @@ export const DEFERRED_DRAIN_DEADLINE_MS = 8_000;
  */
 export const DEFERRED_EVENT_RANK: Readonly<Record<string, number>> = {
   "call.hangup": 0, "call.answered": 1, "call.bridged": 2, "call.initiated": 3,
-  "call.hold": 4, "call.unhold": 4,
+  "call.hold": 4, "call.unhold": 4, "call.dtmf.received": 4,
   "call.gather.ended": 5, "call.playback.ended": 5, "call.speak.ended": 5,
 };
 const DEFERRED_DRAIN_TYPES = Object.keys(DEFERRED_EVENT_RANK);
@@ -508,7 +508,11 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
           // Only requested, announced captures from our registry enter processing. A provider
           // recording enabled in its portal must not silently become an authorised app recording.
           const recorder = readMeta(ownedSession).recording?.recorders.find((r) => r.callControlId === event.callControlId && (r.providerRecordingId && typeof event.payload.recording_id === "string" ? r.providerRecordingId === event.payload.recording_id : event.clientState?.intent === recordingIntent(r.id)));
-          if (recorder && providerRecordingId && sourceUrl && startedAt && endedAt && Number.isFinite(Date.parse(startedAt)) && Date.parse(endedAt) >= Date.parse(startedAt)) {
+          // The durable inbox deliberately omits signed audio URLs. A replay
+          // still has the exact announced recorder identity and provider times;
+          // import obtains a fresh URL through its existing provider provenance
+          // guard. Requiring the ephemeral URL here strands lease-busy saves.
+          if (recorder && providerRecordingId && startedAt && endedAt && Number.isFinite(Date.parse(startedAt)) && Date.parse(endedAt) >= Date.parse(startedAt)) {
             const call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", ownedSession.id).maybeSingle();
             if (call.error || !call.data) throw new Error("recording call association unavailable");
             await enqueueSavedRecording(deps.admin, { organizationId: deps.organizationId, callId: call.data.id, sessionId: ownedSession.id, providerRecordingId, recorderId: recorder.id,

@@ -10,9 +10,10 @@ test.beforeAll(async ({ request, baseURL }) => {
   const sheets = [...new Set([...html.matchAll(/href="([^"<>]+\.css(?:\?[^"<>]*)?)"/g)].map((match) => match[1].replaceAll("&amp;", "&")))];
   expect(sheets.length).toBeGreaterThan(0);
   for (const sheet of sheets) appCss += await (await request.get(new URL(sheet, baseURL).href)).text();
-  const bundle = await build({ entryPoints: ["e2e/fixtures/incoming-call-overview.tsx"], bundle: true, write: false,
+  const bundle = await build({ entryPoints: ["e2e/fixtures/incoming-call-overview.tsx"], bundle: true, write: false, outdir: ".context/incoming-call-overview-fixture",
     platform: "browser", format: "iife", jsx: "automatic", define: { "process.env.NODE_ENV": '"test"' } });
-  script = bundle.outputFiles[0].text;
+  script = bundle.outputFiles.find(file => file.path.endsWith(".js"))!.text;
+  appCss += bundle.outputFiles.filter(file => file.path.endsWith(".css")).map(file => file.text).join("\n");
 });
 test.beforeEach(async ({ page }) => {
   const errors: string[] = [];

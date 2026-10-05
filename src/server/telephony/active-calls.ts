@@ -1,5 +1,6 @@
 import { readPauseReturn } from "@/lib/telephony/presence-policy";
 import { telephonyStabilityEnabled } from "./stability";
+import { UNOWNED_READ_MS } from "./ownership";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { CallerMatch } from "@/data/dispatch-types";
@@ -16,10 +17,10 @@ import type { TelephonyEnvironment } from "./state/types";
  * Snapshot behind `GET /api/telephony/calls/active` (design §2.4).
  *
  * The console polls this endpoint (1 s engaged / 5 s idle), so it must be one
- * flat round trip: active sessions, their open legs, the open ring offers,
- * operator presence and browser-phone devices — no provider call, no joins
- * (PostgREST embeds are avoided so the fake-Supabase harness can drive the
- * same code path).
+ * read-only snapshot of sessions, open legs/offers, presence and devices.
+ * Verified deployments can load these rows in one RPC; the compatibility
+ * path keeps the existing table reads until its migration is activated.
+ * Neither path calls the provider or changes call ownership.
  */
 
 type AdminClient = SupabaseClient<Database>;
@@ -218,12 +219,14 @@ export type ActiveCallRows = {
  * every console that polls in the same few milliseconds after the entry
  * expires starts its own pass — the stampede the cache exists to prevent.
  *
- * A second is well inside what the console already tolerates (the poll floor
- * is three seconds and Realtime pushes changes as they happen), and it is what
- * turns N screens into one database pass.
+ * A slow in-flight pass remains shared after that second expires. Starting
+ * another pass while the database is already slow multiplies the same reads
+ * and competes with answering and controlling calls. Once it settles, the
+ * original start time still decides freshness; a slow result earns no extra
+ * cache interval. Realtime also pushes changes between polls.
  */
 export const ACTIVE_CALLS_CACHE_TTL_MS = 1_000;
-type RowsCacheEntry = { at: number; rows: Promise<ActiveCallRows> };
+type RowsCacheEntry = { at: number; pending: boolean; rows: Promise<ActiveCallRows> };
 const rowsCache = new Map<string, RowsCacheEntry>();
 
 /** Test seam: drops the per-instance row cache. */
@@ -246,24 +249,44 @@ export async function loadActiveCallsCached(
   const now = (deps.now ?? (() => new Date()))();
   const key = `${deps.organizationId}:${deps.environment}`;
   const at = now.getTime();
-  const hit = rowsCache.get(key);
-  if (!hit || at - hit.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < hit.at) {
-    const pending = readActiveCallRows(deps);
-    rowsCache.set(key, { at, rows: pending });
-    try {
-      await pending;
-    } catch (error) {
-      // A failed pass must not be cached: the next reader has to be allowed to
-      // try again rather than being served the same rejection for a second.
-      if (rowsCache.get(key)?.rows === pending) rowsCache.delete(key);
-      throw error;
-    }
+  let entry = rowsCache.get(key);
+  if (!entry || !entry.pending && (at - entry.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < entry.at)) {
+    entry = { at, pending: true, rows: readActiveCallRows(deps) };
+    rowsCache.set(key, entry);
   }
-  return buildActiveCalls(deps, actor, now, await rowsCache.get(key)!.rows);
+  let rows: ActiveCallRows;
+  try {
+    rows = await entry.rows;
+  } catch (error) {
+    // Every waiter observes its own pass, even if another request already
+    // replaced a failed entry with a fresh one.
+    if (rowsCache.get(key) === entry) rowsCache.delete(key);
+    throw error;
+  } finally {
+    entry.pending = false;
+  }
+  return buildActiveCalls(deps, actor, now, rows);
 }
 
 export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveCallRows> {
   const { admin, organizationId } = deps;
+  if (process.env.TELEPHONY_ACTIVE_SNAPSHOT_V1_ENABLED === "true") {
+    const { data, error } = await admin.rpc("motorist_active_call_snapshot_v1", {
+      p_organization_id: organizationId, p_environment: deps.environment,
+    }).abortSignal(AbortSignal.timeout(UNOWNED_READ_MS));
+    // A timeout or installation error must not multiply load with eight more
+    // reads. Activation follows verification of this RPC on the exact project.
+    if (error) throw new Error(`active call snapshot failed: ${error.message}`);
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid active call snapshot");
+    const keys = ["sessions", "legs", "attempts", "presence", "devices", "lines", "operatorSettings", "callRows"] as const;
+    if (!keys.every(key => Array.isArray(data[key]))) throw new Error("incomplete active call snapshot");
+    const rows = data as unknown as Omit<ActiveCallRows, "callIdBySession"> & { callRows: Array<{ id: string; session_id: string | null }> };
+    return {
+      sessions: rows.sessions, legs: rows.legs, attempts: rows.attempts,
+      presence: rows.presence, devices: rows.devices, lines: rows.lines, operatorSettings: rows.operatorSettings,
+      callIdBySession: new Map(rows.callRows.flatMap(row => row.session_id ? [[row.session_id, row.id] as const] : [])),
+    };
+  }
 
   const [sessionsResult, presenceResult, devicesResult, linesResult, operatorSettingsResult] = await Promise.all([
     admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).in("state", ACTIVE_STATES).order("started_at", { ascending: true }),

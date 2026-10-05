@@ -1,7 +1,7 @@
 "use client";
 
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { Check, Clock3, Loader2, PhoneOutgoing, UserRound, X } from "lucide-react";
 
 import { TELEPHONY_TIMEOUT_MS, telephonyJson } from "@/lib/telephony/client-request";
@@ -27,6 +27,7 @@ import {
 } from "@/lib/telephony/callback-queue";
 
 import { useTickingClock } from "./settings/settings-ui";
+import { CallJourneyButton } from "./CallJourney";
 
 /**
  * The callback queue (plan "Fáza 4", fronta spätných volaní).
@@ -187,9 +188,10 @@ export function CallbackQueuePanel({
               </button>;
             })}
           </div>
-          {partialQueue && <p className="text-[11px] text-zinc-500">Filtre a poradie sa vzťahujú na načítané požiadavky. Ďalšie nájdete pod zoznamom.</p>}
+          <p className="text-[11px] text-zinc-500">Vyžiadané spätné volania sú vždy prvé.{partialQueue ? " Filtre a zvolené poradie sa vzťahujú na načítané požiadavky; ďalšie sú pod zoznamom." : ""}</p>
+          {partialQueue && queue.totalsByOrigin && <p className="text-[11px] text-zinc-600">Celkovo: {queue.totalsByOrigin.requested} vyžiadaných volajúcim · {totalOpen - queue.totalsByOrigin.requested} ostatných nevybavených.</p>}
           <label className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-[11px] font-semibold text-zinc-600">
-            Zoradiť
+            V skupine
             <select
               value={order}
               onChange={(event) => setOrder(event.target.value as CallbackQueueOrder)}
@@ -217,9 +219,10 @@ export function CallbackQueuePanel({
             {loaded ? open.length ? "V tejto skupine nie sú žiadne požiadavky." : "Nikto nečaká na spätné volanie." : "Načítavam frontu…"}
           </div>
         ) : (
-          visible.map((request) => (
+          visible.map((request, index) => (
+            <Fragment key={request.id}>
+            {(index === 0 || (originOf(visible[index - 1]).kind === "requested") !== (originOf(request).kind === "requested")) && <h3 className="pt-1 text-xs font-semibold text-zinc-700">{originOf(request).kind === "requested" ? "Vyžiadané volajúcim" : "Ostatné nevybavené"}</h3>}
             <CallbackQueueRow
-              key={request.id}
               busy={busy}
               callable={configured && queue.configured && Boolean(onCallBack)}
               now={now}
@@ -227,6 +230,7 @@ export function CallbackQueuePanel({
               permissions={callbackPermissions(request, actor)}
               request={request}
             />
+            </Fragment>
           ))
         )}
       </div>
@@ -310,8 +314,10 @@ function CallbackQueueRow({
         {request.callerName && <span>{formatPhoneNumberForDisplay(request.callerNumber)}</span>}
         <span className="truncate">{request.lineLabel ?? request.partnerName ?? "Neznáma linka"}</span>
         <span className="truncate">{origin.kind === "requested" && request.source === "missed" ? "Po zvonení / počas čakania" : CALLBACK_SOURCE_LABELS[request.source]}</span>
-        <span className={`font-semibold ${origin.kind === "requested" ? "text-blue-900" : "text-zinc-700"}`} title={detail ?? undefined}>{CALLBACK_ORIGIN_LABELS[origin.kind]}</span>
+        <span className={`font-semibold ${origin.kind === "requested" ? "text-blue-900" : "text-zinc-700"}`}>{CALLBACK_ORIGIN_LABELS[origin.kind]}</span>
       </p>
+      {detail && <p className="mt-1 text-[11px] font-medium text-blue-900">{detail}</p>}
+      {request.sessionId && <div className="mt-1"><CallJourneyButton sessionId={request.sessionId} /></div>}
 
       <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5">
         {request.status === "scheduled" && (

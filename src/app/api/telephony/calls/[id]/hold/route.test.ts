@@ -4,12 +4,15 @@ import { MutationError } from "@/server/motorist-mutations";
 import { CallActionError } from "@/server/telephony/call-actions";
 import { SessionLeaseBusyError } from "@/server/telephony/service-errors";
 
-const maintenance = vi.hoisted(() => ({ after: vi.fn(), replay: vi.fn() }));
+const maintenance = vi.hoisted(() => ({ after: vi.fn(), replay: vi.fn(), contact: vi.fn() }));
 vi.mock("next/server", async importOriginal => ({
   ...await importOriginal<typeof import("next/server")>(), after: maintenance.after,
 }));
 vi.mock("@/server/telephony/telnyx/event-processor", async importOriginal => ({
   ...await importOriginal<typeof import("@/server/telephony/telnyx/event-processor")>(), replayDeferredSessionEvents: maintenance.replay,
+}));
+vi.mock("@/server/telephony/session-runner", async importOriginal => ({
+  ...await importOriginal<typeof import("@/server/telephony/session-runner")>(), recoverSessionContactChecks: maintenance.contact,
 }));
 
 const requireDefaultMotoristActor = vi.fn();
@@ -55,6 +58,7 @@ describe("POST /api/telephony/calls/[id]/hold", () => {
     createTelephonyDeps.mockClear();
     maintenance.after.mockReset();
     maintenance.replay.mockReset().mockResolvedValue(undefined);
+    maintenance.contact.mockReset().mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -72,8 +76,10 @@ describe("POST /api/telephony/calls/[id]/hold", () => {
     expect(createTelephonyDeps).toHaveBeenCalledWith({ organizationId: "org-1", deviceKind: "web" });
     expect(maintenance.after).toHaveBeenCalledTimes(1);
     expect(maintenance.replay).not.toHaveBeenCalled();
+    expect(maintenance.contact).not.toHaveBeenCalled();
     await maintenance.after.mock.calls[0][0]();
     expect(maintenance.replay).toHaveBeenCalledExactlyOnceWith({ marker: "deps" }, "sess-1");
+    expect(maintenance.contact).toHaveBeenCalledExactlyOnceWith({ marker: "deps" }, "sess-1");
   });
 
   it("runs the CSRF check before authentication", async () => {
@@ -136,6 +142,10 @@ describe("POST /api/telephony/calls/[id]/hold", () => {
     maintenance.replay.mockRejectedValueOnce(new Error("database unavailable"));
     expect((await POST(request(), context)).status).toBe(200);
     await expect(maintenance.after.mock.calls[1][0]()).resolves.toBeUndefined();
+    expect(maintenance.contact).toHaveBeenCalledTimes(1);
+    maintenance.contact.mockRejectedValueOnce(new SessionLeaseBusyError());
+    expect((await POST(request(), context)).status).toBe(200);
+    await expect(maintenance.after.mock.calls[2][0]()).resolves.toBeUndefined();
   });
 
   it("maps the kill switch onto 423", async () => {
