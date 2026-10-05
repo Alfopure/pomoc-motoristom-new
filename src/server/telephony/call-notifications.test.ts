@@ -195,7 +195,7 @@ describe("call push audience", () => {
     await h.legEvent(String(loser.telnyx_call_control_id), "call.hangup", { hangup_cause: "originator_cancel" });
     const push = queuedPush(h);
     await blindTransfer(h.deps, { profileId: PROFILES.o1, role: "dispatcher" }, call.sessionId, { profileId: PROFILES.o2 });
-    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([]);
+    expect(await loadCallPushCandidates(deps(h), call.sessionId)).toEqual([expect.objectContaining({ recipientProfileId: PROFILES.o2 })]);
     await completeCallAnnouncements(h, call.sessionId);
     const target = h.openLegFor(call.sessionId, PROFILES.o2)!;
     expect(h.clientStateOf(String(target.telnyx_call_control_id)).intent).toBe("transfer_safe");
