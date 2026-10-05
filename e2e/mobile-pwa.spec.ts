@@ -160,15 +160,16 @@ for (const width of [360, 390, 768, 1280]) {
     if (mobile) await navigation.getByRole("button", { name: "Prípady", exact: true }).click();
     await page.getByRole("button", { name: "Nový prípad", exact: true }).first().click();
     await page.getByLabel("EČV", { exact: true }).fill("MOBILE QA");
-    await navigate(page, "Úlohy");
+    // Tasks preserve the mounted case; settings exercise the leave guard.
+    await navigate(page, "Nastavenia");
     const unsaved = page.getByRole("dialog", { name: "Rozpracovaný prípad nie je uložený", exact: true });
     await expect(unsaved).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await unsaved.getByRole("button", { name: "Zostať vo formulári", exact: true }).last().click();
     await expect(page.getByLabel("EČV", { exact: true })).toHaveValue("MOBILE QA");
-    await navigate(page, "Úlohy");
+    await navigate(page, "Nastavenia");
     await unsaved.getByRole("button", { name: "Odísť bez uloženia", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Zoznam úloh", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Upozornenia a zvuk", exact: true })).toBeVisible();
     expect(runtimeErrors).toEqual([]);
   });
 }
