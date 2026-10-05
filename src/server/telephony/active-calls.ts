@@ -218,12 +218,14 @@ export type ActiveCallRows = {
  * every console that polls in the same few milliseconds after the entry
  * expires starts its own pass — the stampede the cache exists to prevent.
  *
- * A second is well inside what the console already tolerates (the poll floor
- * is three seconds and Realtime pushes changes as they happen), and it is what
- * turns N screens into one database pass.
+ * A slow in-flight pass remains shared after that second expires. Starting
+ * another pass while the database is already slow multiplies the same reads
+ * and competes with answering and controlling calls. Once it settles, the
+ * original start time still decides freshness; a slow result earns no extra
+ * cache interval. Realtime also pushes changes between polls.
  */
 export const ACTIVE_CALLS_CACHE_TTL_MS = 1_000;
-type RowsCacheEntry = { at: number; rows: Promise<ActiveCallRows> };
+type RowsCacheEntry = { at: number; pending: boolean; rows: Promise<ActiveCallRows> };
 const rowsCache = new Map<string, RowsCacheEntry>();
 
 /** Test seam: drops the per-instance row cache. */
@@ -246,20 +248,23 @@ export async function loadActiveCallsCached(
   const now = (deps.now ?? (() => new Date()))();
   const key = `${deps.organizationId}:${deps.environment}`;
   const at = now.getTime();
-  const hit = rowsCache.get(key);
-  if (!hit || at - hit.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < hit.at) {
-    const pending = readActiveCallRows(deps);
-    rowsCache.set(key, { at, rows: pending });
-    try {
-      await pending;
-    } catch (error) {
-      // A failed pass must not be cached: the next reader has to be allowed to
-      // try again rather than being served the same rejection for a second.
-      if (rowsCache.get(key)?.rows === pending) rowsCache.delete(key);
-      throw error;
-    }
+  let entry = rowsCache.get(key);
+  if (!entry || !entry.pending && (at - entry.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < entry.at)) {
+    entry = { at, pending: true, rows: readActiveCallRows(deps) };
+    rowsCache.set(key, entry);
   }
-  return buildActiveCalls(deps, actor, now, await rowsCache.get(key)!.rows);
+  let rows: ActiveCallRows;
+  try {
+    rows = await entry.rows;
+  } catch (error) {
+    // Every waiter observes its own pass, even if another request already
+    // replaced a failed entry with a fresh one.
+    if (rowsCache.get(key) === entry) rowsCache.delete(key);
+    throw error;
+  } finally {
+    entry.pending = false;
+  }
+  return buildActiveCalls(deps, actor, now, rows);
 }
 
 export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveCallRows> {
