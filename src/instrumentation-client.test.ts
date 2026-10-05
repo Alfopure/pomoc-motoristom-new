@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./lib/diagnostics/errors', () => ({ captureDiagnosticError: vi.fn() }));
 vi.mock('./lib/diagnostics/client', () => ({ flushDiagnostics: vi.fn(async () => {}), recordDiagnostic: vi.fn() }));
+vi.mock('./lib/diagnostics/sentry', () => ({ flushDiagnosticExceptions: vi.fn(async () => {}) }));
 import { captureDiagnosticError } from './lib/diagnostics/errors';
 class ScriptFixture {
   constructor(public src: string) {}
 }
 class ErrorFixture extends Event {
-  constructor(public error: Error) { super('error'); }
+  constructor(public error: Error | null, public filename = 'https://app.test/_next/static/chunks/08dc.-edxpw7t.js', public lineno = 12, public colno = 34) { super('error'); }
 }
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); vi.resetModules(); });
 async function listener() {
@@ -40,7 +41,11 @@ describe('early error classification', () => {
     const error = new TypeError('private message');
     capture(new ErrorFixture(error));
     capture(resource(new ScriptFixture('https://app.test/_next/static/chunks/08dc.-edxpw7t.js')));
-    expect(captureDiagnosticError).toHaveBeenNthCalledWith(1, error, 'ui_error');
+    expect(captureDiagnosticError).toHaveBeenNthCalledWith(1, error, 'ui_error', false, { filename: 'https://app.test/_next/static/chunks/08dc.-edxpw7t.js', lineno: 12, colno: 34 });
     expect(captureDiagnosticError).toHaveBeenNthCalledWith(2, undefined, 'chunk_error');
+  });
+  it('forwards browser coordinates when the Error object is missing', async () => {
+    const capture = await listener(); capture(new ErrorFixture(null));
+    expect(captureDiagnosticError).toHaveBeenCalledWith(null, 'ui_error', false, { filename: 'https://app.test/_next/static/chunks/08dc.-edxpw7t.js', lineno: 12, colno: 34 });
   });
 });

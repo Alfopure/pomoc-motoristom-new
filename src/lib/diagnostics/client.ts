@@ -3,6 +3,7 @@ import { setDiagnosticCallContext } from './context';
 import { getDiagnosticCallContext } from './context';
 import { addDiagnosticBreadcrumb, getDiagnosticUiContext, resetDiagnosticUiContext } from './ui-context';
 import { reserveDiagnosticAttempt } from './traffic';
+import { clearDiagnosticExceptions } from './sentry';
 import { createDiagnosticPersistence, type DiagnosticIdentity, type DiagnosticPersistence } from './persistence';
 export { setDiagnosticCallContext, retainDiagnosticCallContext } from './context';
 
@@ -323,6 +324,7 @@ export function setDiagnosticIdentity(actor: DiagnosticIdentity | null): void {
     try {
         instance().setIdentity(actor);
         if (!actor) {
+            clearDiagnosticExceptions();
             try {
                 sessionStorage.removeItem("diagnostic-tab");
             }

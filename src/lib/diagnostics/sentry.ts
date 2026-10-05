@@ -1,4 +1,6 @@
 import { reserveDiagnosticAttempt } from './traffic';
+import { diagnosticErrorText } from './error-value';
+import { DiagnosticExceptionQueue } from './exception-queue';
 import { DIAGNOSTIC_ERROR_CLASSES, isDiagnosticSafeId, isDiagnosticUuid, type DiagnosticErrorClass } from './types';
 import { getDiagnosticBreadcrumbs, getDiagnosticUiContext, sanitizeDiagnosticBreadcrumbs, sanitizeDiagnosticUiContext, type DiagnosticBreadcrumb, type DiagnosticUiContext } from './ui-context';
 type SafeFrame = {
@@ -13,12 +15,13 @@ export type SafeException = {
     level: 'error';
     platform: 'javascript';
     release: string;
+    timestamp?: number;
     environment?: 'production' | 'test' | 'development';
     exception: {
         values: {
             type: DiagnosticErrorClass;
             value: string;
-            stacktrace: {
+            stacktrace?: {
                 frames: SafeFrame[];
             };
         }[];
@@ -35,10 +38,11 @@ export type SafeException = {
     contexts?: { dispatch_ui: DiagnosticUiContext };
     breadcrumbs?: DiagnosticBreadcrumb[];
 };
-export type DiagnosticExceptionContext = { pageId?: string; callSessionId?: string; deviceSessionId?: string; ui?: DiagnosticUiContext; breadcrumbs?: DiagnosticBreadcrumb[] };
+export type DiagnosticErrorLocation = { filename: string; lineno: number; colno: number };
+export type DiagnosticExceptionContext = { pageId?: string; callSessionId?: string; deviceSessionId?: string; ui?: DiagnosticUiContext; breadcrumbs?: DiagnosticBreadcrumb[]; source?: DiagnosticErrorLocation };
 export function diagnosticErrorClass(error: unknown): DiagnosticErrorClass {
     try {
-        const name = error instanceof Error ? error.name : '';
+        const name = diagnosticErrorText(error, 'name');
         return DIAGNOSTIC_ERROR_CLASSES.includes(name as DiagnosticErrorClass) ? name as DiagnosticErrorClass : 'UnknownError';
     }
     catch {
@@ -48,13 +52,21 @@ export function diagnosticErrorClass(error: unknown): DiagnosticErrorClass {
 /** React's numeric code is public; its message arguments may contain private data. */
 export function diagnosticReactErrorCode(error: unknown): string | undefined {
     try {
-        if (!(error instanceof Error)) return;
-        const message = error.message.slice(0, 1024);
+        const message = diagnosticErrorText(error, 'message');
         const match = message.match(/^Minified React error #([1-9]\d{0,3});/);
         if (match) return match[1];
         if (message.startsWith('Maximum update depth exceeded.')) return '185';
         if (message.startsWith('Too many re-renders.')) return '301';
     } catch { /* Ignore nonstandard Error accessors. */ }
+}
+function ownedFrame(filename: string, lineno: number, colno: number, origin: string): SafeFrame | null {
+    try {
+        if (filename.length > 2048) return null;
+        const url = new URL(filename);
+        if (url.origin !== origin || url.username || url.password || !/^\/_next\/static\/chunks\/[a-zA-Z0-9][a-zA-Z0-9._~-]{7,127}\.js$/.test(url.pathname) ||
+            !Number.isInteger(lineno) || lineno <= 0 || lineno > 1_000_000 || !Number.isInteger(colno) || colno <= 0 || colno > 10_000_000) return null;
+        return { filename: `${origin}${url.pathname}`, lineno, colno, in_app: true };
+    } catch { return null; }
 }
 function browserTags(): Pick<SafeException['tags'], 'browser_family' | 'browser_version'> {
     if (typeof navigator === 'undefined') return {};
@@ -76,24 +88,27 @@ export function sanitizeDiagnosticException(error: unknown, id: string, release:
         if (!/^[a-f0-9]{32}$/.test(id) || !isDiagnosticSafeId(release))
             return null;
         const frames: SafeFrame[] = [];
-        const stack = error instanceof Error && typeof error.stack === 'string' ? error.stack.slice(0, 16384) : '';
+        const stack = diagnosticErrorText(error, 'stack');
         // Safari starts with a frame; V8 starts with a message that the regex ignores.
         for (const line of stack.split('\n').slice(0, 41)) {
             const match = line.match(/(https?:\/\/[^\s()]+):(\d+):(\d+)\)?$/);
             if (!match)
                 continue;
-            const url = new URL(match[1]);
-            if (url.origin !== origin || !/^\/_next\/static\/chunks\/[a-zA-Z0-9][a-zA-Z0-9._~-]{7,127}\.js$/.test(url.pathname))
-                continue;
-            frames.push({ filename: `${origin}${url.pathname}`, lineno: Math.min(Number(match[2]), 1000000), colno: Math.min(Number(match[3]), 10000000), in_app: true });
+            const frame = ownedFrame(match[1], Number(match[2]), Number(match[3]), origin);
+            if (!frame) continue;
+            frames.push(frame);
             if (frames.length >= 20)
                 break;
         }
+        if (!frames.length && context.source) {
+            const frame = ownedFrame(context.source.filename, context.source.lineno, context.source.colno, origin);
+            if (frame) frames.push(frame);
+        }
         const type = diagnosticErrorClass(error);
         const code = diagnosticReactErrorCode(error);
-        return sanitizeOutboundDiagnosticException({ event_id: id, level: 'error', platform: 'javascript', release,
+        return sanitizeOutboundDiagnosticException({ event_id: id, level: 'error', platform: 'javascript', release, timestamp: Date.now() / 1000,
             environment: process.env.NEXT_PUBLIC_DIAGNOSTICS_ENVIRONMENT,
-            exception: { values: [{ type, value: code ? `React error #${code}` : type, stacktrace: { frames: frames.reverse() } }] },
+            exception: { values: [{ type, value: code ? `React error #${code}` : type, ...(frames.length ? { stacktrace: { frames: frames.reverse() } } : {}) }] },
             tags: { diagnostic_error_id: id, diagnostic_page_id: context.pageId, react_error_code: code, ...browserTags(), call_session_id: context.callSessionId, device_session_id: context.deviceSessionId },
             contexts: { dispatch_ui: context.ui ?? getDiagnosticUiContext() }, breadcrumbs: context.breadcrumbs ?? getDiagnosticBreadcrumbs(),
         }, origin);
@@ -112,9 +127,9 @@ export function sanitizeOutboundDiagnosticException(value: unknown, origin: stri
         const frames = (Array.isArray(exception.stacktrace?.frames) ? exception.stacktrace.frames : []).slice(-20).flatMap(frame => {
             if (!frame || typeof frame.filename !== 'string') return [];
             const url = new URL(frame.filename);
-            if (url.origin !== origin || url.search || url.hash || url.username || url.password || !/^\/_next\/static\/chunks\/[a-zA-Z0-9][a-zA-Z0-9._~-]{7,127}\.js$/.test(url.pathname) ||
-                !Number.isInteger(frame.lineno) || frame.lineno <= 0 || frame.lineno > 1_000_000 || !Number.isInteger(frame.colno) || frame.colno <= 0 || frame.colno > 10_000_000) return [];
-            return [{ filename: `${origin}${url.pathname}`, lineno: frame.lineno, colno: frame.colno, in_app: true as const }];
+            if (url.search || url.hash) return [];
+            const safe = ownedFrame(frame.filename, frame.lineno, frame.colno, origin);
+            return safe ? [safe] : [];
         });
         const code = typeof exception.value === 'string' ? exception.value.match(/^React error #([1-9]\d{0,3})$/)?.[1] : undefined;
         const tags: SafeException['tags'] = { diagnostic_error_id: input.event_id };
@@ -125,38 +140,49 @@ export function sanitizeOutboundDiagnosticException(value: unknown, origin: stri
         if (['Safari', 'Chrome', 'Firefox', 'Edge'].includes(input.tags?.browser_family ?? '')) tags.browser_family = input.tags.browser_family;
         if (tags.browser_family && typeof input.tags.browser_version === 'string' && /^\d{1,3}(?:\.\d{1,3}){0,3}$/.test(input.tags.browser_version)) tags.browser_version = input.tags.browser_version;
         return { type: undefined, event_id: input.event_id, level: 'error', platform: 'javascript', release: input.release,
+            ...(typeof input.timestamp === 'number' && Number.isFinite(input.timestamp) && input.timestamp > 0 && input.timestamp <= Date.now() / 1000 + 60 ? { timestamp: input.timestamp } : {}),
             ...(['production', 'test', 'development'].includes(input.environment ?? '') ? { environment: input.environment } : {}),
-            exception: { values: [{ type: exception.type, value: code ? `React error #${code}` : exception.type, stacktrace: { frames } }] }, tags,
+            exception: { values: [{ type: exception.type, value: code ? `React error #${code}` : exception.type, ...(frames.length ? { stacktrace: { frames } } : {}) }] }, tags,
             contexts: { dispatch_ui: sanitizeDiagnosticUiContext(input.contexts?.dispatch_ui) }, breadcrumbs: sanitizeDiagnosticBreadcrumbs(input.breadcrumbs),
         };
     } catch { return null; }
 }
-let pending = 0;
-let sent: number[] = [];
 let clientPromise: Promise<import('@sentry/browser').BrowserClient> | undefined;
-const fingerprints = new Map<string, number>();
+let queue: DiagnosticExceptionQueue | undefined;
+function exceptionQueue(): DiagnosticExceptionQueue | undefined {
+    const dsn = process.env.NEXT_PUBLIC_DIAGNOSTICS_SENTRY_DSN;
+    if (!dsn || typeof location === 'undefined' || typeof navigator === 'undefined') return;
+    return queue ??= new DiagnosticExceptionQueue({
+        scope: `${process.env.NEXT_PUBLIC_DIAGNOSTICS_ENVIRONMENT ?? ''}:${new URL(dsn).host}${new URL(dsn).pathname}`,
+        online: () => navigator.onLine,
+        storage: () => sessionStorage,
+        sanitize: event => {
+            const safe = sanitizeOutboundDiagnosticException(event, location.origin);
+            return safe?.environment === process.env.NEXT_PUBLIC_DIAGNOSTICS_ENVIRONMENT ? safe : null;
+        },
+        reserveAttempt: reserveDiagnosticAttempt,
+        send: async event => {
+            const sdk = await import('./sentry-sdk');
+            clientPromise ??= Promise.resolve(sdk.createPrivateSentryClient(dsn));
+            try { return await sdk.sendPrivateSentryEvent(await clientPromise, event); }
+            catch { clientPromise = undefined; return {}; }
+        },
+    });
+}
 /** Explicit errors-only client with only our closed-schema breadcrumbs. */
 export function sendDiagnosticException(error: unknown, id: string, context?: DiagnosticExceptionContext): void {
     try {
-        const dsn = process.env.NEXT_PUBLIC_DIAGNOSTICS_SENTRY_DSN;
-        if (!dsn || typeof location === 'undefined' || !navigator.onLine || pending >= 2)
-            return;
+        const pending = exceptionQueue();
+        if (!pending) return;
         const event = sanitizeDiagnosticException(error, id, process.env.NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID || 'local', location.origin, context);
-        if (!event)
-            return;
-        const now = Date.now();
-        sent = sent.filter(t => t > now - 60000);
-        const fingerprint = JSON.stringify(event.exception);
-        for (const [key, time] of fingerprints)
-            if (time < now - 60000)
-                fingerprints.delete(key);
-        if (sent.length >= 2 || fingerprints.has(fingerprint) || !reserveDiagnosticAttempt(now))
-            return;
-        fingerprints.set(fingerprint, now);
-        sent.push(now);
-        pending++;
-        clientPromise ??= import('./sentry-sdk').then(({ createPrivateSentryClient }) => createPrivateSentryClient(dsn));
-        void clientPromise.then(client => { client.captureEvent(event); }).catch(() => { clientPromise = undefined; }).finally(() => { pending--; });
+        if (event) pending.enqueue(event);
+        void pending.flush();
     }
     catch { /* Diagnostics must never recurse into the global error handler. */ }
+}
+export async function flushDiagnosticExceptions(): Promise<void> {
+    try { await exceptionQueue()?.flush(); } catch { /* no-throw */ }
+}
+export function clearDiagnosticExceptions(): void {
+    try { exceptionQueue()?.clear(); } catch { /* no-throw */ }
 }

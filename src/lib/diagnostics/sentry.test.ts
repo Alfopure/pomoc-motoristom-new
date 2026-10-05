@@ -1,11 +1,12 @@
-import {describe,it,expect} from 'vitest';
-import {sanitizeDiagnosticException, sanitizeOutboundDiagnosticException} from './sentry';
+import {describe,it,expect,vi} from 'vitest';
+import {runInNewContext} from 'node:vm';
+import {diagnosticErrorClass, sanitizeDiagnosticException, sanitizeOutboundDiagnosticException} from './sentry';
 describe('Sentry privacy boundary',()=>{
   it('preserves the first Safari frame and React code without retaining message arguments',()=>{
     const error=new Error('Minified React error #185; visit https://react.dev/errors/185?args[]=CANARY_EMAIL@example.com');
     error.stack='CANARY_FUNCTION@https://app.test/_next/static/chunks/abcdef1234567890.js?token=CANARY_SECRET:12:34\nnext@https://app.test/_next/static/chunks/1234567890abcdef.js:56:78';
     const event=sanitizeDiagnosticException(error,'d'.repeat(32),'build','https://app.test');
-    expect(event?.exception.values[0].stacktrace.frames.at(-1)).toEqual({filename:'https://app.test/_next/static/chunks/abcdef1234567890.js',lineno:12,colno:34,in_app:true});
+    expect(event?.exception.values[0].stacktrace?.frames.at(-1)).toEqual({filename:'https://app.test/_next/static/chunks/abcdef1234567890.js',lineno:12,colno:34,in_app:true});
     expect(event?.exception.values[0].value).toBe('React error #185');
     expect(event?.tags.react_error_code).toBe('185');
     expect(JSON.stringify(event)).not.toMatch(/CANARY|example.com|args|token/);
@@ -32,7 +33,7 @@ describe('Sentry privacy boundary',()=>{
     for(const filename of ['0rotjcs-dgoli.js','08dc.-edxpw7t.js','turbopack-0qkv5p8l~4f0q.js']){
       const error=new Error('CANARY');error.stack=`Error: CANARY\n at https://app.test/_next/static/chunks/${filename}?token=CANARY:23:45`;
       const event=sanitizeDiagnosticException(error,'c'.repeat(32),'build','https://app.test');
-      expect(event?.exception.values[0].stacktrace.frames[0]).toEqual({filename:`https://app.test/_next/static/chunks/${filename}`,lineno:23,colno:45,in_app:true});
+      expect(event?.exception.values[0].stacktrace?.frames[0]).toEqual({filename:`https://app.test/_next/static/chunks/${filename}`,lineno:23,colno:45,in_app:true});
       expect(JSON.stringify(event)).not.toContain('CANARY');
     }
   });
@@ -43,12 +44,50 @@ describe('Sentry privacy boundary',()=>{
     const event=sanitizeDiagnosticException(error,'a'.repeat(32),'build_abc','https://app.test');
     const json=JSON.stringify(event);
     expect(json).not.toMatch(/CANARY|421901|example.com|foreign|private|token/);
-    expect(event?.exception.values[0].stacktrace.frames).toEqual([{filename:'https://app.test/_next/static/chunks/abcdef1234567890.js',lineno:12,colno:34,in_app:true}]);
+    expect(event?.exception.values[0].stacktrace?.frames).toEqual([{filename:'https://app.test/_next/static/chunks/abcdef1234567890.js',lineno:12,colno:34,in_app:true}]);
     expect(event?.exception.values[0].value).toBe('TypeError');
   });
   it('does not retain arbitrary exception class or non-error rejection data',()=>{
     const error=new Error('private');error.name='CANARY_SECRET';
     expect(sanitizeDiagnosticException(error,'b'.repeat(32),'build','https://app.test')?.exception.values[0].type).toBe('UnknownError');
     expect(JSON.stringify(sanitizeDiagnosticException({email:'CANARY_EMAIL'},'b'.repeat(32),'build','https://app.test'))).not.toContain('CANARY');
+  });
+  it('keeps a real cross-realm error class, React code and owned frame',()=>{
+    const error=runInNewContext('new TypeError("Minified React error #185; CANARY private arguments")');
+    error.stack='CANARY_FN@https://app.test/_next/static/chunks/abcdef1234567890.js:12:34';
+    expect(error instanceof Error).toBe(false);
+    const event=sanitizeDiagnosticException(error,'1'.repeat(32),'build','https://app.test');
+    expect(event?.exception.values[0]).toMatchObject({type:'TypeError',value:'React error #185',stacktrace:{frames:[{lineno:12,colno:34}]}});
+    expect(JSON.stringify(event)).not.toContain('CANARY');
+  });
+  it('uses available ErrorEvent coordinates when the browser supplies no stack',()=>{
+    const event=sanitizeDiagnosticException(null,'2'.repeat(32),'build','https://app.test',{source:{filename:'https://app.test/_next/static/chunks/abcdef1234567890.js?CANARY_SECRET',lineno:12,colno:34}});
+    expect(event?.exception.values[0]).toMatchObject({type:'UnknownError',stacktrace:{frames:[{filename:'https://app.test/_next/static/chunks/abcdef1234567890.js',lineno:12,colno:34}]}});
+    expect(JSON.stringify(event)).not.toContain('CANARY');
+  });
+  it('rejects foreign, private, credentialed and invalid fallback coordinates without inventing a stack',()=>{
+    for(const source of [
+      {filename:'https://foreign.test/_next/static/chunks/abcdef1234567890.js',lineno:12,colno:34},
+      {filename:'https://app.test/private/CANARY.js',lineno:12,colno:34},
+      {filename:'https://CANARY@app.test/_next/static/chunks/abcdef1234567890.js',lineno:12,colno:34},
+      {filename:'https://app.test/_next/static/chunks/abcdef1234567890.js',lineno:0,colno:34},
+      {filename:'https://app.test/_next/static/chunks/abcdef1234567890.js',lineno:12,colno:Infinity},
+    ]) expect(sanitizeDiagnosticException(null,'3'.repeat(32),'build','https://app.test',{source})?.exception.values[0]).not.toHaveProperty('stacktrace');
+  });
+  it('does not invoke untrusted Error field or forged brand getters',()=>{
+    const getter=vi.fn(()=>{throw Error('CANARY');});
+    const forged=Object.defineProperty({name:'TypeError',stack:'CANARY'},Symbol.toStringTag,{get:getter});
+    expect(diagnosticErrorClass(forged)).toBe('UnknownError');
+    const error=Object.defineProperty(new Error(), 'name', {get:getter});
+    expect(diagnosticErrorClass(error)).toBe('UnknownError');
+    expect(sanitizeDiagnosticException(error,'4'.repeat(32),'build','https://app.test')).not.toBeNull();
+    expect(getter).not.toHaveBeenCalled();
+  });
+  it('retains standard DOMException classes without reading overridden accessors',()=>{
+    const getter=vi.fn(()=>{throw Error('CANARY');});
+    const error=Object.defineProperty(new DOMException('CANARY private data','AbortError'),'name',{get:getter});
+    expect(diagnosticErrorClass(error)).toBe('AbortError');
+    const event=sanitizeDiagnosticException(error,'5'.repeat(32),'build','https://app.test');
+    expect(event?.exception.values[0].type).toBe('AbortError'); expect(JSON.stringify(event)).not.toContain('CANARY'); expect(getter).not.toHaveBeenCalled();
   });
 });

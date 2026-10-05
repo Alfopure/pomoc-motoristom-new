@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { createPrivateSentryClient } from './sentry-sdk';
+import { createPrivateSentryClient, sendPrivateSentryEvent } from './sentry-sdk';
 import { sanitizeDiagnosticException } from './sentry';
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 it('sends a real SDK envelope with the safe code/context and no SDK-added private fields', async () => {
   vi.stubGlobal('location', { origin: 'https://app.test', href: 'https://app.test/private?token=CANARY' });
   const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 200 }));
@@ -18,5 +18,34 @@ it('sends a real SDK envelope with the safe code/context and no SDK-added privat
   expect(body).toContain('dispatch_ui');
   expect(body).toContain('abcdef1234567890.js');
   expect(fetcher.mock.calls[0][1]?.referrerPolicy).toBe('no-referrer');
+  await client.close();
+});
+it('aborts a stalled fetch without an unhandled error or a false acknowledgement', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('location', { origin: 'https://app.test' });
+  let signal: AbortSignal | undefined;
+  vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+    signal = init?.signal as AbortSignal;
+    signal.addEventListener('abort', () => reject(new TypeError('CANARY network failure')), { once: true });
+  }));
+  const client = createPrivateSentryClient('https://public@errors.test/1');
+  const event = sanitizeDiagnosticException(new Error('CANARY'), 'd'.repeat(32), 'build', 'https://app.test')!;
+  const pending = sendPrivateSentryEvent(client, event);
+  await vi.advanceTimersByTimeAsync(8000);
+  expect(await pending).toEqual({}); expect(signal?.aborted).toBe(true);
+  vi.useRealTimers();
+  await client.close();
+});
+it('uses the server response rather than SDK buffer drain to acknowledge delivery', async () => {
+  vi.stubGlobal('location', { origin: 'https://app.test' });
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('', { status: 503 })).mockResolvedValueOnce(new Response('', { status: 200 }));
+  const client = createPrivateSentryClient('https://public@errors.test/1');
+  const first = sanitizeDiagnosticException(new TypeError('CANARY'), 'b'.repeat(32), 'build', 'https://app.test')!;
+  expect(await sendPrivateSentryEvent(client, first)).toMatchObject({ statusCode: 503 });
+  expect(await client.flush(1000)).toBe(true);
+  expect(await sendPrivateSentryEvent(client, { ...first, event_id: 'c'.repeat(32) })).toMatchObject({ statusCode: 200 });
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(fetcher.mock.calls[0][1]?.credentials).toBe('omit');
+  expect(JSON.stringify(fetcher.mock.calls)).not.toContain('CANARY');
   await client.close();
 });
