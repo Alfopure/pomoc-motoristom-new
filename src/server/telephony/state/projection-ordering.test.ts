@@ -17,6 +17,7 @@ describe("deferred projection ordering", () => {
     const newerTimestamp = h.now().toISOString();
     member.last_offered_at = newerTimestamp;
     const transition = emptyTransition();
+    transition.session = { state: "ringing", answered_by_profile_id: PROFILES.o1, metadata: source.metadata };
     transition.memberTouches = [{ memberId: String(member.id), field: "last_offered_at" }];
     transition.call = { status: "ringing_agent", operator_id: PROFILES.o1 };
     const entry: EffectContinuation = { id: event.id, generation: 1, createdAt: event.occurredAt, event,
@@ -30,6 +31,7 @@ describe("deferred projection ordering", () => {
     h.advance(5 * 60_000);
     await persistTransition(effectsDeps(h.deps), { session: fresh, transition, expectedVersion: null, event, continuation: entry, phase: "projection" });
     expect(h.call(call.sessionId)).toMatchObject({ status: "answered", operator_id: PROFILES.o2 });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", answered_by_profile_id: PROFILES.o2, metadata: fresh.metadata });
     expect(h.rows("motorist_ring_group_members").find(row => row.id === member.id)?.last_offered_at).toBe(newerTimestamp);
   });
 
