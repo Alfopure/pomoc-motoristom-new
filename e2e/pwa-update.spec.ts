@@ -24,7 +24,10 @@ for (const resumeEvent of ["visibilitychange", "pageshow"] as const) {
     const navigation = await observeReload(page);
     await openApp(page);
     await expect(updateNotice(page)).toHaveCount(0);
-    const loadedCode = await page.getByTestId("app-release-code").textContent();
+    await page.getByRole("button", { name: /^Účet / }).click();
+    const account = page.getByRole("dialog", { name: "Používateľský účet" });
+    const loadedCode = await account.getByTestId("app-release-code").textContent();
+    await page.keyboard.press("Escape");
     release.version = release.nextVersion;
     // The resume check is deliberately throttled for 15 seconds.
     await advancePastResumeThrottle(page);
@@ -34,7 +37,9 @@ for (const resumeEvent of ["visibilitychange", "pageshow"] as const) {
     }, resumeEvent));
 
     await expect(updateNotice(page)).toContainText("Nová verzia je pripravená.");
-    await expect(page.getByTestId("app-release-code")).toHaveText(loadedCode!);
+    await page.getByRole("button", { name: /^Účet / }).click();
+    await expect(account.getByTestId("app-release-code")).toHaveText(loadedCode!);
+    await page.keyboard.press("Escape");
     await expect(updateButton(page)).toBeEnabled();
     expect(navigation.documents).toBe(1);
     expect(navigation.reloads).toBe(0);
