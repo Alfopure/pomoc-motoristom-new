@@ -4,32 +4,33 @@ import { useRef, useState } from "react";
 import { Info, X } from "lucide-react";
 import { appEnvironmentLabels, appReleaseDate, type AppRelease } from "@/lib/app-release";
 
-export function AppReleaseBadge({ release }: { release: AppRelease }) {
+export function AppReleaseBadge({ release, variant = "compact" }: { release: AppRelease; variant?: "compact" | "menu" }) {
   // A server refresh must not relabel JavaScript already running in this document.
   const [loadedRelease] = useState(release);
   const dialog = useRef<HTMLDialogElement>(null);
   const date = appReleaseDate(loadedRelease.builtAt);
   const environment = appEnvironmentLabels[loadedRelease.environment];
-  const environmentStyle = loadedRelease.environment === "test"
-    ? "border-amber-300 bg-amber-100 text-amber-950"
-    : loadedRelease.environment === "production"
-      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-      : "border-zinc-300 bg-zinc-100 text-zinc-700";
+  const inMenu = variant === "menu";
 
   return (
-    <div data-testid="app-release" className="border-b border-zinc-200 bg-white text-zinc-700">
+    <div data-testid="app-release" className="text-zinc-500">
       <button type="button" onClick={() => dialog.current?.showModal()}
         aria-label="Zobraziť informácie o verzii aplikácie" aria-haspopup="dialog"
-        className="flex min-h-9 w-full items-center gap-2 px-3 text-left text-[11px] hover:bg-zinc-50 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-zinc-700 sm:px-4 sm:text-xs">
-        <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-bold tracking-wide ${environmentStyle}`}>{environment}</span>
-        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5">
-          <span>{date ? <>Verzia <time dateTime={loadedRelease.builtAt!}>{date}</time></> : "Lokálna zostava"}</span>
-          {loadedRelease.code && <><span aria-hidden="true">·</span><span className="font-mono" data-testid="app-release-code">{loadedRelease.code}</span></>}
+        className={`${inMenu ? "flex min-h-11 w-full items-center gap-3 rounded-lg px-2.5 py-2 hover:bg-zinc-100" : "inline-flex min-h-6 max-w-full items-center rounded px-2 py-1 hover:text-zinc-800"} text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-zinc-700`}>
+        {inMenu && <Info size={16} className="shrink-0 text-zinc-700" aria-hidden="true" />}
+        <span className="min-w-0">
+          {inMenu && <span className="block text-sm font-semibold text-zinc-700">Verzia aplikácie</span>}
+          <span className={`flex flex-wrap items-center gap-x-1.5 text-[11px] ${inMenu ? "mt-0.5" : ""}`}>
+            <span>{environment}</span>
+            <span aria-hidden="true">·</span>
+            <span>{date ? <time dateTime={loadedRelease.builtAt!}>{date}</time> : "Lokálna zostava"}</span>
+            {loadedRelease.code && <><span aria-hidden="true">·</span><span className="font-mono" data-testid="app-release-code">{loadedRelease.code}</span></>}
+          </span>
         </span>
-        <Info size={14} className="ml-auto shrink-0" aria-hidden="true" />
       </button>
       <dialog ref={dialog} aria-label="Verzia aplikácie"
         onClick={event => { if (event.target === event.currentTarget) dialog.current?.close(); }}
+        onKeyDown={event => { if (event.key === "Escape") event.stopPropagation(); }}
         className="fixed inset-0 m-auto max-h-[85dvh] w-[calc(100vw-2rem)] max-w-sm overflow-y-auto rounded-xl border border-zinc-200 bg-white p-5 text-zinc-950 shadow-2xl backdrop:bg-zinc-950/40">
         <div className="mb-4 flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold">Verzia aplikácie</h2>

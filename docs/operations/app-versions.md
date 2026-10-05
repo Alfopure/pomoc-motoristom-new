@@ -1,6 +1,6 @@
 # Verzia aplikácie a obnovenie
 
-Na mobile aj na počítači je pod hornou lištou viditeľné prostredie **TEST / PRODUKCIA**, dátum zostavenia a 12-znakový kód verzie. Rovnaký štítok je aj na hlavnej prihlasovacej obrazovke. Kliknutie alebo ťuknutie otvorí detail verzie načítanej v tomto zariadení a skrátený Git commit zostavy.
+Na počítači je prostredie **TEST / PRODUKCIA**, dátum zostavenia a 12-znakový kód verzie uvedený drobným sivým písmom vľavo dole. Na mobile je verzia v používateľskom menu: ťuknúť na meno vľavo hore a potom na **Verzia aplikácie**. Táto položka je dostupná aj na počítači. Na hlavnej prihlasovacej obrazovke je nenápadný údaj na spodku karty. Kliknutie alebo ťuknutie otvorí detail verzie načítanej v tomto zariadení a skrátený Git commit zostavy.
 
 ## Ako porovnať TEST s produkciou
 

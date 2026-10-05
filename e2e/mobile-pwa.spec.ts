@@ -59,7 +59,32 @@ for (const width of [360, 390, 768, 1280]) {
     page.on("pageerror", (error) => runtimeErrors.push(error.message));
     await page.setViewportSize({ width, height: 900 });
     await openDashboard(page);
-    await expect(page.getByTestId("app-release-code")).toBeInViewport({ ratio: 1 });
+    const releaseFooter = page.getByTestId("app-release-footer");
+    if (mobile) {
+      await expect(releaseFooter).toBeHidden();
+      await expect(page.getByRole("button", { name: "Zobraziť informácie o verzii aplikácie" })).toBeHidden();
+      await page.getByRole("button", { name: /^Účet / }).click();
+      const account = page.getByRole("dialog", { name: "Používateľský účet" });
+      await expect(account.getByTestId("app-release-code")).toBeVisible();
+      await expect(account.getByTestId("app-release-code")).toBeInViewport({ ratio: 1 });
+      if (width === 390) await page.screenshot({ animations: "disabled", path: ".context/version-minimal-mobile-menu.png" });
+      const versionButton = account.getByRole("button", { name: "Zobraziť informácie o verzii aplikácie" });
+      await versionButton.click();
+      const versionDialog = page.getByRole("dialog", { name: "Verzia aplikácie", exact: true });
+      await expect(versionDialog).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(versionDialog).toBeHidden();
+      await expect(account).toBeVisible();
+      await expect(versionButton).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(account).toBeHidden();
+    } else {
+      await expect(releaseFooter.getByTestId("app-release-code")).toBeInViewport({ ratio: 1 });
+      const footerBounds = await releaseFooter.boundingBox();
+      expect(footerBounds!.height).toBeLessThanOrEqual(28);
+      expect(footerBounds!.y + footerBounds!.height).toBe(900);
+      await page.screenshot({ animations: "disabled", path: ".context/version-minimal-desktop.png" });
+    }
     const shell = page.getByTestId("dispatch-console");
     const cases = page.getByTestId("dispatch-case-list");
     const navigation = page.getByRole("navigation", { name: "Mobilná navigácia" });
