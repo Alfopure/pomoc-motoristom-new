@@ -2248,11 +2248,11 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
   return stamps;
 }
 
-export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean; urgentStamps?: UrgentDispatchStamps } = {}): Promise<ApplyResult | null> {
+export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean; urgentStamps?: UrgentDispatchStamps; deferContactChecks?: boolean; contactChecksOnly?: boolean } = {}): Promise<ApplyResult | null> {
   let latest: ApplyResult | null = null;
   let requested: ApplyResult | null = null;
   const stamps: UrgentDispatchStamps = new Map(options.urgentStamps ?? []);
-  if (!options.databaseOnly && !options.teardownPrepared) {
+  if (!options.databaseOnly && !options.teardownPrepared && !options.contactChecksOnly) {
     for (const [key, stamp] of await dispatchUrgentTeardown(deps, session)) stamps.set(key, stamp);
   }
   const queued = readPendingEffects(session).entries;
@@ -2273,6 +2273,13 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     session.organization_id === deps.organizationId ? session : null;
   for (let index = 0; index < queued.length && index < 64; index += 1) {
     const entry = queued[index];
+    // These entries query/account for callback contact after audio is already
+    // connected. Keep them durable, but do not spend the control's lease on
+    // them (or even a fresh read) before replying to the operator. Recorder
+    // acknowledgements and pending audio continuations still run normally.
+    const contactOnly = !entry.commands.length && Boolean(entry.transition.contactChecks?.length || entry.transition.contactProofs?.length);
+    if (options.contactChecksOnly && !contactOnly || options.deferContactChecks && contactOnly ||
+      options.databaseOnly && !entry.commands.length && entry.transition.contactChecks?.length) continue;
     const fresh = index === 0 && reusable ? { data: reusable, error: null }
       : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
     if (fresh.error) throw new EffectsError("pending effects session unavailable");
@@ -2365,7 +2372,8 @@ export async function applyReduceResult(deps: EffectsDeps, input: { session: Ses
     staged = await persistTransition(deps, { session: staged, transition: current.transition, expectedVersion: null,
       event: current.event, continuation: current, phase: "critical" });
   }
-  const result = await resumePendingEffects(deps, staged, { priorityEntryId: input.event.id, teardownPrepared: prepareFacts, urgentStamps });
+  const result = await resumePendingEffects(deps, staged, { priorityEntryId: input.event.id, teardownPrepared: prepareFacts, urgentStamps,
+    deferContactChecks: input.session.writer_contract === 2 && input.event.kind === "app" && input.event.type !== "sweep" });
   if (!result) throw new EffectsError("staged transition missing its continuation");
   return result;
 }

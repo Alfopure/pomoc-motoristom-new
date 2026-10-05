@@ -4,7 +4,7 @@ import type { Database } from "@/lib/supabase/database.types";
 
 import { createClient } from "@supabase/supabase-js";
 
-import { assertOwnership, ownershipRpc, sessionOwnership, telephonyDatabaseFetch, SESSION_LEASE_MS, SESSION_WORK_MS, UNOWNED_READ_MS, type Ownership } from "./ownership";
+import { assertOwnership, ownershipRpc, sessionOwnership, telephonyDatabaseFetch, DATABASE_REQUEST_MS, SESSION_LEASE_MS, SESSION_WORK_MS, UNOWNED_READ_MS, type Ownership } from "./ownership";
 import { SessionLeaseLostError } from "./service-errors";
 
 function admin(error: { code?: string; message: string } | null, data: unknown = null) {
@@ -168,6 +168,32 @@ describe("database work under a session lease", () => {
       .rejects.toBeInstanceOf(SessionLeaseLostError);
 
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let postgrest-js retry an owned read timeout under a fresh cap", async () => {
+    const owned = owner();
+    const fetch = vi.fn().mockRejectedValue(new DOMException("Read timed out", "TimeoutError"));
+    vi.stubGlobal("fetch", fetch);
+    const started = Date.now();
+
+    const result = await sessionOwnership.run(owned, async () => await owned.admin.from("motorist_call_sessions").select("id"));
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(result.error?.message).toContain(`owned database request exceeded ${DATABASE_REQUEST_MS} ms`);
+  });
+
+  it("preserves a lost-lease error through a Supabase read without retry sleeps", async () => {
+    const owned = { ...owner(), deadline: Date.now() - 1 };
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const started = Date.now();
+
+    await expect(sessionOwnership.run(owned, async () => await owned.admin.from("motorist_call_sessions").select("id").throwOnError()))
+      .rejects.toBeInstanceOf(SessionLeaseLostError);
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(Date.now() - started).toBeLessThan(500);
   });
 
   it.each(["motorist_provider_command_result_v2", "motorist_provider_command_result_batch_v2"])("retains late immutable acceptance through %s after lease expiry", async (rpc) => {

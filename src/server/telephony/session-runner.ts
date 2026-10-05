@@ -678,6 +678,24 @@ async function auditSupervisionEnd(deps: SessionRunnerDeps, before: SessionRow, 
  */
 export type SessionOwnershipDeps = Pick<SessionRunnerDeps, "admin" | "organizationId" | "leaseTtlMs" | "leaseWaitMs" | "sleep" | "random" | "logger">;
 
+/** Retained call-action maintenance, under the same fence as normal recovery.
+ * A busy call wins immediately; existing provider events/cron remain the
+ * backstop. This path cannot dispatch any pending call-control commands. */
+export async function recoverSessionContactChecks(deps: SessionRunnerDeps, sessionId: string): Promise<void> {
+  const probe = await deps.admin.from("motorist_call_sessions").select("*")
+    .eq("organization_id", deps.organizationId).eq("id", sessionId).maybeSingle();
+  if (probe.error) throw new SessionEventDeferredError("Contact recovery session unavailable", "snapshot_unavailable");
+  if (!probe.data || probe.data.writer_contract !== 2 || !readPendingEffects(probe.data).entries.some(entry => entry.transition.contactChecks?.length || entry.transition.contactProofs?.length)) return;
+  await ownedSessionWork({ ...deps, leaseWaitMs: 0 }, sessionId, async () => {
+    const owner = sessionOwnership.getStore();
+    if (owner) owner.deadline = Math.min(owner.deadline, Date.now() + 8_000);
+    const fresh = await deps.admin.from("motorist_call_sessions").select("*")
+      .eq("organization_id", deps.organizationId).eq("id", sessionId).single();
+    if (fresh.error) throw new SessionEventDeferredError("Contact recovery snapshot unavailable", "snapshot_unavailable");
+    await resumePendingEffects({ ...effectsDeps(deps), renewLease: () => assertOwnership() }, fresh.data, { contactChecksOnly: true });
+  }, { known: probe.data, eventType: "contact-recovery" });
+}
+
 export async function ownedSessionWork<T>(
   deps: SessionOwnershipDeps, sessionId: string, work: () => Promise<T>,
   options: { known?: SessionRow; /** Diagnostics only: names the waiting event in the busy error. */ eventType?: string } = {},
@@ -883,7 +901,8 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
         const preemptsAudio = event.kind === "telnyx" ? event.type === "call.hangup" : !["sweep", "pickup", "recording_continue"].includes(event.type);
         try {
           effectsMayHaveStarted = true;
-          const resumed = await resumePendingEffects(effects, snapshot.session, { databaseOnly: preemptsAudio, skipCompletedProjections: event.kind !== "app" || event.type !== "sweep" });
+          const resumed = await resumePendingEffects(effects, snapshot.session, { databaseOnly: preemptsAudio, skipCompletedProjections: event.kind !== "app" || event.type !== "sweep",
+            deferContactChecks: snapshot.session.writer_contract === 2 && event.kind === "app" && event.type !== "sweep" });
           if (resumed?.failed && !preemptsAudio && event.kind === "app") return { outcome: "applied", apply: resumed, session: resumed.session, leaseAcquired, retries, stateBefore: snapshot.session.state, commands: resumed.commands };
         } catch (error) {
           if (!preemptsAudio) throw error;

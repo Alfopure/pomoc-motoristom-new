@@ -70,9 +70,9 @@ function unownedReadCap(input: RequestInfo | URL, init?: RequestInit): AbortSign
  * retry, so the cap is surfaced as one: it then bounds the whole read, not
  * each attempt.
  */
-function abortInsteadOfTimeout(error: unknown): never {
+function abortInsteadOfTimeout(error: unknown, description: string): never {
   if ((error as { name?: unknown } | null)?.name === "TimeoutError") {
-    throw new DOMException(`un-owned read exceeded ${UNOWNED_READ_MS} ms`, "AbortError");
+    throw new DOMException(description, "AbortError");
   }
   throw error;
 }
@@ -93,7 +93,8 @@ export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: Re
     if (!cap) return measureRequestStep("db", () => fetch(input, { ...init, headers }));
     const signal = init?.signal ? AbortSignal.any([init.signal, cap]) : cap;
     const detach = observeDatabaseTimeout(cap);
-    try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal }).catch(abortInsteadOfTimeout)); }
+    try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal })
+      .catch(error => abortInsteadOfTimeout(error, `un-owned read exceeded ${UNOWNED_READ_MS} ms`))); }
     finally { detach(); }
   }
   // Snapshot/routing reads and database checkpoints can outlast the 15 s TTL
@@ -105,7 +106,8 @@ export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: Re
   if (remaining <= 0) throw new SessionLeaseLostError();
   const timeout = AbortSignal.timeout(Math.max(1, Math.min(DATABASE_REQUEST_MS, remaining)));
   const detach = observeDatabaseTimeout(timeout);
-  try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout })); }
+  try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout })
+    .catch(error => abortInsteadOfTimeout(error, `owned database request exceeded ${Math.min(DATABASE_REQUEST_MS, remaining)} ms`))); }
   finally { detach(); }
 }
 
