@@ -1,13 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ROUTE_AUTH_REGISTRY } from "@/server/route-auth-registry";
 
-// TS nepozná Vite `import.meta.glob` (vite/client typy nie sú v tsconfig) → lokálna ambientná deklarácia.
-declare global {
-  interface ImportMeta {
-    glob: (pattern: string) => Record<string, () => Promise<Record<string, unknown>>>;
-  }
-}
-
 /**
  * 1.4 (US-103) — CSRF same-origin coverage pre session-mutačné routes (bezpečnostný audit, Milestone 1).
  *
@@ -141,7 +134,8 @@ async function statusFor(handler: Handler, request: Request): Promise<number> {
 }
 
 // Dynamicky importuj VŠETKY route.ts pod src/app/api (mocky sú hoisted → aplikujú sa).
-const routeModules = import.meta.glob("./**/route.ts");
+// Next.js supplies the ambient glob types; narrow only this test's module map.
+const routeModules = import.meta.glob("./**/route.ts") as Record<string, () => Promise<Record<string, unknown>>>;
 
 type MutatingCase = { route: string; method: MutatingMethod; handler: Handler; class: string };
 const mutatingCases: MutatingCase[] = [];
