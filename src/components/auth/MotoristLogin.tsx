@@ -55,7 +55,6 @@ export function MotoristLogin({ message, returnTo, appRelease }: { message: stri
     <main className="auth-app-shell flex min-h-screen items-center justify-center bg-zinc-100 px-4 py-10 text-zinc-950">
       <section className="w-full max-w-sm overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-2xl shadow-zinc-950/10">
         <div className="h-2 bg-[#FCD703]" />
-        {appRelease && <AppReleaseBadge release={appRelease} />}
         <div className="p-6">
           <div className="mb-6">
             <div className="mb-5 flex items-center gap-3">
@@ -113,6 +112,7 @@ export function MotoristLogin({ message, returnTo, appRelease }: { message: stri
             Informácie o nahrávaní hovorov
           </Link>
         </div>
+        {appRelease && <div className="px-4 pb-2"><AppReleaseBadge release={appRelease} /></div>}
       </section>
     </main>
   );
