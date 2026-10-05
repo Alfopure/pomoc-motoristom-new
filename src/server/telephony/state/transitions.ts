@@ -694,6 +694,8 @@ function reduceTelnyx(b: TransitionBuilder, event: TelephonyEvent): ReduceResult
       return onHangup(b, event);
     case "call.gather.ended":
       return onGatherEnded(b, event);
+    case "call.dtmf.received":
+      return onQueueDtmfReceived(b, event);
     case "call.playback.ended":
     case "call.speak.ended":
       return onPlaybackEnded(b, event);
@@ -2278,6 +2280,39 @@ function continueRinging(b: TransitionBuilder, customer: LegRow): void {
 // ---------------------------------------------------------------------------
 // call.gather.ended / call.playback.ended
 // ---------------------------------------------------------------------------
+
+/**
+ * A detached music loop can deliver DTMF even when its silent gather later
+ * ends with an empty timeout. Accept that provider evidence only for this
+ * single-key waiting-room choice, never as a completed IVR/menu gather.
+ */
+function onQueueDtmfReceived(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
+  const leg = b.findLeg(event.callControlId);
+  const state = event.clientState;
+  if (!leg || !isCustomer(leg) || leg.id !== b.session.customer_leg_id || b.legEnded(leg) ||
+    event.digits !== "1" || state?.sid !== b.session.id || state.role !== "customer" || state.intent !== "queue_wait" || !state.gatherId) {
+    return ignoredResult("DTMF is not a correlated waiting-room choice");
+  }
+  // Preserve the existing same-event recovery if a critical callback write
+  // must be retried after the transition has already cleared the queue.
+  const replay = b.session.state === "callback_offered" && b.meta.callback?.confirmed && b.meta.callback.event_id === b.eventKey;
+  if (!replay) {
+    const gather = b.meta.gather;
+    if (!b.meta.queue || !b.meta.waiting || !["waiting", "ringing"].includes(b.session.state) || b.session.ended_at ||
+      b.session.answered_at || b.session.answered_by_profile_id || !queueCallbackEnabled(b) || !gather || gather.call_gone ||
+      gather.id !== state.gatherId || gather.spec.purpose !== "queue_wait" || gather.spec.maximumDigits !== 1 || gather.spec.validDigits !== "1") {
+      return ignoredResult("waiting-room DTMF is no longer available");
+    }
+    // client_state is call-wide: a delayed digit with newer state must not
+    // turn an earlier interaction into consent for the current wait.
+    const occurred = Date.parse(event.occurredAt ?? "");
+    const started = Date.parse(gather.started_at), deadline = Date.parse(gather.deadline_at);
+    if (![occurred, started, deadline].every(Number.isFinite) || occurred < started || occurred > deadline) {
+      return ignoredResult("DTMF outside the current waiting gather");
+    }
+  }
+  return onGatherEnded(b, { ...event, status: "valid" });
+}
 
 function onGatherEnded(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
   const leg = b.findLeg(event.callControlId);
