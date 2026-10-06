@@ -14,7 +14,7 @@ export type TelephonyAlertEmailInput = {
 
 type Explanation = { title: string; happened: string; outcome: string; action: string };
 const UNKNOWN_OUTCOME = "Z tejto kontroly sa nedá potvrdiť, či konkrétny hovor prebehol. Samotné upozornenie nedokazuje stratený hovor.";
-const CALL_CHECKS = new Set(["sessions", "webhooks", "connections", "provider", "ledger"]);
+const CALL_CHECKS = new Set(["sessions", "webhooks", "connections", "provider", "ledger", "interruptions"]);
 const NUMBER = new Intl.NumberFormat("sk-SK");
 const DATE = new Intl.DateTimeFormat("sk-SK", { timeZone: "Europe/Bratislava", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 
@@ -33,6 +33,12 @@ function entries(alert: TelephonyAlert): Record<string, unknown>[] {
 function explain(alert: TelephonyAlert): Explanation {
   const d = alert.detail;
   const problems: Record<string, Explanation> = {
+    interruptions: {
+      title: "Účasť operátora sa prerušila",
+      happened: "Predtým spojená vetva operátora skončila, kým zákaznícka vetva zostala aktívna dlhšie než desať sekúnd. Počkali sme na oneskorené dôkazy a nenašli zodpovedajúce bežné ukončenie, podržanie, parkovanie ani dokončené prepojenie.",
+      outcome: "Záznamy potvrdzujú prerušenie účasti operátora, nie jeho príčinu. Neurčujú, či zlyhal telefón, sieť alebo aplikácia, ani nepotvrdzujú kvalitu zvuku.",
+      action: "Overte priebeh hovoru s operátorom a porovnajte čas prerušenia s Monitorom prevádzky. Pri opakovaní pošlite technickú správu správcovi.",
+    },
     configuration: {
       title: "Nastavenie telefónie",
       happened: d.configured === false ? "Chýba nastavenie potrebné na komunikáciu s Telnyxom."
@@ -117,6 +123,9 @@ function hasUnresolvedConnection(call: AlertCallEvidence, alerts: TelephonyAlert
 }
 
 function callVerdict(call: AlertCallEvidence, alerts: TelephonyAlert[]): string {
+  if (alerts.some(alert => alert.check === "interruptions" && entries(alert).some(entry => entry.sessionId === call.sessionId))) {
+    return "Predtým spojená vetva operátora skončila a zákazník zostal na linke. Príčina prerušenia ani kvalita zvuku nie sú z týchto údajov potvrdené.";
+  }
   if (call.confirmedAt) return hasUnresolvedConnection(call, alerts)
     ? "Hovor bol spojený, ale výsledok ďalšieho spojenia alebo prepojenia nie je potvrdený."
     : "Spojenie účastníkov bolo potvrdené. Kvalitu ani obojstrannú počuteľnosť zvuku tieto záznamy nepotvrdzujú.";
@@ -144,6 +153,7 @@ const HANGUP_REASONS: Record<string, string> = {
 function callNotes(call: AlertCallEvidence, alerts: TelephonyAlert[]): string[] {
   const notes: string[] = [];
   for (const alert of alerts) for (const entry of entries(alert).filter((entry) => entry.sessionId === call.sessionId)) {
+    if (alert.check === "interruptions") notes.push(`Prerušenie účasti operátora: ${alertLocalTime(typeof entry.interruptedAt === "string" ? entry.interruptedAt : null)}. Dôkazy znovu posúdené: ${alertLocalTime(typeof entry.classifiedAt === "string" ? entry.classifiedAt : null)}.`);
     if (typeof entry.reason === "string" && REASONS[entry.reason]) notes.push(REASONS[entry.reason]);
     if (alert.check !== "provider") continue;
     const part = ROLES[String(entry.role)] ?? "časť hovoru";
@@ -178,6 +188,9 @@ export function renderTelephonyAlertEmail(input: TelephonyAlertEmailInput): { su
   if (onlyUsage) {
     headline = input.alerts.some((alert) => alert.status === "fail") ? "Denný limit telefónie dosiahnutý" : "Upozornenie na denný limit";
     summary = "Ide o prevádzkové upozornenie na limit. Nehovorí, že konkrétny hovor zlyhal.";
+  } else if (input.alerts.some(alert => alert.check === "interruptions")) {
+    headline = "Zaznamenané prerušenie účasti operátora";
+    summary = "Predtým spojená vetva operátora skončila, kým zákazník zostal na linke. Dôkazy boli po časovej rezerve znovu posúdené; príčina prerušenia a kvalita zvuku zostávajú neoverené.";
   } else if (evidence.calls.length) {
     if (confirmed === evidence.calls.length && !limited && !unresolved && allCallScoped) {
       const attention = input.alerts.some((alert) => alert.status === "fail") ? "technická chyba potrebuje kontrolu" : "technické upozornenie";

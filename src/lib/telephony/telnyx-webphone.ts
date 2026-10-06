@@ -20,6 +20,7 @@
  */
 
 import { applyStoredAudioOutput, REMOTE_AUDIO_ELEMENT_ID } from "@/lib/telephony/audio-output";
+import { expectedVoiceSilence, voiceQualityWarning, type VoiceQualityWarning, type VoiceQualityWarningCode } from "@/lib/diagnostics/voice-quality";
 import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
 import { browserCallMonotonicNow, browserCallTelemetry, prepareBrowserCallHeartbeat, type BrowserCallPhase, type BrowserCallObservation } from "@/lib/telephony/browser-call-telemetry";
 import { beginBrowserCallStep, type CallTimingContext } from "@/lib/telephony/call-timing";
@@ -78,6 +79,8 @@ export type WebphoneSdkCall = {
 };
 
 export type WebphoneSdkClient = {
+  /** SDK signaling session identity, distinct from an application call session. */
+  sessionid?: string;
   /** Public SDK options also feed the next automatic socket login. */
   options: { login_token?: string };
   connection: { connected: boolean; socketGeneration?: number };
@@ -178,6 +181,8 @@ export class TelnyxWebphone {
   private state: WebphoneState = WEBPHONE_INITIAL_STATE;
   private client: WebphoneSdkClient | null = null;
   private call: WebphoneSdkCall | null = null;
+  private qualityWarnings = new Map<VoiceQualityWarningCode, number>();
+  private qualityWarningsAmbiguous = false;
   private expected: ExpectedOperatorLeg[] = [];
   private incomingPolicy: IncomingOfferPolicy = { automaticAllowed: true };
   private withdrawnInvites = new Set<string>();
@@ -928,6 +933,10 @@ export class TelnyxWebphone {
   private onSdkWarning(payload: WebphoneSdkWarning): void {
     const code = payload?.warning?.code;
     if (typeof code !== "number") return;
+    if (payload.sessionId && this.client?.sessionid && payload.sessionId !== this.client.sessionid) return;
+    const quality = voiceQualityWarning(code);
+    if (quality) { this.recordQualityWarning(payload, quality); return; }
+    if (payload.callId && payload.callId !== this.call?.id) return;
     // Never log the provider payload: it can include tokens, SDP and numbers.
     this.log({ event: "sdk_warning", code });
     if (code === 34001) {
@@ -942,6 +951,22 @@ export class TelnyxWebphone {
     } else if (code === 36005) {
       this.dispatch({ type: "recovery_failed" });
     }
+  }
+
+  private recordQualityWarning(payload: WebphoneSdkWarning, warning: VoiceQualityWarning): void {
+    const call = this.call;
+    if (!call || payload.callId !== call.id || this.qualityWarningsAmbiguous || this.hangupRequestedCallId === call.id ||
+      !this.isCurrentCall(call, this.clientGeneration)) return;
+    const state = String(call.state).toLowerCase();
+    if (state !== "active" && state !== "held") return;
+    if (expectedVoiceSilence(warning, state === "held", Boolean(call.isAudioMuted))) return;
+    const now = this.now();
+    const previous = this.qualityWarnings.get(warning.code);
+    if (previous !== undefined && now >= previous && now - previous < 60_000) return;
+    // At most eight entries for the current call, no timer or new stats poll.
+    this.qualityWarnings.set(warning.code, now);
+    this.log({ event: "sdk_quality_warning", code: warning.code, sdkCallId: call.id,
+      callControlId: call.telnyxIDs?.telnyxCallControlId, callSessionId: this.buildSnapshot().call?.sessionId });
   }
 
   private loadSdk(): Promise<WebphoneSdkModule> {
@@ -1101,6 +1126,12 @@ export class TelnyxWebphone {
       this.hangupRequestedCallId = null;
       this.audioAttempt += 1;
       this.audioBlocked = false;
+    }
+    if (this.call !== call) {
+      // SDK warnings contain a call ID but no peer object/generation. After a
+      // same-ID Attach we cannot tell a late old collector from the new peer.
+      this.qualityWarningsAmbiguous = this.call?.id === call.id;
+      this.qualityWarnings.clear();
     }
     this.call = call;
 
@@ -1373,6 +1404,8 @@ export class TelnyxWebphone {
     this.rememberEndedOperatorLeg(this.call?.telnyxIDs?.telnyxCallControlId);
     this.stopRinging();
     this.call = null;
+    this.qualityWarnings.clear();
+    this.qualityWarningsAmbiguous = false;
     this.callSessionId = null;
     this.answeringCallId = null;
     this.answeredCallId = null;
@@ -1435,7 +1468,7 @@ type WebphoneSdkError = {
   callId?: string;
 };
 
-type WebphoneSdkWarning = { warning?: { code?: number }; callId?: string };
+type WebphoneSdkWarning = { warning?: { code?: number }; callId?: string; sessionId?: string };
 type WebphoneSdkSocketEvent = { socketGeneration?: number } | undefined;
 
 // Verified against @telnyx/webrtc 2.27.10 SDK_ERRORS. Session/transport recovery

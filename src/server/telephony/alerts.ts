@@ -67,6 +67,16 @@ function digest(value: string): string { return createHash("sha256").update(valu
 
 /** Scope alerts by stable incident identity: a different caller later today must still be reported. */
 function scopedAlerts(alert: TelephonyAlert, checkedAt: string): TelephonyAlert[] {
+  if (alert.check === "interruptions") {
+    // One operator departure is one episode, even across midnight; another leg
+    // of the same call must still be reportable. Never mail incomplete evidence.
+    return (Array.isArray(alert.detail.entries) ? alert.detail.entries : []).map(alertObject)
+      .filter(entry => entry.classification === "interruption_observed" &&
+        ["production", "test"].includes(String(entry.environment)) && entry.environment === alert.detail.environment &&
+        [entry.incidentId, entry.legId, entry.sessionId].every(id => typeof id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(id)))
+      .map(entry => ({ ...alert, key: `interruptions:${entry.environment}:${digest(`${entry.incidentId}:${entry.legId}`).slice(0, 24)}`,
+        detail: { ...alert.detail, confirmed: 1, entries: [entry], sessionIds: [entry.sessionId] } }));
+  }
   // A connection report also contains repaired historical failures. They are
   // context, not new failing calls to notify about independently.
   if (alert.check === "connections" && Array.isArray(alert.detail.entries)) {
@@ -108,6 +118,7 @@ function scopedAlerts(alert: TelephonyAlert, checkedAt: string): TelephonyAlert[
 export function alertsFromReport(report: TelephonyHealthReport, day: string): TelephonyAlert[] {
   const alerts: TelephonyAlert[] = [];
   for (const check of report.checks) {
+    if (check.key === "interruptions" && check.status !== "fail") continue;
     const notify = check.status === "fail" || (check.status === "warn" && (WARN_WORTHY.has(check.key) || Boolean(check.detail.error)));
     if (!notify) continue;
     alerts.push(...scopedAlerts({ key: `${day}:${check.key}:${check.status}`, check: check.key, status: check.status as TelephonyAlert["status"], detail: check.detail }, report.checkedAt));

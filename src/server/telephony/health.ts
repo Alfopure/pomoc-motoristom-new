@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
 import { isDeviceLive } from "@/lib/telephony/device-liveness";
+import { getCallInterruptionHealth, type CallInterruptionConfiguration } from "./call-interruptions";
 
 import { STALLED_EVENT_MS, STUCK_SESSION_MS } from "./cron-jobs";
 import { TELEPHONY_INCIDENT_JOBS } from "./incidents";
@@ -54,6 +55,8 @@ export type TelephonyHealthDeps = {
   now?: () => Date;
   /** Read-only facts from this cron tick's existing provider reconciliation. */
   providerVerification?: ProviderVerification;
+  /** Test seam; the default requires explicit activation and a stable deployment. */
+  interruptionConfiguration?: CallInterruptionConfiguration | null;
 };
 
 /** Compatibility name: now a per-interaction overdue grace, never global silence. */
@@ -68,7 +71,7 @@ const WORST_FIRST: HealthStatus[] = ["fail", "warn", "skipped", "ok"];
 /** The worst check wins, so a single `fail` cannot hide behind a page of `ok`. */
 function combine(checks: TelephonyHealthCheck[]): HealthStatus {
   for (const status of WORST_FIRST) {
-    if (checks.some((check) => check.status === status && !(check.key === "provider" && status === "skipped"))) return status;
+    if (checks.some((check) => check.status === status && !(["provider", "interruptions"].includes(check.key) && status === "skipped"))) return status;
   }
   return "ok";
 }
@@ -286,5 +289,6 @@ export async function getTelephonyHealth(deps: TelephonyHealthDeps): Promise<Tel
     },
   });
 
+  checks.push(await getCallInterruptionHealth({ admin: deps.admin, organizationId: deps.organizationId, now, configuration: deps.interruptionConfiguration }));
   return { status: combine(checks), checkedAt: now.toISOString(), organizationId: deps.organizationId, checks };
 }

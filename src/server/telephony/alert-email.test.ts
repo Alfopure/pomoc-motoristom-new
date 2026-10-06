@@ -28,6 +28,15 @@ describe("Slovak telephony alert explanations", () => {
     expect(message.subject).not.toContain("Hovor bol spojený");
   });
 
+  it("states confirmed operator departure without asserting a network cause or audible outage", () => {
+    const message = render([alert("interruptions", { entries: [{ sessionId: "call-1", interruptedAt: NOW, classifiedAt: NOW }] })], [call({ confirmedAt: NOW, checks: ["interruptions"] })]);
+    expect(message.subject).toContain("Zaznamenané prerušenie účasti operátora");
+    expect(message.text).toContain("Predtým spojená vetva operátora skončila a zákazník zostal na linke");
+    expect(message.text).toContain("Príčina prerušenia ani kvalita zvuku nie sú");
+    expect(message.text).toContain("Dôkazy znovu posúdené:");
+    expect(message.subject).not.toContain("Hovor bol spojený;");
+  });
+
   it("puts verified bridge evidence first and explains cancelled parallel ringing", () => {
     const message = render([alert("ledger", { failed24h: 1 })], [call({ checks: ["ledger"], confirmedAt: NOW, confirmationSource: "bridge_events", legs: [
       { id: "loser", role: "external", state: "ended", answeredAt: null, bridgedAt: null, endedAt: NOW, hangupCause: "originator_cancel" },

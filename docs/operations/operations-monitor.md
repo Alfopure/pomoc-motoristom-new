@@ -40,6 +40,7 @@ Fyzický budget sa nastavuje osobitne pre projekt podľa voľnej kapacity a reze
 | `DIAGNOSTICS_PHYSICAL_BUDGET_BYTES` | `0`, ingest blokovaný. Nastaviť až po overení kapacity. |
 | `DIAGNOSTICS_PANEL_ENABLED` | Panel zapnutý; `false` vypne autorizovanú stránku aj read/status API. |
 | `DIAGNOSTICS_CLASSIFIER_ENABLED` | Vypnutý; `true` povolí internú klasifikáciu. |
+| `DIAGNOSTICS_CALL_ALERTS_SINCE` | Prázdne: emaily o prerušení vypnuté. Explicitná UTC hranica `YYYY-MM-DDTHH:mm:ss.sssZ` až po schválenej migrácii a akceptácii. |
 | `NEXT_PUBLIC_DIAGNOSTICS_SENTRY_DSN` | Neprítomný: žiadny externý error SDK transport. Samostatný TEST projekt. |
 | `DIAGNOSTICS_SENTRY_DASHBOARD_URL` | Voliteľný HTTPS dashboard na `sentry.io`, bez query/tokenov. |
 | `DIAGNOSTICS_UPTIME_DASHBOARD_URL` | Voliteľný HTTPS dashboard Sentry/Better Stack/UptimeRobot, bez query/tokenov. |
@@ -52,7 +53,7 @@ Fyzický budget sa nastavuje osobitne pre projekt podľa voľnej kapacity a reze
 6. Externý uptime: overiť existujúci Sentry ready monitor opísaný vyššie, jeho posledné kontroly a schváleného príjemcu. Ďalší monitor ani nové upozornenie sa týmto dokumentom neaktivuje. Produkčný výpadok sa na overenie zámerne nevyvoláva.
 7. Sentry: [privátne source maps](diagnostics-source-maps.md). Overiť skutočný minifikovaný stack presného deploynutého buildu, privátnosť `.map` súborov a sanitizovaný wire payload. Pripravený adaptér sám neznamená funkčnú technickú diagnostiku.
 
-Heuristické upozornenia zostávajú počas sedemdňového pilotu vypnuté; nový automatický email/SMS sender nie je súčasťou tejto implementácie. Existujúce prevádzkové alerty sa nemenia. Po pilote skontrolovať objem, straty, p95, falošné incidenty a DB bloat, až potom rozhodnúť o aktivácii upozornení a príjemcovi.
+Upozornenia o prerušení zostávajú bez explicitnej aktivačnej hranice vypnuté. Použijú existujúci prevádzkový email a jeho príjemcu; nevzniká ďalší sender ani SMS. Pred aktiváciou vyhodnotiť objem, straty, p95, falošné incidenty a DB bloat. Podmienky aktivácie opisuje časť nižšie.
 
 Samotný interný TEST pilot nepotvrdzuje nezávislý dohľad pri úplnom výpadku webu. Historická kontrola 30. 9. ešte nemala Sentry ani externú HTTP službu; následnú akceptáciu 1. 10. opisuje časť vyššie. Existujúci Healthchecks.io patrí BI heartbeatom a jeho checky/príjemcovia sa nemenia. Nenastavovať dashboard URL len kvôli zdanlivému zelenému stavu; odkaz sám neoveruje fungovanie externej služby.
 
@@ -62,7 +63,29 @@ Prirodzený päťminútový `/api/telephony/cron` vracia HTTP 200 aj pri dokonč
 
 Bez novej schémy sa nezavádza trvalý údaj o poslednom úspechu celého cronu: existujúca diagnostická stráž pokrýva iba svoju údržbu a historické `motorist_job_runs` patria odlišnému worker protokolu. Pri overení plánovania používať časovo ohraničené prirodzené Vercel logy a čerstvosť stráže. Ručne nespúšťať celý cron iba kvôli monitorovaciemu testu.
 
+### Nezávislá kontrola plánovaného cronu v Sentry
+
+`DIAGNOSTICS_SENTRY_CRON_MONITOR_SLUG` zapína dvojicu check-inov pre **vopred vytvorený** Sentry cron monitor: po overení `CRON_SECRET` odošle `in_progress`, po dokončení všetkých úloh `ok` alebo `error` s rovnakým ID a trvaním. Používa súkromného serverového klienta s overením správneho Sentry projektu a produkčného alebo dedikovaného TEST deploymentu. Preview a lokálny vývoj check-iny neposielajú. Chýbajúci slug alebo nepripravený klient túto vrstvu nezapne.
+
+Koncový stav sleduje `executionStatus`: zlyhaná podúloha alebo výnimka znamená `error`; úspešná kontrola telefónie, ktorá nájde už existujúce incidenty, znamená `ok`. Tieto incidenty naďalej vidno cez `telephonyHealth` a celkové `status: degraded`. Sentry cron sa preto nesmie zamieňať s potvrdením fungujúceho zvuku ani s vyčistením historických alertov.
+
+Každá fáza odoslania má spolu s inicializáciou/flush limit jednu sekundu. Chyba Sentry nemení obchodný výsledok cronu; lokálne sa uvedie iba `telephony-cron-checkin` / `unconfirmed`, bez textu chyby alebo údajov hovoru. Samotný úspešný flush nie je doklad prijatia: akceptácia vyžaduje readback konkrétneho prirodzeného check-inu v správnom Sentry projekte. Pri TEST readbacku monitora aj jeho `/checkins/` použiť explicitné `?environment=test`: overenie 6. 10. potvrdilo, že endpoint bez tohto filtra môže vrátiť prázdny výsledok napriek prijatému TEST check-inu.
+
+Plán `*/5 * * * *`, UTC, tolerancia vynechania 2 minúty a maximálny čas behu 3 minúty sa nastavujú na vopred vytvorenom externom monitore; samotná route má 120-sekundový limit. Externá služba potom odhalí chýbajúci štart aj nedokončený beh pri páde procesu, keď aplikácia už nedokáže chybu odoslať. Kód neposiela `monitor_config`, nevytvára platené monitory ani alert pravidlá a nepridáva scheduler. Pred aktiváciou overiť dostupnú kvótu, presný projekt/slug a príjemcu; aktuálny stav monitora a doručenie alarmu doložiť samostatne. [Sentry check-in readback](https://docs.sentry.io/api/crons/retrieve-checkins-for-a-monitor-by-project/).
+
 Pre spoločný TEST HOLD/unhold zaznamenať čas, verziu a `x-request-id`. V `request-performance` porovnať `dbFirstMs`, `dbMaxMs`, `steps.db` a `dbAborts`. Počítadlo `dbAborts` zahŕňa aj timeout zadaný volajúcim RPC pred získaním session lease; bežné zrušenie požiadavky sa za DB timeout nepočíta. `dbConnects` aj event-loop využitie majú rozsah jednej serverovej inštancie a nedokazujú vyťaženie celej databázy. Zaznamenaný timeout nedokazuje, či príčinou bola sieť, DB vykonanie alebo pool; konkrétnu príčinu treba doložiť súvisiacimi logmi. Limity ani opakovanie databázových požiadaviek táto diagnostika nemení.
+
+## Potvrdené prerušenie účasti operátora
+
+Pred aktiváciou treba osobitne schváliť a aplikovať `20261011120000_diagnostics_call_environment_guard.sql` na presne určený projekt. Mení iba dve existujúce diagnostické funkcie, bez zmeny ich podpisov, oprávnení či obchodných dát; zachováva limity 250 nových a 250 znovu posudzovaných kandidátov na tick. TEST klasifikuje iba hovory s explicitným `metadata.environment=development`, produkcia iba `production`. Chýbajúce alebo cudzie metadáta znamenajú `unknown`; cudzí kandidáti nevypĺňajú limit nových kandidátov. Starší incident sa pri opätovnom posúdení môže bezpečne zmeniť na `unknown`.
+
+Existujúca kontrola telefónie pridá `interruptions` až pri `DIAGNOSTICS_CLASSIFIER_ENABLED=true` a neprázdnom `DIAGNOSTICS_CALL_ALERTS_SINCE`. TEST navyše vyžaduje presný dedikovaný deployment a dôkaz, že konkrétnu operátorskú vetvu vytvorila TEST aplikácia: podpísaná `call.initiated` na TEST connection alebo prijatý TEST dial pre rovnaký interný hovor a provider ID. Kopírované historické ID a metadáta samotné nestačia. Pracovný Preview ani lokálny vývoj upozornenia nezapnú.
+
+Email vznikne iba pre otvorený `interruption_observed` po aktivácii: predtým spojená operátorská vetva skončila a odpovedaná zákaznícka vetva ostala otvorená aspoň ďalších desať sekúnd. Vyžaduje sa minimálne päť minút na neskoré dôkazy, následná klasifikácia po tejto lehote a jej čerstvosť do desiatich minút. Päťminútový plán preto nie je okamžitým alarmom. Znovu sa overia bežné hangup/HOLD/park/transfer, trvalé údaje o parkovaní aj po pickup, odchod pri blind transfer pred odpoveďou cieľa, úspešný auditovaný odchod z konferencie a už pripojená náhradná vetva rovnakého operátora. Neskoršie opätovné pripojenie samo nevymaže skutočné skoršie prerušenie.
+
+Na kontrolu sa načíta najviac 20 incidentov z posledných 24 hodín; viac výsledkov sa označí `truncated`. Bez kandidáta pribudne jedno čítanie, s kandidátmi najviac osem ohraničených čítaní, so spoločným sieťovým limitom 1,5 s a najviac 80 vetvami/záznamami dôkazov na dávku. Neúplný alebo nedostupný dôkaz zostane `warn`; nevytvorí tvrdenie o potvrdenom prerušení. Nový scheduler, polling telefónu ani provider request nepribúda. Po nasadení porovnať prirodzené cron časy a DB odozvy s predchádzajúcimi meraniami.
+
+Existujúci emailový ledger potlačí opakované upozornenie na rovnaký incident a vetvu aj cez polnoc. Ďalšia vetva toho istého hovoru má vlastný kľúč. Správa uvádza pozorovanú stratu účasti a časy dôkazov; neurčuje príčinu ani netvrdí, že dokázala poruchu zvuku. [SDK pozorovania kvality hlasu](voice-quality-observations.md) sú samostatné signály, nie automatické potvrdenie počuteľnosti alebo dôvod tohto emailu.
 
 ## Vypnutie pri problémoch
 

@@ -35,7 +35,7 @@ import { type IncomingOfferPolicy, type WebphoneSnapshot } from "@/lib/telephony
 import { callControlRetryPolicy, retryUnstartedCallControl } from "@/lib/telephony/call-control-retry";
 import { BrowserReconciliationGate } from "@/lib/telephony/browser-reconciliation";
 import { CoordinatedWebphone } from "@/lib/telephony/coordinated-webphone";
-import { logWebphoneDiagnostic } from "@/lib/telephony/diagnostics";
+import { correlateWebphoneDiagnostic, logWebphoneDiagnostic } from "@/lib/telephony/diagnostics";
 import { recordDiagnostic, setDiagnosticCallContext, retainDiagnosticCallContext } from "@/lib/diagnostics/client";
 import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "@/lib/telephony/webphone-model";
@@ -211,9 +211,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   useEffect(() => {
     if (!enabled || !organizationId || !profileId) return;
     const webphone = new CoordinatedWebphone({ scope: `${organizationId}:${profileId}`, mobile: isMobileApp(), logger: (entry) => {
-      const controlId = webphoneRef.current?.getSnapshot().call?.telnyxCallControlId;
-      const sessionId = entry.callSessionId ?? snapshotRef.current.calls.find(call => call.legs.some(leg => leg.callControlId === controlId))?.sessionId;
-      logWebphoneDiagnostic({ ...entry, callSessionId: sessionId });
+      const correlated = correlateWebphoneDiagnostic(entry, webphoneRef.current?.getSnapshot().call, snapshotRef.current.calls);
+      if (correlated) logWebphoneDiagnostic(correlated);
     } });
     webphoneRef.current = webphone;
     webphone.setIncomingOfferPolicy(incomingPolicyRef.current);

@@ -4,6 +4,8 @@ import { runTelephonyCronJobs, timedCronJob, type TelephonyCronJobResult } from 
 import { completeCronSummary, cronRuntimeObservation } from "@/server/telephony/cron-observation";
 import { DATABASE_REQUEST_MS } from "@/server/telephony/ownership";
 import { createTelephonyDeps } from "@/server/telephony/runtime";
+import { finishCronMonitor, startCronMonitor } from "@/server/diagnostics/cron-monitor";
+import { deferServerError } from "@/server/diagnostics/server-errors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,6 +56,7 @@ export async function GET(request: Request) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
+  const monitor = await startCronMonitor(cronStartedAt);
   try {
     const deps = await createTelephonyDeps({ sweepAfterEvent: false });
     const summary = await runTelephonyCronJobs(deps, { cronStartedAt });
@@ -67,12 +70,15 @@ export async function GET(request: Request) {
 
     const completed = completeCronSummary(summary, [reminders, pauseWarnings, recordings, diagnostics], cronStartedAt, Date.now());
     console.info(JSON.stringify(cronRuntimeObservation(completed)));
+    await finishCronMonitor(monitor, completed.executionStatus);
 
     return Response.json(
       completed,
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
+    deferServerError(error, { source: "cron", route: "/api/telephony/cron", status: 500 });
+    await finishCronMonitor(monitor, "failed");
     console.error(JSON.stringify({ scope: "telephony-cron-runtime", status: "failed", executionStatus: "failed", telephonyHealth: "unknown",
       startedAt: new Date(cronStartedAt).toISOString(), checkedAt: new Date().toISOString(), ms: Math.max(0, Date.now() - cronStartedAt) }));
     console.error("Telephony cron failed:", error);

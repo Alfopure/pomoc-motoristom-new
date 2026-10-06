@@ -7,6 +7,7 @@ import { EXPECTED_LEG_TTL_MS, TOKEN_REFRESH_MIN_MS, WEBPHONE_RECOVERY_TIMEOUT_MS
 import { isDeviceLive } from "./device-liveness";
 import * as browserTiming from "./browser-call-telemetry";
 import { BrowserIncomingRingtone } from "./browser-ringtone";
+import { VOICE_QUALITY_WARNINGS } from "@/lib/diagnostics/voice-quality";
 
 beforeEach(() => {
   vi.spyOn(browserTiming, "browserCallTelemetry").mockReturnValue(new browserTiming.BrowserCallTelemetry());
@@ -21,6 +22,7 @@ beforeEach(() => {
 type Handler = (payload: unknown) => void;
 
 class FakeClient implements WebphoneSdkClient {
+  sessionid = "sdk-session";
   handlers = new Map<string, Handler[]>();
   connected = false;
   disconnected = false;
@@ -158,6 +160,87 @@ function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: b
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+describe("bounded SDK voice-quality observations", () => {
+  const session = "00000000-0000-4000-8000-000000000001";
+  async function active(options: Parameters<typeof harness>[0] = {}) {
+    const entries: Record<string, unknown>[] = [];
+    const h = harness({ ...options, logger: entry => entries.push(entry) });
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: session });
+    const call = fakeCall({ state: "active" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    return { ...h, call, quality: () => entries.filter(entry => entry.event === "sdk_quality_warning") };
+  }
+  function emit(client: FakeClient, code: number, callId: string | undefined = "call-1") {
+    client.emit("telnyx.warning", { warning: { code, message: "PRIVATE SDP 192.0.2.1 +421900111222" },
+      callId, sessionId: client.sessionid, stats: { ip: "192.0.2.1" } });
+  }
+
+  it("retains the eight allowlisted codes and exact call while discarding raw SDK details", async () => {
+    const h = await active();
+    const before = { requests: h.requests.length, timers: h.timers.length };
+    for (const warning of VOICE_QUALITY_WARNINGS) emit(h.client, warning.code);
+    expect(h.quality().map(entry => entry.code)).toEqual(VOICE_QUALITY_WARNINGS.map(warning => warning.code));
+    for (const entry of h.quality()) expect(entry).toMatchObject({ sdkCallId: h.call.id, callControlId: "cc-1", callSessionId: session });
+    expect(JSON.stringify(h.quality())).not.toMatch(/PRIVATE|192\.0\.2|421900|stats|message/);
+    expect({ requests: h.requests.length, timers: h.timers.length }).toEqual(before);
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", callError: null, call: { active: true } });
+    expect(h.call.hungUp).toBe(false); h.phone.stop();
+  });
+
+  it("ignores foreign, missing, ended and stale SDK-session warnings", async () => {
+    const h = await active();
+    emit(h.client, 31001, "foreign-call");
+    h.client.emit("telnyx.warning", { warning: { code: 31001 } });
+    h.client.emit("telnyx.warning", { warning: { code: 31001 }, callId: h.call.id, sessionId: "retired-session" });
+    h.call.state = "ringing"; emit(h.client, 31001);
+    h.call.state = "hangup"; emit(h.client, 31001);
+    expect(h.quality()).toEqual([]);
+    const oldHandler = h.client.handlers.get("telnyx.warning")![0];
+    h.phone.stop();
+    oldHandler({ warning: { code: 31001 }, callId: h.call.id });
+    expect(h.quality()).toEqual([]);
+  });
+
+  it("coalesces bursts per code for a minute without adding timers or changing the call", async () => {
+    let now = Date.parse("2026-09-03T08:00:00.000Z");
+    const h = await active({ now: () => now });
+    for (let i = 0; i < 100; i += 1) emit(h.client, 31001);
+    now += 59_999; emit(h.client, 31001); emit(h.client, 31002);
+    expect(h.quality().map(entry => entry.code)).toEqual([31001, 31002]);
+    now += 1; emit(h.client, 31001);
+    expect(h.quality().map(entry => entry.code)).toEqual([31001, 31002, 31001]);
+    h.phone.stop();
+  });
+
+  it("suppresses held silence and local mute without suppressing distinct network observations", async () => {
+    const h = await active();
+    h.call.state = "held";
+    for (const warning of VOICE_QUALITY_WARNINGS.filter(warning => warning.silence)) emit(h.client, warning.code);
+    emit(h.client, 31001);
+    h.call.state = "active"; h.call.isAudioMuted = true;
+    emit(h.client, 31005); emit(h.client, 32002); emit(h.client, 31006);
+    expect(h.quality().map(entry => entry.code)).toEqual([31001, 31006]);
+    h.call.isAudioMuted = false; emit(h.client, 31005);
+    expect(h.quality().map(entry => entry.code)).toEqual([31001, 31006, 31005]);
+    h.phone.stop();
+  });
+
+  it.each(["call-1", "recovered-call"])("rejects ambiguous same-ID collectors and old IDs after Attach to %s", async id => {
+    const h = await active();
+    const replacement = fakeCall({ id, recoveredCallId: h.call.id, state: "active" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: replacement });
+    emit(h.client, 31001, h.call.id);
+    expect(h.quality()).toHaveLength(0);
+    if (id !== h.call.id) {
+      emit(h.client, 31001, id);
+      expect(h.quality()).toHaveLength(1);
+      expect(h.quality()[0]).toMatchObject({ sdkCallId: id });
+    }
+    h.phone.stop();
+  });
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

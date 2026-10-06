@@ -31,6 +31,7 @@ export type RouteAuthEntry = {
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   diagnostics: {class: 'session', role: ['manager','admin']},
+  'diagnostics/canary': {class: 'dual', role: ['admin'], note: 'Fixed synthetic error only: dedicated TEST + expiring deployment flag; temporary purpose-bound bearer or same-origin admin. Disabled deployments return 404. No application-session or provider access.'},
   'diagnostics/events': {class: 'session', role: ['dispatcher','senior_dispatcher','manager','admin'], note: 'Same-origin, authenticated account-bound diagnostic batch.'},
   'diagnostics/incidents/[id]': {class: 'session', role: ['manager','admin']},
   "telephony/team": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Narrow operational DTO; report and device secrets excluded." },
