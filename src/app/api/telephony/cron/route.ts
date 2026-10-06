@@ -6,6 +6,7 @@ import { DATABASE_REQUEST_MS } from "@/server/telephony/ownership";
 import { createTelephonyDeps } from "@/server/telephony/runtime";
 import { finishCronMonitor, startCronMonitor } from "@/server/diagnostics/cron-monitor";
 import { deferServerError } from "@/server/diagnostics/server-errors";
+import { recordCronHeartbeat } from "@/server/diagnostics/cron-heartbeat";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -57,8 +58,10 @@ export async function GET(request: Request) {
   }
 
   const monitor = await startCronMonitor(cronStartedAt);
+  let heartbeatAdmin: Awaited<ReturnType<typeof createTelephonyDeps>>["admin"] | null = null;
   try {
     const deps = await createTelephonyDeps({ sweepAfterEvent: false });
+    heartbeatAdmin = deps.admin;
     const summary = await runTelephonyCronJobs(deps, { cronStartedAt });
     const reminders = await timedCronJob(() => runReminderMaterialisation(deps.organizationId));
     const pauseWarnings = await timedCronJob(() => runPauseEndingWarningMaterialisation(deps.organizationId));
@@ -70,7 +73,10 @@ export async function GET(request: Request) {
 
     const completed = completeCronSummary(summary, [reminders, pauseWarnings, recordings, diagnostics], cronStartedAt, Date.now());
     console.info(JSON.stringify(cronRuntimeObservation(completed)));
-    await finishCronMonitor(monitor, completed.executionStatus);
+    await Promise.all([
+      finishCronMonitor(monitor, completed.executionStatus),
+      recordCronHeartbeat(deps.admin, cronStartedAt, completed.executionStatus),
+    ]);
 
     return Response.json(
       completed,
@@ -78,7 +84,10 @@ export async function GET(request: Request) {
     );
   } catch (error) {
     deferServerError(error, { source: "cron", route: "/api/telephony/cron", status: 500 });
-    await finishCronMonitor(monitor, "failed");
+    await Promise.all([
+      finishCronMonitor(monitor, "failed"),
+      heartbeatAdmin ? recordCronHeartbeat(heartbeatAdmin, cronStartedAt, "failed") : Promise.resolve(false),
+    ]);
     console.error(JSON.stringify({ scope: "telephony-cron-runtime", status: "failed", executionStatus: "failed", telephonyHealth: "unknown",
       startedAt: new Date(cronStartedAt).toISOString(), checkedAt: new Date().toISOString(), ms: Math.max(0, Date.now() - cronStartedAt) }));
     console.error("Telephony cron failed:", error);

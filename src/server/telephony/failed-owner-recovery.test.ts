@@ -176,7 +176,7 @@ describe("failed owner replay boundaries", () => {
     expect(h.logs).toContainEqual(expect.objectContaining({ message: "lease release pending expiry" }));
   });
 
-  it("excludes operator, answer/bridge, awaiting-correlation and invalid customer identities", async () => {
+  it("excludes operator, answer/bridge, uncorrelated foreign legs and invalid customer identities", async () => {
     const { h, call, operator, retained, finish, owner } = await failedOwner({ customer: false });
     const template = { organization_id: ORG, call_session_id: call.telnyxSessionId, call_control_id: call.callControlId,
       connection_id: "app-test", event_type: "call.hangup", status: "failed", retry_state: "deferred", payload: {},
@@ -187,7 +187,7 @@ describe("failed owner replay boundaries", () => {
       { event_id: "operator-only", call_control_id: operator },
       { event_id: "answer", event_type: "call.answered" },
       { event_id: "bridge", event_type: "call.bridged" },
-      { event_id: "awaiting", retry_state: "awaiting_correlation" },
+      { event_id: "awaiting", retry_state: "awaiting_correlation", call_control_id: "foreign-customer" },
       { event_id: "foreign-leg", call_control_id: "foreign-customer" },
       { event_id: "other-saved-customer", call_control_id: "other-saved-customer" },
       { event_id: "future-backoff", next_attempt_at: new Date(h.db.now().getTime() + 60_000).toISOString() },

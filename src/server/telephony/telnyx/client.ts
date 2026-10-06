@@ -1,6 +1,6 @@
 import "server-only";
 import { measureRequestStep } from "@/server/request-metrics";
-import { recordProviderDispatch, sessionOwnership } from "../ownership";
+import { recordProviderDispatch, sessionOwnership, type Ownership } from "../ownership";
 import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../provider-journal";
 
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
@@ -430,6 +430,37 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
   // Immutable ownership of calls just acknowledged by this client's guarded TEST dial.
   // No global cache; subsequent invocations need durable signed-ingress/journal evidence.
   const createdTestCalls = new Set<string>();
+  // Signed ingress/accepted dial establishes immutable call origin. A HOLD's
+  // STOP, conference operation and START need the same proof, but not three
+  // serial copies of it. Scope reuse to this exact fenced ownership lifetime,
+  // admin, organization and provider boundary; later actions prove it again.
+  // Mutable enrollment, credential validity and all dispatch fences stay fresh.
+  const ownedTestCallProofs = new WeakMap<Ownership, Map<string, Promise<void>>>();
+
+  async function verifyTestCall(callId: string, safety: ReturnType<typeof getTestProviderSafety>, deadline: number): Promise<void> {
+    if (now() >= deadline) throw new TestProviderSafetyError();
+    if (createdTestCalls.has(callId)) return;
+    const verify = async () => {
+      if (!await hasTestCallProvenance({ ...configured, safety }, callId, options.testProvenanceContext)) throw new TestProviderSafetyError();
+    };
+    const owner = sessionOwnership.getStore();
+    const context = options.testProvenanceContext;
+    if (owner?.contract !== 2 || !context || owner.admin !== context.admin || owner.organizationId !== context.organizationId) return verify();
+    let proofs = ownedTestCallProofs.get(owner);
+    if (!proofs) { proofs = new Map(); ownedTestCallProofs.set(owner, proofs); }
+    const key = JSON.stringify([context.organizationId, configured.callControlAppId, configured.credentialConnectionId, callId]);
+    const existing = proofs.get(key);
+    if (existing) return existing;
+    const pending = verify();
+    proofs.set(key, pending);
+    try { await pending; }
+    catch (error) {
+      // Missing rows can become durable later in the same run; an unavailable
+      // read or a negative result must neither authorize nor poison a retry.
+      if (proofs.get(key) === pending) proofs.delete(key);
+      throw error;
+    }
+  }
 
   async function attempt(
     method: string,
@@ -512,13 +543,14 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const safety = configured.testSafety ?? getTestProviderSafety();
     try {
       const checked = checkTestProviderRequest({ ...configured, safety }, method, path, payload);
-      for (const callId of new Set(checked.callIds)) {
-        if (now() >= requestDeadline || (!createdTestCalls.has(callId) && !await hasTestCallProvenance({ ...configured, safety }, callId, options.testProvenanceContext))) throw new TestProviderSafetyError();
-      }
-      for (const conferenceId of new Set(checked.conferenceIds)) {
+      // Independent local proofs run together, but retain the boundary that
+      // rejects a foreign call before even reading its conference at Telnyx.
+      // Every check still precedes journal preparation and provider mutation.
+      await Promise.all([...new Set(checked.callIds)].map(callId => verifyTestCall(callId, safety, requestDeadline)));
+      await Promise.all([...new Set(checked.conferenceIds)].map(async conferenceId => {
         const response = await request<unknown>("GET", `/conferences/${encodeURIComponent(conferenceId)}`, {}, requestDeadline);
         if (asRecord(asRecord(response).data).connection_id !== configured.callControlAppId) throw new TestProviderSafetyError();
-      }
+      }));
       // Tokens and SIP targets must belong to the dedicated TEST connection,
       // including credentials restored from a copied or stale device row.
       const credentials = new Map<string, string | undefined>();
