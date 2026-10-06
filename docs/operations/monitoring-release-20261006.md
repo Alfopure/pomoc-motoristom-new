@@ -7,11 +7,12 @@ owner acceptance of the tested release.
 
 Implementation status: local checks passed; hosted acceptance is pending. The
 TEST server DSN and errors flag are configured for the next source deployment.
-The classifier stays disabled until the exact SQL below receives owner approval.
-The initial Sentry OAuth permitted account reads but monitor creation returned
-403; completing organisation-write authorization is required before creating
-the monitor or changing TEST notification workflows. No monitor was created by
-the rejected request, and production configuration was not changed.
+The owner approved the exact classifier SQL for TEST, and it has been applied
+only to TEST as recorded below. Classifier activation and hosted acceptance are
+separate steps. The initial Sentry OAuth permitted account reads but monitor
+creation returned 403; the additional `org:write` authorization is now confirmed.
+The rejected request created no monitor. TEST monitor/workflow configuration and
+delivery still require verification; production configuration was not changed.
 
 ## Account readback (6 October 2026)
 
@@ -20,7 +21,8 @@ the rejected request, and production configuration was not changed.
 - TEST project `dispecing-test` / `4512181071446096`; production project
   `sentry-beige-horizon` / `4512180793638992`.
 - Actual subscription: Developer (`am3_f`), free, 5,000 errors per billing period
-  (42 used at audit time), one cron monitor (unused), one uptime monitor (used).
+  (42 used at initial readback), one cron monitor (unused at that readback), one
+  uptime monitor (used).
   Pay-as-you-go budget is zero. No subscription or billing change is part of this
   release.
 - Production uptime detector `2335291` is enabled: canonical production
@@ -69,9 +71,29 @@ Quality warnings represent SDK observations; they are not proof of lost audio.
 - Classifier PostgreSQL contracts: 16 passed, one optional PostgREST HTTP test
   skipped. New SQL changes only two existing diagnostic functions, preserving
   signatures, service-only permissions, retention and 250+250 work limits.
-  File: `supabase/migrations/20261011120000_diagnostics_call_environment_guard.sql`.
-  SHA256: `ec90cfcd188bf0dc2c700b4409334c493d07aa6f97031f1dec7f210adaf65a3b`.
-  This migration has not been applied remotely.
+- Auxiliary `apps/testovanie` isolation: the original Next 16.3.8 build failure
+  was reproduced because the shared Turbopack root discovered dispatch's server
+  instrumentation and resolved its aliases against the tracker. The tracker now
+  declares its own no-op `src/instrumentation.ts`. Its build, TypeScript check and
+  all 17 tests passed. The actual compiled instrumentation trace contains only
+  the tracker hook and Turbopack runtime, with no dispatch/Sentry modules; its
+  only export is `register`, and initialization sends no network requests even
+  when the dispatch diagnostics flag is enabled. Dispatch imports and tracker
+  deployment configuration are unchanged.
+
+## TEST SQL application
+
+The owner-approved SQL was applied only to Supabase TEST
+`nzpnqdstvkfncflgqlny`; production was not changed.
+
+- File: `supabase/migrations/20261011120000_diagnostics_call_environment_guard.sql`.
+- SHA256: `ec90cfcd188bf0dc2c700b4409334c493d07aa6f97031f1dec7f210adaf65a3b`.
+- Hosted migration: `diagnostics_call_environment_guard`, version
+  `20261006113306` (6 October 2026, 11:33:06 UTC).
+- Read-only postflight confirmed the deployed `pg_proc` function definitions
+  match the approved SQL and the checked table row counts were unchanged.
+
+This records schema application, not completed hosted monitoring acceptance.
 
 Before activation, set `DIAGNOSTICS_CALL_ALERTS_SINCE` to the actual activation
 time to exclude historical calls. At most 20 recent incidents and 80 evidence
