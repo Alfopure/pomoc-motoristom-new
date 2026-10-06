@@ -60,11 +60,16 @@ export function registerDatabaseOrigin(input: RequestInfo | URL): void {
   } catch { /* No URLs or credentials enter the log. */ }
 }
 
-/** Observe only a transport-owned timeout, and detach when the fetch finishes. */
-export function observeDatabaseTimeout(signal: AbortSignal): () => void {
+/** Observe the effective request deadline, including an RPC caller's timeout.
+ * Ordinary cancellation is not a database timeout; never log its reason. */
+export function observeDatabaseTimeout(signal?: AbortSignal | null): () => void {
+  if (!signal) return () => {};
   const scope = requests.getStore();
-  const aborted = () => { if (scope && !scope.finished) scope.dbAborts += 1; };
-  signal.addEventListener("abort", aborted, { once: true });
+  const aborted = () => {
+    if (scope && !scope.finished && (signal.reason as { name?: unknown } | null)?.name === "TimeoutError") scope.dbAborts += 1;
+  };
+  if (signal.aborted) aborted();
+  else signal.addEventListener("abort", aborted, { once: true });
   return () => signal.removeEventListener("abort", aborted);
 }
 

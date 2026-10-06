@@ -27,7 +27,7 @@ test.beforeAll(async () => {
   script = bundle.outputFiles.find(file => file.path.endsWith(".js"))!.text;
   css = (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css;
 });
-async function boot(page: Page, options: { failingPolls?: boolean; acknowledge?: boolean; acknowledgeAfter?: number; reportRetryAfter?: number; width?: number; disabled?: boolean; coverage?: "unknown" | "limited"; blocked?: boolean } = {}) {
+async function boot(page: Page, options: { failingPolls?: boolean; acknowledge?: boolean; acknowledgeAfter?: number; reportRetryAfter?: number; width?: number; disabled?: boolean; coverage?: "unknown" | "limited"; blocked?: boolean; maintenanceCheckedAt?: string | null } = {}) {
   const requests: string[] = [], errors: string[] = [];
   const counts: Record<string, number> = {};
   const reports: Array<Record<string, unknown>> = [];
@@ -55,7 +55,7 @@ async function boot(page: Page, options: { failingPolls?: boolean; acknowledge?:
     if (options.failingPolls && counts[key] > 1) return route.fulfill({ status: 503, json: { error: "fixture failure" } });
     if (key === "/api/health/live") return route.fulfill({ json: { status: "live", version: "release-3ae56af" } });
     if (key === "/api/health/ready") return route.fulfill({ json: { status: "ready", checkedAt: iso, version: "release-3ae56af" } });
-    if (key === "/api/diagnostics") return route.fulfill({ json: { ...overview(), coverage: options.coverage ?? "unknown", ...(options.blocked ? { storage: { chargedBytes: 1024, eventCount: 120, incidentCount: 3, dropped: 0, physicalBytes: 1024, physicalBudgetBytes: 1024, physicalCheckedAt: iso, blocked: true, cleanupBacklog: false } } : {}), ...(options.disabled ? { enabled: false, incidents: [], operations: [], calls: [] } : {}) } });
+    if (key === "/api/diagnostics") return route.fulfill({ json: { ...overview(), coverage: options.coverage ?? "unknown", ...(options.blocked ? { storage: { chargedBytes: 1024, eventCount: 120, incidentCount: 3, dropped: 0, physicalBytes: 1024, physicalBudgetBytes: 1024, physicalCheckedAt: options.maintenanceCheckedAt === undefined ? iso : options.maintenanceCheckedAt, blocked: true, cleanupBacklog: false } } : {}), ...(options.disabled ? { enabled: false, incidents: [], operations: [], calls: [] } : {}) } });
     return route.abort();
   });
   await page.goto(origin);
@@ -65,6 +65,14 @@ async function boot(page: Page, options: { failingPolls?: boolean; acknowledge?:
   await expect(page.getByText("Posledná kontrola v poriadku", { exact: true })).toHaveCount(2);
   return { requests, counts, errors, reports };
 }
+
+for (const checkedAt of [null, new Date(now - 600_000).toISOString()]) test(`separates ${checkedAt === null ? "unknown" : "stale"} maintenance from quota even while app and database respond`, async ({ page }) => {
+  const io = await boot(page, { blocked: true, maintenanceCheckedAt: checkedAt });
+  await expect(page.getByText(checkedAt === null ? "Údržba diagnostiky neoverená" : "Údržba diagnostiky mešká", { exact: true })).toBeVisible();
+  await expect(page.getByText("Obmedzený kvótou", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Posledná kontrola v poriadku", { exact: true })).toHaveCount(2);
+  expect(io.requests.some(url => /telephony\/(cron|health|calls)/.test(url))).toBe(false);
+});
 
 test("loads evidence only on click, filters evidence and confirms status changes", async ({ page }) => {
   const io = await boot(page);

@@ -1,5 +1,6 @@
 import type { GeoPoint } from "@/domain/types";
 import { MAX_ROUTE_INTERMEDIATES } from "@/lib/driving-route";
+import { canUseMapsIntegration } from "@/lib/app-environment";
 import { assertSameOriginRequest, requireDefaultMotoristOrgMember } from "@/server/api-auth";
 import { MutationError } from "@/server/motorist-mutations";
 
@@ -49,7 +50,7 @@ export async function POST(request: Request) {
 
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
 
-  if (!apiKey || apiKey.startsWith("replace-with")) {
+  if (!canUseMapsIntegration() || !apiKey || apiKey.startsWith("replace-with")) {
     return Response.json({ error: "Výpočet trasy momentálne nie je dostupný." }, { status: 503 });
   }
 

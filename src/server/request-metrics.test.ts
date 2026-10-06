@@ -48,13 +48,31 @@ describe("request metrics", () => {
       const finished = new AbortController();
       const detach = observeDatabaseTimeout(active.signal);
       observeDatabaseTimeout(finished.signal)();
-      active.abort();
+      active.abort(new DOMException("deadline reached", "TimeoutError"));
       detach();
       finished.abort();
       return Response.json({});
     }, { logger });
     expect(logger.mock.calls[0][0]).toMatchObject({ dbConnects: 1, dbConnectsScope: "instance-window", dbAborts: 1 });
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private-project|secret|telnyx/);
+  });
+
+  it("counts an already expired caller deadline but not cancellation or a completed request", async () => {
+    const logger = vi.fn();
+    await withRequestMetrics("call.action", async () => {
+      const expired = AbortSignal.abort(new DOMException("private deadline", "TimeoutError"));
+      observeDatabaseTimeout(expired)();
+      const cancelled = new AbortController();
+      const detach = observeDatabaseTimeout(cancelled.signal);
+      cancelled.abort(new DOMException("private cancellation", "AbortError"));
+      detach();
+      const completed = new AbortController();
+      observeDatabaseTimeout(completed.signal)();
+      completed.abort(new DOMException("late deadline", "TimeoutError"));
+      return Response.json({});
+    }, { logger });
+    expect(logger.mock.calls[0][0]).toMatchObject({ dbAborts: 1 });
+    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private|deadline|cancellation/);
   });
   it("keeps overlapping requests isolated and never records request or response data", async () => {
     const logger = vi.fn();

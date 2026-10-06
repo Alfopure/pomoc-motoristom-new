@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 
 import { runTelephonyCronJobs, timedCronJob, type TelephonyCronJobResult } from "@/server/telephony/cron-jobs";
+import { completeCronSummary, cronRuntimeObservation } from "@/server/telephony/cron-observation";
 import { DATABASE_REQUEST_MS } from "@/server/telephony/ownership";
 import { createTelephonyDeps } from "@/server/telephony/runtime";
 
@@ -64,14 +65,16 @@ export async function GET(request: Request) {
     const { runDiagnosticsMaintenance } = await import("@/server/diagnostics/service");
     const diagnostics = await timedCronJob(() => runDiagnosticsMaintenance(deps.organizationId));
 
-    console.info(JSON.stringify({ scope: "telephony-cron-runtime", node: process.version, undici: process.versions.undici ?? null,
-      ms: Date.now() - cronStartedAt, status: summary.status }));
+    const completed = completeCronSummary(summary, [reminders, pauseWarnings, recordings, diagnostics], cronStartedAt, Date.now());
+    console.info(JSON.stringify(cronRuntimeObservation(completed)));
 
     return Response.json(
-      { ...summary, status: reminders.status === "failed" || pauseWarnings.status === "failed" || recordings.status === "failed" || diagnostics.status === "failed" ? "degraded" : summary.status, jobs: [...summary.jobs, reminders, pauseWarnings, recordings, diagnostics] },
+      completed,
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
+    console.error(JSON.stringify({ scope: "telephony-cron-runtime", status: "failed", executionStatus: "failed", telephonyHealth: "unknown",
+      startedAt: new Date(cronStartedAt).toISOString(), checkedAt: new Date().toISOString(), ms: Math.max(0, Date.now() - cronStartedAt) }));
     console.error("Telephony cron failed:", error);
     return Response.json({ status: "failed", checkedAt: new Date().toISOString(), jobs: [] }, { status: 500 });
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertAppEnvironment, canOperateTelephony, isTestLiveDeployment, resolveAppEnvironment } from "./app-environment";
+import { assertAppEnvironment, canOperateTelephony, canUseMapsIntegration, isTestLiveDeployment, resolveAppEnvironment } from "./app-environment";
 
 const stableTest = {
   MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev",
@@ -31,6 +31,20 @@ describe("application deployment boundary", () => {
   it("blocks Preview device operations even without live flags", () => {
     expect(canOperateTelephony({ VERCEL_ENV: "preview" })).toBe(false);
     expect(canOperateTelephony({ MOTORIST_APP_ENV: "test" })).toBe(false);
+  });
+  it("allows Maps only in production, local development or explicitly enabled dedicated TEST", () => {
+    expect(canUseMapsIntegration({ VERCEL_ENV: "production", MOTORIST_APP_ENV: "production" })).toBe(true);
+    expect(canUseMapsIntegration({})).toBe(true);
+    expect(canUseMapsIntegration(stableTest)).toBe(false);
+    expect(canUseMapsIntegration({ ...stableTest, MOTORIST_TEST_LIVE_INTEGRATIONS: "true" })).toBe(true);
+  });
+  it.each([
+    { VERCEL_ENV: "preview" }, { VERCEL_PROJECT_ID: "prj_foreign" },
+    { VERCEL_GIT_COMMIT_REF: "feature/maps" }, { MOTORIST_TEST_LIVE_INTEGRATIONS: "false" },
+    { SUPABASE_URL: "https://ifpaeegaesdmljfkdvcn.supabase.co" },
+    { APP_BASE_URL: "https://dispecing.linkapomoci.sk" },
+  ])("blocks Maps in mismatched TEST deployment %j", override => {
+    expect(canUseMapsIntegration({ ...stableTest, MOTORIST_TEST_LIVE_INTEGRATIONS: "true", ...override })).toBe(false);
   });
   it("fails mismatches without reflecting credential-bearing input", () => {
     expect(() => assertAppEnvironment({ ...stableTest, SUPABASE_URL: "https://secret@example.org" }))
