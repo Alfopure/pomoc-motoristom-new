@@ -2,6 +2,15 @@ import { JOURNEY_PHASE_LABELS, journeyElapsedSeconds, type CallJourney, type Jou
 
 export const JOURNEY_STALE_MS = 20_000;
 
+/** A customer hangup alone is not terminal: provider cleanup may still be running. */
+export function journeyTerminalKey(journey: CallJourney): string | null {
+  if (journey.sessionActive || journey.customerActive || !["ended", "failed"].includes(journey.sessionState)
+    || !journey.endedAt || !Number.isFinite(Date.parse(journey.endedAt))) return null;
+  // asOf advances on every read, even when all recorded evidence is unchanged.
+  const { asOf: _asOf, ...evidence } = journey;
+  return JSON.stringify(evidence);
+}
+
 /** Wall clocks on the dispatcher device do not change the server's timeline. */
 export function journeyDisplayNow(journey: Pick<CallJourney, "asOf">, observedAt: number | null, now: number, stale: boolean): number {
   const server = Date.parse(journey.asOf);
