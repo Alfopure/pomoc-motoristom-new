@@ -63,7 +63,9 @@ function ownedFrame(filename: string, lineno: number, colno: number, origin: str
     try {
         if (filename.length > 2048) return null;
         const url = new URL(filename);
-        if (url.origin !== origin || url.username || url.password || !/^\/_next\/static\/chunks\/[a-zA-Z0-9][a-zA-Z0-9._~-]{7,127}\.js$/.test(url.pathname) ||
+        // Next 16.3 hosted output adds immutable/; retain the exact compiled URL
+        // for source-map matching while still admitting only owned hashed chunks.
+        if (url.origin !== origin || url.username || url.password || !/^\/_next\/static\/(?:immutable\/)?chunks\/[a-zA-Z0-9][a-zA-Z0-9._~-]{7,127}\.js$/.test(url.pathname) ||
             !Number.isInteger(lineno) || lineno <= 0 || lineno > 1_000_000 || !Number.isInteger(colno) || colno <= 0 || colno > 10_000_000) return null;
         return { filename: `${origin}${url.pathname}`, lineno, colno, in_app: true };
     } catch { return null; }

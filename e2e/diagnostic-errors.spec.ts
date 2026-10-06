@@ -33,7 +33,7 @@ async function setup(page: Page, status = 200) {
             envelopes.push(JSON.parse(lines[2]));
             return route.fulfill({ status, headers: { 'access-control-allow-origin': '*' }, body: '{}' });
         }
-        if (new URL(route.request().url()).pathname === '/_next/static/chunks/abcdef1234567890.js') return route.fulfill({ contentType: 'application/javascript', body: "throw new TypeError('CANARY_email@example.com +421901123456 CANARY_SECRET');" });
+        if (/^\/_next\/static\/(?:immutable\/)?chunks\/abcdef1234567890\.js$/.test(new URL(route.request().url()).pathname)) return route.fulfill({ contentType: 'application/javascript', body: "throw new TypeError('CANARY_email@example.com +421901123456 CANARY_SECRET');" });
         return route.abort();
     });
     await page.addInitScript({ content: `window.diagnosticRecords=[];\n${script}` });
@@ -67,11 +67,12 @@ test('cross-realm TypeError retains its class and stack', async ({ page }) => {
     expect(envelopes[0].exception.values[0]).toMatchObject({ type: 'TypeError', stacktrace: { frames: [{ lineno: 12, colno: 34 }] } });
     expect(JSON.stringify(envelopes)).not.toContain('CANARY');
 });
-test('a real browser throw preserves native lazy stack coordinates', async ({ page }) => {
+for (const directory of ['chunks', 'immutable/chunks']) test(`a real browser throw preserves native lazy stack coordinates under ${directory}`, async ({ page }) => {
     const envelopes = await setup(page);
-    await page.addScriptTag({ url: 'https://diagnostics.test/_next/static/chunks/abcdef1234567890.js' });
+    const filename = `https://diagnostics.test/_next/static/${directory}/abcdef1234567890.js`;
+    await page.addScriptTag({ url: filename });
     await expect.poll(() => envelopes.length).toBe(1);
-    expect(envelopes[0].exception.values[0]).toMatchObject({ type: 'TypeError', stacktrace: { frames: [{ filename: 'https://diagnostics.test/_next/static/chunks/abcdef1234567890.js', lineno: 1 }] } });
+    expect(envelopes[0].exception.values[0]).toMatchObject({ type: 'TypeError', stacktrace: { frames: [{ filename, lineno: 1 }] } });
     expect(JSON.stringify(envelopes)).not.toContain('CANARY');
 });
 test('offline error survives reload and is delivered once after online with its original ID and time', async ({ page, context }) => {
