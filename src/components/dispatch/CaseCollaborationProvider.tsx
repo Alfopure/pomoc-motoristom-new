@@ -23,14 +23,23 @@ function Session({ children, actorKey, viewerProfileId, enabled, initialCases, o
   useEffect(() => { callbacks.current = { onCasesChange, onNotificationsChange, onStateChange }; });
   useEffect(() => { if (enabled) store.acceptCases(initialCases); }, [enabled, initialCases, store]);
   useEffect(() => {
-    if (!enabled) return;
+    // acceptCases or a callback can replace this render's snapshot. Publishing
+    // it back to the parent would undo that update and can create a render loop.
+    // useSyncExternalStore will render the current snapshot before publication.
+    if (!enabled || store.getSnapshot() !== state) return;
     callbacks.current.onStateChange?.({ available: state.available, hidden: state.hidden, denied: state.denied, stale: state.stale });
+    if (store.getSnapshot() !== state) return;
     if (state.available && !state.hidden) {
       callbacks.current.onCasesChange?.(state.cases);
+      if (store.getSnapshot() !== state) return;
       callbacks.current.onNotificationsChange?.(state.notifications);
     }
-    if (state.denied) { callbacks.current.onCasesChange?.([]); callbacks.current.onNotificationsChange?.([]); }
-  }, [enabled, state.available, state.hidden, state.denied, state.stale, state.cases, state.notifications]);
+    if (state.denied) {
+      callbacks.current.onCasesChange?.([]);
+      if (store.getSnapshot() !== state) return;
+      callbacks.current.onNotificationsChange?.([]);
+    }
+  }, [enabled, state, store]);
   useEffect(() => {
     if (!enabled) return;
     store.start();
