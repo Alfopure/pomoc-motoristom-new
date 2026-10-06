@@ -147,6 +147,27 @@ describe("telephony alerts", () => {
     expect(sent[1].text).not.toContain("call-1");
   });
 
+  it("sends confirmed interruption once per incident/leg across midnight and keeps another departure separate", async () => {
+    const h = createTelephonyHarness();
+    const { send, sent } = mailbox();
+    const entry = { incidentId: "incident-1", sessionId: "call-1", legId: "leg-1", environment: "test", classification: "interruption_observed" };
+    const interrupted = (entries = [entry]) => report([{ key: "interruptions", status: "fail", detail: { environment: "test", entries } }]);
+    expect(alertsFromReport(interrupted(), "day-1")[0].key).toBe(alertsFromReport(interrupted(), "day-2")[0].key);
+    await runTelephonyAlerts(alertDeps(h, { send, report: interrupted() }));
+    h.advance(24 * 60 * 60_000);
+    expect(await runTelephonyAlerts(alertDeps(h, { send, report: interrupted() }))).toMatchObject({ detail: { sent: 0, suppressed: 1 } });
+    await runTelephonyAlerts(alertDeps(h, { send, report: interrupted([{ ...entry, incidentId: "incident-2", legId: "leg-2" }]) }));
+    expect(sent).toHaveLength(2);
+  });
+
+  it("never emails candidate, foreign-environment or unavailable interruption evidence", () => {
+    const valid = { incidentId: "incident", sessionId: "session", legId: "leg", environment: "test", classification: "interruption_observed" };
+    for (const entry of [{ ...valid, classification: "candidate" }, { ...valid, environment: "production" }, { ...valid, legId: null }]) {
+      expect(alertsFromReport(report([{ key: "interruptions", status: "fail", detail: { environment: "test", entries: [entry] } }]), "today")).toEqual([]);
+    }
+    expect(alertsFromReport(report([{ key: "interruptions", status: "warn", detail: { error: "interruption_evidence_unavailable" } }]), "today")).toEqual([]);
+  });
+
   it("scopes ledger events and new incident openings independently", () => {
     const events = alertsFromReport(report([{ key: "ledger", status: "fail", detail: { failedIds: ["e1", "e2"] } }]), "today");
     expect(events).toHaveLength(2);

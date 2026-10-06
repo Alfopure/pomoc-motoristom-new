@@ -25,6 +25,7 @@ const nextConfig: NextConfig = {
   generateBuildId: async () => deploymentVersion || "local",
   // Only the private artifact script enables maps, then removes them from public output.
   productionBrowserSourceMaps: process.env.DIAGNOSTICS_PRIVATE_SOURCE_MAPS === "1",
+  experimental: { serverSourceMaps: process.env.DIAGNOSTICS_PRIVATE_SOURCE_MAPS === "1" },
   poweredByHeader: false,
   serverExternalPackages: ["@sparticuz/chromium", "playwright-core"],
   outputFileTracingIncludes: {

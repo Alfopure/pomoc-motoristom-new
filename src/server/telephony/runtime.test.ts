@@ -13,12 +13,13 @@ import { TelnyxCommandError } from "./telnyx/client";
 import { SessionEventDeferredError, SessionLeaseBusyError } from "./service-errors";
 
 let harness: ReturnType<typeof createTelephonyHarness>;
-const notifications = vi.hoisted(() => ({ after: vi.fn(), notify: vi.fn() }));
+const notifications = vi.hoisted(() => ({ after: vi.fn(), notify: vi.fn(), captureError: vi.fn() }));
 
 vi.mock("next/server", async (importOriginal) => ({
   ...await importOriginal<typeof import("next/server")>(), after: notifications.after,
 }));
 vi.mock("./call-notifications", () => ({ notifyCallState: notifications.notify }));
+vi.mock("@/server/diagnostics/server-errors", () => ({ captureServerError: notifications.captureError }));
 
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => harness.admin }));
 vi.mock("@/server/default-organization", () => ({ resolveDefaultOrganizationId: async () => ORG }));
@@ -55,6 +56,7 @@ describe("telephony runtime", () => {
     clearLiveGateCache();
     notifications.after.mockReset();
     notifications.notify.mockReset().mockResolvedValue({ sent: 0, failed: 0 });
+    notifications.captureError.mockReset().mockResolvedValue({ accepted: false, eventId: null });
     process.env.TELNYX_API_KEY = "KEYtest";
     process.env.TELNYX_LIVE_CALLS_ENABLED = "true";
     delete process.env.VERCEL_ENV;
@@ -233,6 +235,30 @@ describe("telephony runtime", () => {
     expect(unexpected.status).toBe(500);
     await expect(unexpected.json()).resolves.toEqual({ error: "Akcia zlyhala." });
     consoleError.mockRestore();
+  });
+
+  it("defers unexpected server failures while leaving expected contention and client errors alone", async () => {
+    vi.stubEnv("DIAGNOSTICS_SERVER_ERRORS_ENABLED", "true");
+    const network = vi.fn();
+    vi.stubGlobal("fetch", network);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const error of [new SessionLeaseBusyError(), new TelephonyNotConfiguredError(), new MutationError("denied", 403),
+        new CallActionError("busy", 409, "operator_busy"), new TelnyxCommandError({ code: "live_calls_disabled", status: 423 })]) {
+        telephonyErrorResponse(error, "Action failed");
+      }
+      expect(notifications.after).not.toHaveBeenCalled();
+      for (const [error, status] of [[new Error("unexpected"), 500], [new SessionEventDeferredError("database failure"), 503],
+        [new OperatorDeviceError("provider unavailable", 503), 503], [new TelnyxCommandError({ code: "timeout", status: 504 }), 502]] as const) {
+        expect(telephonyErrorResponse(error, "Action failed").status).toBe(status);
+      }
+      expect(notifications.after).toHaveBeenCalledTimes(4);
+      expect(notifications.captureError).not.toHaveBeenCalled();
+      expect(network).not.toHaveBeenCalled();
+      for (const [work] of notifications.after.mock.calls) await work();
+      expect(notifications.captureError.mock.calls.map(([, context]) => context.status)).toEqual([500, 503, 503, 502]);
+      expect(notifications.captureError.mock.calls.every(([, context]) => context.source === "telephony" && context.route === "telephony.operation")).toBe(true);
+    } finally { consoleError.mockRestore(); }
   });
 
   it("reports ownership contention as a retryable action conflict without claiming success", async () => {
