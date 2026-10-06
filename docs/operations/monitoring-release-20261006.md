@@ -5,13 +5,15 @@ for the existing five-minute cron, observed operator-leg interruption alerts, an
 correlated Telnyx voice-quality warnings. Production release requires separate
 owner acceptance of the tested release.
 
-The application changes are deployed and verified on stable TEST. Both real
+The original application changes below are deployed and verified on stable TEST. Both real
 compiled canaries reached the correct Sentry project with mapped source frames;
 natural cron check-ins and the TEST-only SQL application are verified. The
 controlled follow-up proved delivery of a repeated warning while its incident
 remained open, followed by two natural successful runs and a delivered recovery
 email. Missing-run detection was delayed again and remains unresolved.
 Production deployment, configuration and SQL were not changed by this release.
+The later readiness extension described below is a separate change requiring
+its own fresh deployment and natural-run verification.
 
 ## Verified stable TEST deployment
 
@@ -197,9 +199,14 @@ neither is an older queued or synthetic success.
 
 This completes the repeated-warning and two-success recovery acceptance.
 It does not repair the separately reproduced missing-run detection delay or
-establish an end-to-end notification SLA. A provider support
-report is prepared but **not sent**; owner authorization to contact support has
-not been given.
+establish an end-to-end notification SLA. The owner subsequently authorized the
+support report and, after the shared mailbox rejected sending, authorized the
+connected Michal Michalek account. Outlook accepted the unchanged report from
+`michal.michalek@alfopure.tech` to `support@sentry.io` at **13:56:26 UTC**;
+its saved sent copy was verified. Narrow account searches at 20:13 UTC found the
+sent report but no reply from support. This proves submission and the saved copy,
+not receipt or investigation by Sentry. Private evidence is
+`.context/sentry-support-send-status.json`.
 
 No already-authorized independent heartbeat for dispatch TEST outside Sentry
 is available in the audited configuration and records. The existing Healthchecks
@@ -208,6 +215,93 @@ worker hooks do not establish a usable account or TEST monitor. The production
 HTTP monitor remains unchanged. A new independent TEST check would require a verified account, isolated TEST
 resource and measured failure/recovery delivery; no account, worker or paid
 upgrade was added.
+
+## Subsequent natural call-test incident (6 October, UTC)
+
+The 19:50 and 19:55 runs reported `error` check-ins after ledger replay could not
+correlate browser counterpart events. This was a real failed subtask, separate
+from the delayed MISSED detector; it does not prove an audio outage. The owner
+clarified that the perceived delay was button reaction/call connection.
+The 19:50 check-in `15b201d8-925d-4894-a4db-c1d12f1ee924` recorded 17,679 ms,
+matching application runtime; event `b36e8a248c3346b0aa5d35e371fcc996` belongs to
+incident `9153438` in `DISPECING-TEST-7`. Direct Outlook inspection verified its
+warning at **19:52:20** and recovery at **20:06:40**.
+
+Natural successes at 20:00:18 and 20:05:18 satisfied the existing two-success
+recovery threshold. Readback at 20:14 UTC showed another success at 20:10:18,
+environment `ok`, no active incident, unchanged */5/margin 2/runtime 3/failure 1/
+recovery 2 settings and TEST digest 60/60. Recovery proves subsequent cron
+execution, not repair of the webhook correlation defect or reprocessing of all
+dead-letter events. No incident was manually resolved for this check. Evidence:
+`.context/monitoring-completion-current-readback-20261006.json` and
+`.context/monitoring-completion-outlook-20261006.json`.
+
+Sentry separately published a dashboard outage from 18:57 to 19:40 UTC. It did
+not overlap the earlier midday MISSED rehearsals; the status report does not
+establish a cause for their delay. [Provider incident](https://status.sentry.io/incidents/925b57x0v6xk).
+
+## Prepared readiness fallback for the existing cron
+
+This extension is default-off until deployed and verified on the identified
+target. It does not repair Sentry's internal MISSED detection. It allows the
+existing HTTP readiness probe to detect missing or failed cron completion,
+without a second Sentry monitor, paid slot, worker, schedule or SQL migration.
+The production HTTP monitor remains unchanged until the identified release is
+approved. TEST has no active external HTTP monitor, so a TEST endpoint check
+alone does not establish external failure/recovery email delivery.
+
+- `DIAGNOSTICS_CRON_HEARTBEAT_ENABLED=true` enables a completion marker after
+  the existing cron's telephony, reminder, recording and diagnostic jobs finish.
+  It writes the final `executionStatus`, including `degraded`/`failed`, not the
+  legacy business-alert health that can remain red for historical incidents.
+- Storage is the existing service-only `motorist_worker_status` runtime table,
+  under the dedicated primary key `dispatch-cron:{environment}:{projectId}`.
+  The older one-shot runtime uses its own worker identifiers; no current app
+  reader scans all rows. This adds one overwritten marker per environment,
+  not a new worker process or a growing per-run ledger. Browser roles have no
+  table access; existing service-role privileges already permit the write.
+  The normal 300-second schedule exceeds the route's 120-second Vercel runtime
+  limit. This marker is not a cross-request mutex; do not create overlapping
+  manual cron requests for acceptance or use them as proof of scheduled health.
+- The marker contains the build SHA, start/completion timestamps and execution
+  status, with no call, user, phone or provider data. A failure after dependency
+  setup records `failed`; a process killed before completion leaves the old
+  marker to expire. An unconfirmed marker write does not change business work.
+- `DIAGNOSTICS_CRON_READINESS_ENABLED=true` additionally requires a fresh `ok`
+  marker in `/api/health/ready`. Missing, failed, degraded, invalid, future-dated
+  or older-than-ten-minute completion returns the existing generic HTTP 503
+  body. A successful run must have start <= completion and duration <= 120 s.
+  A recent earlier build in the exact same project/database is accepted during
+  normal rollout; requiring the latest build immediately would create a false
+  alarm until its first scheduled run. `/api/health/live` is unchanged.
+- Both paths require the exact app environment, Vercel project, Production
+  target, `dev`/`main` branch, canonical origin and isolated database. Local and
+  ordinary Preview cannot write a stable heartbeat. An explicitly enabled
+  readiness check with an invalid configuration or disabled writer fails closed.
+  The flags are independent of Sentry DSNs, credentials and cron capacity.
+- Each write/read has a one-second abort and caller deadline, with no retry
+  loop added. The read is one indexed primary-key lookup, parallel with the
+  existing readiness database query. Cost is one small upsert per five minutes
+  (288/day) and one extra read per readiness request (1,440/day for a single
+  60-second probe, plus dashboard/manual requests). No Telnyx operation is added.
+
+Activation sequence: deploy the writer with readiness still disabled; verify
+the exact fresh deployment and a **natural** completed cron row, correct marker,
+SHA, timestamps and execution status. Then enable readiness in a fresh build
+and confirm canonical 200 with the real marker. Do not seed a synthetic healthy
+row or treat missing storage as a startup success. Unit tests cover stale,
+failed, missing and timed-out reads; hosted failure acceptance must not stop the
+real telephony cron or change production without its approval. Disable the
+readiness flag before disabling its writer during a planned rollback and make
+a fresh deployment of the applicable current branch.
+
+With the existing production HTTP probe, a stopped cron becomes unready after
+the last completion ages past ten minutes; two failing 60-second checks then
+open the uptime incident, subject to provider processing and email latency.
+That is a separate detection path from Sentry Crons, but it still shares Sentry's
+uptime/notification service. It is **not** an independent-vendor backup or a
+guaranteed end-to-end alarm SLA. TEST endpoint acceptance and future production
+external-notification acceptance must remain separate evidence.
 
 ## Remaining acceptance boundaries
 

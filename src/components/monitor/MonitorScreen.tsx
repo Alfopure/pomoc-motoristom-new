@@ -47,7 +47,7 @@ export function MonitorScreen({ appVersion, identity, externalLinks = {} }: Prop
       <div className="flex flex-wrap items-center justify-between gap-3"><p className={noteClass}>Obnova každú minútu, iba vo viditeľnej karte.</p><div className="flex gap-2"><ReportProblemButton /><button className={buttonClass} disabled={overview.loading} onClick={() => { overview.refresh(); live.refresh(); ready.refresh(); }}>Obnoviť</button></div></div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <HealthCard title="Odpoveď aplikácie" resource={live} expected="live" now={now} maxAge={120_000} frequency="60 sekúnd" />
-        <HealthCard title="Spojenie s databázou" resource={ready} expected="ready" now={now} maxAge={600_000} frequency="5 minút" />
+        <HealthCard title="Pripravenosť aplikácie" resource={ready} expected="ready" now={now} maxAge={600_000} frequency="5 minút" />
         <Card title="Zber diagnostiky">
           <Badge warning={!data || !!overview.error || stale || !data.enabled || maintenance !== "fresh" || data.storage?.blocked}>{collectionStatus}</Badge>
           <p className={noteClass}>Chýbajúce udalosti nepotvrdzujú bezchybnú prevádzku.<br />Overené: {timestamp(data?.checkedAt)}

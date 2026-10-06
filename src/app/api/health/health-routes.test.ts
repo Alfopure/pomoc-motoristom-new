@@ -6,10 +6,12 @@ const mocks = vi.hoisted(() => ({
   serviceEnv: vi.fn(),
   adminClient: vi.fn(),
   readinessQuery: vi.fn(),
+  cronReady: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/env", () => ({ getSupabaseServiceEnv: mocks.serviceEnv }));
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: mocks.adminClient }));
+vi.mock("@/server/diagnostics/cron-heartbeat", () => ({ cronHeartbeatReady: mocks.cronReady }));
 
 describe("health release identifiers", () => {
   beforeEach(() => {
@@ -18,6 +20,7 @@ describe("health release identifiers", () => {
     vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "current-commit");
     mocks.serviceEnv.mockReturnValue({});
     mocks.readinessQuery.mockResolvedValue({ error: null });
+    mocks.cronReady.mockResolvedValue(true);
     mocks.adminClient.mockReturnValue({
       from: () => ({ select: () => ({ abortSignal: mocks.readinessQuery }) }),
     });
@@ -38,6 +41,7 @@ describe("health release identifiers", () => {
     } });
     expect(mocks.adminClient).not.toHaveBeenCalled();
     expect(mocks.serviceEnv).not.toHaveBeenCalled();
+    expect(mocks.cronReady).not.toHaveBeenCalled();
   });
 
   it("reads the current deployment on each request", async () => {
@@ -72,5 +76,21 @@ describe("health release identifiers", () => {
       version: "dpl_current",
       checkedAt: expect.any(String),
     });
+  });
+
+  it("returns generic 503 for an unhealthy cron even when the web/database are reachable", async () => {
+    mocks.cronReady.mockResolvedValue(false);
+    const response = await getReady();
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    await expect(response.json()).resolves.toEqual({ status: "not_ready", version: "dpl_current", checkedAt: expect.any(String) });
+    expect(mocks.cronReady).toHaveBeenCalledWith(mocks.adminClient.mock.results[0].value);
+  });
+
+  it("contains an unexpected heartbeat exception without exposing internal state", async () => {
+    mocks.cronReady.mockRejectedValue(new Error("private heartbeat marker"));
+    const response = await getReady();
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({ status: "not_ready", version: "dpl_current", checkedAt: expect.any(String) });
   });
 });

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const runTelephonyCronJobs = vi.fn();
-const createTelephonyDeps = vi.fn(async () => ({ marker: "deps", organizationId: "org-1" }));
+const heartbeatAdmin = { marker: "admin" };
+const createTelephonyDeps = vi.fn(async () => ({ marker: "deps", organizationId: "org-1", admin: heartbeatAdmin }));
 const materializeDueTaskReminders = vi.fn(async () => ({ materialized: 0, skipped: 0 }));
 const materializeDuePauseEndingNotifications = vi.fn(async () => ({ checked: 0, delivered: 0 }));
 const runRecordingProcessing = vi.fn();
@@ -10,6 +11,7 @@ const monitorRun = { marker: "existing-monitor" };
 const startCronMonitor = vi.fn(async () => monitorRun);
 const finishCronMonitor = vi.fn(async () => {});
 const deferServerError = vi.fn();
+const recordCronHeartbeat = vi.fn(async () => true);
 let jobControl: { enabled: boolean } | null = { enabled: true };
 
 vi.mock("@/server/telephony/recording-processing", () => ({ runRecordingProcessing: (...args: unknown[]) => runRecordingProcessing(...args) }));
@@ -19,6 +21,7 @@ vi.mock("@/server/diagnostics/cron-monitor", () => ({
   finishCronMonitor: (...args: unknown[]) => finishCronMonitor(...(args as [])),
 }));
 vi.mock("@/server/diagnostics/server-errors", () => ({ deferServerError: (...args: unknown[]) => deferServerError(...args) }));
+vi.mock("@/server/diagnostics/cron-heartbeat", () => ({ recordCronHeartbeat: (...args: unknown[]) => recordCronHeartbeat(...(args as [])) }));
 
 vi.mock("@/lib/supabase/admin", () => ({
   createSupabaseAdminClient: () => ({
@@ -82,6 +85,7 @@ describe("GET /api/telephony/cron", () => {
     startCronMonitor.mockClear();
     finishCronMonitor.mockClear();
     deferServerError.mockClear();
+    recordCronHeartbeat.mockReset().mockResolvedValue(true);
     materializeDueTaskReminders.mockClear().mockResolvedValue({ materialized: 0, skipped: 0 });
     materializeDuePauseEndingNotifications.mockClear().mockResolvedValue({ checked: 0, delivered: 0 });
     runRecordingProcessing.mockReset().mockResolvedValue({ job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } });
@@ -101,6 +105,7 @@ describe("GET /api/telephony/cron", () => {
     expect(runTelephonyCronJobs).not.toHaveBeenCalled();
     expect(startCronMonitor).not.toHaveBeenCalled();
     expect(finishCronMonitor).not.toHaveBeenCalled();
+    expect(recordCronHeartbeat).not.toHaveBeenCalled();
   });
 
   it("rejects a wrong token", async () => {
@@ -130,12 +135,14 @@ describe("GET /api/telephony/cron", () => {
     // The tail jobs are timed too, so the budget split is visible in the response.
     for (const job of body.jobs.slice(-4)) expect(job).toMatchObject({ ms: expect.any(Number), startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
     expect(createTelephonyDeps).toHaveBeenCalledWith({ sweepAfterEvent: false });
-    expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps", organizationId: "org-1" }, { cronStartedAt: expect.any(Number) });
+    expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps", organizationId: "org-1", admin: heartbeatAdmin }, { cronStartedAt: expect.any(Number) });
     expect(materializeDueTaskReminders).toHaveBeenCalledTimes(1);
     expect(materializeDuePauseEndingNotifications).toHaveBeenCalledTimes(1);
     expect(startCronMonitor).toHaveBeenCalledWith(Date.parse(body.startedAt));
     expect(startCronMonitor.mock.invocationCallOrder[0]).toBeLessThan(createTelephonyDeps.mock.invocationCallOrder[0]);
     expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "ok");
+    expect(recordCronHeartbeat).toHaveBeenCalledExactlyOnceWith(heartbeatAdmin, Date.parse(body.startedAt), "ok");
+    expect(recordCronHeartbeat.mock.invocationCallOrder[0]).toBeGreaterThan(runDiagnosticsMaintenance.mock.invocationCallOrder[0]);
   });
 
   it("materialises due reminders, and honours the job control switch", async () => {
@@ -161,6 +168,7 @@ describe("GET /api/telephony/cron", () => {
     expect(body.jobs.find((job: {job: string}) => job.job === "notifications.materialize")).toMatchObject({ job: "notifications.materialize", status: "failed", error: "reminders down" });
     expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 4);
     expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "degraded");
+    expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "degraded");
     consoleError.mockRestore();
   });
 
@@ -193,6 +201,7 @@ describe("GET /api/telephony/cron", () => {
     await expect(response.json()).resolves.toMatchObject({ status: "failed", jobs: [] });
     expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('"executionStatus":"failed"'));
     expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "failed");
+    expect(recordCronHeartbeat).toHaveBeenCalledExactlyOnceWith(heartbeatAdmin, expect.any(Number), "failed");
     expect(deferServerError).toHaveBeenCalledWith(expect.any(Error), { source: "cron", route: "/api/telephony/cron", status: 500 });
     consoleError.mockRestore();
   });
@@ -204,6 +213,7 @@ describe("GET /api/telephony/cron", () => {
     expect(runTelephonyCronJobs).not.toHaveBeenCalled();
     expect(startCronMonitor).toHaveBeenCalledTimes(1);
     expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "failed");
+    expect(recordCronHeartbeat).not.toHaveBeenCalled();
     consoleError.mockRestore();
   });
 
@@ -218,6 +228,7 @@ describe("GET /api/telephony/cron", () => {
     expect(runtime.jobs).toHaveLength(body.jobs.length);
     expect(JSON.stringify(runtime)).not.toContain("private database response");
     expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "degraded");
+    expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "degraded");
     log.mockRestore();
   });
 
@@ -230,6 +241,16 @@ describe("GET /api/telephony/cron", () => {
     expect(body).toMatchObject({ status: "degraded", executionStatus: "ok", telephonyHealth: "fail", failedJobs: [] });
     expect(runtime).toMatchObject({ status: "degraded", executionStatus: "ok", telephonyHealth: "fail", alerts: { detected: 13, sent: 0, suppressed: 13 } });
     expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "ok");
+    expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "ok");
     log.mockRestore();
+  });
+
+  it("does not change a completed business run when the marker write is unconfirmed", async () => {
+    recordCronHeartbeat.mockResolvedValue(false);
+    const response = await GET(cronRequest(SECRET));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ executionStatus: "ok" });
+    expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "ok");
+    expect(recordCronHeartbeat).toHaveBeenCalledTimes(1);
   });
 });

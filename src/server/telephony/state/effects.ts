@@ -1793,11 +1793,14 @@ async function executeReduceResult(
     if (input.continuation?.completedCommands.includes(key)) continue;
     let providerExecuted = false;
     try {
+      let validitySession: SessionRow | null = null;
       if (input.continuation) {
         if (!providerReadCanReuseSession(ctx.session)) {
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
           if (fresh.error) throw new EffectsError("effect validity read failed");
           ctx.session = fresh.data;
+          const owner = sessionOwnership.getStore();
+          if (owner?.contract === 2 && owner.admin === deps.admin && owner.organizationId === deps.organizationId && owner.sessionId === session.id) validitySession = fresh.data;
         }
         if (!commandStillApplies(ctx.session, input.continuation, command)) {
           await checkpointCommand(key);
@@ -1810,7 +1813,11 @@ async function executeReduceResult(
       const pending = readMeta(ctx.session).recording?.pendingAudio;
       const pendingCommand = pending?.commands.some((item) => "commandId" in command && item.commandId === command.commandId);
       if (pendingCommand) {
-        const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
+        // Contract 2 has no intervening await between the validity read and
+        // this privacy check. Inspect that same fresh row once; never reuse it
+        // after a provider call, recorder settle, checkpoint or legacy renew.
+        const fresh = validitySession ? { data: validitySession, error: null }
+          : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
         const recording = fresh.data ? readMeta(fresh.data).recording : undefined;
         if (fresh.error || !fresh.data || !recording || !pending || !pendingAudioStillOwned(fresh.data, pending) || recording.epoch !== pending.epoch || recording.suppressionReason === "objection" || !recording.pendingAudio?.commands.some((item) => "commandId" in command && item.commandId === command.commandId)) throw new RecordingContinuationSupersededError();
         if (!recording.coverageUnconfirmed && !recording.recorders.some((recorder) => recorder.epoch === pending.epoch && recorder.observed === "recording")) {
