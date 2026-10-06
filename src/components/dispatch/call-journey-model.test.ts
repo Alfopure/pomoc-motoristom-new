@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { CallJourney, JourneyEndpoint, JourneyOccurrence } from "@/lib/telephony/call-journey";
 import { CallJourneyTimeline } from "./CallJourney";
-import { endpointAttemptSeconds, endpointStateLabel, journeyDisplayNow, journeyReason, journeyRouteGroups, journeyStageLabel, occurrenceElapsed } from "./call-journey-model";
+import { endpointAttemptSeconds, endpointStateLabel, journeyDisplayNow, journeyReason, journeyRouteGroups, journeyStageLabel, journeyTerminalKey, occurrenceElapsed } from "./call-journey-model";
 
 const start = "2026-10-04T10:00:00.000Z";
 const occurrence = (patch: Partial<JourneyOccurrence> = {}): JourneyOccurrence => ({ id: "call:0", executionIndex: 0, sourceStepId: "source", kind: "ring", label: "Michal", state: "active", startedAt: start, endedAt: null, configuredSeconds: 25, timingBasis: "observed_transition", reason: null, endpoints: [], ...patch });
@@ -11,6 +11,32 @@ const endpoint = (patch: Partial<JourneyEndpoint> = {}): JourneyEndpoint => ({ i
 const journey = (patch: Partial<CallJourney> = {}): CallJourney => ({ version: 1, sessionId: "call", callId: null, lineId: "line", direction: "inbound", callerNumber: "+421900000001", calledNumber: "+421232408774", phase: "routing", sessionState: "ringing", sessionVersion: 1, asOf: "2026-10-04T10:00:10.000Z", customerActive: true, sessionActive: true, startedAt: start, answeredAt: null, endedAt: null, flow: { source: "incoming_flow", signature: "saved" }, currentOccurrenceId: "call:0", coverage: "complete", truncated: false, occurrences: [occurrence()], events: [], callback: null, ...patch });
 
 describe("human-readable call evidence", () => {
+  it("keeps reconciling after a customer hangup until the session is terminal", () => {
+    const hungUp = journey({ phase: "ended", customerActive: false, endedAt: start });
+    expect(journeyTerminalKey(hungUp)).toBeNull();
+    expect(journeyTerminalKey({ ...hungUp, sessionActive: false })).toBeNull();
+    expect(journeyTerminalKey({ ...hungUp, sessionActive: false, sessionState: "missed" })).toBeNull();
+    expect(journeyTerminalKey({ ...hungUp, sessionActive: false, sessionState: "ended" })).not.toBeNull();
+    expect(journeyTerminalKey({ ...hungUp, sessionActive: false, sessionState: "failed" })).not.toBeNull();
+  });
+  it("requires coherent end evidence before settling a detail", () => {
+    const ended = journey({ phase: "ended", sessionActive: false, customerActive: false, sessionState: "ended", endedAt: start });
+    expect(journeyTerminalKey({ ...ended, customerActive: true })).toBeNull();
+    expect(journeyTerminalKey({ ...ended, endedAt: null })).toBeNull();
+    expect(journeyTerminalKey({ ...ended, endedAt: "invalid" })).toBeNull();
+  });
+  it("ignores read time but notices late session, callback and endpoint evidence", () => {
+    const ended = journey({ phase: "ended", sessionActive: false, customerActive: false, sessionState: "ended", endedAt: start });
+    const key = journeyTerminalKey(ended);
+    expect(journeyTerminalKey({ ...ended, asOf: "2026-10-04T10:02:00.000Z" })).toBe(key);
+    for (const patch of [
+      { sessionVersion: 2 },
+      { callback: { kind: "requested" as const, requestedAt: start, digit: "1" } },
+      { occurrences: [occurrence({ state: "completed", endedAt: start, endpoints: [endpoint({ state: "cancelled" })] })] },
+      { events: [{ id: "late", at: start, label: "Ukončené", kind: "ended" }] },
+      { truncated: true },
+    ]) expect(journeyTerminalKey({ ...ended, ...patch })).not.toBe(key);
+  });
   it("freezes at the server observation during stale refreshes despite device clock skew", () => {
     const call = journey();
     expect(journeyDisplayNow(call, 1_000, 4_000, false)).toBe(Date.parse(call.asOf) + 3_000);

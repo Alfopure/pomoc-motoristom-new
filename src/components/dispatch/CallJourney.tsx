@@ -4,7 +4,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { AlertCircle, Check, ChevronRight, Clock3, GitBranch, MonitorSmartphone, Phone, PhoneForwarded, RefreshCw, X } from "lucide-react";
 import { journeyElapsedSeconds, type CallJourney as Journey, type CallJourneyResponse, type JourneyOccurrence } from "@/lib/telephony/call-journey";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
-import { currentJourneyOccurrence, ENDPOINT_CHANNELS, endpointAttemptSeconds, endpointStateLabel, JOURNEY_STALE_MS, journeyDisplayNow, journeyReason, journeyStageLabel, journeyTimer, occurrenceElapsed } from "./call-journey-model";
+import { currentJourneyOccurrence, ENDPOINT_CHANNELS, endpointAttemptSeconds, endpointStateLabel, JOURNEY_STALE_MS, journeyDisplayNow, journeyReason, journeyStageLabel, journeyTerminalKey, journeyTimer, occurrenceElapsed } from "./call-journey-model";
 import { useCallJourneyClock, useCallJourneyResource } from "./use-call-journey";
 import styles from "./call-journey.module.css";
 
@@ -63,16 +63,28 @@ export function CallJourneyTimeline({ journey, now, stale = false, compact = fal
 
 export function CallJourneyCard({ id, identity = "call", live = false, heading = true }: { id: string; identity?: "call" | "session"; live?: boolean; heading?: boolean }) {
   const url = `/api/telephony/calls/${encodeURIComponent(id)}/journey${identity === "session" ? "?identity=session" : ""}`;
-  const resource = useCallJourneyResource<CallJourneyResponse>(url, live ? 5_000 : 0);
-  const journey = resource.data?.journey;
+  const resource = useCallJourneyResource<CallJourneyResponse>(url, live ? 5_000 : 0, live ? terminalResponseKey : undefined);
+  return <CallJourneySnapshotCard journey={resource.data?.journey} {...resource} live={live} heading={heading} />;
+}
+
+function terminalResponseKey(response: CallJourneyResponse): string | null {
+  return journeyTerminalKey(response.journey);
+}
+
+/** Renders a confirmed snapshot without starting another request loop. */
+export function CallJourneySnapshotCard({ journey, observedAt, loading, error, refresh, settled = false, live = false, heading = true }: {
+  journey?: Journey; observedAt: number | null; loading: boolean; error: string | null; refresh: () => void;
+  settled?: boolean; live?: boolean; heading?: boolean;
+}) {
   const clock = useCallJourneyClock(live && Boolean(journey?.sessionActive));
-  const stale = Boolean(resource.error || (live && resource.observedAt !== null && clock - resource.observedAt > JOURNEY_STALE_MS));
-  const now = journey ? journeyDisplayNow(journey, resource.observedAt, clock, stale || !live) : clock;
+  const stale = Boolean(error || (live && !settled && observedAt !== null && clock - observedAt > JOURNEY_STALE_MS));
+  const now = journey ? journeyDisplayNow(journey, observedAt, clock, stale || !live || settled) : clock;
   return <section className={styles.card} aria-label="Priebeh hovoru">
     {heading && <header className={styles.cardHeader}><h3><GitBranch size={16} aria-hidden="true" />Priebeh hovoru</h3>{journey && <small>{journey.sessionActive ? "Postup pri prijatí hovoru" : "Uložený priebeh"}</small>}</header>}
-    {resource.loading && !journey && <p className={styles.empty} role="status">Načítavam priebeh hovoru…</p>}
-    {(resource.error || stale) && <div className={styles.resourceNotice} role="status"><p>{resource.error ?? "Údaje sa neobnovujú."}{journey ? ` Posledný stav o ${eventTime(journey.asOf)}.` : ""}</p><button type="button" onClick={resource.refresh}><RefreshCw size={13} aria-hidden="true" />Obnoviť</button></div>}
+    {loading && !journey && <p className={styles.empty} role="status">Načítavam priebeh hovoru…</p>}
+    {(error || stale) && <div className={styles.resourceNotice} role="status"><p>{error ?? "Údaje sa neobnovujú."}{journey ? ` Posledný stav o ${eventTime(journey.asOf)}.` : ""}</p><button type="button" onClick={refresh}><RefreshCw size={13} aria-hidden="true" />Obnoviť</button></div>}
     {journey && <CallJourneyTimeline journey={journey} now={now} stale={stale} />}
+    {settled && !stale && <div className={styles.settledActions}><button type="button" className={styles.openButton} onClick={refresh}><RefreshCw size={13} aria-hidden="true" />Obnoviť</button></div>}
   </section>;
 }
 

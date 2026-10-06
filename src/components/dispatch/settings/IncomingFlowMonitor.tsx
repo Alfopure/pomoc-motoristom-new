@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowDown, Clock3, GitBranch, LockKeyhole, Phone, RefreshCw } from "lucide-react";
 import { incomingFlowSignature, type CallJourney, type CallJourneysResponse } from "@/lib/telephony/call-journey";
 import type { IncomingFlow } from "@/lib/telephony/incoming-flow";
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
-import { CallJourneyCard } from "../CallJourney";
+import { CallJourneyCard, CallJourneySnapshotCard } from "../CallJourney";
 import { currentJourneyOccurrence, JOURNEY_STALE_MS, journeyDisplayNow, journeyRouteGroups, journeyStageLabel, journeyTimer, occurrenceElapsed } from "../call-journey-model";
 import { useCallJourneyClock, useCallJourneyResource } from "../use-call-journey";
 import styles from "./incoming-flow-monitor.module.css";
@@ -17,7 +17,15 @@ export function IncomingFlowMonitor({ lineId, savedFlow, dirty }: { lineId: stri
   const groups = journeyRouteGroups(calls);
   const now = useCallJourneyClock(calls.length > 0);
   const stale = Boolean(resource.error || (resource.observedAt !== null && now - resource.observedAt > JOURNEY_STALE_MS));
-  const selected = selectedId ?? calls[0]?.sessionId ?? null;
+  const firstId = calls[0]?.sessionId ?? null;
+  // Keep the selected call visible when it ends and leaves the active list.
+  useEffect(() => { if (selectedId === null && firstId) setSelectedId(firstId); }, [selectedId, firstId]);
+  // A denied list read clears its data and must also remove any private detail.
+  const selected = resource.data ? selectedId ?? firstId : null;
+  const selectedJourney = calls.find(call => call.sessionId === selected);
+  // The batch also caps profile lookups; a dedicated read can fill missing names.
+  const missingNames = selectedJourney?.occurrences.some(occurrence => occurrence.endpoints.some(endpoint => endpoint.profileId && !endpoint.displayName));
+  const sharedJourney = selectedJourney && !selectedJourney.truncated && !resource.data?.truncated && !missingNames ? selectedJourney : undefined;
   const signature = savedFlow ? incomingFlowSignature(savedFlow) : null;
   const chip = (call: CallJourney) => {
     const occurrence = currentJourneyOccurrence(call);
@@ -52,7 +60,9 @@ export function IncomingFlowMonitor({ lineId, savedFlow, dirty }: { lineId: stri
           {elsewhere.length > 0 && <div className={styles.otherCalls}>{elsewhere.map(call => <div key={call.sessionId}><span>{journeyStageLabel(call)}</span>{chip(call)}</div>)}</div>}
         </section>;
       })}</div>
-      {selected && <aside className={styles.detail}><CallJourneyCard key={selected} id={selected} identity="session" live /></aside>}
+      {selected && <aside className={styles.detail}>{sharedJourney
+        ? <CallJourneySnapshotCard key={selected} journey={sharedJourney} observedAt={resource.observedAt} loading={resource.loading} error={resource.error} refresh={resource.refresh} live />
+        : <CallJourneyCard key={selected} id={selected} identity="session" live />}</aside>}
     </div>
   </section>;
 }
