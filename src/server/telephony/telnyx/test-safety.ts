@@ -53,6 +53,9 @@ export type ProviderBoundary = {
   messagingProfileId: string | null;
 };
 
+/** Trusted server scope, resolved by the runtime before creating its client. */
+export type TestProviderContext = { admin: SupabaseClient<Database>; organizationId: string };
+
 export function assertTestProviderEnabled(boundary: ProviderBoundary): void {
   if (!boundary.safety.restricted) return;
   if (!boundary.safety.enabled || !boundary.callControlAppId || !boundary.credentialConnectionId ||
@@ -159,7 +162,7 @@ export function acceptsTestInboundSms(safety: TestProviderSafety, from: unknown,
 }
 
 /** A copied call/session row is not evidence. Only signed TEST ingress or an accepted TEST dial establishes ownership. */
-export async function hasTestCallProvenance(boundary: ProviderBoundary, callControlId: string, context?: { admin: SupabaseClient<Database>; organizationId: string }): Promise<boolean> {
+export async function hasTestCallProvenance(boundary: ProviderBoundary, callControlId: string, context?: TestProviderContext): Promise<boolean> {
   const admin = context?.admin ?? (await import("@/lib/supabase/admin")).createSupabaseAdminClient();
   const signal = AbortSignal.timeout(1500);
   let organizationId = context?.organizationId;
@@ -187,24 +190,33 @@ export async function hasTestCallProvenance(boundary: ProviderBoundary, callCont
 }
 
 /** Resolve only an enrolled TEST browser/mobile identity; never accept arbitrary sip.telnyx.com users. */
-export async function resolveTestSipCredential(sipUsername: string): Promise<string> {
-  const { createSupabaseAdminClient } = await import("@/lib/supabase/admin");
-  const admin = createSupabaseAdminClient();
+export async function resolveTestSipCredential(sipUsername: string, context?: TestProviderContext): Promise<string> {
+  const admin = context?.admin ?? (await import("@/lib/supabase/admin")).createSupabaseAdminClient();
   const signal = AbortSignal.timeout(1500);
-  const organization = await admin.from("motorist_organizations").select("id")
-    .eq("slug", process.env.MOTORIST_ORGANIZATION_SLUG?.trim() || "pomoc-motoristom").eq("active", true).abortSignal(signal).maybeSingle();
-  if (organization.error || !organization.data) throw new TestProviderSafetyError();
+  let organizationId = context?.organizationId;
+  if (!organizationId) {
+    const organization = await admin.from("motorist_organizations").select("id")
+      .eq("slug", process.env.MOTORIST_ORGANIZATION_SLUG?.trim() || "pomoc-motoristom").eq("active", true).abortSignal(signal).maybeSingle();
+    if (organization.error || !organization.data) throw new TestProviderSafetyError();
+    organizationId = organization.data.id;
+  }
+  // Both enrollment tables are independent. Validate every matching profile
+  // together, without a new client/organization lookup for each provider call.
+  // Keep the original deadline and re-read enrollment on every operation.
+  const devices = await Promise.all((["motorist_operator_devices", "motorist_operator_mobile_devices"] as const).map(table =>
+    admin.from(table).select("telnyx_credential_id,profile_id")
+      .eq("organization_id", organizationId).eq("environment", "development").eq("sip_username", sipUsername).limit(2).abortSignal(signal)));
+  if (devices.some(result => result.error)) throw new TestProviderSafetyError();
+  const rows = devices.flatMap(result => result.data ?? []);
+  if (!rows.length) throw new TestProviderSafetyError();
+  const profiles = await admin.from("motorist_profiles").select("id").eq("organization_id", organizationId)
+    .in("id", [...new Set(rows.map(row => row.profile_id))]).eq("active", true).eq("access_status", "active").eq("kind", "human").abortSignal(signal);
+  if (profiles.error) throw new TestProviderSafetyError();
+  const enrolled = new Set(profiles.data?.map(profile => profile.id));
   const ids = new Set<string>();
-  for (const table of ["motorist_operator_devices", "motorist_operator_mobile_devices"] as const) {
-    const { data, error } = await admin.from(table).select("telnyx_credential_id,profile_id")
-      .eq("organization_id", organization.data.id).eq("environment", "development").eq("sip_username", sipUsername).limit(2).abortSignal(signal);
-    if (error) throw new TestProviderSafetyError();
-    for (const row of data ?? []) {
-      const profile = await admin.from("motorist_profiles").select("id").eq("id", row.profile_id).eq("organization_id", organization.data.id)
-        .eq("active", true).eq("access_status", "active").eq("kind", "human").abortSignal(signal).maybeSingle();
-      if (profile.error || !profile.data) throw new TestProviderSafetyError();
-      if (row.telnyx_credential_id) ids.add(row.telnyx_credential_id);
-    }
+  for (const row of rows) {
+    if (!enrolled.has(row.profile_id)) throw new TestProviderSafetyError();
+    if (row.telnyx_credential_id) ids.add(row.telnyx_credential_id);
   }
   if (ids.size !== 1) throw new TestProviderSafetyError();
   return [...ids][0];

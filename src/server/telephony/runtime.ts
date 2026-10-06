@@ -112,7 +112,7 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
   let telnyx: TelnyxClient | null = null;
   if (config.configured) {
     const data = await readLiveGateSettings(admin, organizationId);
-    telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data),
+    telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data), testProvenanceContext: { admin, organizationId },
       onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger) });
   }
 

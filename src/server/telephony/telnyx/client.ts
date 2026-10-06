@@ -6,7 +6,7 @@ import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../pr
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 
 import { getTelnyxConfig, type TelnyxConfig } from "./env";
-import { checkTestProviderRequest, getTestProviderSafety, hasTestCallProvenance, resolveTestSipCredential, TestProviderSafetyError } from "./test-safety";
+import { checkTestProviderRequest, getTestProviderSafety, hasTestCallProvenance, resolveTestSipCredential, TestProviderSafetyError, type TestProviderContext } from "./test-safety";
 
 /**
  * Thin Telnyx REST client over `fetch`.
@@ -131,6 +131,7 @@ export type TelnyxRequestLog = {
 
 export type TelnyxClientOptions = {
   config?: TelnyxConfig;
+  testProvenanceContext?: TestProviderContext;
   liveGate: TelnyxLiveGate;
   fetch?: typeof fetch;
   timeoutMs?: number;
@@ -512,7 +513,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     try {
       const checked = checkTestProviderRequest({ ...configured, safety }, method, path, payload);
       for (const callId of new Set(checked.callIds)) {
-        if (now() >= requestDeadline || (!createdTestCalls.has(callId) && !await hasTestCallProvenance({ ...configured, safety }, callId))) throw new TestProviderSafetyError();
+        if (now() >= requestDeadline || (!createdTestCalls.has(callId) && !await hasTestCallProvenance({ ...configured, safety }, callId, options.testProvenanceContext))) throw new TestProviderSafetyError();
       }
       for (const conferenceId of new Set(checked.conferenceIds)) {
         const response = await request<unknown>("GET", `/conferences/${encodeURIComponent(conferenceId)}`, {}, requestDeadline);
@@ -524,7 +525,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       if (checked.credentialId) credentials.set(checked.credentialId, undefined);
       for (const username of new Set(checked.sipUsernames)) {
         if (now() >= requestDeadline) throw new TestProviderSafetyError();
-        credentials.set(await resolveTestSipCredential(username), username);
+        credentials.set(await (options.testProvenanceContext
+          ? resolveTestSipCredential(username, options.testProvenanceContext)
+          : resolveTestSipCredential(username)), username);
       }
       for (const [credentialId, username] of credentials) {
         const response = await request<unknown>("GET", `/telephony_credentials/${encodeURIComponent(credentialId)}`, {}, requestDeadline);

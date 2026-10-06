@@ -15,7 +15,7 @@ create table public.motorist_calls(id uuid primary key,organization_id uuid,sess
 grant usage on schema public to service_role;
 grant select on all tables in schema public to service_role;
 
-\ir ../../supabase/migrations/20261011120000_active_call_snapshot.sql
+\ir ../../supabase/migrations/20261006063825_active_call_snapshot.sql
 
 insert into motorist_call_sessions values
  ('00000000-0000-4000-8000-000000000101','00000000-0000-4000-8000-000000000001','talking','2026-10-05 12:01Z','{"recording":{"epoch":2}}'),
