@@ -4,9 +4,12 @@ const runTelephonyCronJobs = vi.fn();
 const createTelephonyDeps = vi.fn(async () => ({ marker: "deps", organizationId: "org-1" }));
 const materializeDueTaskReminders = vi.fn(async () => ({ materialized: 0, skipped: 0 }));
 const materializeDuePauseEndingNotifications = vi.fn(async () => ({ checked: 0, delivered: 0 }));
+const runRecordingProcessing = vi.fn();
+const runDiagnosticsMaintenance = vi.fn();
 let jobControl: { enabled: boolean } | null = { enabled: true };
 
-vi.mock("@/server/telephony/recording-processing", () => ({ runRecordingProcessing: vi.fn(async () => ({ job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } })) }));
+vi.mock("@/server/telephony/recording-processing", () => ({ runRecordingProcessing: (...args: unknown[]) => runRecordingProcessing(...args) }));
+vi.mock("@/server/diagnostics/service", () => ({ runDiagnosticsMaintenance: (...args: unknown[]) => runDiagnosticsMaintenance(...args) }));
 
 vi.mock("@/lib/supabase/admin", () => ({
   createSupabaseAdminClient: () => ({
@@ -51,6 +54,7 @@ const SUMMARY = {
   jobs: [
     { job: "telephony.ring.sweep", status: "ok", detail: { checked: 0, swept: 0, errors: [] } },
     { job: "telephony.sessions.stuck", status: "ok", detail: { stuck: 0 } },
+    { job: "telephony.alerts", status: "ok", detail: { health: "ok", alerts: 0, sent: 0 } },
     { job: "telephony.ledger.prune", status: "disabled", detail: { reason: "job_control_disabled" } },
   ],
 };
@@ -68,6 +72,8 @@ describe("GET /api/telephony/cron", () => {
     createTelephonyDeps.mockClear();
     materializeDueTaskReminders.mockClear().mockResolvedValue({ materialized: 0, skipped: 0 });
     materializeDuePauseEndingNotifications.mockClear().mockResolvedValue({ checked: 0, delivered: 0 });
+    runRecordingProcessing.mockReset().mockResolvedValue({ job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } });
+    runDiagnosticsMaintenance.mockReset().mockResolvedValue({ job: "diagnostics.maintenance", status: "disabled", detail: {} });
     jobControl = { enabled: true };
   });
 
@@ -103,6 +109,7 @@ describe("GET /api/telephony/cron", () => {
     const body = await response.json();
     expect(body).toMatchObject({
       ...SUMMARY,
+      checkedAt: expect.any(String), ms: expect.any(Number), executionStatus: "ok", telephonyHealth: "ok", failedJobs: [],
       jobs: [...SUMMARY.jobs, { job: "notifications.materialize", status: "ok", detail: { materialized: 0, skipped: 0 } }, { job: "notifications.pause-ending", status: "ok", detail: { checked: 0, delivered: 0 } }, { job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } }, { job: "diagnostics.maintenance", status: "disabled", detail: {} }],
     });
     expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 4);
@@ -166,6 +173,31 @@ describe("GET /api/telephony/cron", () => {
 
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toMatchObject({ status: "failed", jobs: [] });
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('"executionStatus":"failed"'));
     consoleError.mockRestore();
+  });
+
+  it.each(["diagnostics", "recordings"])("logs and returns a late %s failure instead of the earlier green summary", async failing => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const job = failing === "diagnostics" ? "diagnostics.maintenance" : "telephony.recordings.process";
+    (failing === "diagnostics" ? runDiagnosticsMaintenance : runRecordingProcessing).mockResolvedValue({ job, status: "failed", detail: { reason: "unavailable" }, error: "private database response" });
+    const body = await (await GET(cronRequest(SECRET))).json();
+    const runtime = JSON.parse(log.mock.calls.find(([line]) => String(line).includes("telephony-cron-runtime"))![0]);
+    expect(body).toMatchObject({ status: "degraded", executionStatus: "degraded", telephonyHealth: "ok", failedJobs: [job] });
+    expect(runtime).toMatchObject({ status: body.status, executionStatus: body.executionStatus, telephonyHealth: body.telephonyHealth, failedJobs: [job], checkedAt: body.checkedAt, ms: body.ms });
+    expect(runtime.jobs).toHaveLength(body.jobs.length);
+    expect(JSON.stringify(runtime)).not.toContain("private database response");
+    log.mockRestore();
+  });
+
+  it("distinguishes a successfully suppressed alert from unhealthy telephony", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    runTelephonyCronJobs.mockResolvedValue({ ...SUMMARY, jobs: SUMMARY.jobs.map(job => job.job === "telephony.alerts"
+      ? { ...job, detail: { health: "fail", alerts: 13, sent: 0, suppressed: 13 } } : job) });
+    const body = await (await GET(cronRequest(SECRET))).json();
+    const runtime = JSON.parse(log.mock.calls.find(([line]) => String(line).includes("telephony-cron-runtime"))![0]);
+    expect(body).toMatchObject({ status: "degraded", executionStatus: "ok", telephonyHealth: "fail", failedJobs: [] });
+    expect(runtime).toMatchObject({ status: "degraded", executionStatus: "ok", telephonyHealth: "fail", alerts: { detected: 13, sent: 0, suppressed: 13 } });
+    log.mockRestore();
   });
 });

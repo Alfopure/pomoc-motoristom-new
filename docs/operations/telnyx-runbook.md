@@ -1,13 +1,13 @@
 # Telnyx operations runbook
 
-Operational procedures for the telephony stack of this copy of the dispatch app. The contract the code implements is in [`../telnyx-data-contract.md`](../telnyx-data-contract.md); resource identifiers are in [`telnyx-setup.md`](./telnyx-setup.md).
+Operational procedures for the dispatch application's telephony stack. Production is `https://dispecing.linkapomoci.sk` (`main`, Vercel `pomoc-motoristom-dispatching`, Supabase `ifpaeegaesdmljfkdvcn`). Stable TEST is `https://test.dispecing.linkapomoci.sk` (`dev`, Vercel `pomoc-motoristom-test`, Supabase `nzpnqdstvkfncflgqlny`). Both dedicated projects deploy to their own Vercel Production target. The contract the code implements is in [`../telnyx-data-contract.md`](../telnyx-data-contract.md); resource identifiers are in [`telnyx-setup.md`](./telnyx-setup.md).
 
 Rules that apply to every procedure below:
 
-- Never touch the original production project (Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispecing`, `dispecing.linkapomoci.sk`).
+- Never touch the retired VIPTel project (Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispatching-old`, `dev.dispecing.linkapomoci.sk`, or its listener). That Supabase still hosts another live application. The current production domain belongs to this repository.
 - Secrets stay in Vercel environment variables and the owner's private notes. Never paste an API key, SIP password or WebRTC token into a document, a commit or a ticket.
-- Live calls and live SMS cost money and reach real people. Both kill switches are `false` by default; flip them on immediately before a test and back off afterwards.
-- Applying a Supabase migration or seed is a separate, explicitly requested operation against this copy's project (`ifpaeegaesdmljfkdvcn`) only.
+- Live calls and SMS use the authorized configuration of the identified production or dedicated TEST project. Ordinary branch Preview keeps live integrations disabled and must not operate stable TEST devices or routing. Preserve TEST-owned resources, signed webhooks and per-operation provenance even for cleanup. TEST uses the [authorized phone policy](test-phone-number-policy.md), including ordinary calling without an individual tester list; do not automatically contact copied historical customers.
+- Applying a Supabase migration or seed is a separate, explicitly requested operation with exact SQL and target project: TEST `nzpnqdstvkfncflgqlny` or production `ifpaeegaesdmljfkdvcn`. TEST approval does not authorize production. Do not seed a copied snapshot or apply every pending migration.
 - **The settings screens ("Nastavenia → Telefonovanie") must not be reachable on a database without migrations `20260918100000_ring_config_rpc.sql` and `20260919100000_telnyx_phase3_fixes.sql`.** Until both are applied, `motorist_replace_ring_plan(uuid, jsonb, integer)` does not exist (every configuration save answers 503 with a message naming the migration) and the foundation policies still let any organisation member `PATCH` the routing tables straight through PostgREST — a dispatcher could repoint a production number and a manager could flip the admin-only kill switches, with no validation, no transaction and no audit row. Verify after applying:
 
 ```sql
@@ -18,10 +18,10 @@ select p.oid::regprocedure from pg_proc p
 select table_name, grantee, privilege_type from information_schema.role_table_grants
  where table_schema = 'public' and grantee in ('anon', 'authenticated')
    and privilege_type in ('INSERT', 'UPDATE', 'DELETE')
-   and table_name like 'motorist_ring%' or table_name in
+   and (table_name like 'motorist_ring%' or table_name in
      ('motorist_business_hours', 'motorist_business_hours_intervals', 'motorist_business_hours_exceptions',
       'motorist_ivr_menus', 'motorist_ivr_options', 'motorist_pause_reasons',
-      'motorist_operator_telephony_settings', 'motorist_telephony_settings', 'motorist_telephony_lines');
+      'motorist_operator_telephony_settings', 'motorist_telephony_settings', 'motorist_telephony_lines'));
 -- must list only `select` policies for those tables
 select tablename, policyname, cmd from pg_policies where schemaname = 'public' and tablename like 'motorist_%';
 ```
@@ -34,7 +34,7 @@ Time-boxed verifications that cannot be done offline. Record the outcome (date, 
 
 **Why.** Auto-answer of an outbound click-to-call depends on the browser being able to tell *which* incoming WebRTC invite belongs to the leg the server just dialled. The primary discriminator is `call.telnyxIDs.telnyxCallControlId` matching the `operatorLegCallControlId` returned by `POST /api/telephony/calls`; the `X-PM-Auto-Answer` custom header is a nice-to-have.
 
-**How.** Log in as an operator on the `dev` branch alias with `TELNYX_LIVE_CALLS_ENABLED=true` and `motorist_telephony_settings.live_calls_enabled=true`. Open the browser console, dial your own mobile from a case. In the `telnyx.notification` handler log `call.telnyxIDs` and `call.options.customHeaders` (the webphone exposes both on the SDK call object; `src/lib/telephony/telnyx-webphone.ts` already correlates on `telnyxCallControlId`).
+**How.** Log in as an operator on canonical stable TEST with verified TEST configuration, `TELNYX_LIVE_CALLS_ENABLED=true` and `motorist_telephony_settings.live_calls_enabled=true`. Open the browser console, dial your own mobile from a case using the TEST caller ID. In the `telnyx.notification` handler log `call.telnyxIDs` and `call.options.customHeaders` (the webphone exposes both on the SDK call object; `src/lib/telephony/telnyx-webphone.ts` already correlates on `telnyxCallControlId`).
 
 **Pass criteria.** `telnyxIDs.telnyxCallControlId` is present on the invite and equals the value the route returned. Note separately whether custom headers survive to the SDK.
 
@@ -46,13 +46,13 @@ Time-boxed verifications that cannot be done offline. Record the outcome (date, 
 
 **Why.** Hold, consult, attended transfer, park and supervision all promote a bridged call to a conference. Creating a conference from a bridged leg ends the bridge, and Telnyx documents `park_after_unbridge: "self"` as the only thing that saves a leg when its bridge ends. Inbound calls are bridged **from the customer leg** with that flag, so the customer is protected and the operator is not — which is why the code creates the conference **on the operator leg** and joins the customer. This has to be confirmed against the real API before hold/consult are used in production: a compensation can restore database state, but it cannot resurrect a hung-up WebRTC leg.
 
-**How.** On the `dev` alias with both kill switches on, take a real inbound call, press "Podržať", then "Pokračovať". Watch the PhoneBar and `motorist_call_legs` for the session.
+**How.** On canonical stable TEST with the calls environment and database switches enabled, take a real inbound call to the TEST number, press "Podržať", then "Pokračovať". Watch the PhoneBar and `motorist_call_legs` for the session. Record the deployment commit, timestamps and whether recording was enabled; inspect the same window in server/database logs.
 
 **Pass criteria.** Both legs stay open (`ended_at is null`), the session reaches `held` and returns to `talking` on unhold, the operator hears the caller again and `motorist_job_incidents` gains no `telephony.telnyx.commands` row.
 
-**If it fails** (the operator leg drops on promotion): add `hold_after_unbridge: true` (or `park_after_unbridge: "opposite"`) to the original bridge, and extend the `conference_create` compensation with a re-dial of the operator leg instead of the database-only rollback. Until then, keep hold/consult off in production and use blind transfer.
+**If it fails.** Distinguish a provider hangup on promotion from a database timeout or rejected command using the exact session and timestamps. Review any provider flag or compensation change against the current implementation and repeat the live TEST. A failed attempt does not establish a cause by itself or authorize a production configuration change.
 
-**Result.** _Not yet run._
+**Latest recorded attempt (2026-10-06).** The “Nahrávanie overenie pripravenosti” workspace recorded bidirectional audio followed by a hold error after 22.4 s with recording disabled, alongside database connection timeouts. This is evidence about that TEST attempt, not a new live test or proof of a general/production failure. Hold/unhold, transfer, termination and recording still need a successful run on the final TEST candidate.
 
 ### S2 — Slovak TTS availability (secondary)
 
@@ -111,7 +111,7 @@ Two independent layers, ANDed. Both must be on for a provider-affecting command;
 
 Scope note: the calls switch does **not** block `answer`, so inbound calls are still picked up, greeted and routed while it is off — only outbound legs (including ring fan-out and transfers) are refused. A test that must reach an operator's phone therefore needs the switch **on**.
 
-**Enabling for a live test.** Flip the environment variable for the target environment (only `dev`/Preview unless the owner asks for production), redeploy, then flip the database column. Turn both back off immediately after the test and record what was tested.
+**Live TEST configuration.** Use only the dedicated `pomoc-motoristom-test` project's Production target, `MOTORIST_APP_ENV=test`, and system `VERCEL_PROJECT_ID=prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk`, with TEST-only resources/secrets. Follow the [TEST runbook](full-test-environment.md) and preserve the owner's authorized operating flags. Ordinary Preview is not a live test environment. If a specific test requires temporary flag changes, record the baseline and restore that baseline afterwards; do not turn off the stable TEST application merely because one test ended. Environment changes need a fresh build from current `dev` in the TEST project, never a redeploy of historical source. Production configuration requires its own authorization.
 
 Note that `transfer` is gated by the calls switch as well, because a blind transfer creates a billable target leg.
 
@@ -183,14 +183,14 @@ Raise the Telnyx profile cap and the database cap together: the database cap pro
 
 `POST /api/telephony/dev/simulate-inbound` pushes a synthetic `call.initiated` (and by default `call.answered`) through the real webhook processor, so business hours, IVR, ring plans and the waiting room can be exercised without a reachable DID.
 
-- Admin role, same-origin, session cookie. It refuses on the production deployment (`VERCEL_ENV=production` → `403`) and while telephony is not configured (`503`).
-- Run it from the browser console of the `dev` branch alias while logged in as an admin:
+- Admin role, same-origin, session cookie. It refuses in the production application (`isProductionDeployment()` → `403`) and while telephony is not configured (`503`). The dedicated TEST project's Vercel Production target is still the TEST application.
+- When this simulation is explicitly needed, run it on canonical stable TEST while logged in as an admin, using the actual TEST DID and a chosen tester's number. It writes real sessions and can issue provider commands; it is not a read-only health check or evidence of live audio:
 
   ```js
   await fetch("/api/telephony/dev/simulate-inbound", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ to: "+421232408718", from: "+421910000000" }),
+    body: JSON.stringify({ to: "<TEST DID in E.164>", from: "<tester number in E.164>" }),
   }).then((r) => r.json());
   ```
 

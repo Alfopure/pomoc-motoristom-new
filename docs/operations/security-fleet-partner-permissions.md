@@ -1,6 +1,13 @@
 # B1 — práva flotily a partnerského adresára
 
-**Aplikované iba v TEST databáze `nzpnqdstvkfncflgqlny` 5. 10. 2026 o 07:12 UTC.** Majiteľ schválil konkrétny návrh `.context/security-audit/b1-proposed-test-migration.sql` odpoveďou „Áno, aplikuj iba na TEST“. Produkčná databáza `ifpaeegaesdmljfkdvcn` týmto schválením nie je autorizovaná a zmena v nej nebola vykonaná.
+**Aplikované v TEST aj produkčnej databáze; zhodné oprávnenia potvrdené read-only kontrolou 6. 10. 2026.** Pôvodný TEST návrh `.context/security-audit/b1-proposed-test-migration.sql` majiteľ schválil odpoveďou „Áno, aplikuj iba na TEST“; bol vykonaný 5. 10. o 07:12 UTC. Následný osobitný produkčný súhlas a aplikáciu eviduje [release #404](https://github.com/Alfopure/pomoc-motoristom-new/pull/404). TEST súhlas sám produkciu neautorizoval.
+
+| Projekt | Záznam migrácie `restrict_fleet_partner_client_writes` |
+|---|---|
+| TEST `nzpnqdstvkfncflgqlny` | `20261005071209` |
+| Produkcia `ifpaeegaesdmljfkdvcn` | `20261005195110` |
+
+Zdrojové súbory z pôvodného [#397](https://github.com/Alfopure/pomoc-motoristom-new/pull/397) už prevzal [#403](https://github.com/Alfopure/pomoc-motoristom-new/pull/403) a vydal #404. Otvorená pôvodná evidencia ani rozdiel timestampov neznamenajú chýbajúce SQL; migráciu neopakovať.
 
 ## Problém a výsledok
 
@@ -10,9 +17,13 @@ Pôvodné tabuľkové granty a členské `FOR ALL` politiky umožňovali členov
 
 Serverové operácie naďalej používajú admin klienta a svoje kontroly rolí: správa flotily/adresára pre manager/admin, oprávnené dispečerské priradenie vozidla k prípadu a zámerne povolené rýchle pridanie asistencie členom organizácie. Serverové integračné zápisy zostávajú na rovnakej ceste.
 
-Transakcia presne zodpovedá schválenému návrhu; repozitár dopĺňa iba aktuálny komentár. Názov a verzia sú zhodné so záznamom v TEST migračnom ledgeri. Neaplikovali sa ďalšie pending migrácie ani seed. SQL nemení dáta, pomocné funkcie, telefonické tabuľky, SDK, smerovanie alebo konfiguráciu providerov. Zmena databázových oprávnení je účinná bez nového nasadenia aplikácie.
+Transakcia presne zodpovedá schválenému TEST návrhu; repozitárová verzia zodpovedá TEST ledgeri. Pri pôvodnej TEST operácii sa neaplikovali ďalšie pending migrácie ani seed. Tento SQL nemení dáta, pomocné funkcie, telefonické tabuľky, SDK, smerovanie alebo konfiguráciu providerov. Zmena databázových oprávnení je účinná bez nového nasadenia aplikácie.
 
-## Overenie
+## Aktuálna kontrola oboch projektov — 6. 10. 2026
+
+Na oboch tabuľkách oboch projektov je RLS zapnuté. `anon` a `authenticated` majú SELECT, ale nemajú INSERT/UPDATE/DELETE/TRUNCATE. Jediná členská politika je SELECT pre `authenticated` cez `app_private.motorist_is_org_member(organization_id)`. `service_role` má zachované SELECT/INSERT/UPDATE/DELETE/TRUNCATE. Ide o katalógovú kontrolu bez zápisov; nie o novú ručnú UI akceptáciu.
+
+## Pôvodné TEST overenie — 5. 10. 2026
 
 - Bezprostredný preflight potvrdil zhodu tabuliek, grantov, politík, absencie stĺpcových grantov, membership helperov a triggerov s posúdeným návrhom.
 - Po zmene majú `anon` a `authenticated` na oboch tabuľkách efektívne iba `SELECT`; nemajú INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ani MAINTAIN. Serverové práva zostali zachované.
@@ -31,4 +42,4 @@ V TESTE má manager/admin vedieť upraviť vozidlo a partnera; dispečer má ved
 
 Pred návratom pri regresii overiť konkrétny chybný aplikačný tok. Pôvodný stav oboch tabuliek tvorili `ALL` granty pre anon/authenticated a dve permisívne `FOR ALL TO public` politiky s rovnakým `USING` aj `WITH CHECK`: `app_private.motorist_is_org_member(organization_id)`. Jeho obnova by znovu otvorila auditovaný problém. Presný TEST rollback bol pripravený ako `.context/security-audit/b1-proposed-test-rollback.sql`, ale nebol vykonaný.
 
-Pred produkčným SQL treba jej vlastný aktuálny preflight a osobitné schválenie presného projektu/rozsahu podľa [AGENTS.md](../../AGENTS.md). Nepoužiť hromadné `supabase db push` a neopakovať už aplikovanú TEST migráciu.
+Ak by bola potrebná nová SQL zmena alebo rollback, treba aktuálny preflight a osobitné schválenie presného projektu/rozsahu podľa [AGENTS.md](../../AGENTS.md). Nepoužiť hromadné `supabase db push` a neopakovať B1 migráciu v žiadnom z týchto projektov.

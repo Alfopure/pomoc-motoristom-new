@@ -1,5 +1,6 @@
 import { notificationAudienceFilter } from "@/server/notification-access";
 import "server-only";
+import { canUseMapsIntegration } from "@/lib/app-environment";
 import { fleetTelemetryDetails, isFreshFleetTimestamp, validFleetPoint } from "@/lib/fleet-observation";
 
 import { readVerifiedVehicleLookup } from "@/server/vehicle-lookup/snapshot";
@@ -1875,7 +1876,7 @@ function isIntegrationSecretConfigured(provider: IntegrationConnection["provider
   }
 
   if (provider === "google_maps") {
-    return hasUsableEnv("GOOGLE_MAPS_API_KEY") || hasUsableEnv("NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY");
+    return canUseMapsIntegration() && (hasUsableEnv("GOOGLE_MAPS_API_KEY") || hasUsableEnv("NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY"));
   }
 
   if (provider === "fleet") {

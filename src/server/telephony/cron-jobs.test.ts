@@ -136,6 +136,116 @@ describe("telephony cron jobs", () => {
       errors: [{ eventId: "failed-again", error: "connection still pending" }] } });
   });
 
+  it.each(["stalled", "deferred"])("filters foreign %s rows before the batch limit without losing missing connections", async (selection) => {
+    const h = createTelephonyHarness();
+    if (!h.deps.config.configured) throw new Error("expected configured harness");
+    const at = (ms: number) => new Date(h.now().getTime() - ms).toISOString();
+    // The young deferred rows exercise the second query independently of the
+    // age-based read; older foreign rows would otherwise consume every slot.
+    const base = {
+      organization_id: ORG, status: "failed", event_type: "call.hangup", attempts: 1, payload: {},
+      retry_state: selection === "deferred" ? "deferred" : "ready",
+      next_attempt_at: selection === "deferred" ? at(1_000) : null,
+    };
+    h.db.seed("motorist_telnyx_webhook_events", [
+      ...Array.from({ length: REPLAY_BATCH_SIZE * 2 + 1 }, (_, i) => ({
+        ...base, event_id: `foreign-${i}`, connection_id: "foreign-app",
+        received_at: at(selection === "deferred" ? 30_000 : 180_000),
+        next_attempt_at: selection === "deferred" ? at(2_000) : null,
+      })),
+      ...[
+        { event_id: "call-control", connection_id: CONNECTION_ID },
+        { event_id: "credential", connection_id: h.deps.config.credentialConnectionId },
+        { event_id: "null-connection", connection_id: null },
+        { event_id: "empty-connection", connection_id: "" },
+      ].map(row => ({ ...base, ...row, received_at: at(selection === "deferred" ? 10_000 : 120_000) })),
+    ]);
+    const before = structuredClone(h.rows("motorist_telnyx_webhook_events"));
+    const attempted: string[] = [];
+    const replayEvent = vi.fn(async (envelope: unknown) => {
+      attempted.push((envelope as { data: { id: string } }).data.id);
+      return { outcome: "processed" };
+    });
+
+    expect(await replayStalledWebhookEvents({ ...h.deps, replayEvent })).toMatchObject({
+      status: "ok", detail: { stalled: 4, attempted: 4, replayed: 4, failed: 0 },
+    });
+    expect(attempted.sort()).toEqual(["call-control", "credential", "empty-connection", "null-connection"]);
+    expect(h.rows("motorist_telnyx_webhook_events")).toEqual(before);
+  });
+
+  it("does not reopen incidents or claim a foreign row on successive cron runs", async () => {
+    const h = createTelephonyHarness();
+    const old = new Date(h.now().getTime() - 120_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{
+      organization_id: ORG, event_id: "foreign", connection_id: "foreign-app", status: "failed",
+      event_type: "call.answered", attempts: 1, payload: {}, received_at: old, occurred_at: old,
+    }]);
+    const before = structuredClone(h.rows("motorist_telnyx_webhook_events"));
+    for (let tick = 0; tick < 2; tick += 1) {
+      expect(await replayStalledWebhookEvents(h.deps)).toMatchObject({ status: "ok", detail: { attempted: 0, failed: 0 } });
+      h.advance(300_000);
+    }
+    expect(h.rows("motorist_job_incidents")).toHaveLength(0);
+    expect(h.rows("motorist_telnyx_webhook_events")).toEqual(before);
+  });
+
+  it("still rejects missing-connection callbacks without TEST call provenance", async () => {
+    const h = createTelephonyHarness();
+    if (!h.deps.config.configured) throw new Error("expected configured harness");
+    h.deps.config = { ...h.deps.config, testSafety: {
+      restricted: true, deploymentAllowed: true, enabled: false, allowedNumbers: [], fromNumbers: [],
+    } };
+    const old = new Date(h.now().getTime() - 120_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{
+      organization_id: ORG, event_id: "copied-call", connection_id: null, status: "failed",
+      event_type: "call.hangup", call_control_id: "copied-production-id", attempts: 1,
+      payload: { call_control_id: "copied-production-id" }, received_at: old, occurred_at: old,
+    }]);
+    const before = structuredClone(h.rows("motorist_telnyx_webhook_events"));
+    expect(await replayStalledWebhookEvents(h.deps)).toMatchObject({
+      status: "failed", detail: { attempted: 1, replayed: 0, failed: 1 }, error: "webhook replay rejected: unverified_connection",
+    });
+    expect(h.rows("motorist_telnyx_webhook_events")).toEqual(before);
+    expect(h.rows("motorist_call_sessions")).toHaveLength(0);
+  });
+
+  it("recovers a missing-connection terminal callback with verified TEST call provenance", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const call = await h.inbound({ to: NUMBERS.neutral });
+    if (!h.deps.config.configured) throw new Error("expected configured harness");
+    h.deps.config = { ...h.deps.config, testSafety: {
+      restricted: true, deploymentAllowed: true, enabled: false, allowedNumbers: [], fromNumbers: [],
+    } };
+    h.advance(120_000);
+    const old = new Date(h.now().getTime() - 90_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{
+      organization_id: ORG, event_id: "own-call-hangup", connection_id: null, status: "queued",
+      event_type: "call.hangup", call_control_id: call.callControlId, call_session_id: call.telnyxSessionId,
+      attempts: 1, received_at: old, occurred_at: old,
+      payload: { call_control_id: call.callControlId, call_session_id: call.telnyxSessionId },
+    }]);
+
+    expect(await replayStalledWebhookEvents(h.deps)).toMatchObject({ status: "ok", detail: { attempted: 1, replayed: 1 } });
+    expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "own-call-hangup")).toMatchObject({ status: "processed" });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "missed" });
+    expect(h.rows("motorist_call_legs").find(row => row.telnyx_call_control_id === call.callControlId)).toMatchObject({ ended_at: expect.any(String) });
+  });
+
+  it.each([null, "unexpected,filter.syntax"])("leaves admission to the processor when connection IDs cannot form a filter: %s", async (callControlAppId) => {
+    const h = createTelephonyHarness();
+    if (!h.deps.config.configured) throw new Error("expected configured harness");
+    h.deps.config = { ...h.deps.config, callControlAppId, credentialConnectionId: null };
+    const old = new Date(h.now().getTime() - 120_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{
+      organization_id: ORG, event_id: "candidate", connection_id: "foreign-app", status: "failed",
+      event_type: "call.answered", attempts: 1, payload: {}, received_at: old, occurred_at: old,
+    }]);
+    const replayEvent = vi.fn(async () => ({ outcome: "processed" }));
+    expect(await replayStalledWebhookEvents({ ...h.deps, replayEvent })).toMatchObject({ detail: { attempted: 1, replayed: 1 } });
+    expect(replayEvent).toHaveBeenCalledTimes(1);
+  });
+
   it("does not count deferred or rejected processor outcomes as replayed", async () => {
     const h = createTelephonyHarness();
     const at = new Date(h.now().getTime() - 120_000).toISOString();

@@ -74,3 +74,15 @@ export function canOperateTelephony(env: AppEnvironmentVariables = process.env):
     return true;
   } catch { return false; }
 }
+
+/** Maps use live provider quota too; working-branch Preview must not inherit it. */
+export function canUseMapsIntegration(env: AppEnvironmentVariables = process.env): boolean {
+  try {
+    assertAppEnvironment(env);
+    if (env.VERCEL_ENV === "preview") return false;
+    if (resolveAppEnvironment(env) === "test") {
+      return isTestLiveDeployment(env) && env.MOTORIST_TEST_LIVE_INTEGRATIONS === "true";
+    }
+    return true;
+  } catch { return false; }
+}
