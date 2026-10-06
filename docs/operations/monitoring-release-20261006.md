@@ -5,14 +5,17 @@ for the existing five-minute cron, observed operator-leg interruption alerts, an
 correlated Telnyx voice-quality warnings. Production release requires separate
 owner acceptance of the tested release.
 
-Implementation status: local checks passed; hosted acceptance is pending. The
-TEST server DSN and errors flag are configured for the next source deployment.
+Implementation status: local checks passed; hosted application acceptance is
+pending. The TEST server DSN, errors flag, monitor slug and classifier activation
+are configured for the next fresh stable TEST source deployment.
 The owner approved the exact classifier SQL for TEST, and it has been applied
 only to TEST as recorded below. Classifier activation and hosted acceptance are
 separate steps. The initial Sentry OAuth permitted account reads but monitor
 creation returned 403; the additional `org:write` authorization is now confirmed.
-The rejected request created no monitor. TEST monitor/workflow configuration and
-delivery still require verification; production configuration was not changed.
+The rejected request created no monitor. After authorization, the TEST monitor
+and workflows below were configured. A synthetic baseline check-in was
+acknowledged and retrieved; failure/recovery rehearsals and real application
+delivery remain pending. Production configuration was not changed.
 
 ## Account readback (6 October 2026)
 
@@ -32,8 +35,37 @@ delivery still require verification; production configuration was not changed.
 - TEST uptime detector `2335292` and workflow `1321343` are disabled. The free
   uptime slot is already used by production. The TEST cron monitor does not
   constitute a separate HTTP uptime check.
-- TEST issue stream `2335227` exists; its previous high-priority-only notification
-  workflow `1321295` was disabled. Production error workflow `1320958` is enabled.
+- TEST issue stream `2335227` uses workflow `1321295`, now enabled for first-seen,
+  regression and high-priority events, with `frequency=5`, the existing recipient
+  user `5033331`, and TEST-only scope. Production error workflow `1320958` remains
+  enabled and unchanged.
+- TEST project privacy readback: data scrubbing, default scrubbers and IP
+  scrubbing are enabled; JavaScript source scraping is disabled.
+
+## Configured TEST cron monitor and runtime flags
+
+- Monitor UUID `25d79ace-6af6-4c08-8016-1c6b4c4fde69`, slug
+  `dispatch-test-telephony-cron`, detector `2368907`.
+- Workflow `1339376` is enabled for failure, regression and resolution, with
+  `frequency=0`, environment `test`, and the existing recipient user `5033331`.
+- The monitor temporarily uses a one-minute rehearsal configuration. The final
+  required configuration is `*/5 * * * *`, UTC, two-minute check-in margin and
+  three-minute maximum runtime. Restore and read back these final settings
+  before natural scheduled acceptance. The application's existing Vercel cron
+  remains every five minutes; the rehearsal does not change its schedule.
+- Synthetic baseline acknowledgment and check-in readback are verified. Monitor
+  and `/checkins/` readbacks require explicit `?environment=test`: an unfiltered
+  endpoint returned an empty result despite the confirmed TEST check-in.
+- Timeout, explicit error, missing check-in and recovery rehearsals are still
+  in progress. Incident creation, workflow execution and inbox delivery are
+  separate acceptance facts and are not yet claimed here.
+- The dedicated TEST project's next fresh deployment has
+  `DIAGNOSTICS_SERVER_ERRORS_ENABLED=true`, its TEST-only server DSN,
+  `DIAGNOSTICS_SENTRY_CRON_MONITOR_SLUG=dispatch-test-telephony-cron`,
+  `DIAGNOSTICS_CLASSIFIER_ENABLED=true` and
+  `DIAGNOSTICS_CALL_ALERTS_SINCE=2026-10-06T11:39:19.452Z` configured. Existing
+  immutable deployments do not acquire these settings automatically. Verify
+  the actual deployment version before treating either integration as active.
 
 ## Acceptance requirements
 
@@ -95,8 +127,8 @@ The owner-approved SQL was applied only to Supabase TEST
 
 This records schema application, not completed hosted monitoring acceptance.
 
-Before activation, set `DIAGNOSTICS_CALL_ALERTS_SINCE` to the actual activation
-time to exclude historical calls. At most 20 recent incidents and 80 evidence
+The configured activation cutoff above excludes earlier historical calls; verify
+it on the fresh TEST deployment. At most 20 recent incidents and 80 evidence
 rows per source are checked; truncation is explicit. Expect one extra database
 read per health check without candidates, at most eight bounded reads with
 candidates, and no extra reads when disabled. Existing TEST cron baseline at
