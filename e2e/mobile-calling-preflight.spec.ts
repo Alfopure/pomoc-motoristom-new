@@ -531,6 +531,9 @@ test("an actual SDK microphone failure is identified as a call error while regis
 
 test("a proven not-started control retries once with the same payload and stays pending until acceptance", async ({ page }) => {
   await page.clock.install();
+  // install() still advances with wall time between Playwright commands; hold
+  // it still before asserting the exact 999/1000 ms retry boundary.
+  await page.clock.pauseAt(new Date());
   await page.evaluate(() => window.phoneHarness.connected());
   await expect(page.locator("#state")).toHaveAttribute("data-server-call", "fixture");
   await page.evaluate(() => window.phoneHarness.begin("hold"));

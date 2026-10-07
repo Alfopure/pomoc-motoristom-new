@@ -39,6 +39,7 @@ import {
   type LegRow,
   type LineInboundMode,
   type PresenceRow,
+  type ReduceResult,
   type RoutingContext,
   type RoutingSettings,
   type SessionEvent,
@@ -897,7 +898,11 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
         effectsMayHaveStarted = true;
         await cancelRevokedOffers(effects, snapshot.session, event.kind === "telnyx" && event.callControlId && event.clientState ? { callControlId: event.callControlId, clientState: event.clientState } : undefined);
       }
-      if (readPendingEffects(snapshot.session).entries.length) {
+      const pending = readPendingEffects(snapshot.session).entries;
+      const terminalReplay = owner?.contract === 2 && event.kind === "telnyx" && event.type === "call.hangup" && event.callControlId
+        ? pending.find(entry => entry.id === event.id && entry.event.kind === "telnyx" && entry.event.type === "call.hangup" && entry.event.callControlId === event.callControlId)
+        : undefined;
+      if (pending.length && !terminalReplay) {
         const preemptsAudio = event.kind === "telnyx" ? event.type === "call.hangup" : !["sweep", "pickup", "recording_continue"].includes(event.type);
         try {
           effectsMayHaveStarted = true;
@@ -920,10 +925,17 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
         throw new SessionEventDeferredError("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.");
       }
       const previousContact = JSON.stringify(readContactHistory(snapshot.session));
-      if (durable || readContactHistory(snapshot.session).operations.length) {
+      if (!terminalReplay && (durable || readContactHistory(snapshot.session).operations.length)) {
         snapshot.session = { ...snapshot.session, metadata: toJson({ ...readMeta(snapshot.session), callback_contact: collectContactProof(snapshot, event) }) };
       }
-      let result = reduce(snapshot.session, snapshot.legs, snapshot.attempts, event, context);
+      // The exact terminal fact may have staged atomically before its response
+      // was lost. Re-enter the idempotent stage with that durable transition:
+      // applyReduceResult then prioritizes its leg facts and urgent teardown.
+      // A database-only replay followed by reduce could instead ignore the
+      // now-ended leg and strand its operator hangup until the next cron.
+      let result: ReduceResult = terminalReplay
+        ? { next: terminalReplay.transition, commands: terminalReplay.commands, compensations: terminalReplay.compensations, guard: null, ignored: null }
+        : reduce(snapshot.session, snapshot.legs, snapshot.attempts, event, context);
       if (!leaseAcquired && recordingLeaseRequired && event.kind === "telnyx" && event.type !== "call.hangup" && result.commands.length) {
         // The webhook ledger retains this event for retry. Pure bookkeeping
         // (e.g. conference.created) may advance version without owning media.
@@ -934,7 +946,7 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
         next.session.metadata = snapshot.session.metadata;
         result = { next, commands: [], compensations: [], guard: null, ignored: null };
       }
-      attachContactOperations(snapshot, result, event, durable);
+      if (!terminalReplay) attachContactOperations(snapshot, result, event, durable);
 
       if (result.ignored) {
         await recordCallEvent(effects, {

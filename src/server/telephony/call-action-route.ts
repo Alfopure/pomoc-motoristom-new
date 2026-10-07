@@ -51,6 +51,9 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
   context: { params: Promise<P> },
   options: CallActionRouteOptions<P>,
 ): Promise<Response> {
+  // Hangup's route retains work for 60 s including its foreground request.
+  // Keep the accepted continuation inside that same invocation's budget.
+  const hangupRecoveryDeadline = Date.now() + 55_000;
   return withRequestMetrics("call.action", async () => {
     try {
       assertSameOriginRequest(request);
@@ -67,6 +70,7 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
       // Once the action has completed and released ownership, recover its exact
       // queued facts without waiting for provider redelivery or the cron.
       const applied = result && typeof result === "object" && "sessionId" in result && result.sessionId === params.id;
+      const terminationPending = applied && "terminationPending" in result && result.terminationPending === true;
       const reconciled = applied && "reconciled" in result && result.reconciled === true;
       if (applied && (options.replayDeferred !== false || reconciled)) {
         const reportDeferred = (code = "event_replay_deferred") => {
@@ -75,6 +79,16 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
         };
         try {
           after(withBackgroundRequestMetrics(async () => {
+            if (terminationPending) {
+              try {
+                const { continueAcceptedHangup } = await import("./call-actions");
+                await continueAcceptedHangup(deps, params.id, hangupRecoveryDeadline);
+              } catch { reportDeferred("termination_completion_deferred"); }
+              // This continuation already resumes durable session effects.
+              // Do not start another lease/drain after spending its host budget;
+              // provider callbacks retain their own terminal-fact recovery.
+              return;
+            }
             try {
               const { replayDeferredSessionEvents } = await import("./telnyx/event-processor");
               await replayDeferredSessionEvents(deps, params.id);
@@ -87,7 +101,7 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
         } catch { reportDeferred(); }
       }
 
-      return Response.json({ ok: true, ...(result && typeof result === "object" ? result : {}) });
+      return Response.json({ ok: true, ...(result && typeof result === "object" ? result : {}) }, { status: terminationPending ? 202 : 200 });
     } catch (error) {
       return telephonyErrorResponse(error, options.fallback);
     }

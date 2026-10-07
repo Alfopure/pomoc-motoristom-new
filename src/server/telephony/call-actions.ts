@@ -48,7 +48,8 @@ import {
 import { TelnyxCommandError, TelnyxLiveCallsDisabledError } from "./telnyx/client";
 import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
-import { CallActionError, SessionLeaseLostError } from "./service-errors";
+import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from "./service-errors";
+import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, sessionOwnership } from "./ownership";
 import { humansOnly } from "@/server/profile-kind";
 
 export { CallActionError } from "./service-errors";
@@ -81,9 +82,9 @@ export const OUTBOUND_RATE_LIMIT = { limit: 10, windowMs: 60_000 } as const;
  * The global `LEASE_WAIT_MS` (3 s) is tuned so a hold/unhold click outlasts a
  * webhook waiting `WEBHOOK_LEASE_WAIT_MS`; it is not tuned for the median
  * command-bearing handler (7 s on 21 Sep) that a pickup or hangup lands on.
- * Hangup has already committed its durable intent before it waits, so a
- * longer wait loses nothing; pickup has reserved nothing yet, so waiting is
- * free of side effects. Both stay far inside the 30 s control budget of the
+ * Contract-2 hangup probes once after committing its durable intent; a busy
+ * call returns pending acceptance and uses this wait in the retained request
+ * continuation. Pickup has reserved nothing yet. Both stay inside the control budget of the
  * browser (`TELEPHONY_TIMEOUT_MS.control`) and do not consume `SESSION_WORK_MS`,
  * which starts at acquisition.
  */
@@ -655,6 +656,8 @@ export type CallActionResult = {
    * trusting the `X-PM-Auto-Answer` header alone.
    */
   operatorLegCallControlId?: string;
+  /** Durable termination was accepted, but the provider end is not confirmed. */
+  terminationPending?: true;
 };
 
 /** `detail.callControlId` of the first successful `dial` command of a transition. */
@@ -747,8 +750,36 @@ export async function deferRingingCall(deps: CallActionDeps, actor: CallActor, s
 
 export async function hangupCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
-  // Per-action budget, the same mechanism sweeps use to wait 0 ms (`runSessionEvent`).
-  return runAction({ ...deps, leaseWaitMs: HANGUP_LEASE_WAIT_MS }, session, appEvent("hangup", actor, deps), "Ukončenie hovoru zlyhalo.");
+  try {
+    // Contract 2 commits termination before acquiring ownership. Do not keep
+    // the browser waiting/retrying behind the handler already ending this call.
+    return await runAction({ ...deps, leaseWaitMs: session.writer_contract === 2 ? 0 : HANGUP_LEASE_WAIT_MS }, session, appEvent("hangup", actor, deps), "Ukončenie hovoru zlyhalo.");
+  } catch (error) {
+    // This exact refusal can occur only after the termination RPC succeeded.
+    // An unconfirmed intent write, DB outage or provider failure stays an error.
+    if (session.writer_contract === 2 && error instanceof SessionLeaseBusyError) {
+      return { sessionId, state: session.state, commands: [], ignored: null, terminationPending: true };
+    }
+    throw error;
+  }
+}
+
+/** One bounded continuation of an already authorized, durably accepted hangup.
+ * Re-read the intent; neither the response tag nor a client ID authorizes a
+ * new termination. Existing webhook/cron recovery remains the durable backstop. */
+export async function continueAcceptedHangup(deps: CallActionDeps, sessionId: string, deadline = Date.now() + 40_000): Promise<void> {
+  if (Date.now() >= deadline - UNOWNED_READ_MS - DATABASE_REQUEST_MS) throw new SessionLeaseLostError();
+  const session = await loadSession(deps, sessionId);
+  if (session.writer_contract !== 2 || !session.termination_requested_at) return;
+  // Leave room for the final acquisition RPC and release. The owned transport
+  // and provider fence honor the remaining absolute budget after acquisition.
+  const leaseWaitMs = Math.min(HANGUP_LEASE_WAIT_MS, deadline - Date.now() - 2 * DATABASE_REQUEST_MS);
+  if (leaseWaitMs < 0) throw new SessionLeaseLostError();
+  await ownedSessionWork({ ...deps, leaseWaitMs }, sessionId, async () => {
+    const owner = sessionOwnership.getStore();
+    if (owner) owner.deadline = Math.min(owner.deadline, deadline - DATABASE_REQUEST_MS);
+    await runSessionEvent(deps, sessionId, appEvent("sweep", null, deps));
+  }, { known: session, eventType: "app.hangup.recovery" });
 }
 
 /**
