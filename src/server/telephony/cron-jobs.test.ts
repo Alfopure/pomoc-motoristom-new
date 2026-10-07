@@ -470,14 +470,26 @@ describe("telephony cron jobs", () => {
   it("closes a leg Telnyx has already ended by replaying the missing hangup", async () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
     const call = await h.inbound({ to: "+421232408718" });
-    h.db.update("motorist_call_sessions", { state: "talking", updated_at: new Date(h.now().getTime() - 5 * 60_000).toISOString() }, (row) => row.id === call.sessionId);
+    // Reconciliation visits legs by row ID; place the customer first so the
+    // provider observations have a deterministic order rather than UUID luck.
+    const customerLegId = "00000000-0000-4000-8000-000000000001";
+    h.db.update("motorist_call_legs", { id: customerLegId }, leg => leg.telnyx_call_control_id === call.callControlId);
+    const legIds = h.legs(call.sessionId).map(leg => String(leg.telnyx_call_control_id)).sort();
+    expect(legIds).toHaveLength(4);
+    h.db.update("motorist_call_sessions", { state: "talking", customer_leg_id: customerLegId,
+      updated_at: new Date(h.now().getTime() - 5 * 60_000).toISOString() }, (row) => row.id === call.sessionId);
     h.telnyx.setCallStatus(call.callControlId, { alive: false });
 
     const result = await reconcileWithTelnyx(h.deps);
     expect(result.status).toBe("ok");
-    expect(result.detail).toMatchObject({ deadLegs: 1, closedSessions: 1 });
-    // The ordinary reducer path ran: the leg is closed, not just flagged.
-    expect(h.legs(call.sessionId).find((leg) => leg.telnyx_call_control_id === call.callControlId)?.ended_at).toBeTruthy();
+    // Replaying the customer end also hangs up its three operator legs. The
+    // provider double now exposes those physical ends to subsequent status
+    // reads in this same reconciliation pass, just as Telnyx would.
+    expect(result.detail).toMatchObject({ deadLegs: 4, closedSessions: 1 });
+    expect(h.telnyx.of("hangup").map(command => command.params.callControlId).sort())
+      .toEqual(legIds.filter(id => id !== call.callControlId));
+    expect(h.legs(call.sessionId).filter(leg => leg.ended_at).map(leg => leg.telnyx_call_control_id).sort()).toEqual(legIds);
+    for (const id of legIds.filter(id => id !== call.callControlId)) expect(h.telnyx.physical.legs.get(id)?.ended).toBe(true);
   });
 
   it("does not close a leg when Telnyx has no authoritative status for it", async () => {

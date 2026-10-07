@@ -123,6 +123,9 @@ export type EffectsDeps = {
   eventTiming?: () => EventTiming;
   /** Request-local identity returned by the fenced call projection. Never caches call state. */
   callIds?: Map<string, string>;
+  /** Existing inbound hangups awaiting exact terminal proof. The owned runner
+   * derives this on every invocation, including late HTTP acknowledgements. */
+  deferredCommandIds?: ReadonlySet<string>;
 };
 
 export type CommandOutcome = {
@@ -1801,6 +1804,7 @@ async function executeReduceResult(
   let nextValidity: { session: SessionRow; owner: Ownership } | null = null;
   const rememberCommand = (key: string) => {
     if (!input.continuation) return;
+    if (deps.deferredCommandIds?.has(key)) return;
     if (!input.continuation.completedCommands.includes(key)) input.continuation.completedCommands.push(key);
     banked += 1;
   };
@@ -1816,7 +1820,10 @@ async function executeReduceResult(
     rememberCommand(key);
     await writeCheckpoint();
   };
-  const dispatchList = input.databaseOnly ? [] : commands;
+  // The original command remains part of the durable obligation. A cached
+  // late 2xx is not terminal evidence: only the dedicated recovery path can
+  // retire these keys. Other legs' teardown still proceeds in this invocation.
+  const dispatchList = input.databaseOnly ? [] : commands.filter(command => !deps.deferredCommandIds?.has(commandKey(command)));
   for (const [index, command] of dispatchList.entries()) {
     // Only the preceding successful tail checkpoint can supply this one-use
     // row. No await occurs between its RETURNING and the checks below. Skips,
@@ -2007,7 +2014,7 @@ async function executeReduceResult(
         // open an incident. Retire the entry, which is what the read achieved.
         outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: true,
           bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: { reason: "superseded continuation" } });
-        input.continuation.completedCommands = commands.map(commandKey);
+        input.continuation.completedCommands = commands.map(commandKey).filter(key => !deps.deferredCommandIds?.has(key));
         await checkpointCommand(key);
         break;
       }
@@ -2127,7 +2134,7 @@ async function executeReduceResult(
           // The successor must be durable before retiring the failed commands.
           // Replaying the predecessor first would otherwise recurse forever on
           // the same deterministic provider rejection.
-          input.continuation.completedCommands = commands.map(commandKey);
+          input.continuation.completedCommands = commands.map(commandKey).filter(key => !deps.deferredCommandIds?.has(key));
           session = await checkpointEffects(deps, stagedCompensation.id, input.continuation, input.continuation.id, stagedCompensation);
           const compensatedResult = await resumePendingEffects(deps, session);
           if (compensatedResult) session = compensatedResult.session;
@@ -2257,7 +2264,7 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
       // explicit end decision or privacy STOP can bypass historical writes.
       const monitorDisconnect = command.kind === "hangup" && command.reason === "invited_monitor_stopped";
       return (command.kind === "recording_stop" || ending && command.kind === "hangup" || monitorDisconnect)
-        && !entry.completedCommands.includes(commandKey(command));
+        && !entry.completedCommands.includes(commandKey(command)) && !deps.deferredCommandIds?.has(commandKey(command));
     });
     // A run of hangups goes out together: `hangup` has no post-dispatch
     // bookkeeping, each carries its own journal entry, and an unknown outcome

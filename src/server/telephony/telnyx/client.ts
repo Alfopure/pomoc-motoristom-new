@@ -356,6 +356,8 @@ export type TelnyxClient = {
 export type RequestOptions = {
   /** Internal identity for endpoints whose wire schema omits command_id. */
   journalCommandId?: string;
+  /** Bounded recovery owns its retry slots; retain 429 without a second send. */
+  retryRateLimits?: boolean;
   body?: Record<string, unknown>;
   query?: Record<string, string | number | undefined>;
   commandId?: string;
@@ -637,7 +639,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         const retryAfter = parseRetryAfterMs(response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS;
         // Never shorten the provider's interval. A long wait is a durable
         // deferral; another invocation may resume it after next_attempt_at.
-        if (retryAfter > maxRetryAfterMs || retryAfter + timeoutMs > deadline - now()) throw errorFromBody(429, parsed, commandId);
+        if (requestOptions.retryRateLimits === false || retryAfter > maxRetryAfterMs || retryAfter + timeoutMs > deadline - now()) throw errorFromBody(429, parsed, commandId);
         await sleep(retryAfter);
         retried = true;
         const second = await dispatch();

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { runTelephonyAlerts, type TelephonyAlertDeps } from "./alerts";
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
+import type { InboundHangupRecovery } from "./inbound-hangup-recovery";
 import { closeOrphanLegs, closeStaleRingAttempts, sweepOverdueRingSteps } from "./routing/ring-plan";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
 import { allowedConnectionIds, drainCustomerTerminal, processTelnyxEvent, storedWebhookEnvelope } from "./telnyx/event-processor";
@@ -244,9 +245,16 @@ export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise
   const sessions = [...new Map(queries.flatMap((query) => query.data ?? []).map((session) => [session.id, session])).values()];
   const errors: Array<{ sessionId: string; error: string }> = [];
   const scheduled: string[] = [];
+  const inboundHangups: Array<InboundHangupRecovery & { sessionId: string }> = [];
   for (const session of sessions) {
+    let hangupRecovery: InboundHangupRecovery | undefined;
     try {
-      const result = await sessionRunner(deps)(session.id, { kind: "app", type: "sweep", id: `cron-effects:${session.id}:${randomUUID()}`, actorProfileId: null, occurredAt: now }) as { session?: SessionRow; apply?: { failed?: boolean; projectionPending?: boolean; failure?: { error?: string } } } | undefined;
+      const result = await sessionRunner(deps)(session.id, { kind: "app", type: "sweep", id: `cron-effects:${session.id}:${randomUUID()}`, actorProfileId: null, occurredAt: now }) as { session?: SessionRow; inboundHangupRecovery?: InboundHangupRecovery; apply?: { failed?: boolean; projectionPending?: boolean; failure?: { error?: string } } } | undefined;
+      hangupRecovery = result?.inboundHangupRecovery;
+      if (hangupRecovery && hangupRecovery.status !== "skipped") {
+        inboundHangups.push({ sessionId: session.id, ...hangupRecovery });
+        if (hangupRecovery.status !== "terminal_confirmed") throw new Error(`Inbound hangup remains unresolved: ${hangupRecovery.status}`);
+      }
       if (result?.apply?.failed) throw new Error(result.apply.failure?.error ?? "mandatory effects remain pending");
       if (result?.apply?.projectionPending) throw new Error("auxiliary call projections remain pending");
       const verified = await deps.admin.from("motorist_call_sessions").select("*")
@@ -261,11 +269,14 @@ export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise
       const message = error instanceof Error ? error.message : String(error);
       errors.push({ sessionId: session.id, error: message });
       const oldest = readPendingEffects(session).entries.reduce((time, entry) => Math.min(time, Date.parse(entry.createdAt)), Date.parse(now));
-      if (Date.parse(now) - oldest >= 10 * 60_000) await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error,
-        context: { sessionId: session.id, job: EFFECTS_RECOVERY_JOB, pendingAgeMs: Date.parse(now) - oldest } });
+      if (Date.parse(now) - oldest >= 10 * 60_000 || hangupRecovery?.status === "retry_exhausted" || hangupRecovery?.status === "rejected") {
+        await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error, now: nowOf(deps),
+          context: { sessionId: session.id, job: EFFECTS_RECOVERY_JOB, pendingAgeMs: Date.parse(now) - oldest,
+            ...(hangupRecovery ? { inboundHangupStatus: hangupRecovery.status, attemptCount: hangupRecovery.attemptCount } : {}) } });
+      }
     }
   }
-  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || wrapUp.errors.length || presence.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, scheduled, wrapUp, presence } };
+  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || wrapUp.errors.length || presence.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, scheduled, inboundHangups, wrapUp, presence } };
 }
 
 export async function detectStuckSessions(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
