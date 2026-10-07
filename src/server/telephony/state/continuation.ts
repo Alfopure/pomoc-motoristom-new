@@ -1,7 +1,7 @@
 import { measureRequestStep } from "@/server/request-metrics";
 import type { Json } from "@/lib/supabase/database.types";
 import type { EffectsDeps } from "./effects";
-import { SessionConflictError } from "../service-errors";
+import { SessionConflictError, SessionEventDeferredError, SessionLeaseLostError } from "../service-errors";
 import { measureGuard, sessionOwnership } from "../ownership";
 import { isPausedWithoutCall } from "../routing/reservation";
 import { commandKey, readMeta, toJson, type Command, type Compensation, type ReduceResult, type SessionEvent, type SessionRow, type Transition } from "./types";
@@ -89,6 +89,22 @@ function prepared(session: SessionRow, transition: Transition, commands: Command
   return { sessionPatch, entry };
 }
 
+function stagingFailure(error: unknown): Error {
+  const failure = error && typeof error === "object" ? error as { name?: unknown; code?: unknown; message?: unknown } : {};
+  const message = typeof failure.message === "string" ? failure.message : String(error);
+  const transportError = typeof failure.code !== "string" || failure.code.length === 0;
+  const interrupted = error instanceof SessionLeaseLostError || failure.code === "ABORT_ERR" || transportError && (failure.name === "AbortError" || failure.name === "TimeoutError"
+    // postgrest-js can wrap a renew refusal into the staging RPC's error text.
+    || /(?:^|:\s*)(?:AbortError|TimeoutError):/.test(message));
+  // This event cannot dispatch provider effects before its atomic stage returns.
+  // A lost response may nevertheless mean the stage committed: its durable
+  // entry is keyed by event ID and the next owner resumes it before reducing
+  // the same fact. Keep transport interruptions in the retryable inbox rather
+  // than spending the effect-failure budget or acknowledging an unapplied fact.
+  if (interrupted) return new SessionEventDeferredError(`Transition staging deferred: ${message}`, "transition_staging_unavailable");
+  return new Error(`Transition staging failed: ${message}`);
+}
+
 export async function stageEffects(deps: EffectsDeps, input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number }): Promise<SessionRow> {
   const now = deps.now().toISOString();
   // Colleague calls only: a colleague on pause answers without a reservation
@@ -103,8 +119,10 @@ export async function stageEffects(deps: EffectsDeps, input: { session: SessionR
     p_main: toJson(main), p_rejected: toJson(rejected), p_guard: toJson(guard ? { profileId: guard.profileId, offerToken: guard.offerToken ?? null } : null),
   });
   // Reservation and staging are atomic in this RPC; report the combined time.
-  const result = await (guard ? measureGuard("guard_stage_ms", () => measureRequestStep("guard.stage", stage)) : stage());
-  if (result.error) throw new Error(`Transition staging failed: ${result.error.message}`);
+  let result: Awaited<ReturnType<typeof stage>>;
+  try { result = await (guard ? measureGuard("guard_stage_ms", () => measureRequestStep("guard.stage", stage)) : stage()); }
+  catch (error) { throw stagingFailure(error); }
+  if (result.error) throw stagingFailure(result.error);
   const response = result.data as { applied?: boolean; session?: SessionRow } | null;
   if (response?.applied === false) throw new SessionConflictError(input.session.id, input.expectedVersion);
   if (!response?.session) throw new Error("Transition staging returned no session");
