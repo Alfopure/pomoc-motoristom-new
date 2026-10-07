@@ -39,6 +39,15 @@ describe('recording service authorization',()=>{
   expect(result.stateReason).toContain('Časť zvuku môže chýbať');
   expect(result.segments[0].canPlay).toBe(true);
  });
+ it('keeps stored audio playable without describing unverified coverage as a missing file',async()=>{
+  const f=fixture();
+  f.db.update('motorist_call_recordings',{participant_manifest:{timingVerified:false,channelMappingVerified:false,conversationComplete:false,
+   audioDurationSeconds:20,gaps:[{startSeconds:0,endSeconds:20,reason:'capture_incomplete'}]}},r=>r.id===rec);
+  const result=await getCallRecordingDetail(f.admin,actor('manager'),call);
+  expect(result.state).toBe('partial');
+  expect(result.segments[0]).toMatchObject({canPlay:true,state:'partial',durationSeconds:20});
+  expect(result.gaps).toEqual([{startSeconds:0,endSeconds:20,reason:'Úplnosť záznamu nie je overená'}]);
+ });
  it('cross-organization IDs return no source, including privileged managers',async()=>{
   const f=fixture();await expect(getCallRecordingDetail(f.admin,actor('manager',id(99)),call)).rejects.toMatchObject({status:404});
   expect(f.db.log.filter(x=>x.kind==='query'&&x.operation==='select'&&['motorist_calls','motorist_call_recordings','motorist_call_transcripts'].includes(x.table)).every(x=>x.filters?.some(s=>s==='eq(organization_id)'))).toBe(true);

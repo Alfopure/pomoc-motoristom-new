@@ -3,21 +3,21 @@
 import { useEffect, useRef, useState } from "react";
 import { Play } from "lucide-react";
 import type { CallRecordingDetail } from "@/lib/telephony/recording-quality";
-import { CONTENT_LABELS } from "./recording-presentation";
+import { CONTENT_LABELS, playbackSegmentTarget } from "./recording-presentation";
 import { formatRecordingTime, RecordingMessage, RecordingSection, recordingButtonClass } from "./recording-ui";
 
 export type RecordingSeek = { segmentId: string; offsetSeconds: number; sequence: number; play: boolean };
 
-export function RecordingPlayer({ detail, seek, onSeek }: { detail: CallRecordingDetail; seek: RecordingSeek | null; onSeek: (seconds: number, segmentId: string) => void }) {
-  const selected = detail.segments.find((segment) => segment.id === seek?.segmentId && segment.canPlay && (segment.state === "ready" || segment.state === "partial"));
+export function RecordingPlayer({ detail, seek, onSelectSegment }: { detail: CallRecordingDetail; seek: RecordingSeek | null; onSelectSegment: (segmentId: string) => void }) {
+  const selected = seek ? playbackSegmentTarget(detail, seek.segmentId)?.segment : null;
   return <RecordingSection title="Nahrávka a zachytené úseky">
     {selected && seek ? <SegmentAudio key={`${selected.id}:${seek.sequence}`} callId={detail.callId} segmentId={selected.id} seek={seek} /> : <p className="text-sm text-zinc-600">Vyberte dostupný úsek alebo čas pri replike.</p>}
     {detail.segments.length === 0 ? <p className="text-sm text-zinc-500">Zatiaľ nie je dostupný žiadny zvukový úsek.</p> : <div className="flex flex-wrap gap-2">
-      {detail.segments.map((segment) => <button type="button" key={segment.id} disabled={!segment.canPlay || !["ready", "partial"].includes(segment.state)} onClick={() => onSeek(segment.startSeconds, segment.id)} aria-pressed={selected?.id === segment.id} className={`${recordingButtonClass} ${selected?.id === segment.id ? "border-yellow-400 bg-yellow-50" : ""}`}>
+      {detail.segments.map((segment) => <button type="button" key={segment.id} disabled={!playbackSegmentTarget(detail, segment.id)} onClick={() => onSelectSegment(segment.id)} aria-pressed={selected?.id === segment.id} className={`${recordingButtonClass} ${selected?.id === segment.id ? "border-yellow-400 bg-yellow-50" : ""}`}>
         <Play size={13} aria-hidden="true" /><span>Úsek {segment.index + 1} · {formatRecordingTime(segment.startSeconds)}–{formatRecordingTime(segment.startSeconds + segment.durationSeconds)}<span className="block text-left text-xs font-normal">{CONTENT_LABELS[segment.state]}</span></span>
       </button>)}
     </div>}
-    {detail.gaps.length > 0 && <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950"><p className="font-semibold">Tieto časti hovoru chýbajú</p><ul className="mt-1 space-y-1">{detail.gaps.map((gap, index) => <li key={index}>{formatRecordingTime(gap.startSeconds)}–{formatRecordingTime(gap.endSeconds)} · {gap.reason}</li>)}</ul></div>}
+    {detail.gaps.length > 0 && <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950"><p className="font-semibold">Úseky s neovereným alebo neúplným záznamom</p><p>Dostupné nahrávky možno prehrať samostatne. Ich úplnosť alebo časové zaradenie nemusia byť overené.</p><ul className="mt-1 space-y-1">{detail.gaps.map((gap, index) => <li key={index}>{formatRecordingTime(gap.startSeconds)}–{formatRecordingTime(gap.endSeconds)} · {gap.reason}</li>)}</ul></div>}
     {detail.segments.some((segment) => segment.error) && <RecordingMessage>Niektoré úseky sa nepodarilo pripraviť. Ich stav nájdete pri jednotlivých častiach nahrávky.</RecordingMessage>}
   </RecordingSection>;
 }
