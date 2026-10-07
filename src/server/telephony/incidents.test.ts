@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createFakeSupabase } from "@/test/fake-supabase";
 
@@ -69,5 +69,73 @@ describe("telephony incidents", () => {
   it("describes errors safely with context and a length cap", () => {
     expect(describeIncidentError(new TypeError("bad"), { a: 1 })).toBe('TypeError: bad {"a":1}');
     expect(describeIncidentError("x".repeat(3000)).length).toBe(2000);
+  });
+
+  const pendingHangup = (completed = false) => ({ version: 1, entries: [{
+    event: { kind: "app", type: "hangup" },
+    commands: [{ kind: "hangup", commandId: "original-hangup" }],
+    completedCommands: completed ? ["original-hangup"] : [],
+  }] });
+
+  it("does not recover a commands incident while another ended call still owes an explicit hangup", async () => {
+    const { admin, db } = createFakeSupabase();
+    await recordTelephonyIncident(admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error: "hangup unknown" });
+    db.seed("motorist_call_sessions", [{ id: "other-call", state: "ended", ended_at: "2026-10-07T08:00:00Z",
+      termination_requested_at: "2026-10-07T07:59:00Z", pending_effects: pendingHangup() }]);
+    expect(await recoverTelephonyIncident(admin, TELEPHONY_INCIDENT_JOBS.commands)).toBe(false);
+    expect(db.rows("motorist_job_incidents")[0].status).toBe("open");
+    db.update("motorist_call_sessions", { pending_effects: pendingHangup(true) }, row => row.id === "other-call");
+    expect(await recoverTelephonyIncident(admin, TELEPHONY_INCIDENT_JOBS.commands)).toBe(true);
+  });
+
+  it.each(["query failure", "malformed contract", "malformed command", "too many pending calls"])("keeps commands incidents open on %s", async scenario => {
+    const { admin, db } = createFakeSupabase();
+    await recordTelephonyIncident(admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error: "unknown" });
+    if (scenario === "query failure") db.failNext("motorist_call_sessions", "select", "unavailable");
+    else db.seed("motorist_call_sessions", Array.from({ length: scenario === "too many pending calls" ? 101 : 1 }, (_, index) => ({
+      id: `call-${index}`, termination_requested_at: "2026-10-07T07:59:00Z",
+      pending_effects: scenario === "malformed contract" ? { version: 999, entries: [] }
+        : scenario === "malformed command" ? { version: 1, entries: [{ ...pendingHangup(true).entries[0], commands: [{}] }] } : pendingHangup(true),
+    })));
+    expect(await recoverTelephonyIncident(admin, TELEPHONY_INCIDENT_JOBS.commands)).toBe(false);
+    expect(db.rows("motorist_job_incidents")[0].status).toBe("open");
+  });
+
+  it("does not clear a new concurrent failure even when it has the same timestamp", async () => {
+    const { admin, db } = createFakeSupabase();
+    const now = new Date("2026-10-07T08:00:00Z");
+    await recordTelephonyIncident(admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error: "first", now });
+    const original = db.takeInjectedError.bind(db);
+    let injected = false;
+    vi.spyOn(db, "takeInjectedError").mockImplementation((table, operation) => {
+      if (!injected && table === "motorist_job_incidents" && operation === "update") {
+        injected = true;
+        db.update(table, { consecutive_failures: 2, last_error_safe: "new concurrent failure" }, row => row.status === "open");
+      }
+      return original(table, operation);
+    });
+    expect(await recoverTelephonyIncident(admin, TELEPHONY_INCIDENT_JOBS.commands, now)).toBe(false);
+    expect(db.rows("motorist_job_incidents")[0]).toMatchObject({ status: "open", consecutive_failures: 2 });
+  });
+
+  it("opens a new incident when another instance recovers the row just before recording a failure", async () => {
+    const { admin, db } = createFakeSupabase();
+    const first = await recordTelephonyIncident(admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error: "first" });
+    const original = db.takeInjectedError.bind(db);
+    let injected = false;
+    vi.spyOn(db, "takeInjectedError").mockImplementation((table, operation) => {
+      if (!injected && table === "motorist_job_incidents" && operation === "update") {
+        injected = true;
+        db.update(table, { status: "recovered" }, row => row.incident_id === first.incidentId);
+      }
+      return original(table, operation);
+    });
+    const next = await recordTelephonyIncident(admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error: "new failure" });
+    expect(next.recorded).toBe(true);
+    expect(next.incidentId).not.toBe(first.incidentId);
+    expect(db.rows("motorist_job_incidents").filter(row => row.status === "open")).toEqual([
+      expect.objectContaining({ last_error_safe: "new failure", consecutive_failures: 1 }),
+    ]);
+    expect(db.rows("motorist_job_incidents").find(row => row.incident_id === first.incidentId)?.last_error_safe).toBe("first");
   });
 });

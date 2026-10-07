@@ -63,26 +63,40 @@ export async function reconcileProviderEvent(admin: SupabaseClient<Database>, se
   telnyx?: Pick<TelnyxClient, "request"> | null, snapshotCommands?: PendingProviderCommand[]): Promise<number> {
   const owner = sessionOwnership.getStore();
   if (owner?.contract !== 2 || owner.sessionId !== sessionId || !ELIGIBLE.has(event.type)) return 0;
+  // Generic synthetic reconciliation does not carry the raw exact-ID proof.
+  // The dedicated inbound recovery settles its strictly verified GET directly.
+  if (event.type === "call.hangup" && event.payload.reconciled === true) return 0;
   const pending = snapshotCommands ?? await loadPendingProviderCommands(admin, sessionId, event);
   const candidates = pending.filter(command => commandEvidenceCandidate(command, sessionId, event));
-  // A later join/answer event cannot distinguish two earlier unknown attempts.
-  if (candidates.length !== 1) return 0;
-  const command = candidates[0];
-  let result: Record<string, unknown> = { data: { result: "ok" } };
-  if (command.path === "/conferences") {
-    if (!telnyx || !event.conferenceId) return 0;
-    // conference.created has no name. Verify this exact ID/name via one GET;
-    // creator-leg equality was checked above. No name-only lookup or new create.
-    const response = await telnyx.request<unknown>("GET", `/conferences/${encodeURIComponent(event.conferenceId)}`);
-    const conference = record(record(response).data);
-    if (conference.id !== event.conferenceId || conference.name !== command.payload.name) return 0;
-    result = { data: { id: event.conferenceId, name: conference.name } };
+  // A later join/answer cannot distinguish two earlier unknown attempts.
+  // Terminal evidence is monotonic: one exact leg's hangup satisfies each
+  // earlier hangup of that leg, including separately journaled recovery sends.
+  const terminal = event.type === "call.hangup" && event.callControlId && candidates.every(command =>
+    command.path === `/calls/${encodeURIComponent(event.callControlId!)}/actions/hangup`);
+  if (!candidates.length || candidates.length !== 1 && !terminal) return 0;
+  let adopted = 0;
+  for (const command of candidates) {
+    let result: Record<string, unknown> = { data: { result: "ok" } };
+    if (terminal) result = { data: { result: "ok" }, evidence: {
+      source: "verified_webhook", eventId: event.id,
+      observedAt: event.occurredAt, effectSatisfied: true,
+    } };
+    if (command.path === "/conferences") {
+      if (!telnyx || !event.conferenceId) return 0;
+      // conference.created has no name. Verify this exact ID/name via one GET;
+      // creator-leg equality was checked above. No name-only lookup or new create.
+      const response = await telnyx.request<unknown>("GET", `/conferences/${encodeURIComponent(event.conferenceId)}`);
+      const conference = record(record(response).data);
+      if (conference.id !== event.conferenceId || conference.name !== command.payload.name) return 0;
+      result = { data: { id: event.conferenceId, name: conference.name } };
+    }
+    const changed = await ownershipRpc<boolean>(admin, "motorist_provider_command_result_v2", {
+      p_session_id: sessionId, p_command_id: command.commandId, p_fingerprint: command.fingerprint,
+      p_generation: command.dispatchGeneration, p_token: command.dispatchToken, p_status: 200, p_result: result,
+    });
+    if (changed) adopted += 1;
   }
-  const changed = await ownershipRpc<boolean>(admin, "motorist_provider_command_result_v2", {
-    p_session_id: sessionId, p_command_id: command.commandId, p_fingerprint: command.fingerprint,
-    p_generation: command.dispatchGeneration, p_token: command.dispatchToken, p_status: 200, p_result: result,
-  });
-  return changed ? 1 : 0;
+  return adopted;
 }
 
 /** Same fenced read as reconciliation, issued alongside the session snapshot. */

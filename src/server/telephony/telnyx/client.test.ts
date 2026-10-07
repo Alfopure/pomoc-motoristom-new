@@ -199,6 +199,19 @@ describe("createTelnyxClient", () => {
     expect(logs[0].attempts?.map((attempt) => attempt.status)).toEqual([429, 200]);
   });
 
+  it("leaves a bounded recovery's 429 to its durable retry policy without a hidden second send", async () => {
+    const { impl, calls } = makeFetch([jsonResponse(429, { errors: [{ code: "10011", title: "Too many requests" }] }, { "retry-after": "0" }), jsonResponse(200, { data: { result: "ok" } })]);
+    const { client, sleeps, logs } = makeClient(impl);
+    await expect(client.request("POST", "/calls/cc-1/actions/hangup", {
+      body: { command_id: "original-wire-id", client_state: "original-state" },
+      commandId: "original-wire-id", journalCommandId: "recovery-slot-1", retryRateLimits: false,
+    })).rejects.toMatchObject({ status: 429, commandId: "recovery-slot-1" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].body).toEqual({ command_id: "original-wire-id", client_state: "original-state" });
+    expect(sleeps).toEqual([]);
+    expect(logs[0]).toMatchObject({ status: 429, retried: false });
+  });
+
   it("distinguishes arrival of response headers from consumption of its body", async () => {
     let now = 1_790_000_000_000;
     const start = now;

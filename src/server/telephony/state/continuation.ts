@@ -129,11 +129,13 @@ export async function stageEffects(deps: EffectsDeps, input: { session: SessionR
   return response.session;
 }
 
-export async function checkpointEffects(deps: EffectsDeps, sessionId: string, entry: EffectContinuation | null, entryId: string, knownSession?: SessionRow): Promise<SessionRow> {
+type CheckpointDeps = Pick<EffectsDeps, "admin" | "organizationId" | "now">;
+
+export async function checkpointEffects(deps: CheckpointDeps, sessionId: string, entry: EffectContinuation | null, entryId: string, knownSession?: SessionRow): Promise<SessionRow> {
   return measureRequestStep("checkpoint", () => checkpointOwnedEffects(deps, sessionId, entry, entryId, knownSession));
 }
 
-async function checkpointOwnedEffects(deps: EffectsDeps, sessionId: string, entry: EffectContinuation | null, entryId: string, knownSession?: SessionRow): Promise<SessionRow> {
+async function checkpointOwnedEffects(deps: CheckpointDeps, sessionId: string, entry: EffectContinuation | null, entryId: string, knownSession?: SessionRow): Promise<SessionRow> {
   const owner = sessionOwnership.getStore();
   // A prior stage/checkpoint already returned this complete owned row. Try its
   // version directly; the UPDATE remains fenced and compare-and-set. A changed

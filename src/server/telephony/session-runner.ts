@@ -1,6 +1,7 @@
 import { loadPendingProviderCommands, reconcileProviderEvent, type PendingProviderCommand } from "./provider-event-evidence";
 import { measureRequestStep, requestTimingContext } from "@/server/request-metrics";
 import { reconcileTermination } from "./termination";
+import type { InboundHangupRecovery, InboundHangupRecoveryResult } from "./inbound-hangup-recovery";
 import { sessionOwnership, ownershipRpc, assertOwnership, firstProviderDispatchAt, withProviderDispatchTiming, OWNERSHIP_RENEW_SKIP_MS, SESSION_WORK_MS, SESSION_LEASE_MS, DATABASE_REQUEST_MS, type Ownership } from "./ownership";
 import { ACTIVE_LEG_WINDOW_MS, resolvePersonalRingMembers } from "./routing/ring-plan";
 import { randomUUID } from "node:crypto";
@@ -27,6 +28,7 @@ import { resolveSessionRecordingPolicy } from "./recording-policy-service";
 import {
   DEFAULT_ROUTING_SETTINGS,
   ACTIVE_SESSION_STATES,
+  commandKey,
   emptyTransition,
   isOpenLeg,
   lineModeBehaviour,
@@ -121,9 +123,10 @@ export const MAX_CONFLICT_RETRIES = 20;
 /** Legs older than this no longer count against `max_concurrent_legs`. */
 export { ACTIVE_LEG_WINDOW_MS } from "./routing/ring-plan";
 
-export type SessionRunResult =
+export type SessionRunResult = (
   | { outcome: "ignored"; reason: string; session: SessionRow; leaseAcquired: boolean; retries: number }
-  | { outcome: "applied"; apply: ApplyResult; session: SessionRow; leaseAcquired: boolean; retries: number; stateBefore: string; commands: CommandOutcome[] };
+  | { outcome: "applied"; apply: ApplyResult; session: SessionRow; leaseAcquired: boolean; retries: number; stateBefore: string; commands: CommandOutcome[] }
+) & { inboundHangupRecovery?: InboundHangupRecovery };
 
 export class SessionNotFoundError extends Error {
   constructor(readonly sessionId: string) {
@@ -800,11 +803,13 @@ export async function runSessionEvent(
   }, { known, eventType: `${event.kind}.${event.type}` });
 }
 
-async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership): Promise<SessionRunResult> {
-  return withProviderDispatchTiming(nowOf(deps), () => processOwnedSessionEvent(deps, sessionId, event, owner));
+async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership,
+  verifiedStatus?: InboundHangupRecoveryResult["terminal"]): Promise<SessionRunResult> {
+  return withProviderDispatchTiming(nowOf(deps), () => processOwnedSessionEvent(deps, sessionId, event, owner, verifiedStatus));
 }
 
-async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership): Promise<SessionRunResult> {
+async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership,
+  verifiedStatus?: InboundHangupRecoveryResult["terminal"]): Promise<SessionRunResult> {
   const runnerStarted = nowOf(deps)();
   const token = owner?.token ?? randomUUID();
   let leaseAcquired: boolean;
@@ -822,6 +827,19 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
   if (!leaseAcquired) deps.logger?.({ level: "warn", scope: "lease", sessionId, eventId: event.id, message: "lease unavailable; checking whether event can safely proceed" });
   const maxRetries = deps.maxConflictRetries ?? MAX_CONFLICT_RETRIES;
   let effectsMayHaveStarted = false;
+  let inboundRecovery: InboundHangupRecoveryResult | undefined;
+  const finish = async (result: SessionRunResult): Promise<SessionRunResult> => {
+    if (!inboundRecovery || inboundRecovery.recovery.status === "skipped") return result;
+    if (inboundRecovery.terminal && inboundRecovery.deferredCommandIds.size) {
+      const { completeVerifiedInboundHangup } = await import("./inbound-hangup-recovery");
+      const completed = await completeVerifiedInboundHangup(deps, inboundRecovery);
+      if (completed) {
+        result.session = completed;
+        if (result.outcome === "applied") result.apply.session = completed;
+      } else return { ...result, inboundHangupRecovery: { ...inboundRecovery.recovery, status: "unavailable" } };
+    }
+    return { ...result, inboundHangupRecovery: inboundRecovery.recovery };
+  };
 
   try {
     for (let retries = 0; ; retries += 1) {
@@ -856,6 +874,32 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
           p_client_state: event.rawClientState, p_call_control_id: event.callControlId, p_call_leg_id: event.callLegId,
           p_call_session_id: event.callSessionId, p_alive: event.type !== "call.hangup" });
       }
+      // Derive the gate from the persisted incomplete command on every event
+      // path. A late original HTTP acknowledgement must not erase the last
+      // recovery obligation before exact terminal provider evidence exists.
+      // Load recovery only for a persisted termination obligation. Ordinary
+      // incoming webhooks keep their existing cold-start dependency budget.
+      if (owner?.contract === 2 && snapshot.session.direction === "inbound" && snapshot.session.termination_requested_at &&
+        readPendingEffects(snapshot.session).entries.length) {
+        const { recoverUnknownInboundHangup } = await import("./inbound-hangup-recovery");
+        inboundRecovery = await recoverUnknownInboundHangup(deps, snapshot, event, verifiedStatus);
+        snapshot.session = inboundRecovery.session;
+        if (inboundRecovery.recovery.status !== "skipped") effectsMayHaveStarted = true;
+        if (inboundRecovery.terminal && !(event.kind === "telnyx" && event.type === "call.hangup" && event.callControlId === inboundRecovery.terminal.callControlId)) {
+          const terminal = inboundRecovery.terminal;
+          const { reconciledHangupEvent } = await import("./call-reconciliation");
+          const fact = reconciledHangupEvent(terminal.callControlId, new Date(terminal.observedAt), true);
+          fact.payload = { ...fact.payload, source: "provider_status" };
+          const reconciled = await runOwnedSessionEvent(deps, sessionId, fact, owner, terminal);
+          if (event.kind === "app" && event.type === "sweep") return reconciled;
+          // Keep the original fact/action after recording the independent
+          // terminal observation; an unrelated callback must not be swallowed.
+          snapshot = await loadSessionSnapshot(deps, sessionId);
+          const incomplete = new Set(readPendingEffects(snapshot.session).entries.flatMap(entry => entry.commands
+            .filter(command => !entry.completedCommands.includes(commandKey(command))).map(commandKey)));
+          for (const id of inboundRecovery.deferredCommandIds) if (!incomplete.has(id)) inboundRecovery.deferredCommandIds.delete(id);
+        }
+      }
       // One termination pass per host: the nested `termination:*` run above
       // already ran its post-apply pass and re-read the row, so this fires only
       // when the database says a pass is still due. Every later webhook of an
@@ -887,7 +931,8 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
       }
       context.recordingLeaseHeld = leaseAcquired;
       const recordingLeaseRequired = requiresRecordingLease(snapshot.session, context);
-      const effects: EffectsDeps = { ...effectsDeps(deps), eventTiming: () => timing(), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token, recordingLeaseRequired || durable) : undefined };
+      const effects: EffectsDeps = { ...effectsDeps(deps), deferredCommandIds: inboundRecovery?.deferredCommandIds,
+        eventTiming: () => timing(), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token, recordingLeaseRequired || durable) : undefined };
       if (!leaseAcquired && (recordingLeaseRequired || durable) && event.kind === "app" && event.type === "sweep") {
         // Polling is retried by the next poll/cron. It must not erase the active
         // owner's recording or pending audio intent by changing capture policy.
@@ -908,7 +953,7 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
           effectsMayHaveStarted = true;
           const resumed = await resumePendingEffects(effects, snapshot.session, { databaseOnly: preemptsAudio, skipCompletedProjections: event.kind !== "app" || event.type !== "sweep",
             deferContactChecks: snapshot.session.writer_contract === 2 && event.kind === "app" && event.type !== "sweep" });
-          if (resumed?.failed && !preemptsAudio && event.kind === "app") return { outcome: "applied", apply: resumed, session: resumed.session, leaseAcquired, retries, stateBefore: snapshot.session.state, commands: resumed.commands };
+          if (resumed?.failed && !preemptsAudio && event.kind === "app") return finish({ outcome: "applied", apply: resumed, session: resumed.session, leaseAcquired, retries, stateBefore: snapshot.session.state, commands: resumed.commands });
         } catch (error) {
           if (!preemptsAudio) throw error;
           deps.logger?.({ level: "warn", scope: "effects", sessionId, code: "bookkeeping_deferred_for_teardown" });
@@ -959,7 +1004,7 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
           commands: [],
           timing: timing(),
         });
-        return { outcome: "ignored", reason: result.ignored, session: snapshot.session, leaseAcquired, retries };
+        return finish({ outcome: "ignored", reason: result.ignored, session: snapshot.session, leaseAcquired, retries });
       }
 
       try {
@@ -1044,7 +1089,7 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
           leaseAcquired,
           retries,
         });
-        return { outcome: "applied", apply, session: apply.session, leaseAcquired, retries, stateBefore: snapshot.session.state, commands: apply.commands };
+        return finish({ outcome: "applied", apply, session: apply.session, leaseAcquired, retries, stateBefore: snapshot.session.state, commands: apply.commands });
       } catch (error) {
         if (error instanceof SessionConflictError && retries < maxRetries) {
           await sleepOf(deps)(LEASE_JITTER_MIN_MS);

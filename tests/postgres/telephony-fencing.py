@@ -5,6 +5,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 import json
+import hashlib
 import uuid
 import os
 import socket
@@ -232,6 +233,53 @@ try:
             server.terminate()
             try:server.wait(timeout=5)
             except subprocess.TimeoutExpired:server.kill();server.wait(timeout=5)
+
+        # Inbound recovery uses bounded, separate internal journal slots, but
+        # preserves the exact original wire command and body. This exercises
+        # the real SQL (including result fencing), not the workflow adapter.
+        expire(c)
+        recovery_owner=acquire(c,'RECOVERY-A'); headers(c,'RECOVERY-A',recovery_owner['generation'])
+        path='/calls/inbound%2Fexact%2Bcontrol/actions/hangup'
+        wire_id='inbound-original-wire'
+        payload={'command_id':wire_id,'client_state':'unchanged-provider-state'}
+        fingerprint=hashlib.sha256(json.dumps({'method':'POST','path':path,'body':payload},
+          sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        slot_ids=[wire_id,'inbound-recovery-slot-1','inbound-recovery-slot-2']
+        def recovery_prepare(command,body=payload):
+            return c.execute("select motorist_provider_command_prepare_v2(%s,%s,%s,'POST',%s,%s,%s)",
+              (SID,command,fingerprint,path,payload['client_state'],Jsonb(body))).fetchone()[0]
+        def recovery_result(command,generation,token):
+            return c.execute('select motorist_provider_command_result_v2(%s,%s,%s,%s,%s,200,%s)',
+              (SID,command,fingerprint,generation,token,Jsonb({'data':{'result':'ok'}}))).fetchone()[0]
+        def recovery_rows():
+            return {row[0]:row[1:] for row in c.execute('''select command_id,request_payload,path,fingerprint,
+              dispatch_generation,dispatch_token,first_dispatched_at,outcome from motorist_provider_commands
+              where session_id=%s and command_id=any(%s)''',(SID,slot_ids)).fetchall()}
+        assert recovery_prepare(wire_id)['dispatch']
+        assert recovery_prepare(slot_ids[1])['dispatch']
+        before=recovery_rows()
+        assert set(before)==set(slot_ids[:2])
+        assert all(row[:3]==(payload,path,fingerprint) for row in before.values())
+        assert recovery_prepare(wire_id)['outcome']=='unknown'
+        assert not recovery_prepare(wire_id)['dispatch']
+        rejected(lambda:recovery_prepare(slot_ids[1],{**payload,'client_state':'changed'}))
+        passed('separate inbound recovery journal slots preserve exact original wire identity and immutable payload')
+
+        expire(c)
+        successor=acquire(c,'RECOVERY-B'); headers(c,'RECOVERY-B',successor['generation'])
+        assert recovery_prepare(slot_ids[2])['dispatch']
+        assert not recovery_result(slot_ids[1],successor['generation'],'RECOVERY-B')
+        assert recovery_result(slot_ids[1],recovery_owner['generation'],'RECOVERY-A')
+        assert recovery_rows()[wire_id][-1]=='unknown'  # A recovery ACK cannot silently resolve the original.
+        assert recovery_result(wire_id,recovery_owner['generation'],'RECOVERY-A')
+        assert not recovery_result(slot_ids[2],recovery_owner['generation'],'RECOVERY-A')
+        assert recovery_result(slot_ids[2],successor['generation'],'RECOVERY-B')
+        assert not recovery_result(slot_ids[1],recovery_owner['generation'],'RECOVERY-A')
+        after=recovery_rows()
+        assert all(after[command][:-1]==row[:-1] and after[command][-1]=='accepted' for command,row in before.items())
+        assert all(row[0]==payload and row[-1]=='accepted' for row in after.values())
+        assert all(not recovery_prepare(command)['dispatch'] for command in slot_ids)
+        passed('old-owner acknowledgements settle only exact recovery dispatch tuples without rewriting original evidence')
 
 finally:
     with psycopg.connect(BASE+' dbname=postgres',autocommit=True) as setup:

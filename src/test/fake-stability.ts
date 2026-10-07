@@ -119,11 +119,12 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
   const session = (id: unknown) => db.storage("motorist_call_sessions").find((row) => row.id === id);
   // `20260929200000:227-230`: once a termination is committed the journal
   // refuses every new provider command except teardown.
-  const TEARDOWN = /\/(hangup|record_stop|leave|stop)$/;
+  const TEARDOWN = /\/actions\/(hangup|record_stop|leave|stop)$/;
   db.registerRpc("motorist_provider_command_prepare_v2", (args) => {
     fenceSession(db, args.p_session_id);
     const row = session(args.p_session_id);
     if (!row) throw Object.assign(new Error("session not found"), { code: "PT409" });
+    if (Number(row.writer_contract ?? 1) !== 2) throw Object.assign(new Error("provider journal requires writer contract 2"), { code: "PT409" });
     const journal = (db.storage("motorist_provider_commands") ?? []);
     const existing = journal.find((entry) => entry.session_id === args.p_session_id && entry.command_id === args.p_command_id);
     if (existing) {
@@ -131,16 +132,24 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
         existing.correlation_state !== (args.p_correlation_state ?? null) || !isDeepStrictEqual(existing.request_payload, args.p_payload ?? {})) {
         throw { code: "PT409", message: "provider command payload identity conflict", details: null, hint: null };
       }
-      return { dispatch: false, outcome: String(existing.outcome ?? "unknown"), result: existing.result, http_status: Number(existing.http_status ?? 200) };
+      if (existing.outcome !== "rate_limited" || (existing.next_attempt_at && Date.parse(String(existing.next_attempt_at)) > db.now().getTime())) {
+        return { ...structuredClone(existing), dispatch: false };
+      }
     }
     const terminal = Boolean(row.termination_requested_at) || Boolean(row.ended_at) || ["ended", "failed"].includes(String(row.state));
     if (terminal && !TEARDOWN.test(String(args.p_path))) {
       throw { code: "PT409", message: "telephony termination blocks new provider command", details: null, hint: null };
     }
-    db.insert("motorist_provider_commands", { session_id: args.p_session_id, command_id: args.p_command_id,
+    // This adapter names the SQL ownership_generation field lease_generation.
+    // Preserve the actual immutable dispatch tuple and first-send time so the
+    // production recovery code can inspect them without invented test evidence.
+    const dispatch = { outcome: "unknown", dispatch_generation: Number(row.lease_generation ?? 0),
+      dispatch_token: row.lease_token, next_attempt_at: null };
+    if (existing) Object.assign(existing, dispatch);
+    else db.insert("motorist_provider_commands", { session_id: args.p_session_id, command_id: args.p_command_id,
       fingerprint: args.p_fingerprint, method: args.p_method, path: args.p_path,
       correlation_state: args.p_correlation_state ?? null, request_payload: structuredClone(args.p_payload ?? {}),
-      outcome: "unknown", http_status: null, result: null });
+      ...dispatch, first_dispatched_at: db.nowIso(), http_status: null, result: null, termination_cleanup_at: null });
     return { dispatch: true };
   });
 
@@ -192,11 +201,22 @@ export function registerProviderJournalRpcs(db: FakeDatabase): void {
   });
 
   db.registerRpc("motorist_provider_command_result_v2", (args) => {
-    const entry = db.storage("motorist_provider_commands").find((row) => row.session_id === args.p_session_id && row.command_id === args.p_command_id);
-    if (entry) {
-      entry.outcome = Number(args.p_status) < 400 ? "accepted" : "rejected";
-      entry.http_status = args.p_status;
-      entry.result = args.p_result ?? null;
+    // SQL accepts evidence from an expired owner only for its exact original
+    // dispatch; it neither fences against today's owner nor overwrites a final
+    // outcome. A later rate-limit redispatch invalidates the earlier tuple.
+    const entry = db.storage("motorist_provider_commands").find((row) => row.session_id === args.p_session_id && row.command_id === args.p_command_id &&
+      row.fingerprint === args.p_fingerprint && Number(row.dispatch_generation) === Number(args.p_generation) &&
+      row.dispatch_token === args.p_token && row.outcome === "unknown");
+    if (!entry) return false;
+    const status = Number(args.p_status);
+    entry.outcome = status >= 200 && status < 300 ? "accepted" : status === 429 ? "rate_limited"
+      : status >= 400 && status < 500 && status !== 408 ? "rejected" : "unknown";
+    entry.http_status = args.p_status;
+    entry.result = args.p_result ?? null;
+    entry.next_attempt_at = status === 429 ? new Date(db.now().getTime() + Math.max(0, Number(args.p_retry_after_ms ?? 500))).toISOString() : null;
+    const row = session(args.p_session_id);
+    if (status >= 200 && status < 300 && entry.path === "/calls" && !entry.termination_cleanup_at && row?.termination_requested_at) {
+      row.termination_next_attempt_at = db.nowIso();
     }
     return true;
   });
