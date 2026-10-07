@@ -75,7 +75,9 @@ describe("recorded TEST control provenance cost", () => {
   it("keeps real STOP/HOLD/START/UNHOLD/PARK commands while reusing only same-owner origin evidence", async () => {
     const baseline = await recordedControl(false);
     const optimized = await recordedControl(true);
-    expect(optimized.counts.map(row => row.db)).toEqual([59, 46, 80]);
+    // Same provider/recording sequence; fewer projection and participant round
+    // trips than the previously deployed 59 / 46 / 80 request fixture.
+    expect(optimized.counts.map(row => row.db)).toEqual([53, 43, 71]);
     expect(optimized.mutations.map(path => path.split("/").at(-1))).toEqual(baseline.mutations.map(path => path.split("/").at(-1)));
     expect(optimized.counts.map(row => row.proofs)).toEqual([1, 1, 2]);
     expect(baseline.counts.map(row => row.proofs)).toEqual([3, 2, 6]);

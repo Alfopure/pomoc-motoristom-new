@@ -74,6 +74,10 @@ describe("durable recovery failure boundaries", () => {
     if (failure === "callback") {
       h.db.registerRpc("motorist_create_callback_obligation_v1", () => { attempts += 1; throw fakeError("persistent callback transaction failure", "08006"); });
     } else {
+      // History is behind the authoritative talking session, so this is a
+      // real pending projection repair. An already identical history row
+      // needs no UPDATE and cannot exercise an injected write failure.
+      h.db.update("motorist_calls", { status: "ringing_agent" }, row => row.session_id === call.sessionId);
       const original = h.db.takeInjectedError.bind(h.db);
       vi.spyOn(h.db, "takeInjectedError").mockImplementation((table, operation) => {
         if (table === "motorist_calls" && operation === "update") { attempts += 1; return fakeError("persistent call projection failure", "08006"); }
