@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { requestStepCount, requestTimingContext } from "@/server/request-metrics";
-import { assertOwnership, firstProviderDispatchAt, guardTiming, measureGuard, ownershipRpc, sessionOwnership } from "../ownership";
+import { measureControlStage, requestStepCount, requestTimingContext } from "@/server/request-metrics";
+import { assertOwnership, firstProviderDispatchAt, guardTiming, measureGuard, ownershipRpc, sessionOwnership, type Ownership } from "../ownership";
 import { payloadFingerprint } from "../provider-journal";
 import { isDeepStrictEqual } from "node:util";
 
@@ -199,7 +199,7 @@ function isDuplicate(error: { code?: string } | null): boolean {
 
 export async function persistTransition(
   deps: EffectsDeps,
-  input: { session: SessionRow; transition: Transition; expectedVersion: number | null; event: SessionEvent | null; continuation?: EffectContinuation; phase?: "critical" | "projection" },
+  input: { session: SessionRow; transition: Transition; expectedVersion: number | null; event: SessionEvent | null; continuation?: EffectContinuation; phase?: "critical" | "projection"; deferCallProjectionCheckpoint?: boolean },
 ): Promise<SessionRow> {
   const { admin } = deps;
   const now = deps.now().toISOString();
@@ -264,7 +264,7 @@ export async function persistTransition(
     batchPending = false;
     session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
   };
-  const effect = async (run: () => Promise<unknown>, critical = true, batchable = false) => {
+  const effect = async (run: () => Promise<unknown>, critical = true, batchable = false, deferCheckpoint = false) => {
     const index = cursor++;
     // Preserve the original cursor indices so a pending entry from an older
     // compatible writer can still be resumed without repeating commands.
@@ -278,7 +278,7 @@ export async function persistTransition(
     if (!input.continuation) return;
     input.continuation.databaseCursor = index + 1;
     if (batched) batchPending = true;
-    else session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
+    else if (!deferCheckpoint) session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
   };
   // Folded above, but still walked here so the cursor lands where a resuming
   // writer expects it.
@@ -318,7 +318,13 @@ export async function persistTransition(
   // historical obligation was skipped. Recompute current state/owner from the
   // fresh session instead of restoring old transition-specific overrides.
   const callOverrides = input.continuation && input.continuation.generation !== effectGeneration(session) ? {} : input.transition.call;
-  await effect(() => upsertCallRow(deps, session, callOverrides), false);
+  const owner = sessionOwnership.getStore();
+  const deferCallCheckpoint = input.deferCallProjectionCheckpoint && input.phase === "projection" &&
+    owner?.contract === 2 && owner.admin === admin && owner.organizationId === deps.organizationId && owner.sessionId === session.id;
+  // Only this final, idempotent projection may share the caller's final audit
+  // checkpoint. Its cursor still advances in memory; a crash replays the same
+  // projection and fingerprint-unique audit. Other effects keep their cursor.
+  await effect(() => upsertCallRow(deps, session, callOverrides), false, false, Boolean(deferCallCheckpoint));
   // The critical batch must be durable before any provider command runs.
   await flushBatch();
   return session;
@@ -529,6 +535,19 @@ function seconds(from: string | null | undefined, to: string | null | undefined)
   return Math.max(0, Math.round((end - start) / 1000));
 }
 
+/** Identity only, within this owned execution; never caches admission or state. */
+async function callIdentity(deps: EffectsDeps, session: SessionRow): Promise<string | null> {
+  if (session.organization_id !== deps.organizationId) throw new EffectsError("call identity organization mismatch");
+  const owner = sessionOwnership.getStore();
+  const mayReuse = owner?.contract === 2 && owner.admin === deps.admin && owner.organizationId === deps.organizationId && owner.sessionId === session.id;
+  const known = mayReuse ? deps.callIds?.get(session.id) : undefined;
+  if (known) return known;
+  const call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", session.id).maybeSingle();
+  if (call.error) throw new EffectsError("call identity lookup failed");
+  if (mayReuse && call.data) deps.callIds?.set(session.id, call.data.id);
+  return call.data?.id ?? null;
+}
+
 /** Keeps exactly one `motorist_calls` row per session in sync with the session. */
 export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, overrides: Transition["call"]): Promise<void> {
   const { admin } = deps;
@@ -587,8 +606,13 @@ export async function upsertCallRow(deps: EffectsDeps, session: SessionRow, over
   };
 
   if (current) {
-    const updated = await admin.from("motorist_calls").update(values).eq("id", current.id);
-    if (updated.error) fail("call update failed", updated.error);
+    // The fresh projection already contains these values on metadata-only
+    // recorder barriers and retries. Do not write the same history row again.
+    // Mutable state was read above; this is not a cached projection snapshot.
+    if (!Object.entries(values).every(([key, value]) => isDeepStrictEqual(current[key as keyof typeof current], value))) {
+      const updated = await admin.from("motorist_calls").update(values).eq("id", current.id);
+      if (updated.error) fail("call update failed", updated.error);
+    }
     deps.callIds?.set(session.id, current.id);
     return;
   }
@@ -894,16 +918,21 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
     }
     case "recording_start": {
       if (!readMeta(ctx.session).recording?.policy.enabled) throw new EffectsError("recording policy proof unavailable");
-      let call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id).maybeSingle();
-      if (!call.error && !call.data) {
-        // Recording admission needs a real call identity, but updating an
-        // existing history row is only a projection and must not delay audio.
-        await upsertCallRow(deps, ctx.session, {});
-        call = await deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id).maybeSingle();
-      }
-      if (call.error || !call.data) throw new EffectsError("recording_admission_denied");
-      const admission = await deps.admin.rpc("motorist_recording_admit_session", { p_organization_id: deps.organizationId, p_session_id: ctx.session.id, p_call_id: call.data.id, p_max_per_hour: 10 });
-      if (admission.error || admission.data !== true) throw new EffectsError("recording_admission_denied");
+      await measureControlStage("recording.admission", async () => {
+        let callId: string | null;
+        try { callId = await callIdentity(deps, ctx.session); }
+        catch { throw new EffectsError("recording_admission_denied"); }
+        if (!callId) {
+          // Admission needs a durable identity; fresh authorization is still
+          // checked by the RPC for every START, including a resumed recorder.
+          await upsertCallRow(deps, ctx.session, {});
+          try { callId = await callIdentity(deps, ctx.session); }
+          catch { throw new EffectsError("recording_admission_denied"); }
+        }
+        if (!callId) throw new EffectsError("recording_admission_denied");
+        const admission = await deps.admin.rpc("motorist_recording_admit_session", { p_organization_id: deps.organizationId, p_session_id: ctx.session.id, p_call_id: callId, p_max_per_hour: 10 });
+        if (admission.error || admission.data !== true) throw new EffectsError("recording_admission_denied");
+      });
       await deps.renewLease?.();
       const recording = await telnyx.recordingStart({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, maxLength: command.maxLength,
         clientState: encodeClientState({ sid: ctx.session.id, role: "customer", intent: recordingIntent(command.recorderId) }) });
@@ -1769,16 +1798,18 @@ async function executeReduceResult(
   // write, the replay re-issues them and `prepare_v2` answers every one from
   // its recorded outcome — zero provider calls, same results.
   let banked = 0;
+  let nextValidity: { session: SessionRow; owner: Ownership } | null = null;
   const rememberCommand = (key: string) => {
     if (!input.continuation) return;
     if (!input.continuation.completedCommands.includes(key)) input.continuation.completedCommands.push(key);
     banked += 1;
   };
-  const writeCheckpoint = async () => {
-    if (!input.continuation || banked === 0) return;
+  const writeCheckpoint = async (): Promise<SessionRow | null> => {
+    if (!input.continuation || banked === 0) return null;
     banked = 0;
     ctx.session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, ctx.session);
     session = ctx.session;
+    return session;
   };
   const checkpointCommand = async (key: string) => {
     if (!input.continuation) return;
@@ -1787,6 +1818,11 @@ async function executeReduceResult(
   };
   const dispatchList = input.databaseOnly ? [] : commands;
   for (const [index, command] of dispatchList.entries()) {
+    // Only the preceding successful tail checkpoint can supply this one-use
+    // row. No await occurs between its RETURNING and the checks below. Skips,
+    // failures and uncheckpointed overlapping commands discard the proof.
+    const checkpointValidity = nextValidity;
+    nextValidity = null;
     const started = deps.now().getTime();
     let dbCountAtDispatch: number | null = null;
     const key = commandKey(command);
@@ -1795,7 +1831,10 @@ async function executeReduceResult(
     try {
       let validitySession: SessionRow | null = null;
       if (input.continuation) {
-        if (!providerReadCanReuseSession(ctx.session)) {
+        if (checkpointValidity && sessionOwnership.getStore() === checkpointValidity.owner) {
+          ctx.session = checkpointValidity.session;
+          validitySession = checkpointValidity.session;
+        } else if (!providerReadCanReuseSession(ctx.session)) {
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
           if (fresh.error) throw new EffectsError("effect validity read failed");
           ctx.session = fresh.data;
@@ -1902,20 +1941,22 @@ async function executeReduceResult(
         // Provider START/STOP has already succeeded. A concurrent bookkeeping
         // CAS must retry this acknowledgement, never report that capture became
         // unknown or execute the provider operation again.
-        for (let retry = 0; ; retry++) {
-          const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
-          if (latest.error || !latest.data) throw new EffectsError("recording state checkpoint unavailable");
-          ctx.session = latest.data;
-          const changed = recordingCommandOutcome(ctx.session, command, true, deps.now().toISOString(), false, false, typeof executed.detail?.providerRecordingId === "string" ? executed.detail.providerRecordingId : null);
-          const update = emptyTransition();
-          update.session.metadata = changed.metadata;
-          try {
-            session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
-            break;
-          } catch (error) {
-            if (!(error instanceof SessionConflictError) || retry >= 3) throw error;
+        await measureControlStage("recording.ack", async () => {
+          for (let retry = 0; ; retry++) {
+            const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
+            if (latest.error || !latest.data) throw new EffectsError("recording state checkpoint unavailable");
+            ctx.session = latest.data;
+            const changed = recordingCommandOutcome(ctx.session, command, true, deps.now().toISOString(), false, false, typeof executed.detail?.providerRecordingId === "string" ? executed.detail.providerRecordingId : null);
+            const update = emptyTransition();
+            update.session.metadata = changed.metadata;
+            try {
+              session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
+              break;
+            } catch (error) {
+              if (!(error instanceof SessionConflictError) || retry >= 3) throw error;
+            }
           }
-        }
+        });
         ctx.session = session;
         if (command.kind === "recording_start") {
           const pendingBeforeSettle = readMeta(session).recording?.pendingAudio;
@@ -1939,7 +1980,7 @@ async function executeReduceResult(
       if (!awaitingAudio && ["bridge", "conference_join", "conference_leave", "conference_hold", "conference_unhold", "recording_stop", "recording_start"].includes(command.kind)) {
         const provenConference = Boolean(readMeta(ctx.session).recording?.policy.conferenceVerified &&
           (["conference_join", "conference_unhold"].includes(command.kind) || command.kind === "bridge" && executed.detail?.conferenceId));
-        try { await observeParticipants(deps.admin, ctx.session, commandKey(command), deps.now().toISOString(), provenConference); }
+        try { await measureControlStage("participants", () => observeParticipants(deps.admin, ctx.session, commandKey(command), deps.now().toISOString(), provenConference, () => callIdentity(deps, ctx.session))); }
         catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "participant_observation_failed" }); }
       }
       outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: executed.skipped, bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: executed.detail });
@@ -1948,7 +1989,13 @@ async function executeReduceResult(
       // all of them. Any other branch below writes immediately, and so does
       // the end of the loop.
       const following = index + 1 < dispatchList.length ? commandKey(dispatchList[index + 1]) : null;
-      if (!following || !overlapped.has(following)) await writeCheckpoint();
+      if (!following || !overlapped.has(following)) {
+        const checkpointed = await writeCheckpoint();
+        const owner = sessionOwnership.getStore();
+        if (checkpointed?.writer_contract === 2 && owner?.contract === 2 && owner.admin === deps.admin &&
+          owner.organizationId === deps.organizationId && owner.sessionId === session.id &&
+          checkpointed.id === session.id && checkpointed.organization_id === deps.organizationId) nextValidity = { session: checkpointed, owner };
+      }
     } catch (error) {
       if (error instanceof SessionLeaseLostError) throw error;
       if (input.continuation && !providerExecuted && !TEARDOWN_KINDS.has(command.kind) && isTerminationBlocked(error)) {
@@ -2135,8 +2182,8 @@ async function executeReduceResult(
 
   if (deferProjections && !failure) {
     try {
-      session = await persistTransition(deps, { session: ctx.session, transition, expectedVersion: null, event: input.event,
-        continuation: input.continuation, phase: "projection" });
+      session = await measureControlStage("projection", () => persistTransition(deps, { session: ctx.session, transition, expectedVersion: null, event: input.event,
+        continuation: input.continuation, phase: "projection", deferCallProjectionCheckpoint: true }));
       ctx.session = session;
     } catch (error) {
       if (error instanceof SessionLeaseLostError) throw error;
@@ -2162,8 +2209,9 @@ async function executeReduceResult(
     }
     if (!failure && !projectionError && !input.continuation.auditComplete && input.continuation.commands.every((command) => input.continuation!.completedCommands.includes(commandKey(command)))) {
       try {
-        await recordCallEvent(deps, { session, event: input.continuation.event, handledStatus: "processed", stateBefore: input.continuation.stateBefore, stateAfter: session.state,
-          notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) });
+        const continuation = input.continuation;
+        await measureControlStage("audit", () => recordCallEvent(deps, { session, event: continuation.event, handledStatus: "processed", stateBefore: continuation.stateBefore, stateAfter: session.state,
+          notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) }));
         input.continuation.auditComplete = true;
       } catch (error) {
         if (!deferProjections || error instanceof SessionLeaseLostError) throw error;
@@ -2172,7 +2220,8 @@ async function executeReduceResult(
     }
     input.continuation.attempts += 1;
     input.continuation.lastError = projectionError ?? failure?.error ?? (continuationComplete(input.continuation) ? null : "mandatory effects pending");
-    session = await checkpointEffects(deps, session.id, continuationComplete(input.continuation) ? null : input.continuation, input.continuation.id, session);
+    const continuation = input.continuation;
+    session = await measureControlStage("finalize", () => checkpointEffects(deps, session.id, continuationComplete(continuation) ? null : continuation, continuation.id, session));
     if (!continuationComplete(input.continuation) && !failure && !projectionError) failure = { command: "continuation", error: "mandatory effects pending", callGone: false };
   }
 
@@ -2367,7 +2416,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
 
 export async function applyReduceResult(deps: EffectsDeps, input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number }): Promise<ApplyResult> {
   if (input.session.writer_contract !== 2 && !telephonyStabilityEnabled() && !hasStabilityContract(input.session)) return executeReduceResult(deps, input);
-  let staged = await stageEffects(deps, input);
+  let staged = await measureControlStage("staging", () => stageEffects(deps, input));
   const prepareFacts = input.event.kind === "telnyx" && readPendingEffects(staged).entries.length > 1;
   let urgentStamps: UrgentDispatchStamps | undefined;
   if (prepareFacts) {
