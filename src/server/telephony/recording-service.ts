@@ -162,7 +162,7 @@ export async function getCallRecordingDetail(admin: Admin, actor: MotoristActor,
     return result;
   }
   result.metrics = communicationMetrics(source);
-  result.gaps = source.gaps.map((g) => ({ startSeconds: g.start, endSeconds: g.end, reason: "Nezachytený úsek rozhovoru" }));
+  result.gaps = source.gaps.map((g) => ({ startSeconds: g.start, endSeconds: g.end, reason: "Úplnosť záznamu nie je overená" }));
   result.segments = rows.recordings.map((r, index) => ({ id: r.id, index,
     startSeconds: Math.max(0, ((dateMilliseconds(r.started_at) ?? (dateMilliseconds(call.started_at) ?? 0)) - (dateMilliseconds(call.started_at) ?? 0)) / 1000),
     durationSeconds: typeof jsonObject(r.participant_manifest).audioDurationSeconds === "number" ? Math.max(0, Number(jsonObject(r.participant_manifest).audioDurationSeconds))

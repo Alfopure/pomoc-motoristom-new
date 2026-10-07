@@ -21,6 +21,14 @@ export function playbackTarget(detail: Pick<CallRecordingDetail, "access" | "sta
   return segment ? { segment, offsetSeconds: seconds - segment.startSeconds } : null;
 }
 
+/** A stored file can be playable even when its coverage on the call timeline is unverified. */
+export function playbackSegmentTarget(detail: Pick<CallRecordingDetail, "access" | "state" | "segments">, segmentId: string) {
+  if (!canShowRecordingContent(detail)) return null;
+  const segment = detail.segments.find((item) => item.id === segmentId && item.canPlay && (item.state === "ready" || item.state === "partial")
+    && Number.isFinite(item.durationSeconds) && item.durationSeconds > 0);
+  return segment ? { segment, offsetSeconds: 0 } : null;
+}
+
 export function qualityPercent(value: number | null | undefined): string {
   return value == null || !Number.isFinite(value) || value < 0 || value > 1 ? "—" : `${Math.round(value * 100)} %`;
 }
