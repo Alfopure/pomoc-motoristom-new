@@ -6,6 +6,7 @@ import { DndContext, DragOverlay, KeyboardSensor, MeasuringStrategy, PointerSens
 import { CalendarDays, CheckCircle2, Clock3, GripVertical, RotateCcw, UserRoundCheck } from "lucide-react";
 import type { Operator } from "@/domain/types";
 import type { WorkspaceTask } from "@/domain/task-workspace";
+import { MOTORIST_TIME_ZONE } from "@/domain/time";
 import { isTaskOverdue, taskPriorityLabels } from "@/domain/tasks";
 import { taskWorkflowLabels, taskWorkflowState, type TaskWorkflowAction } from "@/domain/task-workflow";
 import { taskWorkflowCardActions, workflowActionLabels } from "./task-workflow-board";
@@ -56,7 +57,7 @@ export function TaskWorkspaceCard({ task, operators, selected, dirty, disabled, 
     <div className={styles.caseTags}>{task.caseLinks.length ? task.caseLinks.map(link => <span key={link.caseId}>{link.caseNumber}</span>) : <span>Samostatná úloha</span>}</div>
     <div className={styles.cardFooter}>
       <span className={styles.assignee}><span className={styles.avatar} aria-hidden="true">{operator ? operator.name.split(" ").filter(Boolean).slice(0, 2).map(part => part[0]).join("") : "—"}</span>{operator?.name ?? "Nepriradené"}</span>
-      <span className={isTaskOverdue(task, now) ? styles.overdueDate : styles.date}><Clock3 size={12} aria-hidden="true" />{task.dueAt && Number.isFinite(new Date(task.dueAt).getTime()) ? new Date(task.dueAt).toLocaleString("sk-SK", { day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit" }) : "Bez termínu"}</span>
+      <span className={isTaskOverdue(task, now) ? styles.overdueDate : styles.date}><Clock3 size={12} aria-hidden="true" />{task.dueAt && Number.isFinite(new Date(task.dueAt).getTime()) ? new Date(task.dueAt).toLocaleString("sk-SK", { day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit", timeZone: MOTORIST_TIME_ZONE }) : "Bez termínu"}</span>
     </div>
     {workflowEnabled && task.reviewerProfileId && <p className={styles.reviewerLine}><UserRoundCheck size={13} aria-hidden="true" /><span>{stage === "in_review" ? "Kontroluje" : "Kontrolór"}: <strong>{reviewer?.name ?? "Určený kolega"}</strong></span></p>}
     {workflowEnabled && task.reviewReturnReason && stage === "in_progress" && <p className={styles.returnedBadge}>Vrátené na dopracovanie · dôvod v detaile</p>}
