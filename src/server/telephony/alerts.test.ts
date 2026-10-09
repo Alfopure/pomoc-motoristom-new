@@ -176,6 +176,24 @@ describe("telephony alerts", () => {
     expect(jobs("first")[0].key).not.toBe(jobs("second")[0].key);
   });
 
+  it("does not resend the same failed event or open job across midnight, but reports new incidents", async () => {
+    const h = createTelephonyHarness({ now: "2026-10-06T21:59:00Z" });
+    const { send, sent } = mailbox();
+    const incidentReport = (eventId = "same-event", openedAt = "2026-10-06T21:48:32Z") => report([
+      { key: "ledger", status: "fail", detail: { failedIds: [eventId], failures: [{ eventId, kind: "processing_failure" }] } },
+      { key: "incidents", status: "fail", detail: { jobs: [{ job: "telephony.telnyx.commands", openedAt }] } },
+    ]);
+    await runTelephonyAlerts(alertDeps(h, { send, report: incidentReport() }));
+    h.advance(2 * 60_000); // Cross local midnight, like the historical cancellation mail.
+    expect(await runTelephonyAlerts(alertDeps(h, { send, report: incidentReport() }))).toMatchObject({ detail: { sent: 0, suppressed: 2 } });
+    await runTelephonyAlerts(alertDeps(h, { send, report: incidentReport("new-event", "2026-10-06T22:01:00Z") }));
+    expect(sent).toHaveLength(2);
+    expect(sent[1].text).toContain("new-event");
+    expect(sent[1].text).not.toContain("same-event");
+    const usage = report([{ key: "usage", status: "warn", detail: { legs: 90 } }], "warn");
+    expect(alertsFromReport(usage, "day-1")[0].key).not.toBe(alertsFromReport(usage, "day-2")[0].key);
+  });
+
   it("does not turn repaired connection history into a new failed-call alert", () => {
     const alerts = alertsFromReport(report([{ key: "connections", status: "fail", detail: { entries: [
       { sessionId: "pending", outcome: "pending" }, { sessionId: "repaired", outcome: "confirmed_after_failure" },
