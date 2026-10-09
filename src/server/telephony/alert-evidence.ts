@@ -74,6 +74,10 @@ function projectCall(session: Session, legs: Leg[], checks: string[]): AlertCall
   const operatorAt = legs.filter((leg) => ["operator", "external"].includes(leg.role)).map((leg) => iso(leg.bridged_at)).find(Boolean);
   const bridgeAt = customerAt && operatorAt ? (Date.parse(customerAt) > Date.parse(operatorAt) ? customerAt : operatorAt) : null;
   const pending = alertObject(recording.pendingAudio).commands;
+  // An ended session can still owe cleanup of a late accepted dial or a revoked
+  // offer. Future retry times are outstanding work too, not proof of completion.
+  // Cancellation tombstones survive completed cleanup; the retry marker, not
+  // the retained presence_cancellations map, identifies that obligation.
   return {
     sessionId: session.id, checks, state: session.state, direction: session.direction,
     caller: maskedNumber(session.caller_number), called: maskedNumber(session.called_number),
@@ -81,7 +85,9 @@ function projectCall(session: Session, legs: Leg[], checks: string[]): AlertCall
     confirmedAt: conferenceAt ?? bridgeAt,
     confirmationSource: conferenceAt ? "conference_membership" : bridgeAt ? "bridge_events" : null,
     pendingConnection: Array.isArray(pending) && pending.length > 0 || Object.keys(connection).length > 0 && !conferenceAt,
-    pendingWork: Boolean(session.pending_effects),
+    pendingWork: Boolean(session.pending_effects || session.effects_next_attempt_at ||
+      session.termination_next_attempt_at || session.cancellations_next_attempt_at ||
+      session.presence_pickup != null),
     legs: legs.map((leg) => ({ id: leg.id, role: leg.role, state: leg.state, answeredAt: iso(leg.answered_at),
       bridgedAt: iso(leg.bridged_at), endedAt: iso(leg.ended_at), hangupCause: leg.hangup_cause, hangupSource: leg.hangup_source ?? null })),
   };
@@ -137,7 +143,7 @@ export async function loadTelephonyAlertEvidence(deps: { admin: SupabaseClient<D
     if (!evidence.requestedSessionIds.length) return evidence;
     const [sessions, legs] = await Promise.all([
       deps.admin.from("motorist_call_sessions")
-        .select("id, state, direction, caller_number, called_number, started_at, answered_at, ended_at, metadata, pending_effects")
+        .select("id, state, direction, caller_number, called_number, started_at, answered_at, ended_at, metadata, pending_effects, effects_next_attempt_at, termination_next_attempt_at, cancellations_next_attempt_at, presence_pickup")
         .eq("organization_id", deps.organizationId).in("id", evidence.requestedSessionIds).limit(MAX_CALLS),
       deps.admin.from("motorist_call_legs")
         .select("id, session_id, role, state, answered_at, bridged_at, ended_at, hangup_cause, hangup_source")

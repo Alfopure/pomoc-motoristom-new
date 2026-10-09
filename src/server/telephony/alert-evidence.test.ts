@@ -93,6 +93,18 @@ describe("bounded relevant telephony alert evidence", () => {
     expect(evidence.events[0].failureKind).toBe("database_timeout");
   });
 
+  it("retains pending cleanup without exposing private details or confusing a completed tombstone with work", async () => {
+    const h = fixture();
+    h.db.update("motorist_call_sessions", { pending_effects: null, cancellations_next_attempt_at: NOW,
+      termination_next_attempt_at: null, presence_cancellations: { operator: { callControlId: "cleanup-secret" } } }, row => row.id === "call-1");
+    const evidence = await loadTelephonyAlertEvidence({ admin: h.admin, organizationId: ORG, alerts: [scoped("call-1")] });
+    expect(evidence.calls[0].pendingWork).toBe(true);
+    expect(JSON.stringify(evidence)).not.toContain("cleanup-secret");
+    h.db.update("motorist_call_sessions", { cancellations_next_attempt_at: null }, row => row.id === "call-1");
+    const completed = await loadTelephonyAlertEvidence({ admin: h.admin, organizationId: ORG, alerts: [scoped("call-1")] });
+    expect(completed.calls[0].pendingWork).toBe(false);
+  });
+
   it.each(["motorist_call_sessions", "motorist_call_legs"])("still sends the original alert if %s evidence cannot be read", async (table) => {
     const h = fixture();
     h.db.failNext(table, "select", "evidence unavailable");
