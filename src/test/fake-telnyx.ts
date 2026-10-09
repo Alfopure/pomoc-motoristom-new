@@ -3,6 +3,7 @@ import type {
   ConferenceResult,
   DialParams,
   DialResult,
+  RequestOptions,
   TelnyxClient,
   TelnyxLiveGate,
 } from "@/server/telephony/telnyx/client";
@@ -32,6 +33,15 @@ export const FAKE_TELNYX_ENV = {
 };
 
 export type FakeTelnyxCall = { method: string; params: Record<string, unknown> };
+type FakeCallStatus = { alive: boolean; known?: boolean; callLegId?: string | null; callSessionId?: string | null };
+type FakeExecuteOptions = {
+  journalled?: boolean;
+  raw?: boolean;
+  /** Exact generic-request wire body; internal identity is never sent in it. */
+  wire?: { path: string; body: string | undefined; journalCommandId: string | null };
+  onSend?: () => void;
+  observe?: RequestOptions["observe"];
+};
 
 export type PhysicalLeg = { id: string; to: string | null; answered: boolean; ended: boolean };
 export type PhysicalProvider = {
@@ -52,8 +62,9 @@ export type FakeTelnyx = {
   /** Commands of one kind (e.g. `dial`), most recent last. */
   of(method: string): FakeTelnyxCall[];
   failNext(method: string, error?: Error | string): void;
-  /** What `retrieveCall` reports for a leg (default: alive and known). */
-  setCallStatus(callControlId: string, verdict: { alive: boolean; known?: boolean }): void;
+  /** Overrides provider status/optional IDs; otherwise modelled physical state
+   * is used. Unmodelled IDs retain the legacy alive/known, raw-null default. */
+  setCallStatus(callControlId: string, verdict: FakeCallStatus): void;
   /** Exact single-page provider response, independent of webhook delivery. */
   setConferenceParticipants(conferenceId: string, rows: unknown[]): void;
   failAlways(method: string, error?: Error | string): void;
@@ -102,6 +113,11 @@ function wireRequest(method: string, params: Record<string, unknown>): { path: s
   const action = CALL_ACTIONS[method];
   if (!action) return null;
   const { callControlId, ...body } = rest;
+  if (method === "hangup") {
+    const { clientState, ...wireBody } = body;
+    return { path: `/calls/${encodeURIComponent(String(callControlId))}/actions/${action}`,
+      body: { ...wireBody, client_state: clientState ?? wireBody.client_state } };
+  }
   return { path: `/calls/${encodeURIComponent(String(callControlId))}/actions/${action}`, body };
 }
 
@@ -111,7 +127,8 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   const liveGate: TelnyxLiveGate = { callsEnabled: true, smsEnabled: true, ...(options.liveGate ?? {}) };
   const calls: FakeTelnyxCall[] = [];
   const oneShot = new Map<string, Error[]>();
-  const callStatuses = new Map<string, { alive: boolean; known?: boolean }>();
+  const callStatuses = new Map<string, FakeCallStatus>();
+  const callIdentities = new Map<string, { callLegId: string; callSessionId: string }>();
   const conferenceParticipants = new Map<string, Set<string>>();
   const conferenceParticipantSnapshots = new Map<string, unknown[]>();
   const conferenceParticipantFlags = new Map<string, { muted: boolean; on_hold: boolean; whisper_call_control_ids: string[] }>();
@@ -152,18 +169,21 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
    * is active, `prepare_v2` decides whether this command reaches the double at
    * all, and `result_v2` records what it answered.
    */
-  async function execute<T>(method: string, params: Record<string, unknown>, action: () => T, options?: { journalled?: boolean; raw?: boolean }): Promise<T> {
+  async function execute<T>(method: string, params: Record<string, unknown>, action: () => T, options?: FakeExecuteOptions): Promise<T> {
     const commandId = params.commandId ?? params.command_id;
-    const wire = options?.journalled ? null : wireRequest(method, params);
-    const journal = wire
-      ? journalRequest("POST", wire.path, typeof commandId === "string" ? commandId : null,
-          JSON.stringify(compactUndefined({ ...wire.body, command_id: commandId })))
+    const ordinaryWire = options?.wire ? null : wireRequest(method, params);
+    const wire = options?.wire ?? (ordinaryWire ? { path: ordinaryWire.path,
+      body: JSON.stringify(compactUndefined({ ...ordinaryWire.body, command_id: commandId })),
+      journalCommandId: typeof commandId === "string" ? commandId : null } : null);
+    const journal = wire && !options?.journalled
+      ? journalRequest("POST", wire.path, wire.journalCommandId, wire.body)
       : null;
 
     const outcome = await dispatchJournaled(
       journal,
       async () => {
         recordOnly(method, params);
+        options?.onSend?.();
         const injected = takeFailure(method);
         // A provider that answers 4xx has answered: the journal records the
         // refusal, and a replay of the same command gets it back rather than
@@ -172,15 +192,17 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
         // unknown outcome.
         if (injected) {
           if (injected instanceof TelnyxCommandError && injected.status >= 400) {
-            return { status: injected.status, result: { errors: [{ code: injected.code, detail: injected.message }] }, thrown: injected };
+            const sent = { status: injected.status, result: { errors: [{ code: injected.code, detail: injected.message }] }, thrown: injected };
+            options?.observe?.(sent);
+            return sent;
           }
           throw injected;
         }
 
-        const key = typeof commandId === "string" ? `${method}:${commandId}` : null;
-        if (key && accepted.has(key)) return { status: 200, result: accepted.get(key) as T };
-        const result = action();
-        if (key) accepted.set(key, result);
+        const key = typeof commandId === "string" ? `${method}:${wire?.path ?? ""}:${commandId}` : null;
+        const repeated = Boolean(key && accepted.has(key));
+        const result = repeated ? accepted.get(key!) as T : action();
+        if (key && !repeated) accepted.set(key, result);
         const lost = lostResponses.get(method) ?? 0;
         if (lost > 0) {
           lostResponses.set(method, lost - 1);
@@ -188,7 +210,9 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
           // the next attempt has to ask rather than assume.
           throw new TelnyxCommandError({ code: "timeout", status: 504, retryable: true, detail: "Provider executed command; response lost", commandId: typeof commandId === "string" ? commandId : null });
         }
-        return { status: 200, result };
+        const sent = { status: 200, result };
+        options?.observe?.(sent);
+        return sent;
       },
       {
         error: (status, body, replayedCommandId) => new TelnyxCommandError({
@@ -200,7 +224,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     );
 
     if (outcome.cached) return outcome.result as T;
-    if (outcome.sent.thrown && !options?.raw) throw outcome.sent.thrown;
+    if ("thrown" in outcome.sent && outcome.sent.thrown && !options?.raw) throw outcome.sent.thrown;
     return options?.raw ? (outcome.sent as unknown as T) : (outcome.sent.result as T);
   }
 
@@ -247,7 +271,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   async function actionOnce<T = void>(method: string, item: { callControlId: string; commandId: string; body: Record<string, unknown> }, options?: { journalled?: boolean; raw?: boolean }): Promise<T> {
     const params = { callControlId: item.callControlId, commandId: item.commandId, ...item.body };
     return execute(method, params, () => {
-      if (method === "hangup") physical.ended(item.callControlId);
+      if (method === "hangup") { physical.ended(item.callControlId); return { data: { result: "ok" } }; }
       if (method === "answer") physical.answered(item.callControlId);
       return undefined;
     }, options) as Promise<T>;
@@ -258,7 +282,9 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     return execute("dial", params as unknown as Record<string, unknown>, () => {
       const id = nextId("cc"); ensureLeg(id, Array.isArray(params.to) ? params.to[0] : params.to);
       if (params.bridgeOnAnswer && params.linkTo) armBridge(params.linkTo, id);
-      return { callControlId: id, callLegId: `leg-${id}`, callSessionId: params.linkTo ? `sess-of-${params.linkTo}` : `tsess-${id}`, isAlive: true };
+      const identity = { callLegId: `leg-${id}`, callSessionId: params.linkTo ? `sess-of-${params.linkTo}` : `tsess-${id}` };
+      callIdentities.set(id, identity);
+      return { callControlId: id, ...identity, isAlive: true };
     }, options) as Promise<T>;
   }
 
@@ -266,6 +292,23 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     config,
     liveGate,
     async request(method, path, requestOptions) {
+      const hangup = /^\/calls\/([^/]+)\/actions\/hangup$/.exec(path);
+      if (method === "POST" && hangup) {
+        const callControlId = decodeURIComponent(hangup[1]);
+        const commandId = requestOptions?.commandId;
+        // Mirror the real request builder, including its overwrite/removal of
+        // body.command_id. A recovery slot changes only the internal journal ID.
+        const payload = requestOptions?.body || commandId
+          ? compactUndefined({ ...(requestOptions?.body ?? {}), command_id: commandId }) : undefined;
+        return execute("hangup", { callControlId, commandId, journalCommandId: requestOptions?.journalCommandId,
+          ...(typeof payload?.client_state === "string" ? { clientState: payload.client_state } : {}), body: payload },
+        () => { physical.ended(callControlId); return { data: { result: "ok" } }; }, {
+          journalled: requestOptions?.skipJournal,
+          wire: { path, body: payload ? JSON.stringify(payload) : undefined, journalCommandId: requestOptions?.journalCommandId ?? commandId ?? null },
+          onSend: () => record("request", { method, path, ...(requestOptions ?? {}), body: payload }),
+          observe: requestOptions?.observe,
+        }) as never;
+      }
       record("request", { method, path, ...(requestOptions ?? {}) });
       const participants = /^\/conferences\/([^/]+)\/participants$/.exec(path);
       if (method === "GET" && participants) {
@@ -349,7 +392,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       await execute("answer", params, () => physical.answered(params.callControlId));
     },
     async hangup(params) {
-      await execute("hangup", params, () => physical.ended(params.callControlId));
+      await execute("hangup", params, () => { physical.ended(params.callControlId); return { data: { result: "ok" } }; });
     },
     async bridge(params) {
       await execute("bridge", params, () => armBridge(params.callControlId, params.targetCallControlId));
@@ -414,7 +457,15 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     async retrieveCall(callControlId: string) {
       record("retrieveCall", { callControlId });
       const verdict = callStatuses.get(callControlId);
-      return { callControlId, known: verdict?.known ?? true, alive: verdict?.alive ?? true, callSessionId: null, raw: verdict ? { is_alive: verdict.alive } : null };
+      const leg = physicalLegs.get(callControlId);
+      const identity = callIdentities.get(callControlId);
+      const known = verdict?.known ?? true;
+      const alive = verdict?.alive ?? (leg ? !leg.ended : true);
+      const callLegId = verdict?.callLegId === undefined ? identity?.callLegId : verdict.callLegId;
+      const callSessionId = verdict?.callSessionId === undefined ? identity?.callSessionId : verdict.callSessionId;
+      return { callControlId, known, alive, callSessionId: callSessionId ?? null,
+        raw: known && (verdict || leg) ? { call_control_id: callControlId, is_alive: alive,
+          ...(callLegId ? { call_leg_id: callLegId } : {}), ...(callSessionId ? { call_session_id: callSessionId } : {}) } : null };
     },
     async switchSupervisorRole(params) {
       await execute("switchSupervisorRole", { ...params }, () => undefined);
@@ -477,7 +528,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       calls.length = 0;
       physicalLegs.clear(); bridgePairs.clear(); conferenceParticipants.clear(); accepted.clear();
       conferenceParticipantSnapshots.clear(); conferenceParticipantFlags.clear();
-      callStatuses.clear();
+      callStatuses.clear(); callIdentities.clear();
       oneShot.clear();
       lostResponses.clear();
       always.clear();

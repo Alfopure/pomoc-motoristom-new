@@ -9,6 +9,7 @@ import { parseTelnyxEnvelope } from "./state/events";
 import { encodeClientState } from "./telnyx/client-state";
 import { createTelnyxClient } from "./telnyx/client";
 import { getTelnyxConfig } from "./telnyx/env";
+import { reconciledHangupEvent } from "./call-reconciliation";
 
 const dispatched = "2026-09-29T12:00:00.123456Z";
 const state = encodeClientState({ sid: "session", role: "customer", intent: contactOperationIntent("bridge-command") });
@@ -71,6 +72,33 @@ describe("exact provider event evidence", () => {
     expect(await sessionOwnership.run(h.owner, () => reconcileProviderEvent(h.admin, "session", event("call.recording.saved")))).toBe(0);
     expect(h.rpc).toHaveBeenCalledTimes(1);
     expect(await reconcileProviderEvent(h.admin, "session", event())).toBe(0);
+  });
+
+  it("settles each earlier exact-leg hangup while preserving each original dispatch tuple", async () => {
+    const first = command({ commandId: "original", path: "/calls/source/actions/hangup", payload: { command_id: "wire" } });
+    const second = { ...first, commandId: "retry-slot", fingerprint: "second-immutable", dispatchGeneration: 5, dispatchToken: "retry-token" };
+    const future = { ...first, commandId: "later", firstDispatchedAt: "2026-09-29T12:00:02Z" };
+    const foreign = { ...first, commandId: "foreign", path: "/calls/other/actions/hangup" };
+    const h = harness([first, second, future, foreign, command()]);
+    expect(await sessionOwnership.run(h.owner, () => reconcileProviderEvent(h.admin, "session", event("call.hangup")))).toBe(2);
+    const writes = h.rpc.mock.calls.filter(([name]) => name === "motorist_provider_command_result_v2");
+    expect(writes.map(([, args]) => [args.p_command_id, args.p_generation, args.p_token])).toEqual([["original", 1, "old-token"], ["retry-slot", 5, "retry-token"]]);
+    expect(writes[0][1].p_result).toMatchObject({ evidence: { source: "verified_webhook", eventId: "event", effectSatisfied: true } });
+  });
+
+  it("does not use a generic synthetic status event as exact provider evidence", async () => {
+    const h = harness([command({ path: "/calls/source/actions/hangup", payload: {} })]);
+    const at = new Date("2026-09-29T12:00:01Z");
+    expect(await sessionOwnership.run(h.owner, () => reconcileProviderEvent(h.admin, "session", reconciledHangupEvent("source", at, false)))).toBe(0);
+    expect(h.rpc).not.toHaveBeenCalled();
+    expect(await sessionOwnership.run(h.owner, () => reconcileProviderEvent(h.admin, "session", reconciledHangupEvent("source", at, true)))).toBe(0);
+    expect(h.rpc).not.toHaveBeenCalled();
+  });
+
+  it("counts only immutable result writes actually accepted by the database", async () => {
+    const h = harness([command({ path: "/calls/source/actions/hangup", payload: {} })]);
+    h.rpc.mockImplementation(async name => ({ data: name === "motorist_provider_pending_commands_v2" ? [command({ path: "/calls/source/actions/hangup", payload: {} })] : false, error: null }));
+    expect(await sessionOwnership.run(h.owner, () => reconcileProviderEvent(h.admin, "session", event("call.hangup")))).toBe(0);
   });
 
   it("verifies conference creator, exact ID and immutable name with one read", async () => {

@@ -7,7 +7,7 @@ import { RecordingControlActions } from "./CallRecordingControls";
 import { OperatorQualityCard } from "./OperatorQualityCard";
 import { RecordingPlayer, type RecordingSeek } from "./RecordingPlayer";
 import { TranscriptCorrectionEditor } from "./TranscriptCorrectionEditor";
-import { canShowRecordingContent, CONTENT_LABELS, playbackTarget, qualityPercent } from "./recording-presentation";
+import { canShowRecordingContent, CONTENT_LABELS, playbackSegmentTarget, playbackTarget, qualityPercent } from "./recording-presentation";
 import { recordingErrorMessage, recordingRequest } from "./recording-client";
 import { formatRecordingTime, RecordingLoading, RecordingMessage, RecordingSection, recordingButtonClass, recordingInputClass } from "./recording-ui";
 import { useRecordingResource } from "./use-recording-resource";
@@ -35,6 +35,12 @@ export function CallRecordingDetail({ callId }: { callId: string }) {
     if (!target) { setSeek(null); setSeekError("Tento čas nie je v dostupnej nahrávke. Text môže patriť do chýbajúceho alebo neprístupného úseku."); return; }
     setSeekError(null); setSeek((current) => ({ segmentId: target.segment.id, offsetSeconds: target.offsetSeconds, sequence: (current?.sequence ?? 0) + 1, play: true }));
   }
+  function selectSegment(segmentId: string) {
+    if (!detail) return;
+    const target = playbackSegmentTarget(detail, segmentId);
+    if (!target) { setSeek(null); setSeekError("Tento zvukový úsek už nie je dostupný. Obnovte detail hovoru."); return; }
+    setSeekError(null); setSeek((current) => ({ segmentId: target.segment.id, offsetSeconds: target.offsetSeconds, sequence: (current?.sequence ?? 0) + 1, play: true }));
+  }
   const evidenceSeek = (evidence: QualityEvidence) => seekTo(evidence.startSeconds, evidence.segmentId);
   return <div className="min-w-0 space-y-4" data-testid="call-recording-detail">
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold text-zinc-950">Záznam a kvalita hovoru</h2><button type="button" className={recordingButtonClass} onClick={resource.refresh} disabled={resource.loading}><RefreshCw size={14} />Obnoviť</button></div>
@@ -50,7 +56,7 @@ export function CallRecordingDetail({ callId }: { callId: string }) {
         {detail.access === "own_review" && <RecordingMessage>Máte prístup k svojmu hodnoteniu. Nahrávka a obsah zákazníckeho rozhovoru nie sú v tomto pohľade dostupné.</RecordingMessage>}
         {canShowRecordingContent(detail) && <>
           <RecordingControlActions detail={detail} onUpdated={resource.replace} />
-          <RecordingPlayer detail={detail} seek={seek} onSeek={seekTo} />
+          <RecordingPlayer detail={detail} seek={seek} onSelectSegment={selectSegment} />
           {seekError && <RecordingMessage error>{seekError}</RecordingMessage>}
           {detail.analysis && detail.analysis.status !== "failed" && <RecordingSection title="Čo sa v hovore riešilo" accessory={<span className="text-xs text-zinc-500">AI súhrn · overujte podľa záznamu</span>}>
             {detail.analysis.status === "stale" && <RecordingMessage>Podklady sa zmenili. Tento súhrn potrebuje nové spracovanie.</RecordingMessage>}

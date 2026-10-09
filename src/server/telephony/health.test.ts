@@ -16,6 +16,24 @@ function check(report: Awaited<ReturnType<typeof getTelephonyHealth>>, key: stri
   return found;
 }
 
+// Anonymized shape of the 9 October simultaneous customer/fallback hangups.
+// Provider rejection preceded the customer webhook; the cron read both ends.
+function endedFailure(error = "90018(422): This call is no longer active and can't receive commands.") {
+  const h = createTelephonyHarness({ now: "2026-10-09T13:40:30.000Z" });
+  const endedAt = "2026-10-09T13:40:02.000Z";
+  h.db.seed("motorist_call_sessions", [{ id: "ended-call", organization_id: ORG, state: "ended", direction: "inbound",
+    telnyx_session_id: "provider-session", started_at: "2026-10-09T13:36:00.000Z", ended_at: endedAt, pending_effects: null,
+    effects_next_attempt_at: null, termination_next_attempt_at: null, cancellations_next_attempt_at: null,
+    presence_cancellations: {}, presence_pickup: null, metadata: {} }]);
+  h.db.seed("motorist_call_legs", [
+    { id: "customer", organization_id: ORG, session_id: "ended-call", role: "customer", state: "ended", ended_at: endedAt, telnyx_call_control_id: "customer-control" },
+    { id: "fallback", organization_id: ORG, session_id: "ended-call", role: "external", state: "ended", ended_at: "2026-10-09T13:40:01.000Z", telnyx_call_control_id: "fallback-control" },
+  ]);
+  h.db.seed("motorist_telnyx_webhook_events", [{ event_id: "hangup-race", organization_id: ORG, event_type: "call.hangup", status: "failed",
+    error, received_at: "2026-10-09T13:40:01.000Z", call_control_id: "fallback-control", call_session_id: "provider-session" }]);
+  return h;
+}
+
 describe("telephony health", () => {
   it("reports a quiet but configured exchange as ok", async () => {
     const h = createTelephonyHarness();
@@ -182,6 +200,73 @@ describe("telephony health", () => {
     const report = await getTelephonyHealth(healthDeps(h));
     expect(check(report, "incidents")).toMatchObject({ status: "fail", detail: { open: 1 } });
   });
+
+  it("does not turn a rejected command after both ends hung up into an incident", async () => {
+    const h = endedFailure();
+    const report = await getTelephonyHealth(healthDeps(h));
+    expect(check(report, "ledger")).toMatchObject({ status: "ok", detail: { failed24h: 0, failedIds: [], resolvedCallEndFailures: 1 } });
+    // Raw history remains available to the existing replay; health only reads it.
+    expect(h.rows("motorist_telnyx_webhook_events")[0].status).toBe("failed");
+    expect(h.db.log.every(entry => entry.operation === "select")).toBe(true);
+  });
+
+  it.each([
+    "Error: motorist_provider_command_prepare_v2: AbortError: owned database request exceeded 4000 ms",
+    "90034(422): A different provider failure",
+    "Error: database response included 90018(422): in an unrelated message",
+  ])("keeps a real or unrecognized failure visible after caller cancellation: %s", async error => {
+    const h = endedFailure(error);
+    expect(check(await getTelephonyHealth(healthDeps(h)), "ledger")).toMatchObject({ status: "fail",
+      detail: { failedIds: ["hangup-race"], resolvedCallEndFailures: 0 } });
+  });
+
+  it.each([
+    ["late dial cleanup due", { termination_next_attempt_at: "2026-10-09T13:40:10.000Z" }],
+    ["late dial cleanup scheduled", { termination_next_attempt_at: "2026-10-09T13:41:00.000Z" }],
+    ["revoked offer cleanup scheduled", { cancellations_next_attempt_at: "2026-10-09T13:41:00.000Z" }],
+    ["effects retry marker", { effects_next_attempt_at: "2026-10-09T13:41:00.000Z" }],
+    ["pending pickup", { presence_pickup: { expiresAt: "2026-10-09T13:41:00.000Z" } }],
+  ])("keeps the rejected command visible on an ended session with %s", async (_name, pending) => {
+    const h = endedFailure();
+    h.db.update("motorist_call_sessions", pending, () => true);
+    const report = await getTelephonyHealth(healthDeps(h));
+    expect(check(report, "ledger")).toMatchObject({ status: "fail",
+      detail: { failedIds: ["hangup-race"], resolvedCallEndFailures: 0 } });
+    expect(h.rows("motorist_telnyx_webhook_events")[0].status).toBe("failed");
+  });
+
+  it("allows complete terminal evidence after a cancellation tombstone's cleanup is finished", async () => {
+    const h = endedFailure();
+    const tombstones = { revokedOffer: { profileId: PROFILES.o1, requestedAt: "2026-10-09T13:39:00.000Z", reason: "presence_changed" } };
+    h.db.update("motorist_call_sessions", { presence_cancellations: tombstones, cancellations_next_attempt_at: "2026-10-09T13:41:00.000Z" }, () => true);
+    expect(check(await getTelephonyHealth(healthDeps(h)), "ledger").status).toBe("fail");
+    // cancelRevokedOffers clears the schedule, retaining the tombstone so a
+    // late arriving leg cannot resurrect a revoked offer.
+    h.db.update("motorist_call_sessions", { cancellations_next_attempt_at: null }, () => true);
+    expect(check(await getTelephonyHealth(healthDeps(h)), "ledger")).toMatchObject({ status: "ok",
+      detail: { resolvedCallEndFailures: 1 } });
+    expect(h.rows("motorist_call_sessions")[0].presence_cancellations).toEqual(tombstones);
+  });
+
+  it.each(["live customer", "missing customer", "pending work", "pending connection", "future end", "ambiguous session", "missing correlation", "truncated legs", "failed lookup"])(
+    "does not dismiss a call-ended rejection with %s evidence", async scenario => {
+      const h = endedFailure();
+      if (scenario === "live customer") h.db.update("motorist_call_legs", { state: "answered", ended_at: null }, row => row.id === "customer");
+      if (scenario === "missing customer") h.db.update("motorist_call_legs", { role: "external" }, row => row.id === "customer");
+      if (scenario === "pending work") h.db.update("motorist_call_sessions", { pending_effects: { version: 1, entries: [{ id: "unfinished" }] } }, () => true);
+      if (scenario === "pending connection") h.db.update("motorist_call_sessions", { metadata: { recording: { pendingAudio: { commands: [{ kind: "bridge" }] } } } }, () => true);
+      if (scenario === "future end") h.db.update("motorist_call_legs", { ended_at: "2026-10-09T14:00:00.000Z" }, row => row.id === "customer");
+      if (scenario === "ambiguous session") {
+        h.db.seed("motorist_call_sessions", [{ id: "another-call", organization_id: ORG, state: "ended", telnyx_session_id: "different-provider-session" }]);
+        h.db.update("motorist_telnyx_webhook_events", { call_session_id: "different-provider-session" }, () => true);
+      }
+      if (scenario === "missing correlation") h.db.update("motorist_telnyx_webhook_events", { call_control_id: null, call_session_id: null }, () => true);
+      if (scenario === "truncated legs") h.db.seed("motorist_call_legs", Array.from({ length: 200 }, (_, i) => ({ id: `extra-${i}`, organization_id: ORG, session_id: "ended-call", state: "ended", ended_at: "2026-10-09T13:40:01.000Z", role: "operator" })));
+      if (scenario === "failed lookup") h.db.failNext("motorist_call_legs", "select", "read unavailable");
+      expect(check(await getTelephonyHealth(healthDeps(h)), "ledger")).toMatchObject({ status: "fail",
+        detail: { failedIds: ["hangup-race"], resolvedCallEndFailures: 0 } });
+    },
+  );
 
   it("warns before the daily leg cap and fails once it is reached", async () => {
     const h = createTelephonyHarness();

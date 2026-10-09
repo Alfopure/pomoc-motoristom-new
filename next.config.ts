@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 import { realpathSync } from "node:fs";
 import { relative } from "node:path";
-import { resolveAppEnvironment } from "./src/lib/app-environment";
+import { canUseMapsIntegration, resolveAppEnvironment } from "./src/lib/app-environment";
 import { appBuildMetadata } from "./scripts/app-release";
 
 const deploymentVersion = process.env.DEPLOYMENT_VERSION?.trim();
@@ -18,10 +18,14 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_DIAGNOSTICS_ENVIRONMENT: resolveAppEnvironment(),
     NEXT_PUBLIC_APP_RELEASE_CODE: release.code,
     NEXT_PUBLIC_APP_BUILT_AT: release.builtAt,
+    // Override automatic public-env inlining as well as blocking the server route.
+    NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY: canUseMapsIntegration()
+      ? process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY ?? "" : "",
   },
   generateBuildId: async () => deploymentVersion || "local",
   // Only the private artifact script enables maps, then removes them from public output.
   productionBrowserSourceMaps: process.env.DIAGNOSTICS_PRIVATE_SOURCE_MAPS === "1",
+  experimental: { serverSourceMaps: process.env.DIAGNOSTICS_PRIVATE_SOURCE_MAPS === "1" },
   poweredByHeader: false,
   serverExternalPackages: ["@sparticuz/chromium", "playwright-core"],
   outputFileTracingIncludes: {

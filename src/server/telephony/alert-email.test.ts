@@ -28,6 +28,15 @@ describe("Slovak telephony alert explanations", () => {
     expect(message.subject).not.toContain("Hovor bol spojený");
   });
 
+  it("states confirmed operator departure without asserting a network cause or audible outage", () => {
+    const message = render([alert("interruptions", { entries: [{ sessionId: "call-1", interruptedAt: NOW, classifiedAt: NOW }] })], [call({ confirmedAt: NOW, checks: ["interruptions"] })]);
+    expect(message.subject).toContain("Zaznamenané prerušenie účasti operátora");
+    expect(message.text).toContain("Predtým spojená vetva operátora skončila a zákazník zostal na linke");
+    expect(message.text).toContain("Príčina prerušenia ani kvalita zvuku nie sú");
+    expect(message.text).toContain("Dôkazy znovu posúdené:");
+    expect(message.subject).not.toContain("Hovor bol spojený;");
+  });
+
   it("puts verified bridge evidence first and explains cancelled parallel ringing", () => {
     const message = render([alert("ledger", { failed24h: 1 })], [call({ checks: ["ledger"], confirmedAt: NOW, confirmationSource: "bridge_events", legs: [
       { id: "loser", role: "external", state: "ended", answeredAt: null, bridgedAt: null, endedAt: NOW, hangupCause: "originator_cancel" },
@@ -53,6 +62,31 @@ describe("Slovak telephony alert explanations", () => {
     const message = render([alert("connections", { entries: [{ sessionId: "call-1", outcome: "ended_without_confirmation" }] })], [call({ endedAt: NOW, state: "ended" })]);
     expect(message.text).toContain("Hovor je ukončený");
     expect(message.text).toContain("chýbajúci záznam nie je dôkaz, že sa nikdy nespojil");
+  });
+
+  it("states caller cancellation separately from the earlier database timeout", () => {
+    const cancelled = call({ state: "ended", endedAt: NOW, answeredAt: null, checks: ["ledger"], legs: [
+      { id: "customer", role: "customer", state: "ended", endedAt: NOW, answeredAt: NOW, bridgedAt: null,
+        hangupCause: "normal_clearing", hangupSource: "caller" },
+    ] });
+    const message = renderTelephonyAlertEmail({ alerts: [alert("ledger", { failedIds: ["timeout"] })], report, environment: "production",
+      evidence: { ...emptyAlertEvidence(), calls: [cancelled], events: [{ eventId: "timeout", type: "call.answered", receivedAt: NOW,
+        sessionIds: [cancelled.sessionId], failureKind: "database_timeout" }] } });
+    expect(message.subject).toContain("Volajúci zavesil; technická chyba potrebuje kontrolu");
+    for (const output of [message.text, message.html]) {
+      expect(output).toContain("Dôvod zavesenia zo záznamov nevieme určiť");
+      expect(output).toContain("vypršal časový limit databázového kroku");
+      expect(output).not.toContain("Hovor bol spojený;");
+    }
+  });
+
+  it.each([null, "callee"])("does not attribute normal clearing to the caller with source %s", hangupSource => {
+    const message = render([alert("ledger")], [call({ state: "ended", endedAt: NOW, answeredAt: null, checks: ["ledger"], legs: [
+      { id: "customer", role: "customer", state: "ended", endedAt: NOW, answeredAt: NOW, bridgedAt: null,
+        hangupCause: "normal_clearing", hangupSource },
+    ] })]);
+    expect(message.subject).toContain("Spojenie hovoru nevieme potvrdiť");
+    expect(message.text).not.toContain("Volajúci ukončil hovor pred");
   });
 
   it("does not let historical connection confirmation hide a later failed transfer", () => {

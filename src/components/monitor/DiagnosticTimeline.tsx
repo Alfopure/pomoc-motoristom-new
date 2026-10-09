@@ -4,15 +4,19 @@ import { useState } from "react";
 import type { DiagnosticStoredEvent, DiagnosticTimeline } from "@/lib/diagnostics/types";
 import type { RoutingDiagnostic } from "@/lib/diagnostics/routing";
 import { isDiagnosticUuid } from "@/lib/diagnostics/types";
+import { voiceQualityWarning } from "@/lib/diagnostics/voice-quality";
 import { eventLabels, latency, operationLabels, outcomeLabels, timestamp } from "./monitor-model";
 import { useMonitorResource } from "./useMonitorResource";
 
 export function DiagnosticEvents({ events }: { events: DiagnosticStoredEvent[] }) {
   if (!events.length) return <p className="py-3 text-sm text-zinc-500">V tomto období nie sú dostupné udalosti. Chýbajúci záznam nevylučuje problém.</p>;
-  return <ol className="divide-y divide-zinc-100" aria-label="Časová os udalostí">{events.map(event => <li key={event.id} className="grid gap-1 py-3 text-xs sm:grid-cols-[125px_1fr]">
+  return <ol className="divide-y divide-zinc-100" aria-label="Časová os udalostí">{events.map(event => {
+    const quality = voiceQualityWarning(event.sdkWarningCode);
+    return <li key={event.id} className="grid gap-1 py-3 text-xs sm:grid-cols-[125px_1fr]">
     <div><time className="font-medium text-zinc-700" dateTime={event.occurredAt}>{timestamp(event.occurredAt)}</time><p className="mt-1 text-zinc-500">{event.source === "browser" ? "Prehliadač" : event.source === "server" ? "Server" : "Plánovaná úloha"}</p></div>
     <div className="min-w-0"><p className="font-semibold text-zinc-900">{event.operation ? operationLabels[event.operation] : eventLabels[event.type]} <span className="font-normal text-zinc-500">· {outcomeLabels[event.outcome]}</span></p>
-      <p className="mt-1 text-zinc-600">{event.reason && <span>{event.reason} · </span>}{event.errorClass && <span>{event.errorClass} · </span>}{event.durationMs !== undefined && <span>{latency(event.durationMs)} · </span>}Verzia {event.buildId}</p>
+      <p className="mt-1 text-zinc-600">{quality ? <span>{quality.label} · SDK {quality.code} · </span> : event.reason && <span>{event.reason} · </span>}{event.errorClass && <span>{event.errorClass} · </span>}{event.durationMs !== undefined && <span>{latency(event.durationMs)} · </span>}Verzia {event.buildId}</p>
+      {quality && <p className="mt-1 text-zinc-500">Pozorovanie telefónu; samo nepotvrdzuje výpadok ani príčinu. {quality.silence ? "Ticho môže byť zámerné. " : ""}Počuteľnosť oboma smermi treba overiť pri hovore.</p>}
       <details className="mt-1 text-zinc-500"><summary className="w-fit cursor-pointer">Súvislosti udalosti</summary><dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 break-all">
         <dt>Prijaté serverom</dt><dd>{timestamp(event.receivedAt)}</dd><dt>ID udalosti</dt><dd>{event.id}</dd><dt>Stránka / poradie</dt><dd>{event.pageId} / {event.sequence}</dd>
         <dt>Verzia servera pri prijatí</dt><dd>{event.serverBuild}</dd>
@@ -20,7 +24,8 @@ export function DiagnosticEvents({ events }: { events: DiagnosticStoredEvent[] }
         {event.requestId && <><dt>Požiadavka</dt><dd>{event.requestId}</dd></>}{event.operationId && <><dt>Úkon</dt><dd>{event.operationId}</dd></>}{event.deviceSessionId && <><dt>Relácia zariadenia</dt><dd>{event.deviceSessionId}</dd></>}
       </dl></details>
     </div>
-  </li>)}</ol>;
+  </li>;
+  })}</ol>;
 }
 
 const routingReasons: Record<string, string> = {

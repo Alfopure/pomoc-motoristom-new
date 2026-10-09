@@ -33,9 +33,10 @@ import {
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import { type IncomingOfferPolicy, type WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 import { callControlRetryPolicy, retryUnstartedCallControl } from "@/lib/telephony/call-control-retry";
+import { hangupSnapshotConfirmsEnd, type HangupSnapshotScope } from "@/lib/telephony/hangup-confirmation";
 import { BrowserReconciliationGate } from "@/lib/telephony/browser-reconciliation";
 import { CoordinatedWebphone } from "@/lib/telephony/coordinated-webphone";
-import { logWebphoneDiagnostic } from "@/lib/telephony/diagnostics";
+import { correlateWebphoneDiagnostic, logWebphoneDiagnostic } from "@/lib/telephony/diagnostics";
 import { recordDiagnostic, setDiagnosticCallContext, retainDiagnosticCallContext } from "@/lib/diagnostics/client";
 import { isMobileApp } from "@/lib/telephony/phone-platform";
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "@/lib/telephony/webphone-model";
@@ -130,6 +131,14 @@ type PresenceResponse = {
   own?: { status?: string } | null;
 };
 
+type CallCommand = { key: string; sessionId: string };
+type PendingHangup = HangupSnapshotScope & {
+  command: CallCommand;
+  endingBrowserLegId: string | null;
+  confirmBrowserEnded: () => void;
+  awaitingConfirmation: boolean;
+};
+
 function toPhonePauseReasons(reasons: NonNullable<PresenceResponse["pauseReasons"]>): PhonePauseReason[] {
   return reasons.map((reason) => ({ id: reason.id, code: reason.code, label: reason.label, maxMinutes: reason.max_minutes }));
 }
@@ -146,7 +155,12 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const [busyAction, setBusyAction] = useState<string | null>(null);
   // Ref ownership closes the gap before React renders; ending a call may
   // replace another pending command without its late result clearing the UI.
-  const busyCommandRef = useRef<{ key: string; sessionId: string } | null>(null);
+  const busyCommandRef = useRef<CallCommand | null>(null);
+  const snapshotRequestRef = useRef(0);
+  const pendingHangupRef = useRef<PendingHangup | null>(null);
+  // Hangup's progress/error belongs to one session and must not erase a later
+  // presence, media or new-call error when its delayed response arrives.
+  const [hangupNotice, setHangupNotice] = useState<{ command: CallCommand; message: string } | null>(null);
   const [outboundRequestCount, setOutboundRequestCount] = useState(0);
   const [readiness, setReadiness] = useState<PhoneReadiness>({ status: "idle", message: null });
   const [answerRequestCallId, setAnswerRequestCallId] = useState<string | null>(null);
@@ -176,8 +190,22 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   // topic is keyed on it, so the channel opens only after that answer.
   const organizationId = snapshot.organizationId;
 
-  useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
-  useEffect(() => () => { busyCommandRef.current = null; setBusyAction(null); }, [enabled, profileId]);
+  useEffect(() => () => {
+    busyCommandRef.current = null;
+    pendingHangupRef.current = null;
+    endingBrowserLegsRef.current.clear();
+    setBusyAction(null);
+    setHangupNotice(null);
+  }, [enabled, profileId]);
+
+  const finishPendingHangup = useCallback((pending: PendingHangup) => {
+    if (pendingHangupRef.current !== pending) return;
+    pendingHangupRef.current = null;
+    if (pending.endingBrowserLegId) endingBrowserLegsRef.current.delete(pending.endingBrowserLegId);
+    if (busyCommandRef.current === pending.command) { busyCommandRef.current = null; setBusyAction(null); }
+    setHangupNotice((current) => current?.command === pending.command ? null : current);
+    pending.confirmBrowserEnded();
+  }, []);
 
   const reconcileBrowserLeg = useCallback((sessionId: string, callControlId: string) => {
     // Control commands have priority. Missing media is only a hint, and a
@@ -211,9 +239,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   useEffect(() => {
     if (!enabled || !organizationId || !profileId) return;
     const webphone = new CoordinatedWebphone({ scope: `${organizationId}:${profileId}`, mobile: isMobileApp(), logger: (entry) => {
-      const controlId = webphoneRef.current?.getSnapshot().call?.telnyxCallControlId;
-      const sessionId = entry.callSessionId ?? snapshotRef.current.calls.find(call => call.legs.some(leg => leg.callControlId === controlId))?.sessionId;
-      logWebphoneDiagnostic({ ...entry, callSessionId: sessionId });
+      const correlated = correlateWebphoneDiagnostic(entry, webphoneRef.current?.getSnapshot().call, snapshotRef.current.calls);
+      if (correlated) logWebphoneDiagnostic(correlated);
     } });
     webphoneRef.current = webphone;
     webphone.setIncomingOfferPolicy(incomingPolicyRef.current);
@@ -375,6 +402,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         return;
       }
       inFlight = true;
+      const snapshotRequest = ++snapshotRequestRef.current;
       try {
         const presenceGeneration = presenceGenerationRef.current;
         const result = await telephonyJson<ActiveCallsPayload & { error?: string }>("/api/telephony/calls/active", {
@@ -386,7 +414,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           setConfigured(false);
           return;
         }
-        if (!result.ok || !result.body || !Array.isArray(result.body.calls)) {
+        if (!result.ok || !result.body || !Array.isArray(result.body.calls) || !Array.isArray(result.body.waiting)) {
           failures += 1;
           // A transient failure, including a busy 503, retains the last snapshot
           // and keeps call controls and recovery polling available.
@@ -404,7 +432,10 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             ? [{ callControlId: leg.callControlId, sessionId: call.sessionId }] : []));
         incomingPolicyRef.current = { presenceRevision: own?.presenceRevision, automaticAllowed: own?.automaticOffersAllowed ?? (own?.status === "available" || own?.status === "ringing"), explicitLegs };
         webphoneRef.current?.setIncomingOfferPolicy(incomingPolicyRef.current);
+        snapshotRef.current = result.body;
         setSnapshot(result.body);
+        const pendingHangup = pendingHangupRef.current;
+        if (pendingHangup && hangupSnapshotConfirmsEnd(pendingHangup, result.body, snapshotRequest)) finishPendingHangup(pendingHangup);
         const currentLegIds = new Set([...result.body.calls, ...result.body.waiting].flatMap((call) => call.legs.map((leg) => leg.callControlId)));
         setReconciliationNotice((current) => current && !currentLegIds.has(current.legId) ? null : current);
         const browser = webphoneRef.current?.getSnapshot();
@@ -471,7 +502,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       document.removeEventListener("visibilitychange", onVisible);
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     };
-  }, [configured, enabled, reconcileBrowserLeg]);
+  }, [configured, enabled, finishPendingHangup, reconcileBrowserLeg]);
 
   // --- realtime --------------------------------------------------------------
 
@@ -617,6 +648,15 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         [...snapshotRef.current.calls, ...snapshotRef.current.waiting].some((call) => call.sessionId === sessionId &&
           call.legs.some((leg) => leg.profileId === snapshotRef.current.actorProfileId && leg.callControlId === browserCall.telnyxCallControlId))
         ? browserCall.telnyxCallControlId : null;
+      const pendingHangup: PendingHangup | null = action === "hangup" ? {
+        command, sessionId, organizationId: snapshotRef.current.organizationId, actorProfileId: snapshotRef.current.actorProfileId,
+        afterSnapshotRequest: snapshotRequestRef.current, endingBrowserLegId,
+        confirmBrowserEnded: confirmEndedBrowserCall, awaitingConfirmation: false,
+      } : null;
+      if (pendingHangup) {
+        pendingHangupRef.current = pendingHangup;
+        setHangupNotice({ command, message: "Ukončuje sa…" });
+      }
       if (endingBrowserLegId) {
         recordDiagnostic({ type: "phone_lifecycle", module: "telephony", outcome: "ok", reason: "hangup_requested", callSessionId: sessionId,
           deviceSessionId: browser?.getSnapshot().deviceSessionId ?? undefined });
@@ -628,7 +668,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       try {
         const execute = async (webphone = webphoneRef.current) => {
           if (busyCommandRef.current !== command) return;
-          const send = () => telephonyJson<{ error?: string; code?: string; retryAfterMs?: number; operatorLegCallControlId?: string }>(
+          const send = () => telephonyJson<{ error?: string; code?: string; retryAfterMs?: number; operatorLegCallControlId?: string; terminationPending?: boolean }>(
             `/api/telephony/calls/${encodeURIComponent(sessionId)}/${action}`,
             {
               method: "POST",
@@ -636,22 +676,25 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
               body: requestBody,
               label: PHONE_ACTION_LABEL_FOR_REQUEST[action],
               timeoutMs: TELEPHONY_TIMEOUT_MS.control,
-              onSlow: () => { if (busyCommandRef.current === command) setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova."); },
+              onSlow: () => {
+                if (busyCommandRef.current !== command) return;
+                if (pendingHangup) setHangupNotice({ command, message: "Ukončuje sa…" });
+                else setNotice("Operácia ešte nie je potvrdená. Overujeme stav hovoru; neposielajte ju znova.");
+              },
             },
           );
-          let progressShown = false;
           const result = await retryUnstartedCallControl({
             request: send,
             ...callControlRetryPolicy(action),
             onRetry: () => {
               // The server proved the call is owned by another handler and the
               // click will be replayed; say so instead of leaving the bar silent.
-              if (action === "hangup" && busyCommandRef.current === command) { progressShown = true; setNotice("Ukončuje sa…"); }
+              if (action === "hangup" && busyCommandRef.current === command) setHangupNotice({ command, message: "Ukončuje sa…" });
             },
             isCurrent: () => {
               const currentCall = browser?.getSnapshot().call;
               return busyCommandRef.current === command && browser === webphoneRef.current &&
-                (action === "pickup" || (!browserCall ? !currentCall : currentCall?.id === browserCall.id || (action === "hangup" && !currentCall)));
+                (action === "pickup" || action === "hangup" || (!browserCall ? !currentCall : currentCall?.id === browserCall.id));
             },
             canRetry: () => [...snapshotRef.current.calls, ...snapshotRef.current.waiting].some((call) => call.sessionId === sessionId),
           });
@@ -665,7 +708,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             // A hangup webhook can trail the caller by a few seconds. An action
             // against that finished call must not poison the next call's status.
             if (result.status === 409 && (result.body?.code === "call_gone" || result.body?.code === "not_active")) {
-              confirmEndedBrowserCall();
+              if (pendingHangup) finishPendingHangup(pendingHangup);
+              else confirmEndedBrowserCall();
               refreshRef.current?.();
               return;
             }
@@ -677,8 +721,18 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             }
             throw new Error(result.body?.error ?? PHONE_ACTION_ERRORS[action]);
           }
-          if (action === "hangup") confirmEndedBrowserCall();
-          if (progressShown && busyCommandRef.current === command) setNotice(null);
+          if (pendingHangup) {
+            if (result.status === 202 || result.body?.terminationPending === true) {
+              // The server accepted durable intent; it did not confirm the end.
+              // Keep ownership and suppress competing local-BYE reconciliation
+              // until a subsequent successful active-calls read retires this UI.
+              pendingHangup.awaitingConfirmation = true;
+              setHangupNotice({ command, message: "Ukončuje sa…" });
+              refreshRef.current?.();
+              return;
+            }
+            finishPendingHangup(pendingHangup);
+          }
           // A pickup dials this operator's own leg server-side: remember its
           // call-control id so the browser answers exactly that invite.
           if (result.body?.operatorLegCallControlId && webphone === webphoneRef.current) {
@@ -697,13 +751,24 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         if (action === "pickup") await startOutboundRequest(execute, undefined, () => busyCommandRef.current === command);
         else await execute();
       } catch (error) {
-        if (busyCommandRef.current === command) setNotice(error instanceof Error ? error.message : PHONE_ACTION_ERRORS[action]);
+        if (busyCommandRef.current === command) {
+          const message = error instanceof Error ? error.message : PHONE_ACTION_ERRORS[action];
+          if (pendingHangup) setHangupNotice({ command, message });
+          else setNotice(message);
+        }
       } finally {
-        if (endingBrowserLegId) { endingBrowserLegsRef.current.delete(endingBrowserLegId); refreshRef.current?.(); }
-        if (busyCommandRef.current === command) { busyCommandRef.current = null; setBusyAction(null); }
+        const awaitingConfirmation = pendingHangupRef.current === pendingHangup && pendingHangup?.awaitingConfirmation;
+        if (!awaitingConfirmation) {
+          if (endingBrowserLegId && (!pendingHangupRef.current || pendingHangupRef.current === pendingHangup || pendingHangupRef.current.endingBrowserLegId !== endingBrowserLegId)) {
+            endingBrowserLegsRef.current.delete(endingBrowserLegId);
+          }
+          if (busyCommandRef.current === command) { busyCommandRef.current = null; setBusyAction(null); }
+        }
+        // Errors also refresh: retained state or local BYE is no proof of end.
+        if (pendingHangup || endingBrowserLegId) refreshRef.current?.();
       }
     },
-    [startOutboundRequest],
+    [finishPendingHangup, startOutboundRequest],
   );
 
   /**
@@ -1060,6 +1125,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const resumeAudio = useCallback(() => void webphoneRef.current?.resumeAudio(), []);
   const dismissNotice = useCallback(() => {
     setNotice(null);
+    setHangupNotice(null);
     setReconciliationNotice(null);
     webphoneRef.current?.dismissCallError();
   }, []);
@@ -1078,7 +1144,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     readiness,
     preparePhone,
     resumeAudio,
-    notice: notice ?? phone.callError ?? reconciliationNotice?.message ?? null,
+    notice: notice ?? hangupNotice?.message ?? phone.callError ?? reconciliationNotice?.message ?? null,
     degradedSessionIds: degraded,
     liveCalls,
     waitingCalls,

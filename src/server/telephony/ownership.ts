@@ -90,9 +90,13 @@ export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: Re
   }
   if (!owner) {
     const cap = unownedReadCap(input, init);
-    if (!cap) return measureRequestStep("db", () => fetch(input, { ...init, headers }));
+    if (!cap) {
+      const detach = observeDatabaseTimeout(init?.signal ?? (input instanceof Request ? input.signal : undefined));
+      try { return await measureRequestStep("db", () => fetch(input, { ...init, headers })); }
+      finally { detach(); }
+    }
     const signal = init?.signal ? AbortSignal.any([init.signal, cap]) : cap;
-    const detach = observeDatabaseTimeout(cap);
+    const detach = observeDatabaseTimeout(signal);
     try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal })
       .catch(error => abortInsteadOfTimeout(error, `un-owned read exceeded ${UNOWNED_READ_MS} ms`))); }
     finally { detach(); }
@@ -105,8 +109,9 @@ export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: Re
   const remaining = owner.deadline - Date.now();
   if (remaining <= 0) throw new SessionLeaseLostError();
   const timeout = AbortSignal.timeout(Math.max(1, Math.min(DATABASE_REQUEST_MS, remaining)));
-  const detach = observeDatabaseTimeout(timeout);
-  try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout })
+  const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+  const detach = observeDatabaseTimeout(signal);
+  try { return await measureRequestStep("db", () => fetch(input, { ...init, headers, signal })
     .catch(error => abortInsteadOfTimeout(error, `owned database request exceeded ${Math.min(DATABASE_REQUEST_MS, remaining)} ms`))); }
   finally { detach(); }
 }

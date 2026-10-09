@@ -147,12 +147,51 @@ describe("telephony alerts", () => {
     expect(sent[1].text).not.toContain("call-1");
   });
 
+  it("sends confirmed interruption once per incident/leg across midnight and keeps another departure separate", async () => {
+    const h = createTelephonyHarness();
+    const { send, sent } = mailbox();
+    const entry = { incidentId: "incident-1", sessionId: "call-1", legId: "leg-1", environment: "test", classification: "interruption_observed" };
+    const interrupted = (entries = [entry]) => report([{ key: "interruptions", status: "fail", detail: { environment: "test", entries } }]);
+    expect(alertsFromReport(interrupted(), "day-1")[0].key).toBe(alertsFromReport(interrupted(), "day-2")[0].key);
+    await runTelephonyAlerts(alertDeps(h, { send, report: interrupted() }));
+    h.advance(24 * 60 * 60_000);
+    expect(await runTelephonyAlerts(alertDeps(h, { send, report: interrupted() }))).toMatchObject({ detail: { sent: 0, suppressed: 1 } });
+    await runTelephonyAlerts(alertDeps(h, { send, report: interrupted([{ ...entry, incidentId: "incident-2", legId: "leg-2" }]) }));
+    expect(sent).toHaveLength(2);
+  });
+
+  it("never emails candidate, foreign-environment or unavailable interruption evidence", () => {
+    const valid = { incidentId: "incident", sessionId: "session", legId: "leg", environment: "test", classification: "interruption_observed" };
+    for (const entry of [{ ...valid, classification: "candidate" }, { ...valid, environment: "production" }, { ...valid, legId: null }]) {
+      expect(alertsFromReport(report([{ key: "interruptions", status: "fail", detail: { environment: "test", entries: [entry] } }]), "today")).toEqual([]);
+    }
+    expect(alertsFromReport(report([{ key: "interruptions", status: "warn", detail: { error: "interruption_evidence_unavailable" } }]), "today")).toEqual([]);
+  });
+
   it("scopes ledger events and new incident openings independently", () => {
     const events = alertsFromReport(report([{ key: "ledger", status: "fail", detail: { failedIds: ["e1", "e2"] } }]), "today");
     expect(events).toHaveLength(2);
     expect(events[0].key).not.toBe(events[1].key);
     const jobs = (openedAt: string) => alertsFromReport(report([{ key: "incidents", status: "fail", detail: { jobs: [{ job: "reconcile", openedAt }] } }]), "today");
     expect(jobs("first")[0].key).not.toBe(jobs("second")[0].key);
+  });
+
+  it("does not resend the same failed event or open job across midnight, but reports new incidents", async () => {
+    const h = createTelephonyHarness({ now: "2026-10-06T21:59:00Z" });
+    const { send, sent } = mailbox();
+    const incidentReport = (eventId = "same-event", openedAt = "2026-10-06T21:48:32Z") => report([
+      { key: "ledger", status: "fail", detail: { failedIds: [eventId], failures: [{ eventId, kind: "processing_failure" }] } },
+      { key: "incidents", status: "fail", detail: { jobs: [{ job: "telephony.telnyx.commands", openedAt }] } },
+    ]);
+    await runTelephonyAlerts(alertDeps(h, { send, report: incidentReport() }));
+    h.advance(2 * 60_000); // Cross local midnight, like the historical cancellation mail.
+    expect(await runTelephonyAlerts(alertDeps(h, { send, report: incidentReport() }))).toMatchObject({ detail: { sent: 0, suppressed: 2 } });
+    await runTelephonyAlerts(alertDeps(h, { send, report: incidentReport("new-event", "2026-10-06T22:01:00Z") }));
+    expect(sent).toHaveLength(2);
+    expect(sent[1].text).toContain("new-event");
+    expect(sent[1].text).not.toContain("same-event");
+    const usage = report([{ key: "usage", status: "warn", detail: { legs: 90 } }], "warn");
+    expect(alertsFromReport(usage, "day-1")[0].key).not.toBe(alertsFromReport(usage, "day-2")[0].key);
   });
 
   it("does not turn repaired connection history into a new failed-call alert", () => {

@@ -7,6 +7,7 @@ vi.mock("@/server/api-auth", async original => ({
 }));
 import { MutationError } from "@/server/motorist-mutations";
 import { POST } from "./route";
+import { TEST_APP_ORIGIN, TEST_SUPABASE_REF, TEST_VERCEL_PROJECT_ID } from "@/lib/app-environment";
 
 const origin = { lat: 48.1486, lng: 17.1077 };
 const destination = { lat: 50.0755, lng: 14.4378 };
@@ -72,6 +73,24 @@ it.each([401, 403])("preserves access denial (%s)", async status => {
 
 it("reports unavailable configuration without requesting a route", async () => {
   vi.stubEnv("GOOGLE_MAPS_API_KEY", "");
+  expect((await POST(request())).status).toBe(503);
+  expect(mocks.fetch).not.toHaveBeenCalled();
+});
+
+it("does not spend provider quota from Preview even when a production key is inherited", async () => {
+  vi.stubEnv("VERCEL_ENV", "preview");
+  expect((await POST(request())).status).toBe(503);
+  expect(mocks.fetch).not.toHaveBeenCalled();
+});
+
+it("preserves routing on the dedicated TEST while its integration gate is enabled", async () => {
+  for (const [key, value] of Object.entries({ MOTORIST_APP_ENV: "test", VERCEL_ENV: "production",
+    VERCEL_PROJECT_ID: TEST_VERCEL_PROJECT_ID, VERCEL_GIT_COMMIT_REF: "dev", APP_BASE_URL: TEST_APP_ORIGIN,
+    SUPABASE_URL: `https://${TEST_SUPABASE_REF}.supabase.co`, MOTORIST_TEST_LIVE_INTEGRATIONS: "true" })) vi.stubEnv(key, value);
+  expect((await POST(request())).status).toBe(200);
+  expect(mocks.fetch).toHaveBeenCalledOnce();
+  mocks.fetch.mockClear();
+  vi.stubEnv("MOTORIST_TEST_LIVE_INTEGRATIONS", "false");
   expect((await POST(request())).status).toBe(503);
   expect(mocks.fetch).not.toHaveBeenCalled();
 });

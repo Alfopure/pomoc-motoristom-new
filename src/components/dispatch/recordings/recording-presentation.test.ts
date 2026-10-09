@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CallRecordingDetail } from "@/lib/telephony/recording-quality";
-import { canShowRecordingContent, playbackTarget, qualityPercent } from "./recording-presentation";
+import { canShowRecordingContent, playbackSegmentTarget, playbackTarget, qualityPercent } from "./recording-presentation";
 
 function recording(): Pick<CallRecordingDetail, "access" | "state" | "segments" | "gaps"> {
   return { access: "full", state: "partial", gaps: [{ startSeconds: 20, endSeconds: 35, reason: "gap" }], segments: [
@@ -37,6 +37,36 @@ describe("private recording presentation", () => {
     expect(playbackTarget(detail, 1)).toBeNull();
     detail.segments[0].canPlay = true; detail.segments[0].state = "failed";
     expect(playbackTarget(detail, 1)).toBeNull();
+  });
+  it("plays an available file from its own beginning despite unverified global coverage", () => {
+    const detail = recording();
+    detail.segments[0].state = "partial";
+    detail.gaps = [{ startSeconds: 0, endSeconds: 20, reason: "capture_incomplete" }];
+    expect(playbackSegmentTarget(detail, "a")).toEqual({ segment: detail.segments[0], offsetSeconds: 0 });
+    expect(playbackTarget(detail, 0, "a")).toBeNull();
+    expect(playbackTarget(detail, 5, "a")).toBeNull();
+  });
+  it.each(["restricted", "deleted", "disabled"] as const)("blocks local file playback for %s content", (state) => {
+    expect(playbackSegmentTarget({ ...recording(), state }, "a")).toBeNull();
+  });
+  it.each(["restricted", "own_review"] as const)("does not grant local file playback to %s access", (access) => {
+    expect(playbackSegmentTarget({ ...recording(), access }, "a")).toBeNull();
+  });
+  it("requires a present available file with a finite positive duration for local playback", () => {
+    const detail = recording();
+    expect(playbackSegmentTarget(detail, "missing")).toBeNull();
+    detail.segments[0].canPlay = false;
+    expect(playbackSegmentTarget(detail, "a")).toBeNull();
+    detail.segments[0].canPlay = true;
+    for (const state of ["pending", "processing", "failed", "restricted", "deleted", "disabled"] as const) {
+      detail.segments[0].state = state;
+      expect(playbackSegmentTarget(detail, "a")).toBeNull();
+    }
+    detail.segments[0].state = "ready";
+    for (const duration of [0, -1, NaN, Infinity]) {
+      detail.segments[0].durationSeconds = duration;
+      expect(playbackSegmentTarget(detail, "a")).toBeNull();
+    }
   });
   it("does not display unknown or malformed proportions as a measured zero", () => {
     expect(qualityPercent(null)).toBe("—"); expect(qualityPercent(NaN)).toBe("—");

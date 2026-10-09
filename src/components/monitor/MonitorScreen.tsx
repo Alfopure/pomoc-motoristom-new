@@ -31,6 +31,10 @@ export function MonitorScreen({ appVersion, identity, externalLinks = {} }: Prop
   const now = useMonitorClock();
   const data = overview.data;
   const stale = freshness(data?.checkedAt ? Date.parse(data.checkedAt) : overview.observedAt, now, 120_000) !== "fresh";
+  const maintenance = freshness(data?.storage?.physicalCheckedAt ? Date.parse(data.storage.physicalCheckedAt) : null, now, 600_000);
+  const collectionStatus = !data ? "Neoverený" : !data.enabled ? "Vypnutý" : overview.error ? "Nedostupný" : stale ? "Zastarané údaje"
+    : maintenance === "stale" ? "Údržba diagnostiky mešká" : maintenance === "unknown" ? "Údržba diagnostiky neoverená"
+      : data.storage?.blocked ? "Obmedzený kvótou" : `Zapnutý · pokrytie ${data.coverage === "limited" ? "čiastočné" : "nezistené"}`;
   const profileId = identity?.profileId, organizationId = identity?.organizationId;
   useEffect(() => { if (profileId && organizationId) setDiagnosticIdentity({ profileId, organizationId }); }, [profileId, organizationId]);
   function page(value: string | null) { setCursor(value); setSelectedId(null); }
@@ -43,8 +47,13 @@ export function MonitorScreen({ appVersion, identity, externalLinks = {} }: Prop
       <div className="flex flex-wrap items-center justify-between gap-3"><p className={noteClass}>Obnova každú minútu, iba vo viditeľnej karte.</p><div className="flex gap-2"><ReportProblemButton /><button className={buttonClass} disabled={overview.loading} onClick={() => { overview.refresh(); live.refresh(); ready.refresh(); }}>Obnoviť</button></div></div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <HealthCard title="Odpoveď aplikácie" resource={live} expected="live" now={now} maxAge={120_000} frequency="60 sekúnd" />
-        <HealthCard title="Spojenie s databázou" resource={ready} expected="ready" now={now} maxAge={600_000} frequency="5 minút" />
-        <Card title="Zber diagnostiky"><Badge warning={!data || !!overview.error || stale || !data.enabled || data.storage?.blocked}>{!data ? "Neoverený" : !data.enabled ? "Vypnutý" : data.storage?.blocked ? "Obmedzený kvótou" : stale ? "Zastarané údaje" : overview.error ? "Nedostupný" : `Zapnutý · pokrytie ${data.coverage === "limited" ? "čiastočné" : "nezistené"}`}</Badge><p className={noteClass}>Chýbajúce udalosti nepotvrdzujú bezchybnú prevádzku.<br />Overené: {timestamp(data?.checkedAt)}</p></Card>
+        <HealthCard title="Pripravenosť aplikácie" resource={ready} expected="ready" now={now} maxAge={600_000} frequency="5 minút" />
+        <Card title="Zber diagnostiky">
+          <Badge warning={!data || !!overview.error || stale || !data.enabled || maintenance !== "fresh" || data.storage?.blocked}>{collectionStatus}</Badge>
+          <p className={noteClass}>Chýbajúce udalosti nepotvrdzujú bezchybnú prevádzku.<br />Overené: {timestamp(data?.checkedAt)}
+            {data?.enabled && <><br />Posledná údržba: {timestamp(data.storage?.physicalCheckedAt)}</>}
+          </p>
+        </Card>
         <Card title="Externý dohľad">
           {([['uptime', 'Externé HTTP kontroly', 'Externé HTTP kontroly nenakonfigurované.'], ['sentry', 'Technické stacky', 'Technické stacky nie sú pripojené.'], ['heartbeat', 'Heartbeat · nie HTTP kontrola'], ['vercel', 'Vercel'], ['supabase', 'Supabase']] as const).map(([key, label, missing]) => <p key={key} className={noteClass}>{externalLinks[key] ? <a href={externalLinks[key]} target="_blank" rel="noopener noreferrer" className="underline">{label} ↗</a> : missing}</p>)}
           <p className={noteClass}>Stav externých služieb sa tu neoveruje.</p>

@@ -1,7 +1,7 @@
 import "server-only";
 import { canOperateTelephony, resolveAppEnvironment } from "@/lib/app-environment";
 import { after } from "next/server";
-import { withBackgroundRequestMetrics } from "@/server/request-metrics";
+import { requestTimingContext, withBackgroundRequestMetrics } from "@/server/request-metrics";
 import { sessionOwnership } from "./ownership";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -112,7 +112,7 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
   let telnyx: TelnyxClient | null = null;
   if (config.configured) {
     const data = await readLiveGateSettings(admin, organizationId);
-    telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data),
+    telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data), testProvenanceContext: { admin, organizationId },
       onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger) });
   }
 
@@ -191,6 +191,21 @@ function errorJson(message: string, status: number, code?: string | null): Respo
 
 /** Maps the telephony service error classes onto responses; anything else is a logged 500. */
 export function telephonyErrorResponse(error: unknown, fallback: string): Response {
+  const knownStatus = error instanceof MutationError || error instanceof CallActionError || error instanceof PresenceServiceError || error instanceof OperatorDeviceError
+    ? error.status : error instanceof TelnyxCommandError ? error.status === 423 ? 423 : 502 : 500;
+  if (process.env.DIAGNOSTICS_SERVER_ERRORS_ENABLED === "true" && knownStatus >= 500 && !(error instanceof SessionLeaseBusyError) && !(error instanceof TelephonyNotConfiguredError)) {
+    // Register while Next owns the request, then load the reporter after the
+    // response. Keep diagnostic modules out of the cold webhook import graph.
+    try {
+      const requestId = requestTimingContext()?.request_id;
+      after(async () => {
+        try {
+          const { captureServerError } = await import("@/server/diagnostics/server-errors");
+          await captureServerError(error, { source: "telephony", route: "telephony.operation", status: knownStatus, requestId });
+        } catch { /* Reporting cannot change call control. */ }
+      });
+    } catch { /* No retained request lifecycle: skip reporting. */ }
+  }
   if (error instanceof MutationError) return errorJson(error.message, error.status);
   if (error instanceof SessionLeaseBusyError) {
     return Response.json({ error: error.message, code: error.code, retryAfterMs: error.retryAfterMs }, {

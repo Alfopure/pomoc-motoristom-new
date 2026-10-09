@@ -48,6 +48,13 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
+// Exercise the temporary route's authentication while enabled. Its exact TEST,
+// expiry and disabled-404 boundaries have their own canary contract tests.
+vi.mock("@/server/diagnostics/canary-access", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/server/diagnostics/canary-access")>(),
+  canaryDeploymentEnabled: () => true,
+}));
+
 // ── Allowlist: iba tieto routes smú byť dostupné bez prihlásenia ──────────────
 // Jediný zdroj pravdy je `ROUTE_AUTH_REGISTRY` (class: "public"); tento test
 // z neho odvodzuje kľúče, takže sa obe strany nemôžu rozísť. Kľúč = cesta pod

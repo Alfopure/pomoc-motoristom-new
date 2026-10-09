@@ -6,6 +6,7 @@ import { createClient } from "@supabase/supabase-js";
 
 import { assertOwnership, ownershipRpc, sessionOwnership, telephonyDatabaseFetch, DATABASE_REQUEST_MS, SESSION_LEASE_MS, SESSION_WORK_MS, UNOWNED_READ_MS, type Ownership } from "./ownership";
 import { SessionLeaseLostError } from "./service-errors";
+import { withRequestMetrics } from "@/server/request-metrics";
 
 function admin(error: { code?: string; message: string } | null, data: unknown = null) {
   return { rpc: async () => ({ data, error }) } as unknown as SupabaseClient<Database>;
@@ -271,5 +272,67 @@ describe("telephonyDatabaseFetch outside a lease", () => {
     const controller = new AbortController();
     await telephonyDatabaseFetch("https://x.supabase.co/storage/v1/object/x", { method: "GET", signal: controller.signal });
     expect(sentInit(fetch, 3).signal).toBe(controller.signal);
+  });
+});
+
+describe("database timeout observation", () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+  const client = () => createClient<Database>("https://x.supabase.co", "service-key", {
+    global: { fetch: telephonyDatabaseFetch }, auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  it("counts the lease acquisition caller's timeout before any ownership exists", async () => {
+    const deadline = new AbortController();
+    vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(deadline.signal);
+    const fetch = vi.fn(async (_input: unknown, init: RequestInit) => {
+      deadline.abort(new DOMException("private timeout", "TimeoutError"));
+      init.signal!.throwIfAborted();
+      return Response.json(true);
+    });
+    vi.stubGlobal("fetch", fetch);
+    const logger = vi.fn();
+    await withRequestMetrics("call.action", async () => {
+      await expect(ownershipRpc(client(), "motorist_session_lease_acquire_v2", {})).rejects.toThrow("TimeoutError");
+      return Response.json({}, { status: 500 });
+    }, { logger });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(logger.mock.calls[0][0]).toMatchObject({ route: "call.action", status: 500, dbAborts: 1, steps: { db: { count: 1 } } });
+    expect(JSON.stringify(logger.mock.calls)).not.toContain("private timeout");
+  });
+
+  it.each([false, true])("observes an earlier caller deadline with owned=%s instead of only the transport cap", async owned => {
+    const deadline = new AbortController();
+    const fetch = vi.fn(async (_input: unknown, init: RequestInit) => {
+      deadline.abort(new DOMException("private read deadline", "TimeoutError"));
+      init.signal!.throwIfAborted();
+      return Response.json([]);
+    });
+    vi.stubGlobal("fetch", fetch);
+    const logger = vi.fn();
+    const run = async () => {
+      const result = await client().from("motorist_call_sessions").select("id").abortSignal(deadline.signal);
+      expect(result.error?.message).toContain("AbortError");
+      return Response.json({}, { status: 500 });
+    };
+    await withRequestMetrics("call.action", () => owned ? sessionOwnership.run({ admin: client(), sessionId: "session", organizationId: "org", token: "private-token",
+      generation: 1, contract: 2, acquiredAt: Date.now(), deadline: Date.now() + SESSION_WORK_MS }, run) : run(), { logger });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(logger.mock.calls[0][0]).toMatchObject({ dbAborts: 1, steps: { db: { count: 1 } } });
+    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private|deadline/);
+  });
+
+  it("does not classify a cancelled caller read as a database timeout", async () => {
+    const caller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn(async (_input: unknown, init: RequestInit) => {
+      caller.abort();
+      init.signal!.throwIfAborted();
+      return Response.json([]);
+    }));
+    const logger = vi.fn();
+    await withRequestMetrics("call.action", async () => {
+      await client().from("motorist_call_sessions").select("id").abortSignal(caller.signal);
+      return Response.json({});
+    }, { logger });
+    expect(logger.mock.calls[0][0]).toMatchObject({ dbAborts: 0 });
   });
 });

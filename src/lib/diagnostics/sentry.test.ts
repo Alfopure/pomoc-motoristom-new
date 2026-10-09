@@ -38,6 +38,34 @@ describe('Sentry privacy boundary',()=>{
     }
   });
 
+  it('preserves hosted Next 16.3 immutable chunk frames through both privacy boundaries',()=>{
+    const filename='https://app.test/_next/static/immutable/chunks/3bwhjg2vhs-n-.js';
+    const error=new Error('CANARY private input');
+    error.stack=`Error: CANARY\n at onClick (${filename}?dpl=dpl_public&token=CANARY:1:375)`;
+    const event=sanitizeDiagnosticException(error,'6'.repeat(32),'build','https://app.test')!;
+    const frame={filename,lineno:1,colno:375,in_app:true};
+    expect(event.exception.values[0].stacktrace?.frames).toEqual([frame]);
+    expect(sanitizeOutboundDiagnosticException(event,'https://app.test')?.exception.values[0].stacktrace?.frames).toEqual([frame]);
+    const fallback=sanitizeDiagnosticException(null,'7'.repeat(32),'build','https://app.test',{source:{filename:`${filename}?CANARY`,lineno:1,colno:375}});
+    expect(fallback?.exception.values[0].stacktrace?.frames).toEqual([frame]);
+    expect(JSON.stringify([event,fallback])).not.toMatch(/CANARY|token|dpl_public|onClick/);
+  });
+
+  it('does not broaden immutable chunks to private paths, foreign origins or credentialed URLs',()=>{
+    for(const filename of [
+      'https://foreign.test/_next/static/immutable/chunks/3bwhjg2vhs-n-.js',
+      'https://CANARY@app.test/_next/static/immutable/chunks/3bwhjg2vhs-n-.js',
+      'https://app.test/_next/static/immutable/private/3bwhjg2vhs-n-.js',
+      'https://app.test/_next/static/private/chunks/3bwhjg2vhs-n-.js',
+      'https://app.test/_next/static/immutable/chunks/nested/3bwhjg2vhs-n-.js',
+      'https://app.test/_next/static/immutable/chunks/CANARY.tsx',
+    ]) {
+      const event=sanitizeDiagnosticException(null,'8'.repeat(32),'build','https://app.test',{source:{filename,lineno:1,colno:375}});
+      expect(event?.exception.values[0]).not.toHaveProperty('stacktrace');
+      expect(JSON.stringify(event)).not.toContain('CANARY');
+    }
+  });
+
   it('retains only owned hashed chunk coordinates and opaque correlation',()=>{
     const error=new TypeError('CANARY_EMAIL@example.com +421901123456 token=CANARY_SECRET private note');
     error.stack=`${error.name}: ${error.message}\n at CANARY_FUNCTION (https://app.test/_next/static/chunks/abcdef1234567890.js?token=CANARY_SECRET:12:34)\n at https://foreign.test/CANARY_SECRET.js:2:3\n at https://app.test/private/CANARY_SECRET:2:3`;

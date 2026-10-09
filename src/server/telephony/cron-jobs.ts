@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import { runTelephonyAlerts, type TelephonyAlertDeps } from "./alerts";
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
+import type { InboundHangupRecovery } from "./inbound-hangup-recovery";
 import { closeOrphanLegs, closeStaleRingAttempts, sweepOverdueRingSteps } from "./routing/ring-plan";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
-import { drainCustomerTerminal, processTelnyxEvent, storedWebhookEnvelope } from "./telnyx/event-processor";
+import { allowedConnectionIds, drainCustomerTerminal, processTelnyxEvent, storedWebhookEnvelope } from "./telnyx/event-processor";
 import { ACTIVE_SESSION_STATES, type SessionEvent, type SessionRow } from "./state/types";
 import { telephonyStabilityEnabled } from "./stability";
 import { readPendingEffects } from "./state/continuation";
@@ -244,9 +245,16 @@ export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise
   const sessions = [...new Map(queries.flatMap((query) => query.data ?? []).map((session) => [session.id, session])).values()];
   const errors: Array<{ sessionId: string; error: string }> = [];
   const scheduled: string[] = [];
+  const inboundHangups: Array<InboundHangupRecovery & { sessionId: string }> = [];
   for (const session of sessions) {
+    let hangupRecovery: InboundHangupRecovery | undefined;
     try {
-      const result = await sessionRunner(deps)(session.id, { kind: "app", type: "sweep", id: `cron-effects:${session.id}:${randomUUID()}`, actorProfileId: null, occurredAt: now }) as { session?: SessionRow; apply?: { failed?: boolean; projectionPending?: boolean; failure?: { error?: string } } } | undefined;
+      const result = await sessionRunner(deps)(session.id, { kind: "app", type: "sweep", id: `cron-effects:${session.id}:${randomUUID()}`, actorProfileId: null, occurredAt: now }) as { session?: SessionRow; inboundHangupRecovery?: InboundHangupRecovery; apply?: { failed?: boolean; projectionPending?: boolean; failure?: { error?: string } } } | undefined;
+      hangupRecovery = result?.inboundHangupRecovery;
+      if (hangupRecovery && hangupRecovery.status !== "skipped") {
+        inboundHangups.push({ sessionId: session.id, ...hangupRecovery });
+        if (hangupRecovery.status !== "terminal_confirmed") throw new Error(`Inbound hangup remains unresolved: ${hangupRecovery.status}`);
+      }
       if (result?.apply?.failed) throw new Error(result.apply.failure?.error ?? "mandatory effects remain pending");
       if (result?.apply?.projectionPending) throw new Error("auxiliary call projections remain pending");
       const verified = await deps.admin.from("motorist_call_sessions").select("*")
@@ -261,11 +269,14 @@ export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise
       const message = error instanceof Error ? error.message : String(error);
       errors.push({ sessionId: session.id, error: message });
       const oldest = readPendingEffects(session).entries.reduce((time, entry) => Math.min(time, Date.parse(entry.createdAt)), Date.parse(now));
-      if (Date.parse(now) - oldest >= 10 * 60_000) await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error,
-        context: { sessionId: session.id, job: EFFECTS_RECOVERY_JOB, pendingAgeMs: Date.parse(now) - oldest } });
+      if (Date.parse(now) - oldest >= 10 * 60_000 || hangupRecovery?.status === "retry_exhausted" || hangupRecovery?.status === "rejected") {
+        await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error, now: nowOf(deps),
+          context: { sessionId: session.id, job: EFFECTS_RECOVERY_JOB, pendingAgeMs: Date.parse(now) - oldest,
+            ...(hangupRecovery ? { inboundHangupStatus: hangupRecovery.status, attemptCount: hangupRecovery.attemptCount } : {}) } });
+      }
     }
   }
-  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || wrapUp.errors.length || presence.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, scheduled, wrapUp, presence } };
+  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || wrapUp.errors.length || presence.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, scheduled, inboundHangups, wrapUp, presence } };
 }
 
 export async function detectStuckSessions(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
@@ -320,7 +331,9 @@ export async function detectStuckSessions(deps: TelephonyCronDeps): Promise<Tele
  * letter) plus rows in `retry_state = 'deferred'` whose `next_attempt_at` has
  * passed, whatever their age — a deferral is a decision already taken by a
  * handler, not a claim that may still finish. Fresh rows with the default
- * `ready` state are never touched. Both reads are over-fetched
+ * `ready` state are never touched. Foreign connections are excluded in both
+ * reads before their limit, so rejected historical rows cannot starve this
+ * environment's recovery. Both reads are over-fetched
  * (`REPLAY_BATCH_SIZE * 2`), ranked by `replayRank` then `received_at`, and only
  * `REPLAY_BATCH_SIZE` rows are handed to the processor. The deadline is
  * checked at the head of every iteration only.
@@ -339,22 +352,23 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps, option
   const nowIso = now.toISOString();
   const cutoff = new Date(now.getTime() - (deps.stalledEventMs ?? STALLED_EVENT_MS)).toISOString();
   const columns = "event_id, event_type, payload, occurred_at, received_at, attempts, call_control_id, call_session_id, call_leg_id, connection_id, next_attempt_at, retry_state";
-  const [stalled, dueDeferred] = await Promise.all([
-    deps.admin
+  const ownConnections = replayConnectionFilter(deps);
+  const replayRows = () => {
+    const query = deps.admin
       .from("motorist_telnyx_webhook_events")
       .select(columns)
       .eq("organization_id", deps.organizationId)
-      .in("status", ["queued", "failed"])
+      .in("status", ["queued", "failed"]);
+    return ownConnections ? query.or(ownConnections) : query;
+  };
+  const [stalled, dueDeferred] = await Promise.all([
+    replayRows()
       .lt("received_at", cutoff)
       .neq("retry_state", "dead_letter")
       .or(`next_attempt_at.is.null,next_attempt_at.lte.${nowIso}`)
       .order("received_at", { ascending: true })
       .limit(REPLAY_BATCH_SIZE * 2),
-    deps.admin
-      .from("motorist_telnyx_webhook_events")
-      .select(columns)
-      .eq("organization_id", deps.organizationId)
-      .in("status", ["queued", "failed"])
+    replayRows()
       .eq("retry_state", "deferred")
       .lte("next_attempt_at", nowIso)
       .order("next_attempt_at", { ascending: true })
@@ -433,6 +447,18 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps, option
     detail: { stalled: rows.length, attempted, replayed: replayed.length, ignored: ignored.length, deferred: deferred.length, duplicate: duplicate.length, unknownSession: unknownSession.length, failed: errors.length, remaining, deadlineReached, errors },
     error: errors.length > 0 ? errors[0].error : undefined,
   };
+}
+
+/**
+ * Selection optimisation only: the processor still verifies TEST provenance,
+ * including for callbacks without a connection ID. Preserve its null/empty ID
+ * semantics and its behaviour without an allowlist. Unexpected configuration
+ * syntax falls back to that guard instead of interpolating a PostgREST filter.
+ */
+function replayConnectionFilter(deps: TelephonyCronDeps): string | null {
+  const allowed = [...allowedConnectionIds(deps)];
+  if (allowed.length === 0 || allowed.some((id) => !/^[\w-]+$/.test(id))) return null;
+  return ["connection_id.is.null", "connection_id.eq.", ...allowed.map((id) => `connection_id.eq.${id}`)].join(",");
 }
 
 export async function pruneWebhookLedger(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {

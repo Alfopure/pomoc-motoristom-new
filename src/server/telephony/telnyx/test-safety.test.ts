@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTelnyxClient } from "./client";
 import { getTelnyxConfig } from "./env";
-import { acceptsTestInboundSms, acceptsTestProviderEvent, allowsUnlistedTestSmsRecipient, checkTestProviderRequest, getTestProviderSafety, resolveTestSipCredential } from "./test-safety";
+import { acceptsTestInboundSms, acceptsTestProviderEvent, allowsUnlistedTestSmsRecipient, checkTestProviderRequest, getTestProviderSafety, resolveTestSipCredential, type TestProviderContext } from "./test-safety";
 
 vi.mock("./test-safety", async (original) => ({ ...await original<typeof import("./test-safety")>(),
   resolveTestSipCredential: vi.fn(async () => "test-credential"),
@@ -30,6 +30,18 @@ function boundary(env: Record<string, string | undefined> = ENV) {
 }
 
 describe("ordinary phone numbers in dedicated TEST", () => {
+  it.each([
+    { resource_id: "connection:foreign", sip_username: "test_user" },
+    { resource_id: "connection:test-connection", sip_username: "test_user", expired: true },
+    { resource_id: "connection:test-connection", sip_username: "different_user" },
+  ])("trusted runtime scope still requires fresh provider credential ownership: %j", async credential => {
+    const { fetch } = client(ENV, credential);
+    const context = { admin: {} as TestProviderContext["admin"], organizationId: "trusted" };
+    const api = createTelnyxClient({ config: getTelnyxConfig(ENV), liveGate: { callsEnabled: true, smsEnabled: true }, fetch, testProvenanceContext: context });
+    await expect(api.dial({ to: "sip:test_user@sip.telnyx.com", from: FROM, commandId: "dial" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    expect(resolveTestSipCredential).toHaveBeenCalledWith("test_user", context);
+    expect(fetch.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
   const env = { ...ENV, MOTORIST_TEST_ALLOW_ANY_PHONE_NUMBER: "true", MOTORIST_TEST_ALLOWED_NUMBERS: undefined };
   const unlisted = "+420777000123";
   const incoming = { type: "call.initiated", connectionId: "test-app", direction: "incoming", from: unlisted, to: FROM };

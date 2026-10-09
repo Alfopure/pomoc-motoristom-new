@@ -12,14 +12,14 @@ import { alertObject, alertSessionIds, loadTelephonyAlertEvidence } from "./aler
 import { renderTelephonyAlertEmail } from "./alert-email";
 
 /**
- * Turns the health report into e-mail, once per problem per day.
+ * Turns the health report into e-mail, once per identified incident/severity.
  *
  * Everything else in this codebase waits to be asked: the incident row is
  * written, the health route answers, the cron summary is returned to whoever
  * called it. At 03:00 nobody is asking. This job is the only path that reaches
  * a human, so it deliberately errs towards sending — but `motorist_telephony_alerts`
- * keeps a row per (day, check, status, affected entity), which stops a five-minute cron
- * from mailing the same stuck session 288 times.
+ * keeps a row per stable event or job opening. Unscoped checks and session
+ * progress retain a daily key; the same failed event is not new at midnight.
  *
  * A worsening problem is a new key (`…:warn` → `…:fail`), so an escalation is
  * always delivered even though the warning was already sent.
@@ -67,6 +67,16 @@ function digest(value: string): string { return createHash("sha256").update(valu
 
 /** Scope alerts by stable incident identity: a different caller later today must still be reported. */
 function scopedAlerts(alert: TelephonyAlert, checkedAt: string): TelephonyAlert[] {
+  if (alert.check === "interruptions") {
+    // One operator departure is one episode, even across midnight; another leg
+    // of the same call must still be reportable. Never mail incomplete evidence.
+    return (Array.isArray(alert.detail.entries) ? alert.detail.entries : []).map(alertObject)
+      .filter(entry => entry.classification === "interruption_observed" &&
+        ["production", "test"].includes(String(entry.environment)) && entry.environment === alert.detail.environment &&
+        [entry.incidentId, entry.legId, entry.sessionId].every(id => typeof id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(id)))
+      .map(entry => ({ ...alert, key: `interruptions:${entry.environment}:${digest(`${entry.incidentId}:${entry.legId}`).slice(0, 24)}`,
+        detail: { ...alert.detail, confirmed: 1, entries: [entry], sessionIds: [entry.sessionId] } }));
+  }
   // A connection report also contains repaired historical failures. They are
   // context, not new failing calls to notify about independently.
   if (alert.check === "connections" && Array.isArray(alert.detail.entries)) {
@@ -96,11 +106,14 @@ function scopedAlerts(alert: TelephonyAlert, checkedAt: string): TelephonyAlert[
   const eventIds = alert.check === "ledger" && Array.isArray(alert.detail.failedIds)
     ? [...new Set(alert.detail.failedIds.filter((id): id is string => typeof id === "string"))] : [];
   if (eventIds.length) return eventIds.map((eventId) => ({ ...alert,
-    key: `${alert.key}:${digest(`event:${eventId}`).slice(0, 24)}`, detail: { ...alert.detail, failedIds: [eventId] },
+    // Event IDs identify the same incident across midnight; usage still has a daily key.
+    key: `ledger:${alert.status}:${digest(`event:${eventId}`).slice(0, 24)}`, detail: { ...alert.detail, failedIds: [eventId],
+      ...(Array.isArray(alert.detail.failures) ? { failures: alert.detail.failures.filter(failure => alertObject(failure).eventId === eventId) } : {}),
+    },
   }));
   const jobs = alert.check === "incidents" && Array.isArray(alert.detail.jobs) ? alert.detail.jobs.map(alertObject) : [];
   if (jobs.length && jobs.every((job) => typeof job.job === "string" && typeof job.openedAt === "string")) {
-    return jobs.map((job) => ({ ...alert, key: `${alert.key}:${digest(`job:${job.job}:${job.openedAt}`).slice(0, 24)}`, detail: { ...alert.detail, jobs: [job] } }));
+    return jobs.map((job) => ({ ...alert, key: `incidents:${alert.status}:${digest(`job:${job.job}:${job.openedAt}`).slice(0, 24)}`, detail: { ...alert.detail, jobs: [job] } }));
   }
   return [alert];
 }
@@ -108,6 +121,7 @@ function scopedAlerts(alert: TelephonyAlert, checkedAt: string): TelephonyAlert[
 export function alertsFromReport(report: TelephonyHealthReport, day: string): TelephonyAlert[] {
   const alerts: TelephonyAlert[] = [];
   for (const check of report.checks) {
+    if (check.key === "interruptions" && check.status !== "fail") continue;
     const notify = check.status === "fail" || (check.status === "warn" && (WARN_WORTHY.has(check.key) || Boolean(check.detail.error)));
     if (!notify) continue;
     alerts.push(...scopedAlerts({ key: `${day}:${check.key}:${check.status}`, check: check.key, status: check.status as TelephonyAlert["status"], detail: check.detail }, report.checkedAt));

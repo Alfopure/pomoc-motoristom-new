@@ -4,7 +4,7 @@ import { completeAnnouncedAction, completeCallAnnouncements } from "@/test/compl
 import { fakeError } from "@/test/fake-supabase";
 import { createTelephonyHarness, LINES, NUMBERS, ORG, PLAN_ID, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
-import { callColleague, createRateLimiter, HANGUP_LEASE_WAIT_MS, hangupCall, parkCall, pickupWaitingCall, startOutboundCall } from "./call-actions";
+import { callColleague, continueAcceptedHangup, createRateLimiter, HANGUP_LEASE_WAIT_MS, hangupCall, parkCall, pickupWaitingCall, startOutboundCall } from "./call-actions";
 import { loadRoutingContext, loadSessionSnapshot, WEBHOOK_LEASE_POLL_MS, WEBHOOK_LEASE_WAIT_MS } from "./session-runner";
 import { parseTelnyxEnvelope } from "./state/events";
 import { readMeta, type SessionRow } from "./state/types";
@@ -204,32 +204,38 @@ describe("per-action lease budget", () => {
     return { h, sid: call.sessionId, customerCc: call.callControlId };
   }
 
-  it("hangup waits longer than a webhook for the lease and keeps its durable intent", async () => {
+  it("accepts hangup after one probe and leaves the longer lease wait to its retained continuation", async () => {
     const { h, sid, customerCc } = await talkingBehindHeldLease();
     vi.useFakeTimers();
     try {
       const started = Date.now();
-      const pending = hangupCall(h.deps, actor, sid).catch((error: unknown) => error);
+      const pending = hangupCall(h.deps, actor, sid);
       await vi.runAllTimersAsync();
-      const error = await pending;
-      expect(error).toMatchObject({
-        name: "SessionLeaseBusyError", status: 503, code: "session_busy", retryAfterMs: 1000,
-        details: { leaseWaitMs: HANGUP_LEASE_WAIT_MS, eventType: "app.hangup" },
-      });
-      const elapsed = Date.now() - started;
-      expect(elapsed).toBeGreaterThanOrEqual(HANGUP_LEASE_WAIT_MS);
-      expect(elapsed).toBeLessThan(9_000);
-      // More polls than the 3 s interactive budget (7), bounded by the ladder.
-      const hangupPolls = acquires(h);
-      expect(hangupPolls).toBeGreaterThan(7);
-      expect(hangupPolls).toBeLessThanOrEqual(13);
-      expect((error as { details: { polls: number } }).details.polls).toBe(hangupPolls);
-      // The intent is committed before the wait, so the longer wait loses nothing.
+      expect(await pending).toMatchObject({ sessionId: sid, state: "talking", commands: [], terminationPending: true });
+      expect(Date.now() - started).toBe(0);
+      expect(acquires(h)).toBe(1);
       expect(h.db.log.filter(entry => entry.table === "motorist_session_terminate_v2")).toHaveLength(1);
       expect(h.session(sid).termination_requested_at).toBeTruthy();
       expect(h.telnyx.of("hangup")).toEqual([]);
 
-      // A provider fact on the same held session still gives up well before the operator does.
+      // Only the retained continuation pays the longer wait. A busy result
+      // leaves the accepted intent intact for another host or the existing cron.
+      const recoveryStarted = Date.now();
+      const recoveryFrom = h.db.log.length;
+      const recovery = continueAcceptedHangup(h.deps, sid).catch((error: unknown) => error);
+      await vi.runAllTimersAsync();
+      const recoveryError = await recovery;
+      expect(recoveryError).toMatchObject({ name: "SessionLeaseBusyError", status: 503,
+        details: { leaseWaitMs: HANGUP_LEASE_WAIT_MS, eventType: "app.hangup.recovery" } });
+      expect(Date.now() - recoveryStarted).toBeGreaterThanOrEqual(HANGUP_LEASE_WAIT_MS);
+      expect(Date.now() - recoveryStarted).toBeLessThan(9_000);
+      expect(acquires(h, recoveryFrom)).toBeGreaterThan(7);
+      expect(acquires(h, recoveryFrom)).toBeLessThanOrEqual(13);
+      expect(h.session(sid).termination_requested_at).toBeTruthy();
+      expect(h.db.log.filter(entry => entry.table === "motorist_session_terminate_v2")).toHaveLength(1);
+      expect(h.telnyx.of("hangup")).toEqual([]);
+
+      // A provider fact retains its shorter lease budget.
       const from = h.db.log.length;
       const factStarted = Date.now();
       const factPending = h.legEvent(customerCc, "call.playback.ended", {}, "busy-fact");

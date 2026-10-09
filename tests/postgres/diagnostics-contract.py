@@ -12,7 +12,7 @@ import time
 import urllib.request
 import urllib.error
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 import psycopg
@@ -26,8 +26,11 @@ FIXTURE='''
 create table motorist_organizations(id uuid primary key);
 create table motorist_profiles(id uuid primary key,organization_id uuid,active boolean default true,role text);
 create table motorist_cases(id uuid primary key,organization_id uuid);
-create table motorist_call_sessions(id uuid primary key,organization_id uuid,answered_by_profile_id uuid,state text,customer_leg_id uuid,direction text,started_at timestamptz,answered_at timestamptz,ended_at timestamptz,termination_requested_at timestamptz,parked_at timestamptz,metadata jsonb default '{}');
+create table motorist_call_sessions(id uuid primary key,organization_id uuid,answered_by_profile_id uuid,state text,customer_leg_id uuid,direction text,started_at timestamptz,answered_at timestamptz,ended_at timestamptz,termination_requested_at timestamptz,parked_at timestamptz,hold_started_at timestamptz,telnyx_session_id text,metadata jsonb default '{"environment":"development"}');
 create table motorist_call_legs(id uuid primary key,organization_id uuid,session_id uuid,profile_id uuid,role text,initiated_at timestamptz,answered_at timestamptz,bridged_at timestamptz,ended_at timestamptz,updated_at timestamptz default now());
+create table motorist_call_events(id uuid primary key default gen_random_uuid(),organization_id uuid,provider text,provider_session_id text,event_type text,provider_timestamp timestamptz,received_at timestamptz default now(),payload jsonb,normalized_payload jsonb,handled_status text);
+create index call_events_session_idx on motorist_call_events(organization_id,provider,provider_session_id,received_at desc) where provider_session_id is not null;
+create index call_legs_session_idx on motorist_call_legs(organization_id,session_id);
 create table motorist_operator_devices(id uuid primary key,organization_id uuid,profile_id uuid,device_session_id text,environment text);
 '''
 def connect():return psycopg.connect(dbname=DB,**LOCAL,autocommit=True)
@@ -60,6 +63,7 @@ class Contracts(unittest.TestCase):
       c.execute((ROOT/'supabase/migrations/20261008130100_diagnostics_device_session_text.sql').read_text())
       cls.hosted_default_write_grants=all(c.execute('select has_table_privilege(%s,%s,%s)',('service_role','public.'+table,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')).fetchone()[0] for table in ('motorist_diagnostic_guard','motorist_diagnostic_counters','motorist_diagnostic_events','motorist_diagnostic_incidents'))
       c.execute((ROOT/'supabase/migrations/20261008130200_diagnostics_service_table_privileges.sql').read_text())
+      c.execute((ROOT/'supabase/migrations/20261011120000_diagnostics_call_environment_guard.sql').read_text())
       c.execute('insert into motorist_organizations values(%s),(%s)',(ORG,OTHER))
       c.execute("insert into motorist_profiles values(%s,%s,true,'dispatcher'),(%s,%s,true,'manager'),(%s,%s,true,'dispatcher')",(PROFILE,ORG,MANAGER,ORG,FOREIGN,OTHER))
       c.execute('insert into motorist_cases values(%s,%s)',(CASE,ORG))
@@ -69,8 +73,8 @@ class Contracts(unittest.TestCase):
  def tearDownClass(cls):
     pass # Preserve evidence for EXPLAIN inspection until the next test run.
  def setUp(self):
-    self.c=connect();self.c.execute('truncate motorist_diagnostic_events,motorist_diagnostic_incidents,motorist_diagnostic_counters')
-    self.c.execute("update motorist_call_sessions set metadata='{}',termination_requested_at=null,parked_at=null")
+    self.c=connect();self.c.execute('truncate motorist_diagnostic_events,motorist_diagnostic_incidents,motorist_diagnostic_counters,motorist_call_events')
+    self.c.execute("update motorist_call_sessions set metadata='{\"environment\":\"development\"}',termination_requested_at=null,parked_at=null,hold_started_at=null")
     self.c.execute("update motorist_diagnostic_guard set budget_bytes=134217728,physical_bytes=0,checked_at=now(),blocked=false")
  def tearDown(self):self.c.close()
  def test_hosted_defaults_are_removed_but_service_rpcs_still_write(self):
@@ -203,6 +207,71 @@ class Contracts(unittest.TestCase):
     self.assertEqual(self.c.execute('select count(*) from motorist_diagnostic_incidents').fetchone()[0],1)
     self.assertEqual(self.c.execute('select classification from motorist_diagnostic_incidents').fetchone()[0],'interruption_observed')
     self.assertEqual(self.c.execute("select incident_count,dropped from motorist_diagnostic_counters where key='org'").fetchone(),(1,0))
+    self.c.execute('delete from motorist_call_legs');self.c.execute('delete from motorist_call_sessions where id<>%s',(CALL,))
+ def test_classifier_requires_explicit_same_environment_and_rechecks_foreign_incidents(self):
+    operator,customer=str(uuid4()),str(uuid4())
+    self.c.execute('delete from motorist_call_legs')
+    self.c.execute("insert into motorist_call_legs(id,organization_id,session_id,profile_id,role,answered_at,bridged_at,ended_at) values(%s,%s,%s,%s,'operator',now()-interval '20 minutes',now()-interval '20 minutes',now()-interval '10 minutes'),(%s,%s,%s,null,'customer',now()-interval '20 minutes',now()-interval '20 minutes',null)",(operator,ORG,CALL,PROFILE,customer,ORG,CALL))
+    self.c.execute("update motorist_call_sessions set customer_leg_id=%s,metadata='{}' where id=%s",(customer,CALL))
+    for metadata in ({},{'environment':'production'},{'environment':'test'}):
+      self.c.execute('update motorist_call_sessions set metadata=%s where id=%s',(Jsonb(metadata),CALL))
+      self.c.execute("select motorist_diagnostics_maintain(%s,'test',134217728,true)",(ORG,))
+      self.assertEqual(self.c.execute('select count(*) from motorist_diagnostic_incidents').fetchone()[0],0)
+      self.assertEqual(self.c.execute("select motorist_diagnostic_classify_leg(%s,'test',%s,now())",(ORG,operator)).fetchone()[0],'unknown')
+    self.c.execute('update motorist_call_sessions set metadata=%s where id=%s',(Jsonb({'environment':'development'}),CALL))
+    self.c.execute("select motorist_diagnostics_maintain(%s,'test',134217728,true)",(ORG,))
+    self.assertEqual(self.c.execute('select classification from motorist_diagnostic_incidents').fetchone()[0],'interruption_observed')
+    self.assertEqual(self.c.execute("select motorist_diagnostic_classify_leg(%s,'production',%s,now())",(ORG,operator)).fetchone()[0],'unknown')
+    self.c.execute('update motorist_call_sessions set metadata=%s where id=%s',(Jsonb({'environment':'production'}),CALL))
+    self.c.execute("select motorist_diagnostics_maintain(%s,'test',134217728,true)",(ORG,))
+    self.assertEqual(self.c.execute('select classification from motorist_diagnostic_incidents').fetchone()[0],'unknown')
+    self.assertEqual(self.c.execute("select motorist_diagnostic_classify_leg(%s,'production',%s,now())",(ORG,operator)).fetchone()[0],'interruption_observed')
+ def test_hold_park_transfer_and_hangup_are_expected_not_interruptions(self):
+    operator,customer=str(uuid4()),str(uuid4())
+    self.c.execute('delete from motorist_call_legs')
+    self.c.execute("insert into motorist_call_legs(id,organization_id,session_id,profile_id,role,answered_at,bridged_at,ended_at) values(%s,%s,%s,%s,'operator',now()-interval '20 minutes',now()-interval '20 minutes',now()-interval '10 minutes'),(%s,%s,%s,null,'customer',now()-interval '20 minutes',now()-interval '20 minutes',null)",(operator,ORG,CALL,PROFILE,customer,ORG,CALL))
+    self.c.execute('update motorist_call_sessions set customer_leg_id=%s where id=%s',(customer,CALL))
+    ended=self.c.execute('select ended_at from motorist_call_legs where id=%s',(operator,)).fetchone()[0]
+    for field in ('hold_started_at','parked_at','termination_requested_at'):
+      self.c.execute('update motorist_call_sessions set '+field+'=%s where id=%s',(ended,CALL))
+      self.assertEqual(self.c.execute("select motorist_diagnostic_classify_leg(%s,'test',%s,now())",(ORG,operator)).fetchone()[0],'expected_end')
+      self.c.execute('update motorist_call_sessions set '+field+'=null where id=%s',(CALL,))
+    for metadata in ({'hangup':{'at':ended.isoformat()}},{'transfer':{'by':PROFILE,'completed_at':ended.isoformat()}},{'park':{'by':PROFILE,'at':ended.isoformat()}},{'transfer':{'kind':'blind','by':PROFILE,'at':ended.isoformat(),'completed_at':(ended+timedelta(seconds=40)).isoformat()}}):
+      self.c.execute('update motorist_call_sessions set metadata=%s where id=%s',(Jsonb({'environment':'development',**metadata}),CALL))
+      self.assertEqual(self.c.execute("select motorist_diagnostic_classify_leg(%s,'test',%s,now())",(ORG,operator)).fetchone()[0],'expected_end')
+    self.c.execute('update motorist_call_sessions set metadata=%s where id=%s',(Jsonb({'environment':'development','transfer':{'by':MANAGER,'completed_at':ended.isoformat()}}),CALL))
+    self.assertEqual(self.c.execute("select motorist_diagnostic_classify_leg(%s,'test',%s,now())",(ORG,operator)).fetchone()[0],'interruption_observed')
+ def test_expected_leave_requires_processed_same_actor_command_and_existing_sibling(self):
+    operator,customer,sibling=str(uuid4()),str(uuid4()),str(uuid4())
+    self.c.execute('delete from motorist_call_legs')
+    self.c.execute("insert into motorist_call_legs(id,organization_id,session_id,profile_id,role,answered_at,bridged_at,ended_at) values(%s,%s,%s,%s,'operator',now()-interval '20 minutes',now()-interval '20 minutes',now()-interval '10 minutes'),(%s,%s,%s,null,'customer',now()-interval '20 minutes',now()-interval '20 minutes',null)",(operator,ORG,CALL,PROFILE,customer,ORG,CALL))
+    self.c.execute("update motorist_call_sessions set customer_leg_id=%s,telnyx_session_id='provider-session' where id=%s",(customer,CALL))
+    ended=self.c.execute('select ended_at from motorist_call_legs where id=%s',(operator,)).fetchone()[0]
+    def classification():return self.c.execute("select motorist_diagnostic_classify_leg(%s,'test',%s,now())",(ORG,operator)).fetchone()[0]
+    self.assertEqual(classification(),'interruption_observed')
+    valid={'session_id':CALL,'error':None,'commands':[{'kind':'conference_leave','ok':True}]}
+    self.c.execute("insert into motorist_call_events(organization_id,provider,provider_session_id,event_type,provider_timestamp,payload,normalized_payload,handled_status) values(%s,'telnyx','provider-session','app.leave_conference',%s,%s,%s,'processed')",(ORG,ended,Jsonb({'actor':PROFILE}),Jsonb(valid)))
+    self.assertEqual(classification(),'expected_end')
+    for payload,normalized,status in [({'actor':MANAGER},valid,'processed'),({'actor':PROFILE},{**valid,'commands':[{'kind':'conference_leave','ok':False}]},'processed'),({'actor':PROFILE},{**valid,'commands':[{'kind':'conference_leave','ok':True,'skipped':True}]},'processed'),({'actor':PROFILE},valid,'failed'),({'actor':PROFILE},{**valid,'session_id':OTHER},'processed')]:
+      self.c.execute('update motorist_call_events set payload=%s,normalized_payload=%s,handled_status=%s',(Jsonb(payload),Jsonb(normalized),status))
+      self.assertEqual(classification(),'interruption_observed')
+    self.c.execute('truncate motorist_call_events')
+    self.c.execute("insert into motorist_call_legs(id,organization_id,session_id,profile_id,role,bridged_at) values(%s,%s,%s,%s,'operator',%s)",(sibling,ORG,CALL,PROFILE,ended-timedelta(seconds=1)))
+    self.assertEqual(classification(),'expected_end')
+    self.c.execute('update motorist_call_legs set bridged_at=%s where id=%s',(ended+timedelta(seconds=1),sibling))
+    self.assertEqual(classification(),'interruption_observed')
+    self.c.execute('update motorist_call_legs set bridged_at=%s,profile_id=%s where id=%s',(ended-timedelta(seconds=1),MANAGER,sibling))
+    self.assertEqual(classification(),'interruption_observed')
+    self.c.execute('delete from motorist_call_legs')
+ def test_foreign_rows_cannot_fill_new_candidate_budget(self):
+    self.c.execute('delete from motorist_call_legs')
+    for n in range(251):
+      session,operator,customer=str(uuid4()),str(uuid4()),str(uuid4())
+      self.c.execute("insert into motorist_call_sessions(id,organization_id,customer_leg_id,direction,metadata) values(%s,%s,%s,'inbound',%s)",(session,ORG,customer,Jsonb({'environment':'development' if n==250 else 'production'})))
+      self.c.execute("insert into motorist_call_legs(id,organization_id,session_id,profile_id,role,answered_at,bridged_at,ended_at,updated_at) values(%s,%s,%s,%s,'operator',now()-interval '20 minutes',now()-interval '20 minutes',now()-interval '10 minutes',now()+(%s * interval '1 millisecond')),(%s,%s,%s,null,'customer',now()-interval '20 minutes',now()-interval '20 minutes',null,now())",(operator,ORG,session,PROFILE,n,customer,ORG,session))
+    result=self.c.execute("select motorist_diagnostics_maintain(%s,'test',134217728,true)",(ORG,)).fetchone()[0]
+    self.assertEqual(result['candidates'],2) # one admitted + one late-evidence recheck
+    self.assertEqual(self.c.execute('select count(*) from motorist_diagnostic_incidents').fetchone()[0],1)
     self.c.execute('delete from motorist_call_legs');self.c.execute('delete from motorist_call_sessions where id<>%s',(CALL,))
  def test_sources_share_storage_reserve_and_daily_quota(self):
     ingest(self.c,[event()])

@@ -69,6 +69,42 @@ describe("bounded relevant telephony alert evidence", () => {
     expect(evidence.calls).toHaveLength(0);
   });
 
+  it("preserves cancellation and classifies the failure without copying error bodies or pending commands", async () => {
+    const h = fixture();
+    h.db.update("motorist_call_sessions", { state: "ended", ended_at: NOW, answered_at: null,
+      pending_effects: { entries: [{ api_key: "pending-secret" }] } }, row => row.id === "call-1");
+    h.db.seed("motorist_call_legs", [{ id: "customer", organization_id: ORG, session_id: "call-1", role: "customer",
+      state: "ended", ended_at: NOW, hangup_source: "caller", hangup_cause: "normal_clearing" }]);
+    h.db.seed("motorist_telnyx_webhook_events", [{ event_id: "timeout", organization_id: ORG, event_type: "call.answered",
+      call_session_id: "provider-session", error: "AbortError: owned database request exceeded 4000 ms api_key=error-secret" }]);
+    const evidence = await loadTelephonyAlertEvidence({ admin: h.admin, organizationId: ORG,
+      alerts: [{ key: "ledger", check: "ledger", status: "fail", detail: { failedIds: ["timeout"] } }] });
+    expect(evidence.events[0].failureKind).toBe("database_timeout");
+    expect(evidence.calls[0]).toMatchObject({ pendingWork: true, legs: [{ hangupSource: "caller", hangupCause: "normal_clearing" }] });
+    expect(JSON.stringify(evidence)).not.toContain("secret");
+  });
+
+  it("keeps the health failure category if replay clears the raw error before email enrichment", async () => {
+    const h = fixture();
+    h.db.seed("motorist_telnyx_webhook_events", [{ event_id: "timeout", organization_id: ORG, event_type: "call.answered",
+      call_session_id: "provider-session", error: null }]);
+    const evidence = await loadTelephonyAlertEvidence({ admin: h.admin, organizationId: ORG,
+      alerts: [{ key: "ledger", check: "ledger", status: "fail", detail: { failedIds: ["timeout"], failures: [{ eventId: "timeout", kind: "database_timeout" }] } }] });
+    expect(evidence.events[0].failureKind).toBe("database_timeout");
+  });
+
+  it("retains pending cleanup without exposing private details or confusing a completed tombstone with work", async () => {
+    const h = fixture();
+    h.db.update("motorist_call_sessions", { pending_effects: null, cancellations_next_attempt_at: NOW,
+      termination_next_attempt_at: null, presence_cancellations: { operator: { callControlId: "cleanup-secret" } } }, row => row.id === "call-1");
+    const evidence = await loadTelephonyAlertEvidence({ admin: h.admin, organizationId: ORG, alerts: [scoped("call-1")] });
+    expect(evidence.calls[0].pendingWork).toBe(true);
+    expect(JSON.stringify(evidence)).not.toContain("cleanup-secret");
+    h.db.update("motorist_call_sessions", { cancellations_next_attempt_at: null }, row => row.id === "call-1");
+    const completed = await loadTelephonyAlertEvidence({ admin: h.admin, organizationId: ORG, alerts: [scoped("call-1")] });
+    expect(completed.calls[0].pendingWork).toBe(false);
+  });
+
   it.each(["motorist_call_sessions", "motorist_call_legs"])("still sends the original alert if %s evidence cannot be read", async (table) => {
     const h = fixture();
     h.db.failNext(table, "select", "evidence unavailable");

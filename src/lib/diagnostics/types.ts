@@ -1,11 +1,12 @@
 import type { RoutingDiagnostic } from './routing';
+import { VOICE_QUALITY_WARNINGS, voiceQualityWarning, type VoiceQualityWarningCode } from './voice-quality';
 /** Browser-safe closed schema. Never add messages, URLs, stacks or arbitrary metadata. */
 export const DIAGNOSTIC_LIMITS = { queueEvents: 200, queueBytes: 128 * 1024, ttlMs: 86_400_000, batchEvents: 16, batchBytes: 16 * 1024, eventBytes: 1024, flushMs: 30_000, criticalFlushMs: 5_000, attemptsPerMinute: 12, sampleRate: 0.05, maxCount: 10_000 } as const;
 export const DIAGNOSTIC_MODULES = ['app','auth','cases','telephony','sms','documents','fleet','integrations'] as const;
 export const DIAGNOSTIC_OPERATIONS = ['case.open','case.create','case.save','case.assign','case.action','call.start','call.pickup','call.hangup','call.transfer','call.hold','sms.send','document.upload','document.download','document.generate','fleet.refresh','integration.lookup','auth.login','app.refresh'] as const;
 export const DIAGNOSTIC_OUTCOMES = ['ok','failed','conflict','cancelled','timeout','unknown','committed_refresh_failed'] as const;
 export const DIAGNOSTIC_EVENT_TYPES = ['ui_error','unhandled_rejection','chunk_error','user_report','operation','page_lifecycle','phone_lifecycle','app_update','call_timing','coverage'] as const;
-export const DIAGNOSTIC_REASONS = ['online','offline','pagehide','pageshow','update_detected','update_requested','update_blocked','registered','registering','unregistered','reconnect','takeover','dispose','logout','hangup_intent','provider_disconnect','transport_error','chunk_load','boundary','global_error','global_rejection','user_requested','slow','request_failed','validation','refresh_failed','unknown','incoming_event','answer_clicked','sdk_answer_invoked','sdk_active','remote_audio_attached','server_answered','component_unmount','ownership_release','mobile_standby','superseded','recovery_timeout','auth_failure','disconnected','reconnecting','ownership_acquired','takeover_requested','hangup_requested','sdk_warning','sdk_socket_error','sdk_recoverable_error','visible','hidden','queue_drop'] as const;
+export const DIAGNOSTIC_REASONS = ['online','offline','pagehide','pageshow','update_detected','update_requested','update_blocked','registered','registering','unregistered','reconnect','takeover','dispose','logout','hangup_intent','provider_disconnect','transport_error','chunk_load','boundary','global_error','global_rejection','user_requested','slow','request_failed','validation','refresh_failed','unknown','incoming_event','answer_clicked','sdk_answer_invoked','sdk_active','remote_audio_attached','server_answered','component_unmount','ownership_release','mobile_standby','superseded','recovery_timeout','auth_failure','disconnected','reconnecting','ownership_acquired','takeover_requested','hangup_requested','sdk_warning','sdk_socket_error','sdk_recoverable_error','visible','hidden','queue_drop', ...VOICE_QUALITY_WARNINGS.map(warning => warning.reason)] as const;
 export const DIAGNOSTIC_ERROR_CLASSES = ['Error','TypeError','RangeError','ReferenceError','SyntaxError','AbortError','NetworkError','ChunkLoadError','TimeoutError','UnknownError'] as const;
 export type DiagnosticModule = typeof DIAGNOSTIC_MODULES[number];
 export type DiagnosticOperation = typeof DIAGNOSTIC_OPERATIONS[number];
@@ -19,12 +20,13 @@ export type DiagnosticEvent = {
   sampled: boolean; sampleRate: number; operation?: DiagnosticOperation; durationMs?: number;
   requestId?: string; operationId?: string; caseId?: string; callSessionId?: string; deviceSessionId?: string;
   reason?: DiagnosticReason; errorClass?: DiagnosticErrorClass; errorId?: string; count?: number;
+  sdkWarningCode?: VoiceQualityWarningCode;
 };
 export type DiagnosticEventInput = Omit<DiagnosticEvent, 'id'|'pageId'|'sequence'|'occurredAt'|'monotonicMs'|'buildId'|'sampled'|'sampleRate'> & {sampled?:boolean;sampleRate?:number};
 export type DiagnosticAck = {acceptedIds:string[]; rejectedIds?:string[]; degraded?:boolean};
 export function isDiagnosticUuid(value: unknown): value is string { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value); }
 export function isDiagnosticSafeId(value: unknown): value is string { return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(value); }
-const fields = new Set(['id','pageId','sequence','occurredAt','monotonicMs','type','module','outcome','buildId','sampled','sampleRate','operation','durationMs','requestId','operationId','caseId','callSessionId','deviceSessionId','reason','errorClass','errorId','count']);
+const fields = new Set(['id','pageId','sequence','occurredAt','monotonicMs','type','module','outcome','buildId','sampled','sampleRate','operation','durationMs','requestId','operationId','caseId','callSessionId','deviceSessionId','reason','errorClass','errorId','count','sdkWarningCode']);
 const includes = (values: readonly string[], value: unknown) => typeof value === 'string' && values.includes(value);
 const bounded = (v:unknown,min:number,max:number) => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
 /** Reject unknown fields rather than accepting a payload which accidentally contains private data. */
@@ -39,6 +41,10 @@ export function parseDiagnosticEvent(value:unknown):DiagnosticEvent|null {
   for (const key of ['requestId','operationId','caseId','callSessionId','deviceSessionId']) if (e[key]!==undefined&&!isDiagnosticUuid(e[key])) return null;
   if ((e.type==='operation' && e.operation===undefined)||(e.operation!==undefined&&!includes(DIAGNOSTIC_OPERATIONS,e.operation))) return null;
   if (e.reason!==undefined&&!includes(DIAGNOSTIC_REASONS,e.reason)) return null;
+  if (e.sdkWarningCode!==undefined || VOICE_QUALITY_WARNINGS.some(warning => warning.reason===e.reason)) {
+    const warning=voiceQualityWarning(e.sdkWarningCode);
+    if (!warning || e.reason!==warning.reason || e.type!=='phone_lifecycle' || e.module!=='telephony' || e.outcome!=='unknown' || !isDiagnosticUuid(e.callSessionId)) return null;
+  }
   if (e.errorClass!==undefined&&!includes(DIAGNOSTIC_ERROR_CLASSES,e.errorClass)) return null;
   if (e.errorId!==undefined&&!isDiagnosticSafeId(e.errorId)) return null;
   if (e.durationMs!==undefined&&!bounded(e.durationMs,0,86_400_000)) return null;

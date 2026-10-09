@@ -14,7 +14,7 @@ export type TelephonyAlertEmailInput = {
 
 type Explanation = { title: string; happened: string; outcome: string; action: string };
 const UNKNOWN_OUTCOME = "Z tejto kontroly sa nedá potvrdiť, či konkrétny hovor prebehol. Samotné upozornenie nedokazuje stratený hovor.";
-const CALL_CHECKS = new Set(["sessions", "webhooks", "connections", "provider", "ledger"]);
+const CALL_CHECKS = new Set(["sessions", "webhooks", "connections", "provider", "ledger", "interruptions"]);
 const NUMBER = new Intl.NumberFormat("sk-SK");
 const DATE = new Intl.DateTimeFormat("sk-SK", { timeZone: "Europe/Bratislava", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 
@@ -33,6 +33,12 @@ function entries(alert: TelephonyAlert): Record<string, unknown>[] {
 function explain(alert: TelephonyAlert): Explanation {
   const d = alert.detail;
   const problems: Record<string, Explanation> = {
+    interruptions: {
+      title: "Účasť operátora sa prerušila",
+      happened: "Predtým spojená vetva operátora skončila, kým zákaznícka vetva zostala aktívna dlhšie než desať sekúnd. Počkali sme na oneskorené dôkazy a nenašli zodpovedajúce bežné ukončenie, podržanie, parkovanie ani dokončené prepojenie.",
+      outcome: "Záznamy potvrdzujú prerušenie účasti operátora, nie jeho príčinu. Neurčujú, či zlyhal telefón, sieť alebo aplikácia, ani nepotvrdzujú kvalitu zvuku.",
+      action: "Overte priebeh hovoru s operátorom a porovnajte čas prerušenia s Monitorom prevádzky. Pri opakovaní pošlite technickú správu správcovi.",
+    },
     configuration: {
       title: "Nastavenie telefónie",
       happened: d.configured === false ? "Chýba nastavenie potrebné na komunikáciu s Telnyxom."
@@ -117,11 +123,21 @@ function hasUnresolvedConnection(call: AlertCallEvidence, alerts: TelephonyAlert
 }
 
 function callVerdict(call: AlertCallEvidence, alerts: TelephonyAlert[]): string {
+  if (alerts.some(alert => alert.check === "interruptions" && entries(alert).some(entry => entry.sessionId === call.sessionId))) {
+    return "Predtým spojená vetva operátora skončila a zákazník zostal na linke. Príčina prerušenia ani kvalita zvuku nie sú z týchto údajov potvrdené.";
+  }
   if (call.confirmedAt) return hasUnresolvedConnection(call, alerts)
     ? "Hovor bol spojený, ale výsledok ďalšieho spojenia alebo prepojenia nie je potvrdený."
     : "Spojenie účastníkov bolo potvrdené. Kvalitu ani obojstrannú počuteľnosť zvuku tieto záznamy nepotvrdzujú.";
+  if (callerCancelled(call)) return "Volajúci ukončil hovor pred potvrdeným spojením s operátorom. Dôvod zavesenia zo záznamov nevieme určiť; technický problém je opísaný osobitne.";
   if (call.endedAt || ["ended", "failed"].includes(call.state)) return "Hovor je ukončený. Spojenie s operátorom nevieme potvrdiť; chýbajúci záznam nie je dôkaz, že sa nikdy nespojil.";
   return "Spojenie s operátorom zatiaľ nie je potvrdené. Samotné prijatie hovoru môže znamenať iba automatickú hlášku alebo telefónne menu.";
+}
+
+function callerCancelled(call: AlertCallEvidence): boolean {
+  return call.direction === "inbound" && call.state === "ended" && Boolean(call.endedAt) && !call.confirmedAt && !call.answeredAt &&
+    call.legs.some(leg => leg.role === "customer" && leg.state === "ended" && leg.endedAt === call.endedAt &&
+      leg.hangupSource === "caller" && ["normal_clearing", "originator_cancel"].includes(String(leg.hangupCause)));
 }
 
 const REASONS: Record<string, string> = {
@@ -144,6 +160,7 @@ const HANGUP_REASONS: Record<string, string> = {
 function callNotes(call: AlertCallEvidence, alerts: TelephonyAlert[]): string[] {
   const notes: string[] = [];
   for (const alert of alerts) for (const entry of entries(alert).filter((entry) => entry.sessionId === call.sessionId)) {
+    if (alert.check === "interruptions") notes.push(`Prerušenie účasti operátora: ${alertLocalTime(typeof entry.interruptedAt === "string" ? entry.interruptedAt : null)}. Dôkazy znovu posúdené: ${alertLocalTime(typeof entry.classifiedAt === "string" ? entry.classifiedAt : null)}.`);
     if (typeof entry.reason === "string" && REASONS[entry.reason]) notes.push(REASONS[entry.reason]);
     if (alert.check !== "provider") continue;
     const part = ROLES[String(entry.role)] ?? "časť hovoru";
@@ -178,6 +195,9 @@ export function renderTelephonyAlertEmail(input: TelephonyAlertEmailInput): { su
   if (onlyUsage) {
     headline = input.alerts.some((alert) => alert.status === "fail") ? "Denný limit telefónie dosiahnutý" : "Upozornenie na denný limit";
     summary = "Ide o prevádzkové upozornenie na limit. Nehovorí, že konkrétny hovor zlyhal.";
+  } else if (input.alerts.some(alert => alert.check === "interruptions")) {
+    headline = "Zaznamenané prerušenie účasti operátora";
+    summary = "Predtým spojená vetva operátora skončila, kým zákazník zostal na linke. Dôkazy boli po časovej rezerve znovu posúdené; príčina prerušenia a kvalita zvuku zostávajú neoverené.";
   } else if (evidence.calls.length) {
     if (confirmed === evidence.calls.length && !limited && !unresolved && allCallScoped) {
       const attention = input.alerts.some((alert) => alert.status === "fail") ? "technická chyba potrebuje kontrolu" : "technické upozornenie";
@@ -194,6 +214,9 @@ export function renderTelephonyAlertEmail(input: TelephonyAlertEmailInput): { su
         headline = "Výsledky hovorov treba posúdiť jednotlivo";
         summary = `Potvrdenie spojenia máme pri ${confirmed} z ${evidence.calls.length} zobrazených hovorov. Pri ďalšom kroku alebo ďalších hovoroch môže výsledok chýbať; pozrite každý záznam nižšie.`;
       }
+    } else if (allCallScoped && !limited && evidence.calls.every(callerCancelled)) {
+      headline = evidence.calls.length === 1 ? "Volajúci zavesil; technická chyba potrebuje kontrolu" : "Volajúci zavesili; technická chyba potrebuje kontrolu";
+      summary = "Telnyx potvrdil ukončenie zo strany volajúceho pred potvrdeným spojením s operátorom. To nevysvetľuje dôvod zavesenia a nevylučuje skoršiu technickú chybu uvedenú nižšie.";
     } else {
       headline = "Spojenie hovoru nevieme potvrdiť";
       summary = "Z dostupných dôkazov nevieme potvrdiť rozhovor s operátorom. Nie je to automaticky dôkaz, že sa hovor vôbec nespojil.";
@@ -218,7 +241,11 @@ export function renderTelephonyAlertEmail(input: TelephonyAlertEmailInput): { su
       call.confirmedAt ? `Spojenie účastníkov potvrdené: ${alertLocalTime(call.confirmedAt)} (${call.confirmationSource === "conference_membership" ? "overená účasť oboch strán v konferencii" : "potvrdenia spojenia oboch strán"}).` : "",
       call.endedAt ? `Koniec evidovaný: ${alertLocalTime(call.endedAt)}.` : ["ended", "failed"].includes(call.state) ? "Aplikácia eviduje koniec; presný čas chýba." : "Aplikácia zatiaľ neeviduje koniec. Jej stav môže meškať; aktuálny stav posudzujte podľa overenia u Telnyxu.",
     ].filter(Boolean);
-    return { label, verdict: callVerdict(call, input.alerts), timeline, notes: callNotes(call, input.alerts), id: call.sessionId };
+    const notes = callNotes(call, input.alerts);
+    if (evidence.events.some(event => event.sessionIds.includes(call.sessionId) && event.failureKind === "database_timeout")) {
+      notes.push("Pri spracovaní udalosti hovoru vypršal časový limit databázového kroku. Neskoršie zavesenie volajúceho túto technickú chybu nevyvracia.");
+    }
+    return { label, verdict: callVerdict(call, input.alerts), timeline, notes, id: call.sessionId };
   });
   const technical = JSON.stringify(redactAlertDiagnostic({
     schemaVersion: 1, checkedAt: input.report.checkedAt, timezone: "Europe/Bratislava", environment: input.environment,

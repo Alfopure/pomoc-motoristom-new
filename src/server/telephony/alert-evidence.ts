@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import type { TelephonyAlert } from "./alerts";
+import { ledgerFailureKind, type LedgerFailureKind } from "./ledger-failures";
 
 const MAX_CALLS = 20;
 const MAX_EVENTS = 20;
@@ -21,12 +22,13 @@ export type AlertCallEvidence = {
   confirmedAt: string | null;
   confirmationSource: "conference_membership" | "bridge_events" | null;
   pendingConnection: boolean;
-  legs: Array<{ id: string; role: string; state: string; answeredAt: string | null; bridgedAt: string | null; endedAt: string | null; hangupCause: string | null }>;
+  pendingWork?: boolean;
+  legs: Array<{ id: string; role: string; state: string; answeredAt: string | null; bridgedAt: string | null; endedAt: string | null; hangupCause: string | null; hangupSource?: string | null }>;
 };
 
 export type TelephonyAlertEvidence = {
   calls: AlertCallEvidence[];
-  events: Array<{ eventId: string; type: string; receivedAt: string | null; sessionIds: string[] }>;
+  events: Array<{ eventId: string; type: string; receivedAt: string | null; sessionIds: string[]; failureKind?: LedgerFailureKind | null }>;
   requestedSessionIds: string[];
   missingSessionIds: string[];
   errors: string[];
@@ -72,6 +74,10 @@ function projectCall(session: Session, legs: Leg[], checks: string[]): AlertCall
   const operatorAt = legs.filter((leg) => ["operator", "external"].includes(leg.role)).map((leg) => iso(leg.bridged_at)).find(Boolean);
   const bridgeAt = customerAt && operatorAt ? (Date.parse(customerAt) > Date.parse(operatorAt) ? customerAt : operatorAt) : null;
   const pending = alertObject(recording.pendingAudio).commands;
+  // An ended session can still owe cleanup of a late accepted dial or a revoked
+  // offer. Future retry times are outstanding work too, not proof of completion.
+  // Cancellation tombstones survive completed cleanup; the retry marker, not
+  // the retained presence_cancellations map, identifies that obligation.
   return {
     sessionId: session.id, checks, state: session.state, direction: session.direction,
     caller: maskedNumber(session.caller_number), called: maskedNumber(session.called_number),
@@ -79,8 +85,11 @@ function projectCall(session: Session, legs: Leg[], checks: string[]): AlertCall
     confirmedAt: conferenceAt ?? bridgeAt,
     confirmationSource: conferenceAt ? "conference_membership" : bridgeAt ? "bridge_events" : null,
     pendingConnection: Array.isArray(pending) && pending.length > 0 || Object.keys(connection).length > 0 && !conferenceAt,
+    pendingWork: Boolean(session.pending_effects || session.effects_next_attempt_at ||
+      session.termination_next_attempt_at || session.cancellations_next_attempt_at ||
+      session.presence_pickup != null),
     legs: legs.map((leg) => ({ id: leg.id, role: leg.role, state: leg.state, answeredAt: iso(leg.answered_at),
-      bridgedAt: iso(leg.bridged_at), endedAt: iso(leg.ended_at), hangupCause: leg.hangup_cause })),
+      bridgedAt: iso(leg.bridged_at), endedAt: iso(leg.ended_at), hangupCause: leg.hangup_cause, hangupSource: leg.hangup_source ?? null })),
   };
 }
 
@@ -95,7 +104,7 @@ export async function loadTelephonyAlertEvidence(deps: { admin: SupabaseClient<D
     evidence.truncated = allEventIds.length > MAX_EVENTS;
     if (allEventIds.length) {
       const events = await deps.admin.from("motorist_telnyx_webhook_events")
-        .select("event_id, event_type, received_at, call_control_id, call_session_id")
+        .select("event_id, event_type, received_at, call_control_id, call_session_id, error")
         .eq("organization_id", deps.organizationId).in("event_id", allEventIds.slice(0, MAX_EVENTS)).limit(MAX_EVENTS);
       if (events.error) evidence.errors.push(`ledger_lookup: ${events.error.message}`);
       else {
@@ -120,7 +129,11 @@ export async function loadTelephonyAlertEvidence(deps: { admin: SupabaseClient<D
           ])];
           for (const id of sessionIds) add(id, "ledger");
           if (!sessionIds.length) evidence.errors.push(`ledger_session_unknown: ${event.event_id}`);
-          evidence.events.push({ eventId: event.event_id, type: event.event_type, receivedAt: iso(event.received_at), sessionIds });
+          const reportedFailure = deps.alerts.flatMap(alert => Array.isArray(alert.detail.failures) ? alert.detail.failures.map(alertObject) : [])
+            .find(failure => failure.eventId === event.event_id)?.kind;
+          const kind = ledgerFailureKind(event.error) ?? (["call_ended", "database_timeout", "processing_failure"].includes(String(reportedFailure))
+            ? reportedFailure as LedgerFailureKind : null);
+          evidence.events.push({ eventId: event.event_id, type: event.event_type, receivedAt: iso(event.received_at), sessionIds, failureKind: kind });
         }
       }
     }
@@ -130,10 +143,10 @@ export async function loadTelephonyAlertEvidence(deps: { admin: SupabaseClient<D
     if (!evidence.requestedSessionIds.length) return evidence;
     const [sessions, legs] = await Promise.all([
       deps.admin.from("motorist_call_sessions")
-        .select("id, state, direction, caller_number, called_number, started_at, answered_at, ended_at, metadata")
+        .select("id, state, direction, caller_number, called_number, started_at, answered_at, ended_at, metadata, pending_effects, effects_next_attempt_at, termination_next_attempt_at, cancellations_next_attempt_at, presence_pickup")
         .eq("organization_id", deps.organizationId).in("id", evidence.requestedSessionIds).limit(MAX_CALLS),
       deps.admin.from("motorist_call_legs")
-        .select("id, session_id, role, state, answered_at, bridged_at, ended_at, hangup_cause")
+        .select("id, session_id, role, state, answered_at, bridged_at, ended_at, hangup_cause, hangup_source")
         .eq("organization_id", deps.organizationId).in("session_id", evidence.requestedSessionIds).limit(MAX_LEGS + 1),
     ]);
     if (sessions.error) evidence.errors.push(`sessions_lookup: ${sessions.error.message}`);

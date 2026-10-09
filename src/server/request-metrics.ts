@@ -18,11 +18,16 @@ import { getAppVersion } from "./app-version";
  * second away is a decision about deactivated operators. They should not be
  * decided on one number.
  */
+const CONTROL_STAGES = ["recording.admission", "recording.ack", "participants", "projection", "audit", "finalize", "staging"] as const;
+export type ControlStage = typeof CONTROL_STAGES[number];
+type ControlStep = `control.${ControlStage}`;
+const controlStages = new Set<string>(CONTROL_STAGES);
+
 export type RequestStep = "auth" | "auth.token" | "auth.profile" | "db" | "lease" | "provider" | "checkpoint" | "read" | "write"
-  | "routing.snapshot" | "routing.configuration" | "routing.eligibility" | "guard.stage";
+  | "routing.snapshot" | "routing.configuration" | "routing.eligibility" | "guard.stage" | ControlStep;
 export type MeasuredRoute = "case.get" | "case.save" | "case.create" | "case.action" | "case.assign" | "sms.send" | "document.upload" | "document.generate" | "integration.lookup" | "call.start" | "call.action" | "call.webhook" | "call.active" | "dispatch.refresh" | "fleet.refresh";
 
-type Metric = { count: number; ms: number };
+type Metric = { count: number; ms: number; dbCount?: number; dbMs?: number };
 type RequestMetrics = {
   id: string;
   route: MeasuredRoute;
@@ -41,6 +46,7 @@ type RequestMetrics = {
 };
 
 const requests = new AsyncLocalStorage<RequestMetrics>();
+const controlStageScope = new AsyncLocalStorage<{ request: RequestMetrics; metric: Metric; finished: boolean }>();
 const databaseHosts = new Set<string>();
 let databaseConnects = 0;
 
@@ -60,11 +66,16 @@ export function registerDatabaseOrigin(input: RequestInfo | URL): void {
   } catch { /* No URLs or credentials enter the log. */ }
 }
 
-/** Observe only a transport-owned timeout, and detach when the fetch finishes. */
-export function observeDatabaseTimeout(signal: AbortSignal): () => void {
+/** Observe the effective request deadline, including an RPC caller's timeout.
+ * Ordinary cancellation is not a database timeout; never log its reason. */
+export function observeDatabaseTimeout(signal?: AbortSignal | null): () => void {
+  if (!signal) return () => {};
   const scope = requests.getStore();
-  const aborted = () => { if (scope && !scope.finished) scope.dbAborts += 1; };
-  signal.addEventListener("abort", aborted, { once: true });
+  const aborted = () => {
+    if (scope && !scope.finished && (signal.reason as { name?: unknown } | null)?.name === "TimeoutError") scope.dbAborts += 1;
+  };
+  if (signal.aborted) aborted();
+  else signal.addEventListener("abort", aborted, { once: true });
   return () => signal.removeEventListener("abort", aborted);
 }
 
@@ -82,7 +93,10 @@ function newScope(route: MeasuredRoute, now: () => number, logger: RequestMetric
 function finish(scope: RequestMetrics, detail: Record<string, unknown>): void {
   scope.finished = true;
   const round = (value: number) => Math.round(value * 10) / 10;
-  const steps = Object.fromEntries(Object.entries(scope.steps).map(([name, metric]) => [name, { count: metric.count, ms: round(metric.ms) }]));
+  const steps = Object.fromEntries(Object.entries(scope.steps).map(([name, metric]) => [name, {
+    count: metric.count, ms: round(metric.ms),
+    ...(metric.dbCount === undefined ? {} : { dbCount: metric.dbCount, dbMs: round(metric.dbMs ?? 0) }),
+  }]));
   try {
     scope.logger({ scope: "request-performance", requestId: scope.id, route: scope.route, serverBuild: getAppVersion(),
       ms: Math.max(0, round(scope.now() - scope.started)), steps,
@@ -119,7 +133,41 @@ export function recordRequestStep(name: RequestStep, durationMs: number, firstDa
   if (name === "db") {
     if (firstDatabaseRequest ?? scope.dbIssued++ === 0) scope.dbFirstMs = durationMs;
     scope.dbMaxMs = Math.max(scope.dbMaxMs ?? 0, durationMs);
+    const stage = controlStageScope.getStore();
+    if (stage?.request === scope && !stage.finished) {
+      stage.metric.dbCount = (stage.metric.dbCount ?? 0) + 1;
+      stage.metric.dbMs = (stage.metric.dbMs ?? 0) + durationMs;
+    }
   }
+}
+
+/**
+ * Bounded control-stage timing with database attribution to the innermost
+ * active stage. Async-local attribution keeps concurrent stages independent;
+ * subtracting request totals would count unrelated overlapping work.
+ *
+ * `ms` is stage wall time; `dbMs` sums completed database fetches and may exceed
+ * it when fetches overlap. Nested stage wall times must not be added together.
+ * No payload, query, identifier, extra I/O or background work is retained.
+ */
+export async function measureControlStage<T>(name: ControlStage, work: () => PromiseLike<T>): Promise<T> {
+  const request = requests.getStore();
+  if (!request || request.finished || !controlStages.has(name)) return work();
+  const step: ControlStep = `control.${name}`;
+  let started: number;
+  try { started = request.now(); }
+  catch { return work(); }
+  const metric = request.steps[step] ?? { count: 0, ms: 0, dbCount: 0, dbMs: 0 };
+  request.steps[step] = metric;
+  const stage = { request, metric, finished: false };
+  return controlStageScope.run(stage, async () => {
+    try { return await work(); }
+    finally {
+      stage.finished = true;
+      try { recordRequestStep(step, request.now() - started); }
+      catch { /* Stage telemetry must preserve the operation's value or error. */ }
+    }
+  });
 }
 
 /**

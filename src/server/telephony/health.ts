@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
 import { isDeviceLive } from "@/lib/telephony/device-liveness";
+import { getCallInterruptionHealth, type CallInterruptionConfiguration } from "./call-interruptions";
 
 import { STALLED_EVENT_MS, STUCK_SESSION_MS } from "./cron-jobs";
 import { TELEPHONY_INCIDENT_JOBS } from "./incidents";
@@ -10,6 +11,8 @@ import { DEFAULT_DAILY_LEG_SOFT_CAP, usageDay } from "./usage";
 import type { TelnyxConfig } from "./telnyx/env";
 import { ACTIVE_SESSION_STATES, readMeta } from "./state/types";
 import { PROGRESS_WARN_MS, sessionProgressIssue, type ProviderVerification } from "./health-progress";
+import { loadTelephonyAlertEvidence } from "./alert-evidence";
+import { ledgerFailureKind, resolvedCallEndFailureIds } from "./ledger-failures";
 
 /**
  * Operational health of the telephony stack, read straight from Postgres.
@@ -54,6 +57,8 @@ export type TelephonyHealthDeps = {
   now?: () => Date;
   /** Read-only facts from this cron tick's existing provider reconciliation. */
   providerVerification?: ProviderVerification;
+  /** Test seam; the default requires explicit activation and a stable deployment. */
+  interruptionConfiguration?: CallInterruptionConfiguration | null;
 };
 
 /** Compatibility name: now a per-interaction overdue grace, never global silence. */
@@ -68,7 +73,7 @@ const WORST_FIRST: HealthStatus[] = ["fail", "warn", "skipped", "ok"];
 /** The worst check wins, so a single `fail` cannot hide behind a page of `ok`. */
 function combine(checks: TelephonyHealthCheck[]): HealthStatus {
   for (const status of WORST_FIRST) {
-    if (checks.some((check) => check.status === status && !(check.key === "provider" && status === "skipped"))) return status;
+    if (checks.some((check) => check.status === status && !(["provider", "interruptions"].includes(check.key) && status === "skipped"))) return status;
   }
   return "ok";
 }
@@ -196,7 +201,7 @@ export async function getTelephonyHealth(deps: TelephonyHealthDeps): Promise<Tel
       entries: connections.entries, truncated: connections.truncated, error: connections.error } });
   const failed = await deps.admin
     .from("motorist_telnyx_webhook_events")
-    .select("event_id")
+    .select("event_id, error")
     .eq("organization_id", deps.organizationId)
     .eq("status", "failed")
     .gte("received_at", since)
@@ -208,15 +213,23 @@ export async function getTelephonyHealth(deps: TelephonyHealthDeps): Promise<Tel
     .eq("status", "queued").order("received_at", { ascending: false }).limit(201);
 
   const stalled = (queued.data ?? []).filter((row) => (ageMs(now, row.claimed_at) ?? 0) > STALLED_EVENT_MS);
-  const failedCount = failed.data?.length ?? 0;
+  const endedCandidates = (failed.data ?? []).filter(row => ledgerFailureKind(row.error) === "call_ended");
+  const resolved = endedCandidates.length ? resolvedCallEndFailureIds(await loadTelephonyAlertEvidence({
+    admin: deps.admin, organizationId: deps.organizationId, alerts: [{ key: "ledger:fail", check: "ledger", status: "fail",
+      detail: { failedIds: endedCandidates.map(row => row.event_id) } }],
+  }), now.toISOString()) : new Set<string>();
+  const actionable = (failed.data ?? []).filter(row => !resolved.has(row.event_id));
+  const failedCount = actionable.length;
   checks.push({
     key: "ledger",
-    // Failed rows need attention even if a bounded replay can still recover
-    // them; stalled claims normally get another attempt in the next cron tick.
+    // Keep real failures visible, even after a caller cancels. Only a definite
+    // provider call-ended rejection with complete terminal evidence is benign.
     status: failedCount > 0 ? "fail" : stalled.length > 0 || (queued.data?.length ?? 0) > 200 || failed.error || queued.error ? "warn" : "ok",
     detail: {
       failed24h: failedCount,
-      failedIds: (failed.data ?? []).map((row) => row.event_id),
+      failedIds: actionable.map(row => row.event_id),
+      failures: actionable.map(row => ({ eventId: row.event_id, kind: ledgerFailureKind(row.error) })),
+      resolvedCallEndFailures: resolved.size,
       truncated: (failed.data?.length ?? 0) > 200 || (queued.data?.length ?? 0) > 200,
       queued: queued.data?.length ?? 0,
       stalled: stalled.length,
@@ -286,5 +299,6 @@ export async function getTelephonyHealth(deps: TelephonyHealthDeps): Promise<Tel
     },
   });
 
+  checks.push(await getCallInterruptionHealth({ admin: deps.admin, organizationId: deps.organizationId, now, configuration: deps.interruptionConfiguration }));
   return { status: combine(checks), checkedAt: now.toISOString(), organizationId: deps.organizationId, checks };
 }

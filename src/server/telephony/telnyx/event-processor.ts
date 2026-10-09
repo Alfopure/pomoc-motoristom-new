@@ -20,6 +20,7 @@ import { enqueueSavedRecording } from "../recording-jobs";
 import { recordingIntent } from "../state/recording";
 import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, type WebhookClaim } from "./webhook-ledger";
 import { acceptsTestProviderEvent, getTestProviderSafety, hasTestCallProvenance } from "./test-safety";
+import { decodeClientState } from "./client-state";
 
 /**
  * Telnyx webhook processor (design §2.3).
@@ -161,6 +162,78 @@ async function findSession(admin: AdminClient, organizationId: string, event: Te
     if (conference.data) return conference.data;
   }
   return null;
+}
+
+const CREDENTIAL_MIRROR_TYPES = new Set(["call.initiated", "call.answered", "call.bridged", "call.hangup"]);
+const MIRROR_PROOF_LIMIT = 8;
+function object(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/**
+ * A browser receives the other side of our API dial on the credential
+ * connection. That side has different control/leg IDs and no client_state.
+ * It is not another application leg. Acknowledge only a proven mirror, without
+ * adopting its IDs, taking the session lease or running any provider command.
+ * The accepted dial + saved operator leg establish provenance; matching a
+ * provider session, credential connection or SIP address alone never does.
+ */
+async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEvent): Promise<string | null> {
+  const config = deps.config;
+  if (!config.configured || !config.credentialConnectionId || config.credentialConnectionId === config.callControlAppId ||
+      event.connectionId !== config.credentialConnectionId || !CREDENTIAL_MIRROR_TYPES.has(event.type) ||
+      event.payload.client_state != null || !event.callControlId || !event.callLegId || !event.callSessionId ||
+      event.direction !== null && event.direction !== "incoming" ||
+      event.type === "call.initiated" && (event.direction !== "incoming" || event.state !== "bridging")) return null;
+  // Telnyx credential callbacks use the bare username; admit its exact SIP URI
+  // as well, never arbitrary domains, phone numbers, URI parameters or escapes.
+  const destination = event.to ?? "";
+  const username = /^([a-zA-Z0-9_-]{1,128})$/.exec(destination)?.[1] ??
+    /^sip:([a-zA-Z0-9_-]{1,128})@sip\.telnyx\.com$/.exec(destination)?.[1];
+  const occurredAt = Date.parse(event.occurredAt ?? "");
+  if (!username || !Number.isFinite(occurredAt)) return null;
+  const sip = `sip:${username}@sip.telnyx.com`;
+  const signal = AbortSignal.timeout(1_500);
+  try {
+    const candidate = await deps.admin.from("motorist_call_sessions").select("id, metadata")
+      .eq("organization_id", deps.organizationId).eq("telnyx_session_id", event.callSessionId)
+      .contains("metadata", { environment: deps.environment }).abortSignal(signal).maybeSingle();
+    if (candidate.error || !candidate.data) return null;
+    const sessionId = candidate.data.id;
+    const [legs, commands, browsers, mobiles] = await Promise.all([
+      deps.admin.from("motorist_call_legs").select("telnyx_call_control_id, telnyx_call_leg_id, profile_id, from_number")
+        .eq("organization_id", deps.organizationId).eq("session_id", sessionId).eq("role", "operator").eq("to_number", sip)
+        .limit(MIRROR_PROOF_LIMIT + 1).abortSignal(signal),
+      deps.admin.from("motorist_provider_commands").select("first_dispatched_at, request_payload, result")
+        .eq("session_id", sessionId).eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted")
+        .contains("request_payload", { connection_id: config.callControlAppId, to: sip })
+        .limit(MIRROR_PROOF_LIMIT + 1).abortSignal(signal),
+      deps.admin.from("motorist_operator_devices").select("profile_id, telnyx_credential_id")
+        .eq("organization_id", deps.organizationId).eq("environment", deps.environment).eq("sip_username", username)
+        .limit(2).abortSignal(signal),
+      deps.admin.from("motorist_operator_mobile_devices").select("profile_id, telnyx_credential_id")
+        .eq("organization_id", deps.organizationId).eq("environment", deps.environment).eq("sip_username", username)
+        .limit(2).abortSignal(signal),
+    ]);
+    if ([legs, commands, browsers, mobiles].some(read => read.error) ||
+        (legs.data?.length ?? 0) > MIRROR_PROOF_LIMIT || (commands.data?.length ?? 0) > MIRROR_PROOF_LIMIT ||
+        (browsers.data?.length ?? 0) > 1 || (mobiles.data?.length ?? 0) > 1) return null;
+    const enrolled = [...(browsers.data ?? []), ...(mobiles.data ?? [])];
+    const identities = new Set(enrolled.map(row => `${row.profile_id}:${row.telnyx_credential_id}`));
+    if (identities.size !== 1 || !enrolled[0]?.profile_id || !enrolled[0].telnyx_credential_id) return null;
+    const proven = (commands.data ?? []).some(command => {
+      const payload = object(command.request_payload), result = object(object(command.result).data);
+      const state = decodeClientState(payload.client_state);
+      const dispatchedAt = Date.parse(command.first_dispatched_at);
+      if (!Number.isFinite(dispatchedAt) || dispatchedAt > occurredAt || payload.from !== event.from ||
+          result.call_session_id !== event.callSessionId || state?.sid !== sessionId || state.role !== "operator" ||
+          state.operatorId !== enrolled[0].profile_id || typeof result.call_control_id !== "string" ||
+          typeof result.call_leg_id !== "string" || result.call_control_id === event.callControlId || result.call_leg_id === event.callLegId) return false;
+      return (legs.data ?? []).some(leg => leg.telnyx_call_control_id === result.call_control_id &&
+        leg.telnyx_call_leg_id === result.call_leg_id && leg.profile_id === state.operatorId && leg.from_number === event.from);
+    });
+    return proven ? sessionId : null;
+  } catch { return null; }
 }
 
 /**
@@ -422,8 +495,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // the credential connection is our own dial reaching an operator's browser:
     // it is "incoming" from that connection's point of view, and turning it
     // into a customer session would fork the call in two and answer a leg the
-    // API refuses to answer. The connection's webhook URL is unset for this
-    // reason; this guard keeps the mistake harmless if it is ever set again.
+    // API refuses to answer. Credential callbacks may still reach us through
+    // provider routing; the proof below acknowledges only verified mirrors.
     const credentialConnectionId = deps.config.configured ? deps.config.credentialConnectionId : null;
     const fromCredentialConnection = Boolean(credentialConnectionId && event.connectionId === credentialConnectionId);
     if (!session && event.type === "call.initiated" && event.direction === "incoming" && eventClass === "control" && !fromCredentialConnection && Boolean(event.connectionId && allowed.has(event.connectionId))) {
@@ -431,6 +504,12 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     }
 
     if (!session) {
+      const mirrorSessionId = await credentialMirrorSession(deps, event);
+      if (mirrorSessionId) {
+        const completed = await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+        return done({ ...identity, claim, sessionId: mirrorSessionId, status: completed ? 200 : 500,
+          outcome: completed ? "ignored" : "busy", notes: ["verified credential browser mirror"] });
+      }
       if (event.connectionId && allowed.has(event.connectionId)) {
         await markWebhookEventFailed(deps.admin, event.id, "Awaiting exact session/leg correlation", { claimedAt: claim.claimedAt, logger: deps.logger, awaitingCorrelation: true });
         const expired = claim.receivedAt !== null && now().getTime() - Date.parse(claim.receivedAt) >= 60_000;
@@ -768,7 +847,7 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
   const limit = options.limit ?? 2;
   try {
     if (customerTerminalOnly && !session.customer_leg_id) return;
-    let legQuery = deps.admin.from("motorist_call_legs").select("telnyx_call_control_id")
+    let legQuery = deps.admin.from("motorist_call_legs").select("telnyx_call_control_id, telnyx_call_leg_id")
       .eq("organization_id", deps.organizationId).eq("session_id", session.id);
     if (customerTerminalOnly && session.customer_leg_id) legQuery = legQuery.eq("id", session.customer_leg_id).eq("role", "customer");
     const [correlation, legs] = await Promise.all([
@@ -789,23 +868,63 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
       .lte("next_attempt_at", new Date(nowOf(deps)().getTime() + 5_000).toISOString()).neq("event_id", current?.id ?? "")
       .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null };
     if (deferred.error) throw new Error(deferred.error.message);
+    // The customer may hang up before inbound creation saves its leg. A failed
+    // answer still releases an owner with that exact leg now durable; recover
+    // the early fact here, before the ledger's unchanged 60-second expiry.
+    const earlyCustomer = customerTerminalOnly && controlIds.size && session.organization_id === deps.organizationId &&
+      object(session.metadata).environment === deps.environment ? await deps.admin.from("motorist_telnyx_webhook_events").select("*")
+      .eq("organization_id", deps.organizationId).eq("retry_state", "awaiting_correlation")
+      .in("call_control_id", [...controlIds]).eq("event_type", "call.hangup").neq("event_id", current?.id ?? "")
+      .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null };
+    if (earlyCustomer.error) throw new Error(earlyCustomer.error.message);
+    // A credential callback can beat the response to our dial, so proof may
+    // become durable only when this owner finishes. Provider retries can all
+    // arrive before then. Select narrowly here, and prove each counterpart
+    // below; selection by provider session never authorizes an application leg.
+    const mirrors = !customerTerminalOnly && deps.config.configured && deps.config.credentialConnectionId &&
+      session.telnyx_session_id && session.organization_id === deps.organizationId && object(session.metadata).environment === deps.environment
+      ? await deps.admin.from("motorist_telnyx_webhook_events").select("*")
+        .eq("organization_id", deps.organizationId).eq("retry_state", "awaiting_correlation")
+        .eq("call_session_id", session.telnyx_session_id).eq("connection_id", deps.config.credentialConnectionId)
+        .in("event_type", [...CREDENTIAL_MIRROR_TYPES]).neq("event_id", current?.id ?? "")
+        .order("received_at", { ascending: true }).limit(4) : { data: [], error: null };
+    if (mirrors.error) throw new Error(mirrors.error.message);
     const occurredAt = (row: { occurred_at: string | null; received_at: string | null }) => Date.parse(row.occurred_at ?? row.received_at ?? "") || 0;
     const rows = [
       ...(deferred.data ?? []).sort((a, b) => (DEFERRED_EVENT_RANK[a.event_type] ?? 9) - (DEFERRED_EVENT_RANK[b.event_type] ?? 9) || occurredAt(a) - occurredAt(b)),
+      ...(earlyCustomer.data ?? []),
+      ...(mirrors.data ?? []),
       ...(correlation.data ?? []),
     ];
-    let replayed = 0;
+    let replayed = 0, mirrorsReplayed = 0;
+    const visited = new Set<string>();
     for (const row of rows) {
+      if (Date.now() >= deadline) break;
+      if (visited.has(row.event_id)) continue;
+      visited.add(row.event_id);
       const envelope = storedWebhookEnvelope(row);
       const waiting = parseTelnyxEnvelope(envelope);
+      if (!waiting) continue;
       // Recheck the parsed payload too: its identity fields can override the
       // ledger columns, and client-state claims alone cannot authorize this path.
-      if (customerTerminalOnly && (!waiting || waiting.type !== "call.hangup" ||
+      if (customerTerminalOnly && (waiting.type !== "call.hangup" ||
         !waiting.callControlId || !controlIds.has(waiting.callControlId))) continue;
+      if (customerTerminalOnly && row.retry_state === "awaiting_correlation" &&
+        (waiting.payload.client_state != null && !waiting.clientState ||
+          waiting.callSessionId && waiting.callSessionId !== session.telnyx_session_id ||
+          waiting.callLegId && !(legs.data ?? []).some(leg => leg.telnyx_call_control_id === waiting.callControlId &&
+            leg.telnyx_call_leg_id === waiting.callLegId))) continue;
       // A shared Telnyx session ID is deliberately insufficient: it can describe
       // a different customer/operator leg. Exact control ID or our signed sid only.
-      if (!waiting || waiting.clientState?.sid && waiting.clientState.sid !== session.id ||
-        !((waiting.callControlId && controlIds.has(waiting.callControlId)) || current?.callControlId && waiting.callControlId === current.callControlId || waiting.clientState?.sid === session.id)) continue;
+      if (waiting.clientState?.sid && waiting.clientState.sid !== session.id) continue;
+      const exactLeg = Boolean(waiting.callControlId && controlIds.has(waiting.callControlId) ||
+        current?.callControlId && waiting.callControlId === current.callControlId || waiting.clientState?.sid === session.id);
+      // Mirrors never enter the reducer or acquire a session lease. Give four
+      // lifecycle facts a separate cap, retaining the ordinary two-event drain.
+      // Leave room for both bounded proof reads (selection and claimed replay).
+      const mirror = !exactLeg && !customerTerminalOnly && mirrorsReplayed < 4 && Date.now() + 3_000 < deadline &&
+        waiting.callSessionId === session.telnyx_session_id && await credentialMirrorSession(deps, waiting) === session.id;
+      if (!exactLeg && !mirror || exactLeg && replayed >= limit) continue;
       // A terminal fact can be deferred just before the prior owner releases.
       // Retain the SQL backoff instead of missing it until the five-minute cron.
       // This wait owns no session and starts no independent timer/worker.
@@ -816,7 +935,8 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
       if (Date.now() >= deadline) break;
       const replay = await processTelnyxEvent({ ...deps, ledgerReplay: row.retry_state === "deferred" ? "cron" : "correlation",
         replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, envelope);
-      if (++replayed >= limit) break;
+      if (mirror) mirrorsReplayed++; else replayed++;
+      if (customerTerminalOnly && replayed >= limit) break;
       if (replay.outcome === "busy" || replay.error?.includes("SessionLeaseBusyError")) break;
     }
   } catch (error) {

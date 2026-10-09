@@ -12,6 +12,7 @@ E-mail má oddeliť dve otázky: **„Spojil sa volajúci s operátorom?“** a 
 | Existuje potvrdenie spojenia a následne ukončenie | Hovor sa spojil a potom skončil. | Samotné ukončenie neznamená chybu. Záznam nehovorí, či bol zákazník spokojný ani či bol zvuk bezchybný. |
 | Hovor je prijatý, ale spojenie oboch strán nie je potvrdené | Zdvihnutie jednej strany ešte nepreukazuje rozhovor. | Overiť hovor v aplikácii; pri aktuálnom probléme overiť situáciu s operátorom. |
 | Hovor skončil bez dostupného potvrdenia spojenia | Výsledok rozhovoru sa zo záznamov nedá potvrdiť. | Nepovažovať ho automaticky za úspešný ani za technicky pokazený; skontrolovať históriu. |
+| Telnyx pri zákazníckej vetve potvrdil `hangup_source: caller` a bežné zavesenie pred prijatím operátorom | Volajúci ukončil pokus. Dôvod jeho rozhodnutia nepoznáme. | Predmet uvedie „Volajúci zavesil“; prípadnú skoršiu technickú chybu posúdiť osobitne. |
 | Chýbajú údaje alebo ich nemožno načítať | Výsledok nie je známy. | Riadiť sa uvedeným dôvodom a odovzdať technickú časť na kontrolu. |
 | Upozornenie sa týka limitu, nastavenia alebo celej služby | Správa nehodnotí jeden konkrétny hovor. | Postupovať podľa popisu prevádzkového problému. |
 
@@ -61,6 +62,8 @@ Prevádzkové hranice: po troch minútach sa hovor môže dostať do výberu na 
 | Čakanie alebo parkovanie prekročilo očakávanú obnovu či limit | Problém sa týka čakania daného zákazníka. Predchádzajúci rozhovor môže byť potvrdený aj vtedy, keď neskoršie čakanie zlyhá. |
 | Udalosť je vo fronte (`queued`) | Bežné čakanie nie je samo osebe chyba. Dlho nedokončené spracovanie je upozornenie na oneskorenie a existujúce opakovanie spracovania. |
 | Udalosť má `failed` | Zlyhalo spracovanie udalosti. Neznamená to automaticky zlyhanie rozhovoru ani vyčerpanie všetkých možností opakovania. Rozhoduje aj stav obnovy a dôkazy konkrétneho hovoru. |
+| Telnyx odmietol príkaz kódom `90018` / HTTP 422 po zavesení a celý hovor je už preukázateľne ukončený | Bežný súbeh príkazu a ukončenia nevytvorí incidentný e-mail. Pôvodná failed udalosť zostáva dostupná existujúcej obnove a auditu. |
+| Databázový timeout a následné zavesenie volajúceho | Zavesenie nevyvracia skorší timeout. E-mail zachová technickú chybu a uvedie ukončenie volajúcim osobitne; samotný timeout nedokazuje jeho dôvod. |
 | Otvorený incident spracovania webhooku, príkazu alebo používateľskej akcie | Aplikácia eviduje technickú chybu danej časti. Bez dôkazov hovoru nemožno tvrdiť, že zákazník nebol spojený. |
 | Nedá sa načítať konfigurácia, hovory, udalosti, incidenty, využitie alebo zariadenia | Ide o chybu kontroly alebo nedostupné údaje. Nulový počet z neúspešného čítania neznamená „žiadne problémy“. |
 | Približuje sa denný limit vetiev (od 80 %) | Preventívne upozornenie na kapacitu; nehodnotí výsledok už uskutočnených hovorov. Jedno volanie môže vytvoriť viacero vetiev. |
@@ -73,6 +76,8 @@ Prevádzkové hranice: po troch minútach sa hovor môže dostať do výberu na 
 Úrovne `warn` a `fail` vyjadrujú závažnosť zistenej kontroly. Neznamenajú automaticky „hovor prebehol“ a „hovor neprebehol“. Podmienky odosielania jednotlivých upozornení sú v [alerts.ts](../../src/server/telephony/alerts.ts); samotný health report môže obsahovať aj údaje bez samostatného e-mailu.
 
 Odosielajú sa zlyhania kontrol a výstrahy na denný limit, chýbajúci krok hovoru, neisté výsledky spojenia a neúplné provider overenie. Výstraha s chybou načítania údajov sa oznamuje aj pri ostatných kontrolách. Už napravené historické spojenia ani providerom potvrdené aktívne vetvy sa samy nepridávajú medzi dotknuté incidenty iba preto, že iný hovor mal problém.
+
+Výnimka pre `90018` vyžaduje jednoznačné priradenie udalosti k jedinému hovoru, stav session `ended`, platný minulý čas konca, potvrdený koniec zákazníckej aj všetkých ostatných vetiev a žiadnu pending úlohu ani nedokončené spojenie. Chyba čítania, chýbajúca korelácia, nejednoznačné priradenie alebo orezané dôkazy zachovajú pôvodný alarm. Nevzťahuje sa na všeobecné HTTP 422, databázové timeouty ani neznámu chybu. Health detail `resolvedCallEndFailures` ukazuje počet takto doložených bežných ukončení; `failed24h` a `failedIds` obsahujú zostávajúce zlyhania. Voľný text chyby sa do e-mailu nekopíruje.
 
 Pri čakaní na konkrétny ďalší krok sa päťminútová výstražná a pätnásťminútová vážnejšia lehota počítajú od očakávaného termínu daného kroku. Nie sú maximálnou povolenou dĺžkou rozhovoru. Bežná výstraha na nedokončenú udalosť vo fronte zostáva viditeľná v health reporte; nevytvára sama osebe nový e-mail pri každom opakovaní.
 
@@ -88,7 +93,7 @@ Majiteľ 4. 10. 2026 schválil, aby upozornenia zo stabilného TESTu chodili na 
 
 ## Opakovanie správ a zlyhanie doručenia
 
-Pravidlo je najviac jedna správa o tej istej identifikovanej kombinácii problému a závažnosti za deň. Nový dotknutý hovor alebo nová konkrétna udalosť sa nesmú skryť za skoršie upozornenie rovnakého typu. Zhoršenie z `warn` na `fail` alebo nový dôvod problému môže vytvoriť ďalšie upozornenie. Pri celkových kontrolách bez identity hovoru zostáva deduplikácia podľa typu kontroly, závažnosti a dňa. Samotná zmena veku problému alebo poradia výsledkov nesmie vytvárať novú správu pri každom päťminútovom behu.
+Konkrétna failed webhook udalosť sa hlási raz podľa event ID a závažnosti; otvorený job incident podľa názvu úlohy, času otvorenia a závažnosti. Tá istá udalosť alebo otvorenie preto nevytvorí ďalší e-mail iba kvôli polnoci. Nová udalosť, nové otvorenie incidentu alebo zhoršenie z `warn` na `fail` sa hlásia samostatne. Pri celkových kontrolách bez identity incidentu, denných limitoch a upozorneniach na postup session zostáva deduplikácia podľa kontroly, závažnosti, dotknutého hovoru a dňa. Samotná zmena veku problému alebo poradia výsledkov nesmie vytvárať novú správu pri každom päťminútovom behu.
 
 Ak príjemca nie je nastavený, odosielanie je vypnuté alebo provider odoslanie odmietne, správa sa nesmie uložiť ako úspešne odoslaná. Ďalší beh má možnosť pokusu po odstránení príčiny. Prijatie správy e-mailovým providerom ešte nepreukazuje doručenie do schránky. Chyba zápisu evidencie po prijatí správy providerom sa musí hlásiť; opakovanie využíva stabilný idempotency key, jeho účinok však závisí aj od poskytovateľa.
 
