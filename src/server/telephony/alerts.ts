@@ -12,14 +12,14 @@ import { alertObject, alertSessionIds, loadTelephonyAlertEvidence } from "./aler
 import { renderTelephonyAlertEmail } from "./alert-email";
 
 /**
- * Turns the health report into e-mail, once per problem per day.
+ * Turns the health report into e-mail, once per identified incident/severity.
  *
  * Everything else in this codebase waits to be asked: the incident row is
  * written, the health route answers, the cron summary is returned to whoever
  * called it. At 03:00 nobody is asking. This job is the only path that reaches
  * a human, so it deliberately errs towards sending — but `motorist_telephony_alerts`
- * keeps a row per (day, check, status, affected entity), which stops a five-minute cron
- * from mailing the same stuck session 288 times.
+ * keeps a row per stable event or job opening. Unscoped checks and session
+ * progress retain a daily key; the same failed event is not new at midnight.
  *
  * A worsening problem is a new key (`…:warn` → `…:fail`), so an escalation is
  * always delivered even though the warning was already sent.
@@ -106,11 +106,14 @@ function scopedAlerts(alert: TelephonyAlert, checkedAt: string): TelephonyAlert[
   const eventIds = alert.check === "ledger" && Array.isArray(alert.detail.failedIds)
     ? [...new Set(alert.detail.failedIds.filter((id): id is string => typeof id === "string"))] : [];
   if (eventIds.length) return eventIds.map((eventId) => ({ ...alert,
-    key: `${alert.key}:${digest(`event:${eventId}`).slice(0, 24)}`, detail: { ...alert.detail, failedIds: [eventId] },
+    // Event IDs identify the same incident across midnight; usage still has a daily key.
+    key: `ledger:${alert.status}:${digest(`event:${eventId}`).slice(0, 24)}`, detail: { ...alert.detail, failedIds: [eventId],
+      ...(Array.isArray(alert.detail.failures) ? { failures: alert.detail.failures.filter(failure => alertObject(failure).eventId === eventId) } : {}),
+    },
   }));
   const jobs = alert.check === "incidents" && Array.isArray(alert.detail.jobs) ? alert.detail.jobs.map(alertObject) : [];
   if (jobs.length && jobs.every((job) => typeof job.job === "string" && typeof job.openedAt === "string")) {
-    return jobs.map((job) => ({ ...alert, key: `${alert.key}:${digest(`job:${job.job}:${job.openedAt}`).slice(0, 24)}`, detail: { ...alert.detail, jobs: [job] } }));
+    return jobs.map((job) => ({ ...alert, key: `incidents:${alert.status}:${digest(`job:${job.job}:${job.openedAt}`).slice(0, 24)}`, detail: { ...alert.detail, jobs: [job] } }));
   }
   return [alert];
 }
