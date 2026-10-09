@@ -64,6 +64,31 @@ describe("Slovak telephony alert explanations", () => {
     expect(message.text).toContain("chýbajúci záznam nie je dôkaz, že sa nikdy nespojil");
   });
 
+  it("states caller cancellation separately from the earlier database timeout", () => {
+    const cancelled = call({ state: "ended", endedAt: NOW, answeredAt: null, checks: ["ledger"], legs: [
+      { id: "customer", role: "customer", state: "ended", endedAt: NOW, answeredAt: NOW, bridgedAt: null,
+        hangupCause: "normal_clearing", hangupSource: "caller" },
+    ] });
+    const message = renderTelephonyAlertEmail({ alerts: [alert("ledger", { failedIds: ["timeout"] })], report, environment: "production",
+      evidence: { ...emptyAlertEvidence(), calls: [cancelled], events: [{ eventId: "timeout", type: "call.answered", receivedAt: NOW,
+        sessionIds: [cancelled.sessionId], failureKind: "database_timeout" }] } });
+    expect(message.subject).toContain("Volajúci zavesil; technická chyba potrebuje kontrolu");
+    for (const output of [message.text, message.html]) {
+      expect(output).toContain("Dôvod zavesenia zo záznamov nevieme určiť");
+      expect(output).toContain("vypršal časový limit databázového kroku");
+      expect(output).not.toContain("Hovor bol spojený;");
+    }
+  });
+
+  it.each([null, "callee"])("does not attribute normal clearing to the caller with source %s", hangupSource => {
+    const message = render([alert("ledger")], [call({ state: "ended", endedAt: NOW, answeredAt: null, checks: ["ledger"], legs: [
+      { id: "customer", role: "customer", state: "ended", endedAt: NOW, answeredAt: NOW, bridgedAt: null,
+        hangupCause: "normal_clearing", hangupSource },
+    ] })]);
+    expect(message.subject).toContain("Spojenie hovoru nevieme potvrdiť");
+    expect(message.text).not.toContain("Volajúci ukončil hovor pred");
+  });
+
   it("does not let historical connection confirmation hide a later failed transfer", () => {
     const message = render([alert("connections", { entries: [{ sessionId: "call-1", outcome: "pending" }] })], [call({ confirmedAt: NOW, confirmationSource: "conference_membership" })]);
     expect(message.subject).toContain("Ďalší priebeh hovoru nie je potvrdený");
