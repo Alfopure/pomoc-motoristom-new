@@ -1,22 +1,22 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Keyboard, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { MobileCaseCreateInput, MobileCaseFilter, MobileCaseJobType, MobileCasePriority, MobileCaseSummary } from "../../../src/lib/mobile-api";
+import type { MobileCaseDetailData, MobileCaseFilter, MobileCaseNoteAdded, MobileCaseSummary } from "../../../src/lib/mobile-api";
 import { MobileApiError } from "../lib/api";
 import { dialable, formatNumber, formatTime } from "../lib/display";
 import { Button, Card, ErrorNotice, Loading, colors, styles } from "../ui";
 import type { CasesApi } from "./api";
 import { CaseDraft, type DraftState } from "./draft";
+import { randomUUID } from "expo-crypto";
+import { CaseEdit } from "./edit";
+import { CaseEditor } from "./editor";
+import { CaseNoteDraft } from "./notes";
+import { CaseNoteForm, CaseNoteSavedNotice } from "./note-editor";
+import { directionsUrl } from "./maps";
+import { Choice, fields, jobTypes, priorities } from "./form";
 
-const priorities: { value: MobileCasePriority; label: string }[] = [
-  { value: "urgent", label: "Horí" }, { value: "high", label: "Vysoká" }, { value: "normal", label: "Bežná" }, { value: "low", label: "Nízka" },
-];
-const jobTypes: { value: MobileCaseJobType; label: string }[] = [
-  { value: "tow", label: "Odťah" }, { value: "replacement_vehicle", label: "Náhradné vozidlo" },
-  { value: "onsite_assistance", label: "Asistencia na mieste" }, { value: "vehicle_recovery", label: "Vyslobodenie MV" },
-];
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Prípady sa nepodarilo načítať. Skúste znova.";
-type Page = { kind: "list" } | { kind: "new" } | { kind: "detail"; id: string };
+type Page = { kind: "list" } | { kind: "new" } | { kind: "detail"; id: string; note?: CaseNoteDraft } | { kind: "edit"; id: string; edit: CaseEdit } | { kind: "note"; id: string; draft: CaseNoteDraft };
 
 /** Kept mounted under the authenticated workspace across tab changes. Reads
  * pause when hidden; unsaved input and a confirmed created ID stay in memory. */
@@ -25,6 +25,8 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
 }) {
   const queryClient = useQueryClient();
   const prefix = useMemo(() => ["mobile", environment, userId, "cases", profileId], [environment, userId, profileId]);
+  const notes = useRef(new Map<string, CaseNoteDraft>());
+  const edits = useRef(new Map<string, CaseEdit>());
   const draft = useMemo(() => new CaseDraft(api), [api]);
   const state = useSyncExternalStore(draft.subscribe, draft.snapshot, draft.snapshot);
   const [page, setPage] = useState<Page>({ kind: "list" });
@@ -32,6 +34,30 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
   const [category, setCategory] = useState<MobileCaseFilter["category"]>("open");
   const [ownerId, setOwnerId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  useEffect(() => { const retained = edits.current; return () => { for (const edit of retained.values()) edit.dispose(); }; }, []);
+  useEffect(() => { const retained = notes.current; return () => { for (const note of retained.values()) note.dispose(); }; }, []);
+  const edited = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
+    void queryClient.invalidateQueries({ queryKey: [...prefix, "detail"] });
+  }, [queryClient, prefix]);
+  function showDetail(id: string) { setPage({ kind: "detail", id, note: notes.current.get(id) }); }
+  function openEditor(item: MobileCaseDetailData) {
+    const previous = edits.current.get(item.id);
+    if (!previous || previous.snapshot().status === "saved") { previous?.dispose(); edits.current.set(item.id, new CaseEdit(api, item, randomUUID)); }
+    setPage({ kind: "edit", id: item.id, edit: edits.current.get(item.id)! });
+  }
+  function openNote(id: string) {
+    let note = notes.current.get(id);
+    if (!note) { note = new CaseNoteDraft(api, id); notes.current.set(id, note); }
+    note.newNote(); setPage({ kind: "note", id, draft: note });
+  }
+  function noteUpdated(receipt: MobileCaseNoteAdded) {
+    void queryClient.invalidateQueries({ queryKey: [...prefix, "detail", receipt.caseId] });
+    void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
+  }
+  function noteSaved(receipt: MobileCaseNoteAdded) {
+    noteUpdated(receipt); showDetail(receipt.caseId);
+  }
   useEffect(() => () => draft.dispose(), [draft]);
   useEffect(() => { if (!active) void queryClient.cancelQueries({ queryKey: prefix }); }, [active, queryClient, prefix]);
   useEffect(() => {
@@ -45,7 +71,7 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
   async function save() {
     const created = await draft.submit();
     if (created) {
-      setPage({ kind: "detail", id: created.caseId });
+      showDetail(created.caseId);
       void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     }
   }
@@ -62,20 +88,16 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
   return <View style={{ flex: 1 }}>
     {page.kind === "list" ? <CaseList api={api} queryKey={prefix} active={active} ownership={ownership} category={category}
       search={search} ownerId={ownerId} onSearch={setSearch} onOwnership={value => { setOwnership(value); setOwnerId(null); }}
-      onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={setCategory} onOpen={id => setPage({ kind: "detail", id })}
+      onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={setCategory} onOpen={showDetail}
       onNew={showForm} draftState={state} onReviewed={requestedAt => draft.reviewList(requestedAt)} />
       : page.kind === "new" ? <CaseForm draft={draft} state={state} onBack={showList} onSubmit={() => { void save(); }} />
+        : page.kind === "edit" ? <CaseEditor edit={page.edit} active={active} onSaved={edited} onBack={() => showDetail(page.id)} />
+        : page.kind === "note" ? <CaseNoteForm draft={page.draft} onSaved={noteSaved} onBack={() => showDetail(page.id)} />
         : <CaseDetail api={api} queryKey={prefix} active={active} id={page.id} created={state.created?.caseId === page.id ? state.created : null}
-          onBack={showList} onSelectNumber={onSelectNumber} />}
+          onBack={showList} onSelectNumber={onSelectNumber} onEdit={openEditor} onNote={openNote} savedNote={page.note} onNoteUpdated={noteUpdated} />}
   </View>;
 }
 
-function Choice({ label, selected, onPress, disabled }: { label: string; selected: boolean; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityState={{ selected, disabled: Boolean(disabled) }} onPress={onPress} disabled={disabled}
-    style={[s.choice, selected && s.selected, disabled && { opacity: 0.6 }]}>
-    <Text style={[styles.muted, selected && { color: colors.white }]}>{label}</Text>
-  </Pressable>;
-}
 function CaseList({ api, queryKey, active, ownership, category, search, ownerId, onOwner, onSearch, onOwnership, onCategory, onOpen, onNew, draftState, onReviewed }: {
   api: CasesApi; queryKey: string[]; active: boolean; ownership: MobileCaseFilter["ownership"]; category: MobileCaseFilter["category"]; search: string; ownerId: string | null; onOwner: (id: string | null) => void;
   onSearch: (value: string) => void; onOwnership: (value: MobileCaseFilter["ownership"]) => void; onCategory: (value: MobileCaseFilter["category"]) => void;
@@ -152,21 +174,23 @@ function CaseHeading({ item }: { item: MobileCaseSummary }) {
 function Info({ label, value }: { label: string; value: string | null }) {
   return <View><Text style={styles.label}>{label}</Text><Text selectable style={styles.text}>{value || "Nedoplnené"}</Text></View>;
 }
-function CaseDetail({ api, queryKey, active, id, created, onBack, onSelectNumber }: {
-  api: CasesApi; queryKey: string[]; active: boolean; id: string; created: DraftState["created"]; onBack: () => void; onSelectNumber: (number: string) => void;
+function CaseDetail({ api, queryKey, active, id, created, onBack, onSelectNumber, onEdit, onNote, savedNote, onNoteUpdated }: {
+  api: CasesApi; queryKey: string[]; active: boolean; id: string; created: DraftState["created"]; onBack: () => void; onSelectNumber: (number: string) => void; onEdit: (item: MobileCaseDetailData) => void; onNote: (id: string) => void; savedNote?: CaseNoteDraft; onNoteUpdated: (receipt: MobileCaseNoteAdded) => void;
 }) {
   const query = useQuery({ queryKey: [...queryKey, "detail", id], queryFn: ({ signal }) => api.detail(id, signal), enabled: active });
   const item = query.isError ? null : query.data?.case;
   return <ScrollView contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { void query.refetch(); }} />}>
     <Button label="Späť na prípady" onPress={onBack} secondary />
+    {savedNote && <CaseNoteSavedNotice draft={savedNote} onUpdated={onNoteUpdated} />}
     {created && <Card><Text accessibilityRole="alert" style={styles.subheading}>Prípad {created.caseNumber} je uložený.</Text>
       {created.warnings.map((warning, index) => <Text key={warning.code + index} style={styles.text}>{warning.message}</Text>)}</Card>}
     {query.isPending ? <Loading /> : query.isError ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} />
-      : item && <><Card><CaseHeading item={item} /><Text style={styles.muted}>{item.owner.mine ? "Môj prípad" : item.owner.name || "Bez vlastníka"} · {formatTime(item.createdAt)}</Text></Card>
+      : item && <><Button label="Upraviť prípad" onPress={() => onEdit(item)} /><Button label="Pridať poznámku" secondary onPress={() => onNote(item.id)} /><Card><CaseHeading item={item} /><Text style={styles.muted}>{item.owner.mine ? "Môj prípad" : item.owner.name || "Bez vlastníka"} · {formatTime(item.createdAt)}</Text></Card>
         <Card><Info label="Kontakt" value={item.contact.name} /><Info label="Telefón" value={item.contact.phone ? formatNumber(item.contact.phone) : null} />
           {dialable(item.contact.phone) && <Button label="Vybrať číslo v ústredni" onPress={() => { if (item.contact.phone) onSelectNumber(item.contact.phone); }} secondary />}</Card>
         <Card><Info label="EČV" value={item.vehicle.licensePlate} /><Info label="Vozidlo" value={item.vehicle.description} /><Info label="Služba" value={item.jobTypeLabels.join(", ")} /></Card>
-        <Card><Info label="Vyzdvihnutie" value={item.pickupAddress} /><Info label="Cieľ" value={item.destinationAddress} /></Card>
+        <Card><Info label="Vyzdvihnutie" value={item.pickupAddress} /><Info label="Cieľ" value={item.destinationAddress} />
+          <Navigate label="Navigovať na vyzdvihnutie" address={item.pickupAddress} /><Navigate label="Navigovať do cieľa" address={item.destinationAddress} /></Card>
         <Card><Info label="Problém" value={item.incidentDescription || item.summary} /><Info label="Poznámka" value={item.mainNote} /></Card>
         <Text style={styles.subheading}>Posledné udalosti</Text>
         {item.timeline.length === 0 && <Text style={styles.muted}>Zatiaľ bez udalostí.</Text>}
@@ -175,12 +199,18 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onSelectNumber
       </>}
   </ScrollView>;
 }
-const fields: { key: keyof Pick<MobileCaseCreateInput, "contactName" | "contactPhone" | "licensePlate" | "vehicleMake" | "vehicleModel" | "manualPickupAddress" | "manualDestinationAddress" | "incidentDescription" | "note">; label: string; max: number; multiline?: boolean }[] = [
-  { key: "contactName", label: "Meno kontaktu", max: 200 }, { key: "contactPhone", label: "Telefón kontaktu", max: 64 },
-  { key: "licensePlate", label: "EČV", max: 32 }, { key: "vehicleMake", label: "Značka vozidla", max: 80 }, { key: "vehicleModel", label: "Model vozidla", max: 120 },
-  { key: "manualPickupAddress", label: "Miesto vyzdvihnutia", max: 500, multiline: true }, { key: "manualDestinationAddress", label: "Cieľová adresa", max: 500, multiline: true },
-  { key: "incidentDescription", label: "Popis problému", max: 5000, multiline: true }, { key: "note", label: "Poznámka", max: 10000, multiline: true },
-];
+function Navigate({ label, address }: { label: string; address: string | null }) {
+  const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState(false);
+  if (!address?.trim()) return null;
+  return <View style={{ gap: 8 }}><Button label={label} secondary disabled={busy} onPress={() => {
+    setBusy(true); setError(null);
+    void (async () => {
+      try { await Linking.openURL(directionsUrl(address)); }
+      catch (error) { setError(error instanceof Error && error.message.startsWith("Adresa") ? error.message : "Navigáciu sa nepodarilo otvoriť. Skúste znova."); }
+      finally { setBusy(false); }
+    })();
+  }} />{error && <ErrorNotice message={error} />}</View>;
+}
 function CaseForm({ draft, state, onBack, onSubmit }: { draft: CaseDraft; state: DraftState; onBack: () => void; onSubmit: () => void }) {
   const saving = state.status === "saving", uncertain = state.status === "uncertain";
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
@@ -211,6 +241,4 @@ const s = StyleSheet.create({
   modalBackdrop: { flex: 1, justifyContent: "center", padding: 20, backgroundColor: "rgba(0,0,0,0.5)" },
   modalCard: { maxHeight: "80%", backgroundColor: colors.white, borderRadius: 20, padding: 20, gap: 16 },
   choices: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  choice: { borderRadius: 16, paddingHorizontal: 14, paddingVertical: 12, minHeight: 44, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
-  selected: { backgroundColor: colors.ink, borderColor: colors.ink },
 });

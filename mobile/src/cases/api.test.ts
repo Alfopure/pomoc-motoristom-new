@@ -13,7 +13,10 @@ const item = { id: caseId, caseNumber: "2026-001", status: "new", statusLabel: "
   pickupAddress: "Bratislava", destinationAddress: null, summary: "Porucha", createdAt: scope.checkedAt, updatedAt: scope.checkedAt };
 const selection = { ownership: "mine" as const, category: "open" as const, q: "" };
 const list = { ...scope, cases: [item], selection, nextCursor: null };
-const detail = { ...scope, case: { ...item, mainNote: "Poznámka", incidentDescription: "Defekt", jobTypeLabels: ["Odťah"], timeline: [
+const editable = { contactName: "Kontakt", contactPhone: "+421900000001", licensePlate: "BA123AB", vehicleMake: "Škoda", vehicleModel: "Octavia",
+  manualPickupAddress: "Bratislava", manualDestinationAddress: "", incidentDescription: "Defekt", note: "Poznámka", priority: "normal", jobTypes: ["tow"], status: "new" };
+const statusOptions = ["open", "completed_assisted", "completed_no_assistance", "waiting_for_docs", "cancelled", "futile_trip"].map(value => ({ value, label: value }));
+const detail = { ...scope, case: { ...item, editable, statusOptions, mainNote: "Poznámka", incidentDescription: "Defekt", jobTypeLabels: ["Odťah"], timeline: [
   { id: otherId, title: "Vytvorené", body: null, createdAt: scope.checkedAt, actorName: "Dispečer" },
 ] } };
 const created = { ...scope, caseId, caseNumber: item.caseNumber, warnings: [{ code: "missing_contact", field: "contactName", message: "Doplňte kontakt." }] };
@@ -40,6 +43,7 @@ describe("mobile cases contract", () => {
   });
   it("rejects oversized, duplicate, malformed and repeating pages", async () => {
     await expect(fixture({ ...list, cases: Array.from({ length: 26 }, () => item) }).api.list(selection)).rejects.toMatchObject({ status: 502 });
+    await expect(fixture({ ...list, cases: [{ ...item, priority: ["normal"] }] }).api.list(selection)).rejects.toMatchObject({ status: 502 });
     await expect(fixture({ ...list, cases: [item, item] }).api.list(selection)).rejects.toMatchObject({ status: 502 });
     await expect(fixture({ ...list, cases: [{ ...item, contact: { name: "Name", phone: {} } }] }).api.list(selection)).rejects.toMatchObject({ status: 502 });
     await expect(fixture({ ...list, nextCursor: "same" }).api.list({ ...selection, cursor: "same" })).rejects.toMatchObject({ status: 502 });
@@ -87,6 +91,38 @@ describe("mobile cases contract", () => {
     await expect(fixture(detail).api.detail(otherId)).rejects.toMatchObject({ status: 502 });
     await expect(fixture({ ...detail, case: { ...detail.case, timeline: [{ ...detail.case.timeline[0], actorName: 42 }] } }).api.detail(caseId)).rejects.toMatchObject({ status: 502 });
     const f = fixture(detail); await expect(f.api.detail("../../other")).rejects.toMatchObject({ status: 404 }); expect(f.transport).not.toHaveBeenCalled();
+  });
+  it("validates raw editor fields, options and identity without reversing display labels", async () => {
+    for (const change of [{ editable: undefined }, { editable: { ...editable, vehicleMake: null } }, { editable: { ...editable, status: "open" } },
+      { editable: { ...editable, jobTypes: ["tow", "tow"] } }, { editable: { ...editable, jobTypes: [["tow"]] } }, { statusOptions: [statusOptions[0]] }, { statusOptions: [...statusOptions.slice(0, 5), statusOptions[0]] }]) {
+      await expect(fixture({ ...detail, case: { ...detail.case, ...change } }).api.detail(caseId)).rejects.toMatchObject({ status: 502 });
+    }
+    expect((await fixture({ ...detail, case: { ...detail.case, editable: { ...editable, providerSecret: "omit" } } }).api.detail(caseId)).case.editable).toEqual(editable);
+  });
+  it("sends PATCH once and verifies exact mutation receipt and opaque revision", async () => {
+    const input = { note: "Changed", mutationId: otherId, expectedUpdatedAt: "2026-10-11T12:00:00.123456Z" };
+    const receipt = { ...scope, caseId, mutationId: otherId, committedRevision: "2026-10-11T12:01:00.654321Z", warnings: [], refreshRequired: true };
+    const f = fixture(receipt); expect(await f.api.update(caseId, input)).toEqual(receipt);
+    expect(f.transport).toHaveBeenCalledTimes(1); expect(f.transport.mock.calls[0][1]).toMatchObject({ method: "PATCH", body: JSON.stringify(input), credentials: "omit" });
+    for (const change of [{ caseId: otherId }, { mutationId: profileId }, { committedRevision: "bad" }, { refreshRequired: false }, { warnings: null }, { profileId: otherId }]) {
+      await expect(fixture({ ...receipt, ...change }).api.update(caseId, input)).rejects.toMatchObject({ status: 502 });
+    }
+  });
+  it("retains typed revision conflict code and other environment denials", async () => {
+    for (const code of ["CASE_REVISION_CONFLICT", "mobile_environment_mismatch", "CASE_MUTATION_MISMATCH"]) {
+      const f = fixture(); f.transport.mockResolvedValue(Response.json({ error: "Failure", code }, { status: 409 }));
+      await expect(f.api.update(caseId, { mutationId: otherId, expectedUpdatedAt: scope.checkedAt, note: "x" })).rejects.toMatchObject({ status: 409, code });
+    }
+  });
+  it("posts a timeline note once and requires the exact scoped event receipt", async () => {
+    const input = { mutationId: otherId, note: "Nový záznam" };
+    const receipt = { ...scope, caseId, mutationId: otherId, eventId: otherId, warnings: [], refreshRequired: true };
+    const f = fixture(receipt); expect(await f.api.addNote(caseId, input)).toEqual(receipt);
+    expect(f.transport).toHaveBeenCalledTimes(1); expect(f.transport.mock.calls[0][0]).toBe(config.apiOrigin + "/api/mobile/v1/cases/" + caseId + "/notes");
+    expect(f.transport.mock.calls[0][1]).toMatchObject({ method: "POST", body: JSON.stringify(input), credentials: "omit" });
+    for (const change of [{ caseId: otherId }, { mutationId: profileId }, { eventId: profileId }, { refreshRequired: false }, { warnings: null }, { environment: "production" }]) {
+      await expect(fixture({ ...receipt, ...change }).api.addNote(caseId, input)).rejects.toMatchObject({ status: 502 });
+    }
   });
   it("submits incomplete drafts once and keeps committed warnings and identity", async () => {
     const f = fixture(created); expect(await f.api.create({})).toEqual(created);

@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeSupabase } from "@/test/fake-supabase";
 import { CaseCreationCommittedError, createCase } from "@/server/motorist-mutations";
-import { createMobileCase, getMobileCase, listMobileCaseDispatchers, listMobileCases, parseMobileCaseCreate, parseMobileCaseQuery, readMobileCaseCreate } from "./cases";
+import { createMobileCase, getMobileCase, listMobileCaseDispatchers, listMobileCases, parseMobileCaseCreate, parseMobileCaseQuery, parseMobileCaseUpdate, readMobileCaseCreate, readMobileCaseUpdate, updateMobileCase } from "./cases";
 import { MutationError } from "@/server/mutation-error";
 import { GET as list, POST as create } from "@/app/api/mobile/v1/cases/route";
 import { GET as dispatchers } from "@/app/api/mobile/v1/cases/dispatchers/route";
-import { GET as detail } from "@/app/api/mobile/v1/cases/[id]/route";
+import { GET as detail, PATCH as patch } from "@/app/api/mobile/v1/cases/[id]/route";
 
 const mocks = vi.hoisted(() => ({ admin: vi.fn(), actor: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: mocks.admin }));
@@ -191,6 +191,99 @@ describe("mobile case dispatcher choices", () => {
   });
 });
 
+describe("mobile atomic editor", () => {
+  const identity = { mutationId: uuid(30), expectedUpdatedAt: when };
+  const statuses = ["open", "completed_assisted", "completed_no_assistance", "waiting_for_docs", "cancelled", "futile_trip"] as const;
+  it("requires an exact revision, UUID and a nonempty allowlisted patch", () => {
+    expect(() => parseMobileCaseUpdate({ note: "x", mutationId: uuid(30) })).toThrow(expect.objectContaining({ status: 428, code: "CASE_REVISION_REQUIRED" }));
+    for (const input of [null, [], { ...identity }, { ...identity, mutationId: "bad", note: "x" }, { ...identity, expectedUpdatedAt: "2026-02-31T00:00:00Z", note: "x" },
+      { ...identity, ownerId: actor.profileId }, { ...identity, organizationId: actor.organizationId }, { ...identity, contacts: [] },
+      { ...identity, pickup: null }, { ...identity, attachmentMetadata: [] }, { ...identity, status: "new" }, { ...identity, note: "x".repeat(10001) }]) {
+      expect(() => parseMobileCaseUpdate(input)).toThrow(MutationError);
+    }
+    expect(parseMobileCaseUpdate({ ...identity, note: "  hello  ", manualPickupAddress: "" })).toEqual({ ...identity, note: "hello", manualPickupAddress: "" });
+  });
+  it.each(statuses)("accepts the existing writable status %s", status => {
+    expect(parseMobileCaseUpdate({ ...identity, status }).status).toBe(status);
+  });
+  it("bounds actual PATCH body bytes before parsing", async () => {
+    await expect(readMobileCaseUpdate(request({ ...identity, note: "x".repeat(64001) }))).rejects.toMatchObject({ status: 400 });
+  });
+  it("returns canonical editable values and the six status options", async () => {
+    const f = fixture([row(10, { status: "new", contact_id: uuid(20), vehicle_id: uuid(21), pickup_location_id: uuid(22), main_note: "Main",
+      customer_details: { contacts: [{ name: "Web Primary", phone: "+421905333333", isPrimary: true }] },
+      vehicle_details: { jobTypes: ["tow"] }, incident_details: { description: "Defekt" },
+      location_details: { manualPickupAddress: "Old hidden text", manualDestinationAddress: "Manual destination" } })]);
+    f.db.seed("motorist_contacts", [{ id: uuid(20), organization_id: actor.organizationId, name: "Stale row", phone: "+421905000000" }]);
+    f.db.seed("motorist_vehicles", [{ id: uuid(21), organization_id: actor.organizationId, license_plate: "BA123XY", make: "Land Rover", model: "Range Rover Sport" }]);
+    f.db.seed("motorist_locations", [{ id: uuid(22), organization_id: actor.organizationId, address: "Effective address", label: "Place", lat: 48, lng: 17 }]);
+    const result = await getMobileCase(actor, uuid(10), undefined, f.admin);
+    expect(result.editable).toEqual({ contactName: "Web Primary", contactPhone: "+421905333333", licensePlate: "BA123XY", vehicleMake: "Land Rover", vehicleModel: "Range Rover Sport",
+      manualPickupAddress: "Effective address", manualDestinationAddress: "Manual destination", incidentDescription: "Defekt", note: "Main", priority: "normal", status: "new", jobTypes: ["tow"] });
+    expect(result.contact).toEqual({ name: "Web Primary", phone: "+421905333333" });
+    expect(result.statusOptions.map(option => option.value)).toEqual(statuses);
+    expect((await listMobileCases(actor, query(), undefined, f.admin)).cases[0].contact).toEqual(result.contact);
+  });
+  it("uses actor scope and stable location overrides while returning only a confirmed receipt", async () => {
+    const f = fixture([row(10, { pickup_location_id: uuid(22), destination_location_id: uuid(23), location_details: { manualDestinationAddress: "Keep", custom: "Keep" } })]);
+    f.db.registerRpc("motorist_case_mutation_result", () => null);
+    f.db.registerRpc("motorist_save_case_atomic", args => ({ ...row(10), ...args.p_case_patch as object, updated_at: "2026-10-11T10:00:00.000002Z" }));
+    const result = await updateMobileCase(actor, uuid(10), { ...identity, manualPickupAddress: "New place", note: "Note", status: "cancelled" });
+    expect(result).toEqual({ caseId: uuid(10), mutationId: identity.mutationId, committedRevision: "2026-10-11T10:00:00.000002Z", warnings: [], refreshRequired: true });
+    const call = f.db.log.find(entry => entry.table === "motorist_save_case_atomic")!.payload;
+    expect(call).toMatchObject({ p_organization_id: actor.organizationId, p_actor_id: actor.profileId, p_expected_updated_at: when,
+      p_case_patch: { pickup_location_id: null, destination_location_id: uuid(23), main_note: "Note", status: "cancelled", location_details: { manualPickupAddress: "New place", manualDestinationAddress: "Keep", custom: "Keep" } } });
+    expect(f.db.log.some(entry => entry.table === "motorist_locations")).toBe(false);
+  });
+  it("clears both explicit empty addresses with the same fingerprint on retries", async () => {
+    const f = fixture([row(10, { pickup_location_id: uuid(22), destination_location_id: uuid(23) })]);
+    f.db.registerRpc("motorist_case_mutation_result", () => null);
+    f.db.registerRpc("motorist_save_case_atomic", args => ({ ...row(10), ...args.p_case_patch as object }));
+    const input = { ...identity, manualPickupAddress: "", manualDestinationAddress: "" };
+    await updateMobileCase(actor, uuid(10), input);
+    await updateMobileCase(actor, uuid(10), input);
+    const calls = f.db.log.filter(entry => entry.table === "motorist_save_case_atomic").map(entry => entry.payload as { p_case_patch: unknown; p_fingerprint: string });
+    expect(calls[0].p_case_patch).toMatchObject({ pickup_location_id: null, destination_location_id: null, location_details: { manualPickupAddress: null, manualDestinationAddress: null } });
+    expect(calls[0].p_fingerprint).toBe(calls[1].p_fingerprint);
+    expect(input).toEqual({ ...identity, manualPickupAddress: "", manualDestinationAddress: "" });
+  });
+  it.each([{}, { id: uuid(99), organization_id: actor.organizationId, updated_at: when }, { id: uuid(10), organization_id: otherOrg, updated_at: when }, { id: uuid(10), organization_id: actor.organizationId, updated_at: "bad" }, { id: uuid(10), organization_id: actor.organizationId, updated_at: "2026-10-11T10:00:00.000000Z" }])("rejects malformed or foreign committed receipts: %j", async receipt => {
+    const f = fixture(); f.db.registerRpc("motorist_case_mutation_result", () => receipt);
+    await expect(updateMobileCase(actor, uuid(10), { ...identity, note: "x" })).rejects.toMatchObject({ status: 503, code: "CASE_SAVE_UNCONFIRMED" });
+  });
+  it("returns the original exact receipt on replay without a detail reload or new write", async () => {
+    const f = fixture(); f.db.registerRpc("motorist_case_mutation_result", () => row(10));
+    expect(await updateMobileCase(actor, uuid(10), { ...identity, contactName: "Saved" })).toMatchObject({ caseId: uuid(10), mutationId: identity.mutationId, committedRevision: when });
+    expect(f.db.log).toHaveLength(1);
+  });
+  it("authenticates and validates an HTTP patch before any mutation and keeps success private", async () => {
+    const f = fixture();
+    const context = { params: Promise.resolve({ id: uuid(10) }) };
+    expect((await patch(request({ ...identity, organizationId: otherOrg }), context)).status).toBe(400);
+    expect((await patch(request({ mutationId: identity.mutationId, note: "x" }), context)).status).toBe(428);
+    expect((await patch(request({ ...identity, note: "x" }), { params: Promise.resolve({ id: "bad" }) })).status).toBe(400);
+    expect(f.db.log).toEqual([]);
+    f.db.registerRpc("motorist_case_mutation_result", () => row(10));
+    const response = await patch(request({ ...identity, note: "x" }), context);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, environment: "test", profileId: actor.profileId, caseId: uuid(10), mutationId: identity.mutationId, committedRevision: when, refreshRequired: true });
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(response.headers.get("Vary")).toBe("Authorization, X-PM-App-Environment");
+  });
+  it("reports untyped transport failure as uncertainty without retrying", async () => {
+    const f = fixture(); f.db.registerRpc("motorist_case_mutation_result", () => { throw new Error("private transport failure"); });
+    await expect(updateMobileCase(actor, uuid(10), { ...identity, note: "x" })).rejects.toMatchObject({ status: 503, code: "CASE_SAVE_UNCONFIRMED" });
+    expect(f.db.log).toHaveLength(1);
+  });
+  it.each([["PT409", 409, "CASE_REVISION_CONFLICT"], ["PT422", 422, "CASE_MUTATION_MISMATCH"], ["42501", 403, undefined], ["P0002", 404, undefined], ["unknown", 500, "CASE_SAVE_UNCONFIRMED"]])("preserves mutation error %s without retries or leaked database text", async (code, status, expectedCode) => {
+    const f = fixture(); f.db.failNext("motorist_case_mutation_result", "rpc", { code: String(code), message: "private db text", details: null, hint: null });
+    const response = await patch(request({ ...identity, note: "Saved" }), { params: Promise.resolve({ id: uuid(10) }) });
+    expect(response.status).toBe(status);
+    const body = await response.json(); expect(body.code).toBe(expectedCode); expect(JSON.stringify(body)).not.toContain("private db text");
+    expect(f.db.log).toHaveLength(1);
+  });
+});
+
 describe("mobile case creation and confirmed commit boundary", () => {
   it("uses the actor's explicit organization and owner while preserving draft warnings", async () => {
     const f = fixture(); vi.stubEnv("MOTORIST_ORGANIZATION_ID", otherOrg);
@@ -227,7 +320,7 @@ describe("mobile case creation and confirmed commit boundary", () => {
 });
 
 describe("mobile cases HTTP boundary", () => {
-  it.each([list, create, dispatchers, (r: Request) => detail(r, { params: Promise.resolve({ id: uuid(10) }) })])("authenticates before parsing or reading/writing", async route => {
+  it.each([list, create, dispatchers, (r: Request) => patch(r, { params: Promise.resolve({ id: uuid(10) }) }), (r: Request) => detail(r, { params: Promise.resolve({ id: uuid(10) }) })])("authenticates before parsing or reading/writing", async route => {
     fixture(); mocks.actor.mockRejectedValue(new MutationError("Prihláste sa.", 401));
     const response = await route(request({ ownerId: "forged" }, "?unknown=bad"));
     expect(response.status).toBe(401); expect(mocks.admin).not.toHaveBeenCalled();

@@ -193,7 +193,8 @@ export async function createCase(input: CreateCaseInput, ownerProfileId?: string
   return { caseRow, warnings };
 }
 
-export async function updateCase(caseId: string, input: UpdateCaseInput, actorProfileId?: string, actorOrganizationId?: string) {
+export async function updateCase(caseId: string, input: UpdateCaseInput, actorProfileId?: string, actorOrganizationId?: string,
+  options?: { synchronizePrimaryContact?: boolean }) {
   if (!nonEmpty(caseId)) {
     throw new MutationError("Chýba prípad.", 400);
   }
@@ -220,7 +221,9 @@ export async function updateCase(caseId: string, input: UpdateCaseInput, actorPr
   input = withVerifiedVehicleLookup(input, organizationId, { identity: { plate: vehicle?.license_plate ?? undefined, vin: vehicle?.vin ?? undefined }, snapshot: objectJson(existing.vehicle_details).vehicleLookup });
 
   const plan = new CaseWritePlan();
-  const contactId = upsertCaseContact(plan, contact, input);
+  // Derive contact defaults only after receipt lookup; the identity binds the original request.
+  const primaryContact = options?.synchronizePrimaryContact ? mobilePrimaryContactUpdate(existing, contact, input) : undefined;
+  const contactId = upsertCaseContact(plan, contact, primaryContact?.input ?? input);
   const vehicleId = upsertCaseVehicle(plan, vehicle, input);
   const pickupLocationId = upsertCaseLocation(plan, existing.pickup_location_id, input, "pickup", "Pickup");
   const destinationLocationId = upsertCaseLocation(plan, existing.destination_location_id, input, "destination", "Servis");
@@ -234,6 +237,7 @@ export async function updateCase(caseId: string, input: UpdateCaseInput, actorPr
     destinationLocationId,
     vehicle?.license_plate ?? null,
   );
+  if (primaryContact) updatePayload.customer_details = primaryContact.customerDetails;
 
   if (!actorId) throw new MutationError("Uloženie vyžaduje prihláseného operátora.", 403);
   const updated = await commitAtomicCaseSave(supabase, {
@@ -3160,6 +3164,50 @@ function contactForUpdate(contact: ContactRow | null, input: UpdateCaseInput) {
     name: input.contactName !== undefined ? input.contactName : contact?.name ?? "",
     phone: input.contactPhone !== undefined ? canonicalCasePhone(input.contactPhone) ?? "" : contact?.phone ?? "",
     email: input.contactEmail !== undefined ? input.contactEmail : contact?.email ?? undefined,
+  };
+}
+
+/** Compact mobile fields update the web's primary contact without normalizing secondary JSON. */
+function mobilePrimaryContactUpdate(existing: CaseRow, contact: ContactRow | null, input: UpdateCaseInput) {
+  if (input.contactName === undefined && input.contactPhone === undefined) return;
+  const details = objectJson(existing.customer_details);
+  const contacts = Array.isArray(details.contacts) ? [...details.contacts] : [];
+  const text = (value: Json | undefined) => typeof value === "string" ? cleanString(value) : null;
+  const name = (item: Record<string, Json | undefined>) => text(item.name) ?? [text(item.firstName), text(item.lastName)].filter(Boolean).join(" ");
+  const meaningful = contacts.map((value, index) => ({ item: objectJson(value), index }))
+    .filter(({ item }) => name(item) || text(item.phone) || text(item.email) || text(item.note));
+  let selected = meaningful.find(({ item }) => Boolean(item.isPrimary)) ?? meaningful[0];
+  const alternativePhone = text(details.alternativeContact);
+  if (!selected && alternativePhone) {
+    selected = { index: contacts.length, item: { id: `legacy-alternative-${alternativePhone.replace(/\D/g, "") || "contact"}`, name: "Alternatívny kontakt", phone: alternativePhone, role: "other", isPrimary: false } };
+  }
+  if (!selected && (text(details.firstName) || text(details.lastName))) {
+    // Separate contact edits from legacy customer-name defaults used by the web editor.
+    selected = { index: contacts.length, item: { id: contact?.id ?? crypto.randomUUID(), name: contact?.name ?? "", phone: contact?.phone ?? "",
+      email: contact?.email ?? "", role: "primary_customer", isPrimary: true } };
+  }
+  if (!selected) return;
+  const next = { ...selected.item };
+  if (input.contactName !== undefined) {
+    next.name = input.contactName.trim();
+    delete next.firstName;
+    delete next.lastName;
+  }
+  if (input.contactPhone !== undefined) {
+    next.phone = canonicalCasePhone(input.contactPhone) ?? "";
+    delete next.phonePrefix;
+    delete next.phoneNational;
+  }
+  if (!name(next) && !text(next.phone) && !text(next.email) && !text(next.note)
+    && (meaningful.length > 1 || alternativePhone)) {
+    throw new MutationError("Primárny kontakt nemožno vyprázdniť, kým sú uložené ďalšie alebo alternatívne kontakty. Najprv ich upravte alebo vyberte iný primárny kontakt v úplnej webovej karte prípadu.", 400);
+  }
+  contacts[selected.index] = next;
+  return {
+    input: { ...input, contactName: input.contactName ?? (name(selected.item) || contact?.name || ""),
+      contactPhone: input.contactPhone ?? (text(selected.item.phone) || contact?.phone || ""),
+      contactEmail: text(selected.item.email) ?? contact?.email ?? "" },
+    customerDetails: { ...details, contacts } as Json,
   };
 }
 

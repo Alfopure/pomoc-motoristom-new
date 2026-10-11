@@ -4,7 +4,7 @@ Rozsah požadovaný majiteľom 11. 10. 2026 počas čakania na Apple členstvo.
 Funguje v Expo Go a používa rovnaké uložené prípady ako webový dispečing.
 Fyzické iPhone telefonovanie zostáva samostatným neovereným míľnikom.
 
-## Prvá verzia
+## Mobilný pracovný postup
 
 Záložka **Prípady** obsahuje moje/všetky prípady organizácie, filter otvorených
 alebo všetkých stavov vrátane uzavretých, vyhľadávanie, ďalšie stránky,
@@ -30,8 +30,29 @@ automaticky ani cez offline frontu. Po neistom výsledku zápisu treba najprv
 skontrolovať obnovený zoznam, aby sa ten istý prípad nezaložil dvakrát.
 Úspešne potvrdený zápis nezávisí od následného načítania detailu.
 
-Úpravy, zmeny stavu, ďalšie poznámky, fotografie, mapy, priraďovanie vozidiel
-a úlohy sú ďalšie navrhnuté kroky.
+**Upraviť prípad** doplní kontakt, vozidlo, adresy, popis, typ zákazky,
+prioritu a hlavnú poznámku. Posiela iba zmenené polia a presnú serverovú
+revíziu. Súbežná zmena kolegu zachová koncept a zobrazí porovnanie; používateľ
+vedome vyberie zachovanie svojich úprav alebo načítanie údajov kolegu.
+Zmena ručnej adresy nahradí pôvodne vybrané mapové miesto. Hlavný kontakt
+zostane zhodný s webom aj pri viacerých kontaktoch; ostatné kontakty sa zachovajú.
+
+Mobil používa rovnakých šesť ručne nastaviteľných stavov ako webový editor:
+otvorený, vybavený, bez asistencie, čaká na doklady, zrušený a marný výjazd.
+Ostatné existujúce stavy vie zobraziť a pri úprave iného poľa ich zachová.
+
+**Pridať poznámku** pridá samostatný záznam do histórie s autorom a časom.
+Nenahrádza hlavnú poznámku. Úprava aj nový záznam používajú stabilnú identitu
+požiadavky: pri neistom výsledku je možné iba výslovné overenie tej istej
+operácie. Samotné načítanie podobných hodnôt nie je potvrdením zápisu.
+Potvrdená poznámka zostane uložená aj pri neskoršej chybe auditu, ktorú
+odpoveď označí upozornením; nevkladá sa druhýkrát. Tlačidlo **Overiť audit
+poznámky** zopakuje tú istú požiadavku. Aj pri neúspešnom overení zostane
+poznámka označená ako uložená.
+
+**Navigovať** z detailu otvorí mapy pre zobrazené miesto zásahu alebo cieľ.
+Ide o výslovnú akciu; aplikácia si nežiada oprávnenie na polohu.
+Fotografie, prílohy, priraďovanie vozidiel a úlohy sú ďalšie rozšírenia.
 
 ## API a prístup
 
@@ -41,6 +62,8 @@ a úlohy sú ďalšie navrhnuté kroky.
 | `GET /api/mobile/v1/cases/dispatchers` | Najviac 200 ľudských dispečerov tej istej organizácie; iba ID, meno a aktívnosť |
 | `GET /api/mobile/v1/cases/[id]` | Detail jedného prípadu organizácie |
 | `POST /api/mobile/v1/cases` | Založenie cez existujúcu mutáciu, ID/číslo potvrdeného prípadu a prípadné upozornenia |
+| `PATCH /api/mobile/v1/cases/[id]` | Zmenené jednoduché polia, `expectedUpdatedAt` a `mutationId`; potvrdená revízia a upozornenia |
+| `POST /api/mobile/v1/cases/[id]/notes` | Nový historický záznam; iba `note` a `mutationId`, potvrdené ID udalosti a upozornenia |
 
 Mobil posiela Supabase user JWT a `X-PM-App-Environment`. Server overí
 podpis, projekt, platnosť tokenu, aktívny ľudský profil a rolu
@@ -64,6 +87,13 @@ webového vytvárania. Potvrdený prípad sa nesmie vydávať za neúspešný no
 zápis len pre následnú chybu histórie alebo auditu; taká situácia sa musí
 výslovne označiť upozornením. Neznámy výsledok sa neoznačuje ako úspech.
 
+PATCH používa existujúci atomický zápis prípadu, súvisiacich údajov, histórie
+a auditu. Zachová databázové mikrosekundy revízie a pri opakovaní overí
+pôvodnú identitu a obsah. Záznam poznámky má vlastné UUID udalosti a marker;
+opakovaný request musí mať rovnaký prípad, autora a text. Audit s rovnakou
+identitou sa overí alebo doplní, jeho porucha sa nikdy nezamení za neuloženú
+poznámku. Úspešné odpovede nevyžadujú úspech následného GET detailu.
+
 Nevzniká nová schéma, worker, cron, provider integrácia ani automatická SMS
 či e-mail. TEST používa iba `nzpnqdstvkfncflgqlny` a
 https://test.dispecing.linkapomoci.sk. Produkcia potrebuje osobitné
@@ -83,6 +113,13 @@ explicitné schválenie identifikovaného TEST rozsahu.
    tap nespustí druhý POST; potvrdený prípad ostane potvrdený pri chybe GET.
 7. Odhlásiť/prepnúť účet a odobrať prístup; cudzie alebo zamietnuté dáta
    sa nezobrazia. Neautorizované a neplatné požiadavky nemôžu zapisovať.
+8. Upraviť skúšobný prípad, hlavnú poznámku a stav; skontrolovať rovnaké
+   hodnoty na webe. Pri viacerých kontaktoch overiť primárny aj zachovanie ostatných.
+9. Zmeniť prípad súčasne na webe: mobil zachová koncept a vyžiada vedomé
+   rozhodnutie. Pri strate odpovede overovať iba pôvodnú požiadavku.
+10. Pridať poznámku, prepnúť záložky počas konceptu a overiť jeden historický
+    záznam aj po opakovanom overení neistého výsledku.
+11. Otvoriť navigáciu k zobrazenému miestu. Po úprave adresy overiť nový cieľ.
 
 Automatické kontraktové/UI testy, HTTP health/negative-auth checks a JS
 exporty nepreukazujú fyzické prihlásenie, skutočnú databázovú mutáciu ani
