@@ -321,6 +321,19 @@ class Contracts(unittest.TestCase):
       finally:
         proc.terminate();proc.wait(timeout=5)
         self.c.execute('drop trigger diagnostic_slow_fixture on motorist_diagnostic_events')
+ def test_verified_conference_connection_reaches_timeline_and_interruption_candidates(self):
+    operator,customer=str(uuid4()),str(uuid4())
+    self.c.execute('update motorist_call_sessions set customer_leg_id=%s where id=%s',(customer,CALL))
+    self.c.execute("insert into motorist_call_legs(id,organization_id,session_id,profile_id,role,answered_at,ended_at) values(%s,%s,%s,%s,'operator',now()-interval '4 minutes',now()-interval '20 seconds'),(%s,%s,%s,null,'customer',now()-interval '4 minutes',null)",(operator,ORG,CALL,PROFILE,customer,ORG,CALL))
+    self.c.execute("select motorist_diagnostics_maintain(%s,'test',134217728,true)",(ORG,))
+    self.assertEqual(self.c.execute('select count(*) from motorist_diagnostic_incidents where leg_id=%s',(operator,)).fetchone()[0],0)
+    # The application writes this fact only after the exact two participants
+    # have been verified joined; an answer/accepted join alone leaves it null.
+    self.c.execute("update motorist_call_legs set bridged_at=now()-interval '3 minutes',updated_at=clock_timestamp() where id in (%s,%s)",(operator,customer))
+    self.c.execute("select motorist_diagnostics_maintain(%s,'test',134217728,true)",(ORG,))
+    self.assertEqual(self.c.execute('select classification from motorist_diagnostic_incidents where leg_id=%s',(operator,)).fetchone()[0],'interruption_observed')
+    timeline=self.c.execute("select motorist_diagnostics_read(%s,%s,'test','timeline',p_id=>%s)",(ORG,MANAGER,CALL)).fetchone()[0]
+    self.assertEqual(sum(leg['bridgedAt'] is not None for leg in timeline['legs']),2)
  def test_read_samples_and_status(self):
     ev=event(type='operation',outcome='failed',callSessionId=CALL);ingest(self.c,[ev,event(sampled=False,durationMs=80000)])
     payload=self.c.execute("select motorist_diagnostics_read(%s,%s,'test','overview')",(ORG,MANAGER)).fetchone()[0]

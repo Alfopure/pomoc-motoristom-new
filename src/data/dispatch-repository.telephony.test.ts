@@ -3,6 +3,15 @@ import { describe, expect, it } from "vitest";
 import { mapCallCenterCall } from "./dispatch-repository";
 
 describe("historical call line identity", () => {
+  it("keeps the internal diagnostic session separate from the provider conversation", () => {
+    const internal = "d1a729cc-f152-4956-9b92-5dc4bd543a04";
+    const provider = "d37a5826-c57f-11f1-b49f-02420a1f0b70";
+    const result = mapCallCenterCall(args({ session_id: internal, provider_session_id: provider }));
+    expect(result.sessionId).toBe(internal);
+    expect(result.providerSessionId).toBe(provider);
+    expect(mapCallCenterCall(args({ session_id: null, provider_session_id: provider })).sessionId).toBeUndefined();
+  });
+
   it("resolves the stored line row on an inbound call and keeps the persisted received number", () => {
     const result = mapCallCenterCall(args({
       line_id: "line-axa",
